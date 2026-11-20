@@ -1,7 +1,8 @@
 /**
- * The render engine on the editor's canvas (decision 0040, phase 1), behind a switch:
+ * The render engine on the editor's canvas (decision 0040), behind a switch:
  * `?renderer=engine` in the URL, or `localStorage["drawpane:renderer"] = "engine"`
- * (`engine-compat` for WebGPU's compatibility feature level).
+ * (`engine-compat` for explicit WebGPU compatibility testing, `engine-webgl` for WebGL2,
+ * `engine-cpu` for the CPU Worker view mode).
  *
  * Switch persistence rule (see `renderer-switch.ts`):
  * - When the URL sets `renderer` (or `present`), that value is remembered in `sessionStorage`
@@ -12,12 +13,24 @@
  * - Precedence: URL parameter, then `sessionStorage`, then `localStorage`, then `"canvas"`
  *   (and for `present`: URL, `sessionStorage`, `localStorage`, then `"webgpu"`).
  *
- * The engine draws the page into a WebGPU canvas under the overlay. It's patched from the
- * document's change log and follows the camera every frame. A page holding anything the engine
- * doesn't draw yet (effects, masks, blends) is drawn by the canvas renderer instead, whole.
- * Missing WebGPU, an engine error or a lost device fall back to the canvas renderer for the
- * session, with a console note and a `drawpane:renderer-fallback` event (the telemetry hook):
- * the canvas is never left blank.
+ * Backend selection order:
+ * 1. WebGPU core (hardware only unless `drawpane:engine-software=allow`).
+ *    The lazy WebGL2 module is never fetched when WebGPU succeeds.
+ * 2. WebGL2 (lazy-loaded only after WebGPU is absent or fails; software adapters and
+ *    major-performance-caveat contexts refused unless allowed).
+ * 3. CPU view mode (`vello_cpu` in a dedicated Web Worker rendering tiled frames with
+ *    bounded viewport pixel cap and byte-budgeted transfer backpressure, cancelling stale
+ *    work on camera/edit changes and shifting/scaling received frames smoothly during pan/zoom).
+ * 4. Canvas renderer fallback (for unsupported pages, or when even CPU view mode cannot run).
+ *
+ * Device and context loss recovery:
+ * - On the 1st and 2nd loss within 60 s on a GPU backend, rebuilds that same backend on a fresh
+ *   canvas element without losing edits (the canvas renderer draws while rebuilding so the screen
+ *   is never blank).
+ * - On the 3rd loss within 60 s (or when rebuilding fails), disables that backend for the session
+ *   and steps down one backend without flapping back.
+ *
+ * Every fallback logs a console note and dispatches `drawpane:renderer-fallback`.
  */
 
 import {
@@ -31,9 +44,12 @@ import {
   ErrorCode,
   type FrameStats,
   loadBrowserEngine,
+  loadWebglEngine,
   RenderEngine,
+  type Result,
   unsupportedNames,
 } from "@drawpane/engine";
+import type { CpuWorkerReply, CpuWorkerRequest } from "./engine-cpu.worker";
 import {
   type PresentationMode,
   presentation,
@@ -42,31 +58,186 @@ import {
   softwareAllowed,
 } from "./renderer-switch";
 
-export { type PresentationMode, presentation, type RendererChoice, rendererChoice };
+export {
+  type PresentationMode,
+  presentation,
+  type RendererChoice,
+  rendererChoice,
+  softwareAllowed,
+};
+
+export type EngineBackend = "webgpu" | "webgl2" | "cpu-worker";
+export type AdapterClassification = "hardware" | "software" | "unknown" | "unidentified";
+
+/** Software GPU strings refused by default unless `drawpane:engine-software = "allow"`. */
+const SOFTWARE_RE =
+  /swiftshader|llvmpipe|lavapipe|softpipe|software|basic render|mesa offscreen|subzero/i;
+
+/**
+ * WebKit privacy aliases: Safari on macOS Metal (16384 max texture size) and Linux WebKit
+ * both report "Apple GPU" (or "WebKit WebGL" when WEBGL_debug_renderer_info is hidden).
+ * Classified honestly as "unknown" rather than proven hardware or software, and gated by
+ * `failIfMajorPerformanceCaveat: true` plus a lightweight fill-rate timing micro-probe.
+ */
+const WEBKIT_ALIASED_RE = /^(?:apple(?:\s+inc\.?)?\s*\/\s*)?apple\s+gpu$/i;
+const WEBKIT_HIDDEN_RE = /^(?:webkit\s*\/\s*)?webkit\s+webgl$/i;
+
+/** Non-WebKit generic renderer labels that cannot prove hardware identity. */
+const GENERIC_ADAPTER_RE =
+  /^(?:webgl\s*2?(?:\.0)?|mozilla|angle|unknown|webkit(?:\s*\/\s*webgl\s*2?(?:\.0)?)?|\s*\/\s*)*$/i;
+
+/**
+ * Upper bound (ms) for 16 passes of a 512x512 WebGL2 ALU fill probe on "unknown" WebKit adapters.
+ * Hardware GPUs (macOS Metal, NVIDIA T4, integrated GPUs) complete in a few milliseconds;
+ * CPU llvmpipe/SwiftShader takes ~250-600+ milliseconds.
+ */
+const WEBGL2_SOFTWARE_PROBE_MS = 100;
+const WEBGL2_PROBE_PASSES = 16;
+const WEBGL2_PROBE_SIDE = 512;
+
+/** Sliding window for GPU device/context loss recovery before stepping down one backend. */
+const LOSS_WINDOW_MS = 60_000;
+/** Number of same-backend recoveries allowed within LOSS_WINDOW_MS (3rd loss steps down). */
+const MAX_RECOVERIES_IN_WINDOW = 2;
+/** Consecutive healthy GPU wait timeouts before stepping down without blaming device loss. */
+const MAX_CONSECUTIVE_TIMEOUTS = 3;
+/** Frames in a row a GPU canvas cannot take before stepping down. */
+const UNPRESENTED = 3;
+/** Device-pixel tile edge for CPU view mode. */
+const CPU_TILE_SIZE = 512;
+/** Pixel cap for CPU view mode visible + backing surfaces (4096 x 4096 = 64 MiB per surface). */
+export const MAX_CPU_PIXELS = 4096 * 4096;
+
+/** Active `EngineView.create` abort controllers keyed by the durable engine slot. */
+const ACTIVE_CREATES = new WeakMap<HTMLElement, AbortController>();
+
+function classifyAdapter(label: string, softwareFlag: boolean): AdapterClassification {
+  if (softwareFlag || SOFTWARE_RE.test(label)) return "software";
+  const trimmed = label.trim();
+  if (!trimmed || GENERIC_ADAPTER_RE.test(trimmed)) return "unidentified";
+  if (WEBKIT_ALIASED_RE.test(trimmed) || WEBKIT_HIDDEN_RE.test(trimmed)) return "unknown";
+  return "hardware";
+}
+
+/**
+ * Lightweight synchronous WebGL2 fill-rate micro-probe used only when an adapter reports an
+ * aliased/hidden WebKit label ("Apple GPU" or "WebKit WebGL") after passing
+ * `failIfMajorPerformanceCaveat: true`. Returns elapsed milliseconds, or `null` if the context
+ * lacks shader drawing primitives (e.g. minimal unit-test mocks).
+ */
+function measureWebgl2FillRateMs(
+  canvas: HTMLCanvasElement,
+  gl: WebGL2RenderingContext,
+): number | null {
+  if (
+    typeof gl.createShader !== "function" ||
+    typeof gl.createProgram !== "function" ||
+    typeof gl.drawArrays !== "function" ||
+    typeof gl.readPixels !== "function"
+  ) {
+    return null;
+  }
+  canvas.width = WEBGL2_PROBE_SIDE;
+  canvas.height = WEBGL2_PROBE_SIDE;
+  const vs = gl.createShader(gl.VERTEX_SHADER);
+  const fs = gl.createShader(gl.FRAGMENT_SHADER);
+  const prog = gl.createProgram();
+  if (!vs || !fs || !prog) {
+    if (vs) gl.deleteShader(vs);
+    if (fs) gl.deleteShader(fs);
+    if (prog) gl.deleteProgram(prog);
+    return null;
+  }
+  try {
+    gl.shaderSource(
+      vs,
+      `#version 300 es
+void main() {
+  vec2 pos = vec2(gl_VertexID == 1 ? 3.0 : -1.0, gl_VertexID == 2 ? 3.0 : -1.0);
+  gl_Position = vec4(pos, 0.0, 1.0);
+}`,
+    );
+    gl.compileShader(vs);
+    gl.shaderSource(
+      fs,
+      `#version 300 es
+precision highp float;
+uniform float u_pass;
+out vec4 outColor;
+void main() {
+  vec2 p = gl_FragCoord.xy * 0.001953125 + vec2(u_pass * 0.13, u_pass * 0.07);
+  float acc = 0.0;
+  for (int i = 0; i < 64; i++) {
+    float fi = float(i) * 0.17;
+    acc += sin(p.x * 12.9898 + fi) * cos(p.y * 78.233 - fi);
+  }
+  outColor = vec4(fract(abs(acc)), 0.5, 0.25, 1.0);
+}`,
+    );
+    gl.compileShader(fs);
+    gl.attachShader(prog, vs);
+    gl.attachShader(prog, fs);
+    gl.linkProgram(prog);
+    if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) return null;
+    gl.viewport(0, 0, WEBGL2_PROBE_SIDE, WEBGL2_PROBE_SIDE);
+    gl.useProgram(prog);
+    const loc = gl.getUniformLocation(prog, "u_pass");
+    const px = new Uint8Array(4);
+    // Warm up pipeline compilation before timing.
+    gl.uniform1f(loc, 0);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    const t0 = performance.now();
+    for (let i = 1; i <= WEBGL2_PROBE_PASSES; i++) {
+      gl.uniform1f(loc, i);
+      gl.drawArrays(gl.TRIANGLES, 0, 3);
+    }
+    gl.readPixels(0, 0, 1, 1, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    return performance.now() - t0;
+  } catch {
+    return null;
+  } finally {
+    gl.deleteProgram(prog);
+    gl.deleteShader(vs);
+    gl.deleteShader(fs);
+  }
+}
 
 interface AdapterLike {
   readonly isFallbackAdapter?: boolean;
-  readonly info?: { readonly isFallbackAdapter?: boolean };
+  readonly info?: {
+    readonly isFallbackAdapter?: boolean;
+    readonly vendor?: string;
+    readonly architecture?: string;
+    readonly device?: string;
+    readonly description?: string;
+  };
 }
 
 export type FallbackKind = "no-webgpu" | "software-gpu" | "error";
 
 /**
- * Which WebGPU feature level the engine asks for: a hardware adapter at core level, else a
- * hardware one at compatibility level (some drivers offer only that, through OpenGL ES), else
- * a software one only when allowed. Answers the reason when there's none it may use.
+ * Checks whether WebGPU can offer an acceptable adapter at core level (or explicit compatibility
+ * mode when `?renderer=engine-compat` is requested). Compatibility mode is excluded from the
+ * default automatic chain because Vello's shaders require core `flat, first` interpolation.
  */
 export async function adapterLevel(
   choice: RendererChoice,
 ): Promise<
-  { readonly compatibility: boolean } | { readonly reason: string; readonly kind: FallbackKind }
+  | { readonly compatibility: boolean; readonly adapterClass: AdapterClassification }
+  | { readonly reason: string; readonly kind: FallbackKind }
 > {
   const gpu = (navigator as Navigator & { gpu?: { requestAdapter(o?: object): Promise<unknown> } })
     .gpu;
   if (!gpu) return { reason: "this browser has no WebGPU", kind: "no-webgpu" };
-  const soft = (a: unknown) => {
+  const classify = (a: unknown): AdapterClassification => {
     const x = a as AdapterLike | null;
-    return !x || x.info?.isFallbackAdapter === true || x.isFallbackAdapter === true;
+    if (!x) return "software";
+    const isFallback = x.info?.isFallbackAdapter === true || x.isFallbackAdapter === true;
+    const label = [x.info?.vendor, x.info?.architecture, x.info?.device, x.info?.description]
+      .filter(Boolean)
+      .join(" ");
+    return classifyAdapter(label, isFallback);
   };
   const ask = async (o: object) => {
     try {
@@ -75,32 +246,256 @@ export async function adapterLevel(
       return null;
     }
   };
-  const levels = choice === "engine-compat" ? [true] : [false, true];
-  let any = false;
-  for (const compatibility of levels) {
-    const a = await ask(compatibility ? { featureLevel: "compatibility" } : {});
-    if (a) any = true;
-    if (a && !soft(a)) return { compatibility };
-  }
-  if (any && softwareAllowed()) return { compatibility: choice === "engine-compat" };
-  return any
-    ? {
-        reason:
-          "only a software WebGPU adapter is available (set drawpane:engine-software to allow it)",
-        kind: "software-gpu",
+  const compatibility = choice === "engine-compat";
+  const a = await ask(compatibility ? { featureLevel: "compatibility" } : {});
+  if (!a) return { reason: "no WebGPU adapter", kind: "no-webgpu" };
+  const adapterClass = classify(a);
+  if (adapterClass !== "software") return { compatibility, adapterClass };
+  if (softwareAllowed()) return { compatibility, adapterClass };
+  return {
+    reason:
+      "only a software WebGPU adapter is available (set drawpane:engine-software to allow it)",
+    kind: "software-gpu",
+  };
+}
+
+/**
+ * Cheap pre-check before downloading the lazy WebGL2 WASM module: verifies WebGL2 exists
+ * and refuses software / major-performance-caveat renderers unless `drawpane:engine-software = "allow"`.
+ */
+export function probeWebgl2Support():
+  | {
+      readonly ok: true;
+      readonly adapter: string;
+      readonly adapterClass: AdapterClassification;
+    }
+  | {
+      readonly ok: false;
+      readonly reason: string;
+      readonly adapter: string | null;
+      readonly adapterClass: AdapterClassification;
+      readonly kind: FallbackKind;
+    } {
+  try {
+    const allowSoft = softwareAllowed();
+    const readInfo = (gl: WebGL2RenderingContext) => {
+      const ext = gl.getExtension("WEBGL_debug_renderer_info");
+      const renderer = String(
+        (ext ? gl.getParameter(ext.UNMASKED_RENDERER_WEBGL) : null) ??
+          gl.getParameter(gl.RENDERER) ??
+          "",
+      );
+      const vendor = String(
+        (ext ? gl.getParameter(ext.UNMASKED_VENDOR_WEBGL) : null) ??
+          gl.getParameter(gl.VENDOR) ??
+          "",
+      );
+      return [vendor, renderer].filter(Boolean).join(" / ") || "WebGL2";
+    };
+    const probeCanvas = document.createElement("canvas");
+    probeCanvas.width = 1;
+    probeCanvas.height = 1;
+    let gl = probeCanvas.getContext("webgl2", {
+      antialias: false,
+      ...(allowSoft ? {} : { failIfMajorPerformanceCaveat: true }),
+    });
+    if (!gl && !allowSoft) {
+      // Distinguish software / major-performance-caveat WebGL2 from absent WebGL2.
+      const fallbackCanvas = document.createElement("canvas");
+      fallbackCanvas.width = 1;
+      fallbackCanvas.height = 1;
+      const softGl = fallbackCanvas.getContext("webgl2", { antialias: false });
+      if (softGl) {
+        const adapter = readInfo(softGl);
+        softGl.getExtension("WEBGL_lose_context")?.loseContext();
+        return {
+          ok: false,
+          reason: `only a software WebGL2 adapter is available (${adapter}, major performance caveat; set drawpane:engine-software to allow it)`,
+          adapter,
+          adapterClass: "software",
+          kind: "software-gpu",
+        };
       }
-    : { reason: "no WebGPU adapter", kind: "no-webgpu" };
+      return {
+        ok: false,
+        reason: "this browser has no WebGL2",
+        adapter: null,
+        adapterClass: "unidentified",
+        kind: "no-webgpu",
+      };
+    }
+    if (!gl) {
+      return {
+        ok: false,
+        reason: "this browser has no WebGL2",
+        adapter: null,
+        adapterClass: "unidentified",
+        kind: "no-webgpu",
+      };
+    }
+    const adapter = readInfo(gl);
+    const adapterClass = classifyAdapter(adapter, false);
+    let fillMs: number | null = null;
+    if (!allowSoft && adapterClass === "unknown") {
+      fillMs = measureWebgl2FillRateMs(probeCanvas, gl);
+    }
+    // Release the probe context immediately so we never exhaust the browser's context cap.
+    gl.getExtension("WEBGL_lose_context")?.loseContext();
+    gl = null;
+    if (!allowSoft && adapterClass === "unknown") {
+      if (fillMs !== null && fillMs > WEBGL2_SOFTWARE_PROBE_MS) {
+        return {
+          ok: false,
+          reason: `WebGL2 adapter (${adapter}) performed at software speed (${fillMs.toFixed(1)} ms fill probe; set drawpane:engine-software to allow it)`,
+          adapter,
+          adapterClass: "software",
+          kind: "software-gpu",
+        };
+      }
+      // Explicit Safari / WebKit policy: keep identity as "unknown" (never claim hardware),
+      // while allowing hardware-capable 16K Metal / non-caveat WebKit paths.
+      return { ok: true, adapter, adapterClass: "unknown" };
+    }
+    if (!allowSoft && adapterClass !== "hardware") {
+      return {
+        ok: false,
+        reason:
+          adapterClass === "software"
+            ? `only a software WebGL2 adapter is available (${adapter}; set drawpane:engine-software to allow it)`
+            : `WebGL2 adapter identity is unavailable (${adapter}); refusing unverified GPU unless drawpane:engine-software is allowed`,
+        adapter,
+        adapterClass,
+        kind: adapterClass === "software" ? "software-gpu" : "error",
+      };
+    }
+    return { ok: true, adapter, adapterClass };
+  } catch (err) {
+    return {
+      ok: false,
+      reason: `WebGL2 probe failed: ${String(err)}`,
+      adapter: null,
+      adapterClass: "unidentified",
+      kind: "error",
+    };
+  }
 }
 
 export interface FallbackEvent {
+  readonly from: EngineBackend | null;
+  readonly to: EngineBackend | "canvas";
   readonly reason: string;
   readonly code: ErrorCode | null;
   readonly adapter: string | null;
   readonly kind?: FallbackKind;
 }
 
-/** Fallbacks this session: once the engine fails, it stays off until the next session. */
-let failed: FallbackEvent | null = null;
+export interface RecoveredEvent {
+  readonly backend: EngineBackend;
+  readonly adapter: string | null;
+  readonly attempt: number;
+  readonly reason: string;
+}
+
+/** Backends disabled for this session so the engine never flaps back after stepping down. */
+const sessionDisabled = new Set<EngineBackend>();
+/** The last fallback recorded this session, if any. */
+let lastFallback: FallbackEvent | null = null;
+
+/** Resets session-scoped disabled backends (for unit tests only). */
+export function resetSessionBackendsForTest(): void {
+  sessionDisabled.clear();
+  lastFallback = null;
+}
+
+/** Ordered backend candidates for a renderer choice. */
+function chainFor(choice: RendererChoice): EngineBackend[] {
+  if (choice === "engine-webgl") return ["webgl2", "cpu-worker"];
+  if (choice === "engine-cpu") return ["cpu-worker"];
+  return ["webgpu", "webgl2", "cpu-worker"];
+}
+
+function isCanvasElement(el: HTMLElement): el is HTMLCanvasElement {
+  return (
+    el.tagName === "CANVAS" ||
+    (typeof (el as { getContext?: unknown }).getContext === "function" &&
+      typeof (el as { replaceChildren?: unknown }).replaceChildren !== "function")
+  );
+}
+
+/**
+ * Creates a detached `<canvas>` carrying `template`'s layout metadata without touching the DOM.
+ * Each candidate backend probes on its own detached element so a failed or superseded probe never
+ * locks the React-owned slot to an unusable context type.
+ */
+function createCandidateCanvas(template: HTMLElement): HTMLCanvasElement {
+  const next = document.createElement("canvas");
+  if (isCanvasElement(template)) {
+    next.className = template.className;
+    next.style.cssText = template.style.cssText;
+    next.width = template.width;
+    next.height = template.height;
+    const role = (template as { dataset?: { canvasRole?: string } }).dataset?.canvasRole;
+    if (role && (next as { dataset?: { canvasRole?: string } }).dataset) {
+      next.dataset.canvasRole = role;
+    }
+    return next;
+  }
+  next.className = "canvas__layer";
+  next.style.visibility = template.style.visibility || "hidden";
+  if (template.style.width) next.style.width = template.style.width;
+  if (template.style.height) next.style.height = template.style.height;
+  if ((next as { dataset?: { canvasRole?: string } }).dataset) {
+    next.dataset.canvasRole = "engine";
+  }
+  return next;
+}
+
+/** Mounts a winning candidate `<canvas>` into a durable container slot (or legacy canvas). */
+function mountIntoSlot(slot: HTMLElement, canvas: HTMLCanvasElement): void {
+  if (!isCanvasElement(slot) && typeof slot.replaceChildren === "function") {
+    slot.replaceChildren(canvas);
+  } else {
+    slot.replaceWith(canvas);
+  }
+}
+
+/**
+ * Waits briefly (or until the document becomes visible) before retrying one timed-out startup
+ * candidate. Resolves `false` if `signal` aborts while waiting.
+ */
+function waitBeforeStartupRetry(signal?: AbortSignal): Promise<boolean> {
+  if (signal?.aborted) return Promise.resolve(false);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      if (typeof document !== "undefined" && typeof document.removeEventListener === "function") {
+        document.removeEventListener("visibilitychange", onVisible);
+      }
+      resolve(ok);
+    };
+    const onAbort = () => finish(false);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") finish(true);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    let timer = 0;
+    if (
+      typeof document !== "undefined" &&
+      document.visibilityState === "hidden" &&
+      typeof document.addEventListener === "function"
+    ) {
+      document.addEventListener("visibilitychange", onVisible);
+      // Cap background deferral so an offscreen test never stalls indefinitely.
+      timer = window.setTimeout(() => finish(true), 2_000);
+    } else {
+      timer = window.setTimeout(() => finish(true), 150);
+    }
+  });
+}
 
 /** CSS colour (`#rrggbb[aa]`, or a canvas token) as straight RGBA floats. */
 function colour(css: string): [number, number, number, number] {
@@ -111,11 +506,27 @@ function colour(css: string): [number, number, number, number] {
   return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255, a];
 }
 
+/** Bounds CPU view mode canvas dimensions so visible + backing surfaces stay within MAX_CPU_PIXELS. */
+export function boundCpuViewport(
+  width: number,
+  height: number,
+  dpr: number,
+): { readonly width: number; readonly height: number; readonly dpr: number } {
+  const w = Math.max(1, Math.round(width));
+  const h = Math.max(1, Math.round(height));
+  const pixels = w * h;
+  if (pixels <= MAX_CPU_PIXELS) return { width: w, height: h, dpr };
+  const scale = Math.sqrt(MAX_CPU_PIXELS / pixels);
+  const nextW = Math.max(1, Math.floor(w * scale));
+  const nextH = Math.max(1, Math.floor(h * scale));
+  return { width: nextW, height: nextH, dpr: dpr * (nextW / w) };
+}
+
 /** What a draw did. */
 export interface EngineDraw {
   /** The engine drew this frame (false: the canvas renderer must). */
   readonly drawn: boolean;
-  /** It's on screen now (presented). False while a read-back frame is on its way. */
+  /** It's on screen now (presented). False while an async frame/read-back is on its way. */
   readonly ready: boolean;
   /**
    * No stand-ins and no level of detail: what an exact frame shows. While it's false, draw
@@ -130,7 +541,7 @@ export interface EngineDraw {
   /**
    * Nothing more for frames or the time between them to do: every tile shown is as drawn as
    * the page's list allows. A frame that isn't exact then waits for something to change (text
-   * provisional while its faces load: their arrival redraws it).
+   * provisional while its faces load, or an async CPU worker frame in flight).
    */
   readonly settled: boolean;
 }
@@ -176,28 +587,398 @@ export const IDLE_SLICE_MS = 16;
 /** A moving frame's budget that fits no tile: only what nothing stands in for is drawn. */
 const NO_OPTIONAL_MS = 1e-6;
 
-/** Frames in a row the canvas can't take before the engine gives up for the session. */
-const UNPRESENTED = 3;
+interface CpuBackedFrame {
+  readonly canvas: HTMLCanvasElement;
+  readonly pageId: string;
+  readonly revision: number;
+  readonly width: number;
+  readonly height: number;
+  readonly camera: Camera;
+}
+
+interface CpuJobMeta {
+  readonly jobId: number;
+  readonly frame: number;
+  readonly sceneKey: string;
+  readonly pageId: string;
+  readonly revision: number;
+  readonly width: number;
+  readonly height: number;
+  readonly camera: Camera;
+  readonly background: string;
+  readonly exact: boolean;
+  readonly epoch: number;
+  firstTile: boolean;
+}
+
+type InitOutcome =
+  | {
+      readonly ok: true;
+      readonly backend: EngineBackend;
+      readonly canvas: HTMLCanvasElement;
+      readonly engine: RenderEngine | null;
+      readonly readback: CanvasRenderingContext2D | null;
+      readonly cpuWorker: Worker | null;
+      readonly cpu2d: CanvasRenderingContext2D | null;
+      readonly compatibility: boolean;
+      readonly adapter: string;
+      readonly adapterClass: AdapterClassification;
+    }
+  | {
+      readonly ok: false;
+      readonly aborted?: boolean;
+      readonly reason: string;
+      readonly code: ErrorCode | null;
+      readonly adapter: string | null;
+      readonly kind?: FallbackKind;
+    };
+
+interface FailedCandidate {
+  readonly from: EngineBackend;
+  readonly reason: string;
+  readonly code: ErrorCode | null;
+  readonly adapter: string | null;
+  readonly kind: FallbackKind;
+}
+
+function summarizeFailures(failed: readonly FailedCandidate[]): {
+  from: EngineBackend;
+  reason: string;
+  code: ErrorCode | null;
+  adapter: string | null;
+  kind: FallbackKind;
+} {
+  const first = failed[0] as FailedCandidate;
+  const last = failed[failed.length - 1] as FailedCandidate;
+  const reason =
+    failed.length === 1 ? first.reason : failed.map((f) => `${f.from}: ${f.reason}`).join("; ");
+  const kind: FallbackKind = failed.every((f) => f.kind === "software-gpu")
+    ? "software-gpu"
+    : failed.every((f) => f.kind === "no-webgpu")
+      ? "no-webgpu"
+      : failed.every((f) => f.kind === "software-gpu" || f.kind === "no-webgpu")
+        ? "software-gpu"
+        : "error";
+  return { from: first.from, reason, code: last.code, adapter: first.adapter, kind };
+}
+
+/** Starts a dedicated CPU view-mode worker and waits until its WASM engine is ready. */
+function startCpuWorker(signal?: AbortSignal): Promise<Worker> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(new Error("aborted"));
+      return;
+    }
+    if (typeof Worker === "undefined") {
+      reject(new Error("Web Workers are not available in this browser"));
+      return;
+    }
+    const worker = new Worker(new URL("./engine-cpu.worker.ts", import.meta.url), {
+      type: "module",
+    });
+    const timer = window.setTimeout(() => {
+      cleanup();
+      worker.terminate();
+      reject(new Error("CPU render worker timed out while starting"));
+    }, 30_000);
+    const onAbort = () => {
+      cleanup();
+      worker.terminate();
+      reject(new Error("aborted"));
+    };
+    const onMessage = (e: MessageEvent<CpuWorkerReply>) => {
+      if (e.data.type === "ready") {
+        cleanup();
+        resolve(worker);
+      } else if (e.data.type === "error") {
+        cleanup();
+        worker.terminate();
+        reject(new Error(e.data.message));
+      }
+    };
+    const onError = (e: ErrorEvent) => {
+      cleanup();
+      worker.terminate();
+      reject(new Error(e.message || "CPU render worker failed to load"));
+    };
+    const cleanup = () => {
+      window.clearTimeout(timer);
+      worker.removeEventListener("message", onMessage);
+      worker.removeEventListener("error", onError);
+      signal?.removeEventListener("abort", onAbort);
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+    worker.addEventListener("message", onMessage);
+    worker.addEventListener("error", onError);
+    worker.postMessage({ type: "init" } satisfies CpuWorkerRequest);
+  });
+}
+
+/**
+ * Tries to start one specific backend on a fresh detached candidate `<canvas>`.
+ * Never mutates or claims a context on `templateSlot`; the caller commits `res.canvas` into the
+ * live DOM slot only after `ok: true` and a final ownership/abort check.
+ */
+async function initBackend(
+  backend: EngineBackend,
+  templateSlot: HTMLElement,
+  choice: RendererChoice,
+  signal?: AbortSignal,
+): Promise<InitOutcome> {
+  const aborted = (): InitOutcome => ({
+    ok: false,
+    aborted: true,
+    reason: "aborted",
+    code: null,
+    adapter: null,
+    kind: "error",
+  });
+
+  try {
+    if (signal?.aborted) return aborted();
+
+    if (backend === "webgpu") {
+      const level = await adapterLevel(choice);
+      if (signal?.aborted) return aborted();
+      if ("reason" in level) {
+        return {
+          ok: false,
+          reason: level.reason,
+          code: ErrorCode.NoAdapter,
+          adapter: null,
+          kind: level.kind,
+        };
+      }
+      const mod = await loadBrowserEngine();
+      if (signal?.aborted) return aborted();
+      const engine = new RenderEngine(mod, { glyphMaskBytes: 32 << 20 });
+      if (engine.failure) {
+        return {
+          ok: false,
+          reason: engine.failure.message,
+          code: engine.failure.code,
+          adapter: null,
+          kind: "error",
+        };
+      }
+      const useReadback = presentation() === "readback";
+      const surface = createCandidateCanvas(templateSlot);
+      const readback = useReadback ? surface.getContext("2d") : null;
+      const gpu = await engine.attachGpu(useReadback ? null : surface, {
+        compatibility: level.compatibility,
+        glyphMaskBytes: 32 << 20,
+      });
+      if (signal?.aborted) {
+        engine.dispose();
+        return aborted();
+      }
+      if (!gpu.ok) {
+        engine.dispose();
+        return {
+          ok: false,
+          reason: gpu.message,
+          code: gpu.code,
+          adapter: null,
+          kind: "error",
+        };
+      }
+      const rawClass = classifyAdapter(gpu.value.adapter, gpu.value.fallback);
+      const adapterClass: AdapterClassification =
+        rawClass === "unidentified" && !gpu.value.fallback ? "unknown" : rawClass;
+      if (!softwareAllowed() && adapterClass === "software") {
+        const adapter = gpu.value.adapter;
+        engine.dispose();
+        return {
+          ok: false,
+          reason: `only a software WebGPU adapter is available (${adapter})`,
+          code: ErrorCode.NoAdapter,
+          adapter,
+          kind: "software-gpu",
+        };
+      }
+      console.info(
+        `Drawpane: drawing with the render engine on ${gpu.value.adapter} (WebGPU${level.compatibility ? " compatibility mode" : ""})${gpu.value.fallback ? " (a software adapter)" : ""}`,
+      );
+      return {
+        ok: true,
+        backend: "webgpu",
+        canvas: surface,
+        engine,
+        readback,
+        cpuWorker: null,
+        cpu2d: null,
+        compatibility: level.compatibility,
+        adapter: gpu.value.adapter,
+        adapterClass,
+      };
+    }
+
+    if (backend === "webgl2") {
+      const probe = probeWebgl2Support();
+      if (signal?.aborted) return aborted();
+      if (!probe.ok) {
+        return {
+          ok: false,
+          reason: probe.reason,
+          code: ErrorCode.NoAdapter,
+          adapter: probe.adapter,
+          kind: probe.kind,
+        };
+      }
+      // Lazy-load the WebGL2 WASM module only after WebGPU was absent/refused and WebGL2 probed ok.
+      const mod = await loadWebglEngine();
+      if (signal?.aborted) return aborted();
+      const engine = new RenderEngine(mod, { glyphMaskBytes: 32 << 20 });
+      if (engine.failure) {
+        return {
+          ok: false,
+          reason: engine.failure.message,
+          code: engine.failure.code,
+          adapter: probe.adapter,
+          kind: "error",
+        };
+      }
+      const useReadback = presentation() === "readback";
+      const surface = createCandidateCanvas(templateSlot);
+      const readback = useReadback ? surface.getContext("2d") : null;
+      const gpu = await engine.attachGpu(useReadback ? null : surface, {
+        glyphMaskBytes: 32 << 20,
+      });
+      if (signal?.aborted) {
+        engine.dispose();
+        return aborted();
+      }
+      if (!gpu.ok) {
+        engine.dispose();
+        return {
+          ok: false,
+          reason: gpu.message,
+          code: gpu.code,
+          adapter: probe.adapter,
+          kind: "error",
+        };
+      }
+      const rawClass = classifyAdapter(gpu.value.adapter, gpu.value.fallback);
+      if (!softwareAllowed() && rawClass === "software") {
+        const adapter = gpu.value.adapter;
+        engine.dispose();
+        return {
+          ok: false,
+          reason: `only a software WebGL2 adapter is available (${adapter})`,
+          code: ErrorCode.NoAdapter,
+          adapter,
+          kind: "software-gpu",
+        };
+      }
+      const adapterClass: AdapterClassification =
+        probe.adapterClass === "unknown" || probe.adapterClass === "unidentified"
+          ? probe.adapterClass
+          : rawClass;
+      console.info(
+        `Drawpane: drawing with the render engine on ${gpu.value.adapter} (WebGL2)${gpu.value.fallback ? " (a software adapter)" : ""}`,
+      );
+      return {
+        ok: true,
+        backend: "webgl2",
+        canvas: surface,
+        engine,
+        readback,
+        cpuWorker: null,
+        cpu2d: null,
+        compatibility: false,
+        adapter: gpu.value.adapter,
+        adapterClass,
+      };
+    }
+
+    // CPU view mode: start worker first, then create a fresh detached 2D canvas.
+    const cpuWorker = await startCpuWorker(signal);
+    if (signal?.aborted) {
+      cpuWorker.terminate();
+      return aborted();
+    }
+    const surface = createCandidateCanvas(templateSlot);
+    const cpu2d = surface.getContext("2d");
+    if (!cpu2d) {
+      cpuWorker.terminate();
+      return {
+        ok: false,
+        reason: "could not create a 2D canvas for CPU view mode",
+        code: ErrorCode.Gpu,
+        adapter: null,
+        kind: "error",
+      };
+    }
+    console.info(
+      "Drawpane: drawing with the render engine in CPU view mode (vello_cpu in a Web Worker).",
+    );
+    return {
+      ok: true,
+      backend: "cpu-worker",
+      canvas: surface,
+      engine: null,
+      readback: null,
+      cpuWorker,
+      cpu2d,
+      compatibility: false,
+      adapter: "vello_cpu (Web Worker)",
+      adapterClass: "software",
+    };
+  } catch (err) {
+    if (signal?.aborted) return aborted();
+    return { ok: false, reason: String(err), code: null, adapter: null, kind: "error" };
+  }
+}
 
 export class EngineView {
-  readonly canvas: HTMLCanvasElement;
-  readonly #engine: RenderEngine;
-  readonly #builder: DisplayListBuilder;
+  readonly #slot: HTMLElement | null;
+  #canvas: HTMLCanvasElement;
+  readonly #editor: Editor;
+  readonly #measurer: TextMeasurer;
   readonly #images: ImageCache;
-  /** Image refs whose pixels the engine holds, by handle. */
+  readonly #choice: RendererChoice;
+  #backend: EngineBackend;
+  #adapter: string;
+  #adapterClass: AdapterClassification;
+  #compatibility: boolean;
+  #engine: RenderEngine | null;
+  #readback: CanvasRenderingContext2D | null;
+  #cpuWorker: Worker | null;
+  #cpu2d: CanvasRenderingContext2D | null;
+  #builder: DisplayListBuilder;
+  /** Image refs whose pixels the active backend holds, by handle. */
   readonly #uploaded = new Map<string, { handle: number; width: number; height: number }>();
   readonly #pending = new Set<string>();
-  /** Read-back presentation: the 2D context frames are painted into. */
-  readonly #readback: CanvasRenderingContext2D | null;
-  /** The latest frame drawn, the one being read back, and whether one is on its way. */
+  #uploadFailure: { readonly message: string; readonly code: ErrorCode | null } | null = null;
+  /** Monotonic device generation incremented on every GPU detach/reattach/replacement. */
+  #deviceGeneration = 0;
+  /** The latest GPU frame drawn, the one being read back, and whether one is on its way. */
   #frame = 0;
   #reading = false;
+  #readbackFailTimer = 0;
+  #timeoutBackoffTimer = 0;
+  #consecutiveTimeouts = 0;
   #want: { n: number; width: number; height: number; exact: boolean; epoch: number } | null = null;
+  /** CPU view mode state: monotonic job ids, last complete frame for pan/zoom stand-ins. */
+  #cpuJobId = 0;
+  #cpuRevision = 0;
+  #cpuJob: CpuJobMeta | null = null;
+  #cpuCompletedKey: string | null = null;
+  #cpuCompletedExact = false;
+  #cpuBacking: CpuBackedFrame | null = null;
+  #cpuHasPage: string | null = null;
+  #cpuUnsupportedPage: string | null = null;
+  /** Scene key that hit a content/budget Limit in CPU view mode (Canvas draws that frame). */
+  #cpuLimitKey: string | null = null;
+  #cpuLimitMessage: string | null = null;
+  /** Per-frame content/budget Limit fallback reason (Canvas covers the current frame). */
+  #limitReason: string | null = null;
+  /** Aborted on dispose so any in-flight step-down probe stops immediately. */
+  readonly #lifecycle = new AbortController();
   /**
    * Which presentation is current: moves on whenever a content frame isn't the engine's (the
-   * canvas renderer draws it), the page changes or the size does. A read-back from an earlier
-   * one is dropped when it lands: its pixels aren't written, its canvas isn't shown, and it's
-   * never reported exact.
+   * canvas renderer draws it), the page changes or the size does. A read-back or CPU tile from
+   * an earlier one is dropped when it lands.
    */
   #epoch = 0;
   #presenting: { pageId: string; width: number; height: number } | null = null;
@@ -205,21 +986,27 @@ export class EngineView {
   #offImages: () => void;
   #dead = false;
   #unpresented = 0;
+  /** Async device/context recovery or backend step-down in flight. */
+  #recovering: Promise<void> | null = null;
+  /** Loss timestamps within the last LOSS_WINDOW_MS per backend. */
+  readonly #losses = new Map<EngineBackend, number[]>();
   /** Pages the engine couldn't draw (so the page-level event fires once per change). */
   readonly #refused = new Set<string>();
-  /** Called after an engine-side change (an image arrived) that needs a frame. */
+  /** Called after an engine-side change (an image arrived, recovery finished) that needs a frame. */
   onChange: () => void = () => {};
-  /** Called once when the engine gives up for the session. */
+  /** Called once when all engine backends fail and the canvas renderer takes over for the session. */
   onFallback: (e: FallbackEvent) => void = () => {};
-  /** Called when a read-back frame reaches the screen, with whether it was exact. */
+  /** Called when an async frame (read-back or CPU worker tiles) reaches the screen. */
   onPresented: (exact: boolean) => void = () => {};
+  /** Coalesces direct-present `gpuFinished` stamps so WebGL2 never exceeds MAX_FINISHED_WAITERS. */
+  #shownWaiting = false;
   /** What drawing between frames did, summed (`ahead`), for the bench and the debug handle. */
   idle = { slices: 0, tiles: 0, ms: 0 };
   /**
    * Set to an object by the bench: when the first exact frame since was drawn (submitted), when
    * the GPU finished it (no read-back involved), and when an exact frame was first shown (a
-   * read-back painted; with a WebGPU canvas, the first animation frame after the GPU finished
-   * it, the earliest a compositor could show it). Frame numbers tell them apart.
+   * read-back painted; with a WebGPU/WebGL2 canvas, the first animation frame after the GPU
+   * finished it, the earliest a compositor could show it). Frame numbers tell them apart.
    */
   stamps: {
     drawn?: { n: number; at: number };
@@ -227,9 +1014,9 @@ export class EngineView {
     shown?: { n: number; at: number };
   } | null = null;
   /**
-   * The frame last put on screen, exact or not, and when: painted from its read-back, or (a
-   * WebGPU canvas) the first animation frame after the GPU finished it. The bench samples the
-   * canvas as it changes.
+   * The frame last put on screen, exact or not, and when: painted from its read-back or CPU
+   * worker frame, or (a WebGPU/WebGL2 canvas) the first animation frame after the GPU finished it.
+   * The bench samples the canvas as it changes.
    */
   shown = { n: 0, at: 0 };
   /** Set to a list by the bench: each frame and slice between frames, as it happens. */
@@ -246,6 +1033,12 @@ export class EngineView {
     masked: number;
     outlined: number;
   }> | null = null;
+  /** Called whenever the engine swaps in a fresh `<canvas>` DOM element. */
+  onCanvas: (canvas: HTMLCanvasElement) => void = () => {};
+  /** Called when the active backend changes (e.g. webgpu -> webgl2 -> cpu-worker). */
+  onBackendChange: (backend: EngineBackend) => void = () => {};
+  /** Called while a GPU backend is asynchronously recovering so the canvas renderer covers it. */
+  onRecovering: (recovering: boolean) => void = () => {};
   /** The last frame's numbers, for the bench and the debug handle. */
   last = {
     /** The page drawn and the frame's number (benches tell frames of a page apart by them). */
@@ -271,115 +1064,189 @@ export class EngineView {
     /** Where the frame's CPU time went: the patch, the engine's encoding, its renderer, submit. */
     breakdown: { patch: 0, encode: 0, render: 0, submit: 0, readback: 0 },
   };
-
-  readonly backend = "WebGPU";
-  readonly adapter: string;
-  readonly compatibility: boolean;
-  readonly software: boolean;
-
-  private constructor(
-    canvas: HTMLCanvasElement,
-    engine: RenderEngine,
-    editor: Editor,
-    measurer: TextMeasurer,
-    images: ImageCache,
-    readback: CanvasRenderingContext2D | null,
-    info: { readonly adapter: string; readonly compatibility: boolean; readonly software: boolean },
-  ) {
-    this.canvas = canvas;
-    this.adapter = info.adapter;
-    this.compatibility = info.compatibility;
-    this.software = info.software;
-    this.#readback = readback;
-    this.#engine = engine;
-    this.#images = images;
-    this.#builder = new DisplayListBuilder(editor.scene, measurer, {
-      image: (ref) => this.#image(ref),
-    });
-    this.#offImages = images.subscribe(() => this.#upload());
-    // A device can be lost between frames (a driver reset, a headless browser presenting): find
-    // out without waiting for the next frame, so an idle page never shows a dead canvas.
-    this.#health = window.setInterval(() => {
-      const r = this.#engine.gpuCheck();
-      if (!r.ok) this.#fail(r);
-    }, 250);
-  }
-
   readonly #health: number;
 
-  /** The engine on `canvas`, or null (with the reason reported) when it can't run here. */
-  static async create(
-    canvas: HTMLCanvasElement,
+  private constructor(
+    slot: HTMLElement | null,
+    init: Extract<InitOutcome, { ok: true }>,
     editor: Editor,
     measurer: TextMeasurer,
     images: ImageCache,
     choice: RendererChoice,
+  ) {
+    this.#slot = slot;
+    this.#canvas = init.canvas;
+    this.#editor = editor;
+    this.#measurer = measurer;
+    this.#images = images;
+    this.#choice = choice;
+    this.#backend = init.backend;
+    this.#adapter = init.adapter;
+    this.#adapterClass = init.adapterClass;
+    this.#compatibility = init.compatibility;
+    this.#engine = init.engine;
+    this.#readback = init.readback;
+    this.#cpuWorker = init.cpuWorker;
+    this.#cpu2d = init.cpu2d;
+    this.#builder = new DisplayListBuilder(editor.scene, measurer, {
+      image: (ref) => this.#image(ref),
+    });
+    if (this.#cpuWorker) this.#wireCpuWorker(this.#cpuWorker);
+    this.#offImages = images.subscribe(() => {
+      void this.#upload();
+    });
+    // A GPU device or WebGL context can be lost between frames: poll without waiting for the
+    // next frame so an idle page recovers or steps down cleanly.
+    this.#health = window.setInterval(() => {
+      if (this.#dead || this.#recovering || !this.#engine) return;
+      const r = this.#engine.gpuCheck();
+      if (!r.ok) this.#handleGpuFailure(r, true);
+    }, 250);
+  }
+
+  /**
+   * Starts the render engine in `slot` (either a durable React-owned container element or a
+   * legacy `<canvas>`) following the ordered fallback chain, or returns null (with the reason
+   * reported) when every engine backend is unavailable or initialization was superseded/aborted.
+   */
+  static async create(
+    slot: HTMLElement,
+    editor: Editor,
+    measurer: TextMeasurer,
+    images: ImageCache,
+    choice: RendererChoice,
+    signal?: AbortSignal,
   ): Promise<EngineView | null> {
-    if (failed) return null;
+    if (signal?.aborted) return null;
+    // Supersede any earlier in-flight initialization targeting the same slot.
+    ACTIVE_CREATES.get(slot)?.abort();
+    const controller = new AbortController();
+    ACTIVE_CREATES.set(slot, controller);
+    const onCallerAbort = () => controller.abort();
+    signal?.addEventListener("abort", onCallerAbort, { once: true });
+
     try {
-      const module = await loadBrowserEngine();
-      // The browser's GPU holds 32 MiB of glyph atlas (decision 0040, "Text").
-      const engine = new RenderEngine(module, { glyphMaskBytes: 32 << 20 });
-      if (engine.failure) {
-        EngineView.#report({
-          reason: engine.failure.message,
-          code: engine.failure.code,
-          adapter: null,
-          kind: "error",
+      const chain = chainFor(choice);
+      const failed: FailedCandidate[] = [];
+
+      for (const candidate of chain) {
+        if (controller.signal.aborted) return null;
+        if (sessionDisabled.has(candidate)) continue;
+        let res = await initBackend(candidate, slot, choice, controller.signal);
+        // Retry a slow startup once (deferring while hidden) before stepping down.
+        if (!res.ok && !res.aborted && res.code === ErrorCode.Timeout) {
+          const keepGoing = await waitBeforeStartupRetry(controller.signal);
+          if (!keepGoing || controller.signal.aborted) return null;
+          res = await initBackend(candidate, slot, choice, controller.signal);
+        }
+        if (
+          controller.signal.aborted ||
+          ACTIVE_CREATES.get(slot) !== controller ||
+          (!res.ok && res.aborted)
+        ) {
+          if (res.ok) {
+            res.engine?.dispose();
+            res.cpuWorker?.terminate();
+          }
+          return null;
+        }
+        if (res.ok) {
+          // Commit the winning detached candidate into the React-owned slot only after attach
+          // succeeded and final ownership is confirmed.
+          mountIntoSlot(slot, res.canvas);
+          if (failed.length > 0) {
+            const summary = summarizeFailures(failed);
+            EngineView.#report({
+              from: summary.from,
+              to: candidate,
+              reason: summary.reason,
+              code: summary.code,
+              adapter: summary.adapter,
+              kind: summary.kind,
+            });
+          }
+          const containerSlot = isCanvasElement(slot) ? null : slot;
+          return new EngineView(containerSlot, res, editor, measurer, images, choice);
+        }
+        // Do not permanently blacklist a candidate across future views on a transient wait timeout.
+        if (res.code !== ErrorCode.Timeout) sessionDisabled.add(candidate);
+        failed.push({
+          from: candidate,
+          reason: res.reason,
+          code: res.code,
+          adapter: res.adapter,
+          kind: res.kind ?? "error",
         });
-        return null;
       }
-      const level = await adapterLevel(choice);
-      if ("reason" in level) {
-        engine.dispose();
+
+      if (failed.length > 0) {
+        const summary = summarizeFailures(failed);
         EngineView.#report({
-          reason: level.reason,
-          code: ErrorCode.NoAdapter,
-          adapter: null,
-          kind: level.kind,
+          from: summary.from,
+          to: "canvas",
+          reason: summary.reason,
+          code: summary.code,
+          adapter: summary.adapter,
+          kind: summary.kind,
         });
-        return null;
       }
-      const readback = presentation() === "readback" ? canvas.getContext("2d") : null;
-      const gpu = await engine.attachGpu(readback ? null : canvas, {
-        compatibility: level.compatibility,
-        glyphMaskBytes: 32 << 20,
-      });
-      if (!gpu.ok) {
-        engine.dispose();
-        EngineView.#report({
-          reason: gpu.message,
-          code: gpu.code,
-          adapter: null,
-          kind: "error",
-        });
-        return null;
-      }
-      console.info(
-        `Drawpane: drawing with the render engine on ${gpu.value.adapter}${level.compatibility ? " (WebGPU compatibility mode)" : ""}${gpu.value.fallback ? " (a software adapter)" : ""}`,
-      );
-      return new EngineView(canvas, engine, editor, measurer, images, readback, {
-        adapter: gpu.value.adapter,
-        compatibility: level.compatibility,
-        software: gpu.value.fallback,
-      });
-    } catch (err) {
-      EngineView.#report({ reason: String(err), code: null, adapter: null, kind: "error" });
       return null;
+    } finally {
+      signal?.removeEventListener("abort", onCallerAbort);
+      if (ACTIVE_CREATES.get(slot) === controller) ACTIVE_CREATES.delete(slot);
     }
   }
 
   static #report(e: FallbackEvent): void {
-    failed = e;
-    console.info(
-      `Drawpane: the render engine is off for this session (${e.reason}); the canvas renderer draws instead.`,
-    );
+    lastFallback = e;
+    const fromLabel = e.from ?? "engine";
+    if (e.to === "canvas") {
+      console.info(
+        `Drawpane: the render engine is off for this session (${fromLabel} failed: ${e.reason}); the canvas renderer draws instead.`,
+      );
+    } else {
+      console.info(
+        `Drawpane: the render engine fell back from ${fromLabel} to ${e.to} (${e.reason}).`,
+      );
+    }
     window.dispatchEvent(
       new CustomEvent<FallbackEvent>("drawpane:renderer-fallback", { detail: e }),
     );
   }
 
-  get engine(): RenderEngine {
+  get canvas(): HTMLCanvasElement {
+    return this.#canvas;
+  }
+
+  get backend(): EngineBackend {
+    return this.#backend;
+  }
+
+  get adapter(): string {
+    return this.#adapter;
+  }
+
+  get adapterClass(): AdapterClassification {
+    return this.#adapterClass;
+  }
+
+  get compatibility(): boolean {
+    return this.#compatibility;
+  }
+
+  get software(): boolean {
+    return this.#backend !== "cpu-worker" && this.#adapterClass === "software";
+  }
+
+  get recovering(): boolean {
+    return this.#recovering !== null;
+  }
+
+  get limitFallbackReason(): string | null {
+    return this.#limitReason;
+  }
+
+  get engine(): RenderEngine | null {
     return this.#engine;
   }
 
@@ -387,70 +1254,557 @@ export class EngineView {
     return this.#builder;
   }
 
-  /** Whether frames reach the screen through a read-back (headless browsers). */
+  /** Whether frames reach the screen asynchronously (GPU read-back or CPU worker tiles). */
   get readsBack(): boolean {
-    return this.#readback !== null;
+    return this.#readback !== null || this.#backend === "cpu-worker";
   }
 
-  #fail(r: { readonly message: string; readonly code: ErrorCode | null }): EngineDraw {
-    if (this.#dead) return NOT_DRAWN;
+  /** Reads back the currently shown frame pixels (straight RGBA8), on any engine backend. */
+  async pixels(): Promise<Result<Uint8Array>> {
+    if (this.#engine) return this.#engine.gpuPixels();
+    if (this.#cpu2d) {
+      const { width, height } = this.#canvas;
+      if (width <= 0 || height <= 0) {
+        return { ok: false, code: ErrorCode.State, message: "empty canvas" };
+      }
+      const data = this.#cpu2d.getImageData(0, 0, width, height).data;
+      return { ok: true, value: new Uint8Array(data.buffer, data.byteOffset, data.byteLength) };
+    }
+    return { ok: false, code: ErrorCode.State, message: "no active backend" };
+  }
+
+  #wireCpuWorker(worker: Worker): void {
+    worker.onmessage = (e: MessageEvent<CpuWorkerReply>) => {
+      if (this.#dead || this.#cpuWorker !== worker) return;
+      const msg = e.data;
+      if (msg.type === "apply-result") {
+        if (!msg.ok) {
+          this.#supersede();
+          this.#cpuCompletedKey = null;
+          this.#cpuCompletedExact = false;
+          this.#cpuRevision = msg.revision;
+          this.#builder.acknowledge(false, msg.revision);
+          if (msg.code === ErrorCode.Revision) {
+            this.onChange();
+          } else {
+            this.#stepDown({
+              message: msg.message ?? "CPU worker failed to apply display list",
+              code: msg.code ?? null,
+            });
+          }
+        }
+        return;
+      }
+      if (msg.type === "unsupported") {
+        const job = this.#cpuJob;
+        if (job && msg.jobId === job.jobId && msg.revision === job.revision) {
+          this.#cpuUnsupportedPage = job.pageId;
+          this.#cpuJob = null;
+          this.#cpuCompletedKey = null;
+          this.#cpuCompletedExact = false;
+          this.last = { ...this.last, supported: false };
+          this.#pageSupported(job.pageId, false);
+          this.onChange();
+        }
+        return;
+      }
+      if (msg.type === "error") {
+        if (msg.jobId !== undefined) {
+          const job = this.#cpuJob;
+          if (
+            !job ||
+            msg.jobId !== job.jobId ||
+            (msg.revision !== undefined && msg.revision !== job.revision) ||
+            job.revision !== this.#cpuRevision ||
+            job.epoch !== this.#epoch
+          ) {
+            return;
+          }
+          if (msg.code === ErrorCode.Limit) {
+            // Content/budget limit on this specific view, not a Worker crash:
+            // let Canvas draw this view while keeping the healthy CPU Worker alive.
+            this.#cpuJob = null;
+            this.#cpuCompletedKey = null;
+            this.#cpuCompletedExact = false;
+            this.#cpuLimitKey = job.sceneKey;
+            this.#cpuLimitMessage = msg.message;
+            this.#limitReason = msg.message;
+            this.onChange();
+            return;
+          }
+        }
+        this.#stepDown({ message: msg.message, code: msg.code });
+        return;
+      }
+      if (msg.type === "tile") {
+        // Release transfer credit immediately regardless of whether this tile is painted or stale.
+        worker.postMessage({ type: "tile-ack", jobId: msg.jobId } satisfies CpuWorkerRequest);
+        const job = this.#cpuJob;
+        if (
+          !job ||
+          msg.jobId !== job.jobId ||
+          msg.revision !== job.revision ||
+          job.revision !== this.#cpuRevision ||
+          job.epoch !== this.#epoch ||
+          !this.#cpu2d
+        ) {
+          msg.bitmap?.close();
+          return;
+        }
+        if (job.firstTile) {
+          job.firstTile = false;
+          const backed =
+            this.#cpuBacking &&
+            this.#cpuBacking.pageId === job.pageId &&
+            this.#cpuBacking.revision === job.revision;
+          if (!backed) {
+            this.#cpu2d.setTransform(1, 0, 0, 1, 0, 0);
+            this.#cpu2d.clearRect(0, 0, job.width, job.height);
+          }
+        }
+        this.#cpu2d.setTransform(1, 0, 0, 1, 0, 0);
+        if (msg.bitmap) {
+          // Clear the tile rect before drawing so translucent backgrounds never accumulate.
+          this.#cpu2d.clearRect(msg.x, msg.y, msg.width, msg.height);
+          this.#cpu2d.drawImage(msg.bitmap, msg.x, msg.y);
+          msg.bitmap.close();
+        } else if (msg.pixels) {
+          const img = new ImageData(new Uint8ClampedArray(msg.pixels), msg.width, msg.height);
+          this.#cpu2d.putImageData(img, msg.x, msg.y);
+        }
+        this.#cpuHasPage = job.pageId;
+        if (job.frame > this.shown.n) this.shown = { n: job.frame, at: performance.now() };
+        this.onPresented(false);
+        return;
+      }
+      if (msg.type === "done") {
+        const job = this.#cpuJob;
+        if (
+          !job ||
+          msg.jobId !== job.jobId ||
+          msg.revision !== job.revision ||
+          job.revision !== this.#cpuRevision ||
+          job.epoch !== this.#epoch
+        ) {
+          return;
+        }
+        // Snapshot the completed frame for instant shifted/scaled pan and zoom previews.
+        const backing = this.#cpuBacking?.canvas ?? document.createElement("canvas");
+        if (backing.width !== msg.width) backing.width = msg.width;
+        if (backing.height !== msg.height) backing.height = msg.height;
+        const bctx = backing.getContext("2d");
+        if (bctx) {
+          bctx.setTransform(1, 0, 0, 1, 0, 0);
+          bctx.clearRect(0, 0, msg.width, msg.height);
+          bctx.drawImage(this.#canvas, 0, 0);
+          this.#cpuBacking = {
+            canvas: backing,
+            pageId: job.pageId,
+            revision: job.revision,
+            width: msg.width,
+            height: msg.height,
+            camera: msg.camera,
+          };
+        }
+        const frameExact = msg.exact && job.exact && this.#builder.pendingVisible === 0;
+        const at = performance.now();
+        this.#cpuHasPage = job.pageId;
+        this.#cpuCompletedKey = job.sceneKey;
+        this.#cpuCompletedExact = frameExact;
+        this.#cpuJob = null;
+        if (job.frame > this.shown.n) this.shown = { n: job.frame, at };
+        if (this.stamps && !this.stamps.shown && frameExact && job.frame === this.#frame) {
+          this.stamps.shown = { n: job.frame, at };
+        }
+        this.last = {
+          ...this.last,
+          pageId: job.pageId,
+          n: job.frame,
+          ms: msg.ms,
+          records: msg.records,
+          culled: msg.culled,
+          glyphsMasked: msg.glyphsMasked,
+          glyphsOutlined: msg.glyphsOutlined,
+          supported: true,
+          exact: frameExact,
+          plan: msg.plan,
+          tiles: msg.tiles,
+          breakdown: { ...this.last.breakdown, render: msg.ms },
+        };
+        this.onPresented(frameExact && msg.jobId === this.#cpuJobId);
+        // Once the visible frame is exact, let the idle loop finish shaping any offscreen text.
+        if (frameExact && this.#builder.pending > 0) this.onChange();
+      }
+    };
+    worker.onerror = (e) => {
+      if (this.#dead || this.#cpuWorker !== worker) return;
+      this.#stepDown({ message: e.message || "CPU render worker crashed", code: null });
+    };
+  }
+
+  /** Invalidates the active GPU device generation and releases any in-flight readback state. */
+  #bumpDeviceGeneration(): void {
+    this.#deviceGeneration++;
+    this.#reading = false;
+    this.#shownWaiting = false;
+    this.#want = null;
+    this.#consecutiveTimeouts = 0;
+    if (this.#readbackFailTimer) {
+      window.clearTimeout(this.#readbackFailTimer);
+      this.#readbackFailTimer = 0;
+    }
+    if (this.#timeoutBackoffTimer) {
+      window.clearTimeout(this.#timeoutBackoffTimer);
+      this.#timeoutBackoffTimer = 0;
+    }
+  }
+
+  /**
+   * Handles a GPU failure (device loss, WebGL context loss, or unrecoverable error).
+   * Recoverable losses rebuild the same backend on a fresh canvas up to MAX_RECOVERIES_IN_WINDOW
+   * times within LOSS_WINDOW_MS; the next loss steps down one backend for the session.
+   */
+  #handleGpuFailure(
+    r: { readonly message: string; readonly code: ErrorCode | null },
+    recoverable: boolean,
+  ): EngineDraw {
+    if (this.#dead || this.#recovering) return NOT_DRAWN;
+    this.#supersede();
+    this.#bumpDeviceGeneration();
+    this.#unpresented = 0;
+    const isLoss =
+      recoverable &&
+      (r.code === ErrorCode.DeviceLost || r.code === ErrorCode.Gpu || /lost/i.test(r.message));
+    if (isLoss && (this.#backend === "webgpu" || this.#backend === "webgl2")) {
+      const now = Date.now();
+      const history = (this.#losses.get(this.#backend) ?? []).filter(
+        (t) => now - t < LOSS_WINDOW_MS,
+      );
+      history.push(now);
+      this.#losses.set(this.#backend, history);
+      if (history.length <= MAX_RECOVERIES_IN_WINDOW) {
+        this.#recovering = this.#recoverSameBackend(r, history.length);
+        return NOT_DRAWN;
+      }
+    }
+    this.#recovering = this.#stepDown(r);
+    return NOT_DRAWN;
+  }
+
+  async #recoverSameBackend(
+    r: { readonly message: string; readonly code: ErrorCode | null },
+    attempt: number,
+  ): Promise<void> {
+    const backend = this.#backend;
+    const engine = this.#engine;
+    if (!engine || this.#dead) {
+      this.#recovering = null;
+      return;
+    }
+    this.onRecovering(true);
+    try {
+      engine.detachGpu();
+      const candidate = createCandidateCanvas(this.#canvas);
+      const useReadback = presentation() === "readback";
+      const readback = useReadback ? candidate.getContext("2d") : null;
+      const gpu = await engine.attachGpu(useReadback ? null : candidate, {
+        ...(backend === "webgpu" ? { compatibility: this.#compatibility } : {}),
+        glyphMaskBytes: 32 << 20,
+      });
+      if (this.#dead) return;
+      if (!gpu.ok) {
+        await this.#stepDown({
+          message: `${r.message}; recovery failed: ${gpu.message}`,
+          code: gpu.code,
+        });
+        return;
+      }
+      const rawClass = classifyAdapter(gpu.value.adapter, gpu.value.fallback);
+      const adapterClass: AdapterClassification =
+        backend === "webgpu" && rawClass === "unidentified" && !gpu.value.fallback
+          ? "unknown"
+          : rawClass;
+      if (!softwareAllowed() && adapterClass === "software") {
+        await this.#stepDown({
+          message: `recovery returned a software adapter (${gpu.value.adapter})`,
+          code: ErrorCode.NoAdapter,
+        });
+        return;
+      }
+      // Commit the fresh canvas into the DOM slot only after recovery attach succeeded.
+      if (this.#slot && typeof this.#slot.replaceChildren === "function") {
+        this.#slot.replaceChildren(candidate);
+      } else {
+        this.#canvas.replaceWith(candidate);
+      }
+      this.#canvas = candidate;
+      this.#readback = readback;
+      this.#limitReason = null;
+      this.onCanvas(candidate);
+      this.#bumpDeviceGeneration();
+      this.#adapter = gpu.value.adapter;
+      this.#adapterClass = adapterClass;
+      this.#recovering = null;
+      // Flush any images that finished decoding while recovery was in flight.
+      if (!this.#upload() || this.#dead || this.#recovering) return;
+      console.info(
+        `Drawpane: render engine recovered on ${backend} (${gpu.value.adapter}) after device loss (attempt ${attempt}/${MAX_RECOVERIES_IN_WINDOW} in 60 s).`,
+      );
+      window.dispatchEvent(
+        new CustomEvent<RecoveredEvent>("drawpane:renderer-recovered", {
+          detail: { backend, adapter: gpu.value.adapter, attempt, reason: r.message },
+        }),
+      );
+      this.onRecovering(false);
+      this.onChange();
+    } catch (err) {
+      if (this.#dead) return;
+      await this.#stepDown({
+        message: `${r.message}; recovery threw: ${String(err)}`,
+        code: r.code,
+      });
+    }
+  }
+
+  /** Disables the failing backend for this session and steps down to the next available one. */
+  async #stepDown(r: { readonly message: string; readonly code: ErrorCode | null }): Promise<void> {
+    if (this.#dead) return;
+    const oldBackend = this.#backend;
+    const oldAdapter = this.#engine?.gpu?.adapter ?? this.#adapter;
+    sessionDisabled.add(oldBackend);
+    this.onRecovering(true);
+    this.#supersede();
+    this.#bumpDeviceGeneration();
+
+    // Release the failing backend's resources before allocating the next one.
+    this.#engine?.dispose();
+    this.#engine = null;
+    this.#readback = null;
+    if (this.#cpuWorker) {
+      this.#cpuWorker.postMessage({ type: "dispose" } satisfies CpuWorkerRequest);
+      this.#cpuWorker.terminate();
+      this.#cpuWorker = null;
+    }
+    this.#cpu2d = null;
+    this.#cpuBacking = null;
+    this.#cpuJob = null;
+    this.#cpuCompletedKey = null;
+    this.#cpuCompletedExact = false;
+    this.#cpuHasPage = null;
+
+    const chain = chainFor(this.#choice);
+    const startAt = Math.max(0, chain.indexOf(oldBackend) + 1);
+    const failed: FailedCandidate[] = [
+      { from: oldBackend, reason: r.message, code: r.code, adapter: oldAdapter, kind: "error" },
+    ];
+
+    for (let i = startAt; i < chain.length; i++) {
+      const candidate = chain[i] as EngineBackend;
+      if (sessionDisabled.has(candidate)) continue;
+      let res = await initBackend(candidate, this.#canvas, this.#choice, this.#lifecycle.signal);
+      // After a WebGPU device crash, Chromium's GPU process can take a few hundred ms to restart,
+      // during which getContext("webgl2") transiently returns null. Retry briefly before giving up.
+      for (
+        let retry = 0;
+        retry < 3 &&
+        !this.#dead &&
+        !res.ok &&
+        !res.aborted &&
+        oldBackend === "webgpu" &&
+        candidate === "webgl2" &&
+        res.reason === "this browser has no WebGL2";
+        retry++
+      ) {
+        await new Promise((resolve) => window.setTimeout(resolve, 250 * (retry + 1)));
+        if (this.#dead) return;
+        res = await initBackend(candidate, this.#canvas, this.#choice, this.#lifecycle.signal);
+      }
+      if (this.#dead || (!res.ok && res.aborted)) {
+        if (res.ok) {
+          res.engine?.dispose();
+          res.cpuWorker?.terminate();
+        }
+        return;
+      }
+      if (res.ok) {
+        if (this.#slot && typeof this.#slot.replaceChildren === "function") {
+          this.#slot.replaceChildren(res.canvas);
+        } else {
+          this.#canvas.replaceWith(res.canvas);
+        }
+        this.#canvas = res.canvas;
+        this.onCanvas(res.canvas);
+        this.#backend = res.backend;
+        this.#adapter = res.adapter;
+        this.#adapterClass = res.adapterClass;
+        this.#compatibility = res.compatibility;
+        this.#engine = res.engine;
+        this.#readback = res.readback;
+        this.#cpuWorker = res.cpuWorker;
+        this.#cpu2d = res.cpu2d;
+        this.#cpuRevision = 0;
+        this.#cpuUnsupportedPage = null;
+        this.#cpuLimitKey = null;
+        this.#cpuLimitMessage = null;
+        this.#limitReason = null;
+        this.#cpuCompletedKey = null;
+        this.#cpuCompletedExact = false;
+        this.#bumpDeviceGeneration();
+        if (this.#cpuWorker) this.#wireCpuWorker(this.#cpuWorker);
+        // Rebuild the display list from the live editor scene and re-upload every known image
+        // AFTER clearing `#recovering` so ready images are never left as checkers.
+        const prevRefs = new Set([...this.#uploaded.keys(), ...this.#pending]);
+        this.#uploaded.clear();
+        for (const ref of prevRefs) this.#pending.add(ref);
+        this.#builder = new DisplayListBuilder(this.#editor.scene, this.#measurer, {
+          image: (ref) => this.#image(ref),
+        });
+        this.#recovering = null;
+        const flushOk = this.#upload();
+        if (!flushOk || this.#dead || this.#recovering) return;
+        const summary = summarizeFailures(failed);
+        EngineView.#report({
+          from: summary.from,
+          to: candidate,
+          reason: summary.reason,
+          code: summary.code,
+          adapter: summary.adapter,
+          kind: summary.kind,
+        });
+        this.onBackendChange(candidate);
+        this.onRecovering(false);
+        this.onChange();
+        return;
+      }
+      sessionDisabled.add(candidate);
+      failed.push({
+        from: candidate,
+        reason: res.reason,
+        code: res.code,
+        adapter: res.adapter,
+        kind: res.kind ?? "error",
+      });
+    }
+
+    // No engine backend left: fall back to the canvas renderer for the rest of the session.
+    this.#recovering = null;
     this.#dead = true;
+    const summary = summarizeFailures(failed);
     const e: FallbackEvent = {
-      reason: r.message,
-      code: r.code,
-      adapter: this.#engine.gpu?.adapter ?? null,
-      kind: "error",
+      from: summary.from,
+      to: "canvas",
+      reason: summary.reason,
+      code: summary.code,
+      adapter: summary.adapter,
+      kind: summary.kind,
     };
     EngineView.#report(e);
     this.onFallback(e);
     this.dispose();
-    return NOT_DRAWN;
+  }
+
+  /** Uploads one ready image ref to the active backend if decoded in `ImageCache`. */
+  #uploadRef(ref: string): "uploaded" | "pending" | "failed" {
+    const natural = this.#images.natural(ref);
+    const view = natural ? this.#images.get(ref) : null;
+    if (!natural || !view) return "pending";
+    const { bitmap } = view;
+    const surface =
+      typeof OffscreenCanvas !== "undefined"
+        ? new OffscreenCanvas(bitmap.width, bitmap.height)
+        : Object.assign(document.createElement("canvas"), {
+            width: bitmap.width,
+            height: bitmap.height,
+          });
+    const ctx = surface.getContext("2d") as
+      | OffscreenCanvasRenderingContext2D
+      | CanvasRenderingContext2D
+      | null;
+    if (!ctx) return "pending";
+    ctx.drawImage(bitmap, 0, 0);
+    const data = ctx.getImageData(0, 0, bitmap.width, bitmap.height).data;
+    const handle = this.#nextImage++;
+    if (this.#engine) {
+      const r = this.#engine.putImage(
+        handle,
+        bitmap.width,
+        bitmap.height,
+        new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
+        false,
+      );
+      if (!r.ok) {
+        this.#uploadFailure = { message: r.message, code: r.code };
+        return "failed";
+      }
+    } else if (this.#cpuWorker) {
+      const copy = new Uint8Array(data.length);
+      copy.set(data);
+      this.#cpuWorker.postMessage(
+        {
+          type: "put-image",
+          handle,
+          width: bitmap.width,
+          height: bitmap.height,
+          bytes: copy.buffer,
+          premultiplied: false,
+        } satisfies CpuWorkerRequest,
+        [copy.buffer],
+      );
+    } else {
+      return "pending";
+    }
+    this.#uploaded.set(ref, { handle, width: natural.width, height: natural.height });
+    this.#pending.delete(ref);
+    return "uploaded";
   }
 
   #image(ref: string) {
     const held = this.#uploaded.get(ref);
     if (held) return held;
     this.#pending.add(ref);
-    // Starts its load; the cache tells us when it's ready.
-    this.#images.natural(ref);
+    if (!this.#dead && !this.#recovering) {
+      try {
+        const status = this.#uploadRef(ref);
+        if (status === "uploaded") return this.#uploaded.get(ref) ?? null;
+      } catch (err) {
+        this.#uploadFailure = { message: String(err), code: null };
+      }
+    } else {
+      // Starts its load; the cache tells us when it's ready.
+      this.#images.natural(ref);
+    }
     return null;
   }
 
-  /** Sends the engine every image the builder asked for that has finished loading. */
-  #upload(): void {
-    if (this.#dead) return;
+  /**
+   * Sends the active backend every image the builder asked for that has finished loading.
+   * Returns false if uploading triggered a backend failure.
+   */
+  #upload(): boolean {
+    if (this.#dead || this.#recovering) return true;
     try {
       let any = false;
-      for (const ref of this.#pending) {
-        const natural = this.#images.natural(ref);
-        const view = natural ? this.#images.get(ref) : null;
-        if (!natural || !view) continue;
-        const { bitmap } = view;
-        const c = new OffscreenCanvas(bitmap.width, bitmap.height);
-        const ctx = c.getContext("2d");
-        if (!ctx) continue;
-        ctx.drawImage(bitmap, 0, 0);
-        const data = ctx.getImageData(0, 0, bitmap.width, bitmap.height).data;
-        const handle = this.#nextImage++;
-        const r = this.#engine.putImage(
-          handle,
-          bitmap.width,
-          bitmap.height,
-          new Uint8Array(data.buffer),
-          false,
-        );
-        if (!r.ok) {
-          this.#fail(r);
-          return;
+      for (const ref of [...this.#pending]) {
+        const status = this.#uploadRef(ref);
+        if (status === "failed") {
+          const failure = this.#uploadFailure ?? {
+            message: "failed to upload image",
+            code: ErrorCode.Image,
+          };
+          this.#uploadFailure = null;
+          this.#handleGpuFailure(failure, false);
+          return false;
         }
-        this.#uploaded.set(ref, { handle, width: natural.width, height: natural.height });
-        this.#pending.delete(ref);
-        this.#builder.imageReady(ref);
-        any = true;
+        if (status === "uploaded") {
+          this.#builder.imageReady(ref);
+          any = true;
+        }
       }
       if (any) this.onChange();
+      return true;
     } catch (err) {
-      this.#fail({ message: String(err), code: null });
+      this.#handleGpuFailure({ message: String(err), code: null }, false);
+      return false;
     }
   }
 
@@ -459,8 +1813,15 @@ export class EngineView {
     const used = this.#builder.imagesInUse();
     for (const [ref, held] of this.#uploaded) {
       if (used.has(ref)) continue;
-      const r = this.#engine.dropImage(held.handle);
-      if (!r.ok) return;
+      if (this.#engine) {
+        const r = this.#engine.dropImage(held.handle);
+        if (!r.ok) return;
+      } else if (this.#cpuWorker) {
+        this.#cpuWorker.postMessage({
+          type: "drop-image",
+          handle: held.handle,
+        } satisfies CpuWorkerRequest);
+      }
       this.#uploaded.delete(ref);
     }
     for (const ref of this.#pending) if (!used.has(ref)) this.#pending.delete(ref);
@@ -469,8 +1830,17 @@ export class EngineView {
   /** The last fresh list (a page shown): building it and applying it, in ms (benches). */
   opened: { pageId: string; buildMs: number; applyMs: number; records: number } | null = null;
 
-  /** Applies the builder's next message, if any; false (and off for the session) if it can't. */
-  #patch(pageId: string, textMs?: number): boolean {
+  #takeUploadFailure(): { readonly message: string; readonly code: ErrorCode | null } | null {
+    const failure = this.#uploadFailure;
+    this.#uploadFailure = null;
+    return failure;
+  }
+
+  /** Applies the builder's next message to a GPU engine; false if it failed. */
+  #patchGpu(pageId: string, textMs?: number): boolean {
+    const engine = this.#engine;
+    if (!engine) return false;
+    this.#uploadFailure = null;
     const t0 = performance.now();
     // A page shown afresh: its text sent provisional (coarse bars), encoded whole over the next
     // frames and the time between them, so the first frame doesn't wait for every line to be
@@ -479,9 +1849,18 @@ export class EngineView {
       this.#builder.pageId === pageId
         ? this.#builder.update(textMs)
         : this.#builder.build(pageId, undefined, { deferText: true });
+    const uploadErr = this.#takeUploadFailure();
+    if (uploadErr) {
+      if (uploadErr.code === ErrorCode.Limit) {
+        this.#limitReason = uploadErr.message;
+        return false;
+      }
+      this.#handleGpuFailure(uploadErr, false);
+      return false;
+    }
     if (!message) return true;
     const t1 = performance.now();
-    let r = this.#engine.apply(message);
+    let r = engine.apply(message);
     if (this.#builder.stats.fresh)
       this.opened = {
         pageId,
@@ -489,17 +1868,64 @@ export class EngineView {
         applyMs: performance.now() - t1,
         records: this.#builder.stats.records,
       };
-    this.#builder.acknowledge(r.ok, this.#engine.revision);
+    this.#builder.acknowledge(r.ok, engine.revision);
     if (!r.ok && r.code === ErrorCode.Revision) {
-      // Out of step (an earlier message was refused or lost): start the page afresh.
       message = this.#builder.build(pageId);
-      r = this.#engine.apply(message);
-      this.#builder.acknowledge(r.ok, this.#engine.revision);
+      r = engine.apply(message);
+      this.#builder.acknowledge(r.ok, engine.revision);
     }
     if (!r.ok) {
-      this.#fail(r);
+      this.#handleGpuFailure(r, false);
       return false;
     }
+    this.#dropUnused();
+    return true;
+  }
+
+  /** Sends the builder's next message to the CPU worker. */
+  #patchCpu(pageId: string, textMs?: number): boolean {
+    const worker = this.#cpuWorker;
+    if (!worker) return false;
+    this.#uploadFailure = null;
+    const t0 = performance.now();
+    const message =
+      this.#builder.pageId === pageId
+        ? this.#builder.update(textMs)
+        : this.#builder.build(pageId, undefined, { deferText: true });
+    const uploadErr = this.#takeUploadFailure();
+    if (uploadErr) {
+      this.#stepDown(uploadErr);
+      return false;
+    }
+    if (!message) return true;
+    const t1 = performance.now();
+    // Wire header bytes 12..16 hold the message's target revision (docs/decisions/0040-display-list.md).
+    const revision =
+      message.byteLength >= 16
+        ? new DataView(message.buffer, message.byteOffset, message.byteLength).getUint32(12, true)
+        : this.#cpuRevision + 1;
+    const copy = new Uint8Array(message.length);
+    copy.set(message);
+    this.#cpuRevision = revision;
+    this.#cpuUnsupportedPage = null;
+    this.#cpuLimitKey = null;
+    this.#cpuLimitMessage = null;
+    this.#limitReason = null;
+    this.#cpuJob = null;
+    this.#cpuCompletedKey = null;
+    this.#cpuCompletedExact = false;
+    // The worker applies messages in FIFO order before any subsequent render command.
+    this.#builder.acknowledge(true, revision);
+    worker.postMessage({ type: "apply", bytes: copy.buffer } satisfies CpuWorkerRequest, [
+      copy.buffer,
+    ]);
+    if (this.#builder.stats.fresh)
+      this.opened = {
+        pageId,
+        buildMs: t1 - t0,
+        applyMs: performance.now() - t1,
+        records: this.#builder.stats.records,
+      };
     this.#dropUnused();
     return true;
   }
@@ -519,14 +1945,13 @@ export class EngineView {
   }
 
   /**
-   * Draws `pageId` under `camera` into the engine's canvas (`width` × `height` device pixels),
+   * Draws `pageId` under `camera` into the engine's canvas (`width` x `height` device pixels),
    * from the tiles the engine keeps (decision 0040, phase 2). `exact` says the camera rests;
    * otherwise it's moving, and tiles not drawn yet show stand-ins (a stale tile, another level
    * scaled, the last frame moved). `budgetMs` bounds the tiles drawn this frame beyond those
-   * nothing can stand in for (0: none, so a frame at rest comes back exact). While the answer
-   * isn't exact, draw again next frame. Not drawn when the canvas renderer must draw this
-   * frame: the page holds something the engine doesn't draw, the canvas couldn't take the
-   * frame, or the engine failed (and is off for the session).
+   * nothing can stand in for (0: none, so a frame at rest comes back exact). Returns `NOT_DRAWN`
+   * when the canvas renderer must draw this frame (unsupported page, GPU recovery in progress,
+   * or all engine backends failed).
    */
   draw(
     pageId: string,
@@ -539,40 +1964,46 @@ export class EngineView {
     exact = true,
     budgetMs = 0,
   ): EngineDraw {
-    if (this.#dead) return NOT_DRAWN;
+    if (this.#dead || this.#recovering) return NOT_DRAWN;
     const at = this.#presenting;
     if (!at || at.pageId !== pageId || at.width !== width || at.height !== height) {
       this.#supersede();
       this.#presenting = { pageId, width, height };
     }
     try {
-      const r = this.#draw(pageId, camera, width, height, dpr, background, state, exact, budgetMs);
+      const r =
+        this.#backend === "cpu-worker"
+          ? this.#drawCpu(pageId, camera, width, height, dpr, background, state, exact)
+          : this.#drawGpu(pageId, camera, width, height, dpr, background, state, exact, budgetMs);
       // The canvas renderer draws this frame: nothing on its way from the engine may show.
       if (!r.drawn) this.#supersede();
       return r;
     } catch (err) {
-      // Anything thrown on the way (the builder, a canvas call) is the engine's failure: the
-      // canvas renderer takes over, never a blank or stale canvas.
-      return this.#fail({ message: String(err), code: null });
+      return this.#handleGpuFailure({ message: String(err), code: null }, true);
     }
   }
 
   /**
    * Between frames at rest, for at most `budgetMs` (decision 0040, phase 2): sends text of
    * `pageId` still to be encoded whole that's in view (tiles drawn before it would be drawn
-   * again), else draws tiles the next frame will want (those the last frame shows that aren't
-   * up to date, nearest the centre first, then those round it), else sends the rest of the text.
-   * Composites and shows nothing. Null when there's nothing to do it for (the engine isn't
-   * drawing, or failed: the next frame finds out).
+   * again), else draws tiles the next frame will want on GPU backends (those the last frame
+   * shows that aren't up to date, nearest the centre first, then those round it), else sends
+   * the rest of the text. Composites and shows nothing. Null when there's nothing to do it for.
    */
   ahead(pageId: string, background: string, budgetMs: number): EngineAhead | null {
-    if (this.#dead || !this.#presenting || this.#presenting.pageId !== pageId) return null;
+    if (this.#dead || this.#recovering || !this.#presenting || this.#presenting.pageId !== pageId) {
+      return null;
+    }
     const b = this.#builder;
     try {
       const text = (): EngineAhead | null => {
         const t = performance.now();
         const before = b.pending;
-        if (!this.#patch(pageId, budgetMs)) return null;
+        const ok =
+          this.#backend === "cpu-worker"
+            ? this.#patchCpu(pageId, budgetMs)
+            : this.#patchGpu(pageId, budgetMs);
+        if (!ok) return null;
         this.trace?.push({
           t: performance.now(),
           k: "text",
@@ -588,17 +2019,23 @@ export class EngineView {
         });
         return {
           progressed: true,
-          tiles: 1,
+          tiles: this.#backend === "cpu-worker" ? 0 : 1,
           queued: 0,
           text: b.pending,
           textVisible: b.pageId === pageId ? b.pendingVisible : 0,
         };
       };
       if (b.pageId === pageId && b.pendingVisible > 0) return text();
-      const r = this.#engine.renderGpuAhead(colour(background), budgetMs);
+      if (this.#backend === "cpu-worker") {
+        if (b.pageId === pageId && b.pending > 0 && this.#cpuJob === null) return text();
+        return { progressed: false, tiles: 0, queued: 0, text: b.pending, textVisible: 0 };
+      }
+      const engine = this.#engine;
+      if (!engine) return null;
+      const r = engine.renderGpuAhead(colour(background), budgetMs);
       if (!r.ok) {
         // A layer the engine refuses: the next frame draws this page on the canvas.
-        if (r.code !== ErrorCode.Unsupported) this.#fail(r);
+        if (r.code !== ErrorCode.Unsupported) this.#handleGpuFailure(r, true);
         return null;
       }
       this.idle = {
@@ -628,18 +2065,21 @@ export class EngineView {
         textVisible: 0,
       };
     } catch (err) {
-      this.#fail({ message: String(err), code: null });
+      this.#handleGpuFailure({ message: String(err), code: null }, true);
       return null;
     }
   }
 
-  /** Drops every read-back on its way: a newer content frame decided otherwise. */
+  /** Drops every read-back or CPU tile job on its way: a newer content frame decided otherwise. */
   #supersede(): void {
     this.#epoch++;
     this.#want = null;
+    this.#cpuJob = null;
+    this.#cpuCompletedKey = null;
+    this.#cpuCompletedExact = false;
   }
 
-  #draw(
+  #drawGpu(
     pageId: string,
     camera: { x: number; y: number; zoom: number },
     width: number,
@@ -650,6 +2090,8 @@ export class EngineView {
     exact: boolean,
     budgetMs: number,
   ): EngineDraw {
+    const engine = this.#engine;
+    if (!engine) return NOT_DRAWN;
     const t0 = performance.now();
     this.#builder.setEditorState(state);
     // What's in view, in page units: text still to send whole goes there first.
@@ -660,23 +2102,24 @@ export class EngineView {
       x1: (width / dpr - camera.x) / z,
       y1: (height / dpr - camera.y) / z,
     });
-    if (!this.#patch(pageId)) return NOT_DRAWN;
+    if (!this.#patchGpu(pageId)) return NOT_DRAWN;
     const t1 = performance.now();
+    this.#limitReason = null;
     if (!this.#builder.supported) {
       this.last = { ...this.last, supported: false, patchMs: t1 - t0 };
       this.#pageSupported(pageId, false);
       return NOT_DRAWN;
     }
-    if (this.canvas.width !== width || this.canvas.height !== height) {
-      this.canvas.width = width;
-      this.canvas.height = height;
+    if (this.#canvas.width !== width || this.#canvas.height !== height) {
+      this.#canvas.width = width;
+      this.#canvas.height = height;
     }
     const cam: Camera = { zoom: camera.zoom, x: camera.x, y: camera.y, dpr };
     // While text in view is still to be sent whole, a frame draws only what nothing stands in
     // for (as while moving): a tile drawn now would be stale again when the text arrives, and the
     // time between frames sends the text first.
     const textFirst = this.#builder.pendingVisible > 0;
-    const frame = this.#engine.renderGpu(
+    const frame = engine.renderGpu(
       width,
       height,
       cam,
@@ -685,23 +2128,45 @@ export class EngineView {
       textFirst ? NO_OPTIONAL_MS : budgetMs,
     );
     if (!frame.ok) {
-      // A layer the builder didn't flag but the engine refuses: this page draws on the canvas.
       if (frame.code === ErrorCode.Unsupported) {
         this.last = { ...this.last, supported: false };
         this.#pageSupported(pageId, false);
         return NOT_DRAWN;
       }
-      return this.#fail(frame);
+      // Repeatable dimension/budget limits are not device loss: let the canvas renderer draw this frame.
+      if (frame.code === ErrorCode.Limit) {
+        this.#limitReason = frame.message;
+        return NOT_DRAWN;
+      }
+      if (frame.code === ErrorCode.Timeout) {
+        const health = engine.gpuCheck();
+        if (!health.ok) return this.#handleGpuFailure(health, true);
+        this.#consecutiveTimeouts++;
+        if (this.#consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
+          return this.#handleGpuFailure(
+            {
+              message: `GPU wait timed out ${this.#consecutiveTimeouts} times in a row (${frame.message})`,
+              code: ErrorCode.Timeout,
+            },
+            false,
+          );
+        }
+        return NOT_DRAWN;
+      }
+      return this.#handleGpuFailure(frame, true);
     }
     this.#pageSupported(pageId, true);
-    const health = this.#engine.gpuCheck();
-    if (!health.ok) return this.#fail(health);
+    const health = engine.gpuCheck();
+    if (!health.ok) return this.#handleGpuFailure(health, true);
+    if (!this.#readback) this.#consecutiveTimeouts = 0;
     const f = frame.value;
     if (!f.presented) {
-      // The canvas couldn't take it now: the canvas renderer draws this frame; a few in a row
-      // and the engine is off.
-      if (++this.#unpresented >= UNPRESENTED)
-        return this.#fail({ message: "the canvas stopped taking frames", code: ErrorCode.Gpu });
+      if (++this.#unpresented >= UNPRESENTED) {
+        return this.#handleGpuFailure(
+          { message: "the canvas stopped taking frames", code: ErrorCode.Gpu },
+          false,
+        );
+      }
       return NOT_DRAWN;
     }
     this.#unpresented = 0;
@@ -710,23 +2175,42 @@ export class EngineView {
     const shownExact = f.exact && this.#builder.pendingVisible === 0;
     const n = ++this.#frame;
     const stamps = this.stamps;
-    // Presented to a WebGPU canvas, a frame is on screen at the compositor's first frame after
-    // the GPU finished it, which nothing here can see: the first animation frame after then is
-    // the earliest it could be shown, and what's stamped. A read-back frame is shown when its
-    // pixels are painted (`#readNext`).
-    const watch = stamps && f.exact && !stamps.drawn;
-    if (watch) stamps.drawn = { n, at: performance.now() };
-    if (watch || !this.#readback)
-      void this.#engine.gpuFinished().then(() => {
+    const gen = this.#deviceGeneration;
+    // Presented to a WebGPU/WebGL2 canvas, a frame is on screen at the compositor's first frame
+    // after the GPU finished it, which nothing here can see: the first animation frame after then
+    // is the earliest it could be shown, and what's stamped. Coalesce non-watch `gpuFinished`
+    // probes so WebGL2 never exceeds `MAX_FINISHED_WAITERS`.
+    const watch = Boolean(stamps && shownExact && !stamps.drawn);
+    if (watch && stamps) stamps.drawn = { n, at: performance.now() };
+    const trackShown = (targetN: number, isWatch: boolean) => {
+      if (!isWatch) this.#shownWaiting = true;
+      void engine.gpuFinished().then((res) => {
+        if (!isWatch) this.#shownWaiting = false;
+        if (this.#dead || this.#recovering || gen !== this.#deviceGeneration || !res.ok) return;
         const gpu = performance.now();
-        if (watch && this.stamps === stamps && stamps.drawn?.n === n) stamps.gpu = { n, at: gpu };
+        if (isWatch && stamps && this.stamps === stamps && stamps.drawn?.n === targetN) {
+          stamps.gpu = { n: targetN, at: gpu };
+        }
         if (this.#readback) return;
         requestAnimationFrame(() => {
+          if (this.#dead || gen !== this.#deviceGeneration) return;
           const at = performance.now();
-          if (n > this.shown.n) this.shown = { n, at };
-          if (watch && this.stamps === stamps && !stamps.shown) stamps.shown = { n, at };
+          if (targetN > this.shown.n) this.shown = { n: targetN, at };
+          if (isWatch && stamps && this.stamps === stamps && !stamps.shown) {
+            stamps.shown = { n: targetN, at };
+          }
+          // If newer frames were submitted while waiting, stamp the newest one next.
+          if (!isWatch && this.#frame > targetN && !this.#shownWaiting && !this.#readback) {
+            trackShown(this.#frame, false);
+          }
         });
       });
+    };
+    if (watch) {
+      trackShown(n, true);
+    } else if (!this.#readback && !this.#shownWaiting) {
+      trackShown(n, false);
+    }
     if (this.#readback) {
       this.#want = { n, width, height, exact: shownExact, epoch: this.#epoch };
       this.#readNext();
@@ -765,7 +2249,7 @@ export class EngineView {
       masked: f.glyphsMasked,
       outlined: f.glyphsOutlined,
     });
-    // A WebGPU canvas shows the frame once it's presented; a read-back one when it lands.
+    // A GPU canvas shows the frame once it's presented; a read-back one when it lands.
     return {
       drawn: true,
       ready: this.#readback === null,
@@ -775,33 +2259,225 @@ export class EngineView {
     };
   }
 
+  #drawCpu(
+    pageId: string,
+    camera: { x: number; y: number; zoom: number },
+    width: number,
+    height: number,
+    dpr: number,
+    background: string,
+    state: { hidden: ReadonlySet<string>; whole: string | null },
+    exact: boolean,
+  ): EngineDraw {
+    const worker = this.#cpuWorker;
+    const ctx = this.#cpu2d;
+    if (!worker || !ctx) return NOT_DRAWN;
+    const t0 = performance.now();
+    this.#builder.setEditorState(state);
+    const z = camera.zoom > 0 ? camera.zoom : 1;
+    this.#builder.setView({
+      x0: -camera.x / z,
+      y0: -camera.y / z,
+      x1: (width / dpr - camera.x) / z,
+      y1: (height / dpr - camera.y) / z,
+    });
+    if (!this.#patchCpu(pageId)) return NOT_DRAWN;
+    const t1 = performance.now();
+    if (!this.#builder.supported || this.#cpuUnsupportedPage === pageId) {
+      this.last = { ...this.last, supported: false, patchMs: t1 - t0 };
+      this.#pageSupported(pageId, false);
+      return NOT_DRAWN;
+    }
+    this.#pageSupported(pageId, true);
+
+    const bounded = boundCpuViewport(width, height, dpr);
+    const renderW = bounded.width;
+    const renderH = bounded.height;
+    const cam: Camera = { zoom: camera.zoom, x: camera.x, y: camera.y, dpr: bounded.dpr };
+    const sceneKey = `${pageId}|${this.#cpuRevision}|${renderW}x${renderH}|${cam.zoom}|${cam.x}|${cam.y}|${cam.dpr}|${background}`;
+    const hasPendingText = this.#builder.pending > 0;
+    const textFirst = this.#builder.pendingVisible > 0;
+
+    // If this exact view hit a content/budget Limit, let Canvas draw it without terminating the Worker.
+    if (this.#cpuLimitKey === sceneKey) {
+      this.#limitReason = this.#cpuLimitMessage ?? "frame exceeded CPU render limit";
+      return NOT_DRAWN;
+    }
+    this.#limitReason = null;
+
+    // Deduplicate against an already completed frame for identical inputs.
+    if (this.#cpuCompletedKey === sceneKey && (this.#cpuCompletedExact || !exact)) {
+      const doneExact = this.#cpuCompletedExact && !textFirst;
+      return {
+        drawn: true,
+        ready: true,
+        exact: doneExact,
+        ahead: hasPendingText,
+        settled: !textFirst && (doneExact || !exact),
+      };
+    }
+
+    // Deduplicate against an already in-flight job for identical inputs so slow exact jobs are
+    // never cancelled and restarted by an idle settle timer.
+    const inflight = this.#cpuJob;
+    if (inflight && inflight.sceneKey === sceneKey && (inflight.exact || !exact)) {
+      return {
+        drawn: true,
+        ready: this.#cpuHasPage === pageId,
+        exact: false,
+        ahead: textFirst,
+        settled: inflight.exact && !textFirst,
+      };
+    }
+
+    if (this.#canvas.width !== renderW || this.#canvas.height !== renderH) {
+      this.#canvas.width = renderW;
+      this.#canvas.height = renderH;
+    }
+
+    // Instant pan/zoom preview: clear and composite the last completed backing frame once so
+    // translucent page backgrounds never accumulate underneath.
+    let previewReady = false;
+    const backed = this.#cpuBacking;
+    if (backed && backed.pageId === pageId && backed.revision === this.#cpuRevision) {
+      const s = (cam.zoom * cam.dpr) / (backed.camera.zoom * backed.camera.dpr);
+      const tx = cam.x * cam.dpr - s * backed.camera.x * backed.camera.dpr;
+      const ty = cam.y * cam.dpr - s * backed.camera.y * backed.camera.dpr;
+      const bw = backed.width * s;
+      const bh = backed.height * s;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, renderW, renderH);
+      ctx.fillStyle = background;
+      ctx.fillRect(0, 0, renderW, renderH);
+      ctx.clearRect(tx, ty, bw, bh);
+      ctx.drawImage(backed.canvas, tx, ty, bw, bh);
+      previewReady = true;
+    }
+
+    const n = ++this.#frame;
+    if (this.stamps && exact && this.#builder.pendingVisible === 0 && !this.stamps.drawn) {
+      this.stamps.drawn = { n, at: performance.now() };
+    }
+    const jobId = ++this.#cpuJobId;
+    this.#cpuCompletedKey = null;
+    this.#cpuCompletedExact = false;
+    this.#cpuJob = {
+      jobId,
+      frame: n,
+      sceneKey,
+      pageId,
+      revision: this.#cpuRevision,
+      width: renderW,
+      height: renderH,
+      camera: cam,
+      background,
+      exact: exact && !textFirst,
+      epoch: this.#epoch,
+      firstTile: true,
+    };
+    worker.postMessage({
+      type: "render",
+      jobId,
+      revision: this.#cpuRevision,
+      width: renderW,
+      height: renderH,
+      camera: cam,
+      background: colour(background),
+      moving: !exact || textFirst,
+      tileSize: CPU_TILE_SIZE,
+    } satisfies CpuWorkerRequest);
+
+    this.last = {
+      ...this.last,
+      pageId,
+      n,
+      patchMs: t1 - t0,
+      supported: true,
+      exact: false,
+      plan: previewReady ? "standin" : "tiles",
+      breakdown: { ...this.last.breakdown, patch: t1 - t0 },
+    };
+    return {
+      drawn: true,
+      ready: previewReady || this.#cpuHasPage === pageId,
+      exact: false,
+      ahead: textFirst,
+      settled: exact && !textFirst,
+    };
+  }
+
   /**
-   * Reads the latest frame back into the 2D canvas: one read-back at a time, always of the
-   * newest frame (frames drawn meanwhile are skipped, never queued). A failed one is the
-   * engine's failure.
+   * Reads the latest GPU frame back into the 2D canvas: one read-back at a time, always of the
+   * newest frame (frames drawn meanwhile are skipped, never queued).
    */
   #readNext(): void {
     const want = this.#want;
     const ctx = this.#readback;
-    if (this.#reading || !want || !ctx || this.#dead) return;
+    const engine = this.#engine;
+    if (this.#reading || !want || !ctx || !engine || this.#dead || this.#recovering) return;
     this.#want = null;
     this.#reading = true;
+    const gen = this.#deviceGeneration;
     const t = performance.now();
-    void this.#engine.gpuPixels().then((px) => {
+    void engine.gpuPixels().then((px) => {
+      if (gen !== this.#deviceGeneration) return;
       this.#reading = false;
-      if (this.#dead) return;
+      if (this.#dead || this.#recovering || this.#engine !== engine) return;
       if (!px.ok) {
-        // A read-back fails when the device goes, and its loss is told a moment later: wait for
-        // it (the health check runs every 250 ms) so the cause is what's reported.
-        window.setTimeout(() => {
-          const health = this.#engine.gpuCheck();
-          this.#fail(health.ok ? px : health);
+        if (px.code === ErrorCode.Timeout) {
+          const health = engine.gpuCheck();
+          if (!health.ok) {
+            this.#handleGpuFailure(health, true);
+            return;
+          }
+          // Healthy context whose read-back wait expired: keep the device alive and back off
+          // instead of spending the device-loss recovery budget.
+          this.#consecutiveTimeouts++;
+          if (this.#consecutiveTimeouts >= MAX_CONSECUTIVE_TIMEOUTS) {
+            this.#handleGpuFailure(
+              {
+                message: `GPU read-back timed out ${this.#consecutiveTimeouts} times in a row (${px.message})`,
+                code: ErrorCode.Timeout,
+              },
+              false,
+            );
+            return;
+          }
+          if (this.#timeoutBackoffTimer) window.clearTimeout(this.#timeoutBackoffTimer);
+          const delay = 250 * this.#consecutiveTimeouts;
+          this.#timeoutBackoffTimer = window.setTimeout(() => {
+            this.#timeoutBackoffTimer = 0;
+            if (
+              this.#dead ||
+              this.#recovering ||
+              this.#engine !== engine ||
+              gen !== this.#deviceGeneration
+            ) {
+              return;
+            }
+            if (this.#want) this.#readNext();
+            else this.onChange();
+          }, delay);
+          return;
+        }
+        if (this.#readbackFailTimer) window.clearTimeout(this.#readbackFailTimer);
+        this.#readbackFailTimer = window.setTimeout(() => {
+          this.#readbackFailTimer = 0;
+          if (
+            this.#dead ||
+            this.#recovering ||
+            this.#engine !== engine ||
+            gen !== this.#deviceGeneration
+          ) {
+            return;
+          }
+          const health = engine.gpuCheck();
+          this.#handleGpuFailure(health.ok ? px : health, true);
         }, 300);
         return;
       }
+      this.#consecutiveTimeouts = 0;
       if (want.epoch !== this.#epoch || px.value.length !== want.width * want.height * 4) {
-        // Superseded on its way (the canvas renderer drew a frame since, the page or the size
-        // changed): dropped. The next read-back, if any, is of a frame drawn since.
         this.#readNext();
         return;
       }
@@ -856,12 +2532,25 @@ export class EngineView {
   dispose(): void {
     window.clearInterval(this.#health);
     this.#dead = true;
+    this.#lifecycle.abort();
+    this.#bumpDeviceGeneration();
     this.#offImages();
-    this.#engine.dispose();
+    this.#engine?.dispose();
+    this.#engine = null;
+    if (this.#cpuWorker) {
+      this.#cpuWorker.postMessage({ type: "dispose" } satisfies CpuWorkerRequest);
+      this.#cpuWorker.terminate();
+      this.#cpuWorker = null;
+    }
+    this.#cpu2d = null;
+    this.#cpuBacking = null;
+    if (this.#slot && this.#canvas.parentElement === this.#slot) {
+      this.#canvas.remove();
+    }
   }
 }
 
-/** The fallback recorded this session, if any. */
+/** The last fallback recorded this session, if any. */
 export function engineFallback(): FallbackEvent | null {
-  return failed;
+  return lastFallback;
 }

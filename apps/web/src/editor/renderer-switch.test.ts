@@ -1,6 +1,7 @@
 import { ErrorCode } from "@drawpane/engine";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import {
+  engineBackendLabel,
   fallbackToReason,
   formatRendererReason,
   rendererChipLabel,
@@ -81,11 +82,13 @@ describe("renderer-switch", () => {
       renderer: "engine-compat",
       present: "webgpu",
     });
+    expect(engineSearch({ renderer: "engine-webgl" })).toEqual({ renderer: "engine-webgl" });
+    expect(engineSearch({ renderer: "engine-cpu" })).toEqual({ renderer: "engine-cpu" });
     expect(engineSearch({ renderer: "canvas" })).toEqual({ renderer: "canvas" });
     expect(engineSearch({ renderer: "bogus", present: "bogus" })).toEqual({});
   });
 
-  it("remembers ?renderer=engine in sessionStorage across navigations without the query param", () => {
+  it("remembers ?renderer=engine, engine-compat, engine-webgl, and engine-cpu in sessionStorage", () => {
     expect(rendererChoice("")).toBe("canvas");
 
     // Set on the dashboard or initial URL.
@@ -95,9 +98,13 @@ describe("renderer-switch", () => {
     // Opening a file drops the query string: sessionStorage still keeps it.
     expect(rendererChoice("")).toBe("engine");
 
-    // Compatibility level persists too.
+    // Compatibility, WebGL2, and CPU view switches persist too.
     rememberRendererSwitches("?renderer=engine-compat");
     expect(rendererChoice("")).toBe("engine-compat");
+    rememberRendererSwitches("?renderer=engine-webgl");
+    expect(rendererChoice("")).toBe("engine-webgl");
+    rememberRendererSwitches("?renderer=engine-cpu");
+    expect(rendererChoice("")).toBe("engine-cpu");
   });
 
   it("turns the engine back off with ?renderer=canvas", () => {
@@ -109,18 +116,21 @@ describe("renderer-switch", () => {
     expect(sessionStorage.getItem(RENDERER_STORAGE_KEY)).toBeNull();
   });
 
-  it("lets ?renderer=canvas override localStorage for the rest of the session", () => {
-    localStorage.setItem(RENDERER_STORAGE_KEY, "engine");
-    expect(rendererChoice("")).toBe("engine");
+  it("lets ?renderer=canvas override localStorage for engine, engine-webgl, and engine-cpu", () => {
+    for (const storedMode of ["engine", "engine-webgl", "engine-cpu"] as const) {
+      sessionStorage.clear();
+      localStorage.setItem(RENDERER_STORAGE_KEY, storedMode);
+      expect(rendererChoice("")).toBe(storedMode);
 
-    expect(rendererChoice("?renderer=canvas")).toBe("canvas");
-    expect(sessionStorage.getItem(RENDERER_STORAGE_KEY)).toBe("canvas");
-    // Still off after navigating to a URL without the query string.
-    expect(rendererChoice("")).toBe("canvas");
+      expect(rendererChoice("?renderer=canvas")).toBe("canvas");
+      expect(sessionStorage.getItem(RENDERER_STORAGE_KEY)).toBe("canvas");
+      // Still off after navigating to a URL without the query string.
+      expect(rendererChoice("")).toBe("canvas");
 
-    // Re-enabling via URL turns it back on.
-    expect(rendererChoice("?renderer=engine")).toBe("engine");
-    expect(rendererChoice("")).toBe("engine");
+      // Re-enabling via URL turns it back on.
+      expect(rendererChoice(`?renderer=${storedMode}`)).toBe(storedMode);
+      expect(rendererChoice("")).toBe(storedMode);
+    }
   });
 
   it("remembers ?present=readback in sessionStorage and turns it off with ?present=webgpu", () => {
@@ -138,17 +148,48 @@ describe("renderer-switch", () => {
 
 describe("renderer-status formatting", () => {
   it("formats active engine and fallback chip labels and reasons", () => {
+    expect(engineBackendLabel("webgpu")).toBe("WebGPU");
+    expect(engineBackendLabel("webgl2")).toBe("WebGL2");
+    expect(engineBackendLabel("cpu-worker")).toBe("CPU view");
+
     const engine = {
       switchOn: true as const,
       choice: "engine" as const,
       active: "engine" as const,
-      backend: "WebGPU",
+      backend: engineBackendLabel("webgpu"),
       adapter: "Apple M3",
       compatibility: false,
       software: false,
     };
     expect(rendererChipLabel(engine)).toBe("Engine · WebGPU");
     expect(formatRendererReason(engine)).toBe("Drawing with WebGPU (Apple M3)");
+
+    const webgl = {
+      ...engine,
+      choice: "engine-webgl" as const,
+      backend: engineBackendLabel("webgl2"),
+      adapter: "NVIDIA T4",
+    };
+    expect(rendererChipLabel(webgl)).toBe("Engine · WebGL2");
+    expect(formatRendererReason(webgl)).toBe("Drawing with WebGL2 (NVIDIA T4)");
+
+    const cpu = {
+      ...engine,
+      choice: "engine-cpu" as const,
+      backend: engineBackendLabel("cpu-worker"),
+      adapter: "vello_cpu (Web Worker)",
+    };
+    expect(rendererChipLabel(cpu)).toBe("Engine · CPU view");
+    expect(formatRendererReason(cpu)).toBe("Drawing with CPU view (vello_cpu (Web Worker))");
+
+    const recovering = {
+      switchOn: true as const,
+      choice: "engine" as const,
+      active: "canvas" as const,
+      reason: { kind: "recovering" as const },
+    };
+    expect(rendererChipLabel(recovering)).toBe("Canvas renderer");
+    expect(formatRendererReason(recovering)).toBe("recovering GPU surface");
 
     const unsupported = {
       switchOn: true as const,
@@ -164,6 +205,8 @@ describe("renderer-status formatting", () => {
       choice: "engine" as const,
       active: "canvas" as const,
       reason: fallbackToReason({
+        from: "webgpu",
+        to: "canvas",
         reason: "this browser has no WebGPU",
         code: ErrorCode.NoAdapter,
         adapter: null,
@@ -177,6 +220,8 @@ describe("renderer-status formatting", () => {
       choice: "engine" as const,
       active: "canvas" as const,
       reason: fallbackToReason({
+        from: "webgpu",
+        to: "canvas",
         reason: "only a software WebGPU adapter is available",
         code: ErrorCode.NoAdapter,
         adapter: null,
@@ -190,6 +235,8 @@ describe("renderer-status formatting", () => {
       choice: "engine" as const,
       active: "canvas" as const,
       reason: fallbackToReason({
+        from: "webgpu",
+        to: "canvas",
         reason: "device lost",
         code: ErrorCode.DeviceLost,
         adapter: "SwiftShader",

@@ -3,19 +3,19 @@
  * can read and persist them before the lazy-loaded editor bundle arrives.
  *
  * Precedence (highest first):
- * 1. URL query parameter (`?renderer=engine`, `?renderer=engine-compat`, `?renderer=canvas`;
- *    `?present=readback`, `?present=webgpu`). Setting one in the URL remembers it in
- *    `sessionStorage` for the rest of the tab session, so in-app navigation, dashboard-to-file
- *    opens, and sign-in redirects keep it.
+ * 1. URL query parameter (`?renderer=engine`, `?renderer=engine-compat`, `?renderer=engine-webgl`,
+ *    `?renderer=engine-cpu`, `?renderer=canvas`; `?present=readback`, `?present=webgpu`). Setting
+ *    one in the URL remembers it in `sessionStorage` for the rest of the tab session, so in-app
+ *    navigation, dashboard-to-file opens, and sign-in redirects keep it.
  * 2. `sessionStorage["drawpane:renderer"]` / `sessionStorage["drawpane:engine-present"]`.
  * 3. `localStorage["drawpane:renderer"]` / `localStorage["drawpane:engine-present"]`.
  * 4. Defaults: `"canvas"` and `"webgpu"`.
  *
  * `?renderer=canvas` turns the engine back off for the session (clearing `sessionStorage`, or
- * storing `"canvas"` in `sessionStorage` when `localStorage` has the engine enabled).
+ * storing `"canvas"` in `sessionStorage` when `localStorage` has an engine mode enabled).
  */
 
-export type RendererChoice = "canvas" | "engine" | "engine-compat";
+export type RendererChoice = "canvas" | "engine" | "engine-compat" | "engine-webgl" | "engine-cpu";
 export type PresentationMode = "webgpu" | "readback";
 
 export interface EngineSearch {
@@ -28,7 +28,13 @@ export const PRESENT_STORAGE_KEY = "drawpane:engine-present";
 export const SOFTWARE_STORAGE_KEY = "drawpane:engine-software";
 
 export function parseRenderer(value: unknown): RendererChoice | undefined {
-  return value === "canvas" || value === "engine" || value === "engine-compat" ? value : undefined;
+  return value === "canvas" ||
+    value === "engine" ||
+    value === "engine-compat" ||
+    value === "engine-webgl" ||
+    value === "engine-cpu"
+    ? value
+    : undefined;
 }
 
 export function parsePresent(value: unknown): PresentationMode | undefined {
@@ -55,11 +61,27 @@ function readParams(search?: string): URLSearchParams {
   return new URLSearchParams(search);
 }
 
+function getSession(key: string): string | null {
+  try {
+    return sessionStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+function getLocal(key: string): string | null {
+  try {
+    return localStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
 function rememberRenderer(choice: RendererChoice): void {
   try {
     if (choice === "canvas") {
-      const stored = parseRenderer(localStorage.getItem(RENDERER_STORAGE_KEY));
-      if (stored === "engine" || stored === "engine-compat") {
+      const stored = parseRenderer(getLocal(RENDERER_STORAGE_KEY));
+      if (stored && stored !== "canvas") {
         sessionStorage.setItem(RENDERER_STORAGE_KEY, "canvas");
       } else {
         sessionStorage.removeItem(RENDERER_STORAGE_KEY);
@@ -75,7 +97,7 @@ function rememberRenderer(choice: RendererChoice): void {
 function rememberPresent(mode: PresentationMode): void {
   try {
     if (mode === "webgpu") {
-      if (parsePresent(localStorage.getItem(PRESENT_STORAGE_KEY)) === "readback") {
+      if (parsePresent(getLocal(PRESENT_STORAGE_KEY)) === "readback") {
         sessionStorage.setItem(PRESENT_STORAGE_KEY, "webgpu");
       } else {
         sessionStorage.removeItem(PRESENT_STORAGE_KEY);
@@ -112,17 +134,17 @@ export function rendererChoice(search?: string): RendererChoice {
       rememberRenderer(url);
       return url;
     }
-    const session = parseRenderer(sessionStorage.getItem(RENDERER_STORAGE_KEY));
-    if (session) return session;
-    const stored = parseRenderer(localStorage.getItem(RENDERER_STORAGE_KEY));
-    return stored ?? "canvas";
   } catch {
-    return "canvas";
+    // URL unavailable.
   }
+  const session = parseRenderer(getSession(RENDERER_STORAGE_KEY));
+  if (session) return session;
+  const stored = parseRenderer(getLocal(RENDERER_STORAGE_KEY));
+  return stored ?? "canvas";
 }
 
 /**
- * How frames reach the screen: through the WebGPU canvas (the product), or read back through
+ * How frames reach the screen: through the GPU canvas (the product), or read back through
  * a buffer into a 2D canvas (`?present=readback` or `drawpane:engine-present` = "readback").
  * The second is for headless browsers, where presenting a WebGPU canvas loses the device.
  */
@@ -133,24 +155,20 @@ export function presentation(search?: string): PresentationMode {
       rememberPresent(url);
       return url;
     }
-    const session = parsePresent(sessionStorage.getItem(PRESENT_STORAGE_KEY));
-    if (session) return session;
-    const stored = parsePresent(localStorage.getItem(PRESENT_STORAGE_KEY));
-    return stored ?? "webgpu";
   } catch {
-    return "webgpu";
+    // URL unavailable.
   }
+  const session = parsePresent(getSession(PRESENT_STORAGE_KEY));
+  if (session) return session;
+  const stored = parsePresent(getLocal(PRESENT_STORAGE_KEY));
+  return stored ?? "webgpu";
 }
 
 /**
- * Whether the engine may draw on a software WebGPU adapter (SwiftShader, llvmpipe):
- * `drawpane:engine-software` = "allow". Off by default: on one, a page of any size draws far
- * slower than the canvas renderer, so the canvas renderer draws instead. Headless tests allow it.
+ * Whether the engine may draw on a software GPU adapter (SwiftShader, llvmpipe):
+ * `drawpane:engine-software` = "allow". Off by default so slow software GPUs step down to
+ * the threaded CPU view mode instead. Headless tests allow it.
  */
 export function softwareAllowed(): boolean {
-  try {
-    return localStorage.getItem(SOFTWARE_STORAGE_KEY) === "allow";
-  } catch {
-    return false;
-  }
+  return getLocal(SOFTWARE_STORAGE_KEY) === "allow";
 }

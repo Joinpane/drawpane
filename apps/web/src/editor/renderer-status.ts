@@ -5,13 +5,14 @@
  */
 import { type Editor, Store } from "@drawpane/editor";
 import { useSyncExternalStore } from "react";
-import type { FallbackEvent } from "./engine-view";
+import type { EngineBackend, FallbackEvent } from "./engine-view";
 import type { RendererChoice } from "./renderer-switch";
 
 export type EngineChoice = Exclude<RendererChoice, "canvas">;
 
 export type RendererFallbackReason =
   | { readonly kind: "starting" }
+  | { readonly kind: "recovering" }
   | { readonly kind: "unsupported"; readonly features: readonly string[] }
   | { readonly kind: "no-webgpu" }
   | { readonly kind: "software-gpu" }
@@ -107,6 +108,12 @@ export function useRendererStatus(editor: Editor): RendererStatus {
   return useSyncExternalStore(store.subscribe, () => store.get().value);
 }
 
+export function engineBackendLabel(backend: EngineBackend): string {
+  if (backend === "webgpu") return "WebGPU";
+  if (backend === "webgl2") return "WebGL2";
+  return "CPU view";
+}
+
 export function fallbackToReason(event: FallbackEvent): RendererFallbackReason {
   if (event.kind === "no-webgpu") return { kind: "no-webgpu" };
   if (event.kind === "software-gpu") return { kind: "software-gpu" };
@@ -126,6 +133,8 @@ export function formatRendererReason(status: ActiveRendererStatus): string {
   switch (status.reason.kind) {
     case "starting":
       return "starting the render engine";
+    case "recovering":
+      return "recovering GPU surface";
     case "unsupported": {
       if (status.reason.features.length === 0) return "this page uses an unsupported feature";
       const names = status.reason.features.map((f) => FEATURE_LABELS[f] ?? f);

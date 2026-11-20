@@ -180,12 +180,108 @@ test.describe
       await expect(rendererChip(page)).toContainText("Engine · WebGPU", { timeout: 30_000 });
     });
 
-    test("reports software GPU refusal and missing WebGPU in the status chip", async ({
+    test("switches renderers in place on the same route, persists engine-webgl/engine-cpu, and tracks fallback and recovery in the chip", async ({
       browser,
     }) => {
+      test.setTimeout(120_000);
       const storageState = await instance.context.storageState();
 
-      // Software GPU refused (drawpane:engine-software is not set).
+      // 1. Same-route switching without a reload: engine -> canvas -> engine-cpu -> engine-webgl -> canvas.
+      // Verifies durable slot cleanup (zero leaked engine canvases) and accurate chip labels.
+      const switchCtx = await browser.newContext({ baseURL: instance.url, storageState });
+      try {
+        const p = await switchCtx.newPage();
+        await p.addInitScript(() => {
+          localStorage.setItem("drawpane:debug", "1");
+          localStorage.setItem("drawpane:engine-software", "allow");
+          localStorage.removeItem("drawpane:renderer");
+          localStorage.removeItem("drawpane:engine-present");
+        });
+        await p.goto(`${fileUrl}?renderer=engine&present=readback`);
+        await live(p);
+        await expect(rendererChip(p)).toContainText("Engine · WebGPU", { timeout: 30_000 });
+        await p.evaluate(() => {
+          (window as unknown as { __sameDoc?: number }).__sameDoc = 42;
+        });
+
+        const pushSameRoute = async (search: string) => {
+          await p.evaluate(
+            ({ path, search }) => {
+              window.history.pushState({}, "", `${path}${search}`);
+              window.dispatchEvent(new PopStateEvent("popstate"));
+            },
+            { path: fileUrl, search },
+          );
+        };
+
+        // Switch to canvas in place: chip disappears, engine canvas is removed from the durable slot.
+        await pushSameRoute("?renderer=canvas");
+        await expect(rendererChip(p)).toHaveCount(0, { timeout: 10_000 });
+        await expect
+          .poll(() =>
+            p.evaluate(() => ({
+              sameDoc: (window as unknown as { __sameDoc?: number }).__sameDoc,
+              engineCanvases: document.querySelectorAll('[data-canvas-role="engine"]').length,
+              contentVisible:
+                document.querySelector<HTMLCanvasElement>('[data-canvas-role="content"]')?.style
+                  .visibility !== "hidden",
+              hasView: Boolean(
+                (window as unknown as { drawpaneEngineView?: unknown }).drawpaneEngineView,
+              ),
+            })),
+          )
+          .toEqual({ sameDoc: 42, engineCanvases: 0, contentVisible: true, hasView: false });
+
+        // Switch to engine-cpu in place: chip reports Engine · CPU view, persists across reload without query.
+        await pushSameRoute("?renderer=engine-cpu");
+        await expect(rendererChip(p)).toContainText("Engine · CPU view", { timeout: 30_000 });
+        expect(
+          await p.evaluate(() => document.querySelectorAll('[data-canvas-role="engine"]').length),
+        ).toBe(1);
+        await p.goto(fileUrl);
+        await live(p);
+        await expect(rendererChip(p)).toContainText("Engine · CPU view", { timeout: 30_000 });
+
+        // Switch to engine-webgl in place (direct GPU presentation): chip reports Engine · WebGL2, shows recovery cover on context loss.
+        await p.evaluate(() => {
+          (window as unknown as { __sameDoc?: number }).__sameDoc = 99;
+        });
+        await pushSameRoute("?renderer=engine-webgl&present=webgpu");
+        await expect(rendererChip(p)).toContainText("Engine · WebGL2", { timeout: 30_000 });
+        await p.evaluate(() => {
+          const w = window as unknown as {
+            drawpaneEngineView?: {
+              canvas: HTMLCanvasElement;
+              engine?: { attachGpu: (...args: unknown[]) => Promise<unknown> };
+            };
+            releaseRecovery?: () => void;
+          };
+          const eng = w.drawpaneEngineView?.engine;
+          if (!eng) throw new Error("no engine");
+          const orig = eng.attachGpu.bind(eng);
+          eng.attachGpu = (...args: unknown[]) =>
+            new Promise((resolve) => {
+              w.releaseRecovery = () => void orig(...args).then(resolve);
+            });
+          w.drawpaneEngineView?.canvas
+            .getContext("webgl2")
+            ?.getExtension("WEBGL_lose_context")
+            ?.loseContext();
+        });
+        await expect(rendererChip(p)).toContainText("Canvas renderer", { timeout: 15_000 });
+        await expect(rendererChip(p)).toHaveAttribute("aria-label", /recovering GPU surface/);
+        await p.evaluate(() => {
+          (window as unknown as { releaseRecovery?: () => void }).releaseRecovery?.();
+        });
+        await expect(rendererChip(p)).toContainText("Engine · WebGL2", { timeout: 20_000 });
+        expect(
+          await p.evaluate(() => (window as unknown as { __sameDoc?: number }).__sameDoc),
+        ).toBe(99);
+      } finally {
+        await switchCtx.close();
+      }
+
+      // 2. Software GPU refused by default: steps down to CPU view mode, reported truthfully in the chip.
       const softCtx = await browser.newContext({ baseURL: instance.url, storageState });
       try {
         const p = await softCtx.newPage();
@@ -195,21 +291,56 @@ test.describe
         });
         await p.goto(`${fileUrl}?renderer=engine`);
         await live(p);
-        await expect(rendererChip(p)).toContainText("Canvas renderer", { timeout: 30_000 });
+        await expect(rendererChip(p)).toContainText("Engine · CPU view", { timeout: 30_000 });
         await rendererChip(p).click();
         await expect(p.getByRole("dialog", { name: "Renderer status" })).toContainText(
-          "only a software GPU",
+          "Drawing with CPU view",
         );
       } finally {
         await softCtx.close();
       }
 
-      // No WebGPU in this browser.
+      // 3. No WebGPU (software WebGL2 allowed): steps down to WebGL2, reported truthfully in the chip.
       const noGpuCtx = await browser.newContext({ baseURL: instance.url, storageState });
       try {
         const p = await noGpuCtx.newPage();
         await p.addInitScript(() => {
           Object.defineProperty(navigator, "gpu", { value: undefined, configurable: true });
+          localStorage.setItem("drawpane:engine-software", "allow");
+          localStorage.removeItem("drawpane:renderer");
+          localStorage.removeItem("drawpane:engine-present");
+        });
+        await p.goto(`${fileUrl}?renderer=engine`);
+        await live(p);
+        await expect(rendererChip(p)).toContainText("Engine · WebGL2", { timeout: 30_000 });
+        await rendererChip(p).click();
+        await expect(p.getByRole("dialog", { name: "Renderer status" })).toContainText(
+          "Drawing with WebGL2",
+        );
+      } finally {
+        await noGpuCtx.close();
+      }
+
+      // 4. Terminal Canvas fallback (no WebGPU, no WebGL2, no Worker): chip reports Canvas renderer with reason.
+      const terminalCtx = await browser.newContext({ baseURL: instance.url, storageState });
+      try {
+        const p = await terminalCtx.newPage();
+        await p.addInitScript(() => {
+          Object.defineProperty(navigator, "gpu", { value: undefined, configurable: true });
+          Object.defineProperty(window, "Worker", { value: undefined, configurable: true });
+          const orig = HTMLCanvasElement.prototype.getContext;
+          HTMLCanvasElement.prototype.getContext = function (
+            this: HTMLCanvasElement,
+            type: string,
+            ...args: unknown[]
+          ) {
+            if (type === "webgl2" || type === "webgl") return null;
+            return (orig as (this: HTMLCanvasElement, t: string, ...a: unknown[]) => unknown).call(
+              this,
+              type,
+              ...args,
+            );
+          } as typeof HTMLCanvasElement.prototype.getContext;
           localStorage.removeItem("drawpane:renderer");
         });
         await p.goto(`${fileUrl}?renderer=engine`);
@@ -217,10 +348,10 @@ test.describe
         await expect(rendererChip(p)).toContainText("Canvas renderer", { timeout: 30_000 });
         await rendererChip(p).click();
         await expect(p.getByRole("dialog", { name: "Renderer status" })).toContainText(
-          "no WebGPU in this browser",
+          /Web Workers are not available/i,
         );
       } finally {
-        await noGpuCtx.close();
+        await terminalCtx.close();
       }
     });
   });
