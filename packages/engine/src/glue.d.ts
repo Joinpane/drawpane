@@ -24,6 +24,12 @@ export class Outcome {
   readonly presented: boolean;
   readonly standin: boolean;
   readonly plan: number;
+  readonly exact: boolean;
+  readonly tiles_drawn: number;
+  readonly pending: number;
+  readonly queued: number;
+  readonly held: number;
+  readonly evicted: number;
   readonly encode_ms: number;
   readonly render_ms: number;
   readonly submit_ms: number;
@@ -78,6 +84,18 @@ export class Engine {
     background: Float32Array,
     detail: boolean,
   ): Outcome;
+  useCpuTiles(tile: number, slots: number): void;
+  renderCpuTiled(
+    width: number,
+    height: number,
+    zoom: number,
+    x: number,
+    y: number,
+    dpr: number,
+    background: Float32Array,
+    moving: boolean,
+    maxJobs: number,
+  ): Outcome;
   pixels(): Uint8Array;
   renderBand(
     width: number,
@@ -113,8 +131,11 @@ export class Engine {
     y: number,
     dpr: number,
     background: Float32Array,
-    detail: boolean,
+    moving: boolean,
+    budgetMs: number,
   ): Outcome;
+  renderGpuAhead?(background: Float32Array, budgetMs: number): Outcome;
+  clearTiles?(): void;
   gpuCheck?(): Outcome;
   gpuDestroy?(): void;
   gpuFinished?(): Promise<void>;

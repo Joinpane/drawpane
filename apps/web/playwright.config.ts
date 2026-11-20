@@ -55,6 +55,8 @@ export default defineConfig({
       testMatch: /bench\/.*\.spec\.ts/,
       timeout: 300_000,
       use: {
+        // No trace: its DOM snapshots run on the main thread mid-measurement.
+        trace: "off",
         ...devices["Desktop Chrome"],
         viewport: { width: 1440, height: 900 },
         // A retina laptop: twice the pixels to fill.

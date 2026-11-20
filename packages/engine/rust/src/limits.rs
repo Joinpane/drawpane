@@ -44,9 +44,12 @@ pub struct Limits {
     pub frame_verbs: usize,
     /// Clips and opacity layers open at once while drawing (across records).
     pub open_scopes: usize,
-    /// Bytes of GPU memory the engine allocates: images, the glyph atlas, the frame and its
+    /// Bytes of GPU memory the engine allocates: images, the glyph atlas, frames, tiles and their
     /// depth buffer, read-back buffers.
     pub gpu_bytes: usize,
+    /// Bytes of tiles kept (decision 0040, phase 2), within `gpu_bytes`: what's left of it beside
+    /// everything else, at most this.
+    pub tile_bytes: usize,
     /// Bytes the whole engine may hold in a Worker (its WebAssembly memory's maximum): an export
     /// is refused before it starts if the graph, images, glyph masks and the export's own
     /// working set wouldn't fit. Zero: no such check (the browser).
@@ -82,6 +85,7 @@ impl Default for Limits {
             frame_verbs: 4_000_000,
             open_scopes: 512,
             gpu_bytes: 768 * 1024 * 1024,
+            tile_bytes: 256 * 1024 * 1024,
             memory_bytes: 0,
             export_tile: 1024,
             halo: 512,

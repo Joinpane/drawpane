@@ -20,7 +20,13 @@ import { loadedFamilies, watchDocumentFonts } from "../fonts/document-fonts";
 import { fonts } from "../fonts/fonts";
 import { COMPONENT_DRAG_MIME } from "./AssetsPanel";
 import { passesToCanvas } from "./canvas-gestures";
-import { EngineView, rendererChoice } from "./engine-view";
+import {
+  EngineView,
+  IDLE_SLICE_MS,
+  MOVING_BUDGET_MS,
+  REST_BUDGET_MS,
+  rendererChoice,
+} from "./engine-view";
 import { FrameNameEditor } from "./FrameNameEditor";
 import { frameStatsFor } from "./frame-stats";
 import { useEditor, useEditorState } from "./hooks";
@@ -189,8 +195,47 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     let whole = false;
     let settle = 0;
     let fadeTimer = 0;
+    /** The camera the engine last drew: another one this frame means the camera is moving. */
+    let engineCamera: unknown = null;
+    // Between frames at rest the engine draws the tiles the next frame wants, a slice at a time
+    // (decision 0040, phase 2), until the frame it last drew is all drawn and the tiles round
+    // it too. Any frame stops it; a frame at rest that leaves work starts it again.
+    let idleOn = false;
+    let idlePosted = false;
+    /** The engine's last frame was drawn moving (stand-ins), at the camera it still has. */
+    let engineMoved = false;
+    let idleBackground = "";
+    const idle = new MessageChannel();
+    const postIdle = () => {
+      if (idlePosted) return;
+      idlePosted = true;
+      idle.port2.postMessage(0);
+    };
+    idle.port1.onmessage = () => {
+      idlePosted = false;
+      if (!idleOn || !engine || disposed) return;
+      const a = engine.ahead(idleBackground, IDLE_SLICE_MS);
+      if (!a || a.drawn === 0) {
+        // Nothing more can be drawn between frames: frames draw the rest (what the frame
+        // draws itself, straight into it), as before.
+        idleOn = false;
+        if (contentDirty) schedule();
+        return;
+      }
+      // The frame it drew for is all drawn: the next frame shows it exact, and nothing holds it
+      // back (that frame starts drawing round the view again). No frame for tiles drawn round
+      // an exact one.
+      if (a.pending === 0 && contentDirty) {
+        // Drawn now rather than a frame later: the frame is ready.
+        idleOn = false;
+        if (frame) cancelAnimationFrame(frame);
+        draw();
+      } else if (a.pending > 0 || a.queued > 0) postIdle();
+      else idleOn = false;
+    };
     const draw = () => {
       frame = 0;
+      idleOn = false;
       const s = editor.s;
       const t0 = performance.now();
       const page = s.pageId ? editor.doc.get(s.pageId) : undefined;
@@ -198,17 +243,38 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       // when a content frame is drawn, and only to one whose frame is on screen: an overlay-only
       // redraw never hides the engine's frame, and a read-back frame shows once it lands.
       let drewEngine = false;
-      if (contentDirty && s.pageId !== null && engine) {
+      if (contentDirty && s.pageId !== null && engine && engineMoved && !whole) {
+        if (engineCamera === s.camera && engineShowing) {
+          // The camera came to rest where the last frame was drawn: that frame stays on screen
+          // while the time between frames draws the rest, and the exact frame follows (a frame
+          // now would only show the same stand-ins again).
+          drewEngine = true;
+          idleOn = true;
+          idleBackground = (page && getProp(page.props, "backgroundColor")) ?? renderer.canvasColor;
+          postIdle();
+        }
+        engineMoved = false;
+      }
+      if (!drewEngine && contentDirty && s.pageId !== null && engine) {
+        // The engine keeps the page as tiles (decision 0040, phase 2). A camera that moved since
+        // its last frame is moving: tiles not drawn yet show stand-ins. One that didn't rests:
+        // each frame draws more of the missing tiles under a budget until the frame is exact,
+        // never one long frame (a test's whole redraw has no budget).
+        const moving = !whole && !exact && engineCamera !== s.camera;
+        const background = (page && getProp(page.props, "backgroundColor")) ?? renderer.canvasColor;
         const r = engine.draw(
           s.pageId,
           s.camera,
           contentCanvas.width,
           contentCanvas.height,
           dpr,
-          (page && getProp(page.props, "backgroundColor")) ?? renderer.canvasColor,
+          background,
           { hidden: renderer.hidden, whole: s.editingText },
-          exact || whole,
+          !moving,
+          whole ? 0 : moving ? MOVING_BUDGET_MS : REST_BUDGET_MS,
         );
+        engineCamera = s.camera;
+        engineMoved = r.drawn && moving && !r.exact;
         if (r.drawn) {
           drewEngine = true;
           contentDirty = false;
@@ -219,14 +285,18 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
             showEngine(true);
             timing.exact = r.exact;
           } else timing.exact = false;
-          // A stand-in (a pan shifted, a zoom scaled, unreadable text as bars): an exact frame
-          // follows once the camera rests.
-          if (!r.exact)
-            settle = window.setTimeout(() => {
-              exact = true;
-              contentDirty = true;
-              schedule();
-            }, SETTLE_MS);
+          // Stand-ins on screen while moving: the next frame draws more. At rest, the time
+          // between frames draws the rest, without compositing a frame meanwhile, and asks for
+          // the frame once what it shows is drawn; then the tiles round the view, ahead of a pan.
+          if (!r.exact) contentDirty = true;
+          if (moving && (!r.exact || r.ahead)) {
+            contentDirty = true;
+            schedule();
+          } else if (!r.exact || r.ahead) {
+            idleOn = true;
+            idleBackground = background;
+            postIdle();
+          }
         }
       }
       if (!drewEngine && contentDirty && s.pageId) {
@@ -324,6 +394,8 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         s.editingText !== last.editingText
       ) {
         contentDirty = true;
+        // What's drawn ahead is for the frame before: the next one decides again.
+        idleOn = false;
       }
       last = s;
       overlayDirty = true;
@@ -383,6 +455,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       offShaper();
       offFonts();
       if (frame) cancelAnimationFrame(frame);
+      idle.port1.close();
       clearTimeout(settle);
       clearTimeout(fadeTimer);
     };

@@ -8,20 +8,28 @@
  * since headless browsers without a GPU are far slower than a laptop.
  *
  * BENCH_RENDERER=engine runs the same file through the render engine (decision 0040), without
- * the cards' shadows, which phase 1 doesn't draw (it would leave the page to the canvas
- * renderer); BENCH_ENGINE_PRESENT=readback where WebGPU canvases don't present. The GPU's time
- * per frame (`onSubmittedWorkDone`) is reported beside the frame times, labelled not
- * representative on a software adapter.
+ * the cards' shadows, which the engine doesn't draw yet (it would leave the page to the canvas
+ * renderer); BENCH_RENDERER=both runs the canvas renderer and then the engine on that same
+ * shadowless file, in one browser; BENCH_ENGINE_PRESENT=readback where WebGPU canvases don't
+ * present. The GPU's time per frame (`onSubmittedWorkDone`) is reported beside the frame times,
+ * labelled not representative on a software adapter.
  * Run with `pnpm --filter @drawpane/web bench`.
  */
 import { expect, test } from "@playwright/test";
 import { freshInstance, type Instance } from "../fresh-instance";
 import { buildFile } from "./cards";
-import { pan, type Summary, summaryRow, zoom } from "./frames";
+import { pan, type Settles, type Summary, settles, settlesRow, summaryRow, zoom } from "./frames";
 
 const BUDGET_MS = Number(process.env.BENCH_BUDGET_MS ?? 16);
 const ENFORCE = process.env.BENCH_ENFORCE === "1";
-const ENGINE = process.env.BENCH_RENDERER === "engine";
+const RENDERERS: Array<"canvas" | "engine"> =
+  process.env.BENCH_RENDERER === "both"
+    ? ["canvas", "engine"]
+    : process.env.BENCH_RENDERER === "engine"
+      ? ["engine"]
+      : ["canvas"];
+/** The engine draws no shadows yet: with it in the run, the cards have none. */
+const SHADOWS = !RENDERERS.includes("engine");
 
 test.describe("Canvas performance", () => {
   test.skip(!!process.env.E2E_BASE_URL, "Needs its own local instance.");
@@ -36,18 +44,20 @@ test.describe("Canvas performance", () => {
   });
 
   test("pans a 10,000-layer file within budget", async () => {
+    test.setTimeout(30 * 60_000);
     const page = instance.page;
-    await page.evaluate(
-      ({ engine, present }) => {
-        localStorage.setItem("drawpane:debug", "1");
-        localStorage.setItem("drawpane:renderer", engine ? "engine" : "canvas");
-        localStorage.setItem("drawpane:engine-present", present);
-      },
-      {
-        engine: ENGINE,
-        present: process.env.BENCH_ENGINE_PRESENT === "readback" ? "readback" : "webgpu",
-      },
-    );
+    const use = (renderer: "canvas" | "engine") =>
+      page.evaluate(
+        ({ renderer, present }) => {
+          localStorage.setItem("drawpane:debug", "1");
+          localStorage.setItem("drawpane:renderer", renderer);
+          localStorage.setItem("drawpane:engine-present", present);
+        },
+        {
+          renderer,
+          present: process.env.BENCH_ENGINE_PRESENT === "readback" ? "readback" : "webgpu",
+        },
+      );
     // Why the engine didn't draw, if it didn't (no hardware adapter, a failure): the bench
     // reports the canvas renderer then, never hangs on it.
     await page.addInitScript(() => {
@@ -57,13 +67,24 @@ test.describe("Canvas performance", () => {
         ).detail;
       });
     });
-    await page.reload();
-    await page.getByRole("button", { name: "New file" }).first().click();
-    await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
-      timeout: 15_000,
-    });
-    const layers = await buildFile(page, 400, !ENGINE);
-    expect(layers).toBe(10_000);
+    // Each renderer gets its own copy of the file, built the same way in the same browser (a
+    // file built in one session isn't reliably all there after a reload while it saves).
+    for (const renderer of RENDERERS) {
+      await use(renderer);
+      await page.goto("/");
+      await page.getByRole("button", { name: "New file" }).first().click();
+      await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
+        timeout: 15_000,
+      });
+      const layers = await buildFile(page, 400, SHADOWS);
+      expect(layers).toBe(10_000);
+      await measure(renderer);
+    }
+  });
+
+  async function measure(renderer: "canvas" | "engine"): Promise<void> {
+    const page = instance.page;
+    const ENGINE = renderer === "engine";
     // Let fonts and the first full paint settle.
     await page.waitForTimeout(1500);
 
@@ -77,11 +98,57 @@ test.describe("Canvas performance", () => {
     results["zoom, whole"] = await zoom(page, 240);
 
     const rows = Object.entries(results).map(([name, r]) => summaryRow(name, r));
+    // Settling, gesture after gesture: from each one's latest input to the exact frame drawn,
+    // finished on the GPU and shown (p50, p95, worst; timeouts counted apart).
+    const settled: Record<string, Settles> = {};
+    const card = await page.evaluate(() => {
+      const e = (
+        window as unknown as {
+          drawpane: { s: { pageId: string }; doc: { childIds(id: string): string[] } };
+        }
+      ).drawpane;
+      return e.doc.childIds(e.s.pageId)[0] as string;
+    });
+    for (const [name, kind, level] of [
+      ["zoom at fit", "zoom", "fit"],
+      ["pan at fit", "pan", "fit"],
+      ["pan at 100%", "pan", 1],
+      ["drag at 100%", "drag", 1],
+    ] as const) {
+      await page.evaluate(
+        async ({ level, card }) => {
+          const e = (
+            window as unknown as {
+              drawpane: {
+                zoomToFit(): void;
+                zoomTo(z: number): void;
+                centerOn(p: { x: number; y: number }): void;
+                doc: { get(id: string): { props: Record<string, unknown> } | undefined };
+              };
+            }
+          ).drawpane;
+          if (level === "fit") e.zoomToFit();
+          else {
+            e.zoomTo(level);
+            const p = e.doc.get(card)?.props ?? {};
+            e.centerOn({ x: Number(p.x ?? 0) + 160, y: Number(p.y ?? 0) + 110 });
+          }
+          const f = (window as unknown as { drawpaneFrames: { exact: boolean } }).drawpaneFrames;
+          const t = performance.now();
+          while (!f.exact && performance.now() - t < 10_000)
+            await new Promise<void>((r) => requestAnimationFrame(() => r()));
+        },
+        { level, card },
+      );
+      settled[name] = await settles(page, kind, 10, card);
+      rows.push(settlesRow(settled[name]));
+    }
     // With the engine: who drew, on what adapter, and where a frame's time goes. Over a pan:
-    // how each frame was made (shifted, scaled or whole), its CPU breakdown and the GPU's time.
-    // Then whole exact frames drawn back to back: encoding, the renderer, submitting, the GPU
-    // (until its work is done) and the read-back (a full frame through a buffer, as headless
-    // browsers present), each on its own.
+    // how each frame was made (from its tiles, with stand-ins, direct or unchanged), the tiles
+    // drawn, its CPU breakdown and the GPU's time. Then exact frames drawn back to back, cold
+    // (every tile dropped first: what the first exact frame of a view costs) and warm (from the
+    // tiles kept): encoding, the renderer, submitting, the GPU (until its work is done) and the
+    // read-back (a full frame through a buffer, as headless browsers present), each on its own.
     const engine = ENGINE
       ? await page.evaluate(async () => {
           type Ms = { encode: number; render: number; submit: number; total: number };
@@ -89,6 +156,7 @@ test.describe("Canvas performance", () => {
             last: {
               supported: boolean;
               plan: string;
+              tiles: { drawn: number; pending: number; held: number };
               breakdown: { patch: number; encode: number; render: number; submit: number };
             };
             readsBack: boolean;
@@ -96,13 +164,18 @@ test.describe("Canvas performance", () => {
               gpu: { adapter: string; fallback: boolean } | null;
               gpuFinished(): Promise<{ ok: boolean }>;
               gpuPixels(): Promise<{ ok: boolean }>;
+              clearTiles(): void;
               renderGpu(
                 w: number,
                 h: number,
                 c: { zoom: number; x: number; y: number; dpr: number },
                 bg: readonly [number, number, number, number],
-                detail: boolean,
-              ): { ok: boolean; value?: { ms: Ms } };
+                moving: boolean,
+                budgetMs: number,
+              ): {
+                ok: boolean;
+                value?: { ms: Ms; tiles: { drawn: number }; exact: boolean; records: number };
+              };
             };
           };
           const w = window as unknown as {
@@ -117,6 +190,10 @@ test.describe("Canvas performance", () => {
             };
           };
           const view = w.drawpaneEngineView;
+          if (view && (view as unknown as { engine: { records: number } }).engine.records < 9_000)
+            throw new Error(
+              `the engine holds ${(view as unknown as { engine: { records: number } }).engine.records} records, not the file's 10,000`,
+            );
           if (!view?.last.supported)
             return {
               drawnBy: "canvas",
@@ -127,10 +204,15 @@ test.describe("Canvas performance", () => {
             const v = [...xs].sort((a, b) => a - b);
             const at = (p: number) =>
               Math.round((v[Math.floor(p * (v.length - 1))] ?? 0) * 10) / 10;
-            return { p50: at(0.5), p95: at(0.95), max: at(1) };
+            return { p50: at(0.5), p95: at(0.95), p99: at(0.99), max: at(1) };
           };
           const frame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
-          const pan = { gpu: [] as number[], encode: [] as number[], render: [] as number[] };
+          const pan = {
+            gpu: [] as number[],
+            encode: [] as number[],
+            render: [] as number[],
+            tiles: [] as number[],
+          };
           const plans: Record<string, number> = {};
           for (let i = 0; i < 60; i++) {
             w.drawpane.state.set({ camera: w.drawpane.s.camera.pan(i % 30 < 15 ? 6 : -6, 3) });
@@ -140,6 +222,7 @@ test.describe("Canvas performance", () => {
             pan.gpu.push(performance.now() - t);
             pan.encode.push(view.last.breakdown.encode);
             pan.render.push(view.last.breakdown.render);
+            pan.tiles.push(view.last.tiles.drawn);
             plans[view.last.plan] = (plans[view.last.plan] ?? 0) + 1;
           }
           const canvas = document.querySelector("canvas");
@@ -147,38 +230,55 @@ test.describe("Canvas performance", () => {
           const height = canvas?.height ?? 900;
           const c = w.drawpane.s.camera;
           const camera = { zoom: c.zoom, x: c.x, y: c.y, dpr: w.devicePixelRatio };
-          const whole = {
-            encode: [] as number[],
-            render: [] as number[],
-            submit: [] as number[],
-            gpu: [] as number[],
-            readback: [] as number[],
-          };
-          for (let i = 0; i < 20; i++) {
-            const r = view.engine.renderGpu(width, height, camera, [1, 1, 1, 1], false);
-            if (!r.ok || !r.value) break;
-            whole.encode.push(r.value.ms.encode);
-            whole.render.push(r.value.ms.render);
-            whole.submit.push(r.value.ms.submit);
-            let t = performance.now();
-            await view.engine.gpuFinished();
-            whole.gpu.push(performance.now() - t);
-            // Every other frame read back, so both costs show on their own.
-            if (i % 2 === 0) {
-              t = performance.now();
-              await view.engine.gpuPixels();
-              whole.readback.push(performance.now() - t);
+          const exactFrames = async (cold: boolean) => {
+            const out = {
+              encode: [] as number[],
+              render: [] as number[],
+              submit: [] as number[],
+              gpu: [] as number[],
+              readback: [] as number[],
+              tiles: [] as number[],
+              records: [] as number[],
+            };
+            for (let i = 0; i < 12; i++) {
+              if (cold) view.engine.clearTiles();
+              const r = view.engine.renderGpu(width, height, camera, [1, 1, 1, 1], false, 0);
+              if (!r.ok || !r.value) break;
+              out.encode.push(r.value.ms.encode);
+              out.render.push(r.value.ms.render);
+              out.submit.push(r.value.ms.submit);
+              out.tiles.push(r.value.tiles.drawn);
+              out.records.push(r.value.records);
+              let t = performance.now();
+              await view.engine.gpuFinished();
+              out.gpu.push(performance.now() - t);
+              // Every other frame read back, so both costs show on their own.
+              if (i % 2 === 0) {
+                t = performance.now();
+                await view.engine.gpuPixels();
+                out.readback.push(performance.now() - t);
+              }
             }
-          }
+            return Object.fromEntries(Object.entries(out).map(([k, v]) => [k, q(v)]));
+          };
+          const cold = await exactFrames(true);
+          const warm = await exactFrames(false);
           return {
             drawnBy: "engine",
             adapter: view.engine.gpu?.adapter ?? null,
             software: !!view.engine.gpu?.fallback,
             readsBack: view.readsBack,
             frame: { width, height },
+            camera,
             gpuMs: q(pan.gpu),
-            pan: { plans, encode: q(pan.encode), render: q(pan.render), gpu: q(pan.gpu) },
-            whole: Object.fromEntries(Object.entries(whole).map(([k, v]) => [k, q(v)])),
+            pan: {
+              plans,
+              tiles: q(pan.tiles),
+              encode: q(pan.encode),
+              render: q(pan.render),
+              gpu: q(pan.gpu),
+            },
+            exact: { cold, warm },
           };
         })
       : null;
@@ -187,10 +287,15 @@ test.describe("Canvas performance", () => {
     );
     test.info().annotations.push({
       type: "bench",
-      description: JSON.stringify({ ...results, ...(engine ? { engine } : {}) }),
+      description: JSON.stringify({
+        renderer,
+        ...results,
+        settled,
+        ...(engine ? { engine } : {}),
+      }),
     });
     if (ENFORCE)
       for (const [name, r] of Object.entries(results))
         expect(r.content.p95 + r.overlay.p95, `${name} p95 frame time`).toBeLessThan(BUDGET_MS);
-  });
+  }
 });

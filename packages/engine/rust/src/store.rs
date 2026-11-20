@@ -35,6 +35,8 @@ pub struct Node {
     pub children: Vec<u32>,
     /// Subtree bounds in the record's own units: unknown (None) until computed.
     bounds: Cell<Option<Option<Rect>>>,
+    /// Its shown children's bounds in its units, before any clip: computed with `bounds`.
+    kids: Cell<Option<Option<Rect>>>,
 }
 
 impl Node {
@@ -44,6 +46,7 @@ impl Node {
             parent,
             children: Vec::new(),
             bounds: Cell::new(None),
+            kids: Cell::new(None),
         }
     }
 }
@@ -123,8 +126,12 @@ pub struct Store {
     pub revision: u32,
     /// Records with backdrop readers, for invalidation.
     readers: Vec<u32>,
+    /// How many change-against-reader checks the last `dirty` made (its cost, for the tests).
+    dirty_checks: Cell<u64>,
     /// Records holding features the engine doesn't draw (their `unsupported` bits).
     unsupported: HashSet<u32>,
+    /// Records that paint an image, so an image changing invalidates only what shows it.
+    image_records: HashSet<u32>,
     /// What the records hold, roughly, in bytes (`Record::heap_bytes`): held to `Limits::graph_bytes`.
     bytes: usize,
     /// Preorder index and subtree end of every record; rebuilt when the structure changes.
@@ -173,7 +180,9 @@ impl Store {
             glyphs: GlyphStore::default(),
             revision: 0,
             readers: Vec::new(),
+            dirty_checks: Cell::new(0),
             unsupported: HashSet::new(),
+            image_records: HashSet::new(),
             bytes: 0,
             order: None,
             structure: 0,
@@ -304,6 +313,7 @@ impl Store {
         self.glyphs = staged.glyphs;
         self.readers = staged.readers;
         self.unsupported = staged.unsupported;
+        self.image_records = staged.image_records;
         self.bytes = staged.bytes;
         self.order = None;
         self.structure += 1;
@@ -396,6 +406,12 @@ impl Store {
             .filter(|(_, n)| n.record.unsupported != 0)
             .map(|(id, _)| *id)
             .collect();
+        self.image_records = self
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.record.images().next().is_some())
+            .map(|(id, _)| *id)
+            .collect();
         self.bytes = self
             .nodes
             .iter()
@@ -406,6 +422,7 @@ impl Store {
         self.structure += 1;
         for n in self.nodes.values() {
             n.bounds.set(None);
+            n.kids.set(None);
         }
     }
 
@@ -431,6 +448,7 @@ impl Store {
                 let glyphs = std::mem::take(&mut self.glyphs);
                 let readers = std::mem::take(&mut self.readers);
                 self.unsupported.clear();
+                self.image_records.clear();
                 self.bytes = 0;
                 txn.push(Undo::Everything {
                     nodes: old,
@@ -494,6 +512,7 @@ impl Store {
                 }
                 let reads = record.reads().is_some();
                 let unsupported = record.unsupported != 0;
+                let images = record.images().next().is_some();
                 let cost = record.heap_bytes();
                 self.glyphs.retain(&record);
                 let mut structural = true;
@@ -503,6 +522,7 @@ impl Store {
                     let old = std::mem::replace(&mut node.record, record);
                     node.parent = parent;
                     node.bounds.set(None);
+                    node.kids.set(None);
                     self.bytes = self.bytes + cost - old.heap_bytes();
                     self.glyphs.release(&old);
                     if structural {
@@ -549,6 +569,11 @@ impl Store {
                 } else {
                     self.unsupported.remove(&id);
                 }
+                if images {
+                    self.image_records.insert(id);
+                } else {
+                    self.image_records.remove(&id);
+                }
                 self.dirty_up(id);
                 if structural {
                     self.order = None;
@@ -577,6 +602,7 @@ impl Store {
                         self.glyphs.release(&node.record);
                         self.bytes -= node.record.heap_bytes() + NODE_BYTES;
                         self.unsupported.remove(&at);
+                        self.image_records.remove(&at);
                         if txn.track {
                             removed.push((at, node));
                         }
@@ -665,6 +691,7 @@ impl Store {
         loop {
             let Some(n) = self.nodes.get(&id) else { return };
             n.bounds.set(None);
+            n.kids.set(None);
             if id == ROOT {
                 return;
             }
@@ -771,6 +798,7 @@ impl Store {
                     children = Some(children.map_or(t, |o| o.union(t)));
                 }
             }
+            node.kids.set(Some(children));
             if let (Some(mut ch), Some(clip)) = (children, self.children_clip(r)) {
                 ch = ch.intersect(clip);
                 children = (ch.width() >= 0.0 && ch.height() >= 0.0).then_some(ch);
@@ -809,6 +837,12 @@ impl Store {
             out = Some(out.map_or(b, |o| o.intersect(b)));
         }
         out
+    }
+
+    /// Where a record's shown children paint, in its units, before any clip it draws them in.
+    pub fn children_extent(&self, id: u32) -> Option<Rect> {
+        self.bounds(id);
+        self.nodes.get(&id)?.kids.get().flatten()
     }
 
     /// Where a record's subtree paints, in page units.
@@ -853,52 +887,89 @@ impl Store {
             })
             .collect();
         if !self.readers.is_empty() && !items.is_empty() {
-            let mut readers: Vec<(u32, u32, u32)> = self
-                .readers
-                .clone()
-                .into_iter()
-                .map(|id| {
-                    let (o, e) = self.order_of(id);
-                    (o, e, id)
-                })
-                .collect();
-            readers.sort_unstable();
-            for (order, end, id) in readers {
-                let Some(node) = self.nodes.get(&id) else { continue };
+            // Each reader's paint order, subtree end, read and paint regions on the device, and
+            // whether it reads after its children: worked out once.
+            struct Reader {
+                order: u32,
+                end: u32,
+                reads: Rect,
+                paints: Rect,
+                after_children: bool,
+                /// Changes before this index are known not to reach it.
+                seen: usize,
+                joined: bool,
+            }
+            let mut readers: Vec<Reader> = Vec::with_capacity(self.readers.len());
+            for id in self.readers.clone() {
                 if !self.drawn(id) {
                     continue;
                 }
-                let halo = f64::from(node.record.reads().unwrap_or(0.0));
-                let b = Rect::new(0.0, 0.0, f64::from(node.record.size[0]), f64::from(node.record.size[1]));
+                let (order, end) = self.order_of(id);
+                let Some(node) = self.nodes.get(&id) else { continue };
+                let r = &node.record;
+                let halo = f64::from(r.reads().unwrap_or(0.0));
+                let b = Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1]));
                 let device = view * self.world(id);
-                let paints = device.transform_rect_bbox(b).inflate(slop, slop);
-                let reads = device.transform_rect_bbox(b.inflate(halo, halo)).inflate(slop, slop);
-                // What it reads changed if a change beneath it (earlier in paint order: an
-                // earlier subtree or an ancestor) touches its read region. Its own subtree's
-                // changes are above it, unless it reads after its children are drawn.
-                let reads_after_children = node
-                    .record
-                    .ops
-                    .iter()
-                    .position(|op| matches!(op, Op::Children))
-                    .zip(node.record.ops.iter().position(|op| matches!(op, Op::Read { .. })))
-                    .is_some_and(|(c, r)| r > c);
-                let affected = items.iter().any(|d| {
-                    let beneath =
-                        d.stale || d.order < order || (reads_after_children && d.order <= end && d.order > order);
-                    beneath && overlaps(d.rect, reads)
+                readers.push(Reader {
+                    order,
+                    end,
+                    reads: device.transform_rect_bbox(b.inflate(halo, halo)).inflate(slop, slop),
+                    paints: device.transform_rect_bbox(b).inflate(slop, slop),
+                    // Its own subtree's changes are above it, unless it reads (any of its reads)
+                    // after its children are drawn.
+                    after_children: r
+                        .ops
+                        .iter()
+                        .skip_while(|op| !matches!(op, Op::Children))
+                        .any(|op| matches!(op, Op::Read { .. })),
+                    seen: 0,
+                    joined: false,
                 });
-                if affected {
-                    items.push(Dirty {
-                        rect: paints,
-                        order,
-                        end: order,
-                        stale: false,
+            }
+            readers.sort_unstable_by_key(|r| r.order);
+            // In paint order, then again until no reader joins: a reader that reads after its
+            // children reads what readers inside it paint, and those come later in paint order
+            // (a fixed point, conservative). Each reader is checked only against the changes it
+            // hasn't seen, so the closure costs readers × changes at most, however the passes go.
+            let mut checks = 0u64;
+            loop {
+                let mut grew = false;
+                for r in readers.iter_mut() {
+                    if r.joined {
+                        continue;
+                    }
+                    let from = r.seen;
+                    checks += (items.len() - from) as u64;
+                    let hit = items[from..].iter().any(|d| {
+                        let beneath =
+                            d.stale || d.order < r.order || (r.after_children && d.order <= r.end && d.order > r.order);
+                        beneath && overlaps(d.rect, r.reads)
                     });
+                    r.seen = items.len();
+                    if hit {
+                        r.joined = true;
+                        grew = true;
+                        items.push(Dirty {
+                            rect: r.paints,
+                            order: r.order,
+                            end: r.order,
+                            stale: false,
+                        });
+                    }
+                }
+                if !grew {
+                    break;
                 }
             }
+            self.dirty_checks.set(checks);
         }
         items.into_iter().map(|d| d.rect).collect()
+    }
+
+    /// How many change-against-reader checks the last `dirty` made: its cost, bounded by readers
+    /// times the changes and the readers that join.
+    pub fn dirty_checks(&self) -> u64 {
+        self.dirty_checks.get()
     }
 
     /// Whether a record and every ancestor are shown.
@@ -911,6 +982,31 @@ impl Store {
             id = n.parent;
         }
         true
+    }
+
+    /// Where the records painting image `id` paint, as changes (an image put or dropped under a
+    /// handle they use changes their pixels). Readers they reach join through `dirty`.
+    pub fn image_users(&mut self, id: u32) -> Vec<Dirty> {
+        let mut users: Vec<u32> = self
+            .image_records
+            .iter()
+            .copied()
+            .filter(|r| self.nodes.get(r).is_some_and(|n| n.record.images().any(|i| i == id)))
+            .collect();
+        users.sort_unstable();
+        let mut out = Vec::new();
+        for r in users {
+            let (order, end) = self.order_of(r);
+            if let Some(rect) = self.world_extent(r) {
+                out.push(Dirty {
+                    rect,
+                    order,
+                    end,
+                    stale: false,
+                });
+            }
+        }
+        out
     }
 
     /// Records with backdrop readers.

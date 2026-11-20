@@ -2,7 +2,7 @@
 //! clip, and later shadow and glass distance) draws the same curve (decision 0040, "Corner
 //! smoothing").
 
-use vello_common::kurbo::{BezPath, Ellipse, Point, Rect, Shape};
+use vello_common::kurbo::{BezPath, Ellipse, Point, Rect, Shape, Vec2};
 
 /// The canvas's tolerance for turning arcs into curves is far finer than a pixel; kurbo's
 /// default (0.1) is a tenth of a unit, which at high zoom shows. Shapes are generated at this.
@@ -46,45 +46,79 @@ pub fn fit_radii(w: f64, h: f64, radii: [f64; 4]) -> [f64; 4] {
 pub fn rounded_rect(w: f32, h: f32, radii: [f32; 4], smoothing: f32) -> BezPath {
     debug_assert!(smoothing == 0.0, "corner smoothing is refused at decode");
     let (w, h) = (f64::from(w), f64::from(h));
-    let [tl, tr, br, bl] = fit_radii(w.abs(), h.abs(), radii.map(f64::from));
+    rounded_rect_at((0.0, 0.0), w, h, fit_radii(w.abs(), h.abs(), radii.map(f64::from)))
+}
+
+/// A box `w` × `h` with its top left at `origin` and corner radii already fitted (`fit_radii`).
+pub fn rounded_rect_at(origin: (f64, f64), w: f64, h: f64, [tl, tr, br, bl]: [f64; 4]) -> BezPath {
+    let (x, y) = origin;
     let mut p = BezPath::new();
     if tl == 0.0 && tr == 0.0 && br == 0.0 && bl == 0.0 {
-        p.move_to((0.0, 0.0));
-        p.line_to((w, 0.0));
-        p.line_to((w, h));
-        p.line_to((0.0, h));
+        p.move_to((x, y));
+        p.line_to((x + w, y));
+        p.line_to((x + w, y + h));
+        p.line_to((x, y + h));
         p.close_path();
         return p;
     }
-    // Clockwise from the top edge, as the canvas's roundRect: each corner a quarter circle.
-    let quarter = |p: &mut BezPath, c: Point, r: f64, start: f64| {
+    // Clockwise from the top edge, as the canvas's roundRect: each corner a quarter circle, its
+    // cubics worked out once per radius (`quarter`).
+    let corner = |p: &mut BezPath, c: Point, r: f64, which: usize| {
         if r <= 0.0 {
             p.line_to(c);
             return;
         }
-        let arc = vello_common::kurbo::Arc::new(c, (r, r), start, core::f64::consts::FRAC_PI_2, 0.0);
-        arc.to_cubic_beziers(tolerance(r), |a, b, e| p.curve_to(a, b, e));
+        quarter(r, which, |a, b, e| p.curve_to(c + a, c + b, c + e));
     };
-    use core::f64::consts::{FRAC_PI_2, PI};
-    p.move_to((tl, 0.0));
-    p.line_to((w - tr, 0.0));
+    p.move_to((x + tl, y));
+    p.line_to((x + w - tr, y));
     if tr > 0.0 {
-        quarter(&mut p, Point::new(w - tr, tr), tr, -FRAC_PI_2);
+        corner(&mut p, Point::new(x + w - tr, y + tr), tr, 0);
     }
-    p.line_to((w, h - br));
+    p.line_to((x + w, y + h - br));
     if br > 0.0 {
-        quarter(&mut p, Point::new(w - br, h - br), br, 0.0);
+        corner(&mut p, Point::new(x + w - br, y + h - br), br, 1);
     }
-    p.line_to((bl, h));
+    p.line_to((x + bl, y + h));
     if bl > 0.0 {
-        quarter(&mut p, Point::new(bl, h - bl), bl, FRAC_PI_2);
+        corner(&mut p, Point::new(x + bl, y + h - bl), bl, 2);
     }
-    p.line_to((0.0, tl));
+    p.line_to((x, y + tl));
     if tl > 0.0 {
-        quarter(&mut p, Point::new(tl, tl), tl, PI);
+        corner(&mut p, Point::new(x + tl, y + tl), tl, 3);
     }
     p.close_path();
     p
+}
+
+/// Quarter circles of radius `r` about the origin as cubics (`which`: from the top, right,
+/// bottom or left, clockwise), as kurbo's arc makes them at `tolerance(r)`: kept per radius, so
+/// a page of rounded boxes, drawn into tile after tile, works out its arcs' sines and cosines
+/// once (they were a tenth of a cold tile's time).
+fn quarter(r: f64, which: usize, mut out: impl FnMut(Vec2, Vec2, Vec2)) {
+    use core::f64::consts::{FRAC_PI_2, PI};
+    type Quarters = [Vec<[Vec2; 3]>; 4];
+    type Kept = std::collections::HashMap<u64, Quarters, std::hash::BuildHasherDefault<crate::masks::KeyHasher>>;
+    thread_local! {
+        static QUARTERS: core::cell::RefCell<Kept> = core::cell::RefCell::new(Kept::default());
+    }
+    QUARTERS.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= 4096 {
+            cache.clear();
+        }
+        let q = cache.entry(r.to_bits()).or_insert_with(|| {
+            [-FRAC_PI_2, 0.0, FRAC_PI_2, PI].map(|start| {
+                let mut v = Vec::new();
+                let arc = vello_common::kurbo::Arc::new(Point::ORIGIN, (r, r), start, FRAC_PI_2, 0.0);
+                arc.to_cubic_beziers(tolerance(r), |a, b, e| v.push([a.to_vec2(), b.to_vec2(), e.to_vec2()]));
+                v
+            })
+        });
+        for [a, b, e] in &q[which] {
+            out(*a, *b, *e);
+        }
+    });
 }
 
 /// The ellipse inscribed in a `w` × `h` box, from its rightmost point, clockwise (the canvas's
@@ -142,6 +176,30 @@ mod tests {
         // A uniform radius gets half the shorter side.
         assert_eq!(fit_radii(100.0, 40.0, [50.0; 4]), [20.0; 4]);
         assert_eq!(fit_radii(100.0, 40.0, [-3.0, f64::NAN, 5.0, 0.0]), [0.0, 0.0, 5.0, 0.0]);
+    }
+
+    #[test]
+    fn kept_corners_are_kurbos_arcs() {
+        use core::f64::consts::{FRAC_PI_2, PI};
+        for r in [0.5, 3.0, 12.0, 47.25, 1.0e3, 2.5e5] {
+            for (which, start) in [-FRAC_PI_2, 0.0, FRAC_PI_2, PI].into_iter().enumerate() {
+                let c = Point::new(10.0, -7.5);
+                let mut want = Vec::new();
+                vello_common::kurbo::Arc::new(c, (r, r), start, FRAC_PI_2, 0.0)
+                    .to_cubic_beziers(tolerance(r), |a, b, e| want.push([a, b, e]));
+                // Twice: from the cache the second time.
+                for _ in 0..2 {
+                    let mut got = Vec::new();
+                    quarter(r, which, |a, b, e| got.push([c + a, c + b, c + e]));
+                    assert_eq!(got.len(), want.len());
+                    for (g, w) in got.iter().zip(&want) {
+                        for (g, w) in g.iter().zip(w) {
+                            assert!((g.x - w.x).abs() <= 1e-9 * r && (g.y - w.y).abs() <= 1e-9 * r);
+                        }
+                    }
+                }
+            }
+        }
     }
 
     #[test]

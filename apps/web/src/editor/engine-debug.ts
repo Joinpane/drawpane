@@ -234,9 +234,12 @@ export function engineDebug(editor: Editor) {
       module ??= await loadBrowserEngine();
       const px = width * height * 4;
       const row = Math.ceil((width * 4) / 256) * 256;
-      // The atlas (2,048² RGBA8) and checker, three frames with their depth buffers, and one
-      // read-back buffer and a half.
-      const budget = 2048 * 2048 * 4 + 16 * 16 * 4 + 6 * px + Math.floor(row * height * 1.5);
+      // The atlas (2,048² RGBA8) and checker, two frames, the scratch tile with its depth buffer
+      // (a budget this small keeps no tiles: frames are drawn tile by tile), and one read-back
+      // buffer and a half.
+      const scratch = 512 * 512 * 4 * 2;
+      const budget =
+        2048 * 2048 * 4 + 16 * 16 * 4 + 2 * px + scratch + Math.floor(row * height * 1.5);
       const e = new RenderEngine(module, { gpuBytes: budget });
       try {
         const g = await e.attachGpu(null);

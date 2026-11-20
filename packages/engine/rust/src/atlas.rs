@@ -70,18 +70,79 @@ impl Shelves {
         }
         // Full: empty the least recently used shelf that suits, unless this frame drew from it
         // (its texels are in the frame's draws, which run after the upload).
-        let shelf = self
+        if let Some(shelf) = self
             .shelves
             .iter_mut()
             .filter(|s| Self::suits(s.h, h) && s.used < frame)
-            .min_by_key(|s| s.used)?;
-        shelf.x = w + 1;
-        shelf.used = frame;
+            .min_by_key(|s| s.used)
+        {
+            shelf.x = w + 1;
+            shelf.used = frame;
+            return Some(Placed::Reused {
+                x: 0,
+                y: shelf.y,
+                shelf_y: shelf.y,
+                shelf_h: shelf.h,
+            });
+        }
+        // None suits (the masks wanted are another size now: a zoom changed the scale): neighbours
+        // this frame didn't draw from, merged into a shelf of the height wanted (what's left
+        // below it, a shelf of its own), the least recently used run first. Without this, a page
+        // of shelves of one size would refuse every mask of another for good.
+        self.merge(w, h, frame)
+    }
+
+    /// Empties the run of neighbouring shelves, none drawn from in `frame`, that's tall enough for
+    /// a `w` × `h` mask and least recently used, and puts a shelf `h` tall at its top.
+    fn merge(&mut self, w: u32, h: u32, frame: u64) -> Option<Placed> {
+        // A run reaching the last shelf may also take the free rows below it.
+        let last = self.shelves.len().checked_sub(1)?;
+        let reach = |j: usize, s: &Shelf| if j == last { self.side } else { s.y + s.h };
+        let mut best: Option<(u64, usize, usize)> = None;
+        for i in 0..self.shelves.len() {
+            let top = self.shelves[i].y;
+            let mut newest = 0u64;
+            for j in i..self.shelves.len() {
+                let s = self.shelves[j];
+                if s.used >= frame {
+                    break;
+                }
+                newest = newest.max(s.used);
+                if reach(j, &s) - top >= h {
+                    if best.is_none_or(|(n, _, _)| newest < n) {
+                        best = Some((newest, i, j));
+                    }
+                    break;
+                }
+            }
+        }
+        let (_, i, j) = best?;
+        let top = self.shelves[i].y;
+        // The rows masks were on (their masks are evicted); past them, free rows.
+        let end = self.shelves[j].y + self.shelves[j].h;
+        let mut fresh = vec![Shelf {
+            y: top,
+            h,
+            x: w + 1,
+            used: frame,
+        }];
+        if j == last {
+            // The tail below is free again from the new shelf's end.
+            self.next_y = top + h + 1;
+        } else if end > top + h + 1 {
+            fresh.push(Shelf {
+                y: top + h + 1,
+                h: end - (top + h + 1),
+                x: 0,
+                used: 0,
+            });
+        }
+        self.shelves.splice(i..=j, fresh);
         Some(Placed::Reused {
             x: 0,
-            y: shelf.y,
-            shelf_y: shelf.y,
-            shelf_h: shelf.h,
+            y: top,
+            shelf_y: top,
+            shelf_h: end - top,
         })
     }
 
@@ -142,6 +203,31 @@ mod tests {
         assert_eq!(a.place(60, 15, 6), None);
         // A later frame can (all drawn in frame 6: the first of them).
         assert!(matches!(a.place(60, 15, 7), Some(Placed::Reused { y: 0, .. })));
+    }
+
+    #[test]
+    fn a_full_atlas_of_another_size_still_takes_a_mask() {
+        let mut a = Shelves::new(64);
+        // Eight shelves 7 tall fill the texture (each with a row of gap below it).
+        for frame in 1..=8 {
+            assert!(matches!(a.place(60, 7, frame), Some(Placed::At { .. })));
+        }
+        // A mask 20 tall suits none of them: the oldest run tall enough is emptied for it, and
+        // what's left of the run below it is a shelf of its own.
+        assert_eq!(
+            a.place(30, 20, 9),
+            Some(Placed::Reused {
+                x: 0,
+                y: 0,
+                shelf_y: 0,
+                shelf_h: 23
+            })
+        );
+        assert_eq!(a.place(30, 20, 9), Some(Placed::At { x: 31, y: 0 }));
+        // Shelves drawn from this frame are never emptied: past those, a run further down.
+        a.touch(5, 10);
+        a.touch(26, 10);
+        assert!(matches!(a.place(30, 20, 10), Some(Placed::Reused { shelf_y: 32, .. })));
     }
 
     #[test]

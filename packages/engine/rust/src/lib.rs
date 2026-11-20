@@ -19,10 +19,10 @@ pub mod images;
 pub mod kernels;
 pub mod limits;
 pub mod masks;
-pub mod plan;
 pub mod png;
 pub mod record;
 pub mod store;
+pub mod tiles;
 pub mod wire;
 
 use engine::{Camera, Engine as Core};
@@ -54,10 +54,18 @@ pub struct Outcome {
     pub specks: u32,
     /// The frame reached the canvas (a GPU frame with a canvas; always true otherwise).
     pub presented: bool,
-    /// Made from the last frame (a pan shifted, a zoom scaled): a stand-in, not exact.
+    /// Something on screen stands in for what isn't drawn yet: not exact.
     pub standin: bool,
-    /// How a GPU frame was made: 0 whole, 1 pan, 2 zoom stand-in, 3 unchanged.
+    /// How a GPU frame was made: 0 from its tiles, 1 with stand-ins, 2 direct, 3 unchanged.
     pub plan: u32,
+    /// A frame made of tiles that is exactly what a fresh engine draws.
+    pub exact: bool,
+    /// Tiles drawn this frame, still stale or missing on screen, held, and evicted.
+    pub tiles_drawn: u32,
+    pub pending: u32,
+    pub queued: u32,
+    pub held: u32,
+    pub evicted: u32,
     /// Its CPU time (milliseconds): encoding, the renderer's preparing and uploading,
     /// presenting and submitting, and all.
     pub encode_ms: f64,
@@ -98,6 +106,12 @@ impl Outcome {
             presented: true,
             standin: false,
             plan: 0,
+            exact: false,
+            tiles_drawn: 0,
+            pending: 0,
+            queued: 0,
+            held: 0,
+            evicted: 0,
             encode_ms: 0.0,
             render_ms: 0.0,
             submit_ms: 0.0,
@@ -212,8 +226,8 @@ impl Engine {
     }
 
     /// Sets a limit by name (`Limits`' fields: `graph_bytes`, `message_bytes`, `image_bytes`,
-    /// `glyph_outline_bytes`, `glyph_mask_bytes`, `memory_bytes`, `gpu_bytes`, `band_bytes`,
-    /// `frame_verbs`), before anything is applied.
+    /// `glyph_outline_bytes`, `glyph_mask_bytes`, `memory_bytes`, `gpu_bytes`, `tile_bytes`,
+    /// `band_bytes`, `frame_verbs`), before anything is applied.
     #[wasm_bindgen(js_name = setLimit)]
     pub fn set_limit(&mut self, name: &str, value: f64) -> Outcome {
         if self.core.store.revision != 0 || !value.is_finite() || value < 0.0 {
@@ -231,6 +245,7 @@ impl Engine {
             "glyph_outline_bytes" => l.glyph_outline_bytes = v,
             "memory_bytes" => l.memory_bytes = v,
             "gpu_bytes" => l.gpu_bytes = v,
+            "tile_bytes" => l.tile_bytes = v,
             "band_bytes" => l.band_bytes = v.max(4),
             "frame_verbs" => l.frame_verbs = v,
             "glyph_mask_bytes" => {
@@ -382,6 +397,71 @@ impl Engine {
                 self.pixels.extend_from_slice(px);
                 engine::unpremultiply(&mut self.pixels);
                 Outcome::stats(stats)
+            }
+            Err(e) => Outcome::err(e),
+        }
+    }
+
+    /// Keeps tiles on the CPU of `tile` device pixels a side, at most `slots` at once (decision
+    /// 0040, phase 2): what `renderCpuTiled` draws from.
+    #[wasm_bindgen(js_name = useCpuTiles)]
+    pub fn use_cpu_tiles(&mut self, tile: u32, slots: u32) {
+        self.core.use_cpu_tiles(tile.clamp(16, 2048), slots as usize);
+    }
+
+    /// Draws a frame made of tiles on the CPU, as the GPU makes its frames; `pixels()` then
+    /// answers it (straight RGBA8). `max_jobs`: tiles drawn beyond those nothing else can stand
+    /// in for (0xffffffff: no limit).
+    #[allow(clippy::too_many_arguments)]
+    #[wasm_bindgen(js_name = renderCpuTiled)]
+    pub fn render_cpu_tiled(
+        &mut self,
+        width: u32,
+        height: u32,
+        zoom: f64,
+        x: f64,
+        y: f64,
+        dpr: f64,
+        background: Vec<f32>,
+        moving: bool,
+        max_jobs: u32,
+    ) -> Outcome {
+        let bg = rgba(&background);
+        let options = engine::TiledOptions {
+            moving,
+            max_jobs: if max_jobs == u32::MAX {
+                usize::MAX
+            } else {
+                max_jobs as usize
+            },
+            ..engine::TiledOptions::default()
+        };
+        match self
+            .core
+            .render_cpu_tiled(width, height, Camera { zoom, x, y, dpr }, bg, options)
+        {
+            Ok((px, stats)) => {
+                self.pixels.clear();
+                self.pixels.extend_from_slice(px);
+                engine::unpremultiply(&mut self.pixels);
+                let mut o = Outcome::stats(engine::FrameStats {
+                    draw: stats.draw,
+                    masks: self.core.cpu.masks.stats,
+                });
+                o.exact = stats.exact;
+                o.standin = !stats.exact;
+                o.plan = if stats.direct {
+                    2
+                } else if stats.pending > 0 {
+                    1
+                } else {
+                    0
+                };
+                o.tiles_drawn = stats.tiles_drawn;
+                o.pending = stats.pending;
+                o.held = stats.held;
+                o.evicted = stats.evicted;
+                o
             }
             Err(e) => Outcome::err(e),
         }
@@ -547,10 +627,12 @@ pub async fn create_gpu(canvas: JsValue, glyph_mask_bytes: u32) -> GpuInit {
     } else {
         gpu::Target::None
     };
+    // By default, what the glyph atlas holds: it's allocated whole either way, and a mask that
+    // doesn't fit is drawn as its outline, at many times the cost.
     let bytes = if glyph_mask_bytes > 0 {
         glyph_mask_bytes as usize
     } else {
-        limits.glyph_mask_bytes
+        gpu::ATLAS_BYTES
     };
     match gpu::Gpu::create(target, bytes, limits.glyph_mask_side).await {
         Ok(g) => GpuInit {
@@ -592,7 +674,10 @@ impl Engine {
         self.core.gpu = None;
     }
 
-    /// Draws a frame on the GPU.
+    /// Draws a frame on the GPU, made of tiles (decision 0040, phase 2). `moving`: the camera is
+    /// moving, so stand-ins may show and a zoom draws no tiles of a passing scale. `budget_ms`:
+    /// milliseconds it may spend drawing tiles beyond those nothing else can stand in for (zero:
+    /// no limit, so a frame at rest comes back exact). Call again while it isn't exact.
     #[allow(clippy::too_many_arguments)]
     #[wasm_bindgen(js_name = renderGpu)]
     pub fn render_gpu(
@@ -604,12 +689,18 @@ impl Engine {
         y: f64,
         dpr: f64,
         background: Vec<f32>,
-        detail: bool,
+        moving: bool,
+        budget_ms: f64,
     ) -> Outcome {
         let bg = rgba(&background);
+        let options = engine::TiledOptions {
+            moving,
+            budget_ms: if budget_ms.is_finite() { budget_ms } else { 0.0 },
+            ..engine::TiledOptions::default()
+        };
         match self
             .core
-            .render_gpu(width, height, Camera { zoom, x, y, dpr }, bg, detail)
+            .render_gpu(width, height, Camera { zoom, x, y, dpr }, bg, options)
         {
             Ok(draw) => {
                 let masks = self.core.gpu.as_ref().map(|g| g.masks.stats).unwrap_or_default();
@@ -617,9 +708,41 @@ impl Engine {
                 o.presented = draw.presented;
                 o.standin = draw.standin;
                 o.plan = draw.plan;
+                o.exact = draw.exact;
+                o.tiles_drawn = draw.tiles_drawn;
+                o.pending = draw.pending;
+                o.queued = draw.queued;
+                o.held = draw.held;
+                o.evicted = draw.evicted;
                 o.encode_ms = draw.encode_ms;
                 o.render_ms = draw.render_ms;
                 o.submit_ms = draw.submit_ms;
+                o.cpu_ms = draw.cpu_ms;
+                o
+            }
+            Err(e) => Outcome::err(e),
+        }
+    }
+
+    /// Draws tiles for the next frame of the view last drawn, for at most `budget_ms` (at least
+    /// one tile), compositing and presenting nothing: what a browser runs between frames at rest
+    /// (decision 0040, phase 2). In the answer, `tiles_drawn`; `pending`: tiles the last frame
+    /// shows still to draw; `queued`: tiles round it still to draw.
+    #[wasm_bindgen(js_name = renderGpuAhead)]
+    pub fn render_gpu_ahead(&mut self, background: Vec<f32>, budget_ms: f64) -> Outcome {
+        let bg = rgba(&background);
+        let budget = if budget_ms.is_finite() { budget_ms } else { 0.0 };
+        match self.core.render_gpu_ahead(bg, budget) {
+            Ok(draw) => {
+                let masks = self.core.gpu.as_ref().map(|g| g.masks.stats).unwrap_or_default();
+                let mut o = Outcome::stats(engine::FrameStats { draw, masks });
+                o.tiles_drawn = draw.tiles_drawn;
+                o.pending = draw.pending;
+                o.queued = draw.queued;
+                o.held = draw.held;
+                o.evicted = draw.evicted;
+                o.encode_ms = draw.encode_ms;
+                o.render_ms = draw.render_ms;
                 o.cpu_ms = draw.cpu_ms;
                 o
             }
@@ -633,6 +756,14 @@ impl Engine {
         match self.core.gpu.as_ref() {
             Some(g) => outcome(g.check()),
             None => Outcome::err(EngineError::new(error::ErrorCode::State, "no GPU attached")),
+        }
+    }
+
+    /// Drops every tile the GPU holds (benches time cold frames this way).
+    #[wasm_bindgen(js_name = clearTiles)]
+    pub fn clear_tiles(&mut self) {
+        if let Some(g) = self.core.gpu.as_mut() {
+            g.clear_tiles();
         }
     }
 
@@ -661,6 +792,7 @@ impl Engine {
     #[wasm_bindgen(js_name = gpuPixels)]
     pub fn gpu_pixels(&self) -> js_sys::Promise {
         let start = self.core.gpu.as_ref().map(|g| g.read_back_start());
+        let opaque = self.core.gpu.as_ref().is_some_and(|g| g.opaque());
         wasm_bindgen_futures::future_to_promise(async move {
             let (buffer, w, h, row, flight) = match start {
                 Some(Ok(s)) => s,
@@ -669,11 +801,8 @@ impl Engine {
                     return Ok(failure(EngineError::new(error::ErrorCode::State, "no GPU attached")));
                 }
             };
-            match gpu::read_back(buffer, w, h, row, flight).await {
-                Ok(mut px) => {
-                    engine::unpremultiply(&mut px);
-                    Ok(js_sys::Uint8Array::from(px.as_slice()).into())
-                }
+            match gpu::read_back_straight(buffer, w, h, row, flight, opaque).await {
+                Ok(px) => Ok(px.into()),
                 Err(e) => Ok(failure(e)),
             }
         })

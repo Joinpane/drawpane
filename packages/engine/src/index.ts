@@ -60,14 +60,32 @@ export interface FrameStats {
   /** Records drawn coarse (unreadable text as bars) and skipped as specks. */
   readonly coarse: number;
   readonly specks: number;
-  /** Made from the last frame (a pan shifted, a zoom scaled): a stand-in until an exact frame. */
+  /**
+   * Something on screen stands in for what isn't drawn yet (a stale tile, another level scaled,
+   * the last frame moved, unreadable text as bars): not exact.
+   */
   readonly standin: boolean;
-  /** No stand-ins and no level of detail: the frame is what an export would draw. */
+  /** No stand-ins and no level of detail: the frame is what a fresh engine (or an export) draws. */
   readonly exact: boolean;
   /** The frame reached the canvas (false: the canvas couldn't take it now; show another). */
   readonly presented: boolean;
-  /** How a GPU frame was made. */
-  readonly plan: "whole" | "pan" | "zoom" | "unchanged";
+  /**
+   * How a GPU frame was made (decision 0040, phase 2): from its own tiles, all there; with
+   * stand-ins under tiles not drawn yet; drawn tile by tile straight into the frame (its tiles
+   * don't fit the budget); or unchanged.
+   */
+  readonly plan: "tiles" | "standin" | "direct" | "unchanged";
+  /**
+   * GPU tiles: drawn this frame, still stale or missing on screen, still to draw round the view
+   * (ahead of a pan: idle frames may draw them), held, evicted for room.
+   */
+  readonly tiles: {
+    readonly drawn: number;
+    readonly pending: number;
+    readonly queued: number;
+    readonly held: number;
+    readonly evicted: number;
+  };
   /** Where a GPU frame's CPU time went, in milliseconds (see `rust/src/gpu.rs`). */
   readonly ms: {
     /** The walk and Vello's strips. */
@@ -80,7 +98,7 @@ export interface FrameStats {
   };
 }
 
-const PLANS = ["whole", "pan", "zoom", "unchanged"] as const;
+const PLANS = ["tiles", "standin", "direct", "unchanged"] as const;
 
 export interface Camera {
   readonly zoom: number;
@@ -122,7 +140,8 @@ function outcome(o: Glue.Outcome): Result {
   return r;
 }
 
-function stats(o: Glue.Outcome): FrameStats {
+/** A frame's numbers; `gpu`: a frame made of tiles, whose exactness the engine reports itself. */
+function stats(o: Glue.Outcome, gpu = false): FrameStats {
   return {
     records: o.records,
     culled: o.culled,
@@ -134,14 +153,37 @@ function stats(o: Glue.Outcome): FrameStats {
     coarse: o.coarse,
     specks: o.specks,
     standin: o.standin,
-    exact: !o.standin && o.coarse === 0 && o.specks === 0,
+    exact: gpu ? o.exact && !o.standin : !o.standin && o.coarse === 0 && o.specks === 0,
     presented: o.presented,
-    plan: PLANS[o.plan] ?? "whole",
+    plan: PLANS[o.plan] ?? "tiles",
+    tiles: {
+      drawn: o.tiles_drawn,
+      pending: o.pending,
+      queued: o.queued,
+      held: o.held,
+      evicted: o.evicted,
+    },
     ms: { encode: o.encode_ms, render: o.render_ms, submit: o.submit_ms, total: o.cpu_ms },
   };
 }
 
 const bg = (c: readonly [number, number, number, number]) => new Float32Array(c);
+
+/** What drawing ahead between frames did (`RenderEngine.renderGpuAhead`). */
+export interface AheadStats {
+  readonly drawn: number;
+  /** Tiles the last frame shows still to draw. */
+  readonly pending: number;
+  /** Tiles round it still to draw. */
+  readonly queued: number;
+  readonly ms: number;
+  readonly encodeMs: number;
+  readonly renderMs: number;
+  readonly maskMisses: number;
+  readonly records: number;
+  readonly glyphsMasked: number;
+  readonly glyphsOutlined: number;
+}
 
 export interface EngineOptions {
   /** Bytes of rasterised glyph masks to keep per backend (default 4 MiB). */
@@ -158,6 +200,8 @@ export interface EngineOptions {
   readonly memoryBytes?: number;
   /** Bytes of GPU memory the engine allocates (default 768 MiB). */
   readonly gpuBytes?: number;
+  /** Bytes of GPU tiles kept, within `gpuBytes` (default 256 MiB; decision 0040, phase 2). */
+  readonly tileBytes?: number;
 }
 
 /**
@@ -165,7 +209,9 @@ export interface EngineOptions {
  * memory"; the module's memory section holds the maximum): a message is copied in whole, and an
  * export's working set (a 2 MiB band, a tile, the compressor) is admitted beside what's held.
  */
-export const WORKER_LIMITS: Required<Omit<EngineOptions, "gpuBytes" | "glyphMaskBytes">> = {
+export const WORKER_LIMITS: Required<
+  Omit<EngineOptions, "gpuBytes" | "glyphMaskBytes" | "tileBytes">
+> = {
   memoryBytes: 25 << 20,
   graphBytes: 10 << 20,
   messageBytes: 8 << 20,
@@ -181,6 +227,7 @@ const LIMIT_NAMES: Record<keyof EngineOptions, string> = {
   glyphOutlineBytes: "glyph_outline_bytes",
   memoryBytes: "memory_bytes",
   gpuBytes: "gpu_bytes",
+  tileBytes: "tile_bytes",
 };
 
 /** One loaded build of the engine's module. */
@@ -228,6 +275,8 @@ export class RenderEngine {
   #dead: Failure | null = null;
   /** The module's instance this engine lives in (`EngineModule.epoch`). */
   #epoch: number;
+  /** The CPU's tiles were set up (`renderCpuTiled`). */
+  #cpuTiles = false;
 
   /**
    * An engine on `module`. If an engine on it trapped, the module's instance is renewed first
@@ -443,6 +492,41 @@ export class RenderEngine {
     }) as Result<{ pixels: Uint8Array; stats: FrameStats }>;
   }
 
+  /**
+   * A frame made of tiles on the CPU (decision 0040, phase 2), as the GPU makes its frames:
+   * what tests hold invalidation to (an exact one is bitwise a fresh engine's). `tile` and
+   * `slots` set the CPU's tiles the first time (default 512 px, 256 slots); `maxJobs` bounds
+   * the tiles drawn beyond those nothing else can stand in for.
+   */
+  renderCpuTiled(
+    width: number,
+    height: number,
+    camera: Camera,
+    background: readonly [number, number, number, number],
+    options: { moving?: boolean; maxJobs?: number; tile?: number; slots?: number } = {},
+  ): Result<{ pixels: Uint8Array; stats: FrameStats }> {
+    return this.#call((e) => {
+      if (options.tile !== undefined && !this.#cpuTiles) {
+        e.useCpuTiles(options.tile, options.slots ?? 256);
+        this.#cpuTiles = true;
+      }
+      const o = e.renderCpuTiled(
+        width,
+        height,
+        camera.zoom,
+        camera.x,
+        camera.y,
+        camera.dpr,
+        bg(background),
+        options.moving ?? false,
+        options.maxJobs ?? 0xffffffff,
+      );
+      const s = stats(o, true);
+      const r = outcome(o);
+      return r.ok ? { ok: true as const, value: { pixels: e.pixels(), stats: s } } : r;
+    }) as Result<{ pixels: Uint8Array; stats: FrameStats }>;
+  }
+
   /** Rows a band of a frame `width` wide may have: at most 2 MiB of output. */
   bandRows(width: number): number {
     const r = this.#call((e) => e.bandRows(width));
@@ -649,13 +733,25 @@ export class RenderEngine {
     this.#call((e) => e.detachGpu?.());
   }
 
-  /** Draws a frame on the GPU (into its canvas, if it has one). The GPU may still be drawing. */
+  /**
+   * Draws a frame on the GPU (into its canvas, if it has one), made of tiles the engine keeps
+   * (decision 0040, phase 2). The GPU may still be drawing when it returns.
+   *
+   * - `moving`: the camera is moving. Tiles not drawn yet may show stand-ins (stale tiles,
+   *   another level scaled, the last frame moved), and a zoom draws no tiles of a passing scale.
+   * - `budgetMs`: milliseconds the frame may spend drawing tiles beyond those nothing else can
+   *   stand in for. 0: no limit, so a frame at rest comes back exact.
+   *
+   * While the answer isn't `exact`, draw again (at rest, a frame a time under a budget): each
+   * draws more of what's missing, never in one long frame.
+   */
   renderGpu(
     width: number,
     height: number,
     camera: Camera,
     background: readonly [number, number, number, number],
-    detail = true,
+    moving = true,
+    budgetMs = 0,
   ): Result<FrameStats> {
     return this.#call((e) => {
       if (!e.renderGpu) return fail(ErrorCode.NotAvailable, "no GPU backend");
@@ -667,12 +763,48 @@ export class RenderEngine {
         camera.y,
         camera.dpr,
         bg(background),
-        detail,
+        moving,
+        budgetMs,
       );
-      const s = stats(o);
+      const s = stats(o, true);
       const r = outcome(o);
       return r.ok ? { ok: true as const, value: s } : r;
     }) as Result<FrameStats>;
+  }
+
+  /**
+   * Draws tiles for the next frame of the view last drawn, for at most `budgetMs` (at least one
+   * tile; 0: no limit), compositing and presenting nothing (decision 0040, phase 2): what a page
+   * runs between frames at rest, so the exact frame comes sooner without any one long frame.
+   * `pending`: tiles the last frame shows still to draw; `queued`: tiles round it still to draw.
+   */
+  renderGpuAhead(
+    background: readonly [number, number, number, number],
+    budgetMs: number,
+  ): Result<AheadStats> {
+    return this.#call((e) => {
+      if (!e.renderGpuAhead) return fail(ErrorCode.NotAvailable, "no GPU backend");
+      const o = e.renderGpuAhead(bg(background), budgetMs);
+      const value: AheadStats = {
+        drawn: o.tiles_drawn,
+        pending: o.pending,
+        queued: o.queued,
+        ms: o.cpu_ms,
+        encodeMs: o.encode_ms,
+        renderMs: o.render_ms,
+        maskMisses: o.mask_misses,
+        records: o.records,
+        glyphsMasked: o.glyphs_masked,
+        glyphsOutlined: o.glyphs_outlined,
+      };
+      const r = outcome(o);
+      return r.ok ? { ok: true as const, value } : r;
+    }) as Result<AheadStats>;
+  }
+
+  /** Drops every GPU tile (benches time cold frames this way). */
+  clearTiles(): void {
+    this.#call((e) => e.clearTiles?.());
   }
 
   /** The GPU's health: an error recorded since the last frame, or the device's loss. */

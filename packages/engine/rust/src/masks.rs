@@ -50,8 +50,35 @@ pub struct MaskStats {
     pub count: usize,
 }
 
+/// A quick hash for mask keys, looked up once per glyph drawn: their parts are the engine's own
+/// (a serial it hands out, a scale, a phase), so nothing outside picks them to collide.
+#[derive(Default, Clone, Copy)]
+pub struct KeyHasher(u64);
+
+impl std::hash::Hasher for KeyHasher {
+    fn finish(&self) -> u64 {
+        self.0
+    }
+    fn write(&mut self, bytes: &[u8]) {
+        for b in bytes {
+            self.write_u64(u64::from(*b));
+        }
+    }
+    fn write_u8(&mut self, v: u8) {
+        self.write_u64(u64::from(v));
+    }
+    fn write_u32(&mut self, v: u32) {
+        self.write_u64(u64::from(v));
+    }
+    fn write_u64(&mut self, v: u64) {
+        self.0 = (self.0.rotate_left(5) ^ v).wrapping_mul(0x517c_c1b7_2722_0a95);
+    }
+}
+
+type KeyMap<V> = HashMap<MaskKey, V, std::hash::BuildHasherDefault<KeyHasher>>;
+
 pub struct MaskCache<T> {
-    map: HashMap<MaskKey, MaskEntry<T>>,
+    map: KeyMap<MaskEntry<T>>,
     bytes: usize,
     frame: u64,
     budget: usize,
@@ -61,7 +88,7 @@ pub struct MaskCache<T> {
 impl<T> MaskCache<T> {
     pub fn new(budget: usize) -> Self {
         Self {
-            map: HashMap::new(),
+            map: KeyMap::default(),
             bytes: 0,
             frame: 0,
             budget,
@@ -170,17 +197,9 @@ impl<T> MaskCache<T> {
     }
 }
 
-/// A glyph's coverage at device scale (`sx`, `sy`) and subpixel phase, as premultiplied white:
-/// its alpha is the coverage. Answers the mask and its top left from the whole-pixel anchor;
-/// None for a glyph with no outline or one too large.
-pub fn rasterise(
-    resources: &mut Resources,
-    path: &BezPath,
-    sx: f64,
-    sy: f64,
-    phase: (f64, f64),
-    max_side: u32,
-) -> Option<(Pixmap, (i32, i32))> {
+/// Where a glyph's mask lies (top left from the whole-pixel anchor) and its size, before it's
+/// rasterised: None for a glyph with no outline or one too large.
+fn extent(path: &BezPath, sx: f64, sy: f64, phase: (f64, f64), max_side: u32) -> Option<(i64, i64, u16, u16)> {
     if path.is_empty() {
         return None;
     }
@@ -194,7 +213,34 @@ pub fn rasterise(
     if w <= 0 || h <= 0 || w > i64::from(max_side) + 2 || h > i64::from(max_side) + 2 {
         return None;
     }
-    let (w, h) = (w as u16, h as u16);
+    Some((x0, y0, w as u16, h as u16))
+}
+
+/// The size of a glyph's mask (as `rasterise` makes it), so a full cache or atlas refuses it
+/// before the work of rasterising: None for a glyph with no mask.
+pub fn mask_size(path: &BezPath, sx: f64, sy: f64, phase: (f64, f64), max_side: u32) -> Option<(u16, u16)> {
+    let (_, _, w, h) = extent(path, sx, sy, phase, max_side)?;
+    Some((w, h))
+}
+
+/// The bytes of a mask `size` big.
+pub fn bytes((w, h): (u16, u16)) -> usize {
+    usize::from(w) * usize::from(h) * 4
+}
+
+/// A glyph's coverage at device scale (`sx`, `sy`) and subpixel phase, as premultiplied white:
+/// its alpha is the coverage. Answers the mask and its top left from the whole-pixel anchor;
+/// None for a glyph with no outline or one too large.
+pub fn rasterise(
+    resources: &mut Resources,
+    path: &BezPath,
+    sx: f64,
+    sy: f64,
+    phase: (f64, f64),
+    max_side: u32,
+) -> Option<(Pixmap, (i32, i32))> {
+    let (x0, y0, w, h) = extent(path, sx, sy, phase, max_side)?;
+    let t = Affine::new([sx, 0.0, 0.0, sy, phase.0, phase.1]);
     let mut ctx = RenderContext::new(w, h);
     ctx.set_transform(Affine::translate((-(x0 as f64), -(y0 as f64))) * t);
     ctx.set_paint(vello_common::color::palette::css::WHITE);

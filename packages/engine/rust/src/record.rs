@@ -260,6 +260,26 @@ pub struct StrokeStyle {
     pub dash_offset: f32,
 }
 
+/// The largest miter limit a stroke is drawn with (decode takes a larger one as this).
+pub const MITER_MAX: f32 = 1000.0;
+
+impl StrokeStyle {
+    /// How far the stroke's outline can reach from its path, in the record's units, plus a unit
+    /// for anti-aliasing: half the width, times the miter limit for mitered joins (a miter's tip
+    /// lies at most limit × width / 2 from its corner) and √2 for square caps.
+    pub fn reach(&self) -> f64 {
+        let half = f64::from(self.width) / 2.0;
+        let mut k: f64 = 1.0;
+        if self.join == 0 {
+            k = k.max(f64::from(self.miter.clamp(1.0, MITER_MAX)));
+        }
+        if self.cap == 2 {
+            k = k.max(std::f64::consts::SQRT_2);
+        }
+        half * k + 1.0
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Op {
     Fill {
@@ -319,6 +339,18 @@ impl Record {
     }
     pub fn group(&self) -> bool {
         self.flags & FLAG_GROUP != 0
+    }
+    /// The images its paints draw (by handle), for invalidating what shows them when one changes.
+    pub fn images(&self) -> impl Iterator<Item = u32> + '_ {
+        self.ops.iter().chain(self.coarse.iter()).filter_map(|op| match op {
+            Op::Fill {
+                paint: Paint::Image(i), ..
+            }
+            | Op::Stroke {
+                paint: Paint::Image(i), ..
+            } => Some(i.image),
+            _ => None,
+        })
     }
     /// The backdrop readers among its ops: their halos (device pixels).
     pub fn reads(&self) -> Option<f32> {
@@ -381,8 +413,8 @@ impl Record {
     }
 
     /// Where its own ops paint, in its units, before children: the bounds of what it fills and
-    /// strokes, grown by stroke widths (a miter reaches five widths, as the canvas's limit of
-    /// ten allows). Glyph runs need their outlines' bounds: `glyph_bounds` gives them.
+    /// strokes, each stroke grown by how far its outline can reach from its path
+    /// (`StrokeStyle::reach`). Glyph runs need their outlines' bounds: `glyph_bounds` gives them.
     pub fn content_bounds(&self, glyph_bounds: &dyn Fn(u32) -> Option<Rect>) -> Option<Rect> {
         let mut out: Option<Rect> = None;
         let mut add = |r: Rect| out = Some(out.map_or(r, |o| o.union(r)));
@@ -390,7 +422,7 @@ impl Record {
             for op in list.iter() {
                 let (path, grow) = match op {
                     Op::Fill { path, .. } => (*path, 0.0),
-                    Op::Stroke { path, style, .. } => (*path, f64::from(style.width) * 5.0 + 1.0),
+                    Op::Stroke { path, style, .. } => (*path, style.reach()),
                     _ => continue,
                 };
                 if let Some(b) = self.entry_bounds(path, glyph_bounds) {
@@ -401,7 +433,7 @@ impl Record {
         out
     }
 
-    fn entry_bounds(&self, i: u32, glyph_bounds: &dyn Fn(u32) -> Option<Rect>) -> Option<Rect> {
+    pub fn entry_bounds(&self, i: u32, glyph_bounds: &dyn Fn(u32) -> Option<Rect>) -> Option<Rect> {
         match self.paths.get(i as usize)? {
             PathEntry::Path(p) => p.bounds(),
             PathEntry::Rect { w, h, .. } | PathEntry::Ellipse { w, h } => {
@@ -493,7 +525,9 @@ fn stroke_style(r: &mut Reader, limits: &Limits) -> Result<StrokeStyle> {
     if join > 2 || cap > 2 {
         return Err(EngineError::malformed("unknown stroke join or cap"));
     }
-    let miter = r.f32_nonneg()?;
+    // A limit past `MITER_MAX` is taken as `MITER_MAX`, for drawing and bounds alike: a miter
+    // reaches at most limit × width / 2 from its path, so bounds stay finite and true.
+    let miter = r.f32_nonneg()?.min(MITER_MAX);
     let n = r.count(limits.dashes, "dashes", 4)?;
     let mut dashes = Vec::with_capacity(n);
     for _ in 0..n {

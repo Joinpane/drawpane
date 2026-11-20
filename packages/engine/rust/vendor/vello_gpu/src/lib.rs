@@ -1,0 +1,251 @@
+// Copyright 2025 the Vello Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+// After you edit the crate's doc comment, run this command, then check
+// README.md for any missing links
+// cargo rdme --workspace-project=vello_gpu
+
+//! A GPU renderer for 2D vector graphics with CPU-side preprocessing.
+//!
+//! Vello GPU uses the Sparse Strips architecture to divide work between CPU
+//! preprocessing and GPU rendering:
+//!
+//! - The CPU processes paths, tiles, and schedules sparse strips.
+//! - The GPU rasterizes those strips and performs compositing.
+//! - The compact strip representation limits data transfer between them.
+//!
+//! ## Key Features
+//!
+//! - Efficient path rendering with CPU-side processing
+//! - GPU-accelerated compositing and blending
+//! - Support for both windowed and headless rendering
+//!
+//! ## Feature Flags
+//!
+//! - `wgpu` (enabled by default): Enables the GPU rendering backend via wgpu and
+//!   includes the required Vello GPU shaders.
+//! - `wgpu_default` (enabled by default): Enables wgpu with its default hardware
+//!   backends (such as Vulkan, Metal, and DX12).
+//! - `text` (enabled by default): Enables glyph rendering ([`Scene::glyph_run`]).
+//! - `all_shader_features` (enabled by default): Enables all optional shader
+//!   features.
+//! - `blurred_rounded_rect` (enabled by default): Enables rendering of blurred
+//!   rounded rectangles.
+//! - `full_image_support` (enabled by default): If this feature is disabled, only
+//!   external textures using `TextureRegion::Full` with nearest or bilinear
+//!   sampling and opacity are supported. Enabling this feature also adds support
+//!   for glyph atlas caching, bicubic sampling, cropped external textures, and
+//!   colored or alpha-mask tints.
+//! - `gradient_sweep` (enabled by default): Enables rendering of sweep gradients
+//! - `wgpu_external_texture` (enabled by default): Adds a WGSL `texture_external`
+//!   binding when the wgpu device has `wgpu::Features::EXTERNAL_TEXTURE` enabled,
+//!   so `wgpu::ExternalTexture`s (e.g. multi-planar YCbCr video frames) can be
+//!   bound with `TextureBindings::insert_wgpu_external_texture`. Other images are
+//!   not affected.
+//! - `webgl`: Enables the WebGL rendering backend for browser support, using GLSL
+//!   shaders for compatibility.
+//!
+//! If you need to customize the set of enabled wgpu features, disable this crate's
+//! default features then enable its `wgpu` feature. You can then depend on wgpu
+//! directly, setting the specific features you require. Don't forget to also
+//! disable wgpu's default features.
+//!
+//! ## Architecture
+//!
+//! The renderer is split into several key components:
+//!
+//! - `Scene`: Manages the render context and path processing on the CPU
+//! - `Renderer` or `WebGlRenderer`: Handles GPU resource management and executes
+//!   draw operations
+//!
+//! See the individual module documentation for more details on usage and
+//! implementation.
+//!
+//! ## Current state
+//!
+//! Vello GPU is a solid GPU-accelerated 2D renderer with broad, reliable feature
+//! support. Although it does not match the compute-centric `vello` renderer's raw
+//! performance on dynamic and vector-heavy workloads, it provides excellent
+//! performance on workloads that benefit from GPU acceleration, such as images,
+//! gradients, and filters. Overall, we still consider it to be slightly less mature
+//! than its CPU-only counterpart Vello CPU.
+//!
+//! Vello GPU remains under active development. Known limitations include:
+//!
+//! - The following features are not yet supported and will panic: Mask layers,
+//!   complex filter graphs as well as certain blend modes for non-isolated
+//!   blending.
+//! - Parts of the API and its documentation are still suboptimal, for example the
+//!   lifecycle and ownership of external resources through [`Resources`][].
+//! - Some exposed features remain experimental and are not recommended for use,
+//!   including glyph caching. Experimental APIs are identified in their method
+//!   documentation.
+//! - Parts of the rendering pipeline are not yet fully optimized, particularly the
+//!   wgpu backend, but also other aspects.
+//! - Some failures panic instead of being reported through a user-facing error.
+//!
+//! With that said, we are continuously improving Vello GPU and will address these
+//! and other limitations in future releases.
+//!
+//! ## Package rename
+//!
+//! This package was previously named `vello_hybrid`. New dependencies and Rust
+//! imports should use `vello_gpu`; no compatibility re-export package is provided
+//! in this repository. Existing crates.io releases under `vello_hybrid` remain
+//! available, and publication under the new name may lag behind the repository
+//! rename.
+
+#![no_std]
+#![cfg_attr(
+    not(any(feature = "wgpu", feature = "webgl")),
+    allow(
+        dead_code,
+        unused_imports,
+        reason = "backend implementations are unused when none is enabled"
+    )
+)]
+
+extern crate alloc;
+
+pub(crate) mod blend;
+pub(crate) mod copy;
+pub(crate) mod filter;
+mod gradient_cache;
+mod paint;
+mod rect;
+mod render;
+mod resources;
+mod scene;
+mod schedule;
+mod target;
+#[cfg(feature = "text")]
+mod text;
+
+pub(crate) mod draw;
+pub mod util;
+
+pub use render::{ClearSettings, Config, GpuStrip, RenderSize, TargetInit};
+#[cfg(feature = "webgl")]
+pub use render::{
+    IncompatibleContextReason, IncompatiblePrecompiledShadersReason, InvalidTextureTargetReason,
+    ShaderCompilationStats, WebGlContextOperation, WebGlDataTransferOperation, WebGlError,
+    WebGlOperation, WebGlRenderOptions, WebGlRenderTarget, WebGlRenderer, WebGlRendererInit,
+    WebGlRendererInitStatus, WebGlResourceKind, WebGlShaderInterfaceOperation,
+    WebGlShaderProgramOperation, WebGlShaderStage, WebGlTextureBindings, WebGlTextureTarget,
+};
+#[cfg(feature = "wgpu")]
+pub use render::{
+    RenderOptions, RenderTarget, RenderTargetConfig, Renderer, TextureBinding, TextureBindings,
+};
+#[cfg(all(feature = "webgl", feature = "probe"))]
+pub use render::{WebGlPendingProbe, WebGlProbeError, WebGlProbeOperation, WebGlProbeStatus};
+#[cfg(all(feature = "wgpu", feature = "probe"))]
+pub use render::{WgpuPendingProbe, WgpuProbeError, WgpuProbeStatus};
+pub use resources::Resources;
+pub use scene::{LayersConfig, MemorySettings, RenderSettings, Scene};
+#[cfg(feature = "text")]
+pub use text::{GlyphRunBuilder, GpuGlyphRunBackend};
+pub use util::DimensionConstraints;
+pub use vello_common::reexports::gpu::*;
+/// The JavaScript that starts compiling the WebGL shaders before the WebAssembly module loads, for
+/// [`WebGlRenderer::begin_with_precompiled`].
+///
+/// Generating it from a `vello_gpu` dependency with the same features as the renderer's yields the
+/// same shaders, so its programs can be adopted.
+#[cfg(feature = "webgl")]
+pub use vello_gpu_shaders::webgl_bootstrap;
+
+use thiserror::Error;
+use vello_common::paint::ImageId;
+
+/// Errors that can occur during rendering.
+#[derive(Error, Debug, Clone)]
+#[non_exhaustive]
+pub enum RenderError {
+    /// A draw referenced a [`TextureId`] that was not provided at render time.
+    #[error("Missing texture binding for {0:?}")]
+    MissingTextureBinding(TextureId),
+    /// A texture binding aliases the active render target.
+    #[error("Texture binding {0:?} aliases the active render target")]
+    TextureFeedbackLoop(TextureId),
+    /// An image paint sampled a `wgpu::ExternalTexture` binding in an unsupported way.
+    ///
+    /// External textures must be sampled in full with pad extend, low or medium quality, and no
+    /// tint other than opacity.
+    #[error("Unsupported sampling of external texture binding {0:?}")]
+    UnsupportedExternalTextureSampling(TextureId),
+    /// A glyph paint referenced an atlas entry that does not exist.
+    #[error("Missing atlas entry for {0:?}")]
+    MissingAtlasEntry(ImageId),
+    /// An intermediate texture allocation failed.
+    #[error(transparent)]
+    IntermediateTexture(#[from] IntermediateTextureError),
+    /// A scene's packed data doesn't fit into its resource texture.
+    #[error("{texture:?} texture needs {rows} rows, but at most {max_rows} are supported")]
+    ResourceTextureTooLarge {
+        /// The resource texture that overflowed.
+        texture: ResourceTexture,
+        /// The number of rows the data needs.
+        rows: u32,
+        /// The maximum number of rows.
+        max_rows: u32,
+    },
+}
+
+impl From<render::common::DataTextureTooLarge> for RenderError {
+    fn from(error: render::common::DataTextureTooLarge) -> Self {
+        Self::ResourceTextureTooLarge {
+            texture: error.texture,
+            rows: error.rows,
+            max_rows: error.max_rows,
+        }
+    }
+}
+
+/// A texture that the renderer packs scene data into for its shaders to read.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ResourceTexture {
+    /// The alpha masks of the scene's strips.
+    Alphas,
+    /// The scene's encoded paints.
+    EncodedPaints,
+    /// The lookup tables of the scene's gradients.
+    Gradients,
+    /// The parameters of the scene's filters.
+    FilterData,
+}
+
+/// Errors that can occur while allocating intermediate textures.
+#[derive(Error, Debug, Clone)]
+pub enum IntermediateTextureError {
+    /// An intermediate texture allocation exceeds the configured texture dimensions.
+    #[error(
+        "Intermediate texture allocation {width}x{height} exceeds maximum {max_width}x{max_height}"
+    )]
+    TooLarge {
+        /// The requested allocation width.
+        width: u32,
+        /// The requested allocation height.
+        height: u32,
+        /// The maximum intermediate texture width.
+        max_width: u16,
+        /// The maximum intermediate texture height.
+        max_height: u16,
+    },
+    /// A render requires more intermediate textures than configured.
+    #[error(
+        "Render requires {required} intermediate textures, exceeding the configured maximum of {max}"
+    )]
+    LimitReached {
+        /// The number of intermediate textures required by the render.
+        required: usize,
+        /// The configured maximum number of intermediate textures.
+        max: usize,
+    },
+}
+
+#[cfg(test)]
+const _: () = if vello_common::tile::Tile::HEIGHT != 4 {
+    panic!("`vello_gpu` shaders currently require `Tile::HEIGHT` to be `4`");
+};

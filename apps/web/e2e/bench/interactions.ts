@@ -632,7 +632,10 @@ export async function interactions(
         .sort((a, b) => a - b);
       const at = (q: number) =>
         Math.round((gaps[Math.floor(q * (gaps.length - 1))] ?? 0) * 10) / 10;
-      return { ...w.drawpaneFrames.summary(), interval: { p50: at(0.5), p95: at(0.95) } };
+      return {
+        ...w.drawpaneFrames.summary(),
+        interval: { p50: at(0.5), p95: at(0.95), p99: at(0.99), max: at(1) },
+      };
     });
     await page.mouse.up();
     await settle(page);
@@ -816,7 +819,7 @@ export function table(title: string, results: Record<string, CaseResult>): strin
   const rows = Object.entries(results).map(([name, r]) => {
     if ("answer" in r)
       return `${name.padEnd(24)} answer ${String(r.answer.p50).padStart(7)} ms (worst ${String(r.answer.max).padStart(7)}) · content ${String(r.content.p50).padStart(6)} (${r.content.max}) · overlay ${String(r.overlay.p50).padStart(5)} · exact ${String(r.exact).padStart(6)} ms · quiet ${String(r.quiet).padStart(6)} ms · long task ${r.longTask} ms · n ${r.n}`;
-    return `${name.padEnd(24)} content p50 ${String(r.content.p50).padStart(6)} · p95 ${String(r.content.p95).padStart(6)} · max ${String(r.content.max).padStart(6)} ms · frame interval p50 ${r.interval?.p50} / p95 ${r.interval?.p95} ms`;
+    return `${name.padEnd(24)} content p50 ${String(r.content.p50).padStart(6)} · p95 ${String(r.content.p95).padStart(6)} · max ${String(r.content.max).padStart(6)} ms · frame interval p50 ${r.interval?.p50} / p95 ${r.interval?.p95} / p99 ${r.interval?.p99} ms`;
   });
   return `\n${title}\n${rows.join("\n")}`;
 }

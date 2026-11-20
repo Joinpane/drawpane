@@ -1,0 +1,259 @@
+// Copyright 2026 the Vello Authors
+// SPDX-License-Identifier: Apache-2.0 OR MIT
+
+//! GPU paint packing for scheduled strip draws.
+
+use crate::render::common::GpuEncodedPaint;
+use crate::util::pack_u16_pair;
+use vello_common::TextureId;
+use vello_common::encode::{EncodedKind, EncodedPaint};
+use vello_common::image_cache::ImageCache;
+use vello_common::multi_atlas::AtlasId;
+use vello_common::paint::{ImageSource, Paint, TextureRegion, Tint, TintMode};
+use vello_common::peniko::{Extend, ImageQuality, ImageSampler};
+
+const COLOR_SOURCE_PAYLOAD: u32 = 0;
+pub(crate) const COLOR_SOURCE_LAYER: u32 = 1;
+
+const PAINT_TYPE_SOLID: u32 = 0;
+const PAINT_TYPE_IMAGE: u32 = 1;
+const PAINT_TYPE_LINEAR_GRADIENT: u32 = 2;
+const PAINT_TYPE_RADIAL_GRADIENT: u32 = 3;
+const PAINT_TYPE_SWEEP_GRADIENT: u32 = 4;
+const PAINT_TYPE_BLURRED_ROUNDED_RECT: u32 = 5;
+const PAINT_TYPE_NATIVE_IMAGE: u32 = 6;
+#[cfg(all(feature = "wgpu", feature = "wgpu_external_texture"))]
+const PAINT_TYPE_WGPU_EXTERNAL_TEXTURE: u32 = 7;
+
+// See the layout information in `render.wesl`.
+pub(crate) const COLOR_SOURCE_SHIFT: u32 = 29;
+const PAINT_TYPE_SHIFT: u32 = 26;
+pub(crate) const EXTERNAL_TEXTURE_SLOT_SHIFT: u32 = 24;
+const PAINT_TEXTURE_INDEX_MASK: u32 = (1 << EXTERNAL_TEXTURE_SLOT_SHIFT) - 1;
+
+/// Whether an image can use hardware sampling without the manual image shader.
+pub(crate) fn supports_native_image(
+    source: &ImageSource,
+    quality: ImageQuality,
+    tint: Option<Tint>,
+) -> bool {
+    matches!(
+        source,
+        ImageSource::ExternalTexture {
+            source_region: TextureRegion::Full,
+            ..
+        }
+    ) && quality != ImageQuality::High
+        && tint.is_none_or(|tint| {
+            tint.mode == TintMode::Multiply && tint.color.components[..3] == [1.0; 3]
+        })
+}
+
+/// Texture sampled by an image paint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum TextureSourceId {
+    /// A renderer-owned image atlas.
+    Atlas(AtlasId),
+    /// A texture supplied through the render-time bindings.
+    External(TextureId, ExternalSampler),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SamplerFilter {
+    Nearest,
+    Linear,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) enum SamplerAddress {
+    Pad,
+    Repeat,
+    Reflect,
+}
+
+impl From<Extend> for SamplerAddress {
+    fn from(extend: Extend) -> Self {
+        match extend {
+            Extend::Pad => Self::Pad,
+            Extend::Repeat => Self::Repeat,
+            Extend::Reflect => Self::Reflect,
+        }
+    }
+}
+
+/// Sampling state bound with one external texture slot.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ExternalSampler {
+    pub(crate) filter: SamplerFilter,
+    pub(crate) address_x: SamplerAddress,
+    pub(crate) address_y: SamplerAddress,
+}
+
+impl ExternalSampler {
+    pub(crate) const DEFAULT: Self = Self {
+        filter: SamplerFilter::Linear,
+        address_x: SamplerAddress::Pad,
+        address_y: SamplerAddress::Pad,
+    };
+
+    fn from_native_image_sampler(sampler: &ImageSampler) -> Self {
+        let filter = match sampler.quality {
+            ImageQuality::Low => SamplerFilter::Nearest,
+            ImageQuality::Medium => SamplerFilter::Linear,
+            ImageQuality::High => unreachable!("high quality images use manual sampling"),
+        };
+
+        Self {
+            filter,
+            address_x: sampler.x_extend.into(),
+            address_y: sampler.y_extend.into(),
+        }
+    }
+}
+
+/// Shader-ready paint metadata for a strip.
+#[derive(Clone, Copy)]
+pub(crate) struct PackedPaint {
+    /// Value source for the strip's payload field.
+    payload: PaintPayload,
+    /// Packed paint kind, source, and data offset.
+    pub(crate) paint: u32,
+    /// Texture required by this paint, if any.
+    pub(crate) texture_source: Option<TextureSourceId>,
+    /// Whether the paint is fully opaque.
+    pub(crate) opaque: bool,
+}
+
+impl PackedPaint {
+    pub(crate) fn payload_at(self, x: u16, y: u16) -> u32 {
+        match self.payload {
+            PaintPayload::Solid(rgba) => rgba,
+            PaintPayload::Position => pack_u16_pair(x, y),
+        }
+    }
+}
+
+/// Source used to populate a strip's paint payload.
+#[derive(Clone, Copy)]
+enum PaintPayload {
+    /// Premultiplied RGBA value for a solid paint.
+    Solid(u32),
+    /// Scene-space position used to evaluate a non-solid paint.
+    Position,
+}
+
+/// Resolves recorded paints to their encoded GPU offsets.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct PaintResolver<'a> {
+    /// Encoded non-solid paints indexed by [`Paint`].
+    encoded: &'a [EncodedPaint],
+    /// GPU data offset corresponding to each encoded paint.
+    gpu_offsets: &'a [u32],
+    /// GPU paint selected for each encoded paint.
+    gpu_paints: &'a [GpuEncodedPaint],
+    /// Resolves internal images to their atlas textures.
+    image_cache: Option<&'a ImageCache>,
+}
+
+impl<'a> PaintResolver<'a> {
+    pub(crate) fn new(
+        encoded: &'a [EncodedPaint],
+        gpu_offsets: &'a [u32],
+        gpu_paints: &'a [GpuEncodedPaint],
+    ) -> Self {
+        debug_assert_eq!(
+            encoded.len(),
+            gpu_paints.len(),
+            "each encoded paint must have a GPU paint"
+        );
+
+        Self {
+            encoded,
+            gpu_offsets,
+            gpu_paints,
+            image_cache: None,
+        }
+    }
+
+    /// Add the image cache needed to resolve internal image paints.
+    pub(crate) fn with_image_cache(mut self, image_cache: &'a ImageCache) -> Self {
+        self.image_cache = Some(image_cache);
+        self
+    }
+
+    #[inline]
+    pub(crate) fn pack(self, paint: &Paint) -> PackedPaint {
+        match paint {
+            Paint::Solid(color) => PackedPaint {
+                payload: PaintPayload::Solid(color.as_premul_rgba8().to_u32()),
+                paint: (COLOR_SOURCE_PAYLOAD << COLOR_SOURCE_SHIFT)
+                    | (PAINT_TYPE_SOLID << PAINT_TYPE_SHIFT),
+                texture_source: None,
+                opaque: color.is_opaque(),
+            },
+            Paint::Indexed(indexed_paint) => {
+                let paint_id = indexed_paint.index();
+                let gpu_offset = self.gpu_offsets[paint_id];
+                let encoded_paint = &self.encoded[paint_id];
+
+                let (paint_type, texture_source) = match encoded_paint {
+                    EncodedPaint::Image(encoded_image) => match &encoded_image.source {
+                        ImageSource::ExternalTexture { id, .. } => {
+                            let (paint_type, sampler) = match &self.gpu_paints[paint_id] {
+                                GpuEncodedPaint::NativeImage(_) => (
+                                    PAINT_TYPE_NATIVE_IMAGE,
+                                    ExternalSampler::from_native_image_sampler(
+                                        &encoded_image.sampler,
+                                    ),
+                                ),
+                                #[cfg(all(feature = "wgpu", feature = "wgpu_external_texture"))]
+                                GpuEncodedPaint::WgpuExternalTexture(_) => (
+                                    PAINT_TYPE_WGPU_EXTERNAL_TEXTURE,
+                                    ExternalSampler::from_native_image_sampler(
+                                        &encoded_image.sampler,
+                                    ),
+                                ),
+                                GpuEncodedPaint::Image(_) => {
+                                    (PAINT_TYPE_IMAGE, ExternalSampler::DEFAULT)
+                                }
+                                _ => unreachable!("external image has an image GPU paint"),
+                            };
+
+                            (paint_type, Some(TextureSourceId::External(*id, sampler)))
+                        }
+                        ImageSource::Atlas(id) => {
+                            let image_resource = self.image_cache.unwrap().get(*id).unwrap();
+                            (
+                                PAINT_TYPE_IMAGE,
+                                Some(TextureSourceId::Atlas(image_resource.atlas_id)),
+                            )
+                        }
+                        ImageSource::Pixmap(_) => unimplemented!("Unsupported image source"),
+                    },
+                    EncodedPaint::Gradient(gradient) => {
+                        let paint_type = match &gradient.kind {
+                            EncodedKind::Linear(_) => PAINT_TYPE_LINEAR_GRADIENT,
+                            EncodedKind::Radial(_) => PAINT_TYPE_RADIAL_GRADIENT,
+                            EncodedKind::Sweep(_) => PAINT_TYPE_SWEEP_GRADIENT,
+                        };
+                        (paint_type, None)
+                    }
+                    EncodedPaint::BlurredRoundedRect(_) => (PAINT_TYPE_BLURRED_ROUNDED_RECT, None),
+                };
+
+                debug_assert!(
+                    gpu_offset <= PAINT_TEXTURE_INDEX_MASK,
+                    "paint offsets fit in 24 bits because resource textures are capped at 4096×4096"
+                );
+                PackedPaint {
+                    payload: PaintPayload::Position,
+                    paint: (COLOR_SOURCE_PAYLOAD << COLOR_SOURCE_SHIFT)
+                        | (paint_type << PAINT_TYPE_SHIFT)
+                        | (gpu_offset & PAINT_TEXTURE_INDEX_MASK),
+                    texture_source,
+                    opaque: !encoded_paint.may_have_transparency(),
+                }
+            }
+        }
+    }
+}

@@ -44,6 +44,7 @@ type W = {
   drawpaneEngineView?: {
     last: { supported: boolean; records: number; exact: boolean; plan: string };
     engine: {
+      records: number;
       gpuPixels(): Promise<{ ok: boolean; value?: Uint8Array; message?: string }>;
       loseGpu(): void;
       gpu: { adapter: string } | null;
@@ -89,7 +90,9 @@ const settled = (page: Page) =>
  * The engine's on-screen frame, once exact, against a fresh engine's render of the same view, on
  * the GPU.
  */
-async function screenMatchesFresh(page: Page): Promise<{ identical: boolean; mean: number }> {
+async function screenMatchesFresh(
+  page: Page,
+): Promise<{ identical: boolean; mean: number; cpu: ReturnType<typeof score> }> {
   await settled(page);
   const r = await page.evaluate(async () => {
     const w = window as unknown as W;
@@ -102,7 +105,7 @@ async function screenMatchesFresh(page: Page): Promise<{ identical: boolean; mea
     )[1] as HTMLCanvasElement;
     const { x, y, zoom } = w.drawpane.s.camera;
     const dpr = window.devicePixelRatio || 1;
-    const fresh = await w.drawpaneEngine.render({
+    const at = {
       pageId: w.drawpane.s.pageId,
       rect: {
         x: -x / zoom,
@@ -113,25 +116,41 @@ async function screenMatchesFresh(page: Page): Promise<{ identical: boolean; mea
       scale: zoom * dpr,
       width: canvas.width,
       height: canvas.height,
-      backend: "gpu",
       background: ((css: string) => {
         const n = Number.parseInt(css.slice(1, 7), 16);
         return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255, 1];
       })(
         getComputedStyle(document.documentElement).getPropertyValue("--canvas").trim() || "#ebeae6",
       ),
-    });
+    };
+    const fresh = await w.drawpaneEngine.render({ ...at, backend: "gpu" });
+    // And the CPU's whole frame: the GPU's tiles must hold the picture, not just agree with
+    // themselves (a blank tile would match a blank fresh render).
+    const cpu = await w.drawpaneEngine.render({ ...at, backend: "cpu" });
     let s = "";
     const px = shown.value as Uint8Array;
     for (let i = 0; i < px.length; i += 0x8000)
       s += String.fromCharCode(...px.subarray(i, i + 0x8000));
-    return { shown: btoa(s), fresh: fresh.rgba ?? "", width: canvas.width, height: canvas.height };
+    return {
+      shown: btoa(s),
+      fresh: fresh.rgba ?? "",
+      cpu: cpu.rgba ?? "",
+      width: canvas.width,
+      height: canvas.height,
+    };
   });
   const a = Buffer.from(r.shown, "base64");
   const b = Buffer.from(r.fresh, "base64");
   // The background differs only if the page's canvas colour token differs: compare inside.
   const s = score(a, b, r.width, r.height);
-  return { identical: a.equals(b), mean: s.mean };
+  const cpu = score(a, Buffer.from(r.cpu, "base64"), r.width, r.height);
+  // CPU against GPU (decision 0040, "Parity gates"): mean ≤ 0.25, p99 ≤ 4, worst tile ≤ 2,
+  // at most 4 pixels more than 16 apart in any tile.
+  expect(cpu.mean, "the GPU's frame against the CPU's").toBeLessThanOrEqual(0.25);
+  expect(cpu.p99).toBeLessThanOrEqual(4);
+  expect(cpu.worstTile).toBeLessThanOrEqual(2);
+  expect(cpu.severeInTile).toBeLessThanOrEqual(4);
+  return { identical: a.equals(b), mean: s.mean, cpu };
 }
 
 test.describe
@@ -245,12 +264,14 @@ test.describe
         e.zoomTo(1);
         e.centerOn({ x: 500, y: 300 });
       });
-      // Fonts arrive, faces are shaped, then the engine draws the page.
+      // Fonts arrive, faces are shaped, then the engine draws the page. Not a frame's own count
+      // of records drawn: tiles drawn between frames leave the exact frame nothing to encode.
       await page
         .waitForFunction(
-          () =>
-            (window as unknown as W).drawpaneEngineView?.last.supported === true &&
-            ((window as unknown as W).drawpaneEngineView?.last.records ?? 0) > 0,
+          () => {
+            const v = (window as unknown as W).drawpaneEngineView;
+            return v?.last.supported === true && v.engine.records > 0 && v.last.exact;
+          },
           undefined,
           { timeout: 120_000 },
         )
@@ -318,6 +339,94 @@ test.describe
       expect(await screenMatchesFresh(page)).toMatchObject({ identical: true });
     });
 
+    test("stays equal to a fresh render through a seeded walk of pans, zooms and edits", async () => {
+      // Board textures (decision 0040, phase 2): tiles kept across camera moves and edits must
+      // never show a stale picture. Whole and fractional pans, zooms about a point, new, moved
+      // and restyled layers; at each step, once exact, the screen is a fresh engine's frame.
+      let seed = 0x0040_0002;
+      const rand = () => {
+        seed = (seed * 1103515245 + 12345) & 0x7fffffff;
+        return seed / 0x7fffffff;
+      };
+      const made: string[] = [];
+      for (let step = 0; step < 8; step++) {
+        const kind = Math.floor(rand() * 4);
+        const a = rand();
+        const b = rand();
+        const c = rand();
+        await page
+          .evaluate(
+            ({ kind, a, b, c, made }) => {
+              const e = (window as unknown as W).drawpane as W["drawpane"] & {
+                s: { camera: { zoomAt(p: object, z: number): unknown; zoom: number } };
+              };
+              if (kind === 0) {
+                // A pan: whole device pixels, or a fraction (another phase: tiles drawn afresh).
+                const frac = c < 0.4 ? 0.37 : 0;
+                e.state.set({
+                  camera: e.s.camera.pan(
+                    Math.round((a - 0.5) * 600) + frac,
+                    Math.round((b - 0.5) * 400),
+                  ),
+                });
+              } else if (kind === 1) {
+                const z = Math.min(3, Math.max(0.15, e.s.camera.zoom * (0.6 + a * 0.9)));
+                e.state.set({
+                  camera: e.s.camera.zoomAt({ x: 200 + b * 900, y: 100 + c * 600 }, z),
+                });
+              } else if (kind === 2 || made.length === 0) {
+                made.push(
+                  e.createLayer(
+                    "rect",
+                    { x: a * 900, y: b * 500, width: 60 + c * 200, height: 40 + a * 100 },
+                    e.s.pageId,
+                    {
+                      fills: [{ type: "solid", color: c < 0.5 ? "#2b8a3e" : "#c92a2a" }],
+                      rotation: c * 40 - 20,
+                    },
+                  ),
+                );
+              } else {
+                const id = made[Math.floor(a * made.length)] as string;
+                e.commit([
+                  { op: "set", id, prop: "x", value: b * 900 },
+                  {
+                    op: "set",
+                    id,
+                    prop: "fills",
+                    value: [{ type: "solid", color: c < 0.5 ? "#1971c2" : "#f08c00" }],
+                  },
+                ]);
+              }
+              return made;
+            },
+            { kind, a, b, c, made },
+          )
+          .then((m) => {
+            made.splice(0, made.length, ...m);
+          });
+        await frames(page, 2);
+        expect(await screenMatchesFresh(page), `step ${step} (${kind})`).toMatchObject({
+          identical: true,
+        });
+      }
+    });
+
+    test("never reports a stand-in exact", async () => {
+      // A zoom to a scale never drawn: the first frame stands on the last one scaled.
+      // Read in the frame that drew it: idle frames go on drawing what's missing right after.
+      const first = await page.evaluate(async () => {
+        const e = (window as unknown as W).drawpane;
+        e.zoomTo(e.s.camera.zoom * 1.2345);
+        await new Promise((r) => requestAnimationFrame(() => r(null)));
+        const v = (window as unknown as W).drawpaneEngineView;
+        return v ? { exact: v.last.exact, plan: v.last.plan } : null;
+      });
+      expect(first?.exact, JSON.stringify(first)).toBe(false);
+      await settled(page);
+      expect(await screenMatchesFresh(page)).toMatchObject({ identical: true });
+    });
+
     test("agrees with the canvas renderer on the scene", async () => {
       const r = await page.evaluate(async () => {
         const w = window as unknown as W;
@@ -365,8 +474,9 @@ test.describe
     });
 
     test("settles a stand-in into an exact frame once the camera rests", async () => {
-      // Zoomed far out the text is too small to read: interactive frames draw it as bars (and a
-      // zoom scales the last frame); the frame after the camera rests draws every glyph.
+      // Zoomed far out: while the zoom moves, frames stand on the last one scaled and coarse
+      // tiles (text as bars); once the camera rests, frames draw the exact tiles, a few a frame,
+      // until every glyph is drawn exactly (decision 0040, phase 2).
       await page.evaluate(() => (window as unknown as W).drawpane.zoomTo(0.08));
       await frames(page, 1);
       await expect
@@ -374,11 +484,13 @@ test.describe
           () =>
             page.evaluate(() => {
               const v = (window as unknown as W).drawpaneEngineView;
-              return v ? { exact: v.last.exact, plan: v.last.plan } : null;
+              return v
+                ? { exact: v.last.exact, fromTiles: ["tiles", "unchanged"].includes(v.last.plan) }
+                : null;
             }),
           { timeout: 10_000 },
         )
-        .toEqual({ exact: true, plan: "whole" });
+        .toEqual({ exact: true, fromTiles: true });
       expect(await screenMatchesFresh(page)).toMatchObject({ identical: true });
       await page.evaluate(() => (window as unknown as W).drawpane.zoomTo(1.7));
       await frames(page);

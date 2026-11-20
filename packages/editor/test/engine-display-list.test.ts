@@ -305,6 +305,20 @@ function picture(e: RenderEngine): string | Uint8Array {
   return r.ok ? r.value.pixels : `error ${r.code}`;
 }
 
+/**
+ * A frame made of tiles (decision 0040, phase 2), at rest: exact, from whatever tiles the engine
+ * kept, after a moving frame that may draw none of the stale ones. Small tiles, so a frame is
+ * several.
+ */
+function tiledPicture(e: RenderEngine): string | Uint8Array {
+  const options = { tile: 24, slots: 64 };
+  e.renderCpuTiled(W, H, camera, BG, { ...options, moving: true, maxJobs: 0 });
+  const r = e.renderCpuTiled(W, H, camera, BG, options);
+  if (!r.ok) return `error ${r.code}`;
+  if (!r.value.stats.exact) return "not exact at rest";
+  return r.value.pixels;
+}
+
 describe.skipIf(!built("worker") && !process.env.CI)("the display-list builder", () => {
   let mod: EngineModule;
   beforeAll(async () => {
@@ -348,6 +362,12 @@ describe.skipIf(!built("worker") && !process.env.CI)("the display-list builder",
             drawn++;
             if (ours.some((v, i) => i % 4 !== 3 && v !== 255)) painted++;
           }
+          // The patched engine's tiles, kept across every step, against a fresh engine's.
+          const ourTiles = tiledPicture(patched);
+          const theirTiles = tiledPicture(fresh);
+          if (typeof ourTiles === "string" || typeof theirTiles === "string")
+            expect(ourTiles).toEqual(theirTiles);
+          else expect(Buffer.from(ourTiles).equals(Buffer.from(theirTiles))).toBe(true);
           // What the builder flags is what the engine refuses: unsupported never draws.
           expect([...builder.unsupported.keys()].sort()).toEqual(
             [...freshBuilder.unsupported.keys()].sort(),
