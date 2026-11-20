@@ -16,12 +16,12 @@ interface ProfileNode {
 
 /** Runs `work` under the CPU profiler when BENCH_PROFILE is set; saves the profile and prints where the time went. */
 export async function profiled<T>(
-  cdp: CDPSession,
+  cdp: CDPSession | null,
   dir: string | undefined,
   name: string,
   work: () => Promise<T>,
 ): Promise<T> {
-  if (!dir) return work();
+  if (!dir || !cdp) return work();
   await cdp.send("Profiler.start");
   const result = await work();
   const { profile } = await cdp.send("Profiler.stop");

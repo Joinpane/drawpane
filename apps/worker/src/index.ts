@@ -163,13 +163,23 @@ app.get("/ws/share/:token", async (c) => {
   return room.fetch(new Request(c.req.raw.url, { headers }));
 });
 
-app.notFound((c) => {
+app.notFound(async (c) => {
   const { pathname } = new URL(c.req.url);
   if (pathname.startsWith("/api/") || pathname.startsWith("/ws/")) {
     return c.json({ error: { code: "not_found", message: "No such endpoint." } }, 404);
   }
   // Anything else belongs to the app; the assets binding serves index.html for client routes.
-  return c.env.ASSETS.fetch(c.req.raw);
+  const asset = await c.env.ASSETS.fetch(c.req.raw);
+  if (pathname === "/diagnostics" || pathname.startsWith("/diagnostics/")) {
+    const headers = new Headers(asset.headers);
+    headers.set("X-Robots-Tag", "noindex, nofollow");
+    return new Response(asset.body, {
+      status: asset.status,
+      statusText: asset.statusText,
+      headers,
+    });
+  }
+  return asset;
 });
 
 app.onError((error, c) => {

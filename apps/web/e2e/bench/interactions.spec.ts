@@ -34,9 +34,18 @@ import { generateEffectKit } from "@drawpane/corpus";
 import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "../fresh-instance";
 import { importConverted, importNodes } from "../import-converted";
-import { buildFile } from "./cards";
+import { benchShadows, buildFile } from "./cards";
+import {
+  captureRendererState,
+  type DomRendererSnapshot,
+  installFallbackRecorder,
+  verifyEngineBenchmark,
+  verifyScenarioCheckpoint,
+} from "./engine-gate";
 import {
   type CaseResult,
+  type GestureCheckpointSpec,
+  type GestureGate,
   installProbe,
   interactions,
   pickTargets,
@@ -57,15 +66,12 @@ const NAMED = process.env.BENCH_PAGES
   ? process.env.BENCH_PAGES.split(",").map((s) => s.trim())
   : null;
 const PORT = Number(process.env.BENCH_PORT ?? 8977);
-const RENDERERS: Array<"canvas" | "engine"> =
-  process.env.BENCH_RENDERER === "both"
-    ? ["canvas", "engine"]
-    : process.env.BENCH_RENDERER === "engine"
-      ? ["engine"]
-      : ["canvas"];
+const RENDERER_ENV = process.env.BENCH_RENDERER ?? "canvas";
+const RENDERERS: string[] = RENDERER_ENV === "both" ? ["canvas", "engine"] : [RENDERER_ENV];
+const SHADOWS = benchShadows();
 
 /** Picks the renderer for pages opened from here on. */
-async function useRenderer(page: Page, renderer: "canvas" | "engine"): Promise<void> {
+async function useRenderer(page: Page, renderer: string): Promise<void> {
   await page.evaluate(
     ({ renderer, present }) => {
       localStorage.setItem("drawpane:renderer", renderer);
@@ -83,21 +89,35 @@ async function drawnBy(page: Page): Promise<Record<string, unknown>> {
   return page.evaluate(() => {
     const w = window as unknown as {
       drawpaneEngineView?: {
+        backend: string;
+        adapter: string;
         last: { supported: boolean };
-        engine: { gpu: { adapter: string } | null; records: number };
+        engine: { gpu: { adapter: string } | null; records: number } | null;
         unsupported(): Record<string, number>;
       };
     };
     const v = w.drawpaneEngineView;
     if (!v) return { drawnBy: "canvas" };
     return v.last.supported
-      ? { drawnBy: "engine", adapter: v.engine.gpu?.adapter ?? null, records: v.engine.records }
+      ? {
+          drawnBy: "engine",
+          backend: v.backend,
+          adapter: v.engine?.gpu?.adapter ?? v.adapter ?? null,
+          records: v.engine?.records ?? null,
+        }
       : {
           drawnBy: "canvas",
           reason: "the page holds what the engine doesn't draw yet",
           unsupported: v.unsupported(),
         };
   });
+}
+
+async function maybeCdp(page: Page) {
+  if (!PROFILE || page.context().browser()?.browserType().name() !== "chromium") return null;
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send("Profiler.enable");
+  return cdp;
 }
 
 // A trace snapshots the page on every action: that would be most of what a click measures.
@@ -159,7 +179,9 @@ test.describe("Interactions", () => {
     instance = await freshInstance(browser, { port: PORT, inspectorPort: PORT + 540 });
     const page = instance.page;
     page.on("pageerror", (error) => console.log(`page error: ${error.message}`));
+    await installFallbackRecorder(page);
     await page.evaluate(() => localStorage.setItem("drawpane:debug", "1"));
+    await useRenderer(page, RENDERERS[0] ?? "canvas");
   });
   test.afterAll(async () => {
     await instance?.stop();
@@ -174,18 +196,19 @@ test.describe("Interactions", () => {
     test.setTimeout(60 * 60_000);
     const page = instance.page;
     for (const renderer of RENDERERS) {
+      const isEngine = renderer !== "canvas";
       await useRenderer(page, renderer);
       await page.goto("/");
       await page.getByRole("button", { name: "New file" }).first().click();
       await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
         timeout: 15_000,
       });
-      expect(await buildFile(page, 400, !RENDERERS.includes("engine"))).toBe(10_000);
+      expect(await buildFile(page, 400, SHADOWS)).toBe(10_000);
       await page.waitForTimeout(1500);
       await settle(page);
       await installProbe(page);
-      const cdp = await page.context().newCDPSession(page);
-      if (PROFILE) await cdp.send("Profiler.enable");
+      const beforeRenderer = await captureRendererState(page);
+      const cdp = await maybeCdp(page);
       const board = await page.evaluate(() => {
         const e = (
           window as unknown as {
@@ -197,17 +220,88 @@ test.describe("Interactions", () => {
       });
       const targets = await pickTargets(page, board);
       const who = await drawnBy(page);
+      const reportKey = RENDERERS.length > 1 ? `simple-${renderer}` : "simple";
+      const gestureCheckpoints: Record<
+        string,
+        {
+          submittedFramesDelta: number;
+          presentedFramesDelta: number;
+          confirmedFrame: number | null;
+          fallbackFramesDelta: number;
+          compositedNonBlank: boolean;
+          compositedNonBackgroundRatio: number;
+          deltaFromPrevious: number | null;
+          changedCellsFromPrevious: number | null;
+        }
+      > = {};
+      const gestureGate: GestureGate | undefined = isEngine
+        ? {
+            before: () => captureRendererState(page, { sampleSurface: true }),
+            verify: async (name: string, before: unknown, spec: GestureCheckpointSpec) => {
+              const cp = await verifyScenarioCheckpoint(
+                page,
+                before as DomRendererSnapshot,
+                `bench/interactions.spec.ts (${name})`,
+                spec,
+              );
+              gestureCheckpoints[name] = {
+                submittedFramesDelta: cp.submittedFramesDelta,
+                presentedFramesDelta: cp.presentedFramesDelta,
+                confirmedFrame: cp.confirmedFrame,
+                fallbackFramesDelta: cp.fallbackFramesDelta,
+                compositedNonBlank: cp.compositedNonBlank,
+                compositedNonBackgroundRatio: cp.compositedNonBackgroundRatio,
+                deltaFromPrevious: cp.deltaFromPrevious,
+                changedCellsFromPrevious: cp.changedCellsFromPrevious,
+              };
+            },
+          }
+        : undefined;
       const results = await interactions(page, targets, {
         frames: FRAMES,
-        profile: profiler(cdp, PROFILE, `simple-${renderer}`, save),
+        profile: profiler(cdp, PROFILE, reportKey, save),
+        gestureGate,
       });
+      const presentation = isEngine
+        ? await verifyEngineBenchmark(page, beforeRenderer, "bench/interactions.spec.ts (simple)", {
+            minSubmittedFrames: 100,
+            minFrames: 30,
+            checkCameraDelta: true,
+          })
+        : null;
+      const workload = {
+        renderer,
+        layers: 10_000,
+        cards: 400,
+        shadows: SHADOWS,
+        shadowCount: SHADOWS ? 400 : 0,
+      };
+      const engineMeta = isEngine
+        ? {
+            backend: presentation?.after.renderer ?? "unknown",
+            adapter: presentation?.after.adapter ?? "unknown",
+            adapterClass: presentation?.after.adapterClass ?? "unidentified",
+            presentationPath: presentation?.after.presentationPath ?? "unknown",
+            software: presentation?.after.software ?? false,
+            presented: presentation?.after.presented ?? false,
+            submittedFramesDelta: presentation?.submittedFramesDelta ?? 0,
+            presentedFramesDelta: presentation?.presentedFramesDelta ?? 0,
+            fallbackFramesDelta: presentation?.fallbackFramesDelta ?? 0,
+            compositedNonBlank: presentation?.compositedNonBlank ?? false,
+            cameraChangeRatio: presentation?.cameraChangeRatio ?? null,
+            gestureCheckpoints,
+          }
+        : null;
       console.log(
-        table(
-          `Interactions, simple file (10,000 layers), ${renderer}: ${JSON.stringify(who)}`,
-          results,
-        ),
+        `${table(`Interactions, simple file (10,000 layers, ${workload.shadowCount} shadows), ${renderer}: ${JSON.stringify(who)}`, results)}${engineMeta ? `\nengine: ${JSON.stringify(engineMeta)}` : ""}`,
       );
-      report(`simple-${renderer}`, { ...results, who } as unknown as Record<string, unknown>);
+      report(reportKey, {
+        workload,
+        who,
+        ...results,
+        ...(engineMeta ? { engine: engineMeta } : {}),
+        ...(presentation ? { presentation } : {}),
+      });
     }
   });
 
@@ -223,8 +317,7 @@ test.describe("Interactions", () => {
     await page.waitForTimeout(3000);
     await settle(page);
     await installProbe(page);
-    const cdp = await page.context().newCDPSession(page);
-    if (PROFILE) await cdp.send("Profiler.enable");
+    const cdp = await maybeCdp(page);
     const results: Record<string, CaseResult | number> = { open };
     // From the light page to the heavy one, as a designer goes to work on it.
     await switchPage(page, kit.pages[1] as string);
@@ -268,8 +361,7 @@ test.describe("Interactions", () => {
     await page.waitForTimeout(5000);
     await settle(page);
     await installProbe(page);
-    const cdp = await page.context().newCDPSession(page);
-    if (PROFILE) await cdp.send("Profiler.enable");
+    const cdp = await maybeCdp(page);
     const out: Record<string, unknown> = { open };
     console.log(`Opened in ${open} ms.`);
     for (const info of pages) {

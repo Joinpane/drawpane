@@ -195,8 +195,11 @@ test.describe("A real file", () => {
         .join("\n")}`,
     );
     const page = instance.page;
-    const cdp = await page.context().newCDPSession(page);
-    if (PROFILE) {
+    const cdp =
+      PROFILE && page.context().browser()?.browserType().name() === "chromium"
+        ? await page.context().newCDPSession(page)
+        : null;
+    if (cdp) {
       await cdp.send("Profiler.enable");
       await cdp.send("Profiler.setSamplingInterval", { interval: 500 });
     }
@@ -285,23 +288,35 @@ test.describe("A real file", () => {
     // Decision 0040's confirmed targets, on the heaviest page measured, on real hardware: shown
     // (the frame on screen), never a lighter page in its place.
     const gated = results[0];
-    if (RENDERER === "engine" && gated?.engine?.renderer === "engine" && !gated.engine.software) {
-      expect(
-        gated.open.useful?.shown ?? Number.POSITIVE_INFINITY,
-        `${gated.page.name}: a useful image within ${USEFUL_IMAGE_MS} ms`,
-      ).toBeLessThanOrEqual(USEFUL_IMAGE_MS);
-      expect(
-        gated.open.exact.shown ?? Number.POSITIVE_INFINITY,
-        `${gated.page.name}: exact within ${EXACT_MS} ms`,
-      ).toBeLessThanOrEqual(EXACT_MS);
-    } else if (RENDERER === "engine")
+    if (RENDERER === "engine" && gated?.engine?.renderer === "engine") {
+      if (process.env.BENCH_ALLOW_SOFTWARE !== "1") {
+        expect(
+          gated.engine.software,
+          `${gated.page.name}: engine benchmark ran on a software adapter (${gated.engine.adapter})`,
+        ).toBe(false);
+      }
+      if (!gated.engine.software) {
+        expect(
+          gated.open.useful?.shown ?? Number.POSITIVE_INFINITY,
+          `${gated.page.name}: a useful image within ${USEFUL_IMAGE_MS} ms`,
+        ).toBeLessThanOrEqual(USEFUL_IMAGE_MS);
+        expect(
+          gated.open.exact.shown ?? Number.POSITIVE_INFINITY,
+          `${gated.page.name}: exact within ${EXACT_MS} ms`,
+        ).toBeLessThanOrEqual(EXACT_MS);
+      } else {
+        test.info().annotations.push({
+          type: "engine-gate",
+          description: "not gated: software adapter",
+        });
+      }
+    } else if (RENDERER === "engine") {
       test.info().annotations.push({
         type: "engine-gate",
         description: !gated
           ? "not gated: no page measured"
-          : gated.engine?.renderer !== "engine"
-            ? `not gated: the heaviest page, ${gated.page.name}, falls back to the canvas renderer (${JSON.stringify(gated.engine?.unsupported ?? {})})`
-            : "not gated: software adapter",
+          : `not gated: the heaviest page, ${gated.page.name}, falls back to the canvas renderer (${JSON.stringify(gated.engine?.unsupported ?? {})})`,
       });
+    }
   });
 });

@@ -50,6 +50,35 @@ export default defineConfig({
       },
     },
     {
+      name: "firefox",
+      testIgnore: /(tour|bench|calibration)\//,
+      use: {
+        ...devices["Desktop Firefox"],
+        viewport: { width: 1440, height: 900 },
+        headless: process.env.GPU_BENCH_XVFB !== "1",
+        launchOptions: {
+          firefoxUserPrefs: {
+            "gfx.webrender.all": true,
+            "layers.acceleration.force-enabled": true,
+            "webgl.force-enabled": true,
+            "webgl.enable-webgl2": true,
+            "dom.webgpu.enabled": true,
+            "gfx.webgpu.ignore-blocklist": true,
+            "gfx.x11-egl.force-enabled": true,
+          },
+        },
+      },
+    },
+    {
+      name: "webkit",
+      testIgnore: /(tour|bench|calibration)\//,
+      use: {
+        ...devices["Desktop Safari"],
+        viewport: { width: 1440, height: 900 },
+        ignoreHTTPSErrors: true,
+      },
+    },
+    {
       // Performance budgets (docs/PRD.md, non-functional requirements). `pnpm bench`.
       name: "bench",
       testMatch: /bench\/.*\.spec\.ts/,
@@ -64,6 +93,43 @@ export default defineConfig({
         ...(process.env.CHROMIUM_PATH
           ? { launchOptions: { executablePath: process.env.CHROMIUM_PATH } }
           : {}),
+      },
+    },
+    {
+      name: "bench-firefox",
+      testMatch: /bench\/.*\.spec\.ts/,
+      timeout: 300_000,
+      use: {
+        // No trace: its DOM snapshots run on the main thread mid-measurement.
+        trace: "off",
+        ...devices["Desktop Firefox"],
+        viewport: { width: 1440, height: 900 },
+        deviceScaleFactor: 2,
+        headless: process.env.GPU_BENCH_XVFB !== "1",
+        launchOptions: {
+          firefoxUserPrefs: {
+            "gfx.webrender.all": true,
+            "layers.acceleration.force-enabled": true,
+            "webgl.force-enabled": true,
+            "webgl.enable-webgl2": true,
+            "dom.webgpu.enabled": true,
+            "gfx.webgpu.ignore-blocklist": true,
+            "gfx.x11-egl.force-enabled": true,
+          },
+        },
+      },
+    },
+    {
+      name: "bench-webkit",
+      testMatch: /bench\/.*\.spec\.ts/,
+      timeout: 300_000,
+      use: {
+        // No trace: its DOM snapshots run on the main thread mid-measurement.
+        trace: "off",
+        ...devices["Desktop Safari"],
+        viewport: { width: 1440, height: 900 },
+        deviceScaleFactor: 2,
+        ignoreHTTPSErrors: true,
       },
     },
     {

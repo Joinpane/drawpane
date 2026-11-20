@@ -7,11 +7,21 @@
 import type { Page } from "@playwright/test";
 
 /**
- * Fills the current page with `cards` cards of 25 layers, straight into the local document.
- * Without `shadows` the cards have none (the render engine's phase 1 doesn't draw them, and a
- * page with any falls back to the canvas renderer).
+ * Whether the 400-card benchmark fixture includes drop shadows.
+ * Defaults to `false` for both Canvas and Engine so comparisons run on the identical
+ * shadow-free workload (`BENCH_NO_EFFECTS=1` also forces `false`). Opt into a matched
+ * shadow workload for both renderers with `BENCH_SHADOWS=1` once shadows land in both.
  */
-export async function buildFile(page: Page, cards: number, shadows = true): Promise<number> {
+export function benchShadows(env: Record<string, string | undefined> = process.env): boolean {
+  if (env.BENCH_NO_EFFECTS === "1") return false;
+  return env.BENCH_SHADOWS === "1";
+}
+
+/**
+ * Fills the current page with `cards` cards of 25 layers, straight into the local document.
+ * Without `shadows` the cards have none, keeping Canvas and Engine workloads identical.
+ */
+export async function buildFile(page: Page, cards: number, shadows = false): Promise<number> {
   return page.evaluate(
     ({ cards, shadows }) => {
       type Op = {

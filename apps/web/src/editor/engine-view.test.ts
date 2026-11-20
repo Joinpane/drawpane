@@ -22,7 +22,9 @@ const state = vi.hoisted(() => ({
   lastWorker: null as FakeWorker | null,
   builderPendingVisible: 0,
   builderPendingOffscreen: 0,
+  builderSupported: true,
   builderRev: 1,
+  gpuFinishedFixture: null as null | (() => Promise<{ ok: boolean }>),
 }));
 
 class FakeWorker extends EventTarget {
@@ -65,6 +67,7 @@ vi.mock("@drawpane/editor", () => ({
     setView() {}
     build(id: string) {
       this.pageId = id;
+      this.supported = state.builderSupported;
       this.pendingVisible = state.builderPendingVisible;
       this.pending = state.builderPendingVisible + state.builderPendingOffscreen;
       state.builderRev = 1;
@@ -178,6 +181,7 @@ vi.mock("@drawpane/engine", () => ({
       };
     }
     async gpuFinished() {
+      if (state.gpuFinishedFixture) return state.gpuFinishedFixture();
       return { ok: true };
     }
     gpuCheck() {
@@ -806,6 +810,86 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
     } finally {
       state.builderPendingVisible = 0;
       state.builderPendingOffscreen = 0;
+    }
+  });
+
+  it("ignores late direct-GPU completion callbacks after Canvas takes over on an unsupported page", async () => {
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: { gpu: { requestAdapter: async () => ({ info: { description: "NVIDIA T4" } }) } },
+    });
+    (globalThis.window as unknown as { location: { href: string } }).location.href =
+      "https://drawpane.test/?present=webgpu";
+    const holds: Array<() => void> = [];
+    let holdActive = true;
+    state.gpuFinishedFixture = async () => {
+      if (holdActive) {
+        await new Promise<void>((resolve) => holds.push(resolve));
+      }
+      return { ok: true };
+    };
+    const origRaf = globalThis.requestAnimationFrame;
+    const rafQueue: Array<() => void> = [];
+    (
+      globalThis as unknown as { requestAnimationFrame: (cb: () => void) => number }
+    ).requestAnimationFrame = (cb) => {
+      rafQueue.push(cb);
+      return rafQueue.length;
+    };
+    try {
+      const editor = { scene: {} } as never;
+      const images = { subscribe: () => () => {}, natural: () => null, get: () => null } as never;
+      const view = await EngineView.create(
+        new FakeCanvas(true) as unknown as HTMLCanvasElement,
+        editor,
+        {} as never,
+        images,
+        "engine",
+      );
+      expect(view).not.toBeNull();
+      const presentedFrames: number[] = [];
+      if (view) view.onGpuPresented = (n) => presentedFrames.push(n);
+
+      // Submit a direct-GPU frame on page-1 while gpuFinished() is held.
+      const first = view?.draw("page-1", { zoom: 1, x: 0, y: 0 }, 400, 300, 1, "#ffffff", {
+        hidden: new Set(),
+        whole: null,
+      });
+      expect(first?.drawn).toBe(true);
+      expect(holds).toHaveLength(1);
+      expect(presentedFrames).toEqual([]);
+
+      // Switch to an unsupported page-2 so Canvas covers the engine (superseding page-1's epoch).
+      state.builderSupported = false;
+      const fallback = view?.draw("page-2", { zoom: 1, x: 0, y: 0 }, 400, 300, 1, "#ffffff", {
+        hidden: new Set(),
+        whole: null,
+      });
+      expect(fallback?.drawn).toBe(false);
+
+      // Release page-1's late gpuFinished() callback and flush animation frames: MUST NOT count.
+      holdActive = false;
+      for (const release of holds.splice(0)) release();
+      await new Promise((r) => setTimeout(r, 0));
+      for (const cb of rafQueue.splice(0)) cb();
+      expect(presentedFrames).toEqual([]);
+
+      // Returning to a supported page resumes direct-GPU confirmation cleanly.
+      state.builderSupported = true;
+      const resumed = view?.draw("page-1", { zoom: 1, x: 0, y: 0 }, 400, 300, 1, "#ffffff", {
+        hidden: new Set(),
+        whole: null,
+      });
+      expect(resumed?.drawn).toBe(true);
+      await new Promise((r) => setTimeout(r, 0));
+      for (const cb of rafQueue.splice(0)) cb();
+      expect(presentedFrames).toEqual([2]);
+      view?.dispose();
+    } finally {
+      state.builderSupported = true;
+      state.gpuFinishedFixture = null;
+      (globalThis as unknown as { requestAnimationFrame: typeof origRaf }).requestAnimationFrame =
+        origRaf;
     }
   });
 });

@@ -131,16 +131,31 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     engineSlotEl.replaceChildren();
     engineSlotEl.style.visibility = "hidden";
     contentCanvas.style.visibility = "visible";
-
+    let engineSubmittedFrames = 0;
+    let enginePresentedFrames = 0;
+    /** Highest submitted frame sequence number confirmed presented on the visible engine canvas. */
+    let engineConfirmedFrame = 0;
+    /** Maps EngineView frame numbers (`view.last.n`) to monotonic submission sequence numbers. */
+    const submittedFrameSeq = new Map<number, number>();
+    let fallbackFrames = 0;
     const syncRendererAttr = () => {
-      hostEl.dataset.renderer = engineShowing && engine ? engine.backend : "canvas";
-      if (engineShowing && engine) {
-        hostEl.dataset.rendererAdapter = engine.adapter;
-        hostEl.dataset.rendererAdapterClass = engine.adapterClass;
-      } else {
-        delete hostEl.dataset.rendererAdapter;
-        delete hostEl.dataset.rendererAdapterClass;
-      }
+      const active = engineShowing ? engine : null;
+      hostEl.dataset.renderer = active ? active.backend : "canvas";
+      hostEl.dataset.rendererAdapter = active ? active.adapter : "canvas";
+      hostEl.dataset.rendererAdapterClass = active ? active.adapterClass : "canvas";
+      hostEl.dataset.rendererSoftware = active
+        ? String(active.backend === "cpu-worker" || active.software)
+        : "false";
+      hostEl.dataset.rendererPresented = active ? String(active.lastPresented) : "true";
+      hostEl.dataset.rendererPresentation = active
+        ? active.readsBack
+          ? "readback"
+          : "direct"
+        : "2d";
+      hostEl.dataset.rendererSubmittedFrames = String(engineSubmittedFrames);
+      hostEl.dataset.rendererFrames = String(enginePresentedFrames);
+      hostEl.dataset.rendererConfirmedFrame = String(engineConfirmedFrame);
+      hostEl.dataset.rendererFallbackFrames = String(fallbackFrames);
     };
     const syncRendererStatus = () => {
       if (choice === "canvas") {
@@ -230,7 +245,10 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         syncRendererStatus();
         return;
       }
-      if (!on) paintCoverSync();
+      if (!on) {
+        submittedFrameSeq.clear();
+        paintCoverSync();
+      }
       engineShowing = on;
       engineSlotEl.style.visibility = on ? "visible" : "hidden";
       if (activeEngineCanvas) {
@@ -275,6 +293,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         activeEngineCanvas.style.visibility = engineShowing ? "visible" : "hidden";
         syncRendererStatus();
         view.onCanvas = (next) => {
+          submittedFrameSeq.clear();
           activeEngineCanvas = next;
           const rect = hostEl.getBoundingClientRect();
           engineSlotEl.style.width = `${rect.width}px`;
@@ -312,14 +331,46 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           schedule();
         };
         // An async frame (GPU read-back or CPU worker tiles) shows once it lands.
-        view.onPresented = (frameExact) => {
-          if (engine !== view) return;
+        view.onPresented = (frameExact, frameN) => {
+          if (
+            engine !== view ||
+            view.recovering ||
+            !activeEngineCanvas ||
+            activeEngineCanvas !== view.canvas
+          ) {
+            return;
+          }
+          const seq = frameN !== undefined ? submittedFrameSeq.get(frameN) : engineSubmittedFrames;
+          if (frameN !== undefined && seq === undefined) return;
+          enginePresentedFrames++;
+          if (seq !== undefined && seq > engineConfirmedFrame) engineConfirmedFrame = seq;
           showEngine(true);
+          syncRendererAttr();
           timing.exact = frameExact;
           if (frameExact) {
             clearTimeout(settle);
             settle = 0;
           }
+        };
+        // Direct GPU presentation confirms completion after gpuFinished() + rAF, only while the
+        // engine canvas that produced this frame is still the visible canvas.
+        view.onGpuPresented = (frameN) => {
+          if (
+            engine !== view ||
+            !engineShowing ||
+            view.recovering ||
+            !activeEngineCanvas ||
+            activeEngineCanvas !== view.canvas ||
+            engineSlotEl.style.visibility !== "visible" ||
+            activeEngineCanvas.style.visibility !== "visible"
+          ) {
+            return;
+          }
+          const seq = submittedFrameSeq.get(frameN);
+          if (seq === undefined) return;
+          enginePresentedFrames++;
+          if (seq > engineConfirmedFrame) engineConfirmedFrame = seq;
+          syncRendererAttr();
         };
         (window as unknown as { drawpaneEngineView?: EngineView }).drawpaneEngineView = view;
         contentDirty = true;
@@ -463,12 +514,22 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           exact = false;
           whole = false;
           clearTimeout(settle);
+          const seq = ++engineSubmittedFrames;
+          if (engine.last.n > 0) {
+            submittedFrameSeq.set(engine.last.n, seq);
+            if (submittedFrameSeq.size > 128) {
+              const oldest = submittedFrameSeq.keys().next().value;
+              if (oldest !== undefined) submittedFrameSeq.delete(oldest);
+            }
+          }
           if (r.ready) {
             showEngine(true);
+            syncRendererAttr();
             timing.exact = r.exact;
           } else {
-            timing.exact = false;
+            syncRendererAttr();
             syncRendererStatus();
+            timing.exact = false;
           }
           // Stand-ins on screen while moving: the next frame draws more. At rest, the time
           // between frames draws the rest, without compositing a frame meanwhile, and asks for
@@ -487,8 +548,12 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         }
       }
       if (!drewEngine && contentDirty && s.pageId) {
+        if (choice !== "canvas") fallbackFrames++;
         if (engine) showEngine(false);
-        else syncRendererStatus();
+        else {
+          syncRendererAttr();
+          syncRendererStatus();
+        }
         // Truncated text shows all its lines while it's being edited.
         renderer.whole = s.editingText;
         const done = renderer.render(
@@ -645,8 +710,14 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       engineSlotEl.style.visibility = "hidden";
       contentCanvas.style.visibility = "visible";
       hostEl.dataset.renderer = "canvas";
-      delete hostEl.dataset.rendererAdapter;
-      delete hostEl.dataset.rendererAdapterClass;
+      hostEl.dataset.rendererAdapter = "canvas";
+      hostEl.dataset.rendererAdapterClass = "canvas";
+      hostEl.dataset.rendererSoftware = "false";
+      hostEl.dataset.rendererPresented = "true";
+      hostEl.dataset.rendererPresentation = "2d";
+      hostEl.dataset.rendererSubmittedFrames = "0";
+      hostEl.dataset.rendererFrames = "0";
+      hostEl.dataset.rendererFallbackFrames = "0";
       setCpuMode(false);
       observer.disconnect();
       themeObserver.disconnect();

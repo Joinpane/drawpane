@@ -17,19 +17,26 @@
  */
 import { expect, test } from "@playwright/test";
 import { freshInstance, type Instance } from "../fresh-instance";
-import { buildFile } from "./cards";
+import { benchShadows, buildFile } from "./cards";
+import {
+  captureRendererState,
+  installFallbackRecorder,
+  type ScenarioCheckpoint,
+  verifyEngineBenchmark,
+  verifyScenarioCheckpoint,
+} from "./engine-gate";
 import { pan, type Settles, type Summary, settles, settlesRow, summaryRow, zoom } from "./frames";
 
 const BUDGET_MS = Number(process.env.BENCH_BUDGET_MS ?? 16);
 const ENFORCE = process.env.BENCH_ENFORCE === "1";
-const RENDERERS: Array<"canvas" | "engine"> =
-  process.env.BENCH_RENDERER === "both"
-    ? ["canvas", "engine"]
-    : process.env.BENCH_RENDERER === "engine"
-      ? ["engine"]
-      : ["canvas"];
-/** The engine draws no shadows yet: with it in the run, the cards have none. */
-const SHADOWS = !RENDERERS.includes("engine");
+const RENDERER_ENV = process.env.BENCH_RENDERER ?? "canvas";
+const RENDERERS: string[] = RENDERER_ENV === "both" ? ["canvas", "engine"] : [RENDERER_ENV];
+const SHADOWS = benchShadows();
+const PORT = Number(process.env.BENCH_PORT ?? 8821);
+
+// A trace captures full-viewport screencast frames during panning, which distorts frame
+// intervals and can exhaust Firefox WebGPU/Xvfb memory over 960 high-DPR pan/zoom frames.
+test.use({ trace: "off" });
 
 test.describe("Canvas performance", () => {
   test.skip(!!process.env.E2E_BASE_URL, "Needs its own local instance.");
@@ -37,7 +44,7 @@ test.describe("Canvas performance", () => {
 
   test.beforeAll(async ({ browser }) => {
     test.setTimeout(180_000);
-    instance = await freshInstance(browser, { port: 8821, inspectorPort: 9361 });
+    instance = await freshInstance(browser, { port: PORT, inspectorPort: PORT + 540 });
   });
   test.afterAll(async () => {
     await instance?.stop();
@@ -46,7 +53,7 @@ test.describe("Canvas performance", () => {
   test("pans a 10,000-layer file within budget", async () => {
     test.setTimeout(30 * 60_000);
     const page = instance.page;
-    const use = (renderer: "canvas" | "engine") =>
+    const use = (renderer: string) =>
       page.evaluate(
         ({ renderer, present }) => {
           localStorage.setItem("drawpane:debug", "1");
@@ -58,8 +65,7 @@ test.describe("Canvas performance", () => {
           present: process.env.BENCH_ENGINE_PRESENT === "readback" ? "readback" : "webgpu",
         },
       );
-    // Why the engine didn't draw, if it didn't (no hardware adapter, a failure): the bench
-    // reports the canvas renderer then, never hangs on it.
+    await installFallbackRecorder(page);
     await page.addInitScript(() => {
       window.addEventListener("drawpane:renderer-fallback", (e) => {
         (window as unknown as { engineFallback?: unknown }).engineFallback = (
@@ -78,24 +84,79 @@ test.describe("Canvas performance", () => {
       });
       const layers = await buildFile(page, 400, SHADOWS);
       expect(layers).toBe(10_000);
-      await measure(renderer);
+      await measure(renderer, layers);
     }
   });
 
-  async function measure(renderer: "canvas" | "engine"): Promise<void> {
+  async function measure(renderer: string, layers: number): Promise<void> {
     const page = instance.page;
-    const ENGINE = renderer === "engine";
+    const ENGINE = renderer !== "canvas";
     // Let fonts and the first full paint settle.
     await page.waitForTimeout(1500);
+    const beforeRenderer = await captureRendererState(page);
 
     const results: Record<string, Summary> = {};
-    for (const level of ["fit", 0.25, 1] as const)
-      results[level === "fit" ? "pan, whole" : `pan, ${level * 100}%`] = await pan(
-        page,
-        level,
-        240,
-      );
+    const scenarioPresentation: Record<
+      string,
+      {
+        submittedFramesDelta: number;
+        presentedFramesDelta: number;
+        fallbackFramesDelta: number;
+        compositedNonBlank: boolean;
+        compositedNonBackgroundRatio: number;
+        deltaFromPrevious: number | null;
+      }
+    > = {};
+    let lastCheckpoint: ScenarioCheckpoint | null = null;
+    for (const level of ["fit", 0.25, 1] as const) {
+      const name = level === "fit" ? "pan, whole" : `pan, ${level * 100}%`;
+      const sBefore = ENGINE ? await captureRendererState(page, { sampleSurface: true }) : null;
+      results[name] = await pan(page, level, 240);
+      if (ENGINE && sBefore) {
+        // Per-scenario presentation and pixel checkpoint runs outside the timed pan loop.
+        // The very first scenario compares against its pre-pan baseline (`sBefore.engineSurface`).
+        const cp = await verifyScenarioCheckpoint(page, sBefore, name, {
+          minSubmitted: 200,
+          minPresented: 60,
+          previous: lastCheckpoint,
+        });
+        lastCheckpoint = cp;
+        scenarioPresentation[name] = {
+          submittedFramesDelta: cp.submittedFramesDelta,
+          presentedFramesDelta: cp.presentedFramesDelta,
+          fallbackFramesDelta: cp.fallbackFramesDelta,
+          compositedNonBlank: cp.compositedNonBlank,
+          compositedNonBackgroundRatio: cp.compositedNonBackgroundRatio,
+          deltaFromPrevious: cp.deltaFromPrevious,
+        };
+      }
+    }
+    const zBefore = ENGINE ? await captureRendererState(page, { sampleSurface: true }) : null;
     results["zoom, whole"] = await zoom(page, 240);
+    if (ENGINE && zBefore) {
+      const cp = await verifyScenarioCheckpoint(page, zBefore, "zoom, whole", {
+        minSubmitted: 200,
+        minPresented: 60,
+        previous: lastCheckpoint,
+      });
+      lastCheckpoint = cp;
+      scenarioPresentation["zoom, whole"] = {
+        submittedFramesDelta: cp.submittedFramesDelta,
+        presentedFramesDelta: cp.presentedFramesDelta,
+        fallbackFramesDelta: cp.fallbackFramesDelta,
+        compositedNonBlank: cp.compositedNonBlank,
+        compositedNonBackgroundRatio: cp.compositedNonBackgroundRatio,
+        deltaFromPrevious: cp.deltaFromPrevious,
+      };
+    }
+
+    const presentation = ENGINE
+      ? await verifyEngineBenchmark(page, beforeRenderer, "bench/canvas.spec.ts", {
+          minSubmittedFrames: 800,
+          minFrames: 240,
+          checkCameraDelta: true,
+        })
+      : null;
 
     const rows = Object.entries(results).map(([name, r]) => summaryRow(name, r));
     // Settling, gesture after gesture: from each one's latest input to the exact frame drawn,
@@ -153,6 +214,8 @@ test.describe("Canvas performance", () => {
       ? await page.evaluate(async () => {
           type Ms = { encode: number; render: number; submit: number; total: number };
           type View = {
+            backend: "webgpu" | "webgl2" | "cpu-worker";
+            adapter: string;
             last: {
               supported: boolean;
               plan: string;
@@ -162,6 +225,7 @@ test.describe("Canvas performance", () => {
             readsBack: boolean;
             engine: {
               gpu: { adapter: string; fallback: boolean } | null;
+              records: number;
               gpuFinished(): Promise<{ ok: boolean }>;
               gpuPixels(): Promise<{ ok: boolean }>;
               clearTiles(): void;
@@ -176,7 +240,7 @@ test.describe("Canvas performance", () => {
                 ok: boolean;
                 value?: { ms: Ms; tiles: { drawn: number }; exact: boolean; records: number };
               };
-            };
+            } | null;
           };
           const w = window as unknown as {
             drawpaneEngineView?: View;
@@ -190,16 +254,26 @@ test.describe("Canvas performance", () => {
             };
           };
           const view = w.drawpaneEngineView;
-          if (view && (view as unknown as { engine: { records: number } }).engine.records < 9_000)
+          if (view?.engine && view.engine.records < 9_000)
             throw new Error(
-              `the engine holds ${(view as unknown as { engine: { records: number } }).engine.records} records, not the file's 10,000`,
+              `the engine holds ${view.engine.records} records, not the file's 10,000`,
             );
           if (!view?.last.supported)
             return {
               drawnBy: "canvas",
-              adapter: view?.engine.gpu?.adapter ?? null,
+              backend: view?.backend ?? null,
+              adapter: view?.adapter ?? view?.engine?.gpu?.adapter ?? null,
               reason: w.engineFallback?.reason ?? (view ? "the page isn't supported" : null),
             };
+          if (!view.engine) {
+            return {
+              drawnBy: "engine",
+              backend: view.backend,
+              adapter: view.adapter,
+              software: true,
+              readsBack: false,
+            };
+          }
           const q = (xs: number[]) => {
             const v = [...xs].sort((a, b) => a - b);
             const at = (p: number) =>
@@ -215,10 +289,13 @@ test.describe("Canvas performance", () => {
           };
           const plans: Record<string, number> = {};
           for (let i = 0; i < 60; i++) {
+            const eng = view.engine;
+            if (!eng) break;
             w.drawpane.state.set({ camera: w.drawpane.s.camera.pan(i % 30 < 15 ? 6 : -6, 3) });
             await frame();
             const t = performance.now();
-            await view.engine.gpuFinished();
+            const fin = await eng.gpuFinished();
+            if (!fin.ok) break;
             pan.gpu.push(performance.now() - t);
             pan.encode.push(view.last.breakdown.encode);
             pan.render.push(view.last.breakdown.render);
@@ -240,9 +317,15 @@ test.describe("Canvas performance", () => {
               tiles: [] as number[],
               records: [] as number[],
             };
-            for (let i = 0; i < 12; i++) {
-              if (cold) view.engine.clearTiles();
-              const r = view.engine.renderGpu(width, height, camera, [1, 1, 1, 1], false, 0);
+            // Yield one animation frame before each whole-frame render so swapchain textures
+            // presented by `renderGpu` are released by the browser compositor (avoids Firefox
+            // WebGPU swapchain OOM when submitting many 2880x1800 frames inside one tick).
+            for (let i = 0; i < 10; i++) {
+              await frame();
+              const eng = view.engine;
+              if (!eng) break;
+              if (cold) eng.clearTiles();
+              const r = eng.renderGpu(width, height, camera, [1, 1, 1, 1], false, 0);
               if (!r.ok || !r.value) break;
               out.encode.push(r.value.ms.encode);
               out.render.push(r.value.ms.render);
@@ -250,12 +333,14 @@ test.describe("Canvas performance", () => {
               out.tiles.push(r.value.tiles.drawn);
               out.records.push(r.value.records);
               let t = performance.now();
-              await view.engine.gpuFinished();
+              const fin = await eng.gpuFinished();
+              if (!fin.ok) break;
               out.gpu.push(performance.now() - t);
               // Every other frame read back, so both costs show on their own.
               if (i % 2 === 0) {
                 t = performance.now();
-                await view.engine.gpuPixels();
+                const px = await eng.gpuPixels();
+                if (!px.ok) break;
                 out.readback.push(performance.now() - t);
               }
             }
@@ -265,8 +350,9 @@ test.describe("Canvas performance", () => {
           const warm = await exactFrames(false);
           return {
             drawnBy: "engine",
-            adapter: view.engine.gpu?.adapter ?? null,
-            software: !!view.engine.gpu?.fallback,
+            backend: view.backend,
+            adapter: view.engine?.gpu?.adapter ?? view.adapter,
+            software: !!view.engine?.gpu?.fallback,
             readsBack: view.readsBack,
             frame: { width, height },
             camera,
@@ -282,16 +368,191 @@ test.describe("Canvas performance", () => {
           };
         })
       : null;
+
+    // Optional frame-interval ablation (BENCH_FRAME_DIAG=1) to attribute interval cost outside
+    // `content`: empty rAF, 2880x1800 2D/WebGPU standalone clears at 2x DPR, overlay hidden/1x1,
+    // and direct engine pan without React or overlay updates.
+    const frameDiag =
+      process.env.BENCH_FRAME_DIAG === "1"
+        ? await page.evaluate(async () => {
+            type Camera = {
+              x: number;
+              y: number;
+              zoom: number;
+              pan(dx: number, dy: number): Camera;
+            };
+            const w = window as unknown as {
+              devicePixelRatio: number;
+              drawpane: {
+                s: { camera: Camera; pageId: string };
+                state: { set(p: { camera: Camera }): void };
+                zoomTo(z: number): void;
+              };
+              drawpaneFrames: {
+                reset(): void;
+                summary(): {
+                  content: { p50: number; p95: number };
+                  overlay: { p50: number; p95: number };
+                };
+              };
+              drawpaneEngineView?: {
+                backend: string;
+                draw(
+                  pageId: string,
+                  camera: Camera,
+                  width: number,
+                  height: number,
+                  dpr: number,
+                  bg: string,
+                  opts: { hidden: Set<string>; whole: boolean },
+                  exact: boolean,
+                ): { drawn: boolean; ready: boolean };
+                engine: { gpuFinished(): Promise<{ ok: boolean }> } | null;
+              };
+            };
+            const q = (xs: number[]) => {
+              const v = [...xs].sort((a, b) => a - b);
+              const at = (p: number) =>
+                Math.round((v[Math.floor(p * (v.length - 1))] ?? 0) * 10) / 10;
+              return { p50: at(0.5), p95: at(0.95) };
+            };
+            const next = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
+            const measureLoop = async (n: number, step: (i: number) => void | Promise<void>) => {
+              await next();
+              await next();
+              w.drawpaneFrames.reset();
+              const times: number[] = [];
+              for (let i = 0; i < n; i++) {
+                await step(i);
+                await next();
+                times.push(performance.now());
+              }
+              const gaps = times.slice(1).map((t, i) => t - (times[i] as number));
+              return { interval: q(gaps), ...w.drawpaneFrames.summary() };
+            };
+
+            w.drawpane.zoomTo(0.25);
+            await next();
+            await next();
+            const out: Record<string, unknown> = {
+              viewport: { w: window.innerWidth, h: window.innerHeight, dpr: w.devicePixelRatio },
+            };
+            out.emptyRaf = await measureLoop(60, () => {});
+            out.baseline = await measureLoop(60, (i) => {
+              const d = i % 30 < 15 ? 6 : -6;
+              w.drawpane.state.set({ camera: w.drawpane.s.camera.pan(d, d / 2) });
+            });
+
+            // Canvas order inside `.canvas`: [contentCanvas, engineCanvas, overlayCanvas].
+            const canvases = [
+              ...document.querySelectorAll(".canvas canvas"),
+            ] as HTMLCanvasElement[];
+            const overlayCanvas = canvases[canvases.length - 1];
+            const contentCanvas = canvases[0];
+            out.canvasSizes = canvases.map((c) => ({
+              w: c.width,
+              h: c.height,
+              vis: getComputedStyle(c).visibility,
+              disp: getComputedStyle(c).display,
+            }));
+
+            if (overlayCanvas) {
+              const prevDisp = overlayCanvas.style.display;
+              overlayCanvas.style.display = "none";
+              out.overlayDisplayNone = await measureLoop(60, (i) => {
+                const d = i % 30 < 15 ? 6 : -6;
+                w.drawpane.state.set({ camera: w.drawpane.s.camera.pan(d, d / 2) });
+              });
+              const prevW = overlayCanvas.width;
+              const prevH = overlayCanvas.height;
+              overlayCanvas.width = 1;
+              overlayCanvas.height = 1;
+              out.overlay1x1Hidden = await measureLoop(60, (i) => {
+                const d = i % 30 < 15 ? 6 : -6;
+                w.drawpane.state.set({ camera: w.drawpane.s.camera.pan(d, d / 2) });
+              });
+              overlayCanvas.width = prevW;
+              overlayCanvas.height = prevH;
+              overlayCanvas.style.display = prevDisp;
+            }
+
+            const view = w.drawpaneEngineView;
+            if (view && contentCanvas) {
+              let cam = w.drawpane.s.camera;
+              const drawMs: number[] = [];
+              const res = await measureLoop(60, (i) => {
+                const d = i % 30 < 15 ? 6 : -6;
+                cam = cam.pan(d, d / 2);
+                const t0 = performance.now();
+                view.draw(
+                  w.drawpane.s.pageId,
+                  cam,
+                  contentCanvas.width,
+                  contentCanvas.height,
+                  w.devicePixelRatio,
+                  "#ebeae6",
+                  { hidden: new Set<string>(), whole: false },
+                  false,
+                );
+                drawMs.push(performance.now() - t0);
+              });
+              out.directEngineOnly = { interval: res.interval, drawMs: q(drawMs) };
+
+              // Same direct engine pan, with an empty 2880x1800 transparent overlay cleared each frame.
+              if (overlayCanvas) {
+                const octx = overlayCanvas.getContext("2d");
+                const clearMs: number[] = [];
+                const res2 = await measureLoop(60, (i) => {
+                  const d = i % 30 < 15 ? 6 : -6;
+                  cam = cam.pan(d, d / 2);
+                  view.draw(
+                    w.drawpane.s.pageId,
+                    cam,
+                    contentCanvas.width,
+                    contentCanvas.height,
+                    w.devicePixelRatio,
+                    "#ebeae6",
+                    { hidden: new Set<string>(), whole: false },
+                    false,
+                  );
+                  if (octx) {
+                    const t0 = performance.now();
+                    octx.clearRect(0, 0, overlayCanvas.width, overlayCanvas.height);
+                    clearMs.push(performance.now() - t0);
+                  }
+                });
+                out.directEnginePlusClearOverlay = {
+                  interval: res2.interval,
+                  clearMs: q(clearMs),
+                };
+              }
+            }
+            return out;
+          })
+        : null;
+    if (frameDiag) console.log(`FRAME_DIAG: ${JSON.stringify(frameDiag)}`);
+    const workload = {
+      renderer,
+      layers,
+      cards: 400,
+      shadows: SHADOWS,
+      shadowCount: SHADOWS ? 400 : 0,
+    };
     console.log(
-      `\n${ENGINE ? "Engine" : "Canvas"}, 10,000 layers, ${BUDGET_MS} ms budget\n${rows.join("\n")}${engine ? `\n${JSON.stringify(engine)}${engine.software ? " (software adapter: not representative)" : ""}` : ""}\n`,
+      `\n${ENGINE ? "Engine" : "Canvas"}, 10,000 layers (${workload.shadowCount} shadows), ${BUDGET_MS} ms budget\n${rows.join("\n")}${engine ? `\n${JSON.stringify(engine)}${engine.software ? " (software adapter: not representative)" : ""}` : ""}\n`,
     );
     test.info().annotations.push({
       type: "bench",
       description: JSON.stringify({
         renderer,
+        workload,
         ...results,
         settled,
         ...(engine ? { engine } : {}),
+        ...(presentation
+          ? { presentation: { ...presentation, scenarios: scenarioPresentation } }
+          : {}),
+        ...(frameDiag ? { frameDiag } : {}),
       }),
     });
     if (ENFORCE)

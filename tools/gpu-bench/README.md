@@ -1,13 +1,19 @@
 # GPU bench
 
-Runs apps/web's Playwright `bench` project (`apps/web/e2e/bench/*.spec.ts`)
-in headless Chromium on a real NVIDIA GPU on [Modal](https://modal.com), from
-any machine, in one command. Canvas and WebGPU timings from a machine without
+Runs apps/web's Playwright benchmark, parity, and e2e suites (`apps/web/e2e/**/*.spec.ts`)
+across Chromium, Firefox, and WebKit on a real NVIDIA GPU on [Modal](https://modal.com), from
+any machine, in one command. Canvas, WebGL2, and WebGPU timings from a machine without
 a GPU (like the development VM) say little about a designer's laptop. These do.
 
 ```sh
 # This worktree as it is on disk, the canvas bench, on a T4:
 pnpm gpu-bench -- bench/canvas.spec.ts
+
+# All three browsers (Chromium, Firefox, WebKit) in one T4 container:
+pnpm gpu-bench --browsers chromium,firefox,webkit --env BENCH_RENDERER=engine -- bench/canvas.spec.ts
+
+# Cross-browser render engine parity on a real T4:
+pnpm gpu-bench --browsers chromium,firefox,webkit --env ENGINE_PARITY_BACKENDS=auto -- parity/engine.spec.ts
 
 # A baseline and a change, back to back in the same container:
 pnpm gpu-bench --ref origin/main --ref HEAD -- bench/canvas.spec.ts
@@ -40,7 +46,9 @@ profiles with `--profile`, and Playwright's traces of failed tests.
 | `--ref <commit>` | Run this commit (`git archive`). Repeatable; runs in order, in one container, on one GPU. |
 | `--worktree <path>` | Run this worktree as it is on disk: tracked files and untracked files git doesn't ignore. Repeatable. The default when neither is given is the current worktree. |
 | `--gpu T4\|L4` | Modal GPU type, default T4. |
-| `--modes <list>` | Comma-separated, run in order in the same container: `gpu` (default: the 2D canvas, WebGL and compositing on the GPU), `webgpu` (core WebGPU on the GPU, compositing in software), `cpu` (Chromium's GPU disabled). See *Modes*. |
+| `--browsers <list>` | Comma-separated: `chromium` (default), `firefox`, `webkit`. |
+| `--project <name>` | Playwright project override; by default auto-picks `bench`/`bench-firefox`/`bench-webkit` for `bench/` specs and `chromium`/`firefox`/`webkit` for parity and e2e specs. |
+| `--modes <list>` | Comma-separated, run in order in the same container: `gpu` (default: the 2D canvas, WebGL and compositing on the GPU), `webgpu` (core WebGPU on the GPU, compositing in software), `cpu` (GPU disabled). See *Modes*. |
 | `--chrome-flag <flag>` | An extra Chromium flag for the `gpu` and `webgpu` runs (repeatable). |
 | `--file <folder>` | A kit folder from `tools/kit-parity`'s convert step, for `bench/file.spec.ts` (`BENCH_FILE`). See *Private data*. |
 | `--env KEY=VALUE` | Passed to the bench, e.g. `BENCH_PAGES`, `BENCH_FRAMES`, `BENCH_PAGE_COUNT`. |
@@ -64,8 +72,9 @@ single-use container (4 cores, 12 GiB, the chosen GPU) whose image has:
 - Ubuntu 24.04, Node and pnpm at the repo's versions (`mise.toml`,
   `packageManager`; a checkout pinning others gets them installed at run
   time);
-- the Chromium (Chrome for Testing) that `@playwright/test` pins, with its
-  system dependencies; another pin is installed at run time;
+- the Chromium, Firefox, and WebKit builds that `@playwright/test` pins, with
+  their system dependencies (while keeping GLVND `libglvnd0`, `libgl1`, `libglx0`,
+  `libegl1` intact), plus `xvfb`, `mesa-utils`, and `openssl`;
 - the Vulkan loader and `vulkaninfo`.
 
 For each checkout it runs `pnpm install --frozen-lockfile` and `pnpm
@@ -136,6 +145,25 @@ Playwright adds `--headless` (the new headless mode in Chrome for Testing).
 The wrapper merges every `--enable-features` and `--disable-features` with
 Playwright's own and writes Chromium's stderr to `chrome.log`.
 
+### Firefox and WebKit on Modal
+
+- **Firefox** disables WebGPU and WebGL2 in `--headless` mode on Linux, so
+  `gpu_bench.py` runs Firefox under Xvfb (`DISPLAY=:99`, `GPU_BENCH_XVFB=1`,
+  `headless: false`) with `dom.webgpu.enabled=true` and
+  `gfx.webgpu.ignore-blocklist=true`. In that mode Firefox's `wgpu` WebGPU
+  stack opens the real NVIDIA T4 over Vulkan (`maxTextureDimension2D: 32767`)
+  and presents WebGPU canvases directly, while Xvfb GLX WebGL2 falls back to
+  llvmpipe.
+- **WebKit** (Playwright's Linux MiniBrowser) has no WebGPU, so the engine
+  selects WebGL2. With `__EGL_VENDOR_LIBRARY_FILENAMES=/usr/share/glvnd/egl_vendor.d/10_nvidia.json`
+  and `WEBKIT_DISABLE_DMABUF_RENDERER=1`, WebKit opens WebGL2 on the NVIDIA T4
+  via Surfaceless EGL (`maxTextureSize: 32768`; WebKit masks
+  `UNMASKED_RENDERER_WEBGL` to `"Apple GPU"`). Because Linux WebKit rejects
+  `Secure` (`__Host-`) cookies over `http://localhost`, `apps/web/e2e/fresh-instance.ts`
+  automatically fronts the local Worker with an ephemeral self-signed HTTPS
+  proxy (`ignoreHTTPSErrors: true`) and installs a pure-WebCrypto P-256 virtual
+  passkey authenticator for Firefox and WebKit.
+
 ### The gate
 
 `gate.mjs` runs before each mode's bench, with the same Chromium, wrapper and
@@ -154,13 +182,14 @@ prints and saves (`gate.json`, `chrome-gpu.txt`, `gate.png`):
 
 The run aborts unless:
 
-- `gpu`: the WebGL renderer is NVIDIA (not SwiftShader, llvmpipe, lavapipe or
-  other software), Canvas, Rasterization, Compositing and WebGL are
-  "Hardware accelerated", the read-backs are right, and an NVIDIA WebGPU
-  adapter (core or compatibility mode, not a fallback) renders;
-- `webgpu`: the same but compositing may be software, and the core adapter
-  must be a working NVIDIA one;
-- `cpu`: never; it records what it saw.
+- `gpu`:
+  - **Chromium:** WebGL renderer is NVIDIA (not software), Canvas/Rasterization/Compositing/WebGL are "Hardware accelerated", 2D/WebGL readbacks and onscreen WebGL screenshot presentation succeed, and a non-fallback NVIDIA WebGPU adapter renders;
+  - **Firefox:** 2D readback passes and either non-fallback hardware WebGPU renders + presents onscreen (verified via `#cgpu` screenshot) or non-software WebGL2 presents onscreen;
+  - **WebKit:** 2D readback and non-software WebGL2 readback + onscreen `#cgl` screenshot presentation succeed with hardware texture limits;
+- `webgpu`: Chromium core WebGPU runs on a working NVIDIA adapter (compositing may be software);
+- `cpu`: GPU ICDs are forced to Mesa software (`llvmpipe` / `lavapipe`), and the gate fails if any hardware GPU renderer or non-fallback WebGPU adapter is still exposed.
+
+In addition, `bench/canvas.spec.ts` and `bench/interactions.spec.ts` verify in-app DOM renderer state (`data-renderer`, `data-renderer-software`, `data-renderer-presented`, presented frame delta, zero fallback frames) and non-blank composited `.canvas` screenshots whenever `BENCH_RENDERER=engine`.
 
 ## Private data
 

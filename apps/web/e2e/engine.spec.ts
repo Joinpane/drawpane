@@ -18,16 +18,18 @@ import { score } from "@drawpane/engine/compare";
 import { expect, type Page, test } from "@playwright/test";
 import { dropImage, freshInstance, type Instance } from "./fresh-instance";
 
-test.use({
-  launchOptions: {
-    args: [
-      "--enable-unsafe-webgpu",
-      "--enable-unsafe-swiftshader",
-      ...(process.env.ENGINE_CHROME_ARGS ?? "").split(/\s+/).filter(Boolean),
-    ],
-    ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
-  },
-});
+if (!process.env.ENGINE_BROWSER || process.env.ENGINE_BROWSER === "chromium") {
+  test.use({
+    launchOptions: {
+      args: [
+        "--enable-unsafe-webgpu",
+        "--enable-unsafe-swiftshader",
+        ...(process.env.ENGINE_CHROME_ARGS ?? "").split(/\s+/).filter(Boolean),
+      ],
+      ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
+    },
+  });
+}
 
 type W = {
   drawpane: {
