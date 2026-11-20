@@ -38,10 +38,12 @@
 import {
   type BuildBudget,
   BuildTooLarge,
+  getProp,
   heapBytes,
   layoutVariables,
   type NodeRecord,
   type Op,
+  type Paint,
   ROOT_ID,
   TokenResolver,
   tokenRefs,
@@ -108,6 +110,9 @@ function remove(map: Map<string, Set<string>>, key: string, value: string): void
   set.delete(value);
   if (set.size === 0) map.delete(key);
 }
+
+const hasVisiblePaint = (paints: readonly Paint[]) =>
+  paints.some((paint) => paint.visible !== false);
 
 function kindOf(node: NodeRecord): Kind | null {
   if (node.type === "variable") return "variable";
@@ -304,11 +309,39 @@ export class TokenView {
       }
     for (const s of styles) for (const id of this.#byStyle.get(s) ?? []) bound.add(id);
 
+    // Paint styles supply strokes through their fills. Walk the inverse in
+    // undo order to find the style's presence and visibility before the edit.
+    const oldStrokeStyles = new Map<string, boolean | null>();
+    for (const op of inverse) {
+      if (!styles.has(op.id)) continue;
+      if (op.op === "delete") oldStrokeStyles.set(op.id, null);
+      else if (op.op === "create" && op.type === "paintStyle")
+        oldStrokeStyles.set(op.id, hasVisiblePaint(getProp(op.props, "fills")));
+      else if (op.op === "set" && op.prop === "fills")
+        oldStrokeStyles.set(op.id, Array.isArray(op.value) && hasVisiblePaint(op.value));
+    }
+
     const affected = bound.size > 0 ? this.#source.builtFrom(bound) : new Set<string>();
     for (const id of affected) {
       this.#forget(id);
       const raw = this.#source.get(id);
-      if (raw && layoutVariables(raw.props).some((v) => variables.has(v))) this.#layout.add(id);
+      if (!raw) continue;
+      if (layoutVariables(raw.props).some((v) => variables.has(v))) this.#layout.add(id);
+      const strokeStyle = getProp(raw.props, "strokeStyle");
+      const oldStyle = strokeStyle ? oldStrokeStyles.get(strokeStyle) : undefined;
+      if (
+        oldStyle !== undefined &&
+        raw.type === "frame" &&
+        getProp(raw.props, "strokesIncludedInLayout") &&
+        getProp(raw.props, "strokeAlign") === "inside" &&
+        getProp(raw.props, "layoutMode") !== "none"
+      ) {
+        const fallback = getProp(raw.props, "strokes");
+        const style = strokeStyle ? this.#source.get(strokeStyle) : undefined;
+        const strokes = style?.type === "paintStyle" ? getProp(style.props, "fills") : fallback;
+        if ((oldStyle ?? hasVisiblePaint(fallback)) !== hasVisiblePaint(strokes))
+          this.#layout.add(id);
+      }
     }
 
     // Where modes apply changed.

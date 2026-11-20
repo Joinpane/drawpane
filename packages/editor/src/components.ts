@@ -701,25 +701,28 @@ export function relayoutTargets(
   const layout: string[] = [];
   const text: string[] = [];
   if (!doc.compactCopies) return { layout, text };
-  const changes = ops.filter(
-    (op) => op.op !== "set" || (op.prop !== "overrides" && !LAYOUT_NEUTRAL.has(op.prop)),
-  );
+  const changes = ops.filter((op) => {
+    if (op.op !== "set") return true;
+    // An overridden string can still display its main's bound value. Unbinding
+    // can expose the copy's saved text, so treat a text binding edit as a layout edit.
+    if (op.prop === "bindings") return doc.getUnresolved(op.id)?.type === "text";
+    return op.prop !== "overrides" && !LAYOUT_NEUTRAL.has(op.prop);
+  });
   if (changes.length === 0) return { layout, text };
   // Text overrides can insulate the entire copy from a text edit. A refit
   // with the browser's metrics would still rewrite those imported text boxes.
-  const textOnly = changes.every(
-    (op) => op.op === "set" && (op.prop === "characters" || op.prop === "textRuns"),
-  );
-  const changesById = textOnly ? Map.groupBy(changes, (op) => op.id) : null;
+  // Run edits can change run bindings as well as their saved values.
+  const charactersOnly = changes.every((op) => op.op === "set" && op.prop === "characters");
+  const changedCharacters = charactersOnly ? new Set(changes.map((op) => op.id)) : null;
   const inheritsTextChange = (id: string): boolean => {
-    for (const prop of ["characters", "textRuns"] as const) {
-      for (let node = doc.getUnresolved(id); node?.type === "text"; ) {
-        if (changesById?.get(node.id)?.some((op) => op.op === "set" && op.prop === prop))
-          return true;
-        if (getProp(node.props, "overrides").includes(prop)) break;
-        const source = getProp(node.props, "mirrors");
-        node = source ? doc.getUnresolved(source) : undefined;
-      }
+    let overridden = false;
+    let bound = false;
+    for (let node = doc.getUnresolved(id); node?.type === "text"; ) {
+      bound ||= !!getProp(node.props, "bindings").characters;
+      if (changedCharacters?.has(node.id)) return !overridden || bound;
+      overridden ||= getProp(node.props, "overrides").includes("characters");
+      const source = getProp(node.props, "mirrors");
+      node = source ? doc.getUnresolved(source) : undefined;
     }
     return false;
   };
@@ -770,7 +773,7 @@ export function relayoutTargets(
           const id = all[i] as string;
           all.push(...doc.childIds(id));
         }
-        const toMeasure = changesById ? all.filter(inheritsTextChange) : all;
+        const toMeasure = changedCharacters ? all.filter(inheritsTextChange) : all;
         if (toMeasure.length === 0) continue;
         for (const id of all) layout.push(id);
         for (const id of toMeasure) text.push(id);
