@@ -9,7 +9,7 @@
 
 export const MAGIC = 0x4c445044; // "DPDL", little-endian
 export const MAJOR = 1;
-export const MINOR = 1;
+export const MINOR = 2;
 /** A message with this base replaces everything; it starts with a reset. */
 export const ANY_REVISION = 0xffffffff;
 /** The page: the root top-level records hang from. */
@@ -32,7 +32,17 @@ export const COMMAND = {
 export const FLAG = { hidden: 1, isolate: 2, group: 4, provisional: 8 } as const;
 
 export const PATH = { path: 1, rect: 2, ellipse: 3, glyphs: 4, outside: 5 } as const;
-export const OP = { fill: 1, stroke: 2, clip: 3, unclip: 4, children: 5, read: 6 } as const;
+export const OP = {
+  fill: 1,
+  stroke: 2,
+  clip: 3,
+  unclip: 4,
+  children: 5,
+  read: 6,
+  layer: 7,
+  unlayer: 8,
+} as const;
+export const COMPOSE = { srcOver: 0, destOut: 1, destIn: 2 } as const;
 export const PAINT = {
   solid: 1,
   linear: 2,
@@ -61,10 +71,12 @@ export const UNSUPPORTED = {
   mask: 1 << 6,
   blend: 1 << 7,
   textWithoutOutlines: 1 << 8,
+  /** Retired in phase 3C (corner smoothing is drawn natively). Kept for bit stability. */
   cornerSmoothing: 1 << 9,
   progressiveBlur: 1 << 10,
+  /** Retired in phase 3C (outside text strokes use OP.layer / OP.unlayer). Kept for bit stability. */
   textStrokeOutside: 1 << 11,
-  /** Set by the engine itself (`record.rs`, `derived`): a diamond gradient, which it doesn't draw. */
+  /** Retired in phase 3C (diamond gradients are drawn natively). Kept for bit stability. */
   diamondGradient: 1 << 12,
   /** Set by the engine itself: a backdrop reader, outside the tests (phase 3). */
   backdropReader: 1 << 13,
@@ -179,7 +191,9 @@ export type WireOp =
   | { readonly op: "clip"; readonly path: number; readonly evenOdd: boolean }
   | { readonly op: "unclip" }
   | { readonly op: "children" }
-  | { readonly op: "read"; readonly kernel: number; readonly halo: number };
+  | { readonly op: "read"; readonly kernel: number; readonly halo: number }
+  | { readonly op: "layer"; readonly compose: number }
+  | { readonly op: "unlayer" };
 
 export interface WireRecord {
   readonly flags: number;
@@ -209,14 +223,14 @@ export class ListWriter {
   #commands = 0;
   #countAt: number;
 
-  constructor(base: number, revision: number, initial = 64 * 1024) {
+  constructor(base: number, revision: number, initial = 64 * 1024, minor = MINOR) {
     this.#buf = new ArrayBuffer(initial);
     this.#view = new DataView(this.#buf);
     this.#bytes = new Uint8Array(this.#buf);
     this.u32(MAGIC);
     this.#reserve(4);
     this.#view.setUint16(this.#at, MAJOR, true);
-    this.#view.setUint16(this.#at + 2, MINOR, true);
+    this.#view.setUint16(this.#at + 2, minor, true);
     this.#at += 4;
     this.u32(base >>> 0);
     this.u32(revision >>> 0);
@@ -407,6 +421,14 @@ export class ListWriter {
           this.u32(OP.read);
           this.u32(o.kernel);
           this.f32(o.halo);
+          break;
+        case "layer":
+          this.u32(OP.layer);
+          this.u32(o.compose);
+          break;
+        case "unlayer":
+          this.u32(OP.unlayer);
+          break;
       }
     }
   }

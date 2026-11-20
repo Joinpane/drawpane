@@ -7,7 +7,7 @@ import { cssGradient, type Doc } from "@drawpane/editor";
 import { getProp, type NodeRecord, type Paint } from "@drawpane/model";
 import { composite, cssColor, parseHex, type Rgba, toHex } from "@drawpane/ui";
 
-export type GradientPaint = Extract<Paint, { type: "linear" | "radial" | "angular" }>;
+export type GradientPaint = Extract<Paint, { type: "linear" | "radial" | "angular" | "diamond" }>;
 export type GradientKind = GradientPaint["type"];
 export type SolidPaint = Extract<Paint, { type: "solid" }>;
 export type PaintKind = "solid" | "gradient" | "image";
@@ -145,7 +145,8 @@ export function leadColor(paint: Paint): string {
 /** Where each gradient kind puts its handles when a paint becomes that kind. */
 function handlesFor(kind: GradientKind): Pick<GradientPaint, "from" | "to"> {
   if (kind === "linear") return handlesForAngle(180);
-  if (kind === "radial") return { from: { x: 0.5, y: 0.5 }, to: { x: 1, y: 0.5 } };
+  if (kind === "radial" || kind === "diamond")
+    return { from: { x: 0.5, y: 0.5 }, to: { x: 1, y: 0.5 } };
   return angularHandles({ x: 0.5, y: 0.5 }, 0);
 }
 
@@ -155,7 +156,8 @@ export function convertPaint(paint: Paint, to: "solid" | GradientKind): Paint {
   if (to === "solid") return { type: "solid", color: leadColor(paint).slice(0, 7), ...base };
   if (paint.type !== "solid" && paint.type !== "image") {
     if (paint.type === to) return paint;
-    return { ...paint, type: to, ...handlesFor(to) };
+    const { width: _dropWidth, ...rest } = paint;
+    return { ...rest, type: to, ...handlesFor(to) };
   }
   // From a color: that color fading out, the way Figma starts a gradient.
   const c = parseHex(leadColor(paint)) ?? { r: 0, g: 0, b: 0, a: 1 };

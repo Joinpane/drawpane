@@ -95,11 +95,16 @@ export function convertPaint(
         };
       });
       if (!from || !to || stops.length < 2) return null;
-      if (p.type === "GRADIENT_DIAMOND") notes.add("gradient-diamond");
-      // Drawpane's width handle is always a quarter turn from the main one, as long.
-      if (width && p.type !== "GRADIENT_LINEAR") {
-        const ex = from.x - (to.y - from.y);
-        const ey = from.y + (to.x - from.x);
+      const ex = from.x - (to.y - from.y);
+      const ey = from.y + (to.x - from.x);
+      let diamondWidth: { x: number; y: number } | undefined;
+      if (width && p.type === "GRADIENT_DIAMOND") {
+        // Preserve stretched or skewed second axis for Figma diamond gradients.
+        if (Math.hypot(width.x - ex, width.y - ey) > 1e-4) {
+          diamondWidth = { x: round4(width.x), y: round4(width.y) };
+        }
+      } else if (width && p.type !== "GRADIENT_LINEAR") {
+        // Drawpane's radial/angular width handle is a quarter turn from the main one, as long.
         if (Math.hypot(width.x - ex, width.y - ey) > 0.01) notes.add("gradient-skewed");
       }
       return {
@@ -108,9 +113,12 @@ export function convertPaint(
             ? "linear"
             : p.type === "GRADIENT_ANGULAR"
               ? "angular"
-              : "radial",
+              : p.type === "GRADIENT_DIAMOND"
+                ? "diamond"
+                : "radial",
         from: { x: round4(from.x), y: round4(from.y) },
         to: { x: round4(to.x), y: round4(to.y) },
+        ...(diamondWidth ? { width: diamondWidth } : {}),
         stops: stops.slice(0, 32),
         ...common,
       };

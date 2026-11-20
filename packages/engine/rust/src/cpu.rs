@@ -55,6 +55,10 @@ pub struct Cpu {
     raster: masks::Rasterizer,
     images: HashMap<u32, Vec<Arc<Pixmap>>>,
     image_bytes: usize,
+    /// Temporary diamond-gradient raster bytes retained during the current tile's scene build.
+    diamond_bytes: usize,
+    /// Upper bound on retained diamond-gradient raster bytes for the current tile.
+    diamond_budget: usize,
     pub masks: MaskCache<Arc<Pixmap>>,
     mask_side: u32,
     checker: Arc<Pixmap>,
@@ -73,11 +77,17 @@ impl Cpu {
             raster: masks::Rasterizer::default(),
             images: HashMap::new(),
             image_bytes: 0,
+            diamond_bytes: 0,
+            diamond_budget: usize::MAX,
             masks: MaskCache::new(mask_bytes),
             mask_side,
             checker: Arc::new(pixmap(16, 16, checker_pixels())),
             halo: 0,
         }
+    }
+
+    pub fn set_diamond_budget(&mut self, budget: usize) {
+        self.diamond_budget = budget;
     }
 
     pub fn image_bytes(&self) -> usize {
@@ -127,6 +137,7 @@ impl Cpu {
             p.copy_from_slice(&background);
         }
         self.scene.reset_and_resize(width, height);
+        self.diamond_bytes = 0;
         self.masks.begin_frame();
     }
 
@@ -192,6 +203,32 @@ impl Backend for Cpu {
 
     fn whole_runs(&self) -> bool {
         true
+    }
+
+    fn diamond_gradient(
+        &mut self,
+        area: IRect,
+        device_to_grad: vello_common::kurbo::Affine,
+        stops: &[(f32, crate::record::Rgba)],
+        alpha: f32,
+    ) -> Result<Option<ImageSource>> {
+        if area.is_empty() {
+            return Ok(None);
+        }
+        let w = (area.x1 - area.x0).max(1) as usize;
+        let h = (area.y1 - area.y0).max(1) as usize;
+        let bytes = w.saturating_mul(h).saturating_mul(4);
+        let next = self.diamond_bytes.saturating_add(bytes);
+        if next > self.diamond_budget {
+            return Err(EngineError::limit(format!(
+                "diamond gradient rasters need {} MiB in this tile; the CPU budget allows {} MiB",
+                next.div_ceil(1 << 20),
+                self.diamond_budget >> 20
+            )));
+        }
+        let pm = crate::diamond::render_cpu(area, device_to_grad, stops, alpha);
+        self.diamond_bytes = next;
+        Ok(Some(ImageSource::Pixmap(Arc::new(pm))))
     }
 
     fn read(&mut self, kernel: u32, paints: IRect, reads: IRect, open: &[Open]) -> Result<()> {

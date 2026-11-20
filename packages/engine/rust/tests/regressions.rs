@@ -504,21 +504,15 @@ fn far_with(paint: Paint) -> Rec {
 
 #[test]
 fn an_operation_the_engine_refuses_refuses_its_page_wherever_it_is() {
-    // A diamond gradient is valid on the wire, and the executor refuses it only when it walks
-    // it: off screen (or outside an export's crop) nothing walks it. It's found at decode.
+    // A non-normal paint blend is valid on the wire, and the executor refuses it only when it
+    // walks it: off screen (or outside an export's crop) nothing walks it. It's found at decode.
     let mut e = Engine::new(Limits::default());
     let mut w = W::new(ANY, 1);
     w.reset();
     w.set(1, 0, &rect(20.0, 20.0, [1.0; 4]));
-    w.set(
-        2,
-        0,
-        &far_with(Paint::Gradient {
-            kind: 5,
-            m: [10.0, 0.0, 0.0, 10.0, 0.0, 0.0],
-            stops: vec![(0.0, [1.0, 0.0, 0.0, 1.0]), (1.0, [0.0, 0.0, 1.0, 1.0])],
-        }),
-    );
+    let mut blended = far_with(Paint::Solid([1.0, 0.0, 0.0, 1.0]));
+    blended.blend = 3;
+    w.set(2, 0, &blended);
     e.apply(&w.finish()).unwrap();
     assert!(matches!(e.render_cpu(64, 64, camera(), [0.0; 4], true), Err(err) if err.code == ErrorCode::Unsupported));
     assert!(matches!(e.render_band(64, 64, camera(), [0.0; 4], 0, 16), Err(err) if err.code == ErrorCode::Unsupported));
@@ -526,9 +520,9 @@ fn an_operation_the_engine_refuses_refuses_its_page_wherever_it_is() {
 }
 
 #[test]
-fn a_blend_or_smoothed_corner_on_the_wire_refuses_the_page_not_the_message() {
+fn a_blend_on_the_wire_refuses_the_page_not_the_message() {
     // Applying succeeds (the message is valid); drawing the page is refused, so the editor falls
-    // back for the page, not for the session.
+    // back for the page, not for the session. Smoothed corners are now drawn natively.
     let mut e = Engine::new(Limits::default());
     let mut blended = far_with(Paint::Solid([1.0; 4]));
     blended.blend = 3;
@@ -537,18 +531,28 @@ fn a_blend_or_smoothed_corner_on_the_wire_refuses_the_page_not_the_message() {
     w.set(1, 0, &blended);
     e.apply(&w.finish()).unwrap();
     assert!(matches!(e.render_cpu(64, 64, camera(), [0.0; 4], true), Err(err) if err.code == ErrorCode::Unsupported));
-    let mut smooth = rect(20.0, 20.0, [1.0; 4]);
+    let mut smooth = rect(40.0, 40.0, [1.0, 0.0, 0.0, 1.0]);
     smooth.paths = vec![Entry::Rect {
-        w: 20.0,
-        h: 20.0,
-        radii: [5.0; 4],
+        w: 40.0,
+        h: 40.0,
+        radii: [12.0; 4],
     }];
     smooth.smoothing = 0.6;
     let mut w = W::new(ANY, 2);
     w.reset();
     w.set(1, 0, &smooth);
     e.apply(&w.finish()).unwrap();
-    assert!(matches!(e.render_cpu(64, 64, camera(), [0.0; 4], true), Err(err) if err.code == ErrorCode::Unsupported));
+    let smooth_px = pixels(&mut e);
+    smooth.smoothing = 0.0;
+    let mut w = W::new(ANY, 3);
+    w.reset();
+    w.set(1, 0, &smooth);
+    e.apply(&w.finish()).unwrap();
+    let plain_px = pixels(&mut e);
+    assert_ne!(
+        smooth_px, plain_px,
+        "smoothed corners must draw squircle curves, not plain arcs"
+    );
 }
 
 #[test]

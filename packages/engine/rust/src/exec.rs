@@ -11,7 +11,7 @@ use crate::error::{EngineError, Result};
 use crate::geometry;
 use crate::limits::Limits;
 use crate::masks::{MaskKey, PHASES};
-use crate::record::{GradientKind, Op, Paint, PathEntry, Record, Rgba, StrokeStyle};
+use crate::record::{ComposeMode, GradientKind, Op, Paint, PathEntry, Record, Rgba, StrokeStyle};
 use crate::store::Store;
 use vello_common::color::{AlphaColor, Srgb};
 use vello_common::kurbo::{Affine, BezPath, Cap, Join, Rect, Stroke};
@@ -36,6 +36,7 @@ pub trait Draw {
     fn push_clip_path(&mut self, p: &BezPath);
     fn pop_clip(&mut self);
     fn push_opacity(&mut self, opacity: f32);
+    fn push_layer(&mut self, compose: Compose, opacity: Option<f32>);
     fn pop_layer(&mut self);
 }
 
@@ -80,6 +81,12 @@ macro_rules! impl_draw {
             }
             fn push_opacity(&mut self, opacity: f32) {
                 <$t>::push_layer(self, None, None, Some(opacity), None, None);
+            }
+            fn push_layer(&mut self, compose: vello_common::peniko::Compose, opacity: Option<f32>) {
+                let blend = (compose != vello_common::peniko::Compose::SrcOver).then_some(
+                    vello_common::peniko::BlendMode::new(vello_common::peniko::Mix::Normal, compose),
+                );
+                <$t>::push_layer(self, None, blend, opacity, None, None);
             }
             fn pop_layer(&mut self) {
                 <$t>::pop_layer(self);
@@ -161,7 +168,14 @@ pub trait Backend {
     /// an image's pixels a level differently by its size, and an export's bands must be bitwise its
     /// whole frame), or only of the glyphs in view, cut to the tile drawing it (the GPU).
     fn whole_runs(&self) -> bool;
-
+    /// Renders an exact diamond gradient (`t = clamp(|u| + |v|, 0, 1)`) covering device pixels `area`.
+    fn diamond_gradient(
+        &mut self,
+        area: IRect,
+        device_to_grad: Affine,
+        stops: &[(f32, Rgba)],
+        alpha: f32,
+    ) -> Result<Option<ImageSource>>;
     /// Runs a backdrop reader over what's drawn so far (`open` is open in the scene).
     fn read(&mut self, kernel: u32, paints: IRect, reads: IRect, open: &[Open]) -> Result<()>;
 }
@@ -573,12 +587,17 @@ impl<B: Backend> Walk<'_, B> {
         }
         let ops = if coarse { &r.coarse } else { &r.ops };
         let depth = self.open.len();
+        let mut active_alpha = inner;
+        let mut layer_stack: Vec<(f32, bool)> = Vec::new();
+        let mut mask_depth = 0usize;
         for (at, op) in ops.iter().enumerate() {
             self.stats.ops += 1;
             match op {
                 Op::Fill { .. } | Op::Stroke { .. } | Op::Read { .. } if !self.paints() => {}
-                Op::Fill { path, even_odd, paint } => self.fill(r, *path, device, *even_odd, paint, inner)?,
-                Op::Stroke { path, style, paint } => self.stroke(r, *path, device, style, paint, inner)?,
+                Op::Fill { path, even_odd, paint } => {
+                    self.fill(r, *path, device, *even_odd, paint, active_alpha, mask_depth == 0)?;
+                }
+                Op::Stroke { path, style, paint } => self.stroke(r, *path, device, style, paint, active_alpha)?,
                 Op::Clip { path, .. } if self.clip_changes_nothing(id, r, &ops[at + 1..], *path, device) => {
                     // Left out: the same pixels (see `clip_changes_nothing`), and what's drawn
                     // under no clip takes the renderers' fast paths.
@@ -602,7 +621,36 @@ impl<B: Backend> Walk<'_, B> {
                         self.backend.scene().pop_clip();
                     }
                 }
-                Op::Children => self.children(id, &node.children, world, inner)?,
+                Op::Layer { compose } => {
+                    self.scope()?;
+                    let (vello_compose, is_mask, layer_opacity) = match compose {
+                        ComposeMode::SrcOver => (Compose::SrcOver, false, (active_alpha < 1.0).then_some(active_alpha)),
+                        ComposeMode::DestOut => (Compose::DestOut, true, None),
+                        ComposeMode::DestIn => (Compose::DestIn, true, None),
+                    };
+                    self.backend.scene().push_layer(vello_compose, layer_opacity);
+                    self.open.push(Open::Layer);
+                    layer_stack.push((active_alpha, is_mask));
+                    // Inside an isolated SrcOver layer, opacity is applied once on pop; inside a
+                    // DestOut/DestIn mask layer, the mask draws at full coverage regardless of opacity.
+                    active_alpha = 1.0;
+                    if is_mask {
+                        mask_depth += 1;
+                    }
+                }
+                Op::Unlayer => {
+                    if self.open.len() > depth {
+                        self.open.pop();
+                        self.backend.scene().pop_layer();
+                        if let Some((prev_alpha, is_mask)) = layer_stack.pop() {
+                            active_alpha = prev_alpha;
+                            if is_mask {
+                                mask_depth = mask_depth.saturating_sub(1);
+                            }
+                        }
+                    }
+                }
+                Op::Children => self.children(id, &node.children, world, active_alpha)?,
                 Op::Read { kernel, halo } => {
                     self.stats.reads += 1;
                     let b = Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1]));
@@ -756,7 +804,6 @@ impl<B: Backend> Walk<'_, B> {
         }
     }
 
-    /// Sets the scene's paint for `paint` drawn under `device`. False when it paints nothing.
     /// Sets `paint` up for what's drawn next under `device`, over `region` (the record's units,
     /// where known): answers whether it paints at all.
     fn set_paint(&mut self, paint: &Paint, device: Affine, alpha: f32, region: Option<Rect>) -> Result<bool> {
@@ -771,18 +818,50 @@ impl<B: Backend> Walk<'_, B> {
             }
             Paint::Gradient(g) => {
                 let crate::record::GradientPaint { kind, matrix, stops } = &**g;
+                if matrix.determinant().abs() < 1e-12 || alpha <= 0.0 {
+                    return Ok(false);
+                }
+                if *kind == GradientKind::Diamond {
+                    if device.determinant().abs() < 1e-300 {
+                        return Ok(false);
+                    }
+                    let grad_to_device = device * *matrix;
+                    if grad_to_device.determinant().abs() < 1e-300 {
+                        return Ok(false);
+                    }
+                    let area = diamond_device_rect(region, device, self.frame.area);
+                    if area.is_empty() {
+                        return Ok(false);
+                    }
+                    let Some(source) = self
+                        .backend
+                        .diamond_gradient(area, grad_to_device.inverse(), stops, alpha)?
+                    else {
+                        return Ok(false);
+                    };
+                    let img = Image {
+                        image: source,
+                        sampler: ImageSampler {
+                            x_extend: Extend::Pad,
+                            y_extend: Extend::Pad,
+                            quality: ImageQuality::Low,
+                            alpha: 1.0,
+                        },
+                    };
+                    let scene = self.backend.scene();
+                    scene.set_paint(img.into());
+                    scene.set_paint_transform(
+                        device.inverse() * Affine::translate((f64::from(area.x0), f64::from(area.y0))),
+                    );
+                    return Ok(true);
+                }
                 let mut g = match kind {
                     GradientKind::Linear => Gradient::new_linear((0.0, 0.0), (1.0, 0.0)),
                     GradientKind::Radial => Gradient::new_radial((0.0, 0.0), 1.0),
                     // Conic gradients start at 3 o'clock and turn clockwise (y down), as the canvas's do.
                     GradientKind::Angular => Gradient::new_sweep((0.0, 0.0), 0.0, core::f32::consts::TAU),
-                    GradientKind::Diamond => {
-                        return Err(EngineError::unsupported("diamond gradients"));
-                    }
+                    GradientKind::Diamond => unreachable!(),
                 };
-                if matrix.determinant().abs() < 1e-12 {
-                    return Ok(false);
-                }
                 g.extend = Extend::Pad;
                 // The canvas interpolates gradient colours unpremultiplied.
                 g.interpolation_alpha_space = InterpolationAlphaSpace::Unpremultiplied;
@@ -873,13 +952,27 @@ impl<B: Backend> Walk<'_, B> {
             .map(|b| b.inflate(grow, grow))
     }
 
-    fn fill(&mut self, r: &Record, i: u32, device: Affine, even_odd: bool, paint: &Paint, alpha: f32) -> Result<()> {
-        if let (Some(PathEntry::Glyphs { scale, glyphs }), Paint::Solid(c), false) =
-            (r.paths.get(i as usize), paint, even_odd)
+    #[allow(clippy::too_many_arguments)]
+    fn fill(
+        &mut self,
+        r: &Record,
+        i: u32,
+        device: Affine,
+        even_odd: bool,
+        paint: &Paint,
+        alpha: f32,
+        allow_glyph_masks: bool,
+    ) -> Result<()> {
+        if allow_glyph_masks
+            && let (Some(PathEntry::Glyphs { scale, glyphs }), Paint::Solid(c), false) =
+                (r.paths.get(i as usize), paint, even_odd)
         {
             return self.glyphs(device, f64::from(*scale), glyphs, *c, alpha);
         }
         let p = self.path(r, i, device, 0.0)?;
+        if p.is_empty() {
+            return Ok(());
+        }
         if !self.set_paint(paint, device, alpha, self.region(r, i, 0.0))? {
             return Ok(());
         }
@@ -914,8 +1007,11 @@ impl<B: Backend> Walk<'_, B> {
             return Ok(());
         }
         // A glyph off the viewport by less than the stroke's reach still shows its stroke.
-        let reach = f64::from(style.width) * f64::from(style.miter.max(1.0)) + 1.0;
+        let reach = stroke_paint_reach(style);
         let p = self.path(r, i, device, reach)?;
+        if p.is_empty() {
+            return Ok(());
+        }
         if !style.dashes.is_empty() {
             // Decode checked the dashes on shapes whose length it knows; a glyph run's is known now.
             let length = polygon_length(&p);
@@ -1194,6 +1290,30 @@ fn stroke_ring(r: &Record, i: u32, style: &StrokeStyle) -> Option<BezPath> {
         ));
     }
     Some(ring)
+}
+
+/// Conservative local-space reach around a stroked path's bounding box, shared by draw-time
+/// diamond rasterization and export preflight admission.
+pub(crate) fn stroke_paint_reach(style: &StrokeStyle) -> f64 {
+    if style.width <= 0.0 {
+        0.0
+    } else {
+        f64::from(style.width) * f64::from(style.miter.max(1.0)) + 1.0
+    }
+}
+
+/// Device-pixel rectangle that a diamond gradient rasterizes for `local_bounds` under `device`,
+/// clipped to `clip_area`. Shared by draw-time rasterization and export preflight admission.
+pub(crate) fn diamond_device_rect(local_bounds: Option<Rect>, device: Affine, clip_area: IRect) -> IRect {
+    let dev_rect = local_bounds
+        .map(|b| IRect::around(device.transform_rect_bbox(b).inflate(1.0, 1.0)))
+        .unwrap_or(clip_area);
+    IRect {
+        x0: dev_rect.x0.max(clip_area.x0),
+        y0: dev_rect.y0.max(clip_area.y0),
+        x1: dev_rect.x1.min(clip_area.x1),
+        y1: dev_rect.y1.min(clip_area.y1),
+    }
 }
 
 /// Normal blending, for the record of what the engine composites by itself.

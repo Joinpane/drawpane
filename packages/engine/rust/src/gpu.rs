@@ -217,6 +217,7 @@ const ATLAS_SIDE: u32 = 2048;
 pub const ATLAS_BYTES: usize = (ATLAS_SIDE * ATLAS_SIDE * 4) as usize;
 const ATLAS_ID: TextureId = TextureId(1 << 48);
 const CHECKER_ID: TextureId = TextureId((1 << 48) + 1);
+const TEMP_ID_BASE: u64 = (1 << 48) + 1024;
 
 const BLIT: &str = r"
 @group(0) @binding(0) var frame: texture_2d<f32>;
@@ -475,6 +476,12 @@ enum TileTarget {
     ScratchOnly,
 }
 
+struct DiamondPipeline {
+    pipeline: wgpu::RenderPipeline,
+    uniforms: wgpu::Buffer,
+    group: wgpu::BindGroup,
+}
+
 /// Milliseconds now, for the frame's breakdown.
 fn now() -> f64 {
     web_sys::window().and_then(|w| w.performance()).map_or(0.0, |p| p.now())
@@ -518,6 +525,7 @@ pub struct Gpu {
     /// straight into the frame, for a frame whose tiles don't fit the budget).
     scratch: Option<(wgpu::Texture, wgpu::TextureView, wgpu::TextureView)>,
     compositor: Option<Compositor>,
+    diamond: Option<DiamondPipeline>,
     /// The frame shown: what it was drawn for, so the next may stand on it.
     last: Option<Last>,
     last_scale: Option<f64>,
@@ -527,6 +535,10 @@ pub struct Gpu {
     tile_ms: f64,
     blit: Option<wgpu::RenderPipeline>,
     images: HashMap<u32, Vec<(TextureId, wgpu::Texture, u32, u32)>>,
+    /// Per-draw temporary textures (e.g. diamond gradients), released right after submit.
+    temp_textures: Vec<(TextureId, wgpu::Texture)>,
+    temp_bytes: usize,
+    next_temp_id: u64,
     image_bytes: usize,
     atlas: Atlas,
     pub masks: MaskCache<Arc<vello_cpu::Pixmap>>,
@@ -566,6 +578,10 @@ impl Drop for Gpu {
             c.uniforms.destroy();
             c.instances.destroy();
         }
+        if let Some(d) = self.diamond.take() {
+            d.uniforms.destroy();
+        }
+        self.release_temp_textures();
         for (_, levels) in self.images.drain() {
             for (_, tex, _, _) in levels {
                 tex.destroy();
@@ -904,12 +920,16 @@ impl Gpu {
             pages: Vec::new(),
             scratch: None,
             compositor: None,
+            diamond: None,
             last: None,
             last_scale: None,
             shown: None,
             tile_ms: 0.0,
             blit,
             images: HashMap::new(),
+            temp_textures: Vec::new(),
+            temp_bytes: 0,
+            next_temp_id: TEMP_ID_BASE,
             image_bytes: 0,
             atlas: Atlas {
                 texture: atlas_tex,
@@ -928,6 +948,7 @@ impl Gpu {
             readbacks: Rc::new(Flights::default()),
         };
         gpu.ensure_compositor();
+        gpu.ensure_diamond();
         let refused = validation.pop().await;
         let refused = refused.or(oom.pop().await);
         if let Some(e) = refused {
@@ -1761,7 +1782,13 @@ impl Gpu {
             },
         };
         let limits = store.limits;
-        let s = exec::draw_split(store, self, &tile, &limits, verbs, split)?;
+        let s = match exec::draw_split(store, self, &tile, &limits, verbs, split) {
+            Ok(s) => s,
+            Err(e) => {
+                self.release_temp_textures();
+                return Err(e);
+            }
+        };
         stats.add(&s);
         // Exact only if nothing stood in: no level of detail, no provisional record.
         let exact = s.exact();
@@ -1770,9 +1797,18 @@ impl Gpu {
         // render follows its target's size, so a page as the target would cost a page's worth
         // for each tile), then copied where it goes. The same scene and view either way: the
         // same pixels.
-        self.ensure_scratch()?;
+        if let Err(e) = self.ensure_scratch() {
+            self.release_temp_textures();
+            return Err(e);
+        }
         let place = match target {
-            TileTarget::Slot(slot) => Some(self.slot_place(slot)?),
+            TileTarget::Slot(slot) => match self.slot_place(slot) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    self.release_temp_textures();
+                    return Err(e);
+                }
+            },
             TileTarget::Scratch | TileTarget::ScratchOnly => None,
         };
         // The masks this tile placed reach the atlas before it renders.
@@ -1785,11 +1821,15 @@ impl Gpu {
         let [r, g, b, a] = background;
         let color = vello_common::color::AlphaColor::new([r, g, b, a]);
         options.target_init = TargetInit::Clear(ClearSettings::Viewport { color });
-        let (scratch, view_t, depth_t) = self
-            .scratch
-            .as_ref()
-            .ok_or_else(|| EngineError::new(ErrorCode::State, "no scratch tile"))?;
-        self.renderer
+        let (scratch, view_t, depth_t) = match self.scratch.as_ref() {
+            Some(s) => s,
+            None => {
+                self.release_temp_textures();
+                return Err(EngineError::new(ErrorCode::State, "no scratch tile"));
+            }
+        };
+        let render_res = self
+            .renderer
             .render(
                 &self.scene,
                 &mut self.resources,
@@ -1801,7 +1841,11 @@ impl Gpu {
                 &self.bindings,
                 options,
             )
-            .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+            .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")));
+        if let Err(e) = render_res {
+            self.release_temp_textures();
+            return Err(e);
+        }
         // Where it goes: its slot in a page, or (drawn direct) where the frame shows it.
         let (dst_tex, src, dst, size) = match place {
             Some((p, x, y)) => (&self.pages[p].texture, (0, 0), (x, y), (TILE, TILE)),
@@ -1857,6 +1901,7 @@ impl Gpu {
         // second render in the same encoder would overwrite before the first ran.
         self.queue.submit([encoder.finish()]);
         self.submits += 1;
+        self.release_temp_textures();
         stats.encode_ms += t1 - t0;
         stats.render_ms += now() - t1;
         Ok(exact)
@@ -2470,6 +2515,70 @@ impl Gpu {
         });
     }
 
+    /// Makes the pipeline that evaluates exact diamond gradients on both WebGPU and WebGL2.
+    fn ensure_diamond(&mut self) {
+        if self.diamond.is_some() {
+            return;
+        }
+        let module = self.device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("diamond gradient"),
+            source: wgpu::ShaderSource::Wgsl(crate::diamond::WGSL.into()),
+        });
+        let pipeline = self.device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("diamond gradient"),
+            layout: None,
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: FORMAT,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        });
+        let uniforms = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("diamond uniforms"),
+            size: crate::diamond::UNIFORM_BYTES as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("diamond gradient"),
+            layout: &pipeline.get_bind_group_layout(0),
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: uniforms.as_entire_binding(),
+            }],
+        });
+        self.diamond = Some(DiamondPipeline {
+            pipeline,
+            uniforms,
+            group,
+        });
+    }
+
+    fn release_temp_textures(&mut self) {
+        for (tid, tex) in self.temp_textures.drain(..) {
+            self.bindings.remove(tid);
+            tex.destroy();
+        }
+        self.bytes = self.bytes.saturating_sub(self.temp_bytes);
+        self.temp_bytes = 0;
+    }
+
     /// Starts reading the last frame back: a buffer the frame is copied into, mapped by
     /// `read_back` (which takes the in-flight count it answers). At most `READBACKS` at once.
     pub fn read_back_start(&self) -> Result<ReadBack> {
@@ -2893,6 +3002,68 @@ impl Backend for Gpu {
             y1: (y + u32::from(h)) as u16,
         };
         Some(ImageSource::external_texture(ATLAS_ID, TextureRegion::Rect(rect), true))
+    }
+
+    fn diamond_gradient(
+        &mut self,
+        area: IRect,
+        device_to_grad: Affine,
+        stops: &[(f32, crate::record::Rgba)],
+        alpha: f32,
+    ) -> Result<Option<ImageSource>> {
+        if area.is_empty() {
+            return Ok(None);
+        }
+        let w = (area.x1 - area.x0) as u32;
+        let h = (area.y1 - area.y0) as u32;
+        self.check_texture_size(w, h, "a diamond gradient")?;
+        let tex_bytes = (w as usize).saturating_mul(h as usize).saturating_mul(4);
+        self.reserve(tex_bytes, 0, "a diamond gradient")?;
+        self.ensure_diamond();
+        let dp = self
+            .diamond
+            .as_ref()
+            .ok_or_else(|| EngineError::new(ErrorCode::Gpu, "no diamond gradient pipeline"))?;
+        let tex = texture(
+            &self.device,
+            w,
+            h,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            "diamond gradient",
+        );
+        self.bytes = self.bytes.saturating_add(tex_bytes);
+        self.temp_bytes = self.temp_bytes.saturating_add(tex_bytes);
+        let view = tex.create_view(&Default::default());
+        let bytes = crate::diamond::pack_uniforms(area, device_to_grad, stops, alpha);
+        self.queue.write_buffer(&dp.uniforms, 0, &bytes);
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("diamond gradient"),
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("diamond gradient"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&dp.pipeline);
+            pass.set_bind_group(0, &dp.group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+        self.queue.submit([encoder.finish()]);
+        self.submits += 1;
+        let tid = TextureId(self.next_temp_id);
+        self.next_temp_id = self.next_temp_id.wrapping_add(1).max(TEMP_ID_BASE);
+        self.bindings.insert(tid, view);
+        self.temp_textures.push((tid, tex));
+        Ok(Some(ImageSource::external_texture(tid, TextureRegion::Full, true)))
     }
 
     fn read(&mut self, kernel: u32, _paints: IRect, _reads: IRect, _open: &[Open]) -> Result<()> {

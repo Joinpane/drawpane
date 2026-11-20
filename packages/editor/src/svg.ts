@@ -43,6 +43,7 @@ import {
 import { boxOutline, ellipseOutline, fitDashes, type OutlineSegment } from "./dashes";
 import { exportBounds } from "./export";
 import { type Matrix, type Rect, round2 } from "./geometry";
+import { boxInGradientSpace, gradientMatrix } from "./gradients";
 import { FULL_CROP, imagePlacement } from "./images";
 import type { LinearMode } from "./linear-blend";
 import { markersOf, trimmedStroke } from "./markers";
@@ -311,6 +312,48 @@ class SvgWriter {
       }
       this.defs.push(
         `<pattern id="${id}" patternUnits="userSpaceOnUse" width="1" height="1" patternTransform="matrix(${round2(Math.max(w, 0.01))} 0 0 ${round2(Math.max(h, 0.01))} 0 0)">${wedges.join("")}</pattern>`,
+      );
+      return ` ${kind}="url(#${id})"${opacity < 1 ? attr(`${kind}-opacity`, opacity) : ""}`;
+    }
+    if (paint.type === "diamond") {
+      const m = gradientMatrix(paint, w, h);
+      if (!m) return null;
+      const id = this.id("diamond");
+      // Exact L1 diamond (`t = clamp(|u| + |v|, 0, 1)`): in each quadrant `(sx, sy)`, a linear
+      // gradient from `(0, 0)` to `(0.5 * sx, 0.5 * sy)` evaluates `sx * u + sy * v = |u| + |v|`.
+      const pad = Math.max(w, h) * 0.5;
+      const box = boxInGradientSpace(m, w, h, pad);
+      const xMin = Math.min(0, box.x);
+      const xMax = Math.max(0, box.x + box.width);
+      const yMin = Math.min(0, box.y);
+      const yMax = Math.max(0, box.y + box.height);
+      const f = (n: number) => String(Math.round(n * 1e4) / 1e4);
+      const ordered = [...paint.stops].sort((a, b) => a.position - b.position);
+      const stops = ordered
+        .map((s) => {
+          const { color, alpha } = splitColor(s.color);
+          return `<stop${attr("offset", s.position)}${attr("stop-color", color)}${alpha < 1 ? attr("stop-opacity", alpha) : ""}/>`;
+        })
+        .join("");
+      const quads: Array<[string, number, number, number, number, number, number]> = [
+        ["pp", 0.5, 0.5, 0, 0, xMax, yMax],
+        ["np", -0.5, 0.5, xMin, 0, -xMin, yMax],
+        ["nn", -0.5, -0.5, xMin, yMin, -xMin, -yMin],
+        ["pn", 0.5, -0.5, 0, yMin, xMax, -yMin],
+      ];
+      for (const [q, x2, y2] of quads) {
+        this.defs.push(
+          `<linearGradient id="${id}-${q}" gradientUnits="userSpaceOnUse" x1="0" y1="0" x2="${x2}" y2="${y2}">${stops}</linearGradient>`,
+        );
+      }
+      const rects = quads
+        .map(
+          ([q, , , rx, ry, rw, rh]) =>
+            `<rect x="${f(rx)}" y="${f(ry)}" width="${f(rw)}" height="${f(rh)}" fill="url(#${id}-${q})" shape-rendering="crispEdges"/>`,
+        )
+        .join("");
+      this.defs.push(
+        `<pattern id="${id}" patternUnits="userSpaceOnUse" x="${round2(-pad)}" y="${round2(-pad)}" width="${round2(Math.max(w + pad * 2, 0.01))}" height="${round2(Math.max(h + pad * 2, 0.01))}"><g transform="matrix(${m.map(f).join(" ")})">${rects}</g></pattern>`,
       );
       return ` ${kind}="url(#${id})"${opacity < 1 ? attr(`${kind}-opacity`, opacity) : ""}`;
     }

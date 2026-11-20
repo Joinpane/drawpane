@@ -31,16 +31,19 @@ async function buildParity(figma, suites) {
     const dx = to.x - from.x;
     const dy = to.y - from.y;
     if (paint.type === "linear") {
-      // Gradient space → unit square: x along the handles, y across them.
+      // Gradient space -> unit square: x along the handles, y across them.
       return invert([
         [dx, -dy, from.x + 0.5 * dy],
         [dy, dx, from.y - 0.5 * dx],
       ]);
     }
-    // Radial and angular: centred on `from`, radius (and start) toward `to`.
+    // Radial, angular, and diamond: centred on `from`, axis 1 toward `to`, axis 2 toward `width`
+    // (or a quarter turn clockwise of equal length when `width` is omitted).
+    const wx = paint.width ? paint.width.x - from.x : -dy;
+    const wy = paint.width ? paint.width.y - from.y : dx;
     return invert([
-      [2 * dx, -2 * dy, from.x - dx + dy],
-      [2 * dy, 2 * dx, from.y - dy - dx],
+      [2 * dx, 2 * wx, from.x - dx - wx],
+      [2 * dy, 2 * wy, from.y - dy - wy],
     ]);
   };
   const BLEND = (mode) => (mode ?? "normal").toUpperCase().replace(/-/g, "_");
@@ -61,6 +64,7 @@ async function buildParity(figma, suites) {
       linear: "GRADIENT_LINEAR",
       radial: "GRADIENT_RADIAL",
       angular: "GRADIENT_ANGULAR",
+      diamond: "GRADIENT_DIAMOND",
     }[p.type];
     return {
       type,
@@ -190,6 +194,13 @@ async function buildParity(figma, suites) {
     if (spec.paragraphSpacing) node.paragraphSpacing = spec.paragraphSpacing;
     if (spec.leadingTrim === "cap-height") node.leadingTrim = "CAP_HEIGHT";
     node.fills = (spec.fills ?? [{ type: "solid", color: "#1c1b1a" }]).map(paint);
+    if (spec.strokes?.length) {
+      node.strokes = spec.strokes.map(paint);
+      node.strokeWeight = spec.strokeWeight ?? 1;
+      node.strokeAlign = (spec.strokeAlign ?? "center").toUpperCase();
+      if (spec.strokeDashes) node.dashPattern = spec.strokeDashes;
+      if (spec.strokeJoin) node.strokeJoin = spec.strokeJoin.toUpperCase();
+    }
     for (const run of spec.textRuns ?? []) {
       if (run.fontWeight || run.fontStyle)
         node.setRangeFontName(

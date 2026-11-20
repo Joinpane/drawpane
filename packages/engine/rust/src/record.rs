@@ -25,8 +25,6 @@ const KNOWN_FLAGS: u32 = FLAG_HIDDEN | FLAG_ISOLATE | FLAG_GROUP | FLAG_PROVISIO
 /// screen or not, in an export's crop or not, whatever the builder flagged.
 pub mod derived {
     pub const BLEND: u32 = 1 << 7;
-    pub const CORNER_SMOOTHING: u32 = 1 << 9;
-    pub const DIAMOND_GRADIENT: u32 = 1 << 12;
     pub const BACKDROP_READER: u32 = 1 << 13;
 }
 
@@ -283,6 +281,13 @@ impl StrokeStyle {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ComposeMode {
+    SrcOver,
+    DestOut,
+    DestIn,
+}
+
 #[derive(Clone, Debug)]
 pub enum Op {
     Fill {
@@ -308,6 +313,11 @@ pub enum Op {
         kernel: u32,
         halo: f32,
     },
+    /// Opens an isolated compositing layer (SrcOver, DestOut, DestIn), closed by `Unlayer`.
+    Layer {
+        compose: ComposeMode,
+    },
+    Unlayer,
 }
 
 #[derive(Clone, Debug)]
@@ -480,9 +490,6 @@ fn paint(r: &mut Reader, limits: &Limits, derived: &mut u32) -> Result<Paint> {
     if blend != 0 {
         *derived |= derived::BLEND;
     }
-    if kind == 5 {
-        *derived |= derived::DIAMOND_GRADIENT;
-    }
     Ok(match kind {
         1 => Paint::Solid(r.rgba()?),
         2..=5 => {
@@ -554,10 +561,18 @@ fn stroke_style(r: &mut Reader, limits: &Limits) -> Result<StrokeStyle> {
     })
 }
 
-fn ops(r: &mut Reader, limits: &Limits, paths: usize, allow_children: bool, derived: &mut u32) -> Result<Vec<Op>> {
+fn ops(
+    r: &mut Reader,
+    limits: &Limits,
+    paths: usize,
+    allow_children: bool,
+    derived: &mut u32,
+    minor: u16,
+) -> Result<Vec<Op>> {
     let n = r.count(limits.record_items, "ops", 4)?;
     let mut out = Vec::with_capacity(n);
-    let mut clips = 0usize;
+    // Strict LIFO scope stack: true = clip, false = layer, so clips and layers never interleave.
+    let mut scopes: Vec<bool> = Vec::new();
     let mut children = false;
     let path_index = |r: &mut Reader| -> Result<u32> {
         let i = r.u32()?;
@@ -587,10 +602,10 @@ fn ops(r: &mut Reader, limits: &Limits, paths: usize, allow_children: bool, deri
                 }
             }
             3 => {
-                clips += 1;
-                if clips > limits.depth {
-                    return Err(EngineError::limit("clips nested too deep"));
+                if scopes.len() >= limits.depth {
+                    return Err(EngineError::limit("clips and layers nested too deep"));
                 }
+                scopes.push(true);
                 let path = path_index(r)?;
                 Op::Clip {
                     path,
@@ -598,9 +613,9 @@ fn ops(r: &mut Reader, limits: &Limits, paths: usize, allow_children: bool, deri
                 }
             }
             4 => {
-                clips = clips
-                    .checked_sub(1)
-                    .ok_or_else(|| EngineError::malformed("an unclip without a clip"))?;
+                if scopes.pop() != Some(true) {
+                    return Err(EngineError::malformed("an unclip without a matching clip"));
+                }
                 Op::Unclip
             }
             5 => {
@@ -623,17 +638,48 @@ fn ops(r: &mut Reader, limits: &Limits, paths: usize, allow_children: bool, deri
                 }
                 Op::Read { kernel, halo }
             }
+            7 => {
+                if minor < 2 {
+                    return Err(EngineError::new(
+                        crate::error::ErrorCode::Version,
+                        format!("layer op requires display list 1.2 (header is 1.{minor})"),
+                    ));
+                }
+                if scopes.len() >= limits.depth {
+                    return Err(EngineError::limit("clips and layers nested too deep"));
+                }
+                scopes.push(false);
+                let compose = match r.u32()? {
+                    0 => ComposeMode::SrcOver,
+                    1 => ComposeMode::DestOut,
+                    2 => ComposeMode::DestIn,
+                    k => return Err(EngineError::malformed(format!("unknown layer compose {k}"))),
+                };
+                Op::Layer { compose }
+            }
+            8 => {
+                if minor < 2 {
+                    return Err(EngineError::new(
+                        crate::error::ErrorCode::Version,
+                        format!("unlayer op requires display list 1.2 (header is 1.{minor})"),
+                    ));
+                }
+                if scopes.pop() != Some(false) {
+                    return Err(EngineError::malformed("an unlayer without a matching layer"));
+                }
+                Op::Unlayer
+            }
             k => return Err(EngineError::malformed(format!("unknown op {k}"))),
         };
         out.push(op);
     }
-    if clips != 0 {
-        return Err(EngineError::malformed("clips left open"));
+    if !scopes.is_empty() {
+        return Err(EngineError::malformed("clips or layers left open"));
     }
     Ok(out)
 }
 
-pub fn decode(r: &mut Reader, limits: &Limits) -> Result<Record> {
+pub fn decode(r: &mut Reader, limits: &Limits, minor: u16) -> Result<Record> {
     let flags = r.u32()?;
     if flags & !KNOWN_FLAGS != 0 {
         return Err(EngineError::malformed(format!("unknown record flags {flags:#x}")));
@@ -654,16 +700,7 @@ pub fn decode(r: &mut Reader, limits: &Limits) -> Result<Record> {
                 let (w, h) = (r.f32()?, r.f32()?);
                 let radii = [r.f32_nonneg()?, r.f32_nonneg()?, r.f32_nonneg()?, r.f32_nonneg()?];
                 let smoothing = r.f32()?.clamp(0.0, 1.0);
-                if smoothing > 0.0 && radii.iter().any(|r| *r > 0.0) {
-                    // Squircles come with the shared geometry function (see geometry.rs).
-                    derived |= derived::CORNER_SMOOTHING;
-                }
-                PathEntry::Rect {
-                    w,
-                    h,
-                    radii,
-                    smoothing: 0.0,
-                }
+                PathEntry::Rect { w, h, radii, smoothing }
             }
             3 => PathEntry::Ellipse {
                 w: r.f32()?,
@@ -692,8 +729,8 @@ pub fn decode(r: &mut Reader, limits: &Limits) -> Result<Record> {
             k => return Err(EngineError::malformed(format!("unknown path kind {k}"))),
         });
     }
-    let ops_list = ops(r, limits, paths.len(), true, &mut derived)?;
-    let coarse = ops(r, limits, paths.len(), false, &mut derived)?;
+    let ops_list = ops(r, limits, paths.len(), true, &mut derived, minor)?;
+    let coarse = ops(r, limits, paths.len(), false, &mut derived, minor)?;
     let record = Record {
         flags,
         opacity,

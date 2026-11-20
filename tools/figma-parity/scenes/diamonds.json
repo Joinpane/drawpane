@@ -1,0 +1,176 @@
+{
+  "suite": "diamonds",
+  "about": "Diamond gradients: centred, rotated, stretched second axis, skewed axes, alpha stops over a stripe, and a diamond stroke.",
+  "cell": {
+    "width": 240,
+    "height": 160,
+    "gap": 40,
+    "columns": 3
+  },
+  "background": "#f4f3ef",
+  "cells": [
+    {
+      "id": "diamond-centre",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 30,
+          "y": 20,
+          "width": 180,
+          "height": 120,
+          "cornerRadius": 8,
+          "fills": [
+            {
+              "type": "diamond",
+              "from": { "x": 0.5, "y": 0.5 },
+              "to": { "x": 1, "y": 0.5 },
+              "stops": [
+                { "position": 0, "color": "#ff7a45" },
+                { "position": 1, "color": "#3d7bf0" }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "diamond-rotated",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 30,
+          "y": 20,
+          "width": 180,
+          "height": 120,
+          "cornerRadius": 8,
+          "fills": [
+            {
+              "type": "diamond",
+              "from": { "x": 0.5, "y": 0.5 },
+              "to": { "x": 0.85, "y": 0.85 },
+              "stops": [
+                { "position": 0, "color": "#ff7a45" },
+                { "position": 0.5, "color": "#ffd166" },
+                { "position": 1, "color": "#3d7bf0" }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "diamond-stretched",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 30,
+          "y": 20,
+          "width": 180,
+          "height": 120,
+          "cornerRadius": 8,
+          "fills": [
+            {
+              "type": "diamond",
+              "from": { "x": 0.5, "y": 0.5 },
+              "to": { "x": 0.95, "y": 0.5 },
+              "width": { "x": 0.5, "y": 0.72 },
+              "stops": [
+                { "position": 0, "color": "#ff7a45" },
+                { "position": 1, "color": "#3d7bf0" }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "diamond-skewed",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 30,
+          "y": 20,
+          "width": 180,
+          "height": 120,
+          "cornerRadius": 8,
+          "fills": [
+            {
+              "type": "diamond",
+              "from": { "x": 0.4, "y": 0.55 },
+              "to": { "x": 0.85, "y": 0.45 },
+              "width": { "x": 0.48, "y": 0.82 },
+              "stops": [
+                { "position": 0, "color": "#e8590c" },
+                { "position": 0.55, "color": "#30a46c" },
+                { "position": 1, "color": "#1c1b1a" }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "diamond-alpha",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 30,
+          "y": 64,
+          "width": 180,
+          "height": 32,
+          "fills": [{ "type": "solid", "color": "#1c1b1a" }]
+        },
+        {
+          "type": "rect",
+          "x": 30,
+          "y": 20,
+          "width": 180,
+          "height": 120,
+          "cornerRadius": 8,
+          "fills": [
+            {
+              "type": "diamond",
+              "from": { "x": 0.5, "y": 0.5 },
+              "to": { "x": 0.95, "y": 0.5 },
+              "width": { "x": 0.5, "y": 0.9 },
+              "stops": [
+                { "position": 0, "color": "#3d7bf0ff" },
+                { "position": 0.5, "color": "#ff7a4580" },
+                { "position": 1, "color": "#3d7bf000" }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "diamond-stroke",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 45,
+          "y": 30,
+          "width": 150,
+          "height": 100,
+          "cornerRadius": 16,
+          "fills": [{ "type": "solid", "color": "#ffffff" }],
+          "strokes": [
+            {
+              "type": "diamond",
+              "from": { "x": 0.35, "y": 0.4 },
+              "to": { "x": 1.15, "y": 0.4 },
+              "width": { "x": 0.35, "y": 1.1 },
+              "stops": [
+                { "position": 0, "color": "#ff7a45" },
+                { "position": 0.5, "color": "#ffd166" },
+                { "position": 1, "color": "#3d7bf0" }
+              ]
+            }
+          ],
+          "strokeWeight": 14,
+          "strokeAlign": "center"
+        }
+      ]
+    }
+  ]
+}

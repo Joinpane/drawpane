@@ -635,6 +635,125 @@ test.describe
       expect(s.worstTile).toBeLessThan(12);
     });
 
+    test("renders smoothed corners, diamond gradients, and outside text strokes across CPU, WebGPU, WebGL2, and Canvas", async () => {
+      const ids = await page.evaluate(() => {
+        const e = (window as unknown as W).drawpane;
+        const host = e.createLayer("frame", { x: 0, y: 700, width: 420, height: 180 }, e.s.pageId, {
+          fills: [{ type: "solid", color: "#e9ecef" }],
+        });
+        // 1. Smoothed squircle with asymmetric radii and inside stroke.
+        e.createLayer("rect", { x: 16, y: 716, width: 110, height: 90 }, host, {
+          cornerRadii: [32, 16, 32, 8],
+          cornerSmoothing: 0.6,
+          fills: [{ type: "solid", color: "#3b5bdb" }],
+          strokes: [{ type: "solid", color: "#1864ab" }],
+          strokeWeight: 2,
+          strokeAlign: "inside",
+        });
+        // 2. Diamond gradient fill (L1 norm) with alpha stop and isolating opacity.
+        e.createLayer("rect", { x: 146, y: 716, width: 110, height: 90 }, host, {
+          cornerRadius: 16,
+          cornerSmoothing: 0.8,
+          opacity: 0.9,
+          fills: [
+            {
+              type: "diamond",
+              from: { x: 0.5, y: 0.5 },
+              to: { x: 1, y: 0.5 },
+              stops: [
+                { position: 0, color: "#ff0000" },
+                { position: 0.5, color: "#ffd43b80" },
+                { position: 1, color: "#1c7ed6" },
+              ],
+            },
+          ],
+          strokes: [
+            {
+              type: "diamond",
+              from: { x: 0.5, y: 0.5 },
+              to: { x: 1, y: 0.5 },
+              stops: [
+                { position: 0, color: "#2b8a3e" },
+                { position: 1, color: "#862e9c" },
+              ],
+            },
+          ],
+          strokeWeight: 4,
+          strokeAlign: "outside",
+        });
+        // 3. Text with outside stroke (filled + hollow) over the grey backdrop.
+        e.createLayer("text", { x: 274, y: 724, width: 130, height: 50 }, host, {
+          characters: "Hi",
+          fontSize: 42,
+          fontWeight: 700,
+          fills: [{ type: "solid", color: "#111827" }],
+          strokes: [{ type: "solid", color: "#e03131" }],
+          strokeWeight: 3,
+          strokeAlign: "outside",
+        });
+        e.createLayer("text", { x: 274, y: 786, width: 130, height: 50 }, host, {
+          characters: "Oo",
+          fontSize: 42,
+          fontWeight: 700,
+          fills: [{ type: "solid", color: "#000000", visible: false }],
+          strokes: [{ type: "solid", color: "#2f9e44" }],
+          strokeWeight: 3,
+          strokeAlign: "outside",
+        });
+        return [host];
+      });
+      try {
+        const res = await page.evaluate(async () => {
+          const w = window as unknown as W;
+          const rect = { x: 0, y: 700, width: 420, height: 180 };
+          const opts = {
+            pageId: w.drawpane.s.pageId,
+            rect,
+            scale: 1,
+            width: 420,
+            height: 180,
+            background: [1, 1, 1, 1] as [number, number, number, number],
+          };
+          const cpu = await w.drawpaneEngine.render({ ...opts, backend: "cpu" });
+          const gpu = await w.drawpaneEngine.render({ ...opts, backend: "gpu" });
+          const webgl = await w.drawpaneEngine.render({ ...opts, backend: "webgl" });
+          const canvas = await w.drawpaneEngine.canvasRender({
+            pageId: w.drawpane.s.pageId,
+            rect,
+            scale: 1,
+            width: 420,
+            height: 180,
+            background: "#ffffff",
+          });
+          return { cpu, gpu, webgl, canvas };
+        });
+        expect(res.cpu.ok, res.cpu.error).toBe(true);
+        expect(res.gpu.ok, res.gpu.error).toBe(true);
+        expect(res.webgl.ok, res.webgl.error).toBe(true);
+        const cpuPx = Buffer.from(res.cpu.rgba ?? "", "base64");
+        const gpuPx = Buffer.from(res.gpu.rgba ?? "", "base64");
+        const glPx = Buffer.from(res.webgl.rgba ?? "", "base64");
+        const canvasPx = Buffer.from(res.canvas, "base64");
+        const cpuVsGpu = score(gpuPx, cpuPx, 420, 180);
+        const cpuVsGl = score(glPx, cpuPx, 420, 180);
+        const cpuVsCanvas = score(cpuPx, canvasPx, 420, 180);
+        expect(cpuVsGpu.mean).toBeLessThanOrEqual(0.25);
+        expect(cpuVsGpu.p99).toBeLessThanOrEqual(4);
+        expect(cpuVsGpu.worstTile).toBeLessThanOrEqual(2);
+        expect(cpuVsGpu.severeInTile).toBeLessThanOrEqual(4);
+        expect(cpuVsGl.mean).toBeLessThanOrEqual(0.25);
+        expect(cpuVsGl.p99).toBeLessThanOrEqual(4);
+        expect(cpuVsGl.worstTile).toBeLessThanOrEqual(2);
+        expect(cpuVsGl.severeInTile).toBeLessThanOrEqual(4);
+        expect(cpuVsCanvas.mean).toBeLessThan(2.5);
+      } finally {
+        await page.evaluate(
+          (id) => (window as unknown as W).drawpane.commit([{ op: "delete", id }]),
+          ids[0] as string,
+        );
+      }
+    });
+
     test("settles a stand-in into an exact frame once the camera rests", async () => {
       // Zoomed far out: while the zoom moves, frames stand on the last one scaled and coarse
       // tiles (text as bars); once the camera rests, frames draw the exact tiles, a few a frame,

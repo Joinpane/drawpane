@@ -17,8 +17,8 @@ impl W {
     pub fn new(base: u32, revision: u32) -> Self {
         let mut w = W::default();
         w.u32(u32::from_le_bytes(*b"DPDL"));
-        w.b.extend_from_slice(&1u16.to_le_bytes());
-        w.b.extend_from_slice(&0u16.to_le_bytes());
+        w.b.extend_from_slice(&drawpane_engine::wire::MAJOR.to_le_bytes());
+        w.b.extend_from_slice(&drawpane_engine::wire::MINOR.to_le_bytes());
         w.u32(base);
         w.u32(revision);
         w.count_at = w.b.len();
@@ -157,6 +157,10 @@ pub enum Op {
     Read {
         halo: f32,
     },
+    Layer {
+        compose: u32,
+    },
+    Unlayer,
 }
 
 #[derive(Clone, Debug)]
@@ -283,6 +287,11 @@ impl Rec {
                     w.u32(1);
                     w.f32(*halo);
                 }
+                Op::Layer { compose } => {
+                    w.u32(7);
+                    w.u32(*compose);
+                }
+                Op::Unlayer => w.u32(8),
             }
         }
     }

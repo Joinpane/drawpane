@@ -51,9 +51,9 @@ const OUT =
 const EXPECTED_FALLBACKS: Record<string, readonly string[]> = {
   // Non-normal blend modes: phase 3's blend kernels.
   fills: ["blend"],
-  // Squircles wait for the engine's port of corners.ts; the effects in the suite are phase 3's.
-  corners: ["cornerSmoothing", "shadow", "layerBlur", "mask"],
-  "corners-glass": ["cornerSmoothing", "glass", "backgroundBlur"],
+  // Effects on smoothed corners wait for phase 3A/3B; pure squircles are drawn natively.
+  corners: ["shadow", "layerBlur", "mask"],
+  "corners-glass": ["glass", "backgroundBlur"],
 };
 /** Suites whose every cell needs a phase 3 feature (effects, glass, masks, blends, grain). */
 const PHASE_3 = new Set([
@@ -78,7 +78,9 @@ const PHASE_3 = new Set([
 const MIN_DRAWN: Record<string, number> = {
   strokes: 17,
   fills: 10,
-  corners: 2,
+  corners: 20,
+  diamonds: 6,
+  "text-strokes": 4,
   text: 19,
   "text-overlap": 3,
   "text-ranges": 3,

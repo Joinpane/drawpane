@@ -50,7 +50,12 @@ function hex(color: string, opacity = 1): string {
 function paintCss(paint: Paint, w: number, h: number): string | null {
   if (paint.visible === false) return null;
   if (paint.type === "solid") return hex(paint.color, paint.opacity ?? 1);
-  if (paint.type === "linear" || paint.type === "radial" || paint.type === "angular")
+  if (
+    paint.type === "linear" ||
+    paint.type === "radial" ||
+    paint.type === "angular" ||
+    paint.type === "diamond"
+  )
     return cssGradient(paint, w, h, (color) => hex(color, paint.opacity ?? 1));
   return null; // Images need an asset URL: exported separately.
 }

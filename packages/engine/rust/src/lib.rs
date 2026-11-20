@@ -7,6 +7,7 @@
 //! sizes are limited (`limits.rs`), and the fuzz tests (`tests/fuzz.rs`) hold that.
 
 pub mod cpu;
+pub mod diamond;
 pub mod engine;
 pub mod error;
 pub mod exec;

@@ -54,7 +54,7 @@ describe("Document regressions (review of PR 216)", () => {
     expect(greekLines(node, measurer).lines).toBe(1);
   });
 
-  it("flags smoothed corners instead of drawing them plain", () => {
+  it("supports smoothed corners natively without flagging them unsupported", () => {
     const doc = page();
     doc.apply([
       {
@@ -68,7 +68,7 @@ describe("Document regressions (review of PR 216)", () => {
     ]);
     const builder = new DisplayListBuilder(new Scene(doc), measurer);
     builder.build("p");
-    expect(unsupportedNames(builder.unsupported.get("box") ?? 0)).toContain("cornerSmoothing");
+    expect(unsupportedNames(builder.unsupported.get("box") ?? 0)).toEqual([]);
   });
 
   it("doesn't shape hidden text", () => {

@@ -179,12 +179,15 @@ export const GradientPaint = z.object({
   /**
    * Linear runs from `from` to `to`; radial spreads from `from` out to the
    * distance of `to`; angular sweeps clockwise around `from`, starting in the
-   * direction of `to`.
+   * direction of `to`; diamond evaluates `clamp(|u| + |v|, 0, 1)` along `to`
+   * and optional `width` (defaulting to a quarter turn clockwise of equal length).
    */
-  type: z.enum(["linear", "radial", "angular"]),
+  type: z.enum(["linear", "radial", "angular", "diamond"]),
   /** Start and end handles in the node's unit square (0,0 top-left to 1,1 bottom-right). */
   from: Point,
   to: Point,
+  /** Optional second-axis handle in the node's unit square (preserves stretched/skewed Figma diamonds). */
+  width: Point.optional(),
   stops: z.array(GradientStop).min(2).max(32),
   ...paintBase,
 });
