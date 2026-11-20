@@ -313,7 +313,78 @@ describe("auto layout and components", () => {
     );
     expect(byName(nodes, "Toolbar").props).toMatchObject({
       justifyContent: "space-between",
+      spaceBetweenMode: "figma",
       gap: 0,
+    });
+  });
+
+  it("imports wrapped counterAxisAlignContent SPACE_BETWEEN while keeping dormant rowGap and binding", () => {
+    const alias = { type: "VARIABLE_ALIAS" as const, id: "VariableID:9:1" };
+    const { nodes } = convertFile({
+      ...file(
+        node({
+          id: "3:2",
+          type: "FRAME",
+          name: "Chips",
+          size: { x: 100, y: 100 },
+          relativeTransform: at(0, 0),
+          layoutMode: "HORIZONTAL",
+          layoutWrap: "WRAP",
+          counterAxisAlignContent: "SPACE_BETWEEN",
+          counterAxisSpacing: 14,
+          boundVariables: { counterAxisSpacing: alias },
+        }),
+      ),
+      variables: {
+        variableCollections: {
+          "VariableCollectionId:9:0": {
+            id: "VariableCollectionId:9:0",
+            name: "Space",
+            modes: [{ modeId: "9:2", name: "Default" }],
+            defaultModeId: "9:2",
+            variableIds: [alias.id],
+          },
+        },
+        variables: {
+          [alias.id]: {
+            id: alias.id,
+            name: "RowGap",
+            variableCollectionId: "VariableCollectionId:9:0",
+            resolvedType: "FLOAT",
+            valuesByMode: { "9:2": 14 },
+          },
+        },
+      },
+    });
+    const chips = byName(nodes, "Chips");
+    expect(chips.props).toMatchObject({
+      layoutWrap: true,
+      alignContent: "space-between",
+      rowGap: 14,
+    });
+    expect(chips.props.bindings?.rowGap).toBe(drawpaneId(alias.id));
+
+    // Packed wrapped Figma frames opt into explicit alignContent: "auto".
+    const packed = convertFile(
+      file(
+        node({
+          id: "2:0",
+          type: "FRAME",
+          name: "Packed",
+          size: { x: 100, y: 100 },
+          relativeTransform: at(0, 0),
+          layoutMode: "HORIZONTAL",
+          layoutWrap: "WRAP",
+          counterAxisAlignItems: "CENTER",
+          counterAxisSpacing: 8,
+        }),
+      ),
+    );
+    expect(byName(packed.nodes, "Packed").props).toMatchObject({
+      layoutWrap: true,
+      alignItems: "center",
+      alignContent: "auto",
+      rowGap: 8,
     });
   });
 

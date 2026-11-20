@@ -103,12 +103,19 @@ export function containerLayout(node: Figma.Node): Props {
   if (node.strokesIncludedInLayout) props.strokesIncludedInLayout = true;
   if (node.layoutWrap === "WRAP") {
     props.layoutWrap = true;
+    props.alignContent =
+      node.counterAxisAlignContent === "SPACE_BETWEEN" ? "space-between" : "auto";
+    // Keep the packed line gap dormant under Auto so switching distribution recovers it.
     props.rowGap = round2(node.counterAxisSpacing ?? 0);
   }
   const justify = pick(JUSTIFY, node.primaryAxisAlignItems);
   if (justify) props.justifyContent = justify;
-  // Figma saves the packed gap even while Auto distributes the remaining space.
-  if (justify === "space-between") props.gap = 0;
+  // Figma saves the packed gap even while Auto distributes the remaining space,
+  // and centers single items / allows negative overflow spacing.
+  if (justify === "space-between") {
+    props.gap = 0;
+    props.spaceBetweenMode = "figma";
+  }
   const align = pick(ALIGN, node.counterAxisAlignItems);
   if (align) props.alignItems = align;
   return props;

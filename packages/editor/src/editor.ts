@@ -614,6 +614,9 @@ export class Editor {
       const first = extra.length > 0 ? [...ops, ...extra] : ops;
       // What changes to variables, styles and modes lay out again is this edit's, not a collaborator's.
       this.doc.takeTokenLayout();
+      const shrinkEmpty = new Set<string>();
+      const alreadyEmpty = new Set<string>();
+      this.#collectEmptyTransitions(first, shrinkEmpty, alreadyEmpty);
       let inverse = this.sync.commit(first);
       // A group whose last layer left (moved, deleted, cut) goes too, like Figma's.
       const emptied = this.#emptiedGroupOps(inverse);
@@ -636,6 +639,7 @@ export class Editor {
         // Compact copies follow their mains unwritten; the ones laid out differently go again.
         const relayout = relayoutTargets(this.doc, live, lastOps);
         let synced = propagationOps(this.doc, live);
+        if (synced.length > 0) this.#collectEmptyTransitions(synced, shrinkEmpty, alreadyEmpty);
         let roundInverse: Op[] = synced.length > 0 ? this.sync.commit(synced) : [];
         // Compact copies' layers placed by constraints in a resized copy follow their main layers.
         const placed = copyConstraintOps(this.doc, lastOps);
@@ -661,7 +665,11 @@ export class Editor {
         const afterSync =
           derived.length > 0 ? this.#touchedBy(derived, roundInverse) : new Set<string>();
         const layoutTargets = new Set([...live, ...afterSync, ...relayout.layout]);
-        const layout = layoutOps(this.doc, layoutTargets);
+        const layout = layoutOps(
+          this.doc,
+          layoutTargets,
+          shrinkEmpty.size > 0 ? { shrinkEmpty, keepEmpty: alreadyEmpty } : undefined,
+        );
         layout.push(...constraintOps(this.doc, layout));
         layout.push(...pathResizeOps(this.doc, layout));
         const layoutInverse = layout.length > 0 ? this.sync.commit(layout) : [];
@@ -671,6 +679,106 @@ export class Editor {
       }
       return inverse;
     });
+  }
+
+  /**
+   * Records layout frames that have flow children before `ops` commit, so a
+   * frame that transitions to empty shrinks to its padding while already-empty
+   * frames keep their saved box.
+   */
+  #collectEmptyTransitions(
+    ops: readonly Op[],
+    shrinkEmpty: Set<string>,
+    alreadyEmpty: Set<string>,
+  ): void {
+    const inspect = (frameId: string) => {
+      if (shrinkEmpty.has(frameId) || alreadyEmpty.has(frameId)) return;
+      const frame = this.doc.get(frameId);
+      if (frame?.type !== "frame" || getProp(frame.props, "layoutMode") === "none") return;
+      if (flowChildren(this.doc, frameId).length > 0) shrinkEmpty.add(frameId);
+      else alreadyEmpty.add(frameId);
+    };
+    const markHugSwitch = (id: string, axis: "h" | "v") => {
+      const prop = axis === "h" ? "sizingH" : "sizingV";
+      for (const presented of this.doc.tokens.source().builtFrom([id])) {
+        const frame = this.doc.get(presented);
+        if (frame?.type !== "frame" || getProp(frame.props, prop) === "hug") continue;
+        shrinkEmpty.add(`${frame.id}:${axis}`);
+      }
+    };
+    const markAncestors = (id: string) => {
+      for (const presented of this.doc.tokens.source().builtFrom([id])) {
+        let node = this.doc.get(presented);
+        if (node?.type === "frame" && getProp(node.props, "layoutMode") !== "none")
+          inspect(node.id);
+        while (node) {
+          let parent = this.doc.get(node.parent);
+          while (parent?.type === "group") parent = this.doc.get(parent.parent);
+          if (parent?.type !== "frame" || getProp(parent.props, "layoutMode") === "none") break;
+          inspect(parent.id);
+          node = parent;
+        }
+      }
+    };
+    const changedVars = new Set<string>();
+    let modeChanged = false;
+    for (const op of ops) {
+      markAncestors(op.id);
+      if (op.op === "move") markAncestors(op.parent);
+      if (op.op === "set" && op.value === "hug") {
+        if (op.prop === "sizingH") markHugSwitch(op.id, "h");
+        else if (op.prop === "sizingV") markHugSwitch(op.id, "v");
+      } else if (op.op === "create" && op.type === "override") {
+        const path = Array.isArray(op.props.path) ? (op.props.path as string[]) : [];
+        const target = path.at(-1);
+        if (target) {
+          const check = (axis: "h" | "v", prop: "sizingH" | "sizingV") => {
+            if (op.props[prop] !== "hug") return;
+            for (const presented of this.doc.tokens.source().builtFrom([target])) {
+              const frame = this.doc.get(presented);
+              if (frame?.type !== "frame" || getProp(frame.props, prop) === "hug") continue;
+              // Match only copies inside the override's instance parent.
+              let at: NodeRecord | undefined = frame;
+              let underParent = false;
+              while (at) {
+                if (at.id === op.parent) {
+                  underParent = true;
+                  break;
+                }
+                at = this.doc.get(at.parent);
+              }
+              if (underParent) shrinkEmpty.add(`${frame.id}:${axis}`);
+            }
+          };
+          check("h", "sizingH");
+          check("v", "sizingV");
+        }
+      }
+      const raw = this.doc.getUnresolved(op.id);
+      if (raw?.type === "variable") changedVars.add(op.id);
+      else if (raw?.type === "collection") {
+        for (const v of this.doc.tokens.variablesOf(op.id) ?? []) changedVars.add(v);
+      } else if (
+        (op.op === "set" && (op.prop === "variableModes" || op.prop === "unset")) ||
+        op.op === "move"
+      ) {
+        modeChanged = true;
+      }
+    }
+    if (changedVars.size > 0) {
+      this.doc.tokens.closeAliases(changedVars);
+      for (const v of changedVars)
+        for (const boundId of this.doc.tokens.boundTo(v) ?? []) {
+          const raw = this.doc.getUnresolved(boundId);
+          if (raw && getProp(raw.props, "bindings").visible) markAncestors(boundId);
+        }
+    }
+    if (modeChanged) {
+      for (const boundId of this.doc.tokens.boundIds()) {
+        const raw = this.doc.getUnresolved(boundId);
+        if (raw && getProp(raw.props, "bindings").visible) markAncestors(boundId);
+      }
+    }
   }
 
   /**

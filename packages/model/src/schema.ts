@@ -1000,7 +1000,9 @@ export const PROPS = {
   paddingBottom: prop(nonNegative, 0, CONTAINERS),
   paddingLeft: prop(nonNegative, 0, CONTAINERS),
   justifyContent: prop(z.enum(["start", "center", "end", "space-between"]), "start", CONTAINERS),
+  spaceBetweenMode: prop(z.enum(["css", "figma"]), "css", CONTAINERS),
   alignItems: prop(z.enum(["start", "center", "end", "stretch", "baseline"]), "start", CONTAINERS),
+  alignContent: prop(z.enum(["start", "auto", "space-between"]), "start", CONTAINERS),
   // Grid layout: tracks, and how items sit across their cells (`alignItems` sits them down).
   gridColumns: prop(z.array(GridTrack).max(64), [], CONTAINERS),
   gridRows: prop(z.array(GridTrack).max(64), [], CONTAINERS),

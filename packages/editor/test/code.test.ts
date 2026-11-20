@@ -259,7 +259,7 @@ describe("design to code", () => {
     );
   });
 
-  it("writes wrapping lines with their own gap", () => {
+  it("writes wrapping lines with their own gap and cross-axis distribution", () => {
     const editor = setup();
     const row = editor.createLayer("frame", { x: 0, y: 0, width: 400, height: 300 }, "p", {
       layoutMode: "row",
@@ -272,6 +272,153 @@ describe("design to code", () => {
       "align-content": "flex-start",
       "row-gap": "24px",
       "column-gap": "8px",
+    });
+
+    const spread = editor.createLayer("frame", { x: 0, y: 0, width: 400, height: 300 }, "p", {
+      layoutMode: "row",
+      layoutWrap: true,
+      alignContent: "space-between",
+      gap: 8,
+      rowGap: 24,
+    }) as string;
+    const spreadCss = decl(cssFor(editor.doc, editor.doc.get(spread) as never));
+    expect(spreadCss).toMatchObject({
+      "flex-wrap": "wrap",
+      "align-content": "space-between",
+      "column-gap": "8px",
+    });
+    expect(spreadCss).not.toHaveProperty("row-gap");
+    expect(tailwindFor(editor.doc, editor.doc.get(spread) as never)).toContain("content-between");
+  });
+
+  it("keeps absent alignContent as flex-start and maps explicit auto to alignItems", () => {
+    const editor = setup();
+    const legacy = editor.createLayer("frame", { x: 0, y: 0, width: 100, height: 100 }, "p", {
+      layoutMode: "row",
+      layoutWrap: true,
+      alignItems: "center",
+    }) as string;
+    expect(decl(cssFor(editor.doc, editor.doc.get(legacy) as never))).toMatchObject({
+      "flex-wrap": "wrap",
+      "align-content": "flex-start",
+    });
+
+    const packed = editor.createLayer("frame", { x: 0, y: 0, width: 100, height: 100 }, "p", {
+      layoutMode: "row",
+      layoutWrap: true,
+      alignItems: "center",
+      alignContent: "auto",
+    }) as string;
+    expect(decl(cssFor(editor.doc, editor.doc.get(packed) as never))).toMatchObject({
+      "flex-wrap": "wrap",
+      "align-content": "center",
+    });
+  });
+
+  it("matches Drawpane space-between placement for single-item/line centering and overflow", () => {
+    const editor = setup();
+
+    // Single wrapped line with alignContent: space-between centers at y=40 in Drawpane -> align-content: center.
+    const oneLine = editor.createLayer("frame", { x: 0, y: 0, width: 100, height: 100 }, "p", {
+      layoutMode: "row",
+      layoutWrap: true,
+      alignContent: "space-between",
+    }) as string;
+    const oneLineChild = editor.createLayer("rect", { x: 0, y: 0, width: 60, height: 20 }, oneLine);
+    expect(editor.doc.get(oneLineChild as string)?.props.y).toBe(40);
+    expect(decl(cssFor(editor.doc, editor.doc.get(oneLine) as never))).toMatchObject({
+      display: "flex",
+      "flex-wrap": "wrap",
+      "align-content": "center",
+    });
+
+    // Overflowing wrapped space-between (two 20px lines in a 30px frame at y=0 and y=10) bakes explicit placement.
+    const crossOver = editor.createLayer("frame", { x: 0, y: 0, width: 100, height: 30 }, "p", {
+      layoutMode: "row",
+      layoutWrap: true,
+      alignContent: "space-between",
+    }) as string;
+    const co1 = editor.createLayer(
+      "rect",
+      { x: 0, y: 0, width: 60, height: 20 },
+      crossOver,
+    ) as string;
+    const co2 = editor.createLayer(
+      "rect",
+      { x: 0, y: 0, width: 60, height: 20 },
+      crossOver,
+    ) as string;
+    expect(editor.doc.get(co1)?.props.y).toBe(0);
+    expect(editor.doc.get(co2)?.props.y).toBe(10);
+    const crossOverCss = decl(cssFor(editor.doc, editor.doc.get(crossOver) as never));
+    expect(crossOverCss.position).toBe("relative");
+    expect(crossOverCss).not.toHaveProperty("display");
+    expect(decl(cssFor(editor.doc, editor.doc.get(co1) as never))).toMatchObject({
+      position: "absolute",
+      left: "0px",
+      top: "0px",
+    });
+    expect(decl(cssFor(editor.doc, editor.doc.get(co2) as never))).toMatchObject({
+      position: "absolute",
+      left: "0px",
+      top: "10px",
+    });
+
+    // Legacy/native wrapped space-between without spaceBetweenMode keeps items at x=0 and exports space-between.
+    const legacyWrap = editor.createLayer("frame", { x: 0, y: 0, width: 100, height: 100 }, "p", {
+      layoutMode: "row",
+      layoutWrap: true,
+      justifyContent: "space-between",
+    }) as string;
+    const lw1 = editor.createLayer("rect", { x: 0, y: 0, width: 60, height: 20 }, legacyWrap);
+    const lw2 = editor.createLayer("rect", { x: 0, y: 0, width: 60, height: 20 }, legacyWrap);
+    expect(editor.doc.get(lw1 as string)?.props.x).toBe(0);
+    expect(editor.doc.get(lw2 as string)?.props.x).toBe(0);
+    expect(decl(cssFor(editor.doc, editor.doc.get(legacyWrap) as never))).toMatchObject({
+      display: "flex",
+      "flex-wrap": "wrap",
+      "align-content": "flex-start",
+      "justify-content": "space-between",
+    });
+
+    // Single child with Figma spaceBetweenMode centers at x=40 in Drawpane -> justify-content: center.
+    const oneItem = editor.createLayer("frame", { x: 0, y: 0, width: 100, height: 40 }, "p", {
+      layoutMode: "row",
+      justifyContent: "space-between",
+      spaceBetweenMode: "figma",
+    }) as string;
+    const oneItemChild = editor.createLayer("rect", { x: 0, y: 0, width: 20, height: 20 }, oneItem);
+    expect(editor.doc.get(oneItemChild as string)?.props.x).toBe(40);
+    expect(decl(cssFor(editor.doc, editor.doc.get(oneItem) as never))).toMatchObject({
+      display: "flex",
+      "justify-content": "center",
+    });
+
+    // Overflowing Figma main-axis space-between (two 60px children in 100px row at x=0 and x=40) bakes placement.
+    const mainOver = editor.createLayer("frame", { x: 0, y: 0, width: 100, height: 40 }, "p", {
+      layoutMode: "row",
+      justifyContent: "space-between",
+      spaceBetweenMode: "figma",
+    }) as string;
+    const mo1 = editor.createLayer(
+      "rect",
+      { x: 0, y: 0, width: 60, height: 20 },
+      mainOver,
+    ) as string;
+    const mo2 = editor.createLayer(
+      "rect",
+      { x: 0, y: 0, width: 60, height: 20 },
+      mainOver,
+    ) as string;
+    expect(editor.doc.get(mo1)?.props.x).toBe(0);
+    expect(editor.doc.get(mo2)?.props.x).toBe(40);
+    expect(decl(cssFor(editor.doc, editor.doc.get(mainOver) as never))).toMatchObject({
+      position: "relative",
+    });
+    expect(decl(cssFor(editor.doc, editor.doc.get(mo2) as never))).toMatchObject({
+      position: "absolute",
+      left: "40px",
+      top: "0px",
     });
   });
 });

@@ -4,8 +4,9 @@
  * Row and column frames are flexbox (`display: flex`, `flex-direction`,
  * `flex-wrap`, `gap`, `padding`, `justify-content`, `align-items`, and per
  * child `flex: 1` for Fill, `fit-content` for Hug, `align-self`,
- * `position: absolute`). Wrapped lines pack at the start, as with
- * `align-content: flex-start`.
+ * `position: absolute`). Wrapped lines distribute with `alignContent:
+ * "space-between"`, pack according to `alignItems` with `"auto"`, or pack at
+ * the start with `"start"` (the default).
  *
  * Grid frames are CSS grid (`grid-template-columns/rows` with px, fr and auto
  * tracks, `column-gap`/`row-gap`, `justify-items`/`align-items`, and per child
@@ -55,10 +56,13 @@ interface FlexAxes {
   readonly pad: ReturnType<typeof padding>;
   readonly innerMain: number;
   readonly innerCross: number;
+  /** Inner space without clamping to 0, so alignment still centres when padding exceeds a fixed box. */
+  readonly rawInnerMain: number;
+  readonly rawInnerCross: number;
   readonly hugsMain: boolean;
   readonly wraps: boolean;
   readonly gap: number;
-  /** Between wrapped lines. */
+  /** Between wrapped lines (0 when cross-axis spacing is Auto / space-between). */
   readonly lineGap: number;
 }
 
@@ -444,10 +448,40 @@ export class LayoutEngine {
   readonly boxes = new Map<string, LayoutBox>();
   /** Which layout frames below the one run are laid out too; the rest keep their insides as they are. */
   readonly #enters: (frame: NodeRecord) => boolean;
+  /** Frames that had flow children before the edit and should shrink when emptied. */
+  readonly #shrinkEmpty: ReadonlySet<string> | undefined;
+  /** Frames already known to be empty before the edit (overrides main-frame fallback). */
+  readonly #keepEmpty: ReadonlySet<string> | undefined;
 
-  constructor(doc: Doc, options: { enters?: (frame: NodeRecord) => boolean } = {}) {
+  constructor(
+    doc: Doc,
+    options: {
+      enters?: (frame: NodeRecord) => boolean;
+      shrinkEmpty?: ReadonlySet<string>;
+      keepEmpty?: ReadonlySet<string>;
+    } = {},
+  ) {
     this.#doc = doc;
     this.#enters = options.enters ?? (() => true);
+    this.#shrinkEmpty = options.shrinkEmpty;
+    this.#keepEmpty = options.keepEmpty;
+  }
+
+  #shouldShrinkEmpty(frame: NodeRecord, axis: Axis): boolean {
+    if (!this.#shrinkEmpty || this.#shrinkEmpty.size === 0) return false;
+    const axisKey = (id: string) => `${id}:${axis}`;
+    if (this.#shrinkEmpty.has(frame.id) || this.#shrinkEmpty.has(axisKey(frame.id))) return true;
+    if (this.#keepEmpty?.has(frame.id) || this.#keepEmpty?.has(axisKey(frame.id))) return false;
+    const mirrors = getProp(frame.props, "mirrors");
+    if (mirrors && (this.#shrinkEmpty.has(mirrors) || this.#shrinkEmpty.has(axisKey(mirrors))))
+      return true;
+    const instanceOf = getProp(frame.props, "instanceOf");
+    if (
+      instanceOf &&
+      (this.#shrinkEmpty.has(instanceOf) || this.#shrinkEmpty.has(axisKey(instanceOf)))
+    )
+      return true;
+    return false;
   }
 
   /** A child that is a layout frame this run lays out inside. */
@@ -549,9 +583,68 @@ export class LayoutEngine {
     this.#set(frame.id, axis, clamp(content + padAxis, min, max));
   }
 
-  /** The size a child brings to a line or a track before it stretches. */
-  #intrinsic(child: NodeRecord, axis: Axis, stretching: boolean): number {
-    return stretching ? (limits(child, axis)[0] ?? 0) : this.#get(child.id, axis);
+  /** Sine and cosine magnitudes of a layer's rotation, or null when unrotated. */
+  #trig(child: NodeRecord): { cos: number; sin: number } | null {
+    if (child.type === "group") return null;
+    const rot = getProp(child.props, "rotation");
+    if (rot === 0) return null;
+    const rad = (rot * Math.PI) / 180;
+    return { cos: Math.abs(Math.cos(rad)), sin: Math.abs(Math.sin(rad)) };
+  }
+
+  /** A child's axis-aligned size in its parent's flow (its own size when unrotated). */
+  #flowSize(child: NodeRecord, axis: Axis): number {
+    const trig = this.#trig(child);
+    if (!trig) return this.#get(child.id, axis);
+    const b = this.box(child.id);
+    return axis === "h"
+      ? b.width * trig.cos + b.height * trig.sin
+      : b.width * trig.sin + b.height * trig.cos;
+  }
+
+  /** The child's own axis most aligned with `parentAxis` (swapped when turned past 45 deg). */
+  #localAxis(child: NodeRecord, parentAxis: Axis): Axis {
+    const trig = this.#trig(child);
+    if (!trig || trig.sin <= trig.cos) return parentAxis;
+    return parentAxis === "h" ? "v" : "h";
+  }
+
+  /** Whether a child is rotated at an oblique angle (not a multiple of 90 degrees). */
+  #isOblique(child: NodeRecord): boolean {
+    const trig = this.#trig(child);
+    return trig !== null && Math.min(trig.cos, trig.sin) >= 1e-9;
+  }
+
+  /**
+   * Projected size along `axis`, substituting `min` on any local axis that the
+   * parent stretches so wrapping and track sizing stay invariant across passes.
+   */
+  #projectedIntrinsic(child: NodeRecord, axis: Axis, stretchH: boolean, stretchV: boolean): number {
+    const trig = this.#trig(child);
+    if (!trig) {
+      const stretch = axis === "h" ? stretchH : stretchV;
+      return stretch ? (limits(child, axis)[0] ?? 0) : this.#get(child.id, axis);
+    }
+    const w = stretchH ? (limits(child, "h")[0] ?? 0) : this.#get(child.id, "h");
+    const h = stretchV ? (limits(child, "v")[0] ?? 0) : this.#get(child.id, "v");
+    return axis === "h" ? w * trig.cos + h * trig.sin : w * trig.sin + h * trig.cos;
+  }
+
+  /** Which of a child's local axes a flex parent stretches. */
+  #stretchedLocal(
+    frame: NodeRecord,
+    child: NodeRecord,
+    axes: Pick<FlexAxes, "main" | "cross" | "hugsMain">,
+  ): { h: boolean; v: boolean } {
+    const stretchMain = sizing(child, axes.main) === "fill" && !axes.hugsMain;
+    const stretchCross = stretches(child, axes.cross, crossAlign(frame, child));
+    if (!stretchMain && !stretchCross) return { h: false, v: false };
+    const localMain = this.#localAxis(child, axes.main);
+    const localCross = this.#localAxis(child, axes.cross);
+    return {
+      h: (stretchMain && localMain === "h") || (stretchCross && localCross === "h"),
+      v: (stretchMain && localMain === "v") || (stretchCross && localCross === "v"),
+    };
   }
 
   /** Bottom-up: settle the size of a hugging layout frame from its content. */
@@ -574,17 +667,17 @@ export class LayoutEngine {
     const cross: Axis = row ? "v" : "h";
     const pad = padding(frame);
     const box = this.box(frame.id);
-    const innerMain = Math.max(
-      0,
-      row ? box.width - pad.left - pad.right : box.height - pad.top - pad.bottom,
-    );
-    const innerCross = Math.max(
-      0,
-      row ? box.height - pad.top - pad.bottom : box.width - pad.left - pad.right,
-    );
+    const rawInnerMain = row ? box.width - pad.left - pad.right : box.height - pad.top - pad.bottom;
+    const rawInnerCross = row
+      ? box.height - pad.top - pad.bottom
+      : box.width - pad.left - pad.right;
+    const innerMain = Math.max(0, rawInnerMain);
+    const innerCross = Math.max(0, rawInnerCross);
     const hugsMain = sizing(frame, main) === "hug";
     // Wrapping needs a main size to wrap at: a hugging frame never wraps.
     const wraps = getProp(frame.props, "layoutWrap") && !hugsMain;
+    const lineGap =
+      getProp(frame.props, "alignContent") === "space-between" ? 0 : getProp(frame.props, "rowGap");
     return {
       row,
       main,
@@ -592,26 +685,29 @@ export class LayoutEngine {
       pad,
       innerMain,
       innerCross,
+      rawInnerMain,
+      rawInnerCross,
       hugsMain,
       wraps,
       gap: getProp(frame.props, "gap"),
-      lineGap: getProp(frame.props, "rowGap"),
+      lineGap,
     };
   }
 
-  /** A child's main size before Fill shares out space: Fill starts at its minimum. */
-  #basis(child: NodeRecord, main: Axis, hugsMain: boolean): number {
-    return this.#intrinsic(child, main, sizing(child, main) === "fill" && !hugsMain);
+  /** A child's main size before Fill shares out space: stretched local axes start at their minimum. */
+  #basis(frame: NodeRecord, child: NodeRecord, axes: FlexAxes): number {
+    const s = this.#stretchedLocal(frame, child, axes);
+    return this.#projectedIntrinsic(child, axes.main, s.h, s.v);
   }
 
   /** Breaks children into lines that fit `innerMain` (one line when not wrapping). */
-  #lines(children: NodeRecord[], axes: FlexAxes): NodeRecord[][] {
+  #lines(frame: NodeRecord, children: NodeRecord[], axes: FlexAxes): NodeRecord[][] {
     if (!axes.wraps) return [children];
     const lines: NodeRecord[][] = [];
     let line: NodeRecord[] = [];
     let used = 0;
     for (const child of children) {
-      const size = this.#basis(child, axes.main, axes.hugsMain);
+      const size = this.#basis(frame, child, axes);
       if (line.length > 0 && used + axes.gap + size > axes.innerMain + 1e-6) {
         lines.push(line);
         line = [];
@@ -624,10 +720,19 @@ export class LayoutEngine {
     return lines;
   }
 
-  /** How thick a wrapped line is across: its thickest child that doesn't stretch to the line. */
-  #lineCross(frame: NodeRecord, line: NodeRecord[], cross: Axis): number {
+  /** How thick a wrapped line is across: its thickest child's cross contribution. */
+  #lineCross(frame: NodeRecord, line: NodeRecord[], axes: FlexAxes): number {
     return line.reduce(
-      (m, c) => Math.max(m, this.#intrinsic(c, cross, stretches(c, cross, crossAlign(frame, c)))),
+      (m, c) =>
+        Math.max(
+          m,
+          this.#contribution(
+            c,
+            axes.cross,
+            stretches(c, axes.cross, crossAlign(frame, c)),
+            sizing(c, axes.main) === "fill" && !axes.hugsMain,
+          ),
+        ),
       0,
     );
   }
@@ -640,10 +745,11 @@ export class LayoutEngine {
    * size (it won't let a frame hug only layers that fill it), so the line is
    * as thick as they are, not their minimum. Imported kits have such frames.
    */
-  #hugLineCross(frame: NodeRecord, line: NodeRecord[], cross: Axis): number {
+  #hugLineCross(frame: NodeRecord, line: NodeRecord[], axes: FlexAxes): number {
+    const { cross } = axes;
     const free = line.length > 0 && line.every((c) => stretches(c, cross, crossAlign(frame, c)));
-    if (!free) return this.#lineCross(frame, line, cross);
-    return line.reduce((m, c) => Math.max(m, this.#get(c.id, cross)), 0);
+    if (!free) return this.#lineCross(frame, line, axes);
+    return line.reduce((m, c) => Math.max(m, this.#flowSize(c, cross)), 0);
   }
 
   /**
@@ -657,8 +763,8 @@ export class LayoutEngine {
     if (!axes.wraps) return [axes.innerCross];
     const { cross } = axes;
     if (sizing(frame, cross) === "hug")
-      return lines.map((line) => this.#hugLineCross(frame, line, cross));
-    const thickness = lines.map((line) => this.#lineCross(frame, line, cross));
+      return lines.map((line) => this.#hugLineCross(frame, line, axes));
+    const thickness = lines.map((line) => this.#lineCross(frame, line, axes));
     const unsized = lines.map((line) =>
       line.every((c) => stretches(c, cross, crossAlign(frame, c))),
     );
@@ -673,29 +779,109 @@ export class LayoutEngine {
   /** A flex frame's lines as placed: their layers, thickness, and the layer that sets it. */
   lines(frame: NodeRecord): FlowLine[] {
     const axes = this.#flexAxes(frame);
-    const lines = this.#lines(this.#children(frame), axes);
+    const lines = this.#lines(frame, this.#children(frame), axes);
     const thickness = this.#thicknesses(frame, lines, axes);
     return lines.map((line, i) => {
       let setBy: NodeRecord | null = null;
       if (axes.wraps)
         for (const c of line) {
           if (stretches(c, axes.cross, crossAlign(frame, c))) continue;
-          if (!setBy || this.#get(c.id, axes.cross) > this.#get(setBy.id, axes.cross)) setBy = c;
+          if (!setBy || this.#flowSize(c, axes.cross) > this.#flowSize(setBy, axes.cross))
+            setBy = c;
         }
       return { ids: line.map((c) => c.id), thickness: thickness[i] ?? 0, setBy: setBy?.id ?? null };
     });
   }
 
+  /** Space-between distribution summary for CSS export parity. */
+  flexDistribution(frame: NodeRecord): FlexDistribution {
+    const justify = getProp(frame.props, "justifyContent");
+    const figmaSpaceBetween = getProp(frame.props, "spaceBetweenMode") === "figma";
+    const align = getProp(frame.props, "alignItems");
+    const wraps = getProp(frame.props, "layoutWrap");
+    const alignContentProp = getProp(frame.props, "alignContent");
+    let cssAlignContent: FlexDistribution["alignContent"] = !wraps
+      ? null
+      : alignContentProp === "space-between"
+        ? "space-between"
+        : alignContentProp === "auto" && (align === "center" || align === "end")
+          ? align === "center"
+            ? "center"
+            : "flex-end"
+          : "flex-start";
+    const figmaMain = justify === "space-between" && figmaSpaceBetween;
+    const figmaCross = wraps && alignContentProp === "space-between";
+    if (!figmaMain && !figmaCross) {
+      return { bake: false, justify, alignContent: cssAlignContent };
+    }
+    const children = this.#children(frame);
+    if (children.length === 0) {
+      return { bake: false, justify, alignContent: cssAlignContent };
+    }
+    const axes = this.#flexAxes(frame);
+    const lines = this.#lines(frame, children, axes);
+    const thickness = this.#thicknesses(frame, lines, axes);
+    let bake = false;
+    let cssJustify = justify;
+    if (axes.wraps && alignContentProp === "space-between") {
+      if (lines.length === 1) {
+        cssAlignContent = "center";
+        if (axes.rawInnerCross < 0) bake = true;
+      } else if (lines.length > 1) {
+        const usedCross = thickness.reduce((s, t) => s + t, 0);
+        if (usedCross > axes.rawInnerCross + 1e-6) bake = true;
+      }
+    }
+    if (figmaMain) {
+      const singleLines = lines.filter((l) => l.length === 1).length;
+      const multiLines = lines.filter((l) => l.length > 1).length;
+      if (singleLines > 0 && multiLines > 0) {
+        bake = true;
+      } else if (singleLines > 0) {
+        cssJustify = "center";
+        if (axes.rawInnerMain < 0) bake = true;
+      } else if (multiLines > 0) {
+        for (const line of lines) {
+          if (line.length <= 1) continue;
+          const used = line.reduce((s, c) => s + this.#flowSize(c, axes.main), 0);
+          if (used > axes.rawInnerMain + 1e-6) {
+            bake = true;
+            break;
+          }
+        }
+      }
+    }
+    return { bake, justify: cssJustify, alignContent: cssAlignContent };
+  }
+
   #measureFlex(frame: NodeRecord, children: NodeRecord[]): void {
+    // An already-empty hugging frame keeps its saved box; a frame that just lost
+    // its last flow child or explicitly switched an axis to Hug measures normally.
+    const empty = children.length === 0;
     const axes = this.#flexAxes(frame);
     const { main, cross } = axes;
-    if (axes.hugsMain) {
-      const sizes = children.map((c) => this.#get(c.id, main));
+    if (axes.hugsMain && (!empty || this.#shouldShrinkEmpty(frame, main))) {
+      const sizes = children.map((c) => {
+        if (
+          this.#isOblique(c) &&
+          sizing(frame, cross) !== "hug" &&
+          stretches(c, cross, crossAlign(frame, c))
+        ) {
+          const localCross = this.#localAxis(c, cross);
+          const [min, max] = limits(c, localCross);
+          const targetCross = clamp(axes.innerCross, min, max);
+          const trig = this.#trig(c) as { cos: number; sin: number };
+          const w = localCross === "h" ? targetCross : this.#get(c.id, "h");
+          const h = localCross === "v" ? targetCross : this.#get(c.id, "v");
+          return main === "h" ? w * trig.cos + h * trig.sin : w * trig.sin + h * trig.cos;
+        }
+        return this.#flowSize(c, main);
+      });
       this.#hug(frame, main, total(sizes, axes.gap));
     }
-    if (sizing(frame, cross) === "hug") {
-      const lines = this.#lines(children, axes);
-      const thickness = lines.map((line) => this.#hugLineCross(frame, line, cross));
+    if (sizing(frame, cross) === "hug" && (!empty || this.#shouldShrinkEmpty(frame, cross))) {
+      const lines = this.#lines(frame, children, axes);
+      const thickness = lines.map((line) => this.#hugLineCross(frame, line, axes));
       this.#hug(frame, cross, total(thickness, axes.lineGap));
     }
   }
@@ -710,8 +896,26 @@ export class LayoutEngine {
 
   #arrangeFlex(frame: NodeRecord, children: NodeRecord[]): void {
     const axes = this.#flexAxes(frame);
-    const { row, main, cross, gap, innerMain, hugsMain, pad } = axes;
-    const lines = this.#lines(children, axes);
+    const { row, main, cross, gap, innerMain, rawInnerMain, rawInnerCross, hugsMain, pad } = axes;
+    const lines = this.#lines(frame, children, axes);
+    const thickness = this.#thicknesses(frame, lines, axes);
+    const hugsCross = sizing(frame, cross) === "hug";
+
+    // Oblique children that only stretch across settle before main Fill so
+    // their final projected main size is included in `fixedTotal`.
+    lines.forEach((line, i) => {
+      const allStretchCross =
+        hugsCross && line.every((c) => stretches(c, cross, crossAlign(frame, c)));
+      if (allStretchCross) return;
+      for (const child of line) {
+        if (!this.#isOblique(child)) continue;
+        if (sizing(child, main) === "fill" && !hugsMain) continue;
+        if (!stretches(child, cross, crossAlign(frame, child))) continue;
+        const local = this.#localAxis(child, cross);
+        const [min, max] = limits(child, local);
+        this.#claim(child, local, clamp(thickness[i] ?? 0, min, max));
+      }
+    });
 
     // Main axis sizes: in each line, Fill children share what is left (a
     // hugging parent can't be filled).
@@ -719,7 +923,7 @@ export class LayoutEngine {
       const fills = line.filter((c) => sizing(c, main) === "fill" && !hugsMain);
       const fixedTotal = line
         .filter((c) => !fills.includes(c))
-        .reduce((s, c) => s + this.#get(c.id, main), 0);
+        .reduce((s, c) => s + this.#flowSize(c, main), 0);
       let remaining = innerMain - fixedTotal - gap * Math.max(0, line.length - 1);
       // Distribute, respecting min/max: clamped children drop out and the rest re-share.
       let open = [...fills];
@@ -728,9 +932,10 @@ export class LayoutEngine {
         const next: NodeRecord[] = [];
         let used = 0;
         for (const child of open) {
-          const [min, max] = limits(child, main);
+          const local = this.#localAxis(child, main);
+          const [min, max] = limits(child, local);
           const value = clamp(share, min, max);
-          this.#claim(child, main, value);
+          this.#claim(child, local, value);
           if (value !== share) used += value;
           else next.push(child);
         }
@@ -740,13 +945,31 @@ export class LayoutEngine {
       }
     }
 
+    // If an oblique main-Fill child grew its projected cross size, widen wrapped
+    // lines to fit it before stretching the remaining children across.
+    if (axes.wraps) {
+      lines.forEach((line, i) => {
+        for (const child of line) {
+          if (!this.#isOblique(child)) continue;
+          if (!(sizing(child, main) === "fill" && !hugsMain)) continue;
+          if (stretches(child, cross, crossAlign(frame, child))) continue;
+          thickness[i] = Math.max(thickness[i] ?? 0, this.#flowSize(child, cross));
+        }
+      });
+    }
+
     // Cross axis: a single line spans the frame; wrapped lines are as thick as their content.
-    const thickness = this.#thicknesses(frame, lines, axes);
     lines.forEach((line, i) => {
+      const allStretchCross =
+        hugsCross && line.every((c) => stretches(c, cross, crossAlign(frame, c)));
       for (const child of line) {
         if (!stretches(child, cross, crossAlign(frame, child))) continue;
-        const [min, max] = limits(child, cross);
-        this.#claim(child, cross, clamp(thickness[i] ?? 0, min, max));
+        if (this.#isOblique(child)) {
+          if (allStretchCross || !(sizing(child, main) === "fill" && !hugsMain)) continue;
+        }
+        const local = this.#localAxis(child, cross);
+        const [min, max] = limits(child, local);
+        this.#claim(child, local, clamp(thickness[i] ?? 0, min, max));
       }
     });
 
@@ -755,48 +978,92 @@ export class LayoutEngine {
     for (const child of children) if (this.#nested(child)) this.measure(child);
 
     const justify = getProp(frame.props, "justifyContent");
+    const figmaSpaceBetween = getProp(frame.props, "spaceBetweenMode") === "figma";
+    const alignContent = getProp(frame.props, "alignContent");
+    const frameAlign = getProp(frame.props, "alignItems");
     let crossStart = row ? pad.top : pad.left;
+    let lineStepGap = axes.lineGap;
+    if (axes.wraps) {
+      if (alignContent === "space-between") {
+        const usedCross = thickness.reduce((s, t) => s + t, 0);
+        if (lines.length === 1) crossStart += (rawInnerCross - usedCross) / 2;
+        else if (lines.length > 1) lineStepGap = (rawInnerCross - usedCross) / (lines.length - 1);
+      } else if (alignContent === "auto") {
+        const freeCross = rawInnerCross - total(thickness, axes.lineGap);
+        if (frameAlign === "center") crossStart += freeCross / 2;
+        else if (frameAlign === "end") crossStart += freeCross;
+      }
+    }
     lines.forEach((line, i) => {
       const lineCross = thickness[i] ?? 0;
-      const used = line.reduce((s, c) => s + this.#get(c.id, main), 0);
-      const free = innerMain - used - gap * Math.max(0, line.length - 1);
+      const slotCross = axes.wraps ? lineCross : rawInnerCross;
+      const used = line.reduce((s, c) => s + this.#flowSize(c, main), 0);
+      const free = rawInnerMain - used - gap * Math.max(0, line.length - 1);
       let offset = row ? pad.left : pad.top;
       let spacing = gap;
       if (justify === "center") offset += free / 2;
       else if (justify === "end") offset += free;
-      else if (justify === "space-between" && line.length > 1) {
-        spacing = gap + Math.max(0, free) / (line.length - 1);
+      else if (justify === "space-between") {
+        if (figmaSpaceBetween) {
+          if (line.length === 1) offset += free / 2;
+          else if (line.length > 1) spacing = (rawInnerMain - used) / (line.length - 1);
+        } else if (line.length > 1) {
+          // CSS keeps the gap as a minimum and shares only the space left above it.
+          const extra = innerMain - used - gap * (line.length - 1);
+          spacing = gap + Math.max(0, extra) / (line.length - 1);
+        }
       }
       for (const child of line) {
         const b = this.box(child.id);
-        const size = this.#get(child.id, cross);
+        const rotated = this.#trig(child) !== null;
+        const mainSize = this.#flowSize(child, main);
+        const crossSize = this.#flowSize(child, cross);
         const align = crossAlign(frame, child);
         let crossPos = crossStart;
-        if (align === "center") crossPos += (lineCross - size) / 2;
-        else if (align === "end") crossPos += lineCross - size;
+        if (align === "center" || (rotated && stretches(child, cross, align)))
+          crossPos += (slotCross - crossSize) / 2;
+        else if (align === "end") crossPos += slotCross - crossSize;
+        const mainLocal = this.#get(child.id, main);
+        const crossLocal = this.#get(child.id, cross);
+        const mainPos = offset + (mainSize - mainLocal) / 2;
+        const finalCrossPos = crossPos + (crossSize - crossLocal) / 2;
         if (row) {
-          b.x = offset;
-          b.y = crossPos;
+          b.x = mainPos;
+          b.y = finalCrossPos;
         } else {
-          b.x = crossPos;
-          b.y = offset;
+          b.x = finalCrossPos;
+          b.y = mainPos;
         }
-        offset += this.#get(child.id, main) + spacing;
+        offset += mainSize + spacing;
       }
-      crossStart += lineCross + axes.lineGap;
+      crossStart += lineCross + lineStepGap;
     });
   }
 
   /**
-   * What a grid item brings to the tracks it's in: its size, or when it
-   * stretches to its cells, what its content needs, as CSS sizes a grid's
-   * tracks by their items' content. (A stretched layer's own size is the
-   * track's, so it can't size the track; a stretched layer with no layout
-   * brings its minimum.)
+   * What an item brings to the line or track it's in: its flow size, or when it
+   * stretches, what its content needs (nested layout frames measure their own
+   * content; vertically stretched text keeps its text height; other layers
+   * bring their minimum).
    */
-  #contribution(child: NodeRecord, axis: Axis, stretching: boolean): number {
-    if (stretching && isLayoutFrame(child)) return this.#contentSize(child, axis);
-    return this.#intrinsic(child, axis, stretching);
+  #contribution(child: NodeRecord, axis: Axis, stretching: boolean, stretchOther = false): number {
+    if (!stretching) {
+      if (!stretchOther) return this.#flowSize(child, axis);
+      const other = this.#localAxis(child, axis === "h" ? "v" : "h");
+      return this.#projectedIntrinsic(child, axis, other === "h", other === "v");
+    }
+    if (axis === "v" && child.type === "text" && this.#localAxis(child, axis) === "v") {
+      const gl = getProp(child.props, "glyphLayout");
+      const content =
+        gl !== null
+          ? gl.h
+          : getProp(child.props, "textAutoResize") !== "none"
+            ? this.#get(child.id, "v")
+            : 0;
+      return Math.max(limits(child, "v")[0] ?? 0, content);
+    }
+    if (isLayoutFrame(child)) return this.#contentSize(child, axis);
+    return limits(child, this.#localAxis(child, axis))[0] ?? 0;
   }
 
   /**
@@ -825,18 +1092,17 @@ export class LayoutEngine {
       const axes = this.#flexAxes(frame);
       if (axis === axes.main) {
         const sizes = children.map((c) =>
-          this.#contribution(c, axis, c.type !== "group" && sizing(c, axis) === "fill"),
+          this.#contribution(
+            c,
+            axis,
+            c.type !== "group" && sizing(c, axis) === "fill",
+            stretches(c, axes.cross, crossAlign(frame, c)),
+          ),
         );
         content = total(sizes, axes.gap);
       } else {
-        const lines = this.#lines(children, axes);
-        const thickness = lines.map((line) =>
-          line.reduce(
-            (m, c) =>
-              Math.max(m, this.#contribution(c, axis, stretches(c, axis, crossAlign(frame, c)))),
-            0,
-          ),
-        );
+        const lines = this.#lines(frame, children, axes);
+        const thickness = lines.map((line) => this.#lineCross(frame, line, axes));
         content = total(thickness, axes.lineGap);
       }
     }
@@ -853,6 +1119,7 @@ export class LayoutEngine {
     defs: readonly GridTrack[],
     inner: number | null,
   ): number[] {
+    const otherAxis: Axis = axis === "h" ? "v" : "h";
     const items = children.map((child) => {
       const cell = cells.get(child.id) as GridCell;
       return {
@@ -862,6 +1129,7 @@ export class LayoutEngine {
           child,
           axis,
           stretches(child, axis, cellAlign(frame, child, axis)),
+          stretches(child, otherAxis, cellAlign(frame, child, otherAxis)),
         ),
       };
     });
@@ -879,13 +1147,17 @@ export class LayoutEngine {
   }
 
   #measureGrid(frame: NodeRecord, children: NodeRecord[]): void {
+    const empty = children.length === 0;
+    const hugH = sizing(frame, "h") === "hug" && (!empty || this.#shouldShrinkEmpty(frame, "h"));
+    const hugV = sizing(frame, "v") === "hug" && (!empty || this.#shouldShrinkEmpty(frame, "v"));
+    if (!hugH && !hugV) return;
     const { cells, rowCount } = placeGridItems(frame, children);
     const defs = this.#gridDefs(frame, rowCount);
-    if (sizing(frame, "h") === "hug") {
+    if (hugH) {
       const sizes = this.#gridTracks(frame, children, cells, "h", defs.columns, null);
       this.#hug(frame, "h", total(sizes, getProp(frame.props, "gap")));
     }
-    if (sizing(frame, "v") === "hug") {
+    if (hugV) {
       const sizes = this.#gridTracks(frame, children, cells, "v", defs.rows, null);
       this.#hug(frame, "v", total(sizes, getProp(frame.props, "rowGap")));
     }
@@ -924,10 +1196,11 @@ export class LayoutEngine {
     for (const child of children) {
       const cell = cells.get(child.id) as GridCell;
       if (!stretches(child, "h", cellAlign(frame, child, "h"))) continue;
-      const [min, max] = limits(child, "h");
+      const local = this.#localAxis(child, "h");
+      const [min, max] = limits(child, local);
       this.#claim(
         child,
-        "h",
+        local,
         clamp(span(columns, cell.column, cell.columnSpan, columnGap), min, max),
       );
     }
@@ -944,8 +1217,9 @@ export class LayoutEngine {
     for (const child of children) {
       const cell = cells.get(child.id) as GridCell;
       if (!stretches(child, "v", cellAlign(frame, child, "v"))) continue;
-      const [min, max] = limits(child, "v");
-      this.#claim(child, "v", clamp(span(rows, cell.row, cell.rowSpan, rowGap), min, max));
+      const local = this.#localAxis(child, "v");
+      const [min, max] = limits(child, local);
+      this.#claim(child, local, clamp(span(rows, cell.row, cell.rowSpan, rowGap), min, max));
     }
     for (const child of children) if (this.#nested(child)) this.measure(child);
 
@@ -954,12 +1228,15 @@ export class LayoutEngine {
     for (const child of children) {
       const cell = cells.get(child.id) as GridCell;
       const b = this.box(child.id);
+      const rotated = this.#trig(child) !== null;
       const place = (axis: Axis, start: number, area: number) => {
-        const size = this.#get(child.id, axis);
+        const size = this.#flowSize(child, axis);
         const align = cellAlign(frame, child, axis);
-        if (align === "center") return start + (area - size) / 2;
-        if (align === "end") return start + area - size;
-        return start;
+        let pos = start;
+        if (align === "center" || (rotated && stretches(child, axis, align)))
+          pos = start + (area - size) / 2;
+        else if (align === "end") pos = start + area - size;
+        return pos + (size - this.#get(child.id, axis)) / 2;
       };
       b.x = place(
         "h",
@@ -1135,10 +1412,27 @@ export function flowLines(doc: Doc, frameId: string): FlowLine[] {
   return new LayoutEngine(doc).lines(frame);
 }
 
-export function layoutOps(doc: Doc, ids: Iterable<string>): Op[] {
+/** How CSS should represent a flex frame's distribution to match Drawpane's placement. */
+export interface FlexDistribution {
+  /** True when Drawpane's placement cannot be expressed with CSS flexbox (negative gaps or per-line centering). */
+  readonly bake: boolean;
+  readonly justify: "start" | "center" | "end" | "space-between";
+  readonly alignContent: "flex-start" | "center" | "flex-end" | "space-between" | null;
+}
+
+/** Distribution summary for a row or column flex frame, used by CSS export. */
+export function flexDistribution(doc: Doc, frame: NodeRecord): FlexDistribution {
+  return new LayoutEngine(doc).flexDistribution(frame);
+}
+
+export function layoutOps(
+  doc: Doc,
+  ids: Iterable<string>,
+  options: { shrinkEmpty?: ReadonlySet<string>; keepEmpty?: ReadonlySet<string> } = {},
+): Op[] {
   const roots = layoutRoots(doc, ids);
   if (roots.length === 0) return [];
-  const engine = new LayoutEngine(doc);
+  const engine = new LayoutEngine(doc, options);
   for (const root of roots) engine.run(root);
   return engine.diff();
 }
