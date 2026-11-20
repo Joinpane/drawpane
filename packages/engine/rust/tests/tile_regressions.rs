@@ -1370,7 +1370,7 @@ fn wire_minor_version_gates_newer_features() {
     bytes[7] = 0;
     let mut e = Engine::new(Limits::default());
     let err = e.apply(&bytes).unwrap_err();
-    assert_eq!(err.code, drawpane_engine::error::ErrorCode::Malformed);
+    assert_eq!(err.code, drawpane_engine::error::ErrorCode::Version);
 
     // Normal 1.0 record is accepted under minor 3, while FLAG_PROVISIONAL (1.1) is refused under 1.0.
     let mut plain = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [20.0, 20.0]);
@@ -1401,7 +1401,7 @@ fn wire_minor_version_gates_newer_features() {
     b3[6] = 0;
     b3[7] = 0;
     let err3 = e.apply(&b3).unwrap_err();
-    assert_eq!(err3.code, drawpane_engine::error::ErrorCode::Malformed);
+    assert_eq!(err3.code, drawpane_engine::error::ErrorCode::Version);
 
     // Layer blur post-effect (FLAG_POST, wire 1.4) refused under minor 3.
     let mut blurred = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [20.0, 20.0]);
@@ -1413,7 +1413,7 @@ fn wire_minor_version_gates_newer_features() {
     b4[6] = 3;
     b4[7] = 0;
     let err4 = e.apply(&b4).unwrap_err();
-    assert_eq!(err4.code, drawpane_engine::error::ErrorCode::Malformed);
+    assert_eq!(err4.code, drawpane_engine::error::ErrorCode::Version);
 
     // Paint-level non-normal blend (wire 1.4) refused under minor 3.
     let mut paint_blend = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [20.0, 20.0]);
@@ -1448,7 +1448,7 @@ fn wire_minor_version_gates_newer_features() {
     b6[7] = 0;
     assert_eq!(
         e.apply(&b6).unwrap_err().code,
-        drawpane_engine::error::ErrorCode::Malformed
+        drawpane_engine::error::ErrorCode::Version
     );
 
     let mut ends = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [20.0, 20.0]);
@@ -1461,7 +1461,7 @@ fn wire_minor_version_gates_newer_features() {
     b7[7] = 0;
     assert_eq!(
         e.apply(&b7).unwrap_err().code,
-        drawpane_engine::error::ErrorCode::Malformed
+        drawpane_engine::error::ErrorCode::Version
     );
 }
 
@@ -2131,5 +2131,66 @@ fn ordered_post_stack_and_phase_3a_substack_match_across_tiles() {
     assert!(
         diff_count > 100,
         "expected blends inside mask scopes to visibly change pixels, only {diff_count} differed"
+    );
+}
+
+#[test]
+fn provisional_text_in_reader_halo_converges_to_exact() {
+    // A provisional text record sits just below tile (0, 0)'s core (y = 70, tile = 64) inside the
+    // tile's reader halo (halo = 24 from a reader elsewhere on the page). When tile (0, 0) draws
+    // at full detail while the text is provisional, its grown walk visits the provisional record
+    // and stores `full = true, exact = false`. When the text later resolves, `Store::dirty` only
+    // invalidates tiles touching y = 70 (not tile (0, 0)), so `invalidate_inexact_full` must mark
+    // tile (0, 0) stale once no provisional records remain so the frame converges to `exact = true`.
+    let mut reader = Rec::new([1.0, 0.0, 0.0, 1.0, 140.0, 0.0], [32.0, 32.0]);
+    reader.ops.push(Op::Read { kernel: 1, halo: 24.0 });
+
+    let mut text = Rec::new([1.0, 0.0, 0.0, 1.0, 8.0, 70.0], [48.0, 16.0]);
+    text.flags = 8; // FLAG_PROVISIONAL
+    text.paths.push(Entry::Rect {
+        w: 48.0,
+        h: 16.0,
+        radii: [0.0; 4],
+    });
+    text.coarse.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.2, 0.2, 0.2, 1.0]),
+    });
+    text.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.0, 0.0, 0.0, 1.0]),
+    });
+
+    let mut init = W::new(ANY, 1);
+    init.reset();
+    init.set(1, 0, &reader);
+    init.set(2, 0, &text);
+    let mut engine = Engine::new(Limits::default());
+    engine.use_cpu_tiles(64, 32);
+    engine.apply(&init.finish()).unwrap();
+
+    let opts = TiledOptions {
+        prefetch: false,
+        ..TiledOptions::default()
+    };
+    let (_, s1) = engine
+        .render_cpu_tiled(192, 128, camera(1.0, 0.0, 0.0), [1.0; 4], opts)
+        .unwrap();
+    assert!(!s1.exact, "frame with provisional record must not be exact");
+
+    // Resolve the provisional record to its final non-provisional form.
+    text.flags = 0;
+    let mut patch = W::new(1, 2);
+    patch.set(2, 0, &text);
+    engine.apply(&patch.finish()).unwrap();
+
+    let (_, s2) = engine
+        .render_cpu_tiled(192, 128, camera(1.0, 0.0, 0.0), [1.0; 4], opts)
+        .unwrap();
+    assert!(
+        s2.exact,
+        "tile that saw provisional record only in its reader halo must converge to exact: {s2:?}"
     );
 }

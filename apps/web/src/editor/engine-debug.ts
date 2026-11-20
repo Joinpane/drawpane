@@ -146,6 +146,8 @@ export function engineDebug(editor: Editor) {
       pageId: string;
       /** Just these layers, drawn alone as an export draws them; else the whole page. */
       ids?: string[];
+      /** Export with page backdrop context for backdrop readers (decision 0039). */
+      context?: boolean;
       rect: Rect;
       scale: number;
       width: number;
@@ -163,7 +165,12 @@ export function engineDebug(editor: Editor) {
       // canvas's parity spec waits for fonts), up to 20 s: what's drawn is the text itself.
       const make = () => {
         const b = builder(options.pageId, uploaded);
-        return { b, list: options.ids ? b.buildLayers(options.ids) : b.build(options.pageId) };
+        return {
+          b,
+          list: options.ids
+            ? b.buildLayers(options.ids, { context: options.context })
+            : b.build(options.pageId),
+        };
       };
       const loading = (b: DisplayListBuilder) =>
         b.waiting > 0 ||
@@ -177,7 +184,9 @@ export function engineDebug(editor: Editor) {
       // (fresh lists only move the revision forward).
       const b = builder(options.pageId, uploaded);
       b.acknowledge(false, e.revision);
-      const list = options.ids ? b.buildLayers(options.ids) : b.build(options.pageId);
+      const list = options.ids
+        ? b.buildLayers(options.ids, { context: options.context })
+        : b.build(options.pageId);
       const t1 = performance.now();
       const applied = e.apply(list);
       const t2 = performance.now();
@@ -357,11 +366,12 @@ export function engineDebug(editor: Editor) {
     list(
       pageId: string,
       ids?: string[],
+      context?: boolean,
     ): { list: string; unsupported: Record<string, string[]>; records: number } {
       const cpu = engines.cpu;
       const uploaded = (cpu && uploadedByEngine.get(cpu)) || new Map();
       const b = builder(pageId, uploaded);
-      const list = ids ? b.buildLayers(ids) : b.build(pageId);
+      const list = ids ? b.buildLayers(ids, { context }) : b.build(pageId);
       return { list: toBase64(list), unsupported: unsupportedOf(b), records: b.stats.records };
     },
 

@@ -459,7 +459,7 @@ pub mod gpu {
         }
 
         /// Encodes a single scissored fragment pass writing `blend(src * opacity * clip, backdrop)`
-        /// into `dst_view` over `[dst_origin.0 .. +size.0, dst_origin.1 .. +size.1]`.
+        /// into `dst_view` over the portion of the source within the parent target.
         #[allow(clippy::too_many_arguments)]
         pub fn encode(
             &self,
@@ -471,17 +471,17 @@ pub mod gpu {
             clip_view: Option<&wgpu::TextureView>,
             picture: Option<(&wgpu::TextureView, u32)>,
             dst_view: &wgpu::TextureView,
-            dst_origin: (u32, u32),
-            size: (u32, u32),
+            dst_origin: (i32, i32),
+            scissor: (u32, u32, u32, u32),
             mode: u32,
             opacity: f32,
         ) {
-            if size.0 == 0 || size.1 == 0 {
+            if scissor.2 == 0 || scissor.3 == 0 {
                 return;
             }
             let mut bytes = [0u8; 32];
-            bytes[0..4].copy_from_slice(&(dst_origin.0 as i32).to_le_bytes());
-            bytes[4..8].copy_from_slice(&(dst_origin.1 as i32).to_le_bytes());
+            bytes[0..4].copy_from_slice(&dst_origin.0.to_le_bytes());
+            bytes[4..8].copy_from_slice(&dst_origin.1.to_le_bytes());
             bytes[8..12].copy_from_slice(&mode.to_le_bytes());
             bytes[12..16].copy_from_slice(&opacity.clamp(0.0, 1.0).to_le_bytes());
             let (picture_view, mask_kind) = picture.unwrap_or((&self.dummy_view, 0));
@@ -535,7 +535,7 @@ pub mod gpu {
                 &self.pipe_plain
             });
             pass.set_bind_group(0, &bg, &[]);
-            pass.set_scissor_rect(dst_origin.0, dst_origin.1, size.0, size.1);
+            pass.set_scissor_rect(scissor.0, scissor.1, scissor.2, scissor.3);
             pass.draw(0..3, 0..1);
         }
     }

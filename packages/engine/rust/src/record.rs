@@ -15,10 +15,12 @@ pub const FLAG_HIDDEN: u32 = 1;
 pub const FLAG_ISOLATE: u32 = 2;
 /// No paint of its own: a group, whose children are drawn in its parent's space.
 pub const FLAG_GROUP: u32 = 4;
-/// Sent ahead of its real drawing (text not shaped yet, while a page opens): drawn as its coarse
-/// ops at every scale, and never exact. Its record is sent again whole soon after.
+/// Sent ahead of its real drawing (wire 1.1+, text not shaped yet while a page opens): drawn as
+/// its coarse ops at every scale, and never exact. Its record is sent again whole soon after.
 pub const FLAG_PROVISIONAL: u32 = 8;
-// Bit 16 (1 << 4) is reserved for phase 3B's `context` flag.
+/// Export context (wire 1.3+, decision 0039): painted into the backdrop for exported readers,
+/// never visible output.
+pub const FLAG_CONTEXT: u32 = 16;
 /// Has an ordered list of post-effects (`post_effects`) encoded after `coarse`.
 pub const FLAG_POST: u32 = 32;
 /// Has a non-normal layer blend mode (`1..=17`, minor 1.4) encoded after `post_effects` (or `coarse`).
@@ -27,8 +29,20 @@ pub const FLAG_BLEND: u32 = 64;
 pub const FLAG_MASK: u32 = 128;
 /// Layer ends an active sibling mask scope (visible clipping frame, minor 1.4).
 pub const FLAG_ENDS_MASK: u32 = 256;
-const KNOWN_FLAGS: u32 =
-    FLAG_HIDDEN | FLAG_ISOLATE | FLAG_GROUP | FLAG_PROVISIONAL | FLAG_POST | FLAG_BLEND | FLAG_MASK | FLAG_ENDS_MASK;
+
+const FLAGS_V1_0: u32 = FLAG_HIDDEN | FLAG_ISOLATE | FLAG_GROUP;
+const FLAGS_V1_1: u32 = FLAGS_V1_0 | FLAG_PROVISIONAL;
+const FLAGS_V1_3: u32 = FLAGS_V1_1 | FLAG_CONTEXT;
+const FLAGS_V1_4: u32 = FLAGS_V1_3 | FLAG_POST | FLAG_BLEND | FLAG_MASK | FLAG_ENDS_MASK;
+
+fn allowed_flags(minor: u16) -> u32 {
+    match minor {
+        0 => FLAGS_V1_0,
+        1 | 2 => FLAGS_V1_1,
+        3 => FLAGS_V1_3,
+        _ => FLAGS_V1_4,
+    }
+}
 
 /// Mask kind values when `FLAG_MASK` is set (matching `MASK` in `wire.ts`).
 pub const MASK_OUTLINE_NONZERO: u32 = 1;
@@ -41,6 +55,8 @@ pub const MASK_LUMINANCE: u32 = 5;
 /// decodes, so anything it would refuse while drawing refuses its page before any drawing, on
 /// screen or not, in an export's crop or not, whatever the builder flagged.
 pub mod derived {
+    pub const BACKGROUND_BLUR: u32 = 1 << 2;
+    pub const PROGRESSIVE_BLUR: u32 = 1 << 10;
     pub const BACKDROP_READER: u32 = 1 << 13;
 }
 
@@ -340,6 +356,45 @@ pub enum ComposeMode {
 }
 
 #[derive(Clone, Debug)]
+pub struct GlassOp {
+    /// Path entries forming the lens mask (1 entry for shapes; all runs + bars for text).
+    pub paths: Vec<u32>,
+    pub even_odd: bool,
+    /// 0 = box, 1 = ellipse, 2 = other.
+    pub kind: u8,
+    /// Shape's largest inscribed radius in local units (0.0 means measure from `paths` once).
+    pub inradius: f32,
+    pub angle: f32,
+    pub intensity: f32,
+    pub refraction: f32,
+    pub depth: f32,
+    pub dispersion: f32,
+    pub frost: f32,
+    pub splay: f32,
+    pub box_radii: [f32; 4],
+    pub box_smoothing: [f32; 4],
+    /// Lazily measured inradius when `inradius == 0.0` (negative means not measured yet).
+    pub measured_inradius: std::cell::Cell<f32>,
+}
+
+#[derive(Clone, Debug)]
+pub struct BackgroundBlurOp {
+    pub paths: Vec<u32>,
+    pub even_odd: bool,
+    pub radius: f32,
+}
+
+#[derive(Clone, Debug)]
+pub struct ProgressiveBlurOp {
+    pub paths: Vec<u32>,
+    pub even_odd: bool,
+    pub start_radius: f32,
+    pub end_radius: f32,
+    pub start: [f32; 2],
+    pub end: [f32; 2],
+}
+
+#[derive(Clone, Debug)]
 pub enum Op {
     Fill {
         path: u32,
@@ -360,8 +415,8 @@ pub enum Op {
     Unclip,
     /// The record's children are drawn here, inside the clips open at this point.
     Children,
-    /// Reads what's drawn beneath (a backdrop reader: glass, background blur), within its
-    /// record's extent grown by `halo` device pixels, and paints over it in place.
+    /// Reads what's drawn beneath (test reference kernel 1), within its record's extent grown by
+    /// `halo` local units, and paints over it in place.
     Read {
         kernel: u32,
         halo: f32,
@@ -397,6 +452,21 @@ pub enum Op {
         color: Rgba,
         blend: u32,
     },
+    /// Glass lens over the non-glass backdrop (decisions 0007 and 0039).
+    Glass(Box<GlassOp>),
+    /// Gaussian background blur over the non-glass backdrop (decision 0039).
+    BackgroundBlur(Box<BackgroundBlurOp>),
+    /// Progressive background blur whose sigma follows a linear gradient across the layer box.
+    ProgressiveBlur(Box<ProgressiveBlurOp>),
+}
+
+impl Op {
+    pub fn is_reader(&self) -> bool {
+        matches!(
+            self,
+            Op::Read { .. } | Op::Glass(_) | Op::BackgroundBlur(_) | Op::ProgressiveBlur(_)
+        )
+    }
 }
 
 /// An ordered post-effect applied to a record's finished picture (fills, strokes, shadows, and
@@ -475,6 +545,9 @@ impl Record {
     pub fn ends_mask(&self) -> bool {
         self.flags & FLAG_ENDS_MASK != 0
     }
+    pub fn context(&self) -> bool {
+        self.flags & FLAG_CONTEXT != 0
+    }
     /// The images its paints draw (by handle), for invalidating what shows them when one changes.
     pub fn images(&self) -> impl Iterator<Item = u32> + '_ {
         self.ops.iter().chain(self.coarse.iter()).filter_map(|op| match op {
@@ -487,12 +560,29 @@ impl Record {
             _ => None,
         })
     }
-    /// The backdrop readers among its ops: their halos (device pixels).
+    /// The backdrop readers among its ops: their max local-unit halo.
     pub fn reads(&self) -> Option<f32> {
         self.ops.iter().fold(None, |acc, op| match op {
             Op::Read { halo, .. } => Some(acc.unwrap_or(0.0f32).max(*halo)),
+            Op::Glass(g) => Some(acc.unwrap_or(0.0f32).max(crate::glass::local_halo(g))),
+            Op::BackgroundBlur(b) => Some(acc.unwrap_or(0.0f32).max((b.radius * 1.5).ceil() + 2.0)),
+            Op::ProgressiveBlur(b) => {
+                let r = b.start_radius.max(b.end_radius);
+                Some(acc.unwrap_or(0.0f32).max((r * 1.5).ceil() + 2.0))
+            }
             _ => acc,
         })
+    }
+    /// Whether this record has a glass op (which writes only to output, never to backdrop).
+    pub fn has_glass(&self) -> bool {
+        self.ops.iter().any(|op| matches!(op, Op::Glass(_)))
+    }
+    /// Whether this record's backdrop reader writes its result back into the backdrop read by
+    /// later readers (`Op::Read`, `BackgroundBlur`, `ProgressiveBlur`, never `Glass`).
+    pub fn reader_writes_backdrop(&self) -> bool {
+        self.ops
+            .iter()
+            .any(|op| matches!(op, Op::Read { .. } | Op::BackgroundBlur(_) | Op::ProgressiveBlur(_)))
     }
 
     /// Bytes it holds, roughly: what the render graph is held to (`Limits::graph_bytes`).
@@ -519,6 +609,9 @@ impl Record {
                                 .as_ref()
                                 .map_or(0, |s| size_of::<StrokeStyle>() + s.dashes.capacity() * 4)
                     }
+                    Op::Glass(g) => size_of::<GlassOp>() + g.paths.capacity() * 4,
+                    Op::BackgroundBlur(bb) => size_of::<BackgroundBlurOp>() + bb.paths.capacity() * 4,
+                    Op::ProgressiveBlur(pb) => size_of::<ProgressiveBlurOp>() + pb.paths.capacity() * 4,
                     _ => 0,
                 };
         }
@@ -598,11 +691,7 @@ impl Record {
         !self.post_effects.is_empty()
             || self.has_own_blend()
             || self.is_picture_mask()
-            || self
-                .ops
-                .iter()
-                .chain(&self.coarse)
-                .any(|op| matches!(op, Op::Read { .. }))
+            || self.ops.iter().chain(&self.coarse).any(Op::is_reader)
     }
 
     /// The length of an entry's outline, at most (a glyph run's isn't known here: None).
@@ -668,6 +757,27 @@ impl Record {
                     Op::InnerShadow { shape, .. } => {
                         if let Some(b) = self.entry_bounds(*shape, glyph_bounds) {
                             add(b);
+                        }
+                    }
+                    Op::Glass(g) => {
+                        for &path in &g.paths {
+                            if let Some(b) = self.entry_bounds(path, glyph_bounds) {
+                                add(b);
+                            }
+                        }
+                    }
+                    Op::BackgroundBlur(bb) => {
+                        for &path in &bb.paths {
+                            if let Some(b) = self.entry_bounds(path, glyph_bounds) {
+                                add(b);
+                            }
+                        }
+                    }
+                    Op::ProgressiveBlur(pb) => {
+                        for &path in &pb.paths {
+                            if let Some(b) = self.entry_bounds(path, glyph_bounds) {
+                                add(b);
+                            }
                         }
                     }
                     _ => {}
@@ -918,7 +1028,8 @@ fn ops(
         Ok(i)
     };
     for _ in 0..n {
-        let op = match r.u32()? {
+        let code = r.u32()?;
+        let op = match code {
             1 => {
                 let path = path_index(r)?;
                 let even_odd = r.u32()? == 1;
@@ -971,8 +1082,7 @@ fn ops(
                 if halo > limits.halo as f32 {
                     return Err(EngineError::limit("a backdrop reader reads too far"));
                 }
-                // Phase 1 draws no backdrop reader outside the tests (glass and background blur
-                // are phase 3's): a reader refuses its page.
+                // Test-only reference kernel: refused outside `test-kernels`.
                 if !cfg!(feature = "test-kernels") || kernel != crate::kernels::KERNEL_BOX_MEAN {
                     *derived |= derived::BACKDROP_READER;
                 }
@@ -1008,6 +1118,112 @@ fn ops(
                     return Err(EngineError::malformed("an unlayer without a matching layer"));
                 }
                 Op::Unlayer
+            }
+            9 => {
+                if minor < 3 {
+                    return Err(EngineError::new(
+                        crate::error::ErrorCode::Version,
+                        format!("glass op (9) requires display list 1.3, got 1.{minor}"),
+                    ));
+                }
+                let count = r.count(limits.record_items, "glass paths", 4)?;
+                if count == 0 {
+                    return Err(EngineError::malformed("glass op with no paths"));
+                }
+                let mut gpaths = Vec::with_capacity(count);
+                for _ in 0..count {
+                    gpaths.push(path_index(r)?);
+                }
+                let even_odd = r.u32()? == 1;
+                let kind = r.u32()?;
+                if kind > 2 {
+                    return Err(EngineError::malformed(format!("unknown glass kind {kind}")));
+                }
+                let inradius = r.f32_nonneg()?;
+                let angle = r.f32()?;
+                let intensity = r.f32()?.clamp(0.0, 100.0);
+                let refraction = r.f32()?.clamp(0.0, 100.0);
+                let depth = r.f32()?.clamp(0.0, 100.0);
+                let dispersion = r.f32()?.clamp(0.0, 100.0);
+                let frost = r.f32()?.clamp(0.0, 100.0);
+                let splay = r.f32()?.clamp(0.0, 100.0);
+                let box_radii = [r.f32_nonneg()?, r.f32_nonneg()?, r.f32_nonneg()?, r.f32_nonneg()?];
+                let box_smoothing = [
+                    r.f32()?.clamp(0.0, 1.0),
+                    r.f32()?.clamp(0.0, 1.0),
+                    r.f32()?.clamp(0.0, 1.0),
+                    r.f32()?.clamp(0.0, 1.0),
+                ];
+                Op::Glass(Box::new(GlassOp {
+                    paths: gpaths,
+                    even_odd,
+                    kind: kind as u8,
+                    inradius,
+                    angle,
+                    intensity,
+                    refraction,
+                    depth,
+                    dispersion,
+                    frost,
+                    splay,
+                    box_radii,
+                    box_smoothing,
+                    measured_inradius: std::cell::Cell::new(-1.0),
+                }))
+            }
+            10 => {
+                if minor < 3 {
+                    return Err(EngineError::new(
+                        crate::error::ErrorCode::Version,
+                        format!("backgroundBlur op (10) requires display list 1.3, got 1.{minor}"),
+                    ));
+                }
+                let count = r.count(limits.record_items, "background-blur paths", 4)?;
+                if count == 0 {
+                    return Err(EngineError::malformed("background-blur op with no paths"));
+                }
+                let mut bpaths = Vec::with_capacity(count);
+                for _ in 0..count {
+                    bpaths.push(path_index(r)?);
+                }
+                let even_odd = r.u32()? == 1;
+                let radius = r.f32_nonneg()?;
+                *derived |= derived::BACKGROUND_BLUR;
+                Op::BackgroundBlur(Box::new(BackgroundBlurOp {
+                    paths: bpaths,
+                    even_odd,
+                    radius,
+                }))
+            }
+            11 => {
+                if minor < 3 {
+                    return Err(EngineError::new(
+                        crate::error::ErrorCode::Version,
+                        format!("progressiveBlur op (11) requires display list 1.3, got 1.{minor}"),
+                    ));
+                }
+                let count = r.count(limits.record_items, "progressive-blur paths", 4)?;
+                if count == 0 {
+                    return Err(EngineError::malformed("progressive-blur op with no paths"));
+                }
+                let mut bpaths = Vec::with_capacity(count);
+                for _ in 0..count {
+                    bpaths.push(path_index(r)?);
+                }
+                let even_odd = r.u32()? == 1;
+                let start_radius = r.f32_nonneg()?;
+                let end_radius = r.f32_nonneg()?;
+                let start = [r.f32()?, r.f32()?];
+                let end = [r.f32()?, r.f32()?];
+                *derived |= derived::PROGRESSIVE_BLUR;
+                Op::ProgressiveBlur(Box::new(ProgressiveBlurOp {
+                    paths: bpaths,
+                    even_odd,
+                    start_radius,
+                    end_radius,
+                    start,
+                    end,
+                }))
             }
             13 => {
                 if minor < 4 {
@@ -1104,17 +1320,14 @@ fn ops(
 
 pub fn decode(r: &mut Reader, limits: &Limits, minor: u16) -> Result<Record> {
     let flags = r.u32()?;
-    let mut allowed_flags = KNOWN_FLAGS;
-    if minor < 1 {
-        allowed_flags &= !FLAG_PROVISIONAL;
+    if flags & !FLAGS_V1_4 != 0 {
+        return Err(EngineError::malformed(format!("unknown record flags {flags:#x}")));
     }
-    if minor < 4 {
-        allowed_flags &= !(FLAG_POST | FLAG_BLEND | FLAG_MASK | FLAG_ENDS_MASK);
-    }
-    if flags & !allowed_flags != 0 {
-        return Err(EngineError::malformed(format!(
-            "record flags {flags:#x} not allowed in display list 1.{minor}"
-        )));
+    if flags & !allowed_flags(minor) != 0 {
+        return Err(EngineError::new(
+            crate::error::ErrorCode::Version,
+            format!("record flags {flags:#x} require a newer display list than 1.{minor}"),
+        ));
     }
     let opacity = r.f32()?.clamp(0.0, 1.0);
     let transform = r.affine()?;

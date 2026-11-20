@@ -31,7 +31,7 @@ test-kernels = []
 
 [dependencies]
 vello_common = { version = "=0.4.0", default-features = false, features = ["std"] }
-vello_cpu = { version = "=0.4.0", default-features = false, features = ["std", "f32_pipeline"] }
+vello_cpu = { version = "=0.4.0", default-features = false, features = ["std", "u8_pipeline", "f32_pipeline"] }
 vello_gpu = { version = "=0.4.0", default-features = false, features = ["wgpu", "full_image_support", "gradient_sweep", "blurred_rounded_rect"], optional = true }
 wgpu = { version = "30.0.2", default-features = false, features = ["std", "wgsl"], optional = true }
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }

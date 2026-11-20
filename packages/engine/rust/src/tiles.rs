@@ -768,6 +768,17 @@ impl TileCache {
         }
     }
 
+    /// Marks stale any tile drawn at full detail that was still inexact (e.g. because a
+    /// provisional text record sat inside its reader halo when drawn) so the frame converges to
+    /// exact once no provisional records remain shown.
+    pub fn invalidate_inexact_full(&mut self) {
+        for e in self.tiles.values_mut() {
+            if !e.stale && e.full && !e.exact {
+                e.stale = true;
+            }
+        }
+    }
+
     /// A slot for drawing `key` into: its own if it's held, else a free one, a new one under
     /// `max_slots`, or the slot of the tile least worth keeping that this frame doesn't show.
     pub fn slot_for(&mut self, key: TileKey) -> Option<u32> {

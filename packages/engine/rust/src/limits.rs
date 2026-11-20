@@ -2,6 +2,19 @@
 //! memory or stall a frame. Each limit fails with `ErrorCode::Limit`; the caller falls back.
 //! See docs/decisions/0040-display-list.md, "Limits".
 
+/// The CPU-only Wasm module is linked with a 25 MiB maximum. A caller's limit
+/// may narrow that maximum, but cannot disable or raise it.
+pub(crate) fn memory_budget(requested: usize) -> usize {
+    const WORKER_MEMORY_BYTES: usize = 25 << 20;
+    if cfg!(all(target_arch = "wasm32", not(feature = "gpu-common")))
+        && (requested == 0 || requested > WORKER_MEMORY_BYTES)
+    {
+        WORKER_MEMORY_BYTES
+    } else {
+        requested
+    }
+}
+
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     /// Records held at once (a 500,000-layer file's largest page is far below this).
@@ -86,10 +99,7 @@ impl Default for Limits {
             open_scopes: 512,
             gpu_bytes: 768 * 1024 * 1024,
             tile_bytes: 256 * 1024 * 1024,
-            #[cfg(all(target_arch = "wasm32", not(feature = "gpu-common")))]
-            memory_bytes: 25 * 1024 * 1024,
-            #[cfg(not(all(target_arch = "wasm32", not(feature = "gpu-common"))))]
-            memory_bytes: 0,
+            memory_bytes: memory_budget(0),
             export_tile: 1024,
             halo: 512,
         }

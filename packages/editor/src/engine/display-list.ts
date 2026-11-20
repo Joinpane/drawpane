@@ -20,13 +20,17 @@
  */
 import {
   ANY_REVISION,
+  FLAG,
   ListWriter,
   type PathData,
   ROOT,
   type WireRecord,
 } from "@drawpane/engine/wire";
-import type { NodeRecord } from "@drawpane/model";
+import { getProp, type NodeRecord } from "@drawpane/model";
+import type { Rect } from "../geometry";
+import { glassParams } from "../glass";
 import { isActiveMask } from "../masks";
+import { blurSigma } from "../post-effects";
 import { glyphTable } from "../saved-glyphs";
 import type { Scene } from "../scene";
 import type { TextMeasurer } from "../text";
@@ -437,29 +441,235 @@ export class DisplayListBuilder {
 
   /**
    * A fresh list of just `ids` and everything in them, each placed on the page (an export's
-   * list: the layers drawn alone, as `CanvasRenderer.renderNodes` draws them). Not patched
-   * afterwards: `build` or `buildLayers` again.
+   * list: the layers drawn alone, as `CanvasRenderer.renderNodes` draws them). With
+   * `options.context`, exports holding backdrop readers include the page prefix beneath them
+   * flagged with `FLAG.context` (decision 0039). Not patched afterwards: `build` or
+   * `buildLayers` again.
    */
-  buildLayers(ids: readonly string[]): Uint8Array {
+  buildLayers(
+    ids: readonly string[],
+    options?: { readonly context?: boolean | undefined },
+  ): Uint8Array {
     const doc = this.#scene.doc;
     const first = ids.map((id) => doc.get(id)).find((n) => n !== undefined);
     const pageId = first ? this.#pageOf(first.id) : null;
+    if (options?.context && pageId) {
+      const parts = this.#readerContextParts(ids);
+      if (parts.length > 0) {
+        const list = this.#buildWithContext(pageId, ids, parts);
+        this.#page = null;
+        return list;
+      }
+    }
     const list = this.build(pageId ?? "", ids);
     this.#page = null;
     return list;
   }
 
   /**
-   * A fresh list of every layer on `pageId` (or of just `roots` on it, placed on the page),
-   * written as it's walked: each record goes into the message as it's encoded, after the glyphs
-   * it brings, so the page is never held as records too.
+   * Computes a single reader layer's conservative page-space read rectangle (grown by its reach
+   * and intersected with clipping ancestors), or null if the layer has no visible reader.
    */
-  build(
+  #readerReachRect(id: string, onlyBackdropWriters = false): Rect | null {
+    const doc = this.#scene.doc;
+    const node = doc.get(id);
+    if (!node || node.props.visible === false || node.type === "group") return null;
+    let pad = 0;
+    for (const e of getProp(node.props, "effects")) {
+      if (e.visible === false) continue;
+      if (e.type === "glass" && !onlyBackdropWriters) {
+        const p = glassParams(e, 1);
+        pad = Math.max(pad, p.margin + Math.ceil(3 * p.sigma) + 4);
+      } else if (e.type === "background-blur") {
+        const maxR = Math.max(e.radius, (e as { startRadius?: number }).startRadius ?? 0);
+        pad = Math.max(pad, Math.ceil(blurSigma(maxR) * 3.5) + 8);
+      }
+    }
+    if (pad <= 0) return null;
+    const b = this.#scene.bounds(id);
+    if (!b) return null;
+    const m = this.#scene.worldMatrix(id);
+    const s = Math.max(1, Math.hypot(m[0], m[1]), Math.hypot(m[2], m[3]));
+    const grow = pad * s;
+    let r: Rect = {
+      x: b.x - grow,
+      y: b.y - grow,
+      width: b.width + grow * 2,
+      height: b.height + grow * 2,
+    };
+    // A reader inside a clipping frame cannot read pixels outside that frame.
+    for (let a = doc.get(node.parent); a && a.type !== "page"; a = doc.get(a.parent)) {
+      if (a.type !== "frame" || !getProp(a.props, "clipContent")) continue;
+      const ab = this.#scene.bounds(a.id);
+      if (!ab) continue;
+      const x0 = Math.max(r.x, ab.x);
+      const y0 = Math.max(r.y, ab.y);
+      const x1 = Math.min(r.x + r.width, ab.x + ab.width);
+      const y1 = Math.min(r.y + r.height, ab.y + ab.height);
+      r = {
+        x: x0,
+        y: y0,
+        width: Math.max(0, x1 - x0),
+        height: Math.max(0, y1 - y0),
+      };
+    }
+    return r.width > 0 && r.height > 0 ? r : null;
+  }
+
+  /**
+   * Page-space regions that backdrop readers inside `ids` read (each grown by its conservative
+   * reach and intersected with any clipping ancestors). Empty when `ids` hold no visible readers.
+   */
+  #readerContextParts(ids: readonly string[]): Rect[] {
+    const doc = this.#scene.doc;
+    const parts: Rect[] = [];
+    const visit = (id: string) => {
+      const node = doc.get(id);
+      if (!node || node.props.visible === false) return;
+      const r = this.#readerReachRect(id, false);
+      if (r) parts.push(r);
+      for (const c of doc.childIds(id)) visit(c);
+    };
+    for (const id of ids) visit(id);
+    return parts;
+  }
+
+  /**
+   * Builds a fresh export list containing `ids` (without `FLAG.context`) plus the page prefix
+   * transitively feeding them (marked `FLAG.context`), preserving ancestor frames so `clipWithin`
+   * and transforms match the page (decision 0039). Prefix selection runs in reverse paint order
+   * so an earlier backdrop-writing blur pulls in its own backdrop inputs transitively.
+   */
+  #buildWithContext(
     pageId: string,
-    roots?: readonly string[],
-    options: { readonly deferText?: boolean } = {},
+    ids: readonly string[],
+    initialParts: readonly Rect[],
   ): Uint8Array {
     const t0 = performance.now();
+    const doc = this.#scene.doc;
+    this.#resetState(pageId);
+    const ctx = this.#context();
+    const revision = this.#revision + 1;
+    const w = new ListWriter(
+      ANY_REVISION,
+      revision,
+      Math.max(1 << 20, Math.ceil(this.#lastFresh * 1.1)),
+    );
+    w.reset();
+    const exported = new Set(ids);
+    const remaining = new Set(ids);
+    const ancestors = new Set<string>();
+    for (const id of ids) {
+      for (let p = doc.get(id)?.parent; p && p !== pageId; p = doc.get(p)?.parent) {
+        ancestors.add(p);
+      }
+    }
+
+    // 1. Collect visible prefix nodes in paint order up to the last exported root.
+    const prefixOrder: string[] = [];
+    const collectPrefix = (id: string, inExported: boolean) => {
+      if (!inExported && remaining.size === 0) return;
+      const node = doc.get(id);
+      if (!node) return;
+      const isExportRoot = exported.has(id);
+      const nextExported = inExported || isExportRoot;
+      if (!nextExported) {
+        if (!ancestors.has(id) && node.props.visible === false) return;
+        prefixOrder.push(id);
+      }
+      for (const c of doc.childIds(id)) collectPrefix(c, nextExported);
+      if (isExportRoot) remaining.delete(id);
+    };
+    for (const c of doc.childIds(pageId)) collectPrefix(c, false);
+
+    // 2. Reverse paint-order transitive closure: any prefix layer overlapping `needParts` is kept,
+    //    and if it writes to the backdrop via background blur, its own reach expands `needParts`
+    //    for all earlier layers beneath it.
+    const needParts: Rect[] = [...initialParts];
+    const keptContext = new Set<string>(ancestors);
+    const overlapsAny = (id: string): boolean => {
+      const raw = this.#scene.extent(id) ?? this.#scene.bounds(id);
+      if (!raw) return true;
+      let bx0 = raw.x;
+      let by0 = raw.y;
+      let bx1 = raw.x + raw.width;
+      let by1 = raw.y + raw.height;
+      // A layer inside a clipping frame cannot paint outside that frame.
+      for (
+        let a = doc.get(doc.get(id)?.parent ?? "");
+        a && a.type !== "page";
+        a = doc.get(a.parent)
+      ) {
+        if (a.type !== "frame" || !getProp(a.props, "clipContent")) continue;
+        const ab = this.#scene.bounds(a.id);
+        if (!ab) continue;
+        bx0 = Math.max(bx0, ab.x);
+        by0 = Math.max(by0, ab.y);
+        bx1 = Math.min(bx1, ab.x + ab.width);
+        by1 = Math.min(by1, ab.y + ab.height);
+        if (bx1 <= bx0 || by1 <= by0) return false;
+      }
+      for (const r of needParts) {
+        if (bx0 < r.x + r.width && r.x < bx1 && by0 < r.y + r.height && r.y < by1) {
+          return true;
+        }
+      }
+      return false;
+    };
+    for (let i = prefixOrder.length - 1; i >= 0; i--) {
+      const id = prefixOrder[i] as string;
+      const node = doc.get(id);
+      if (!node) continue;
+      if (keptContext.has(id) || overlapsAny(id)) {
+        keptContext.add(id);
+        for (let p: string | undefined = node.parent; p && p !== pageId; p = doc.get(p)?.parent) {
+          keptContext.add(p);
+        }
+        // Only backdrop-writing readers (background-blur / progressive-blur) pull in earlier
+        // inputs transitively; glass writes only to output (decision 0007).
+        const blurReach = this.#readerReachRect(id, true);
+        if (blurReach) needParts.push(blurReach);
+      }
+    }
+
+    // 3. Emit kept context nodes (flagged `FLAG.context`) and exported nodes in paint order.
+    let records = 0;
+    let glyphs = 0;
+    const emitRemaining = new Set(ids);
+    const emit = (id: string, inExported: boolean) => {
+      if (!inExported && emitRemaining.size === 0) return;
+      const node = doc.get(id);
+      if (!node) return;
+      const isExportRoot = exported.has(id);
+      const nextExported = inExported || isExportRoot;
+      if (!nextExported && !keptContext.has(id)) return;
+      let record = this.#encode(node, ctx);
+      if (!nextExported) record = { ...record, flags: record.flags | FLAG.context };
+      const parent = this.#parentHandle(node);
+      glyphs += this.#writeGlyphs(w);
+      w.set(this.#handleOf(id), parent, record);
+      records++;
+      this.#kid(node.parent, id);
+      for (const c of doc.childIds(id)) emit(c, nextExported);
+      if (isExportRoot) emitRemaining.delete(id);
+    };
+    for (const c of doc.childIds(pageId)) emit(c, false);
+    this.#revision = revision;
+    const bytes = w.finish();
+    this.#lastFresh = bytes.length;
+    this.stats = {
+      records,
+      transforms: 0,
+      removed: 0,
+      glyphs,
+      bytes: bytes.length,
+      ms: performance.now() - t0,
+      fresh: true,
+    };
+    return bytes;
+  }
+
+  #resetState(pageId: string): void {
     const doc = this.#scene.doc;
     this.#page = pageId;
     this.#version = doc.version;
@@ -492,6 +702,21 @@ export class DisplayListBuilder {
     this.#shaped = new WeakMap();
     this.#newGlyphs = [];
     this.#nextGlyph = 1;
+  }
+
+  /**
+   * A fresh list of every layer on `pageId` (or of just `roots` on it, placed on the page),
+   * written as it's walked: each record goes into the message as it's encoded, after the glyphs
+   * it brings, so the page is never held as records too.
+   */
+  build(
+    pageId: string,
+    roots?: readonly string[],
+    options: { readonly deferText?: boolean } = {},
+  ): Uint8Array {
+    const t0 = performance.now();
+    const doc = this.#scene.doc;
+    this.#resetState(pageId);
     const ctx = this.#context(options.deferText ?? false);
     const revision = this.#revision + 1;
     // Sized for the last fresh list (a page reopened, a reset), so the buffer rarely grows.

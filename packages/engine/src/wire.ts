@@ -9,6 +9,14 @@
 
 export const MAGIC = 0x4c445044; // "DPDL", little-endian
 export const MAJOR = 1;
+/**
+ * Wire minor allocation (must match `rust/src/wire.rs` and `docs/decisions/0040-display-list.md`):
+ * - 1.0: flags 1..4 (`hidden`, `isolate`, `group`), ops 1..6 (`fill`..`read`).
+ * - 1.1: flag 8 (`provisional`, phase 2).
+ * - 1.2: ops 7..8 for geometry-item `layer` / `unlayer` (blends/masks).
+ * - 1.3: flag 16 (`context`); ops 9..11 (`glass`, `backgroundBlur`, `progressiveBlur`), 12 reserved.
+ * - 1.4: flags 32/64/128/256 (`post`, `blend`, `mask`, `endsMask`); ops 13..14 (shadows).
+ */
 export const MINOR = 4;
 /** A message with this base replaces everything; it starts with a reset. */
 export const ANY_REVISION = 0xffffffff;
@@ -26,15 +34,18 @@ export const COMMAND = {
 } as const;
 
 /**
- * Record flags. `provisional`: sent ahead of its real drawing (text not shaped yet while a page
- * opens), drawn as its coarse ops at every scale and never exact; sent again whole soon after.
- * Bit 16 is reserved for phase 3B's `context` flag.
+ * Record flags.
+ * - `provisional` (8, wire 1.1+): sent ahead of its real drawing (text not shaped yet while a page
+ *   opens), drawn as its coarse ops at every scale and never exact; sent again whole soon after.
+ * - `context` (16, wire 1.3+): export backdrop prefix (decision 0039), painted into the backdrop
+ *   for exported readers, never visible output.
  */
 export const FLAG = {
   hidden: 1,
   isolate: 2,
   group: 4,
   provisional: 8,
+  context: 16,
   post: 32,
   blend: 64,
   mask: 128,
@@ -59,6 +70,7 @@ export const PATH = {
   box: 6,
   oval: 7,
 } as const;
+
 export const OP = {
   fill: 1,
   stroke: 2,
@@ -68,7 +80,10 @@ export const OP = {
   read: 6,
   layer: 7,
   unlayer: 8,
-  // 9..=12 reserved for phase 3B reader ops.
+  glass: 9,
+  backgroundBlur: 10,
+  progressiveBlur: 11,
+  // Wire 1.3 reserves opcode 12.
   dropShadow: 13,
   innerShadow: 14,
 } as const;
@@ -92,6 +107,7 @@ export const BLEND = {
   "linear-dodge": 16,
   "linear-burn": 17,
 } as const;
+export const GLASS_KIND = { box: 0, ellipse: 1, other: 2 } as const;
 export const COMPOSE = { srcOver: 0, destOut: 1, destIn: 2 } as const;
 export const PAINT = {
   solid: 1,
@@ -262,6 +278,37 @@ export type WireOp =
   | { readonly op: "read"; readonly kernel: number; readonly halo: number }
   | { readonly op: "layer"; readonly compose: number }
   | { readonly op: "unlayer" }
+  | {
+      readonly op: "glass";
+      readonly paths: readonly number[];
+      readonly evenOdd: boolean;
+      readonly kind: number;
+      readonly inradius: number;
+      readonly angle: number;
+      readonly intensity: number;
+      readonly refraction: number;
+      readonly depth: number;
+      readonly dispersion: number;
+      readonly frost: number;
+      readonly splay: number;
+      readonly boxRadii: readonly [number, number, number, number];
+      readonly boxSmoothing: readonly [number, number, number, number];
+    }
+  | {
+      readonly op: "backgroundBlur";
+      readonly paths: readonly number[];
+      readonly evenOdd: boolean;
+      readonly radius: number;
+    }
+  | {
+      readonly op: "progressiveBlur";
+      readonly paths: readonly number[];
+      readonly evenOdd: boolean;
+      readonly startRadius: number;
+      readonly endRadius: number;
+      readonly start: readonly [number, number];
+      readonly end: readonly [number, number];
+    }
   | {
       readonly op: "dropShadow";
       readonly paths: readonly number[];
@@ -590,6 +637,42 @@ export class ListWriter {
         case "unlayer":
           this.u32(OP.unlayer);
           break;
+        case "glass":
+          this.u32(OP.glass);
+          this.u32(o.paths.length);
+          for (const p of o.paths) this.u32(p);
+          this.u32(o.evenOdd ? 1 : 0);
+          this.u32(o.kind);
+          this.f32(Math.max(0, o.inradius));
+          this.f32(o.angle);
+          this.f32(o.intensity);
+          this.f32(o.refraction);
+          this.f32(o.depth);
+          this.f32(o.dispersion);
+          this.f32(o.frost);
+          this.f32(o.splay);
+          for (const r of o.boxRadii) this.f32(Math.max(0, r));
+          for (const s of o.boxSmoothing) this.f32(s);
+          break;
+        case "backgroundBlur":
+          this.u32(OP.backgroundBlur);
+          this.u32(o.paths.length);
+          for (const p of o.paths) this.u32(p);
+          this.u32(o.evenOdd ? 1 : 0);
+          this.f32(Math.max(0, o.radius));
+          break;
+        case "progressiveBlur":
+          this.u32(OP.progressiveBlur);
+          this.u32(o.paths.length);
+          for (const p of o.paths) this.u32(p);
+          this.u32(o.evenOdd ? 1 : 0);
+          this.f32(Math.max(0, o.startRadius));
+          this.f32(Math.max(0, o.endRadius));
+          this.f32(o.start[0]);
+          this.f32(o.start[1]);
+          this.f32(o.end[0]);
+          this.f32(o.end[1]);
+          break;
         case "dropShadow":
           this.u32(OP.dropShadow);
           this.u32(o.paths.length);
@@ -620,6 +703,7 @@ export class ListWriter {
           this.f32(o.blur);
           this.rgba(o.color);
           this.u32(o.blend);
+          break;
       }
     }
   }

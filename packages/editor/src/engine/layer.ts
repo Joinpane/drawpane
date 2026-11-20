@@ -12,6 +12,7 @@ import {
   CAP,
   COMPOSE,
   FLAG,
+  GLASS_KIND,
   type GradientStop,
   JOIN,
   MASK,
@@ -27,7 +28,14 @@ import {
   type WirePostEffect,
   type WireRecord,
 } from "@drawpane/engine/wire";
-import { type BlendMode, GLYPH_UNITS, getProp, type NodeRecord, type Paint } from "@drawpane/model";
+import {
+  type BlendMode,
+  GLYPH_UNITS,
+  type Glass,
+  getProp,
+  type NodeRecord,
+  type Paint,
+} from "@drawpane/model";
 import { fitCorners } from "../corner-geometry";
 import { layerCorners, spreadRadii } from "../corners";
 import { boxOutline, ellipseOutline, fitDashes } from "../dashes";
@@ -793,6 +801,57 @@ function textRuns(
   return { runs, bars };
 }
 
+/** Resolves a layer's visible glass effect into a wire op, or null when it has none. */
+function glassOp(
+  node: NodeRecord,
+  paths: readonly number[],
+  evenOdd: boolean,
+  w: number,
+  h: number,
+): WireOp | null {
+  if (paths.length === 0) return null;
+  const glass = getProp(node.props, "effects").find(
+    (e): e is Glass => e.type === "glass" && e.visible !== false,
+  );
+  if (!glass) return null;
+  const isBox = node.type === "rect" || node.type === "frame";
+  const kind = isBox
+    ? GLASS_KIND.box
+    : node.type === "ellipse"
+      ? GLASS_KIND.ellipse
+      : GLASS_KIND.other;
+  const inradius = isBox || node.type === "ellipse" ? Math.min(w, h) / 2 : 0;
+  let boxRadii: readonly [number, number, number, number] = [0, 0, 0, 0];
+  let boxSmoothing: readonly [number, number, number, number] = [0, 0, 0, 0];
+  if (isBox) {
+    const { radii, smoothing } = layerCorners(node);
+    const fitted = fitCorners(w, h, radii, smoothing);
+    boxRadii = [fitted[0].radius, fitted[1].radius, fitted[2].radius, fitted[3].radius];
+    boxSmoothing = [
+      fitted[0].smoothing,
+      fitted[1].smoothing,
+      fitted[2].smoothing,
+      fitted[3].smoothing,
+    ];
+  }
+  return {
+    op: "glass",
+    paths,
+    evenOdd,
+    kind,
+    inradius,
+    angle: glass.angle,
+    intensity: glass.intensity,
+    refraction: glass.refraction,
+    depth: glass.depth,
+    dispersion: glass.dispersion,
+    frost: glass.frost,
+    splay: glass.splay,
+    boxRadii,
+    boxSmoothing,
+  };
+}
+
 /** Text: its glyphs filled in each run's paints, in order, then its strokes around the glyphs. */
 function text(
   b: Builder,
@@ -837,6 +896,8 @@ function text(
       });
     }
   }
+  const g = glassOp(node, shadowPaths, false, width, height);
+  if (g) b.ops.push(g);
   // The canvas fills each run in its paints, then its decorations in the same.
   for (const r of runs.runs) fill(r.entry, r.paints);
   for (const bar of runs.bars) fill(bar.entry, bar.paints);
@@ -924,7 +985,6 @@ function unsupportedOf(node: NodeRecord): number {
   for (const e of getProp(node.props, "effects")) {
     if (e.visible === false) continue;
     if (e.type === "background-blur") bits |= UNSUPPORTED.backgroundBlur;
-    else if (e.type === "glass") bits |= UNSUPPORTED.glass;
   }
   return bits;
 }
@@ -998,7 +1058,9 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
     const shape = b.path(shapeEntry(node, w, h));
     const evenOdd = node.type === "path" && getProp(node.props, "windingRule") === "evenodd";
     emitDropShadows(b, node, shape, evenOdd, w, h);
-    if (node.type !== "line")
+    if (node.type !== "line") {
+      const g = glassOp(node, [shape], evenOdd, w, h);
+      if (g) b.ops.push(g);
       for (const paint of getProp(node.props, "fills")) {
         if (!shows(paint)) continue;
         if (paint.type === "image") imageFill(b, shape, evenOdd, paint, w, h, ctx);
@@ -1007,6 +1069,7 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
           if (p) b.ops.push({ op: "fill", path: shape, evenOdd, paint: p });
         }
       }
+    }
     emitInnerShadows(b, node, shape, evenOdd, w, h);
     if (node.type === "frame") {
       const clip = getProp(node.props, "clipContent");

@@ -7,10 +7,13 @@ import { inflateSync } from "node:zlib";
 import { beforeAll, describe, expect, it } from "vitest";
 import { score } from "../src/compare";
 import {
+  ANY_REVISION,
   type EngineModule,
   ErrorCode,
+  FLAG,
   ListWriter,
   MAX_SIDE,
+  MINOR,
   PathData,
   RenderEngine,
   ROOT,
@@ -373,5 +376,115 @@ describe.skipIf(!built("worker") && !process.env.CI)("the engine's modules", () 
     const whole = e.renderCpu(480, 360, cam, BG, false);
     if (!whole.ok) throw new Error(whole.message);
     expect(Buffer.from(out).equals(Buffer.from(whole.value.pixels))).toBe(true);
+  });
+
+  it("refuses a Worker PNG export whose nested isolation and glass exceed memory_bytes without trapping", async () => {
+    const cap = 25 << 20;
+    const e = new RenderEngine(worker, { memoryBytes: cap });
+    const width = 2048;
+    const height = 1024;
+    const w = new ListWriter(ANY_REVISION, 1);
+    w.reset();
+    for (let id = 1; id <= 24; id++) {
+      w.set(
+        id,
+        id - 1,
+        rec({
+          flags: FLAG.group | FLAG.isolate,
+          opacity: 0.5,
+          width: 0,
+          height: 0,
+          ops: [{ op: "children" }],
+        }),
+      );
+    }
+    w.set(
+      25,
+      24,
+      rec({
+        width,
+        height,
+        paths: [{ kind: "rect", w: width, h: height, radii: [0, 0, 0, 0], smoothing: 0 }],
+        ops: [
+          {
+            op: "glass",
+            paths: [0],
+            evenOdd: false,
+            kind: 0,
+            inradius: 512,
+            angle: -45,
+            intensity: 60,
+            refraction: 80,
+            depth: 8,
+            dispersion: 50,
+            frost: 10,
+            splay: 0,
+            boxRadii: [0, 0, 0, 0],
+            boxSmoothing: [0, 0, 0, 0],
+          },
+        ],
+      }),
+    );
+    expect(e.apply(w.finish()).ok).toBe(true);
+    const res = e.renderPngStream(width, height, { zoom: 1, x: 0, y: 0, dpr: 1 }, BG);
+    expect(res).toMatchObject({ ok: false, code: ErrorCode.Limit });
+    expect(e.dead).toBe(false);
+    const small = e.renderPngStream(16, 16, { zoom: 1, x: 0, y: 0, dpr: 1 }, BG);
+    if (!small.ok) throw new Error(small.message);
+    const bytes = new Uint8Array(await new Response(small.value).arrayBuffer());
+    expect([...bytes.subarray(0, 8)]).toEqual([137, 80, 78, 71, 13, 10, 26, 10]);
+    expect(worker.memoryBytes()).toBeLessThanOrEqual(cap);
+    e.dispose();
+  });
+
+  it("checks wire version compatibility on RenderEngine construction and rejects incompatible wire versions", () => {
+    const stale: EngineModule = {
+      ...worker,
+      glue: {
+        ...worker.glue,
+        listVersion: () => new Uint32Array([1, 2]),
+      },
+    };
+    const staleEngine = new RenderEngine(stale);
+    expect(staleEngine.dead).toBe(true);
+    const staleApply = staleEngine.apply(scene());
+    expect(staleApply.ok).toBe(false);
+    if (!staleApply.ok) expect(staleApply.code).toBe(ErrorCode.Version);
+    staleEngine.dispose();
+
+    const e = new RenderEngine(worker);
+    // Export context is valid from 1.3 onwards. A 1.2 header must fail with Version.
+    const w = new ListWriter(ANY_REVISION, 1);
+    w.reset();
+    w.set(
+      1,
+      ROOT,
+      rec({
+        flags: FLAG.context,
+        width: 64,
+        height: 64,
+        paths: [{ kind: "rect", w: 64, h: 64, radii: [0, 0, 0, 0], smoothing: 0 }],
+        ops: [
+          { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [1, 0, 0, 1] } },
+        ],
+      }),
+    );
+    const bytes = w.finish();
+    const asV12 = bytes.slice();
+    asV12[6] = 2; // minor = 2
+    const r12 = e.apply(asV12);
+    expect(r12.ok).toBe(false);
+    if (!r12.ok) expect(r12.code).toBe(ErrorCode.Version);
+
+    const future = bytes.slice();
+    future[6] = MINOR + 1;
+    const newer = e.apply(future);
+    expect(newer.ok).toBe(false);
+    if (!newer.ok) expect(newer.code).toBe(ErrorCode.Version);
+
+    const asV13 = bytes.slice();
+    asV13[6] = 3;
+    expect(e.apply(asV13).ok).toBe(true);
+    e.dispose();
   });
 });

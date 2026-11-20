@@ -9,7 +9,8 @@ pub struct Model {
     pub nodes: BTreeMap<u32, (u32, Rec)>,
     pub children: HashMap<u32, Vec<u32>>,
     pub next: u32,
-    pub readers: bool,
+    readers: bool,
+    effects: bool,
 }
 
 pub fn ident() -> [f64; 6] {
@@ -41,7 +42,7 @@ pub fn gen_paint(r: &mut Rng, w: f32, h: f32) -> Paint {
     }
 }
 
-pub fn gen_rec(r: &mut Rng, readers: bool) -> Rec {
+fn gen_rec(r: &mut Rng, readers: bool, effects: bool) -> Rec {
     let rot = if r.chance(0.2) { r.range(-0.6, 0.6) as f64 } else { 0.0 };
     let s = if r.chance(0.2) { r.range(0.5, 1.5) as f64 } else { 1.0 };
     let t = [
@@ -55,7 +56,7 @@ pub fn gen_rec(r: &mut Rng, readers: bool) -> Rec {
     if r.chance(0.12) {
         let mut g = Rec::group();
         g.transform = ident();
-        if !readers && r.chance(0.12) {
+        if effects && r.chance(0.12) {
             g.post.push(Post::LayerBlur(r.range(2.0, 14.0)));
         }
         return g;
@@ -85,7 +86,7 @@ pub fn gen_rec(r: &mut Rng, readers: bool) -> Rec {
     };
     let text = matches!(shape, Entry::Glyphs { .. });
     rec.paths.push(shape);
-    if !readers && r.chance(0.22) {
+    if effects && r.chance(0.22) {
         let blur = if r.chance(0.25) { 0.0 } else { r.range(2.0, 20.0) };
         let dx = r.range(-10.0, 10.0);
         let dy = r.range(-10.0, 10.0);
@@ -137,10 +138,33 @@ pub fn gen_rec(r: &mut Rng, readers: bool) -> Rec {
         }
     }
     if readers && r.chance(0.15) {
-        rec.ops.push(Op::Read {
-            kernel: 1,
-            halo: r.range(0.0, 3.0).round(),
-        });
+        if r.chance(0.5) {
+            rec.ops.push(Op::Read {
+                kernel: 1,
+                halo: r.range(0.0, 3.0).round(),
+            });
+        } else {
+            let (kind, box_radii) = match &rec.paths[0] {
+                Entry::Rect { radii, .. } => (0, *radii),
+                Entry::Ellipse { .. } => (1, [0.0; 4]),
+                _ => (2, [0.0; 4]),
+            };
+            rec.ops.push(Op::Glass {
+                paths: vec![0],
+                even_odd: false,
+                kind,
+                inradius: w.min(h) * 0.5,
+                angle: -45.0,
+                intensity: r.range(20.0, 90.0),
+                refraction: r.range(10.0, 80.0),
+                depth: r.range(4.0, 20.0),
+                dispersion: r.range(0.0, 40.0),
+                frost: r.range(0.0, 8.0),
+                splay: 0.0,
+                box_radii,
+                box_smoothing: [0.0; 4],
+            });
+        }
     }
     let paint = if text && r.chance(0.7) {
         Paint::Solid(r.color())
@@ -152,7 +176,7 @@ pub fn gen_rec(r: &mut Rng, readers: bool) -> Rec {
         even_odd: r.chance(0.2),
         paint,
     });
-    if !readers && !text && r.chance(0.18) {
+    if effects && !text && r.chance(0.18) {
         let blur = if r.chance(0.25) { 0.0 } else { r.range(2.0, 16.0) };
         let dx = r.range(-8.0, 8.0);
         let dy = r.range(-8.0, 8.0);
@@ -186,11 +210,11 @@ pub fn gen_rec(r: &mut Rng, readers: bool) -> Rec {
             blend: 0,
         });
     }
-    if !readers && r.chance(0.10) {
+    if effects && r.chance(0.10) {
         rec.post
             .push(Post::LayerBlur(if r.chance(0.2) { 0.0 } else { r.range(2.0, 14.0) }));
     }
-    if !readers && r.chance(0.07) {
+    if effects && r.chance(0.07) {
         rec.post.push(Post::Noise {
             noise_type: r.below(3),
             size: r.range(0.5, 4.0),
@@ -200,19 +224,19 @@ pub fn gen_rec(r: &mut Rng, readers: bool) -> Rec {
             opacity: r.range(0.25, 1.0),
         });
     }
-    if !readers && r.chance(0.07) {
+    if effects && r.chance(0.07) {
         rec.post.push(Post::Texture {
             size: r.range(2.0, 12.0),
             radius: r.range(1.0, 8.0),
             clip_to_shape: r.chance(0.5),
         });
     }
-    if !readers && r.chance(0.08) {
+    if effects && r.chance(0.08) {
         rec.layer_blend = 1 + r.below(17);
     }
-    if !readers && !text && r.chance(0.07) {
+    if effects && !text && r.chance(0.07) {
         rec.mask = 1 + r.below(5);
-    } else if !readers && r.chance(0.05) {
+    } else if effects && r.chance(0.05) {
         rec.flags |= 256;
     }
     if !text && r.chance(0.6) {
@@ -266,9 +290,7 @@ pub fn gen_rec(r: &mut Rng, readers: bool) -> Rec {
     }
     if r.chance(0.25) {
         rec.opacity = r.range(0.2, 0.95);
-        // Readers can't sit inside a layer that fades as one in phase 1: keep isolation out of
-        // the reader runs.
-        if !readers && r.chance(0.6) {
+        if r.chance(0.6) {
             rec.flags |= 2;
         }
     }
@@ -294,18 +316,27 @@ pub fn gen_rec(r: &mut Rng, readers: bool) -> Rec {
 
 impl Model {
     pub fn new(r: &mut Rng, n: u32, readers: bool) -> Self {
-        let mut m = Model {
-            nodes: BTreeMap::new(),
-            children: HashMap::new(),
-            next: 1,
-            readers,
-        };
+        Self::new_with_features(r, n, readers, !readers)
+    }
+
+    pub fn new_with_features(r: &mut Rng, n: u32, readers: bool, effects: bool) -> Self {
+        let mut m = Self::empty(1, readers, effects);
         for _ in 0..n {
             let parent = m.random_parent(r);
             m.insert(r, parent);
         }
         m
     }
+    pub fn empty(next: u32, readers: bool, effects: bool) -> Self {
+        Self {
+            nodes: BTreeMap::new(),
+            children: HashMap::new(),
+            next,
+            readers,
+            effects,
+        }
+    }
+
     pub fn random_parent(&self, r: &mut Rng) -> u32 {
         if self.nodes.is_empty() || r.chance(0.4) {
             return 0;
@@ -316,7 +347,7 @@ impl Model {
     pub fn insert(&mut self, r: &mut Rng, parent: u32) -> u32 {
         let id = self.next;
         self.next += 1;
-        let rec = gen_rec(r, self.readers);
+        let rec = gen_rec(r, self.readers, self.effects);
         self.nodes.insert(id, (parent, rec));
         let list = self.children.entry(parent).or_default();
         let at = r.below(list.len() as u32 + 1) as usize;
@@ -433,7 +464,7 @@ impl Model {
                     let Some((p, old)) = self.nodes.get(&id).cloned() else {
                         continue;
                     };
-                    let mut rec = gen_rec(r, self.readers);
+                    let mut rec = gen_rec(r, self.readers, self.effects);
                     // Keep a container's children drawn where they were, sometimes.
                     if old.ops.iter().any(|o| matches!(o, Op::Children))
                         && !rec.ops.iter().any(|o| matches!(o, Op::Children))
