@@ -68,6 +68,35 @@ function trackList(tracks: readonly GridTrack[]): string {
     : all.join(" ");
 }
 
+/** An auto-layout inside stroke excluded from layout, drawn as a border overlay. */
+interface ExcludedStroke {
+  readonly color: string;
+  readonly resolved?: string;
+  readonly sides: readonly [number, number, number, number];
+}
+
+function excludedInsideStroke(doc: Doc, node: NodeRecord): ExcludedStroke | null {
+  if (node.type !== "frame") return null;
+  const p = node.props;
+  if (getProp(p, "layoutMode") === "none") return null;
+  if (getProp(p, "strokeAlign") !== "inside" || getProp(p, "strokesIncludedInLayout")) return null;
+  const sides = strokeWidths(node);
+  if (Math.max(...sides) <= 0) return null;
+  const box = { w: getProp(p, "width") || 1, h: getProp(p, "height") || 1 };
+  const strokes = getProp(p, "strokes")
+    .map((paint) => paintCss(paint, box.w, box.h))
+    .filter((v): v is string => v !== null);
+  const first = strokes[0];
+  if (!first) return null;
+  const bindings = getProp(p, "bindings");
+  const id = bindingVariable(bindings.stroke);
+  const variable = id ? doc.get(id) : undefined;
+  const token = variable ? getProp(variable.props, "name") : undefined;
+  return token
+    ? { color: `var(${cssVariableName(token)})`, resolved: first, sides }
+    : { color: first, sides };
+}
+
 /** CSS declarations for one layer, in the order a person would write them. */
 export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
   const p = node.props;
@@ -146,6 +175,12 @@ export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
         property: "align-self",
         value: parentLayout === "grid" ? alignSelf : flexAlign(alignSelf),
       });
+  }
+
+  const excludedStroke = excludedInsideStroke(doc, node);
+  if (excludedStroke && !out.some((d) => d.property === "position")) {
+    // Establish a containing block for the positioned ::after stroke overlay.
+    out.push({ property: "position", value: "relative" });
   }
 
   // Layout.
@@ -331,7 +366,8 @@ export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
     .filter((v): v is string => v !== null);
   const sides = strokeWidths(node);
   const weight = sides[0];
-  if (strokes[0] && Math.max(...sides) > 0 && !isText) {
+  const shadows: string[] = [];
+  if (strokes[0] && Math.max(...sides) > 0 && !isText && !excludedStroke) {
     const align = getProp(p, "strokeAlign");
     const color = tokenName("stroke")
       ? `var(${cssVariableName(tokenName("stroke") as string)})`
@@ -351,7 +387,6 @@ export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
     }
   }
 
-  const shadows: string[] = [];
   for (const e of getProp(p, "effects")) {
     if (e.visible === false) continue;
     if (e.type === "drop-shadow" || e.type === "inner-shadow") {
@@ -439,10 +474,32 @@ export function className(name: string): string {
 /** A CSS rule for a layer, with resolved values of variables in comments. */
 export function cssRule(doc: Doc, node: NodeRecord): string {
   const name = layerName(node);
+  const cls = className(name);
   const lines = cssFor(doc, node).map(
     (d) => `  ${d.property}: ${d.value};${d.resolved ? ` /* ${d.resolved} */` : ""}`,
   );
-  return `/* ${name} */\n.${className(name)} {\n${lines.join("\n")}\n}`;
+  const base = `/* ${name} */\n.${cls} {\n${lines.join("\n")}\n}`;
+  const stroke = excludedInsideStroke(doc, node);
+  if (!stroke) return base;
+  // Excluded inside strokes paint once over children without consuming layout space.
+  const comment = stroke.resolved ? ` /* ${stroke.resolved} */` : "";
+  const border = isUniform(stroke.sides)
+    ? [`  border: ${px(stroke.sides[0])} solid ${stroke.color};${comment}`]
+    : [
+        "  border-style: solid;",
+        `  border-color: ${stroke.color};${comment}`,
+        `  border-width: ${stroke.sides.map(px).join(" ")};`,
+      ];
+  const overlay = [
+    '  content: "";',
+    "  position: absolute;",
+    "  inset: 0;",
+    "  pointer-events: none;",
+    "  border-radius: inherit;",
+    "  box-sizing: border-box;",
+    ...border,
+  ];
+  return `${base}\n\n.${cls}::after {\n${overlay.join("\n")}\n}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -662,6 +719,35 @@ export function tailwindFor(doc: Doc, node: NodeRecord): string[] {
         break;
       default:
         classes.push(`[${d.property}:${d.value.replace(/\s+/g, "_")}]`);
+    }
+  }
+  const stroke = excludedInsideStroke(doc, node);
+  if (stroke) {
+    const [top, right, bottom, left] = stroke.sides;
+    const color = stroke.color.startsWith("var(")
+      ? `border-[color:${stroke.color}]`
+      : tw("border", stroke.color);
+    classes.push(
+      "after:content-['']",
+      "after:pointer-events-none",
+      "after:absolute",
+      "after:inset-0",
+      "after:box-border",
+      "after:rounded-[inherit]",
+      "after:border-solid",
+      `after:${color}`,
+    );
+    if (isUniform(stroke.sides)) {
+      classes.push(`after:border-[${px(top)}]`);
+    } else {
+      const sideTw = (prefix: string, w: number) =>
+        w === 0 ? `after:${prefix}-0` : `after:${prefix}-[${px(w)}]`;
+      classes.push(
+        sideTw("border-t", top),
+        sideTw("border-r", right),
+        sideTw("border-b", bottom),
+        sideTw("border-l", left),
+      );
     }
   }
   return classes;

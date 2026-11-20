@@ -5,9 +5,12 @@
  */
 import { SceneGraph, type SceneNode } from "@open-pencil/scene-graph";
 import { describe, expect, it } from "vitest";
-import type { RestIds } from "../src/ids";
+import { adaptNode, localMatrix } from "../src/adapt";
+import { RestIds } from "../src/ids";
+import { FigNotes } from "../src/notes";
 import type { RawRecord } from "../src/raw";
 import { applySwappedLooks } from "../src/swaps";
+import { layerBoundVariables } from "../src/tokens";
 
 const WHITE = { r: 1, g: 1, b: 1, a: 1 };
 const DARK = { r: 0.09, g: 0.09, b: 0.09, a: 1 };
@@ -263,4 +266,240 @@ it("carries counterAxisAlignContent from the selected variant and respects expli
     over.layers,
   );
   expect(over.graph.getNode(over.copy.id)?.counterAxisAlignContent).toBe("AUTO");
+});
+
+it("keeps an independently authored multiplier even when its saved number equals the old main", () => {
+  const { graph, copy, ids, records, layers } = scene();
+  const collection = graph.createCollection("Spacing");
+  const wide = graph.createMode(collection.id, "Wide") as string;
+  const regular = graph.createVariable("Regular", "FLOAT", collection.id, 10);
+  regular.valuesByMode[wide] = 5;
+  const compact = graph.createVariable("Compact", "FLOAT", collection.id, 8);
+  const [oldId, newId] = [...layers.values()] as [string, string];
+  graph.updateNode(oldId, { paddingLeft: 10, boundVariables: { paddingLeft: regular.id } });
+  graph.updateNode(newId, { paddingLeft: 8, boundVariables: { paddingLeft: compact.id } });
+  graph.updateNode(copy.id, {
+    paddingLeft: 10,
+    boundVariables: { paddingLeft: regular.id },
+    variableBindingScales: { paddingLeft: 2 },
+    variableModes: { [collection.id]: wide },
+  });
+  applySwappedLooks(graph, ids, records, layers);
+  expect(graph.getNode(copy.id)).toMatchObject({
+    paddingLeft: 10,
+    boundVariables: { paddingLeft: regular.id },
+    variableBindingScales: { paddingLeft: 2 },
+  });
+});
+
+it("takes an inherited padding binding through a swap at 2x instance scale", () => {
+  const { graph, copy, ids, records, layers } = scene();
+  const collection = graph.createCollection("Spacing");
+  const regular = graph.createVariable("Regular", "FLOAT", collection.id, 10);
+  const compact = graph.createVariable("Compact", "FLOAT", collection.id, 8);
+  const [oldId, newId] = [...layers.values()] as [string, string];
+  graph.updateNode(oldId, { paddingLeft: 10, boundVariables: { paddingLeft: regular.id } });
+  graph.updateNode(newId, { paddingLeft: 8, boundVariables: { paddingLeft: compact.id } });
+  graph.updateNode(copy.id, {
+    paddingLeft: 20,
+    componentScale: 2,
+    boundVariables: { paddingLeft: regular.id },
+    variableBindingScales: { paddingLeft: 2 },
+  });
+  applySwappedLooks(graph, ids, records, layers);
+  const result = graph.getNode(copy.id) as SceneNode;
+  expect(result.paddingLeft).toBe(16);
+  expect(result.boundVariables.paddingLeft).toBe(compact.id);
+  expect(result.variableBindingScales.paddingLeft).toBe(2);
+  expect(
+    layerBoundVariables(result, (id) =>
+      typeof id === "string" ? { type: "VARIABLE_ALIAS", id } : undefined,
+    ),
+  ).toBeUndefined();
+});
+
+it("keeps the selected mode's scaled stroke weight as the adapter's literal fallback", () => {
+  const { graph, copy, ids, records, layers } = scene({ strokeWeight: 10 });
+  const collection = graph.createCollection("Strokes");
+  const wide = graph.createMode(collection.id, "Wide") as string;
+  const regular = graph.createVariable("Regular", "FLOAT", collection.id, 10);
+  const compact = graph.createVariable("Compact", "FLOAT", collection.id, 8);
+  compact.valuesByMode[wide] = 12;
+  const [oldId, newId] = [...layers.values()] as [string, string];
+  graph.updateNode(oldId, { strokeWeight: 10, boundVariables: { strokeWeight: regular.id } });
+  graph.updateNode(newId, {
+    strokeWeight: 16,
+    strokes: [
+      { color: DARK, weight: 16, opacity: 1, visible: true, align: "INSIDE" },
+    ] as SceneNode["strokes"],
+    boundVariables: { strokeWeight: compact.id },
+    variableBindingScales: { strokeWeight: 2 },
+  });
+  graph.updateNode(copy.id, {
+    boundVariables: { strokeWeight: regular.id },
+    variableModes: { [collection.id]: wide },
+  });
+  applySwappedLooks(graph, ids, records, layers);
+
+  const result = graph.getNode(copy.id) as SceneNode;
+  const parent = graph.getNode(result.parentId as string) as SceneNode;
+  const converted = adaptNode(result, parent, localMatrix(parent), {
+    graph,
+    ids: new RestIds(graph, layers),
+    records,
+    notes: new FigNotes(),
+    aliasOf: (id) => (typeof id === "string" ? { type: "VARIABLE_ALIAS", id } : undefined),
+  });
+  expect(converted.boundVariables?.strokeWeight).toBeUndefined();
+  expect(converted.strokeWeight).toBe(24);
+});
+
+it("writes a placed padding fallback once when the chosen variant has a multiplier", () => {
+  const { graph, copy, ids, records, layers } = scene({ paddingLeft: 10 });
+  const collection = graph.createCollection("Spacing");
+  const wide = graph.createMode(collection.id, "Wide") as string;
+  const regular = graph.createVariable("Regular", "FLOAT", collection.id, 10);
+  const compact = graph.createVariable("Compact", "FLOAT", collection.id, 8);
+  compact.valuesByMode[wide] = 12;
+  const [oldId, newId] = [...layers.values()] as [string, string];
+  graph.updateNode(oldId, { paddingLeft: 10, boundVariables: { paddingLeft: regular.id } });
+  graph.updateNode(newId, {
+    paddingLeft: 16,
+    boundVariables: { paddingLeft: compact.id },
+    variableBindingScales: { paddingLeft: 2 },
+  });
+  graph.updateNode(copy.id, {
+    boundVariables: { paddingLeft: regular.id },
+    variableModes: { [collection.id]: wide },
+  });
+  applySwappedLooks(graph, ids, records, layers);
+  const result = graph.getNode(copy.id) as SceneNode;
+  expect(result.paddingLeft).toBe(24);
+  expect(
+    layerBoundVariables(result, (id) =>
+      typeof id === "string" ? { type: "VARIABLE_ALIAS", id } : undefined,
+    ),
+  ).toBeUndefined();
+});
+
+it("preserves explicit scaled padding on a 2x source instance record even when it equals old main times scale", () => {
+  const { graph, copy, ids, records, layers } = scene();
+  const [oldId, newId] = [...layers.values()] as [string, string];
+  graph.updateNode(oldId, { paddingLeft: 10 });
+  graph.updateNode(newId, { paddingLeft: 8 });
+  graph.updateNode(copy.id, { paddingLeft: 20, componentScale: 2 });
+  records.set("9:9", {
+    symbolData: { symbolID: { sessionID: 1, localID: 1 } },
+    stackHorizontalPadding: 20,
+  } as RawRecord);
+
+  applySwappedLooks(graph, ids, records, layers);
+
+  expect(graph.getNode(copy.id)?.paddingLeft).toBe(20);
+});
+
+it("preserves explicit scaled padding from a source instance root claim at 2x scale", () => {
+  const { graph, copy, ids, records, layers } = scene();
+  const [oldId, newId] = [...layers.values()] as [string, string];
+  graph.updateNode(oldId, { paddingLeft: 10 });
+  graph.updateNode(newId, { paddingLeft: 8 });
+  graph.updateNode(copy.id, { paddingLeft: 20, componentScale: 2 });
+  records.set("9:9", {
+    symbolData: {
+      symbolID: { sessionID: 1, localID: 1 },
+      symbolOverrides: [
+        { guidPath: { guids: [{ sessionID: 1, localID: 1 }] }, stackHorizontalPadding: 20 },
+      ],
+    },
+  } as unknown as RawRecord);
+
+  applySwappedLooks(graph, ids, records, layers);
+
+  expect(graph.getNode(copy.id)?.paddingLeft).toBe(20);
+});
+
+it("preserves explicit padding on a unit-scale source instance record matching old main", () => {
+  const { graph, copy, ids, records, layers } = scene();
+  const [oldId, newId] = [...layers.values()] as [string, string];
+  graph.updateNode(oldId, { paddingLeft: 10 });
+  graph.updateNode(newId, { paddingLeft: 8 });
+  graph.updateNode(copy.id, { paddingLeft: 10, componentScale: 1 });
+  records.set("9:9", {
+    symbolData: { symbolID: { sessionID: 1, localID: 1 } },
+    stackHorizontalPadding: 10,
+  } as RawRecord);
+
+  applySwappedLooks(graph, ids, records, layers);
+
+  expect(graph.getNode(copy.id)?.paddingLeft).toBe(10);
+});
+
+it("preserves explicit legacy stackPadding shorthand on a 2x source instance record", () => {
+  const { graph, copy, ids, records, layers } = scene();
+  const [oldId, newId] = [...layers.values()] as [string, string];
+  graph.updateNode(oldId, {
+    paddingTop: 10,
+    paddingRight: 10,
+    paddingBottom: 10,
+    paddingLeft: 10,
+  });
+  graph.updateNode(newId, {
+    paddingTop: 8,
+    paddingRight: 8,
+    paddingBottom: 8,
+    paddingLeft: 8,
+  });
+  graph.updateNode(copy.id, {
+    paddingTop: 20,
+    paddingRight: 20,
+    paddingBottom: 20,
+    paddingLeft: 20,
+    componentScale: 2,
+  });
+  records.set("9:9", {
+    symbolData: { symbolID: { sessionID: 1, localID: 1 } },
+    stackPadding: 20,
+  } as unknown as RawRecord);
+
+  applySwappedLooks(graph, ids, records, layers);
+
+  expect(graph.getNode(copy.id)).toMatchObject({
+    paddingTop: 20,
+    paddingRight: 20,
+    paddingBottom: 20,
+    paddingLeft: 20,
+  });
+});
+
+it("still swaps cached unit-scale padding from oldRecord unless explicitly claimed in root overrides", () => {
+  const cached = scene();
+  const [cachedOld, cachedNew] = [...cached.layers.values()] as [string, string];
+  cached.graph.updateNode(cachedOld, { paddingLeft: 10 });
+  cached.graph.updateNode(cachedNew, { paddingLeft: 8 });
+  cached.graph.updateNode(cached.copy.id, { paddingLeft: 10, componentScale: 1 });
+  cached.records.set("1:1", { stackHorizontalPadding: 10 } as RawRecord);
+  cached.records.set("9:9", {
+    symbolData: { symbolID: { sessionID: 1, localID: 1 } },
+    stackHorizontalPadding: 10,
+  } as RawRecord);
+  applySwappedLooks(cached.graph, cached.ids, cached.records, cached.layers);
+  expect(cached.graph.getNode(cached.copy.id)?.paddingLeft).toBe(8);
+
+  const claimed = scene();
+  const [claimedOld, claimedNew] = [...claimed.layers.values()] as [string, string];
+  claimed.graph.updateNode(claimedOld, { paddingLeft: 10 });
+  claimed.graph.updateNode(claimedNew, { paddingLeft: 8 });
+  claimed.graph.updateNode(claimed.copy.id, { paddingLeft: 10, componentScale: 1 });
+  claimed.records.set("1:1", { stackHorizontalPadding: 10 } as RawRecord);
+  claimed.records.set("9:9", {
+    symbolData: {
+      symbolID: { sessionID: 1, localID: 1 },
+      symbolOverrides: [
+        { guidPath: { guids: [{ sessionID: 1, localID: 1 }] }, stackHorizontalPadding: 10 },
+      ],
+    },
+    stackHorizontalPadding: 10,
+  } as unknown as RawRecord);
+  applySwappedLooks(claimed.graph, claimed.ids, claimed.records, claimed.layers);
+  expect(claimed.graph.getNode(claimed.copy.id)?.paddingLeft).toBe(10);
 });

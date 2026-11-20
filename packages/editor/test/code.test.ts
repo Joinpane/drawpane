@@ -421,4 +421,113 @@ describe("design to code", () => {
       top: "0px",
     });
   });
+
+  it("writes excluded inside strokes on auto layout frames as a positioned border overlay", () => {
+    const editor = setup();
+    const excluded = editor.createLayer("frame", { x: 0, y: 0, width: 200, height: 80 }, "p", {
+      name: "Card",
+      layoutMode: "row",
+      cornerRadius: 8,
+      strokes: [{ type: "solid", color: "#111111" }],
+      strokeWeight: 2,
+      strokeAlign: "inside",
+      strokesIncludedInLayout: false,
+    }) as string;
+    const excludedNode = editor.doc.get(excluded) as never;
+    const excludedCss = decl(cssFor(editor.doc, excludedNode));
+    expect(excludedCss.position).toBe("relative");
+    expect(excludedCss).not.toHaveProperty("border");
+    expect(excludedCss).not.toHaveProperty("box-sizing");
+    expect(excludedCss).not.toHaveProperty("box-shadow");
+
+    const excludedRule = cssRule(editor.doc, excludedNode);
+    expect(excludedRule).toContain(".card::after {");
+    expect(excludedRule).toContain('  content: "";');
+    expect(excludedRule).toContain("  position: absolute;");
+    expect(excludedRule).toContain("  inset: 0;");
+    expect(excludedRule).toContain("  pointer-events: none;");
+    expect(excludedRule).toContain("  border-radius: inherit;");
+    expect(excludedRule).toContain("  box-sizing: border-box;");
+    expect(excludedRule).toContain("  border: 2px solid #111111;");
+    expect(tailwindFor(editor.doc, excludedNode)).toEqual(
+      expect.arrayContaining([
+        "relative",
+        "after:content-['']",
+        "after:pointer-events-none",
+        "after:absolute",
+        "after:inset-0",
+        "after:box-border",
+        "after:rounded-[inherit]",
+        "after:border-solid",
+        "after:border-[#111111]",
+        "after:border-[2px]",
+      ]),
+    );
+
+    const included = editor.createLayer("frame", { x: 0, y: 100, width: 200, height: 80 }, "p", {
+      layoutMode: "row",
+      strokes: [{ type: "solid", color: "#111111" }],
+      strokeWeight: 2,
+      strokeAlign: "inside",
+      strokesIncludedInLayout: true,
+    }) as string;
+    const includedNode = editor.doc.get(included) as never;
+    const includedCss = decl(cssFor(editor.doc, includedNode));
+    expect(includedCss).toMatchObject({
+      border: "2px solid #111111",
+      "box-sizing": "border-box",
+    });
+    expect(includedCss).not.toHaveProperty("box-shadow");
+    expect(cssRule(editor.doc, includedNode)).not.toContain("::after");
+
+    // Adjacent nonuniform translucent sides draw as a single border in ::after (no double-composited
+    // corners) and paint over children, while effect shadows stay on the frame's box-shadow.
+    const perSide = editor.createLayer("frame", { x: 0, y: 200, width: 200, height: 80 }, "p", {
+      name: "Panel",
+      layoutMode: "column",
+      strokes: [{ type: "solid", color: "#11111180" }],
+      strokeWeight: 1,
+      strokeWeights: [2, 3, 0, 0],
+      strokeAlign: "inside",
+      strokesIncludedInLayout: false,
+      effects: [{ type: "drop-shadow", color: "#00000033", x: 0, y: 4, blur: 8, spread: 0 }],
+    }) as string;
+    const perSideNode = editor.doc.get(perSide) as never;
+    const perSideCss = decl(cssFor(editor.doc, perSideNode));
+    expect(perSideCss.position).toBe("relative");
+    expect(perSideCss["box-shadow"]).toBe("0px 4px 8px 0px rgb(0 0 0 / 20%)");
+    expect(perSideCss).not.toHaveProperty("border-width");
+    expect(perSideCss).not.toHaveProperty("box-sizing");
+
+    const perSideRule = cssRule(editor.doc, perSideNode);
+    expect(perSideRule).toContain(".panel::after {");
+    expect(perSideRule).toContain("  border-style: solid;");
+    expect(perSideRule).toContain("  border-color: rgb(17 17 17 / 50%);");
+    expect(perSideRule).toContain("  border-width: 2px 3px 0px 0px;");
+    expect(tailwindFor(editor.doc, perSideNode)).toEqual(
+      expect.arrayContaining([
+        "relative",
+        "shadow-[0px_4px_8px_0px_rgb(0_0_0_/_20%)]",
+        "after:border-solid",
+        "after:border-[rgb(17_17_17_/_50%)]",
+        "after:border-t-[2px]",
+        "after:border-r-[3px]",
+        "after:border-b-0",
+        "after:border-l-0",
+      ]),
+    );
+
+    const plain = editor.createLayer("frame", { x: 0, y: 300, width: 200, height: 80 }, "p", {
+      strokes: [{ type: "solid", color: "#111111" }],
+      strokeWeight: 2,
+      strokeAlign: "inside",
+      strokesIncludedInLayout: false,
+    }) as string;
+    const plainNode = editor.doc.get(plain) as never;
+    expect(decl(cssFor(editor.doc, plainNode))).toMatchObject({
+      border: "2px solid #111111",
+      "box-sizing": "border-box",
+    });
+    expect(cssRule(editor.doc, plainNode)).not.toContain("::after");
+  });
 });

@@ -12,7 +12,7 @@ export interface IconButtonProps
   /** Shown in the tooltip after the label, such as "R" or "⌘ .". */
   shortcut?: string | undefined;
   /** Toggle state; renders aria-pressed. Omit for one-shot actions. */
-  pressed?: boolean;
+  pressed?: boolean | "mixed";
   /** `sm` 24px in pane headers (default), `md` 28px in the command strip. */
   size?: "sm" | "md";
   /** Show the label and shortcut in a Tooltip on hover and keyboard focus. Default true. */
