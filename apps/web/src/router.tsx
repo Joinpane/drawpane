@@ -41,6 +41,11 @@ const PresentPage = lazy(() =>
 const SharedPrototypePage = lazy(() =>
   import("./prototype/SharedPrototypePage").then((m) => ({ default: m.SharedPrototypePage })),
 );
+const RendererDiagnosticsPage = lazy(() =>
+  import("./diagnostics/RendererDiagnosticsPage").then((m) => ({
+    default: m.RendererDiagnosticsPage,
+  })),
+);
 
 interface RouterContext {
   queryClient: QueryClient;
@@ -266,6 +271,17 @@ const sharedRoute = createRoute({
   ),
 });
 
+/** Standalone renderer diagnostics: public, no sign-in, no API calls, not linked from nav. */
+const rendererDiagnosticsRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/diagnostics/renderer",
+  component: () => (
+    <Suspense fallback={<div className="app-loading" aria-busy="true" />}>
+      <RendererDiagnosticsPage />
+    </Suspense>
+  ),
+});
+
 const routeTree = rootRoute.addChildren([
   unsubscribeRoute,
   indexRoute,
@@ -281,6 +297,7 @@ const routeTree = rootRoute.addChildren([
   fileRoute,
   presentRoute,
   sharedRoute,
+  rendererDiagnosticsRoute,
 ]);
 
 export const router = createRouter({

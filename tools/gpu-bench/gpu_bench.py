@@ -1,8 +1,10 @@
-"""Drawpane's browser benchmarks on a real GPU, on Modal.
+"""Drawpane's browser benchmarks and parity runs on a real GPU, on Modal.
 
 Run from a checkout (see README.md):
 
     pnpm gpu-bench -- bench/canvas.spec.ts
+    pnpm gpu-bench --browsers chromium,firefox,webkit -- bench/canvas.spec.ts
+    pnpm gpu-bench --browsers chromium,firefox,webkit --project auto -- parity/engine.spec.ts
     pnpm gpu-bench --ref origin/main --ref HEAD --modes gpu,cpu -- bench/canvas.spec.ts
 
 Locally this packs each checkout to compare (a commit through `git archive`,
@@ -10,8 +12,8 @@ or a worktree's tracked and untracked-but-not-ignored files as they are on
 disk), uploads the private kit named by --file to a Modal Volume (once per
 content hash), and calls one GPU container that, for every checkout in turn:
 installs its dependencies, builds apps/web, passes the GPU gate (gate.mjs)
-and runs the Playwright bench project. The results come back as a tarball
-and are unpacked into the output folder, with a summary.
+and runs the Playwright project for each selected browser. The results come
+back as a tarball and are unpacked into the output folder, with a summary.
 
 The container is single-use, has a timeout, and nothing is kept warm.
 """
@@ -58,6 +60,8 @@ PRICE_GIB = 0.00000222
 CPU_CORES = 4.0
 MEMORY_MIB = 12288
 
+BROWSERS = ("chromium", "firefox", "webkit")
+
 # Chromium's flags for each mode. `--headless` (new headless) comes from
 # Playwright; the wrapper merges every --enable-features into one.
 #
@@ -94,6 +98,7 @@ image = (
     .apt_install(
         "ca-certificates", "curl", "xz-utils", "git", "vulkan-tools", "libvulkan1",
         "libxext6", "libx11-6", "libatomic1", "dbus", "fonts-liberation",
+        "xvfb", "mesa-utils", "openssl",
         # GLVND: the NVIDIA Vulkan driver (libGLX_nvidia) loads it at run time and
         # answers no vkCreateInstance without it.
         "libglvnd0", "libgl1", "libglx0", "libegl1",
@@ -106,7 +111,7 @@ image = (
     .env({"PATH": "/opt/node/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"})
     .run_commands(
         f"npm install -g pnpm@{PNPM_VERSION} playwright@{PLAYWRIGHT_VERSION}",
-        "playwright install --with-deps chromium",
+        "playwright install --with-deps chromium firefox webkit",
     )
     # The render engine (packages/engine, decision 0040) is Rust built to WebAssembly with its
     # folder's mise.toml; apps/web's build needs it. The toolchain is baked in so a run only
@@ -180,36 +185,81 @@ def _vulkan(env: dict) -> dict:
             "vulkaninfo": summary}
 
 
+def _start_xvfb() -> subprocess.Popen | None:
+    """Starts Xvfb on :99 so browsers that need an X11 display for EGL/GLX have one."""
+    proc = subprocess.Popen(
+        ["Xvfb", ":99", "-screen", "0", "1920x1080x24", "+extension", "GLX", "+render", "-noreset"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    time.sleep(0.5)
+    return proc
+
+
 @app.function(image=image, gpu="T4", cpu=2.0, memory=4096, timeout=900, single_use_containers=True)
 def doctor(sets: list[dict]) -> dict:
-    """The GPU stack without a checkout (`--doctor`): Vulkan, then the gate for each
-    set ({"mode": "gpu" | "webgpu" | "cpu", "flags": [...]}) in the image's Chromium.
-    A flag "env:NAME=value" sets a variable for that set, "env:-NAME" unsets one."""
+    """The GPU stack without a checkout (`--doctor`): Vulkan, EGL/GLVND inventory, then the
+    gate for each set ({"browser": "chromium"|"firefox"|"webkit", "mode": ..., "flags": [...],
+    "headless": True|False}) in the image's browsers."""
     out = Path("/out")
     out.mkdir()
     env = _container_env()
-    vk = _vulkan(env)
-    lines = [f"{vk['gpu']}, driver {vk['driver']}, Vulkan devices {vk['vulkanDevices']}"]
-    (out / "vulkaninfo.txt").write_text(vk["vulkaninfo"])
-    chrome = str(next(Path("/ms-playwright").glob("chromium-*/chrome-linux64/chrome")))
-    for n, one in enumerate(sets):
-        at = out / f"gate-{n}"
-        at.mkdir()
-        set_env = dict(env)
-        for item in one["flags"]:
-            if item.startswith("env:-"):
-                set_env.pop(item[5:], None)
-            elif item.startswith("env:"):
-                k, _, v = item[4:].partition("=")
-                set_env[k] = v
-        flags = [f for f in one["flags"] if not f.startswith("env:")]
-        wrapper = _wrapper(Path(f"/tmp/chrome-doctor-{n}"), chrome, flags, at / "chrome.log")
-        code = _run(["node", "/opt/gpu-bench/gate.mjs", "--chrome", wrapper, "--expect", one["mode"],
-                     "--out", str(at)], env=set_env, log=at / "gate.log", timeout=240)
-        lines.append(f"[gate-{n}] {one['mode']}: {'passed' if code == 0 else 'FAILED'} with "
-                     f"{' '.join(one['flags'])}")
-    (out / "doctor.txt").write_text("\n".join(lines) + "\n")
-    return {"lines": lines, "tar": _tar(out)}
+    xvfb = _start_xvfb()
+    try:
+        vk = _vulkan(env)
+        lines = [f"{vk['gpu']}, driver {vk['driver']}, Vulkan devices {vk['vulkanDevices']}"]
+        (out / "vulkaninfo.txt").write_text(vk["vulkaninfo"])
+        gl_info = _sh(
+            "ls -la /usr/share/glvnd/egl_vendor.d/ /etc/vulkan/icd.d/ /dev/dri 2>&1; "
+            "echo '--- glxinfo ---'; DISPLAY=:99 glxinfo -B 2>&1; "
+            "echo '--- eglinfo ---'; eglinfo -B 2>&1",
+            env,
+        )
+        (out / "gl-inventory.txt").write_text(gl_info)
+        chrome = str(next(Path("/ms-playwright").glob("chromium-*/chrome-linux64/chrome")))
+        for n, one in enumerate(sets):
+            browser = one.get("browser", "chromium")
+            headless = one.get("headless", True)
+            mode = one["mode"]
+            at = out / f"gate-{n}-{browser}-{mode}{'' if headless else '-xvfb'}"
+            at.mkdir()
+            set_env = dict(env)
+            if not headless:
+                set_env["DISPLAY"] = ":99"
+            for item in one.get("flags", []):
+                if item.startswith("env:-"):
+                    set_env.pop(item[5:], None)
+                elif item.startswith("env:"):
+                    k, _, v = item[4:].partition("=")
+                    set_env[k] = v
+            flags = [f for f in one.get("flags", []) if not f.startswith("env:")]
+            cmd = [
+                "node",
+                "/opt/gpu-bench/gate.mjs",
+                "--browser",
+                browser,
+                "--headless",
+                "true" if headless else "false",
+                "--host-gpu-ok",
+                "true" if mode != "cpu" and vk["ok"] else "false",
+                "--expect",
+                mode,
+                "--out",
+                str(at),
+            ]
+            if browser == "chromium":
+                wrapper = _wrapper(Path(f"/tmp/chrome-doctor-{n}"), chrome, flags, at / "chrome.log")
+                cmd += ["--chrome", wrapper]
+            code = _run(cmd, env=set_env, log=at / "gate.log", timeout=240)
+            lines.append(
+                f"[gate-{n}] {browser} ({mode}, headless={headless}): "
+                f"{'passed' if code == 0 else 'FAILED'} with {' '.join(one.get('flags', []))}"
+            )
+        (out / "doctor.txt").write_text("\n".join(lines) + "\n")
+        return {"lines": lines, "tar": _tar(out)}
+    finally:
+        if xvfb:
+            xvfb.terminate()
 
 
 def _toolchain(src: Path, env: dict) -> dict:
@@ -241,21 +291,24 @@ def _toolchain(src: Path, env: dict) -> dict:
     return {"node": node, "pnpm": pnpm}
 
 
-def _chromium(src: Path, env: dict) -> tuple[str, str]:
-    """The Chromium the checkout's Playwright pins (installed if the image lacks it)."""
+def _browser_bin(src: Path, env: dict, browser_name: str) -> tuple[str | None, str]:
+    """Ensures the checkout's pinned Playwright browser is installed and returns its path and version."""
     web = src / "apps/web"
     core = subprocess.run(
         ["node", "-p", "require.resolve('playwright-core/package.json',"
          "{paths:[require.resolve('@playwright/test')]})"],
         cwd=web, env=env, capture_output=True, text=True, check=True).stdout.strip()
     browsers = json.loads((Path(core).parent / "browsers.json").read_text())
-    entry = next(b for b in browsers["browsers"] if b["name"] == "chromium")
-    exe = Path(env["PLAYWRIGHT_BROWSERS_PATH"]) / f"chromium-{entry['revision']}/chrome-linux64/chrome"
-    if not exe.exists():
-        _log(f"installing Chromium {entry['browserVersion']} (r{entry['revision']})")
-        subprocess.run(["node_modules/.bin/playwright", "install", "chromium"], cwd=web, env=env,
+    entry = next(b for b in browsers["browsers"] if b["name"] == browser_name)
+    root = Path(env["PLAYWRIGHT_BROWSERS_PATH"]) / f"{browser_name}-{entry['revision']}"
+    if not root.exists():
+        _log(f"installing {browser_name} {entry['browserVersion']} (r{entry['revision']})")
+        subprocess.run(["node_modules/.bin/playwright", "install", browser_name], cwd=web, env=env,
                        check=True)
-    return str(exe), entry["browserVersion"]
+    exe = None
+    if browser_name == "chromium":
+        exe = str(root / "chrome-linux64/chrome")
+    return exe, entry["browserVersion"]
 
 
 def _wrapper(path: Path, chrome: str, flags: list[str], log: Path) -> str:
@@ -293,8 +346,28 @@ def _container_env() -> dict:
     os.makedirs("/tmp/xdg", mode=0o700, exist_ok=True)
     subprocess.run("mkdir -p /run/dbus && dbus-daemon --system --fork", shell=True,
                    capture_output=True)
-    return {**os.environ, "CI": "", "VK_DRIVER_FILES": NVIDIA_ICD, "VK_ICD_FILENAMES": NVIDIA_ICD,
-            "XDG_RUNTIME_DIR": "/tmp/xdg"}
+    env = {
+        **os.environ,
+        "CI": "",
+        "VK_DRIVER_FILES": NVIDIA_ICD,
+        "VK_ICD_FILENAMES": NVIDIA_ICD,
+        "XDG_RUNTIME_DIR": "/tmp/xdg",
+    }
+    # Point EGL at NVIDIA's vendor ICD if present so Firefox/WebKit pick the T4 over Mesa software.
+    nvidia_egl = "/usr/share/glvnd/egl_vendor.d/10_nvidia.json"
+    if Path(nvidia_egl).exists():
+        env["__EGL_VENDOR_LIBRARY_FILENAMES"] = nvidia_egl
+    return env
+
+
+def _project_for(browser: str, project_opt: str | None, pw_args: list[str]) -> str:
+    """Resolves the Playwright project name for a browser and spec list."""
+    if project_opt and project_opt != "auto":
+        return project_opt
+    is_bench = not pw_args or any("bench/" in a or a == "bench" for a in pw_args)
+    if is_bench:
+        return "bench" if browser == "chromium" else f"bench-{browser}"
+    return browser
 
 
 def _bench_annotations(report: Path) -> dict:
@@ -335,6 +408,7 @@ def bench(job: dict, sources: list[dict]) -> dict:
     out.mkdir()
     result: dict = {"status": "error", "runs": []}
     base_env = _container_env()
+    xvfb = _start_xvfb()
     try:
         vk = _vulkan(base_env)
         result["host"] = {k: v for k, v in vk.items() if k != "vulkaninfo"}
@@ -353,9 +427,10 @@ def bench(job: dict, sources: list[dict]) -> dict:
             if not Path(kit, ".complete").exists():
                 raise RuntimeError(f"The kit {job['kit']} isn't on the volume.")
 
+        browsers = job.get("browsers") or ["chromium"]
         for n, source in enumerate(sources):
             label = source["label"]
-            run: dict = {"label": label, "git": source.get("git"), "modes": {}}
+            run: dict = {"label": label, "git": source.get("git"), "browsers": {}, "modes": {}}
             result["runs"].append(run)
             src = Path(f"/work/{n}")
             src.mkdir(parents=True)
@@ -373,59 +448,125 @@ def bench(job: dict, sources: list[dict]) -> dict:
             if _run(["pnpm", "--filter", "@drawpane/web...", "build"], cwd=str(src), env=env,
                     log=log) != 0:
                 raise RuntimeError(f"{label}: building apps/web failed (see {label}/build.log).")
-            chrome, version = _chromium(src, env)
-            run["chromium"] = version
+            browser_bins: dict[str, str | None] = {}
+            for browser in browsers:
+                exe, version = _browser_bin(src, env, browser)
+                browser_bins[browser] = exe
+                run["browsers"][browser] = version
+                if browser == "chromium":
+                    run["chromium"] = version
             run["buildSeconds"] = round(time.time() - t)
 
-            for mode in job["modes"]:
-                t = time.time()
-                at = dest / mode
-                at.mkdir()
-                flags = MODE_FLAGS[mode] + (job.get("chromeFlags", []) if mode != "cpu" else [])
-                wrapper = _wrapper(Path(f"/tmp/chrome-{mode}"), chrome, flags, at / "chrome.log")
-                gate_env = dict(env)
-                if mode == "cpu":
-                    gate_env.pop("VK_DRIVER_FILES")
-                    gate_env.pop("VK_ICD_FILENAMES")
-                code = _run(["node", "/opt/gpu-bench/gate.mjs", "--checkout", str(src),
-                             "--chrome", wrapper, "--expect", mode, "--out", str(at)],
-                            env=gate_env, log=at / "gate.log", timeout=180)
-                gate = json.loads((at / "gate.json").read_text()) if (at / "gate.json").exists() else {}
-                entry: dict = {"gate": {"ok": code == 0, **gate.get("summary", {}),
-                                        "problems": gate.get("problems", [])}}
-                run["modes"][mode] = entry
-                if code != 0:
-                    raise RuntimeError(f"{label} ({mode}): the GPU gate failed; see {label}/{mode}/gate.log.")
+            for browser in browsers:
+                browser_modes = job["modes"] if browser == "chromium" else [
+                    m for m in job["modes"] if m != "webgpu"
+                ] or ["gpu"]
+                for mode in browser_modes:
+                    t = time.time()
+                    key = mode if browser == "chromium" else f"{browser}-{mode}"
+                    at = dest / key
+                    at.mkdir()
+                    gate_env = dict(env)
+                    if mode == "cpu":
+                        # Actively hide hardware GPU ICDs and force Mesa software paths so
+                        # Firefox and WebKit cannot silently pick the NVIDIA T4 in cpu mode.
+                        lavapipe = "/usr/share/vulkan/icd.d/lvp_icd.x86_64.json"
+                        mesa_egl = "/usr/share/glvnd/egl_vendor.d/50_mesa.json"
+                        gate_env["VK_DRIVER_FILES"] = lavapipe if Path(lavapipe).exists() else "/dev/null"
+                        gate_env["VK_ICD_FILENAMES"] = gate_env["VK_DRIVER_FILES"]
+                        gate_env["__EGL_VENDOR_LIBRARY_FILENAMES"] = (
+                            mesa_egl if Path(mesa_egl).exists() else "/dev/null"
+                        )
+                        gate_env["LIBGL_ALWAYS_SOFTWARE"] = "1"
+                        gate_env["GALLIUM_DRIVER"] = "llvmpipe"
+                        gate_env["MOZ_WEBRENDER"] = "0"
+                        gate_env["MOZ_ACCELERATED"] = "0"
+                        gate_env["WEBKIT_DISABLE_COMPOSITING_MODE"] = "1"
+                    gate_cmd = [
+                        "node",
+                        "/opt/gpu-bench/gate.mjs",
+                        "--checkout",
+                        str(src),
+                        "--browser",
+                        browser,
+                        "--host-gpu-ok",
+                        "true" if mode in ("gpu", "webgpu") and vk["ok"] else "false",
+                        "--expect",
+                        mode,
+                        "--out",
+                        str(at),
+                    ]
+                    wrapper = None
+                    if browser == "chromium":
+                        flags = MODE_FLAGS[mode] + (job.get("chromeFlags", []) if mode != "cpu" else [])
+                        wrapper = _wrapper(Path(f"/tmp/chrome-{mode}"), browser_bins[browser], flags,
+                                           at / "chrome.log")
+                        gate_cmd += ["--chrome", wrapper]
+                    elif browser == "webkit":
+                        gate_env.setdefault("WEBKIT_DISABLE_DMABUF_RENDERER", "1")
+                        gate_env["DISPLAY"] = ":99"
+                    elif browser == "firefox":
+                        # Firefox headless on Linux disables WebGPU and WebGL2; running under
+                        # Xvfb enables real Vulkan WebGPU on the NVIDIA T4.
+                        gate_env["DISPLAY"] = ":99"
+                        gate_env["GPU_BENCH_XVFB"] = "1"
+                        gate_cmd += ["--headless", "false"]
 
-                test_env = {
-                    **gate_env,
-                    "CHROMIUM_PATH": wrapper,
-                    "PLAYWRIGHT_JSON_OUTPUT_NAME": str(at / "report.json"),
-                    "E2E_PORT": "8849",
-                    "TOUR_PORT": "8859",
-                    **job.get("env", {}),
-                }
-                if kit:
-                    test_env["BENCH_FILE"] = kit
-                    test_env.setdefault("BENCH_OUT", str(at / "file.json"))
-                if job.get("profile"):
-                    test_env["BENCH_PROFILE"] = str(at / "profiles")
-                code = _run(
-                    ["node_modules/.bin/playwright", "test", "--project=bench", "--reporter=list,json",
-                     f"--output={at / 'test-results'}", *job["args"]],
-                    cwd=str(src / "apps/web"), env=test_env, log=at / "bench.log",
-                    timeout=job["timeout"])
-                entry["exitCode"] = code
-                entry["seconds"] = round(time.time() - t)
-                entry["bench"] = _bench_annotations(at / "report.json")
-                (at / "bench.json").write_text(json.dumps(entry["bench"], indent=1) + "\n")
-                _log(f"{label} ({mode}): Playwright exited {code} after {entry['seconds']} s")
+                    code = _run(gate_cmd, env=gate_env, log=at / "gate.log", timeout=180)
+                    gate = json.loads((at / "gate.json").read_text()) if (at / "gate.json").exists() else {}
+                    entry: dict = {
+                        "browser": browser,
+                        "mode": mode,
+                        "gate": {
+                            "ok": code == 0,
+                            **gate.get("summary", {}),
+                            "problems": gate.get("problems", []),
+                        },
+                    }
+                    run["modes"][key] = entry
+                    if code != 0 and job.get("strictGate", True):
+                        raise RuntimeError(
+                            f"{label} ({key}): the GPU gate failed; see {label}/{key}/gate.log."
+                        )
+
+                    project = _project_for(browser, job.get("project"), job["args"])
+                    verified_backends = gate.get("summary", {}).get("verifiedBackends", [])
+                    test_env = {
+                        **gate_env,
+                        "ENGINE_BROWSER": browser,
+                        "ENGINE_PARITY_OUT": str(at / "engine-parity"),
+                        "PLAYWRIGHT_JSON_OUTPUT_NAME": str(at / "report.json"),
+                        "E2E_PORT": "8849",
+                        "TOUR_PORT": "8859",
+                        **job.get("env", {}),
+                    }
+                    if verified_backends:
+                        test_env["BENCH_VERIFIED_BACKENDS"] = ",".join(verified_backends)
+                    if wrapper:
+                        test_env["CHROMIUM_PATH"] = wrapper
+                    if kit:
+                        test_env["BENCH_FILE"] = kit
+                        test_env.setdefault("BENCH_OUT", str(at / "file.json"))
+                    if job.get("profile") and browser == "chromium":
+                        test_env["BENCH_PROFILE"] = str(at / "profiles")
+                    code = _run(
+                        ["node_modules/.bin/playwright", "test", f"--project={project}",
+                         "--reporter=list,json", f"--output={at / 'test-results'}", *job["args"]],
+                        cwd=str(src / "apps/web"), env=test_env, log=at / "bench.log",
+                        timeout=job["timeout"])
+                    entry["exitCode"] = code
+                    entry["seconds"] = round(time.time() - t)
+                    entry["bench"] = _bench_annotations(at / "report.json")
+                    (at / "bench.json").write_text(json.dumps(entry["bench"], indent=1) + "\n")
+                    _log(f"{label} ({key}): Playwright exited {code} after {entry['seconds']} s")
             shutil.rmtree(src, ignore_errors=True)
         result["status"] = "ok"
     except Exception as error:  # noqa: BLE001 - reported to the caller with what was gathered
         result["error"] = str(error)
         _log(f"error: {error}")
     finally:
+        if xvfb:
+            xvfb.terminate()
         result["seconds"] = round(time.time() - started)
         (out / "result.json").write_text(json.dumps(result, indent=1) + "\n")
         result["tar"] = _tar(out)
@@ -530,17 +671,21 @@ def _summary(result: dict, job: dict, wall: float, attempts: int) -> str:
         lines += ["", f"**Error:** {result['error']}"]
     for run in result.get("runs", []):
         git = run.get("git") or {}
-        lines += ["", f"## {run['label']} ({git.get('ref') or git.get('worktree')}), Chromium "
-                  f"{run.get('chromium')}, build {run.get('buildSeconds')} s"]
+        versions = ", ".join(f"{b} {v}" for b, v in (run.get("browsers") or {}).items()) or f"Chromium {run.get('chromium')}"
+        lines += ["", f"## {run['label']} ({git.get('ref') or git.get('worktree')}), {versions}, build {run.get('buildSeconds')} s"]
         for mode, entry in run["modes"].items():
             g = entry["gate"]
-            lines += ["", f"### {mode.upper()}: gate {'passed' if g['ok'] else 'FAILED'}, "
+            lines += ["", f"### {mode.upper()}: gate {'passed' if g['ok'] else 'FAILED'} "
+                      f"(presentation: {g.get('presentationMode', 'n/a')}), "
                       f"bench {entry.get('seconds')} s, exit {entry.get('exitCode')}", "",
-                      f"- WebGPU adapter: {g.get('webgpuAdapter')}",
+                      f"- WebGPU adapter: {g.get('webgpuAdapter')} (identity={g.get('webgpuIdentityClass')}, hostGpuOk={g.get('hostGpuOk')})",
                       f"- WebGPU adapter, compatibility mode: {g.get('webgpuCompatAdapter')}",
-                      f"- WebGL renderer: {g.get('webglRenderer')}",
-                      f"- chrome://gpu: Canvas {g.get('canvas')}; Rasterization {g.get('rasterization')}; "
-                      f"Compositing {g.get('compositing')}; WebGL {g.get('webgl')}; WebGPU {g.get('webgpu')}"]
+                      f"- WebGL renderer: {g.get('webglRenderer')} (identity={g.get('webglIdentityClass')}, maxTex={g.get('webglMaxTextureSize')}, caveatOk={g.get('webglCaveatOk')}, perfMs={g.get('webglPerfProbeMs')})"]
+            if entry.get("browser", "chromium") == "chromium":
+                lines.append(
+                    f"- chrome://gpu: Canvas {g.get('canvas')}; Rasterization {g.get('rasterization')}; "
+                    f"Compositing {g.get('compositing')}; WebGL {g.get('webgl')}; WebGPU {g.get('webgpu')}"
+                )
             lines += [f"- problem: {p}" for p in g.get("problems", [])]
             for test, value in (entry.get("bench") or {}).items():
                 if test == "_status":
@@ -549,22 +694,28 @@ def _summary(result: dict, job: dict, wall: float, attempts: int) -> str:
                 if "pages" in value:
                     for page in value["pages"]:
                         name = page["page"]["name"]
-                        lines.append(f"- {name}: first frame {page['firstFrameMs']} ms, exact after "
-                                     f"{page['exactMs']} ms")
+                        opened = page.get("open")
+                        if isinstance(opened, dict):
+                            useful = (opened.get("useful") or {}).get("shown")
+                            exact = (opened.get("exact") or {}).get("shown")
+                            lines.append(f"- {name}: useful image {useful} ms, exact shown {exact} ms")
+                        else:
+                            lines.append(f"- {name}: first frame {page.get('firstFrameMs')} ms, exact after "
+                                         f"{page.get('exactMs')} ms")
                         tables += [(f"{name}: {k}", v) for k, v in page["canvas"].items()]
                 else:
                     tables += _flatten(value)
-                frames = [(n, s) for n, s in tables if isinstance(s, dict) and "answer" not in s]
+                frames = [(n, s) for n, s in tables if isinstance(s, dict) and "answer" not in s and "content" in s]
                 answers = [(n, s) for n, s in tables if isinstance(s, dict) and "answer" in s]
                 numbers = [(n, s) for n, s in tables if isinstance(s, (int, float))]
                 lines += ["", f"{test}", ""]
                 lines += [f"- {name}: {s} ms" for name, s in numbers]
                 if frames:
-                    lines += ["", "| measurement | content p50 / p95 ms | overlay p95 ms | frame interval p50 / p95 ms |",
+                    lines += ["", "| measurement | frame interval p50 / p95 ms | content p50 / p95 ms | overlay p95 ms |",
                               "| --- | --- | --- | --- |"]
                     for name, s in frames:
-                        lines.append(f"| {name} | {_fmt(s.get('content'))} | {(s.get('overlay') or {}).get('p95')} | "
-                                     f"{_fmt(s.get('interval'))} |")
+                        lines.append(f"| {name} | {_fmt(s.get('interval'))} | {_fmt(s.get('content'))} | "
+                                     f"{(s.get('overlay') or {}).get('p95')} |")
                 if answers:
                     # Interaction cases (bench/interactions.ts): input to the frame showing it.
                     lines += ["", "| interaction | answer p50 / worst ms | drawing p50 ms (content + overlay) | "
@@ -572,8 +723,10 @@ def _summary(result: dict, job: dict, wall: float, attempts: int) -> str:
                     for name, s in answers:
                         a = s["answer"]
                         draw = round(s["content"]["p50"] + s["overlay"]["p50"], 1)
+                        lt = s.get("longTask")
+                        lt_str = "n/a" if lt is None else str(lt)
                         lines.append(f"| {name} | {a['p50']} / {a['max']} | {draw} | {s.get('exact')} | "
-                                     f"{s.get('quiet', '–')} | {s.get('longTask')} |")
+                                     f"{s.get('quiet', '-')} | {lt_str} |")
     return "\n".join(lines) + "\n"
 
 
@@ -583,17 +736,21 @@ def main(argv: list[str]) -> int:
     parser = argparse.ArgumentParser(
         prog="pnpm gpu-bench",
         allow_abbrev=False,
-        description="Runs apps/web's bench project on a Modal GPU. Arguments it doesn't know "
+        description="Runs apps/web's Playwright suites on a Modal GPU. Arguments it doesn't know "
                     "(or everything after --) go to `playwright test`.")
     parser.add_argument("--ref", action="append", default=[],
                         help="a commit to run (repeatable; in order, in the same container)")
     parser.add_argument("--worktree", action="append", default=[],
                         help="a worktree to run as it is on disk (repeatable); the default is this one")
     parser.add_argument("--gpu", default="T4", help="Modal GPU type: T4 (default) or L4")
+    parser.add_argument("--browsers", default="chromium",
+                        help="comma-separated: chromium (default), firefox, webkit")
+    parser.add_argument("--project", default=None,
+                        help="Playwright project override (default auto-picks bench/chromium/firefox/webkit)")
     parser.add_argument("--modes", default="gpu",
                         help="comma-separated: gpu (default; the canvas, WebGL and compositing on "
                              "the GPU), webgpu (core WebGPU on the GPU, software compositing), cpu "
-                             "(Chromium's GPU disabled)")
+                             "(GPU disabled)")
     parser.add_argument("--file", help="a converted kit folder for bench/file.spec.ts (BENCH_FILE)")
     parser.add_argument("--env", action="append", default=[], help="KEY=VALUE for the bench (repeatable)")
     parser.add_argument("--profile", action="store_true", help="CPU profiles (BENCH_PROFILE)")
@@ -606,15 +763,21 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--chrome-flag", action="append", default=[],
                         help="an extra Chromium flag for GPU runs (repeatable)")
     parser.add_argument("--doctor", action="store_true",
-                        help="only check the GPU stack (Vulkan, then the gate) on a small container")
+                        help="only check the GPU stack (Vulkan, then the gate across Chromium, Firefox, WebKit)")
     args, rest = parser.parse_known_args(argv)
     if "--" in rest:
         rest.remove("--")
     if args.doctor:
         out = Path(args.out or HERE / "runs" / f"doctor-{time.strftime('%Y%m%d-%H%M%S')}").resolve()
-        flag_sets = [{"mode": m, "flags": MODE_FLAGS[m] + args.chrome_flag} for m in ("gpu", "webgpu")]
+        flag_sets = [
+            {"browser": "chromium", "mode": "gpu", "flags": MODE_FLAGS["gpu"] + args.chrome_flag, "headless": True},
+            {"browser": "chromium", "mode": "webgpu", "flags": MODE_FLAGS["webgpu"] + args.chrome_flag, "headless": True},
+            {"browser": "firefox", "mode": "info", "flags": [], "headless": True},
+            {"browser": "firefox", "mode": "info", "flags": [], "headless": False},
+            {"browser": "webkit", "mode": "info", "flags": ["env:WEBKIT_DISABLE_DMABUF_RENDERER=1"], "headless": True},
+            {"browser": "webkit", "mode": "info", "flags": ["env:WEBKIT_DISABLE_DMABUF_RENDERER=1"], "headless": False},
+        ]
         if os.environ.get("GPU_BENCH_DOCTOR_SETS"):
-            # More sets to compare, as JSON: [{"mode": "gpu", "flags": [...]}].
             flag_sets += json.loads(os.environ["GPU_BENCH_DOCTOR_SETS"])
         with modal.enable_output(), app.run():
             result = doctor.with_options(gpu=args.gpu).remote(flag_sets)
@@ -625,6 +788,9 @@ def main(argv: list[str]) -> int:
         return 0
     repo = Path(_git(["rev-parse", "--show-toplevel"], Path.cwd()).strip())
 
+    browsers = [b.strip() for b in args.browsers.split(",") if b.strip()]
+    if not browsers or any(b not in BROWSERS for b in browsers):
+        parser.error("--browsers takes a comma-separated list of chromium, firefox and webkit")
     modes = [m.strip() for m in args.modes.split(",") if m.strip()]
     if not modes or any(m not in MODE_FLAGS for m in modes):
         parser.error("--modes takes a comma-separated list of gpu, webgpu and cpu")
@@ -637,16 +803,25 @@ def main(argv: list[str]) -> int:
         if labels.count(s["label"]) > 1:
             s["label"] = f"{i + 1}-{s['label']}"
     env = dict(e.split("=", 1) for e in args.env)
-    job = {"gpu": args.gpu, "modes": modes, "args": rest or ["bench/"], "env": env,
-           "chromeFlags": args.chrome_flag,
-           "profile": args.profile, "timeout": args.timeout * 60, "kit": None}
+    job = {
+        "gpu": args.gpu,
+        "browsers": browsers,
+        "project": args.project,
+        "modes": modes,
+        "args": rest or ["bench/"],
+        "env": env,
+        "chromeFlags": args.chrome_flag,
+        "profile": args.profile,
+        "timeout": args.timeout * 60,
+        "kit": None,
+    }
     stamp = time.strftime("%Y%m%d-%H%M%S")
     out = Path(args.out or HERE / "runs" / stamp).resolve()
     out.mkdir(parents=True, exist_ok=True)
     for s in sources:
         print(f"Packed {s['label']}: {len(s['tar']) / 1e6:.1f} MB")
 
-    budget = len(sources) * (15 * 60 + len(modes) * (job["timeout"] + 5 * 60))
+    budget = len(sources) * (15 * 60 + len(browsers) * len(modes) * (job["timeout"] + 5 * 60))
     started = time.time()
     attempts = 0
     with modal.enable_output(), app.run():

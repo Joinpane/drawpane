@@ -997,7 +997,12 @@ export class EngineView {
   /** Called once when all engine backends fail and the canvas renderer takes over for the session. */
   onFallback: (e: FallbackEvent) => void = () => {};
   /** Called when an async frame (read-back or CPU worker tiles) reaches the screen. */
-  onPresented: (exact: boolean) => void = () => {};
+  onPresented: (exact: boolean, frame?: number) => void = () => {};
+  /**
+   * Called on direct GPU presentation after `gpuFinished()` resolves and the following
+   * animation frame fires (earliest compositor presentation tick).
+   */
+  onGpuPresented: (frame: number) => void = () => {};
   /** Coalesces direct-present `gpuFinished` stamps so WebGL2 never exceeds MAX_FINISHED_WAITERS. */
   #shownWaiting = false;
   /** What drawing between frames did, summed (`ahead`), for the bench and the debug handle. */
@@ -1234,8 +1239,12 @@ export class EngineView {
     return this.#compatibility;
   }
 
+  /** Whether the active GPU backend is running on a software adapter (excludes CPU view mode). */
   get software(): boolean {
-    return this.#backend !== "cpu-worker" && this.#adapterClass === "software";
+    return (
+      this.#backend !== "cpu-worker" &&
+      (this.#adapterClass === "software" || !!this.#engine?.gpu?.fallback)
+    );
   }
 
   get recovering(): boolean {
@@ -1257,6 +1266,11 @@ export class EngineView {
   /** Whether frames reach the screen asynchronously (GPU read-back or CPU worker tiles). */
   get readsBack(): boolean {
     return this.#readback !== null || this.#backend === "cpu-worker";
+  }
+
+  /** Whether the latest engine draw presented a frame cleanly (not recovering or stalled). */
+  get lastPresented(): boolean {
+    return !this.#dead && !this.#recovering && this.#unpresented === 0 && this.last.supported;
   }
 
   /** Reads back the currently shown frame pixels (straight RGBA8), on any engine backend. */
@@ -1374,7 +1388,7 @@ export class EngineView {
         }
         this.#cpuHasPage = job.pageId;
         if (job.frame > this.shown.n) this.shown = { n: job.frame, at: performance.now() };
-        this.onPresented(false);
+        this.onPresented(false, job.frame);
         return;
       }
       if (msg.type === "done") {
@@ -1431,7 +1445,7 @@ export class EngineView {
           tiles: msg.tiles,
           breakdown: { ...this.last.breakdown, render: msg.ms },
         };
-        this.onPresented(frameExact && msg.jobId === this.#cpuJobId);
+        this.onPresented(frameExact && msg.jobId === this.#cpuJobId, job.frame);
         // Once the visible frame is exact, let the idle loop finish shaping any offscreen text.
         if (frameExact && this.#builder.pending > 0) this.onChange();
       }
@@ -1445,6 +1459,7 @@ export class EngineView {
   /** Invalidates the active GPU device generation and releases any in-flight readback state. */
   #bumpDeviceGeneration(): void {
     this.#deviceGeneration++;
+    this.#supersede();
     this.#reading = false;
     this.#shownWaiting = false;
     this.#want = null;
@@ -2070,9 +2085,10 @@ export class EngineView {
     }
   }
 
-  /** Drops every read-back or CPU tile job on its way: a newer content frame decided otherwise. */
+  /** Drops every read-back, direct-GPU presentation stamp, or CPU tile job on its way: a newer content frame decided otherwise. */
   #supersede(): void {
     this.#epoch++;
+    this.#shownWaiting = false;
     this.#want = null;
     this.#cpuJob = null;
     this.#cpuCompletedKey = null;
@@ -2176,6 +2192,7 @@ export class EngineView {
     const n = ++this.#frame;
     const stamps = this.stamps;
     const gen = this.#deviceGeneration;
+    const epoch = this.#epoch;
     // Presented to a WebGPU/WebGL2 canvas, a frame is on screen at the compositor's first frame
     // after the GPU finished it, which nothing here can see: the first animation frame after then
     // is the earliest it could be shown, and what's stamped. Coalesce non-watch `gpuFinished`
@@ -2186,16 +2203,34 @@ export class EngineView {
       if (!isWatch) this.#shownWaiting = true;
       void engine.gpuFinished().then((res) => {
         if (!isWatch) this.#shownWaiting = false;
-        if (this.#dead || this.#recovering || gen !== this.#deviceGeneration || !res.ok) return;
+        if (
+          this.#dead ||
+          this.#recovering ||
+          gen !== this.#deviceGeneration ||
+          epoch !== this.#epoch ||
+          !res.ok
+        ) {
+          return;
+        }
         const gpu = performance.now();
         if (isWatch && stamps && this.stamps === stamps && stamps.drawn?.n === targetN) {
           stamps.gpu = { n: targetN, at: gpu };
         }
         if (this.#readback) return;
         requestAnimationFrame(() => {
-          if (this.#dead || gen !== this.#deviceGeneration) return;
+          if (
+            this.#dead ||
+            this.#recovering ||
+            gen !== this.#deviceGeneration ||
+            epoch !== this.#epoch
+          ) {
+            return;
+          }
           const at = performance.now();
-          if (targetN > this.shown.n) this.shown = { n: targetN, at };
+          if (targetN > this.shown.n) {
+            this.shown = { n: targetN, at };
+            this.onGpuPresented(targetN);
+          }
           if (isWatch && stamps && this.stamps === stamps && !stamps.shown) {
             stamps.shown = { n: targetN, at };
           }
@@ -2516,7 +2551,7 @@ export class EngineView {
       this.shown = { n: want.n, at: performance.now() };
       if (this.stamps && !this.stamps.shown && want.exact && want.n === this.#frame)
         this.stamps.shown = { n: want.n, at: performance.now() };
-      this.onPresented(want.exact && want.n === this.#frame);
+      this.onPresented(want.exact && want.n === this.#frame, want.n);
       this.#readNext();
     });
   }

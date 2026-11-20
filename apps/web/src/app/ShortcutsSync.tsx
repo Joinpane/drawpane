@@ -15,7 +15,13 @@ export function fetchShortcuts() {
 }
 
 export function ShortcutsSync() {
-  const session = useQuery({ queryKey: ["session"], queryFn: api.session });
+  const skipApi =
+    typeof window !== "undefined" && window.location.pathname.startsWith("/diagnostics");
+  const session = useQuery({
+    queryKey: ["session"],
+    queryFn: api.session,
+    enabled: !skipApi,
+  });
   const signedIn = !!session.data?.user;
   const shortcuts = useQuery({
     queryKey: SHORTCUTS_QUERY,

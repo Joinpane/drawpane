@@ -35,8 +35,8 @@ export interface Answer {
   exact: number;
   /** Until the page was quiet (no long task for a while) after the last repeat: work set off later, such as the export preview, counts. */
   quiet: number;
-  /** The longest task from the first input until quiet. */
-  longTask: number;
+  /** The longest task from the first input until quiet, or null when the browser lacks `longtask`. */
+  longTask: number | null;
 }
 
 export type CaseResult = Answer | Summary;
@@ -61,6 +61,7 @@ type Probe = {
   content: number;
   overlay: number;
   longest: number;
+  longTaskSupported: boolean;
   frames: number;
   /** When the last long task ended (any, armed or not). */
   lastTask: number;
@@ -84,6 +85,7 @@ export async function installProbe(page: Page): Promise<void> {
       content: 0,
       overlay: 0,
       longest: 0,
+      longTaskSupported: false,
       frames: 0,
       lastTask: 0,
       tasks: [],
@@ -108,16 +110,28 @@ export async function installProbe(page: Page): Promise<void> {
         p.overlay = overlay;
       }
     };
-    new PerformanceObserver((list) => {
-      for (const e of list.getEntries()) {
-        p.lastTask = Math.max(p.lastTask, e.startTime + e.duration);
-        p.tasks.push([e.startTime, e.duration]);
-        if (p.tasks.length > 500) p.tasks.shift();
-        // Since the input, answered or not: work an input sets off later counts too.
-        if (p.input && e.startTime + e.duration >= p.input)
-          p.longest = Math.max(p.longest, e.duration);
+    try {
+      const supported =
+        typeof PerformanceObserver !== "undefined" &&
+        Array.isArray(PerformanceObserver.supportedEntryTypes) &&
+        PerformanceObserver.supportedEntryTypes.includes("longtask");
+      if (supported) {
+        new PerformanceObserver((list) => {
+          for (const e of list.getEntries()) {
+            p.lastTask = Math.max(p.lastTask, e.startTime + e.duration);
+            p.tasks.push([e.startTime, e.duration]);
+            if (p.tasks.length > 500) p.tasks.shift();
+            // Since the input, answered or not: work an input sets off later counts too.
+            if (p.input && e.startTime + e.duration >= p.input)
+              p.longest = Math.max(p.longest, e.duration);
+          }
+        }).observe({ type: "longtask" });
+        p.longTaskSupported = true;
       }
-    }).observe({ type: "longtask" });
+    } catch {
+      // Firefox and WebKit do not support the longtask PerformanceObserver entry type.
+      p.longTaskSupported = false;
+    }
   });
 }
 
@@ -145,7 +159,7 @@ async function arm(page: Page, want: string, programmatic = false): Promise<void
   );
 }
 
-type Reading = { answer: number; content: number; overlay: number; longest: number };
+type Reading = { answer: number; content: number; overlay: number; longest: number | null };
 
 /** Waits for the armed probe's answer. */
 async function answered(page: Page, timeout = 120_000): Promise<Reading> {
@@ -161,7 +175,7 @@ async function answered(page: Page, timeout = 120_000): Promise<Reading> {
       answer: p.answered - p.input,
       content: p.content,
       overlay: p.overlay,
-      longest: p.longest,
+      longest: p.longTaskSupported ? p.longest : null,
     };
   });
 }
@@ -206,6 +220,10 @@ async function quietAfter(page: Page, since: number): Promise<After> {
           last = now;
           const end = Math.max(busyEnd, p.lastTask);
           if (now - Math.max(end, p.input, since) > QUIET) {
+            if (!p.longTaskSupported) {
+              resolve({ quiet: Math.max(0, end - since), longest: null });
+              return;
+            }
             let longest = 0;
             for (const [start, duration] of p.tasks)
               if (start + duration >= since) longest = Math.max(longest, duration);
@@ -221,15 +239,31 @@ async function quietAfter(page: Page, since: number): Promise<After> {
 /** After the last input: until the page was quiet, and the longest task meanwhile. */
 interface After {
   quiet: number;
-  longest: number;
+  longest: number | null;
+}
+
+function mergeAfter(prev: After, next: After): After {
+  return {
+    quiet: Math.max(prev.quiet, next.quiet),
+    longest:
+      prev.longest === null
+        ? next.longest
+        : next.longest === null
+          ? prev.longest
+          : Math.max(prev.longest, next.longest),
+  };
 }
 
 function summarise(readings: Reading[], exact: number, after?: After): Answer {
-  const stat = (k: keyof Reading) => {
+  const stat = (k: "answer" | "content" | "overlay") => {
     const v = readings.map((r) => r[k]).sort((a, b) => a - b);
     const round = (n: number) => Math.round(n * 10) / 10;
     return { p50: round(v[Math.floor(v.length / 2)] ?? 0), max: round(v.at(-1) ?? 0) };
   };
+  const longTasks = [
+    ...(after?.longest !== null && after?.longest !== undefined ? [after.longest] : []),
+    ...readings.map((r) => r.longest).filter((v): v is number => v !== null),
+  ];
   return {
     n: readings.length,
     answer: stat("answer"),
@@ -237,7 +271,7 @@ function summarise(readings: Reading[], exact: number, after?: After): Answer {
     overlay: stat("overlay"),
     exact: Math.round(exact),
     quiet: Math.round(after?.quiet ?? 0),
-    longTask: Math.round(Math.max(after?.longest ?? 0, ...readings.map((r) => r.longest))),
+    longTask: longTasks.length > 0 ? Math.round(Math.max(...longTasks)) : null,
   };
 }
 
@@ -393,10 +427,26 @@ type Profiler = <T>(name: string, work: () => Promise<T>) => Promise<T>;
 
 const noProfile: Profiler = (_name, work) => work();
 
+export interface GestureCheckpointSpec {
+  readonly minSubmitted: number;
+  readonly minPresented: number;
+  readonly requirePixelChange: boolean;
+  readonly pixelMatchMode?: "coarse" | "fine";
+  readonly minDeltaFromPrevious?: number;
+  readonly minChangedCells?: number;
+}
+
+export interface GestureGate {
+  before(): Promise<unknown>;
+  verify(name: string, before: unknown, spec: GestureCheckpointSpec): Promise<void>;
+}
+
 /**
  * Runs every interaction on `targets.board` and returns the named results.
  * `profile` wraps each case (a CPU profile per case, when the caller wants
- * them). Leaves the document as it found it (each edit is undone).
+ * them). `gestureGate` (optional, used for engine verification) runs
+ * presentation and pixel checkpoints strictly outside each gesture's timed
+ * window. Leaves the document as it found it (each edit is undone).
  */
 export async function interactions(
   page: Page,
@@ -406,9 +456,19 @@ export async function interactions(
     zooms = [1, 2, 4],
     frames = 60,
     repeats = 8,
-  }: { profile?: Profiler; zooms?: number[]; frames?: number; repeats?: number } = {},
+    gestureGate,
+  }: {
+    profile?: Profiler;
+    zooms?: number[];
+    frames?: number;
+    repeats?: number;
+    gestureGate?: GestureGate | undefined;
+  } = {},
 ): Promise<Record<string, CaseResult>> {
   await installProbe(page);
+  const undoKey = (await page.evaluate(() => /Mac|iPhone|iPad/.test(navigator.platform)))
+    ? "Meta+z"
+    : "Control+z";
   const out: Record<string, CaseResult> = {};
   const select = (ids: string[]) =>
     page.evaluate(
@@ -416,17 +476,48 @@ export async function interactions(
         (window as unknown as { drawpane: { select(ids: string[]): void } }).drawpane.select(ids),
       ids,
     );
-  const run = async (name: string, work: () => Promise<CaseResult>) => {
+  const run = async (
+    name: string,
+    work: () => Promise<CaseResult>,
+    check?: GestureCheckpointSpec,
+  ) => {
+    const before = gestureGate && check ? await gestureGate.before() : null;
     out[name] = await profile(name, work);
     await settle(page);
+    if (gestureGate && check && before !== null) {
+      await gestureGate.verify(name, before, check);
+    }
   };
+  const panMinSubmitted = Math.max(1, Math.floor(frames / 2));
+  const panMinPresented = Math.max(1, Math.floor(frames / 6));
 
   // Pans and zooms on the board, at fit and up close.
-  await run("pan, fit", () => pan(page, "fit", frames));
-  await run("zoom, fit", () => zoom(page, frames));
+  await run("pan, fit", () => pan(page, "fit", frames), {
+    minSubmitted: panMinSubmitted,
+    minPresented: panMinPresented,
+    requirePixelChange: true,
+    pixelMatchMode: "coarse",
+  });
+  await run("zoom, fit", () => zoom(page, frames), {
+    minSubmitted: panMinSubmitted,
+    minPresented: panMinPresented,
+    requirePixelChange: true,
+    pixelMatchMode: "coarse",
+  });
   for (const level of zooms) {
+    // Capture baseline before focusOn so even a full back-and-forth pan (frames % 120 === 0)
+    // proves the engine rendered the new zoom level and view rather than staying frozen.
+    const beforeZoomPan = gestureGate ? await gestureGate.before() : null;
     await focusOn(page, targets.board, level);
     await run(`pan, ${level * 100}%`, () => pan(page, level, frames));
+    if (gestureGate && beforeZoomPan !== null) {
+      await gestureGate.verify(`pan, ${level * 100}%`, beforeZoomPan, {
+        minSubmitted: panMinSubmitted,
+        minPresented: panMinPresented,
+        requirePixelChange: true,
+        pixelMatchMode: "coarse",
+      });
+    }
   }
 
   // The rest at 100% on the board (or fitting it, if it's larger than the screen).
@@ -455,121 +546,130 @@ export async function interactions(
   await settle(page);
 
   // Hovering: the pointer onto a layer, then off it, each a repeat.
-  await run("hover", async () => {
-    const at = await onScreen(page, targets.hover);
-    const readings: Reading[] = [];
-    for (let i = 0; i < repeats; i++) {
-      await arm(page, `(e) => e.s.hover !== null`);
-      await page.mouse.move(at.x + (i % 3), at.y);
-      readings.push(await answered(page));
-      await arm(page, `(e) => e.s.hover === null`);
-      await page.mouse.move(5, 450);
-      readings.push(await answered(page));
-    }
-    return summarise(readings, 0);
-  });
+  const overlayOnlyCheck: GestureCheckpointSpec = {
+    minSubmitted: 0,
+    minPresented: 0,
+    requirePixelChange: false,
+  };
+  await run(
+    "hover",
+    async () => {
+      const at = await onScreen(page, targets.hover);
+      const readings: Reading[] = [];
+      for (let i = 0; i < repeats; i++) {
+        await arm(page, `(e) => e.s.hover !== null`);
+        await page.mouse.move(at.x + (i % 3), at.y);
+        readings.push(await answered(page));
+        await arm(page, `(e) => e.s.hover === null`);
+        await page.mouse.move(5, 450);
+        readings.push(await answered(page));
+      }
+      return summarise(readings, 0);
+    },
+    overlayOnlyCheck,
+  );
 
   // Clicking a layer on the canvas, then clicking empty canvas.
-  await run("select on canvas", async () => {
-    const at = await onScreen(page, targets.hover);
-    const readings: Reading[] = [];
-    // Each click stays selected until the page is quiet (the inspector and its export
-    // preview are part of selecting); "exact" is the slowest of those.
-    let after: After = { quiet: 0, longest: 0 };
-    for (let i = 0; i < repeats / 2; i++) {
-      await page.mouse.move(at.x, at.y);
-      await page.waitForTimeout(150);
-      await arm(page, `(e) => e.s.selection.length > 0`);
-      const t = await now(page);
-      await page.mouse.down();
-      readings.push(await answered(page));
-      await page.mouse.up();
-      const a = await quietAfter(page, t);
-      after = {
-        quiet: Math.max(after.quiet, a.quiet),
-        longest: Math.max(after.longest, a.longest),
-      };
-      await select([]);
-      await page.waitForTimeout(300);
-    }
-    return summarise(readings, 0, after);
-  });
+  await run(
+    "select on canvas",
+    async () => {
+      const at = await onScreen(page, targets.hover);
+      const readings: Reading[] = [];
+      // Each click stays selected until the page is quiet (the inspector and its export
+      // preview are part of selecting); "exact" is the slowest of those.
+      let after: After = { quiet: 0, longest: null };
+      for (let i = 0; i < repeats / 2; i++) {
+        await page.mouse.move(at.x, at.y);
+        await page.waitForTimeout(150);
+        await arm(page, `(e) => e.s.selection.length > 0`);
+        const t = await now(page);
+        await page.mouse.down();
+        readings.push(await answered(page));
+        await page.mouse.up();
+        after = mergeAfter(after, await quietAfter(page, t));
+        await select([]);
+        await page.waitForTimeout(300);
+      }
+      return summarise(readings, 0, after);
+    },
+    overlayOnlyCheck,
+  );
 
   // The inspector's export preview of the clicked layer, scrolled into view: how long the page
   // is busy drawing it (it's drawn only while it's on screen).
   // The same layer a click there selects (a board's direct child, as in Figma), clicked again.
-  await run("export preview", async () => {
-    const at = await onScreen(page, targets.hover);
-    let after: After = { quiet: 0, longest: 0 };
-    for (let i = 0; i < 2; i++) {
-      await page.mouse.move(at.x, at.y);
-      await page.waitForTimeout(150);
-      await arm(page, `(e) => e.s.selection.length > 0`);
-      const t = await now(page);
-      await page.mouse.click(at.x, at.y);
-      await answered(page);
-      const found = await page.evaluate(() => {
-        const el = document.querySelector(".inspector-export");
-        el?.scrollIntoView();
-        return !!el;
-      });
-      if (!found) throw new Error("The inspector shows no Export section");
-      const a = await quietAfter(page, t);
-      after = {
-        quiet: Math.max(after.quiet, a.quiet),
-        longest: Math.max(after.longest, a.longest),
-      };
-      await select([]);
-      await page.waitForTimeout(300);
-    }
-    return summarise([], 0, after);
-  });
+  await run(
+    "export preview",
+    async () => {
+      const at = await onScreen(page, targets.hover);
+      let after: After = { quiet: 0, longest: null };
+      for (let i = 0; i < 2; i++) {
+        await page.mouse.move(at.x, at.y);
+        await page.waitForTimeout(150);
+        await arm(page, `(e) => e.s.selection.length > 0`);
+        const t = await now(page);
+        await page.mouse.click(at.x, at.y);
+        await answered(page);
+        const found = await page.evaluate(() => {
+          const el = document.querySelector(".inspector-export");
+          el?.scrollIntoView();
+          return !!el;
+        });
+        if (!found) throw new Error("The inspector shows no Export section");
+        after = mergeAfter(after, await quietAfter(page, t));
+        await select([]);
+        await page.waitForTimeout(300);
+      }
+      return summarise([], 0, after);
+    },
+    overlayOnlyCheck,
+  );
 
   // Clicking the moved layer's row in the layers panel.
-  await run("select in layers panel", async () => {
-    await select([targets.move]);
-    await page.waitForTimeout(800);
-    await select([]);
-    await page.waitForTimeout(400);
-    const row = page.locator(`.layers__scroll [data-layer-id="${targets.move}"] .dp-layer__name`);
-    const box = await row.first().boundingBox();
-    if (!box) throw new Error("The layer's row isn't drawn");
-    const readings: Reading[] = [];
-    let after: After = { quiet: 0, longest: 0 };
-    for (let i = 0; i < repeats / 2; i++) {
-      // The row shown selected is the answer here: the canvas follows (its frame is "content").
-      await page.evaluate((id) => {
-        const p = (window as unknown as { __probe: Probe }).__probe;
-        const scroller = document.querySelector(".layers__scroll") as HTMLElement;
-        const seen = new MutationObserver(() => {
-          const el = scroller.querySelector(`[data-layer-id="${CSS.escape(id)}"]`);
-          if (el?.getAttribute("aria-selected") === "true" && p.input && !p.answered) {
-            seen.disconnect();
-            requestAnimationFrame(() => {
-              p.answered = performance.now();
-            });
-          }
-        });
-        seen.observe(scroller, {
-          subtree: true,
-          attributes: true,
-          attributeFilter: ["aria-selected"],
-        });
-      }, targets.move);
-      await arm(page, `() => false`);
-      const t = await now(page);
-      await page.mouse.click(box.x + Math.min(20, box.width / 2), box.y + box.height / 2);
-      readings.push(await answered(page));
-      const a = await quietAfter(page, t);
-      after = {
-        quiet: Math.max(after.quiet, a.quiet),
-        longest: Math.max(after.longest, a.longest),
-      };
+  await run(
+    "select in layers panel",
+    async () => {
+      await select([targets.move]);
+      await page.waitForTimeout(800);
       await select([]);
-      await page.waitForTimeout(300);
-    }
-    return summarise(readings, 0, after);
-  });
+      await page.waitForTimeout(400);
+      const row = page.locator(`.layers__scroll [data-layer-id="${targets.move}"] .dp-layer__name`);
+      const box = await row.first().boundingBox();
+      if (!box) throw new Error("The layer's row isn't drawn");
+      const readings: Reading[] = [];
+      let after: After = { quiet: 0, longest: null };
+      for (let i = 0; i < repeats / 2; i++) {
+        // The row shown selected is the answer here: the canvas follows (its frame is "content").
+        await page.evaluate((id) => {
+          const p = (window as unknown as { __probe: Probe }).__probe;
+          const scroller = document.querySelector(".layers__scroll") as HTMLElement;
+          const seen = new MutationObserver(() => {
+            const el = scroller.querySelector(`[data-layer-id="${CSS.escape(id)}"]`);
+            if (el?.getAttribute("aria-selected") === "true" && p.input && !p.answered) {
+              seen.disconnect();
+              requestAnimationFrame(() => {
+                p.answered = performance.now();
+              });
+            }
+          });
+          seen.observe(scroller, {
+            subtree: true,
+            attributes: true,
+            attributeFilter: ["aria-selected"],
+          });
+        }, targets.move);
+        await arm(page, `() => false`);
+        const t = await now(page);
+        await page.mouse.click(box.x + Math.min(20, box.width / 2), box.y + box.height / 2);
+        readings.push(await answered(page));
+        after = mergeAfter(after, await quietAfter(page, t));
+        await select([]);
+        await page.waitForTimeout(300);
+      }
+      return summarise(readings, 0, after);
+    },
+    overlayOnlyCheck,
+  );
 
   // Dragging the layer by 12 steps of 8 px, one pointer move a frame.
   const version = `(window.drawpane ?? {}).doc?.version`;
@@ -578,6 +678,7 @@ export async function interactions(
   await run("drag", async () => {
     await select([targets.move]);
     await page.waitForTimeout(300);
+    const before = gestureGate ? await gestureGate.before() : null;
     const at = await onScreen(page, targets.move);
     await page.mouse.move(at.x, at.y);
     await page.mouse.down();
@@ -590,7 +691,16 @@ export async function interactions(
     const t = await now(page);
     await page.mouse.up();
     const result = summarise(readings, await exactAfter(page, t), await quietAfter(page, t));
-    await page.keyboard.press("Control+z");
+    if (gestureGate && before !== null) {
+      await gestureGate.verify("drag", before, {
+        minSubmitted: 6,
+        minPresented: 1,
+        requirePixelChange: true,
+        pixelMatchMode: "fine",
+        minChangedCells: 1,
+      });
+    }
+    await page.keyboard.press(undoKey);
     return result;
   });
 
@@ -599,6 +709,7 @@ export async function interactions(
   await run("drag, 60 frames", async () => {
     await select([targets.move]);
     await page.waitForTimeout(300);
+    const before = gestureGate ? await gestureGate.before() : null;
     const at = await onScreen(page, targets.move);
     await page.mouse.move(at.x, at.y);
     await page.mouse.down();
@@ -637,9 +748,24 @@ export async function interactions(
         interval: { p50: at(0.5), p95: at(0.95), p99: at(0.99), max: at(1) },
       };
     });
+    if (gestureGate && before !== null) {
+      // Strictly outside timing: displace once before releasing so pixels differ from pre-drag.
+      await page.mouse.move(at.x + 120, at.y + 60);
+      await page.evaluate(
+        () =>
+          new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))),
+      );
+      await gestureGate.verify("drag, 60 frames", before, {
+        minSubmitted: 20,
+        minPresented: 5,
+        requirePixelChange: true,
+        pixelMatchMode: "fine",
+        minChangedCells: 1,
+      });
+    }
     await page.mouse.up();
     await settle(page);
-    await page.keyboard.press("Control+z");
+    await page.keyboard.press(undoKey);
     return summary;
   });
 
@@ -649,6 +775,7 @@ export async function interactions(
   await run("drag into the next board", async () => {
     await select([targets.move]);
     await page.waitForTimeout(300);
+    const before = gestureGate ? await gestureGate.before() : null;
     const at = await onScreen(page, targets.move);
     await page.mouse.move(at.x, at.y);
     await page.mouse.down();
@@ -690,7 +817,16 @@ export async function interactions(
     await page.mouse.up();
     const exact = await exactAfter(page, t);
     await settle(page);
-    await page.keyboard.press("Control+z");
+    if (gestureGate && before !== null) {
+      await gestureGate.verify("drag into the next board", before, {
+        minSubmitted: 20,
+        minPresented: 5,
+        requirePixelChange: true,
+        pixelMatchMode: "fine",
+        minChangedCells: 1,
+      });
+    }
+    await page.keyboard.press(undoKey);
     return { ...summary, exactMs: exact };
   });
 
@@ -698,6 +834,7 @@ export async function interactions(
   await run("resize", async () => {
     await select([targets.move]);
     await page.waitForTimeout(300);
+    const before = gestureGate ? await gestureGate.before() : null;
     const at = await onScreen(page, targets.move);
     const corner = { x: at.x + at.w / 2, y: at.y + at.h / 2 };
     await page.mouse.move(corner.x, corner.y);
@@ -712,7 +849,16 @@ export async function interactions(
     const t = await now(page);
     await page.mouse.up();
     const result = summarise(readings, await exactAfter(page, t), await quietAfter(page, t));
-    await page.keyboard.press("Control+z");
+    if (gestureGate && before !== null) {
+      await gestureGate.verify("resize", before, {
+        minSubmitted: 6,
+        minPresented: 1,
+        requirePixelChange: true,
+        pixelMatchMode: "fine",
+        minChangedCells: 1,
+      });
+    }
+    await page.keyboard.press(undoKey);
     return result;
   });
 
@@ -721,6 +867,7 @@ export async function interactions(
     await select([targets.move]);
     await page.mouse.move(5, 450);
     await page.waitForTimeout(300);
+    const before = gestureGate ? await gestureGate.before() : null;
     const readings: Reading[] = [];
     for (let i = 0; i < repeats; i++) {
       await arm(page, await changed());
@@ -728,25 +875,48 @@ export async function interactions(
       readings.push(await answered(page));
     }
     const t = await now(page);
-    return summarise(readings, await exactAfter(page, t), await quietAfter(page, t));
+    const result = summarise(readings, await exactAfter(page, t), await quietAfter(page, t));
+    if (gestureGate && before !== null) {
+      // Strictly outside timing: nudge 10px right via Shift+ArrowRight so displacement is clearly
+      // visible on the sampled engine surface, verify, then undo that single probe nudge.
+      await page.keyboard.press("Shift+ArrowRight");
+      await page.evaluate(
+        () =>
+          new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))),
+      );
+      await gestureGate.verify("nudge", before, {
+        minSubmitted: 2,
+        minPresented: 1,
+        requirePixelChange: true,
+        pixelMatchMode: "fine",
+        minChangedCells: 1,
+      });
+      await page.keyboard.press(undoKey);
+    }
+    return result;
   });
 
   // Undo, a step at a time (the nudges).
-  await run("undo", async () => {
-    const readings: Reading[] = [];
-    for (let i = 0; i < repeats; i++) {
-      await arm(page, await changed());
-      await page.keyboard.press("Control+z");
-      readings.push(await answered(page));
-    }
-    const t = await now(page);
-    return summarise(readings, await exactAfter(page, t), await quietAfter(page, t));
-  });
+  await run(
+    "undo",
+    async () => {
+      const readings: Reading[] = [];
+      for (let i = 0; i < repeats; i++) {
+        await arm(page, await changed());
+        await page.keyboard.press(undoKey);
+        readings.push(await answered(page));
+      }
+      const t = await now(page);
+      return summarise(readings, await exactAfter(page, t), await quietAfter(page, t));
+    },
+    { minSubmitted: 2, minPresented: 1, requirePixelChange: false },
+  );
 
   // Typing a word at the end of a text layer.
   if (targets.text) {
     const text = targets.text;
     await run("type", async () => {
+      const before = gestureGate ? await gestureGate.before() : null;
       await page.evaluate((id) => {
         const e = (
           window as unknown as {
@@ -776,14 +946,24 @@ export async function interactions(
       const t = await now(page);
       await page.keyboard.press("Escape");
       const result = summarise(readings, await exactAfter(page, t), await quietAfter(page, t));
+      if (gestureGate && before !== null) {
+        await gestureGate.verify("type", before, {
+          minSubmitted: 2,
+          minPresented: 1,
+          requirePixelChange: true,
+          pixelMatchMode: "fine",
+          minChangedCells: 1,
+        });
+      }
       // Undo the typing.
-      for (let i = 0; i < readings.length; i++) await page.keyboard.press("Control+z");
+      for (let i = 0; i < readings.length; i++) await page.keyboard.press(undoKey);
       return result;
     });
   }
 
   // A fill's colour, and a shadow's blur, as the inspector sets them (a colour drag: several steps).
-  const edit = async (id: string, prop: "fills" | "effects") => {
+  const edit = async (name: string, id: string, prop: "fills" | "effects") => {
+    const before = gestureGate ? await gestureGate.before() : null;
     const readings: Reading[] = [];
     const t = await now(page);
     for (let i = 0; i < repeats / 2; i++) {
@@ -820,18 +1000,27 @@ export async function interactions(
       readings.push(await answered(page));
     }
     const result = summarise(readings, await exactAfter(page, t), await quietAfter(page, t));
-    for (let i = 0; i < repeats / 2; i++) await page.keyboard.press("Control+z");
+    if (gestureGate && before !== null) {
+      await gestureGate.verify(name, before, {
+        minSubmitted: 2,
+        minPresented: 1,
+        requirePixelChange: true,
+        pixelMatchMode: "fine",
+        minChangedCells: 1,
+      });
+    }
+    for (let i = 0; i < repeats / 2; i++) await page.keyboard.press(undoKey);
     return result;
   };
   if (targets.fill) {
     const fill = targets.fill;
     await select([fill]);
-    await run("change fill", () => edit(fill, "fills"));
+    await run("change fill", () => edit("change fill", fill, "fills"));
   }
   if (targets.effect) {
     const effect = targets.effect;
     await select([effect]);
-    await run("change effect", () => edit(effect, "effects"));
+    await run("change effect", () => edit("change effect", effect, "effects"));
   }
   await select([]);
   return out;
@@ -861,7 +1050,7 @@ export async function switchPage(page: Page, pageId: string): Promise<Answer> {
     overlay: { p50: 0, max: 0 },
     exact: Math.round(r.exact),
     quiet: 0,
-    longTask: 0,
+    longTask: null,
   };
 }
 
@@ -869,20 +1058,20 @@ export async function switchPage(page: Page, pageId: string): Promise<Answer> {
 export function table(title: string, results: Record<string, CaseResult>): string {
   const rows = Object.entries(results).map(([name, r]) => {
     if ("answer" in r)
-      return `${name.padEnd(24)} answer ${String(r.answer.p50).padStart(7)} ms (worst ${String(r.answer.max).padStart(7)}) · content ${String(r.content.p50).padStart(6)} (${r.content.max}) · overlay ${String(r.overlay.p50).padStart(5)} · exact ${String(r.exact).padStart(6)} ms · quiet ${String(r.quiet).padStart(6)} ms · long task ${r.longTask} ms · n ${r.n}`;
-    return `${name.padEnd(24)} content p50 ${String(r.content.p50).padStart(6)} · p95 ${String(r.content.p95).padStart(6)} · p99 ${String(r.content.p99 ?? "-").padStart(6)} · max ${String(r.content.max).padStart(6)} ms · frame interval p50 ${r.interval?.p50} / p95 ${r.interval?.p95} / p99 ${r.interval?.p99} ms${r.exactMs !== undefined ? ` · exact after drop ${r.exactMs} ms` : ""}`;
+      return `${name.padEnd(24)} answer ${String(r.answer.p50).padStart(7)} ms (worst ${String(r.answer.max).padStart(7)}) · content ${String(r.content.p50).padStart(6)} (${r.content.max}) · overlay ${String(r.overlay.p50).padStart(5)} · exact ${String(r.exact).padStart(6)} ms · quiet ${String(r.quiet).padStart(6)} ms · long task ${r.longTask === null ? "n/a" : `${r.longTask} ms`} · n ${r.n}`;
+    return `${name.padEnd(24)} frame interval p50 ${r.interval?.p50} / p95 ${r.interval?.p95} / p99 ${r.interval?.p99} ms · content p50 ${String(r.content.p50).padStart(6)} · p95 ${String(r.content.p95).padStart(6)} · p99 ${String(r.content.p99 ?? "-").padStart(6)} · max ${String(r.content.max).padStart(6)} ms${r.exactMs !== undefined ? ` · exact after drop ${r.exactMs} ms` : ""}`;
   });
   return `\n${title}\n${rows.join("\n")}`;
 }
 
 /** Profiles each case under the CPU profiler and saves it (BENCH_PROFILE). */
 export function profiler(
-  cdp: CDPSession,
+  cdp: CDPSession | null,
   dir: string | undefined,
   prefix: string,
   save: (name: string, profile: unknown) => void,
 ): Profiler {
-  if (!dir) return noProfile;
+  if (!dir || !cdp) return noProfile;
   return async (name, work) => {
     await cdp.send("Profiler.start");
     const result = await work();

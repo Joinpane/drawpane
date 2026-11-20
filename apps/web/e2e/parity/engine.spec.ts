@@ -259,11 +259,18 @@ test.describe("Render engine parity", () => {
             { backend: "gpu", compatibility: true },
             { backend: "webgl", compatibility: false },
           ];
+          let software: {
+            backend: GpuBackend;
+            compatibility: boolean;
+            info: { adapter: string; backend: "webgpu" | "webgl2"; fallback: boolean };
+          } | null = null;
           for (const t of tries) {
             const info = await eng.gpu(t.compatibility, t.backend);
-            if (!("error" in info)) return { ...t, info };
+            if ("error" in info) continue;
+            if (!info.fallback) return { ...t, info };
+            software ??= { ...t, info };
           }
-          return null;
+          return software;
         });
         if (!probe) throw new Error("No working GPU backend (WebGPU or WebGL2) in auto mode");
         activeBackends = [{ backend: probe.backend, compatibility: probe.compatibility }];

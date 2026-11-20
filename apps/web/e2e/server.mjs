@@ -40,7 +40,7 @@ if (migrate.status !== 0) {
 }
 
 const vars = {
-  PUBLIC_ORIGIN: `http://localhost:${port}`,
+  PUBLIC_ORIGIN: process.env.E2E_PUBLIC_ORIGIN ?? `http://localhost:${port}`,
   SESSION_SECRET: "e2e-session-secret-0123456789abcdef",
   SETUP_TOKEN: "e2e-setup-token",
   // Sign-in buttons for GitHub and Google show; the providers themselves are stubbed in tests.

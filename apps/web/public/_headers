@@ -10,3 +10,9 @@
 
 /assets/*
   Cache-Control: public, max-age=31536000, immutable
+
+/diagnostics
+  X-Robots-Tag: noindex, nofollow
+
+/diagnostics/*
+  X-Robots-Tag: noindex, nofollow
