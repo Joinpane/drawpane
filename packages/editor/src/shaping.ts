@@ -171,6 +171,11 @@ export class Shaper {
     return this.#faces.get(faceKey(face))?.status ?? "loading";
   }
 
+  /** A face's status by its key (`faceKey`): loading until it's ready or unavailable. */
+  statusOf(key: string): FaceStatus {
+    return this.#faces.get(key)?.status ?? "loading";
+  }
+
   /**
    * Tries an unavailable face again (its file failed to load, say): the next
    * shape or load starts over.
@@ -436,6 +441,19 @@ export class ShapingMeasurer implements TextMeasurer {
 
   shape(text: string, run: ShapingRun): ShapedText | null {
     return this.shaper.shape(text, run);
+  }
+
+  loading(run: ShapingRun): string | null {
+    const face = shapingFace(run);
+    return this.shaper.status(face) === "loading" ? faceKey(face) : null;
+  }
+
+  faceStatus(key: string): FaceStatus {
+    return this.shaper.statusOf(key);
+  }
+
+  get faceGeneration(): number {
+    return this.shaper.generation;
   }
 
   metrics(font: string): FontMetrics | null {

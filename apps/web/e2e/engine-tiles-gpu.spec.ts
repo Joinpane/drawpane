@@ -223,3 +223,16 @@ test("a drag erases its selection where only the last frame showed it", async ({
   expect(movedIn?.pixel).toEqual(red);
   expect(movedOut?.pixel).toEqual([0, 0, 0, 0]);
 });
+
+test("a page opened at a fractional device pixel ratio shows the coarse frame it draws", async ({
+  page,
+}) => {
+  // The opening frame draws a coarser level first: at 1.25 it must still be one the composite
+  // lays (at most 4× coarser), never a frame of background only.
+  const [frame] = await sample(page, solid(512), [
+    { size: [64, 64], pixel: [32, 32], camera: [1, 0, 0, 1.25], moving: false, budget: 12 },
+  ]);
+  expect(frame?.exact).toBe(false);
+  expect(frame?.drawn).toBeGreaterThan(0);
+  expect(frame?.pixel).toEqual(red);
+});

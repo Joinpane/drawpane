@@ -3,7 +3,9 @@
 //! stale, a mitered stroke culled from a tile; prefetch pinning the slots a missing tile was
 //! promised, a reader chain rechecking every change on every pass, an atlas refusing a mask its
 //! free rows would hold; a drag's history growing with its travel, a drag of a huge selection
-//! leaving the view blank, a split kept after its board began to fade.
+//! leaving the view blank, a split kept after its board began to fade, a selection left in the
+//! last frame; a page opened at a fractional device pixel ratio showing nothing, provisional text
+//! exported or reported exact.
 
 mod common;
 
@@ -245,7 +247,7 @@ fn prefetch_cannot_pin_the_slots_promised_to_a_missing_visible_tile() {
     for (i, j) in warm {
         let key = TileKey { level, i, j };
         let slot = cache.slot_for(key).unwrap();
-        cache.drawn(key, slot, true);
+        cache.drawn(key, slot, true, true);
     }
 
     // Seven visible tiles and nine neighbors are still held. A prior stand-in covered the view.
@@ -264,7 +266,7 @@ fn prefetch_cannot_pin_the_slots_promised_to_a_missing_visible_tile() {
             .unwrap();
         let slot = cache.slot_for(job.key);
         if let Some(slot) = slot {
-            cache.drawn(job.key, slot, true);
+            cache.drawn(job.key, slot, true, true);
             break;
         }
     }
@@ -784,4 +786,126 @@ fn a_drag_erases_its_selection_from_the_last_frame_with_no_tile_kept_there() {
         // In, out of the view, and back beside where it was.
         x = if revision == 1 { 200.0 } else { 40.0 };
     }
+}
+
+/// A 512-unit square, filled red.
+fn square() -> Rec {
+    solid(0.0, 512.0, 512.0, 1.0)
+}
+
+/// An engine given `record` alone, in a list of version 1.1 (provisional records are 1.1).
+fn provisional_engine(record: &Rec) -> Engine {
+    let mut msg = W::new(ANY, 1);
+    msg.b[6..8].copy_from_slice(&1u16.to_le_bytes());
+    msg.reset();
+    msg.set(1, 0, record);
+    let mut engine = Engine::new(Limits::default());
+    engine.apply(&msg.finish()).unwrap();
+    engine
+}
+
+#[test]
+fn opening_at_non_ladder_scale_draws_content() {
+    let mut engine = provisional_engine(&square());
+    engine.use_cpu_tiles(48, 32);
+    let camera = Camera {
+        dpr: 1.25,
+        ..camera(1.0, 0.0, 0.0)
+    };
+    let (pixels, stats) = engine
+        .render_cpu_tiled(
+            64,
+            64,
+            camera,
+            [0.0; 4],
+            TiledOptions {
+                max_jobs: 1,
+                ..TiledOptions::default()
+            },
+        )
+        .unwrap();
+    assert!(!stats.exact, "opening should use a stand-in");
+    assert!(stats.tiles_drawn > 0, "opening did no tile work");
+    assert_eq!(&pixels[(32 * 64 + 32) * 4..][..4], &[255, 0, 0, 255]);
+}
+
+#[test]
+fn provisional_text_is_refused_before_png_and_band() {
+    let mut provisional = square();
+    provisional.flags = 8;
+    provisional.coarse = std::mem::take(&mut provisional.ops);
+    let mut engine = provisional_engine(&provisional);
+    let camera = camera(1.0, 0.0, 0.0);
+    let admission = engine.admit_export(64, 64, camera);
+    let band = engine.render_band(64, 64, camera, [0.0; 4], 0, 4);
+    assert!(
+        admission.is_err() && band.is_err(),
+        "provisional content was accepted: admission {admission:?}, band first pixel {:?}",
+        band.ok().map(|pixels| &pixels[..4])
+    );
+}
+
+#[test]
+fn a_visible_provisional_record_without_bars_is_not_exact() {
+    let mut provisional = square();
+    provisional.flags = 8;
+    provisional.ops.clear();
+    provisional.paths.clear();
+    let mut engine = provisional_engine(&provisional);
+    engine.use_cpu_tiles(48, 32);
+    let (_, stats) = engine
+        .render_cpu_tiled(64, 64, camera(1.0, 0.0, 0.0), [0.0; 4], TiledOptions::default())
+        .unwrap();
+    assert!(
+        !stats.exact,
+        "an accepted visible provisional record was described as exact"
+    );
+}
+
+#[test]
+fn a_provisional_tile_waits_for_the_text_and_is_not_drawn_again_meanwhile() {
+    // Text still loading: its record is provisional. Its tiles are drawn once at full detail;
+    // until the list changes there's nothing more to draw (no frame or slice between frames
+    // draws them again), though no frame is exact. When the text arrives they're drawn again
+    // and the frame is exact.
+    let mut provisional = square();
+    provisional.flags = 8;
+    provisional.coarse = provisional.ops.clone();
+    let mut engine = provisional_engine(&provisional);
+    engine.use_cpu_tiles(48, 64);
+    let c = camera(1.0, 0.0, 0.0);
+    let options = TiledOptions {
+        prefetch: false,
+        ..TiledOptions::default()
+    };
+    // The page opens coarse, then its own tiles are drawn: a few frames, bounded.
+    let mut frames = 0;
+    loop {
+        let (_, f) = engine.render_cpu_tiled(96, 96, c, [0.0; 4], options).unwrap();
+        assert!(!f.exact, "{f:?}");
+        frames += 1;
+        if f.pending == 0 {
+            break;
+        }
+        assert!(frames < 4, "never settled: {f:?}");
+    }
+    let (_, again) = engine.render_cpu_tiled(96, 96, c, [0.0; 4], options).unwrap();
+    assert!(!again.exact, "{again:?}");
+    assert_eq!((again.tiles_drawn, again.pending), (0, 0), "{again:?}");
+    // Between frames: only tiles round the view (ahead of a pan), none of the frame's again.
+    let ahead = engine.render_cpu_ahead([0.0; 4], usize::MAX).unwrap();
+    assert_eq!(ahead.pending, 0, "{ahead:?}");
+    let (_, still) = engine.render_cpu_tiled(96, 96, c, [0.0; 4], options).unwrap();
+    assert_eq!(
+        (still.tiles_drawn, still.pending, still.exact),
+        (0, 0, false),
+        "{still:?}"
+    );
+
+    let mut patch = W::new(1, 2);
+    patch.b[6..8].copy_from_slice(&1u16.to_le_bytes());
+    patch.set(1, 0, &square());
+    engine.apply(&patch.finish()).unwrap();
+    let (_, settled) = engine.render_cpu_tiled(96, 96, c, [0.0; 4], options).unwrap();
+    assert!(settled.exact && settled.tiles_drawn > 0, "{settled:?}");
 }

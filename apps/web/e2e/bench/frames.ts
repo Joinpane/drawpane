@@ -139,7 +139,7 @@ export async function pan(page: Page, zoom: number | "fit", frames: number): Pro
         const trace = (traced?.trace ?? [])
           .map(
             (e) =>
-              `${e.k === "frame" ? "f" : e.k === "present" ? "p" : "i"}${Math.round(e.t - t)}:${Math.round(e.ms)}(${Math.round(e.encode)}+${Math.round(e.render)})/${e.tiles}/${e.pending}/m${e.misses}/r${e.records}/g${e.masked}+${e.outlined}`,
+              `${e.k === "frame" ? "f" : e.k === "present" ? "p" : e.k === "text" ? "t" : "i"}${Math.round(e.t - t)}:${Math.round(e.ms)}(${Math.round(e.encode)}+${Math.round(e.render)})/${e.tiles}/${e.pending}/m${e.misses}/r${e.records}/g${e.masked}+${e.outlined}`,
           )
           .join(" ");
         if (traced) traced.trace = null;
@@ -268,7 +268,7 @@ export async function zoom(page: Page, frames: number): Promise<Summary> {
       const trace = (traced?.trace ?? [])
         .map(
           (e) =>
-            `${e.k === "frame" ? "f" : e.k === "present" ? "p" : "i"}${Math.round(e.t - t)}:${Math.round(e.ms)}(${Math.round(e.encode)}+${Math.round(e.render)})/${e.tiles}/${e.pending}/m${e.misses}/r${e.records}/g${e.masked}+${e.outlined}`,
+            `${e.k === "frame" ? "f" : e.k === "present" ? "p" : e.k === "text" ? "t" : "i"}${Math.round(e.t - t)}:${Math.round(e.ms)}(${Math.round(e.encode)}+${Math.round(e.render)})/${e.tiles}/${e.pending}/m${e.misses}/r${e.records}/g${e.masked}+${e.outlined}`,
         )
         .join(" ");
       if (traced) traced.trace = null;

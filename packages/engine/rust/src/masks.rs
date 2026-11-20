@@ -228,11 +228,28 @@ pub fn bytes((w, h): (u16, u16)) -> usize {
     usize::from(w) * usize::from(h) * 4
 }
 
+/// What rasterising masks keeps between them: vello_cpu's resources and one render context,
+/// reset and resized for each mask (making a context per mask cost more than drawing it: a page
+/// opening rasterises thousands).
+pub struct Rasterizer {
+    pub resources: Resources,
+    ctx: RenderContext,
+}
+
+impl Default for Rasterizer {
+    fn default() -> Self {
+        Self {
+            resources: Resources::new(),
+            ctx: RenderContext::new(1, 1),
+        }
+    }
+}
+
 /// A glyph's coverage at device scale (`sx`, `sy`) and subpixel phase, as premultiplied white:
 /// its alpha is the coverage. Answers the mask and its top left from the whole-pixel anchor;
 /// None for a glyph with no outline or one too large.
 pub fn rasterise(
-    resources: &mut Resources,
+    r: &mut Rasterizer,
     path: &BezPath,
     sx: f64,
     sy: f64,
@@ -241,12 +258,47 @@ pub fn rasterise(
 ) -> Option<(Pixmap, (i32, i32))> {
     let (x0, y0, w, h) = extent(path, sx, sy, phase, max_side)?;
     let t = Affine::new([sx, 0.0, 0.0, sy, phase.0, phase.1]);
-    let mut ctx = RenderContext::new(w, h);
+    let ctx = &mut r.ctx;
+    ctx.reset_and_resize(w, h);
     ctx.set_transform(Affine::translate((-(x0 as f64), -(y0 as f64))) * t);
     ctx.set_paint(vello_common::color::palette::css::WHITE);
     ctx.fill_path(path);
     ctx.flush();
     let mut pixmap = Pixmap::new(w, h);
-    ctx.render(&mut pixmap, resources);
+    ctx.render(&mut pixmap, &mut r.resources);
     Some((pixmap, (x0 as i32, y0 as i32)))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_kept_context_rasterises_the_same_masks_as_a_new_one() {
+        let mut p = BezPath::new();
+        p.move_to((0.0, 0.0));
+        p.curve_to((100.0, 700.0), (400.0, 700.0), (500.0, 0.0));
+        p.line_to((450.0, 0.0));
+        p.curve_to((380.0, 600.0), (120.0, 600.0), (50.0, 0.0));
+        p.close_path();
+        let mut kept = Rasterizer::default();
+        for (i, s) in [0.004, 0.016, 0.031, 0.09, 0.2]
+            .into_iter()
+            .cycle()
+            .take(40)
+            .enumerate()
+        {
+            let phase = (f64::from(i as u32 % 8) / 8.0, f64::from(i as u32 % 3) / 8.0);
+            let a = rasterise(&mut kept, &p, s, -s, phase, 160);
+            let b = rasterise(&mut Rasterizer::default(), &p, s, -s, phase, 160);
+            match (a, b) {
+                (Some((a, ao)), Some((b, bo))) => {
+                    assert_eq!(ao, bo);
+                    assert_eq!(a.data_as_u8_slice(), b.data_as_u8_slice(), "scale {s}, phase {phase:?}");
+                }
+                (None, None) => {}
+                _ => panic!("one rasterised and the other didn't"),
+            }
+        }
+    }
 }

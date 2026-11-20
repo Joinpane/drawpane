@@ -414,6 +414,20 @@ impl Engine {
 
     /// Refuses a page holding a shown record the engine doesn't draw, wherever it is: the caller
     /// draws the whole page another way.
+    /// Refuses an export while any shown record is provisional (display list 1.1, flag 8: its
+    /// text still loading, drawn as placeholder bars): an export is exact or isn't made, so it
+    /// waits for the list that has the text. Wherever the record is, in the crop or not: the list
+    /// isn't the document yet.
+    pub fn check_settled(&self) -> Result<()> {
+        match self.store.provisional_shown() {
+            Some(id) => Err(EngineError::new(
+                ErrorCode::State,
+                format!("record {id} is provisional (its text is still loading): an export waits for it"),
+            )),
+            None => Ok(()),
+        }
+    }
+
     pub fn check_supported(&self) -> Result<()> {
         match self.store.refusal() {
             Some((id, bits)) => Err(EngineError::unsupported(format!(
@@ -444,6 +458,7 @@ impl Engine {
         self.check_size(width, height)?;
         camera.check()?;
         self.check_supported()?;
+        self.check_settled()?;
         let budget = self.store.limits.memory_bytes;
         if budget == 0 {
             return Ok(());
@@ -783,7 +798,7 @@ impl Engine {
                     let from = ((y + h) * side + h) * 4;
                     out.extend_from_slice(&target[from..from + t * 4]);
                 }
-                tiles.cache.drawn(job.key, slot, fs.draw.exact());
+                tiles.cache.drawn(job.key, slot, fs.draw.exact(), !job.detail);
             }
             let (pending, _) = tiles.cache.left(&plan);
             stats.pending = pending;
@@ -886,7 +901,7 @@ impl Engine {
                 tiles.slots.resize_with(s + 1, Vec::new);
             }
             take(self.cpu.target.data_as_u8_slice(), &mut tiles.slots[s]);
-            tiles.cache.drawn(job.key, slot, exact);
+            tiles.cache.drawn(job.key, slot, exact, !job.detail);
         }
         let mut comp_exact = true;
         if !plan.direct {
@@ -1008,7 +1023,7 @@ impl Engine {
                                     tiles.slots.resize_with(s + 1, Vec::new);
                                 }
                                 take(self.cpu.target.data_as_u8_slice(), &mut tiles.slots[s]);
-                                tiles.cache.drawn(key, slot, true);
+                                tiles.cache.drawn(key, slot, true, true);
                                 Some(slot)
                             }
                             None => None,
@@ -1070,6 +1085,7 @@ impl Engine {
         self.check_size(width, height)?;
         camera.check()?;
         self.check_supported()?;
+        self.check_settled()?;
         let most = self.band_rows(width);
         if rows == 0 || rows > most || y0.checked_add(rows).is_none_or(|end| end > height) {
             return Err(EngineError::new(

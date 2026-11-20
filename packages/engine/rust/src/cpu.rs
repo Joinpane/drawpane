@@ -51,6 +51,8 @@ pub struct Cpu {
     pub origin: (i32, i32),
     scene: RenderContext,
     resources: Resources,
+    /// Rasterises glyph masks.
+    raster: masks::Rasterizer,
     images: HashMap<u32, Vec<Arc<Pixmap>>>,
     image_bytes: usize,
     pub masks: MaskCache<Arc<Pixmap>>,
@@ -83,7 +85,7 @@ impl Cpu {
             self.masks.stats.outlines += 1;
             return None;
         }
-        let (mask, origin) = masks::rasterise(&mut self.resources, path, scale.0, scale.1, phase, side)?;
+        let (mask, origin) = masks::rasterise(&mut self.raster, path, scale.0, scale.1, phase, side)?;
         let size = (mask.width(), mask.height());
         let mask = Arc::new(mask);
         let e = self.masks.insert(key, mask, origin, size);
@@ -96,6 +98,7 @@ impl Cpu {
             origin: (0, 0),
             scene: RenderContext::new(1, 1),
             resources: Resources::new(),
+            raster: masks::Rasterizer::default(),
             images: HashMap::new(),
             image_bytes: 0,
             masks: MaskCache::new(mask_bytes),

@@ -80,10 +80,15 @@ export interface EncodedLayer {
   readonly record: WireRecord;
   /** Image refs it paints (so it's encoded again when one arrives). */
   readonly images: readonly string[];
-  /** Text it couldn't outline yet (a face still loading): encoded again when shaping can. */
+  /** Text it couldn't outline (no face will come): encoded again when shaping can. */
   readonly textPending: boolean;
   /** Sent provisional (`LayerContext.deferText`): to be encoded whole. */
   readonly deferred: boolean;
+  /**
+   * Faces its text waits for while their files load (`TextMeasurer.loading`): it's sent
+   * provisional, its coarse bars, and encoded again when they arrive.
+   */
+  readonly waiting: readonly string[];
 }
 
 const IDENTITY: Matrix = [1, 0, 0, 1, 0, 0];
@@ -133,8 +138,12 @@ class Builder {
   readonly images: string[] = [];
   unsupported = 0;
   textPending = false;
-  /** Sent ahead of its real drawing (`LayerContext.deferText`). */
+  /** Sent ahead of its real drawing: deferred, or waiting for faces. */
   provisional = false;
+  /** Sent ahead of its real drawing because text was deferred (`LayerContext.deferText`). */
+  deferred = false;
+  /** Faces its text waits for (`TextMeasurer.loading`). */
+  readonly waiting = new Set<string>();
   path(entry: PathEntry): number {
     this.paths.push(entry);
     return this.paths.length - 1;
@@ -562,9 +571,13 @@ function textRuns(
     const marker = line.marker;
     if (marker) {
       const span = spanAt(line.start);
-      const shaped = span ? shape(marker.text, runFor(span.props, ctx.measurer)) : null;
-      if (!shaped || shaped.outlines === false) missing = true;
-      else {
+      const run = span ? runFor(span.props, ctx.measurer) : null;
+      const shaped = run ? shape(marker.text, run) : null;
+      if (!shaped || shaped.outlines === false) {
+        const face = run && !shaped ? (ctx.measurer.loading?.(run) ?? null) : null;
+        if (face) b.waiting.add(face);
+        else missing = true;
+      } else {
         const glyphs = shapedGlyphs(shaped, marker.text, 0, x0 + marker.x, baseline, ctx);
         if (glyphs.length > 0)
           runs.push({
@@ -580,7 +593,10 @@ function textRuns(
       const shaped = run ? shape(frag.text, run) : null;
       const x = x0 + frag.x;
       if (!shaped || shaped.outlines === false) {
-        missing = true;
+        // A face still loading: provisional until it arrives. One that won't: not drawn here.
+        const face = run && !shaped ? (ctx.measurer.loading?.(run) ?? null) : null;
+        if (face) b.waiting.add(face);
+        else missing = true;
         continue;
       }
       const glyphs = shapedGlyphs(shaped, frag.text, frag.letterSpacing, x, baseline, ctx);
@@ -607,7 +623,7 @@ function textRuns(
   if (missing) {
     b.unsupported |= UNSUPPORTED.textWithoutOutlines;
     b.textPending = true;
-  }
+  } else if (b.waiting.size > 0) b.provisional = true;
   return { runs, bars };
 }
 
@@ -621,7 +637,10 @@ function text(
 ): void {
   // Deferred: its coarse bars only, for now (below), never its glyphs.
   const runs = ctx.deferText ? { runs: [], bars: [] } : textRuns(b, node, width, ctx);
-  if (ctx.deferText) b.provisional = true;
+  if (ctx.deferText) {
+    b.provisional = true;
+    b.deferred = true;
+  }
   if (!runs) {
     b.unsupported |= UNSUPPORTED.textWithoutOutlines;
     return;
@@ -777,6 +796,7 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
     },
     images: b.images,
     textPending: b.textPending,
-    deferred: b.provisional,
+    deferred: b.deferred,
+    waiting: [...b.waiting],
   };
 }

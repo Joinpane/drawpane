@@ -200,7 +200,8 @@ pub struct Gpu {
     atlas: Atlas,
     pub masks: MaskCache<RectU16>,
     mask_side: u32,
-    cpu_resources: vello_cpu::Resources,
+    /// Rasterises glyph masks (on the CPU, as the CPU backend does: the same coverage).
+    raster: masks::Rasterizer,
     pub health: Arc<Health>,
     pub adapter: String,
     pub fallback_adapter: bool,
@@ -298,7 +299,7 @@ impl Gpu {
                 return None;
             }
         };
-        let (mask, origin) = masks::rasterise(&mut self.cpu_resources, path, scale.0, scale.1, phase, side)?;
+        let (mask, origin) = masks::rasterise(&mut self.raster, path, scale.0, scale.1, phase, side)?;
         if (mask.width(), mask.height()) != (w, h) {
             return None;
         }
@@ -509,7 +510,7 @@ impl Gpu {
             },
             masks: MaskCache::new(mask_bytes),
             mask_side,
-            cpu_resources: vello_cpu::Resources::new(),
+            raster: masks::Rasterizer::default(),
             health,
             submits: 0,
             bytes: (ATLAS_SIDE * ATLAS_SIDE * 4 + 16 * 16 * 4) as usize,
@@ -848,13 +849,16 @@ impl Gpu {
         for job in &plan.jobs {
             // Within the budget. Past it, what something stands in for waits for a later frame;
             // what nothing stands in for is drawn regardless (the plan puts it first). At rest a
-            // frame always draws one tile, so it makes progress; while the camera moves each is
-            // drawn only if a tile, at what tiles have lately cost, fits what's left, so a dense
-            // tile never makes a long moving frame.
+            // frame always draws one tile, so it makes progress. While the camera moves a tile is
+            // drawn if one, at what tiles have lately cost, fits what's left; the frame's first
+            // may take up to three budgets, so a pan keeps up with ordinary tiles while a dense
+            // one (tens of ms) never makes a long moving frame.
             let elapsed = now() - t0;
             let over = options.budget_ms > 0.0
                 && if options.moving {
-                    elapsed + self.tile_ms > options.budget_ms
+                    let fits = elapsed + self.tile_ms <= options.budget_ms;
+                    let first = !drew_any && elapsed + self.tile_ms.max(1.0) <= options.budget_ms * 3.0;
+                    !(fits || first)
                 } else {
                     drew_any && elapsed >= options.budget_ms
                 };
@@ -885,7 +889,7 @@ impl Gpu {
             let took = now() - t0 - elapsed;
             self.tile_ms = self.tile_ms * 0.75 + took * 0.25;
             match target {
-                TileTarget::Slot(s) => self.tiles.drawn(job.key, s, exact),
+                TileTarget::Slot(s) => self.tiles.drawn(job.key, s, exact, !job.detail),
                 TileTarget::Scratch | TileTarget::ScratchOnly => direct_exact &= exact,
             }
         }
@@ -991,7 +995,7 @@ impl Gpu {
                 &mut stats,
                 &mut verbs,
             )?;
-            self.tiles.drawn(job.key, slot, exact);
+            self.tiles.drawn(job.key, slot, exact, !job.detail);
         }
         let (pending, queued) = self.tiles.left(&plan);
         stats.pending = pending;
@@ -1361,7 +1365,7 @@ impl Gpu {
                             self.tiles.release(key, slot);
                             return Err(e);
                         }
-                        self.tiles.drawn(key, slot, true);
+                        self.tiles.drawn(key, slot, true, true);
                         slot
                     }
                 };

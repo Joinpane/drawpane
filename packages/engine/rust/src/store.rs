@@ -919,6 +919,14 @@ impl Store {
                 let b = Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1])).inflate(reach, reach);
                 out = Some(out.map_or(b, |o| o.union(b)));
             }
+            // A provisional record (its text still loading) stands in over its box, grown by its
+            // reach, whatever its placeholder ops cover: so it's never culled away uncounted (a
+            // frame showing it is never exact), and its tiles go stale when the text arrives.
+            if r.provisional() {
+                let reach = f64::from(r.reach);
+                let b = Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1])).inflate(reach, reach);
+                out = Some(out.map_or(b, |o| o.union(b)));
+            }
             // A reader paints over its own box.
             if r.reads().is_some() {
                 let b = Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1]));
@@ -1103,6 +1111,16 @@ impl Store {
     /// times the changes and the readers that join.
     pub fn dirty_checks(&self) -> u64 {
         self.dirty_checks.get()
+    }
+
+    /// A provisional record that's shown (it and every ancestor), if there is one: an export
+    /// waits until there's none.
+    pub fn provisional_shown(&self) -> Option<u32> {
+        self.nodes
+            .iter()
+            .filter(|(_, n)| n.record.provisional())
+            .map(|(id, _)| *id)
+            .find(|id| self.drawn(*id))
     }
 
     /// Whether a record and every ancestor are shown.

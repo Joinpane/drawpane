@@ -213,24 +213,23 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     };
     idle.port1.onmessage = () => {
       idlePosted = false;
-      if (!idleOn || !engine || disposed) return;
-      const a = engine.ahead(idleBackground, IDLE_SLICE_MS);
-      if (!a || a.drawn === 0) {
-        // Nothing more can be drawn between frames: frames draw the rest (what the frame
-        // draws itself, straight into it), as before.
+      const pageId = editor.s.pageId;
+      if (!idleOn || !engine || disposed || !pageId) return;
+      const a = engine.ahead(pageId, idleBackground, IDLE_SLICE_MS);
+      if (!a?.progressed) {
+        // Nothing more can be done between frames. What's left, if anything, is the frame's to
+        // draw (a tile no slot can hold is drawn straight into it).
         idleOn = false;
-        if (contentDirty) schedule();
+        if (contentDirty && a && a.tiles > 0) schedule();
         return;
       }
-      // The frame it drew for is all drawn: the next frame shows it exact, and nothing holds it
-      // back (that frame starts drawing round the view again). No frame for tiles drawn round
-      // an exact one.
-      if (a.pending === 0 && contentDirty) {
-        // Drawn now rather than a frame later: the frame is ready.
+      if (a.tiles === 0 && a.textVisible === 0 && contentDirty) {
+        // The frame it drew for is all drawn: shown now rather than a frame later, and nothing
+        // holds it back (that frame starts the rest again: text out of view, tiles round it).
         idleOn = false;
         if (frame) cancelAnimationFrame(frame);
         draw();
-      } else if (a.pending > 0 || a.queued > 0) postIdle();
+      } else if (a.tiles > 0 || a.queued > 0 || a.text > 0) postIdle();
       else idleOn = false;
     };
     const draw = () => {
@@ -288,11 +287,13 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           // Stand-ins on screen while moving: the next frame draws more. At rest, the time
           // between frames draws the rest, without compositing a frame meanwhile, and asks for
           // the frame once what it shows is drawn; then the tiles round the view, ahead of a pan.
-          if (!r.exact) contentDirty = true;
+          // A frame at rest that isn't exact but is settled (text provisional while its faces
+          // load) waits: their arrival redraws it.
+          if (!r.exact && !(r.settled && !moving)) contentDirty = true;
           if (moving && (!r.exact || r.ahead)) {
             contentDirty = true;
             schedule();
-          } else if (!r.exact || r.ahead) {
+          } else if ((!r.exact && !r.settled) || r.ahead) {
             idleOn = true;
             idleBackground = background;
             postIdle();

@@ -113,52 +113,143 @@ async function stored(page: Page): Promise<{ nodes: number; bytes: number }> {
   });
 }
 
-/** Shows `pageId`, whole: how long until its first frame was drawn, and until it was exact. */
+/**
+ * Shows `pageId`, whole: how long until its first frame was drawn, and until it was exact. With
+ * the engine, each is told apart by page and frame (`EngineView.last`): its first frame of the
+ * page with anything drawn, its first exact one, and whether the exact frame on screen was the
+ * engine's (a page left to the canvas renderer is counted as such, `fallbacks`). At most 60 s.
+ */
 async function firstFrame(
   page: Page,
   pageId: string,
-): Promise<{ first: number; exact: number; engine: Record<string, unknown> | null }> {
+): Promise<{
+  first: number;
+  exact: number;
+  engine: Record<string, unknown> | null;
+}> {
   return page.evaluate(async (pageId) => {
+    type Last = {
+      pageId: string;
+      n: number;
+      ms: number;
+      patchMs: number;
+      records: number;
+      exact: boolean;
+      plan: string;
+      tiles: object;
+      supported: boolean;
+    };
     const w = window as unknown as {
       drawpane: { setPage(id: string): void; zoomToFit(): void };
       drawpaneFrames: { exact: boolean };
+      drawpaneEngineView?: {
+        last: Last;
+        trace: Array<{
+          t: number;
+          k: string;
+          ms: number;
+          tiles: number;
+          pending: number;
+          encode: number;
+          render: number;
+          misses: number;
+          masked: number;
+          outlined: number;
+          records: number;
+        }> | null;
+        engine: { records: number; gpu: { adapter: string } | null };
+        builder: { stats: object };
+        opened: object | null;
+        unsupported(): Record<string, number>;
+      };
     };
+    const fallbacks: unknown[] = [];
+    const onFallback = (e: Event) => fallbacks.push((e as CustomEvent).detail);
+    window.addEventListener("drawpane:renderer-page-fallback", onFallback);
     const e = w.drawpane;
     const frame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
     const t = performance.now();
+    const before = w.drawpaneEngineView?.last.n ?? 0;
+    if (w.drawpaneEngineView) w.drawpaneEngineView.trace = [];
     e.setPage(pageId);
     e.zoomToFit();
     await frame();
     await frame();
     const first = performance.now() - t;
-    const v = (
-      window as unknown as {
-        drawpaneEngineView?: {
-          last: { ms: number; patchMs: number; plan: string; tiles: object; supported: boolean };
-          engine: { records: number; gpu: { adapter: string } | null };
-          builder: { stats: object };
-          opened: object | null;
-          unsupported(): Record<string, number>;
-        };
-      }
-    ).drawpaneEngineView;
+    let engineFirst: { ms: number; last: Last } | null = null;
+    let engineExact: number | null = null;
+    const watch = () => {
+      const l = w.drawpaneEngineView?.last;
+      if (!l || l.pageId !== pageId || l.n <= before) return;
+      if (!engineFirst && l.records > 0) engineFirst = { ms: performance.now() - t, last: l };
+      if (engineExact === null && l.exact) engineExact = performance.now() - t;
+    };
+    watch();
+    while (!w.drawpaneFrames.exact && performance.now() - t < 60_000) {
+      await frame();
+      watch();
+    }
+    const exact = performance.now() - t;
+    window.removeEventListener("drawpane:renderer-page-fallback", onFallback);
+    const v = w.drawpaneEngineView;
+    // Where the time went until the exact frame: frames, text sent between them, tiles drawn
+    // between them (count, ms, and when the first and last of each ended).
+    const spent: Record<
+      string,
+      { n: number; ms: number; items: number; from: number; to: number }
+    > = {};
+    for (const ev of v?.trace ?? []) {
+      const at = ev.t - t;
+      if (engineExact !== null && at > engineExact + 1) continue;
+      const k = spent[ev.k] ?? { n: 0, ms: 0, items: 0, from: at, to: at };
+      spent[ev.k] = k;
+      k.n++;
+      k.ms += ev.ms;
+      k.items += ev.k === "text" ? ev.pending : ev.tiles;
+      k.to = at;
+    }
+    const timeline = (v?.trace ?? [])
+      .filter((ev) => engineExact === null || ev.t - t <= engineExact + 1)
+      .map((ev) => {
+        const at = `${ev.k[0]}${Math.round(ev.t - t)}:${Math.round(ev.ms)}`;
+        if (ev.k === "text") return `${at}/${ev.pending}`;
+        if (ev.k === "frame") return `${at}(patch ${Math.round(ev.render)})/${ev.tiles}`;
+        if (ev.k === "idle")
+          return `${at}(${Math.round(ev.encode)}+${Math.round(ev.render)})/${ev.tiles}/r${ev.records}/g${ev.masked}+${ev.outlined}/m${ev.misses}`;
+        return at;
+      })
+      .join(" ");
+    for (const k of Object.values(spent)) {
+      k.ms = Math.round(k.ms);
+      k.from = Math.round(k.from);
+      k.to = Math.round(k.to);
+    }
+    if (v) v.trace = null;
+    const firstEngine = engineFirst as { ms: number; last: Last } | null;
     const engine = v
       ? {
           supported: v.last.supported,
           records: v.engine.records,
           adapter: v.engine.gpu?.adapter ?? null,
-          firstFrame: {
-            ms: v.last.ms,
-            patchMs: v.last.patchMs,
-            plan: v.last.plan,
-            tiles: v.last.tiles,
-          },
+          firstFrame: firstEngine
+            ? {
+                ms: Math.round(firstEngine.ms),
+                frameMs: Math.round(firstEngine.last.ms),
+                patchMs: Math.round(firstEngine.last.patchMs),
+                plan: firstEngine.last.plan,
+                tiles: firstEngine.last.tiles,
+              }
+            : null,
+          exactDrawnMs: engineExact === null ? null : Math.round(engineExact),
+          exactShownBy: v.last.pageId === pageId && v.last.exact ? "engine" : "canvas",
+          fallbacks,
+          spent,
+          timeline,
           opened: v.opened,
           ...(v.last.supported ? {} : { unsupported: v.unsupported() }),
         }
       : null;
-    while (!w.drawpaneFrames.exact) await frame();
-    return { first, exact: performance.now() - t, engine };
+    return { first, exact, engine };
   }, pageId);
 }
 

@@ -213,6 +213,115 @@ describe.skipIf(!built("worker") && !process.env.CI)("the engine's tiles", () =>
     }
   });
 
+  describe("text whose face is", () => {
+    /** Two texts: one in a face that's loading (until `arrive`), one in a face at hand. */
+    function faces() {
+      const doc = page();
+      for (const [id, family, y] of [
+        ["late", "Late", 4],
+        ["stable", "Stable", 44],
+      ] as const)
+        doc.apply([
+          {
+            op: "create",
+            id,
+            type: "text",
+            parent: "p",
+            key: id === "late" ? "a0" : "a1",
+            props: {
+              x: 8,
+              y,
+              width: 70,
+              height: 30,
+              characters: "A",
+              fontSize: 20,
+              fontFamily: family,
+            },
+          },
+        ]);
+      let status: "loading" | "ready" | "unavailable" = "loading";
+      let faceGeneration = 0;
+      const shaped = {
+        glyphs: [{ path: null, d: "M0 0H500V800H0Z", x: 0, y: 0, cluster: 0 }],
+        width: 16,
+        scale: 0.02,
+      };
+      const m: TextMeasurer = {
+        ...measurer,
+        missing: () => false,
+        get generation() {
+          return faceGeneration;
+        },
+        get faceGeneration() {
+          return faceGeneration;
+        },
+        shape: (_text, run) => (run.family === "Late" && status !== "ready" ? null : shaped),
+        loading: (run) => (run.family === "Late" && status === "loading" ? "face:Late" : null),
+        faceStatus: () => status,
+      };
+      const settle = (to: "ready" | "unavailable") => {
+        status = to;
+        faceGeneration++;
+      };
+      return { doc, m, settle };
+    }
+
+    it("loading draws provisional, never on the canvas renderer, and only it is sent again when it arrives", () => {
+      const { doc, m, settle } = faces();
+      const scene = new Scene(doc);
+      const builder = new DisplayListBuilder(scene, m);
+      const e = new RenderEngine(mod);
+      try {
+        expect(e.apply(builder.build("p")).ok).toBe(true);
+        // Waiting for its face: provisional (bars), the page still the engine's.
+        expect(builder.supported).toBe(true);
+        expect(builder.waiting).toBe(1);
+        const r = e.renderCpuTiled(W, H, camera, BG, TILES);
+        if (!r.ok) throw new Error(r.message);
+        expect(r.value.stats.exact).toBe(false);
+        // Nothing changes until the face arrives.
+        expect(builder.update()).toBeNull();
+        settle("ready");
+        const patch = builder.update();
+        expect(patch).not.toBeNull();
+        // Only the text that waited, not the one in a face at hand.
+        expect(builder.stats.records).toBe(1);
+        if (patch) expect(e.apply(patch).ok).toBe(true);
+        expect(builder.waiting).toBe(0);
+        expect(same(tiled(e), fresh(mod, scene, m))).toBe(true);
+      } finally {
+        e.dispose();
+      }
+    });
+
+    it("never coming falls back to the canvas renderer, typed", () => {
+      const { doc, m, settle } = faces();
+      settle("unavailable");
+      const builder = new DisplayListBuilder(new Scene(doc), m);
+      builder.build("p");
+      expect(builder.supported).toBe(false);
+      expect(builder.waiting).toBe(0);
+    });
+
+    it("at hand is left alone when other faces arrive", () => {
+      const { doc, m, settle } = faces();
+      const scene = new Scene(doc);
+      const builder = new DisplayListBuilder(scene, m);
+      const e = new RenderEngine(mod);
+      try {
+        expect(e.apply(builder.build("p")).ok).toBe(true);
+        settle("ready");
+        const patch = builder.update();
+        if (patch) expect(e.apply(patch).ok).toBe(true);
+        // A face nobody waits for arriving sends nothing.
+        settle("ready");
+        expect(builder.update()).toBeNull();
+      } finally {
+        e.dispose();
+      }
+    });
+  });
+
   it("show nothing of the last page after a page switch, even while moving", () => {
     const doc = page();
     doc.apply([
