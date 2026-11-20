@@ -62,6 +62,8 @@ pub struct Cpu {
     pub masks: MaskCache<Arc<Pixmap>>,
     mask_side: u32,
     checker: Arc<Pixmap>,
+    /// Shareable CPU blur pyramids, reused across equal inputs within a frame.
+    pub blur: crate::blur::CpuBlurCache,
     /// How far the target extends past the band each way, for readers' reach: kernels may read
     /// past the band's edge, never past the target's.
     pub halo: i32,
@@ -82,6 +84,7 @@ impl Cpu {
             masks: MaskCache::new(mask_bytes),
             mask_side,
             checker: Arc::new(pixmap(16, 16, checker_pixels())),
+            blur: crate::blur::CpuBlurCache::new(mask_bytes.clamp(1 << 20, 4 << 20)),
             halo: 0,
         }
     }
@@ -139,6 +142,7 @@ impl Cpu {
         self.scene.reset_and_resize(width, height);
         self.diamond_bytes = 0;
         self.masks.begin_frame();
+        self.blur.begin_frame();
     }
 
     /// Lays the scene drawn since the last flush onto the target.

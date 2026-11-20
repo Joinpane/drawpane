@@ -121,7 +121,7 @@ pub enum Open {
 }
 
 /// A rectangle of device pixels.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct IRect {
     pub x0: i32,
     pub y0: i32,

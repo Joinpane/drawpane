@@ -41,6 +41,29 @@ A grain suite (12 cells: noise of each kind at several sizes and densities, text
 
 The suite's mean went from 7.36 to 1.12. Goldens now come from Figma's own exporter in the browser (`export-in-figma.mjs`), not the REST API, whose image reads a file on Figma's free plan can spend in a few runs; the two were checked to agree (shadows score 0.25 against the exporter's goldens, 0.27 against REST's).
 
+## Revision: blur sigma calibration across effects (2026-11-20)
+
+The initial parity pass set `sigma = radius / 2` (0.50) across effects while glass frost calibration converged on `0.45 * radius`. When implementing the phase 3 render engine, a controlled CPU A/B comparison (holding code, scenes, crops, and scoring constant while changing only the radius-to-sigma multiplier between `0.50` and `0.45`) was measured against the 2x Figma goldens:
+
+| Suite or family | Mean at 0.50 | Mean at 0.45 | Breakdown |
+| --- | --- | --- | --- |
+| `shadows` | 0.270 | 0.143 | 13 better, 2 sharp controls identical |
+| `blurs` (layer blur) | 0.868 | 0.666 | 5 better |
+| `blurs` (uniform background blur) | 0.874 | 0.714 | 4 better, 1 identical control |
+| `glass` default frost | 1.398 | 1.248 | 9 better, 1 worse (`glass/text`: 3.96 vs 3.99) |
+| `glass-alpha` frost | 0.407 | 0.362 | 3 better, 1 rounded tie |
+| `glass-context` frost | 1.213 | 1.107 | 3 better |
+| `glass-dark` frost | 0.729 | 0.668 | 1 better, 4 rounded ties |
+| `glass-stack` frost | 3.225 | 2.901 | 12 better |
+| `corners-glass` frost | 1.210 | 0.900 | 1 drawable plain lens better |
+| `glass-probe-2` frost edge probes (partial, 21/31) | 0.85 / 3.51 / 7.81 | 0.32 / 1.30 / 2.78 | `frost-20`, `frost-50`, `frost-100` all favor 0.45 |
+
+Overall, 32 of 38 measured frost-sensitive cells favored `0.45`, 5 tied at suite precision, and 1 (`glass/text`) favored `0.50`; all 13 blurred shadow cells, all 5 layer-blur cells, and all 9 sensitive background-blur cells favored `0.45`.
+
+Real-kit frame evidence is mixed or insensitive: four blur-sensitive shadcn shadow frames gave two small improvements (`Hover Card` 0.21 to 0.20, `Open=Yes` 2.89 to 2.87) and two rounded ties; five zero-radius shadow frames were identical; the shadcn `Drawer` frame (via banded PNG streaming) scored 0.4954 at 0.45 vs 0.4940 at 0.50 with identical worst tile and p99; a large iOS UI kit background frame (`10509:2668`) was bit-identical (mean ~0.004), while other sampled kit frames with readers or layer blurs waited on additional phase 3 effects. Progressive blur endpoints use the same radius conversion contract as uniform background blur, though no progressive Figma golden has calibrated them yet.
+
+**Decision:** Standardize the render engine's Figma blur radius-to-sigma conversion on the single shared constant `FIGMA_BLUR_SIGMA = 0.45` (`sigma_from_radius(radius)` in `packages/engine/rust/src/blur.rs`), shared by shadows, layer blur, background blur, progressive blur, and glass frost so every effect shares one radius contract. This is an empirical parity calibration against Figma's exports, not a claim about Figma's internal kernel or truncation algorithm.
+
 ## Consequences
 
 - Documents that relied on the old drawing (circular radial gradients on wide layers, blurs half as strong) look different after this change. There are no published files yet; matching Figma now is cheaper than a migration later.
