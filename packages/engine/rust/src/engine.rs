@@ -301,13 +301,14 @@ impl Engine {
         });
     }
 
-    /// The drag as this frame needs it: where its selection is now.
+    /// The drag as this frame needs it: where its selection is now (including any ancestor
+    /// post-effect halo that moves with it).
     pub fn drag_frame(&self) -> Option<DragFrame> {
         let d = self.dragging.as_ref()?;
         let now = d
             .ids
             .iter()
-            .filter_map(|id| self.store.world_extent(*id))
+            .filter_map(|id| self.store.dirty_extent(*id))
             .reduce(|a, b| a.union(b))
             .unwrap_or(Rect::ZERO);
         Some(DragFrame {
@@ -476,19 +477,19 @@ impl Engine {
         l.band_rows.min(by_bytes as u32).max(1)
     }
 
-    /// Estimates the peak extra transient working set needed by visible shadows and isolated
-    /// offscreen scopes on an export tile of `cols` x `tile_rows`, and validates that no visible
-    /// shadow blur exceeds `MAX_BLUR_SIGMA` or `Limits::texture_side`.
+    /// Estimates the peak extra transient working set needed by visible shadows, layer blurs, and
+    /// isolated offscreen scopes on an export tile of `cols` x `tile_rows` (which already includes
+    /// export backdrop-reader halos), and validates that no visible blur exceeds `MAX_BLUR_SIGMA`
+    /// or `Limits::texture_side`. Propagates expanded offscreen dimensions through nested blur
+    /// scopes so stacked blurs and shadows inside blurred containers are admitted accurately.
     fn export_effect_working_set(&self, cols: usize, tile_rows: usize, view: Affine) -> Result<usize> {
         let view_scale = view.determinant().abs().sqrt();
         let max_tex = self.store.limits.texture_side as usize;
-        let mut peak_shadow = 0usize;
-        let mut max_iso_depth = 0usize;
-        let tile_bytes = cols.saturating_mul(tile_rows).saturating_mul(4);
-        let iso_scope_bytes =
-            tile_bytes.saturating_add(crate::cpu::scene_estimate_bytes(cols as u32, tile_rows as u32));
-        let mut stack: Vec<(u32, usize)> = vec![(crate::store::ROOT, 0)];
-        while let Some((id, iso_depth)) = stack.pop() {
+        let mut peak_total = 0usize;
+        // Stack entries: (id, parent_world, cur_cols, cur_rows, live_iso_bytes).
+        let mut stack: Vec<(u32, Affine, usize, usize, usize)> =
+            vec![(crate::store::ROOT, Affine::IDENTITY, cols, tile_rows, 0)];
+        while let Some((id, parent_world, cur_cols, cur_rows, live_iso)) = stack.pop() {
             let Some(node) = self.store.nodes.get(&id) else {
                 continue;
             };
@@ -496,13 +497,89 @@ impl Engine {
             if id != crate::store::ROOT && r.hidden() {
                 continue;
             }
-            let next_depth =
-                if id != crate::store::ROOT && r.isolate() && r.opacity < 1.0 && self.store.subtree_has_pass(id) {
-                    iso_depth + 1
-                } else {
-                    iso_depth
-                };
-            max_iso_depth = max_iso_depth.max(next_depth);
+            let world = if id == crate::store::ROOT {
+                parent_world
+            } else {
+                parent_world * r.transform
+            };
+            let cur_tile_bytes = cur_cols.saturating_mul(cur_rows).saturating_mul(4);
+            let has_post = id != crate::store::ROOT && !r.post_effects.is_empty();
+            let mut next_cols = cur_cols;
+            let mut next_rows = cur_rows;
+            let mut next_iso = live_iso;
+            if has_post {
+                let mut total_pad = 0usize;
+                let mut max_step = 4usize;
+                let mut any_blur = false;
+                for pe in &r.post_effects {
+                    match *pe {
+                        crate::record::PostEffect::LayerBlur { radius } => {
+                            let sigma = (f64::from(crate::blur::sigma_from_radius(radius)) * view_scale) as f32;
+                            if sigma < 1e-4 {
+                                continue;
+                            }
+                            any_blur = true;
+                            crate::blur::validate_sigma(
+                                sigma,
+                                IRect {
+                                    x0: 0,
+                                    y0: 0,
+                                    x1: cur_cols.max(1) as i32,
+                                    y1: cur_rows.max(1) as i32,
+                                },
+                                crate::blur::EdgeMode::Zero,
+                            )?;
+                            total_pad = total_pad.saturating_add(crate::shadow::blur_support_pad(sigma) as usize);
+                            if sigma > crate::blur::DIRECT_SIGMA_MAX {
+                                let (lvl, _) = crate::blur::choose_level(sigma, crate::blur::MAX_PYRAMID_LEVELS);
+                                max_step = max_step.max(1usize << lvl.min(8));
+                            }
+                        }
+                    }
+                }
+                if any_blur {
+                    let (content_w, content_h) = if let (Some(bounds), page_pad) = self.store.bounds_and_pad(id) {
+                        let inner_pad = (page_pad - r.post_pad()).max(0.0);
+                        let inner_pad_dev = if inner_pad > 0.0 {
+                            inner_pad * view_scale + 2.0
+                        } else {
+                            0.0
+                        };
+                        let dev_box = (view * world)
+                            .transform_rect_bbox(bounds)
+                            .inflate(inner_pad_dev, inner_pad_dev);
+                        let ir = IRect::around(dev_box).inflate(2, 2);
+                        ((ir.x1 - ir.x0).max(1) as usize, (ir.y1 - ir.y0).max(1) as usize)
+                    } else {
+                        (cur_cols, cur_rows)
+                    };
+                    let raw_w = content_w.min(cur_cols.saturating_add(total_pad.saturating_mul(2)));
+                    let raw_h = content_h.min(cur_rows.saturating_add(total_pad.saturating_mul(2)));
+                    let src_w = raw_w.next_multiple_of(max_step);
+                    let src_h = raw_h.next_multiple_of(max_step);
+                    if src_w > max_tex || src_h > max_tex {
+                        return Err(EngineError::limit(format!(
+                            "layer blur source {src_w} x {src_h} px exceeds maximum target size {max_tex} px"
+                        )));
+                    }
+                    let src_bytes = src_w.saturating_mul(src_h).saturating_mul(4);
+                    let src_scene = crate::cpu::scene_estimate_bytes(src_w as u32, src_h as u32);
+                    // Offscreen input pixmap + blur scratch/pyramid + scene strips + blurred output.
+                    let blur_need = live_iso
+                        .saturating_add(src_bytes.saturating_mul(3))
+                        .saturating_add(src_scene)
+                        .saturating_add(cur_tile_bytes);
+                    peak_total = peak_total.max(blur_need);
+                    next_cols = src_w;
+                    next_rows = src_h;
+                    next_iso = live_iso.saturating_add(src_bytes).saturating_add(src_scene);
+                }
+            } else if id != crate::store::ROOT && r.isolate() && r.opacity < 1.0 && self.store.subtree_has_pass(id) {
+                next_iso = live_iso
+                    .saturating_add(cur_tile_bytes)
+                    .saturating_add(crate::cpu::scene_estimate_bytes(cur_cols as u32, cur_rows as u32));
+                peak_total = peak_total.max(next_iso);
+            }
             for op in &r.ops {
                 match op {
                     crate::record::Op::DropShadow { blur, .. } | crate::record::Op::InnerShadow { blur, .. } => {
@@ -512,8 +589,8 @@ impl Engine {
                             IRect {
                                 x0: 0,
                                 y0: 0,
-                                x1: cols.max(1) as i32,
-                                y1: tile_rows.max(1) as i32,
+                                x1: next_cols.max(1) as i32,
+                                y1: next_rows.max(1) as i32,
                             },
                             crate::blur::EdgeMode::Zero,
                         )?;
@@ -521,32 +598,32 @@ impl Engine {
                             let pad = crate::shadow::blur_support_pad(sigma) as usize;
                             let shift = crate::shadow::shadow_raster_shift(sigma);
                             let s = 1usize << shift;
-                            let mw = (cols.saturating_add(pad.saturating_mul(2))).div_ceil(s);
-                            let mh = (tile_rows.saturating_add(pad.saturating_mul(2))).div_ceil(s);
+                            let mw = (next_cols.saturating_add(pad.saturating_mul(2))).div_ceil(s);
+                            let mh = (next_rows.saturating_add(pad.saturating_mul(2))).div_ceil(s);
                             if mw > max_tex || mh > max_tex {
                                 return Err(EngineError::limit(format!(
                                     "shadow mask {mw} x {mh} px exceeds maximum target size {max_tex} px"
                                 )));
                             }
                             let mask_b = mw.saturating_mul(mh).saturating_mul(4);
-                            let shadow_need = mask_b
-                                .saturating_mul(3)
+                            let cur_out = next_cols.saturating_mul(next_rows).saturating_mul(4);
+                            let shadow_need = next_iso
+                                .saturating_add(mask_b.saturating_mul(3))
                                 .saturating_add(crate::cpu::scene_estimate_bytes(mw as u32, mh as u32))
-                                .saturating_add(tile_bytes);
-                            peak_shadow = peak_shadow.max(shadow_need);
+                                .saturating_add(cur_out);
+                            peak_total = peak_total.max(shadow_need);
                         }
                     }
                     crate::record::Op::Children => {
                         for &c in &node.children {
-                            stack.push((c, next_depth));
+                            stack.push((c, world, next_cols, next_rows, next_iso));
                         }
                     }
                     _ => {}
                 }
             }
         }
-        let iso_bytes = max_iso_depth.saturating_mul(iso_scope_bytes);
-        Ok(iso_bytes.saturating_add(peak_shadow))
+        Ok(peak_total)
     }
 
     /// Refuses an export of a `width` × `height` frame before it starts when its working set
@@ -675,6 +752,139 @@ impl Engine {
         Ok(())
     }
 
+    /// Draws the whole frame on the CPU into `out` (premultiplied RGBA8, `width` x `height`).
+    ///
+    /// When `Limits::memory_bytes` is non-zero (Worker builds or an explicit memory cap), admits
+    /// the frame upfront and renders in bounded horizontal bands/tiles directly into `out` so a
+    /// single output buffer is held (never duplicating the framebuffer beside a full-frame target
+    /// or full-frame offscreen effect buffers), returning `ErrorCode::Limit` cleanly if the frame
+    /// and its band working set cannot fit instead of trapping Wasm.
+    pub fn render_cpu_into(
+        &mut self,
+        out: &mut Vec<u8>,
+        width: u32,
+        height: u32,
+        camera: Camera,
+        background: [f32; 4],
+        detail: bool,
+    ) -> Result<FrameStats> {
+        self.check_size(width, height)?;
+        camera.check()?;
+        self.check_supported()?;
+        let frame_bytes = (width as usize)
+            .checked_mul(height as usize)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or_else(|| EngineError::limit("frame pixel buffer overflow"))?;
+        let budget = self.store.limits.memory_bytes;
+        if budget == 0 {
+            let (stats, _) = self.cpu_tile(
+                width,
+                height,
+                camera,
+                background,
+                detail,
+                IRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: width as i32,
+                    y1: height as i32,
+                },
+                0,
+            )?;
+            out.clear();
+            out.extend_from_slice(self.cpu.target.data_as_u8_slice());
+            return Ok(stats);
+        }
+
+        // Bounded path: drop stale scratch buffers before checking admission so prior renders do
+        // not inflate Wasm linear memory.
+        out.clear();
+        if out.capacity() != frame_bytes {
+            out.shrink_to_fit();
+        }
+        self.band.clear();
+        self.band.shrink_to_fit();
+        self.cpu.shrink_target();
+
+        let view = camera.view();
+        let halo = self.halo(view)? as usize;
+        let scene_bytes = crate::cpu::scene_estimate_bytes(width, height);
+        let held = self.held_bytes();
+        // Match `Cpu::check_memory`'s headroom for Wasm static data, stack, allocator overhead,
+        // and transient `vello_cpu` strip buffers.
+        let cap = budget.saturating_sub(4 << 20).max(budget / 2);
+
+        let mut band_h = self.band_rows(width).min(128).min(height).max(1);
+        let chosen_rows = loop {
+            let cols = (self.store.limits.export_tile.max(1).min(width) as usize + 2 * halo).min(width as usize);
+            let tile_rows = (band_h as usize + 2 * halo).min(height as usize);
+            let effects = self.export_effect_working_set(cols, tile_rows, view)?;
+            let diamond = self.export_diamond_bytes(width, height, view, cols, tile_rows);
+            let tile_bytes = cols.saturating_mul(tile_rows).saturating_mul(4);
+            let need = frame_bytes
+                .saturating_add(tile_bytes)
+                .saturating_add(scene_bytes)
+                .saturating_add(effects)
+                .saturating_add(diamond);
+            if held.saturating_add(need) <= cap {
+                break band_h;
+            }
+            if band_h <= 32 {
+                return Err(EngineError::limit(format!(
+                    "CPU render {width} x {height} px needs {} MiB beside the {} MiB held; limit is {} MiB",
+                    need.div_ceil(1 << 20),
+                    held.div_ceil(1 << 20),
+                    budget >> 20
+                )));
+            }
+            band_h = (band_h / 2).max(32);
+        };
+
+        out.resize(frame_bytes, 0);
+        let stride = width as usize * 4;
+        let mut total_stats = FrameStats::default();
+        let res = (|| -> Result<()> {
+            let mut y0 = 0u32;
+            while y0 < height {
+                let rows = chosen_rows.min(height - y0);
+                let mut x0 = 0u32;
+                while x0 < width {
+                    let cols = self.store.limits.export_tile.max(1).min(width - x0);
+                    let area = IRect {
+                        x0: x0 as i32,
+                        y0: y0 as i32,
+                        x1: (x0 + cols) as i32,
+                        y1: (y0 + rows) as i32,
+                    };
+                    let (tile_stats, grown) =
+                        self.cpu_tile(width, height, camera, background, detail, area, out.capacity())?;
+                    total_stats.draw.add(&tile_stats.draw);
+                    total_stats.masks = tile_stats.masks;
+                    let tw = (grown.x1 - grown.x0) as usize * 4;
+                    let px = self.cpu.target.data_as_u8_slice();
+                    let n = cols as usize * 4;
+                    let x_off = (x0 as i32 - grown.x0) as usize * 4;
+                    let y_off = (y0 as i32 - grown.y0) as usize;
+                    for r in 0..rows as usize {
+                        let from = (y_off + r) * tw + x_off;
+                        let to = (y0 as usize + r) * stride + x0 as usize * 4;
+                        out[to..to + n].copy_from_slice(&px[from..from + n]);
+                    }
+                    x0 += cols;
+                }
+                y0 += rows;
+            }
+            Ok(())
+        })();
+        if let Err(e) = res {
+            out.clear();
+            out.shrink_to_fit();
+            self.cpu.shrink_target();
+            return Err(e);
+        }
+        Ok(total_stats)
+    }
+
     /// Draws the whole frame on the CPU: premultiplied RGBA8, `width` × `height`.
     pub fn render_cpu(
         &mut self,
@@ -684,6 +894,13 @@ impl Engine {
         background: [f32; 4],
         detail: bool,
     ) -> Result<(&[u8], FrameStats)> {
+        if self.store.limits.memory_bytes > 0 {
+            let mut buf = std::mem::take(&mut self.band);
+            let res = self.render_cpu_into(&mut buf, width, height, camera, background, detail);
+            self.band = buf;
+            let stats = res?;
+            return Ok((self.band.as_slice(), stats));
+        }
         self.check_size(width, height)?;
         camera.check()?;
         self.check_supported()?;
@@ -813,7 +1030,7 @@ impl Engine {
     }
 
     /// Draws `area` of a `width` × `height` frame into the CPU target, extended by the readers'
-    /// reach each way so what they read is drawn; answers the extended area. `extra_held_bytes`
+    /// reach each way so what they read is drawn; answers the extended area. `extra_external`
     /// accounts for any live export band buffer temporarily taken out of `self.band`.
     #[allow(clippy::too_many_arguments)]
     fn cpu_tile(
@@ -824,7 +1041,7 @@ impl Engine {
         background: [f32; 4],
         detail: bool,
         area: IRect,
-        extra_held_bytes: usize,
+        extra_external: usize,
     ) -> Result<(FrameStats, IRect)> {
         let view = camera.view();
         let halo = self.halo(view)?;
@@ -842,7 +1059,7 @@ impl Engine {
         let runtime_held = self
             .held_bytes()
             .saturating_add(tile_bytes)
-            .saturating_add(extra_held_bytes);
+            .saturating_add(extra_external);
         let diamond_budget = if self.store.limits.memory_bytes > 0 {
             self.store.limits.memory_bytes.saturating_sub(runtime_held)
         } else {
@@ -852,7 +1069,7 @@ impl Engine {
         self.cpu.set_external_bytes(
             self.held_bytes()
                 .saturating_sub(self.cpu.image_bytes())
-                .saturating_add(extra_held_bytes)
+                .saturating_add(extra_external)
                 .saturating_add(512 * 1024),
         );
         self.cpu

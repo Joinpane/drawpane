@@ -195,6 +195,7 @@ pub struct Store {
 struct IsoAncestor {
     id: u32,
     had_pass: bool,
+    had_pad: f64,
     before_rect: Option<Rect>,
     order: (u32, u32),
 }
@@ -366,11 +367,14 @@ impl Store {
         for IsoAncestor {
             id: a,
             had_pass,
+            had_pad,
             before_rect,
             order: (order, end),
         } in txn.iso_ancestors
         {
-            if self.nodes.contains_key(&a) && self.subtree_has_pass(a) != had_pass {
+            if self.nodes.contains_key(&a)
+                && (self.subtree_has_pass(a) != had_pass || (self.bounds_and_pad(a).1 - had_pad).abs() > 1e-6)
+            {
                 if let Some(rect) = before_rect {
                     txn.before.push(Dirty {
                         rect,
@@ -890,11 +894,13 @@ impl Store {
             let iso = n.record.isolate() && n.record.opacity < 1.0;
             if iso && txn.iso_seen.insert(at) {
                 let had_pass = self.subtree_has_pass(at);
-                let rect = self.world_extent(at);
+                let had_pad = self.bounds_and_pad(at).1;
+                let rect = self.dirty_extent(at);
                 let ord = self.order_of(at);
                 txn.iso_ancestors.push(IsoAncestor {
                     id: at,
                     had_pass,
+                    had_pad,
                     before_rect: rect,
                     order: ord,
                 });
@@ -911,7 +917,7 @@ impl Store {
         }
         self.note_iso_ancestors(id, txn);
         let (order, end) = self.order_of(id);
-        if let Some(rect) = self.world_extent(id) {
+        if let Some(rect) = self.dirty_extent(id) {
             txn.before.push(Dirty {
                 rect,
                 order,
@@ -1051,6 +1057,9 @@ impl Store {
             if let Some(ch) = children {
                 out = Some(out.map_or(ch, |o| o.union(ch)));
             }
+            if out.is_some() {
+                pad += r.post_pad();
+            }
         }
         node.bounds.set(Some((out, pad)));
         (out, pad)
@@ -1104,6 +1113,28 @@ impl Store {
         Some(if pad > 0.0 { r.inflate(pad, pad) } else { r })
     }
 
+    /// Page-unit extent where a change to `id` may alter pixels, including outward spread from
+    /// any blurred/post-processed ancestors and any isolated offscreen ancestor's page-space pad.
+    pub fn dirty_extent(&self, id: u32) -> Option<Rect> {
+        let r = self.world_extent(id)?;
+        let mut anc_pad = 0.0f64;
+        let mut at = id;
+        while let Some(n) = self.nodes.get(&at) {
+            let p = n.parent;
+            if p == ROOT {
+                break;
+            }
+            if let Some(pn) = self.nodes.get(&p) {
+                anc_pad += pn.record.post_pad();
+                if pn.record.isolate() && pn.record.opacity < 1.0 {
+                    anc_pad = anc_pad.max(self.bounds_and_pad(p).1);
+                }
+            }
+            at = p;
+        }
+        Some(if anc_pad > 0.0 { r.inflate(anc_pad, anc_pad) } else { r })
+    }
+
     /// Where the touched records paint now, added to where they painted before.
     fn changes(&mut self, before: Vec<Dirty>, touched: &[u32]) -> Vec<Dirty> {
         let mut items = before;
@@ -1113,7 +1144,7 @@ impl Store {
                 continue;
             }
             let (order, end) = self.order_of(*id);
-            if let Some(rect) = self.world_extent(*id) {
+            if let Some(rect) = self.dirty_extent(*id) {
                 items.push(Dirty {
                     rect,
                     order,
@@ -1319,7 +1350,7 @@ impl Store {
                 break;
             }
             let n = self.nodes.get(&p)?;
-            if n.record.isolate() && n.record.opacity < 1.0 {
+            if (n.record.isolate() && n.record.opacity < 1.0) || !n.record.post_effects.is_empty() {
                 return None;
             }
             p = n.parent;

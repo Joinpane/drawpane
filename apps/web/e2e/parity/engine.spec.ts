@@ -43,21 +43,50 @@ const OUT =
   process.env.ENGINE_PARITY_OUT ??
   fileURLToPath(new URL("../../test-results/engine-parity", import.meta.url));
 
-/** Cells of otherwise supported suites that need what phase 1 doesn't draw, and why. */
 /**
- * Features a supported suite's cells may fall back for, by name: a cell falls back expectedly
- * only when every reason it gives is listed for its suite.
+ * Per-cell expected fallbacks for supported and partially supported suites: every cell not
+ * listed here (outside `PHASE_3`) MUST draw; every cell listed here MUST fall back with these
+ * exact feature reasons so a spurious fallback bit on a drawable cell fails immediately.
  */
-const EXPECTED_FALLBACKS: Record<string, readonly string[]> = {
-  // Non-normal blend modes: phase 3's blend kernels.
-  fills: ["blend"],
-  // Effects on smoothed corners wait for phase 3A/3B; pure squircles are drawn natively.
-  corners: ["layerBlur", "mask"],
-  "corners-glass": ["glass", "backgroundBlur"],
+const EXPECTED_CELL_FALLBACKS: Record<string, Record<string, readonly string[]>> = {
+  fills: Object.fromEntries(
+    [
+      "blend-multiply",
+      "blend-screen",
+      "blend-overlay",
+      "blend-darken",
+      "blend-lighten",
+      "blend-color-dodge",
+      "blend-color-burn",
+      "blend-hard-light",
+      "blend-soft-light",
+      "blend-difference",
+      "blend-exclusion",
+      "blend-hue",
+      "blend-saturation",
+      "blend-color",
+      "blend-luminosity",
+    ].map((id) => [id, ["blend"]]),
+  ),
+  blurs: {
+    "background-4": ["backgroundBlur"],
+    "background-12": ["backgroundBlur"],
+    "background-32": ["backgroundBlur"],
+    "background-clear-12": ["backgroundBlur"],
+    "background-ellipse-16": ["backgroundBlur"],
+  },
+  corners: {
+    mask: ["mask"],
+  },
+  "corners-glass": {
+    "glass-ios": ["glass"],
+    "glass-full": ["glass"],
+    "background-blur": ["backgroundBlur"],
+    "glass-plain": ["glass"],
+  },
 };
 /** Suites whose every cell needs a phase 3 feature (effects, glass, masks, blends, grain). */
 const PHASE_3 = new Set([
-  "blurs",
   "glass",
   "glass-alpha",
   "glass-context",
@@ -69,6 +98,11 @@ const PHASE_3 = new Set([
   "grain",
   "linear-blends",
 ]);
+/**
+ * Suites gated against the live current canvas renderer baseline (decision 0040 replacement gate:
+ * mean not worse by more than 0.01, worst 32 x 32 tile not worse by more than 1, alpha not worse).
+ */
+const REPLACEMENT_SUITES = new Set(["shadows", "blurs"]);
 
 /**
  * Minimum drawn-cell count per supported suite so a regression or accidental fallback cannot turn
@@ -159,6 +193,15 @@ type Engine = {
     }>;
   };
   drawpane: { s: { pageId: string }; doc: { childIds(id: string): string[] } };
+  drawpaneParity: {
+    render(
+      id: string,
+      rect: { x: number; y: number; width: number; height: number },
+      scale: number,
+      width: number,
+      height: number,
+    ): Promise<{ png: string }>;
+  };
 };
 
 interface CellResult {
@@ -168,10 +211,16 @@ interface CellResult {
   readonly figmaCpu?: number;
   readonly figmaGpu?: number;
   readonly figmaWebgl?: number;
+  readonly figmaCanvas?: number;
   readonly limit?: number;
   readonly cpuGpu?: ReturnType<typeof score> extends infer S ? Omit<S & object, "heat"> : never;
   readonly cpuWebgl?: ReturnType<typeof score> extends infer S ? Omit<S & object, "heat"> : never;
-  readonly alpha?: { cpu: Omit<ReturnType<typeof score>, "heat"> };
+  readonly alpha?: {
+    cpu: Omit<ReturnType<typeof score>, "heat">;
+    gpu?: Omit<ReturnType<typeof score>, "heat">;
+    webgl?: Omit<ReturnType<typeof score>, "heat">;
+    canvas?: Omit<ReturnType<typeof score>, "heat">;
+  };
   readonly workerIdentical?: boolean;
 }
 
@@ -286,6 +335,7 @@ test.describe("Render engine parity", () => {
           failures.push(`${cell.id}: missing Figma golden at ${golden}`);
           continue;
         }
+        const expectedFallback = EXPECTED_CELL_FALLBACKS[suite.suite]?.[cell.id];
         const rect = exportRect(suite, i);
         const width = rect.width * SCALE;
         const height = rect.height * SCALE;
@@ -309,16 +359,25 @@ test.describe("Render engine parity", () => {
         const mine = new Set(members[i]);
         const reasons = Object.entries(cpu.unsupported)
           .filter(([, ids]) => ids.some((id) => mine.has(id)))
-          .map(([name]) => name);
+          .map(([name]) => name)
+          .sort();
         if (!cpu.ok) {
           // Refused: it must be for what the builder flagged in this cell, and allowed here.
           if (cpu.code !== 5 || (reasons.length === 0 && !PHASE_3.has(suite.suite)))
             failures.push(`${cell.id}: refused without a reason it flagged (${cpu.error})`);
-          else if (
-            !PHASE_3.has(suite.suite) &&
-            !reasons.every((r) => EXPECTED_FALLBACKS[suite.suite]?.includes(r))
-          )
-            failures.push(`${cell.id}: falls back (${reasons.join(", ")}) in a supported suite`);
+          else if (!PHASE_3.has(suite.suite)) {
+            if (!expectedFallback)
+              failures.push(
+                `${cell.id}: unexpected fallback (${reasons.join(", ")}) on a drawable cell`,
+              );
+            else {
+              const want = [...expectedFallback].sort();
+              if (reasons.length !== want.length || reasons.some((r, k) => r !== want[k]))
+                failures.push(
+                  `${cell.id}: fallback reasons [${reasons.join(", ")}] differ from expected [${want.join(", ")}]`,
+                );
+            }
+          }
           results.push({ cell: cell.id, status: "fallback", reasons });
           rows.push(
             `<tr><th>${cell.id}<br><small>falls back: ${reasons.join(", ")}</small></th></tr>`,
@@ -329,6 +388,10 @@ test.describe("Render engine parity", () => {
           failures.push(`${cell.id}: CPU render returned no pixels`);
           continue;
         }
+        if (expectedFallback)
+          failures.push(
+            `${cell.id}: drew cleanly, remove from EXPECTED_CELL_FALLBACKS (expected ${expectedFallback.join(", ")})`,
+          );
         const theirs = await decodePng(page, golden);
         expect(theirs.width, `${cell.id} golden size`).toBe(width);
         // The canvas renderer's metric, as parity.spec.ts records thresholds with it.
@@ -346,13 +409,16 @@ test.describe("Render engine parity", () => {
           suite.suite === "shadows" && cell.id === "drop-layered"
             ? 0.23
             : recorded[suite.suite]?.[cell.id];
+        const figmaPx = Buffer.from(theirs.data, "base64");
         const cpuPx = Buffer.from(cpu.rgba, "base64");
-        const vsFigma = score(cpuPx, Buffer.from(theirs.data, "base64"), width, height);
-        if (limit !== undefined && suite.blur === undefined && figmaCpu > limit)
+        const vsFigma = score(cpuPx, figmaPx, width, height);
+        if (limit !== undefined && figmaCpu > limit)
           failures.push(`${cell.id}: CPU ${figmaCpu} from Figma (limit ${limit})`);
 
         let figmaGpu: number | undefined;
         let figmaWebgl: number | undefined;
+        let vsFigmaGpu: ReturnType<typeof score> | undefined;
+        let vsFigmaWebgl: ReturnType<typeof score> | undefined;
         let cpuGpu: Omit<ReturnType<typeof score>, "heat"> | undefined;
         let cpuWebgl: Omit<ReturnType<typeof score>, "heat"> | undefined;
         const backendImgs: string[] = [];
@@ -380,16 +446,19 @@ test.describe("Render engine parity", () => {
           const f = await figma(out.rgba);
           const px = Buffer.from(out.rgba, "base64");
           const cg = score(cpuPx, px, width, height);
+          const vf = score(px, figmaPx, width, height);
           const worse = outsideTolerance(cg);
           if (worse.length > 0)
             failures.push(`${cell.id}: CPU against ${label} ${worse.join(", ")}`);
-          if (limit !== undefined && suite.blur === undefined && f > limit)
+          if (limit !== undefined && f > limit)
             failures.push(`${cell.id}: ${label} ${f} from Figma (limit ${limit})`);
           if (backend === "gpu") {
             figmaGpu = f;
+            vsFigmaGpu = vf;
             cpuGpu = strip(cg);
           } else {
             figmaWebgl = f;
+            vsFigmaWebgl = vf;
             cpuWebgl = strip(cg);
           }
           backendNotes.push(
@@ -399,7 +468,69 @@ test.describe("Render engine parity", () => {
             `<td><img src="${await encodePng(page, out.rgba, width, height)}"></td>`,
           );
         }
-
+        let figmaCanvas: number | undefined;
+        let vsFigmaCanvas: ReturnType<typeof score> | undefined;
+        if (REPLACEMENT_SUITES.has(suite.suite)) {
+          const canvasRgba = await page.evaluate(
+            async ({ id, rect, scale, width, height }) => {
+              const p = (window as unknown as Engine).drawpaneParity;
+              const { png } = await p.render(id, rect, scale, width, height);
+              const bytes = Uint8Array.from(atob(png), (ch) => ch.charCodeAt(0));
+              const img = await createImageBitmap(new Blob([bytes], { type: "image/png" }), {
+                premultiplyAlpha: "none",
+              });
+              const c = new OffscreenCanvas(width, height);
+              const ctx = c.getContext("2d") as OffscreenCanvasRenderingContext2D;
+              ctx.drawImage(img, 0, 0);
+              const data = ctx.getImageData(0, 0, width, height).data;
+              let s = "";
+              for (let j = 0; j < data.length; j += 0x8000)
+                s += String.fromCharCode(...data.subarray(j, j + 0x8000));
+              return btoa(s);
+            },
+            { id: frames[i] as string, rect, scale: SCALE, width, height },
+          );
+          figmaCanvas = await figma(canvasRgba);
+          vsFigmaCanvas = score(Buffer.from(canvasRgba, "base64"), figmaPx, width, height);
+          if (figmaCpu > figmaCanvas + 0.01)
+            failures.push(
+              `${cell.id}: CPU ${figmaCpu} regresses past live canvas ${figmaCanvas} (+0.01 gate)`,
+            );
+          if (figmaGpu !== undefined && figmaGpu > figmaCanvas + 0.01)
+            failures.push(
+              `${cell.id}: WebGPU ${figmaGpu} regresses past live canvas ${figmaCanvas} (+0.01 gate)`,
+            );
+          if (figmaWebgl !== undefined && figmaWebgl > figmaCanvas + 0.01)
+            failures.push(
+              `${cell.id}: WebGL2 ${figmaWebgl} regresses past live canvas ${figmaCanvas} (+0.01 gate)`,
+            );
+          if (suite.blur === undefined) {
+            if (vsFigma.worstTile > vsFigmaCanvas.worstTile + 1.0)
+              failures.push(
+                `${cell.id}: CPU worst tile ${vsFigma.worstTile.toFixed(2)} regresses past canvas ${vsFigmaCanvas.worstTile.toFixed(2)} (+1.0 gate)`,
+              );
+            if (vsFigmaGpu && vsFigmaGpu.worstTile > vsFigmaCanvas.worstTile + 1.0)
+              failures.push(
+                `${cell.id}: WebGPU worst tile ${vsFigmaGpu.worstTile.toFixed(2)} regresses past canvas ${vsFigmaCanvas.worstTile.toFixed(2)} (+1.0 gate)`,
+              );
+            if (vsFigmaWebgl && vsFigmaWebgl.worstTile > vsFigmaCanvas.worstTile + 1.0)
+              failures.push(
+                `${cell.id}: WebGL2 worst tile ${vsFigmaWebgl.worstTile.toFixed(2)} regresses past canvas ${vsFigmaCanvas.worstTile.toFixed(2)} (+1.0 gate)`,
+              );
+            if (vsFigma.alphaMean > vsFigmaCanvas.alphaMean + 0.05)
+              failures.push(
+                `${cell.id}: CPU alpha mean ${vsFigma.alphaMean.toFixed(3)} regresses past canvas ${vsFigmaCanvas.alphaMean.toFixed(3)}`,
+              );
+            if (vsFigmaGpu && vsFigmaGpu.alphaMean > vsFigmaCanvas.alphaMean + 0.05)
+              failures.push(
+                `${cell.id}: WebGPU alpha mean ${vsFigmaGpu.alphaMean.toFixed(3)} regresses past canvas ${vsFigmaCanvas.alphaMean.toFixed(3)}`,
+              );
+            if (vsFigmaWebgl && vsFigmaWebgl.alphaMean > vsFigmaCanvas.alphaMean + 0.05)
+              failures.push(
+                `${cell.id}: WebGL2 alpha mean ${vsFigmaWebgl.alphaMean.toFixed(3)} regresses past canvas ${vsFigmaCanvas.alphaMean.toFixed(3)}`,
+              );
+          }
+        }
         // The Worker's build draws the same list bit for bit (an engine of its own per cell: each
         // cell's list is a fresh list from revision 0).
         const cellList = await page.evaluate(
@@ -428,10 +559,16 @@ test.describe("Render engine parity", () => {
           figmaCpu,
           ...(figmaGpu !== undefined ? { figmaGpu } : {}),
           ...(figmaWebgl !== undefined ? { figmaWebgl } : {}),
+          ...(figmaCanvas !== undefined ? { figmaCanvas } : {}),
           ...(limit !== undefined ? { limit } : {}),
           ...(cpuGpu ? { cpuGpu } : {}),
           ...(cpuWebgl ? { cpuWebgl } : {}),
-          alpha: { cpu: strip(vsFigma) },
+          alpha: {
+            cpu: strip(vsFigma),
+            ...(vsFigmaGpu ? { gpu: strip(vsFigmaGpu) } : {}),
+            ...(vsFigmaWebgl ? { webgl: strip(vsFigmaWebgl) } : {}),
+            ...(vsFigmaCanvas ? { canvas: strip(vsFigmaCanvas) } : {}),
+          },
           workerIdentical,
         });
         const img = async (b64: string) => encodePng(page, b64, width, height);
@@ -439,10 +576,11 @@ test.describe("Render engine parity", () => {
           `CPU ${figmaCpu}`,
           ...(figmaGpu !== undefined ? [`WebGPU ${figmaGpu}`] : []),
           ...(figmaWebgl !== undefined ? [`WebGL2 ${figmaWebgl}`] : []),
-          ...(limit !== undefined ? [`canvas may be ${limit}`] : []),
+          ...(figmaCanvas !== undefined ? [`canvas ${figmaCanvas}`] : []),
+          ...(limit !== undefined ? [`max ${limit}`] : []),
         ].join(" · ");
         rows.push(
-          `<tr><th>${cell.id}<br><small>Figma: ${figmaLine}<br>alpha-aware: mean ${vsFigma.mean.toFixed(2)} · alpha ${vsFigma.alphaMean.toFixed(2)} · worst tile ${vsFigma.worstTile.toFixed(1)}<br>${backendNotes.join("<br>")}</small></th><td><img src="data:image/png;base64,${readFileSync(golden).toString("base64")}"></td><td><img src="${await img(cpu.rgba)}"></td>${backendImgs.join("")}</tr>`,
+          `<tr><th>${cell.id}<br><small>Figma: ${figmaLine}<br>alpha-aware: mean ${vsFigma.mean.toFixed(2)} · alpha ${vsFigma.alphaMean.toFixed(2)} · worst tile ${vsFigma.worstTile.toFixed(1)}${vsFigmaCanvas ? ` (canvas ${vsFigmaCanvas.worstTile.toFixed(1)})` : ""}<br>${backendNotes.join("<br>")}</small></th><td><img src="data:image/png;base64,${readFileSync(golden).toString("base64")}"></td><td><img src="${await img(cpu.rgba)}"></td>${backendImgs.join("")}</tr>`,
         );
       }
       all[suite.suite] = results;

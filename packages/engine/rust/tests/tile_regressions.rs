@@ -1158,3 +1158,56 @@ fn clipped_frame_keeps_clip_when_child_has_drop_shadow() {
     let at = (38 * 96 + 68) * 4;
     assert_eq!(&px[at..at + 4], &[255, 255, 255, 255], "shadow escaped parent clip");
 }
+
+#[test]
+fn layer_blur_matches_across_48px_tile_seams_at_pyramid_sigma_and_invalidates_children() {
+    // Pyramid-regime layer blur (radius = 36 -> sigma = 18 > DIRECT_SIGMA_MAX) straddling a
+    // 48 px tile boundary (non-power-of-two!) under a fractional camera pan: phase-aligned
+    // pyramid snapping must keep tiled rendering aligned with whole-frame rendering, and moving
+    // a child inside the blurred parent must invalidate every tile its blur halo reaches and
+    // refuse split-drag.
+    let mut parent = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [120.0, 80.0]);
+    parent.ops.push(Op::Children);
+    parent.post.push(Post::LayerBlur(36.0));
+
+    let mut child = Rec::new([1.0, 0.0, 0.0, 1.0, 16.0, 18.0], [26.0, 26.0]);
+    child.paths.push(Entry::Rect {
+        w: 26.0,
+        h: 26.0,
+        radii: [4.0; 4],
+    });
+    child.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.1, 0.5, 0.95, 1.0]),
+    });
+
+    let mut msg = W::new(ANY, 1);
+    msg.reset();
+    msg.set(1, 0, &parent);
+    msg.set(2, 1, &child);
+    let mut e = Engine::new(Limits::default());
+    e.use_cpu_tiles(48, 64);
+    e.apply(&msg.finish()).unwrap();
+    // Selection inside a blurred parent must not use the split-drag fast path.
+    assert!(e.store.selection(&[2]).is_none());
+
+    let cam = camera(1.0, 3.25, -2.5);
+    let whole = e.render_cpu(96, 64, cam, [1.0; 4], false).unwrap().0.to_vec();
+    let (tiled, stats) = e
+        .render_cpu_tiled(96, 64, cam, [1.0; 4], TiledOptions::default())
+        .unwrap();
+    assert!(stats.exact);
+    let worst = whole.iter().zip(tiled).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+    assert!(worst <= 2, "pyramid layer blur tile seam mismatch: worst {worst}");
+
+    // Move the child far off-screen: every tile touched by the blurred halo must update cleanly.
+    let mut move_child = W::new(1, 2);
+    move_child.transform(2, [1.0, 0.0, 0.0, 1.0, -300.0, 18.0]);
+    e.apply(&move_child.finish()).unwrap();
+    let whole_after = e.render_cpu(96, 64, cam, [1.0; 4], false).unwrap().0.to_vec();
+    let (tiled_after, _) = e
+        .render_cpu_tiled(96, 64, cam, [1.0; 4], TiledOptions::default())
+        .unwrap();
+    assert_eq!(tiled_after, whole_after, "stale blurred halo survived in neighbor tile");
+}

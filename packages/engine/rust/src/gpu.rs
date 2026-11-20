@@ -542,6 +542,7 @@ struct GpuTarget {
     origin: (i32, i32),
     active_size: (u16, u16),
     cleared: bool,
+    scene_pending: bool,
     bytes: usize,
 }
 
@@ -1351,6 +1352,7 @@ impl Gpu {
             t.origin = origin;
             t.active_size = (w as u16, h as u16);
             t.cleared = false;
+            t.scene_pending = true;
             return Ok(t);
         }
         let bytes = need_w as usize * need_h as usize * 8; // RGBA8 + depth
@@ -1381,6 +1383,7 @@ impl Gpu {
             origin,
             active_size: (w as u16, h as u16),
             cleared: false,
+            scene_pending: true,
             bytes,
         })
     }
@@ -3752,15 +3755,29 @@ impl Backend for Gpu {
         )))
     }
 
-    fn push_isolated(&mut self, area: IRect, open: &[Open]) -> Result<bool> {
+    fn push_isolated(
+        &mut self,
+        area: IRect,
+        clip_to_parent: bool,
+        _scene_origin_hint: Option<(i32, i32)>,
+        open: &[Open],
+    ) -> Result<bool> {
         if open.iter().any(|o| matches!(o, Open::Layer)) {
             return Err(EngineError::unsupported(
                 "offscreen isolation inside a Vello opacity layer",
             ));
         }
-        let area = area.intersect(self.target_bounds());
+        let area = if clip_to_parent {
+            area.intersect(self.target_bounds())
+        } else {
+            area
+        };
         if area.is_empty() {
             return Ok(false);
+        }
+        let max_tex = self.device.limits().max_texture_dimension_2d as i32;
+        if area.x1 - area.x0 > max_tex || area.y1 - area.y0 > max_tex {
+            return Err(EngineError::limit("offscreen target exceeds GPU texture limit"));
         }
         let w = (area.x1 - area.x0) as u32;
         let h = (area.y1 - area.y0) as u32;
@@ -3774,8 +3791,162 @@ impl Backend for Gpu {
         Ok(true)
     }
 
+    fn blur_isolated(&mut self, steps: &[(IRect, f32)]) -> Result<()> {
+        if steps.is_empty() {
+            return Ok(());
+        }
+        let Some(src) = self.offscreen_stack.pop() else {
+            return Ok(());
+        };
+        if src.scene_pending {
+            self.flush_masks();
+        }
+        let t0 = now();
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("layer blur"),
+        });
+        let mut intermediates: Vec<GpuTarget> = Vec::with_capacity(steps.len());
+        let mut current = Some(src);
+        let mut flushed_scene = false;
+        let res = (|| -> Result<()> {
+            {
+                let src = current.as_mut().expect("current");
+                if src.scene_pending {
+                    let mut options = RenderOptions::default();
+                    let rect = [RectU16 {
+                        x0: 0,
+                        y0: 0,
+                        x1: src.active_size.0,
+                        y1: src.active_size.1,
+                    }];
+                    options.target_init = if !src.cleared {
+                        src.cleared = true;
+                        TargetInit::Clear(ClearSettings::Rects {
+                            color: AlphaColor::TRANSPARENT,
+                            rects: &rect,
+                        })
+                    } else {
+                        TargetInit::SrcOver
+                    };
+                    options.offset = (0, 0);
+                    self.renderer
+                        .render(
+                            &self.scene,
+                            &mut self.resources,
+                            &mut encoder,
+                            RenderTarget {
+                                view: &src.view,
+                                depth_view: Some(&src.depth),
+                            },
+                            &self.bindings,
+                            options,
+                        )
+                        .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+                    src.scene_pending = false;
+                    flushed_scene = true;
+                }
+            }
+            for &(out_area, sigma) in steps {
+                if out_area.is_empty() {
+                    if let Some(s) = current.take() {
+                        intermediates.push(s);
+                    }
+                    return Ok(());
+                }
+                let out_w = (out_area.x1 - out_area.x0) as u32;
+                let out_h = (out_area.y1 - out_area.y0) as u32;
+                let (src_size, src_origin, src_active) = {
+                    let s = current.as_ref().expect("current");
+                    ((s.width, s.height), s.origin, s.active_size)
+                };
+                let dst_origin = (out_area.x0 - src_origin.0, out_area.y0 - src_origin.1);
+                let spec = BlurSpec {
+                    sigma,
+                    edge: EdgeMode::Zero,
+                    clamp_bounds: IRect {
+                        x0: 0,
+                        y0: 0,
+                        x1: i32::from(src_active.0),
+                        y1: i32::from(src_active.1),
+                    },
+                    dirty: IRect {
+                        x0: dst_origin.0,
+                        y0: dst_origin.1,
+                        x1: dst_origin.0 + out_w as i32,
+                        y1: dst_origin.1 + out_h as i32,
+                    },
+                };
+                let blur_work = self
+                    .blur
+                    .estimate_work_bytes(src_size, (out_w, out_h), dst_origin, &spec, None);
+                self.reserve_or_trim(blur_work, 0, "a layer blur")?;
+                let mut dst = self.acquire_offscreen(out_w, out_h, (out_area.x0, out_area.y0))?;
+                let src = current.as_ref().expect("current");
+                if let Err(e) = self.blur.encode(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    &src.view,
+                    (src.width, src.height),
+                    &dst.view,
+                    (out_w, out_h),
+                    dst_origin,
+                    &spec,
+                    None,
+                ) {
+                    self.offscreen_pool.push(dst);
+                    return Err(e);
+                }
+                dst.cleared = true;
+                dst.scene_pending = false;
+                if let Some(prev) = current.replace(dst) {
+                    intermediates.push(prev);
+                }
+            }
+            Ok(())
+        })();
+        match res {
+            Ok(()) => {
+                self.queue.submit([encoder.finish()]);
+                self.submits += 1;
+                self.blur.flush_retired();
+                if let Some(root) = self.root_render.as_mut() {
+                    root.flush_ms += now() - t0;
+                }
+                if flushed_scene {
+                    self.atlas.at = (0, 0, 0);
+                    self.scene.reset();
+                    self.recycle_in_use();
+                }
+                self.offscreen_pool.append(&mut intermediates);
+                if let Some(dst) = current {
+                    let (w, h) = dst.active_size;
+                    self.offscreen_stack.push(dst);
+                    self.scene.reset_and_resize(w, h);
+                }
+                Ok(())
+            }
+            Err(e) => {
+                drop(encoder);
+                self.blur.flush_retired();
+                if flushed_scene {
+                    self.atlas.at = (0, 0, 0);
+                    self.scene.reset();
+                    self.recycle_in_use();
+                }
+                if let Some(s) = current {
+                    intermediates.push(s);
+                }
+                self.offscreen_pool.append(&mut intermediates);
+                Err(e)
+            }
+        }
+    }
+
     fn pop_isolated(&mut self, opacity: f32, open: &[Open]) -> Result<()> {
-        self.flush_active_scene()?;
+        if self.offscreen_stack.last().is_some_and(|t| t.scene_pending) {
+            self.flush_active_scene()?;
+        }
         let Some(top) = self.offscreen_stack.pop() else {
             return Ok(());
         };

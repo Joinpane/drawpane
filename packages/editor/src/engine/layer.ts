@@ -22,6 +22,7 @@ import {
   UNSUPPORTED,
   type WireOp,
   type WirePaint,
+  type WirePostEffect,
   type WireRecord,
 } from "@drawpane/engine/wire";
 import { type BlendMode, GLYPH_UNITS, getProp, type NodeRecord, type Paint } from "@drawpane/model";
@@ -922,14 +923,11 @@ function unsupportedOf(node: NodeRecord, scene: Scene): number {
     if (e.visible === false) continue;
     if (e.type === "drop-shadow" || e.type === "inner-shadow") {
       if (e.blendMode !== undefined && e.blendMode !== "normal") bits |= UNSUPPORTED.blend;
-    } else if (e.type === "layer-blur") bits |= UNSUPPORTED.layerBlur;
-    else if (e.type === "background-blur") bits |= UNSUPPORTED.backgroundBlur;
+    } else if (e.type === "background-blur") bits |= UNSUPPORTED.backgroundBlur;
     else if (e.type === "glass") bits |= UNSUPPORTED.glass;
     else if (e.type === "noise") bits |= UNSUPPORTED.noise;
     else if (e.type === "texture") bits |= UNSUPPORTED.texture;
   }
-  const post = postEffects(getProp(node.props, "effects"));
-  if (post && post.length > 0) bits |= UNSUPPORTED.layerBlur;
   const mode = getProp(node.props, "blendMode");
   if (mode !== "normal") bits |= UNSUPPORTED.blend;
   const id = node.id;
@@ -950,10 +948,17 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
   b.unsupported |= unsupportedOf(node, scene);
   const w = node.type === "group" ? 0 : getProp(node.props, "width");
   const h = node.type === "group" ? 0 : getProp(node.props, "height");
+  const wirePost: WirePostEffect[] = [];
+  for (const pe of postEffects(getProp(node.props, "effects"))) {
+    if (pe.type === "layer-blur" && pe.radius > 0) {
+      wirePost.push({ kind: "layerBlur", radius: pe.radius });
+    }
+  }
   const flags =
     (hidden ? FLAG.hidden : 0) |
     (isolate ? FLAG.isolate : 0) |
-    (node.type === "group" ? FLAG.group : 0);
+    (node.type === "group" ? FLAG.group : 0) |
+    (wirePost.length > 0 ? FLAG.post : 0);
   if (node.type === "group") {
     b.ops.push({ op: "children" });
   } else if (node.type === "text") {
@@ -995,6 +1000,7 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
       paths: b.paths,
       ops: b.ops,
       coarse: b.coarse,
+      ...(wirePost.length > 0 ? { postEffects: wirePost } : {}),
     },
     images: b.images,
     textPending: b.textPending,

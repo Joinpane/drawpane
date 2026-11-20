@@ -39,7 +39,7 @@ Each glyph definition gets a serial no other definition has, in any engine, acro
 
 | Field | Type | |
 | --- | --- | --- |
-| flags | u32 | 1 hidden, 2 isolate (fades as one: an opacity group), 4 group (no paint of its own; its ops are only `children`), 8 provisional (sent ahead of its real drawing, as text not yet shaped while a page opens or while its face loads: drawn as its coarse ops at every scale, never exact, and sent again whole soon after; it counts its box, grown by its reach, wherever its coarse ops paint or don't, and an export is refused while any shown record is provisional) |
+| flags | u32 | 1 hidden, 2 isolate (fades as one: an opacity group), 4 group (no paint of its own; its ops are only `children`), 8 provisional (sent ahead of its real drawing, as text not yet shaped while a page opens or while its face loads: drawn as its coarse ops at every scale, never exact, and sent again whole soon after; it counts its box, grown by its reach, wherever its coarse ops paint or don't, and an export is refused while any shown record is provisional), 16 reserved for 3B context, 32 post (minor 1.4: ordered `postEffects` list follows `coarse`) |
 | opacity | f32 | Its own; inherited opacity multiplies down unless it isolates. |
 | transform | f64 × 6 | Its units to its parent record's (`a b c d e f`), not to the page: moving a board is one command. |
 | width, height | f32 × 2 | Its box, for the speck rule (layers under half a device pixel both ways are skipped on screen). |
@@ -49,6 +49,7 @@ Each glyph definition gets a serial no other definition has, in any engine, acro
 | paths | u32 count, entries | Its shapes, referred to by index |
 | ops | u32 count, ops | What it draws, in order |
 | coarse | u32 count, ops | Drawn instead of `ops` below `coarse below` (no `children`) |
+| post effects | u32 count, entries | Present only when `flags & 32` is set (minor 1.4). Applied in order to the record's finished picture: kind `1` = layer blur (`radius` `f32`, `sigma = 0.45 * radius * view_scale`, decision 0013 revision). |
 
 **Path entries:**
 

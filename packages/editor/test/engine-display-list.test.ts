@@ -120,6 +120,7 @@ const LOOKS: Array<[PropName, unknown]> = [
   ["characters", "Hello"],
   ["characters", "Wide text here"],
   ["effects", [{ type: "drop-shadow", x: 2, y: 2, blur: 4, spread: 0, color: "#00000040" }]],
+  ["effects", [{ type: "layer-blur", radius: 8 }]],
   ["effects", []],
 ];
 
