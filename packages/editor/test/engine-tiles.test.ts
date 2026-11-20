@@ -6,8 +6,8 @@
  */
 import { type EngineModule, RenderEngine } from "@drawpane/engine";
 import { built, loadNodeEngine } from "@drawpane/engine/node";
-import { glyphKey, ROOT_ID } from "@drawpane/model";
-import { beforeAll, describe, expect, it } from "vitest";
+import { glyphKey, keyBetween, type Op, ROOT_ID } from "@drawpane/model";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { Doc } from "../src/doc";
 import { DisplayListBuilder, type DisplayListOptions } from "../src/engine/display-list";
 import { Scene } from "../src/scene";
@@ -500,5 +500,68 @@ describe.skipIf(!built("worker") && !process.env.CI)("a page opening", () => {
     } finally {
       e.dispose();
     }
+  });
+});
+
+describe("text sent whole after a page opens", () => {
+  /** A page of `n` text layers in a grid of 20 columns, 50 units apart. */
+  function grid(n: number): Doc {
+    const doc = page();
+    const ops: Op[] = [];
+    let key: string | null = null;
+    for (let i = 0; i < n; i++) {
+      key = keyBetween(key, null);
+      ops.push({
+        op: "create",
+        id: `t${i}`,
+        type: "text",
+        parent: "p",
+        key,
+        props: {
+          x: (i % 20) * 50,
+          y: Math.floor(i / 20) * 50,
+          width: 40,
+          height: 40,
+          characters: "Hi",
+          fontSize: 20,
+        },
+      });
+    }
+    doc.apply(ops);
+    return doc;
+  }
+
+  it("finds what's in view once a layer however often the view moves, never in a getter", () => {
+    // A fit, then a pan a frame while the text is still to come: each view used to sort the
+    // whole queue again (every layer's bounds) before the text's budget started.
+    const n = 400;
+    const scene = new Scene(grid(n));
+    const builder = new DisplayListBuilder(scene, { ...measurer, missing: () => false });
+    builder.build("p", undefined, { deferText: true });
+    const bounds = vi.spyOn(scene, "bounds");
+    for (let i = 0; i < 50; i++) {
+      builder.setView({ x0: i * 5, y0: 0, x1: i * 5 + 200, y1: 200 });
+      const asked = bounds.mock.calls.length;
+      void builder.pendingVisible;
+      expect(bounds.mock.calls.length).toBe(asked);
+      builder.update(0);
+    }
+    expect(bounds.mock.calls.length).toBeLessThanOrEqual(n);
+  });
+
+  it("sends what's in view first", () => {
+    const n = 400;
+    const builder = new DisplayListBuilder(new Scene(grid(n)), {
+      ...measurer,
+      missing: () => false,
+    });
+    builder.build("p", undefined, { deferText: true });
+    // The last row's last four layers.
+    builder.setView({ x0: 800, y0: 950, x1: 1000, y1: 1000 });
+    for (let i = 0; i < n && builder.pendingVisible > 0; i++) builder.update(0);
+    expect(builder.pendingVisible).toBe(0);
+    expect(n - builder.pending).toBe(4);
+    for (let i = 0; i < 2 * n && builder.pending > 0; i++) builder.update(0);
+    expect(builder.pending).toBe(0);
   });
 });

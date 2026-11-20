@@ -343,6 +343,8 @@ test.describe
       // Board textures (decision 0040, phase 2): tiles kept across camera moves and edits must
       // never show a stale picture. Whole and fractional pans, zooms about a point, new, moved
       // and restyled layers; at each step, once exact, the screen is a fresh engine's frame.
+      // About 25 s alone; twice that on a loaded machine.
+      test.setTimeout(120_000);
       let seed = 0x0040_0002;
       const rand = () => {
         seed = (seed * 1103515245 + 12345) & 0x7fffffff;

@@ -93,6 +93,48 @@ describe("Shaper", () => {
     expect(await shaper.load(face)).toBe("ready");
   });
 
+  it("gives a face that never loads up at its deadline, and takes its file if it comes late", async () => {
+    // A font request that stalls: its text isn't left waiting for as long as the file is open.
+    let arrive: (b: ArrayBuffer) => void = () => {};
+    const file = new Promise<ArrayBuffer>((resolve) => {
+      arrive = resolve;
+    });
+    const shaper = new Shaper(() => file, { makePath, loadDeadlineMs: 20 });
+    const heard = vi.fn();
+    shaper.subscribe(heard);
+    const face = { family: "Instrument Sans", weight: 400, italic: false };
+    expect(await shaper.load(face)).toBe("unavailable");
+    expect(heard).toHaveBeenCalledTimes(1);
+    expect(shaper.generation).toBe(1);
+    expect(shaper.shape("12", run({ tnum: true }))).toBeNull();
+    // The file comes after all: the face is ready, and listeners hear it again.
+    arrive(bytes());
+    await vi.waitFor(() => expect(shaper.status(face)).toBe("ready"));
+    expect(heard).toHaveBeenCalledTimes(2);
+    expect(shaper.generation).toBe(2);
+    expect(shaper.shape("12", run({ tnum: true }))).not.toBeNull();
+  });
+
+  it("keeps a face that never loads unavailable, once, however long it stalls", async () => {
+    vi.useFakeTimers();
+    try {
+      const shaper = new Shaper(() => new Promise<ArrayBuffer>(() => {}), { makePath });
+      const heard = vi.fn();
+      shaper.subscribe(heard);
+      const face = { family: "Instrument Sans", weight: 400, italic: false };
+      const status = shaper.load(face);
+      expect(shaper.status(face)).toBe("loading");
+      await vi.advanceTimersByTimeAsync(2999);
+      expect(shaper.status(face)).toBe("loading");
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await status).toBe("unavailable");
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(heard).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("lists the features a font offers", async () => {
     const shaper = await ready();
     const tags = (

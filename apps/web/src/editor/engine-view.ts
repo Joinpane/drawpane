@@ -188,14 +188,10 @@ export const REST_BUDGET_MS = 12;
  * (`EngineView.ahead`): the time a page has between animation frames goes to the exact frame
  * too, not only each frame's budget. A frame's length at 60 Hz: the browser renders between
  * slices (on the T4 bench, ~8 ms each time), so fewer, longer slices settle sooner, and none
- * holds input back for more than a frame.
+ * holds input back for more than a frame. Text sent whole after a page opens goes in slices of
+ * the same length.
  */
 export const IDLE_SLICE_MS = 16;
-/**
- * Text sent whole between frames goes in slices this many times longer (`EngineView.ahead`):
- * a page opening sends thousands of records, and each slice pays for a patch and its apply.
- */
-const TEXT_SLICES = 3;
 /** A moving frame's budget that fits no tile: only what nothing stands in for is drawn. */
 const NO_OPTIONAL_MS = 1e-6;
 
@@ -239,15 +235,20 @@ export class EngineView {
   /** What drawing between frames did, summed (`ahead`), for the bench and the debug handle. */
   idle = { slices: 0, tiles: 0, ms: 0 };
   /**
-   * Set to an object by the bench: when the latest exact frame was drawn (submitted), when the
-   * GPU finished it (no read-back involved), and when it was shown (a read-back painted; with a
-   * WebGPU canvas, when it was drawn). Frame numbers tell them apart.
+   * Set to an object by the bench: when the first exact frame since was drawn (submitted), when
+   * the GPU finished it (no read-back involved), and when an exact frame was first shown (a
+   * read-back painted; with a WebGPU canvas, when it was drawn). Frame numbers tell them apart.
    */
   stamps: {
     drawn?: { n: number; at: number };
     gpu?: { n: number; at: number };
     shown?: { n: number; at: number };
   } | null = null;
+  /**
+   * The frame last put on screen, exact or not, and when: painted from its read-back, or (a
+   * WebGPU canvas) drawn. The bench samples the canvas as it changes.
+   */
+  shown = { n: 0, at: 0 };
   /** Set to a list by the bench: each frame and slice between frames, as it happens. */
   trace: Array<{
     t: number;
@@ -559,7 +560,7 @@ export class EngineView {
       const text = (): EngineAhead | null => {
         const t = performance.now();
         const before = b.pending;
-        if (!this.#patch(pageId, budgetMs * TEXT_SLICES)) return null;
+        if (!this.#patch(pageId, budgetMs)) return null;
         this.trace?.push({
           t: performance.now(),
           k: "text",
@@ -697,7 +698,8 @@ export class EngineView {
     const shownExact = f.exact && this.#builder.pendingVisible === 0;
     const n = ++this.#frame;
     const stamps = this.stamps;
-    if (stamps && f.exact) {
+    if (!this.#readback) this.shown = { n, at: performance.now() };
+    if (stamps && f.exact && !stamps.drawn) {
       const at = performance.now();
       stamps.drawn = { n, at };
       if (!this.#readback) stamps.shown = { n, at };
@@ -816,7 +818,8 @@ export class EngineView {
         breakdown: { ...this.last.breakdown, readback: performance.now() - t },
       };
       // Exact only if it's still the newest frame drawn.
-      if (this.stamps && want.exact && want.n === this.#frame)
+      this.shown = { n: want.n, at: performance.now() };
+      if (this.stamps && !this.stamps.shown && want.exact && want.n === this.#frame)
         this.stamps.shown = { n: want.n, at: performance.now() };
       this.onPresented(want.exact && want.n === this.#frame);
       this.#readNext();

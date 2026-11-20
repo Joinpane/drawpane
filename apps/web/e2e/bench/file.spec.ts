@@ -8,7 +8,9 @@
  * or the pages named in BENCH_PAGES, comma separated), BENCH_PAGE_COUNT of
  * them (default 3):
  *
- * - **first frame**: the page shown whole, and how long until it's exact;
+ * - **opening**: the page shown whole (`opening`): when a useful image of it
+ *   was first on screen, and when its exact frame was drawn, finished by the
+ *   GPU and shown;
  * - **pan**: the whole page, and its busiest top-level frame at 50% and
  *   100% (BENCH_FRAMES animation frames each, default 120);
  * - **zoom**: in and out about the centre from the whole page.
@@ -22,8 +24,9 @@
  * driver), and each page also records which renderer drew it (a page with what phase 1
  * doesn't draw falls back to the canvas renderer, with its features named), the adapter, and
  * the GPU's time per frame (`onSubmittedWorkDone`). On a hardware adapter, the heaviest page
- * the engine draws is held to 0040's confirmed targets: a useful image within 1 s of opening it,
- * the exact picture within 3 s. On a software adapter (SwiftShader) nothing is gated and the
+ * measured is held to 0040's confirmed targets, as shown: a useful image within 1 s of opening
+ * it, the exact picture within 3 s. When it falls back to the canvas renderer it isn't gated,
+ * and the run says so (no lighter page stands in for it). On a software adapter (SwiftShader) nothing is gated and the
  * GPU timings are labelled not representative.
  *
  * Opt-in (skipped without BENCH_FILE), never in CI. Prints a table and
@@ -36,7 +39,7 @@ import { writeFileSync } from "node:fs";
 import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "../fresh-instance";
 import { importConverted } from "../import-converted";
-import { pan, type Summary, summaryRow, zoom } from "./frames";
+import { type Opening, opening, openingRow, pan, type Summary, summaryRow, zoom } from "./frames";
 import { type PageInfo, pagesOf } from "./kit-pages";
 import { profiled } from "./profile";
 
@@ -67,8 +70,8 @@ interface EngineFacts {
 
 interface PageResult {
   page: PageInfo;
-  firstFrameMs: number;
-  exactMs: number;
+  /** The page shown: a useful image, and the exact frame drawn, finished and shown (`opening`). */
+  open: Opening;
   canvas: Record<string, Summary>;
   engine?: EngineFacts;
 }
@@ -129,25 +132,6 @@ async function engineFacts(page: Page, frames: number): Promise<EngineFacts> {
       ...(gpu?.fallback ? { note: "software adapter: GPU timings not representative" } : {}),
     };
   }, frames);
-}
-
-/** Shows `pageId`, whole: how long until its first frame was drawn, and until it was exact. */
-async function firstFrame(page: Page, pageId: string): Promise<{ first: number; exact: number }> {
-  return page.evaluate(async (pageId) => {
-    const w = window as unknown as {
-      drawpane: { setPage(id: string): void; zoomToFit(): void };
-      drawpaneFrames: { exact: boolean };
-    };
-    const frame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
-    const t = performance.now();
-    w.drawpane.setPage(pageId);
-    w.drawpane.zoomToFit();
-    await frame();
-    await frame();
-    const first = performance.now() - t;
-    while (!w.drawpaneFrames.exact) await frame();
-    return { first, exact: performance.now() - t };
-  }, pageId);
 }
 
 /** Centres the view on a layer, at most at 100%, and waits until the canvas is exact. */
@@ -231,7 +215,7 @@ test.describe("A real file", () => {
     const started = Date.now();
     const fileId = await importConverted(page, folder, "Bench");
     const importSeconds = Math.round((Date.now() - started) / 1000);
-    const opening = Date.now();
+    const openingAt = Date.now();
     await page.goto(`/f/${fileId}`);
     await page.waitForFunction(
       () =>
@@ -240,7 +224,7 @@ test.describe("A real file", () => {
       undefined,
       { timeout: 30 * 60_000, polling: 1000 },
     );
-    const openSeconds = Math.round((Date.now() - opening) / 1000);
+    const openSeconds = Math.round((Date.now() - openingAt) / 1000);
     console.log(`Imported in ${importSeconds} s, opened in ${openSeconds} s.`);
     // Fonts and images arrive after the file opens.
     await page.waitForTimeout(5000);
@@ -249,7 +233,7 @@ test.describe("A real file", () => {
     for (const info of pages) {
       const at = (what: string) => `${info.name} ${what}`;
       const shown = await profiled(cdp, PROFILE, at("first frame"), async () => {
-        const shown = await firstFrame(page, info.id);
+        const shown = await opening(page, info.id);
         await settle(page);
         return shown;
       });
@@ -275,8 +259,7 @@ test.describe("A real file", () => {
         }
       const result: PageResult = {
         page: info,
-        firstFrameMs: Math.round(shown.first),
-        exactMs: Math.round(shown.exact),
+        open: shown,
         canvas,
         ...(RENDERER === "engine" ? { engine: await engineFacts(page, Math.min(FRAMES, 60)) } : {}),
       };
@@ -284,7 +267,7 @@ test.describe("A real file", () => {
       console.log(
         [
           `\n${info.name}: ${info.layers} layers, ${info.readers} reading the backdrop, ${info.shadows} shadows`,
-          `first frame ${result.firstFrameMs} ms, exact after ${result.exactMs} ms`,
+          openingRow(result.open),
           ...(result.engine
             ? [
                 `drawn by ${result.engine.renderer}${result.engine.renderer === "canvas" ? ` (${JSON.stringify(result.engine.unsupported)})` : ""} on ${result.engine.adapter}${result.engine.gpuMs ? `, GPU ${result.engine.gpuMs.p50} / ${result.engine.gpuMs.p95} ms per frame` : ""}${result.engine.note ? ` (${result.engine.note})` : ""}`,
@@ -299,22 +282,26 @@ test.describe("A real file", () => {
     if (process.env.BENCH_OUT)
       writeFileSync(process.env.BENCH_OUT, `${JSON.stringify(report, null, 1)}\n`);
     expect(results.length).toBeGreaterThan(0);
-    // Decision 0040's confirmed targets, on the heaviest page the engine draws, on real hardware.
-    const gated = results.find((r) => r.engine?.renderer === "engine");
-    if (RENDERER === "engine" && gated?.engine && !gated.engine.software) {
+    // Decision 0040's confirmed targets, on the heaviest page measured, on real hardware: shown
+    // (the frame on screen), never a lighter page in its place.
+    const gated = results[0];
+    if (RENDERER === "engine" && gated?.engine?.renderer === "engine" && !gated.engine.software) {
       expect(
-        gated.firstFrameMs,
+        gated.open.useful?.shown ?? Number.POSITIVE_INFINITY,
         `${gated.page.name}: a useful image within ${USEFUL_IMAGE_MS} ms`,
       ).toBeLessThanOrEqual(USEFUL_IMAGE_MS);
-      expect(gated.exactMs, `${gated.page.name}: exact within ${EXACT_MS} ms`).toBeLessThanOrEqual(
-        EXACT_MS,
-      );
+      expect(
+        gated.open.exact.shown ?? Number.POSITIVE_INFINITY,
+        `${gated.page.name}: exact within ${EXACT_MS} ms`,
+      ).toBeLessThanOrEqual(EXACT_MS);
     } else if (RENDERER === "engine")
       test.info().annotations.push({
         type: "engine-gate",
-        description: gated
-          ? "not gated: software adapter"
-          : "not gated: every page measured falls back to the canvas renderer (phase 3 features)",
+        description: !gated
+          ? "not gated: no page measured"
+          : gated.engine?.renderer !== "engine"
+            ? `not gated: the heaviest page, ${gated.page.name}, falls back to the canvas renderer (${JSON.stringify(gated.engine?.unsupported ?? {})})`
+            : "not gated: software adapter",
       });
   });
 });

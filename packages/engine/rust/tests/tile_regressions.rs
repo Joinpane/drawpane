@@ -909,3 +909,58 @@ fn a_provisional_tile_waits_for_the_text_and_is_not_drawn_again_meanwhile() {
     let (_, settled) = engine.render_cpu_tiled(96, 96, c, [0.0; 4], options).unwrap();
     assert!(settled.exact && settled.tiles_drawn > 0, "{settled:?}");
 }
+
+#[test]
+fn no_frame_is_exact_while_provisional_text_outside_it_may_paint_into_it() {
+    // A provisional record's box is off the view's left edge; its text, once it arrives, paints
+    // 24 units from the same origin, into the view. The frame before can't know that, so it
+    // isn't exact; the frame after, with the text, is.
+    let transform = [1.0, 0.0, 0.0, 1.0, -18.0, 0.0];
+    let mut provisional = Rec::new(transform, [16.0, 16.0]);
+    provisional.flags = 8;
+    let mut engine = provisional_engine(&provisional);
+    engine.use_cpu_tiles(64, 16);
+    let c = camera(1.0, 0.0, 0.0);
+    let options = TiledOptions {
+        prefetch: false,
+        ..TiledOptions::default()
+    };
+    let at = (8 * 64 + 3) * 4;
+    let (before, stats) = engine.render_cpu_tiled(64, 64, c, [0.0; 4], options).unwrap();
+    let before = before[at..at + 4].to_vec();
+    assert!(!stats.exact, "exact before the text arrived: {stats:?}");
+
+    let mut text = Rec::new(transform, [16.0, 16.0]);
+    text.paths.push(Entry::Rect {
+        w: 24.0,
+        h: 16.0,
+        radii: [0.0; 4],
+    });
+    text.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([1.0, 0.0, 0.0, 1.0]),
+    });
+    let mut patch = W::new(1, 2);
+    patch.b[6..8].copy_from_slice(&1u16.to_le_bytes());
+    patch.set(1, 0, &text);
+    engine.apply(&patch.finish()).unwrap();
+    let (after, ready) = engine.render_cpu_tiled(64, 64, c, [0.0; 4], options).unwrap();
+    assert!(ready.exact, "{ready:?}");
+    assert_eq!(&after[at..at + 4], &[255, 0, 0, 255]);
+    assert_ne!(before, after[at..at + 4]);
+}
+
+#[test]
+fn hidden_provisional_text_leaves_frames_exact() {
+    // Only shown records count: text in a hidden layer never paints until it's shown, and
+    // showing it is a change of its own.
+    let mut provisional = square();
+    provisional.flags = 8 | 1;
+    let mut engine = provisional_engine(&provisional);
+    engine.use_cpu_tiles(64, 16);
+    let (_, stats) = engine
+        .render_cpu_tiled(64, 64, camera(1.0, 0.0, 0.0), [0.0; 4], TiledOptions::default())
+        .unwrap();
+    assert!(stats.exact, "{stats:?}");
+}

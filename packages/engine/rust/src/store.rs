@@ -172,6 +172,8 @@ pub struct Store {
     readers: Vec<u32>,
     /// How many change-against-reader checks the last `dirty` made (its cost, for the tests).
     dirty_checks: Cell<u64>,
+    /// `provisional_shown`'s answer and the revision it was found for: asked every frame.
+    provisional: Cell<Option<(u32, Option<u32>)>>,
     /// Records holding features the engine doesn't draw (their `unsupported` bits).
     unsupported: HashSet<u32>,
     /// Records that paint an image, so an image changing invalidates only what shows it.
@@ -225,6 +227,7 @@ impl Store {
             revision: 0,
             readers: Vec::new(),
             dirty_checks: Cell::new(0),
+            provisional: Cell::new(None),
             unsupported: HashSet::new(),
             image_records: HashSet::new(),
             bytes: 0,
@@ -1114,13 +1117,22 @@ impl Store {
     }
 
     /// A provisional record that's shown (it and every ancestor), if there is one: an export
-    /// waits until there's none.
+    /// waits until there's none, and no frame is exact while there's one (its text, once it
+    /// arrives, may paint anywhere: its box bounds only its bars). Found once a revision.
     pub fn provisional_shown(&self) -> Option<u32> {
-        self.nodes
+        if let Some((revision, found)) = self.provisional.get()
+            && revision == self.revision
+        {
+            return found;
+        }
+        let found = self
+            .nodes
             .iter()
             .filter(|(_, n)| n.record.provisional())
             .map(|(id, _)| *id)
-            .find(|id| self.drawn(*id))
+            .find(|id| self.drawn(*id));
+        self.provisional.set(Some((self.revision, found)));
+        found
     }
 
     /// Whether a record and every ancestor are shown.

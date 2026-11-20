@@ -595,7 +595,7 @@ impl Engine {
             .gpu
             .as_mut()
             .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
-        gpu.render(
+        let mut stats = gpu.render(
             &self.store,
             &frame,
             background,
@@ -603,7 +603,13 @@ impl Engine {
             halo,
             options,
             drag.as_ref(),
-        )
+        )?;
+        // No frame is exact while text is still to come: it may paint past its box.
+        if stats.exact && self.store.provisional_shown().is_some() {
+            stats.exact = false;
+            stats.standin = true;
+        }
+        Ok(stats)
     }
 
     /// Device pixels the readers on the page may read past where they paint, summed through
@@ -751,7 +757,11 @@ impl Engine {
         let mut tiles = self.cpu_tiles.take().expect("made above");
         let result = self.cpu_tiled_frame(&mut tiles, width, height, view, halo, background, options);
         self.cpu_tiles = Some(tiles);
-        let stats = result?;
+        let mut stats = result?;
+        // No frame is exact while text is still to come: it may paint past its box.
+        if self.store.provisional_shown().is_some() {
+            stats.exact = false;
+        }
         Ok((self.cpu_tiles.as_ref().map_or(&[][..], |t| t.frame.as_slice()), stats))
     }
 

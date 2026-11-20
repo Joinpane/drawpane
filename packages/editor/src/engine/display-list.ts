@@ -108,15 +108,25 @@ export class DisplayListBuilder {
   readonly #pendingText = new Set<string>();
   /**
    * Text to encode whole a few at a time: sent provisional when a page opened (`build`'s
-   * `deferText`), or waiting for faces that have since arrived. `#queue` is the order (what's in
-   * view first, as of `#sorted`), read from `#at` on.
+   * `deferText`), or waiting for faces that have since arrived. `#queue` is the order they were
+   * queued in, sent from `#at` on once what's in view is sent.
+   *
+   * What's in view is found by a scan of the queue from `#scanAt`, a slice at a time within the
+   * text's budget (`update`), started again when the view moves: never a sort of the whole queue
+   * on a camera change. Found, it's in `#shown` (to send first) and `#visible`.
    */
   readonly #deferred = new Set<string>();
   #queue: string[] = [];
   #at = 0;
-  #sorted = true;
-  /** Of `#deferred`, what was in view when the queue was ordered. */
+  #scanAt = 0;
+  #shown: string[] = [];
+  /** Of `#deferred`, what the scan found in view and isn't sent yet. */
   readonly #visible = new Set<string>();
+  /** Page bounds of queued text, found once (`Scene.bounds`) and dropped when the page changes. */
+  readonly #bounds = new Map<
+    string,
+    { x: number; y: number; width: number; height: number } | null
+  >();
   /** The page rectangle in view (`setView`), for ordering the queue. */
   #view: { x0: number; y0: number; x1: number; y1: number } | null = null;
   /** Faces each layer's text waits for, and the layers each face is waited for by. */
@@ -261,7 +271,6 @@ export class DisplayListBuilder {
     if (this.#deferred.has(id)) return;
     this.#deferred.add(id);
     this.#queue.push(id);
-    this.#sorted = false;
   }
 
   /** Notes the faces a layer's text waits for now, forgetting those it waited for before. */
@@ -283,30 +292,50 @@ export class DisplayListBuilder {
     }
   }
 
-  /** Orders what's left of the queue: what's in view first (`setView`), then the rest. */
-  #sortQueue(): void {
-    if (this.#sorted) return;
+  /** Starts the scan for what's in view again: the view moved, or the page changed. */
+  #rescan(): void {
+    this.#scanAt = this.#at;
+    this.#shown = [];
+    this.#visible.clear();
+  }
+
+  /** Whether the scan has been through the whole queue for the current view. */
+  get #scanned(): boolean {
+    return this.#scanAt >= this.#queue.length;
+  }
+
+  /**
+   * Scans more of the queue for text in view, until `until` (`performance.now()`): what it finds
+   * goes in `#shown`. Answers whether it's been through the whole queue.
+   */
+  #scan(until: number): boolean {
     const view = this.#view;
-    const shown: string[] = [];
-    const rest: string[] = [];
-    for (let i = this.#at; i < this.#queue.length; i++) {
-      const id = this.#queue[i] as string;
-      if (!this.#deferred.has(id)) continue;
-      const b = view ? this.#scene.bounds(id) : null;
-      const inView =
-        view !== null &&
+    if (!view) {
+      this.#scanAt = this.#queue.length;
+      return true;
+    }
+    let n = 0;
+    while (this.#scanAt < this.#queue.length) {
+      if ((++n & 63) === 0 && performance.now() >= until) return false;
+      const id = this.#queue[this.#scanAt++] as string;
+      if (!this.#deferred.has(id) || this.#visible.has(id)) continue;
+      let b = this.#bounds.get(id);
+      if (b === undefined) {
+        b = this.#scene.bounds(id);
+        this.#bounds.set(id, b);
+      }
+      if (
         b !== null &&
         b.x < view.x1 &&
         b.x + b.width > view.x0 &&
         b.y < view.y1 &&
-        b.y + b.height > view.y0;
-      (inView ? shown : rest).push(id);
+        b.y + b.height > view.y0
+      ) {
+        this.#shown.push(id);
+        this.#visible.add(id);
+      }
     }
-    this.#queue = [...shown, ...rest];
-    this.#at = 0;
-    this.#visible.clear();
-    for (const id of shown) this.#visible.add(id);
-    this.#sorted = true;
+    return true;
   }
 
   /**
@@ -321,7 +350,7 @@ export class DisplayListBuilder {
     )
       return;
     this.#view = view;
-    if (this.#deferred.size > 0) this.#sorted = false;
+    if (this.#deferred.size > 0) this.#rescan();
   }
 
   /** Notes the images a layer's record paints now, forgetting those it painted before. */
@@ -448,8 +477,8 @@ export class DisplayListBuilder {
     this.#deferred.clear();
     this.#queue = [];
     this.#at = 0;
-    this.#sorted = true;
-    this.#visible.clear();
+    this.#rescan();
+    this.#bounds.clear();
     this.#waits.clear();
     this.#waitingOn.clear();
     this.#extra.clear();
@@ -562,10 +591,12 @@ export class DisplayListBuilder {
     return this.#deferred.size;
   }
 
-  /** Of `pending`, what's in view (as of the last `setView`): the frame isn't exact without it. */
+  /**
+   * Of `pending`, what's in view (as of the last `setView`): sent before anything else. While
+   * the scan for it isn't through the queue, at least 1 (it may be). Finds nothing itself.
+   */
   get pendingVisible(): number {
-    this.#sortQueue();
-    return this.#visible.size;
+    return this.#visible.size + (this.#deferred.size > 0 && !this.#scanned ? 1 : 0);
   }
 
   /** Layers whose text waits for faces still loading (sent provisional meanwhile). */
@@ -625,6 +656,11 @@ export class DisplayListBuilder {
     for (const id of forced) touched.add(id);
     this.#version = doc.version;
     if (touched.size === 0 && parents.size === 0 && this.#deferred.size === 0) return null;
+    // The page changed: where queued text is may have too.
+    if (changes.length > 0 && this.#deferred.size > 0) {
+      this.#bounds.clear();
+      this.#rescan();
+    }
 
     const sets = new Set<string>();
     const moves = new Set<string>();
@@ -679,24 +715,36 @@ export class DisplayListBuilder {
       records.push([this.#handleOf(id), this.#parentHandle(node), this.#encode(node, ctx)]);
       this.#kid(node.parent, id);
     }
-    // Text sent provisional: encoded whole, a few milliseconds' worth, what's in view first.
+    // Text sent provisional: encoded whole, a few milliseconds' worth (finding what's in view
+    // included), what's in view first, at least one record or a slice of the scan.
     if (this.#deferred.size > 0) {
-      this.#sortQueue();
       const until = performance.now() + textMs;
       let sent = 0;
-      while (this.#at < this.#queue.length && (sent === 0 || performance.now() < until)) {
-        const id = this.#queue[this.#at++] as string;
-        if (!this.#deferred.has(id)) continue;
+      const send = (id: string) => {
+        if (!this.#deferred.has(id)) return;
         this.#deferred.delete(id);
         this.#visible.delete(id);
         const node = doc.get(id);
-        if (!node || !this.#handles.has(id) || this.#pageOf(id) !== page) continue;
+        if (!node || !this.#handles.has(id) || this.#pageOf(id) !== page) return;
         records.push([this.#handleOf(id), this.#parentHandle(node), this.#encode(node, ctx)]);
         sent++;
+      };
+      const more = () => sent === 0 || performance.now() < until;
+      for (;;) {
+        while (this.#shown.length > 0 && more()) send(this.#shown.pop() as string);
+        // Out of time, or nothing more can be in view.
+        if (this.#shown.length > 0 || !more() || this.#scanned) break;
+        // Spent scanning without finding any: the next slice goes on from there.
+        if (!this.#scan(until) && this.#shown.length === 0) break;
       }
-      if (this.#at >= this.#queue.length) {
+      // Then the rest, in the order it was queued, once nothing more can be in view.
+      if (this.#scanned && this.#shown.length === 0)
+        while (this.#at < this.#queue.length && more()) send(this.#queue[this.#at++] as string);
+      if (this.#at >= this.#queue.length && this.#shown.length === 0) {
         this.#queue = [];
         this.#at = 0;
+        this.#scanAt = 0;
+        this.#bounds.clear();
       }
     }
     const revision = this.#revision + 1;

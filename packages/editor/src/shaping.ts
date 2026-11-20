@@ -17,6 +17,12 @@
  * loading; when the face is ready, listeners hear its family so the text is
  * measured and drawn again. A face whose bytes can't be had (a system or
  * local font) stays unavailable: the inspector says why.
+ *
+ * A face's load has a deadline (`ShaperOptions.loadDeadlineMs`, 3 s by
+ * default): one still loading then is unavailable, so its text isn't left
+ * waiting for as long as the file is open. Its file may still come: if it
+ * does, the face is ready then, and listeners hear it as they would have.
+ * A face that failed or timed out is loaded again on `retry`.
  */
 import type { FontFeatures } from "@drawpane/model";
 import { type Face, type FontBytesLoader, faceKey } from "@drawpane/raster";
@@ -81,8 +87,12 @@ interface ReadyFace {
 
 type FaceEntry =
   | { readonly status: "loading" }
-  | { readonly status: "unavailable" }
+  /** `late`: its load passed the deadline, and its file may still come. */
+  | { readonly status: "unavailable"; readonly late?: true }
   | ({ readonly status: "ready" } & ReadyFace);
+
+/** How long a face may load before it's unavailable (its file may still come later). */
+export const FACE_LOAD_DEADLINE_MS = 3000;
 
 /** Strong right-to-left characters: Hebrew, Arabic, Syriac, Thaana, NKo and their presentation forms. */
 const RIGHT_TO_LEFT =
@@ -131,12 +141,15 @@ export interface ShaperOptions {
   readonly harfBuzz?: () => Promise<HarfBuzz>;
   /** An outline from SVG path data; by default `new Path2D(d)`. */
   readonly makePath?: (d: string) => Path2D | null;
+  /** How long a face may load before it's unavailable: `FACE_LOAD_DEADLINE_MS` by default. */
+  readonly loadDeadlineMs?: number;
 }
 
 export class Shaper {
   readonly #loadBytes: FontBytesLoader;
   readonly #loadHarfBuzz: () => Promise<HarfBuzz>;
   readonly #makePath: (d: string) => Path2D | null;
+  readonly #deadline: number;
   #harfBuzz: Promise<HarfBuzz> | null = null;
   readonly #faces = new Map<string, FaceEntry>();
   /** Shaped runs, and null for runs that can't be shaped faithfully (see #shape). */
@@ -147,6 +160,7 @@ export class Shaper {
   constructor(loadBytes: FontBytesLoader, options: ShaperOptions = {}) {
     this.#loadBytes = loadBytes;
     this.#loadHarfBuzz = options.harfBuzz ?? (() => import("harfbuzzjs"));
+    this.#deadline = options.loadDeadlineMs ?? FACE_LOAD_DEADLINE_MS;
     this.#makePath =
       options.makePath ?? ((d) => (typeof Path2D === "undefined" ? null : new Path2D(d)));
   }
@@ -312,13 +326,24 @@ export class Shaper {
     const key = faceKey(face);
     let entry = this.#faces.get(key);
     if (!entry) {
-      entry = { status: "loading" };
-      this.#faces.set(key, entry);
-      void this.#open(face).then(
-        (ready) =>
-          this.#settle(face, ready ? { status: "ready", ...ready } : { status: "unavailable" }),
-        () => this.#settle(face, { status: "unavailable" }),
-      );
+      const loading: FaceEntry = { status: "loading" };
+      entry = loading;
+      this.#faces.set(key, loading);
+      // Past the deadline the face is unavailable, marked late: its file, if it comes after
+      // all, still makes it ready (unless it was retried or unloaded meanwhile).
+      const late: FaceEntry = { status: "unavailable", late: true };
+      const timer = setTimeout(() => {
+        if (this.#faces.get(key) === loading) this.#settle(face, late);
+      }, this.#deadline);
+      const done = (ready: ReadyFace | null) => {
+        clearTimeout(timer);
+        const now = this.#faces.get(key);
+        if (now === loading)
+          this.#settle(face, ready ? { status: "ready", ...ready } : { status: "unavailable" });
+        else if (now === late && ready) this.#settle(face, { status: "ready", ...ready });
+        else if (ready) releaseFace(ready.hb, ready.bytes);
+      };
+      void this.#open(face).then(done, () => done(null));
     }
     return entry;
   }

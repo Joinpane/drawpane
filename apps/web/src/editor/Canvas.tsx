@@ -132,7 +132,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           engine = view;
           if (!view) return;
           view.onChange = () => {
-            contentDirty = true;
+            contentDirty = changed = true;
             schedule();
           };
           view.onFallback = () => {
@@ -154,6 +154,12 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       );
     let dpr = window.devicePixelRatio || 1;
     let contentDirty = true;
+    /**
+     * What the page shows changed since the engine last drew (the document, images, fonts),
+     * not only the camera: the engine's next frame must send it, so the last moving frame
+     * can't simply stay on screen while the time between frames settles it.
+     */
+    let changed = false;
     let overlayDirty = true;
     let frame = 0;
     let last = editor.s;
@@ -218,9 +224,11 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       const a = engine.ahead(pageId, idleBackground, IDLE_SLICE_MS);
       if (!a?.progressed) {
         // Nothing more can be done between frames. What's left, if anything, is the frame's to
-        // draw (a tile no slot can hold is drawn straight into it).
+        // draw: a tile no slot can hold is drawn straight into it, a change that came after the
+        // last frame is sent with the next, and a frame at rest that's as drawn as the list
+        // allows ends the loop.
         idleOn = false;
-        if (contentDirty && a && a.tiles > 0) schedule();
+        if (contentDirty) schedule();
         return;
       }
       if (a.tiles === 0 && a.textVisible === 0 && contentDirty) {
@@ -243,7 +251,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       // redraw never hides the engine's frame, and a read-back frame shows once it lands.
       let drewEngine = false;
       if (contentDirty && s.pageId !== null && engine && engineMoved && !whole) {
-        if (engineCamera === s.camera && engineShowing) {
+        if (engineCamera === s.camera && engineShowing && !changed) {
           // The camera came to rest where the last frame was drawn: that frame stays on screen
           // while the time between frames draws the rest, and the exact frame follows (a frame
           // now would only show the same stand-ins again).
@@ -261,6 +269,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         // never one long frame (a test's whole redraw has no budget).
         const moving = !whole && !exact && engineCamera !== s.camera;
         const background = (page && getProp(page.props, "backgroundColor")) ?? renderer.canvasColor;
+        changed = false;
         const r = engine.draw(
           s.pageId,
           s.camera,
@@ -370,7 +379,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       // gone, so the renderer mustn't reuse it (a pan would move black).
       renderer.invalidate();
       editor.setViewport(width, height);
-      contentDirty = overlayDirty = true;
+      contentDirty = overlayDirty = changed = true;
       schedule();
     };
     const observer = new ResizeObserver(resize);
@@ -378,12 +387,12 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     resize();
 
     const offDoc = editor.doc.subscribe(() => {
-      contentDirty = overlayDirty = true;
+      contentDirty = overlayDirty = changed = true;
       schedule();
     });
     // An image finished decoding (or a sharper copy is ready): repaint the content.
     const offImages = renderer.images.subscribe(() => {
-      contentDirty = true;
+      contentDirty = changed = true;
       schedule();
     });
     const offState = editor.state.subscribe(() => {
@@ -415,27 +424,27 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           for (const from of fonts.aliasedTo(family)) families.add(from);
         if (families.size > 0) editor.refitText(families);
       }
-      contentDirty = overlayDirty = true;
+      contentDirty = overlayDirty = changed = true;
       schedule();
     };
     document.fonts.addEventListener("loadingdone", onFonts);
     // A face for OpenType features became ready: its text is shaped now, so measure and draw it again.
     const offShaper = shaper.subscribe((family) => {
       editor.refitText(new Set([family]));
-      contentDirty = overlayDirty = true;
+      contentDirty = overlayDirty = changed = true;
       schedule();
     });
     void document.fonts.load(fontString({})).then(() => onFonts());
     // The team's fonts, aliases or the catalog arrived: a run may be drawn in another family now.
     const offRegistry = fonts.subscribe(() => {
-      contentDirty = overlayDirty = true;
+      contentDirty = overlayDirty = changed = true;
       schedule();
     });
 
     const themeObserver = new MutationObserver(() => {
       theme = readTheme();
       renderer.canvasColor = canvasToken();
-      contentDirty = overlayDirty = true;
+      contentDirty = overlayDirty = changed = true;
       schedule();
     });
     themeObserver.observe(document.documentElement, {

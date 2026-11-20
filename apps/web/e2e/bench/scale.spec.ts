@@ -6,9 +6,10 @@
  * loaded into the editor the way opening a file loads it (one document
  * reset), then measured:
  *
- * - **load**: the reset, then the first frame of its largest page, and
- *   how long until that page is drawn exactly (a large page shows a
- *   stand-in first and is drawn a few tiles a frame, decision 0028);
+ * - **load**: the reset, then its largest page shown (`opening`): when a
+ *   useful image of it was first on screen, and when its exact frame was
+ *   drawn, finished by the GPU and shown (a large page shows a stand-in
+ *   first and is drawn a few tiles a frame, decision 0028);
  * - **memory**: the JS heap after a collection, file loaded;
  * - **canvas**: panning the largest page whole, at 25% and at 100%, and
  *   zooming it (content and overlay time per frame, as the canvas bench);
@@ -38,7 +39,7 @@ import { generateKit } from "@drawpane/corpus";
 import { compactByInstance, type NodeRecord } from "@drawpane/model";
 import { type CDPSession, expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "../fresh-instance";
-import { pan, type Summary, summaryRow, zoom } from "./frames";
+import { type Opening, opening, openingRow, pan, type Summary, summaryRow, zoom } from "./frames";
 
 const SIZES = (process.env.BENCH_SCALE ?? "100000").split(",").map(Number);
 const RENDERERS: Array<"canvas" | "engine"> =
@@ -57,6 +58,8 @@ interface Result {
   bytes: number;
   copies: number;
   load: { resetMs: number; firstFrameMs: number; exactMs: number };
+  /** The largest page shown: a useful image, and the exact frame drawn, finished and shown. */
+  open: Opening;
   /** The engine's first frame of the largest page: building and applying the list, drawing. */
   engine?: Record<string, unknown>;
   heapMb: number;
@@ -114,143 +117,104 @@ async function stored(page: Page): Promise<{ nodes: number; bytes: number }> {
 }
 
 /**
- * Shows `pageId`, whole: how long until its first frame was drawn, and until it was exact. With
- * the engine, each is told apart by page and frame (`EngineView.last`): its first frame of the
- * page with anything drawn, its first exact one, and whether the exact frame on screen was the
- * engine's (a page left to the canvas renderer is counted as such, `fallbacks`). At most 60 s.
+ * Shows `pageId`, whole (`opening`): when a useful image was first on screen, and when the
+ * exact frame was drawn, finished and shown, stamped with who drew it. With the engine, also
+ * where the time went until then (frames, text sent between them, tiles drawn between them) and
+ * any page left to the canvas renderer (`fallbacks`). At most 60 s.
  */
 async function firstFrame(
   page: Page,
   pageId: string,
 ): Promise<{
-  first: number;
-  exact: number;
+  open: Opening;
   engine: Record<string, unknown> | null;
 }> {
-  return page.evaluate(async (pageId) => {
-    type Last = {
-      pageId: string;
-      n: number;
-      ms: number;
-      patchMs: number;
-      records: number;
-      exact: boolean;
-      plan: string;
-      tiles: object;
-      supported: boolean;
-    };
+  await page.evaluate(() => {
     const w = window as unknown as {
-      drawpane: { setPage(id: string): void; zoomToFit(): void };
-      drawpaneFrames: { exact: boolean };
-      drawpaneEngineView?: {
-        last: Last;
-        trace: Array<{
-          t: number;
-          k: string;
-          ms: number;
-          tiles: number;
-          pending: number;
-          encode: number;
-          render: number;
-          misses: number;
-          masked: number;
-          outlined: number;
-          records: number;
-        }> | null;
-        engine: { records: number; gpu: { adapter: string } | null };
-        builder: { stats: object };
-        opened: object | null;
-        unsupported(): Record<string, number>;
-      };
+      drawpaneEngineView?: { trace: unknown[] | null };
+      benchFallbacks?: unknown[];
     };
     const fallbacks: unknown[] = [];
-    const onFallback = (e: Event) => fallbacks.push((e as CustomEvent).detail);
-    window.addEventListener("drawpane:renderer-page-fallback", onFallback);
-    const e = w.drawpane;
-    const frame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
-    const t = performance.now();
-    const before = w.drawpaneEngineView?.last.n ?? 0;
+    w.benchFallbacks = fallbacks;
+    window.addEventListener("drawpane:renderer-page-fallback", (e) =>
+      fallbacks.push((e as CustomEvent).detail),
+    );
     if (w.drawpaneEngineView) w.drawpaneEngineView.trace = [];
-    e.setPage(pageId);
-    e.zoomToFit();
-    await frame();
-    await frame();
-    const first = performance.now() - t;
-    let engineFirst: { ms: number; last: Last } | null = null;
-    let engineExact: number | null = null;
-    const watch = () => {
-      const l = w.drawpaneEngineView?.last;
-      if (!l || l.pageId !== pageId || l.n <= before) return;
-      if (!engineFirst && l.records > 0) engineFirst = { ms: performance.now() - t, last: l };
-      if (engineExact === null && l.exact) engineExact = performance.now() - t;
-    };
-    watch();
-    while (!w.drawpaneFrames.exact && performance.now() - t < 60_000) {
-      await frame();
-      watch();
-    }
-    const exact = performance.now() - t;
-    window.removeEventListener("drawpane:renderer-page-fallback", onFallback);
-    const v = w.drawpaneEngineView;
-    // Where the time went until the exact frame: frames, text sent between them, tiles drawn
-    // between them (count, ms, and when the first and last of each ended).
-    const spent: Record<
-      string,
-      { n: number; ms: number; items: number; from: number; to: number }
-    > = {};
-    for (const ev of v?.trace ?? []) {
-      const at = ev.t - t;
-      if (engineExact !== null && at > engineExact + 1) continue;
-      const k = spent[ev.k] ?? { n: 0, ms: 0, items: 0, from: at, to: at };
-      spent[ev.k] = k;
-      k.n++;
-      k.ms += ev.ms;
-      k.items += ev.k === "text" ? ev.pending : ev.tiles;
-      k.to = at;
-    }
-    const timeline = (v?.trace ?? [])
-      .filter((ev) => engineExact === null || ev.t - t <= engineExact + 1)
-      .map((ev) => {
-        const at = `${ev.k[0]}${Math.round(ev.t - t)}:${Math.round(ev.ms)}`;
-        if (ev.k === "text") return `${at}/${ev.pending}`;
-        if (ev.k === "frame") return `${at}(patch ${Math.round(ev.render)})/${ev.tiles}`;
-        if (ev.k === "idle")
-          return `${at}(${Math.round(ev.encode)}+${Math.round(ev.render)})/${ev.tiles}/r${ev.records}/g${ev.masked}+${ev.outlined}/m${ev.misses}`;
-        return at;
-      })
-      .join(" ");
-    for (const k of Object.values(spent)) {
-      k.ms = Math.round(k.ms);
-      k.from = Math.round(k.from);
-      k.to = Math.round(k.to);
-    }
-    if (v) v.trace = null;
-    const firstEngine = engineFirst as { ms: number; last: Last } | null;
-    const engine = v
-      ? {
-          supported: v.last.supported,
-          records: v.engine.records,
-          adapter: v.engine.gpu?.adapter ?? null,
-          firstFrame: firstEngine
-            ? {
-                ms: Math.round(firstEngine.ms),
-                frameMs: Math.round(firstEngine.last.ms),
-                patchMs: Math.round(firstEngine.last.patchMs),
-                plan: firstEngine.last.plan,
-                tiles: firstEngine.last.tiles,
-              }
-            : null,
-          exactDrawnMs: engineExact === null ? null : Math.round(engineExact),
-          exactShownBy: v.last.pageId === pageId && v.last.exact ? "engine" : "canvas",
-          fallbacks,
-          spent,
-          timeline,
-          opened: v.opened,
-          ...(v.last.supported ? {} : { unsupported: v.unsupported() }),
-        }
-      : null;
-    return { first, exact, engine };
-  }, pageId);
+  });
+  const open = await opening(page, pageId);
+  const engine = await page.evaluate(
+    ({ t, until }) => {
+      type Ev = {
+        t: number;
+        k: string;
+        ms: number;
+        tiles: number;
+        pending: number;
+        encode: number;
+        render: number;
+        misses: number;
+        masked: number;
+        outlined: number;
+        records: number;
+      };
+      const w = window as unknown as {
+        benchFallbacks?: unknown[];
+        drawpaneEngineView?: {
+          last: { supported: boolean };
+          trace: Ev[] | null;
+          engine: { records: number; gpu: { adapter: string } | null };
+          opened: object | null;
+          unsupported(): Record<string, number>;
+        };
+      };
+      const v = w.drawpaneEngineView;
+      if (!v) return null;
+      // Where the time went until the exact frame: frames, text sent between them, tiles drawn
+      // between them (count, ms, and when the first and last of each ended).
+      const spent: Record<
+        string,
+        { n: number; ms: number; items: number; from: number; to: number }
+      > = {};
+      const upTo = (v.trace ?? []).filter((ev) => until === null || ev.t - t <= until + 1);
+      for (const ev of upTo) {
+        const at = ev.t - t;
+        const k = spent[ev.k] ?? { n: 0, ms: 0, items: 0, from: at, to: at };
+        spent[ev.k] = k;
+        k.n++;
+        k.ms += ev.ms;
+        k.items += ev.k === "text" ? ev.pending : ev.tiles;
+        k.to = at;
+      }
+      for (const k of Object.values(spent)) {
+        k.ms = Math.round(k.ms);
+        k.from = Math.round(k.from);
+        k.to = Math.round(k.to);
+      }
+      const timeline = upTo
+        .map((ev) => {
+          const at = `${ev.k[0]}${Math.round(ev.t - t)}:${Math.round(ev.ms)}`;
+          if (ev.k === "text") return `${at}/${ev.pending}`;
+          if (ev.k === "frame") return `${at}(patch ${Math.round(ev.render)})/${ev.tiles}`;
+          if (ev.k === "idle")
+            return `${at}(${Math.round(ev.encode)}+${Math.round(ev.render)})/${ev.tiles}/r${ev.records}/g${ev.masked}+${ev.outlined}/m${ev.misses}`;
+          return at;
+        })
+        .join(" ");
+      v.trace = null;
+      return {
+        supported: v.last.supported,
+        records: v.engine.records,
+        adapter: v.engine.gpu?.adapter ?? null,
+        fallbacks: w.benchFallbacks ?? [],
+        spent,
+        timeline,
+        opened: v.opened,
+        ...(v.last.supported ? {} : { unsupported: v.unsupported() }),
+      };
+    },
+    { t: open.t0, until: open.exact.drawn },
+  );
+  return { open, engine };
 }
 
 /**
@@ -372,9 +336,10 @@ test.describe("Scale", () => {
           copies: kit.stats.instances,
           load: {
             resetMs: Math.round(resetMs),
-            firstFrameMs: Math.round(shown.first),
-            exactMs: Math.round(shown.exact),
+            firstFrameMs: shown.open.twoFrames,
+            exactMs: shown.open.exactAny,
           },
+          open: shown.open,
           ...(shown.engine ? { engine: shown.engine } : {}),
           heapMb: heap,
           canvas,
@@ -390,7 +355,9 @@ test.describe("Scale", () => {
           [
             `\nScale: ${result.layers.toLocaleString("en")} layers, ${(result.bytes / 1048576).toFixed(0)} MB of nodes, ${result.copies.toLocaleString("en")} copies${COMPACT ? ", compact copies" : ""}${NO_EFFECTS ? ", effects stripped" : ""}, ${renderer}`,
             `stored      ${result.stored.nodes.toLocaleString("en")} nodes, ${(result.stored.bytes / 1048576).toFixed(0)} MB`,
-            `load        reset ${result.load.resetMs} ms · first frame of the largest page ${result.load.firstFrameMs} ms, exact after ${result.load.exactMs} ms${result.engine ? ` · engine ${JSON.stringify(result.engine)}` : ""}`,
+            `load        reset ${result.load.resetMs} ms, then the largest page shown`,
+            openingRow(shown.open),
+            ...(result.engine ? [`engine      ${JSON.stringify(result.engine)}`] : []),
             `memory      ${result.heapMb} MB of JS heap for the file`,
             ...Object.entries(canvas).map(([name, r]) => summaryRow(name, r)),
             `edit main   ${result.editMain.ms} ms to change a fill on a main with ${result.editMain.copies.toLocaleString("en")} copies, drawn (the commit ${result.editMain.commitMs} ms)`,
