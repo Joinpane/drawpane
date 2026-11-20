@@ -270,6 +270,10 @@ struct DragTiles {
     level: Option<u32>,
     seen: u64,
     touched: HashSet<(i32, i32)>,
+    /// Where the selection was drawn in the last frame (page units): that frame's pixels show
+    /// it there, whether or not a tile of its own was kept, so where they're on screen the drag
+    /// composites them again (without it, once it's gone).
+    last: Option<Rect>,
 }
 
 /// A drag as a frame's tiles need it: which drag, its moves, where its selection was when it
@@ -332,6 +336,10 @@ impl TileCache {
                     self.drag_touch(plan, grid.transform_rect_bbox(s).inflate(2.0, 2.0), false);
                 }
                 self.drag_touch(plan, now, true);
+                if let Some(l) = self.drag.last {
+                    self.drag_touch(plan, grid.transform_rect_bbox(l).inflate(2.0, 2.0), true);
+                }
+                self.drag.last = Some(d.now);
                 if d.eligible {
                     if moved {
                         self.drag_skip(plan, now);
@@ -400,9 +408,17 @@ impl TileCache {
     /// while both stay the same. Answers whether it moved since the last frame.
     pub fn drag_frame(&mut self, serial: u64, moves: u64, level: u32) -> bool {
         if self.drag.serial != serial || self.drag.level != Some(level) {
+            // The same drag at another level: the last frame still shows its selection where it
+            // was, at whatever level that frame was drawn.
+            let last = if self.drag.serial == serial {
+                self.drag.last
+            } else {
+                None
+            };
             self.drag_end();
             self.drag.serial = serial;
             self.drag.level = Some(level);
+            self.drag.last = last;
         }
         let moved = self.drag.seen != moves;
         self.drag.seen = moves;

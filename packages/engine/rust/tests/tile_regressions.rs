@@ -639,7 +639,6 @@ fn degenerate_image_placements_never_panic_and_tiles_match_the_whole_frame() {
 }
 
 #[test]
-#[test]
 fn large_drag_never_suppresses_all_visible_work() {
     let mut rect = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [34_000.0; 2]);
     rect.paths.push(Entry::Rect {
@@ -733,4 +732,56 @@ fn fading_an_ancestor_rechecks_drag_eligibility() {
         e.drag_frame().is_none_or(|d| d.split.is_none()),
         "drag retained an ineligible split"
     );
+}
+
+#[test]
+fn a_drag_erases_its_selection_from_the_last_frame_with_no_tile_kept_there() {
+    // The split draws the selection into the frame where no tile of its own is kept (the view
+    // opened somewhere else); when the selection moves away, that frame's pixels are all that
+    // show it there, and a frame drawing no optional tile must still not show it.
+    let mut r = Rec::new([1.0, 0.0, 0.0, 1.0, 8.0, 8.0], [16.0; 2]);
+    r.paths.push(Entry::Rect {
+        w: 16.0,
+        h: 16.0,
+        radii: [0.0; 4],
+    });
+    r.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([1.0, 0.0, 0.0, 1.0]),
+    });
+    let mut list = W::new(ANY, 1);
+    list.reset();
+    list.set(1, 0, &r);
+    let mut engine = Engine::new(Limits::default());
+    engine.use_cpu_tiles(64, 16);
+    engine.apply(&list.finish()).unwrap();
+    let bg = [0.0; 4];
+    let still = TiledOptions {
+        prefetch: false,
+        ..TiledOptions::default()
+    };
+    let starved = TiledOptions {
+        max_jobs: 0,
+        prefetch: false,
+        moving: true,
+        ..TiledOptions::default()
+    };
+    engine
+        .render_cpu_tiled(64, 64, camera(1.0, 512.0, 0.0), bg, still)
+        .unwrap();
+    let at = (16 * 64 + 32) * 4;
+    let mut x = 24.0;
+    for revision in 1..4 {
+        let mut shift = W::new(revision, revision + 1);
+        shift.transform(1, [1.0, 0.0, 0.0, 1.0, x, 8.0]);
+        engine.apply(&shift.finish()).unwrap();
+        let (frame, stats) = engine
+            .render_cpu_tiled(64, 64, camera(1.0, 0.0, 0.0), bg, starved)
+            .unwrap();
+        let want: &[u8] = if x < 32.0 { &[255, 0, 0, 255] } else { &[0, 0, 0, 0] };
+        assert_eq!(&frame[at..at + 4], want, "selection at {x}: {stats:?}");
+        // In, out of the view, and back beside where it was.
+        x = if revision == 1 { 200.0 } else { 40.0 };
+    }
 }

@@ -192,3 +192,34 @@ test("a drag of a selection over more than 4,096 tiles keeps the view drawn", as
   ]);
   expect(frame?.pixel).toEqual(red);
 });
+
+test("a drag erases its selection where only the last frame showed it", async ({ page }) => {
+  // The view opens elsewhere, so no tile is kept where the selection is moved in; moved out,
+  // the last frame's pixels are all that show it there, and a moving frame with no budget for
+  // optional tiles must still erase it.
+  const shift = (revision: number, x: number) => {
+    const patch = new ListWriter(revision - 1, revision);
+    patch.transform(1, [1, 0, 0, 1, x, 8]);
+    return [...patch.finish()];
+  };
+  const moved = (revision: number, x: number): Frame => ({
+    size: [64, 64],
+    pixel: [32, 16],
+    camera: [1, 0, 0, 1],
+    moving: true,
+    budget: 0.000001,
+    patch: shift(revision, x),
+  });
+  const [, movedIn, movedOut] = await sample(
+    page,
+    solid(16),
+    [
+      { size: [64, 64], pixel: [32, 16], camera: [1, 4096, 0, 1], moving: false, budget: 0 },
+      moved(2, 24),
+      moved(3, 600),
+    ],
+    16 << 20,
+  );
+  expect(movedIn?.pixel).toEqual(red);
+  expect(movedOut?.pixel).toEqual([0, 0, 0, 0]);
+});
