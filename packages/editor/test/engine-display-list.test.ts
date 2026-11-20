@@ -141,6 +141,11 @@ const LOOKS: Array<[PropName, unknown]> = [
   ["blendMode", "linear-burn"],
   ["blendMode", "luminosity"],
   ["blendMode", "normal"],
+  ["isMask", true],
+  ["isMask", false],
+  ["maskType", "outline"],
+  ["maskType", "alpha"],
+  ["maskType", "luminance"],
 ];
 
 type Action =
@@ -290,7 +295,14 @@ function opsFor(doc: Doc, a: Action): Op[] {
       if (prop === "clipContent" && n.type !== "frame") return [];
       if (prop === "characters" && n.type !== "text") return [];
       if (prop === "cornerRadius" && n.type !== "rect" && n.type !== "frame") return [];
-      if (n.type === "group" && prop !== "opacity" && prop !== "visible" && prop !== "blendMode")
+      if (
+        n.type === "group" &&
+        prop !== "opacity" &&
+        prop !== "visible" &&
+        prop !== "blendMode" &&
+        prop !== "isMask" &&
+        prop !== "maskType"
+      )
         return [];
       return [{ op: "set", id: n.id, prop, value } as Op];
     }

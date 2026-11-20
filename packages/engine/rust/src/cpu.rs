@@ -811,10 +811,11 @@ impl Backend for Cpu {
         Ok(())
     }
 
-    fn pop_blended(&mut self, blend: u32, opacity: f32, open: &[Open]) -> Result<()> {
+    fn pop_composited(&mut self, blend: u32, opacity: f32, mask_kind: Option<u32>, open: &[Open]) -> Result<()> {
         if self.offscreen_stack.last().is_some_and(|t| t.scene_pending) {
             self.flush_current();
         }
+        let picture = mask_kind.and_then(|_| self.offscreen_stack.pop());
         let Some(top) = self.offscreen_stack.pop() else {
             return Ok(());
         };
@@ -832,7 +833,10 @@ impl Backend for Cpu {
             let clip_pm = if has_clips {
                 let clip_bytes = usize::from(tw) * usize::from(th) * 4;
                 self.check_memory(
-                    clip_bytes.saturating_add(scene_estimate_bytes(u32::from(pw), u32::from(ph))),
+                    clip_bytes
+                        .saturating_add(scene_estimate_bytes(u32::from(pw), u32::from(ph)))
+                        .saturating_add(top.pixmap.data_as_u8_slice().len())
+                        .saturating_add(picture.as_ref().map_or(0, |p| p.pixmap.data_as_u8_slice().len())),
                     "a blended clip mask",
                 )?;
                 let parent_so = self.scene_offset();
@@ -882,7 +886,7 @@ impl Backend for Cpu {
             };
             let dst_size = (u32::from(dst_pm.width()), u32::from(dst_pm.height()));
             let offset = (top.origin.0 - dst_origin.0, top.origin.1 - dst_origin.1);
-            crate::blend::blend_cpu(
+            crate::blend::composite_cpu(
                 top.pixmap.data_as_u8_slice(),
                 dst_pm.data_as_u8_slice_mut(),
                 dst_size,
@@ -891,6 +895,10 @@ impl Backend for Cpu {
                 blend,
                 alpha,
                 clip_pm.as_ref().map(|p| p.data_as_u8_slice()),
+                picture
+                    .as_ref()
+                    .zip(mask_kind)
+                    .map(|(p, kind)| (p.pixmap.data_as_u8_slice(), kind)),
             );
         }
         self.reopen_clips(open);

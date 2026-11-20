@@ -188,6 +188,9 @@ pub struct Store {
     unsupported: HashSet<u32>,
     /// Records that paint an image, so an image changing invalidates only what shows it.
     image_records: HashSet<u32>,
+    /// Number of direct mask children under each parent, so `endsMask` edits in unmasked
+    /// containers stay O(1) instead of scanning all siblings.
+    masked_parents: HashMap<u32, usize>,
     /// What the records hold, roughly, in bytes (`Record::heap_bytes`): held to `Limits::graph_bytes`.
     bytes: usize,
     /// Preorder index and subtree end of every record; rebuilt when the structure changes.
@@ -211,6 +214,8 @@ struct Txn {
     track: bool,
     undo: Vec<Undo>,
     before: Vec<Dirty>,
+    before_seen: HashSet<u32>,
+    mask_siblings_seen: HashSet<u32>,
     touched: Vec<u32>,
     /// Isolated faded ancestors of touched nodes, recorded before edits so if a descendant's
     /// edit flips `subtree_has_pass` (switching between Vello opacity and offscreen isolation),
@@ -226,6 +231,8 @@ impl Txn {
             track,
             undo: Vec::new(),
             before: Vec::new(),
+            before_seen: HashSet::new(),
+            mask_siblings_seen: HashSet::new(),
             touched: Vec::new(),
             iso_ancestors: Vec::new(),
             iso_seen: HashSet::new(),
@@ -256,9 +263,24 @@ impl Store {
             provisional: Cell::new(None),
             unsupported: HashSet::new(),
             image_records: HashSet::new(),
+            masked_parents: HashMap::new(),
             bytes: 0,
             order: None,
             structure: 0,
+        }
+    }
+
+    fn parent_has_mask(&self, parent: u32) -> bool {
+        self.masked_parents.get(&parent).copied().unwrap_or(0) > 0
+    }
+
+    fn bump_mask_parent(&mut self, parent: u32, delta: isize) {
+        let count = self.masked_parents.get(&parent).copied().unwrap_or(0);
+        let next = count.saturating_add_signed(delta);
+        if next == 0 {
+            self.masked_parents.remove(&parent);
+        } else {
+            self.masked_parents.insert(parent, next);
         }
     }
 
@@ -452,6 +474,7 @@ impl Store {
         self.readers = staged.readers;
         self.unsupported = staged.unsupported;
         self.image_records = staged.image_records;
+        self.masked_parents = staged.masked_parents;
         self.bytes = staged.bytes;
         self.order = None;
         self.structure += 1;
@@ -557,6 +580,12 @@ impl Store {
             .filter(|(_, n)| n.record.images().next().is_some())
             .map(|(id, _)| *id)
             .collect();
+        self.masked_parents.clear();
+        for (&id, n) in &self.nodes {
+            if id != ROOT && n.record.is_mask() {
+                *self.masked_parents.entry(n.parent).or_insert(0) += 1;
+            }
+        }
         self.bytes = self
             .nodes
             .iter()
@@ -596,6 +625,7 @@ impl Store {
                 let readers = std::mem::take(&mut self.readers);
                 self.unsupported.clear();
                 self.image_records.clear();
+                self.masked_parents.clear();
                 self.bytes = 0;
                 txn.push(Undo::Everything {
                     nodes: old,
@@ -605,6 +635,8 @@ impl Store {
                 self.order = None;
                 self.structure += 1;
                 txn.before.clear();
+                txn.before_seen.clear();
+                txn.mask_siblings_seen.clear();
                 txn.touched.clear();
                 txn.full = true;
             }
@@ -662,9 +694,23 @@ impl Store {
                 if depth + below > self.limits.depth {
                     return Err(EngineError::limit("records nested too deep"));
                 }
+                let old_info = self
+                    .nodes
+                    .get(&id)
+                    .map(|n| (n.parent, n.record.is_mask(), n.record.ends_mask()));
+                let new_mask = record.is_mask();
+                let new_ends = record.ends_mask();
                 if txn.track {
                     self.note_before(id, txn);
                     self.note_iso_ancestors(parent, txn);
+                    if let Some((old_parent, old_mask, old_ends)) = old_info
+                        && (old_mask || (old_ends && self.parent_has_mask(old_parent)))
+                    {
+                        self.note_mask_siblings(old_parent, txn);
+                    }
+                    if new_mask || (new_ends && self.parent_has_mask(parent)) {
+                        self.note_mask_siblings(parent, txn);
+                    }
                 }
                 let reads = record.reads().is_some();
                 let unsupported = record.unsupported != 0;
@@ -677,6 +723,7 @@ impl Store {
                     let old_hash = std::mem::replace(&mut node.hash, hash);
                     structural = old_parent != parent;
                     let old = std::mem::replace(&mut node.record, record);
+                    let old_was_mask = old.is_mask();
                     node.parent = parent;
                     node.bounds.set(None);
                     node.kids.set(None);
@@ -684,6 +731,12 @@ impl Store {
                     node.has_blend.set(None);
                     self.bytes = self.bytes + cost - old.heap_bytes();
                     self.glyphs.release(&old);
+                    if old_was_mask && (!new_mask || old_parent != parent) {
+                        self.bump_mask_parent(old_parent, -1);
+                    }
+                    if new_mask && (!old_was_mask || old_parent != parent) {
+                        self.bump_mask_parent(parent, 1);
+                    }
                     if structural {
                         let index = self.detach(id, old_parent);
                         // Its old parent's subtree shrank.
@@ -718,6 +771,9 @@ impl Store {
                     }
                     self.bytes += cost + NODE_BYTES;
                     self.nodes.insert(id, Node::new(record, parent, hash));
+                    if new_mask {
+                        self.bump_mask_parent(parent, 1);
+                    }
                     self.attach(id, parent, None);
                     txn.push(Undo::Inserted { id });
                 }
@@ -750,9 +806,16 @@ impl Store {
                     .get(&id)
                     .ok_or_else(|| EngineError::unknown(format!("no record {id} to remove")))?
                     .parent;
+                let (old_mask, old_ends) = self
+                    .nodes
+                    .get(&id)
+                    .map_or((false, false), |n| (n.record.is_mask(), n.record.ends_mask()));
                 if txn.track {
                     self.note_before(id, txn);
                     self.note_iso_ancestors(parent, txn);
+                    if old_mask || (old_ends && self.parent_has_mask(parent)) {
+                        self.note_mask_siblings(parent, txn);
+                    }
                 }
                 let index = self.detach(id, parent);
                 self.dirty_up(parent);
@@ -761,6 +824,9 @@ impl Store {
                 while let Some(at) = stack.pop() {
                     if let Some(node) = self.nodes.remove(&at) {
                         stack.extend(node.children.iter().copied());
+                        if node.record.is_mask() {
+                            self.bump_mask_parent(node.parent, -1);
+                        }
                         self.glyphs.release(&node.record);
                         self.bytes -= node.record.heap_bytes() + NODE_BYTES;
                         self.unsupported.remove(&at);
@@ -814,8 +880,12 @@ impl Store {
                 if !self.nodes.contains_key(&id) {
                     return Err(EngineError::unknown(format!("no record {id} to move")));
                 }
+                let mask_parent = self.nodes.get(&id).and_then(|n| n.record.is_mask().then_some(n.parent));
                 if txn.track {
                     self.note_before(id, txn);
+                    if let Some(p) = mask_parent {
+                        self.note_mask_siblings(p, txn);
+                    }
                 }
                 let node = self.nodes.get_mut(&id).expect("checked");
                 let old = std::mem::replace(&mut node.record.transform, transform);
@@ -922,8 +992,26 @@ impl Store {
         }
     }
 
-    /// Notes where `id`'s subtree paints now, before a command changes it.
+    /// Notes all direct children of `parent` once per transaction when a mask or mask-ending
+    /// sibling changes inside a container that actually has a mask.
+    fn note_mask_siblings(&mut self, parent: u32, txn: &mut Txn) {
+        if !txn.mask_siblings_seen.insert(parent) {
+            return;
+        }
+        let Some(kids) = self.nodes.get(&parent).map(|n| n.children.clone()) else {
+            return;
+        };
+        for c in kids {
+            self.note_before(c, txn);
+        }
+    }
+
+    /// Notes where `id`'s subtree paints now, before a command changes it (at most once per
+    /// transaction so batch patches never build duplicate dirty rectangles).
     fn note_before(&mut self, id: u32, txn: &mut Txn) {
+        if !txn.before_seen.insert(id) {
+            return;
+        }
         txn.touched.push(id);
         if !self.nodes.contains_key(&id) {
             return;
@@ -1378,10 +1466,17 @@ impl Store {
         let mut p = parent;
         loop {
             path.push(p);
+            let n = self.nodes.get(&p)?;
+            if n.children.iter().any(|c| {
+                self.nodes
+                    .get(c)
+                    .is_some_and(|cn| !cn.record.hidden() && cn.record.is_mask())
+            }) {
+                return None;
+            }
             if p == ROOT {
                 break;
             }
-            let n = self.nodes.get(&p)?;
             if (n.record.isolate() && n.record.opacity < 1.0) || !n.record.post_effects.is_empty() {
                 return None;
             }

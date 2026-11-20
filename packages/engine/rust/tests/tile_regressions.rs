@@ -1348,8 +1348,8 @@ fn blended_group_isolates_children_like_figma_and_svg() {
 
 #[test]
 fn wire_minor_version_gates_newer_features() {
-    // Regression for PR #242 review: messages declaring a lower minor version must be refused
-    // when they carry flags, ops, path entries, or paint blends introduced in a higher minor.
+    // Regression for PR #242 / #244 review: messages declaring a lower minor version must be
+    // refused when they carry flags, ops, path entries, or paint blends introduced in a higher minor.
     let mut blended = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [20.0, 20.0]);
     blended.layer_blend = 1;
     blended.paths.push(Entry::Rect {
@@ -1366,7 +1366,6 @@ fn wire_minor_version_gates_newer_features() {
     w.reset();
     w.set(1, 0, &blended);
     let mut bytes = w.finish();
-    // Patch wire header minor (u16 LE at offset 6..8) from 4 down to 3.
     bytes[6] = 3;
     bytes[7] = 0;
     let mut e = Engine::new(Limits::default());
@@ -1416,7 +1415,7 @@ fn wire_minor_version_gates_newer_features() {
     let err4 = e.apply(&b4).unwrap_err();
     assert_eq!(err4.code, drawpane_engine::error::ErrorCode::Malformed);
 
-    // Paint-level non-normal blend (wire 1.4) also refused under minor 3.
+    // Paint-level non-normal blend (wire 1.4) refused under minor 3.
     let mut paint_blend = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [20.0, 20.0]);
     paint_blend.blend = 16; // linear-dodge
     paint_blend.paths.push(Entry::Rect {
@@ -1437,4 +1436,194 @@ fn wire_minor_version_gates_newer_features() {
     b5[7] = 0;
     let err5 = e.apply(&b5).unwrap_err();
     assert_eq!(err5.code, drawpane_engine::error::ErrorCode::Malformed);
+
+    // Mask and endsMask flags (wire 1.4) refused under minor 3.
+    let mut masked = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [20.0, 20.0]);
+    masked.mask = 4;
+    let mut w6 = W::new(ANY, 5);
+    w6.reset();
+    w6.set(1, 0, &masked);
+    let mut b6 = w6.finish();
+    b6[6] = 3;
+    b6[7] = 0;
+    assert_eq!(
+        e.apply(&b6).unwrap_err().code,
+        drawpane_engine::error::ErrorCode::Malformed
+    );
+
+    let mut ends = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [20.0, 20.0]);
+    ends.flags = 256; // FLAG_ENDS_MASK
+    let mut w7 = W::new(ANY, 6);
+    w7.reset();
+    w7.set(1, 0, &ends);
+    let mut b7 = w7.finish();
+    b7[6] = 3;
+    b7[7] = 0;
+    assert_eq!(
+        e.apply(&b7).unwrap_err().code,
+        drawpane_engine::error::ErrorCode::Malformed
+    );
+}
+
+#[test]
+fn picture_mask_matches_across_48px_tile_seams_invalidates_siblings_and_refuses_split_drag() {
+    // An alpha picture mask with layer blur straddling a 48 px tile boundary, masking a solid
+    // sibling above it. Tiled rendering must match whole-frame rendering across the seam,
+    // split-drag must be refused inside the masked container, and moving the mask must invalidate
+    // both the old and new tiles cleanly.
+    let mut mask = Rec::new([1.0, 0.0, 0.0, 1.0, 26.0, 10.0], [44.0, 44.0]);
+    mask.mask = 4; // alpha picture mask
+    mask.post.push(Post::LayerBlur(10.0));
+    mask.paths.push(Entry::Ellipse { w: 44.0, h: 44.0 });
+    mask.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([1.0, 1.0, 1.0, 0.85]),
+    });
+
+    let mut content = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [96.0, 64.0]);
+    content.paths.push(Entry::Rect {
+        w: 96.0,
+        h: 64.0,
+        radii: [0.0; 4],
+    });
+    content.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.9, 0.25, 0.15, 1.0]),
+    });
+
+    let mut msg = W::new(ANY, 1);
+    msg.reset();
+    msg.set(1, 0, &mask);
+    msg.set(2, 0, &content);
+    msg.order(0, &[1, 2]);
+    let mut e = Engine::new(Limits::default());
+    e.use_cpu_tiles(48, 64);
+    e.apply(&msg.finish()).unwrap();
+    // Moving a mask or a masked sibling must not use the SrcOver split-drag fast path.
+    assert!(e.store.selection(&[1]).is_none());
+    assert!(e.store.selection(&[2]).is_none());
+
+    let cam = camera(1.0, 0.0, 0.0);
+    let whole = e.render_cpu(96, 64, cam, [1.0; 4], false).unwrap().0.to_vec();
+    let (tiled, stats) = e
+        .render_cpu_tiled(96, 64, cam, [1.0; 4], TiledOptions::default())
+        .unwrap();
+    assert!(stats.exact);
+    let worst = whole.iter().zip(tiled).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+    assert!(worst <= 1, "blurred picture mask tile seam mismatch: worst {worst}");
+
+    // Move the mask completely into the right tile: left tile must clear back to white.
+    let mut move_mask = W::new(1, 2);
+    move_mask.transform(1, [1.0, 0.0, 0.0, 1.0, 68.0, 10.0]);
+    e.apply(&move_mask.finish()).unwrap();
+    let whole_after = e.render_cpu(96, 64, cam, [1.0; 4], false).unwrap().0.to_vec();
+    let (tiled_after, _) = e
+        .render_cpu_tiled(96, 64, cam, [1.0; 4], TiledOptions::default())
+        .unwrap();
+    let worst_after = whole_after
+        .iter()
+        .zip(tiled_after)
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap_or(0);
+    assert!(
+        worst_after <= 1,
+        "stale masked pixels survived after moving mask: worst {worst_after}"
+    );
+}
+
+#[test]
+fn batch_updating_clipping_frames_stays_linear_with_and_without_masks() {
+    // Regression for PR #244 review: batch-updating N clipping frames (FLAG_ENDS_MASK = 256) in
+    // one container previously re-scanned all N siblings per Set, producing O(N^2) work and N^2
+    // duplicate dirty entries. Verify both unmasked and masked containers stay strictly linear.
+    let n = 1000u32;
+    let mut init = W::new(ANY, 1);
+    init.reset();
+    for i in 1..=n {
+        let mut r = Rec::new([1.0, 0.0, 0.0, 1.0, f64::from(i) * 2.0, 0.0], [10.0, 10.0]);
+        r.flags = 256; // FLAG_ENDS_MASK (every clipping frame carries this)
+        r.paths.push(Entry::Rect {
+            w: 10.0,
+            h: 10.0,
+            radii: [0.0; 4],
+        });
+        r.ops.push(Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::Solid([0.2, 0.4, 0.6, 1.0]),
+        });
+        init.set(i, 0, &r);
+    }
+    let mut store = drawpane_engine::store::Store::new(Limits::default());
+    store.apply(&init.finish()).unwrap();
+
+    // Update all N clipping frames in a single patch when ROOT has no masks.
+    let mut patch = W::new(1, 2);
+    for i in 1..=n {
+        let mut r = Rec::new([1.0, 0.0, 0.0, 1.0, f64::from(i) * 2.0 + 1.0, 0.0], [10.0, 10.0]);
+        r.flags = 256;
+        r.paths.push(Entry::Rect {
+            w: 10.0,
+            h: 10.0,
+            radii: [0.0; 4],
+        });
+        r.ops.push(Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::Solid([0.3, 0.4, 0.6, 1.0]),
+        });
+        patch.set(i, 0, &r);
+    }
+    let applied = store.apply(&patch.finish()).unwrap();
+    assert_eq!(applied.touched.len(), n as usize);
+    assert!(
+        applied.changes.len() <= (n as usize) * 2,
+        "expected O(N) dirty changes for {n} clipping frames, got {}",
+        applied.changes.len()
+    );
+
+    // Now add a mask child under ROOT and batch-update all N clipping frames: must STILL be O(N),
+    // with each sibling recorded at most once in before and once in after.
+    let mut add_mask = W::new(2, 3);
+    let mut mask = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [50.0, 50.0]);
+    mask.mask = 4;
+    mask.paths.push(Entry::Rect {
+        w: 50.0,
+        h: 50.0,
+        radii: [0.0; 4],
+    });
+    mask.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([1.0; 4]),
+    });
+    add_mask.set(n + 1, 0, &mask);
+    store.apply(&add_mask.finish()).unwrap();
+
+    let mut patch_masked = W::new(3, 4);
+    for i in 1..=n {
+        let mut r = Rec::new([1.0, 0.0, 0.0, 1.0, f64::from(i) * 2.0 + 2.0, 0.0], [10.0, 10.0]);
+        r.flags = 256;
+        r.paths.push(Entry::Rect {
+            w: 10.0,
+            h: 10.0,
+            radii: [0.0; 4],
+        });
+        r.ops.push(Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::Solid([0.4, 0.4, 0.6, 1.0]),
+        });
+        patch_masked.set(i, 0, &r);
+    }
+    let applied_masked = store.apply(&patch_masked.finish()).unwrap();
+    assert_eq!(applied_masked.touched.len(), (n + 1) as usize);
+    assert!(
+        applied_masked.changes.len() <= ((n + 1) as usize) * 2,
+        "expected O(N) dirty changes in masked container, got {}",
+        applied_masked.changes.len()
+    );
 }

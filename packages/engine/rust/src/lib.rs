@@ -20,6 +20,7 @@ pub mod gpu;
 pub mod images;
 pub mod kernels;
 pub mod limits;
+pub mod mask;
 pub mod masks;
 pub mod png;
 pub mod record;

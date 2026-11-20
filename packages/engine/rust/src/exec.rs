@@ -253,7 +253,12 @@ pub trait Backend {
     /// Flushes (if pending) and pops the active offscreen target, blends it onto the parent target
     /// using blend mode `blend` (`1..=17` or `crate::blend::BLEND_LERP`) at `opacity` masked by
     /// parent `open` clips, and reopens parent `open` clips.
-    fn pop_blended(&mut self, blend: u32, opacity: f32, open: &[Open]) -> Result<()>;
+    fn pop_blended(&mut self, blend: u32, opacity: f32, open: &[Open]) -> Result<()> {
+        self.pop_composited(blend, opacity, None, open)
+    }
+    /// Composites an isolated picture. With a mask kind, the stack top is the mask picture
+    /// and the next target is the content. Apply mask coverage before the final RGBA8 store.
+    fn pop_composited(&mut self, blend: u32, opacity: f32, mask_kind: Option<u32>, open: &[Open]) -> Result<()>;
     /// Discards the active offscreen target on error unwind without compositing.
     fn abort_isolated(&mut self);
     /// Renders a Gaussian-blurred shadow mask over `dirty` (device pixels) and draws it into the
@@ -450,11 +455,10 @@ pub fn draw_split<B: Backend>(
         verbs_left: *budget,
         open_scopes: limits.open_scopes,
     };
-    let root = store
-        .nodes
-        .get(&crate::store::ROOT)
-        .ok_or_else(|| EngineError::malformed("no page"))?;
-    let result = walk.children(crate::store::ROOT, &root.children, Affine::IDENTITY, 1.0);
+    if !store.nodes.contains_key(&crate::store::ROOT) {
+        return Err(EngineError::malformed("no page"));
+    }
+    let result = walk.draw_children(crate::store::ROOT, Affine::IDENTITY, 1.0);
     *budget = walk.verbs_left;
     // Whatever failed part way, close what's open so the scene stays usable.
     while let Some(o) = walk.open.pop() {
@@ -639,6 +643,109 @@ fn paint_visible(paint: &Paint, alpha: f32) -> bool {
     }
 }
 
+/// Whether any child of `parent_id` (including picture-mask scopes) would flush the active CPU
+/// scene on a full-frame render.
+fn children_flush_in_full_frame(
+    store: &Store,
+    frame: &Frame,
+    full_frame: IRect,
+    full_viewport: Rect,
+    parent_id: u32,
+    world: Affine,
+    inner: f32,
+) -> bool {
+    let Some(parent_node) = store.nodes.get(&parent_id) else {
+        return false;
+    };
+    let has_mask = parent_node.children.iter().any(|c| {
+        store
+            .nodes
+            .get(c)
+            .is_some_and(|n| !n.record.hidden() && n.record.is_mask())
+    });
+    if !has_mask {
+        return parent_node
+            .children
+            .iter()
+            .any(|&c| subtree_flushes_in_full_frame(store, frame, full_frame, full_viewport, c, world, inner));
+    }
+    let view_scale = scale_of(frame.view);
+    let mask_flushes = |mid: u32, has_ids: bool| -> bool {
+        if !has_ids {
+            return false;
+        }
+        let Some(mn) = store.nodes.get(&mid) else {
+            return false;
+        };
+        let mdev = frame.view * world * mn.record.transform;
+        if !finite(mdev) {
+            return false;
+        }
+        let (Some(bounds), page_pad) = store.bounds_and_pad(mid) else {
+            return false;
+        };
+        let pad_dev = if page_pad > 0.0 {
+            page_pad * view_scale + 2.0
+        } else {
+            0.0
+        };
+        let raw = IRect::around(
+            mdev.transform_rect_bbox(bounds)
+                .inflate(pad_dev, pad_dev)
+                .inflate(1.0, 1.0),
+        );
+        !raw.intersect(full_frame).is_empty()
+    };
+    let mut pic_scope: Option<(u32, bool)> = None;
+    let mut active_clip = false;
+    for &cid in &parent_node.children {
+        let Some(cn) = store.nodes.get(&cid) else {
+            continue;
+        };
+        let cr = &cn.record;
+        if cr.hidden() {
+            continue;
+        }
+        if cr.is_mask() {
+            if let Some((mid, has_ids)) = pic_scope.take()
+                && mask_flushes(mid, has_ids)
+            {
+                return true;
+            }
+            active_clip = false;
+            if cr.is_picture_mask() {
+                pic_scope = Some((cid, false));
+            } else {
+                active_clip = true;
+            }
+            continue;
+        }
+        if (active_clip || pic_scope.is_some()) && cr.ends_mask() {
+            if let Some((mid, has_ids)) = pic_scope.take()
+                && mask_flushes(mid, has_ids)
+            {
+                return true;
+            }
+            active_clip = false;
+            if subtree_flushes_in_full_frame(store, frame, full_frame, full_viewport, cid, world, inner) {
+                return true;
+            }
+            continue;
+        }
+        if let Some((_, ref mut has_ids)) = pic_scope {
+            *has_ids = true;
+        } else if subtree_flushes_in_full_frame(store, frame, full_frame, full_viewport, cid, world, inner) {
+            return true;
+        }
+    }
+    if let Some((mid, has_ids)) = pic_scope
+        && mask_flushes(mid, has_ids)
+    {
+        return true;
+    }
+    false
+}
+
 /// Whether `id` (culled from a tile) would flush the active CPU scene on a full-frame render.
 fn subtree_flushes_in_full_frame(
     store: &Store,
@@ -815,11 +922,7 @@ fn subtree_flushes_in_full_frame(
                     }
                 }
             }
-            Op::Children
-                if node.children.iter().any(|&c| {
-                    subtree_flushes_in_full_frame(store, frame, full_frame, full_viewport, c, world, inner)
-                }) =>
-            {
+            Op::Children if children_flush_in_full_frame(store, frame, full_frame, full_viewport, id, world, inner) => {
                 return true;
             }
             _ => {}
@@ -874,6 +977,239 @@ impl<B: Backend> Walk<'_, B> {
             Affine::translate((-f64::from(sox), -f64::from(soy))) * device
         }
     }
+    fn draw_children(&mut self, parent_id: u32, world: Affine, inner: f32) -> Result<()> {
+        let Some(parent_node) = self.store.nodes.get(&parent_id) else {
+            return Ok(());
+        };
+        let has_mask = parent_node.children.iter().any(|c| {
+            self.store
+                .nodes
+                .get(c)
+                .is_some_and(|n| !n.record.hidden() && n.record.is_mask())
+        });
+        if !has_mask {
+            return self.children(parent_id, &parent_node.children, world, inner);
+        }
+        let mut clipping = false;
+        let mut pic_scope: Option<(u32, u32, Vec<u32>)> = None;
+        for &cid in &parent_node.children {
+            let Some(cn) = self.store.nodes.get(&cid) else {
+                continue;
+            };
+            let cr = &cn.record;
+            if cr.hidden() {
+                continue;
+            }
+            if cr.is_mask() {
+                if let Some((mid, mkind, ids)) = pic_scope.take() {
+                    self.draw_picture_mask(mid, mkind, &ids, world, inner)?;
+                }
+                if clipping {
+                    self.open.pop();
+                    self.backend.scene().pop_clip();
+                    clipping = false;
+                }
+                if cr.unsupported != 0 {
+                    return Err(EngineError::unsupported(format!(
+                        "record {cid} needs features {:#x}",
+                        cr.unsupported
+                    )));
+                }
+                match cr.mask {
+                    crate::record::MASK_OUTLINE_NONZERO | crate::record::MASK_OUTLINE_EVENODD => {
+                        let mask_world = world * cr.transform;
+                        let mask_dev = self.frame.view * mask_world;
+                        if !finite(mask_dev) {
+                            return Err(EngineError::limit(format!(
+                                "record {cid}'s transform overflows on the device"
+                            )));
+                        }
+                        self.scope()?;
+                        let p = self.path(cr, 0, mask_dev, 0.0)?;
+                        let even_odd = cr.mask == crate::record::MASK_OUTLINE_EVENODD;
+                        let sd = self.scene_device(mask_dev);
+                        let scene = self.backend.scene();
+                        scene.set_transform(sd);
+                        scene.set_fill_rule(if even_odd { Fill::EvenOdd } else { Fill::NonZero });
+                        scene.push_clip_path(&p);
+                        self.open.push(Open::Clip {
+                            transform: sd,
+                            path: p,
+                            even_odd,
+                        });
+                        clipping = true;
+                    }
+                    kind => {
+                        pic_scope = Some((cid, kind, Vec::new()));
+                    }
+                }
+                continue;
+            }
+            if (clipping || pic_scope.is_some()) && cr.ends_mask() {
+                if let Some((mid, mkind, ids)) = pic_scope.take() {
+                    self.draw_picture_mask(mid, mkind, &ids, world, inner)?;
+                }
+                if clipping {
+                    self.open.pop();
+                    self.backend.scene().pop_clip();
+                    clipping = false;
+                }
+                self.node(cid, world, inner)?;
+                continue;
+            }
+            if let Some((_, _, ref mut ids)) = pic_scope {
+                ids.push(cid);
+            } else {
+                self.node(cid, world, inner)?;
+            }
+        }
+        if let Some((mid, mkind, ids)) = pic_scope.take() {
+            self.draw_picture_mask(mid, mkind, &ids, world, inner)?;
+        }
+        if clipping {
+            self.open.pop();
+            self.backend.scene().pop_clip();
+        }
+        Ok(())
+    }
+
+    fn draw_picture_mask(
+        &mut self,
+        mask_id: u32,
+        mask_kind: u32,
+        ids: &[u32],
+        world: Affine,
+        inner: f32,
+    ) -> Result<()> {
+        if ids.is_empty() {
+            return Ok(());
+        }
+        let Some(mask_node) = self.store.nodes.get(&mask_id) else {
+            return Ok(());
+        };
+        let mask_world = world * mask_node.record.transform;
+        let mask_dev = self.frame.view * mask_world;
+        if !finite(mask_dev) {
+            return Err(EngineError::limit(format!(
+                "record {mask_id}'s transform overflows on the device"
+            )));
+        }
+        let (Some(bounds), page_pad) = self.store.bounds_and_pad(mask_id) else {
+            return Ok(());
+        };
+        let view_scale = scale_of(self.frame.view);
+        let pad_dev = if page_pad > 0.0 {
+            page_pad * view_scale + 2.0
+        } else {
+            0.0
+        };
+        let mask_bbox = mask_dev.transform_rect_bbox(bounds).inflate(pad_dev, pad_dev);
+        let raw_area = IRect::around(mask_bbox.inflate(1.0, 1.0));
+        let mask_area = raw_area.intersect(self.backend.target_bounds());
+        let whole_mask = {
+            let r = raw_area.intersect(self.full_frame);
+            if r.is_empty() {
+                r
+            } else {
+                IRect {
+                    x0: r.x0.div_euclid(4) * 4 - 4,
+                    y0: r.y0.div_euclid(4) * 4 - 4,
+                    x1: (r.x1 + 3).div_euclid(4) * 4 + 4,
+                    y1: (r.y1 + 3).div_euclid(4) * 4 + 4,
+                }
+                .intersect(self.full_frame)
+            }
+        };
+        if mask_area.is_empty() {
+            if self.tiled && !whole_mask.is_empty() {
+                self.backend.flush_barrier(&self.open);
+            }
+            return Ok(());
+        }
+        self.scope()?;
+        if !self.backend.push_isolated(mask_area, true, None, &self.open)? {
+            if self.tiled && !whole_mask.is_empty() {
+                self.backend.flush_barrier(&self.open);
+            }
+            return Ok(());
+        }
+        let content_tb = self.backend.target_bounds();
+        let prev_open = std::mem::take(&mut self.open);
+        let prev_viewport = self.viewport;
+        let prev_full_frame = self.full_frame;
+        let prev_full_viewport = self.full_viewport;
+        self.viewport = Rect::new(
+            f64::from(content_tb.x0) - 1.0,
+            f64::from(content_tb.y0) - 1.0,
+            f64::from(content_tb.x1) + 1.0,
+            f64::from(content_tb.y1) + 1.0,
+        );
+        self.full_frame = whole_mask;
+        self.full_viewport = Rect::new(
+            f64::from(whole_mask.x0) - 1.0,
+            f64::from(whole_mask.y0) - 1.0,
+            f64::from(whole_mask.x1) + 1.0,
+            f64::from(whole_mask.y1) + 1.0,
+        );
+        let content_res = (|| -> Result<()> {
+            for &cid in ids {
+                self.node(cid, world, inner)?;
+            }
+            Ok(())
+        })();
+        while let Some(o) = self.open.pop() {
+            match o {
+                Open::Clip { .. } => self.backend.scene().pop_clip(),
+                Open::Layer => self.backend.scene().pop_layer(),
+            }
+        }
+        if let Err(e) = content_res {
+            self.viewport = prev_viewport;
+            self.full_frame = prev_full_frame;
+            self.full_viewport = prev_full_viewport;
+            self.open = prev_open;
+            self.backend.abort_isolated();
+            return Err(e);
+        }
+        let pushed_pic = match self.backend.push_isolated(content_tb, false, None, &[]) {
+            Ok(p) => p,
+            Err(e) => {
+                self.viewport = prev_viewport;
+                self.full_frame = prev_full_frame;
+                self.full_viewport = prev_full_viewport;
+                self.open = prev_open;
+                self.backend.abort_isolated();
+                return Err(e);
+            }
+        };
+        if !pushed_pic {
+            self.viewport = prev_viewport;
+            self.full_frame = prev_full_frame;
+            self.full_viewport = prev_full_viewport;
+            self.open = prev_open;
+            self.backend.abort_isolated();
+            return Ok(());
+        }
+        let mask_res = self.node(mask_id, world, 1.0);
+        while let Some(o) = self.open.pop() {
+            match o {
+                Open::Clip { .. } => self.backend.scene().pop_clip(),
+                Open::Layer => self.backend.scene().pop_layer(),
+            }
+        }
+        self.viewport = prev_viewport;
+        self.full_frame = prev_full_frame;
+        self.full_viewport = prev_full_viewport;
+        self.open = prev_open;
+        if let Err(e) = mask_res {
+            self.backend.abort_isolated();
+            self.backend.abort_isolated();
+            return Err(e);
+        }
+        self.backend.pop_composited(0, 1.0, Some(mask_kind), &self.open)?;
+        Ok(())
+    }
+
     fn node(&mut self, id: u32, parent: Affine, alpha: f32) -> Result<()> {
         let on_path = self.split.pass != Pass::All && self.split.path.contains(&id);
         // A subtree that isn't on the selection's path lies wholly in one part: skipped when
@@ -1241,7 +1577,7 @@ impl<B: Backend> Walk<'_, B> {
                             }
                         }
                     }
-                    Op::Children => self.children(id, &node.children, world, active_alpha)?,
+                    Op::Children => self.draw_children(id, world, active_alpha)?,
                     Op::Read { kernel, halo } => {
                         self.stats.reads += 1;
                         let b = Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1]));

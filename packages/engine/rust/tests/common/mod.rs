@@ -225,6 +225,8 @@ pub struct Rec {
     pub post: Vec<Post>,
     /// Layer blend mode (0 normal, 1..=17 per wire.ts `BLEND`).
     pub layer_blend: u32,
+    /// Mask kind (0 none, 1..=5 per wire.ts `MASK`).
+    pub mask: u32,
     /// The blend mode written on every paint (0 normal), and every rect entry's smoothing.
     pub blend: u32,
     pub smoothing: f32,
@@ -244,6 +246,7 @@ impl Rec {
             coarse: vec![],
             post: vec![],
             layer_blend: 0,
+            mask: 0,
             blend: 0,
             smoothing: 0.0,
         }
@@ -394,7 +397,10 @@ impl Rec {
         }
     }
     pub fn write(&self, w: &mut W) {
-        let flags = self.flags | if self.post.is_empty() { 0 } else { 32 } | if self.layer_blend != 0 { 64 } else { 0 };
+        let flags = self.flags
+            | if self.post.is_empty() { 0 } else { 32 }
+            | if self.layer_blend != 0 { 64 } else { 0 }
+            | if self.mask != 0 { 128 } else { 0 };
         w.u32(flags);
         w.f32(self.opacity);
         w.m(self.transform);
@@ -473,6 +479,9 @@ impl Rec {
         }
         if self.layer_blend != 0 {
             w.u32(self.layer_blend);
+        }
+        if self.mask != 0 {
+            w.u32(self.mask);
         }
     }
 }

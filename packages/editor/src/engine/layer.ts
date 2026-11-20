@@ -14,6 +14,7 @@ import {
   FLAG,
   type GradientStop,
   JOIN,
+  MASK,
   type Matrix,
   PathData,
   type PathEntry,
@@ -33,7 +34,7 @@ import { boxOf, localMatrix } from "../geometry";
 import { gradientMatrix } from "../gradients";
 import { imagePlacement } from "../images";
 import { markersOf, trimmedStroke } from "../markers";
-import { isActiveMask } from "../masks";
+import { clipsByShape, endsMask, isActiveMask } from "../masks";
 import { postEffects } from "../post-effects";
 import { paintMargin } from "../reach";
 import { fadesAsOne, GREEK_BELOW, greekLines, largestFontSize } from "../render";
@@ -916,8 +917,8 @@ function text(
   }
 }
 
-/** Effects and masks the engine doesn't draw yet: their bits. */
-function unsupportedOf(node: NodeRecord, scene: Scene): number {
+/** Effects the engine doesn't draw yet: their bits. */
+function unsupportedOf(node: NodeRecord): number {
   let bits = 0;
   for (const e of getProp(node.props, "effects")) {
     if (e.visible === false) continue;
@@ -926,9 +927,6 @@ function unsupportedOf(node: NodeRecord, scene: Scene): number {
     else if (e.type === "noise") bits |= UNSUPPORTED.noise;
     else if (e.type === "texture") bits |= UNSUPPORTED.texture;
   }
-  const id = node.id;
-  const masks = isActiveMask(node);
-  if (masks || scene.hasMask(id)) bits |= UNSUPPORTED.mask;
   return bits;
 }
 
@@ -941,7 +939,24 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
   const opacity = getProp(node.props, "opacity");
   const isolate = opacity < 1 && fadesAsOne(node, children);
   const blend = blendCode(getProp(node.props, "blendMode"));
-  b.unsupported |= unsupportedOf(node, scene);
+  const activeMask = !hidden && isActiveMask(node);
+  const stopMask = !hidden && !activeMask && endsMask(node);
+  let mask = 0;
+  if (activeMask) {
+    if (clipsByShape(node)) {
+      const evenOdd = node.type === "path" && getProp(node.props, "windingRule") === "evenodd";
+      mask = evenOdd ? MASK.outlineShapeEvenOdd : MASK.outlineShapeNonZero;
+    } else {
+      const maskType = getProp(node.props, "maskType");
+      mask =
+        maskType === "luminance"
+          ? MASK.luminance
+          : maskType === "alpha"
+            ? MASK.alpha
+            : MASK.outlinePicture;
+    }
+  }
+  b.unsupported |= unsupportedOf(node);
   const w = node.type === "group" ? 0 : getProp(node.props, "width");
   const h = node.type === "group" ? 0 : getProp(node.props, "height");
   const wirePost: WirePostEffect[] = [];
@@ -955,7 +970,9 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
     (isolate ? FLAG.isolate : 0) |
     (node.type === "group" ? FLAG.group : 0) |
     (wirePost.length > 0 ? FLAG.post : 0) |
-    (blend !== 0 ? FLAG.blend : 0);
+    (blend !== 0 ? FLAG.blend : 0) |
+    (mask !== 0 ? FLAG.mask : 0) |
+    (stopMask ? FLAG.endsMask : 0);
   if (node.type === "group") {
     b.ops.push({ op: "children" });
   } else if (node.type === "text") {
@@ -999,6 +1016,7 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
       coarse: b.coarse,
       ...(wirePost.length > 0 ? { postEffects: wirePost } : {}),
       ...(blend !== 0 ? { blend } : {}),
+      ...(mask !== 0 ? { mask } : {}),
     },
     images: b.images,
     textPending: b.textPending,

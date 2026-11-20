@@ -39,7 +39,7 @@ Each glyph definition gets a serial no other definition has, in any engine, acro
 
 | Field | Type | |
 | --- | --- | --- |
-| flags | u32 | 1 hidden, 2 isolate (fades as one: an opacity group), 4 group (no paint of its own; its ops are only `children`), 8 provisional (sent ahead of its real drawing, as text not yet shaped while a page opens or while its face loads: drawn as its coarse ops at every scale, never exact, and sent again whole soon after; it counts its box, grown by its reach, wherever its coarse ops paint or don't, and an export is refused while any shown record is provisional), 16 reserved for 3B context, 32 post (minor 1.4: ordered `postEffects` list follows `coarse`), 64 blend (minor 1.4: layer blend mode `u32` `1..=17` follows `postEffects` or `coarse`) |
+| flags | u32 | 1 hidden, 2 isolate (fades as one: an opacity group), 4 group (no paint of its own; its ops are only `children`), 8 provisional (sent ahead of its real drawing, as text not yet shaped while a page opens or while its face loads: drawn as its coarse ops at every scale, never exact, and sent again whole soon after; it counts its box, grown by its reach, wherever its coarse ops paint or don't, and an export is refused while any shown record is provisional), 16 reserved for 3B context, 32 post (minor 1.4: ordered `postEffects` list follows `coarse`), 64 blend (minor 1.4: layer blend mode `u32` `1..=17` follows `postEffects` or `coarse`), 128 mask (minor 1.4: mask kind `u32` `1..=5` follows `blend`), 256 ends mask (minor 1.4: visible clipping frame that closes a sibling mask scope) |
 | opacity | f32 | Its own; inherited opacity multiplies down unless it isolates. |
 | transform | f64 × 6 | Its units to its parent record's (`a b c d e f`), not to the page: moving a board is one command. |
 | width, height | f32 × 2 | Its box, for the speck rule (layers under half a device pixel both ways are skipped on screen). |
@@ -51,6 +51,7 @@ Each glyph definition gets a serial no other definition has, in any engine, acro
 | coarse | u32 count, ops | Drawn instead of `ops` below `coarse below` (no `children`) |
 | post effects | u32 count, entries | Present only when `flags & 32` is set (minor 1.4). Applied in order to the record's finished picture: kind `1` = layer blur (`radius` `f32`, `sigma = 0.45 * radius * view_scale`, decision 0013 revision). |
 | blend | u32 | Present only when `flags & 64` is set (minor 1.4). Non-normal layer blend mode (`1..=17`, matching `BLEND` in `wire.ts`). |
+| mask | u32 | Present only when `flags & 128` is set (minor 1.4). Mask kind (`1` outline shape NonZero, `2` outline shape EvenOdd, `3` outline picture, `4` alpha picture, `5` luminance picture, matching `MASK` in `wire.ts`). Kinds `1` and `2` clip siblings above them to `paths[0]`; kinds `3..=5` composite siblings above them against the mask's rendered picture (`mask.rs` / `mask.wgsl`). |
 
 **Path entries:**
 

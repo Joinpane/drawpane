@@ -354,7 +354,13 @@ describe.skipIf(!built())("Recovery and stream lifetimes", () => {
     const w = 1157;
     const h = 305;
     const cam = { zoom: 1, x: 13.42, y: -7.57, dpr: 1.35 };
-    const cases: Array<{ name: string; shadow?: number; blurs?: number[]; blend?: number }> = [
+    const cases: Array<{
+      name: string;
+      shadow?: number;
+      blurs?: number[];
+      blend?: number;
+      mask?: { kind: number; blur?: number };
+    }> = [
       { name: "shadow only", shadow: 35 },
       { name: "blur only odd", blurs: [24] },
       { name: "blur plus shadow", blurs: [32], shadow: 68 },
@@ -362,6 +368,9 @@ describe.skipIf(!built())("Recovery and stream lifetimes", () => {
       { name: "large blur plus shadow", blurs: [280], shadow: 89 },
       { name: "blended multiply plus shadow", shadow: 35, blend: 1 },
       { name: "blended linear-dodge plus blur", blurs: [24], blend: 16 },
+      { name: "alpha picture mask", mask: { kind: 4 } },
+      { name: "luminance picture mask", mask: { kind: 5 } },
+      { name: "blurred alpha picture mask", mask: { kind: 4, blur: 18 } },
     ];
     for (const c of cases) {
       const e = new RenderEngine(module);
@@ -387,6 +396,37 @@ describe.skipIf(!built())("Recovery and stream lifetimes", () => {
         ],
         coarse: [],
       });
+      if (c.mask) {
+        list.set(20, ROOT, {
+          flags: FLAG.mask | (c.mask.blur ? FLAG.post : 0),
+          opacity: 1,
+          transform: [1.15, 0.14, -0.18, 0.94, 620.25, 45.75],
+          width: 340,
+          height: 150,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [{ kind: "rect", w: 340, h: 150, radii: [20, 20, 20, 20], smoothing: 0 }],
+          ops: [
+            {
+              op: "fill",
+              path: 0,
+              evenOdd: false,
+              paint: {
+                kind: "linear",
+                matrix: [340, 0, 0, 150, 0, 0],
+                stops: [
+                  { position: 0, color: [1, 1, 1, 1] },
+                  { position: 1, color: [0, 0, 0, 0.1] },
+                ],
+              },
+            },
+          ],
+          coarse: [],
+          ...(c.mask.blur ? { postEffects: [{ kind: "layerBlur", radius: c.mask.blur }] } : {}),
+          mask: c.mask.kind,
+        });
+      }
       list.set(1, ROOT, {
         flags: (c.blurs ? FLAG.post : 0) | (c.blend ? FLAG.blend : 0),
         opacity: 1,
@@ -425,7 +465,7 @@ describe.skipIf(!built())("Recovery and stream lifetimes", () => {
           : {}),
         ...(c.blend ? { blend: c.blend } : {}),
       });
-      list.order(ROOT, [10, 1]);
+      list.order(ROOT, c.mask ? [10, 20, 1] : [10, 1]);
       expect(e.apply(list.finish()).ok, c.name).toBe(true);
       const full = e.renderCpu(w, h, cam, clear, false);
       if (!full.ok) throw new Error(`${c.name}: ${full.message}`);

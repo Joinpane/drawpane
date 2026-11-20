@@ -999,3 +999,18 @@ All 17 non-normal blend modes (`FLAG_BLEND = 64`, paint/shadow/layer blend codes
   - Editor e2e suite: 15/15 passed (including `multiplied-shadow` on CPU and GPU vs canvas).
   - Module sizes: worker 629 KB raw / 249 KB gzipped (budget 400 KB); browser 1118 KB raw / 421 KB gzipped (budget 1000 KB).
   - Workerd 8,192 x 8,192 export: engine 17.4 / 25 MiB, isolate peak 46.5 MiB.
+
+## Amendment: outline, alpha, and luminance masks (phase 3A, 2026-11-20)
+
+All three Figma mask types (outline, alpha, and luminance, plus sibling scope termination by visible clipping frames; `FLAG_MASK = 128`, `FLAG_ENDS_MASK = 256`, `MASK` codes `1..=5`, wire version 1.4) are drawn by both backends, clearing `UNSUPPORTED.mask`.
+
+- **Sibling mask scoping and outline clip paths (`exec.rs`, `layer.ts`, `store.rs`):** Both `ROOT` and container `Op::Children` walk siblings through `Walk::draw_children` with exact `masks.ts` scoping: an active mask ends any prior mask scope, a visible clipping frame (`FLAG_ENDS_MASK`) closes the active mask scope and draws unmasked, and hidden masks or clipping frames have no effect. Outline masks on single filled shapes (`frame`, `rect`, `ellipse`, `polygon`, `star`, `path`) clip masked siblings via Vello's clip stack (`Open::Clip` on `paths[0]` with `NonZero` or `EvenOdd`), ignoring mask opacity and translucency.
+- **Picture mask pass (`mask.rs`, `mask.wgsl`, `cpu.rs`, `gpu.rs`, `exec.rs`):** Alpha masks (`MASK_ALPHA = 4`), luminance masks (`MASK_LUMINANCE = 5`, Rec. 709 premultiplied `dot(m.rgb, [0.2126, 0.7152, 0.0722])` matching `luminance.ts`), and non-shape outline masks (`MASK_OUTLINE_PICTURE = 3`, `m.a > 0 ? 1 : 0` matching `opaqueAlpha`) render masked siblings into a `content` offscreen target and the mask subtree (with its fills, gradients, opacity, layer blur, strokes, and children) into an equal-sized `picture` offscreen target over the mask's device bounds, then modulate `content` by `picture` (`mask_cpu` on CPU; pure full-screen triangle fragment pass `mask.wgsl` fused with pending `picture` rendering into one `CommandEncoder` and one `queue.submit` on GPU) and composite onto the parent. Never uses Vello's unsupported GPU mask layer API.
+- **Invalidation and Worker memory bounds (`store.rs`, `engine.rs`):** Editing, moving, adding, or removing a mask or `FLAG_ENDS_MASK` record dirties all siblings in its parent (`note_mask_siblings`) so `Store::dirty` covers every changed pixel. `export_effect_working_set` charges two concurrent offscreen targets (`next_depth + 2`) for active picture masks.
+- **Measured conformance and sizes:**
+  - `masks` parity suite: 7/7 cells drawn, 0 fallbacks. Against Figma: CPU mean 0.27, GPU mean 0.27 (overall better than live canvas 0.31; `alpha-blurred` 0.46/0.46 vs canvas 0.93; every cell well under half its `thresholds.json` limit; CPU vs GPU worst mean 0.00077, 0 severe). Worker vs browser CPU: bit-identical on 7/7.
+  - `corners` parity suite: `mask` cell fallback narrowed from `["cornerSmoothing", "mask"]` to `["cornerSmoothing"]`.
+  - Rust unit + fuzz tests: 29/29 lib tests (including exact `alpha`, Rec. 709 `luminance`, and `outlinePicture` mask tests) and 8/8 `FUZZ_CASES=200` fuzz tests (200/200 bit-identical tiled exports + patched == fresh + dirty coverage with random outline/alpha/luminance masks and `ends_mask` frames).
+  - Banded CPU seam regression (`regressions.test.ts`): 10/10 cases (including alpha, luminance, and blurred alpha picture masks across 73-row DPR 1.35 bands) match whole-frame CPU bit-for-bit.
+  - Module sizes: worker 640 KB raw / 253 KB gzipped (budget 400 KB); browser 1139 KB raw / 428 KB gzipped (budget 1000 KB).
+  - Workerd 8,192 x 8,192 export: engine 17.4 / 25 MiB.
