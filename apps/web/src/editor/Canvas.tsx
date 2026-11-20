@@ -14,6 +14,7 @@ import {
 } from "@drawpane/editor";
 import { getProp } from "@drawpane/model";
 import { colors } from "@drawpane/ui";
+import { useRouterState } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef } from "react";
 import { isMac } from "../app/format";
 import { loadedFamilies, watchDocumentFonts } from "../fonts/document-fonts";
@@ -22,6 +23,7 @@ import { COMPONENT_DRAG_MIME } from "./AssetsPanel";
 import { passesToCanvas } from "./canvas-gestures";
 import {
   EngineView,
+  engineFallback,
   IDLE_SLICE_MS,
   MOVING_BUDGET_MS,
   REST_BUDGET_MS,
@@ -32,6 +34,7 @@ import { frameStatsFor } from "./frame-stats";
 import { useEditor, useEditorState } from "./hooks";
 import { LIBRARY_DRAG_MIME, type LibraryDrag, loadedSource } from "./libraries/sources";
 import { imagesFor } from "./media";
+import { fallbackToReason, setRendererStatus } from "./renderer-status";
 import { shaper } from "./shaping";
 import { TextEditor } from "./TextEditor";
 import { openMenu } from "./ui-state";
@@ -83,6 +86,9 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
   /** The render engine's WebGPU canvas, under the overlay; shown only while it draws the page. */
   const gpuCanvas = useRef<HTMLCanvasElement>(null);
   const editingText = useEditorState((s) => s.editingText);
+  // Read the switch reactively so changing `?renderer=...` in place takes effect without a reload.
+  const searchStr = useRouterState({ select: (s) => s.location.searchStr });
+  const choice = useMemo(() => rendererChoice(searchStr), [searchStr]);
   // The editor's measurer re-measures after web fonts load (EditorPage gives it one that does).
   const measurer = editor.measurer as TextMeasurer & { invalidate(): void };
   const renderer = useMemo(
@@ -113,7 +119,8 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     let engine: EngineView | null = null;
     let engineShowing = false;
     let disposed = false;
-    const choice = rendererChoice();
+    engineCanvas.style.visibility = "hidden";
+    contentCanvas.style.visibility = "visible";
     const showEngine = (on: boolean) => {
       if (on === engineShowing) return;
       engineShowing = on;
@@ -122,7 +129,28 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       // The canvas renderer drew nothing meanwhile: its last frame can't be reused.
       if (!on) renderer.invalidate();
     };
-    if (choice !== "canvas")
+    const reportEngine = (view: EngineView) => {
+      if (choice === "canvas") return;
+      setRendererStatus(editor, {
+        switchOn: true,
+        choice,
+        active: "engine",
+        backend: view.backend,
+        adapter: view.adapter,
+        compatibility: view.compatibility,
+        software: view.software,
+      });
+    };
+    if (choice === "canvas") {
+      setRendererStatus(editor, { switchOn: false });
+    } else {
+      const priorFallback = engineFallback();
+      setRendererStatus(editor, {
+        switchOn: true,
+        choice,
+        active: "canvas",
+        reason: priorFallback ? fallbackToReason(priorFallback) : { kind: "starting" },
+      });
       void EngineView.create(engineCanvas, editor, measurer, imagesFor(editor), choice).then(
         (view) => {
           if (disposed) {
@@ -130,14 +158,31 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
             return;
           }
           engine = view;
-          if (!view) return;
+          if (!view) {
+            const fb = engineFallback();
+            setRendererStatus(editor, {
+              switchOn: true,
+              choice,
+              active: "canvas",
+              reason: fb
+                ? fallbackToReason(fb)
+                : { kind: "error", message: "could not start the render engine" },
+            });
+            return;
+          }
           view.onChange = () => {
             contentDirty = changed = true;
             schedule();
           };
-          view.onFallback = () => {
+          view.onFallback = (event) => {
             engine = null;
             showEngine(false);
+            setRendererStatus(editor, {
+              switchOn: true,
+              choice,
+              active: "canvas",
+              reason: fallbackToReason(event),
+            });
             contentDirty = true;
             schedule();
           };
@@ -145,6 +190,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           view.onPresented = (frameExact) => {
             if (engine !== view) return;
             showEngine(true);
+            reportEngine(view);
             timing.exact = frameExact;
           };
           (window as unknown as { drawpaneEngineView?: EngineView }).drawpaneEngineView = view;
@@ -152,6 +198,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           schedule();
         },
       );
+    }
     let dpr = window.devicePixelRatio || 1;
     let contentDirty = true;
     /**
@@ -291,6 +338,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           clearTimeout(settle);
           if (r.ready) {
             showEngine(true);
+            reportEngine(engine);
             timing.exact = r.exact;
           } else timing.exact = false;
           // Stand-ins on screen while moving: the next frame draws more. At rest, the time
@@ -307,6 +355,13 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
             idleBackground = background;
             postIdle();
           }
+        } else if (engine && !engine.last.supported && choice !== "canvas") {
+          setRendererStatus(editor, {
+            switchOn: true,
+            choice,
+            active: "canvas",
+            reason: { kind: "unsupported", features: Object.keys(engine.unsupported()) },
+          });
         }
       }
       if (!drewEngine && contentDirty && s.pageId) {
@@ -454,7 +509,11 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
 
     return () => {
       disposed = true;
+      const w = window as unknown as { drawpaneEngineView?: EngineView };
+      if (engine && w.drawpaneEngineView === engine) delete w.drawpaneEngineView;
       engine?.dispose();
+      engineCanvas.style.visibility = "hidden";
+      contentCanvas.style.visibility = "visible";
       observer.disconnect();
       themeObserver.disconnect();
       offDoc();
@@ -469,7 +528,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       clearTimeout(settle);
       clearTimeout(fadeTimer);
     };
-  }, [editor, interaction, renderer, measurer]);
+  }, [editor, interaction, renderer, measurer, choice]);
 
   // Pointer and wheel input.
   useEffect(() => {

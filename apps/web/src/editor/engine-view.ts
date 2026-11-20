@@ -3,6 +3,15 @@
  * `?renderer=engine` in the URL, or `localStorage["drawpane:renderer"] = "engine"`
  * (`engine-compat` for WebGPU's compatibility feature level).
  *
+ * Switch persistence rule (see `renderer-switch.ts`):
+ * - When the URL sets `renderer` (or `present`), that value is remembered in `sessionStorage`
+ *   for the rest of the tab session, so in-app navigation (dashboard to file, toggling review,
+ *   switching branches) and login redirects keep it.
+ * - `?renderer=canvas` turns the engine back off for the session (clearing `sessionStorage`, or
+ *   overriding `localStorage` for this session when `localStorage["drawpane:renderer"]` is set).
+ * - Precedence: URL parameter, then `sessionStorage`, then `localStorage`, then `"canvas"`
+ *   (and for `present`: URL, `sessionStorage`, `localStorage`, then `"webgpu"`).
+ *
  * The engine draws the page into a WebGPU canvas under the overlay. It's patched from the
  * document's change log and follows the camera every frame. A page holding anything the engine
  * doesn't draw yet (effects, masks, blends) is drawn by the canvas renderer instead, whole.
@@ -25,43 +34,22 @@ import {
   RenderEngine,
   unsupportedNames,
 } from "@drawpane/engine";
+import {
+  type PresentationMode,
+  presentation,
+  type RendererChoice,
+  rendererChoice,
+  softwareAllowed,
+} from "./renderer-switch";
 
-export type RendererChoice = "canvas" | "engine" | "engine-compat";
-
-/**
- * How frames reach the screen: through the WebGPU canvas (the product), or read back through
- * a buffer into a 2D canvas (`drawpane:engine-present` = "readback"). The second is for headless
- * browsers, where presenting a WebGPU canvas loses the device (SwiftShader on this VM, and the
- * GPU bench's NVIDIA driver on Modal): it's slow, and it exercises everything but presentation.
- */
-export function presentation(): "webgpu" | "readback" {
-  try {
-    const v =
-      new URL(window.location.href).searchParams.get("present") ??
-      localStorage.getItem("drawpane:engine-present");
-    return v === "readback" ? "readback" : "webgpu";
-  } catch {
-    return "webgpu";
-  }
-}
-
-/**
- * Whether the engine may draw on a software WebGPU adapter (SwiftShader, llvmpipe):
- * `drawpane:engine-software` = "allow". Off by default: on one, a page of any size draws far
- * slower than the canvas renderer, so the canvas renderer draws instead. Headless tests allow it.
- */
-function softwareAllowed(): boolean {
-  try {
-    return localStorage.getItem("drawpane:engine-software") === "allow";
-  } catch {
-    return false;
-  }
-}
+export { type PresentationMode, presentation, type RendererChoice, rendererChoice };
 
 interface AdapterLike {
   readonly isFallbackAdapter?: boolean;
   readonly info?: { readonly isFallbackAdapter?: boolean };
 }
+
+export type FallbackKind = "no-webgpu" | "software-gpu" | "error";
 
 /**
  * Which WebGPU feature level the engine asks for: a hardware adapter at core level, else a
@@ -70,10 +58,12 @@ interface AdapterLike {
  */
 export async function adapterLevel(
   choice: RendererChoice,
-): Promise<{ readonly compatibility: boolean } | { readonly reason: string }> {
+): Promise<
+  { readonly compatibility: boolean } | { readonly reason: string; readonly kind: FallbackKind }
+> {
   const gpu = (navigator as Navigator & { gpu?: { requestAdapter(o?: object): Promise<unknown> } })
     .gpu;
-  if (!gpu) return { reason: "this browser has no WebGPU" };
+  if (!gpu) return { reason: "this browser has no WebGPU", kind: "no-webgpu" };
   const soft = (a: unknown) => {
     const x = a as AdapterLike | null;
     return !x || x.info?.isFallbackAdapter === true || x.isFallbackAdapter === true;
@@ -93,29 +83,20 @@ export async function adapterLevel(
     if (a && !soft(a)) return { compatibility };
   }
   if (any && softwareAllowed()) return { compatibility: choice === "engine-compat" };
-  return {
-    reason: any
-      ? "only a software WebGPU adapter is available (set drawpane:engine-software to allow it)"
-      : "no WebGPU adapter",
-  };
-}
-
-/** Which renderer the switch asks for. */
-export function rendererChoice(): RendererChoice {
-  try {
-    const url = new URL(window.location.href).searchParams.get("renderer");
-    const stored = localStorage.getItem("drawpane:renderer");
-    const v = url ?? stored;
-    return v === "engine" || v === "engine-compat" ? v : "canvas";
-  } catch {
-    return "canvas";
-  }
+  return any
+    ? {
+        reason:
+          "only a software WebGPU adapter is available (set drawpane:engine-software to allow it)",
+        kind: "software-gpu",
+      }
+    : { reason: "no WebGPU adapter", kind: "no-webgpu" };
 }
 
 export interface FallbackEvent {
   readonly reason: string;
   readonly code: ErrorCode | null;
   readonly adapter: string | null;
+  readonly kind?: FallbackKind;
 }
 
 /** Fallbacks this session: once the engine fails, it stays off until the next session. */
@@ -291,6 +272,11 @@ export class EngineView {
     breakdown: { patch: 0, encode: 0, render: 0, submit: 0, readback: 0 },
   };
 
+  readonly backend = "WebGPU";
+  readonly adapter: string;
+  readonly compatibility: boolean;
+  readonly software: boolean;
+
   private constructor(
     canvas: HTMLCanvasElement,
     engine: RenderEngine,
@@ -298,8 +284,12 @@ export class EngineView {
     measurer: TextMeasurer,
     images: ImageCache,
     readback: CanvasRenderingContext2D | null,
+    info: { readonly adapter: string; readonly compatibility: boolean; readonly software: boolean },
   ) {
     this.canvas = canvas;
+    this.adapter = info.adapter;
+    this.compatibility = info.compatibility;
+    this.software = info.software;
     this.#readback = readback;
     this.#engine = engine;
     this.#images = images;
@@ -335,13 +325,19 @@ export class EngineView {
           reason: engine.failure.message,
           code: engine.failure.code,
           adapter: null,
+          kind: "error",
         });
         return null;
       }
       const level = await adapterLevel(choice);
       if ("reason" in level) {
         engine.dispose();
-        EngineView.#report({ reason: level.reason, code: ErrorCode.NoAdapter, adapter: null });
+        EngineView.#report({
+          reason: level.reason,
+          code: ErrorCode.NoAdapter,
+          adapter: null,
+          kind: level.kind,
+        });
         return null;
       }
       const readback = presentation() === "readback" ? canvas.getContext("2d") : null;
@@ -351,15 +347,24 @@ export class EngineView {
       });
       if (!gpu.ok) {
         engine.dispose();
-        EngineView.#report({ reason: gpu.message, code: gpu.code, adapter: null });
+        EngineView.#report({
+          reason: gpu.message,
+          code: gpu.code,
+          adapter: null,
+          kind: "error",
+        });
         return null;
       }
       console.info(
         `Drawpane: drawing with the render engine on ${gpu.value.adapter}${level.compatibility ? " (WebGPU compatibility mode)" : ""}${gpu.value.fallback ? " (a software adapter)" : ""}`,
       );
-      return new EngineView(canvas, engine, editor, measurer, images, readback);
+      return new EngineView(canvas, engine, editor, measurer, images, readback, {
+        adapter: gpu.value.adapter,
+        compatibility: level.compatibility,
+        software: gpu.value.fallback,
+      });
     } catch (err) {
-      EngineView.#report({ reason: String(err), code: null, adapter: null });
+      EngineView.#report({ reason: String(err), code: null, adapter: null, kind: "error" });
       return null;
     }
   }
@@ -390,7 +395,12 @@ export class EngineView {
   #fail(r: { readonly message: string; readonly code: ErrorCode | null }): EngineDraw {
     if (this.#dead) return NOT_DRAWN;
     this.#dead = true;
-    const e = { reason: r.message, code: r.code, adapter: this.#engine.gpu?.adapter ?? null };
+    const e: FallbackEvent = {
+      reason: r.message,
+      code: r.code,
+      adapter: this.#engine.gpu?.adapter ?? null,
+      kind: "error",
+    };
     EngineView.#report(e);
     this.onFallback(e);
     this.dispose();

@@ -97,6 +97,7 @@ import { clampPane, PANE, panelLayout, setPanelLayout, usePanelLayout } from "./
 import { parityDebug } from "./parity-debug";
 import { useInspectorRoom } from "./popover-room";
 import { PrototypePanel } from "./prototype/PrototypePanel";
+import { RendererStatus } from "./RendererStatus";
 import { RULER, RULER_GAP, Rulers } from "./Rulers";
 import { ShortcutsDialog } from "./ShortcutsDialog";
 import { textMeasurer } from "./shaping";
@@ -1026,7 +1027,10 @@ function FileEditor({ fileId }: { fileId: string }) {
           <>
             <EditorContext.Provider value={active}>
               {comparing ? null : <Minimap />}
-              <ZoomControls />
+              <div className="bottom-bar">
+                <ZoomControls />
+                <RendererStatus />
+              </div>
             </EditorContext.Provider>
             <SyncStatus />
           </>
