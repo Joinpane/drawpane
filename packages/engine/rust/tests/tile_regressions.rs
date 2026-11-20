@@ -470,3 +470,35 @@ fn a_box_stroke_as_a_ring_matches_the_stroker() {
         );
     }
 }
+
+#[test]
+fn an_image_shrunk_to_nothing_paints_nothing() {
+    // An image tiled at 1e-38 of a page unit: its inverse overflows a float, and vello_cpu's
+    // sample positions become NaN. On x86 that indexed past the image and panicked (CI's fuzz,
+    // seed 1795185273032291663); elsewhere it read the first pixel across the shape. Nothing.
+    let mut r = Rec::new([1.0, 0.0, 0.0, 1.0, 4.0, 4.0], [40.0, 30.0]);
+    r.paths.push(Entry::Rect {
+        w: 40.0,
+        h: 30.0,
+        radii: [0.0; 4],
+    });
+    r.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Image {
+            id: 7,
+            m: [1e-38, 0.0, 0.0, 1e-38, 0.0, 0.0],
+            tile: true,
+            opacity: 1.0,
+        },
+    });
+    let mut list = W::new(ANY, 1);
+    list.reset();
+    list.set(1, 0, &r);
+    let mut e = Engine::new(Limits::default());
+    e.apply(&list.finish()).unwrap();
+    let pixels: Vec<u8> = (0..64).flat_map(|_| [200u8, 30, 60, 255]).collect();
+    e.put_image(7, 8, 8, &pixels, false).unwrap();
+    let (frame, _) = e.render_cpu(64, 48, camera(1.0, 0.0, 0.0), [1.0; 4], false).unwrap();
+    assert!(frame.iter().all(|v| *v == 255), "the image painted");
+}

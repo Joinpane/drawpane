@@ -299,6 +299,17 @@ struct Walk<'a, B: Backend> {
     open_scopes: usize,
 }
 
+/// Whether an image placed on the device by `t` (its unit square to device pixels) can be
+/// sampled: `t` and its inverse finite and of bounded size. vello_cpu turns a sample's position
+/// into a pixel index by a float-to-integer conversion that on x86 makes NaN or infinity an index
+/// past the image (a panic; elsewhere it reads the first pixel across the shape). A transform
+/// that shrinks the image to nothing, or blows it up past any device, paints nothing.
+fn sampleable(t: Affine) -> bool {
+    const MOST: f64 = 1e12;
+    let bounded = |m: Affine| m.as_coeffs().iter().all(|c| c.is_finite() && c.abs() <= MOST);
+    bounded(t) && bounded(t.inverse())
+}
+
 fn finite(m: Affine) -> bool {
     m.as_coeffs().iter().all(|v| v.is_finite())
 }
@@ -627,7 +638,7 @@ impl<B: Backend> Walk<'_, B> {
                     tile,
                     opacity,
                 } = &**img;
-                if opacity * alpha <= 0.0 {
+                if opacity * alpha <= 0.0 || !sampleable(device * *matrix) {
                     return Ok(false);
                 }
                 // Device pixels the image's width spans: pick a level at least that wide.
@@ -659,7 +670,7 @@ impl<B: Backend> Walk<'_, B> {
                 );
             }
             Paint::Placeholder(opacity) => {
-                if opacity * alpha <= 0.0 {
+                if opacity * alpha <= 0.0 || !sampleable(device) {
                     return Ok(false);
                 }
                 let source = self.backend.checker();
