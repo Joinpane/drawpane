@@ -37,28 +37,60 @@ pub struct Node {
     bounds: Cell<Option<Option<Rect>>>,
     /// Its shown children's bounds in its units, before any clip: computed with `bounds`.
     kids: Cell<Option<Option<Rect>>>,
+    /// A hash of the record's bytes as they arrived: a set of the very same record where it
+    /// already is changes nothing (the builder re-sends text still waiting for its faces).
+    hash: u64,
 }
 
 impl Node {
-    fn new(record: Record, parent: u32) -> Self {
+    fn new(record: Record, parent: u32, hash: u64) -> Self {
         Self {
             record,
             parent,
             children: Vec::new(),
             bounds: Cell::new(None),
             kids: Cell::new(None),
+            hash,
         }
     }
 }
 
+/// FNV-1a over a record's bytes (never 0, which marks the page).
+fn record_hash(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0100_0000_01b3);
+    }
+    h.max(1)
+}
+
 enum Command {
     Reset,
-    Glyph { glyph: u32, path: BezPath },
-    GlyphFree { glyph: u32 },
-    Set { id: u32, parent: u32, record: Record },
-    Remove { id: u32 },
-    Order { parent: u32, ids: Vec<u32> },
-    Transform { id: u32, transform: Affine },
+    Glyph {
+        glyph: u32,
+        path: BezPath,
+    },
+    GlyphFree {
+        glyph: u32,
+    },
+    Set {
+        id: u32,
+        parent: u32,
+        record: Record,
+        hash: u64,
+    },
+    Remove {
+        id: u32,
+    },
+    Order {
+        parent: u32,
+        ids: Vec<u32>,
+    },
+    Transform {
+        id: u32,
+        transform: Affine,
+    },
 }
 
 /// What changing the graph undoes to, newest last.
@@ -80,6 +112,7 @@ enum Undo {
         record: Record,
         parent: u32,
         index: usize,
+        hash: u64,
     },
     Removed {
         nodes: Vec<(u32, Node)>,
@@ -93,6 +126,7 @@ enum Undo {
     Transform {
         id: u32,
         transform: Affine,
+        hash: u64,
     },
 }
 
@@ -117,6 +151,16 @@ pub struct Applied {
     pub changes: Vec<Dirty>,
     /// Everything changed (a reset): redraw it all.
     pub full: bool,
+    /// The message only moved these records (transform commands and nothing else): a drag
+    /// (decision 0040, "Dragging"). Sorted, without repeats.
+    pub moved: Option<Vec<u32>>,
+    /// The message changed nothing (records set as they already were, children ordered as they
+    /// already are): it neither continues nor ends a drag, and nothing needs drawing again.
+    pub noop: bool,
+    /// It changed the structure (a record added, removed, moved to another parent, reordered).
+    pub structural: bool,
+    /// The records it changed (set, moved, removed), before any structure changed.
+    pub touched: Vec<u32>,
 }
 
 pub struct Store {
@@ -173,7 +217,7 @@ const NODE_BYTES: usize = 96;
 impl Store {
     pub fn new(limits: Limits) -> Self {
         let mut nodes = HashMap::new();
-        nodes.insert(ROOT, Node::new(Record::empty(), ROOT));
+        nodes.insert(ROOT, Node::new(Record::empty(), ROOT, 0));
         Self {
             limits,
             nodes,
@@ -251,10 +295,30 @@ impl Store {
         }
         let mut txn = Txn::new(true);
         let before_structure = self.structure;
+        let mut moved: Option<Vec<u32>> = (n > 0).then(Vec::new);
+        let mut changed = false;
         // Each command is applied as it's read (never all of them decoded at once), with an undo
         // log: a command that fails puts back everything before it.
         for _ in 0..n {
-            let result = next_command(&mut r, &limits).and_then(|command| self.command(command, &mut txn));
+            let result = next_command(&mut r, &limits).and_then(|command| {
+                match &command {
+                    Command::Transform { id, .. } => {
+                        changed = true;
+                        if let Some(m) = moved.as_mut() {
+                            m.push(*id);
+                        }
+                    }
+                    // A record set as it already is, or children ordered as they already are,
+                    // change nothing: a drag stays a drag.
+                    Command::Set { id, parent, hash, .. } if self.unchanged_set(*id, *parent, *hash) => {}
+                    Command::Order { parent, ids } if self.nodes.get(parent).is_some_and(|n| &n.children == ids) => {}
+                    _ => {
+                        changed = true;
+                        moved = None;
+                    }
+                }
+                self.command(command, &mut txn)
+            });
             let result = result.and_then(|()| self.check_bytes(0));
             if let Err(e) = result {
                 self.rollback(txn.undo);
@@ -270,6 +334,10 @@ impl Store {
             return Ok(Applied {
                 changes: Vec::new(),
                 full: true,
+                moved: None,
+                noop: false,
+                structural: true,
+                touched: Vec::new(),
             });
         }
         if self.structure != before_structure {
@@ -277,8 +345,24 @@ impl Store {
                 d.stale = true;
             }
         }
+        let touched = txn.touched.clone();
         let changes = self.changes(std::mem::take(&mut txn.before), &txn.touched);
-        Ok(Applied { changes, full: false })
+        if let Some(m) = moved.as_mut() {
+            m.sort_unstable();
+            m.dedup();
+        }
+        // Nothing moved (only sets and orders that changed nothing): not a move.
+        if moved.as_ref().is_some_and(Vec::is_empty) {
+            moved = None;
+        }
+        Ok(Applied {
+            changes,
+            full: false,
+            moved,
+            noop: !changed,
+            structural: self.structure != before_structure,
+            touched,
+        })
     }
 
     /// A fresh list: built into a staged graph, read once, and swapped in whole.
@@ -321,6 +405,10 @@ impl Store {
         Ok(Applied {
             changes: Vec::new(),
             full: true,
+            moved: None,
+            noop: false,
+            structural: true,
+            touched: Vec::new(),
         })
     }
 
@@ -357,6 +445,7 @@ impl Store {
                     record,
                     parent,
                     index,
+                    hash,
                 } => {
                     let current = self.nodes.get(&id).map(|n| n.parent);
                     if let Some(p) = current {
@@ -365,6 +454,7 @@ impl Store {
                     if let Some(node) = self.nodes.get_mut(&id) {
                         let old = std::mem::replace(&mut node.record, record);
                         node.parent = parent;
+                        node.hash = hash;
                         self.glyphs.release(&old);
                         if let Some(n) = self.nodes.get(&id) {
                             self.glyphs.retain(&n.record);
@@ -387,9 +477,10 @@ impl Store {
                         p.children = children;
                     }
                 }
-                Undo::Transform { id, transform } => {
+                Undo::Transform { id, transform, hash } => {
                     if let Some(n) = self.nodes.get_mut(&id) {
                         n.record.transform = transform;
+                        n.hash = hash;
                     }
                 }
             }
@@ -443,7 +534,7 @@ impl Store {
         match command {
             Command::Reset => {
                 let mut nodes = HashMap::new();
-                nodes.insert(ROOT, Node::new(Record::empty(), ROOT));
+                nodes.insert(ROOT, Node::new(Record::empty(), ROOT, 0));
                 let old = std::mem::replace(&mut self.nodes, nodes);
                 let glyphs = std::mem::take(&mut self.glyphs);
                 let readers = std::mem::take(&mut self.readers);
@@ -475,9 +566,17 @@ impl Store {
                     before: Some(previous),
                 });
             }
-            Command::Set { id, parent, record } => {
+            Command::Set {
+                id,
+                parent,
+                record,
+                hash,
+            } => {
                 if id == ROOT {
                     return Err(EngineError::malformed("the page can't be set"));
+                }
+                if self.unchanged_set(id, parent, hash) {
+                    return Ok(());
                 }
                 if !self.nodes.contains_key(&parent) {
                     return Err(EngineError::unknown(format!(
@@ -518,6 +617,7 @@ impl Store {
                 let mut structural = true;
                 if let Some(node) = self.nodes.get_mut(&id) {
                     let old_parent = node.parent;
+                    let old_hash = std::mem::replace(&mut node.hash, hash);
                     structural = old_parent != parent;
                     let old = std::mem::replace(&mut node.record, record);
                     node.parent = parent;
@@ -535,6 +635,7 @@ impl Store {
                             record: old,
                             parent: old_parent,
                             index,
+                            hash: old_hash,
                         });
                     } else {
                         // In place: same parent, same place among its siblings.
@@ -548,6 +649,7 @@ impl Store {
                             record: old,
                             parent,
                             index,
+                            hash: old_hash,
                         });
                     }
                 } else {
@@ -556,7 +658,7 @@ impl Store {
                         return Err(EngineError::limit("too many records"));
                     }
                     self.bytes += cost + NODE_BYTES;
-                    self.nodes.insert(id, Node::new(record, parent));
+                    self.nodes.insert(id, Node::new(record, parent, hash));
                     self.attach(id, parent, None);
                     txn.push(Undo::Inserted { id });
                 }
@@ -657,13 +759,44 @@ impl Store {
                 }
                 let node = self.nodes.get_mut(&id).expect("checked");
                 let old = std::mem::replace(&mut node.record.transform, transform);
-                txn.push(Undo::Transform { id, transform: old });
+                // Its bytes as last set no longer describe it: no set is "the same" until the
+                // next one (0 never matches a record's hash).
+                let hash = std::mem::replace(&mut node.hash, 0);
+                txn.push(Undo::Transform {
+                    id,
+                    transform: old,
+                    hash,
+                });
                 // Its own bounds hold (they're in its units); its ancestors' don't.
                 let parent = node.parent;
                 self.dirty_up(parent);
             }
         }
         Ok(())
+    }
+
+    /// Whether `id` is one of `of` or lies inside one of them.
+    pub fn within(&self, mut id: u32, of: &[u32]) -> bool {
+        loop {
+            if of.contains(&id) {
+                return true;
+            }
+            if id == ROOT {
+                return false;
+            }
+            match self.nodes.get(&id) {
+                Some(n) => id = n.parent,
+                None => return false,
+            }
+        }
+    }
+
+    /// Whether setting `id` under `parent` to a record hashing to `hash` would change nothing:
+    /// the very same record, where it already is.
+    fn unchanged_set(&self, id: u32, parent: u32, hash: u64) -> bool {
+        self.nodes
+            .get(&id)
+            .is_some_and(|n| n.hash != 0 && n.parent == parent && n.hash == hash)
     }
 
     /// Takes `id` out of `parent`'s children, answering where it was.
@@ -1009,6 +1142,52 @@ impl Store {
         out
     }
 
+    /// The selection a drag's moved records make, if moving a cached picture of it is exact
+    /// (decision 0040, "Dragging"): consecutive children of one parent (so contiguous in paint
+    /// order within one scope), no backdrop reader on the page (phase 2 draws none: a page with
+    /// one has no fast path), and no ancestor that fades as one (a faded frame would composite
+    /// the selection with what's beneath it inside the group). Answers the parent, the first and
+    /// last child index, and the parent's ancestor path (parent first).
+    pub fn selection(&self, ids: &[u32]) -> Option<(u32, usize, usize, Vec<u32>)> {
+        if ids.is_empty() || !self.readers.is_empty() {
+            return None;
+        }
+        let parent = self.nodes.get(ids.first()?)?.parent;
+        if ids
+            .iter()
+            .any(|id| self.nodes.get(id).is_none_or(|n| n.parent != parent))
+        {
+            return None;
+        }
+        let siblings = &self.nodes.get(&parent)?.children;
+        let mut at: Vec<usize> = ids
+            .iter()
+            .filter_map(|id| siblings.iter().position(|c| c == id))
+            .collect();
+        if at.len() != ids.len() {
+            return None;
+        }
+        at.sort_unstable();
+        let (first, last) = (*at.first()?, *at.last()?);
+        if last - first + 1 != at.len() {
+            return None;
+        }
+        let mut path = Vec::new();
+        let mut p = parent;
+        loop {
+            path.push(p);
+            if p == ROOT {
+                break;
+            }
+            let n = self.nodes.get(&p)?;
+            if n.record.isolate() && n.record.opacity < 1.0 {
+                return None;
+            }
+            p = n.parent;
+        }
+        Some((parent, first, last, path))
+    }
+
     /// Records with backdrop readers.
     pub fn readers(&self) -> &[u32] {
         &self.readers
@@ -1077,10 +1256,12 @@ fn next_command(r: &mut Reader, limits: &Limits) -> Result<Command> {
         4 => {
             let id = c.u32()?;
             let parent = c.u32()?;
+            let hash = record_hash(c.rest());
             Command::Set {
                 id,
                 parent,
                 record: record::decode(&mut c, limits)?,
+                hash,
             }
         }
         5 => Command::Remove { id: c.u32()? },

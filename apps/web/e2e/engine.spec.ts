@@ -412,6 +412,90 @@ test.describe
       }
     });
 
+    test("drags a layer: composited while it moves, exact once dropped, into another board too", async () => {
+      // Decision 0040, "Dragging": the page below the dragged layer and the page above it are
+      // kept for the drag, the layer is drawn afresh at its real position between them, and the
+      // frame is a stand-in until the drag rests; dropped into another board, the layer leaves
+      // one and joins the other at its real place in paint order.
+      const ids = await page.evaluate(() => {
+        const e = (window as unknown as W).drawpane as W["drawpane"] & {
+          doc: { childIds(id: string): readonly string[] };
+        };
+        e.zoomTo(1);
+        // The first card in view (the walk before left the camera anywhere).
+        e.centerOn({ x: 260, y: 120 });
+        const cards = e.doc.childIds(e.s.pageId);
+        const from = cards[0] as string;
+        const to = cards[1] as string;
+        const id = e.createLayer("rect", { x: 30, y: 40, width: 70, height: 50 }, from, {
+          fills: [{ type: "solid", color: "#7048e8" }],
+          cornerRadius: 8,
+        });
+        return { id, to };
+      });
+      await settled(page);
+      const seen: Array<{ exact: boolean; dragged: number; dragging: string }> = [];
+      for (let i = 1; i <= 6; i++) {
+        // Moved, and read in the frame that drew it (idle frames draw what's missing after).
+        seen.push(
+          await page.evaluate(
+            async ({ id, i }) => {
+              const e = (window as unknown as W).drawpane;
+              e.commit([
+                { op: "set", id, prop: "x", value: 30 + i * 9 },
+                { op: "set", id, prop: "y", value: 40 + i * 4 },
+              ]);
+              await new Promise((r) => requestAnimationFrame(() => r(null)));
+              const v = (window as unknown as W).drawpaneEngineView as unknown as {
+                last: { exact: boolean; tiles: { dragged: number } };
+                engine: { dragging: string };
+              };
+              return {
+                exact: v.last.exact,
+                dragged: v.last.tiles.dragged,
+                dragging: v.engine.dragging,
+              };
+            },
+            { id: ids.id, i },
+          ),
+        );
+      }
+      const fell = await page.evaluate(() => (window as unknown as W).fallbacks);
+      expect(fell, "the engine fell back while dragging").toEqual([]);
+      expect(
+        seen.every((f) => f.dragging === "composited"),
+        JSON.stringify(seen),
+      ).toBe(true);
+      expect(
+        seen.some((f) => f.dragged > 0 && !f.exact),
+        JSON.stringify(seen),
+      ).toBe(true);
+      expect(seen.every((f) => !(f.dragged > 0 && f.exact))).toBe(true);
+      expect(await screenMatchesFresh(page)).toMatchObject({ identical: true });
+      // Dropped into the next board, where it was on the page.
+      await page.evaluate(({ id, to }) => {
+        const e = (window as unknown as W).drawpane as W["drawpane"] & {
+          reparentOps(id: string, parent: string, key: string): object[];
+          topKey(parent: string): string;
+        };
+        e.commit(e.reparentOps(id, to, e.topKey(to)));
+      }, ids);
+      await frames(page, 2);
+      expect(await screenMatchesFresh(page)).toMatchObject({ identical: true });
+      // And dragged on inside it.
+      for (let i = 1; i <= 3; i++) {
+        await page.evaluate(
+          ({ id, i }) => {
+            const e = (window as unknown as W).drawpane;
+            e.commit([{ op: "set", id, prop: "y", value: 20 + i * 6 }]);
+          },
+          { id: ids.id, i },
+        );
+        await frames(page, 1);
+      }
+      expect(await screenMatchesFresh(page)).toMatchObject({ identical: true });
+    });
+
     test("never reports a stand-in exact", async () => {
       // A zoom to a scale never drawn: the first frame stands on the last one scaled.
       // Read in the frame that drew it: idle frames go on drawing what's missing right after.

@@ -65,6 +65,8 @@ pub struct Outcome {
     pub pending: u32,
     pub queued: u32,
     pub held: u32,
+    /// Tiles a drag composited this frame (decision 0040, "Dragging").
+    pub dragged: u32,
     pub evicted: u32,
     /// Its CPU time (milliseconds): encoding, the renderer's preparing and uploading,
     /// presenting and submitting, and all.
@@ -111,6 +113,7 @@ impl Outcome {
             pending: 0,
             queued: 0,
             held: 0,
+            dragged: 0,
             evicted: 0,
             encode_ms: 0.0,
             render_ms: 0.0,
@@ -207,6 +210,17 @@ impl Engine {
     #[wasm_bindgen(getter)]
     pub fn revision(&self) -> u32 {
         self.core.store.revision
+    }
+
+    /// The drag in progress (decision 0040, "Dragging"): 0 none, 1 drawn at its real position
+    /// every frame (no fast path), 2 composited from the page's parts around it.
+    #[wasm_bindgen(getter)]
+    pub fn dragging(&self) -> u32 {
+        match &self.core.dragging {
+            None => 0,
+            Some(d) if d.split.is_none() => 1,
+            Some(_) => 2,
+        }
     }
 
     /// Records held.
@@ -461,6 +475,7 @@ impl Engine {
                 o.pending = stats.pending;
                 o.held = stats.held;
                 o.evicted = stats.evicted;
+                o.dragged = stats.dragged;
                 o
             }
             Err(e) => Outcome::err(e),
@@ -712,6 +727,7 @@ impl Engine {
                 o.tiles_drawn = draw.tiles_drawn;
                 o.pending = draw.pending;
                 o.queued = draw.queued;
+                o.dragged = draw.dragged;
                 o.held = draw.held;
                 o.evicted = draw.evicted;
                 o.encode_ms = draw.encode_ms;

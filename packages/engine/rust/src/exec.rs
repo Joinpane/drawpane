@@ -207,6 +207,8 @@ pub struct DrawStats {
     pub evicted: u32,
     /// The frame's tiles didn't fit the budget: drawn one at a time straight into the frame.
     pub direct: bool,
+    /// Tiles a drag composited (the part below, its selection, the part above): a stand-in.
+    pub dragged: u32,
     /// Where its CPU time went (GPU, milliseconds): encoding the scene (the walk and Vello's
     /// strips), the renderer's preparing and uploading, presenting and submitting, and all.
     pub encode_ms: f64,
@@ -240,6 +242,50 @@ pub fn draw<B: Backend>(store: &Store, backend: &mut B, frame: &Frame, limits: &
     draw_budgeted(store, backend, frame, limits, &mut budget)
 }
 
+/// Which part of the page a pass draws, split around a selection of consecutive siblings
+/// (decision 0040, "Dragging"): everything painted before it, the selection alone, or
+/// everything painted after it. The page's background goes with the part before; the other two
+/// are drawn over nothing, so the three laid over each other in order are the page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pass {
+    All,
+    Below,
+    Selection,
+    Above,
+}
+
+/// The selection a pass splits around: children `first..=last` of `parent`, in paint order.
+#[derive(Clone, Debug)]
+pub struct Split {
+    pub pass: Pass,
+    pub parent: u32,
+    pub first: usize,
+    pub last: usize,
+    /// `parent` and its ancestors: walked in every pass (their clips and transforms hold the
+    /// selection, and paint order runs through them), though they paint only in their part.
+    pub path: Vec<u32>,
+}
+
+impl Split {
+    pub fn all() -> Self {
+        Self {
+            pass: Pass::All,
+            parent: u32::MAX,
+            first: 0,
+            last: 0,
+            path: Vec::new(),
+        }
+    }
+}
+
+/// Where the walk is in paint order relative to the selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Phase {
+    Before,
+    In,
+    After,
+}
+
 /// `draw`, charging what it generates to `budget` (path elements left), which several passes of
 /// one frame share (a pan's strips): what's left is written back.
 pub fn draw_budgeted<B: Backend>(
@@ -249,7 +295,21 @@ pub fn draw_budgeted<B: Backend>(
     limits: &Limits,
     budget: &mut usize,
 ) -> Result<DrawStats> {
+    draw_split(store, backend, frame, limits, budget, &Split::all())
+}
+
+/// `draw_budgeted`, drawing only the part of the page `split` names.
+pub fn draw_split<B: Backend>(
+    store: &Store,
+    backend: &mut B,
+    frame: &Frame,
+    limits: &Limits,
+    budget: &mut usize,
+    split: &Split,
+) -> Result<DrawStats> {
     let mut walk = Walk {
+        split,
+        phase: Phase::Before,
         store,
         backend,
         frame: *frame,
@@ -269,12 +329,7 @@ pub fn draw_budgeted<B: Backend>(
         .nodes
         .get(&crate::store::ROOT)
         .ok_or_else(|| EngineError::malformed("no page"))?;
-    let result = (|| {
-        for c in &root.children {
-            walk.node(*c, Affine::IDENTITY, 1.0)?;
-        }
-        Ok(())
-    })();
+    let result = walk.children(crate::store::ROOT, &root.children, Affine::IDENTITY, 1.0);
     *budget = walk.verbs_left;
     // Whatever failed part way, close what's open so the scene stays usable.
     while let Some(o) = walk.open.pop() {
@@ -287,6 +342,8 @@ pub fn draw_budgeted<B: Backend>(
 }
 
 struct Walk<'a, B: Backend> {
+    split: &'a Split,
+    phase: Phase,
     store: &'a Store,
     backend: &'a mut B,
     frame: Frame,
@@ -402,7 +459,56 @@ fn color(c: Rgba, alpha: f32) -> AlphaColor<Srgb> {
 }
 
 impl<B: Backend> Walk<'_, B> {
+    /// Whether paint now belongs to the part being drawn.
+    fn paints(&self) -> bool {
+        match self.split.pass {
+            Pass::All => true,
+            Pass::Below => self.phase == Phase::Before,
+            Pass::Selection => self.phase == Phase::In,
+            Pass::Above => self.phase == Phase::After,
+        }
+    }
+
+    /// A parent's children in paint order, the split's selection marking where paint order
+    /// passes it.
+    fn children(&mut self, parent: u32, children: &[u32], world: Affine, alpha: f32) -> Result<()> {
+        let here = self.split.pass != Pass::All && self.split.parent == parent;
+        for (k, c) in children.iter().enumerate() {
+            if here {
+                self.phase = if k < self.split.first {
+                    Phase::Before
+                } else if k <= self.split.last {
+                    Phase::In
+                } else {
+                    Phase::After
+                };
+            }
+            self.node(*c, world, alpha)?;
+        }
+        if here {
+            self.phase = Phase::After;
+        }
+        Ok(())
+    }
+
     fn node(&mut self, id: u32, parent: Affine, alpha: f32) -> Result<()> {
+        let on_path = self.split.pass != Pass::All && self.split.path.contains(&id);
+        // A subtree that isn't on the selection's path lies wholly in one part: skipped when
+        // that isn't the part being drawn.
+        if self.split.pass != Pass::All && !on_path && !self.paints() {
+            return Ok(());
+        }
+        let drawn = self.node_inner(id, parent, alpha);
+        // Past a node on the selection's path, paint order has passed the selection, whether
+        // the node was walked or culled (hidden, off the tile, transparent): what follows is
+        // above it.
+        if on_path {
+            self.phase = Phase::After;
+        }
+        drawn
+    }
+
+    fn node_inner(&mut self, id: u32, parent: Affine, alpha: f32) -> Result<()> {
         let store = self.store;
         let Some(node) = store.nodes.get(&id) else {
             return Ok(());
@@ -458,6 +564,7 @@ impl<B: Backend> Walk<'_, B> {
         for (at, op) in ops.iter().enumerate() {
             self.stats.ops += 1;
             match op {
+                Op::Fill { .. } | Op::Stroke { .. } | Op::Read { .. } if !self.paints() => {}
                 Op::Fill { path, even_odd, paint } => self.fill(r, *path, device, *even_odd, paint, inner)?,
                 Op::Stroke { path, style, paint } => self.stroke(r, *path, device, style, paint, inner)?,
                 Op::Clip { path, .. } if self.clip_changes_nothing(id, r, &ops[at + 1..], *path, device) => {
@@ -483,11 +590,7 @@ impl<B: Backend> Walk<'_, B> {
                         self.backend.scene().pop_clip();
                     }
                 }
-                Op::Children => {
-                    for c in &node.children {
-                        self.node(*c, world, inner)?;
-                    }
-                }
+                Op::Children => self.children(id, &node.children, world, inner)?,
                 Op::Read { kernel, halo } => {
                     self.stats.reads += 1;
                     let b = Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1]));

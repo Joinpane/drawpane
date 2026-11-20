@@ -85,6 +85,11 @@ export interface FrameStats {
     readonly queued: number;
     readonly held: number;
     readonly evicted: number;
+    /**
+     * Composited by a drag (decision 0040, "Dragging"): the page below the dragged layers, the
+     * layers drawn afresh, the page above. Exact but for rounding, reported as a stand-in.
+     */
+    readonly dragged: number;
   };
   /** Where a GPU frame's CPU time went, in milliseconds (see `rust/src/gpu.rs`). */
   readonly ms: {
@@ -162,6 +167,7 @@ function stats(o: Glue.Outcome, gpu = false): FrameStats {
       queued: o.queued,
       held: o.held,
       evicted: o.evicted,
+      dragged: o.dragged,
     },
     ms: { encode: o.encode_ms, render: o.render_ms, submit: o.submit_ms, total: o.cpu_ms },
   };
@@ -321,6 +327,15 @@ export class RenderEngine {
 
   get records(): number {
     return this.#live()?.records ?? 0;
+  }
+
+  /**
+   * The drag in progress (decision 0040, "Dragging"), followed from the messages: one that only
+   * moves the same records continues it. "composited": the page is drawn in parts around the
+   * dragged layers; "drawn": they're drawn at their real position every frame (no fast path).
+   */
+  get dragging(): "none" | "drawn" | "composited" {
+    return (["none", "drawn", "composited"] as const)[this.#live()?.dragging ?? 0] ?? "none";
   }
 
   get glyphs(): { count: number; bytes: number } {

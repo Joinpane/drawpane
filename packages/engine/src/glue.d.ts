@@ -29,6 +29,7 @@ export class Outcome {
   readonly pending: number;
   readonly queued: number;
   readonly held: number;
+  readonly dragged: number;
   readonly evicted: number;
   readonly encode_ms: number;
   readonly render_ms: number;
@@ -50,6 +51,7 @@ export class Engine {
   free(): void;
   readonly revision: number;
   readonly records: number;
+  readonly dragging: number;
   readonly glyphs: number;
   readonly glyphBytes: number;
   readonly heldBytes: number;

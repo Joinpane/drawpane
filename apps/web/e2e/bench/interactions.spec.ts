@@ -16,6 +16,13 @@
  *   the busiest board of each (BENCH_PAGES, BENCH_PAGE_COUNT as in
  *   `file.spec.ts`). Skipped without it.
  *
+ * BENCH_RENDERER=engine draws with the render engine (decision 0040), the simple file without
+ * the cards' shadows (the engine doesn't draw them yet); BENCH_RENDERER=both runs the simple file
+ * with the canvas renderer and then the engine, each on its own copy, in one browser.
+ * BENCH_ENGINE_PRESENT=readback where WebGPU canvases don't present (the GPU bench). A page the
+ * engine doesn't draw (the effect-heavy file's glass and blurs) falls back to the canvas renderer,
+ * which the results say (`drawnBy`).
+ *
  * BENCH_PROFILE=<dir> saves a CPU profile per case and prints where the
  * time went; BENCH_OUT=<file> writes the numbers as JSON (the file's name
  * gets the case set's name). BENCH_ONLY=simple,effects,file picks files.
@@ -50,6 +57,48 @@ const NAMED = process.env.BENCH_PAGES
   ? process.env.BENCH_PAGES.split(",").map((s) => s.trim())
   : null;
 const PORT = Number(process.env.BENCH_PORT ?? 8977);
+const RENDERERS: Array<"canvas" | "engine"> =
+  process.env.BENCH_RENDERER === "both"
+    ? ["canvas", "engine"]
+    : process.env.BENCH_RENDERER === "engine"
+      ? ["engine"]
+      : ["canvas"];
+
+/** Picks the renderer for pages opened from here on. */
+async function useRenderer(page: Page, renderer: "canvas" | "engine"): Promise<void> {
+  await page.evaluate(
+    ({ renderer, present }) => {
+      localStorage.setItem("drawpane:renderer", renderer);
+      localStorage.setItem("drawpane:engine-present", present);
+    },
+    {
+      renderer,
+      present: process.env.BENCH_ENGINE_PRESENT === "readback" ? "readback" : "webgpu",
+    },
+  );
+}
+
+/** Who drew the page: the engine (and on what), or the canvas renderer and why. */
+async function drawnBy(page: Page): Promise<Record<string, unknown>> {
+  return page.evaluate(() => {
+    const w = window as unknown as {
+      drawpaneEngineView?: {
+        last: { supported: boolean };
+        engine: { gpu: { adapter: string } | null; records: number };
+        unsupported(): Record<string, number>;
+      };
+    };
+    const v = w.drawpaneEngineView;
+    if (!v) return { drawnBy: "canvas" };
+    return v.last.supported
+      ? { drawnBy: "engine", adapter: v.engine.gpu?.adapter ?? null, records: v.engine.records }
+      : {
+          drawnBy: "canvas",
+          reason: "the page holds what the engine doesn't draw yet",
+          unsupported: v.unsupported(),
+        };
+  });
+}
 
 // A trace snapshots the page on every action: that would be most of what a click measures.
 test.use({ trace: "off" });
@@ -122,41 +171,51 @@ test.describe("Interactions", () => {
 
   test("on a simple 10,000-layer file", async () => {
     test.skip(!!ONLY && !ONLY.includes("simple"), "Not in BENCH_ONLY.");
-    test.setTimeout(30 * 60_000);
+    test.setTimeout(60 * 60_000);
     const page = instance.page;
-    await page.goto("/");
-    await page.getByRole("button", { name: "New file" }).first().click();
-    await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
-      timeout: 15_000,
-    });
-    expect(await buildFile(page, 400)).toBe(10_000);
-    await page.waitForTimeout(1500);
-    await settle(page);
-    await installProbe(page);
-    const cdp = await page.context().newCDPSession(page);
-    if (PROFILE) await cdp.send("Profiler.enable");
-    const board = await page.evaluate(() => {
-      const e = (
-        window as unknown as {
-          drawpane: { s: { pageId: string }; doc: { childIds(id: string): readonly string[] } };
-        }
-      ).drawpane;
-      const tops = e.doc.childIds(e.s.pageId);
-      return tops[Math.floor(tops.length / 2)] as string;
-    });
-    const targets = await pickTargets(page, board);
-    const results = await interactions(page, targets, {
-      frames: FRAMES,
-      profile: profiler(cdp, PROFILE, "simple", save),
-    });
-    console.log(table("Interactions, simple file (10,000 layers)", results));
-    report("simple", results);
+    for (const renderer of RENDERERS) {
+      await useRenderer(page, renderer);
+      await page.goto("/");
+      await page.getByRole("button", { name: "New file" }).first().click();
+      await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
+        timeout: 15_000,
+      });
+      expect(await buildFile(page, 400, !RENDERERS.includes("engine"))).toBe(10_000);
+      await page.waitForTimeout(1500);
+      await settle(page);
+      await installProbe(page);
+      const cdp = await page.context().newCDPSession(page);
+      if (PROFILE) await cdp.send("Profiler.enable");
+      const board = await page.evaluate(() => {
+        const e = (
+          window as unknown as {
+            drawpane: { s: { pageId: string }; doc: { childIds(id: string): readonly string[] } };
+          }
+        ).drawpane;
+        const tops = e.doc.childIds(e.s.pageId);
+        return tops[Math.floor(tops.length / 2)] as string;
+      });
+      const targets = await pickTargets(page, board);
+      const who = await drawnBy(page);
+      const results = await interactions(page, targets, {
+        frames: FRAMES,
+        profile: profiler(cdp, PROFILE, `simple-${renderer}`, save),
+      });
+      console.log(
+        table(
+          `Interactions, simple file (10,000 layers), ${renderer}: ${JSON.stringify(who)}`,
+          results,
+        ),
+      );
+      report(`simple-${renderer}`, { ...results, who } as unknown as Record<string, unknown>);
+    }
   });
 
   test("on a generated effect-heavy file", async () => {
     test.skip(!!ONLY && !ONLY.includes("effects"), "Not in BENCH_ONLY.");
     test.setTimeout(60 * 60_000);
     const page = instance.page;
+    await useRenderer(page, RENDERERS.at(-1) ?? "canvas");
     await page.goto("/");
     const kit = generateEffectKit();
     const fileId = await importNodes(page, kit.nodes, "Effects");
@@ -173,6 +232,8 @@ test.describe("Interactions", () => {
     results["switch page"] = await switchPage(page, kit.pages[0] as string);
     await settle(page);
     const targets = await pickTargets(page, await busiestBoard(page));
+    const who = await drawnBy(page);
+    console.log(`Effect-heavy file drawn by: ${JSON.stringify(who)}`);
     Object.assign(
       results,
       await interactions(page, targets, {

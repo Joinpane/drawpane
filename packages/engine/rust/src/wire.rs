@@ -29,6 +29,11 @@ impl<'a> Reader<'a> {
         self.at >= self.bytes.len()
     }
 
+    /// The bytes not read yet, without reading them.
+    pub fn rest(&self) -> &'a [u8] {
+        self.bytes.get(self.at..).unwrap_or(&[])
+    }
+
     pub fn remaining(&self) -> usize {
         self.bytes.len().saturating_sub(self.at)
     }
