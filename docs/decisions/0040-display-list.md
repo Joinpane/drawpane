@@ -49,7 +49,7 @@ Each glyph definition gets a serial no other definition has, in any engine, acro
 | paths | u32 count, entries | Its shapes, referred to by index |
 | ops | u32 count, ops | What it draws, in order |
 | coarse | u32 count, ops | Drawn instead of `ops` below `coarse below` (no `children`) |
-| post effects | u32 count, entries | Present only when `flags & 32` is set (minor 1.4). Applied in order to the record's finished picture: kind `1` = layer blur (`radius` `f32`, `sigma = 0.45 * radius * view_scale`, decision 0013 revision). |
+| post effects | u32 count, entries | Present only when `flags & 32` is set (minor 1.4). Applied in order to the record's finished picture: kind `1` = layer blur (`radius` `f32`, `sigma = 0.45 * radius * view_scale`, decision 0013 revision); kind `2` = noise (`noiseType` `u32` 0 mono / 1 duo / 2 multi, `size` `f32`, `density` `f32`, `color` RGBA `f32` × 4, `secondaryColor` RGBA `f32` × 4, `opacity` `f32` in `[0, 1]`); kind `3` = texture (`size` `f32` in [0.5, 50], `radius` `f32` in [0, 100], `clipToShape` `u32` 0 or 1). |
 | blend | u32 | Present only when `flags & 64` is set (minor 1.4). Non-normal layer blend mode (`1..=17`, matching `BLEND` in `wire.ts`). |
 | mask | u32 | Present only when `flags & 128` is set (minor 1.4). Mask kind (`1` outline shape NonZero, `2` outline shape EvenOdd, `3` outline picture, `4` alpha picture, `5` luminance picture, matching `MASK` in `wire.ts`). Kinds `1` and `2` clip siblings above them to `paths[0]`; kinds `3..=5` composite siblings above them against the mask's rendered picture (`mask.rs` / `mask.wgsl`). |
 

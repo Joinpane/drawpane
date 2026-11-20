@@ -349,6 +349,196 @@ describe.skipIf(!built())("Recovery and stream lifetimes", () => {
     }
   });
 
+  it("handles large-radius textures in the 25 MiB Worker without trapping Wasm", async () => {
+    const module = await loadNodeEngine("worker", { fresh: true });
+    const w = 4096;
+    const h = 1800;
+    for (const [radius, zoom] of [
+      [12, 1],
+      [100, 1],
+      [100, 20],
+    ] as const) {
+      const cam = { zoom, x: 0, y: 0, dpr: 1 };
+      const e = new RenderEngine(module);
+      const list = new ListWriter(0xffffffff, 1);
+      list.reset();
+      list.set(1, ROOT, {
+        flags: FLAG.post,
+        opacity: 1,
+        transform: [1, 0, 0, 1, 0, 0],
+        width: w,
+        height: h,
+        coarseBelow: 0,
+        reach: 0,
+        unsupported: 0,
+        paths: [{ kind: "rect", w, h, radii: [0, 0, 0, 0], smoothing: 0 }],
+        ops: [
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: { kind: "solid", color: [0.3, 0.6, 0.9, 1] },
+          },
+        ],
+        coarse: [],
+        postEffects: [{ kind: "texture", size: 4, radius, clipToShape: false }],
+      });
+      expect(e.apply(list.finish()).ok).toBe(true);
+      const started = e.renderPngStream(w, h, cam, clear);
+      if (started.ok) {
+        const reader = started.value.getReader();
+        let chunks = 0;
+        try {
+          for (let i = 0; i < 4; i++) {
+            const r = await reader.read();
+            if (r.done) break;
+            chunks++;
+          }
+        } finally {
+          await reader.cancel().catch(() => {});
+        }
+        expect(chunks).toBeGreaterThan(0);
+      } else {
+        expect(started.code).toBe(ErrorCode.Limit);
+      }
+      expect(e.dead).toBe(false);
+      expect(module.trapped).not.toBe(true);
+      e.dispose();
+    }
+  });
+
+  it("refuses or streams noise, texture, and multi-step post chains under tight Worker memory without trapping", async () => {
+    const module = await loadNodeEngine("worker", { fresh: true });
+    const cam = { zoom: 1, x: 0, y: 0, dpr: 1 };
+    const cases: Array<{
+      name: string;
+      w: number;
+      h: number;
+      memoryBytes?: number;
+      mustRefuse?: boolean;
+      rejectWire?: boolean;
+      postEffects: NonNullable<Parameters<ListWriter["set"]>[2]["postEffects"]>;
+    }> = [
+      {
+        name: "noise under tight 4 MiB Worker budget",
+        w: 512,
+        h: 512,
+        memoryBytes: 4 << 20,
+        mustRefuse: true,
+        postEffects: [
+          {
+            kind: "noise",
+            noiseType: 0,
+            size: 1.5,
+            density: 65,
+            color: [0, 0, 0, 0.7],
+            secondaryColor: [1, 1, 1, 1],
+            opacity: 1,
+          },
+        ],
+      },
+      {
+        name: "texture under tight 2 MiB Worker budget",
+        w: 512,
+        h: 512,
+        memoryBytes: 2 << 20,
+        mustRefuse: true,
+        postEffects: [{ kind: "texture", size: 4, radius: 18, clipToShape: false }],
+      },
+      {
+        name: "multi-step blur + texture + noise chain at 4096x1800 in 25 MiB Worker",
+        w: 4096,
+        h: 1800,
+        postEffects: [
+          { kind: "layerBlur", radius: 220 },
+          { kind: "texture", size: 4, radius: 100, clipToShape: false },
+          {
+            kind: "noise",
+            noiseType: 2,
+            size: 1.4,
+            density: 70,
+            color: [0, 0, 0, 1],
+            secondaryColor: [1, 1, 1, 1],
+            opacity: 0.7,
+          },
+        ],
+      },
+      {
+        name: "extreme texture lattice scale",
+        w: 256,
+        h: 256,
+        rejectWire: true,
+        postEffects: [{ kind: "texture", size: 1e-8, radius: 8, clipToShape: false }],
+      },
+      {
+        name: "texture radius outside the editor range",
+        w: 256,
+        h: 256,
+        rejectWire: true,
+        postEffects: [{ kind: "texture", size: 3, radius: 101, clipToShape: false }],
+      },
+    ];
+    for (const c of cases) {
+      const e = new RenderEngine(
+        module,
+        c.memoryBytes !== undefined ? { memoryBytes: c.memoryBytes } : undefined,
+      );
+      const list = new ListWriter(0xffffffff, 1);
+      list.reset();
+      list.set(1, ROOT, {
+        flags: FLAG.post,
+        opacity: 1,
+        transform: [1, 0, 0, 1, 0, 0],
+        width: c.w,
+        height: c.h,
+        coarseBelow: 0,
+        reach: 0,
+        unsupported: 0,
+        paths: [{ kind: "rect", w: c.w, h: c.h, radii: [0, 0, 0, 0], smoothing: 0 }],
+        ops: [
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: { kind: "solid", color: [0.3, 0.5, 0.8, 1] },
+          },
+        ],
+        coarse: [],
+        postEffects: c.postEffects,
+      });
+      const applied = e.apply(list.finish());
+      if (c.rejectWire) {
+        expect(applied, c.name).toMatchObject({ ok: false, code: ErrorCode.Limit });
+        expect(e.dead, c.name).toBe(false);
+        e.dispose();
+        continue;
+      }
+      expect(applied.ok, c.name).toBe(true);
+      const started = e.renderPngStream(c.w, c.h, cam, clear);
+      if (c.mustRefuse) {
+        expect(started, c.name).toMatchObject({ ok: false, code: ErrorCode.Limit });
+      } else if (started.ok) {
+        const reader = started.value.getReader();
+        let chunks = 0;
+        try {
+          for (let i = 0; i < 4; i++) {
+            const r = await reader.read();
+            if (r.done) break;
+            chunks++;
+          }
+        } finally {
+          await reader.cancel().catch(() => {});
+        }
+        expect(chunks, c.name).toBeGreaterThan(0);
+      } else {
+        expect(started.code, c.name).toBe(ErrorCode.Limit);
+      }
+      expect(e.dead, c.name).toBe(false);
+      expect(module.trapped, c.name).not.toBe(true);
+      e.dispose();
+    }
+  });
+
   it("matches whole-frame and 73-row banded CPU renders bit-for-bit across shadow and layer-blur seams", async () => {
     const module = await loadNodeEngine("worker");
     const w = 1157;
@@ -358,6 +548,7 @@ describe.skipIf(!built())("Recovery and stream lifetimes", () => {
       name: string;
       shadow?: number;
       blurs?: number[];
+      postEffects?: Parameters<ListWriter["set"]>[2]["postEffects"];
       blend?: number;
       mask?: { kind: number; blur?: number };
     }> = [
@@ -371,6 +562,63 @@ describe.skipIf(!built())("Recovery and stream lifetimes", () => {
       { name: "alpha picture mask", mask: { kind: 4 } },
       { name: "luminance picture mask", mask: { kind: 5 } },
       { name: "blurred alpha picture mask", mask: { kind: 4, blur: 18 } },
+      {
+        name: "mono noise",
+        postEffects: [
+          {
+            kind: "noise",
+            noiseType: 0,
+            size: 1.8,
+            density: 65,
+            color: [0.05, 0.05, 0.05, 0.7],
+            secondaryColor: [1, 1, 1, 1],
+            opacity: 1,
+          },
+        ],
+      },
+      {
+        name: "duo and multi noise",
+        postEffects: [
+          {
+            kind: "noise",
+            noiseType: 1,
+            size: 2.2,
+            density: 55,
+            color: [0.1, 0.1, 0.1, 0.65],
+            secondaryColor: [1, 1, 1, 0.7],
+            opacity: 1,
+          },
+          {
+            kind: "noise",
+            noiseType: 2,
+            size: 1.2,
+            density: 70,
+            color: [0, 0, 0, 1],
+            secondaryColor: [1, 1, 1, 1],
+            opacity: 0.6,
+          },
+        ],
+      },
+      {
+        name: "unclipped texture",
+        postEffects: [{ kind: "texture", size: 4.5, radius: 14, clipToShape: false }],
+      },
+      {
+        name: "clipped texture plus blur plus noise",
+        postEffects: [
+          { kind: "layerBlur", radius: 14 },
+          {
+            kind: "noise",
+            noiseType: 0,
+            size: 1.5,
+            density: 60,
+            color: [0, 0, 0, 0.5],
+            secondaryColor: [1, 1, 1, 1],
+            opacity: 1,
+          },
+          { kind: "texture", size: 3.5, radius: 9, clipToShape: true },
+        ],
+      },
     ];
     for (const c of cases) {
       const e = new RenderEngine(module);
@@ -427,8 +675,10 @@ describe.skipIf(!built())("Recovery and stream lifetimes", () => {
           mask: c.mask.kind,
         });
       }
+      const posts =
+        c.postEffects ?? c.blurs?.map((radius) => ({ kind: "layerBlur" as const, radius }));
       list.set(1, ROOT, {
-        flags: (c.blurs ? FLAG.post : 0) | (c.blend ? FLAG.blend : 0),
+        flags: (posts ? FLAG.post : 0) | (c.blend ? FLAG.blend : 0),
         opacity: 1,
         transform: [1.19, 0.22, -0.26, 0.91, 650.37, 79.53],
         width: 312,
@@ -460,9 +710,7 @@ describe.skipIf(!built())("Recovery and stream lifetimes", () => {
           },
         ],
         coarse: [],
-        ...(c.blurs
-          ? { postEffects: c.blurs.map((radius) => ({ kind: "layerBlur" as const, radius })) }
-          : {}),
+        ...(posts ? { postEffects: posts } : {}),
         ...(c.blend ? { blend: c.blend } : {}),
       });
       list.order(ROOT, c.mask ? [10, 20, 1] : [10, 1]);

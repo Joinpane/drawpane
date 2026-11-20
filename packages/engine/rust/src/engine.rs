@@ -514,9 +514,24 @@ impl Engine {
             let mut next_rows = cur_rows;
             let mut next_iso = live_iso;
             if has_post {
+                enum StepKind {
+                    Blur {
+                        sigma: f32,
+                        src_pad: usize,
+                        grow_pad: usize,
+                    },
+                    Noise,
+                    Texture {
+                        src_pad: usize,
+                        grow_pad: usize,
+                    },
+                }
+                let mut active_steps: Vec<StepKind> = Vec::with_capacity(r.post_effects.len());
                 let mut total_pad = 0usize;
                 let mut max_step = 4usize;
-                let mut any_blur = false;
+                let mut has_noise = false;
+                let device = view * world;
+                let inv = (device.determinant().abs() > 1e-300).then(|| device.inverse());
                 for pe in &r.post_effects {
                     match *pe {
                         crate::record::PostEffect::LayerBlur { radius } => {
@@ -524,7 +539,6 @@ impl Engine {
                             if sigma < 1e-4 {
                                 continue;
                             }
-                            any_blur = true;
                             crate::blur::validate_sigma(
                                 sigma,
                                 IRect {
@@ -535,15 +549,67 @@ impl Engine {
                                 },
                                 crate::blur::EdgeMode::Zero,
                             )?;
-                            total_pad = total_pad.saturating_add(crate::shadow::blur_support_pad(sigma) as usize);
+                            let pad = crate::shadow::blur_support_pad(sigma) as usize;
+                            total_pad = total_pad.saturating_add(pad);
                             if sigma > crate::blur::DIRECT_SIGMA_MAX {
                                 let (lvl, _) = crate::blur::choose_level(sigma, crate::blur::MAX_PYRAMID_LEVELS);
                                 max_step = max_step.max(1usize << lvl.min(8));
                             }
+                            active_steps.push(StepKind::Blur {
+                                sigma,
+                                src_pad: pad,
+                                grow_pad: pad,
+                            });
+                        }
+                        crate::record::PostEffect::Noise { size, density, .. } => {
+                            if size > 0.0 && density > 0.0 {
+                                let Some(dev_to_layer) = inv else {
+                                    continue;
+                                };
+                                let uv_scale =
+                                    crate::noise::PIXELS_PER_UNIT / (f64::from(size) * crate::noise::NOISE_TILE as f64);
+                                let coeffs = (Affine::scale(uv_scale) * dev_to_layer).as_coeffs();
+                                if !uv_scale.is_finite() || coeffs.iter().any(|c| !(*c as f32).is_finite()) {
+                                    return Err(EngineError::limit("noise scale exceeds finite coordinate bounds"));
+                                }
+                                has_noise = true;
+                                active_steps.push(StepKind::Noise);
+                            }
+                        }
+                        crate::record::PostEffect::Texture {
+                            size,
+                            radius,
+                            clip_to_shape,
+                        } => {
+                            let Some(dev_to_layer) = inv else {
+                                continue;
+                            };
+                            let radius_dev = (f64::from(radius) * view_scale) as f32;
+                            if size > 0.0 && radius_dev >= 1e-4 {
+                                if !radius_dev.is_finite() || radius_dev > max_tex as f32 {
+                                    return Err(EngineError::limit("texture radius exceeds finite target bounds"));
+                                }
+                                crate::exec::validate_texture_lattice(
+                                    IRect {
+                                        x0: 0,
+                                        y0: 0,
+                                        x1: cur_cols.max(1) as i32,
+                                        y1: cur_rows.max(1) as i32,
+                                    },
+                                    dev_to_layer,
+                                    size,
+                                )?;
+                                let pad = (radius_dev.ceil() as usize).saturating_add(2);
+                                total_pad = total_pad.saturating_add(pad);
+                                active_steps.push(StepKind::Texture {
+                                    src_pad: pad,
+                                    grow_pad: if clip_to_shape { 0 } else { pad },
+                                });
+                            }
                         }
                     }
                 }
-                if any_blur {
+                if !active_steps.is_empty() {
                     let (content_w, content_h) = if let (Some(bounds), page_pad) = self.store.bounds_and_pad(id) {
                         let inner_pad = (page_pad - r.post_pad()).max(0.0);
                         let inner_pad_dev = if inner_pad > 0.0 {
@@ -551,9 +617,7 @@ impl Engine {
                         } else {
                             0.0
                         };
-                        let dev_box = (view * world)
-                            .transform_rect_bbox(bounds)
-                            .inflate(inner_pad_dev, inner_pad_dev);
+                        let dev_box = device.transform_rect_bbox(bounds).inflate(inner_pad_dev, inner_pad_dev);
                         let ir = IRect::around(dev_box).inflate(2, 2);
                         ((ir.x1 - ir.x0).max(1) as usize, (ir.y1 - ir.y0).max(1) as usize)
                     } else {
@@ -565,20 +629,81 @@ impl Engine {
                     let src_h = raw_h.next_multiple_of(max_step);
                     if src_w > max_tex || src_h > max_tex {
                         return Err(EngineError::limit(format!(
-                            "layer blur source {src_w} x {src_h} px exceeds maximum target size {max_tex} px"
+                            "post-effect source {src_w} x {src_h} px exceeds maximum target size {max_tex} px"
                         )));
                     }
                     let src_bytes = src_w.saturating_mul(src_h).saturating_mul(4);
                     let src_scene = crate::cpu::scene_estimate_bytes(src_w as u32, src_h as u32);
-                    // Offscreen input pixmap + blur scratch/pyramid + scene strips + blurred output
-                    // (+ backdrop copy when blended).
+                    // Walk the ordered post chain mirroring `exec.rs` so multi-step chains account
+                    // for coexisting halo-expanded intermediate buffers (`prev_bytes + step_bytes`).
+                    let total_steps = active_steps.len();
+                    let mut rem_pads = vec![0usize; total_steps];
+                    let mut suffix = 0usize;
+                    for i in (0..total_steps).rev() {
+                        rem_pads[i] = suffix;
+                        let sp = match active_steps[i] {
+                            StepKind::Blur { src_pad, .. } | StepKind::Texture { src_pad, .. } => src_pad,
+                            StepKind::Noise => 0,
+                        };
+                        suffix = suffix.saturating_add(sp);
+                    }
+                    let noise_extra = if has_noise {
+                        crate::noise::NOISE_WORKING_SET_BYTES
+                    } else {
+                        0
+                    };
                     let blend_extra = if r.blend != 0 { cur_tile_bytes } else { 0 };
-                    let blur_need = live_iso
-                        .saturating_add(src_bytes.saturating_mul(3))
-                        .saturating_add(src_scene)
-                        .saturating_add(cur_tile_bytes)
-                        .saturating_add(blend_extra);
-                    peak_total = peak_total.max(blur_need);
+                    // Peak during child rendering into `src_area`:
+                    peak_total = peak_total.max(
+                        live_iso
+                            .saturating_add(src_bytes)
+                            .saturating_add(src_scene)
+                            .saturating_add(noise_extra),
+                    );
+                    let mut prev_size = (src_w as u32, src_h as u32);
+                    let mut prev_bytes = src_bytes;
+                    let mut grown = 0usize;
+                    for (idx, step) in active_steps.iter().enumerate() {
+                        let gp = match *step {
+                            StepKind::Blur { grow_pad, .. } | StepKind::Texture { grow_pad, .. } => grow_pad,
+                            StepKind::Noise => 0,
+                        };
+                        grown = grown.saturating_add(gp);
+                        let (step_w, step_h) = if idx + 1 == total_steps {
+                            (cur_cols, cur_rows)
+                        } else {
+                            let rem = rem_pads[idx];
+                            let rw = content_w
+                                .saturating_add(grown.saturating_mul(2))
+                                .min(cur_cols.saturating_add(rem.saturating_mul(2)));
+                            let rh = content_h
+                                .saturating_add(grown.saturating_mul(2))
+                                .min(cur_rows.saturating_add(rem.saturating_mul(2)));
+                            let sw = rw.next_multiple_of(max_step);
+                            let sh = rh.next_multiple_of(max_step);
+                            if sw > max_tex || sh > max_tex {
+                                return Err(EngineError::limit(format!(
+                                    "post-effect intermediate {sw} x {sh} px exceeds maximum target size {max_tex} px"
+                                )));
+                            }
+                            (sw, sh)
+                        };
+                        let step_bytes = step_w.saturating_mul(step_h).saturating_mul(4);
+                        let step_size = (step_w as u32, step_h as u32);
+                        let scratch_extra = match *step {
+                            StepKind::Blur { sigma, .. } => crate::blur::cpu_work_bytes(prev_size, step_size, sigma),
+                            _ => 0,
+                        };
+                        let step_need = live_iso
+                            .saturating_add(prev_bytes)
+                            .saturating_add(step_bytes)
+                            .saturating_add(scratch_extra)
+                            .saturating_add(noise_extra)
+                            .saturating_add(if idx + 1 == total_steps { blend_extra } else { 0 });
+                        peak_total = peak_total.max(step_need);
+                        prev_bytes = step_bytes;
+                        prev_size = step_size;
+                    }
                     next_cols = src_w;
                     next_rows = src_h;
                     next_iso = live_iso.saturating_add(src_bytes).saturating_add(src_scene);

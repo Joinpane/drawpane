@@ -1245,7 +1245,7 @@ impl Store {
                 break;
             }
             if let Some(pn) = self.nodes.get(&p) {
-                anc_pad += pn.record.post_pad();
+                anc_pad += pn.record.post_dirty_pad();
                 if pn.record.blend != 0 || (pn.record.isolate() && pn.record.opacity < 1.0) {
                     anc_pad = anc_pad.max(self.bounds_and_pad(p).1);
                 }
@@ -1407,8 +1407,9 @@ impl Store {
         true
     }
 
-    /// Where the records painting image `id` paint, as changes (an image put or dropped under a
-    /// handle they use changes their pixels). Readers they reach join through `dirty`.
+    /// Where the records painting image `id` may change pixels, including outward spread from
+    /// any blurred/textured ancestors and any siblings gated by an image-bearing mask. Readers
+    /// they reach join through `dirty`.
     pub fn image_users(&mut self, id: u32) -> Vec<Dirty> {
         let mut users: Vec<u32> = self
             .image_records
@@ -1416,11 +1417,23 @@ impl Store {
             .copied()
             .filter(|r| self.nodes.get(r).is_some_and(|n| n.record.images().any(|i| i == id)))
             .collect();
+        // If an image belongs to a mask layer, replacing it can alter all siblings in that container.
+        let mut extra: Vec<u32> = Vec::new();
+        for &r in &users {
+            if let Some(n) = self.nodes.get(&r)
+                && n.record.is_mask()
+                && let Some(p) = self.nodes.get(&n.parent)
+            {
+                extra.extend(p.children.iter().copied());
+            }
+        }
+        users.extend(extra);
         users.sort_unstable();
+        users.dedup();
         let mut out = Vec::new();
         for r in users {
             let (order, end) = self.order_of(r);
-            if let Some(rect) = self.world_extent(r) {
+            if let Some(rect) = self.dirty_extent(r) {
                 out.push(Dirty {
                     rect,
                     order,

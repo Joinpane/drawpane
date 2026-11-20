@@ -8,7 +8,7 @@
 
 use crate::blur::{BlurSpec, EdgeMode, try_blur_cpu, validate_sigma};
 use crate::error::{EngineError, Result};
-use crate::exec::{Backend, GlyphMask, IRect, ImageView, Open, ShadowCast, impl_draw};
+use crate::exec::{Backend, GlyphMask, IRect, ImageView, Open, PostStep, ShadowCast, impl_draw};
 use crate::images::{self, Level};
 use crate::kernels;
 use crate::masks::{self, MaskCache, MaskKey};
@@ -116,6 +116,8 @@ pub struct Cpu {
     checker: Arc<Pixmap>,
     /// Shareable CPU blur pyramids, reused across equal inputs within a frame.
     pub blur: crate::blur::CpuBlurCache,
+    /// Bounded LRU cache of periodic 320 x 320 premultiplied noise grain tiles.
+    pub noise: crate::noise::CpuNoiseCache,
     /// Strictly budgeted LRU cache for canonical blurred shadow masks.
     pub shadow_cache: ShadowMaskCache<Arc<Pixmap>>,
     /// How far the target extends past the band each way, for readers' reach: kernels may read
@@ -158,6 +160,7 @@ impl Cpu {
             mask_side,
             checker: Arc::new(pixmap(16, 16, checker_pixels())),
             blur: crate::blur::CpuBlurCache::new(blur_budget),
+            noise: crate::noise::CpuNoiseCache::default(),
             shadow_cache: ShadowMaskCache::new(shadow_budget),
             halo: 0,
             offscreen_stack: Vec::new(),
@@ -217,6 +220,7 @@ impl Cpu {
             .saturating_add(self.image_bytes)
             .saturating_add(self.masks.stats.bytes)
             .saturating_add(self.blur.bytes())
+            .saturating_add(self.noise.bytes())
             .saturating_add(self.shadow_cache.bytes())
             .saturating_add(self.temp_bytes)
             .saturating_add(self.diamond_bytes)
@@ -237,6 +241,7 @@ impl Cpu {
         if total > cap {
             let _ = self.shadow_cache.clear();
             self.blur.clear();
+            self.noise.clear();
         }
         let total = self
             .external_bytes
@@ -675,7 +680,7 @@ impl Backend for Cpu {
         Ok(true)
     }
 
-    fn blur_isolated(&mut self, steps: &[(IRect, f32)]) -> Result<()> {
+    fn apply_post_isolated(&mut self, steps: &[PostStep]) -> Result<()> {
         if steps.is_empty() {
             return Ok(());
         }
@@ -686,57 +691,178 @@ impl Backend for Cpu {
         let Some(mut src) = self.offscreen_stack.pop() else {
             return Ok(());
         };
-        for &(out_area, sigma) in steps {
-            if out_area.is_empty() {
-                return Ok(());
-            }
+        for step in steps {
             let src_w = u32::from(src.pixmap.width());
             let src_h = u32::from(src.pixmap.height());
-            let dst_w = (out_area.x1 - out_area.x0).max(1) as u32;
-            let dst_h = (out_area.y1 - out_area.y0).max(1) as u32;
-            let dst_origin = (out_area.x0 - src.origin.0, out_area.y0 - src.origin.1);
-            let spec = BlurSpec {
-                sigma,
-                edge: EdgeMode::Zero,
-                clamp_bounds: IRect {
-                    x0: 0,
-                    y0: 0,
-                    x1: src_w as i32,
-                    y1: src_h as i32,
-                },
-                dirty: IRect {
-                    x0: dst_origin.0,
-                    y0: dst_origin.1,
-                    x1: dst_origin.0 + dst_w as i32,
-                    y1: dst_origin.1 + dst_h as i32,
-                },
-            };
-            crate::blur::validate_sigma(sigma, spec.clamp_bounds, spec.edge)?;
+            // `src` was popped from `offscreen_stack`, so `runtime_bytes()` does not count it;
+            // charge it alongside `dst` in every step so Worker limits see both live buffers.
             let src_bytes = (src_w as usize).saturating_mul(src_h as usize).saturating_mul(4);
-            let dst_bytes = (dst_w as usize)
-                .checked_mul(dst_h as usize)
-                .and_then(|n| n.checked_mul(4))
-                .ok_or_else(|| EngineError::limit("layer blur output size overflow"))?;
-            // Charge blurred output plus intermediate pyramid/scratch bytes beside current src.
-            let scratch = crate::blur::cpu_work_bytes((src_w, src_h), (dst_w, dst_h), sigma);
-            let need = src_bytes.saturating_add(dst_bytes).saturating_add(scratch);
-            self.check_memory(need, "a layer blur pass")?;
-            let mut out = vec![0u8; dst_bytes];
-            try_blur_cpu(
-                src.pixmap.data_as_u8_slice(),
-                (src_w, src_h),
-                &mut out,
-                (dst_w, dst_h),
-                dst_origin,
-                &spec,
-            )?;
-            src = CpuTarget {
-                pixmap: pixmap(dst_w, dst_h, out),
-                origin: (out_area.x0, out_area.y0),
-                scene_origin: (0, 0),
-                scene_size: self.frame_size,
-                scene_pending: false,
-            };
+            match *step {
+                PostStep::LayerBlur { out_area, sigma } => {
+                    if out_area.is_empty() {
+                        return Ok(());
+                    }
+                    let dst_w = (out_area.x1 - out_area.x0).max(1) as u32;
+                    let dst_h = (out_area.y1 - out_area.y0).max(1) as u32;
+                    let dst_origin = (out_area.x0 - src.origin.0, out_area.y0 - src.origin.1);
+                    let spec = BlurSpec {
+                        sigma,
+                        edge: EdgeMode::Zero,
+                        clamp_bounds: IRect {
+                            x0: 0,
+                            y0: 0,
+                            x1: src_w as i32,
+                            y1: src_h as i32,
+                        },
+                        dirty: IRect {
+                            x0: dst_origin.0,
+                            y0: dst_origin.1,
+                            x1: dst_origin.0 + dst_w as i32,
+                            y1: dst_origin.1 + dst_h as i32,
+                        },
+                    };
+                    crate::blur::validate_sigma(sigma, spec.clamp_bounds, spec.edge)?;
+                    let dst_bytes = (dst_w as usize)
+                        .checked_mul(dst_h as usize)
+                        .and_then(|n| n.checked_mul(4))
+                        .ok_or_else(|| EngineError::limit("layer blur output size overflow"))?;
+                    // Charge blurred output plus live src and scratch beside runtime bytes.
+                    let scratch = crate::blur::cpu_work_bytes((src_w, src_h), (dst_w, dst_h), sigma);
+                    let need = src_bytes.saturating_add(dst_bytes).saturating_add(scratch);
+                    self.check_memory(need, "a layer blur pass")?;
+                    let mut out = vec![0u8; dst_bytes];
+                    try_blur_cpu(
+                        src.pixmap.data_as_u8_slice(),
+                        (src_w, src_h),
+                        &mut out,
+                        (dst_w, dst_h),
+                        dst_origin,
+                        &spec,
+                    )?;
+                    src = CpuTarget {
+                        pixmap: pixmap(dst_w, dst_h, out),
+                        origin: (out_area.x0, out_area.y0),
+                        scene_origin: (0, 0),
+                        scene_size: self.frame_size,
+                        scene_pending: false,
+                    };
+                }
+                PostStep::Noise {
+                    out_area,
+                    noise_type,
+                    size,
+                    density,
+                    color,
+                    secondary_color,
+                    opacity,
+                    dev_to_layer,
+                } => {
+                    if out_area.is_empty() {
+                        return Ok(());
+                    }
+                    let dst_w = (out_area.x1 - out_area.x0).max(1) as u32;
+                    let dst_h = (out_area.y1 - out_area.y0).max(1) as u32;
+                    let dst_bytes = (dst_w as usize)
+                        .checked_mul(dst_h as usize)
+                        .and_then(|n| n.checked_mul(4))
+                        .ok_or_else(|| EngineError::limit("noise output size overflow"))?;
+                    let active = size > 0.0 && density > 0.0;
+                    let noise_need = if !active {
+                        0
+                    } else if !self.noise.has_fields() {
+                        crate::noise::NOISE_WORKING_SET_BYTES
+                    } else {
+                        let key = crate::noise::NoiseLookKey::from_params(
+                            noise_type,
+                            density,
+                            color,
+                            secondary_color,
+                            opacity,
+                        );
+                        if self.noise.contains(key) {
+                            0
+                        } else {
+                            crate::noise::CpuNoiseCache::TILE_BYTES
+                        }
+                    };
+                    self.check_memory(
+                        src_bytes.saturating_add(dst_bytes).saturating_add(noise_need),
+                        "a noise post-effect pass",
+                    )?;
+                    // If `check_memory` evicted warm caches (including `self.noise`), re-check
+                    // with the full noise working set so we never regenerate it past the cap.
+                    if active && !self.noise.has_fields() {
+                        self.check_memory(
+                            src_bytes
+                                .saturating_add(dst_bytes)
+                                .saturating_add(crate::noise::NOISE_WORKING_SET_BYTES),
+                            "a noise post-effect pass",
+                        )?;
+                    }
+                    let mut out = vec![0u8; dst_bytes];
+                    crate::noise::noise_cpu(
+                        &mut self.noise,
+                        src.pixmap.data_as_u8_slice(),
+                        (src_w, src_h),
+                        src.origin,
+                        &mut out,
+                        (dst_w, dst_h),
+                        (out_area.x0, out_area.y0),
+                        noise_type,
+                        size,
+                        density,
+                        color,
+                        secondary_color,
+                        opacity,
+                        dev_to_layer,
+                    );
+                    src = CpuTarget {
+                        pixmap: pixmap(dst_w, dst_h, out),
+                        origin: (out_area.x0, out_area.y0),
+                        scene_origin: (0, 0),
+                        scene_size: self.frame_size,
+                        scene_pending: false,
+                    };
+                }
+                PostStep::Texture {
+                    out_area,
+                    size,
+                    radius_dev,
+                    clip_to_shape,
+                    dev_to_layer,
+                } => {
+                    if out_area.is_empty() {
+                        return Ok(());
+                    }
+                    let dst_w = (out_area.x1 - out_area.x0).max(1) as u32;
+                    let dst_h = (out_area.y1 - out_area.y0).max(1) as u32;
+                    let dst_bytes = (dst_w as usize)
+                        .checked_mul(dst_h as usize)
+                        .and_then(|n| n.checked_mul(4))
+                        .ok_or_else(|| EngineError::limit("texture output size overflow"))?;
+                    self.check_memory(src_bytes.saturating_add(dst_bytes), "a texture post-effect pass")?;
+                    let mut out = vec![0u8; dst_bytes];
+                    crate::texture::texture_cpu(
+                        src.pixmap.data_as_u8_slice(),
+                        (src_w, src_h),
+                        src.origin,
+                        &mut out,
+                        (dst_w, dst_h),
+                        (out_area.x0, out_area.y0),
+                        size,
+                        radius_dev,
+                        clip_to_shape,
+                        dev_to_layer,
+                    );
+                    src = CpuTarget {
+                        pixmap: pixmap(dst_w, dst_h, out),
+                        origin: (out_area.x0, out_area.y0),
+                        scene_origin: (0, 0),
+                        scene_size: self.frame_size,
+                        scene_pending: false,
+                    };
+                }
+            }
         }
         self.offscreen_stack.push(src);
         Ok(())

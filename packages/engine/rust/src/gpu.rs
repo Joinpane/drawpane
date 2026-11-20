@@ -28,7 +28,7 @@ use crate::blur::{BlurSpec, EdgeMode, validate_sigma};
 use crate::engine::{DragFrame, TiledOptions};
 use crate::error::{EngineError, ErrorCode, Result};
 use crate::exec::{
-    self, Backend, DrawStats, Frame, GlyphMask, IRect, ImageView, Open, Pass, ShadowCast, Split, impl_draw,
+    self, Backend, DrawStats, Frame, GlyphMask, IRect, ImageView, Open, Pass, PostStep, ShadowCast, Split, impl_draw,
 };
 use crate::images::{self, Level};
 use crate::masks::{self, MaskCache, MaskKey};
@@ -635,6 +635,10 @@ pub struct Gpu {
     /// Blend shader pass (all 17 non-normal blend modes and `BLEND_LERP`).
     blend: crate::blend::gpu::GpuBlend,
     /// Picture mask shader pass (outline picture, alpha, luminance).
+    /// Noise grain shader pass and bounded GPU grain tile cache.
+    noise: crate::noise::gpu::GpuNoise,
+    /// Texture displacement shader pass.
+    texture: crate::texture::gpu::GpuTexture,
     /// Root target state during `draw_into`.
     root_render: Option<RootRender>,
     /// Active offscreen isolation stack (top is the current render target).
@@ -1004,6 +1008,8 @@ impl Gpu {
         let blur = crate::blur::gpu::GpuBlur::new(&device, blur_fmt, 32 << 20);
         let shadow = crate::shadow::gpu::GpuShadow::new(&device);
         let blend = crate::blend::gpu::GpuBlend::new(&device);
+        let noise = crate::noise::gpu::GpuNoise::new(&device);
+        let texture = crate::texture::gpu::GpuTexture::new(&device);
         let mut gpu = Self {
             adapter: format!(
                 "{} ({:?}, {:?}){}",
@@ -1061,6 +1067,8 @@ impl Gpu {
             shadow_cache: ShadowMaskCache::new(GPU_SHADOW_CACHE_BYTES),
             retired_shadows: Vec::new(),
             blend,
+            noise,
+            texture,
             root_render: None,
             offscreen_stack: Vec::new(),
             offscreen_pool: Vec::new(),
@@ -1235,7 +1243,7 @@ impl Gpu {
 
     /// GPU memory the engine has allocated.
     pub fn bytes(&self) -> usize {
-        self.bytes + self.blur.bytes() + self.pool_bytes + self.shadow_cache.bytes()
+        self.bytes + self.blur.bytes() + self.pool_bytes + self.shadow_cache.bytes() + self.noise.gpu_bytes()
     }
 
     /// Refuses an allocation of `bytes` (beside `freed`, about to go) past the budget.
@@ -1275,6 +1283,7 @@ impl Gpu {
                 s.tex.destroy();
             }
             self.blur.clear();
+            self.noise.clear();
         }
         while self.pool_bytes > keep_bytes {
             if let Some(t) = self.temp_pool.pop() {
@@ -3918,7 +3927,7 @@ impl Backend for Gpu {
         Ok(true)
     }
 
-    fn blur_isolated(&mut self, steps: &[(IRect, f32)]) -> Result<()> {
+    fn apply_post_isolated(&mut self, steps: &[PostStep]) -> Result<()> {
         if steps.is_empty() {
             return Ok(());
         }
@@ -3930,7 +3939,7 @@ impl Backend for Gpu {
         }
         let t0 = now();
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("layer blur"),
+            label: Some("post effects"),
         });
         let mut intermediates: Vec<GpuTarget> = Vec::with_capacity(steps.len());
         let mut current = Some(src);
@@ -3973,61 +3982,165 @@ impl Backend for Gpu {
                     flushed_scene = true;
                 }
             }
-            for &(out_area, sigma) in steps {
-                if out_area.is_empty() {
-                    if let Some(s) = current.take() {
-                        intermediates.push(s);
+            for &step in steps {
+                match step {
+                    PostStep::LayerBlur { out_area, sigma } => {
+                        if out_area.is_empty() {
+                            if let Some(s) = current.take() {
+                                intermediates.push(s);
+                            }
+                            return Ok(());
+                        }
+                        let out_w = (out_area.x1 - out_area.x0) as u32;
+                        let out_h = (out_area.y1 - out_area.y0) as u32;
+                        let (src_size, src_origin, src_active) = {
+                            let s = current.as_ref().expect("current");
+                            ((s.width, s.height), s.origin, s.active_size)
+                        };
+                        let dst_origin = (out_area.x0 - src_origin.0, out_area.y0 - src_origin.1);
+                        let spec = BlurSpec {
+                            sigma,
+                            edge: EdgeMode::Zero,
+                            clamp_bounds: IRect {
+                                x0: 0,
+                                y0: 0,
+                                x1: i32::from(src_active.0),
+                                y1: i32::from(src_active.1),
+                            },
+                            dirty: IRect {
+                                x0: dst_origin.0,
+                                y0: dst_origin.1,
+                                x1: dst_origin.0 + out_w as i32,
+                                y1: dst_origin.1 + out_h as i32,
+                            },
+                        };
+                        let blur_work =
+                            self.blur
+                                .estimate_work_bytes(src_size, (out_w, out_h), dst_origin, &spec, None);
+                        let mut dst = self.acquire_offscreen(out_w, out_h, (out_area.x0, out_area.y0))?;
+                        if let Err(e) = self.reserve_or_trim(blur_work, 0, "a layer blur") {
+                            self.offscreen_pool.push(dst);
+                            return Err(e);
+                        }
+                        let src = current.as_ref().expect("current");
+                        if let Err(e) = self.blur.encode(
+                            &self.device,
+                            &self.queue,
+                            &mut encoder,
+                            &src.view,
+                            (src.width, src.height),
+                            &dst.view,
+                            (out_w, out_h),
+                            dst_origin,
+                            &spec,
+                            None,
+                        ) {
+                            self.offscreen_pool.push(dst);
+                            return Err(e);
+                        }
+                        dst.cleared = true;
+                        dst.scene_pending = false;
+                        if let Some(prev) = current.replace(dst) {
+                            intermediates.push(prev);
+                        }
                     }
-                    return Ok(());
-                }
-                let out_w = (out_area.x1 - out_area.x0) as u32;
-                let out_h = (out_area.y1 - out_area.y0) as u32;
-                let (src_size, src_origin, src_active) = {
-                    let s = current.as_ref().expect("current");
-                    ((s.width, s.height), s.origin, s.active_size)
-                };
-                let dst_origin = (out_area.x0 - src_origin.0, out_area.y0 - src_origin.1);
-                let spec = BlurSpec {
-                    sigma,
-                    edge: EdgeMode::Zero,
-                    clamp_bounds: IRect {
-                        x0: 0,
-                        y0: 0,
-                        x1: i32::from(src_active.0),
-                        y1: i32::from(src_active.1),
-                    },
-                    dirty: IRect {
-                        x0: dst_origin.0,
-                        y0: dst_origin.1,
-                        x1: dst_origin.0 + out_w as i32,
-                        y1: dst_origin.1 + out_h as i32,
-                    },
-                };
-                let blur_work = self
-                    .blur
-                    .estimate_work_bytes(src_size, (out_w, out_h), dst_origin, &spec, None);
-                self.reserve_or_trim(blur_work, 0, "a layer blur")?;
-                let mut dst = self.acquire_offscreen(out_w, out_h, (out_area.x0, out_area.y0))?;
-                let src = current.as_ref().expect("current");
-                if let Err(e) = self.blur.encode(
-                    &self.device,
-                    &self.queue,
-                    &mut encoder,
-                    &src.view,
-                    (src.width, src.height),
-                    &dst.view,
-                    (out_w, out_h),
-                    dst_origin,
-                    &spec,
-                    None,
-                ) {
-                    self.offscreen_pool.push(dst);
-                    return Err(e);
-                }
-                dst.cleared = true;
-                dst.scene_pending = false;
-                if let Some(prev) = current.replace(dst) {
-                    intermediates.push(prev);
+                    PostStep::Noise {
+                        out_area,
+                        noise_type,
+                        size,
+                        density,
+                        color,
+                        secondary_color,
+                        opacity,
+                        dev_to_layer,
+                    } => {
+                        if out_area.is_empty() {
+                            if let Some(s) = current.take() {
+                                intermediates.push(s);
+                            }
+                            return Ok(());
+                        }
+                        let key = crate::noise::NoiseLookKey::from_params(
+                            noise_type,
+                            density,
+                            color,
+                            secondary_color,
+                            opacity,
+                        );
+                        let out_w = (out_area.x1 - out_area.x0) as u32;
+                        let out_h = (out_area.y1 - out_area.y0) as u32;
+                        let mut dst = self.acquire_offscreen(out_w, out_h, (out_area.x0, out_area.y0))?;
+                        if !self.noise.contains(key)
+                            && let Err(e) =
+                                self.reserve_or_trim(crate::noise::gpu::GpuNoise::TILE_BYTES, 0, "a noise tile")
+                        {
+                            self.offscreen_pool.push(dst);
+                            return Err(e);
+                        }
+                        let src = current.as_ref().expect("current");
+                        let src_active = (u32::from(src.active_size.0), u32::from(src.active_size.1));
+                        self.noise.encode(
+                            &self.device,
+                            &self.queue,
+                            &mut encoder,
+                            &src.view,
+                            src_active,
+                            src.origin,
+                            &dst.view,
+                            (out_w, out_h),
+                            (out_area.x0, out_area.y0),
+                            noise_type,
+                            size,
+                            density,
+                            color,
+                            secondary_color,
+                            opacity,
+                            dev_to_layer,
+                        );
+                        dst.cleared = true;
+                        dst.scene_pending = false;
+                        if let Some(prev) = current.replace(dst) {
+                            intermediates.push(prev);
+                        }
+                    }
+                    PostStep::Texture {
+                        out_area,
+                        size,
+                        radius_dev,
+                        clip_to_shape,
+                        dev_to_layer,
+                    } => {
+                        if out_area.is_empty() {
+                            if let Some(s) = current.take() {
+                                intermediates.push(s);
+                            }
+                            return Ok(());
+                        }
+                        let out_w = (out_area.x1 - out_area.x0) as u32;
+                        let out_h = (out_area.y1 - out_area.y0) as u32;
+                        let mut dst = self.acquire_offscreen(out_w, out_h, (out_area.x0, out_area.y0))?;
+                        let src = current.as_ref().expect("current");
+                        let src_active = (u32::from(src.active_size.0), u32::from(src.active_size.1));
+                        self.texture.encode(
+                            &self.device,
+                            &mut encoder,
+                            &src.view,
+                            src_active,
+                            src.origin,
+                            &dst.view,
+                            (out_w, out_h),
+                            (out_area.x0, out_area.y0),
+                            size,
+                            radius_dev,
+                            clip_to_shape,
+                            dev_to_layer,
+                        );
+                        dst.cleared = true;
+                        dst.scene_pending = false;
+                        if let Some(prev) = current.replace(dst) {
+                            intermediates.push(prev);
+                        }
+                    }
                 }
             }
             Ok(())
@@ -4037,6 +4150,7 @@ impl Backend for Gpu {
                 self.queue.submit([encoder.finish()]);
                 self.submits += 1;
                 self.blur.flush_retired();
+                self.noise.flush_retired();
                 if let Some(root) = self.root_render.as_mut() {
                     root.flush_ms += now() - t0;
                 }
@@ -4056,13 +4170,16 @@ impl Backend for Gpu {
             Err(e) => {
                 drop(encoder);
                 self.blur.flush_retired();
+                self.noise.flush_retired();
                 if flushed_scene {
                     self.atlas.at = (0, 0, 0);
                     self.scene.reset();
                     self.recycle_in_use();
                 }
+                // The caller aborts the current isolation. Keep its target on the stack so
+                // that abort releases this scope and leaves its parent in place.
                 if let Some(s) = current {
-                    intermediates.push(s);
+                    self.offscreen_stack.push(s);
                 }
                 self.offscreen_pool.append(&mut intermediates);
                 Err(e)

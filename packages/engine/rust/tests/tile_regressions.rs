@@ -1627,3 +1627,509 @@ fn batch_updating_clipping_frames_stays_linear_with_and_without_masks() {
         applied_masked.changes.len()
     );
 }
+
+#[test]
+fn noise_and_texture_match_across_48px_tile_seams_and_invalidate_neighbor_tiles() {
+    // Two layers straddling a 48 px tile boundary:
+    // 1) A rectangle with duo noise and unclipped texture (radius 10 extends past its box into the
+    //    adjacent tile).
+    // 2) A rotated ellipse with clipped texture and multi noise (sampling halo still crosses the
+    //    48 px tile boundary even though clip_to_shape keeps outward reach zero).
+    let mut noisy = Rec::new([1.0, 0.0, 0.0, 1.0, 24.0, 8.0], [36.0, 32.0]);
+    noisy.paths.push(Entry::Rect {
+        w: 36.0,
+        h: 32.0,
+        radii: [6.0; 4],
+    });
+    noisy.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.2, 0.5, 0.85, 1.0]),
+    });
+    noisy.post.push(Post::Noise {
+        noise_type: 1,
+        size: 1.5,
+        density: 65.0,
+        color: [0.05, 0.05, 0.05, 0.7],
+        secondary_color: [1.0, 1.0, 1.0, 0.6],
+        opacity: 0.8,
+    });
+    noisy.post.push(Post::Texture {
+        size: 4.0,
+        radius: 10.0,
+        clip_to_shape: false,
+    });
+
+    let mut clipped = Rec::new([0.92, 0.39, -0.39, 0.92, 42.0, 26.0], [34.0, 24.0]);
+    clipped.paths.push(Entry::Ellipse { w: 34.0, h: 24.0 });
+    clipped.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.9, 0.35, 0.2, 0.9]),
+    });
+    clipped.post.push(Post::Texture {
+        size: 3.0,
+        radius: 6.0,
+        clip_to_shape: true,
+    });
+    clipped.post.push(Post::Noise {
+        noise_type: 2,
+        size: 2.0,
+        density: 75.0,
+        color: [0.0; 4],
+        secondary_color: [1.0; 4],
+        opacity: 0.75,
+    });
+
+    let mut msg = W::new(ANY, 1);
+    msg.reset();
+    msg.set(1, 0, &noisy);
+    msg.set(2, 0, &clipped);
+    msg.order(0, &[1, 2]);
+    let mut e = Engine::new(Limits::default());
+    e.use_cpu_tiles(48, 64);
+    e.apply(&msg.finish()).unwrap();
+
+    let cam = camera(1.0, 0.0, 0.0);
+    let whole = e.render_cpu(96, 64, cam, [1.0; 4], false).unwrap().0.to_vec();
+    let (tiled, stats) = e
+        .render_cpu_tiled(96, 64, cam, [1.0; 4], TiledOptions::default())
+        .unwrap();
+    assert!(stats.exact);
+    assert_eq!(tiled, whole, "noise/texture 48 px tile seam mismatch");
+
+    // Move the unclipped texture layer so its radius-10 halo leaves the left tile completely.
+    let mut move_noisy = W::new(1, 2);
+    move_noisy.transform(1, [1.0, 0.0, 0.0, 1.0, 62.0, 8.0]);
+    e.apply(&move_noisy.finish()).unwrap();
+    let whole_after = e.render_cpu(96, 64, cam, [1.0; 4], false).unwrap().0.to_vec();
+    let (tiled_after, _) = e
+        .render_cpu_tiled(96, 64, cam, [1.0; 4], TiledOptions::default())
+        .unwrap();
+    assert_eq!(
+        tiled_after, whole_after,
+        "stale unclipped texture halo survived in left tile after move"
+    );
+}
+
+#[test]
+fn image_replacement_under_ancestor_texture_and_blur_invalidates_displaced_tiles() {
+    // Regression for PR #245 review: replacing an image inside a frame carrying an unclipped
+    // texture (or clipped texture / layer blur) must invalidate neighbor tiles reached through
+    // the ancestor's displacement or blur pad (`Store::image_users` using `dirty_extent`).
+    let mut frame = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [96.0, 48.0]);
+    frame.ops.push(Op::Children);
+    frame.post.push(Post::Texture {
+        size: 36.0,
+        radius: 36.0,
+        clip_to_shape: false,
+    });
+
+    let mut img_child = Rec::new([1.0, 0.0, 0.0, 1.0, 22.0, 12.0], [14.0, 24.0]);
+    img_child.paths.push(Entry::Rect {
+        w: 14.0,
+        h: 24.0,
+        radii: [0.0; 4],
+    });
+    img_child.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Image {
+            id: 1,
+            m: [14.0, 0.0, 0.0, 24.0, 0.0, 0.0],
+            tile: false,
+            opacity: 1.0,
+        },
+    });
+
+    let mut msg = W::new(ANY, 1);
+    msg.reset();
+    msg.set(1, 0, &frame);
+    msg.set(2, 1, &img_child);
+    msg.order(0, &[1]);
+
+    let mut e = Engine::new(Limits::default());
+    e.use_cpu_tiles(48, 64);
+    let red: Vec<u8> = [230u8, 25, 25, 255].repeat(4 * 4);
+    let green: Vec<u8> = [25u8, 210, 40, 255].repeat(4 * 4);
+    e.put_image(1, 4, 4, &red, false).unwrap();
+    e.apply(&msg.finish()).unwrap();
+
+    let cam = camera(1.0, 0.0, 0.0);
+    let whole_red = e.render_cpu(96, 48, cam, [1.0; 4], false).unwrap().0.to_vec();
+    let (tiled_red, stats_red) = e
+        .render_cpu_tiled(96, 48, cam, [1.0; 4], TiledOptions::default())
+        .unwrap();
+    assert!(stats_red.exact);
+    assert_eq!(tiled_red, whole_red);
+
+    // Replace image 1 in place from red to green: right tile (x >= 48) receives displaced pixels
+    // from x = 22..36 via the ancestor's radius-36 texture and must not keep stale red pixels.
+    e.put_image(1, 4, 4, &green, false).unwrap();
+    let whole_green = e.render_cpu(96, 48, cam, [1.0; 4], false).unwrap().0.to_vec();
+    let (tiled_green, stats_green) = e
+        .render_cpu_tiled(96, 48, cam, [1.0; 4], TiledOptions::default())
+        .unwrap();
+    assert!(stats_green.exact);
+    assert_eq!(
+        tiled_green, whole_green,
+        "stale red pixels survived in displaced neighbor tile after image replacement"
+    );
+    // Verify the right tile actually shows displaced green (proving the test exercises displacement).
+    let right_tile_has_green = (0..48usize).any(|y| {
+        (48..96usize).any(|x| {
+            let i = (y * 96 + x) * 4;
+            tiled_green[i + 1] > 180 && tiled_green[i] < 80
+        })
+    });
+    assert!(right_tile_has_green, "expected displaced green pixels in right tile");
+}
+
+#[test]
+fn texture_matches_bit_identically_across_bands_and_tiles_at_fractional_zooms() {
+    // Regression for PR #245 review + CI fuzz failure: texture displacement must evaluate the
+    // exact same float coordinates regardless of band/tile origin (`dst_origin`, `src_origin`).
+    let mut striped = Rec::new([1.0, 0.0, 0.0, 1.0, 7.35, 5.65], [78.0, 76.0]);
+    striped.paths.push(Entry::Rect {
+        w: 78.0,
+        h: 76.0,
+        radii: [0.0; 4],
+    });
+    for i in 0..8u32 {
+        striped.paths.push(Entry::Rect {
+            w: 78.0,
+            h: 4.5,
+            radii: [0.0; 4],
+        });
+        striped.ops.push(Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::Solid(if i % 2 == 0 {
+                [0.9, 0.15, 0.15, 1.0]
+            } else {
+                [0.1, 0.35, 0.85, 1.0]
+            }),
+        });
+    }
+    striped.post.push(Post::Texture {
+        size: 7.5,
+        radius: 12.0,
+        clip_to_shape: false,
+    });
+
+    let mut msg = W::new(ANY, 1);
+    msg.reset();
+    msg.set(1, 0, &striped);
+    let mut e = Engine::new(Limits::default());
+    e.apply(&msg.finish()).unwrap();
+
+    for zoom in [0.75, 1.0, 1.25, 1.5, 2.0] {
+        let cam = camera(zoom, 3.25, 1.75);
+        let whole = e.render_cpu(96, 96, cam, [1.0; 4], false).unwrap().0.to_vec();
+        // Partition into 48 x 12 bands/tiles using tile mode.
+        e.use_cpu_tiles(48, 64);
+        let (tiled, stats) = e
+            .render_cpu_tiled(96, 96, cam, [1.0; 4], TiledOptions::default())
+            .unwrap();
+        assert!(stats.exact);
+        assert_eq!(tiled, whole, "texture mismatch across 48 px tiles at zoom {zoom}");
+    }
+
+    // Direct `texture_cpu` coordinate-coded probe across shifted destination/source windows.
+    let (w, h) = (96usize, 96usize);
+    let mut src = vec![0u8; w * h * 4];
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) * 4;
+            src[i] = (x * 2) as u8;
+            src[i + 1] = (y * 2) as u8;
+            src[i + 2] = ((x + y) & 255) as u8;
+            src[i + 3] = 255;
+        }
+    }
+    let dev_to_layer = vello_common::kurbo::Affine::new([0.8, 0.0, 0.0, 0.8, -5.88, -4.52]);
+    let mut full = vec![0u8; w * h * 4];
+    drawpane_engine::texture::texture_cpu(
+        &src,
+        (w as u32, h as u32),
+        (0, 0),
+        &mut full,
+        (w as u32, h as u32),
+        (0, 0),
+        7.5,
+        15.0,
+        false,
+        dev_to_layer,
+    );
+    for by in (0..h).step_by(12) {
+        for bx in (0..w).step_by(48) {
+            let mut tile = vec![0u8; 48 * 12 * 4];
+            drawpane_engine::texture::texture_cpu(
+                &src,
+                (w as u32, h as u32),
+                (0, 0),
+                &mut tile,
+                (48, 12),
+                (bx as i32, by as i32),
+                7.5,
+                15.0,
+                false,
+                dev_to_layer,
+            );
+            for y in 0..12 {
+                let f_off = ((by + y) * w + bx) * 4;
+                let t_off = y * 48 * 4;
+                assert_eq!(
+                    &tile[t_off..t_off + 48 * 4],
+                    &full[f_off..f_off + 48 * 4],
+                    "texture_cpu window ({bx},{by}) row {y} diverged from full frame"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn texture_rejects_out_of_range_wire_inputs_and_device_radius() {
+    use drawpane_engine::error::ErrorCode;
+
+    let mut r = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [32.0, 32.0]);
+    r.paths.push(Entry::Rect {
+        w: 32.0,
+        h: 32.0,
+        radii: [0.0; 4],
+    });
+    r.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.8, 0.2, 0.2, 1.0]),
+    });
+
+    let mut e = Engine::new(Limits::default());
+    for (size, radius) in [(1.0e-38, 6.0), (4.0, 1.0e20), (51.0, 6.0)] {
+        r.post = vec![Post::Texture {
+            size,
+            radius,
+            clip_to_shape: false,
+        }];
+        let mut message = W::new(ANY, 1);
+        message.reset();
+        message.set(1, 0, &r);
+        assert_eq!(e.apply(&message.finish()).unwrap_err().code, ErrorCode::Limit);
+    }
+
+    // A valid wire radius still needs device-space validation after zoom is applied.
+    r.post = vec![Post::Texture {
+        size: 4.0,
+        radius: 100.0,
+        clip_to_shape: false,
+    }];
+    let mut message = W::new(ANY, 1);
+    message.reset();
+    message.set(1, 0, &r);
+    e.apply(&message.finish()).unwrap();
+    let err = e
+        .render_cpu(64, 64, camera(100.0, 0.0, 0.0), [1.0; 4], false)
+        .unwrap_err();
+    assert_eq!(err.code, ErrorCode::Limit);
+}
+
+#[test]
+fn ordered_post_stack_and_phase_3a_substack_match_across_tiles() {
+    // Phase 3A composition substack (decision 0040's glass arrives in phase 3B): layer blur,
+    // separable blend (multiply), linear blend (linear-dodge), alpha and luminance masks with
+    // real backdrop content inside each mask scope, mono/duo/multi noise, and unclipped + clipped
+    // texture composed inside a translucent faded frame straddling a 48 px tile seam.
+    let mut bg = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [96.0, 64.0]);
+    bg.paths.push(Entry::Rect {
+        w: 96.0,
+        h: 64.0,
+        radii: [0.0; 4],
+    });
+    bg.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.2, 0.35, 0.6, 1.0]),
+    });
+
+    let mut frame = Rec::new([1.0, 0.0, 0.0, 1.0, 4.0, 4.0], [88.0, 56.0]);
+    frame.flags = 2; // isolate (fades as one over visible outer bg)
+    frame.opacity = 0.85;
+    frame.paths.push(Entry::Rect {
+        w: 88.0,
+        h: 56.0,
+        radii: [8.0; 4],
+    });
+    frame.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.92, 0.9, 0.84, 0.5]),
+    });
+    frame.ops.push(Op::Clip {
+        path: 0,
+        even_odd: false,
+    });
+    frame.ops.push(Op::Children);
+    frame.ops.push(Op::Unclip);
+
+    // Alpha picture mask with layer blur gating a backdrop card + multiply noisy textured card.
+    let mut alpha_mask = Rec::new([1.0, 0.0, 0.0, 1.0, 8.0, 6.0], [44.0, 44.0]);
+    alpha_mask.mask = 4;
+    alpha_mask.paths.push(Entry::Ellipse { w: 44.0, h: 44.0 });
+    alpha_mask.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([1.0, 1.0, 1.0, 0.85]),
+    });
+    alpha_mask.post.push(Post::LayerBlur(6.0));
+
+    let mut mask1_base = Rec::new([1.0, 0.0, 0.0, 1.0, 8.0, 6.0], [46.0, 44.0]);
+    mask1_base.paths.push(Entry::Rect {
+        w: 46.0,
+        h: 44.0,
+        radii: [4.0; 4],
+    });
+    mask1_base.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.85, 0.78, 0.45, 1.0]),
+    });
+    mask1_base.post.push(Post::Noise {
+        noise_type: 0, // mono
+        size: 1.5,
+        density: 65.0,
+        color: [0.0, 0.0, 0.0, 0.55],
+        secondary_color: [1.0; 4],
+        opacity: 1.0,
+    });
+
+    let mut sep_blended = Rec::new([1.0, 0.0, 0.0, 1.0, 16.0, 10.0], [44.0, 36.0]);
+    sep_blended.layer_blend = 1; // multiply over mask1_base inside mask scope
+    sep_blended.paths.push(Entry::Rect {
+        w: 44.0,
+        h: 36.0,
+        radii: [6.0; 4],
+    });
+    sep_blended.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.9, 0.35, 0.25, 0.95]),
+    });
+    sep_blended.post.push(Post::Noise {
+        noise_type: 1, // duo
+        size: 1.5,
+        density: 70.0,
+        color: [0.0, 0.0, 0.0, 0.6],
+        secondary_color: [1.0, 1.0, 1.0, 0.6],
+        opacity: 1.0,
+    });
+    sep_blended.post.push(Post::Texture {
+        size: 3.5,
+        radius: 5.0,
+        clip_to_shape: false,
+    });
+
+    // Luminance picture mask closing previous scope and gating a dark base + linear-dodge badge.
+    let mut lum_mask = Rec::new([1.0, 0.0, 0.0, 1.0, 34.0, 8.0], [44.0, 40.0]);
+    lum_mask.mask = 5;
+    lum_mask.paths.push(Entry::Rect {
+        w: 44.0,
+        h: 40.0,
+        radii: [8.0; 4],
+    });
+    lum_mask.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Gradient {
+            kind: 2,
+            m: [44.0, 0.0, 0.0, 40.0, 0.0, 0.0],
+            stops: vec![(0.0, [1.0, 1.0, 1.0, 1.0]), (1.0, [0.15, 0.15, 0.15, 1.0])],
+        },
+    });
+
+    let mut mask2_base = Rec::new([1.0, 0.0, 0.0, 1.0, 34.0, 8.0], [44.0, 40.0]);
+    mask2_base.paths.push(Entry::Rect {
+        w: 44.0,
+        h: 40.0,
+        radii: [6.0; 4],
+    });
+    mask2_base.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.25, 0.25, 0.35, 1.0]),
+    });
+
+    let mut lin_blended = Rec::new([1.0, 0.0, 0.0, 1.0, 38.0, 12.0], [40.0, 32.0]);
+    lin_blended.layer_blend = 16; // linear-dodge over mask2_base inside mask scope
+    lin_blended.paths.push(Entry::Rect {
+        w: 40.0,
+        h: 32.0,
+        radii: [4.0; 4],
+    });
+    lin_blended.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.4, 0.65, 0.9, 0.9]),
+    });
+    lin_blended.post.push(Post::LayerBlur(4.0));
+    lin_blended.post.push(Post::Noise {
+        noise_type: 2, // multi
+        size: 1.5,
+        density: 70.0,
+        color: [0.0; 4],
+        secondary_color: [1.0; 4],
+        opacity: 0.7,
+    });
+    lin_blended.post.push(Post::Texture {
+        size: 3.0,
+        radius: 4.0,
+        clip_to_shape: true,
+    });
+
+    let mut msg = W::new(ANY, 1);
+    msg.reset();
+    msg.set(1, 0, &bg);
+    msg.set(2, 0, &frame);
+    msg.set(3, 2, &alpha_mask);
+    msg.set(4, 2, &mask1_base);
+    msg.set(5, 2, &sep_blended);
+    msg.set(6, 2, &lum_mask);
+    msg.set(7, 2, &mask2_base);
+    msg.set(8, 2, &lin_blended);
+    msg.order(0, &[1, 2]);
+    msg.order(2, &[3, 4, 5, 6, 7, 8]);
+
+    let mut e = Engine::new(Limits::default());
+    e.use_cpu_tiles(48, 64);
+    e.apply(&msg.finish()).unwrap();
+
+    let cam = camera(1.0, 0.0, 0.0);
+    let whole = e.render_cpu(96, 64, cam, [1.0; 4], false).unwrap().0.to_vec();
+    let (tiled, stats) = e
+        .render_cpu_tiled(96, 64, cam, [1.0; 4], TiledOptions::default())
+        .unwrap();
+    assert!(stats.exact);
+    let worst = whole.iter().zip(tiled).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+    assert!(worst <= 1, "phase-3A substack 48 px tile mismatch: worst {worst}");
+
+    // Verify that the blends inside the mask scopes actually blend against their mask-scope
+    // backdrops (switching both to normal must materially change pixels).
+    sep_blended.layer_blend = 0;
+    lin_blended.layer_blend = 0;
+    let mut no_blend = W::new(1, 2);
+    no_blend.set(5, 2, &sep_blended);
+    no_blend.set(8, 2, &lin_blended);
+    e.apply(&no_blend.finish()).unwrap();
+    let normal_px = e.render_cpu(96, 64, cam, [1.0; 4], false).unwrap().0.to_vec();
+    let diff_count = whole
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(normal_px.as_chunks::<4>().0.iter())
+        .filter(|(a, b)| a.iter().zip(b.iter()).any(|(x, y)| x.abs_diff(*y) > 8))
+        .count();
+    assert!(
+        diff_count > 100,
+        "expected blends inside mask scopes to visibly change pixels, only {diff_count} differed"
+    );
+}

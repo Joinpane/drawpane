@@ -1014,3 +1014,11 @@ All three Figma mask types (outline, alpha, and luminance, plus sibling scope te
   - Banded CPU seam regression (`regressions.test.ts`): 10/10 cases (including alpha, luminance, and blurred alpha picture masks across 73-row DPR 1.35 bands) match whole-frame CPU bit-for-bit.
   - Module sizes: worker 640 KB raw / 253 KB gzipped (budget 400 KB); browser 1139 KB raw / 428 KB gzipped (budget 1000 KB).
   - Workerd 8,192 x 8,192 export: engine 17.4 / 25 MiB.
+
+## Amendment: noise and texture (phase 3A, 2026-11-20)
+
+Procedural noise (`POST.noise = 2`: mono, duo, and multi) and Perlin-displacement texture (`POST.texture = 3`: clipped and unclipped) are drawn in declared effect order alongside layer blur (`FLAG_POST = 32`, wire version 1.4), clearing `UNSUPPORTED.noise` and `UNSUPPORTED.texture`.
+
+- **Noise tiles and GPU retirement (`noise.rs`, `noise.wgsl`, `cpu.rs`, `gpu.rs`):** Synthesizes the same 320 x 320 periodic Perlin fields and `noise.ts` transfer curves (`mono`, `duo`, and `multi` with straight-channel rounding before premultiplication so CPU and GPU match `u8` quantization). Both CPU and GPU caches cap at 8 tiles (`NOISE_TILE_LIMIT`), evict before allocating, and `GpuNoise` holds evicted tiles in `retired` until after `queue.submit` so chains exceeding 8 distinct noise looks in one submission never destroy in-flight textures. UVs are evaluated from origin-invariant device coordinates (`dev_pos = dst_origin + pixel + 0.5`).
+- **Origin-invariant texture displacement (`texture.rs`, `texture.wgsl`, `exec.rs`):** Evaluates the 2D gradient Perlin displacement field from origin-invariant device coordinates (`dev_to_layer` plus `dst_origin`), keeping tiled and banded exports bit-identical across fractional camera zooms and offsets. Extreme texture radii or lattice coordinates overflow cleanly into `ErrorCode::Limit` before rendering.
+- **Invalidation and Worker admission (`store.rs`, `record.rs`, `engine.rs`):** `Record::post_dirty_pad()` includes both clipped and unclipped texture displacement radius so descendant edits and image replacements (`image_users`) dirty all displaced halo pixels. `export_effect_working_set` walks the full ordered `post_effects` chain, charging coexisting halo-expanded intermediates and noise working-set memory before any PNG byte streams.
