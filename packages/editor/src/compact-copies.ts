@@ -55,8 +55,6 @@ export const LAYOUT_NEUTRAL: ReadonlySet<string> = new Set([
   "opacity",
   "blendMode",
   "fills",
-  "strokes",
-  "strokeAlign",
   "strokeCap",
   "strokeJoin",
   "strokeDashes",

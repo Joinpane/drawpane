@@ -296,6 +296,27 @@ describe("auto layout and components", () => {
     expect(sell.props).toMatchObject({ mirrors: drawpaneId("3:2"), overrides: ["characters"] });
   });
 
+  it("imports a space-between frame without its inactive packed gap", () => {
+    const { nodes } = convertFile(
+      file(
+        node({
+          id: "3:1",
+          type: "FRAME",
+          name: "Toolbar",
+          size: { x: 220, y: 44 },
+          relativeTransform: at(0, 0),
+          layoutMode: "HORIZONTAL",
+          itemSpacing: 96,
+          primaryAxisAlignItems: "SPACE_BETWEEN",
+        }),
+      ),
+    );
+    expect(byName(nodes, "Toolbar").props).toMatchObject({
+      justifyContent: "space-between",
+      gap: 0,
+    });
+  });
+
   it("links a copy's nested instance to the variant a variable mode chose", () => {
     // A set with Light and Dark variants; a main whose material is the Light one, its Mode
     // property bound to a variable; a copy in a frame set to Dark. Figma's API gives the

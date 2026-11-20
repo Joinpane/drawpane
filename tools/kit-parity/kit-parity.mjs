@@ -23,6 +23,8 @@
 //                                              every Figma feature the file uses and what the
 //                                              import makes of it, judged on the converted
 //                                              output (coverage[-<label>].json and .md)
+//   relayout  --fig <file.fig> | --nodes <lines.json> [--name <label>]
+//                                              geometry drift after rerunning editor auto layout
 //   text-widths [--run <dir>] [--only id,id] [--name <label>]
 //                                              Figma's text widths against Drawpane's, per font
 //                                              (text-widths[-<label>].json and .md in the run)
@@ -130,8 +132,17 @@ function spec(stage, extra = {}) {
     ...extra,
   };
   const run = spawnSync(
-    "npx",
-    ["playwright", "test", "e2e/kit-parity.spec.ts", "--project", "chromium", "--workers", "1"],
+    "pnpm",
+    [
+      "exec",
+      "playwright",
+      "test",
+      "e2e/kit-parity.spec.ts",
+      "--project",
+      "chromium",
+      "--workers",
+      "1",
+    ],
     { cwd: web, env, stdio: "inherit" },
   );
   if (run.status !== 0) process.exit(run.status ?? 1);
@@ -212,6 +223,24 @@ async function coverage() {
   });
 }
 
+async function relayout() {
+  const { withMachineLock } = await import("./src/lock.mjs");
+  await withMachineLock(`relayout step for ${out}`, async () => {
+    const { importTs } = await import("./src/ts.mjs");
+    const { relayoutReport } = await importTs("relayout.ts");
+    const source = values.nodes ? resolve(values.nodes) : join(await convert(), "nodes.ndjson");
+    const report = relayoutReport(source);
+    const file = join(out, `relayout${values.name ? `-${values.name}` : ""}.json`);
+    writeFileSync(file, `${JSON.stringify({ source, ...report }, null, 1)}\n`);
+    console.log(
+      `${report.changed} of ${report.layers} visible layer boxes changed by more than ${report.threshold} px in ${report.framesAffected} of ${report.frames.length} frame subtrees (${report.alreadyChanged} boxes already different on resolution).`,
+    );
+    for (const { cause, count } of report.causes) console.log(`  ${count}  ${cause}`);
+    console.log(`${report.hiddenChanged} of ${report.hiddenLayers} hidden layer boxes changed.`);
+    console.log(`Saved ${file}`);
+  });
+}
+
 async function textWidthsStep() {
   const { importTs } = await import("./src/ts.mjs");
   const { textWidths, textWidthsMarkdown } = await importTs("text-widths.ts");
@@ -234,6 +263,7 @@ const steps = {
   compare,
   detach,
   coverage,
+  relayout,
   "text-widths": textWidthsStep,
 };
 if (step === "all") {

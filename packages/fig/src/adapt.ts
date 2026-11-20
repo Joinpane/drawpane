@@ -349,6 +349,7 @@ function layoutFields(
       paddingBottom: n.paddingBottom,
       paddingLeft: n.paddingLeft,
       layoutWrap: n.layoutWrap,
+      strokesIncludedInLayout: n.strokesIncludedInLayout,
     } satisfies Partial<RestNode>);
   }
   if (parent.layoutMode === "HORIZONTAL" || parent.layoutMode === "VERTICAL") {

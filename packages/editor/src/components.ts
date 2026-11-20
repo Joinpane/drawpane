@@ -685,18 +685,51 @@ export function copyConstraintOps(doc: Doc, ops: readonly Op[]): Op[] {
  *
  * - one whose layout differs from its main's (it stores a value a layout
  *   reads: a text, a size, a hidden layer), when its main's layout inside
- *   may have changed: every layer of it, so texts measure themselves and
- *   frames place their children;
+ *   may have changed: frames place their children and affected texts
+ *   measure themselves;
  * - one whose main changed size, so its parent's layout places it again.
  *
  * A main whose instances (inside it, as the icon in a button) changed size
  * changed inside too, with no operation of its own. Changes no layout reads
  * (a fill, a name, a child of a frame without auto layout) lay out nothing.
  */
-export function relayoutTargets(doc: Doc, ids: Iterable<string>, ops: readonly Op[]): string[] {
-  if (!doc.compactCopies) return [];
-  const reads = (op: Op) => op.op !== "set" || !LAYOUT_NEUTRAL.has(op.prop);
-  if (!ops.some(reads)) return [];
+export function relayoutTargets(
+  doc: Doc,
+  ids: Iterable<string>,
+  ops: readonly Op[],
+): { layout: string[]; text: string[] } {
+  const layout: string[] = [];
+  const text: string[] = [];
+  if (!doc.compactCopies) return { layout, text };
+  const changes = ops.filter((op) => {
+    if (op.op !== "set") return true;
+    // An overridden string can still display its main's bound value. Unbinding
+    // can expose the copy's saved text, so treat a text binding edit as a layout edit.
+    if (op.prop === "bindings") return doc.getUnresolved(op.id)?.type === "text";
+    // Strokes take room in a layout only on a frame that includes them.
+    if (op.prop === "strokes" || op.prop === "strokeAlign")
+      return doc.getUnresolved(op.id)?.type === "frame";
+    return op.prop !== "overrides" && !LAYOUT_NEUTRAL.has(op.prop);
+  });
+  if (changes.length === 0) return { layout, text };
+  // Text overrides can insulate the entire copy from a text edit. A refit
+  // with the browser's metrics would still rewrite those imported text boxes.
+  // Run edits can change run bindings as well as their saved values.
+  const charactersOnly = changes.every((op) => op.op === "set" && op.prop === "characters");
+  const changedCharacters = charactersOnly ? new Set(changes.map((op) => op.id)) : null;
+  // Only the main's characters changed (a binding edit isn't characters-only),
+  // so a copy that overrides them shows the same text as before: its own, or
+  // its binding's value, which this edit didn't touch.
+  const inheritsTextChange = (id: string): boolean => {
+    let overridden = false;
+    for (let node = doc.getUnresolved(id); node?.type === "text"; ) {
+      if (changedCharacters?.has(node.id)) return !overridden;
+      overridden ||= getProp(node.props, "overrides").includes("characters");
+      const source = getProp(node.props, "mirrors");
+      node = source ? doc.getUnresolved(source) : undefined;
+    }
+    return false;
+  };
   const isLayout = (node: NodeRecord | undefined) =>
     node?.type === "frame" && getProp(node.props, "layoutMode") !== "none";
   const inLayout = (node: NodeRecord) => {
@@ -708,8 +741,7 @@ export function relayoutTargets(doc: Doc, ids: Iterable<string>, ops: readonly O
   const inner = new Set<string>();
   /** Mains whose root changed in a way its instances' parents read. */
   const sized = new Set<string>();
-  for (const op of ops) {
-    if (!reads(op)) continue;
+  for (const op of changes) {
     const node = op.op === "delete" ? undefined : doc.getUnresolved(op.id);
     if (!node) {
       // Gone: whatever held it may have changed.
@@ -733,7 +765,6 @@ export function relayoutTargets(doc: Doc, ids: Iterable<string>, ops: readonly O
           inner.add(outer);
           queue.push(outer);
         }
-  const out: string[] = [];
   const seen = new Set<string>();
   for (const componentId of new Set([...inner, ...sized])) {
     for (const root of doc.instanceRoots(componentId)) {
@@ -744,13 +775,16 @@ export function relayoutTargets(doc: Doc, ids: Iterable<string>, ops: readonly O
         const all = [root];
         for (let i = 0; i < all.length; i++) {
           const id = all[i] as string;
-          out.push(id);
           all.push(...doc.childIds(id));
         }
-      } else if (sized.has(componentId)) out.push(root);
+        const toMeasure = changedCharacters ? all.filter(inheritsTextChange) : all;
+        if (toMeasure.length === 0) continue;
+        for (const id of all) layout.push(id);
+        for (const id of toMeasure) text.push(id);
+      } else if (sized.has(componentId)) layout.push(root);
     }
   }
-  return out;
+  return { layout, text };
 }
 
 /**

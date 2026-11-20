@@ -100,12 +100,15 @@ export function containerLayout(node: Figma.Node): Props {
     if (rows) props.gridRows = rows;
     return props;
   }
+  if (node.strokesIncludedInLayout) props.strokesIncludedInLayout = true;
   if (node.layoutWrap === "WRAP") {
     props.layoutWrap = true;
     props.rowGap = round2(node.counterAxisSpacing ?? 0);
   }
   const justify = pick(JUSTIFY, node.primaryAxisAlignItems);
   if (justify) props.justifyContent = justify;
+  // Figma saves the packed gap even while Auto distributes the remaining space.
+  if (justify === "space-between") props.gap = 0;
   const align = pick(ALIGN, node.counterAxisAlignItems);
   if (align) props.alignItems = align;
   return props;

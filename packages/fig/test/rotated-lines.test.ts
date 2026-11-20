@@ -39,6 +39,7 @@ function fixture() {
       stackPrimarySizing: "RESIZE_TO_FIT_WITH_IMPLICIT_SIZE",
       stackCounterAlignItems: "CENTER",
       stackSpacing: 10,
+      bordersTakeSpace: true,
       fillPaints: [],
     },
     {
@@ -87,7 +88,11 @@ describe("rotated lines", { timeout: 60_000 }, () => {
     const [[, , tx], [, , ty]] = line?.relativeTransform ?? [[], []];
     expect([tx, ty].map((v) => Math.round((v ?? Number.NaN) * 1000) / 1000 + 0)).toEqual([0, 0]);
     // Drawpane turns the 20 x 0 box about its centre, which is (0, 10) in the row.
-    const converted = convertFile(fig.file).nodes.find((n) => n.props.name === "Line");
+    const { nodes } = convertFile(fig.file);
+    const converted = nodes.find((n) => n.props.name === "Line");
     expect(converted?.props).toMatchObject({ x: -10, y: 10, width: 20, height: 0, rotation: 90 });
+    expect(nodes.find((n) => n.props.name === "Separator")?.props.strokesIncludedInLayout).toBe(
+      true,
+    );
   });
 });

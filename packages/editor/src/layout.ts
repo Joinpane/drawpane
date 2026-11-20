@@ -19,6 +19,7 @@
 import { type GridTrack, getProp, type NodeRecord, type Op } from "@drawpane/model";
 import type { Doc } from "./doc";
 import { round2 } from "./geometry";
+import { strokeWidths } from "./stroke-sides";
 
 export interface LayoutBox {
   x: number;
@@ -99,7 +100,7 @@ export function inFlow(node: NodeRecord): boolean {
  * A layer's box as auto layout sees it, in its parent's space: its own
  * position and size, or for a group, the box around everything in it.
  */
-export function layoutBox(doc: Doc, id: string): LayoutBox {
+export function layoutBox(doc: Pick<Doc, "get" | "childIds">, id: string): LayoutBox {
   const node = doc.get(id);
   if (node?.type !== "group") {
     const p = node?.props ?? {};
@@ -218,11 +219,17 @@ function limits(node: NodeRecord, axis: Axis): [number | null, number | null] {
 
 function padding(frame: NodeRecord) {
   const p = frame.props;
+  const [top, right, bottom, left] =
+    getProp(p, "strokesIncludedInLayout") &&
+    getProp(p, "strokeAlign") === "inside" &&
+    getProp(p, "strokes").some((paint) => paint.visible !== false)
+      ? strokeWidths(frame)
+      : [0, 0, 0, 0];
   return {
-    top: getProp(p, "paddingTop"),
-    right: getProp(p, "paddingRight"),
-    bottom: getProp(p, "paddingBottom"),
-    left: getProp(p, "paddingLeft"),
+    top: getProp(p, "paddingTop") + (top ?? 0),
+    right: getProp(p, "paddingRight") + (right ?? 0),
+    bottom: getProp(p, "paddingBottom") + (bottom ?? 0),
+    left: getProp(p, "paddingLeft") + (left ?? 0),
   };
 }
 

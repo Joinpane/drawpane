@@ -992,6 +992,7 @@ export const PROPS = {
   clipContent: prop(z.boolean(), true, CONTAINERS),
   layoutMode: prop(z.enum(["none", "row", "column", "grid"]), "none", CONTAINERS),
   layoutWrap: prop(z.boolean(), false, CONTAINERS),
+  strokesIncludedInLayout: prop(z.boolean(), false, CONTAINERS),
   gap: prop(finite, 0, CONTAINERS),
   rowGap: prop(finite, 0, CONTAINERS),
   paddingTop: prop(nonNegative, 0, CONTAINERS),

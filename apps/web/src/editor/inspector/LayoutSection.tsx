@@ -52,6 +52,7 @@ export function AutoLayoutSection({ editor, nodes }: { editor: Editor; nodes: No
   const justify = common(nodes, "justifyContent");
   const align = common(nodes, "alignItems");
   const justifyItems = common(nodes, "justifyItems");
+  const includeStrokes = common(nodes, "strokesIncludedInLayout");
 
   const set = (label: string, changes: ReadonlyArray<[PropName, unknown]>) => {
     editor.beginGesture(label);
@@ -224,6 +225,25 @@ export function AutoLayoutSection({ editor, nodes }: { editor: Editor; nodes: No
             </PropertyRow>
           )}
           {grid ? <GridTracks editor={editor} nodes={nodes} /> : null}
+          <PropertyRow columns="label">
+            <span className="inspector__label">Strokes</span>
+            <Select
+              label="Strokes in layout"
+              value={includeStrokes === null ? null : includeStrokes ? "included" : "excluded"}
+              options={[
+                { value: "included", label: "Included in layout" },
+                { value: "excluded", label: "Excluded from layout" },
+              ]}
+              onChange={(value) =>
+                editor.setProp(
+                  ids,
+                  "strokesIncludedInLayout",
+                  value === "included",
+                  "Layout strokes",
+                )
+              }
+            />
+          </PropertyRow>
         </>
       ) : null}
     </PropertySection>

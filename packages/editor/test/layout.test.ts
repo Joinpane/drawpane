@@ -76,6 +76,28 @@ describe("auto layout", () => {
     expect(box("c1")).toEqual([6, 34, 80, 20]);
   });
 
+  it("reserves the frame's own inside stroke in Fill and Hug", () => {
+    const { doc, box } = setup(
+      {
+        layoutMode: "column",
+        width: 100,
+        sizingV: "hug",
+        paddingLeft: 3,
+        strokesIncludedInLayout: true,
+        strokes: [{ type: "solid", color: "#000000" }],
+        strokeWeights: [1, 2, 3, 4],
+      },
+      [{ sizingH: "fill" }],
+    );
+    expect(box("f")).toEqual([0, 0, 100, 24]);
+    expect(box("c0")).toEqual([7, 1, 91, 20]);
+
+    doc.apply([{ op: "set", id: "f", prop: "strokeAlign", value: "outside" }]);
+    doc.apply(layoutOps(doc, ["f"]));
+    expect(box("f")).toEqual([0, 0, 100, 20]);
+    expect(box("c0")).toEqual([3, 0, 97, 20]);
+  });
+
   it("shares space between Fill children and respects max", () => {
     const { box } = setup({ layoutMode: "row", gap: 10 }, [
       { sizingH: "fill" },

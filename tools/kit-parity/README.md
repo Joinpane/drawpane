@@ -40,6 +40,17 @@ The conversion cache key covers the packages conversion runs through, `pnpm-lock
 
 The `drawpane` step holds a lock in the temp folder while it converts and draws: a large kit takes several GB, and two or three at once run a machine out of memory. A second run waits and says whose run it's waiting for. `KIT_PARITY_NO_LOCK=1` skips it.
 
+## Relayout stability
+
+```sh
+node --max-old-space-size=12000 tools/kit-parity/kit-parity.mjs relayout --fig kit.fig --out $OUT [--name <label>]
+node --max-old-space-size=12000 tools/kit-parity/kit-parity.mjs relayout --nodes <nodes.ndjson> --out $OUT [--name <label>]
+```
+
+Runs the editor's layout and constraint fixups in a fresh `Doc` with the kit's variables, styles, and inherited modes. It uses every imported layer as a layout target and uses the text sizes the import saved. It compares the resulting parent-relative x, y, width, and height with the imported boxes. A layer counts once when any value changes by more than 0.5 px. A group's box comes from its children.
+
+`relayout[-<label>].json` includes kit totals, counts for each frame subtree, and examples grouped by observable causes. Totals and causes count layers visible after relayout. A separate count shows which visible boxes already differed when the editor resolved bindings, before running layout. Hidden box changes are reported separately and include descendants of hidden layers. Nested frame counts overlap, so use the kit totals to compare whole files.
+
 ## Copies that stay copies
 
 ```sh
