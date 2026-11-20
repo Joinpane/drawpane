@@ -45,20 +45,86 @@ const THIRDS = ["start", "center", "end"] as const;
 export function AutoLayoutSection({ editor, nodes }: { editor: Editor; nodes: NodeRecord[] }) {
   const ids = nodes.map((n) => n.id);
   const mode = common(nodes, "layoutMode");
-  const on = mode !== "none" && mode !== null;
+  const allAuto = nodes.length > 0 && nodes.every((n) => getProp(n.props, "layoutMode") !== "none");
+  const on = allAuto;
   const grid = mode === "grid";
+  const allFlex =
+    allAuto &&
+    nodes.every((n) => {
+      const m = getProp(n.props, "layoutMode");
+      return m === "row" || m === "column";
+    });
+  const mixedDirection = allAuto && mode === null;
   const row = mode === "row";
   const wrap = common(nodes, "layoutWrap");
   const justify = common(nodes, "justifyContent");
   const align = common(nodes, "alignItems");
   const justifyItems = common(nodes, "justifyItems");
   const includeStrokes = common(nodes, "strokesIncludedInLayout");
+  const allSpread =
+    allFlex && nodes.every((n) => getProp(n.props, "justifyContent") === "space-between");
+  const mixedSpread =
+    allFlex &&
+    !allSpread &&
+    nodes.some((n) => getProp(n.props, "justifyContent") === "space-between");
+  const allStretch =
+    grid &&
+    nodes.every(
+      (n) =>
+        getProp(n.props, "justifyItems") === "stretch" &&
+        getProp(n.props, "alignItems") === "stretch",
+    );
+  const mixedStretch =
+    grid &&
+    !allStretch &&
+    nodes.some(
+      (n) =>
+        getProp(n.props, "justifyItems") === "stretch" &&
+        getProp(n.props, "alignItems") === "stretch",
+    );
 
   const set = (label: string, changes: ReadonlyArray<[PropName, unknown]>) => {
     editor.beginGesture(label);
     for (const [prop, value] of changes) editor.setProp(ids, prop, value);
     editor.endGesture();
   };
+
+  const padding = (
+    <div className="inspector__padding">
+      <Num
+        editor={editor}
+        nodes={nodes}
+        prop="paddingLeft"
+        label="L"
+        ariaLabel="Left padding"
+        min={0}
+      />
+      <Num
+        editor={editor}
+        nodes={nodes}
+        prop="paddingRight"
+        label="R"
+        ariaLabel="Right padding"
+        min={0}
+      />
+      <Num
+        editor={editor}
+        nodes={nodes}
+        prop="paddingTop"
+        label="T"
+        ariaLabel="Top padding"
+        min={0}
+      />
+      <Num
+        editor={editor}
+        nodes={nodes}
+        prop="paddingBottom"
+        label="B"
+        ariaLabel="Bottom padding"
+        min={0}
+      />
+    </div>
+  );
 
   return (
     <PropertySection
@@ -82,123 +148,104 @@ export function AutoLayoutSection({ editor, nodes }: { editor: Editor; nodes: No
               label="Direction"
               options={DIRECTIONS}
               value={mode ?? ""}
-              onChange={(value) => editor.setLayoutMode(ids, value)}
+              onChange={(value) => {
+                if (value) editor.setLayoutMode(ids, value);
+              }}
             />
-            {grid ? null : (
+            {allFlex ? (
               <IconButton
                 icon="wrap"
                 label="Wrap"
-                pressed={wrap === true}
-                onClick={() => editor.setProp(ids, "layoutWrap", !wrap, "Wrap")}
+                pressed={wrap === null ? "mixed" : wrap}
+                onClick={() => editor.setProp(ids, "layoutWrap", wrap !== true, "Wrap")}
               />
-            )}
+            ) : null}
           </div>
-          <PropertyRow>
-            <Num
-              editor={editor}
-              nodes={nodes}
-              prop="gap"
-              icon={row || grid ? "gap-horizontal" : "gap-vertical"}
-              ariaLabel={grid ? "Gap between columns" : "Gap between items"}
-            />
-            {grid || wrap ? (
+          {grid || allFlex ? (
+            <PropertyRow>
               <Num
                 editor={editor}
                 nodes={nodes}
-                prop="rowGap"
-                icon={row || grid ? "gap-vertical" : "gap-horizontal"}
-                ariaLabel={grid ? "Gap between rows" : "Gap between lines"}
+                prop="gap"
+                {...(mixedDirection
+                  ? { label: "Gap" }
+                  : { icon: row || grid ? "gap-horizontal" : "gap-vertical" })}
+                ariaLabel={grid ? "Gap between columns" : "Gap between items"}
               />
-            ) : null}
-          </PropertyRow>
-          <div className="inspector__layout">
-            <fieldset className="inspector__align" aria-label="Alignment">
-              {THIRDS.map((a) =>
-                THIRDS.map((j) => {
-                  if (grid) {
-                    // Grids place items in their cells: across (justify) and down (align).
+              {grid || (allFlex && wrap === true) ? (
+                <Num
+                  editor={editor}
+                  nodes={nodes}
+                  prop="rowGap"
+                  {...(mixedDirection
+                    ? { label: "Line" }
+                    : { icon: row || grid ? "gap-vertical" : "gap-horizontal" })}
+                  ariaLabel={grid ? "Gap between rows" : "Gap between lines"}
+                />
+              ) : null}
+            </PropertyRow>
+          ) : null}
+          {mixedDirection ? (
+            padding
+          ) : (
+            <div className="inspector__layout">
+              <fieldset className="inspector__align" aria-label="Alignment">
+                {THIRDS.map((a) =>
+                  THIRDS.map((j) => {
+                    if (grid) {
+                      // Grids place items in their cells: across (justify) and down (align).
+                      const active =
+                        justifyItems === j &&
+                        (align === a || (align === "stretch" && a === "start"));
+                      return (
+                        <button
+                          key={`${a}-${j}`}
+                          type="button"
+                          className="inspector__align-dot"
+                          aria-pressed={active}
+                          aria-label={`Items ${j} across, ${a} down`}
+                          onClick={() =>
+                            set("Alignment", [
+                              ["justifyItems", j],
+                              ["alignItems", a],
+                            ])
+                          }
+                        />
+                      );
+                    }
+                    // Rows: columns = justify (main axis), rows = align. Columns: transposed.
+                    const jj = row ? j : a;
+                    const aa = row ? a : j;
                     const active =
-                      justifyItems === j && (align === a || (align === "stretch" && a === "start"));
+                      justify === jj && (align === aa || (align === "stretch" && aa === "start"));
                     return (
                       <button
                         key={`${a}-${j}`}
                         type="button"
                         className="inspector__align-dot"
                         aria-pressed={active}
-                        aria-label={`Items ${j} across, ${a} down`}
+                        aria-label={`Justify ${jj}, align ${aa}`}
                         onClick={() =>
                           set("Alignment", [
-                            ["justifyItems", j],
-                            ["alignItems", a],
+                            ["justifyContent", jj],
+                            ["alignItems", aa],
                           ])
                         }
                       />
                     );
-                  }
-                  // Rows: columns = justify (main axis), rows = align. Columns: transposed.
-                  const jj = row ? j : a;
-                  const aa = row ? a : j;
-                  const active =
-                    justify === jj && (align === aa || (align === "stretch" && aa === "start"));
-                  return (
-                    <button
-                      key={`${a}-${j}`}
-                      type="button"
-                      className="inspector__align-dot"
-                      aria-pressed={active}
-                      aria-label={`Justify ${jj}, align ${aa}`}
-                      onClick={() =>
-                        set("Alignment", [
-                          ["justifyContent", jj],
-                          ["alignItems", aa],
-                        ])
-                      }
-                    />
-                  );
-                }),
-              )}
-            </fieldset>
-            <div className="inspector__padding">
-              <Num
-                editor={editor}
-                nodes={nodes}
-                prop="paddingLeft"
-                label="L"
-                ariaLabel="Left padding"
-                min={0}
-              />
-              <Num
-                editor={editor}
-                nodes={nodes}
-                prop="paddingRight"
-                label="R"
-                ariaLabel="Right padding"
-                min={0}
-              />
-              <Num
-                editor={editor}
-                nodes={nodes}
-                prop="paddingTop"
-                label="T"
-                ariaLabel="Top padding"
-                min={0}
-              />
-              <Num
-                editor={editor}
-                nodes={nodes}
-                prop="paddingBottom"
-                label="B"
-                ariaLabel="Bottom padding"
-                min={0}
-              />
+                  }),
+                )}
+              </fieldset>
+              {padding}
             </div>
-          </div>
+          )}
           {grid ? (
             <PropertyRow columns="label">
               <span className="inspector__label">Stretch</span>
               <Switch
                 label="Fill their cells"
-                checked={justifyItems === "stretch" && align === "stretch"}
+                checked={allStretch}
+                indeterminate={mixedStretch}
                 onChange={(checked) =>
                   set("Stretch items", [
                     ["justifyItems", checked ? "stretch" : "start"],
@@ -207,12 +254,13 @@ export function AutoLayoutSection({ editor, nodes }: { editor: Editor; nodes: No
                 }
               />
             </PropertyRow>
-          ) : (
+          ) : allFlex ? (
             <PropertyRow columns="label">
               <span className="inspector__label">Spread</span>
               <Switch
                 label="Space between"
-                checked={justify === "space-between"}
+                checked={allSpread}
+                indeterminate={mixedSpread}
                 onChange={(checked) =>
                   editor.setProp(
                     ids,
@@ -223,7 +271,7 @@ export function AutoLayoutSection({ editor, nodes }: { editor: Editor; nodes: No
                 }
               />
             </PropertyRow>
-          )}
+          ) : null}
           {grid ? <GridTracks editor={editor} nodes={nodes} /> : null}
           <PropertyRow columns="label">
             <span className="inspector__label">Strokes</span>

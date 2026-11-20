@@ -90,6 +90,10 @@
   background: var(--signal-soft);
   color: var(--signal-ink);
 }
+.dp-iconbtn[aria-pressed="mixed"] {
+  background: var(--surface-hover);
+  color: var(--signal-ink);
+}
 .dp-iconbtn:disabled {
   background: transparent;
   color: var(--ink-disabled);

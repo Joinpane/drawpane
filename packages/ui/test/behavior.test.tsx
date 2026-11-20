@@ -235,6 +235,38 @@ describe("Switch", () => {
     await user.click(screen.getByRole("switch", { name: "Disabled" }));
     expect(onChange).toHaveBeenCalledTimes(1);
   });
+
+  it("exposes mixed state accessibly when indeterminate and turns on when clicked", async () => {
+    const user = userEvent.setup();
+    const onChange = vi.fn();
+    render(
+      <>
+        <p id="spread-hint">Distributes items along the main axis.</p>
+        <Switch
+          label="Space between"
+          checked={false}
+          indeterminate
+          aria-describedby="spread-hint"
+          onChange={onChange}
+        />
+        <IconButton icon="wrap" label="Wrap" pressed="mixed" />
+      </>,
+    );
+    const control = screen.getByRole("switch", { name: "Space between" });
+    expect(control.getAttribute("aria-checked")).toBe("false");
+    expect(control.classList.contains("dp-switch--mixed")).toBe(true);
+    const describedIds = (control.getAttribute("aria-describedby") ?? "")
+      .split(/\s+/)
+      .filter(Boolean);
+    expect(describedIds).toContain("spread-hint");
+    const descriptionText = describedIds
+      .map((id) => document.getElementById(id)?.textContent ?? "")
+      .join(" ");
+    expect(descriptionText).toContain("Mixed");
+    await user.click(control);
+    expect(onChange).toHaveBeenCalledWith(true);
+    expect(screen.getByRole("button", { name: "Wrap" }).getAttribute("aria-pressed")).toBe("mixed");
+  });
 });
 
 describe("NumberField", () => {

@@ -32,6 +32,14 @@
   background: var(--icon);
   transition: transform var(--duration-toggle) ease-out;
 }
+.dp-switch--mixed .dp-switch__track {
+  background: var(--signal-soft);
+  border-color: var(--signal);
+}
+.dp-switch--mixed .dp-switch__thumb {
+  transform: translateX(5px);
+  background: var(--signal-ink);
+}
 .dp-switch[aria-checked="true"] .dp-switch__track {
   background: var(--signal);
   border-color: var(--signal);

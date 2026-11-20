@@ -82,7 +82,12 @@ const corners = (variable: Guid) => ({
   ].map((field) => binding(field, variable)),
 });
 
-function fixture(swap = true, literal = false) {
+function fixture(
+  swap = true,
+  literal = false,
+  scale = 1,
+  options: { nestedPadding?: number; unboundNew?: boolean } = {},
+) {
   const parsed = parseFigBuffer(bytes.slice().buffer as ArrayBuffer);
   const records = parsed.nodeChanges;
   const set = records.find((r) => r.type === "VARIABLE_SET") as NodeChange & {
@@ -128,7 +133,7 @@ function fixture(swap = true, literal = false) {
         }
       : {}),
     stackMode: "HORIZONTAL",
-    stackHorizontalPadding: bound === ids.newOpacity ? 80 : 50,
+    stackHorizontalPadding: id === ids.newVariant ? 80 : 50,
     bordersTakeSpace: id === ids.newVariant,
   });
   const box = (id: Guid, name: string, x: number, independent: boolean) => ({
@@ -275,7 +280,7 @@ function fixture(swap = true, literal = false) {
     number(ids.newOpacity, "New opacity", 80, "~New"),
     number(ids.overrideOpacity, "Override opacity", 50, "~Override"),
     symbol(ids.oldVariant, "Original", 0.5, literal ? undefined : ids.oldOpacity),
-    symbol(ids.newVariant, "Replacement", 0.8, ids.newOpacity),
+    symbol(ids.newVariant, "Replacement", 0.8, options.unboundNew ? undefined : ids.newOpacity),
     symbol(ids.host, "Host", 1),
     {
       ...base,
@@ -288,14 +293,18 @@ function fixture(swap = true, literal = false) {
       transform: identity(),
       symbolData: { symbolID: ids.oldVariant, symbolOverrides: [] },
       stackMode: "HORIZONTAL",
-      stackHorizontalPadding: 50,
+      ...(options.nestedPadding !== undefined
+        ? { stackHorizontalPadding: options.nestedPadding }
+        : scale === 1
+          ? { stackHorizontalPadding: 50 }
+          : {}),
       bordersTakeSpace: false,
       ...(!literal
         ? {
             variableConsumptionMap: {
               entries: [
                 binding("OPACITY", ids.oldOpacity),
-                binding("STACK_PADDING_LEFT", ids.overrideOpacity),
+                ...(scale === 1 ? [binding("STACK_PADDING_LEFT", ids.overrideOpacity)] : []),
               ],
             },
           }
@@ -311,6 +320,7 @@ function fixture(swap = true, literal = false) {
       transform: identity(100, 4700),
       symbolData: {
         symbolID: ids.host,
+        ...(scale !== 1 ? { uniformScaleFactor: scale } : {}),
         symbolOverrides: [
           {
             guidPath: { guids: [ids.nested] },
@@ -335,8 +345,13 @@ function fixture(swap = true, literal = false) {
   );
 }
 
-async function converted(swap = true, literal = false) {
-  const fig = await readFig(fixture(swap, literal));
+async function converted(
+  swap = true,
+  literal = false,
+  scale = 1,
+  options: { nestedPadding?: number; unboundNew?: boolean } = {},
+) {
+  const fig = await readFig(fixture(swap, literal, scale, options));
   const { nodes } = convertFile(fig.file as Figma.File);
   const byId = new Map(nodes.map((n) => [n.id, n]));
   const resolver = new TokenResolver(new MemoryStore(nodes));
@@ -481,4 +496,25 @@ it("takes the new variant's included stroke flag from .fig metadata", {
   const nested = result.copyOf(ids.swapped, ids.nested);
   expect(nested.props.instanceOf).toBe(drawpaneId(key(ids.newVariant)));
   expect(nested.props.strokesIncludedInLayout).toBe(true);
+});
+
+it("takes the new variant padding at the inherited 2x placement scale in .fig conversion", {
+  timeout: 60_000,
+}, async () => {
+  const original = (await converted(false, false, 2)).copyOf(ids.swapped, ids.nested);
+  expect(original.props.paddingLeft).toBe(100);
+  const after = (await converted(true, false, 2)).copyOf(ids.swapped, ids.nested);
+  expect(after.props.instanceOf).toBe(drawpaneId(key(ids.newVariant)));
+  expect(after.props.paddingLeft).toBe(160);
+});
+
+it("preserves an explicit nested source padding across a 2x host swap to an unbound variant", {
+  timeout: 60_000,
+}, async () => {
+  const opts = { nestedPadding: 50, unboundNew: true };
+  const original = (await converted(false, true, 2, opts)).copyOf(ids.swapped, ids.nested);
+  expect(original.props.paddingLeft).toBe(100);
+  const after = (await converted(true, true, 2, opts)).copyOf(ids.swapped, ids.nested);
+  expect(after.props.instanceOf).toBe(drawpaneId(key(ids.newVariant)));
+  expect(after.props.paddingLeft).toBe(100);
 });

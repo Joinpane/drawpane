@@ -66,7 +66,7 @@ const LOOK = [
   "clipsContent",
 ] as const;
 
-const LAYOUT_NUMBERS: ReadonlySet<string> = new Set([
+const SCALED_NUMBERS: ReadonlySet<string> = new Set([
   "itemSpacing",
   "counterAxisSpacing",
   "paddingTop",
@@ -77,9 +77,20 @@ const LAYOUT_NUMBERS: ReadonlySet<string> = new Set([
   "maxWidth",
   "minHeight",
   "maxHeight",
+  "strokeWeight",
+  "borderTopWeight",
+  "borderRightWeight",
+  "borderBottomWeight",
+  "borderLeftWeight",
+  "cornerRadius",
+  "topLeftRadius",
+  "topRightRadius",
+  "bottomLeftRadius",
+  "bottomRightRadius",
 ]);
 
 const same = (a: unknown, b: unknown) => a === b || JSON.stringify(a) === JSON.stringify(b);
+const near = (a: number, b: number) => Math.abs(a - b) <= 1e-9;
 
 /** Kiwi's names for the look fields a variable binds, as an override's consumption map has them. */
 const BOUND_LOOK_FIELDS: Readonly<Record<string, string>> = {
@@ -164,6 +175,7 @@ const SET_LOOK_FIELDS: Readonly<Record<string, readonly string[]>> = {
   stackCounterSizing: ["counterAxisSizing"],
   stackSpacing: ["itemSpacing"],
   stackCounterSpacing: ["counterAxisSpacing"],
+  stackPadding: ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"],
   stackVerticalPadding: ["paddingTop"],
   stackPaddingRight: ["paddingRight"],
   stackPaddingBottom: ["paddingBottom"],
@@ -173,6 +185,20 @@ const SET_LOOK_FIELDS: Readonly<Record<string, readonly string[]>> = {
   maxSize: ["maxWidth", "maxHeight"],
   frameMaskDisabled: ["clipsContent"],
 };
+
+const PADDING_SIDES = ["paddingTop", "paddingRight", "paddingBottom", "paddingLeft"] as const;
+
+const RAW_FIELDS_BY_LOOK: ReadonlyMap<string, readonly string[]> = (() => {
+  const map = new Map<string, string[]>();
+  for (const [rawField, looks] of Object.entries(SET_LOOK_FIELDS)) {
+    for (const look of looks) {
+      const list = map.get(look);
+      if (list) list.push(rawField);
+      else map.set(look, [rawField]);
+    }
+  }
+  return map;
+})();
 
 /**
  * The look fields the instances around a layer bind or set explicitly in
@@ -206,6 +232,8 @@ function explicitLooks(overrides: readonly Readonly<Record<string, unknown>>[]):
       if (o[field] !== undefined) for (const look of looks) set.add(look);
     for (const [field, look] of Object.entries(PLAIN_LOOK_FIELDS))
       if (typeof o[field] === "number" && !values.has(look)) values.set(look, o[field]);
+    if (typeof o.stackPadding === "number")
+      for (const side of PADDING_SIDES) if (!values.has(side)) values.set(side, o.stackPadding);
     if (typeof o.bordersTakeSpace === "boolean" && !values.has("strokesIncludedInLayout"))
       values.set("strokesIncludedInLayout", o.bordersTakeSpace);
     if (
@@ -225,6 +253,69 @@ function bindingsOf(bound: Bound | undefined, field: string): Record<string, str
   for (const [key, id] of Object.entries(bound ?? {}))
     if (key === field || key.startsWith(`${field}/`)) out[key] = id;
   return out;
+}
+
+/**
+ * Root-targeting override claims saved on the nested instance's own record.
+ * Unlike cached properties copied directly onto an INSTANCE record by Figma,
+ * root claims are always explicit overrides authored on that instance.
+ */
+function sourceRootOverrides(
+  source: string | null,
+  sourceRecord: RawRecord | undefined,
+  before: string,
+  oldRecord: RawRecord | undefined,
+  now: string,
+  newRecord: RawRecord | undefined,
+): Readonly<Record<string, unknown>>[] {
+  if (!sourceRecord) return [];
+  const out: Readonly<Record<string, unknown>>[] = [];
+  const rootKeys = new Set<string>([before, now]);
+  if (source) rootKeys.add(source);
+  for (const record of [sourceRecord, oldRecord, newRecord]) {
+    if (record?.overrideKey) rootKeys.add(guidString(record.overrideKey));
+  }
+  for (const override of sourceRecord.symbolData?.symbolOverrides ?? []) {
+    const guids = override.guidPath?.guids;
+    if (guids?.length === 1 && guids[0] && rootKeys.has(guidString(guids[0]))) {
+      out.push(override as unknown as Readonly<Record<string, unknown>>);
+    }
+  }
+  return out;
+}
+
+function rawLookBinding(record: Readonly<Record<string, unknown>>, field: string): unknown {
+  for (const map of [record.variableConsumptionMap, record.parameterConsumptionMap]) {
+    const entries = (
+      map as { entries?: { variableField?: unknown; variableData?: unknown }[] } | undefined
+    )?.entries;
+    for (const entry of entries ?? []) {
+      const name = typeof entry.variableField === "string" ? entry.variableField : "";
+      if (BOUND_LOOK_FIELDS[name] === field) return entry.variableData;
+    }
+  }
+  return undefined;
+}
+
+/**
+ * Figma saves a cached copy of the original component's own properties directly
+ * onto every nested INSTANCE record. When both records exist at unit scale and
+ * every raw field (and variable binding) the source declares for `field` equals
+ * the old component record verbatim, treat it as that cached copy rather than
+ * an explicit source override.
+ */
+function mirrorsOldRecord(
+  sourceRecord: RawRecord,
+  oldRecord: RawRecord | undefined,
+  field: string,
+): boolean {
+  if (!oldRecord) return false;
+  const src = sourceRecord as unknown as Readonly<Record<string, unknown>>;
+  const old = oldRecord as unknown as Readonly<Record<string, unknown>>;
+  for (const rawField of RAW_FIELDS_BY_LOOK.get(field) ?? []) {
+    if (src[rawField] !== undefined && !same(src[rawField], old[rawField])) return false;
+  }
+  return same(rawLookBinding(src, field), rawLookBinding(old, field));
 }
 
 /**
@@ -250,7 +341,8 @@ export function applySwappedLooks(
     if (node.type !== "INSTANCE" || !node.componentId) continue;
     // The record it copies, and the component that record names.
     const source = ids.sourceGuid(node);
-    const symbol = source ? records.get(source)?.symbolData?.symbolID : undefined;
+    const sourceRecord = source ? records.get(source) : undefined;
+    const symbol = sourceRecord?.symbolData?.symbolID;
     if (!symbol) continue;
     const before = guidString(symbol);
     const now = ids.sourceGuid(graph.getNode(node.componentId) as SceneNode);
@@ -263,8 +355,24 @@ export function applySwappedLooks(
     const own = node as unknown as Record<string, unknown>;
     const was = oldMain as unknown as Record<string, unknown>;
     const next = newMain as unknown as Record<string, unknown>;
+    const placementScale =
+      Number.isFinite(node.componentScale) && node.componentScale > 0 ? node.componentScale : 1;
     // An explicit override belongs to the instance even when its value matches the old main's.
     const explicit = explicitLooks(ids.overridesOf?.(node) ?? []);
+    const oldRecord = records.get(before);
+    const sourceRootExplicit = explicitLooks(
+      sourceRootOverrides(source, sourceRecord, before, oldRecord, now, records.get(now)),
+    );
+    const sourceRecordExplicit = sourceRecord
+      ? explicitLooks([sourceRecord as unknown as Readonly<Record<string, unknown>>])
+      : null;
+    const sourceDeclared = (field: string) =>
+      sourceRootExplicit.set.has(field) ||
+      node.instanceOverrides?.self?.has(field) === true ||
+      node.instanceOverrides?.self?.has(`boundVariables/${field}`) === true ||
+      (sourceRecord !== undefined &&
+        sourceRecordExplicit?.set.has(field) === true &&
+        (placementScale !== 1 || !mirrorsOldRecord(sourceRecord, oldRecord, field)));
     const bound = { ...(node.boundVariables as Bound | undefined) };
     const scales = { ...node.variableBindingScales };
     let rebound = false;
@@ -283,8 +391,20 @@ export function applySwappedLooks(
           else bound[key] = binding;
           rebound = true;
         }
-        const scale = binding === undefined ? undefined : from?.variableBindingScales?.[key];
-        if (scale !== scales[key]) {
+        const authored = from?.variableBindingScales?.[key];
+        const scale =
+          binding === undefined
+            ? undefined
+            : SCALED_NUMBERS.has(key)
+              ? authored !== undefined || placementScale !== 1
+                ? (authored ?? 1) * placementScale
+                : undefined
+              : authored;
+        const prevScale = scales[key];
+        const scaleChanged =
+          (scale === undefined) !== (prevScale === undefined) ||
+          (scale !== undefined && prevScale !== undefined && !near(scale, prevScale));
+        if (scaleChanged) {
           if (scale === undefined) delete scales[key];
           else scales[key] = scale;
           rescaled = true;
@@ -301,35 +421,70 @@ export function applySwappedLooks(
         if (!explicit.bound.has(field)) replaceBindings(field);
         continue;
       }
-      const numericLayout = LAYOUT_NUMBERS.has(field);
+      const scaledNumber = SCALED_NUMBERS.has(field);
       const ownBinding = node.boundVariables?.[field];
       const oldBinding = oldMain.boundVariables?.[field];
-      const ownScale = node.variableBindingScales?.[field] ?? 1;
+      const ownTotalScale =
+        node.variableBindingScales?.[field] ?? (scaledNumber ? placementScale : 1);
+      const ownAuthoredScale = scaledNumber ? ownTotalScale / placementScale : ownTotalScale;
+      const oldAuthoredScale = oldMain.variableBindingScales?.[field] ?? 1;
       if (
-        numericLayout &&
+        scaledNumber &&
         ownBinding !== undefined &&
-        (ownBinding !== oldBinding || ownScale !== (oldMain.variableBindingScales?.[field] ?? 1))
+        (ownBinding !== oldBinding || !near(ownAuthoredScale, oldAuthoredScale))
       )
         continue;
-      // Open Pencil resolved the old layout token where the copy sits. Its
-      // fallback can differ from the old component's without being an override.
+      // Open Pencil resolved the old token where the copy sits and factored
+      // instance placement scale into both the saved value and variableBindingScales.
+      // When the source instance explicitly declares a numeric look field on its own
+      // record or root claims, keep that value instead of assuming it was inherited
+      // from the old component.
+      if (scaledNumber && sourceDeclared(field)) continue;
       const previous =
-        numericLayout && ownBinding
+        scaledNumber && ownBinding
           ? graph.resolveNumberVariableForNode(node.id, ownBinding)
           : undefined;
-      const inherited = previous !== undefined && own[field] === previous * ownScale;
+      const inherited =
+        (previous !== undefined &&
+          typeof own[field] === "number" &&
+          near(own[field], previous * ownTotalScale)) ||
+        (scaledNumber &&
+          typeof own[field] === "number" &&
+          typeof was[field] === "number" &&
+          near(own[field], was[field] * placementScale));
       if (!inherited && !same(own[field], was[field])) continue;
       const newBinding = newMain.boundVariables?.[field];
+      const newAuthoredScale = newMain.variableBindingScales?.[field] ?? 1;
+      const newTotalScale = scaledNumber ? newAuthoredScale * placementScale : newAuthoredScale;
       const resolved =
-        numericLayout && newBinding
+        scaledNumber && newBinding
           ? graph.resolveNumberVariableForNode(node.id, newBinding)
           : undefined;
       const value =
-        resolved === undefined
-          ? next[field]
-          : resolved * (newMain.variableBindingScales?.[field] ?? 1);
+        resolved !== undefined
+          ? resolved * newTotalScale
+          : scaledNumber && typeof next[field] === "number"
+            ? next[field] * placementScale
+            : next[field];
       if (!same(own[field], value)) updates[field] = structuredClone(value);
       replaceBindings(field, newMain);
+    }
+    // Keep per-stroke weights aligned with the resolved strokeWeight so adaptNode
+    // exports the copy's mode- and scale-resolved weight as its literal fallback.
+    const effectiveStrokeWeight = (updates.strokeWeight ?? node.strokeWeight) as number;
+    const strokes = (updates.strokes ?? node.strokes) as SceneNode["strokes"];
+    if (
+      strokes.length > 0 &&
+      (updates.strokeWeight !== undefined ||
+        (updates.strokes !== undefined && !near(effectiveStrokeWeight, newMain.strokeWeight))) &&
+      strokes.some((stroke) => !near(stroke.weight, effectiveStrokeWeight))
+    ) {
+      const nextStrokes =
+        updates.strokes !== undefined
+          ? (updates.strokes as SceneNode["strokes"])
+          : structuredClone(node.strokes);
+      for (const stroke of nextStrokes) stroke.weight = effectiveStrokeWeight;
+      updates.strokes = nextStrokes;
     }
     if (rebound) updates.boundVariables = bound;
     if (rescaled) updates.variableBindingScales = scales;
