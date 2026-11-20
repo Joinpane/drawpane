@@ -39,10 +39,13 @@ export class Outcome {
 
 export class GpuInit {
   free(): void;
+  __destroy_into_raw(): number;
   readonly ok: boolean;
   readonly code: number;
   readonly message: string;
   readonly adapter: string;
+  readonly backend: string;
+  readonly details: string;
   readonly fallback: boolean;
 }
 
@@ -140,7 +143,7 @@ export class Engine {
   clearTiles?(): void;
   gpuCheck?(): Outcome;
   gpuDestroy?(): void;
-  gpuFinished?(): Promise<void>;
+  gpuFinished?(): Promise<Outcome | undefined>;
   /** Resolves to the pixels, or to an `Outcome` saying why not; never rejects. */
   gpuPixels?(): Promise<Uint8Array | Outcome>;
 }
@@ -148,7 +151,8 @@ export class Engine {
 export function listVersion(): Uint32Array;
 export function memoryBytes(): number;
 export function hasGpu(): boolean;
-/** The browser build only. */
+export function gpuBackend(): string;
+/** The browser builds (WebGPU and WebGL2) only. */
 export function createGpu(
   canvas: HTMLCanvasElement | OffscreenCanvas | null,
   glyphMaskBytes: number,
@@ -157,9 +161,15 @@ export function createGpu(
 export interface InitOutput {
   readonly memory: WebAssembly.Memory;
 }
+/** Added to the glue by scripts/build.mjs: creates an isolated per-generation glue instance. */
+export function __drawpaneCreateGlue(): typeof import("./glue");
+/** Added to the glue by scripts/build.mjs: silences timers, closures, and finalizers on trap. */
+export function __drawpaneQuiesce(): void;
+/** Added to the glue by scripts/build.mjs: returns the compiled WebAssembly.Module. */
+export function __drawpaneModule(): WebAssembly.Module | undefined;
 /** Added to the glue by scripts/build.mjs: a new instance after a trap. */
-export function __drawpaneRenew(): InitOutput;
-export function initSync(module: { module: BufferSource | WebAssembly.Module }): InitOutput;
+export function __drawpaneRenew(): InitOutput | typeof import("./glue");
+export function initSync(module?: { module: BufferSource | WebAssembly.Module }): InitOutput;
 export default function init(module?: {
   module_or_path: RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 }): Promise<InitOutput>;

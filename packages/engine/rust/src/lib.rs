@@ -12,7 +12,7 @@ pub mod error;
 pub mod exec;
 pub mod geometry;
 pub mod glyphs;
-#[cfg(feature = "gpu")]
+#[cfg(feature = "gpu-common")]
 pub mod gpu;
 pub mod images;
 pub mod kernels;
@@ -173,7 +173,19 @@ pub fn memory_bytes() -> f64 {
 /// Whether this build draws on the GPU.
 #[wasm_bindgen(js_name = hasGpu)]
 pub fn has_gpu() -> bool {
-    cfg!(feature = "gpu")
+    cfg!(feature = "gpu-common")
+}
+
+/// Which GPU backend this build uses: `"webgpu"`, `"webgl2"`, or `""` (CPU-only build).
+#[wasm_bindgen(js_name = gpuBackend)]
+pub fn gpu_backend() -> String {
+    if cfg!(feature = "webgl") {
+        "webgl2".to_string()
+    } else if cfg!(feature = "gpu") {
+        "webgpu".to_string()
+    } else {
+        String::new()
+    }
 }
 
 #[wasm_bindgen]
@@ -591,7 +603,7 @@ impl Engine {
 }
 
 /// A failure as a JS value (an `Outcome`), for promises that resolve to one instead of rejecting.
-#[cfg(feature = "gpu")]
+#[cfg(feature = "gpu-common")]
 fn failure(e: EngineError) -> JsValue {
     JsValue::from(Outcome::err(e))
 }
@@ -602,7 +614,7 @@ fn rgba(v: &[f32]) -> [f32; 4] {
 }
 
 /// A GPU being created: `createGpu` answers one, `Engine.attachGpu` takes its device.
-#[cfg(feature = "gpu")]
+#[cfg(feature = "gpu-common")]
 #[wasm_bindgen]
 pub struct GpuInit {
     inner: Option<gpu::Gpu>,
@@ -610,11 +622,13 @@ pub struct GpuInit {
     pub code: u32,
     message: String,
     adapter: String,
+    backend: String,
+    details: String,
     /// A software adapter (SwiftShader, llvmpipe): its timings say nothing about a GPU.
     pub fallback: bool,
 }
 
-#[cfg(feature = "gpu")]
+#[cfg(feature = "gpu-common")]
 #[wasm_bindgen]
 impl GpuInit {
     #[wasm_bindgen(getter)]
@@ -625,11 +639,20 @@ impl GpuInit {
     pub fn adapter(&self) -> String {
         self.adapter.clone()
     }
+    #[wasm_bindgen(getter)]
+    pub fn backend(&self) -> String {
+        self.backend.clone()
+    }
+    #[wasm_bindgen(getter)]
+    pub fn details(&self) -> String {
+        self.details.clone()
+    }
 }
 
-/// Creates a WebGPU device, drawing into `canvas` (an `HTMLCanvasElement` or `OffscreenCanvas`),
-/// or into nothing (null: frames are only read back).
-#[cfg(feature = "gpu")]
+/// Creates a GPU device (WebGPU or WebGL2, per this build's feature), drawing into `canvas`
+/// (an `HTMLCanvasElement` or `OffscreenCanvas`), or into nothing (null: frames are only read
+/// back). Runs a capability probe (pipelines + small render readback) before succeeding.
+#[cfg(feature = "gpu-common")]
 #[wasm_bindgen(js_name = createGpu)]
 pub async fn create_gpu(canvas: JsValue, glyph_mask_bytes: u32) -> GpuInit {
     use wasm_bindgen::JsCast;
@@ -651,6 +674,8 @@ pub async fn create_gpu(canvas: JsValue, glyph_mask_bytes: u32) -> GpuInit {
     match gpu::Gpu::create(target, bytes, limits.glyph_mask_side).await {
         Ok(g) => GpuInit {
             adapter: g.adapter.clone(),
+            backend: g.backend.to_string(),
+            details: g.details.clone(),
             fallback: g.fallback_adapter,
             inner: Some(g),
             ok: true,
@@ -663,12 +688,14 @@ pub async fn create_gpu(canvas: JsValue, glyph_mask_bytes: u32) -> GpuInit {
             code: e.code as u32,
             message: e.message,
             adapter: String::new(),
+            backend: gpu_backend(),
+            details: String::new(),
             fallback: false,
         },
     }
 }
 
-#[cfg(feature = "gpu")]
+#[cfg(feature = "gpu-common")]
 #[wasm_bindgen]
 impl Engine {
     /// Takes the device `init` made (once).
@@ -786,19 +813,27 @@ impl Engine {
     #[wasm_bindgen(js_name = gpuDestroy)]
     pub fn gpu_destroy(&self) {
         if let Some(g) = self.core.gpu.as_ref() {
-            g.device.destroy();
+            g.destroy();
         }
     }
 
-    /// Resolves when the GPU has finished what it was given (never rejects).
+    /// Resolves when the GPU has finished what it was given, or to an `Outcome` on failure
+    /// (never rejects).
     #[wasm_bindgen(js_name = gpuFinished)]
     pub fn gpu_finished(&self) -> js_sys::Promise {
-        let queue = self.core.gpu.as_ref().map(|g| g.queue.clone());
+        let triple = self
+            .core
+            .gpu
+            .as_ref()
+            .map(|g| (g.device.clone(), g.health.clone(), g.queue.clone()));
         wasm_bindgen_futures::future_to_promise(async move {
-            if let Some(q) = queue {
-                gpu::finished(q).await;
+            let Some((device, health, queue)) = triple else {
+                return Ok(failure(EngineError::new(error::ErrorCode::State, "no GPU attached")));
+            };
+            match gpu::finished(device, health, queue).await {
+                Ok(()) => Ok(JsValue::UNDEFINED),
+                Err(e) => Ok(failure(e)),
             }
-            Ok(JsValue::UNDEFINED)
         })
     }
 
@@ -806,17 +841,18 @@ impl Engine {
     /// `Outcome` saying why not (it never rejects).
     #[wasm_bindgen(js_name = gpuPixels)]
     pub fn gpu_pixels(&self) -> js_sys::Promise {
+        let pair = self.core.gpu.as_ref().map(|g| (g.device.clone(), g.health.clone()));
         let start = self.core.gpu.as_ref().map(|g| g.read_back_start());
         let opaque = self.core.gpu.as_ref().is_some_and(|g| g.opaque());
         wasm_bindgen_futures::future_to_promise(async move {
-            let (buffer, w, h, row, flight) = match start {
-                Some(Ok(s)) => s,
-                Some(Err(e)) => return Ok(failure(e)),
-                None => {
-                    return Ok(failure(EngineError::new(error::ErrorCode::State, "no GPU attached")));
-                }
+            let (Some((device, health)), Some(start)) = (pair, start) else {
+                return Ok(failure(EngineError::new(error::ErrorCode::State, "no GPU attached")));
             };
-            match gpu::read_back_straight(buffer, w, h, row, flight, opaque).await {
+            let (buffer, w, h, row, flight) = match start {
+                Ok(s) => s,
+                Err(e) => return Ok(failure(e)),
+            };
+            match gpu::read_back_straight(device, health, buffer, w, h, row, flight, opaque).await {
                 Ok(px) => Ok(px.into()),
                 Err(e) => Ok(failure(e)),
             }

@@ -1,9 +1,13 @@
-//! The GPU backend: vello_gpu on wgpu's WebGPU backend (the browser build).
+//! The GPU backend: vello_gpu on wgpu's WebGPU backend (`browser`) or WebGL2 backend (`webgl`).
 //!
 //! - The frame is drawn into an RGBA8 texture of the engine's own (`main`), then copied to the
 //!   canvas's surface by one full-screen pass. Tests and the GPU bench read `main` back through
 //!   a buffer (`copy_texture_to_buffer`), never through the canvas: a WebGPU canvas copied into a
 //!   2D canvas can come back empty on headless drivers.
+//! - On WebGL2, wgpu's GL backend translates WGSL to GLSL ES 3.0 through naga, shares one device
+//!   between Vello and Drawpane's passes, asks for WebGL2 downlevel limits with the adapter's
+//!   texture and buffer sizes, and drives buffer-map / work-done callbacks through a non-blocking
+//!   yielding poll loop (a blocking poll would spin the page's thread).
 //! - Images are textures, one per level, uploaded once. Glyph masks are rasterised by vello_cpu
 //!   (`masks.rs`, the same coverage as the CPU backend) and kept on the CPU; each tile lays its
 //!   runs' masks into one image a run and uploads them into the atlas texture, packed in rows
@@ -15,8 +19,9 @@
 //! - A frame the canvas can't take (its surface lost, or a validation error getting its texture)
 //!   is a failure, after one reconfiguration: the caller keeps or draws a picture another way,
 //!   never a blank canvas.
-//! - Errors never panic: wgpu's uncaptured errors and device loss are recorded and turned into
-//!   `ErrorCode::Gpu` and `ErrorCode::DeviceLost` on the next call, so the editor falls back.
+//! - Errors never panic: wgpu's uncaptured errors, WebGPU device loss, and WebGL2 context loss
+//!   are recorded and turned into `ErrorCode::Gpu` and `ErrorCode::DeviceLost` on the next call,
+//!   so the editor recovers or falls back.
 //! - Backdrop readers are phase 3 here (`read` refuses), as everywhere outside the tests.
 
 use crate::engine::{DragFrame, TiledOptions};
@@ -29,8 +34,10 @@ use crate::store::Store;
 use crate::tiles::{Composite, Last, TILE, TileCache, TileKey};
 use std::cell::Cell;
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use vello_common::TextureId;
 use vello_common::geometry::RectU16;
@@ -40,6 +47,167 @@ use vello_gpu::{
     ClearSettings, RenderOptions, RenderSize, RenderTarget, RenderTargetConfig, Renderer, Resources, Scene, TargetInit,
     TextureBindings,
 };
+use wasm_bindgen::JsCast;
+use wasm_bindgen::prelude::wasm_bindgen;
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_name = setTimeout)]
+    fn set_timeout(callback: &js_sys::Function, ms: i32) -> i32;
+    #[wasm_bindgen(js_name = clearTimeout)]
+    fn clear_timeout(id: i32);
+}
+
+/// Timeout for the startup capability probe before refusing the adapter (allows cold shader JIT on slow drivers).
+const PROBE_TIMEOUT_MS: i32 = 6_000;
+/// Timeout for runtime GPU waits (`read_back` and `finished`).
+const WAIT_TIMEOUT_MS: i32 = 12_000;
+/// Maximum concurrent `gpuFinished` waits per device.
+const MAX_FINISHED_WAITERS: u32 = 8;
+
+/// An armed JS timeout that clears itself on drop so completed or cancelled waits leak no timers.
+struct Timeout {
+    id: i32,
+    _cb: wasm_bindgen::closure::Closure<dyn FnMut()>,
+}
+
+impl Timeout {
+    fn after(ms: i32) -> (Self, futures_channel::oneshot::Receiver<()>) {
+        let (tx, rx) = futures_channel::oneshot::channel();
+        let mut tx = Some(tx);
+        let cb = wasm_bindgen::closure::Closure::<dyn FnMut()>::new(move || {
+            if let Some(tx) = tx.take() {
+                let _ = tx.send(());
+            }
+        });
+        let id = set_timeout(cb.as_ref().unchecked_ref(), ms);
+        (Self { id, _cb: cb }, rx)
+    }
+}
+
+impl Drop for Timeout {
+    fn drop(&mut self) {
+        clear_timeout(self.id);
+    }
+}
+
+/// The web's display handle, which wgpu's GL backend asks for.
+#[cfg(feature = "webgl")]
+#[derive(Debug)]
+struct WebDisplay;
+
+#[cfg(feature = "webgl")]
+impl wgpu::rwh::HasDisplayHandle for WebDisplay {
+    fn display_handle(&self) -> std::result::Result<wgpu::rwh::DisplayHandle<'_>, wgpu::rwh::HandleError> {
+        Ok(wgpu::rwh::DisplayHandle::web())
+    }
+}
+
+/// Listens for `webglcontextlost` on the canvas backing a WebGL2 surface so context loss is
+/// reported as `ErrorCode::DeviceLost` immediately (and removes the listener on drop).
+#[cfg(feature = "webgl")]
+struct ContextLossGuard {
+    target: web_sys::EventTarget,
+    callback: wasm_bindgen::closure::Closure<dyn FnMut(web_sys::Event)>,
+}
+
+#[cfg(feature = "webgl")]
+impl ContextLossGuard {
+    fn attach(target: web_sys::EventTarget, health: Arc<Health>) -> Self {
+        let callback = wasm_bindgen::closure::Closure::<dyn FnMut(web_sys::Event)>::new(move |e: web_sys::Event| {
+            e.prevent_default();
+            health.mark_lost("webglcontextlost".to_string());
+        });
+        let _ = target.add_event_listener_with_callback("webglcontextlost", callback.as_ref().unchecked_ref());
+        Self { target, callback }
+    }
+}
+
+#[cfg(feature = "webgl")]
+impl Drop for ContextLossGuard {
+    fn drop(&mut self) {
+        let _ = self
+            .target
+            .remove_event_listener_with_callback("webglcontextlost", self.callback.as_ref().unchecked_ref());
+    }
+}
+
+const IS_WEBGL: bool = cfg!(feature = "webgl");
+
+fn is_software_adapter(info: &wgpu::AdapterInfo) -> bool {
+    if matches!(info.device_type, wgpu::DeviceType::Cpu) {
+        return true;
+    }
+    let words = format!("{} {} {}", info.name, info.driver, info.driver_info).to_lowercase();
+    [
+        "swiftshader",
+        "llvmpipe",
+        "lavapipe",
+        "softpipe",
+        "software",
+        "basic render",
+        "mesa offscreen",
+        "subzero",
+    ]
+    .iter()
+    .any(|s| words.contains(s))
+}
+
+fn json_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    out.push('"');
+    for ch in s.chars() {
+        match ch {
+            '"' => out.push_str("\\\""),
+            '\\' => out.push_str("\\\\"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            c if (c as u32) < 0x20 => {
+                use std::fmt::Write;
+                let _ = write!(out, "\\u{:04x}", c as u32);
+            }
+            c => out.push(c),
+        }
+    }
+    out.push('"');
+    out
+}
+
+fn format_details(
+    info: &wgpu::AdapterInfo,
+    limits: &wgpu::Limits,
+    features: wgpu::Features,
+    backend: &str,
+    fallback: bool,
+) -> String {
+    let features_list = format!("{features:?}");
+    format!(
+        "{{\"backend\":{},\"wgpuBackend\":{},\"name\":{},\"vendor\":{},\"device\":{},\"deviceType\":{},\"driver\":{},\"driverInfo\":{},\"fallback\":{},\"features\":{},\"limits\":{{\"maxTextureDimension1D\":{},\"maxTextureDimension2D\":{},\"maxTextureDimension3D\":{},\"maxTextureArrayLayers\":{},\"maxBindGroups\":{},\"maxSampledTexturesPerShaderStage\":{},\"maxSamplersPerShaderStage\":{},\"maxUniformBuffersPerShaderStage\":{},\"maxUniformBufferBindingSize\":{},\"maxBufferSize\":{},\"maxColorAttachments\":{},\"maxInterStageShaderVariables\":{}}}}}",
+        json_escape(backend),
+        json_escape(&format!("{:?}", info.backend)),
+        json_escape(&info.name),
+        info.vendor,
+        info.device,
+        json_escape(&format!("{:?}", info.device_type)),
+        json_escape(&info.driver),
+        json_escape(&info.driver_info),
+        fallback,
+        json_escape(&features_list),
+        limits.max_texture_dimension_1d,
+        limits.max_texture_dimension_2d,
+        limits.max_texture_dimension_3d,
+        limits.max_texture_array_layers,
+        limits.max_bind_groups,
+        limits.max_sampled_textures_per_shader_stage,
+        limits.max_samplers_per_shader_stage,
+        limits.max_uniform_buffers_per_shader_stage,
+        limits.max_uniform_buffer_binding_size,
+        limits.max_buffer_size,
+        limits.max_color_attachments,
+        limits.max_inter_stage_shader_variables,
+    )
+}
 
 impl_draw!(Scene);
 
@@ -61,17 +229,153 @@ const BLIT: &str = r"
 }
 ";
 
-/// What wgpu reports out of band: uncaptured errors and the device's loss.
+/// What wgpu reports out of band: uncaptured errors, device loss, and wait cancellation.
 #[derive(Default)]
 pub struct Health {
     errors: Mutex<Vec<String>>,
     lost: AtomicBool,
     lost_reason: Mutex<String>,
+    cancelled: AtomicBool,
+    waiters: Mutex<Vec<futures_channel::oneshot::Sender<()>>>,
+    finished_waiters: AtomicU32,
+    #[cfg(feature = "webgl")]
+    poll_waiters: AtomicU32,
+    #[cfg(feature = "webgl")]
+    poll_running: AtomicBool,
+    #[cfg(feature = "webgl")]
+    poll_error: Mutex<Option<String>>,
+    #[cfg(feature = "webgl")]
+    poll_wake: Mutex<Option<futures_channel::oneshot::Sender<()>>>,
+}
+
+impl Health {
+    fn wake_waiters(&self) {
+        if let Ok(mut list) = self.waiters.lock() {
+            for tx in std::mem::take(&mut *list) {
+                let _ = tx.send(());
+            }
+        }
+        #[cfg(feature = "webgl")]
+        self.wake_poll();
+    }
+
+    #[cfg(feature = "webgl")]
+    fn wake_poll(&self) {
+        if let Ok(mut wake) = self.poll_wake.lock()
+            && let Some(tx) = wake.take()
+        {
+            let _ = tx.send(());
+        }
+    }
+
+    #[cfg(feature = "webgl")]
+    fn watch_poll_wake(&self) -> futures_channel::oneshot::Receiver<()> {
+        let (tx, rx) = futures_channel::oneshot::channel();
+        if let Ok(mut wake) = self.poll_wake.lock() {
+            if self.is_stopped() || self.poll_waiters.load(Ordering::SeqCst) == 0 {
+                let _ = tx.send(());
+            } else {
+                *wake = Some(tx);
+            }
+        }
+        rx
+    }
+
+    fn record_error(&self, message: String) {
+        if let Ok(mut list) = self.errors.lock()
+            && list.len() < 16
+        {
+            list.push(message);
+        }
+    }
+
+    fn mark_lost(&self, reason: String) {
+        self.lost.store(true, Ordering::SeqCst);
+        if let Ok(mut r) = self.lost_reason.lock() {
+            *r = reason;
+        }
+        self.wake_waiters();
+    }
+
+    fn mark_lost_if_empty(&self, reason: &str) {
+        self.lost.store(true, Ordering::SeqCst);
+        if let Ok(mut r) = self.lost_reason.lock()
+            && r.is_empty()
+        {
+            *r = reason.to_string();
+        }
+        self.wake_waiters();
+    }
+
+    #[cfg(feature = "webgl")]
+    fn fail_poll(&self, message: String) {
+        if let Ok(mut pe) = self.poll_error.lock() {
+            *pe = Some(message);
+        }
+        self.wake_waiters();
+    }
+
+    pub fn cancel(&self) {
+        self.cancelled.store(true, Ordering::SeqCst);
+        self.wake_waiters();
+    }
+
+    fn is_stopped(&self) -> bool {
+        if self.lost.load(Ordering::SeqCst) || self.cancelled.load(Ordering::SeqCst) {
+            return true;
+        }
+        #[cfg(feature = "webgl")]
+        if let Ok(pe) = self.poll_error.lock()
+            && pe.is_some()
+        {
+            return true;
+        }
+        false
+    }
+
+    fn stop_error(&self) -> Option<EngineError> {
+        if self.lost.load(Ordering::SeqCst) {
+            let reason = self.lost_reason.lock().map(|r| r.clone()).unwrap_or_default();
+            return Some(EngineError::new(
+                ErrorCode::DeviceLost,
+                format!("the GPU device was lost ({reason})"),
+            ));
+        }
+        if self.cancelled.load(Ordering::SeqCst) {
+            return Some(EngineError::new(ErrorCode::State, "GPU wait cancelled"));
+        }
+        #[cfg(feature = "webgl")]
+        if let Ok(pe) = self.poll_error.lock()
+            && let Some(msg) = pe.as_ref()
+        {
+            return Some(EngineError::new(ErrorCode::Gpu, msg.clone()));
+        }
+        None
+    }
+
+    fn cancelled_or_callback_error(&self) -> EngineError {
+        self.stop_error()
+            .unwrap_or_else(|| EngineError::new(ErrorCode::Gpu, "GPU callback cancelled"))
+    }
+
+    fn watch_stop(&self) -> futures_channel::oneshot::Receiver<()> {
+        let (tx, rx) = futures_channel::oneshot::channel();
+        if let Ok(mut list) = self.waiters.lock() {
+            list.retain(|s| !s.is_canceled());
+            if self.is_stopped() {
+                let _ = tx.send(());
+            } else {
+                list.push(tx);
+            }
+        }
+        rx
+    }
 }
 
 struct Main {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+    present_group: Option<wgpu::BindGroup>,
     width: u32,
     height: u32,
 }
@@ -190,6 +494,13 @@ pub struct Flights {
 pub struct Gpu {
     /// Held for the device's lifetime: on the web, dropping the instance loses the device.
     _instance: wgpu::Instance,
+    /// Off-screen WebGL2 context surface when `surface` is None (read-back-only mode): wgpu's GL
+    /// backend keeps its WebGL2 context alive through its surface.
+    #[cfg(feature = "webgl")]
+    _gl_surface: Option<wgpu::Surface<'static>>,
+    /// Removes the `webglcontextlost` listener when dropped.
+    #[cfg(feature = "webgl")]
+    _context_loss: Option<ContextLossGuard>,
     pub device: wgpu::Device,
     pub queue: wgpu::Queue,
     surface: Option<(wgpu::Surface<'static>, wgpu::SurfaceConfiguration)>,
@@ -224,14 +535,45 @@ pub struct Gpu {
     raster: masks::Rasterizer,
     pub health: Arc<Health>,
     pub adapter: String,
+    pub backend: &'static str,
+    pub details: String,
     pub fallback_adapter: bool,
     /// Command buffers submitted, for the report.
     pub submits: u32,
     /// GPU memory allocated (`Limits::gpu_bytes`), and the budget.
     bytes: usize,
     pub budget: usize,
+    /// Actual device limits validated before allocating textures or read-back buffers.
+    max_texture_2d: u32,
+    max_buffer_size: u64,
     /// Read-backs in flight.
     readbacks: Rc<Flights>,
+}
+
+impl Drop for Gpu {
+    fn drop(&mut self) {
+        self.health.cancel();
+        for m in self.frames.drain(..) {
+            m.texture.destroy();
+        }
+        for p in self.pages.drain(..) {
+            p.texture.destroy();
+        }
+        if let Some((tex, _, _)) = self.scratch.take() {
+            tex.destroy();
+        }
+        if let Some(c) = self.compositor.take() {
+            c.uniforms.destroy();
+            c.instances.destroy();
+        }
+        for (_, levels) in self.images.drain() {
+            for (_, tex, _, _) in levels {
+                tex.destroy();
+            }
+        }
+        self.atlas.texture.destroy();
+        self.device.destroy();
+    }
 }
 
 fn texture(device: &wgpu::Device, w: u32, h: u32, usage: wgpu::TextureUsages, label: &str) -> wgpu::Texture {
@@ -281,11 +623,43 @@ pub enum Target {
     None,
 }
 
+#[cfg(feature = "webgl")]
+fn offscreen_gl_surface(instance: &wgpu::Instance) -> Result<(wgpu::Surface<'static>, web_sys::EventTarget)> {
+    if let Ok(off) = web_sys::OffscreenCanvas::new(1, 1) {
+        let target: web_sys::EventTarget = off.clone().into();
+        if let Ok(s) = instance.create_surface(wgpu::SurfaceTarget::OffscreenCanvas(off)) {
+            return Ok((s, target));
+        }
+    }
+    let canvas = web_sys::window()
+        .and_then(|w| w.document())
+        .and_then(|d| d.create_element("canvas").ok())
+        .and_then(|e| e.dyn_into::<web_sys::HtmlCanvasElement>().ok())
+        .ok_or_else(|| EngineError::new(ErrorCode::NoAdapter, "no canvas available for WebGL2"))?;
+    canvas.set_width(1);
+    canvas.set_height(1);
+    let target: web_sys::EventTarget = canvas.clone().into();
+    let s = instance
+        .create_surface(wgpu::SurfaceTarget::Canvas(canvas))
+        .map_err(|e| EngineError::new(ErrorCode::NoAdapter, format!("no WebGL2 surface: {e}")))?;
+    Ok((s, target))
+}
+
 impl Gpu {
-    /// A WebGPU device and, given a canvas, a surface on it. In compatibility mode the caller
-    /// has made `navigator.gpu.requestAdapter` ask for a compatibility adapter; the device is
-    /// requested with the adapter's own limits either way, so a compatibility adapter takes it.
+    /// A GPU device (WebGPU or WebGL2, per feature) and, given a canvas, a surface on it.
+    /// In compatibility mode (WebGPU) the caller has made `navigator.gpu.requestAdapter` ask for
+    /// a compatibility adapter; WebGL2 asks for downlevel WebGL2 limits with the adapter's
+    /// texture and buffer sizes. Runs a capability probe (pipelines + small render readback)
+    /// before succeeding so broken drivers are refused up front.
     pub async fn create(target: Target, mask_bytes: usize, mask_side: u32) -> Result<Self> {
+        let backend_name: &'static str = if IS_WEBGL { "webgl2" } else { "webgpu" };
+        #[cfg(feature = "webgl")]
+        let instance = {
+            let mut desc = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(WebDisplay));
+            desc.backends = wgpu::Backends::GL;
+            wgpu::Instance::new(desc)
+        };
+        #[cfg(not(feature = "webgl"))]
         let instance = wgpu::Instance::new(wgpu::InstanceDescriptor {
             display: None,
             backends: wgpu::Backends::BROWSER_WEBGPU,
@@ -293,6 +667,30 @@ impl Gpu {
             memory_budget_thresholds: wgpu::MemoryBudgetThresholds::default(),
             backend_options: wgpu::BackendOptions::default(),
         });
+
+        let presents = !matches!(target, Target::None);
+        #[cfg(feature = "webgl")]
+        let (surface, event_target) = match target {
+            Target::Canvas(c) => {
+                let et: web_sys::EventTarget = c.clone().into();
+                let s = instance
+                    .create_surface(wgpu::SurfaceTarget::Canvas(c))
+                    .map_err(|e| EngineError::new(ErrorCode::NoAdapter, format!("no WebGL2 surface: {e}")))?;
+                (Some(s), Some(et))
+            }
+            Target::Offscreen(c) => {
+                let et: web_sys::EventTarget = c.clone().into();
+                let s = instance
+                    .create_surface(wgpu::SurfaceTarget::OffscreenCanvas(c))
+                    .map_err(|e| EngineError::new(ErrorCode::NoAdapter, format!("no WebGL2 surface: {e}")))?;
+                (Some(s), Some(et))
+            }
+            Target::None => {
+                let (s, et) = offscreen_gl_surface(&instance)?;
+                (Some(s), Some(et))
+            }
+        };
+        #[cfg(not(feature = "webgl"))]
         let surface = match target {
             Target::Canvas(c) => Some(instance.create_surface(wgpu::SurfaceTarget::Canvas(c))),
             Target::Offscreen(c) => Some(instance.create_surface(wgpu::SurfaceTarget::OffscreenCanvas(c))),
@@ -300,6 +698,7 @@ impl Gpu {
         }
         .transpose()
         .map_err(|e| EngineError::new(ErrorCode::NoAdapter, format!("no WebGPU surface: {e}")))?;
+
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 power_preference: wgpu::PowerPreference::HighPerformance,
@@ -308,69 +707,105 @@ impl Gpu {
                 ..Default::default()
             })
             .await
-            .map_err(|e| EngineError::new(ErrorCode::NoAdapter, format!("no WebGPU adapter: {e}")))?;
+            .map_err(|e| EngineError::new(ErrorCode::NoAdapter, format!("no {backend_name} adapter: {e}")))?;
         let info = adapter.get_info();
-        let limits = adapter.limits();
+        let adapter_limits = adapter.limits();
+        let adapter_features = adapter.features();
+        let required_limits = if IS_WEBGL {
+            let dl = wgpu::Limits::downlevel_webgl2_defaults();
+            wgpu::Limits {
+                max_texture_dimension_1d: adapter_limits.max_texture_dimension_1d,
+                max_texture_dimension_2d: adapter_limits.max_texture_dimension_2d,
+                max_texture_dimension_3d: adapter_limits.max_texture_dimension_3d.min(dl.max_texture_dimension_3d),
+                max_texture_array_layers: adapter_limits.max_texture_array_layers.min(dl.max_texture_array_layers),
+                max_buffer_size: adapter_limits.max_buffer_size,
+                max_uniform_buffers_per_shader_stage: dl
+                    .max_uniform_buffers_per_shader_stage
+                    .min(adapter_limits.max_uniform_buffers_per_shader_stage),
+                max_uniform_buffer_binding_size: dl
+                    .max_uniform_buffer_binding_size
+                    .min(adapter_limits.max_uniform_buffer_binding_size),
+                max_inter_stage_shader_variables: dl
+                    .max_inter_stage_shader_variables
+                    .min(adapter_limits.max_inter_stage_shader_variables),
+                max_color_attachments: dl.max_color_attachments.min(adapter_limits.max_color_attachments),
+                ..dl
+            }
+        } else {
+            adapter_limits.clone()
+        };
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("drawpane engine"),
                 required_features: wgpu::Features::empty(),
-                required_limits: limits.clone(),
+                required_limits,
                 ..Default::default()
             })
             .await
-            .map_err(|e| EngineError::new(ErrorCode::NoAdapter, format!("no WebGPU device: {e}")))?;
+            .map_err(|e| EngineError::new(ErrorCode::NoAdapter, format!("no {backend_name} device: {e}")))?;
+        let device_limits = device.limits();
+        if device_limits.max_texture_dimension_2d < ATLAS_SIDE {
+            return Err(EngineError::new(
+                ErrorCode::NoAdapter,
+                format!(
+                    "GPU maxTextureDimension2D {} is below required glyph atlas size {ATLAS_SIDE}",
+                    device_limits.max_texture_dimension_2d
+                ),
+            ));
+        }
         let health = Arc::new(Health::default());
         {
             let h = health.clone();
             device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
-                if let Ok(mut list) = h.errors.lock()
-                    && list.len() < 16
-                {
-                    list.push(e.to_string());
-                }
+                h.record_error(e.to_string());
             }));
             let h = health.clone();
             device.set_device_lost_callback(move |reason, message| {
-                h.lost.store(true, Ordering::SeqCst);
-                if let Ok(mut r) = h.lost_reason.lock() {
-                    *r = format!("{reason:?}: {message}");
-                }
+                h.mark_lost(format!("{reason:?}: {message}"));
             });
         }
-        let surface = match surface {
-            Some(s) => {
-                let caps = s.get_capabilities(&adapter);
-                let format = caps
-                    .formats
-                    .iter()
-                    .copied()
-                    .find(|f| matches!(f, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm))
-                    .or_else(|| caps.formats.first().copied())
-                    .ok_or_else(|| EngineError::new(ErrorCode::NoAdapter, "the canvas offers no format"))?;
-                let alpha = if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque) {
-                    wgpu::CompositeAlphaMode::Opaque
-                } else {
-                    caps.alpha_modes
-                        .first()
+        #[cfg(feature = "webgl")]
+        let context_loss = event_target.map(|et| ContextLossGuard::attach(et, health.clone()));
+
+        let (present_surface, _kept_gl_surface) = if presents {
+            let s = match surface {
+                Some(s) => {
+                    let caps = s.get_capabilities(&adapter);
+                    let format = caps
+                        .formats
+                        .iter()
                         .copied()
-                        .unwrap_or(wgpu::CompositeAlphaMode::Auto)
-                };
-                let config = wgpu::SurfaceConfiguration {
-                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
-                    format,
-                    width: 1,
-                    height: 1,
-                    present_mode: wgpu::PresentMode::Fifo,
-                    desired_maximum_frame_latency: 2,
-                    alpha_mode: alpha,
-                    color_space: wgpu::SurfaceColorSpace::default(),
-                    view_formats: vec![],
-                };
-                Some((s, config))
-            }
-            None => None,
+                        .find(|f| matches!(f, wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Rgba8Unorm))
+                        .or_else(|| caps.formats.first().copied())
+                        .ok_or_else(|| EngineError::new(ErrorCode::NoAdapter, "the canvas offers no format"))?;
+                    let alpha = if caps.alpha_modes.contains(&wgpu::CompositeAlphaMode::Opaque) {
+                        wgpu::CompositeAlphaMode::Opaque
+                    } else {
+                        caps.alpha_modes
+                            .first()
+                            .copied()
+                            .unwrap_or(wgpu::CompositeAlphaMode::Auto)
+                    };
+                    let config = wgpu::SurfaceConfiguration {
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+                        format,
+                        width: 1,
+                        height: 1,
+                        present_mode: wgpu::PresentMode::Fifo,
+                        desired_maximum_frame_latency: 2,
+                        alpha_mode: alpha,
+                        color_space: wgpu::SurfaceColorSpace::default(),
+                        view_formats: vec![],
+                    };
+                    Some((s, config))
+                }
+                None => None,
+            };
+            (s, None)
+        } else {
+            (None, surface)
         };
+        let surface = present_surface;
         // Everything made from here to the end is checked at once: an adapter that can't make
         // Vello's pipelines (WebGPU's compatibility mode can't: they interpolate `flat, first`)
         // or runs out of memory doing it is refused now, with the reason, not mid-frame.
@@ -434,6 +869,8 @@ impl Gpu {
         let mut bindings = TextureBindings::new();
         bindings.insert(ATLAS_ID, atlas_tex.create_view(&Default::default()));
         bindings.insert(CHECKER_ID, checker.create_view(&Default::default()));
+        let fallback_adapter = is_software_adapter(&info);
+        let details = format_details(&info, &adapter_limits, adapter_features, backend_name, fallback_adapter);
         let mut gpu = Self {
             adapter: format!(
                 "{} ({:?}, {:?}){}",
@@ -446,8 +883,14 @@ impl Gpu {
                     format!(" {}", info.driver)
                 }
             ),
-            fallback_adapter: matches!(info.device_type, wgpu::DeviceType::Cpu),
+            backend: backend_name,
+            details,
+            fallback_adapter,
             _instance: instance,
+            #[cfg(feature = "webgl")]
+            _gl_surface: _kept_gl_surface,
+            #[cfg(feature = "webgl")]
+            _context_loss: context_loss,
             device,
             queue,
             surface,
@@ -480,6 +923,8 @@ impl Gpu {
             submits: 0,
             bytes: (ATLAS_SIDE * ATLAS_SIDE * 4 + 16 * 16 * 4) as usize,
             budget: crate::limits::Limits::default().gpu_bytes,
+            max_texture_2d: device_limits.max_texture_dimension_2d,
+            max_buffer_size: device_limits.max_buffer_size,
             readbacks: Rc::new(Flights::default()),
         };
         gpu.ensure_compositor();
@@ -494,7 +939,143 @@ impl Gpu {
                 ),
             ));
         }
+        gpu.probe().await?;
         Ok(gpu)
+    }
+
+    /// Capability probe (decision 0040, "Fallbacks"): renders a small known scene through Vello
+    /// and reads back a pixel so a broken or black driver is refused before the editor adopts it.
+    async fn probe(&mut self) -> Result<()> {
+        let probe_tex = texture(
+            &self.device,
+            4,
+            4,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+            "capability probe",
+        );
+        let probe_view = probe_tex.create_view(&Default::default());
+        let probe_depth = self
+            .renderer
+            .create_depth_texture_view(&RenderSize { width: 4, height: 4 });
+        self.scene.reset_and_resize(4, 4);
+        self.scene.set_transform(Affine::IDENTITY);
+        self.scene
+            .set_paint(vello_common::color::AlphaColor::<vello_common::color::Srgb>::new([
+                1.0, 0.0, 0.0, 1.0,
+            ]));
+        self.scene.fill_rect(&Rect::new(0.0, 0.0, 4.0, 4.0));
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("probe") });
+        let mut options = RenderOptions::default();
+        options.target_init = TargetInit::Clear(ClearSettings::Viewport {
+            color: vello_common::color::AlphaColor::new([0.0, 0.0, 0.0, 0.0]),
+        });
+        let render_res = self.renderer.render(
+            &self.scene,
+            &mut self.resources,
+            &mut encoder,
+            RenderTarget {
+                view: &probe_view,
+                depth_view: Some(&probe_depth),
+            },
+            &self.bindings,
+            options,
+        );
+        self.scene.reset();
+        if let Err(e) = render_res {
+            probe_tex.destroy();
+            return Err(EngineError::new(
+                ErrorCode::NoAdapter,
+                format!("GPU probe render failed on {}: {e:?}", self.adapter),
+            ));
+        }
+        let row = 256u32;
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("probe readback"),
+            size: u64::from(row) * 4,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &probe_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: None,
+                },
+            },
+            wgpu::Extent3d {
+                width: 4,
+                height: 4,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit([encoder.finish()]);
+        let flight = InFlight::new(Rc::new(Flights::default()), row as usize * 4);
+        let px = read_back_with_timeout(
+            self.device.clone(),
+            self.health.clone(),
+            buffer,
+            4,
+            4,
+            row,
+            flight,
+            PROBE_TIMEOUT_MS,
+        )
+        .await;
+        probe_tex.destroy();
+        let px = px.map_err(|e| {
+            let code = if e.code == ErrorCode::Timeout {
+                ErrorCode::Timeout
+            } else {
+                ErrorCode::NoAdapter
+            };
+            EngineError::new(
+                code,
+                format!("GPU probe readback failed on {}: {}", self.adapter, e.message),
+            )
+        })?;
+        self.check()
+            .map_err(|e| EngineError::new(ErrorCode::NoAdapter, e.message))?;
+        let i = (2 * 4 + 2) * 4;
+        let pixel = [px[i], px[i + 1], px[i + 2], px[i + 3]];
+        let expected = [255u8, 0, 0, 255];
+        let ok = pixel.iter().zip(expected.iter()).all(|(a, b)| a.abs_diff(*b) <= 2);
+        if !ok {
+            return Err(EngineError::new(
+                ErrorCode::NoAdapter,
+                format!(
+                    "GPU probe produced wrong pixels on {}: got {pixel:?}, expected {expected:?}",
+                    self.adapter
+                ),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Destroys the GPU device (for testing recovery and fallback).
+    pub fn destroy(&self) {
+        self.device.destroy();
+        self.health.mark_lost_if_empty("Destroyed: device destroyed");
+    }
+
+    /// Validates a 2D texture dimension against the active device limit before allocating.
+    pub fn check_texture_size(&self, width: u32, height: u32, what: &str) -> Result<()> {
+        if width > self.max_texture_2d || height > self.max_texture_2d {
+            return Err(EngineError::limit(format!(
+                "{what} {width} x {height} px exceeds this GPU's maxTextureDimension2D ({})",
+                self.max_texture_2d
+            )));
+        }
+        Ok(())
     }
 
     /// GPU memory the engine has allocated.
@@ -518,12 +1099,24 @@ impl Gpu {
 
     /// The device's health: an error recorded since the last call, or its loss.
     pub fn check(&self) -> Result<()> {
+        #[cfg(feature = "webgl")]
+        {
+            if let Err(e) = self.device.poll(wgpu::PollType::Poll) {
+                self.health.fail_poll(format!("GPU poll failed: {e}"));
+            }
+        }
         if self.health.lost.load(Ordering::SeqCst) {
             let reason = self.health.lost_reason.lock().map(|r| r.clone()).unwrap_or_default();
             return Err(EngineError::new(
                 ErrorCode::DeviceLost,
                 format!("the GPU device was lost ({reason})"),
             ));
+        }
+        #[cfg(feature = "webgl")]
+        if let Ok(mut pe) = self.health.poll_error.lock()
+            && let Some(msg) = pe.take()
+        {
+            return Err(EngineError::new(ErrorCode::Gpu, msg));
         }
         if let Ok(mut list) = self.health.errors.lock()
             && !list.is_empty()
@@ -536,6 +1129,9 @@ impl Gpu {
     }
 
     pub fn put_image(&mut self, id: u32, levels: &[Level], budget: usize) -> Result<()> {
+        for l in levels {
+            self.check_texture_size(l.width, l.height, "an image")?;
+        }
         let bytes = images::bytes(levels);
         let freed: usize = self
             .images
@@ -585,6 +1181,7 @@ impl Gpu {
     }
 
     fn ensure_frames(&mut self, width: u32, height: u32) -> Result<()> {
+        self.check_texture_size(width, height, "a frame")?;
         if self
             .frames
             .first()
@@ -613,9 +1210,21 @@ impl Gpu {
                     | wgpu::TextureUsages::COPY_DST,
                 "frame",
             );
+            let view = tex.create_view(&Default::default());
+            let present_group = self.blit.as_ref().map(|blit| {
+                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("present"),
+                    layout: &blit.get_bind_group_layout(0),
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&view),
+                    }],
+                })
+            });
             self.frames.push(Main {
-                view: tex.create_view(&Default::default()),
+                view,
                 texture: tex,
+                present_group,
                 width,
                 height,
             });
@@ -710,6 +1319,7 @@ impl Gpu {
         let within = slot % PER_PAGE;
         let (x, y) = ((within % PER_ROW) * TILE, (within / PER_ROW) * TILE);
         while self.pages.len() <= page {
+            self.check_texture_size(PAGE, PAGE, "a page of tiles")?;
             self.reserve(PAGE_BYTES, 0, "a page of tiles")?;
             let tex = texture(
                 &self.device,
@@ -730,6 +1340,7 @@ impl Gpu {
     /// The scratch tile and its depth buffer, made on first use.
     fn ensure_scratch(&mut self) -> Result<()> {
         if self.scratch.is_none() {
+            self.check_texture_size(TILE, TILE, "the scratch tile")?;
             let bytes = (TILE * TILE * 4 * 2) as usize;
             self.reserve(bytes, 0, "the scratch tile")?;
             let tex = texture(
@@ -991,14 +1602,21 @@ impl Gpu {
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("present") });
             let view = t.texture.create_view(&Default::default());
-            let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &blit.get_bind_group_layout(0),
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&main.view),
-                }],
-            });
+            let fallback_group;
+            let group = match main.present_group.as_ref() {
+                Some(g) => g,
+                None => {
+                    fallback_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: None,
+                        layout: &blit.get_bind_group_layout(0),
+                        entries: &[wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(&main.view),
+                        }],
+                    });
+                    &fallback_group
+                }
+            };
             {
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("present"),
@@ -1014,7 +1632,7 @@ impl Gpu {
                     ..Default::default()
                 });
                 pass.set_pipeline(blit);
-                pass.set_bind_group(0, &group, &[]);
+                pass.set_bind_group(0, group, &[]);
                 pass.draw(0..3, 0..1);
             }
             self.queue.submit([encoder.finish()]);
@@ -1865,6 +2483,13 @@ impl Gpu {
         }
         let (w, h) = (main.width, main.height);
         let row = (w * 4).next_multiple_of(256);
+        let size = u64::from(row) * u64::from(h);
+        if size > self.max_buffer_size {
+            return Err(EngineError::limit(format!(
+                "a read-back buffer of {size} bytes exceeds this GPU's maxBufferSize ({})",
+                self.max_buffer_size
+            )));
+        }
         self.reserve(row as usize * h as usize, 0, "a read-back")?;
         let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("read back"),
@@ -1931,14 +2556,189 @@ impl Drop for InFlight {
     }
 }
 
+/// Shared WebGL2 poll driver ticket: at most one non-blocking poll loop runs per device while any
+/// wait is active, and it stops immediately when all waits end or `Health` is stopped/cancelled.
+#[cfg(feature = "webgl")]
+struct PollTicket(Arc<Health>);
+
+#[cfg(feature = "webgl")]
+impl PollTicket {
+    fn enter(device: &wgpu::Device, health: &Arc<Health>) -> Self {
+        health.poll_waiters.fetch_add(1, Ordering::SeqCst);
+        ensure_poll_driver(device, health);
+        Self(health.clone())
+    }
+}
+
+#[cfg(feature = "webgl")]
+impl Drop for PollTicket {
+    fn drop(&mut self) {
+        if self.0.poll_waiters.fetch_sub(1, Ordering::SeqCst) == 1 {
+            self.0.wake_poll();
+        }
+    }
+}
+
+#[cfg(feature = "webgl")]
+fn ensure_poll_driver(device: &wgpu::Device, health: &Arc<Health>) {
+    if health.is_stopped() || health.poll_waiters.load(Ordering::SeqCst) == 0 {
+        return;
+    }
+    if health.poll_running.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    let device = device.clone();
+    let health = health.clone();
+    wasm_bindgen_futures::spawn_local(async move {
+        struct Running(Arc<Health>);
+        impl Drop for Running {
+            fn drop(&mut self) {
+                self.0.poll_running.store(false, Ordering::SeqCst);
+            }
+        }
+        let _running = Running(health.clone());
+        loop {
+            if health.is_stopped() || health.poll_waiters.load(Ordering::SeqCst) == 0 {
+                break;
+            }
+            if let Err(e) = device.poll(wgpu::PollType::Poll) {
+                health.fail_poll(format!("GPU poll failed: {e}"));
+                break;
+            }
+            if health.is_stopped() || health.poll_waiters.load(Ordering::SeqCst) == 0 {
+                break;
+            }
+            let (_timer, mut tick_rx) = Timeout::after(0);
+            let mut wake_rx = health.watch_poll_wake();
+            std::future::poll_fn(|cx| {
+                if health.is_stopped() || health.poll_waiters.load(Ordering::SeqCst) == 0 {
+                    return std::task::Poll::Ready(());
+                }
+                if Pin::new(&mut wake_rx).poll(cx).is_ready() {
+                    return std::task::Poll::Ready(());
+                }
+                if Pin::new(&mut tick_rx).poll(cx).is_ready() {
+                    return std::task::Poll::Ready(());
+                }
+                std::task::Poll::Pending
+            })
+            .await;
+        }
+    });
+}
+
+/// Waits for a wgpu callback with a hard timeout and cancellation tied to `Health` (device loss
+/// or `Gpu` drop). On WebGL2, shares one non-blocking poll driver across all active waits.
+async fn pump<T>(
+    device: &wgpu::Device,
+    health: &Arc<Health>,
+    mut rx: futures_channel::oneshot::Receiver<T>,
+    timeout_ms: i32,
+) -> Result<T> {
+    if let Some(err) = health.stop_error() {
+        return Err(err);
+    }
+    match rx.try_recv() {
+        Ok(Some(v)) => return Ok(v),
+        Ok(None) => {}
+        Err(_) => return Err(health.cancelled_or_callback_error()),
+    }
+    #[cfg(feature = "webgl")]
+    let _poll = PollTicket::enter(device, health);
+    #[cfg(not(feature = "webgl"))]
+    let _ = device;
+    let (_timer, mut timeout_rx) = Timeout::after(timeout_ms);
+    let mut stop_rx = health.watch_stop();
+    std::future::poll_fn(|cx| {
+        if let Some(err) = health.stop_error() {
+            return std::task::Poll::Ready(Err(err));
+        }
+        match Pin::new(&mut rx).poll(cx) {
+            std::task::Poll::Ready(Ok(v)) => return std::task::Poll::Ready(Ok(v)),
+            std::task::Poll::Ready(Err(_)) => {
+                return std::task::Poll::Ready(Err(health.cancelled_or_callback_error()));
+            }
+            std::task::Poll::Pending => {}
+        }
+        if Pin::new(&mut stop_rx).poll(cx).is_ready() {
+            return std::task::Poll::Ready(Err(health
+                .stop_error()
+                .unwrap_or_else(|| EngineError::new(ErrorCode::State, "GPU wait cancelled"))));
+        }
+        if Pin::new(&mut timeout_rx).poll(cx).is_ready() {
+            return std::task::Poll::Ready(Err(EngineError::new(
+                ErrorCode::Timeout,
+                format!("GPU wait timed out after {timeout_ms} ms"),
+            )));
+        }
+        std::task::Poll::Pending
+    })
+    .await
+}
+
 /// The frame's pixels, premultiplied RGBA8, from a buffer `read_back_start` filled. A failed
-/// copy or map is an error, never empty pixels.
+/// copy, map, cancellation, or timeout is an error, never empty pixels.
+#[allow(clippy::too_many_arguments)]
+async fn read_back_with_timeout(
+    device: wgpu::Device,
+    health: Arc<Health>,
+    buffer: wgpu::Buffer,
+    w: u32,
+    h: u32,
+    row: u32,
+    flight: InFlight,
+    timeout_ms: i32,
+) -> Result<Vec<u8>> {
+    let _flight = flight;
+    if let Some(err) = health.stop_error() {
+        buffer.destroy();
+        return Err(err);
+    }
+    let (tx, rx) = futures_channel::oneshot::channel();
+    buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    match pump(&device, &health, rx, timeout_ms).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            buffer.destroy();
+            return Err(EngineError::new(ErrorCode::Gpu, e.to_string()));
+        }
+        Err(e) => {
+            buffer.destroy();
+            return Err(e);
+        }
+    }
+    let mapped = buffer
+        .slice(..)
+        .get_mapped_range()
+        .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+    let line = (w * 4) as usize;
+    if mapped.len() < row as usize * h as usize || line > row as usize {
+        drop(mapped);
+        buffer.unmap();
+        buffer.destroy();
+        return Err(EngineError::new(ErrorCode::Gpu, "a read-back came back short"));
+    }
+    let mut out = Vec::with_capacity(line * h as usize);
+    for chunk in mapped.chunks_exact(row as usize).take(h as usize) {
+        out.extend_from_slice(&chunk[..line]);
+    }
+    drop(mapped);
+    buffer.unmap();
+    buffer.destroy();
+    Ok(out)
+}
+
 /// Reads a frame back (`read_back_start`'s buffer) straight into a JS array, unpremultiplied (as
 /// a canvas takes pixels) unless the frame is `opaque` (drawn over an opaque background, every
 /// pixel is): one copy out of the mapping, for a frame read back at every presentation
-/// (headless browsers).
+/// (headless browsers). Bounded, cancellable, and driven through `pump` on WebGL2.
 #[cfg(target_arch = "wasm32")]
+#[allow(clippy::too_many_arguments)]
 pub async fn read_back_straight(
+    device: wgpu::Device,
+    health: Arc<Health>,
     buffer: wgpu::Buffer,
     w: u32,
     h: u32,
@@ -1947,19 +2747,34 @@ pub async fn read_back_straight(
     opaque: bool,
 ) -> Result<js_sys::Uint8Array> {
     let _flight = flight;
+    if let Some(err) = health.stop_error() {
+        buffer.destroy();
+        return Err(err);
+    }
     let (tx, rx) = futures_channel::oneshot::channel();
     buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
         let _ = tx.send(r);
     });
-    rx.await
-        .map_err(|e| EngineError::new(ErrorCode::Gpu, e.to_string()))?
-        .map_err(|e| EngineError::new(ErrorCode::Gpu, e.to_string()))?;
+    match pump(&device, &health, rx, WAIT_TIMEOUT_MS).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            buffer.destroy();
+            return Err(EngineError::new(ErrorCode::Gpu, e.to_string()));
+        }
+        Err(e) => {
+            buffer.destroy();
+            return Err(e);
+        }
+    }
     let mapped = buffer
         .slice(..)
         .get_mapped_range()
         .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
     let line = (w * 4) as usize;
     if mapped.len() < row as usize * h as usize || line > row as usize {
+        drop(mapped);
+        buffer.unmap();
+        buffer.destroy();
         return Err(EngineError::new(ErrorCode::Gpu, "a read-back came back short"));
     }
     let out = js_sys::Uint8Array::new_with_length(w * h * 4);
@@ -1986,13 +2801,47 @@ pub async fn read_back_straight(
     Ok(out)
 }
 
-/// Resolves when the GPU has finished what was submitted (how the bench times GPU work).
-pub async fn finished(queue: wgpu::Queue) {
+/// Counts concurrent `gpuFinished` waits against `MAX_FINISHED_WAITERS`.
+struct FinishedTicket(Arc<Health>);
+
+impl FinishedTicket {
+    fn try_enter(health: &Arc<Health>) -> Result<Self> {
+        let mut cur = health.finished_waiters.load(Ordering::SeqCst);
+        loop {
+            if cur >= MAX_FINISHED_WAITERS {
+                return Err(EngineError::new(
+                    ErrorCode::State,
+                    "too many gpuFinished waits in flight",
+                ));
+            }
+            match health
+                .finished_waiters
+                .compare_exchange(cur, cur + 1, Ordering::SeqCst, Ordering::SeqCst)
+            {
+                Ok(_) => return Ok(Self(health.clone())),
+                Err(next) => cur = next,
+            }
+        }
+    }
+}
+
+impl Drop for FinishedTicket {
+    fn drop(&mut self) {
+        self.0.finished_waiters.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Resolves when the GPU has finished what was submitted (bounded, cancellable, capped waiters).
+pub async fn finished(device: wgpu::Device, health: Arc<Health>, queue: wgpu::Queue) -> Result<()> {
+    if let Some(err) = health.stop_error() {
+        return Err(err);
+    }
+    let _ticket = FinishedTicket::try_enter(&health)?;
     let (tx, rx) = futures_channel::oneshot::channel();
     queue.on_submitted_work_done(move || {
         let _ = tx.send(());
     });
-    let _ = rx.await;
+    pump(&device, &health, rx, WAIT_TIMEOUT_MS).await
 }
 
 impl Backend for Gpu {
