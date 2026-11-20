@@ -565,3 +565,50 @@ describe("text sent whole after a page opens", () => {
     expect(builder.pending).toBe(0);
   });
 });
+
+describe.skipIf(!built("worker") && !process.env.CI)("a see-through text layer", () => {
+  let mod: EngineModule;
+  beforeAll(async () => {
+    mod = await loadNodeEngine("worker");
+  });
+
+  it("covers where its lines overlap once, as one shape", () => {
+    // Two lines set tighter than their glyphs (16 tall, 8 apart), at half alpha: Figma covers
+    // the overlap once (`text-overlap` in the parity suites). Each line was a run of its own,
+    // filled in turn, so the overlap was covered twice (alpha 192, not 128).
+    const doc = page();
+    doc.apply([
+      {
+        op: "create",
+        id: "text",
+        type: "text",
+        parent: "p",
+        key: "a0",
+        props: {
+          x: 10,
+          y: 10,
+          width: 40,
+          height: 40,
+          characters: "A\nA",
+          fontSize: 20,
+          lineHeight: { unit: "px", value: 8 },
+          fills: [{ type: "solid", color: "#ff000080" }],
+        },
+      },
+    ]);
+    const shaping: TextMeasurer = { ...measurer, missing: () => false };
+    const scene = new Scene(doc);
+    const e = new RenderEngine(mod);
+    try {
+      expect(e.apply(new DisplayListBuilder(scene, shaping).build("p")).ok).toBe(true);
+      const r = e.renderCpu(W, H, camera, [0, 0, 0, 0], false);
+      if (!r.ok) throw new Error(r.message);
+      const px = r.value.pixels;
+      let most = 0;
+      for (let i = 3; i < px.length; i += 4) most = Math.max(most, px[i] ?? 0);
+      expect(Math.abs(most - 128)).toBeLessThanOrEqual(1);
+    } finally {
+      e.dispose();
+    }
+  });
+});

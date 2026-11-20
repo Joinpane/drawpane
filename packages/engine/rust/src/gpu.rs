@@ -2029,8 +2029,8 @@ impl Backend for Gpu {
         )
     }
 
-    fn runs(&self) -> bool {
-        true
+    fn whole_runs(&self) -> bool {
+        false
     }
 
     fn run_image(&mut self, w: u16, h: u16, pixels: Vec<u8>) -> Option<ImageSource> {

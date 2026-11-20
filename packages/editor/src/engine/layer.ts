@@ -565,6 +565,30 @@ function textRuns(
   const spanAt = (i: number) =>
     spans.find((s) => s.start <= i && i < s.end) ?? spans[spans.length - 1];
   let missing = false;
+  // A text layer composites as one shape, as Figma draws it (`text-overlap` in the parity
+  // suites): where its glyphs overlap, across lines too, they're covered once. Glyphs in a row
+  // with the same paints and scale go in one run, which the engine covers once (one fill of its
+  // outlines, or one image of its masks); a change of paints or size starts the next, so paint
+  // order between them stays as the text reads.
+  let open: { key: string; scale: number; glyphs: number[]; paints: readonly Paint[] } | null =
+    null;
+  const flush = () => {
+    if (open && open.glyphs.length > 0)
+      runs.push({
+        entry: b.path({ kind: "glyphs", scale: open.scale, glyphs: open.glyphs }),
+        paints: open.paints,
+      });
+    open = null;
+  };
+  const add = (scale: number, glyphs: number[], paints: readonly Paint[]) => {
+    if (glyphs.length === 0) return;
+    const key = `${scale}|${JSON.stringify(paints)}`;
+    if (open?.key !== key) {
+      flush();
+      open = { key, scale, glyphs: [], paints };
+    }
+    for (const v of glyphs) open.glyphs.push(v);
+  };
   for (const line of layout.lines) {
     const x0 = lineOffset(line, width, node.props);
     const baseline = drawnBaseline(line, dy);
@@ -578,12 +602,11 @@ function textRuns(
         if (face) b.waiting.add(face);
         else missing = true;
       } else {
-        const glyphs = shapedGlyphs(shaped, marker.text, 0, x0 + marker.x, baseline, ctx);
-        if (glyphs.length > 0)
-          runs.push({
-            entry: b.path({ kind: "glyphs", scale: shaped.scale, glyphs }),
-            paints: paintsOf(marker.fills),
-          });
+        add(
+          shaped.scale,
+          shapedGlyphs(shaped, marker.text, 0, x0 + marker.x, baseline, ctx),
+          paintsOf(marker.fills),
+        );
       }
     }
     for (const frag of line.fragments) {
@@ -601,8 +624,7 @@ function textRuns(
       }
       const glyphs = shapedGlyphs(shaped, frag.text, frag.letterSpacing, x, baseline, ctx);
       const paints = paintsOf(frag.fills);
-      if (glyphs.length > 0)
-        runs.push({ entry: b.path({ kind: "glyphs", scale: shaped.scale, glyphs }), paints });
+      add(shaped.scale, glyphs, paints);
       if (frag.decoration !== "none") {
         const bar = decorationBar(frag.decoration, baseline, frag.fontSize);
         bars.push({
@@ -620,6 +642,7 @@ function textRuns(
       }
     }
   }
+  flush();
   if (missing) {
     b.unsupported |= UNSUPPORTED.textWithoutOutlines;
     b.textPending = true;

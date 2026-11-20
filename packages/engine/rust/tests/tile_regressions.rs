@@ -1005,3 +1005,42 @@ fn a_curved_stroke_zoomed_out_draws_what_it_does_at_its_device_size() {
         );
     }
 }
+
+#[test]
+fn a_see_through_run_covers_its_overlaps_once() {
+    // One glyph, a disjoint one, then the first again in the same place, at half alpha. Figma
+    // covers a text layer's overlaps once, as one shape (`text-overlap` in the parity suites):
+    // the GPU laid the run's masks into one image and did; the CPU laid them one over another
+    // (alpha 192 where 128 is right), and its exports with it.
+    let square = vec![
+        (0, vec![0.0, 0.0]),
+        (1, vec![16.0, 0.0]),
+        (1, vec![16.0, 16.0]),
+        (1, vec![0.0, 16.0]),
+        (4, vec![]),
+    ];
+    let mut r = Rec::new([1.0, 0.0, 0.0, 1.0, 8.0, 8.0], [64.0, 48.0]);
+    r.paths.push(Entry::Glyphs {
+        scale: 1.0,
+        glyphs: vec![(1, 0.0, 24.0), (1, 32.0, 24.0), (1, 0.0, 24.0)],
+    });
+    r.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([1.0, 0.0, 0.0, 0.5]),
+    });
+    let mut list = W::new(ANY, 1);
+    list.reset();
+    list.glyph(1, &square);
+    list.set(1, 0, &r);
+    let mut e = Engine::new(Limits::default());
+    e.apply(&list.finish()).unwrap();
+    let c = camera(1.0, 0.0, 0.0);
+    let whole = e.render_cpu(96, 64, c, [0.0; 4], false).unwrap().0.to_vec();
+    let at = (24 * 96 + 16) * 4;
+    assert!(whole[at + 3].abs_diff(128) <= 1, "alpha {}", whole[at + 3]);
+    // The run's image is the whole run's, so bands draw what the whole frame does, bit for bit.
+    let mut banded = e.render_band(96, 64, c, [0.0; 4], 0, 20).unwrap().to_vec();
+    banded.extend_from_slice(e.render_band(96, 64, c, [0.0; 4], 20, 44).unwrap());
+    assert!(banded == whole, "bands differ from the whole frame");
+}

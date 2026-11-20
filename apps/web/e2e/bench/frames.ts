@@ -404,7 +404,10 @@ export async function settles(
           await frame();
         }
         const st = v?.stamps;
-        if (v ? !(st?.drawn && st.shown) : !w.drawpaneFrames.exact) {
+        if (v) v.stamps = null;
+        // A gesture counts only with every stamp: one missing is a timeout, never a sample left
+        // out of one column and not the others.
+        if (v ? !(st?.drawn && st.shown && st.gpu) : !w.drawpaneFrames.exact) {
           timeouts++;
           continue;
         }
@@ -412,7 +415,6 @@ export async function settles(
         if (st?.gpu) gpu.push(st.gpu.at - input);
         if (st?.shown) shown.push(st.shown.at - input);
         else shown.push(performance.now() - input);
-        if (v) v.stamps = null;
       }
       const spread = (xs: number[]) => {
         const s = [...xs].sort((a, b) => a - b);

@@ -17,6 +17,8 @@ const { chromium } = require("@playwright/test");
 const email = process.env.FIGMA_EMAIL ?? process.env.FIGMA_LOGIN_USERNAME;
 const password = process.env.FIGMA_PASSWORD;
 const profile = process.env.FIGMA_PROFILE ?? "/tmp/figma-parity-profile";
+// A browser of your own (Playwright's download can go missing).
+const executablePath = process.env.CHROMIUM_PATH;
 // biome-ignore-end lint/suspicious/noUndeclaredEnvVars: a tool run by hand.
 
 /** Opens `link` with `figma` ready on the page, runs `work(page)`, and closes. */
@@ -28,6 +30,7 @@ export async function withFigma(link, work) {
     userAgent:
       "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36",
     args: ["--disable-blink-features=AutomationControlled"],
+    ...(executablePath ? { executablePath } : {}),
   });
   const page = context.pages()[0] ?? (await context.newPage());
   try {

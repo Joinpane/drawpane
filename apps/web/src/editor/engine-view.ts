@@ -237,7 +237,8 @@ export class EngineView {
   /**
    * Set to an object by the bench: when the first exact frame since was drawn (submitted), when
    * the GPU finished it (no read-back involved), and when an exact frame was first shown (a
-   * read-back painted; with a WebGPU canvas, when it was drawn). Frame numbers tell them apart.
+   * read-back painted; with a WebGPU canvas, the first animation frame after the GPU finished
+   * it, the earliest a compositor could show it). Frame numbers tell them apart.
    */
   stamps: {
     drawn?: { n: number; at: number };
@@ -246,7 +247,8 @@ export class EngineView {
   } | null = null;
   /**
    * The frame last put on screen, exact or not, and when: painted from its read-back, or (a
-   * WebGPU canvas) drawn. The bench samples the canvas as it changes.
+   * WebGPU canvas) the first animation frame after the GPU finished it. The bench samples the
+   * canvas as it changes.
    */
   shown = { n: 0, at: 0 };
   /** Set to a list by the bench: each frame and slice between frames, as it happens. */
@@ -698,16 +700,23 @@ export class EngineView {
     const shownExact = f.exact && this.#builder.pendingVisible === 0;
     const n = ++this.#frame;
     const stamps = this.stamps;
-    if (!this.#readback) this.shown = { n, at: performance.now() };
-    if (stamps && f.exact && !stamps.drawn) {
-      const at = performance.now();
-      stamps.drawn = { n, at };
-      if (!this.#readback) stamps.shown = { n, at };
+    // Presented to a WebGPU canvas, a frame is on screen at the compositor's first frame after
+    // the GPU finished it, which nothing here can see: the first animation frame after then is
+    // the earliest it could be shown, and what's stamped. A read-back frame is shown when its
+    // pixels are painted (`#readNext`).
+    const watch = stamps && f.exact && !stamps.drawn;
+    if (watch) stamps.drawn = { n, at: performance.now() };
+    if (watch || !this.#readback)
       void this.#engine.gpuFinished().then(() => {
-        if (this.stamps === stamps && stamps.drawn?.n === n)
-          stamps.gpu = { n, at: performance.now() };
+        const gpu = performance.now();
+        if (watch && this.stamps === stamps && stamps.drawn?.n === n) stamps.gpu = { n, at: gpu };
+        if (this.#readback) return;
+        requestAnimationFrame(() => {
+          const at = performance.now();
+          if (n > this.shown.n) this.shown = { n, at };
+          if (watch && this.stamps === stamps && !stamps.shown) stamps.shown = { n, at };
+        });
       });
-    }
     if (this.#readback) {
       this.#want = { n, width, height, exact: shownExact, epoch: this.#epoch };
       this.#readNext();

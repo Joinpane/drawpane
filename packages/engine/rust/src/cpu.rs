@@ -182,12 +182,16 @@ impl Backend for Cpu {
         )
     }
 
-    fn run_image(&mut self, _w: u16, _h: u16, _pixels: Vec<u8>) -> Option<ImageSource> {
-        None
+    fn run_image(&mut self, w: u16, h: u16, pixels: Vec<u8>) -> Option<ImageSource> {
+        Some(ImageSource::Pixmap(Arc::new(pixmap(
+            u32::from(w),
+            u32::from(h),
+            pixels,
+        ))))
     }
 
-    fn runs(&self) -> bool {
-        false
+    fn whole_runs(&self) -> bool {
+        true
     }
 
     fn read(&mut self, kernel: u32, paints: IRect, reads: IRect, open: &[Open]) -> Result<()> {

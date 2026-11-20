@@ -126,12 +126,14 @@ export function engineDebug(editor: Editor) {
       if (typeof e === "string") return { ok: false, error: e, unsupported: {} };
       await images(e, options.pageId);
       // Text whose face is still loading can't be outlined yet: the shaper starts loading it on
-      // the first try. Wait for it (as the canvas's parity spec waits for fonts), up to 20 s.
+      // the first try, and the list sends it provisional (bars) meanwhile. Wait for it (as the
+      // canvas's parity spec waits for fonts), up to 20 s: what's drawn is the text itself.
       const make = () => {
         const b = builder(options.pageId);
         return { b, list: options.ids ? b.buildLayers(options.ids) : b.build(options.pageId) };
       };
       const loading = (b: DisplayListBuilder) =>
+        b.waiting > 0 ||
         [...b.unsupported.values()].some((bits) =>
           unsupportedNames(bits).includes("textWithoutOutlines"),
         );
