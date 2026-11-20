@@ -44,6 +44,7 @@ type W = {
   drawpaneEngineView?: {
     last: { supported: boolean; records: number; exact: boolean; plan: string };
     engine: {
+      records: number;
       gpuPixels(): Promise<{ ok: boolean; value?: Uint8Array; message?: string }>;
       loseGpu(): void;
       gpu: { adapter: string } | null;
@@ -263,12 +264,14 @@ test.describe
         e.zoomTo(1);
         e.centerOn({ x: 500, y: 300 });
       });
-      // Fonts arrive, faces are shaped, then the engine draws the page.
+      // Fonts arrive, faces are shaped, then the engine draws the page. Not a frame's own count
+      // of records drawn: tiles drawn between frames leave the exact frame nothing to encode.
       await page
         .waitForFunction(
-          () =>
-            (window as unknown as W).drawpaneEngineView?.last.supported === true &&
-            ((window as unknown as W).drawpaneEngineView?.last.records ?? 0) > 0,
+          () => {
+            const v = (window as unknown as W).drawpaneEngineView;
+            return v?.last.supported === true && v.engine.records > 0 && v.last.exact;
+          },
           undefined,
           { timeout: 120_000 },
         )
