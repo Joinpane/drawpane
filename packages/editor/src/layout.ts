@@ -1008,7 +1008,9 @@ export class LayoutEngine {
           if (line.length === 1) offset += free / 2;
           else if (line.length > 1) spacing = (rawInnerMain - used) / (line.length - 1);
         } else if (line.length > 1) {
-          spacing = Math.max(0, (innerMain - used) / (line.length - 1));
+          // CSS keeps the gap as a minimum and shares only the space left above it.
+          const extra = innerMain - used - gap * (line.length - 1);
+          spacing = gap + Math.max(0, extra) / (line.length - 1);
         }
       }
       for (const child of line) {

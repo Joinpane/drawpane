@@ -411,6 +411,16 @@ describe("auto layout", () => {
     expect(legacyOverflow.box("c0")[1]).toBe(4);
     expect(legacyOverflow.box("c1")[1]).toBe(26);
 
+    // CSS keeps the gap as a minimum when children overflow, as the exported flexbox does.
+    const gapOverflow = setup(
+      { layoutMode: "row", justifyContent: "space-between", gap: 10, width: 100 },
+      [
+        { width: 60, height: 20 },
+        { width: 60, height: 20 },
+      ],
+    );
+    expect(gapOverflow.box("c1")[0]).toBe(70);
+
     // Explicit Figma provenance: single child centers, overflow allows negative spacing.
     const single = setup(
       {
