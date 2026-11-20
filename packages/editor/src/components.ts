@@ -706,6 +706,9 @@ export function relayoutTargets(
     // An overridden string can still display its main's bound value. Unbinding
     // can expose the copy's saved text, so treat a text binding edit as a layout edit.
     if (op.prop === "bindings") return doc.getUnresolved(op.id)?.type === "text";
+    // Strokes take room in a layout only on a frame that includes them.
+    if (op.prop === "strokes" || op.prop === "strokeAlign")
+      return doc.getUnresolved(op.id)?.type === "frame";
     return op.prop !== "overrides" && !LAYOUT_NEUTRAL.has(op.prop);
   });
   if (changes.length === 0) return { layout, text };
@@ -714,12 +717,13 @@ export function relayoutTargets(
   // Run edits can change run bindings as well as their saved values.
   const charactersOnly = changes.every((op) => op.op === "set" && op.prop === "characters");
   const changedCharacters = charactersOnly ? new Set(changes.map((op) => op.id)) : null;
+  // Only the main's characters changed (a binding edit isn't characters-only),
+  // so a copy that overrides them shows the same text as before: its own, or
+  // its binding's value, which this edit didn't touch.
   const inheritsTextChange = (id: string): boolean => {
     let overridden = false;
-    let bound = false;
     for (let node = doc.getUnresolved(id); node?.type === "text"; ) {
-      bound ||= !!getProp(node.props, "bindings").characters;
-      if (changedCharacters?.has(node.id)) return !overridden || bound;
+      if (changedCharacters?.has(node.id)) return !overridden;
       overridden ||= getProp(node.props, "overrides").includes("characters");
       const source = getProp(node.props, "mirrors");
       node = source ? doc.getUnresolved(source) : undefined;
