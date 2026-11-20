@@ -10,12 +10,13 @@ import { inkOn } from "./contrast";
 import { boxPath, flattenBox, isSquare, layerCorners } from "./corners";
 import { imageRect } from "./crop";
 import { croppingTarget } from "./crop-session";
+import type { Doc } from "./doc";
 import type { Editor } from "./editor";
 import { apply, type Point, type Rect } from "./geometry";
 import { framesWithGrids, gridLines, gridTracks, placedGuides, visibleGrids } from "./grids";
 import type { ImageCache } from "./images";
 import type { Interaction } from "./interaction";
-import { frameLabels, LABEL_FONT } from "./labels";
+import { type FrameLabel, frameLabelsInRect, LABEL_FONT } from "./labels";
 import { trackLabel } from "./layout";
 import { drawPrototypeOverlay } from "./prototype/overlay";
 import { readingOrderOf } from "./reading-order";
@@ -58,6 +59,100 @@ const HANDLE = 7;
 const XRAY_PADDING_INK = "#6b4e00";
 const XRAY_GAP_INK = "#8a1f50";
 
+interface ComponentSetCache {
+  version: number;
+  readonly pageId: string;
+  readonly ids: readonly string[];
+  /** Every top-level frame and direct child visited, mapped to its `isComponentSet` boolean. */
+  readonly seen: ReadonlyMap<string, boolean>;
+}
+const componentSetCaches = new WeakMap<Doc, ComponentSetCache>();
+
+/**
+ * Component set IDs on `pageId` (top-level or direct children of top-level frames).
+ * Cached by document version so panning a 10,000-layer file does not walk all children every frame.
+ */
+export function componentSetIds(doc: Doc, pageId: string): readonly string[] {
+  const last = componentSetCaches.get(doc);
+  if (last && last.pageId === pageId) {
+    if (last.version === doc.version) return last.ids;
+    const changes = doc.changesSince(last.version);
+    const same =
+      changes?.every(
+        (change) =>
+          !change.reset &&
+          change.parents.size === 0 &&
+          [...change.ids].every((id) => {
+            const prev = last.seen.get(id);
+            if (prev === undefined) return true;
+            const node = doc.get(id);
+            return node !== undefined && Boolean(getProp(node.props, "isComponentSet")) === prev;
+          }),
+      ) ?? false;
+    if (same) {
+      last.version = doc.version;
+      return last.ids;
+    }
+  }
+  const ids: string[] = [];
+  const seen = new Map<string, boolean>();
+  for (const id of doc.childIds(pageId)) {
+    const node = doc.get(id);
+    if (node?.type !== "frame") continue;
+    const isSet = Boolean(getProp(node.props, "isComponentSet"));
+    seen.set(id, isSet);
+    if (isSet) {
+      ids.push(id);
+    } else {
+      for (const child of doc.childIds(id)) {
+        const childIsSet = Boolean(getProp(doc.get(child)?.props ?? {}, "isComponentSet"));
+        seen.set(child, childIsSet);
+        if (childIsSet) ids.push(child);
+      }
+    }
+  }
+  componentSetCaches.set(doc, { version: doc.version, pageId, ids, seen });
+  return ids;
+}
+
+/** Label inks resolved against the page's chosen background colour. */
+export function resolveLabelInks(
+  editor: Editor,
+  pageId: string,
+  theme: OverlayTheme,
+): { readonly mutedInk: string; readonly componentInk: string } {
+  const pageBackground = getProp(editor.doc.get(pageId)?.props ?? {}, "backgroundColor");
+  const labelInk = (own: "inkMuted" | "componentInk") =>
+    pageBackground && theme.otherLabels
+      ? inkOn(pageBackground, theme[own], theme.otherLabels[own])
+      : theme[own];
+  return { mutedInk: labelInk("inkMuted"), componentInk: labelInk("componentInk") };
+}
+
+/** Draws one artboard / component / instance label at its screen coordinates. */
+export function drawSingleLabel(
+  ctx: CanvasRenderingContext2D,
+  label: FrameLabel,
+  highlighted: boolean,
+  theme: OverlayTheme,
+  mutedInk: string,
+  componentInk: string,
+): void {
+  const isComponentish = label.kind !== "frame";
+  if (isComponentish) {
+    // Components and instances wear the component colour, with a small diamond.
+    drawDiamond(
+      ctx,
+      label.box.x + 4,
+      label.baseline - 3.5,
+      label.kind === "component",
+      theme.component,
+    );
+  }
+  ctx.fillStyle = highlighted ? theme.signal : isComponentish ? componentInk : mutedInk;
+  if (label.text) ctx.fillText(label.text, label.textX, label.baseline);
+}
+
 export function drawOverlay(
   ctx: CanvasRenderingContext2D,
   editor: Editor,
@@ -66,6 +161,26 @@ export function drawOverlay(
   dpr: number,
   /** The app's image cache, for the image shown around a crop. */
   images?: ImageCache,
+): void {
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+  if (!editor.s.pageId) return;
+  drawOverlayContent(ctx, editor, interaction, theme, dpr, images, true);
+}
+
+/**
+ * Draws the overlay without clearing `ctx` first, optionally omitting artboard labels
+ * (when a separate retained label canvas owns them). Used by `OverlayRenderer` for
+ * dirty-region transient redraws and by `drawOverlay` for full single-canvas draws.
+ */
+export function drawOverlayContent(
+  ctx: CanvasRenderingContext2D,
+  editor: Editor,
+  interaction: Interaction,
+  theme: OverlayTheme,
+  dpr: number,
+  images: ImageCache | undefined,
+  includeLabels: boolean,
 ): void {
   const {
     camera,
@@ -84,8 +199,6 @@ export function drawOverlay(
     prototyping,
     cropping,
   } = editor.s;
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
   if (!pageId) return;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   const scene = editor.scene;
@@ -111,48 +224,28 @@ export function drawOverlay(
   drawGuides(ctx, editor, theme);
 
   // Component sets: a dashed outline in the component colour, like Figma.
-  const sets: string[] = [];
-  for (const id of doc.childIds(pageId)) {
-    const node = doc.get(id);
-    if (node?.type === "frame" && getProp(node.props, "isComponentSet")) sets.push(id);
-    else if (node?.type === "frame") {
-      for (const child of doc.childIds(id))
-        if (getProp(doc.get(child)?.props ?? {}, "isComponentSet")) sets.push(child);
-    }
-  }
-  for (const id of sets) {
+  for (const id of componentSetIds(doc, pageId)) {
     const corners = scene.corners(id);
     if (corners) quad(corners, theme.component, 1, [4, 3]);
   }
 
   // Artboard labels: names above top-level frames (the one being renamed is an input instead).
   // On a background the file chose, in whichever theme's inks read on it.
-  const pageBackground = getProp(doc.get(pageId)?.props ?? {}, "backgroundColor");
-  const labelInk = (own: "inkMuted" | "componentInk") =>
-    pageBackground && theme.otherLabels
-      ? inkOn(pageBackground, theme[own], theme.otherLabels[own])
-      : theme[own];
-  const mutedInk = labelInk("inkMuted");
-  const componentInk = labelInk("componentInk");
-  ctx.font = LABEL_FONT;
-  ctx.textBaseline = "alphabetic";
-  for (const label of frameLabels(editor)) {
-    if (label.id === editor.s.renamingFrame) continue;
-    const selected = selection.includes(label.id);
-    const hovered = hover === label.id;
-    const isComponentish = label.kind !== "frame";
-    if (isComponentish) {
-      // Components and instances wear the component colour, with a small diamond.
-      drawDiamond(
-        ctx,
-        label.box.x + 4,
-        label.baseline - 3.5,
-        label.kind === "component",
-        theme.component,
-      );
+  if (includeLabels) {
+    const { mutedInk, componentInk } = resolveLabelInks(editor, pageId, theme);
+    const clipW = ctx.canvas.width > 0 ? ctx.canvas.width / dpr : editor.s.viewport.width;
+    const clipH = ctx.canvas.height > 0 ? ctx.canvas.height / dpr : editor.s.viewport.height;
+    const labels = frameLabelsInRect(editor, { x: 0, y: 0, width: clipW, height: clipH }, 16);
+    if (labels.length > 0) {
+      ctx.font = LABEL_FONT;
+      ctx.textBaseline = "alphabetic";
+      for (const label of labels) {
+        if (label.id === editor.s.renamingFrame) continue;
+        if (!label.text && label.kind === "frame") continue;
+        const highlighted = selection.includes(label.id) || hover === label.id;
+        drawSingleLabel(ctx, label, highlighted, theme, mutedInk, componentInk);
+      }
     }
-    ctx.fillStyle = selected || hovered ? theme.signal : isComponentish ? componentInk : mutedInk;
-    if (label.text) ctx.fillText(label.text, label.textX, label.baseline);
   }
 
   // Grid layout: the cells of a selected grid, or of the grid a selected or
@@ -576,7 +669,7 @@ function drawMeasurements(
 }
 
 /** The component glyph: a diamond, solid inside for a main component. */
-function drawDiamond(
+export function drawDiamond(
   ctx: CanvasRenderingContext2D,
   cx: number,
   cy: number,
@@ -846,6 +939,46 @@ function drawCursor(
   ctx.stroke();
   drawNameTag(ctx, 10, 16, color, ink, name, font);
   ctx.restore();
+}
+
+/**
+ * Screen-space (CSS px) ink bounds of `drawNameTag(ctx, x, y, ..., name, font)`, measured with
+ * the exact same font and including glyph overhangs (`actualBoundingBox*`) so dirty-region clears
+ * never leave ghost pixels for wide ligatures, CJK/Arabic scripts, or tall combining marks.
+ */
+export function measureNameTagBounds(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  name: string,
+  font: string,
+): { readonly x: number; readonly y: number; readonly width: number; readonly height: number } {
+  ctx.save();
+  ctx.font = `600 11px ${font}`;
+  ctx.textBaseline = "middle";
+  const m = ctx.measureText(name);
+  ctx.restore();
+  const advanceW = Number.isFinite(m.width) ? m.width : name.length * 10;
+  const pillLeft = Math.round(x);
+  const pillTop = Math.round(y);
+  const pillRight = pillLeft + advanceW + 10;
+  const pillBottom = pillTop + 18;
+  const textX = pillLeft + 5;
+  const textY = pillTop + 9.5;
+  const leftOver = Number.isFinite(m.actualBoundingBoxLeft) ? m.actualBoundingBoxLeft : 0;
+  const rightOver = Number.isFinite(m.actualBoundingBoxRight) ? m.actualBoundingBoxRight : advanceW;
+  const ascOver = Number.isFinite(m.actualBoundingBoxAscent) ? m.actualBoundingBoxAscent : 9;
+  const descOver = Number.isFinite(m.actualBoundingBoxDescent) ? m.actualBoundingBoxDescent : 9;
+  const minX = Math.min(pillLeft, textX - leftOver) - 3;
+  const maxX = Math.max(pillRight, textX + rightOver) + 3;
+  const minY = Math.min(pillTop, textY - ascOver) - 3;
+  const maxY = Math.max(pillBottom, textY + descOver) + 3;
+  return {
+    x: minX,
+    y: minY,
+    width: Math.max(1, maxX - minX),
+    height: Math.max(1, maxY - minY),
+  };
 }
 
 /** Someone's name on a tag of their colour, its top left at (x, y): by their cursor or selection. */
@@ -1139,7 +1272,7 @@ function drawCrop(
 }
 
 /** A rectangle's or frame's rounded outline as points in its own box; null when its corners are square. */
-function boxOutlinePoints(node: NodeRecord): Point[] | null {
+export function boxOutlinePoints(node: NodeRecord): Point[] | null {
   const { radii, smoothing } = layerCorners(node);
   if (isSquare(radii)) return null;
   const w = getProp(node.props, "width");

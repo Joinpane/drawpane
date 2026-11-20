@@ -443,12 +443,16 @@ test.describe("Canvas performance", () => {
               w.drawpane.state.set({ camera: w.drawpane.s.camera.pan(d, d / 2) });
             });
 
-            // Canvas order inside `.canvas`: [contentCanvas, engineCanvas, overlayCanvas].
+            // Canvases inside `.canvas`: content, engine, retained labels, transient overlay.
             const canvases = [
               ...document.querySelectorAll(".canvas canvas"),
             ] as HTMLCanvasElement[];
-            const overlayCanvas = canvases[canvases.length - 1];
-            const contentCanvas = canvases[0];
+            const overlayCanvas = document.querySelector(
+              ".canvas .canvas__overlay",
+            ) as HTMLCanvasElement | null;
+            const contentCanvas = document.querySelector(
+              '.canvas canvas[data-canvas-role="content"]',
+            ) as HTMLCanvasElement | null;
             out.canvasSizes = canvases.map((c) => ({
               w: c.width,
               h: c.height,
