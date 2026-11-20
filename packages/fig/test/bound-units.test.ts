@@ -120,7 +120,16 @@ function fixture(swap = true, literal = false) {
     size: { x: 40, y: 40 },
     transform: identity(0, 4700),
     fillPaints: [],
-    ...(bound ? { variableConsumptionMap: { entries: [binding("OPACITY", bound)] } } : {}),
+    ...(bound
+      ? {
+          variableConsumptionMap: {
+            entries: [binding("OPACITY", bound), binding("STACK_PADDING_LEFT", bound)],
+          },
+        }
+      : {}),
+    stackMode: "HORIZONTAL",
+    stackHorizontalPadding: bound === ids.newOpacity ? 80 : 50,
+    bordersTakeSpace: id === ids.newVariant,
   });
   const box = (id: Guid, name: string, x: number, independent: boolean) => ({
     ...base,
@@ -278,8 +287,18 @@ function fixture(swap = true, literal = false) {
       size: { x: 40, y: 40 },
       transform: identity(),
       symbolData: { symbolID: ids.oldVariant, symbolOverrides: [] },
+      stackMode: "HORIZONTAL",
+      stackHorizontalPadding: 50,
+      bordersTakeSpace: false,
       ...(!literal
-        ? { variableConsumptionMap: { entries: [binding("OPACITY", ids.oldOpacity)] } }
+        ? {
+            variableConsumptionMap: {
+              entries: [
+                binding("OPACITY", ids.oldOpacity),
+                binding("STACK_PADDING_LEFT", ids.overrideOpacity),
+              ],
+            },
+          }
         : {}),
     },
     {
@@ -440,4 +459,26 @@ describe("bound fields read through the layer", { timeout: 60_000 }, () => {
       value: 24,
     });
   });
+});
+
+it("preserves the nested record's independent padding alias across a .fig swap", {
+  timeout: 60_000,
+}, async () => {
+  const original = await converted(false);
+  const result = await converted();
+  const nested = result.copyOf(ids.swapped, ids.nested);
+  const wanted = drawpaneId(`VariableID:${key(ids.overrideOpacity)}`);
+  expect(original.copyOf(ids.swapped, ids.nested).props.bindings?.paddingLeft).toBe(wanted);
+  expect(nested.props.instanceOf).toBe(drawpaneId(key(ids.newVariant)));
+  expect(nested.props.bindings?.paddingLeft).toBe(wanted);
+});
+
+it("takes the new variant's included stroke flag from .fig metadata", {
+  timeout: 60_000,
+}, async () => {
+  const result = await converted();
+  expect(result.get(ids.newVariant).props.strokesIncludedInLayout).toBe(true);
+  const nested = result.copyOf(ids.swapped, ids.nested);
+  expect(nested.props.instanceOf).toBe(drawpaneId(key(ids.newVariant)));
+  expect(nested.props.strokesIncludedInLayout).toBe(true);
 });

@@ -1,6 +1,8 @@
 import { compactByInstance, getProp, type NodeRecord, ROOT_ID } from "@drawpane/model";
 import { expect, it } from "vitest";
+import { convertFile, drawpaneId, type Figma } from "../../figma/src/index";
 import { Editor } from "../src/editor";
+import { layoutOps } from "../src/layout";
 
 function open(nodes: NodeRecord[], compact = false) {
   const editor = new Editor({
@@ -329,4 +331,87 @@ it("undoing Hide restores a plain frame's original imported descendant geometry"
   editor.redo();
   expect(getProp(props("plain"), "visible")).toBe(false);
   expect(props("badge").width).toBe(50);
+});
+
+it("does not reuse a packed variable gap as a minimum for Figma Auto spacing", () => {
+  const alias = { type: "VARIABLE_ALIAS", id: "VariableID:1:1" } as const;
+  const at = (x: number): Figma.Transform => [
+    [1, 0, x],
+    [0, 1, 0],
+  ];
+  const file = {
+    name: "Bound Auto gap",
+    variables: {
+      variableCollections: {
+        "VariableCollectionId:1:0": {
+          id: "VariableCollectionId:1:0",
+          name: "Spacing",
+          modes: [{ modeId: "1:2", name: "Default" }],
+          defaultModeId: "1:2",
+          variableIds: [alias.id],
+        },
+      },
+      variables: {
+        [alias.id]: {
+          id: alias.id,
+          name: "Gap",
+          variableCollectionId: "VariableCollectionId:1:0",
+          resolvedType: "FLOAT",
+          valuesByMode: { "1:2": 30 },
+        },
+      },
+    },
+    document: {
+      id: "0:0",
+      name: "Document",
+      type: "DOCUMENT",
+      children: [
+        {
+          id: "0:1",
+          name: "Page",
+          type: "CANVAS",
+          children: [
+            {
+              id: "2:0",
+              name: "Row",
+              type: "FRAME",
+              size: { x: 100, y: 20 },
+              relativeTransform: at(0),
+              layoutMode: "HORIZONTAL",
+              primaryAxisAlignItems: "SPACE_BETWEEN",
+              itemSpacing: 30,
+              layoutWrap: "WRAP",
+              counterAxisSpacing: 7,
+              boundVariables: { itemSpacing: alias },
+              children: [
+                {
+                  id: "2:1",
+                  name: "Left",
+                  type: "RECTANGLE",
+                  size: { x: 40, y: 20 },
+                  relativeTransform: at(0),
+                },
+                {
+                  id: "2:2",
+                  name: "Right",
+                  type: "RECTANGLE",
+                  size: { x: 40, y: 20 },
+                  relativeTransform: at(60),
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  } satisfies Figma.File;
+  const { nodes } = convertFile(file);
+  const { editor } = open(nodes);
+  const row = drawpaneId("2:0");
+  const right = drawpaneId("2:2");
+  expect(editor.doc.get(right)?.props.x).toBe(60);
+  expect(editor.doc.get(row)?.props).toMatchObject({ gap: 0, rowGap: 7 });
+  expect(editor.doc.get(row)?.props.bindings?.gap).toBeUndefined();
+  editor.doc.apply(layoutOps(editor.doc, [row]));
+  expect(editor.doc.get(right)?.props).toMatchObject({ x: 60, y: 0 });
 });

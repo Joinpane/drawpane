@@ -47,6 +47,7 @@ const LOOK = [
   // Its own auto layout, and the sizes it may take.
   "layoutMode",
   "layoutWrap",
+  "strokesIncludedInLayout",
   "primaryAxisAlign",
   "counterAxisAlign",
   "primaryAxisSizing",
@@ -165,6 +166,7 @@ const SET_LOOK_FIELDS: Readonly<Record<string, readonly string[]>> = {
   stackPaddingRight: ["paddingRight"],
   stackPaddingBottom: ["paddingBottom"],
   stackHorizontalPadding: ["paddingLeft"],
+  bordersTakeSpace: ["strokesIncludedInLayout"],
   minSize: ["minWidth", "minHeight"],
   maxSize: ["maxWidth", "maxHeight"],
   frameMaskDisabled: ["clipsContent"],
@@ -202,6 +204,8 @@ function explicitLooks(overrides: readonly Readonly<Record<string, unknown>>[]):
       if (o[field] !== undefined) for (const look of looks) set.add(look);
     for (const [field, look] of Object.entries(PLAIN_LOOK_FIELDS))
       if (typeof o[field] === "number" && !values.has(look)) values.set(look, o[field]);
+    if (typeof o.bordersTakeSpace === "boolean" && !values.has("strokesIncludedInLayout"))
+      values.set("strokesIncludedInLayout", o.bordersTakeSpace);
   }
   return { set, bound, values };
 }
@@ -228,6 +232,13 @@ export function applySwappedLooks(
   layers: ReadonlyMap<string, string>,
 ): number {
   let changed = 0;
+  // Open Pencil retains the Kiwi field as metadata. Normalize it before
+  // comparing a copy with either variant so the swap can replace the flag.
+  for (const node of graph.getAllNodes()) {
+    const flag = node.source.fig.layout?.bordersTakeSpace;
+    if (flag !== undefined && flag !== node.strokesIncludedInLayout)
+      graph.updateNode(node.id, { strokesIncludedInLayout: flag });
+  }
   for (const node of graph.getAllNodes()) {
     if (node.type !== "INSTANCE" || !node.componentId) continue;
     // The record it copies, and the component that record names.
@@ -245,16 +256,34 @@ export function applySwappedLooks(
     const own = node as unknown as Record<string, unknown>;
     const was = oldMain as unknown as Record<string, unknown>;
     const next = newMain as unknown as Record<string, unknown>;
-    // Provenance, not colour (decision 0034): a field the instance doesn't override (its value
-    // still the old component's) takes the new component's value and its binding, whatever
-    // the copy's binding was (a main holding the copy may bind it to another variable, and
-    // Open Pencil leaves some copies' bindings out). One whose value differs is an override:
-    // its value and binding are kept.
-    // A field an override binds or sets is the instance's own, even when it matches the old
-    // component's value (two variables can agree in the mode it was saved in).
+    // An explicit override belongs to the instance even when its value matches the old main's.
     const explicit = explicitLooks(ids.overridesOf?.(node) ?? []);
     const bound = { ...(node.boundVariables as Bound | undefined) };
+    const scales = { ...node.variableBindingScales };
     let rebound = false;
+    let rescaled = false;
+    const replaceBindings = (field: string, from?: SceneNode) => {
+      const nextBinds = bindingsOf(from?.boundVariables, field);
+      const keys = new Set([
+        field,
+        ...Object.keys(bindingsOf(bound, field)),
+        ...Object.keys(nextBinds),
+      ]);
+      for (const key of keys) {
+        const binding = nextBinds[key];
+        if (binding !== bound[key]) {
+          if (binding === undefined) delete bound[key];
+          else bound[key] = binding;
+          rebound = true;
+        }
+        const scale = binding === undefined ? undefined : from?.variableBindingScales?.[key];
+        if (scale !== scales[key]) {
+          if (scale === undefined) delete scales[key];
+          else scales[key] = scale;
+          rescaled = true;
+        }
+      }
+    };
     for (const field of LOOK) {
       if (explicit.set.has(field)) {
         // The override's own: its plain value back where Open Pencil's swap dropped it, and,
@@ -262,39 +291,41 @@ export function applySwappedLooks(
         const value = explicit.values.get(field);
         if (value === undefined) continue;
         if (!same(own[field], value)) updates[field] = value;
-        if (!explicit.bound.has(field)) {
-          const binds = bindingsOf(bound, field);
-          if (Object.keys(binds).length > 0) {
-            for (const key of Object.keys(binds)) delete bound[key];
-            rebound = true;
-          }
-        }
+        if (!explicit.bound.has(field)) replaceBindings(field);
         continue;
       }
-      const ownBinds = bindingsOf(node.boundVariables as Bound, field);
+      const numericLayout = LAYOUT_NUMBERS.has(field);
+      const ownBinding = node.boundVariables?.[field];
       const oldBinding = oldMain.boundVariables?.[field];
+      const ownScale = node.variableBindingScales?.[field] ?? 1;
+      if (
+        numericLayout &&
+        ownBinding !== undefined &&
+        (ownBinding !== oldBinding || ownScale !== (oldMain.variableBindingScales?.[field] ?? 1))
+      )
+        continue;
       // Open Pencil resolved the old layout token where the copy sits. Its
       // fallback can differ from the old component's without being an override.
-      const inherited =
-        LAYOUT_NUMBERS.has(field) &&
-        oldBinding !== undefined &&
-        ownBinds[field] === oldBinding &&
-        own[field] === graph.resolveNumberVariableForNode(node.id, oldBinding);
+      const previous =
+        numericLayout && ownBinding
+          ? graph.resolveNumberVariableForNode(node.id, ownBinding)
+          : undefined;
+      const inherited = previous !== undefined && own[field] === previous * ownScale;
       if (!inherited && !same(own[field], was[field])) continue;
       const newBinding = newMain.boundVariables?.[field];
       const resolved =
-        LAYOUT_NUMBERS.has(field) && newBinding
+        numericLayout && newBinding
           ? graph.resolveNumberVariableForNode(node.id, newBinding)
           : undefined;
-      const value = resolved ?? next[field];
+      const value =
+        resolved === undefined
+          ? next[field]
+          : resolved * (newMain.variableBindingScales?.[field] ?? 1);
       if (!same(own[field], value)) updates[field] = structuredClone(value);
-      const nextBinds = bindingsOf(newMain.boundVariables as Bound, field);
-      if (same(ownBinds, nextBinds)) continue;
-      for (const key of Object.keys(ownBinds)) delete bound[key];
-      Object.assign(bound, nextBinds);
-      rebound = true;
+      replaceBindings(field, newMain);
     }
     if (rebound) updates.boundVariables = bound;
+    if (rescaled) updates.variableBindingScales = scales;
     if (Object.keys(updates).length > 0) {
       graph.updateNode(node.id, updates as Partial<SceneNode>);
       changed++;

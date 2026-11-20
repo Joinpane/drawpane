@@ -270,6 +270,9 @@ export function layerBindings(
     if (propAllowed(type, prop as never)) out[key] = bindingRef(key, id);
   };
   for (const [field, alias] of Object.entries(bound)) {
+    // Auto spacing ignores the packed gap and its binding. The cross-axis
+    // gap of a wrapped layout is still active.
+    if (field === "itemSpacing" && node.primaryAxisAlignItems === "SPACE_BETWEEN") continue;
     const key = FIELDS[field];
     if (key) put(key, alias);
     const nested = NESTED[field];

@@ -107,9 +107,8 @@ export function containerLayout(node: Figma.Node): Props {
   }
   const justify = pick(JUSTIFY, node.primaryAxisAlignItems);
   if (justify) props.justifyContent = justify;
-  // A Figma Auto gap distributes the remaining space. A numeric itemSpacing
-  // saved beside it is an inactive packed gap, not a minimum between children.
-  if (justify === "space-between" && !node.boundVariables?.itemSpacing) props.gap = 0;
+  // Figma saves the packed gap even while Auto distributes the remaining space.
+  if (justify === "space-between") props.gap = 0;
   const align = pick(ALIGN, node.counterAxisAlignItems);
   if (align) props.alignItems = align;
   return props;
