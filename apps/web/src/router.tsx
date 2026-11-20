@@ -22,6 +22,11 @@ import { TokensPage } from "./auth/TokensPage";
 import { UnsubscribePage } from "./auth/UnsubscribePage";
 import { DashboardPage } from "./dashboard/DashboardPage";
 import { isTeamView, type TeamView } from "./dashboard/views";
+import {
+  type EngineSearch,
+  engineSearch,
+  rememberRendererSwitches,
+} from "./editor/renderer-switch";
 import { NewFilePage } from "./new-file/NewFilePage";
 import type { PresentSearch } from "./prototype/PresentPage";
 import type { SharedSearch } from "./prototype/SharedPrototypePage";
@@ -44,6 +49,11 @@ interface RouterContext {
 const sessionQuery = { queryKey: ["session"], queryFn: api.session };
 
 const rootRoute = createRootRouteWithContext<RouterContext>()({
+  beforeLoad: ({ location }) => {
+    // Remember URL render switches (`?renderer=...`, `?present=...`) for this session before any
+    // redirect (such as `/` -> `/t/$teamId` or `requireUser` -> `/signin`) can drop them.
+    rememberRendererSwitches(location.searchStr);
+  },
   component: () => (
     <>
       <ShortcutsSync />
@@ -174,9 +184,12 @@ const teamRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/t/$teamId",
   beforeLoad: requireUser,
-  validateSearch: (search: Record<string, unknown>): { project?: string; view?: TeamView } => ({
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { project?: string; view?: TeamView } & EngineSearch => ({
     ...(typeof search.project === "string" ? { project: search.project } : {}),
     ...(isTeamView(search.view) ? { view: search.view } : {}),
+    ...engineSearch(search),
   }),
   component: DashboardPage,
 });
@@ -195,11 +208,15 @@ const fileRoute = createRoute({
   path: "/f/$fileId",
   beforeLoad: requireUser,
   // `thread`: open at a comment (from the inbox). `review`: a branch, open for review.
-  validateSearch: (search: Record<string, unknown>): { thread?: string; review?: true } => ({
+  // `renderer` and `present`: render engine switches (engine-view.ts).
+  validateSearch: (
+    search: Record<string, unknown>,
+  ): { thread?: string; review?: true } & EngineSearch => ({
     ...(typeof search.thread === "string" ? { thread: search.thread } : {}),
     ...(search.review === true || search.review === "1" || search.review === 1
       ? { review: true as const }
       : {}),
+    ...engineSearch(search),
   }),
   component: () => (
     <Suspense fallback={<div className="app-loading" aria-busy="true" />}>

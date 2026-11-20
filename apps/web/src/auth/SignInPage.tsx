@@ -25,7 +25,16 @@ export function SignInPage() {
       // Nothing cached for the signed-out page may linger (see forgetCachedData).
       forgetCachedData(queryClient);
       queryClient.setQueryData(["session"], { user, needsSetup: false });
-      await navigate({ to: next ?? "/" });
+      if (next) {
+        const target = new URL(next, window.location.origin);
+        await navigate({
+          to: target.pathname,
+          search: Object.fromEntries(target.searchParams.entries()),
+          ...(target.hash ? { hash: target.hash.slice(1) } : {}),
+        });
+      } else {
+        await navigate({ to: "/" });
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     } finally {

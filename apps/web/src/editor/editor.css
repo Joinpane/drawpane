@@ -1219,14 +1219,27 @@
   }
 }
 
-/* Bottom: zoom, status, notices */
+/* Bottom: zoom, renderer status chip, sync status, notices */
+.bottom-bar {
+  position: absolute;
+  z-index: 2;
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: var(--space-200);
+  pointer-events: none;
+}
+.bottom-bar > .pane {
+  position: static;
+  pointer-events: auto;
+}
+
 .zoom {
   margin: 0;
   border: 0;
   min-width: 0;
-  bottom: 12px;
-  left: 50%;
-  transform: translateX(-50%);
   display: flex;
   align-items: center;
   gap: 2px;
@@ -1251,6 +1264,73 @@
 .zoom__value:focus-visible {
   outline: none;
   box-shadow: var(--shadow-focus);
+}
+
+.renderer-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-100);
+  height: 36px;
+  padding: 0 var(--space-300);
+  border: 0;
+  box-sizing: border-box;
+  color: var(--ink);
+  font: var(--type-ui-label);
+  white-space: nowrap;
+  cursor: pointer;
+}
+.renderer-chip:hover {
+  background: var(--surface-hover);
+}
+.renderer-chip:active {
+  background: var(--surface-active);
+}
+.renderer-chip:focus-visible {
+  outline: none;
+  box-shadow: var(--shadow-pane), var(--shadow-focus);
+}
+.renderer-chip--engine .dp-icon {
+  color: var(--success);
+}
+.renderer-chip--canvas .dp-icon {
+  color: var(--warning);
+}
+.renderer-chip--starting {
+  color: var(--ink-muted);
+}
+.renderer-chip--starting .dp-icon {
+  color: var(--ink-muted);
+}
+.renderer-popover {
+  width: max-content;
+  max-width: 280px;
+  padding: var(--space-300);
+}
+.renderer-popover__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-200);
+}
+.renderer-popover__title {
+  font: var(--type-ui-strong);
+  color: var(--ink);
+}
+.renderer-popover__icon--engine {
+  color: var(--success);
+}
+.renderer-popover__icon--canvas {
+  color: var(--warning);
+}
+.renderer-popover__reason {
+  margin: var(--space-100) 0 0;
+  font: var(--type-ui-body);
+  color: var(--ink-muted);
+  overflow-wrap: anywhere;
+}
+.renderer-popover__meta {
+  margin: var(--space-100) 0 0;
+  font: var(--type-ui-label);
+  color: var(--ink-muted);
 }
 
 .sync {
