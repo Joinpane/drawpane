@@ -9,7 +9,7 @@
 
 export const MAGIC = 0x4c445044; // "DPDL", little-endian
 export const MAJOR = 1;
-export const MINOR = 2;
+export const MINOR = 4;
 /** A message with this base replaces everything; it starts with a reset. */
 export const ANY_REVISION = 0xffffffff;
 /** The page: the root top-level records hang from. */
@@ -31,7 +31,15 @@ export const COMMAND = {
  */
 export const FLAG = { hidden: 1, isolate: 2, group: 4, provisional: 8 } as const;
 
-export const PATH = { path: 1, rect: 2, ellipse: 3, glyphs: 4, outside: 5 } as const;
+export const PATH = {
+  path: 1,
+  rect: 2,
+  ellipse: 3,
+  glyphs: 4,
+  outside: 5,
+  box: 6,
+  oval: 7,
+} as const;
 export const OP = {
   fill: 1,
   stroke: 2,
@@ -41,6 +49,29 @@ export const OP = {
   read: 6,
   layer: 7,
   unlayer: 8,
+  // 9..=12 reserved for phase 3B reader ops.
+  dropShadow: 13,
+  innerShadow: 14,
+} as const;
+export const BLEND = {
+  normal: 0,
+  multiply: 1,
+  screen: 2,
+  overlay: 3,
+  darken: 4,
+  lighten: 5,
+  "color-dodge": 6,
+  "color-burn": 7,
+  "hard-light": 8,
+  "soft-light": 9,
+  difference: 10,
+  exclusion: 11,
+  hue: 12,
+  saturation: 13,
+  color: 14,
+  luminosity: 15,
+  "linear-dodge": 16,
+  "linear-burn": 17,
 } as const;
 export const COMPOSE = { srcOver: 0, destOut: 1, destIn: 2 } as const;
 export const PAINT = {
@@ -140,7 +171,23 @@ export type PathEntry =
       /** Glyph handle, then x and y of its origin on the baseline, in the layer's units. */
       readonly glyphs: readonly number[];
     }
-  | { readonly kind: "outside"; readonly of: number };
+  | { readonly kind: "outside"; readonly of: number }
+  | {
+      readonly kind: "box";
+      readonly x: number;
+      readonly y: number;
+      readonly w: number;
+      readonly h: number;
+      readonly radii: readonly [number, number, number, number];
+      readonly smoothing: number;
+    }
+  | {
+      readonly kind: "oval";
+      readonly x: number;
+      readonly y: number;
+      readonly w: number;
+      readonly h: number;
+    };
 
 export interface GradientStop {
   readonly position: number;
@@ -193,7 +240,30 @@ export type WireOp =
   | { readonly op: "children" }
   | { readonly op: "read"; readonly kernel: number; readonly halo: number }
   | { readonly op: "layer"; readonly compose: number }
-  | { readonly op: "unlayer" };
+  | { readonly op: "unlayer" }
+  | {
+      readonly op: "dropShadow";
+      readonly paths: readonly number[];
+      readonly evenOdd: boolean;
+      readonly dx: number;
+      readonly dy: number;
+      readonly blur: number;
+      readonly color: Rgba;
+      readonly blend: number;
+      /** When set, cast the shadow by stroking `paths` with this style (open stroke-only layers). */
+      readonly stroke?: StrokeStyle;
+    }
+  | {
+      readonly op: "innerShadow";
+      readonly shape: number;
+      readonly hole: number | null;
+      readonly evenOdd: boolean;
+      readonly dx: number;
+      readonly dy: number;
+      readonly blur: number;
+      readonly color: Rgba;
+      readonly blend: number;
+    };
 
 export interface WireRecord {
   readonly flags: number;
@@ -381,6 +451,22 @@ export class ListWriter {
       case "outside":
         this.u32(PATH.outside);
         this.u32(p.of);
+        return;
+      case "box":
+        this.u32(PATH.box);
+        this.f32(p.x);
+        this.f32(p.y);
+        this.f32(p.w);
+        this.f32(p.h);
+        for (const r of p.radii) this.f32(Math.max(0, r));
+        this.f32(p.smoothing);
+        return;
+      case "oval":
+        this.u32(PATH.oval);
+        this.f32(p.x);
+        this.f32(p.y);
+        this.f32(p.w);
+        this.f32(p.h);
     }
   }
 
@@ -429,6 +515,36 @@ export class ListWriter {
         case "unlayer":
           this.u32(OP.unlayer);
           break;
+        case "dropShadow":
+          this.u32(OP.dropShadow);
+          this.u32(o.paths.length);
+          for (const p of o.paths) this.u32(p);
+          this.u32((o.evenOdd ? 1 : 0) | (o.stroke ? 2 : 0));
+          this.f32(o.dx);
+          this.f32(o.dy);
+          this.f32(o.blur);
+          this.rgba(o.color);
+          this.u32(o.blend);
+          if (o.stroke) {
+            this.f32(o.stroke.width);
+            this.u32(o.stroke.join);
+            this.u32(o.stroke.cap);
+            this.f32(o.stroke.miter);
+            this.u32(o.stroke.dashes.length);
+            for (const d of o.stroke.dashes) this.f32(d);
+            this.f32(o.stroke.dashOffset);
+          }
+          break;
+        case "innerShadow":
+          this.u32(OP.innerShadow);
+          this.u32(o.shape);
+          this.u32(o.hole === null ? 0xffffffff : o.hole);
+          this.u32(o.evenOdd ? 1 : 0);
+          this.f32(o.dx);
+          this.f32(o.dy);
+          this.f32(o.blur);
+          this.rgba(o.color);
+          this.u32(o.blend);
       }
     }
   }

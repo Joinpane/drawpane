@@ -22,6 +22,7 @@ pub mod limits;
 pub mod masks;
 pub mod png;
 pub mod record;
+pub mod shadow;
 pub mod store;
 pub mod tiles;
 pub mod wire;
@@ -270,7 +271,10 @@ impl Engine {
             "message_bytes" => l.message_bytes = v,
             "image_bytes" => l.image_bytes = v,
             "glyph_outline_bytes" => l.glyph_outline_bytes = v,
-            "memory_bytes" => l.memory_bytes = v,
+            "memory_bytes" => {
+                l.memory_bytes = v;
+                self.core.cpu.set_memory_budget(v);
+            }
             "gpu_bytes" => l.gpu_bytes = v,
             "tile_bytes" => l.tile_bytes = v,
             "band_bytes" => l.band_bytes = v.max(4),

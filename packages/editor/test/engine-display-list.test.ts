@@ -438,16 +438,95 @@ describe.skipIf(!built("worker") && !process.env.CI)("the display-list builder",
         op: "set",
         id: frame,
         prop: "effects",
-        value: [{ type: "drop-shadow", x: 0, y: 2, blur: 4, spread: 0, color: "#00000040" }],
+        value: [{ type: "background-blur", radius: 8 }],
       },
     ]);
     const builder = new DisplayListBuilder(new Scene(doc), measurer);
     const engine = new RenderEngine(mod);
     expect(engine.apply(builder.build("p1")).ok).toBe(true);
     expect(builder.supported).toBe(false);
-    expect(unsupportedNames(builder.unsupported.get(frame) ?? 0)).toEqual(["shadow"]);
+    expect(unsupportedNames(builder.unsupported.get(frame) ?? 0)).toEqual(["backgroundBlur"]);
     const r = engine.renderCpu(W, H, camera, BG);
     expect(r.ok).toBe(false);
     if (!r.ok) expect(r.code).toBe(5);
+  });
+
+  it("encodes and renders drop shadows, cut-outs, inner shadows, and text shadows", () => {
+    const doc = new Doc();
+    seed(doc);
+    const frame = doc.childIds("p1")[0] as string;
+    doc.apply([
+      {
+        op: "set",
+        id: frame,
+        prop: "effects",
+        value: [
+          {
+            type: "drop-shadow",
+            x: 0,
+            y: 6,
+            blur: 14,
+            spread: 2,
+            color: "#00000040",
+            showBehind: false,
+          },
+          {
+            type: "inner-shadow",
+            x: 0,
+            y: 2,
+            blur: 6,
+            spread: 1,
+            color: "#ffffff60",
+          },
+        ],
+      },
+      create("rect", frame, "a0", {
+        x: 20,
+        y: 20,
+        width: 80,
+        height: 60,
+        cornerRadius: 12,
+        opacity: 0.7,
+        fills: [{ type: "solid", color: "#3366cc" }],
+        effects: [{ type: "drop-shadow", x: 3, y: 4, blur: 10, spread: 0, color: "#00000050" }],
+      }),
+      create("text", frame, "a1", {
+        x: 20,
+        y: 110,
+        width: 140,
+        height: 40,
+        characters: "Shadow",
+        fontSize: 24,
+        textDecoration: "underline",
+        fills: [{ type: "solid", color: "#111111" }],
+        effects: [{ type: "drop-shadow", x: 1, y: 3, blur: 6, spread: 0, color: "#00000060" }],
+      }),
+    ]);
+    const builder = new DisplayListBuilder(new Scene(doc), measurer);
+    const engine = new RenderEngine(mod);
+    expect(engine.apply(builder.build("p1")).ok).toBe(true);
+    expect(builder.supported).toBe(true);
+    const r = engine.renderCpu(W, H, camera, BG);
+    expect(r.ok).toBe(true);
+  });
+
+  it("elides zero-alpha shadows without changing rendered pixels", () => {
+    const doc = new Doc();
+    seed(doc);
+    const frame = doc.childIds("p1")[0] as string;
+    const plain = new DisplayListBuilder(new Scene(doc), measurer).build("p1");
+    doc.apply([
+      {
+        op: "set",
+        id: frame,
+        prop: "effects",
+        value: [
+          { type: "drop-shadow", x: 0, y: 0, blur: 0, spread: 0, color: "#00000000" },
+          { type: "inner-shadow", x: 2, y: 2, blur: 8, spread: 1, color: "#ffffff00" },
+        ],
+      },
+    ]);
+    const withZero = new DisplayListBuilder(new Scene(doc), measurer).build("p1");
+    expect(withZero.length).toBe(plain.length);
   });
 });

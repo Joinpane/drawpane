@@ -22,7 +22,7 @@
 
 use std::collections::HashMap;
 use vello_common::kurbo::{Affine, BezPath, Shape};
-use vello_cpu::{Pixmap, RenderContext, Resources};
+use vello_cpu::{Pixmap, RasterizerSettings, RenderContext, RenderMode, Resources};
 
 /// Subpixel positions per pixel, on each axis.
 pub const PHASES: f64 = 8.0;
@@ -270,7 +270,11 @@ pub fn rasterise(
     ctx.fill_path(path);
     ctx.flush();
     let mut pixmap = Pixmap::new(w, h);
-    ctx.render(&mut pixmap, &mut r.resources);
+    let settings = RasterizerSettings {
+        render_mode: RenderMode::OptimizeQuality,
+        ..Default::default()
+    };
+    ctx.render_with(&mut pixmap, &mut r.resources, settings);
     Some((pixmap, (x0 as i32, y0 as i32)))
 }
 

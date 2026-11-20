@@ -2669,10 +2669,18 @@ export class CanvasRenderer {
           ctx.shadowBlur = s.blur * scale;
           ctx.shadowOffsetX = s.x * scale;
           ctx.shadowOffsetY = s.y * scale;
+          const evenOdd = node.type === "path" && getProp(node.props, "windingRule") === "evenodd";
+          const fillRule: CanvasFillRule = evenOdd ? "evenodd" : "nonzero";
           if (kind === "drop-shadow") {
+            const openStrokeOnly =
+              (node.type === "line" ||
+                (node.type === "path" && !isClosedPath(getProp(node.props, "pathData")))) &&
+              !getProp(node.props, "fills").some(
+                (p) => p.visible !== false && (p.opacity ?? 1) > 0,
+              );
             // Cast as Figma casts it (decision 0031): cut out under the shape where it mustn't show there.
             const cast = dropShadowCast(node, s);
-            if (cast.cutOut) {
+            if (cast.cutOut && !openStrokeOnly) {
               const outside = new Path2D();
               outside.rect(-1e5, -1e5, 2e5, 2e5);
               outside.addPath(shape);
@@ -2686,12 +2694,32 @@ export class CanvasRenderer {
             ctx.shadowOffsetY = s.y * scale - t.b * far;
             ctx.translate(far, 0);
             if (node.type === "text") this.#text(ctx, node, width, "#000", scale);
-            else {
+            else if (openStrokeOnly) {
+              const weight = getProp(node.props, "strokeWeight");
+              const hasStroke =
+                weight > 0 &&
+                getProp(node.props, "strokes").some(
+                  (p) => p.visible !== false && (p.opacity ?? 1) > 0,
+                );
+              if (hasStroke) {
+                const cap = getProp(node.props, "strokeCap");
+                const dashes = getProp(node.props, "strokeDashes");
+                ctx.strokeStyle = "#000";
+                ctx.lineWidth = weight;
+                ctx.lineJoin = getProp(node.props, "strokeJoin");
+                ctx.lineCap = cap === "none" ? "butt" : cap;
+                ctx.miterLimit = 10;
+                ctx.setLineDash(
+                  dashes.every((d) => Number.isFinite(d) && d >= 0) ? [...dashes] : [],
+                );
+                ctx.stroke(shape);
+              }
+            } else {
               ctx.fillStyle = "#000";
-              ctx.fill(this.#spreadShape(node, shape, width, height, cast.spread));
+              ctx.fill(this.#spreadShape(node, shape, width, height, cast.spread), fillRule);
             }
           } else {
-            ctx.clip(shape);
+            ctx.clip(shape, fillRule);
             // As above: paint only the ring's shadow. The ring itself overlaps the
             // inside of the shape when there's spread, and would show as a solid band.
             const t = ctx.getTransform();

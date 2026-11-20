@@ -46,7 +46,29 @@ pub fn premultiply(c: [f32; 4]) -> [u8; 4] {
 
 /// Premultiplied RGBA8 to straight, in place (as a PNG or `ImageData` holds pixels).
 pub fn unpremultiply(px: &mut [u8]) {
-    for p in px.as_chunks_mut::<4>().0.iter_mut() {
+    // Fast path: check two pixels (8 bytes) at once so opaque (0xff) and transparent (0x00)
+    // spans skip scalar division entirely.
+    let (chunks8, rem) = px.as_chunks_mut::<8>();
+    for pair in chunks8.iter_mut() {
+        let a0 = pair[3];
+        let a1 = pair[7];
+        if (a0 == 0 || a0 == 255) && (a1 == 0 || a1 == 255) {
+            continue;
+        }
+        if a0 != 0 && a0 != 255 {
+            let a = u32::from(a0);
+            for c in &mut pair[..3] {
+                *c = ((u32::from(*c) * 255 + a / 2) / a).min(255) as u8;
+            }
+        }
+        if a1 != 0 && a1 != 255 {
+            let a = u32::from(a1);
+            for c in &mut pair[4..7] {
+                *c = ((u32::from(*c) * 255 + a / 2) / a).min(255) as u8;
+            }
+        }
+    }
+    for p in rem.as_chunks_mut::<4>().0.iter_mut() {
         let a = u32::from(p[3]);
         if a != 0 && a != 255 {
             for c in &mut p[..3] {
@@ -204,7 +226,7 @@ impl Engine {
         Self {
             generation: 0,
             band: Vec::new(),
-            cpu: Cpu::new(limits.glyph_mask_bytes, limits.glyph_mask_side),
+            cpu: Cpu::new(limits.glyph_mask_bytes, limits.glyph_mask_side, limits.memory_bytes),
             store: Store::new(limits),
             #[cfg(feature = "gpu-common")]
             gpu: None,
@@ -454,34 +476,109 @@ impl Engine {
         l.band_rows.min(by_bytes as u32).max(1)
     }
 
+    /// Estimates the peak extra transient working set needed by visible shadows and isolated
+    /// offscreen scopes on an export tile of `cols` x `tile_rows`, and validates that no visible
+    /// shadow blur exceeds `MAX_BLUR_SIGMA` or `Limits::texture_side`.
+    fn export_effect_working_set(&self, cols: usize, tile_rows: usize, view: Affine) -> Result<usize> {
+        let view_scale = view.determinant().abs().sqrt();
+        let max_tex = self.store.limits.texture_side as usize;
+        let mut peak_shadow = 0usize;
+        let mut max_iso_depth = 0usize;
+        let tile_bytes = cols.saturating_mul(tile_rows).saturating_mul(4);
+        let iso_scope_bytes =
+            tile_bytes.saturating_add(crate::cpu::scene_estimate_bytes(cols as u32, tile_rows as u32));
+        let mut stack: Vec<(u32, usize)> = vec![(crate::store::ROOT, 0)];
+        while let Some((id, iso_depth)) = stack.pop() {
+            let Some(node) = self.store.nodes.get(&id) else {
+                continue;
+            };
+            let r = &node.record;
+            if id != crate::store::ROOT && r.hidden() {
+                continue;
+            }
+            let next_depth =
+                if id != crate::store::ROOT && r.isolate() && r.opacity < 1.0 && self.store.subtree_has_pass(id) {
+                    iso_depth + 1
+                } else {
+                    iso_depth
+                };
+            max_iso_depth = max_iso_depth.max(next_depth);
+            for op in &r.ops {
+                match op {
+                    crate::record::Op::DropShadow { blur, .. } | crate::record::Op::InnerShadow { blur, .. } => {
+                        let sigma = crate::blur::sigma_from_radius(*blur) * view_scale as f32;
+                        crate::blur::validate_sigma(
+                            sigma,
+                            IRect {
+                                x0: 0,
+                                y0: 0,
+                                x1: cols.max(1) as i32,
+                                y1: tile_rows.max(1) as i32,
+                            },
+                            crate::blur::EdgeMode::Zero,
+                        )?;
+                        if crate::blur::kernel_radius(sigma) > 0 {
+                            let pad = crate::shadow::blur_support_pad(sigma) as usize;
+                            let shift = crate::shadow::shadow_raster_shift(sigma);
+                            let s = 1usize << shift;
+                            let mw = (cols.saturating_add(pad.saturating_mul(2))).div_ceil(s);
+                            let mh = (tile_rows.saturating_add(pad.saturating_mul(2))).div_ceil(s);
+                            if mw > max_tex || mh > max_tex {
+                                return Err(EngineError::limit(format!(
+                                    "shadow mask {mw} x {mh} px exceeds maximum target size {max_tex} px"
+                                )));
+                            }
+                            let mask_b = mw.saturating_mul(mh).saturating_mul(4);
+                            let shadow_need = mask_b
+                                .saturating_mul(3)
+                                .saturating_add(crate::cpu::scene_estimate_bytes(mw as u32, mh as u32))
+                                .saturating_add(tile_bytes);
+                            peak_shadow = peak_shadow.max(shadow_need);
+                        }
+                    }
+                    crate::record::Op::Children => {
+                        for &c in &node.children {
+                            stack.push((c, next_depth));
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+        let iso_bytes = max_iso_depth.saturating_mul(iso_scope_bytes);
+        Ok(iso_bytes.saturating_add(peak_shadow))
+    }
+
     /// Refuses an export of a `width` × `height` frame before it starts when its working set
     /// wouldn't fit beside what the engine holds, under `Limits::memory_bytes` (a Worker's cap;
     /// zero: no check). The working set is a band of output, a tile of target (with the readers'
-    /// reach round it), the scene's rows, and the compressor.
+    /// reach round it), the scene's rows, peak shadow/isolated offscreen passes, and the compressor.
     pub fn admit_export(&self, width: u32, height: u32, camera: Camera) -> Result<()> {
         self.check_size(width, height)?;
         camera.check()?;
         self.check_supported()?;
         self.check_settled()?;
-        let budget = self.store.limits.memory_bytes;
-        if budget == 0 {
-            return Ok(());
-        }
         let l = &self.store.limits;
         let rows = self.band_rows(width) as usize;
         let halo = self.halo(camera.view())? as usize;
         let cols = (l.export_tile.min(width) as usize + 2 * halo).min(width as usize);
         let tile_rows = (rows + 2 * halo).min(height as usize);
+        let effects = self.export_effect_working_set(cols, tile_rows, camera.view())?;
+        let budget = self.store.limits.memory_bytes;
+        if budget == 0 {
+            return Ok(());
+        }
         let band = rows * width as usize * 4;
         // A tile's target and a copy of it for the PNG's straight pixels.
         let tile = cols * tile_rows * 4 * 2;
         // vello_cpu keeps per wide tile (256 × 4 px) command lists for the whole frame.
-        let scene = (width as usize).div_ceil(256) * (height as usize).div_ceil(4) * 64;
+        let scene = crate::cpu::scene_estimate_bytes(width, height);
         let png = 512 * 1024;
         let diamond = self.export_diamond_bytes(width, height, camera.view(), cols, tile_rows);
         let need = band
             .saturating_add(tile)
             .saturating_add(scene)
+            .saturating_add(effects)
             .saturating_add(png)
             .saturating_add(diamond);
         let held = self.held_bytes();
@@ -752,6 +849,12 @@ impl Engine {
             self.store.limits.image_bytes
         };
         self.cpu.set_diamond_budget(diamond_budget);
+        self.cpu.set_external_bytes(
+            self.held_bytes()
+                .saturating_sub(self.cpu.image_bytes())
+                .saturating_add(extra_held_bytes)
+                .saturating_add(512 * 1024),
+        );
         self.cpu
             .begin(width as u16, height as u16, grown, premultiply(background));
         let frame = Frame {

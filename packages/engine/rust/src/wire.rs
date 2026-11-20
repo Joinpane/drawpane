@@ -9,7 +9,7 @@ pub const MAGIC: u32 = u32::from_le_bytes(*b"DPDL");
 /// A change to the major version breaks old readers; the engine refuses other majors.
 pub const MAJOR: u16 = 1;
 /// Minor versions add commands or kinds; the engine reads lists up to its own minor.
-pub const MINOR: u16 = 2;
+pub const MINOR: u16 = 4;
 
 pub struct Reader<'a> {
     bytes: &'a [u8],

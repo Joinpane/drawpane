@@ -107,10 +107,33 @@ impl W {
 #[derive(Clone, Debug)]
 pub enum Entry {
     Path(Vec<(u8, Vec<f32>)>),
-    Rect { w: f32, h: f32, radii: [f32; 4] },
-    Ellipse { w: f32, h: f32 },
-    Glyphs { scale: f32, glyphs: Vec<(u32, f32, f32)> },
+    Rect {
+        w: f32,
+        h: f32,
+        radii: [f32; 4],
+    },
+    Ellipse {
+        w: f32,
+        h: f32,
+    },
+    Glyphs {
+        scale: f32,
+        glyphs: Vec<(u32, f32, f32)>,
+    },
     Outside(u32),
+    Box {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radii: [f32; 4],
+    },
+    Oval {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -161,6 +184,25 @@ pub enum Op {
         compose: u32,
     },
     Unlayer,
+    DropShadow {
+        paths: Vec<u32>,
+        even_odd: bool,
+        dx: f32,
+        dy: f32,
+        blur: f32,
+        color: [f32; 4],
+        blend: u32,
+    },
+    InnerShadow {
+        shape: u32,
+        hole: Option<u32>,
+        even_odd: bool,
+        dx: f32,
+        dy: f32,
+        blur: f32,
+        color: [f32; 4],
+        blend: u32,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -292,6 +334,51 @@ impl Rec {
                     w.u32(*compose);
                 }
                 Op::Unlayer => w.u32(8),
+                Op::DropShadow {
+                    paths,
+                    even_odd,
+                    dx,
+                    dy,
+                    blur,
+                    color,
+                    blend: sb,
+                } => {
+                    w.u32(13);
+                    w.u32(paths.len() as u32);
+                    for p in paths {
+                        w.u32(*p);
+                    }
+                    w.u32(u32::from(*even_odd));
+                    w.f32(*dx);
+                    w.f32(*dy);
+                    w.f32(*blur);
+                    for v in color {
+                        w.f32(*v);
+                    }
+                    w.u32(*sb);
+                }
+                Op::InnerShadow {
+                    shape,
+                    hole,
+                    even_odd,
+                    dx,
+                    dy,
+                    blur,
+                    color,
+                    blend: sb,
+                } => {
+                    w.u32(14);
+                    w.u32(*shape);
+                    w.u32(hole.unwrap_or(u32::MAX));
+                    w.u32(u32::from(*even_odd));
+                    w.f32(*dx);
+                    w.f32(*dy);
+                    w.f32(*blur);
+                    for v in color {
+                        w.f32(*v);
+                    }
+                    w.u32(*sb);
+                }
             }
         }
     }
@@ -338,6 +425,24 @@ impl Rec {
                 Entry::Outside(of) => {
                     w.u32(5);
                     w.u32(*of);
+                }
+                Entry::Box { x, y, w: bw, h, radii } => {
+                    w.u32(6);
+                    w.f32(*x);
+                    w.f32(*y);
+                    w.f32(*bw);
+                    w.f32(*h);
+                    for r in radii {
+                        w.f32(*r);
+                    }
+                    w.f32(self.smoothing);
+                }
+                Entry::Oval { x, y, w: ow, h } => {
+                    w.u32(7);
+                    w.f32(*x);
+                    w.f32(*y);
+                    w.f32(*ow);
+                    w.f32(*h);
                 }
             }
         }

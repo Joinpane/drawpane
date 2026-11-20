@@ -7,7 +7,7 @@
  *   pages, toggling branch review, and a sign-out/sign-in redirect;
  * - `?renderer=canvas` turns the switch back off for the session;
  * - the chip reports "Engine · WebGPU" on a plain page and "Canvas renderer"
- *   with the reason on a page with a drop shadow, on a software GPU when not
+ *   with the reason on a page with a background blur, on a software GPU when not
  *   allowed, and in a browser without WebGPU.
  */
 import { expect, type Page, test } from "@playwright/test";
@@ -49,7 +49,7 @@ test.describe
     let page: Page;
     let fileUrl: string;
     let plainPageId: string;
-    let shadowPageId: string;
+    let fallbackPageId: string;
 
     test.beforeAll(async ({ browser }) => {
       test.setTimeout(180_000);
@@ -88,7 +88,7 @@ test.describe
       await expect(rendererChip(page)).toBeVisible({ timeout: 30_000 });
       await expect(rendererChip(page)).toContainText("Engine · WebGPU", { timeout: 30_000 });
 
-      // Add a plain rect on Page 1, then create Page 2 with a drop shadow.
+      // Add a plain rect on Page 1, then create Page 2 with a background blur.
       const pages = await page.evaluate(() => {
         const e = (window as unknown as W).drawpane;
         const plain = e.s.pageId;
@@ -96,23 +96,26 @@ test.describe
           fills: [{ type: "solid", color: "#228be6" }],
         });
         e.addPage();
-        const shadow = e.s.pageId;
-        e.createLayer("rect", { x: 40, y: 40, width: 160, height: 100 }, shadow, {
+        const fallback = e.s.pageId;
+        e.createLayer("rect", { x: 40, y: 40, width: 160, height: 100 }, fallback, {
           fills: [{ type: "solid", color: "#ffffff" }],
-          effects: [{ type: "drop-shadow", x: 0, y: 4, blur: 12, spread: 0, color: "#00000040" }],
+          effects: [{ type: "background-blur", radius: 12 }],
         });
-        return { plain, shadow };
+        return { plain, fallback };
       });
       plainPageId = pages.plain;
-      shadowPageId = pages.shadow;
+      fallbackPageId = pages.fallback;
 
-      // Drop shadow page: chip reports Canvas renderer and names shadow in its popover.
+      // Background blur page: chip reports Canvas renderer and names background blur in its popover.
       await expect(rendererChip(page)).toContainText("Canvas renderer", { timeout: 15_000 });
-      await expect(rendererChip(page)).toHaveAttribute("aria-label", /this page uses shadow/);
+      await expect(rendererChip(page)).toHaveAttribute(
+        "aria-label",
+        /this page uses background blur/,
+      );
       await rendererChip(page).click();
       const popover = page.getByRole("dialog", { name: "Renderer status" });
       await expect(popover).toBeVisible();
-      await expect(popover).toContainText("this page uses shadow");
+      await expect(popover).toContainText("this page uses background blur");
       await page.keyboard.press("Escape");
       await expect(popover).toHaveCount(0);
       await expect(rendererChip(page)).toBeFocused();
@@ -121,8 +124,8 @@ test.describe
       await page.evaluate((id) => (window as unknown as W).drawpane.setPage(id), plainPageId);
       await expect(rendererChip(page)).toContainText("Engine · WebGPU", { timeout: 15_000 });
 
-      // And back to the shadow page once more to confirm switching pages preserves the switch.
-      await page.evaluate((id) => (window as unknown as W).drawpane.setPage(id), shadowPageId);
+      // And back to the fallback page once more to confirm switching pages preserves the switch.
+      await page.evaluate((id) => (window as unknown as W).drawpane.setPage(id), fallbackPageId);
       await expect(rendererChip(page)).toContainText("Canvas renderer", { timeout: 15_000 });
     });
 

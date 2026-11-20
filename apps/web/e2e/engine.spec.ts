@@ -6,7 +6,7 @@
  * - after edits (patches) and camera moves, what's on screen equals a fresh engine's render of
  *   the same page and camera (read back through a buffer, never through the canvas);
  * - on the e2e scene, the engine agrees with the canvas renderer within a bound;
- * - a page holding what the engine doesn't draw yet (a shadow) is drawn by the canvas renderer,
+ * - a page holding what the engine doesn't draw yet (a background blur) is drawn by the canvas renderer,
  *   and the engine takes over again when it's gone;
  * - a lost device, and a browser without WebGPU, fall back to the canvas renderer with a
  *   console note and a `drawpane:renderer-fallback` event, never a blank canvas. A headless
@@ -80,7 +80,7 @@ type W = {
   drawpaneEngine: {
     blurProbe: ReturnType<typeof import("../src/editor/engine-debug").engineDebug>["blurProbe"];
     readbackPair(w: number, h: number): Promise<Array<{ ok: boolean; code?: number }>>;
-    render(o: object): Promise<{ ok: boolean; rgba?: string; error?: string }>;
+    render(o: object): Promise<{ ok: boolean; code?: number; rgba?: string; error?: string }>;
     canvasRender(o: object): Promise<string>;
   };
 
@@ -800,11 +800,11 @@ test.describe
         w.drawpaneFrames.redraw();
       });
       await frames(page, 4);
-      const shadow = await page.evaluate(() => {
+      const unsupported = await page.evaluate(() => {
         const e = (window as unknown as W).drawpane;
         return e.createLayer("rect", { x: 40, y: 420, width: 100, height: 60 }, e.s.pageId, {
           fills: [{ type: "solid", color: "#ffffff" }],
-          effects: [{ type: "drop-shadow", x: 0, y: 4, blur: 12, spread: 0, color: "#00000040" }],
+          effects: [{ type: "background-blur", radius: 12 }],
         });
       });
       await expect
@@ -824,34 +824,34 @@ test.describe
           | undefined;
         if (engine) delete engine.gpuPixels;
         w.drawpane.commit([{ op: "delete", id }]);
-      }, shadow);
+      }, unsupported);
       await expect
         .poll(() => showing(page), { timeout: 15_000 })
         .toEqual({ engine: true, content: false });
     });
 
     test("leaves a page it can't draw to the canvas renderer, and takes it back", async () => {
-      const shadow = await page.evaluate(() => {
+      const unsupported = await page.evaluate(() => {
         const e = (window as unknown as W).drawpane;
         return e.createLayer("rect", { x: 40, y: 420, width: 100, height: 60 }, e.s.pageId, {
           fills: [{ type: "solid", color: "#ffffff" }],
-          effects: [{ type: "drop-shadow", x: 0, y: 4, blur: 12, spread: 0, color: "#00000040" }],
+          effects: [{ type: "background-blur", radius: 12 }],
         });
       });
       await frames(page);
       expect(await showing(page)).toEqual({ engine: false, content: true });
       expect(
         await page.evaluate(() => (window as unknown as W).drawpaneEngineView?.unsupported()),
-      ).toEqual({ shadow: 1 });
+      ).toEqual({ backgroundBlur: 1 });
       // The page's fallback is reported, with what it holds (an earlier one may be from while its
       // fonts loaded, when its text couldn't be outlined yet).
       expect(await page.evaluate(() => (window as unknown as W).pageFallbacks?.at(-1))).toEqual({
         pageId: expect.any(String),
-        features: { shadow: 1 },
+        features: { backgroundBlur: 1 },
       });
       await page.evaluate(
         (id) => (window as unknown as W).drawpane.commit([{ op: "delete", id }]),
-        shadow,
+        unsupported,
       );
       // Read back (headless), the engine's frame shows once it lands, never before.
       await expect
@@ -1071,6 +1071,282 @@ test.describe
       console.log(
         `reference Gaussian blur conformance: worst GPU vs CPU pyramid mean=${worstGpuVsPyr.toFixed(4)}, worst GPU vs CPU reference mean=${worstGpuVsRef.toFixed(4)}`,
       );
+    });
+
+    test("drop and inner shadows (0031 cut-out, text, spread, faded frame) agree across CPU and GPU", async () => {
+      const ids = await page.evaluate(() => {
+        const e = (window as unknown as W).drawpane;
+        const ox = 1200;
+        const oy = 0;
+        const wrap = e.createLayer("frame", { x: ox, y: oy, width: 420, height: 260 }, e.s.pageId, {
+          fills: [{ type: "solid", color: "#f4f3ef" }],
+          clipContent: true,
+        });
+        // Decision 0031 cut-out shadow on a translucent rect (`showBehind: false`): interior stays clear.
+        e.createLayer("rect", { x: ox + 24, y: oy + 24, width: 120, height: 80 }, wrap, {
+          cornerRadius: 12,
+          fills: [{ type: "solid", color: "#ffffff40" }],
+          effects: [
+            {
+              type: "drop-shadow",
+              color: "#1c1b1a99",
+              x: 0,
+              y: 6,
+              blur: 16,
+              spread: 4,
+              showBehind: false,
+            },
+          ],
+        });
+        // Text drop shadow with decoration bar.
+        e.createLayer("text", { x: ox + 180, y: oy + 30, width: 200, height: 48 }, wrap, {
+          characters: "Shadow Text",
+          fontSize: 28,
+          fontWeight: 700,
+          textDecoration: "underline",
+          fills: [{ type: "solid", color: "#1c1b1a" }],
+          effects: [{ type: "drop-shadow", color: "#3d7bf080", x: 2, y: 4, blur: 8, spread: 0 }],
+        });
+        // Faded isolated frame holding drop + inner shadows.
+        const faded = e.createLayer(
+          "frame",
+          { x: ox + 24, y: oy + 136, width: 160, height: 96 },
+          wrap,
+          {
+            cornerRadius: 14,
+            opacity: 0.65,
+            fills: [{ type: "solid", color: "#ffffff" }],
+            effects: [
+              { type: "drop-shadow", color: "#00000050", x: 0, y: 8, blur: 20, spread: 0 },
+              { type: "inner-shadow", color: "#2b4fd670", x: 4, y: 4, blur: 10, spread: 3 },
+            ],
+          },
+        );
+        e.createLayer("ellipse", { x: ox + 124, y: oy + 160, width: 40, height: 40 }, faded, {
+          fills: [{ type: "solid", color: "#ff7a45" }],
+        });
+        // Zero-blur hard inner shadow with spread + hard drop shadow.
+        e.createLayer("rect", { x: ox + 220, y: oy + 136, width: 140, height: 80 }, wrap, {
+          cornerRadius: 10,
+          fills: [{ type: "solid", color: "#e9e7e1" }],
+          effects: [
+            { type: "inner-shadow", color: "#00000040", x: 6, y: 6, blur: 0, spread: 4 },
+            { type: "drop-shadow", color: "#00000033", x: 0, y: 2, blur: 0, spread: 0 },
+          ],
+        });
+        return [wrap];
+      });
+      await frames(page, 4);
+      const r = await page.evaluate(async (wrapIds) => {
+        const w = window as unknown as W;
+        const opts = {
+          pageId: w.drawpane.s.pageId,
+          ids: wrapIds,
+          rect: { x: 1200, y: 0, width: 420, height: 260 },
+          scale: 2,
+          width: 840,
+          height: 520,
+          background: [1, 1, 1, 1] as const,
+        };
+        const cpu = await w.drawpaneEngine.render({ ...opts, backend: "cpu" });
+        const gpu = await w.drawpaneEngine.render({ ...opts, backend: "gpu" });
+        const canvas = await w.drawpaneEngine.canvasRender({
+          pageId: w.drawpane.s.pageId,
+          rect: opts.rect,
+          scale: 2,
+          width: 840,
+          height: 520,
+          background: "#ffffff",
+        });
+        return { cpu, gpu, canvas };
+      }, ids);
+      await page.evaluate(
+        (id) => (window as unknown as W).drawpane.commit([{ op: "delete", id }]),
+        ids[0],
+      );
+      expect(r.cpu.ok, r.cpu.error).toBe(true);
+      expect(r.gpu.ok, r.gpu.error).toBe(true);
+      const cpuPx = Buffer.from(r.cpu.rgba ?? "", "base64");
+      const gpuPx = Buffer.from(r.gpu.rgba ?? "", "base64");
+      const canvasPx = Buffer.from(r.canvas, "base64");
+      const cg = score(cpuPx, gpuPx, 840, 520);
+      expect(
+        outsideTolerance(cg),
+        `shadows CPU vs GPU: mean=${cg.mean.toFixed(4)} p99=${cg.p99} tile=${cg.worstTile.toFixed(3)} sev=${cg.severeInTile}`,
+      ).toEqual([]);
+      // Decision 0031 cut-out check: interior of translucent rect at local (84, 64) -> device (168, 128)
+      // must blend #ffffff40 over #f4f3ef (~[247, 246, 243]), NOT darkened by the #1c1b1a99 drop shadow,
+      // while just below it at local (84, 112) -> device (168, 224) the drop shadow darkens #f4f3ef.
+      const at = (buf: Buffer, x: number, y: number) => {
+        const i = (y * 840 + x) * 4;
+        return [buf[i] ?? 0, buf[i + 1] ?? 0, buf[i + 2] ?? 0];
+      };
+      const inside = at(gpuPx, 168, 128);
+      const below = at(gpuPx, 168, 224);
+      expect(inside[0], `cut-out interior should stay bright: ${inside}`).toBeGreaterThanOrEqual(
+        242,
+      );
+      expect(below[0], `drop shadow below translucent rect should darken: ${below}`).toBeLessThan(
+        210,
+      );
+      const vsCanvas = score(gpuPx, canvasPx, 840, 520);
+      expect(vsCanvas.mean).toBeLessThan(1.5);
+      console.log(
+        `shadow rules conformance: CPU vs GPU mean=${cg.mean.toFixed(4)} p99=${cg.p99} tile=${cg.worstTile.toFixed(3)}, GPU vs canvas mean=${vsCanvas.mean.toFixed(2)}, inside=${inside.join("/")}, below=${below.join("/")}`,
+      );
+    });
+
+    test("shadow edge cases (open stroke, evenodd inner, rotated cutout, mixed text, blend refusal)", async () => {
+      const scenes = await page.evaluate(() => {
+        const e = (window as unknown as W).drawpane;
+        const ox = 1800;
+        const defs: Array<[string, string, Record<string, unknown>]> = [
+          [
+            "open-stroke",
+            "line",
+            {
+              strokes: [{ type: "solid", color: "#ff0000" }],
+              strokeWeight: 12,
+              fills: [],
+              effects: [
+                { type: "drop-shadow", x: 0, y: 12, blur: 12, spread: 0, color: "#000000ff" },
+              ],
+            },
+          ],
+          [
+            "evenodd-inner",
+            "path",
+            {
+              pathData: "M0 0 H124 V72 H0 Z M24 18 H100 V54 H24 Z",
+              windingRule: "evenodd",
+              fills: [{ type: "solid", color: "#ffffff" }],
+              effects: [
+                { type: "inner-shadow", x: 4, y: 4, blur: 12, spread: 0, color: "#000000ff" },
+              ],
+            },
+          ],
+          [
+            "fractional-rotated",
+            "rect",
+            {
+              rotation: 24,
+              cornerRadius: 8,
+              fills: [{ type: "solid", color: "#ffffff60" }],
+              effects: [
+                {
+                  type: "drop-shadow",
+                  showBehind: false,
+                  x: 4.3,
+                  y: -7.4,
+                  spread: 3.5,
+                  blur: 16,
+                  color: "#000000ff",
+                },
+              ],
+            },
+          ],
+          [
+            "multiplied-shadow",
+            "rect",
+            {
+              fills: [{ type: "solid", color: "#50506090" }],
+              effects: [
+                {
+                  type: "drop-shadow",
+                  x: 0,
+                  y: 12,
+                  blur: 12,
+                  spread: 0,
+                  blendMode: "multiply",
+                  color: "#ff000088",
+                },
+              ],
+            },
+          ],
+        ];
+        return defs.map(([name, type, props], i) => {
+          const x = ox + i * 260;
+          const frame = e.createLayer("frame", { x, y: 0, width: 220, height: 150 }, e.s.pageId, {
+            fills: [{ type: "solid", color: "#ffffff" }],
+            clipContent: true,
+          });
+          e.createLayer(type, { x: x + 40, y: 32, width: 124, height: 72 }, frame, props);
+          return { name, frame, x };
+        });
+      });
+      await frames(page, 4);
+      try {
+        for (const item of scenes) {
+          const res = await page.evaluate(async ({ frame, x }) => {
+            const w = window as unknown as W;
+            const opts = {
+              pageId: w.drawpane.s.pageId,
+              rect: { x, y: 0, width: 220, height: 150 },
+              scale: 1.35,
+              width: 297,
+              height: 203,
+            };
+            const cpu = await w.drawpaneEngine.render({
+              ...opts,
+              backend: "cpu",
+              background: [1, 1, 1, 1],
+              ids: [frame],
+            });
+            const gpu = await w.drawpaneEngine.render({
+              ...opts,
+              backend: "gpu",
+              background: [1, 1, 1, 1],
+              ids: [frame],
+            });
+            const canvas = await w.drawpaneEngine.canvasRender({ ...opts, background: "#ffffff" });
+            return { cpu, gpu, canvas };
+          }, item);
+          if (item.name === "multiplied-shadow") {
+            expect(res.cpu.ok).toBe(false);
+            expect(res.cpu.code).toBe(5);
+            continue;
+          }
+          expect(res.cpu.ok, `${item.name} cpu: ${res.cpu.error}`).toBe(true);
+          expect(res.gpu.ok, `${item.name} gpu: ${res.gpu.error}`).toBe(true);
+          const cpuPx = Buffer.from(res.cpu.rgba ?? "", "base64");
+          const gpuPx = Buffer.from(res.gpu.rgba ?? "", "base64");
+          const canPx = Buffer.from(res.canvas, "base64");
+          const cg = score(cpuPx, gpuPx, 297, 203);
+          expect(
+            outsideTolerance(cg),
+            `${item.name} CPU vs GPU: mean=${cg.mean.toFixed(4)} p99=${cg.p99} tile=${cg.worstTile.toFixed(3)}`,
+          ).toEqual([]);
+          if (item.name === "open-stroke") {
+            // Line at y=32+36=68, strokeWeight=12, shadow offset y=+12 -> shadow centered at y=80 (108 dev).
+            const idx = (Math.round(80 * 1.35) * 297 + Math.round(100 * 1.35)) * 4;
+            expect(cpuPx[idx], "open stroked line must cast a visible drop shadow").toBeLessThan(
+              180,
+            );
+            expect(gpuPx[idx], "open stroked line GPU shadow must be visible").toBeLessThan(180);
+          }
+          if (item.name === "evenodd-inner") {
+            // Donut hole center at local (62, 36) -> (102, 68) -> dev (138, 92) stays white.
+            const idx = (Math.round(68 * 1.35) * 297 + Math.round(102 * 1.35)) * 4;
+            expect(cpuPx[idx], "evenodd inner shadow must not paint inside hole").toBeGreaterThan(
+              250,
+            );
+            expect(canPx[idx], "canvas evenodd inner shadow must match engine").toBeGreaterThan(
+              250,
+            );
+          }
+          const vsCan = score(gpuPx, canPx, 297, 203);
+          expect(
+            vsCan.mean,
+            `${item.name} GPU vs canvas mean=${vsCan.mean.toFixed(3)} tile=${vsCan.worstTile.toFixed(2)}`,
+          ).toBeLessThan(1.2);
+        }
+      } finally {
+        await page.evaluate(
+          (ids) =>
+            (window as unknown as W).drawpane.commit(ids.map((id) => ({ op: "delete", id }))),
+          scenes.map((s) => s.frame),
+        );
+      }
     });
 
     test("recovers from device loss without losing edits, then steps down to WebGL2 on the 3rd loss", async () => {

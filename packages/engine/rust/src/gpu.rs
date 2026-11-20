@@ -24,12 +24,18 @@
 //!   so the editor recovers or falls back.
 //! - Backdrop readers are phase 3 here (`read` refuses), as everywhere outside the tests.
 
+use crate::blur::{BlurSpec, EdgeMode, validate_sigma};
 use crate::engine::{DragFrame, TiledOptions};
 use crate::error::{EngineError, ErrorCode, Result};
-use crate::exec::{self, Backend, DrawStats, Frame, GlyphMask, IRect, ImageView, Open, impl_draw};
-use crate::exec::{Pass, Split};
+use crate::exec::{
+    self, Backend, DrawStats, Frame, GlyphMask, IRect, ImageView, Open, Pass, ShadowCast, Split, impl_draw,
+};
 use crate::images::{self, Level};
 use crate::masks::{self, MaskCache, MaskKey};
+use crate::shadow::{
+    CanonicalShadow, ShadowMaskCache, compute_mask_rect, compute_mask_rect_bounds, reduced_dirty_rect,
+    scaled_shadow_sigma, shadow_raster_shift,
+};
 use crate::store::Store;
 use crate::tiles::{Composite, Last, TILE, TileCache, TileKey};
 use std::cell::Cell;
@@ -40,9 +46,11 @@ use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use vello_common::TextureId;
+use vello_common::color::{AlphaColor, Srgb};
 use vello_common::geometry::RectU16;
 use vello_common::kurbo::{Affine, BezPath, Rect};
-use vello_common::paint::{ImageSource, TextureRegion};
+use vello_common::paint::{Image, ImageSource, TextureRegion, Tint, TintMode};
+use vello_common::peniko::{Extend, Fill, ImageQuality, ImageSampler};
 use vello_gpu::{
     ClearSettings, RenderOptions, RenderSize, RenderTarget, RenderTargetConfig, Renderer, Resources, Scene, TargetInit,
     TextureBindings,
@@ -217,7 +225,14 @@ const ATLAS_SIDE: u32 = 2048;
 pub const ATLAS_BYTES: usize = (ATLAS_SIDE * ATLAS_SIDE * 4) as usize;
 const ATLAS_ID: TextureId = TextureId(1 << 48);
 const CHECKER_ID: TextureId = TextureId((1 << 48) + 1);
-const TEMP_ID_BASE: u64 = (1 << 48) + 1024;
+const TEMP_TEX_BASE: u64 = 1 << 49;
+/// Byte cap on transient offscreen textures referenced by the active GPU scene before an
+/// automatic flush recycles them into the pool.
+const GPU_TEMP_FLUSH_BYTES: usize = 16 << 20;
+/// Soft cap on pooled offscreen/temp GPU textures kept warm between frames.
+const GPU_POOL_KEEP_BYTES: usize = 32 << 20;
+/// Budget for the GPU canonical shadow mask cache (strictly enforced LRU).
+const GPU_SHADOW_CACHE_BYTES: usize = 16 << 20;
 
 const BLIT: &str = r"
 @group(0) @binding(0) var frame: texture_2d<f32>;
@@ -491,11 +506,73 @@ fn now() -> f64 {
 /// the in-flight count it holds a place in.
 pub type ReadBack = (wgpu::Buffer, u32, u32, u32, InFlight);
 
-/// Read-backs in flight: how many, and the bytes of their buffers (held against the budget).
+/// Read-backs in flight: how many, and their bytes.
 #[derive(Default)]
 pub struct Flights {
     count: Cell<u32>,
     bytes: Cell<usize>,
+}
+
+/// Cached GPU texture holding a canonical blurred shadow mask (reused across identical UI shapes
+/// and tile frames without extra submits).
+struct GpuCachedShadow {
+    tid: TextureId,
+    tex: wgpu::Texture,
+    bytes: usize,
+}
+
+/// Active root tile render state while `exec::draw_split` runs (so mid-tile flushes triggered
+/// by offscreen isolation or shadow temp-pool caps render into `self.scratch`).
+struct RootRender {
+    background: [f32; 4],
+    cleared: bool,
+    scene_size: (u16, u16),
+    flush_ms: f64,
+}
+
+/// Pooled offscreen RGBA8 target (with Vello depth buffer and bound `TextureId`) for isolated
+/// layers and multi-pass effects.
+struct GpuTarget {
+    tid: TextureId,
+    tex: wgpu::Texture,
+    view: wgpu::TextureView,
+    depth: wgpu::TextureView,
+    width: u32,
+    height: u32,
+    origin: (i32, i32),
+    active_size: (u16, u16),
+    cleared: bool,
+    bytes: usize,
+}
+
+/// Pooled transient RGBA8 texture (with bound `TextureId`) holding one blurred shadow mask until
+/// the active scene flushes.
+struct GpuTempTex {
+    tid: TextureId,
+    tex: wgpu::Texture,
+    view: wgpu::TextureView,
+    width: u32,
+    height: u32,
+    bytes: usize,
+}
+
+/// Reusable scratch RGBA8 + depth target for rasterising shadow cast/hole masks.
+struct GpuMaskScratch {
+    tex: wgpu::Texture,
+    view: wgpu::TextureView,
+    depth: wgpu::TextureView,
+    width: u32,
+    height: u32,
+    bytes: usize,
+}
+
+/// Reusable scratch RGBA8 texture for inner-shadow blur output before alpha inversion.
+struct GpuBlurScratch {
+    tex: wgpu::Texture,
+    view: wgpu::TextureView,
+    width: u32,
+    height: u32,
+    bytes: usize,
 }
 
 pub struct Gpu {
@@ -538,7 +615,6 @@ pub struct Gpu {
     /// Per-draw temporary textures (e.g. diamond gradients), released right after submit.
     temp_textures: Vec<(TextureId, wgpu::Texture)>,
     temp_bytes: usize,
-    next_temp_id: u64,
     image_bytes: usize,
     atlas: Atlas,
     pub masks: MaskCache<Arc<vello_cpu::Pixmap>>,
@@ -547,6 +623,35 @@ pub struct Gpu {
     raster: masks::Rasterizer,
     /// Reusable reference Gaussian blur pass and shareable GPU blur pyramids.
     pub blur: crate::blur::gpu::GpuBlur,
+    /// Shadow helper shader pass (inner-shadow alpha inversion and reduced-mask upsampling).
+    shadow: crate::shadow::gpu::GpuShadow,
+    /// Persistent scratch scene reused for shadow mask rasterisation (avoids `Scene::new` per miss).
+    mask_scene: Scene,
+    /// Strictly budgeted LRU cache of canonical blurred shadow masks.
+    shadow_cache: ShadowMaskCache<GpuCachedShadow>,
+    /// Evicted cached shadow textures waiting for the active scene to flush before destruction.
+    retired_shadows: Vec<GpuCachedShadow>,
+    /// Root target state during `draw_into`.
+    root_render: Option<RootRender>,
+    /// Active offscreen isolation stack (top is the current render target).
+    offscreen_stack: Vec<GpuTarget>,
+    /// Warm reusable offscreen targets.
+    offscreen_pool: Vec<GpuTarget>,
+    /// Popped offscreen targets referenced by `self.scene` until the next flush.
+    offscreen_in_use: Vec<GpuTarget>,
+    /// Warm reusable transient shadow textures.
+    temp_pool: Vec<GpuTempTex>,
+    /// Transient shadow textures referenced by `self.scene` until the next flush.
+    temp_in_use: Vec<GpuTempTex>,
+    /// Scratch rasterisation target for shadow masks.
+    scratch_mask: Option<GpuMaskScratch>,
+    /// Scratch blur output texture for inner-shadow inversion.
+    scratch_blur: Option<GpuBlurScratch>,
+    next_temp_id: u64,
+    /// Total GPU bytes held by offscreen/temp pools and shadow scratch textures.
+    pool_bytes: usize,
+    /// Bytes of textures currently held in `temp_in_use` + `offscreen_in_use`.
+    in_use_bytes: usize,
     pub health: Arc<Health>,
     pub adapter: String,
     pub backend: &'static str,
@@ -891,6 +996,7 @@ impl Gpu {
         let details = format_details(&info, &adapter_limits, adapter_features, backend_name, fallback_adapter);
         let blur_fmt = crate::blur::gpu::preferred_intermediate_format(&adapter);
         let blur = crate::blur::gpu::GpuBlur::new(&device, blur_fmt, 32 << 20);
+        let shadow = crate::shadow::gpu::GpuShadow::new(&device);
         let mut gpu = Self {
             adapter: format!(
                 "{} ({:?}, {:?}){}",
@@ -933,7 +1039,6 @@ impl Gpu {
             images: HashMap::new(),
             temp_textures: Vec::new(),
             temp_bytes: 0,
-            next_temp_id: TEMP_ID_BASE,
             image_bytes: 0,
             atlas: Atlas {
                 texture: atlas_tex,
@@ -944,6 +1049,21 @@ impl Gpu {
             mask_side,
             raster: masks::Rasterizer::default(),
             blur,
+            shadow,
+            mask_scene: Scene::new(1, 1),
+            shadow_cache: ShadowMaskCache::new(GPU_SHADOW_CACHE_BYTES),
+            retired_shadows: Vec::new(),
+            root_render: None,
+            offscreen_stack: Vec::new(),
+            offscreen_pool: Vec::new(),
+            offscreen_in_use: Vec::new(),
+            temp_pool: Vec::new(),
+            temp_in_use: Vec::new(),
+            scratch_mask: None,
+            scratch_blur: None,
+            next_temp_id: TEMP_TEX_BASE,
+            pool_bytes: 0,
+            in_use_bytes: 0,
             health,
             submits: 0,
             bytes: (ATLAS_SIDE * ATLAS_SIDE * 4 + 16 * 16 * 4) as usize,
@@ -1106,21 +1226,387 @@ impl Gpu {
 
     /// GPU memory the engine has allocated.
     pub fn bytes(&self) -> usize {
-        self.bytes + self.blur.bytes()
+        self.bytes + self.blur.bytes() + self.pool_bytes + self.shadow_cache.bytes()
     }
 
     /// Refuses an allocation of `bytes` (beside `freed`, about to go) past the budget.
     fn reserve(&self, bytes: usize, freed: usize, what: &str) -> Result<()> {
-        // Read-back buffers in flight count until they land.
+        // Read-back buffers in flight count against the budget.
         let held = self.bytes() + self.readbacks.bytes.get();
-        if held - freed + bytes > self.budget {
+        if held.saturating_sub(freed).saturating_add(bytes) > self.budget {
             return Err(EngineError::limit(format!(
                 "{what} would take the engine's GPU memory to {} MiB; the most is {} MiB",
-                (held - freed + bytes) >> 20,
+                held.saturating_sub(freed).saturating_add(bytes) >> 20,
                 self.budget >> 20
             )));
         }
         Ok(())
+    }
+
+    /// Like `reserve`, freeing warm unused pool textures first if tight on budget.
+    fn reserve_or_trim(&mut self, bytes: usize, freed: usize, what: &str) -> Result<()> {
+        if self.reserve(bytes, freed, what).is_err() {
+            self.trim_pools(0);
+            self.reserve(bytes, freed, what)?;
+        }
+        Ok(())
+    }
+
+    fn alloc_temp_id(&mut self) -> TextureId {
+        let id = TextureId(self.next_temp_id);
+        self.next_temp_id += 1;
+        id
+    }
+
+    /// Releases unused pooled textures until `pool_bytes <= keep_bytes`.
+    fn trim_pools(&mut self, keep_bytes: usize) {
+        if keep_bytes == 0 && self.root_render.is_none() {
+            for s in self.shadow_cache.clear() {
+                self.bindings.remove(s.tid);
+                s.tex.destroy();
+            }
+            self.blur.clear();
+        }
+        while self.pool_bytes > keep_bytes {
+            if let Some(t) = self.temp_pool.pop() {
+                self.bindings.remove(t.tid);
+                self.pool_bytes = self.pool_bytes.saturating_sub(t.bytes);
+                t.tex.destroy();
+            } else if let Some(t) = self.offscreen_pool.pop() {
+                self.bindings.remove(t.tid);
+                self.pool_bytes = self.pool_bytes.saturating_sub(t.bytes);
+                t.tex.destroy();
+            } else if let Some(s) = self.scratch_blur.take() {
+                self.pool_bytes = self.pool_bytes.saturating_sub(s.bytes);
+                s.tex.destroy();
+            } else if let Some(s) = self.scratch_mask.take() {
+                self.pool_bytes = self.pool_bytes.saturating_sub(s.bytes);
+                s.tex.destroy();
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn recycle_in_use(&mut self) {
+        self.release_temp_textures();
+        self.temp_pool.append(&mut self.temp_in_use);
+        self.offscreen_pool.append(&mut self.offscreen_in_use);
+        for s in self.retired_shadows.drain(..) {
+            self.bindings.remove(s.tid);
+            self.pool_bytes = self.pool_bytes.saturating_sub(s.bytes);
+            s.tex.destroy();
+        }
+        self.in_use_bytes = 0;
+    }
+
+    fn abort_all_offscreens(&mut self) {
+        while let Some(t) = self.offscreen_stack.pop() {
+            self.offscreen_pool.push(t);
+        }
+    }
+
+    fn reopen_clips(&mut self, open: &[Open]) {
+        for o in open {
+            if let Open::Clip {
+                transform,
+                path,
+                even_odd,
+            } = o
+            {
+                self.scene.set_transform(*transform);
+                self.scene
+                    .set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
+                self.scene.push_clip_path(path);
+            }
+        }
+    }
+
+    fn active_scene_size(&self) -> (u16, u16) {
+        if let Some(top) = self.offscreen_stack.last() {
+            top.active_size
+        } else if let Some(root) = self.root_render.as_ref() {
+            root.scene_size
+        } else {
+            (1, 1)
+        }
+    }
+
+    fn acquire_offscreen(&mut self, w: u32, h: u32, origin: (i32, i32)) -> Result<GpuTarget> {
+        let max_tex = self.device.limits().max_texture_dimension_2d;
+        if w > max_tex || h > max_tex {
+            return Err(EngineError::limit("offscreen target exceeds GPU texture limit"));
+        }
+        let need_w = w.max(1).next_multiple_of(64).min(max_tex);
+        let need_h = h.max(1).next_multiple_of(64).min(max_tex);
+        let max_area = (need_w as usize * need_h as usize * 4).max(65_536);
+        if let Some((idx, _)) = self
+            .offscreen_pool
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.width >= w && t.height >= h && (t.width as usize * t.height as usize) <= max_area)
+            .min_by_key(|(_, t)| t.width as usize * t.height as usize)
+        {
+            let mut t = self.offscreen_pool.swap_remove(idx);
+            t.origin = origin;
+            t.active_size = (w as u16, h as u16);
+            t.cleared = false;
+            return Ok(t);
+        }
+        let bytes = need_w as usize * need_h as usize * 8; // RGBA8 + depth
+        self.reserve_or_trim(bytes, 0, "an offscreen target")?;
+        let tex = texture(
+            &self.device,
+            need_w,
+            need_h,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            "offscreen target",
+        );
+        let view = tex.create_view(&Default::default());
+        let bind_view = tex.create_view(&Default::default());
+        let depth = self.renderer.create_depth_texture_view(&RenderSize {
+            width: need_w as u16,
+            height: need_h as u16,
+        });
+        let tid = self.alloc_temp_id();
+        self.bindings.insert(tid, bind_view);
+        self.pool_bytes += bytes;
+        Ok(GpuTarget {
+            tid,
+            tex,
+            view,
+            depth,
+            width: need_w,
+            height: need_h,
+            origin,
+            active_size: (w as u16, h as u16),
+            cleared: false,
+            bytes,
+        })
+    }
+
+    fn acquire_temp(&mut self, w: u32, h: u32) -> Result<GpuTempTex> {
+        let max_tex = self.device.limits().max_texture_dimension_2d;
+        if w > max_tex || h > max_tex {
+            return Err(EngineError::limit("shadow texture exceeds GPU texture limit"));
+        }
+        let need_w = w.max(1).next_multiple_of(64).min(max_tex);
+        let need_h = h.max(1).next_multiple_of(64).min(max_tex);
+        let max_area = (need_w as usize * need_h as usize * 4).max(65_536);
+        if let Some((idx, _)) = self
+            .temp_pool
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.width >= w && t.height >= h && (t.width as usize * t.height as usize) <= max_area)
+            .min_by_key(|(_, t)| t.width as usize * t.height as usize)
+        {
+            return Ok(self.temp_pool.swap_remove(idx));
+        }
+        let bytes = need_w as usize * need_h as usize * 4;
+        self.reserve_or_trim(bytes, 0, "a shadow texture")?;
+        let tex = texture(
+            &self.device,
+            need_w,
+            need_h,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            "shadow temp",
+        );
+        let view = tex.create_view(&Default::default());
+        let bind_view = tex.create_view(&Default::default());
+        let tid = self.alloc_temp_id();
+        self.bindings.insert(tid, bind_view);
+        self.pool_bytes += bytes;
+        Ok(GpuTempTex {
+            tid,
+            tex,
+            view,
+            width: need_w,
+            height: need_h,
+            bytes,
+        })
+    }
+
+    fn ensure_scratch_mask(&mut self, w: u32, h: u32) -> Result<()> {
+        let max_tex = self.device.limits().max_texture_dimension_2d;
+        if w > max_tex || h > max_tex {
+            return Err(EngineError::limit("shadow mask exceeds GPU texture limit"));
+        }
+        let need_w = w.max(1).next_multiple_of(64).min(max_tex);
+        let need_h = h.max(1).next_multiple_of(64).min(max_tex);
+        let max_area = (need_w as usize * need_h as usize * 4).max(65_536);
+        let reuse = self
+            .scratch_mask
+            .as_ref()
+            .is_some_and(|s| s.width >= w && s.height >= h && (s.width as usize * s.height as usize) <= max_area);
+        if reuse {
+            return Ok(());
+        }
+        let freed = self.scratch_mask.as_ref().map_or(0, |s| s.bytes);
+        let bytes = need_w as usize * need_h as usize * 8;
+        self.reserve_or_trim(bytes, freed, "a shadow mask")?;
+        if let Some(old) = self.scratch_mask.take() {
+            self.pool_bytes = self.pool_bytes.saturating_sub(old.bytes);
+            old.tex.destroy();
+        }
+        let tex = texture(
+            &self.device,
+            need_w,
+            need_h,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            "shadow mask",
+        );
+        let view = tex.create_view(&Default::default());
+        let depth = self.renderer.create_depth_texture_view(&RenderSize {
+            width: need_w as u16,
+            height: need_h as u16,
+        });
+        self.pool_bytes += bytes;
+        self.scratch_mask = Some(GpuMaskScratch {
+            tex,
+            view,
+            depth,
+            width: need_w,
+            height: need_h,
+            bytes,
+        });
+        Ok(())
+    }
+
+    fn ensure_scratch_blur(&mut self, w: u32, h: u32) -> Result<()> {
+        let max_tex = self.device.limits().max_texture_dimension_2d;
+        if w > max_tex || h > max_tex {
+            return Err(EngineError::limit("shadow blur scratch exceeds GPU texture limit"));
+        }
+        let need_w = w.max(1).next_multiple_of(64).min(max_tex);
+        let need_h = h.max(1).next_multiple_of(64).min(max_tex);
+        let max_area = (need_w as usize * need_h as usize * 4).max(65_536);
+        let reuse = self
+            .scratch_blur
+            .as_ref()
+            .is_some_and(|s| s.width >= w && s.height >= h && (s.width as usize * s.height as usize) <= max_area);
+        if reuse {
+            return Ok(());
+        }
+        let freed = self.scratch_blur.as_ref().map_or(0, |s| s.bytes);
+        let bytes = need_w as usize * need_h as usize * 4;
+        self.reserve_or_trim(bytes, freed, "a shadow blur buffer")?;
+        if let Some(old) = self.scratch_blur.take() {
+            self.pool_bytes = self.pool_bytes.saturating_sub(old.bytes);
+            old.tex.destroy();
+        }
+        let tex = texture(
+            &self.device,
+            need_w,
+            need_h,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            "shadow blur scratch",
+        );
+        let view = tex.create_view(&Default::default());
+        self.pool_bytes += bytes;
+        self.scratch_blur = Some(GpuBlurScratch {
+            tex,
+            view,
+            width: need_w,
+            height: need_h,
+            bytes,
+        });
+        Ok(())
+    }
+
+    /// Renders `self.scene` into the active target (top offscreen target, or `self.scratch`),
+    /// submits, resets `self.scene`, and returns any in-use temp textures to their pools.
+    fn flush_active_scene(&mut self) -> Result<()> {
+        let t0 = now();
+        self.flush_masks();
+        if let Some(top) = self.offscreen_stack.last_mut() {
+            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("offscreen"),
+            });
+            let mut options = RenderOptions::default();
+            let rect = [RectU16 {
+                x0: 0,
+                y0: 0,
+                x1: top.active_size.0,
+                y1: top.active_size.1,
+            }];
+            options.target_init = if !top.cleared {
+                top.cleared = true;
+                TargetInit::Clear(ClearSettings::Rects {
+                    color: AlphaColor::TRANSPARENT,
+                    rects: &rect,
+                })
+            } else {
+                TargetInit::SrcOver
+            };
+            options.offset = (0, 0);
+            self.renderer
+                .render(
+                    &self.scene,
+                    &mut self.resources,
+                    &mut encoder,
+                    RenderTarget {
+                        view: &top.view,
+                        depth_view: Some(&top.depth),
+                    },
+                    &self.bindings,
+                    options,
+                )
+                .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+            self.queue.submit([encoder.finish()]);
+            self.submits += 1;
+            self.atlas.at = (0, 0, 0);
+            self.scene.reset();
+            self.recycle_in_use();
+            if let Some(root) = self.root_render.as_mut() {
+                root.flush_ms += now() - t0;
+            }
+            return Ok(());
+        }
+        let Some(mut root) = self.root_render.take() else {
+            return Ok(());
+        };
+        let res = (|| -> Result<()> {
+            let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("tile flush"),
+            });
+            let mut options = RenderOptions::default();
+            options.target_init = if !root.cleared {
+                root.cleared = true;
+                let [r, g, b, a] = root.background;
+                let color = AlphaColor::new([r, g, b, a]);
+                TargetInit::Clear(ClearSettings::Viewport { color })
+            } else {
+                TargetInit::SrcOver
+            };
+            let (_, view_t, depth_t) = self
+                .scratch
+                .as_ref()
+                .ok_or_else(|| EngineError::new(ErrorCode::State, "no scratch tile"))?;
+            self.renderer
+                .render(
+                    &self.scene,
+                    &mut self.resources,
+                    &mut encoder,
+                    RenderTarget {
+                        view: view_t,
+                        depth_view: Some(depth_t),
+                    },
+                    &self.bindings,
+                    options,
+                )
+                .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+            // One render per submission: the renderer writes its buffers through the queue, which a
+            // second render in the same encoder would overwrite before the first ran.
+            self.queue.submit([encoder.finish()]);
+            self.submits += 1;
+            Ok(())
+        })();
+        root.flush_ms += now() - t0;
+        self.root_render = Some(root);
+        self.atlas.at = (0, 0, 0);
+        self.scene.reset();
+        self.recycle_in_use();
+        res
     }
 
     /// The device's health: an error recorded since the last call, or its loss.
@@ -1411,6 +1897,8 @@ impl Gpu {
         self.ensure_compositor();
         self.masks.begin_frame();
         self.blur.begin_frame();
+        self.shadow.begin_frame();
+        self.trim_pools(GPU_POOL_KEEP_BYTES);
         let t0 = now();
         self.tiles.begin(background, halo);
         self.fit_tiles(store.limits.tile_bytes);
@@ -1570,6 +2058,7 @@ impl Gpu {
         let Some(last) = self.last else { return Ok(stats) };
         let t0 = now();
         self.masks.begin_frame();
+        self.blur.begin_frame();
         self.tiles.begin(background, halo);
         self.fit_tiles(store.limits.tile_bytes);
         let Some(plan) = self.tiles.plan(last.view, last.size, false, Some(last), true) else {
@@ -1769,12 +2258,23 @@ impl Gpu {
         verbs: &mut usize,
     ) -> Result<bool> {
         let t0 = now();
+        // Every tile is drawn into the scratch tile, a target of its own size (Vello's work per
+        // render follows its target's size, so a page as the target would cost a page's worth
+        // for each tile), then copied where it goes. The same scene and view either way: the
+        // same pixels. Allocated before `exec::draw_split` so mid-tile flushes target it too.
+        self.ensure_scratch()?;
         // Each tile is its own render and submission: masks the tiles before it drew from may go
         // now, and its run images pack from the atlas's top left again (the draws before run
         // before any upload made after them).
         self.masks.begin_frame();
         self.atlas.at = (0, 0, 0);
         self.scene.reset_and_resize(TILE as u16, TILE as u16);
+        self.root_render = Some(RootRender {
+            background,
+            cleared: false,
+            scene_size: (TILE as u16, TILE as u16),
+            flush_ms: 0.0,
+        });
         let tile = Frame {
             width: TILE as u16,
             height: TILE as u16,
@@ -1788,10 +2288,19 @@ impl Gpu {
             },
         };
         let limits = store.limits;
-        let s = match exec::draw_split(store, self, &tile, &limits, verbs, split) {
+        let drawn = exec::draw_split(store, self, &tile, &limits, verbs, split);
+        let root = self.root_render.take().unwrap_or(RootRender {
+            background,
+            cleared: false,
+            scene_size: (TILE as u16, TILE as u16),
+            flush_ms: 0.0,
+        });
+        let s = match drawn {
             Ok(s) => s,
             Err(e) => {
-                self.release_temp_textures();
+                self.abort_all_offscreens();
+                self.recycle_in_use();
+                self.scene.reset();
                 return Err(e);
             }
         };
@@ -1799,14 +2308,6 @@ impl Gpu {
         // Exact only if nothing stood in: no level of detail, no provisional record.
         let exact = s.exact();
         let t1 = now();
-        // Every tile is drawn into the scratch tile, a target of its own size (Vello's work per
-        // render follows its target's size, so a page as the target would cost a page's worth
-        // for each tile), then copied where it goes. The same scene and view either way: the
-        // same pixels.
-        if let Err(e) = self.ensure_scratch() {
-            self.release_temp_textures();
-            return Err(e);
-        }
         let place = match target {
             TileTarget::Slot(slot) => match self.slot_place(slot) {
                 Ok(p) => Some(p),
@@ -1824,16 +2325,17 @@ impl Gpu {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("tile") });
         let mut options = RenderOptions::default();
-        let [r, g, b, a] = background;
-        let color = vello_common::color::AlphaColor::new([r, g, b, a]);
-        options.target_init = TargetInit::Clear(ClearSettings::Viewport { color });
-        let (scratch, view_t, depth_t) = match self.scratch.as_ref() {
-            Some(s) => s,
-            None => {
-                self.release_temp_textures();
-                return Err(EngineError::new(ErrorCode::State, "no scratch tile"));
-            }
+        options.target_init = if !root.cleared {
+            let [r, g, b, a] = background;
+            let color = vello_common::color::AlphaColor::new([r, g, b, a]);
+            TargetInit::Clear(ClearSettings::Viewport { color })
+        } else {
+            TargetInit::SrcOver
         };
+        let (scratch, view_t, depth_t) = self
+            .scratch
+            .as_ref()
+            .ok_or_else(|| EngineError::new(ErrorCode::State, "no scratch tile"))?;
         let render_res = self
             .renderer
             .render(
@@ -1907,9 +2409,12 @@ impl Gpu {
         // second render in the same encoder would overwrite before the first ran.
         self.queue.submit([encoder.finish()]);
         self.submits += 1;
-        self.release_temp_textures();
-        stats.encode_ms += t1 - t0;
-        stats.render_ms += now() - t1;
+        self.scene.reset();
+        self.recycle_in_use();
+        self.trim_pools(GPU_POOL_KEEP_BYTES);
+        let render_ms = root.flush_ms + (now() - t1);
+        stats.render_ms += render_ms;
+        stats.encode_ms += ((now() - t0) - render_ms).max(0.0);
         Ok(exact)
     }
 
@@ -2586,7 +3091,7 @@ impl Gpu {
     }
 
     /// Starts reading the last frame back: a buffer the frame is copied into, mapped by
-    /// `read_back` (which takes the in-flight count it answers). At most `READBACKS` at once.
+    /// `read_back_straight` (which takes the in-flight count it answers). At most `READBACKS` at once.
     pub fn read_back_start(&self) -> Result<ReadBack> {
         self.check()?;
         let main = self.current()?;
@@ -3107,6 +3612,35 @@ impl Backend for Gpu {
         &mut self.scene
     }
 
+    fn scene_offset(&self) -> (i32, i32) {
+        self.offscreen_stack.last().map_or((0, 0), |t| t.origin)
+    }
+
+    fn target_bounds(&self) -> IRect {
+        if let Some(top) = self.offscreen_stack.last() {
+            IRect {
+                x0: top.origin.0,
+                y0: top.origin.1,
+                x1: top.origin.0 + i32::from(top.active_size.0),
+                y1: top.origin.1 + i32::from(top.active_size.1),
+            }
+        } else if let Some(root) = self.root_render.as_ref() {
+            IRect {
+                x0: 0,
+                y0: 0,
+                x1: i32::from(root.scene_size.0),
+                y1: i32::from(root.scene_size.1),
+            }
+        } else {
+            IRect {
+                x0: 0,
+                y0: 0,
+                x1: 0,
+                y1: 0,
+            }
+        }
+    }
+
     fn image(&mut self, id: u32, px: f64) -> Option<ImageView> {
         let levels = self.images.get(&id)?;
         let i = images::pick(levels.iter().map(|l| l.2), px);
@@ -3206,8 +3740,7 @@ impl Backend for Gpu {
         }
         self.queue.submit([encoder.finish()]);
         self.submits += 1;
-        let tid = TextureId(self.next_temp_id);
-        self.next_temp_id = self.next_temp_id.wrapping_add(1).max(TEMP_ID_BASE);
+        let tid = self.alloc_temp_id();
         self.bindings.insert(tid, view);
         self.temp_textures.push((tid, tex));
         Ok(Some(ImageSource::external_texture(tid, TextureRegion::Full, true)))
@@ -3217,5 +3750,655 @@ impl Backend for Gpu {
         Err(EngineError::unsupported(format!(
             "backdrop reader {kernel} on the GPU (phase 3)"
         )))
+    }
+
+    fn push_isolated(&mut self, area: IRect, open: &[Open]) -> Result<bool> {
+        if open.iter().any(|o| matches!(o, Open::Layer)) {
+            return Err(EngineError::unsupported(
+                "offscreen isolation inside a Vello opacity layer",
+            ));
+        }
+        let area = area.intersect(self.target_bounds());
+        if area.is_empty() {
+            return Ok(false);
+        }
+        let w = (area.x1 - area.x0) as u32;
+        let h = (area.y1 - area.y0) as u32;
+        for _ in open {
+            self.scene.pop_clip();
+        }
+        self.flush_active_scene()?;
+        let target = self.acquire_offscreen(w, h, (area.x0, area.y0))?;
+        self.offscreen_stack.push(target);
+        self.scene.reset_and_resize(w as u16, h as u16);
+        Ok(true)
+    }
+
+    fn pop_isolated(&mut self, opacity: f32, open: &[Open]) -> Result<()> {
+        self.flush_active_scene()?;
+        let Some(top) = self.offscreen_stack.pop() else {
+            return Ok(());
+        };
+        let (pw, ph) = self.active_scene_size();
+        self.scene.reset_and_resize(pw, ph);
+        self.reopen_clips(open);
+        let alpha = opacity.clamp(0.0, 1.0);
+        if alpha <= 0.0 {
+            self.offscreen_pool.push(top);
+            return Ok(());
+        }
+        let (sox, soy) = self.scene_offset();
+        let x = f64::from(top.origin.0 - sox);
+        let y = f64::from(top.origin.1 - soy);
+        let (aw, ah) = top.active_size;
+        let tid = top.tid;
+        let bytes = top.bytes;
+        self.offscreen_in_use.push(top);
+        self.in_use_bytes += bytes;
+        let region = TextureRegion::Rect(RectU16 {
+            x0: 0,
+            y0: 0,
+            x1: aw,
+            y1: ah,
+        });
+        self.scene.set_transform(Affine::IDENTITY);
+        self.scene.set_paint(Image {
+            image: ImageSource::external_texture(tid, region, true),
+            sampler: ImageSampler {
+                x_extend: Extend::Pad,
+                y_extend: Extend::Pad,
+                quality: ImageQuality::Low,
+                alpha,
+            },
+        });
+        self.scene.set_paint_transform(Affine::translate((x, y)));
+        self.scene.set_tint(None);
+        self.scene.set_fill_rule(Fill::NonZero);
+        self.scene
+            .fill_rect(&Rect::new(x, y, x + f64::from(aw), y + f64::from(ah)));
+        if self.in_use_bytes >= GPU_TEMP_FLUSH_BYTES && !open.iter().any(|o| matches!(o, Open::Layer)) {
+            for _ in open {
+                self.scene.pop_clip();
+            }
+            self.flush_active_scene()?;
+            self.reopen_clips(open);
+        }
+        Ok(())
+    }
+
+    fn abort_isolated(&mut self) {
+        if let Some(top) = self.offscreen_stack.pop() {
+            self.offscreen_pool.push(top);
+        }
+        let (pw, ph) = self.active_scene_size();
+        self.scene.reset_and_resize(pw, ph);
+    }
+
+    fn draw_blurred_shadow(
+        &mut self,
+        cast: &ShadowCast<'_>,
+        canonical: Option<&CanonicalShadow>,
+        invert: bool,
+        dirty: IRect,
+        sigma: f32,
+        color: AlphaColor<Srgb>,
+        open: &[Open],
+    ) -> Result<()> {
+        if dirty.is_empty() {
+            return Ok(());
+        }
+        validate_sigma(
+            sigma,
+            IRect {
+                x0: 0,
+                y0: 0,
+                x1: (dirty.x1 - dirty.x0).max(1),
+                y1: (dirty.y1 - dirty.y0).max(1),
+            },
+            EdgeMode::Zero,
+        )?;
+
+        // Fast path: bounded LRU canonical shadow mask cache (zero submits on hit!).
+        if let Some(canon) = canonical {
+            let cw = (canon.mask_rect.x1 - canon.mask_rect.x0) as u32;
+            let ch = (canon.mask_rect.y1 - canon.mask_rect.y0) as u32;
+            let cache_bytes = (cw as usize) * (ch as usize) * 4;
+            if self.shadow_cache.fits_budget(cache_bytes) {
+                if let Some(entry) = self.shadow_cache.get(&canon.key) {
+                    let tid = entry.value.tid;
+                    let (ew, eh) = entry.size;
+                    let origin = (canon.anchor.0 + entry.origin.0, canon.anchor.1 + entry.origin.1);
+                    let (sox, soy) = self.scene_offset();
+                    let px = f64::from(origin.0 - sox);
+                    let py = f64::from(origin.1 - soy);
+                    let dx = f64::from(dirty.x0 - sox);
+                    let dy = f64::from(dirty.y0 - soy);
+                    let dw = f64::from(dirty.x1 - dirty.x0);
+                    let dh = f64::from(dirty.y1 - dirty.y0);
+                    let region = TextureRegion::Rect(RectU16 {
+                        x0: 0,
+                        y0: 0,
+                        x1: ew,
+                        y1: eh,
+                    });
+                    self.scene.set_transform(Affine::IDENTITY);
+                    self.scene.set_paint(Image {
+                        image: ImageSource::external_texture(tid, region, true),
+                        sampler: ImageSampler {
+                            x_extend: Extend::Pad,
+                            y_extend: Extend::Pad,
+                            quality: ImageQuality::Low,
+                            alpha: 1.0,
+                        },
+                    });
+                    self.scene.set_paint_transform(Affine::translate((px, py)));
+                    self.scene.set_tint(Some(Tint {
+                        color,
+                        mode: TintMode::AlphaMask,
+                    }));
+                    self.scene.set_fill_rule(Fill::NonZero);
+                    self.scene.fill_rect(&Rect::new(dx, dy, dx + dw, dy + dh));
+                    self.scene.set_tint(None);
+                    return Ok(());
+                }
+
+                // Cache miss: rasterise + blur canonical mask once and cache it.
+                let t0 = now();
+                let max_tex = self.device.limits().max_texture_dimension_2d;
+                if cw <= max_tex && ch <= max_tex {
+                    self.ensure_scratch_mask(cw, ch)?;
+                    if invert {
+                        self.ensure_scratch_blur(cw, ch)?;
+                    }
+                    let full = IRect {
+                        x0: 0,
+                        y0: 0,
+                        x1: cw as i32,
+                        y1: ch as i32,
+                    };
+                    let spec = BlurSpec {
+                        sigma: canon.sigma,
+                        edge: EdgeMode::Zero,
+                        clamp_bounds: full,
+                        dirty: full,
+                    };
+                    let mask_size = {
+                        let m = self.scratch_mask.as_ref().expect("scratch_mask");
+                        (m.width, m.height)
+                    };
+                    let blur_work = self.blur.estimate_work_bytes(mask_size, (cw, ch), (0, 0), &spec, None);
+                    self.reserve_or_trim(cache_bytes.saturating_add(blur_work), 0, "a cached shadow mask")?;
+                    // `trim_pools` may have dropped unused scratch targets under tight budget.
+                    self.ensure_scratch_mask(cw, ch)?;
+                    if invert {
+                        self.ensure_scratch_blur(cw, ch)?;
+                    }
+                    let tex = texture(
+                        &self.device,
+                        cw,
+                        ch,
+                        wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                        "shadow cache",
+                    );
+                    let view = tex.create_view(&Default::default());
+                    let bind_view = tex.create_view(&Default::default());
+                    let tid = self.alloc_temp_id();
+
+                    self.mask_scene.reset_and_resize(cw as u16, ch as u16);
+                    self.mask_scene.set_transform(Affine::translate((
+                        -f64::from(canon.mask_rect.x0),
+                        -f64::from(canon.mask_rect.y0),
+                    )));
+                    self.mask_scene.set_paint(AlphaColor::<Srgb>::new([1.0, 1.0, 1.0, 1.0]));
+                    self.mask_scene.set_fill_rule(Fill::NonZero);
+                    self.mask_scene.fill_path(&canon.path);
+
+                    let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                        label: Some("shadow cache"),
+                    });
+                    let res = (|| -> Result<()> {
+                        let mask_tex = self.scratch_mask.as_ref().expect("scratch_mask");
+                        let mask_clear = [RectU16 {
+                            x0: 0,
+                            y0: 0,
+                            x1: cw as u16,
+                            y1: ch as u16,
+                        }];
+                        let mut options = RenderOptions::default();
+                        options.target_init = TargetInit::Clear(ClearSettings::Rects {
+                            color: AlphaColor::TRANSPARENT,
+                            rects: &mask_clear,
+                        });
+                        self.renderer
+                            .render(
+                                &self.mask_scene,
+                                &mut self.resources,
+                                &mut encoder,
+                                RenderTarget {
+                                    view: &mask_tex.view,
+                                    depth_view: Some(&mask_tex.depth),
+                                },
+                                &self.bindings,
+                                options,
+                            )
+                            .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+                        if !invert {
+                            self.blur.encode(
+                                &self.device,
+                                &self.queue,
+                                &mut encoder,
+                                &mask_tex.view,
+                                (mask_tex.width, mask_tex.height),
+                                &view,
+                                (cw, ch),
+                                (0, 0),
+                                &spec,
+                                None,
+                            )?;
+                        } else {
+                            let blur_tex = self.scratch_blur.as_ref().expect("scratch_blur");
+                            self.blur.encode(
+                                &self.device,
+                                &self.queue,
+                                &mut encoder,
+                                &mask_tex.view,
+                                (mask_tex.width, mask_tex.height),
+                                &blur_tex.view,
+                                (cw, ch),
+                                (0, 0),
+                                &spec,
+                                None,
+                            )?;
+                            self.shadow
+                                .encode_invert_alpha(&self.device, &mut encoder, &blur_tex.view, &view, cw, ch);
+                        }
+                        Ok(())
+                    })();
+                    if let Err(e) = res {
+                        drop(encoder);
+                        self.blur.flush_retired();
+                        tex.destroy();
+                        return Err(e);
+                    }
+                    self.queue.submit([encoder.finish()]);
+                    self.submits += 1;
+                    self.blur.flush_retired();
+                    if let Some(root) = self.root_render.as_mut() {
+                        root.flush_ms += now() - t0;
+                    }
+                    self.bindings.insert(tid, bind_view);
+                    let mask_origin = (canon.mask_rect.x0, canon.mask_rect.y0);
+                    let evicted = self.shadow_cache.insert(
+                        canon.key,
+                        GpuCachedShadow {
+                            tid,
+                            tex,
+                            bytes: cache_bytes,
+                        },
+                        mask_origin,
+                        (cw as u16, ch as u16),
+                        cache_bytes,
+                    );
+                    for ev in evicted {
+                        self.pool_bytes += ev.bytes;
+                        self.retired_shadows.push(ev);
+                    }
+                    let (sox, soy) = self.scene_offset();
+                    let px = f64::from(canon.anchor.0 + mask_origin.0 - sox);
+                    let py = f64::from(canon.anchor.1 + mask_origin.1 - soy);
+                    let dx = f64::from(dirty.x0 - sox);
+                    let dy = f64::from(dirty.y0 - soy);
+                    let dw = f64::from(dirty.x1 - dirty.x0);
+                    let dh = f64::from(dirty.y1 - dirty.y0);
+                    let region = TextureRegion::Rect(RectU16 {
+                        x0: 0,
+                        y0: 0,
+                        x1: cw as u16,
+                        y1: ch as u16,
+                    });
+                    self.scene.set_transform(Affine::IDENTITY);
+                    self.scene.set_paint(Image {
+                        image: ImageSource::external_texture(tid, region, true),
+                        sampler: ImageSampler {
+                            x_extend: Extend::Pad,
+                            y_extend: Extend::Pad,
+                            quality: ImageQuality::Low,
+                            alpha: 1.0,
+                        },
+                    });
+                    self.scene.set_paint_transform(Affine::translate((px, py)));
+                    self.scene.set_tint(Some(Tint {
+                        color,
+                        mode: TintMode::AlphaMask,
+                    }));
+                    self.scene.set_fill_rule(Fill::NonZero);
+                    self.scene.fill_rect(&Rect::new(dx, dy, dx + dw, dy + dh));
+                    self.scene.set_tint(None);
+                    return Ok(());
+                }
+            }
+        }
+
+        let max_tex = self.device.limits().max_texture_dimension_2d as i32;
+        let mask_rect_opt = match cast {
+            ShadowCast::Fill { paths, .. } => compute_mask_rect(paths, dirty, sigma, max_tex),
+            ShadowCast::Stroke { bbox, .. } => compute_mask_rect_bounds(*bbox, dirty, sigma, max_tex),
+        };
+        let Some(mask_rect) = mask_rect_opt else {
+            if invert {
+                let (sox, soy) = self.scene_offset();
+                let x = f64::from(dirty.x0 - sox);
+                let y = f64::from(dirty.y0 - soy);
+                let w = f64::from(dirty.x1 - dirty.x0);
+                let h = f64::from(dirty.y1 - dirty.y0);
+                self.scene.set_transform(Affine::IDENTITY);
+                self.scene.reset_paint_transform();
+                self.scene.set_tint(None);
+                self.scene.set_paint(color);
+                self.scene.set_fill_rule(Fill::NonZero);
+                self.scene.fill_rect(&Rect::new(x, y, x + w, y + h));
+            }
+            return Ok(());
+        };
+        if self.in_use_bytes >= GPU_TEMP_FLUSH_BYTES && !open.iter().any(|o| matches!(o, Open::Layer)) {
+            for _ in open {
+                self.scene.pop_clip();
+            }
+            self.flush_active_scene()?;
+            self.reopen_clips(open);
+        }
+        let mask_w = (mask_rect.x1 - mask_rect.x0).max(1) as u32;
+        let mask_h = (mask_rect.y1 - mask_rect.y0).max(1) as u32;
+        let dirty_w = (dirty.x1 - dirty.x0).max(1) as u32;
+        let dirty_h = (dirty.y1 - dirty.y0).max(1) as u32;
+        let shift = shadow_raster_shift(sigma);
+        let dst_origin = (dirty.x0 - mask_rect.x0, dirty.y0 - mask_rect.y0);
+
+        let t0 = now();
+        let temp = self.acquire_temp(dirty_w, dirty_h)?;
+        let res = (|| -> Result<wgpu::CommandEncoder> {
+            if shift == 0 {
+                let spec = BlurSpec {
+                    sigma,
+                    edge: EdgeMode::Zero,
+                    clamp_bounds: IRect {
+                        x0: 0,
+                        y0: 0,
+                        x1: mask_w as i32,
+                        y1: mask_h as i32,
+                    },
+                    dirty: IRect {
+                        x0: dst_origin.0,
+                        y0: dst_origin.1,
+                        x1: dst_origin.0 + dirty_w as i32,
+                        y1: dst_origin.1 + dirty_h as i32,
+                    },
+                };
+                let blur_work =
+                    self.blur
+                        .estimate_work_bytes((mask_w, mask_h), (dirty_w, dirty_h), dst_origin, &spec, None);
+                self.reserve_or_trim(blur_work, 0, "a shadow blur")?;
+                self.ensure_scratch_mask(mask_w, mask_h)?;
+                if invert {
+                    self.ensure_scratch_blur(dirty_w, dirty_h)?;
+                }
+                self.mask_scene.reset_and_resize(mask_w as u16, mask_h as u16);
+                let base_shift = Affine::translate((-f64::from(mask_rect.x0), -f64::from(mask_rect.y0)));
+                self.mask_scene.set_paint(AlphaColor::<Srgb>::new([1.0, 1.0, 1.0, 1.0]));
+                match cast {
+                    ShadowCast::Fill { paths, even_odd } => {
+                        self.mask_scene.set_transform(base_shift);
+                        self.mask_scene
+                            .set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
+                        for p in *paths {
+                            if !p.is_empty() {
+                                self.mask_scene.fill_path(p);
+                            }
+                        }
+                    }
+                    ShadowCast::Stroke {
+                        paths,
+                        transform,
+                        stroke,
+                        ..
+                    } => {
+                        self.mask_scene.set_transform(base_shift * *transform);
+                        self.mask_scene.set_stroke(stroke.clone());
+                        for p in *paths {
+                            if !p.is_empty() {
+                                self.mask_scene.stroke_path(p);
+                            }
+                        }
+                    }
+                }
+                let mut encoder = self
+                    .device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("shadow") });
+                let mask_tex = self.scratch_mask.as_ref().expect("scratch_mask");
+                let mask_clear = [RectU16 {
+                    x0: 0,
+                    y0: 0,
+                    x1: mask_w as u16,
+                    y1: mask_h as u16,
+                }];
+                let mut options = RenderOptions::default();
+                options.target_init = TargetInit::Clear(ClearSettings::Rects {
+                    color: AlphaColor::TRANSPARENT,
+                    rects: &mask_clear,
+                });
+                self.renderer
+                    .render(
+                        &self.mask_scene,
+                        &mut self.resources,
+                        &mut encoder,
+                        RenderTarget {
+                            view: &mask_tex.view,
+                            depth_view: Some(&mask_tex.depth),
+                        },
+                        &self.bindings,
+                        options,
+                    )
+                    .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+                if !invert {
+                    self.blur.encode(
+                        &self.device,
+                        &self.queue,
+                        &mut encoder,
+                        &mask_tex.view,
+                        (mask_tex.width, mask_tex.height),
+                        &temp.view,
+                        (dirty_w, dirty_h),
+                        dst_origin,
+                        &spec,
+                        None,
+                    )?;
+                } else {
+                    let blur_tex = self.scratch_blur.as_ref().expect("scratch_blur");
+                    self.blur.encode(
+                        &self.device,
+                        &self.queue,
+                        &mut encoder,
+                        &mask_tex.view,
+                        (mask_tex.width, mask_tex.height),
+                        &blur_tex.view,
+                        (dirty_w, dirty_h),
+                        dst_origin,
+                        &spec,
+                        None,
+                    )?;
+                    self.shadow.encode_invert_alpha(
+                        &self.device,
+                        &mut encoder,
+                        &blur_tex.view,
+                        &temp.view,
+                        dirty_w,
+                        dirty_h,
+                    );
+                }
+                Ok(encoder)
+            } else {
+                let s = 1u32 << shift;
+                let sw = (mask_w / s).max(1);
+                let sh = (mask_h / s).max(1);
+                let (red_origin, (bd_w, bd_h)) = reduced_dirty_rect(mask_rect, dirty, shift);
+                let spec = BlurSpec {
+                    sigma: scaled_shadow_sigma(sigma, shift),
+                    edge: EdgeMode::Zero,
+                    clamp_bounds: IRect {
+                        x0: 0,
+                        y0: 0,
+                        x1: sw as i32,
+                        y1: sh as i32,
+                    },
+                    dirty: IRect {
+                        x0: red_origin.0,
+                        y0: red_origin.1,
+                        x1: red_origin.0 + bd_w as i32,
+                        y1: red_origin.1 + bd_h as i32,
+                    },
+                };
+                let blur_work = self
+                    .blur
+                    .estimate_work_bytes((sw, sh), (bd_w, bd_h), red_origin, &spec, None);
+                self.reserve_or_trim(blur_work, 0, "a shadow blur")?;
+                self.ensure_scratch_mask(sw, sh)?;
+                self.ensure_scratch_blur(bd_w, bd_h)?;
+                self.mask_scene.reset_and_resize(sw as u16, sh as u16);
+                let red_tf = Affine::scale(1.0 / f64::from(s))
+                    * Affine::translate((-f64::from(mask_rect.x0), -f64::from(mask_rect.y0)));
+                self.mask_scene.set_paint(AlphaColor::<Srgb>::new([1.0, 1.0, 1.0, 1.0]));
+                match cast {
+                    ShadowCast::Fill { paths, even_odd } => {
+                        self.mask_scene.set_transform(red_tf);
+                        self.mask_scene
+                            .set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
+                        for p in *paths {
+                            if !p.is_empty() {
+                                self.mask_scene.fill_path(p);
+                            }
+                        }
+                    }
+                    ShadowCast::Stroke {
+                        paths,
+                        transform,
+                        stroke,
+                        ..
+                    } => {
+                        self.mask_scene.set_transform(red_tf * *transform);
+                        self.mask_scene.set_stroke(stroke.clone());
+                        for p in *paths {
+                            if !p.is_empty() {
+                                self.mask_scene.stroke_path(p);
+                            }
+                        }
+                    }
+                }
+                let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                    label: Some("shadow reduced"),
+                });
+                let mask_tex = self.scratch_mask.as_ref().expect("scratch_mask");
+                let blur_tex = self.scratch_blur.as_ref().expect("scratch_blur");
+                let mask_clear = [RectU16 {
+                    x0: 0,
+                    y0: 0,
+                    x1: sw as u16,
+                    y1: sh as u16,
+                }];
+                let mut options = RenderOptions::default();
+                options.target_init = TargetInit::Clear(ClearSettings::Rects {
+                    color: AlphaColor::TRANSPARENT,
+                    rects: &mask_clear,
+                });
+                self.renderer
+                    .render(
+                        &self.mask_scene,
+                        &mut self.resources,
+                        &mut encoder,
+                        RenderTarget {
+                            view: &mask_tex.view,
+                            depth_view: Some(&mask_tex.depth),
+                        },
+                        &self.bindings,
+                        options,
+                    )
+                    .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+                self.blur.encode(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    &mask_tex.view,
+                    (mask_tex.width, mask_tex.height),
+                    &blur_tex.view,
+                    (bd_w, bd_h),
+                    red_origin,
+                    &spec,
+                    None,
+                )?;
+                self.shadow.encode_upsample_mask(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    &blur_tex.view,
+                    (blur_tex.width, blur_tex.height),
+                    (bd_w, bd_h),
+                    red_origin,
+                    &temp.view,
+                    (dirty_w, dirty_h),
+                    dst_origin,
+                    shift,
+                    invert,
+                );
+                Ok(encoder)
+            }
+        })();
+        let encoder = match res {
+            Ok(enc) => enc,
+            Err(e) => {
+                self.blur.flush_retired();
+                self.temp_pool.push(temp);
+                return Err(e);
+            }
+        };
+        self.queue.submit([encoder.finish()]);
+        self.submits += 1;
+        self.blur.flush_retired();
+        if let Some(root) = self.root_render.as_mut() {
+            root.flush_ms += now() - t0;
+        }
+
+        let tid = temp.tid;
+        let bytes = temp.bytes;
+        self.temp_in_use.push(temp);
+        self.in_use_bytes += bytes;
+
+        let (sox, soy) = self.scene_offset();
+        let x = f64::from(dirty.x0 - sox);
+        let y = f64::from(dirty.y0 - soy);
+        let region = TextureRegion::Rect(RectU16 {
+            x0: 0,
+            y0: 0,
+            x1: dirty_w as u16,
+            y1: dirty_h as u16,
+        });
+        self.scene.set_transform(Affine::IDENTITY);
+        self.scene.set_paint(Image {
+            image: ImageSource::external_texture(tid, region, true),
+            sampler: ImageSampler {
+                x_extend: Extend::Pad,
+                y_extend: Extend::Pad,
+                quality: ImageQuality::Low,
+                alpha: 1.0,
+            },
+        });
+        self.scene.set_paint_transform(Affine::translate((x, y)));
+        self.scene.set_tint(Some(Tint {
+            color,
+            mode: TintMode::AlphaMask,
+        }));
+        self.scene.set_fill_rule(Fill::NonZero);
+        self.scene
+            .fill_rect(&Rect::new(x, y, x + f64::from(dirty_w), y + f64::from(dirty_h)));
+        self.scene.set_tint(None);
+        Ok(())
     }
 }
