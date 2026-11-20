@@ -32,6 +32,7 @@ interface Tally {
   layers: number;
   changed: number;
   alreadyChanged: number;
+  hiddenLayers: number;
   hiddenChanged: number;
 }
 
@@ -48,7 +49,13 @@ export function measureRelayout(nodes: readonly NodeRecord[]) {
   const changed = new Set<string>();
   const frames: (Tally & { id: string; name: string })[] = [];
   const causes = new Map<string, { count: number; examples: Example[] }>();
-  const totals: Tally = { layers: 0, changed: 0, alreadyChanged: 0, hiddenChanged: 0 };
+  const totals: Tally = {
+    layers: 0,
+    changed: 0,
+    alreadyChanged: 0,
+    hiddenLayers: 0,
+    hiddenChanged: 0,
+  };
   const alreadyChanged = new Set<string>();
   const tokenInputs = new Set<string>();
   const constraints = new Set<string>();
@@ -70,7 +77,6 @@ export function measureRelayout(nodes: readonly NodeRecord[]) {
 
   const imported = nodes.filter((node) => layers.has(node.type));
   for (const node of imported) {
-    if (!visible(node.id)) hidden.add(node.id);
     if (node.type === "group") {
       const raw = layoutBox(unresolved, node.id);
       groupBoxes.set(node.id, raw);
@@ -96,16 +102,22 @@ export function measureRelayout(nodes: readonly NodeRecord[]) {
   for (const node of imported) {
     const result = doc.get(node.id);
     if (!result) continue;
-    totals.layers++;
-    if (alreadyChanged.has(node.id)) totals.alreadyChanged++;
     const before = box(node, groupBoxes.get(node.id));
     const after = box(result, node.type === "group" ? layoutBox(doc, node.id) : undefined);
-    if (!differs(before, after)) continue;
-    totals.changed++;
-    if (hidden.has(node.id)) {
-      hiddenChanged.add(node.id);
-      totals.hiddenChanged++;
+    const moved = differs(before, after);
+    if (!visible(node.id)) {
+      hidden.add(node.id);
+      totals.hiddenLayers++;
+      if (moved) {
+        hiddenChanged.add(node.id);
+        totals.hiddenChanged++;
+      }
+      continue;
     }
+    totals.layers++;
+    if (alreadyChanged.has(node.id)) totals.alreadyChanged++;
+    if (!moved) continue;
+    totals.changed++;
     const parent = doc.get(node.parent);
     // These are observable contributors, not inferred importer diagnoses.
     const cause = alreadyChanged.has(node.id)
@@ -114,12 +126,10 @@ export function measureRelayout(nodes: readonly NodeRecord[]) {
         ? "constraints follow a resized frame"
         : tokenInputs.has(node.id) || tokenInputs.has(node.parent)
           ? "layer or parent has a different resolved layout input"
-          : hidden.has(node.id)
-            ? "layout within a hidden subtree"
-            : getProp(node.props, "layoutMode") === "grid" ||
-                (parent && getProp(parent.props, "layoutMode") === "grid")
-              ? "grid layout"
-              : "flow layout";
+          : getProp(node.props, "layoutMode") === "grid" ||
+              (parent && getProp(parent.props, "layoutMode") === "grid")
+            ? "grid layout"
+            : "flow layout";
     changed.add(node.id);
     const entry = causes.get(cause) ?? { count: 0, examples: [] };
     entry.count++;
@@ -130,9 +140,10 @@ export function measureRelayout(nodes: readonly NodeRecord[]) {
   function tally(id: string): Tally {
     const node = doc.getUnresolved(id);
     const result = {
-      layers: node && layers.has(node.type) ? 1 : 0,
+      layers: node && layers.has(node.type) && !hidden.has(id) ? 1 : 0,
       changed: changed.has(id) ? 1 : 0,
-      alreadyChanged: alreadyChanged.has(id) ? 1 : 0,
+      alreadyChanged: alreadyChanged.has(id) && !hidden.has(id) ? 1 : 0,
+      hiddenLayers: hidden.has(id) ? 1 : 0,
       hiddenChanged: hiddenChanged.has(id) ? 1 : 0,
     };
     for (const child of doc.childIds(id)) {
@@ -140,6 +151,7 @@ export function measureRelayout(nodes: readonly NodeRecord[]) {
       result.layers += counts.layers;
       result.changed += counts.changed;
       result.alreadyChanged += counts.alreadyChanged;
+      result.hiddenLayers += counts.hiddenLayers;
       result.hiddenChanged += counts.hiddenChanged;
     }
     if (node?.type === "frame") frames.push({ id, name: getProp(node.props, "name"), ...result });

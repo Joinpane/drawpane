@@ -2,7 +2,6 @@ import { type Op, type Props, ROOT_ID } from "@drawpane/model";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { Doc } from "../src/doc";
-import { Editor } from "../src/editor";
 import {
   gridCellAt,
   gridGeometry,
@@ -203,50 +202,6 @@ describe("auto layout", () => {
     doc.apply(layoutOps(doc, ["dot"]));
     expect(box("badge")).toEqual([200, 40, 20, 8]);
     expect(box("dot")).toEqual([4, 0, 12, 8]);
-  });
-
-  it("keeps hidden layout boxes until shown, including inside a plain frame", () => {
-    const editor = new Editor({ clientId: "test", measurer: { width: () => 0 } });
-    editor.doc.apply([
-      { op: "create", id: "page", type: "page", parent: ROOT_ID, key: "a0", props: {} },
-      {
-        op: "create",
-        id: "outer",
-        type: "frame",
-        parent: "page",
-        key: "a0",
-        props: { layoutMode: "row", width: 100, height: 100 },
-      },
-      {
-        op: "create",
-        id: "hidden",
-        type: "frame",
-        parent: "outer",
-        key: "a0",
-        props: { visible: false, width: 100, height: 100 },
-      },
-      {
-        op: "create",
-        id: "badge",
-        type: "frame",
-        parent: "hidden",
-        key: "a0",
-        props: { layoutMode: "row", sizingH: "hug", width: 50, height: 20 },
-      },
-      {
-        op: "create",
-        id: "dot",
-        type: "rect",
-        parent: "badge",
-        key: "a0",
-        props: { width: 20, height: 20 },
-      },
-    ]);
-    editor.state.set({ role: "editor" });
-
-    expect(layoutOps(editor.doc, ["outer", "badge"])).toEqual([]);
-    editor.setProp(["hidden"], "visible", true);
-    expect(editor.doc.get("badge")?.props.width).toBe(20);
   });
 
   it("places a group as the box around its layers, moving them with it", () => {

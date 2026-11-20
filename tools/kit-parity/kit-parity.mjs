@@ -233,9 +233,10 @@ async function relayout() {
     const file = join(out, `relayout${values.name ? `-${values.name}` : ""}.json`);
     writeFileSync(file, `${JSON.stringify({ source, ...report }, null, 1)}\n`);
     console.log(
-      `${report.changed} of ${report.layers} layer boxes changed by more than ${report.threshold} px in ${report.framesAffected} of ${report.frames.length} frame subtrees (${report.hiddenChanged} changed layers hidden, ${report.alreadyChanged} boxes already different on resolution).`,
+      `${report.changed} of ${report.layers} visible layer boxes changed by more than ${report.threshold} px in ${report.framesAffected} of ${report.frames.length} frame subtrees (${report.alreadyChanged} boxes already different on resolution).`,
     );
     for (const { cause, count } of report.causes) console.log(`  ${count}  ${cause}`);
+    console.log(`${report.hiddenChanged} of ${report.hiddenLayers} hidden layer boxes changed.`);
     console.log(`Saved ${file}`);
   });
 }

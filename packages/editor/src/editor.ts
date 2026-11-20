@@ -83,7 +83,6 @@ import {
   layoutBox,
   layoutOps,
   placedByLayout,
-  revealedLayouts,
 } from "./layout";
 import {
   assetMain,
@@ -622,12 +621,7 @@ export class Editor {
       let touched = this.#touchedBy([...ops, ...emptied], inverse);
       // Layers whose bound layout values now resolve differently (a padding variable, a mode
       // switch) are laid out here, by the client that made the change (decision 0034).
-      for (const id of this.doc.takeTokenLayout()) {
-        touched.add(id);
-        const node = this.doc.get(id);
-        if (node && getProp(node.props, "bindings").visible)
-          for (const frame of revealedLayouts(this.doc, id)) touched.add(frame);
-      }
+      for (const id of this.doc.takeTokenLayout()) touched.add(id);
       let lastOps: readonly Op[] = first;
       // Text styles this deleted (their inverse makes them again): the only deletes whose
       // followers are looked for (an agent run's commit depends on what that reads).
@@ -666,12 +660,8 @@ export class Editor {
         const derived = [...derivedSoFar, ...text];
         const afterSync =
           derived.length > 0 ? this.#touchedBy(derived, roundInverse) : new Set<string>();
-        const edited = new Set([...live, ...afterSync, ...relayout.layout]);
-        const revealed = new Set<string>();
-        for (const op of [...lastOps, ...derivedSoFar])
-          if (op.op === "set" && op.prop === "visible")
-            for (const frame of revealedLayouts(this.doc, op.id)) revealed.add(frame);
-        const layout = layoutOps(this.doc, revealed, edited);
+        const layoutTargets = new Set([...live, ...afterSync, ...relayout.layout]);
+        const layout = layoutOps(this.doc, layoutTargets);
         layout.push(...constraintOps(this.doc, layout));
         layout.push(...pathResizeOps(this.doc, layout));
         const layoutInverse = layout.length > 0 ? this.sync.commit(layout) : [];
