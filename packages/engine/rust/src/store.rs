@@ -262,7 +262,7 @@ impl Store {
         }
         let limits = self.limits;
         let mut r = Reader::new(bytes);
-        let (base, next, n) = header(&mut r, &limits)?;
+        let (base, next, n, minor) = header(&mut r, &limits)?;
         if next == ANY_REVISION {
             return Err(EngineError::new(
                 ErrorCode::Revision,
@@ -279,7 +279,7 @@ impl Store {
                     ),
                 ));
             }
-            return self.apply_fresh(&mut r, next, n);
+            return self.apply_fresh(&mut r, next, n, minor);
         }
         if base != self.revision {
             return Err(EngineError::new(
@@ -303,7 +303,7 @@ impl Store {
         // Each command is applied as it's read (never all of them decoded at once), with an undo
         // log: a command that fails puts back everything before it.
         for _ in 0..n {
-            let result = next_command(&mut r, &limits).and_then(|command| {
+            let result = next_command(&mut r, &limits, minor).and_then(|command| {
                 match &command {
                     Command::Transform { id, .. } => {
                         changed = true;
@@ -369,13 +369,13 @@ impl Store {
     }
 
     /// A fresh list: built into a staged graph, read once, and swapped in whole.
-    fn apply_fresh(&mut self, r: &mut Reader, next: u32, n: usize) -> Result<Applied> {
+    fn apply_fresh(&mut self, r: &mut Reader, next: u32, n: usize, minor: u16) -> Result<Applied> {
         let limits = self.limits;
         let mut staged = Store::new(limits);
         let mut txn = Txn::new(false);
         let held = self.bytes();
         for i in 0..n {
-            let command = next_command(r, &limits)?;
+            let command = next_command(r, &limits, minor)?;
             if i == 0 {
                 if !matches!(command, Command::Reset) {
                     return Err(EngineError::malformed(
@@ -1249,8 +1249,8 @@ fn overlaps(a: Rect, b: Rect) -> bool {
     a.x0 <= b.x1 && b.x0 <= a.x1 && a.y0 <= b.y1 && b.y0 <= a.y1
 }
 
-/// Reads a message's header: the revision it applies to, the one it makes, and its command count.
-fn header(r: &mut Reader, limits: &Limits) -> Result<(u32, u32, usize)> {
+/// Reads a message's header: the revision it applies to, the one it makes, command count, and minor version.
+fn header(r: &mut Reader, limits: &Limits) -> Result<(u32, u32, usize, u16)> {
     if r.u32()? != MAGIC {
         return Err(EngineError::malformed("not a display list"));
     }
@@ -1265,11 +1265,11 @@ fn header(r: &mut Reader, limits: &Limits) -> Result<(u32, u32, usize)> {
     let base = r.u32()?;
     let next = r.u32()?;
     let n = r.count(limits.records.saturating_mul(4), "commands", 8)?;
-    Ok((base, next, n))
+    Ok((base, next, n, minor))
 }
 
 /// Reads one command from its own length-bounded reader, checking it's exactly as long as it says.
-fn next_command(r: &mut Reader, limits: &Limits) -> Result<Command> {
+fn next_command(r: &mut Reader, limits: &Limits, minor: u16) -> Result<Command> {
     let op = r.u32()?;
     let len = r.u32()? as usize;
     if len > r.remaining() {
@@ -1290,7 +1290,7 @@ fn next_command(r: &mut Reader, limits: &Limits) -> Result<Command> {
             Command::Set {
                 id,
                 parent,
-                record: record::decode(&mut c, limits)?,
+                record: record::decode(&mut c, limits, minor)?,
                 hash,
             }
         }

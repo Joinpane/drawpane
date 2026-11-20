@@ -478,9 +478,14 @@ impl Engine {
         // vello_cpu keeps per wide tile (256 × 4 px) command lists for the whole frame.
         let scene = (width as usize).div_ceil(256) * (height as usize).div_ceil(4) * 64;
         let png = 512 * 1024;
-        let need = band + tile + scene + png;
+        let diamond = self.export_diamond_bytes(width, height, camera.view(), cols, tile_rows);
+        let need = band
+            .saturating_add(tile)
+            .saturating_add(scene)
+            .saturating_add(png)
+            .saturating_add(diamond);
         let held = self.held_bytes();
-        if held + need > budget {
+        if held.saturating_add(need) > budget {
             return Err(EngineError::limit(format!(
                 "an export {width} × {height} px needs {} MiB beside the {} MiB the engine holds; it may hold {} MiB",
                 need.div_ceil(1 << 20),
@@ -489,6 +494,75 @@ impl Engine {
             )));
         }
         Ok(())
+    }
+
+    /// Upper bound on retained temporary diamond-gradient raster bytes for one export tile of
+    /// `cols × tile_rows` device pixels.
+    fn export_diamond_bytes(&self, width: u32, height: u32, view: Affine, cols: usize, tile_rows: usize) -> usize {
+        use crate::record::{GradientKind, Op, Paint};
+        let frame_rect = IRect {
+            x0: 0,
+            y0: 0,
+            x1: width as i32,
+            y1: height as i32,
+        };
+        let mut total = 0usize;
+        let mut stack = vec![(crate::store::ROOT, Affine::IDENTITY)];
+        let glyph_bounds = |g: u32| self.store.glyphs.get(g).and_then(|glyph| glyph.bounds);
+        while let Some((id, parent_world)) = stack.pop() {
+            let Some(node) = self.store.nodes.get(&id) else {
+                continue;
+            };
+            let world = if id == crate::store::ROOT {
+                parent_world
+            } else {
+                if node.record.hidden() {
+                    continue;
+                }
+                parent_world * node.record.transform
+            };
+            if id != crate::store::ROOT {
+                let device = view * world;
+                if device.determinant().abs() >= 1e-300 {
+                    for op in &node.record.ops {
+                        let (path, pad, paint) = match op {
+                            Op::Fill { path, paint, .. } => (*path, 0.0, paint),
+                            Op::Stroke { path, style, paint } => {
+                                if style.width <= 0.0 {
+                                    continue;
+                                }
+                                (*path, exec::stroke_paint_reach(style), paint)
+                            }
+                            _ => continue,
+                        };
+                        let Paint::Gradient(g) = paint else {
+                            continue;
+                        };
+                        if g.kind != GradientKind::Diamond
+                            || g.matrix.determinant().abs() < 1e-12
+                            || (device * g.matrix).determinant().abs() < 1e-300
+                        {
+                            continue;
+                        }
+                        let local = node
+                            .record
+                            .entry_bounds(path, &glyph_bounds)
+                            .map(|b| if pad > 0.0 { b.inflate(pad, pad) } else { b });
+                        let clipped = exec::diamond_device_rect(local, device, frame_rect);
+                        if clipped.is_empty() {
+                            continue;
+                        }
+                        let w = ((clipped.x1 - clipped.x0) as usize).min(cols);
+                        let h = ((clipped.y1 - clipped.y0) as usize).min(tile_rows);
+                        total = total.saturating_add(w.saturating_mul(h).saturating_mul(4));
+                    }
+                }
+            }
+            for &child in &node.children {
+                stack.push((child, world));
+            }
+        }
+        total
     }
 
     fn check_size(&self, width: u32, height: u32) -> Result<()> {
@@ -528,6 +602,7 @@ impl Engine {
                 x1: width as i32,
                 y1: height as i32,
             },
+            0,
         )?;
         Ok((self.cpu.target.data_as_u8_slice(), stats))
     }
@@ -641,7 +716,9 @@ impl Engine {
     }
 
     /// Draws `area` of a `width` × `height` frame into the CPU target, extended by the readers'
-    /// reach each way so what they read is drawn; answers the extended area.
+    /// reach each way so what they read is drawn; answers the extended area. `extra_held_bytes`
+    /// accounts for any live export band buffer temporarily taken out of `self.band`.
+    #[allow(clippy::too_many_arguments)]
     fn cpu_tile(
         &mut self,
         width: u32,
@@ -650,6 +727,7 @@ impl Engine {
         background: [f32; 4],
         detail: bool,
         area: IRect,
+        extra_held_bytes: usize,
     ) -> Result<(FrameStats, IRect)> {
         let view = camera.view();
         let halo = self.halo(view)?;
@@ -661,6 +739,19 @@ impl Engine {
         }
         .clamp(width as i32, height as i32);
         self.cpu.halo = halo;
+        let tile_w = (grown.x1 - grown.x0).max(1) as usize;
+        let tile_h = (grown.y1 - grown.y0).max(1) as usize;
+        let tile_bytes = tile_w.saturating_mul(tile_h).saturating_mul(4);
+        let runtime_held = self
+            .held_bytes()
+            .saturating_add(tile_bytes)
+            .saturating_add(extra_held_bytes);
+        let diamond_budget = if self.store.limits.memory_bytes > 0 {
+            self.store.limits.memory_bytes.saturating_sub(runtime_held)
+        } else {
+            self.store.limits.image_bytes
+        };
+        self.cpu.set_diamond_budget(diamond_budget);
         self.cpu
             .begin(width as u16, height as u16, grown, premultiply(background));
         let frame = Frame {
@@ -715,6 +806,14 @@ impl Engine {
             y1: side,
         };
         self.cpu.halo = halo;
+        let tile_bytes = (side as usize).saturating_mul(side as usize).saturating_mul(4);
+        let runtime_held = self.held_bytes().saturating_add(tile_bytes);
+        let diamond_budget = if self.store.limits.memory_bytes > 0 {
+            self.store.limits.memory_bytes.saturating_sub(runtime_held)
+        } else {
+            self.store.limits.image_bytes
+        };
+        self.cpu.set_diamond_budget(diamond_budget);
         self.cpu.begin(side as u16, side as u16, area, premultiply(background));
         let frame = Frame {
             width: side as u16,
@@ -1111,8 +1210,9 @@ impl Engine {
         }
         let stride = width as usize * 4;
         let mut band = std::mem::take(&mut self.band);
+        let band_bytes = stride * rows as usize;
         band.clear();
-        band.resize(stride * rows as usize, 0);
+        band.resize(band_bytes, 0);
         let mut x0 = 0u32;
         let result = (|| {
             while x0 < width {
@@ -1123,7 +1223,7 @@ impl Engine {
                     x1: (x0 + cols) as i32,
                     y1: (y0 + rows) as i32,
                 };
-                let (_, grown) = self.cpu_tile(width, height, camera, background, false, area)?;
+                let (_, grown) = self.cpu_tile(width, height, camera, background, false, area, band_bytes)?;
                 let tw = (grown.x1 - grown.x0) as usize * 4;
                 let px = self.cpu.target.data_as_u8_slice();
                 for r in 0..rows as usize {

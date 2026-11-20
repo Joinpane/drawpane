@@ -11,6 +11,7 @@
  * `ErrorCode.Trap` from then on; make a fresh engine.
  */
 import type * as Glue from "./glue";
+import { MAJOR, MINOR } from "./wire";
 
 export * from "./wire";
 
@@ -394,6 +395,20 @@ export class RenderEngine {
         state.trapped = false;
         this.#glue = state.activeGlue;
         this.#genTrapNotice = state.trapNotice;
+      }
+      // Explicitly verify the paired Wasm module supports the wire version JS writes.
+      if (typeof this.#glue.listVersion === "function") {
+        const version = this.#glue.listVersion();
+        const wasmMajor = version[0] ?? 0;
+        const wasmMinor = version[1] ?? 0;
+        if (wasmMajor !== MAJOR || wasmMinor < MINOR) {
+          this.#dead = {
+            ok: false,
+            code: ErrorCode.Version,
+            message: `Wasm module speaks display list ${wasmMajor}.${wasmMinor}; JS requires ${MAJOR}.${MINOR}`,
+          };
+          return;
+        }
       }
       const engine = unfinalized(new this.#glue.Engine(0, 0));
       this.#engine = engine;

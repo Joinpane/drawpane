@@ -218,7 +218,7 @@ Vello's glyph path takes font files and marks its atlas experimental (`glifo` 0.
 | Feature | How it's drawn |
 | --- | --- |
 | Solid fill | Vello fill, nonzero or even-odd |
-| Linear, radial, angular gradients | Vello gradient paint with the layer's unit-square transform as its paint transform (decision 0013); angular is Vello's sweep gradient. Diamond comes in as radial today and stays so. |
+| Linear, radial, angular, diamond gradients | Vello gradient paint with the layer's unit-square transform as its paint transform (decision 0013); angular is Vello's sweep gradient; diamond (`clamp(\|u\| + \|v\|, 0, 1)`) is evaluated on CPU and GPU within the memory budget with its optional second-axis handle (`width`) preserved on Figma import. |
 | Images (fill, fit, stretch, crop, tile) | Vello image paint with a transform per scale mode (as `images.ts`); tile uses `Extend::Repeat`. Uploaded once per content hash, with mipmaps, under the GPU budget, as wgpu textures. |
 | Strokes | Center is a Vello stroke (kurbo's stroker); inside and outside clip a double-width stroke to the shape or its outside, as today; dashes from `fitDashes`; miter limit 10, the canvas's default |
 | Per-side stroke widths | An even-odd region from `strokeRegion`, filled |

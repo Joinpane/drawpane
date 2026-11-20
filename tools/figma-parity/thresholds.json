@@ -344,5 +344,19 @@
     "lines": 1.15,
     "tracking": 1.06,
     "lines-spaced": 2.79
+  },
+  "diamonds": {
+    "diamond-centre": 0.44,
+    "diamond-rotated": 0.44,
+    "diamond-stretched": 0.42,
+    "diamond-skewed": 0.43,
+    "diamond-alpha": 0.38,
+    "diamond-stroke": 0.37
+  },
+  "text-strokes": {
+    "outside-filled": 0.89,
+    "outside-hollow": 0.71,
+    "outside-multipaint": 1.59,
+    "outside-list": 0.88
   }
 }

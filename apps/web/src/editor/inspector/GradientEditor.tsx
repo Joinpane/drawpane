@@ -80,11 +80,12 @@ export function GradientEditor({
             { value: "linear", label: "Linear" },
             { value: "radial", label: "Radial" },
             { value: "angular", label: "Angular" },
+            { value: "diamond", label: "Diamond" },
           ]}
           value={paint.type}
           onChange={(type) => onChange(convertPaint(paint, type) as GradientPaint, "Gradient type")}
         />
-        {paint.type === "radial" ? null : (
+        {paint.type === "radial" || paint.type === "diamond" ? null : (
           <NumberField
             icon="rotate"
             ariaLabel="Gradient angle"

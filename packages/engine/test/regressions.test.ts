@@ -197,10 +197,10 @@ describe.skipIf(!built())("Recovery and stream lifetimes", () => {
 describe.skipIf(!built())(
   "Operations the engine refuses, from the wire (re-check of PR 216)",
   () => {
-    it("refuses a page holding a diamond gradient before any PNG byte, even outside the crop", async () => {
+    it("refuses a page holding a backdrop reader before any PNG byte, even outside the crop", async () => {
       const w = new ListWriter(0xffffffff, 1);
       w.reset();
-      const record = (x: number, paint: WirePaintForTest) => ({
+      const base = (x: number, ops: Parameters<ListWriter["set"]>[2]["ops"]) => ({
         flags: 0,
         opacity: 1,
         transform: [1, 0, 0, 1, x, 0] as const,
@@ -212,41 +212,42 @@ describe.skipIf(!built())(
         paths: [
           { kind: "rect" as const, w: 16, h: 16, radii: [0, 0, 0, 0] as const, smoothing: 0 },
         ],
-        ops: [{ op: "fill" as const, path: 0, evenOdd: false, paint }],
+        ops,
         coarse: [],
       });
-      w.set(1, ROOT, record(0, { kind: "solid", color: [1, 0, 0, 1] }));
       w.set(
-        2,
+        1,
         ROOT,
-        record(5000, {
-          kind: "diamond",
-          matrix: [16, 0, 0, 16, 0, 0],
-          stops: [
-            { position: 0, color: [1, 0, 0, 1] },
-            { position: 1, color: [0, 0, 1, 1] },
-          ],
-        }),
+        base(0, [
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: {
+              kind: "diamond",
+              matrix: [16, 0, 0, 16, 0, 0],
+              stops: [
+                { position: 0, color: [1, 0, 0, 1] },
+                { position: 1, color: [0, 0, 1, 1] },
+              ],
+            },
+          },
+        ]),
       );
+      w.set(2, ROOT, base(5000, [{ op: "read", kernel: 0, halo: 4 }]));
       const engine = new RenderEngine(await loadNodeEngine());
       try {
         expect(engine.apply(w.finish()).ok).toBe(true);
         expect(
           engine.renderPngStream(32, 32, { zoom: 1, x: 0, y: 0, dpr: 1 }, [0, 0, 0, 0]),
         ).toMatchObject({ ok: false, code: ErrorCode.Unsupported });
-        expect(engine.unsupported()).toMatchObject({ ok: true, value: [[2, 1 << 12]] });
+        expect(engine.unsupported()).toMatchObject({ ok: true, value: [[2, 1 << 13]] });
       } finally {
         engine.dispose();
       }
     });
   },
 );
-
-type WirePaintForTest = Parameters<ListWriter["set"]>[2]["ops"][number] extends infer O
-  ? O extends { paint: infer P }
-    ? P
-    : never
-  : never;
 
 describe.skipIf(!built())("Engines sharing a module (re-check of PR 216)", () => {
   const fresh = (revision: number) => {
@@ -559,5 +560,17 @@ describe.skipIf(!built())("Engines sharing a module (re-check of PR 216)", () =>
         delete (globalThis as { navigator?: unknown }).navigator;
       }
     }
+  });
+
+  it("refuses a Wasm module whose listVersion is older than the JS wire writer", () => {
+    const staleModule = {
+      build: "browser",
+      glue: {
+        listVersion: () => new Uint32Array([1, 0]),
+      },
+      memoryBytes: () => 0,
+    } as unknown as EngineModule;
+    const engine = new RenderEngine(staleModule);
+    expect(engine.failure).toMatchObject({ ok: false, code: ErrorCode.Version });
   });
 });

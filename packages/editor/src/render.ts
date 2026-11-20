@@ -2226,7 +2226,7 @@ export class CanvasRenderer {
         gradient.addColorStop(stop.position, hexToRgba(stop.color, paint.opacity ?? 1));
       return gradient;
     }
-    if (paint.type === "radial" || paint.type === "angular")
+    if (paint.type === "radial" || paint.type === "angular" || paint.type === "diamond")
       return this.#gradientPattern(ctx, paint, w, h, reach);
     return null; // Images arrive with the asset pipeline.
   }
@@ -2263,19 +2263,97 @@ export class CanvasRenderer {
           : Object.assign(document.createElement("canvas"), { width, height });
       const c = canvas.getContext("2d") as Ctx | null;
       if (!c) return null;
-      // Layer units to the canvas's pixels, then the unit gradient onto the layer.
-      c.setTransform(k, 0, 0, k, reach * k, reach * k);
-      c.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
-      const gradient =
-        paint.type === "radial"
-          ? c.createRadialGradient(0, 0, 0, 0, 0, 1)
-          : // Conic gradients start at 3 o'clock and turn clockwise: here, toward `to`.
-            c.createConicGradient(0, 0, 0);
-      for (const stop of paint.stops)
-        gradient.addColorStop(stop.position, hexToRgba(stop.color, paint.opacity ?? 1));
-      c.fillStyle = gradient;
-      const box = boxInGradientSpace(m, w, h, reach);
-      c.fillRect(box.x, box.y, box.width, box.height);
+      if (paint.type === "diamond") {
+        // Exact diamond gradient: t = clamp(|u| + |v|, 0, 1) in unit gradient space, unpremultiplied stops.
+        const img = c.createImageData(width, height);
+        const data = img.data;
+        const opacity = paint.opacity ?? 1;
+        const stops = [...paint.stops]
+          .map((s, idx) => {
+            const h = s.color.trim();
+            const hex = (i: number) => Number.parseInt(h.slice(i, i + 2), 16) / 255;
+            const valid = /^#[0-9a-f]{6}([0-9a-f]{2})?$/i.test(h);
+            const r = valid ? hex(1) : 0;
+            const g = valid ? hex(3) : 0;
+            const b = valid ? hex(5) : 0;
+            const a = (valid && h.length >= 9 ? hex(7) : 1) * opacity;
+            return { pos: Math.min(1, Math.max(0, s.position)), r, g, b, a, idx };
+          })
+          .sort((a, b) => a.pos - b.pos || a.idx - b.idx);
+        const [m0, m1, m2, m3, m4, m5] = m;
+        // Map pixel (px, py) -> layer (px / k - reach, py / k - reach) -> unit gradient (u, v).
+        const det = m0 * m3 - m1 * m2;
+        const ia = m3 / det;
+        const ib = -m1 / det;
+        const ic = -m2 / det;
+        const id = m0 / det;
+        const ie = (m2 * m5 - m3 * m4) / det;
+        const jf = (m1 * m4 - m0 * m5) / det;
+        const first = stops[0];
+        if (first) {
+          for (let py = 0; py < height; py++) {
+            const ly = (py + 0.5) / k - reach;
+            const baseU = ic * ly + ie;
+            const baseV = id * ly + jf;
+            for (let px = 0; px < width; px++) {
+              const lx = (px + 0.5) / k - reach;
+              const u = ia * lx + baseU;
+              const v = ib * lx + baseV;
+              const t = Math.min(1, Math.abs(u) + Math.abs(v));
+              let r = first.r;
+              let g = first.g;
+              let b = first.b;
+              let a = first.a;
+              if (t > first.pos) {
+                for (let i = 1; i < stops.length; i++) {
+                  const s1 = stops[i] as (typeof stops)[number];
+                  if (t <= s1.pos) {
+                    const s0 = stops[i - 1] as (typeof stops)[number];
+                    const span = s1.pos - s0.pos;
+                    if (span > 0) {
+                      const f = Math.min(1, Math.max(0, (t - s0.pos) / span));
+                      r = s0.r + (s1.r - s0.r) * f;
+                      g = s0.g + (s1.g - s0.g) * f;
+                      b = s0.b + (s1.b - s0.b) * f;
+                      a = s0.a + (s1.a - s0.a) * f;
+                    } else {
+                      r = s1.r;
+                      g = s1.g;
+                      b = s1.b;
+                      a = s1.a;
+                    }
+                    break;
+                  }
+                  r = s1.r;
+                  g = s1.g;
+                  b = s1.b;
+                  a = s1.a;
+                }
+              }
+              const idx = (py * width + px) * 4;
+              data[idx] = Math.round(r * 255);
+              data[idx + 1] = Math.round(g * 255);
+              data[idx + 2] = Math.round(b * 255);
+              data[idx + 3] = Math.round(a * 255);
+            }
+          }
+        }
+        c.putImageData(img, 0, 0);
+      } else {
+        // Layer units to the canvas's pixels, then the unit gradient onto the layer.
+        c.setTransform(k, 0, 0, k, reach * k, reach * k);
+        c.transform(m[0], m[1], m[2], m[3], m[4], m[5]);
+        const gradient =
+          paint.type === "radial"
+            ? c.createRadialGradient(0, 0, 0, 0, 0, 1)
+            : // Conic gradients start at 3 o'clock and turn clockwise: here, toward `to`.
+              c.createConicGradient(0, 0, 0);
+        for (const stop of paint.stops)
+          gradient.addColorStop(stop.position, hexToRgba(stop.color, paint.opacity ?? 1));
+        c.fillStyle = gradient;
+        const box = boxInGradientSpace(m, w, h, reach);
+        c.fillRect(box.x, box.y, box.width, box.height);
+      }
       raster = { canvas, w, h, reach, k };
       this.#gradientRasters.set(paint, raster);
     }
@@ -2943,13 +3021,20 @@ export class CanvasRenderer {
       }
       for (const line of layout.lines) {
         const x0 = lineOffset(line, width, node.props);
+        const y = drawnBaseline(line, dy);
+        // Stroke list markers along with their line's runs, matching Figma and the render engine.
+        const marker = line.marker;
+        if (marker) {
+          typeset(c, marker.font);
+          if (spaced) (c as Ctx & { letterSpacing: string }).letterSpacing = "0px";
+          paint(null, { text: marker.text } as TextFragment, x0 + marker.x, y);
+        }
         for (const frag of line.fragments) {
           if (!frag.text) continue;
           typeset(c, frag.font);
           if (spaced)
             (c as Ctx & { letterSpacing: string }).letterSpacing = `${frag.letterSpacing}px`;
           const x = x0 + frag.x;
-          const y = drawnBaseline(line, dy);
           paint(outline(frag, x, y), frag, x, y);
         }
       }

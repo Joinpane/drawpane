@@ -693,7 +693,12 @@ export class TokenResolver {
         const opacity = this.#number(bind.opacity, at);
         if (opacity !== undefined) next = { ...next, opacity: clampUnit(opacity / 100) };
       }
-      if (next.type === "linear" || next.type === "radial" || next.type === "angular") {
+      if (
+        next.type === "linear" ||
+        next.type === "radial" ||
+        next.type === "angular" ||
+        next.type === "diamond"
+      ) {
         let changed = false;
         const stops = next.stops.map((stop) => {
           const color = this.#color(stop.bind?.color, at);

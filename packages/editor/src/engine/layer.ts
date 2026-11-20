@@ -9,6 +9,7 @@
  */
 import {
   CAP,
+  COMPOSE,
   FLAG,
   type GradientStop,
   JOIN,
@@ -23,7 +24,6 @@ import {
   type WireRecord,
 } from "@drawpane/engine/wire";
 import { GLYPH_UNITS, getProp, type NodeRecord, type Paint } from "@drawpane/model";
-import { fitCorners } from "../corner-geometry";
 import { layerCorners } from "../corners";
 import { boxOutline, ellipseOutline, fitDashes } from "../dashes";
 import { boxOf, localMatrix } from "../geometry";
@@ -166,16 +166,14 @@ function shapeEntry(node: NodeRecord, w: number, h: number): PathEntry {
     }
     case "frame":
     case "rect": {
-      // Radii as corners.ts fits them (Figma's rule: each corner's share of the side it's on),
-      // so the engine's own clamp (half the shorter side) never changes them.
-      const { radii } = layerCorners(node);
-      const fitted = fitCorners(w, h, radii, 0);
+      // Raw radii and smoothing: Rust's geometry.rs fits both with Figma's rule (corner-geometry.ts).
+      const { radii, smoothing } = layerCorners(node);
       return {
         kind: "rect",
         w,
         h,
-        radii: [fitted[0].radius, fitted[1].radius, fitted[2].radius, fitted[3].radius],
-        smoothing: 0,
+        radii: [radii[0], radii[1], radii[2], radii[3]],
+        smoothing,
       };
     }
     default:
@@ -684,20 +682,44 @@ function text(
   if (strokes.length > 0 && weight > 0 && runs.runs.length > 0) {
     if (strokes.some(blendOf)) b.unsupported |= UNSUPPORTED.blend;
     const align = getProp(node.props, "strokeAlign");
-    if (align === "outside") b.unsupported |= UNSUPPORTED.textStrokeOutside;
     const style = strokeStyle(
       align === "center" ? weight : weight * 2,
       getProp(node.props, "strokeJoin"),
       "butt",
       getProp(node.props, "strokeDashes"),
     );
-    for (const r of runs.runs) {
-      if (align === "inside") b.ops.push({ op: "clip", path: r.entry, evenOdd: false });
+    if (align === "outside") {
+      // Paint-major order across runs (matching render.ts and Figma): each stroke paint strokes all
+      // runs in an isolated layer, then cuts out all run interiors via nonzero destination-out.
+      b.ops.push({ op: "layer", compose: COMPOSE.srcOver });
       for (const paint of strokes) {
         const p = wirePaint(paint, width, height);
-        if (p) b.ops.push({ op: "stroke", path: r.entry, style, paint: p });
+        if (!p) continue;
+        for (const r of runs.runs) {
+          b.ops.push({ op: "stroke", path: r.entry, style, paint: p });
+        }
       }
-      if (align === "inside") b.ops.push({ op: "unclip" });
+      b.ops.push({ op: "layer", compose: COMPOSE.destOut });
+      for (const r of runs.runs) {
+        b.ops.push({
+          op: "fill",
+          path: r.entry,
+          evenOdd: false,
+          paint: { kind: "solid", color: [0, 0, 0, 1] },
+        });
+      }
+      b.ops.push({ op: "unlayer" });
+      b.ops.push({ op: "unlayer" });
+    } else {
+      for (const paint of strokes) {
+        const p = wirePaint(paint, width, height);
+        if (!p) continue;
+        for (const r of runs.runs) {
+          if (align === "inside") b.ops.push({ op: "clip", path: r.entry, evenOdd: false });
+          b.ops.push({ op: "stroke", path: r.entry, style, paint: p });
+          if (align === "inside") b.ops.push({ op: "unclip" });
+        }
+      }
     }
   }
   // Too small to read on screen: bars where the lines are (`#greek`), in the last visible fill.
@@ -750,11 +772,6 @@ function unsupportedOf(node: NodeRecord, scene: Scene): number {
   if (post && post.length > 0) bits |= UNSUPPORTED.layerBlur;
   const mode = getProp(node.props, "blendMode");
   if (mode !== "normal") bits |= UNSUPPORTED.blend;
-  // Squircles wait for the engine's port of corners.ts; drawing plain corners instead is wrong.
-  if (node.type === "rect" || node.type === "frame") {
-    const { radii, smoothing } = layerCorners(node);
-    if (smoothing > 0 && radii.some((r) => r > 0)) bits |= UNSUPPORTED.cornerSmoothing;
-  }
   const id = node.id;
   const masks = isActiveMask(node);
   if (masks || scene.hasMask(id)) bits |= UNSUPPORTED.mask;

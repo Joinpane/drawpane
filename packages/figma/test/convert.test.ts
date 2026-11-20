@@ -619,6 +619,50 @@ describe("auto layout and components", () => {
 });
 
 describe("strokes", () => {
+  it("preserves Figma diamond gradients with their second axis handle while keeping radial unchanged", () => {
+    const diamond = (id: string, name: string, widthHandle: { x: number; y: number }) =>
+      node({
+        id,
+        type: "RECTANGLE",
+        name,
+        size: { x: 100, y: 100 },
+        relativeTransform: at(0, 0),
+        fills: [
+          {
+            type: "GRADIENT_DIAMOND",
+            gradientHandlePositions: [{ x: 0.5, y: 0.5 }, { x: 0.9, y: 0.5 }, widthHandle],
+            gradientStops: [
+              { position: 0, color: { r: 1, g: 0, b: 0, a: 1 } },
+              { position: 1, color: { r: 0, g: 0, b: 1, a: 1 } },
+            ],
+          },
+        ],
+      });
+    const { nodes, notes } = convertFile(
+      file(
+        diamond("1:10", "Regular", { x: 0.5, y: 0.9 }),
+        diamond("1:11", "Narrow", { x: 0.5, y: 0.7 }),
+      ),
+    );
+    validate(nodes);
+    const regFill = getProp(byName(nodes, "Regular").props, "fills")[0];
+    const narFill = getProp(byName(nodes, "Narrow").props, "fills")[0];
+    expect(regFill).toMatchObject({
+      type: "diamond",
+      from: { x: 0.5, y: 0.5 },
+      to: { x: 0.9, y: 0.5 },
+    });
+    expect("width" in (regFill as object)).toBe(false);
+    expect(narFill).toMatchObject({
+      type: "diamond",
+      from: { x: 0.5, y: 0.5 },
+      to: { x: 0.9, y: 0.5 },
+      width: { x: 0.5, y: 0.7 },
+    });
+    expect(narFill).not.toEqual(regFill);
+    expect(notes.lines()).toEqual([]);
+  });
+
   it("keeps a box's width per side, and the widest as its one width", () => {
     const row = node({
       id: "1:20",

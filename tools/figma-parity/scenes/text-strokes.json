@@ -1,0 +1,105 @@
+{
+  "suite": "text-strokes",
+  "about": "Outside text strokes: filled, hollow (no fill), overlapping multi-paint translucent strokes, and bulleted list markers.",
+  "cell": {
+    "width": 240,
+    "height": 160,
+    "gap": 40,
+    "columns": 2
+  },
+  "background": "#f4f3ef",
+  "cells": [
+    {
+      "id": "outside-filled",
+      "layers": [
+        {
+          "type": "text",
+          "x": 24,
+          "y": 48,
+          "width": 192,
+          "height": 64,
+          "fontFamily": "Inter",
+          "fontSize": 40,
+          "fontWeight": 700,
+          "characters": "Hello",
+          "fills": [{ "type": "solid", "color": "#ffffff" }],
+          "strokes": [{ "type": "solid", "color": "#1c1b1a" }],
+          "strokeWeight": 4,
+          "strokeAlign": "outside",
+          "textAutoResize": "width"
+        }
+      ]
+    },
+    {
+      "id": "outside-hollow",
+      "layers": [
+        {
+          "type": "text",
+          "x": 24,
+          "y": 48,
+          "width": 192,
+          "height": 64,
+          "fontFamily": "Inter",
+          "fontSize": 40,
+          "fontWeight": 700,
+          "characters": "Hollow",
+          "fills": [{ "type": "solid", "color": "#000000", "visible": false }],
+          "strokes": [{ "type": "solid", "color": "#e8590c" }],
+          "strokeWeight": 4,
+          "strokeAlign": "outside",
+          "textAutoResize": "width"
+        }
+      ]
+    },
+    {
+      "id": "outside-multipaint",
+      "layers": [
+        {
+          "type": "text",
+          "x": 28,
+          "y": 24,
+          "width": 184,
+          "height": 112,
+          "fontFamily": "Inter",
+          "fontSize": 44,
+          "fontWeight": 700,
+          "lineHeight": { "unit": "px", "value": 46 },
+          "characters": "AA\nBB",
+          "fills": [{ "type": "solid", "color": "#ffffff" }],
+          "strokes": [
+            { "type": "solid", "color": "#ff000080" },
+            { "type": "solid", "color": "#0000ff80" }
+          ],
+          "strokeWeight": 8,
+          "strokeAlign": "outside",
+          "textAutoResize": "width"
+        }
+      ]
+    },
+    {
+      "id": "outside-list",
+      "layers": [
+        {
+          "type": "text",
+          "x": 24,
+          "y": 28,
+          "width": 192,
+          "height": 104,
+          "fontFamily": "Inter",
+          "fontSize": 28,
+          "fontWeight": 700,
+          "characters": "One\nTwo",
+          "fills": [{ "type": "solid", "color": "#ffffff" }],
+          "strokes": [{ "type": "solid", "color": "#e8590c" }],
+          "strokeWeight": 4,
+          "strokeAlign": "outside",
+          "textAutoResize": "width",
+          "textRuns": [
+            { "start": 0, "end": 4, "listType": "bullet" },
+            { "start": 4, "end": 7, "listType": "bullet" }
+          ]
+        }
+      ]
+    }
+  ]
+}

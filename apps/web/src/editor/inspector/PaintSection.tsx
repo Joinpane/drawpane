@@ -125,7 +125,9 @@ export function PaintSection({
                     ? `Linear ${gradientAngle(paint)}°`
                     : paint.type === "angular"
                       ? `Angular ${gradientAngle(paint)}°`
-                      : "Radial"}
+                      : paint.type === "diamond"
+                        ? "Diamond"
+                        : "Radial"}
                 </span>
               )}
               <NumberField
