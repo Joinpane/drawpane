@@ -242,3 +242,25 @@ it("takes the selected variant's strokes-in-layout setting", () => {
   applySwappedLooks(graph, ids, records, layers);
   expect(graph.getNode(copy.id)?.strokesIncludedInLayout).toBe(true);
 });
+
+it("carries counterAxisAlignContent from the selected variant and respects explicit overrides", () => {
+  const { graph, copy, ids, records, layers } = scene();
+  const [, filled] = [...layers.values()] as [string, string];
+  graph.updateNode(filled, { counterAxisAlignContent: "SPACE_BETWEEN" });
+  applySwappedLooks(graph, ids, records, layers);
+  expect(graph.getNode(copy.id)?.counterAxisAlignContent).toBe("SPACE_BETWEEN");
+
+  const over = scene();
+  const [, filledOver] = [...over.layers.values()] as [string, string];
+  over.graph.updateNode(filledOver, { counterAxisAlignContent: "SPACE_BETWEEN" });
+  applySwappedLooks(
+    over.graph,
+    {
+      sourceGuid: (node) => over.ids.sourceGuid(node),
+      overridesOf: () => [{ stackCounterAlignContent: "AUTO" }],
+    },
+    over.records,
+    over.layers,
+  );
+  expect(over.graph.getNode(over.copy.id)?.counterAxisAlignContent).toBe("AUTO");
+});

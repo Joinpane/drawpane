@@ -50,6 +50,7 @@ const LOOK = [
   "strokesIncludedInLayout",
   "primaryAxisAlign",
   "counterAxisAlign",
+  "counterAxisAlignContent",
   "primaryAxisSizing",
   "counterAxisSizing",
   "itemSpacing",
@@ -158,6 +159,7 @@ const SET_LOOK_FIELDS: Readonly<Record<string, readonly string[]>> = {
   stackWrap: ["layoutWrap"],
   stackPrimaryAlignItems: ["primaryAxisAlign"],
   stackCounterAlignItems: ["counterAxisAlign"],
+  stackCounterAlignContent: ["counterAxisAlignContent"],
   stackPrimarySizing: ["primaryAxisSizing"],
   stackCounterSizing: ["counterAxisSizing"],
   stackSpacing: ["itemSpacing"],
@@ -206,6 +208,11 @@ function explicitLooks(overrides: readonly Readonly<Record<string, unknown>>[]):
       if (typeof o[field] === "number" && !values.has(look)) values.set(look, o[field]);
     if (typeof o.bordersTakeSpace === "boolean" && !values.has("strokesIncludedInLayout"))
       values.set("strokesIncludedInLayout", o.bordersTakeSpace);
+    if (
+      (o.stackCounterAlignContent === "AUTO" || o.stackCounterAlignContent === "SPACE_BETWEEN") &&
+      !values.has("counterAxisAlignContent")
+    )
+      values.set("counterAxisAlignContent", o.stackCounterAlignContent);
   }
   return { set, bound, values };
 }

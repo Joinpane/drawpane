@@ -16,6 +16,7 @@ import {
 } from "@drawpane/model";
 import type { Doc } from "./doc";
 import { cssGradient } from "./gradients";
+import { flexDistribution } from "./layout";
 import { layerName } from "./names";
 import { blurSigma } from "./post-effects";
 import { type RunStyle, textSpans } from "./rich-text";
@@ -105,10 +106,15 @@ export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
 
   const parent = doc.get(node.parent);
   const parentLayout = parent?.type === "frame" ? getProp(parent.props, "layoutMode") : "none";
-  const inLayout = parentLayout !== "none" && getProp(p, "positioning") === "auto";
+  const parentBaked =
+    parent?.type === "frame" &&
+    (parentLayout === "row" || parentLayout === "column") &&
+    flexDistribution(doc, parent).bake;
+  const inLayout = parentLayout !== "none" && !parentBaked && getProp(p, "positioning") === "auto";
   const isText = node.type === "text";
 
-  // Position: absolute children of plain frames, and explicitly absolute ones.
+  // Position: absolute children of plain frames, explicitly absolute ones, and
+  // children whose parent's space-between placement cannot be expressed in CSS flex.
   if (
     node.type !== "page" &&
     node.type !== "group" &&
@@ -144,6 +150,9 @@ export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
 
   // Layout.
   const layoutMode = node.type === "frame" ? getProp(p, "layoutMode") : "none";
+  const flexDist =
+    layoutMode === "row" || layoutMode === "column" ? flexDistribution(doc, node) : null;
+  const baked = flexDist?.bake === true;
   if (layoutMode === "grid") {
     out.push({ property: "display", value: "grid" });
     out.push({
@@ -161,26 +170,36 @@ export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
     const align = getProp(p, "alignItems");
     if (align !== "start") out.push({ property: "align-items", value: align });
     gaps(getProp(p, "rowGap"), getProp(p, "gap"), "rowGap", "gap");
-  } else if (layoutMode !== "none") {
+  } else if (baked) {
+    // Overflowing or mixed-line space-between uses negative gaps or per-line centering
+    // that CSS flexbox cannot represent; children emit explicit coordinates relative to here.
+    if (!out.some((d) => d.property === "position"))
+      out.push({ property: "position", value: "relative" });
+  } else if (layoutMode !== "none" && flexDist) {
     out.push({ property: "display", value: "flex" });
     if (layoutMode === "column") out.push({ property: "flex-direction", value: "column" });
+    const align = getProp(p, "alignItems");
     const wraps = getProp(p, "layoutWrap");
+    const alignContent = wraps ? getProp(p, "alignContent") : "start";
     if (wraps) {
       out.push({ property: "flex-wrap", value: "wrap" });
-      // Lines pack at the start, as the editor lays them out.
-      out.push({ property: "align-content", value: "flex-start" });
+      out.push({
+        property: "align-content",
+        value: flexDist.alignContent ?? "flex-start",
+      });
     }
-    const justify = getProp(p, "justifyContent");
-    if (justify !== "start")
+    if (flexDist.justify !== "start")
       out.push({
         property: "justify-content",
-        value: justify === "space-between" ? "space-between" : flexAlign(justify),
+        value: flexDist.justify === "space-between" ? "space-between" : flexAlign(flexDist.justify),
       });
-    const align = getProp(p, "alignItems");
     if (align !== "start")
       out.push({ property: "align-items", value: align === "baseline" ? align : flexAlign(align) });
     if (!wraps) {
       if (getProp(p, "gap") !== 0 || bindings.gap) push("gap", px(getProp(p, "gap")), "gap");
+    } else if (alignContent === "space-between") {
+      const prop = layoutMode === "row" ? "column-gap" : "row-gap";
+      if (getProp(p, "gap") !== 0 || bindings.gap) push(prop, px(getProp(p, "gap")), "gap");
     } else if (layoutMode === "row") {
       gaps(getProp(p, "rowGap"), getProp(p, "gap"), "rowGap", "gap");
     } else {
@@ -188,7 +207,7 @@ export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
       gaps(getProp(p, "gap"), getProp(p, "rowGap"), "gap", "rowGap");
     }
   }
-  if (layoutMode !== "none") {
+  if (layoutMode !== "none" && !baked) {
     const [t, r, b, l] = [
       getProp(p, "paddingTop"),
       getProp(p, "paddingRight"),
@@ -218,6 +237,10 @@ export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
       const sizing = getProp(p, axis === "width" ? "sizingH" : "sizingV");
       const mainAxis = inLayout && ((axis === "width" && row) || (axis === "height" && !row));
       if (sizing === "fill") {
+        if (parentBaked) {
+          push(axis, px(getProp(p, axis)), axis);
+          return;
+        }
         if (inLayout && parentLayout === "grid") {
           const property = axis === "width" ? "justify-self" : "align-self";
           if (!out.some((d) => d.property === property)) out.push({ property, value: "stretch" });
@@ -233,6 +256,10 @@ export function cssFor(doc: Doc, node: NodeRecord): CssDeclaration[] {
           ((axis === "width" && getProp(p, "textAutoResize") === "width") ||
             (axis === "height" && getProp(p, "textAutoResize") !== "none")))
       ) {
+        if (baked) {
+          push(axis, px(getProp(p, axis)), axis);
+          return;
+        }
         if (!isText) out.push({ property: axis, value: "fit-content" });
         return;
       }
@@ -537,7 +564,7 @@ export function tailwindFor(doc: Doc, node: NodeRecord): string[] {
         classes.push(`justify-self-${d.value}`);
         break;
       case "align-content":
-        classes.push(`content-${d.value.replace("flex-", "")}`);
+        classes.push(`content-${d.value.replace("flex-", "").replace("space-", "")}`);
         break;
       case "row-gap":
         classes.push(tw("gap-y", d.value, isPx ? n : undefined));

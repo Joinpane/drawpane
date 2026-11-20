@@ -359,6 +359,230 @@ describe("auto layout", () => {
     const { doc } = setup({ layoutMode: "row", gap: 10 }, [{}, {}]);
     expect(layoutOps(doc, ["f"])).toEqual([]);
   });
+
+  it("keeps empty hugging frames at their current size instead of collapsing to 0", () => {
+    const empty = setup(
+      { layoutMode: "column", sizingH: "hug", sizingV: "hug", width: 120, height: 22 },
+      [{ visible: false, width: 40, height: 10 }],
+    );
+    expect(empty.box("f")).toEqual([0, 0, 120, 22]);
+    const emptyGrid = setup(
+      {
+        layoutMode: "grid",
+        sizingH: "hug",
+        sizingV: "hug",
+        width: 180,
+        height: 40,
+        gridColumns: [{ unit: "auto" }],
+      },
+      [],
+    );
+    expect(emptyGrid.box("f")).toEqual([0, 0, 180, 40]);
+  });
+
+  it("keeps default space-between CSS-compatible and enables Figma centering/overflow only when marked", () => {
+    // Legacy/native frame without spaceBetweenMode: single child stays at start, overflow clamps to 0.
+    const legacyWrapped = setup(
+      {
+        layoutMode: "row",
+        layoutWrap: true,
+        justifyContent: "space-between",
+        width: 100,
+        height: 100,
+      },
+      [
+        { width: 60, height: 20 },
+        { width: 60, height: 20 },
+      ],
+    );
+    expect(legacyWrapped.box("c0")).toEqual([0, 0, 60, 20]);
+    expect(legacyWrapped.box("c1")).toEqual([0, 20, 60, 20]);
+
+    const legacyOverflow = setup(
+      {
+        layoutMode: "column",
+        justifyContent: "space-between",
+        height: 48,
+        paddingTop: 4,
+        paddingBottom: 4,
+      },
+      [{ height: 22 }, { height: 20 }],
+    );
+    expect(legacyOverflow.box("c0")[1]).toBe(4);
+    expect(legacyOverflow.box("c1")[1]).toBe(26);
+
+    // Explicit Figma provenance: single child centers, overflow allows negative spacing.
+    const single = setup(
+      {
+        layoutMode: "row",
+        justifyContent: "space-between",
+        spaceBetweenMode: "figma",
+        width: 402,
+        paddingLeft: 16,
+        paddingRight: 16,
+      },
+      [{ width: 8, height: 8 }],
+    );
+    // 16 + (402 - 32 - 8) / 2 = 197
+    expect(single.box("c0")[0]).toBe(197);
+
+    const overflow = setup(
+      {
+        layoutMode: "column",
+        justifyContent: "space-between",
+        spaceBetweenMode: "figma",
+        height: 48,
+        paddingTop: 4,
+        paddingBottom: 4,
+      },
+      [{ height: 22 }, { height: 20 }],
+    );
+    // inner = 40, used = 42, negative spacing = -2 -> second sits flush at 44 - 20 = 24
+    expect(overflow.box("c0")[1]).toBe(4);
+    expect(overflow.box("c1")[1]).toBe(24);
+  });
+
+  it("centers children using unclamped inner space when padding exceeds a fixed box", () => {
+    const { box } = setup(
+      {
+        layoutMode: "column",
+        justifyContent: "center",
+        height: 161,
+        paddingTop: 165,
+        paddingBottom: 165,
+      },
+      [{ height: 22 }],
+    );
+    // 165 + (161 - 330 - 22) / 2 = 69.5
+    expect(box("c0")[1]).toBe(69.5);
+  });
+
+  it("measures and positions rotated flow children by their axis-aligned bounds", () => {
+    // 90 deg vertical separator in a 16x44 row with 8px left padding, filling vertically.
+    const { box } = setup(
+      { layoutMode: "row", width: 16, height: 44, paddingLeft: 8, paddingRight: 8 },
+      [],
+      [
+        {
+          op: "create",
+          id: "sep",
+          type: "line",
+          parent: "f",
+          key: "a0",
+          props: { width: 44, height: 0, rotation: 90, sizingV: "fill" },
+        },
+      ],
+    );
+    expect(box("sep")).toEqual([-14, 22, 44, 0]);
+
+    // Oblique rotated child (45 deg) occupies its AABB width and height in a hugging row.
+    const oblique = setup({ layoutMode: "row", sizingH: "hug", sizingV: "hug" }, [
+      { width: 40, height: 100, rotation: -45 },
+    ]);
+    const aabb = Math.round((40 + 100) * Math.SQRT1_2 * 100) / 100;
+    expect(oblique.box("f")[2]).toBeCloseTo(aabb, 1);
+    expect(oblique.box("f")[3]).toBeCloseTo(aabb, 1);
+    expect(oblique.box("c0")[0]).toBeCloseTo((aabb - 40) / 2, 1);
+    expect(oblique.box("c0")[1]).toBeCloseTo((aabb - 100) / 2, 1);
+  });
+
+  it("fills oblique rotated children to line thickness sensibly and stays idempotent across passes", () => {
+    // Review repro: 100x100 wrapping row with a 50x10 rect rotated 30 deg (sizingV: fill)
+    // and a 48x20 sibling stretches local height to 20 (matching Figma, never collapsing to 0)
+    // and emits zero ops on the second pass.
+    const wrapped = setup({ layoutMode: "row", layoutWrap: true, width: 100, height: 100 }, [
+      { width: 50, height: 10, rotation: 30, sizingV: "fill" },
+      { width: 48, height: 20 },
+    ]);
+    expect(wrapped.box("c0")[2]).toBe(50);
+    expect(wrapped.box("c0")[3]).toBe(20);
+    expect(wrapped.box("c1")[0]).toBeCloseTo(50 * Math.cos(Math.PI / 6) + 20 * 0.5, 1);
+    expect(wrapped.box("c1")[1]).toBe(0);
+    expect(layoutOps(wrapped.doc, ["f"])).toEqual([]);
+
+    // Oblique cross-Fill inside a taller line with a main-Fill sibling.
+    const mixed = setup({ layoutMode: "row", layoutWrap: true, width: 200, height: 100 }, [
+      { width: 50, height: 10, rotation: 30, sizingV: "fill" },
+      { width: 40, height: 40, sizingH: "fill" },
+    ]);
+    expect(mixed.box("c0")[3]).toBe(40);
+    expect(mixed.box("c1")[2]).toBeGreaterThan(100);
+    expect(layoutOps(mixed.doc, ["f"])).toEqual([]);
+
+    // Oblique Fill on both main and cross axes.
+    const both = setup({ layoutMode: "row", width: 200, height: 100 }, [
+      { width: 40, height: 20, rotation: 30, sizingH: "fill", sizingV: "fill" },
+    ]);
+    expect(both.box("c0")[2]).toBe(200);
+    expect(both.box("c0")[3]).toBe(100);
+    expect(layoutOps(both.doc, ["f"])).toEqual([]);
+
+    // All-stretch cross-hugging row with an oblique rotated Fill child must not grow per pass.
+    const hugging = setup({ layoutMode: "row", sizingV: "hug", width: 200, height: 50 }, [
+      { width: 50, height: 10, rotation: 30, sizingV: "fill" },
+    ]);
+    expect(hugging.box("c0")[3]).toBe(10);
+    expect(layoutOps(hugging.doc, ["f"])).toEqual([]);
+  });
+
+  it("keeps stretched layout frames and text at their content height inside cross-hugging rows", () => {
+    const { box } = setup(
+      { layoutMode: "row", sizingV: "hug", width: 300, height: 35 },
+      [{ width: 40, height: 17 }],
+      [
+        {
+          op: "create",
+          id: "stack",
+          type: "frame",
+          parent: "f",
+          key: "a1",
+          props: { layoutMode: "column", sizingH: "fill", sizingV: "fill", width: 200, height: 35 },
+        },
+        {
+          op: "create",
+          id: "t1",
+          type: "rect",
+          parent: "stack",
+          key: "a0",
+          props: { width: 100, height: 20 },
+        },
+        {
+          op: "create",
+          id: "t2",
+          type: "rect",
+          parent: "stack",
+          key: "a1",
+          props: { width: 100, height: 15 },
+        },
+      ],
+    );
+    expect(box("f")[3]).toBe(35);
+    expect(box("stack")[3]).toBe(35);
+
+    const textRow = setup(
+      { layoutMode: "row", sizingV: "hug", width: 300, height: 48 },
+      [{ width: 72, height: 36 }],
+      [
+        {
+          op: "create",
+          id: "heading",
+          type: "text",
+          parent: "f",
+          key: "a1",
+          props: {
+            characters: "Shop by Category",
+            width: 200,
+            height: 48,
+            sizingH: "fill",
+            sizingV: "fill",
+            textAutoResize: "height",
+          },
+        },
+      ],
+    );
+    expect(textRow.box("f")[3]).toBe(48);
+    expect(textRow.box("heading")[3]).toBe(48);
+  });
 });
 
 describe("wrap", () => {
@@ -416,6 +640,67 @@ describe("wrap", () => {
     ]);
     expect(box("c0")[1]).toBe(80);
     expect(box("c1")[3]).toBe(100);
+  });
+
+  it("keeps absent alignContent start-packed, aligns alignContent auto by alignItems, and distributes space-between", () => {
+    // Stored wrapped frames without alignContent keep the legacy start-packed placement.
+    const legacy = setup(
+      { layoutMode: "row", layoutWrap: true, width: 100, height: 100, alignItems: "center" },
+      [
+        { width: 60, height: 20 },
+        { width: 60, height: 20 },
+      ],
+    );
+    expect(legacy.box("c0")[1]).toBe(0);
+    expect(legacy.box("c1")[1]).toBe(20);
+
+    // Explicit alignContent: "auto" (Figma packed wrap) packs wrapped lines by alignItems.
+    const packed = setup(
+      {
+        layoutMode: "row",
+        layoutWrap: true,
+        width: 100,
+        height: 100,
+        alignItems: "center",
+        alignContent: "auto",
+      },
+      [
+        { width: 60, height: 20 },
+        { width: 60, height: 20 },
+      ],
+    );
+    expect(packed.box("c0")[1]).toBe(30);
+    expect(packed.box("c1")[1]).toBe(50);
+
+    const centered = setup(
+      {
+        layoutMode: "row",
+        layoutWrap: true,
+        width: 269,
+        height: 48,
+        alignItems: "center",
+        alignContent: "auto",
+      },
+      [{ width: 80, height: 16 }],
+    );
+    expect(centered.box("c0")[1]).toBe(16);
+
+    const spread = setup(
+      {
+        layoutMode: "row",
+        layoutWrap: true,
+        width: 100,
+        height: 100,
+        alignContent: "space-between",
+        rowGap: 7,
+      },
+      [
+        { width: 60, height: 20 },
+        { width: 60, height: 20 },
+      ],
+    );
+    expect(spread.box("c0")[1]).toBe(0);
+    expect(spread.box("c1")[1]).toBe(80);
   });
 });
 

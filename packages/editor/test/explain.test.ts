@@ -144,6 +144,26 @@ describe("X-ray regions", () => {
     expect(xrayRegionAt(editor, { x: 100, y: 20 + 12 + 52 + 4 })?.prop).toBe("gap");
     expect(xrayRegionAt(editor, { x: 100, y: 20 + 6 })?.prop).toBe("paddingTop");
   });
+
+  it("omits distributed space-between gap handles in X-ray until switched to fixed spacing", () => {
+    const { editor } = setup();
+    const row = editor.createLayer("frame", { x: 0, y: 0, width: 100, height: 100 }, "p", {
+      layoutMode: "row",
+      layoutWrap: true,
+      alignContent: "space-between",
+      rowGap: 14,
+    }) as string;
+    editor.createLayer("rect", { x: 0, y: 0, width: 60, height: 20 }, row);
+    editor.createLayer("rect", { x: 0, y: 0, width: 60, height: 20 }, row);
+    editor.select([row]);
+    expect(xrayRegions(editor, row).some((r) => r.prop === "rowGap")).toBe(false);
+    expect(xrayRegionAt(editor, { x: 50, y: 50 })).toBeNull();
+
+    // Switching back to packed spacing exposes the dormant rowGap handle again.
+    editor.setProp([row], "alignContent", "auto");
+    expect(xrayRegions(editor, row).some((r) => r.prop === "rowGap")).toBe(true);
+    expect(xrayRegionAt(editor, { x: 50, y: 27 })?.prop).toBe("rowGap");
+  });
 });
 
 describe("dragging in X-ray", () => {

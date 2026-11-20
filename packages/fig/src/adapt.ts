@@ -339,6 +339,7 @@ function layoutFields(
       counterAxisSizingMode: n.counterAxisSizing === "HUG" ? "AUTO" : "FIXED",
       primaryAxisAlignItems: n.primaryAxisAlign,
       counterAxisAlignItems: n.counterAxisAlign,
+      counterAxisAlignContent: n.counterAxisAlignContent,
       itemSpacing: Number.isFinite(n.itemSpacing) ? n.itemSpacing : 0,
       // Figma saves "the same as the item spacing" as NaN.
       counterAxisSpacing: Number.isFinite(n.counterAxisSpacing)

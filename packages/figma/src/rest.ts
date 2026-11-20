@@ -197,6 +197,7 @@ export interface Node {
   readonly strokesIncludedInLayout?: boolean;
   readonly primaryAxisAlignItems?: string;
   readonly counterAxisAlignItems?: string;
+  readonly counterAxisAlignContent?: "AUTO" | "SPACE_BETWEEN";
   readonly primaryAxisSizingMode?: "FIXED" | "AUTO";
   readonly counterAxisSizingMode?: "FIXED" | "AUTO";
   readonly layoutSizingHorizontal?: "FIXED" | "HUG" | "FILL";

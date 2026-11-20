@@ -113,8 +113,12 @@ export function xrayRegions(editor: Editor, frameId: string): XrayRegion[] {
 
   // Gaps between consecutive children along the flow, across the band the
   // two share (wrapped lines each have their own); between lines, the line gap.
+  // Distributed Auto (space-between) axes don't read gap/rowGap, so X-ray
+  // omits them rather than offering a handle that cannot change the spacing.
   const row = mode === "row";
   const wrapped = getProp(p, "layoutWrap");
+  const spreadMain = getProp(p, "justifyContent") === "space-between";
+  const spreadCross = wrapped && getProp(p, "alignContent") === "space-between";
   const children = flowChildren(doc, frameId);
   const box = (i: number) => {
     const child = children[i];
@@ -129,32 +133,38 @@ export function xrayRegions(editor: Editor, frameId: string): XrayRegion[] {
     if (row) {
       // A wrap starts a new line: the space between lines is the line gap.
       if (wrapped && b.x < a.x + a.w) {
-        add(
-          "rowGap",
-          { x: left, y: a.y + a.h, width: w - left - right, height: b.y - a.y - a.h },
-          "y",
-          1,
-          "gap",
-        );
+        if (!spreadCross)
+          add(
+            "rowGap",
+            { x: left, y: a.y + a.h, width: w - left - right, height: b.y - a.y - a.h },
+            "y",
+            1,
+            "gap",
+          );
         continue;
       }
-      const y0 = wrapped ? Math.min(a.y, b.y) : top;
-      const y1 = wrapped ? Math.max(a.y + a.h, b.y + b.h) : h - bottom;
-      add("gap", { x: a.x + a.w, y: y0, width: b.x - a.x - a.w, height: y1 - y0 }, "x", 1, "gap");
+      if (!spreadMain) {
+        const y0 = wrapped ? Math.min(a.y, b.y) : top;
+        const y1 = wrapped ? Math.max(a.y + a.h, b.y + b.h) : h - bottom;
+        add("gap", { x: a.x + a.w, y: y0, width: b.x - a.x - a.w, height: y1 - y0 }, "x", 1, "gap");
+      }
     } else {
       if (wrapped && b.y < a.y + a.h) {
-        add(
-          "rowGap",
-          { x: a.x + a.w, y: top, width: b.x - a.x - a.w, height: h - top - bottom },
-          "x",
-          1,
-          "gap",
-        );
+        if (!spreadCross)
+          add(
+            "rowGap",
+            { x: a.x + a.w, y: top, width: b.x - a.x - a.w, height: h - top - bottom },
+            "x",
+            1,
+            "gap",
+          );
         continue;
       }
-      const x0 = wrapped ? Math.min(a.x, b.x) : left;
-      const x1 = wrapped ? Math.max(a.x + a.w, b.x + b.w) : w - right;
-      add("gap", { x: x0, y: a.y + a.h, width: x1 - x0, height: b.y - a.y - a.h }, "y", 1, "gap");
+      if (!spreadMain) {
+        const x0 = wrapped ? Math.min(a.x, b.x) : left;
+        const x1 = wrapped ? Math.max(a.x + a.w, b.x + b.w) : w - right;
+        add("gap", { x: x0, y: a.y + a.h, width: x1 - x0, height: b.y - a.y - a.h }, "y", 1, "gap");
+      }
     }
   }
   return out;

@@ -415,3 +415,243 @@ it("does not reuse a packed variable gap as a minimum for Figma Auto spacing", (
   editor.doc.apply(layoutOps(editor.doc, [row]));
   expect(editor.doc.get(right)?.props).toMatchObject({ x: 60, y: 0 });
 });
+
+it("distributes wrapped tracks when the Figma cross-axis spacing is Auto", () => {
+  const alias = { type: "VARIABLE_ALIAS", id: "VariableID:1:1" } as const;
+  const at = (x: number, y = 0): Figma.Transform => [
+    [1, 0, x],
+    [0, 1, y],
+  ];
+  const file = {
+    name: "Bound Auto cross gap",
+    variables: {
+      variableCollections: {
+        "VariableCollectionId:1:0": {
+          id: "VariableCollectionId:1:0",
+          name: "Spacing",
+          modes: [{ modeId: "1:2", name: "Default" }],
+          defaultModeId: "1:2",
+          variableIds: [alias.id],
+        },
+      },
+      variables: {
+        [alias.id]: {
+          id: alias.id,
+          name: "Gap",
+          variableCollectionId: "VariableCollectionId:1:0",
+          resolvedType: "FLOAT",
+          valuesByMode: { "1:2": 30 },
+        },
+      },
+    },
+    document: {
+      id: "0:0",
+      name: "Document",
+      type: "DOCUMENT",
+      children: [
+        {
+          id: "0:1",
+          name: "Page",
+          type: "CANVAS",
+          children: [
+            {
+              id: "2:0",
+              name: "Row",
+              type: "FRAME",
+              size: { x: 100, y: 100 },
+              layoutWrap: "WRAP",
+              counterAxisAlignContent: "SPACE_BETWEEN",
+              counterAxisSpacing: 7,
+              relativeTransform: at(0),
+              layoutMode: "HORIZONTAL",
+              primaryAxisAlignItems: "SPACE_BETWEEN",
+              itemSpacing: 0,
+              boundVariables: { itemSpacing: alias, counterAxisSpacing: alias },
+              children: [
+                {
+                  id: "2:1",
+                  name: "Left",
+                  type: "RECTANGLE",
+                  size: { x: 60, y: 20 },
+                  relativeTransform: at(0, 0),
+                },
+                {
+                  id: "2:2",
+                  name: "Right",
+                  type: "RECTANGLE",
+                  size: { x: 60, y: 20 },
+                  relativeTransform: at(0, 80),
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  } satisfies Figma.File;
+  const { nodes } = convertFile(file);
+  const { editor } = open(nodes);
+  const row = drawpaneId("2:0");
+  const right = drawpaneId("2:2");
+  expect(editor.doc.get(right)?.props.y).toBe(80);
+  expect(editor.doc.get(row)?.props).toMatchObject({
+    alignContent: "space-between",
+    rowGap: 30,
+  });
+  expect(editor.doc.get(row)?.props.bindings?.rowGap).toBe(drawpaneId(alias.id));
+  editor.doc.apply(layoutOps(editor.doc, [row]));
+  expect(editor.doc.get(right)?.props.y).toBe(80);
+
+  // Switching distribution away from space-between recovers the dormant rowGap binding.
+  editor.setProp([row], "alignContent", "auto");
+  expect(editor.doc.get(right)?.props.y).toBe(50);
+});
+
+it("shrinks a hugging frame when an edit removes its last flow child while preserving already-empty frames", () => {
+  const make = () =>
+    open([
+      page,
+      {
+        id: "hug",
+        type: "frame",
+        parent: "page",
+        key: "a0",
+        props: {
+          layoutMode: "row",
+          sizingH: "hug",
+          sizingV: "hug",
+          paddingTop: 10,
+          paddingRight: 10,
+          paddingBottom: 10,
+          paddingLeft: 10,
+          width: 120,
+          height: 60,
+        },
+      },
+      {
+        id: "only",
+        type: "rect",
+        parent: "hug",
+        key: "a0",
+        props: { x: 10, y: 10, width: 100, height: 40 },
+      },
+    ]);
+
+  // Deleting the only flow child shrinks 120x60 to 20x20 (its padding).
+  const del = make();
+  del.editor.select(["only"]);
+  del.editor.deleteSelection();
+  expect(del.props("hug")).toMatchObject({ width: 20, height: 20 });
+
+  // Hiding the only flow child shrinks to 20x20.
+  const hide = make();
+  hide.editor.setProp(["only"], "visible", false);
+  expect(hide.props("hug")).toMatchObject({ width: 20, height: 20 });
+
+  // Taking the only child out of flow shrinks to 20x20.
+  const abs = make();
+  abs.editor.setProp(["only"], "positioning", "absolute");
+  expect(abs.props("hug")).toMatchObject({ width: 20, height: 20 });
+
+  // Moving the only child out shrinks to 20x20.
+  const moved = make();
+  moved.editor.commit(
+    moved.editor.reparentOps("only", "page", moved.editor.topKey("page")),
+    "Move",
+  );
+  expect(moved.props("hug")).toMatchObject({ width: 20, height: 20 });
+
+  // Hiding the only flow child via a bound visibility variable shrinks to 20x20.
+  const bound = open([
+    page,
+    {
+      id: "c",
+      type: "collection",
+      parent: ROOT_ID,
+      key: "a1",
+      props: { modes: [{ id: "m1", name: "Default" }] },
+    },
+    {
+      id: "vis",
+      type: "variable",
+      parent: "c",
+      key: "a0",
+      props: { variableType: "boolean", values: { m1: true } },
+    },
+    {
+      id: "hug",
+      type: "frame",
+      parent: "page",
+      key: "a0",
+      props: {
+        layoutMode: "row",
+        sizingH: "hug",
+        sizingV: "hug",
+        paddingTop: 10,
+        paddingRight: 10,
+        paddingBottom: 10,
+        paddingLeft: 10,
+        width: 120,
+        height: 60,
+      },
+    },
+    {
+      id: "only",
+      type: "rect",
+      parent: "hug",
+      key: "a0",
+      props: { x: 10, y: 10, width: 100, height: 40, bindings: { visible: "vis" } },
+    },
+  ]);
+  bound.editor.setProp(["vis"], "values", { m1: false });
+  expect(bound.props("hug")).toMatchObject({ width: 20, height: 20 });
+
+  // An already-empty imported hug frame keeps its saved dimensions on relayout and unrelated edits.
+  const empty = open([
+    page,
+    {
+      id: "emptyHug",
+      type: "frame",
+      parent: "page",
+      key: "a0",
+      props: {
+        layoutMode: "row",
+        sizingH: "hug",
+        sizingV: "hug",
+        paddingTop: 10,
+        paddingRight: 10,
+        paddingBottom: 10,
+        paddingLeft: 10,
+        width: 120,
+        height: 60,
+      },
+    },
+  ]);
+  expect(layoutOps(empty.editor.doc, ["emptyHug"])).toEqual([]);
+  empty.editor.setProp(["emptyHug"], "fills", [{ type: "solid", color: "#ff0000" }]);
+  expect(empty.props("emptyHug")).toMatchObject({ width: 120, height: 60 });
+
+  // Explicitly switching an empty fixed-width frame to Hug measures normally (shrinks to padding).
+  const fixedEmpty = open([
+    page,
+    {
+      id: "emptyFixed",
+      type: "frame",
+      parent: "page",
+      key: "a0",
+      props: {
+        layoutMode: "row",
+        sizingH: "fixed",
+        sizingV: "hug",
+        paddingTop: 10,
+        paddingRight: 10,
+        paddingBottom: 10,
+        paddingLeft: 10,
+        width: 120,
+        height: 60,
+      },
+    },
+  ]);
+  fixedEmpty.editor.setProp(["emptyFixed"], "sizingH", "hug");
+  expect(fixedEmpty.props("emptyFixed")).toMatchObject({ width: 20, height: 60 });
+});
