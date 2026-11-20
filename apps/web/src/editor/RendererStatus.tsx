@@ -24,7 +24,9 @@ export function RendererStatus() {
   const label = rendererChipLabel(status);
   const reason = formatRendererReason(status);
   const isEngine = status.active === "engine";
-  const isStarting = status.active === "canvas" && status.reason.kind === "starting";
+  const isStarting =
+    status.active === "canvas" &&
+    (status.reason.kind === "starting" || status.reason.kind === "recovering");
   const ariaLabel = isEngine ? `Renderer: ${label}` : `Renderer: ${label}, ${reason}`;
   const meta = isEngine
     ? [status.compatibility ? "Compatibility mode" : null, status.software ? "Software GPU" : null]

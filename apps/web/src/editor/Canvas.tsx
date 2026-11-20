@@ -15,7 +15,7 @@ import {
 import { getProp } from "@drawpane/model";
 import { colors } from "@drawpane/ui";
 import { useRouterState } from "@tanstack/react-router";
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { isMac } from "../app/format";
 import { loadedFamilies, watchDocumentFonts } from "../fonts/document-fonts";
 import { fonts } from "../fonts/fonts";
@@ -24,8 +24,10 @@ import { passesToCanvas } from "./canvas-gestures";
 import {
   EngineView,
   engineFallback,
+  type FallbackEvent,
   IDLE_SLICE_MS,
   MOVING_BUDGET_MS,
+  presentation,
   REST_BUDGET_MS,
   rendererChoice,
 } from "./engine-view";
@@ -34,7 +36,7 @@ import { frameStatsFor } from "./frame-stats";
 import { useEditor, useEditorState } from "./hooks";
 import { LIBRARY_DRAG_MIME, type LibraryDrag, loadedSource } from "./libraries/sources";
 import { imagesFor } from "./media";
-import { fallbackToReason, setRendererStatus } from "./renderer-status";
+import { engineBackendLabel, fallbackToReason, setRendererStatus } from "./renderer-status";
 import { shaper } from "./shaping";
 import { TextEditor } from "./TextEditor";
 import { openMenu } from "./ui-state";
@@ -83,12 +85,14 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
   const host = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLCanvasElement>(null);
   const overlay = useRef<HTMLCanvasElement>(null);
-  /** The render engine's WebGPU canvas, under the overlay; shown only while it draws the page. */
-  const gpuCanvas = useRef<HTMLCanvasElement>(null);
+  /** Durable React-owned container slot for the render engine's active canvas, under the overlay. */
+  const engineSlot = useRef<HTMLDivElement>(null);
+  const [cpuMode, setCpuMode] = useState(false);
   const editingText = useEditorState((s) => s.editingText);
-  // Read the switch reactively so changing `?renderer=...` in place takes effect without a reload.
+  // Read the switch reactively so changing `?renderer=...` or `?present=...` in place takes effect without a reload.
   const searchStr = useRouterState({ select: (s) => s.location.searchStr });
   const choice = useMemo(() => rendererChoice(searchStr), [searchStr]);
+  const present = useMemo(() => presentation(searchStr), [searchStr]);
   // The editor's measurer re-measures after web fonts load (EditorPage gives it one that does).
   const measurer = editor.measurer as TextMeasurer & { invalidate(): void };
   const renderer = useMemo(
@@ -101,9 +105,9 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
   useEffect(() => {
     const contentCanvas = content.current;
     const overlayCanvas = overlay.current;
-    const engineCanvas = gpuCanvas.current;
+    const engineSlotEl = engineSlot.current;
     const hostEl = host.current;
-    if (!contentCanvas || !overlayCanvas || !hostEl || !engineCanvas) return;
+    if (!contentCanvas || !overlayCanvas || !hostEl || !engineSlotEl) return;
     const cctx = contentCanvas.getContext("2d", { alpha: false });
     const octx = overlayCanvas.getContext("2d");
     if (!cctx || !octx) return;
@@ -116,88 +120,211 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     renderer.canvasColor = canvasToken();
     // The render engine, behind its switch (decision 0040): it draws the page when it can, and
     // the canvas renderer draws whatever it can't, never a blank canvas.
+    let activeEngineCanvas: HTMLCanvasElement | null = null;
     let engine: EngineView | null = null;
+    let createdView: EngineView | null = null;
     let engineShowing = false;
+    let engineStarted = false;
+    let terminalFallback: FallbackEvent | null = null;
     let disposed = false;
-    engineCanvas.style.visibility = "hidden";
+    const engineInit = new AbortController();
+    engineSlotEl.replaceChildren();
+    engineSlotEl.style.visibility = "hidden";
     contentCanvas.style.visibility = "visible";
-    const showEngine = (on: boolean) => {
-      if (on === engineShowing) return;
-      engineShowing = on;
-      engineCanvas.style.visibility = on ? "visible" : "hidden";
-      contentCanvas.style.visibility = on ? "hidden" : "visible";
-      // The canvas renderer drew nothing meanwhile: its last frame can't be reused.
-      if (!on) renderer.invalidate();
+
+    const syncRendererAttr = () => {
+      hostEl.dataset.renderer = engineShowing && engine ? engine.backend : "canvas";
+      if (engineShowing && engine) {
+        hostEl.dataset.rendererAdapter = engine.adapter;
+        hostEl.dataset.rendererAdapterClass = engine.adapterClass;
+      } else {
+        delete hostEl.dataset.rendererAdapter;
+        delete hostEl.dataset.rendererAdapterClass;
+      }
     };
-    const reportEngine = (view: EngineView) => {
-      if (choice === "canvas") return;
-      setRendererStatus(editor, {
-        switchOn: true,
-        choice,
-        active: "engine",
-        backend: view.backend,
-        adapter: view.adapter,
-        compatibility: view.compatibility,
-        software: view.software,
-      });
-    };
-    if (choice === "canvas") {
-      setRendererStatus(editor, { switchOn: false });
-    } else {
-      const priorFallback = engineFallback();
+    const syncRendererStatus = () => {
+      if (choice === "canvas") {
+        setCpuMode(false);
+        setRendererStatus(editor, { switchOn: false });
+        return;
+      }
+      setCpuMode(
+        engine !== null &&
+          engine.backend === "cpu-worker" &&
+          (engineShowing ||
+            (!engine.recovering && engine.last.supported && !engine.limitFallbackReason)),
+      );
+      if (engineShowing && engine) {
+        setRendererStatus(editor, {
+          switchOn: true,
+          choice,
+          active: "engine",
+          backend: engineBackendLabel(engine.backend),
+          adapter: engine.adapter,
+          compatibility: engine.compatibility,
+          software: engine.software,
+        });
+        return;
+      }
+      if (engine?.recovering) {
+        setRendererStatus(editor, {
+          switchOn: true,
+          choice,
+          active: "canvas",
+          reason: { kind: "recovering" },
+        });
+        return;
+      }
+      if (engine && !engine.last.supported) {
+        setRendererStatus(editor, {
+          switchOn: true,
+          choice,
+          active: "canvas",
+          reason: { kind: "unsupported", features: Object.keys(engine.unsupported()) },
+        });
+        return;
+      }
+      if (engine?.limitFallbackReason) {
+        setRendererStatus(editor, {
+          switchOn: true,
+          choice,
+          active: "canvas",
+          reason: { kind: "error", message: engine.limitFallbackReason },
+        });
+        return;
+      }
+      if (!engine) {
+        const fb = terminalFallback ?? engineFallback();
+        setRendererStatus(editor, {
+          switchOn: true,
+          choice,
+          active: "canvas",
+          reason: !engineStarted
+            ? { kind: "starting" }
+            : fb
+              ? fallbackToReason(fb)
+              : { kind: "error", message: "could not start the render engine" },
+        });
+        return;
+      }
       setRendererStatus(editor, {
         switchOn: true,
         choice,
         active: "canvas",
-        reason: priorFallback ? fallbackToReason(priorFallback) : { kind: "starting" },
+        reason: { kind: "starting" },
       });
-      void EngineView.create(engineCanvas, editor, measurer, imagesFor(editor), choice).then(
-        (view) => {
-          if (disposed) {
-            view?.dispose();
-            return;
-          }
-          engine = view;
-          if (!view) {
-            const fb = engineFallback();
-            setRendererStatus(editor, {
-              switchOn: true,
-              choice,
-              active: "canvas",
-              reason: fb
-                ? fallbackToReason(fb)
-                : { kind: "error", message: "could not start the render engine" },
-            });
-            return;
-          }
-          view.onChange = () => {
-            contentDirty = changed = true;
-            schedule();
-          };
-          view.onFallback = (event) => {
-            engine = null;
+    };
+    const paintCoverSync = () => {
+      const s = editor.s;
+      if (!s.pageId) return;
+      renderer.invalidate();
+      renderer.whole = s.editingText;
+      renderer.render(cctx, s.pageId, s.camera, s.viewport, dpr, {
+        exact: false,
+        budget: timing.budget ?? CONTENT_BUDGET,
+      });
+    };
+    const showEngine = (on: boolean) => {
+      if (on === engineShowing) {
+        syncRendererAttr();
+        syncRendererStatus();
+        return;
+      }
+      if (!on) paintCoverSync();
+      engineShowing = on;
+      engineSlotEl.style.visibility = on ? "visible" : "hidden";
+      if (activeEngineCanvas) {
+        activeEngineCanvas.style.visibility = on ? "visible" : "hidden";
+      }
+      contentCanvas.style.visibility = on ? "hidden" : "visible";
+      syncRendererAttr();
+      syncRendererStatus();
+      // The canvas renderer drew nothing meanwhile: its last frame can't be reused.
+      if (!on) renderer.invalidate();
+    };
+
+    syncRendererAttr();
+    syncRendererStatus();
+    if (choice !== "canvas") {
+      void EngineView.create(
+        engineSlotEl,
+        editor,
+        measurer,
+        imagesFor(editor),
+        choice,
+        engineInit.signal,
+      ).then((view) => {
+        if (disposed || engineInit.signal.aborted) {
+          view?.dispose();
+          return;
+        }
+        engineStarted = true;
+        engine = view;
+        createdView = view;
+        if (!view) {
+          syncRendererAttr();
+          syncRendererStatus();
+          return;
+        }
+        activeEngineCanvas = view.canvas;
+        const { width: hostW, height: hostH } = hostEl.getBoundingClientRect();
+        engineSlotEl.style.width = `${hostW}px`;
+        engineSlotEl.style.height = `${hostH}px`;
+        activeEngineCanvas.style.width = `${hostW}px`;
+        activeEngineCanvas.style.height = `${hostH}px`;
+        activeEngineCanvas.style.visibility = engineShowing ? "visible" : "hidden";
+        syncRendererStatus();
+        view.onCanvas = (next) => {
+          activeEngineCanvas = next;
+          const rect = hostEl.getBoundingClientRect();
+          engineSlotEl.style.width = `${rect.width}px`;
+          engineSlotEl.style.height = `${rect.height}px`;
+          activeEngineCanvas.style.width = `${rect.width}px`;
+          activeEngineCanvas.style.height = `${rect.height}px`;
+          activeEngineCanvas.style.visibility = engineShowing ? "visible" : "hidden";
+        };
+        view.onBackendChange = () => {
+          syncRendererAttr();
+          syncRendererStatus();
+        };
+        view.onRecovering = (recovering) => {
+          if (recovering) {
             showEngine(false);
-            setRendererStatus(editor, {
-              switchOn: true,
-              choice,
-              active: "canvas",
-              reason: fallbackToReason(event),
-            });
             contentDirty = true;
             schedule();
-          };
-          // A read-back frame (headless) is on screen once it lands: show it then.
-          view.onPresented = (frameExact) => {
-            if (engine !== view) return;
-            showEngine(true);
-            reportEngine(view);
-            timing.exact = frameExact;
-          };
-          (window as unknown as { drawpaneEngineView?: EngineView }).drawpaneEngineView = view;
+          } else {
+            syncRendererStatus();
+          }
+        };
+        view.onChange = () => {
+          contentDirty = changed = true;
+          schedule();
+        };
+        view.onFallback = (event) => {
+          const w = window as unknown as { drawpaneEngineView?: EngineView };
+          if (w.drawpaneEngineView === view) delete w.drawpaneEngineView;
+          terminalFallback = event;
+          engine = null;
+          activeEngineCanvas = null;
+          engineSlotEl.replaceChildren();
+          showEngine(false);
           contentDirty = true;
           schedule();
-        },
-      );
+        };
+        // An async frame (GPU read-back or CPU worker tiles) shows once it lands.
+        view.onPresented = (frameExact) => {
+          if (engine !== view) return;
+          showEngine(true);
+          timing.exact = frameExact;
+          if (frameExact) {
+            clearTimeout(settle);
+            settle = 0;
+          }
+        };
+        (window as unknown as { drawpaneEngineView?: EngineView }).drawpaneEngineView = view;
+        contentDirty = true;
+        schedule();
+      });
     }
     let dpr = window.devicePixelRatio || 1;
     let contentDirty = true;
@@ -329,7 +456,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           whole ? 0 : moving ? MOVING_BUDGET_MS : REST_BUDGET_MS,
         );
         engineCamera = s.camera;
-        engineMoved = r.drawn && moving && !r.exact;
+        engineMoved = r.drawn && moving && !r.exact && engine.backend !== "cpu-worker";
         if (r.drawn) {
           drewEngine = true;
           contentDirty = false;
@@ -338,14 +465,16 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           clearTimeout(settle);
           if (r.ready) {
             showEngine(true);
-            reportEngine(engine);
             timing.exact = r.exact;
-          } else timing.exact = false;
+          } else {
+            timing.exact = false;
+            syncRendererStatus();
+          }
           // Stand-ins on screen while moving: the next frame draws more. At rest, the time
           // between frames draws the rest, without compositing a frame meanwhile, and asks for
           // the frame once what it shows is drawn; then the tiles round the view, ahead of a pan.
           // A frame at rest that isn't exact but is settled (text provisional while its faces
-          // load) waits: their arrival redraws it.
+          // load, or an async CPU worker frame in flight) waits: their arrival redraws it.
           if (!r.exact && !(r.settled && !moving)) contentDirty = true;
           if (moving && (!r.exact || r.ahead)) {
             contentDirty = true;
@@ -355,17 +484,11 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
             idleBackground = background;
             postIdle();
           }
-        } else if (engine && !engine.last.supported && choice !== "canvas") {
-          setRendererStatus(editor, {
-            switchOn: true,
-            choice,
-            active: "canvas",
-            reason: { kind: "unsupported", features: Object.keys(engine.unsupported()) },
-          });
         }
       }
       if (!drewEngine && contentDirty && s.pageId) {
         if (engine) showEngine(false);
+        else syncRendererStatus();
         // Truncated text shows all its lines while it's being edited.
         renderer.whole = s.editingText;
         const done = renderer.render(
@@ -427,9 +550,13 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         canvas.style.height = `${height}px`;
       }
       // The engine's canvas sizes its buffer when it draws (resizing a configured WebGPU canvas
-      // reconfigures it); here it only takes the host's size on the page.
-      engineCanvas.style.width = `${width}px`;
-      engineCanvas.style.height = `${height}px`;
+      // reconfigures it); here the slot and active canvas only take the host's size on the page.
+      engineSlotEl.style.width = `${width}px`;
+      engineSlotEl.style.height = `${height}px`;
+      if (activeEngineCanvas) {
+        activeEngineCanvas.style.width = `${width}px`;
+        activeEngineCanvas.style.height = `${height}px`;
+      }
       // Sizing a canvas clears it, even to the same size: the last frame is
       // gone, so the renderer mustn't reuse it (a pan would move black).
       renderer.invalidate();
@@ -509,11 +636,18 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
 
     return () => {
       disposed = true;
+      engineInit.abort();
       const w = window as unknown as { drawpaneEngineView?: EngineView };
-      if (engine && w.drawpaneEngineView === engine) delete w.drawpaneEngineView;
+      if (createdView && w.drawpaneEngineView === createdView) delete w.drawpaneEngineView;
       engine?.dispose();
-      engineCanvas.style.visibility = "hidden";
+      activeEngineCanvas = null;
+      engineSlotEl.replaceChildren();
+      engineSlotEl.style.visibility = "hidden";
       contentCanvas.style.visibility = "visible";
+      hostEl.dataset.renderer = "canvas";
+      delete hostEl.dataset.rendererAdapter;
+      delete hostEl.dataset.rendererAdapterClass;
+      setCpuMode(false);
       observer.disconnect();
       themeObserver.disconnect();
       offDoc();
@@ -528,7 +662,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       clearTimeout(settle);
       clearTimeout(fadeTimer);
     };
-  }, [editor, interaction, renderer, measurer, choice]);
+  }, [editor, interaction, renderer, measurer, choice, present]);
 
   // Pointer and wheel input.
   useEffect(() => {
@@ -824,10 +958,20 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           );
       }}
     >
-      <canvas ref={content} className="canvas__layer" />
+      <canvas ref={content} className="canvas__layer" data-canvas-role="content" />
       {/* After the content canvas, so it's the first canvas wherever a canvas is looked for. */}
-      <canvas ref={gpuCanvas} className="canvas__layer" style={{ visibility: "hidden" }} />
-      <canvas ref={overlay} className="canvas__layer canvas__overlay" />
+      <div
+        ref={engineSlot}
+        className="canvas__layer canvas__engine-slot"
+        data-canvas-role="engine-slot"
+        style={{ visibility: "hidden" }}
+      />
+      <canvas ref={overlay} className="canvas__layer canvas__overlay" data-canvas-role="overlay" />
+      {cpuMode ? (
+        <div className="canvas__mode-badge" role="status" data-renderer-mode="cpu-worker">
+          CPU view mode
+        </div>
+      ) : null}
       {/* Keyed: editing another layer starts afresh, never with the last one's text. */}
       {editingNode && getProp(editingNode.props, "visible") ? (
         <TextEditor key={editingNode.id} nodeId={editingNode.id} />

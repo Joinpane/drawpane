@@ -16,12 +16,13 @@
  */
 import { score } from "@drawpane/engine/compare";
 import { expect, type Page, test } from "@playwright/test";
-import { freshInstance, type Instance } from "./fresh-instance";
+import { dropImage, freshInstance, type Instance } from "./fresh-instance";
 
 test.use({
   launchOptions: {
     args: [
       "--enable-unsafe-webgpu",
+      "--enable-unsafe-swiftshader",
       ...(process.env.ENGINE_CHROME_ARGS ?? "").split(/\s+/).filter(Boolean),
     ],
     ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
@@ -37,18 +38,39 @@ type W = {
     state: { set(patch: object): void };
     createLayer(t: string, r: object, p: string, props?: object): string;
     commit(ops: object[]): boolean;
+    setProp(ids: string[], prop: string, value: unknown, label: string): void;
     zoomTo(z: number): void;
     centerOn(p: { x: number; y: number }): void;
   };
   drawpaneFrames: { redraw(): void };
   drawpaneEngineView?: {
-    last: { supported: boolean; records: number; exact: boolean; plan: string };
+    canvas: HTMLCanvasElement;
+    backend: "webgpu" | "webgl2" | "cpu-worker";
+    adapter: string;
+    adapterClass: "hardware" | "software" | "unknown" | "unidentified";
+    readsBack: boolean;
+    last: {
+      supported: boolean;
+      records: number;
+      exact: boolean;
+      plan: string;
+      tiles: {
+        drawn: number;
+        pending: number;
+        queued: number;
+        held: number;
+        evicted: number;
+        dragged: number;
+      };
+    };
     engine: {
       records: number;
+      attachGpu(canvas: unknown, opts?: object): Promise<unknown>;
       gpuPixels(): Promise<{ ok: boolean; value?: Uint8Array; message?: string }>;
       loseGpu(): void;
       gpu: { adapter: string } | null;
-    };
+    } | null;
+    pixels(): Promise<{ ok: boolean; value?: Uint8Array; message?: string }>;
     unsupported(): Record<string, number>;
   };
   drawpaneEngine: {
@@ -57,7 +79,14 @@ type W = {
     canvasRender(o: object): Promise<string>;
   };
 
-  fallbacks?: unknown[];
+  fallbacks?: Array<{
+    from: string | null;
+    to: string;
+    reason: string;
+    code: number | null;
+    adapter: string | null;
+  }>;
+  recoveries?: Array<{ backend: string; adapter: string | null; attempt: number; reason: string }>;
   pageFallbacks?: Array<{ pageId: string; features: Record<string, number> }>;
 };
 
@@ -78,6 +107,31 @@ const showing = (page: Page) =>
     };
   });
 
+/** Checks that the visible editor canvas area actually displays varied composited pixels on screen. */
+async function visibleCanvasPainted(page: Page): Promise<boolean> {
+  const png = await page.locator(".canvas").screenshot();
+  return page.evaluate(async (b64) => {
+    const bytes = Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
+    const bmp = await createImageBitmap(new Blob([bytes], { type: "image/png" }));
+    const c = document.createElement("canvas");
+    c.width = bmp.width;
+    c.height = bmp.height;
+    const ctx = c.getContext("2d");
+    if (!ctx) {
+      bmp.close();
+      return false;
+    }
+    ctx.drawImage(bmp, 0, 0);
+    bmp.close();
+    const d = ctx.getImageData(0, 0, c.width, c.height).data;
+    const first = `${d[0]},${d[1]},${d[2]},${d[3]}`;
+    for (let i = 0; i < d.length; i += 4 * 97) {
+      if (`${d[i]},${d[i + 1]},${d[i + 2]},${d[i + 3]}` !== first) return true;
+    }
+    return false;
+  }, png.toString("base64"));
+}
+
 /** Waits for the frame shown to be exact: a stand-in (a pan, a zoom, bars) gives way to one at rest. */
 const settled = (page: Page) =>
   expect
@@ -92,13 +146,14 @@ const settled = (page: Page) =>
  */
 async function screenMatchesFresh(
   page: Page,
+  backend: "gpu" | "webgl" | "cpu" = "gpu",
 ): Promise<{ identical: boolean; mean: number; cpu: ReturnType<typeof score> }> {
   await settled(page);
-  const r = await page.evaluate(async () => {
+  const r = await page.evaluate(async (backend) => {
     const w = window as unknown as W;
     const view = w.drawpaneEngineView;
     if (!view) throw new Error("no engine view");
-    const shown = await view.engine.gpuPixels();
+    const shown = await view.pixels();
     if (!shown.ok) throw new Error(`read back: ${JSON.stringify(shown)}`);
     const canvas = document.querySelectorAll<HTMLCanvasElement>(
       ".canvas canvas.canvas__layer",
@@ -123,10 +178,11 @@ async function screenMatchesFresh(
         getComputedStyle(document.documentElement).getPropertyValue("--canvas").trim() || "#ebeae6",
       ),
     };
-    const fresh = await w.drawpaneEngine.render({ ...at, backend: "gpu" });
-    // And the CPU's whole frame: the GPU's tiles must hold the picture, not just agree with
+    const fresh = await w.drawpaneEngine.render({ ...at, backend });
+    // And the CPU's whole frame: tiles must hold the picture, not just agree with
     // themselves (a blank tile would match a blank fresh render).
-    const cpu = await w.drawpaneEngine.render({ ...at, backend: "cpu" });
+    const cpu =
+      backend === "cpu" ? fresh : await w.drawpaneEngine.render({ ...at, backend: "cpu" });
     let s = "";
     const px = shown.value as Uint8Array;
     for (let i = 0; i < px.length; i += 0x8000)
@@ -138,7 +194,7 @@ async function screenMatchesFresh(
       width: canvas.width,
       height: canvas.height,
     };
-  });
+  }, backend);
   const a = Buffer.from(r.shown, "base64");
   const b = Buffer.from(r.fresh, "base64");
   // The background differs only if the page's canvas colour token differs: compare inside.
@@ -180,9 +236,17 @@ test.describe
       });
       await page.addInitScript(() => {
         (window as unknown as W).fallbacks = [];
+        (window as unknown as W).recoveries = [];
         (window as unknown as W).pageFallbacks = [];
         window.addEventListener("drawpane:renderer-fallback", (e) =>
-          (window as unknown as W).fallbacks?.push((e as CustomEvent).detail),
+          (window as unknown as W).fallbacks?.push(
+            (e as CustomEvent).detail as NonNullable<W["fallbacks"]>[number],
+          ),
+        );
+        window.addEventListener("drawpane:renderer-recovered", (e) =>
+          (window as unknown as W).recoveries?.push(
+            (e as CustomEvent).detail as NonNullable<W["recoveries"]>[number],
+          ),
         );
         window.addEventListener("drawpane:renderer-page-fallback", (e) =>
           (window as unknown as W).pageFallbacks?.push((e as CustomEvent).detail),
@@ -270,7 +334,7 @@ test.describe
         .waitForFunction(
           () => {
             const v = (window as unknown as W).drawpaneEngineView;
-            return v?.last.supported === true && v.engine.records > 0 && v.last.exact;
+            return v?.last.supported === true && (v.engine?.records ?? 0) > 0 && v.last.exact;
           },
           undefined,
           { timeout: 120_000 },
@@ -295,17 +359,29 @@ test.describe
       await instance?.stop();
     });
 
-    test("draws the page with the engine, under the overlay", async () => {
+    test("draws the page with the engine, under the overlay, without fetching the WebGL2 module", async () => {
       const fallbacks = await page.evaluate(() => (window as unknown as W).fallbacks);
       expect(fallbacks, "the engine fell back").toEqual([]);
       // Read back (headless), the engine's first frame shows once it lands.
       await expect
         .poll(() => showing(page), { timeout: 15_000 })
         .toEqual({ engine: true, content: false });
-      const adapter = await page.evaluate(
-        () => (window as unknown as W).drawpaneEngineView?.engine.gpu?.adapter,
-      );
-      test.info().annotations.push({ type: "adapter", description: String(adapter) });
+      const info = await page.evaluate(() => {
+        const v = (window as unknown as W).drawpaneEngineView;
+        const wasms = performance
+          .getEntriesByType("resource")
+          .map((e) => e.name)
+          .filter((u) => /engine_bg.*\.wasm/i.test(u));
+        return {
+          backend: v?.backend,
+          adapter: v?.engine?.gpu?.adapter,
+          engineWasms: wasms,
+        };
+      });
+      expect(info.backend).toBe("webgpu");
+      // Only the WebGPU browser module is fetched; the lazy WebGL2 module stays untouched.
+      expect(info.engineWasms).toHaveLength(1);
+      test.info().annotations.push({ type: "adapter", description: String(info.adapter) });
       expect(notes.some((n) => n.includes("drawing with the render engine"))).toBe(true);
     });
 
@@ -659,35 +735,157 @@ test.describe
         .toEqual({ engine: true, content: false });
     });
 
-    test("falls back to the canvas renderer when the device is lost", async () => {
-      await page.evaluate(() => (window as unknown as W).drawpaneEngineView?.engine.loseGpu());
-      await page.evaluate(() => (window as unknown as W).drawpaneFrames.redraw());
-      await frames(page, 8);
-      expect(await showing(page)).toEqual({ engine: false, content: true });
-      const fallbacks = await page.evaluate(() => (window as unknown as W).fallbacks);
-      expect(fallbacks?.length).toBe(1);
-      expect(JSON.stringify(fallbacks)).toMatch(/lost|8/);
-      expect(notes.some((n) => n.includes("is off for this session"))).toBe(true);
-      // And the canvas renderer drew the page: not blank.
-      const painted = await page.evaluate(() => {
-        const c = document.querySelector<HTMLCanvasElement>(
-          ".canvas canvas.canvas__layer",
-        ) as HTMLCanvasElement;
-        const d = (c.getContext("2d") as CanvasRenderingContext2D).getImageData(
-          0,
-          0,
-          c.width,
-          c.height,
-        ).data;
-        const first = d.slice(0, 4).join();
-        for (let i = 0; i < d.length; i += 4 * 97)
-          if (d.slice(i, i + 4).join() !== first) return true;
-        return false;
+    test("recovers from device loss without losing edits, then steps down to WebGL2 on the 3rd loss", async () => {
+      // 1st loss: recovers on WebGPU without losing edits.
+      await page.evaluate(() => {
+        const w = window as unknown as W;
+        w.drawpaneEngineView?.engine?.loseGpu();
+        w.drawpaneFrames.redraw();
       });
-      expect(painted).toBe(true);
+      await expect
+        .poll(() => page.evaluate(() => (window as unknown as W).recoveries?.length ?? 0), {
+          timeout: 15_000,
+        })
+        .toBe(1);
+      // Add an edit right after recovery and verify pixels match a fresh render.
+      await page.evaluate(() => {
+        const e = (window as unknown as W).drawpane;
+        e.createLayer("rect", { x: 180, y: 120, width: 90, height: 60 }, e.s.pageId, {
+          fills: [{ type: "solid", color: "#12b886" }],
+        });
+      });
+      await expect
+        .poll(() => showing(page), { timeout: 25_000 })
+        .toEqual({ engine: true, content: false });
+      expect(await page.evaluate(() => (window as unknown as W).drawpaneEngineView?.backend)).toBe(
+        "webgpu",
+      );
+      expect(await page.evaluate(() => (window as unknown as W).fallbacks)).toEqual([]);
+      expect(await screenMatchesFresh(page, "gpu")).toMatchObject({ identical: true });
+
+      // 2nd loss within 60 s: recovers on WebGPU again.
+      await page.evaluate(() => {
+        const w = window as unknown as W;
+        w.drawpaneEngineView?.engine?.loseGpu();
+        w.drawpaneFrames.redraw();
+      });
+      await expect
+        .poll(() => page.evaluate(() => (window as unknown as W).recoveries?.length ?? 0), {
+          timeout: 15_000,
+        })
+        .toBe(2);
+      await expect
+        .poll(() => showing(page), { timeout: 25_000 })
+        .toEqual({ engine: true, content: false });
+      expect(await page.evaluate(() => (window as unknown as W).drawpaneEngineView?.backend)).toBe(
+        "webgpu",
+      );
+
+      // 3rd loss within 60 s: disables WebGPU for this session and steps down to WebGL2.
+      await page.evaluate(() => {
+        const w = window as unknown as W;
+        w.drawpaneEngineView?.engine?.loseGpu();
+        w.drawpaneFrames.redraw();
+      });
+      await expect
+        .poll(() => page.evaluate(() => (window as unknown as W).drawpaneEngineView?.backend), {
+          timeout: 20_000,
+        })
+        .toBe("webgl2");
+      await expect
+        .poll(() => showing(page), { timeout: 15_000 })
+        .toEqual({ engine: true, content: false });
+      const fallbacks = await page.evaluate(() => (window as unknown as W).fallbacks);
+      expect(fallbacks?.length).toBeGreaterThanOrEqual(1);
+      expect(fallbacks?.[0]).toMatchObject({ from: "webgpu", to: "webgl2" });
+      expect(notes.some((n) => n.includes("fell back from webgpu to webgl2"))).toBe(true);
+      // Every prior edit survives on WebGL2 and matches a fresh WebGL2 render.
+      expect(await screenMatchesFresh(page, "webgl")).toMatchObject({ identical: true });
     });
 
-    test("falls back when surface acquisition fails without device loss", async ({ browser }) => {
+    test("renders directly on forced WebGL2 and steps down to CPU view mode after repeated context loss", async ({
+      browser,
+    }) => {
+      const context = await browser.newContext({
+        baseURL: instance.url,
+        storageState: await instance.context.storageState(),
+      });
+      try {
+        const p = await context.newPage();
+        await p.addInitScript(() => {
+          localStorage.setItem("drawpane:debug", "1");
+          localStorage.setItem("drawpane:renderer", "engine-webgl");
+          localStorage.setItem("drawpane:engine-software", "allow");
+          // Direct canvas presentation (no readback).
+          localStorage.removeItem("drawpane:engine-present");
+          (window as unknown as W).fallbacks = [];
+          (window as unknown as W).recoveries = [];
+          window.addEventListener("drawpane:renderer-fallback", (e) =>
+            (window as unknown as W).fallbacks?.push(
+              (e as CustomEvent).detail as NonNullable<W["fallbacks"]>[number],
+            ),
+          );
+          window.addEventListener("drawpane:renderer-recovered", (e) =>
+            (window as unknown as W).recoveries?.push(
+              (e as CustomEvent).detail as NonNullable<W["recoveries"]>[number],
+            ),
+          );
+        });
+        await p.goto(page.url());
+        await expect
+          .poll(
+            () =>
+              p.evaluate(() => {
+                const v = (window as unknown as W).drawpaneEngineView;
+                return v
+                  ? { backend: v.backend, records: v.last.records, readsBack: v.readsBack }
+                  : null;
+              }),
+            { timeout: 60_000 },
+          )
+          .toMatchObject({ backend: "webgl2", readsBack: false });
+        await expect
+          .poll(() => showing(p), { timeout: 15_000 })
+          .toEqual({ engine: true, content: false });
+        expect(await p.evaluate(() => (window as unknown as W).fallbacks)).toEqual([]);
+
+        // Lose WebGL2 context 3 times: recovers twice, then steps down to CPU view mode.
+        for (let i = 1; i <= 2; i++) {
+          await p.evaluate(() => {
+            const w = window as unknown as W;
+            w.drawpaneEngineView?.engine?.loseGpu();
+            w.drawpaneFrames.redraw();
+          });
+          await expect
+            .poll(() => p.evaluate(() => (window as unknown as W).recoveries?.length ?? 0), {
+              timeout: 20_000,
+            })
+            .toBe(i);
+          expect(await p.evaluate(() => (window as unknown as W).drawpaneEngineView?.backend)).toBe(
+            "webgl2",
+          );
+        }
+        await p.evaluate(() => {
+          const w = window as unknown as W;
+          w.drawpaneEngineView?.engine?.loseGpu();
+          w.drawpaneFrames.redraw();
+        });
+        await expect
+          .poll(() => p.evaluate(() => (window as unknown as W).drawpaneEngineView?.backend), {
+            timeout: 20_000,
+          })
+          .toBe("cpu-worker");
+        await expect(p.locator("[data-renderer-mode='cpu-worker']")).toBeVisible();
+        const fbs = await p.evaluate(() => (window as unknown as W).fallbacks);
+        expect(fbs?.some((f) => f.from === "webgl2" && f.to === "cpu-worker")).toBe(true);
+      } finally {
+        await context.close();
+      }
+    });
+
+    test("falls back to WebGL2 when WebGPU surface acquisition fails without device loss", async ({
+      browser,
+    }) => {
       const context = await browser.newContext({
         baseURL: instance.url,
         storageState: await instance.context.storageState(),
@@ -705,53 +903,70 @@ test.describe
           };
           (window as unknown as W).fallbacks = [];
           window.addEventListener("drawpane:renderer-fallback", (e) =>
-            (window as unknown as W).fallbacks?.push((e as CustomEvent).detail),
+            (window as unknown as W).fallbacks?.push(
+              (e as CustomEvent).detail as NonNullable<W["fallbacks"]>[number],
+            ),
           );
         });
         await p.goto(page.url());
-        await p.waitForFunction(
-          () => {
-            const w = window as unknown as W;
-            return (w.fallbacks?.length ?? 0) > 0 || (w.drawpaneEngineView?.last.records ?? 0) > 0;
-          },
-          undefined,
-          { timeout: 60_000 },
-        );
-        await frames(p, 8);
-        expect(await showing(p)).toEqual({ engine: false, content: true });
-        expect(await p.evaluate(() => (window as unknown as W).fallbacks)).toHaveLength(1);
+        await expect
+          .poll(() => p.evaluate(() => (window as unknown as W).drawpaneEngineView?.backend), {
+            timeout: 60_000,
+          })
+          .toBe("webgl2");
+        await expect
+          .poll(() => showing(p), { timeout: 15_000 })
+          .toEqual({ engine: true, content: false });
+        const fbs = await p.evaluate(() => (window as unknown as W).fallbacks);
+        expect(fbs?.some((f) => f.from === "webgpu" && f.to === "webgl2")).toBe(true);
       } finally {
         await context.close();
       }
     });
 
-    test("falls back when presenting loses the device (headless), never blank", async ({
+    test("falls back when presenting loses the WebGPU device (headless), never blank", async ({
       browser,
     }) => {
       const context = await browser.newContext({
         baseURL: instance.url,
         storageState: await instance.context.storageState(),
       });
-      const p = await context.newPage();
-      await p.addInitScript(() => {
-        localStorage.setItem("drawpane:engine-present", "webgpu");
-        (window as unknown as W).fallbacks = [];
-        window.addEventListener("drawpane:renderer-fallback", (e) =>
-          (window as unknown as W).fallbacks?.push((e as CustomEvent).detail),
+      try {
+        const p = await context.newPage();
+        await p.addInitScript(() => {
+          localStorage.setItem("drawpane:engine-present", "webgpu");
+          (window as unknown as W).fallbacks = [];
+          window.addEventListener("drawpane:renderer-fallback", (e) =>
+            (window as unknown as W).fallbacks?.push(
+              (e as CustomEvent).detail as NonNullable<W["fallbacks"]>[number],
+            ),
+          );
+        });
+        await p.goto(page.url());
+        await p.waitForFunction(
+          () => ((window as unknown as W).fallbacks?.length ?? 0) > 0,
+          undefined,
+          { timeout: 60_000 },
         );
-      });
-      await p.goto(page.url());
-      await p.waitForFunction(
-        () => ((window as unknown as W).fallbacks?.length ?? 0) > 0,
-        undefined,
-        { timeout: 60_000 },
-      );
-      await frames(p, 8);
-      expect(await showing(p)).toEqual({ engine: false, content: true });
-      expect(JSON.stringify(await p.evaluate(() => (window as unknown as W).fallbacks))).toMatch(
-        /lost/,
-      );
-      await context.close();
+        await expect
+          .poll(() => p.evaluate(() => (window as unknown as W).drawpaneEngineView?.backend), {
+            timeout: 20_000,
+          })
+          .toBe("webgl2");
+        await expect
+          .poll(() => showing(p), { timeout: 15_000 })
+          .toEqual({ engine: true, content: false });
+        // Verify the visible WebGL2 canvas actually painted varied pixels, and stays painted across resize.
+        await expect.poll(() => visibleCanvasPainted(p), { timeout: 10_000 }).toBe(true);
+        await p.setViewportSize({ width: 960, height: 640 });
+        await frames(p, 4);
+        await expect.poll(() => visibleCanvasPainted(p), { timeout: 10_000 }).toBe(true);
+        const fbs = await p.evaluate(() => (window as unknown as W).fallbacks);
+        expect(fbs?.some((f) => f.from === "webgpu" && f.to === "webgl2")).toBe(true);
+        expect(JSON.stringify(fbs)).toMatch(/lost/);
+      } finally {
+        await context.close();
+      }
     });
 
     test("counts read-backs in flight against the GPU budget", async () => {
@@ -762,27 +977,712 @@ test.describe
       expect(r).toEqual([{ ok: true }, { ok: false, code: 4 }]);
     });
 
-    test("falls back without WebGPU", async ({ browser }) => {
+    test("falls back from WebGPU to WebGL2 without WebGPU, and to CPU view mode without WebGL2", async ({
+      browser,
+    }) => {
+      // 1. Without WebGPU: lazy-loads WebGL2 and renders accurately.
+      const glContext = await browser.newContext({
+        baseURL: instance.url,
+        storageState: await instance.context.storageState(),
+      });
+      try {
+        const p = await glContext.newPage();
+        await p.addInitScript(() => {
+          Object.defineProperty(navigator, "gpu", { value: undefined, configurable: true });
+          localStorage.removeItem("drawpane:engine-present");
+          (window as unknown as W).fallbacks = [];
+          window.addEventListener("drawpane:renderer-fallback", (e) =>
+            (window as unknown as W).fallbacks?.push(
+              (e as CustomEvent).detail as NonNullable<W["fallbacks"]>[number],
+            ),
+          );
+        });
+        await p.goto(page.url());
+        await expect
+          .poll(() => p.evaluate(() => (window as unknown as W).drawpaneEngineView?.backend), {
+            timeout: 60_000,
+          })
+          .toBe("webgl2");
+        await expect
+          .poll(() => showing(p), { timeout: 15_000 })
+          .toEqual({ engine: true, content: false });
+        const fbs = await p.evaluate(() => (window as unknown as W).fallbacks);
+        expect(fbs?.some((f) => f.from === "webgpu" && f.to === "webgl2")).toBe(true);
+      } finally {
+        await glContext.close();
+      }
+
+      // 2. Without WebGPU or WebGL2: falls back to CPU view mode in a Worker, renders tiles matching fresh CPU.
+      const cpuContext = await browser.newContext({
+        baseURL: instance.url,
+        storageState: await instance.context.storageState(),
+      });
+      try {
+        const p = await cpuContext.newPage();
+        await p.addInitScript(() => {
+          Object.defineProperty(navigator, "gpu", { value: undefined, configurable: true });
+          const orig = HTMLCanvasElement.prototype.getContext;
+          HTMLCanvasElement.prototype.getContext = function (
+            this: HTMLCanvasElement,
+            type: string,
+            ...args: unknown[]
+          ) {
+            if (type === "webgl2" || type === "webgl") return null;
+            return (orig as (this: HTMLCanvasElement, t: string, ...a: unknown[]) => unknown).call(
+              this,
+              type,
+              ...args,
+            );
+          } as typeof HTMLCanvasElement.prototype.getContext;
+          (window as unknown as W).fallbacks = [];
+          window.addEventListener("drawpane:renderer-fallback", (e) =>
+            (window as unknown as W).fallbacks?.push(
+              (e as CustomEvent).detail as NonNullable<W["fallbacks"]>[number],
+            ),
+          );
+        });
+        await p.goto(page.url());
+        await expect
+          .poll(() => p.evaluate(() => (window as unknown as W).drawpaneEngineView?.backend), {
+            timeout: 60_000,
+          })
+          .toBe("cpu-worker");
+        await expect
+          .poll(() => showing(p), { timeout: 20_000 })
+          .toEqual({ engine: true, content: false });
+        await expect(p.locator("[data-renderer-mode='cpu-worker']")).toBeVisible();
+        await expect(p.locator(".canvas")).toHaveAttribute("data-renderer", "cpu-worker");
+        const cmp = await screenMatchesFresh(p, "cpu");
+        expect(cmp.mean).toBeLessThan(0.05);
+        // Pan in CPU view mode: received tiles shift immediately and settle to exact match.
+        await p.evaluate(() => {
+          const e = (window as unknown as W).drawpane;
+          e.state.set({ camera: e.s.camera.pan(-80, 32) });
+        });
+        await frames(p, 4);
+        const afterPan = await screenMatchesFresh(p, "cpu");
+        expect(afterPan.mean).toBeLessThan(0.05);
+        const fbs = await p.evaluate(() => (window as unknown as W).fallbacks);
+        // Only one transition is reported directly to the adopted backend (cpu-worker), recording
+        // both failed candidates without claiming an unpresented webgl2 transition.
+        expect(
+          fbs?.some(
+            (f) => f.from === "webgpu" && f.to === "cpu-worker" && /webgl2/i.test(f.reason),
+          ),
+        ).toBe(true);
+      } finally {
+        await cpuContext.close();
+      }
+    });
+
+    test("refuses software GPU adapters by default and steps down to CPU view mode", async ({
+      browser,
+    }) => {
       const context = await browser.newContext({
         baseURL: instance.url,
         storageState: await instance.context.storageState(),
       });
-      const p = await context.newPage();
-      await p.addInitScript(() => {
-        Object.defineProperty(navigator, "gpu", { value: undefined, configurable: true });
-        (window as unknown as W).fallbacks = [];
-        window.addEventListener("drawpane:renderer-fallback", (e) =>
-          (window as unknown as W).fallbacks?.push((e as CustomEvent).detail),
+      try {
+        const p = await context.newPage();
+        await p.addInitScript(() => {
+          localStorage.setItem("drawpane:renderer", "engine");
+          localStorage.removeItem("drawpane:engine-software");
+          (window as unknown as W).fallbacks = [];
+          window.addEventListener("drawpane:renderer-fallback", (e) =>
+            (window as unknown as W).fallbacks?.push(
+              (e as CustomEvent).detail as NonNullable<W["fallbacks"]>[number],
+            ),
+          );
+        });
+        await p.goto(page.url());
+        await expect
+          .poll(() => p.evaluate(() => (window as unknown as W).drawpaneEngineView?.backend), {
+            timeout: 60_000,
+          })
+          .toBe("cpu-worker");
+        await expect.poll(() => visibleCanvasPainted(p), { timeout: 15_000 }).toBe(true);
+        const fbs = await p.evaluate(() => (window as unknown as W).fallbacks);
+        expect(fbs).toHaveLength(1);
+        expect(fbs?.[0]).toMatchObject({ from: "webgpu", to: "cpu-worker" });
+        expect(fbs?.[0]?.reason).toMatch(/webgpu:.*software/i);
+        expect(fbs?.[0]?.reason).toMatch(/webgl2:.*software/i);
+        // Because the WebGL2 pre-check refused SwiftShader, only the browser WASM (for CPU worker)
+        // was fetched; the lazy WebGL2 WASM module was never downloaded.
+        const engineWasms = await p.evaluate(() =>
+          performance
+            .getEntriesByType("resource")
+            .map((e) => e.name)
+            .filter((u) => /engine_bg.*\.wasm/i.test(u)),
         );
+        expect(engineWasms.length).toBeLessThanOrEqual(1);
+        expect(engineWasms.every((u) => !/webgl/i.test(u))).toBe(true);
+      } finally {
+        await context.close();
+      }
+    });
+
+    test("does not restart slow unchanged CPU worker exact jobs on the settle timer", async ({
+      browser,
+    }) => {
+      test.setTimeout(90_000);
+      const context = await browser.newContext({
+        baseURL: instance.url,
+        storageState: await instance.context.storageState(),
+        viewport: { width: 1400, height: 900 },
       });
-      await p.goto(page.url());
-      await p.waitForFunction(
-        () => ((window as unknown as W).fallbacks?.length ?? 0) > 0,
-        undefined,
-        { timeout: 60_000 },
-      );
-      await frames(p);
-      expect(await showing(p)).toEqual({ engine: false, content: true });
-      await context.close();
+      try {
+        const p = await context.newPage();
+        await p.route(/engine-cpu\.worker-[^/]+\.js(?:\?|$)/, async (route) => {
+          const response = await route.fetch();
+          const prefix = `
+            const createOriginal = globalThis.createImageBitmap;
+            globalThis.createImageBitmap = async (...args) => {
+              await new Promise((resolve) => setTimeout(resolve, 85));
+              return createOriginal(...args);
+            };
+          `;
+          await route.fulfill({ response, body: `${prefix}\n${await response.text()}` });
+        });
+        await p.addInitScript(() => {
+          localStorage.setItem("drawpane:debug", "1");
+          localStorage.setItem("drawpane:renderer", "engine-cpu");
+          const w = window as unknown as { cpuJobs: Array<{ jobId: number; detail: boolean }> };
+          w.cpuJobs = [];
+          const post = Worker.prototype.postMessage;
+          Worker.prototype.postMessage = function (message: unknown, ...args: unknown[]) {
+            const m = message as {
+              type?: string;
+              tileSize?: number;
+              jobId?: number;
+              detail?: boolean;
+            };
+            if (m?.type === "render" && m.tileSize) {
+              w.cpuJobs.push({ jobId: m.jobId ?? 0, detail: !!m.detail });
+            }
+            return Reflect.apply(post, this, [message, ...args]);
+          };
+        });
+        await p.goto(page.url());
+        await expect
+          .poll(
+            () =>
+              p.evaluate(() => {
+                const v = (window as unknown as W).drawpaneEngineView;
+                return v ? { backend: v.backend, exact: v.last.exact } : null;
+              }),
+            { timeout: 40_000 },
+          )
+          .toEqual({ backend: "cpu-worker", exact: true });
+        // Once settled, sitting idle must submit zero additional jobs.
+        const countAtRest = await p.evaluate(
+          () => (window as unknown as { cpuJobs: unknown[] }).cpuJobs.length,
+        );
+        await p.waitForTimeout(800);
+        const countLater = await p.evaluate(
+          () => (window as unknown as { cpuJobs: unknown[] }).cpuJobs.length,
+        );
+        expect(countLater).toBe(countAtRest);
+      } finally {
+        await context.close();
+      }
+    });
+
+    test("preserves cached images across three real WEBGL_lose_context losses into CPU view mode", async ({
+      browser,
+    }) => {
+      test.setTimeout(120_000);
+      const context = await browser.newContext({
+        baseURL: instance.url,
+        storageState: await instance.context.storageState(),
+      });
+      try {
+        const p = await context.newPage();
+        await p.addInitScript(() => {
+          localStorage.setItem("drawpane:debug", "1");
+          localStorage.setItem("drawpane:renderer", "engine-webgl");
+          localStorage.setItem("drawpane:engine-software", "allow");
+          localStorage.removeItem("drawpane:engine-present");
+          const w = window as unknown as W & { contextLosses: number };
+          w.recoveries = [];
+          w.contextLosses = 0;
+          window.addEventListener("drawpane:renderer-recovered", (e) =>
+            w.recoveries?.push((e as CustomEvent).detail as NonNullable<W["recoveries"]>[number]),
+          );
+          window.addEventListener(
+            "webglcontextlost",
+            (e) => {
+              if (e.target === w.drawpaneEngineView?.canvas) w.contextLosses++;
+            },
+            true,
+          );
+        });
+        await p.goto("/");
+        await p.getByRole("button", { name: "New file" }).first().click();
+        await expect(p.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
+          timeout: 15_000,
+        });
+        await expect
+          .poll(
+            () =>
+              p.evaluate(() => {
+                const v = (window as unknown as W).drawpaneEngineView;
+                return v ? { backend: v.backend, shown: v.canvas.style.visibility } : null;
+              }),
+            { timeout: 40_000 },
+          )
+          .toEqual({ backend: "webgl2", shown: "visible" });
+
+        const box = await p.locator(".canvas__overlay").boundingBox();
+        if (!box) throw new Error("No editor canvas");
+        await dropImage(
+          p,
+          { x: box.x + 180, y: box.y + 180 },
+          { width: 140, height: 100, colors: ["#ff00ff"], name: "magenta.png" },
+        );
+
+        const magentaCount = () =>
+          p.evaluate(async () => {
+            const view = (window as unknown as W).drawpaneEngineView;
+            if (!view) return -1;
+            const res = await view.pixels();
+            if (!res.ok || !res.value) return -1;
+            let count = 0;
+            for (let i = 0; i < res.value.length; i += 4) {
+              if (
+                (res.value[i] ?? 0) > 245 &&
+                (res.value[i + 1] ?? 255) < 10 &&
+                (res.value[i + 2] ?? 0) > 245
+              ) {
+                count++;
+              }
+            }
+            return count;
+          });
+
+        await expect.poll(magentaCount, { timeout: 20_000 }).toBeGreaterThan(1000);
+        for (let i = 1; i <= 3; i++) {
+          await p.evaluate(() => {
+            const view = (window as unknown as W).drawpaneEngineView;
+            const gl = view?.canvas.getContext("webgl2");
+            const ext = gl?.getExtension("WEBGL_lose_context");
+            if (!ext) throw new Error("No WEBGL_lose_context");
+            ext.loseContext();
+          });
+          if (i < 3) {
+            await expect
+              .poll(() => p.evaluate(() => (window as unknown as W).recoveries?.length ?? 0), {
+                timeout: 20_000,
+              })
+              .toBe(i);
+            await expect.poll(magentaCount, { timeout: 20_000 }).toBeGreaterThan(1000);
+          }
+        }
+        await expect
+          .poll(
+            () =>
+              p.evaluate(() => {
+                const v = (window as unknown as W).drawpaneEngineView;
+                return v ? { backend: v.backend, shown: v.canvas.style.visibility } : null;
+              }),
+            { timeout: 25_000 },
+          )
+          .toEqual({ backend: "cpu-worker", shown: "visible" });
+        await expect.poll(magentaCount, { timeout: 20_000 }).toBeGreaterThan(1000);
+        const losses = await p.evaluate(
+          () => (window as unknown as { contextLosses: number }).contextLosses,
+        );
+        expect(losses).toBe(3);
+      } finally {
+        await context.close();
+      }
+    });
+
+    test("rejects masked software WebGL2 adapters via failIfMajorPerformanceCaveat", async ({
+      browser,
+    }) => {
+      test.setTimeout(90_000);
+      const context = await browser.newContext({
+        baseURL: instance.url,
+        storageState: await instance.context.storageState(),
+      });
+      try {
+        const p = await context.newPage();
+        await p.addInitScript(() => {
+          Object.defineProperty(navigator, "gpu", { value: undefined, configurable: true });
+          localStorage.setItem("drawpane:debug", "1");
+          localStorage.setItem("drawpane:renderer", "engine");
+          localStorage.removeItem("drawpane:engine-software");
+          const proto = WebGL2RenderingContext.prototype;
+          const getExtension = proto.getExtension;
+          const getSupportedExtensions = proto.getSupportedExtensions;
+          proto.getExtension = function (this: WebGL2RenderingContext, name: string) {
+            return name === "WEBGL_debug_renderer_info"
+              ? null
+              : Reflect.apply(getExtension, this, [name]);
+          } as typeof proto.getExtension;
+          proto.getSupportedExtensions = function (this: WebGL2RenderingContext) {
+            return (
+              getSupportedExtensions.call(this)?.filter((x) => x !== "WEBGL_debug_renderer_info") ??
+              null
+            );
+          };
+        });
+        await p.goto(page.url());
+        await expect
+          .poll(() => p.evaluate(() => (window as unknown as W).drawpaneEngineView?.backend), {
+            timeout: 45_000,
+          })
+          .toBe("cpu-worker");
+      } finally {
+        await context.close();
+      }
+    });
+
+    test("renders translucent CPU view backgrounds once without darkening on redraws", async ({
+      browser,
+    }) => {
+      test.setTimeout(90_000);
+      const context = await browser.newContext({
+        baseURL: instance.url,
+        storageState: await instance.context.storageState(),
+      });
+      try {
+        const p = await context.newPage();
+        await p.addInitScript(() => {
+          localStorage.setItem("drawpane:debug", "1");
+          localStorage.setItem("drawpane:renderer", "engine-cpu");
+        });
+        await p.goto("/");
+        await p.getByRole("button", { name: "New file" }).first().click();
+        await expect(p.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
+          timeout: 15_000,
+        });
+        await expect
+          .poll(
+            () =>
+              p.evaluate(() => {
+                const v = (window as unknown as W).drawpaneEngineView;
+                return v ? { backend: v.backend, exact: v.last.exact } : null;
+              }),
+            { timeout: 35_000 },
+          )
+          .toEqual({ backend: "cpu-worker", exact: true });
+        await p.evaluate(() => {
+          const e = (window as unknown as W).drawpane;
+          e.setProp([e.s.pageId], "backgroundColor", "#ff000080", "Translucent background");
+        });
+        await expect
+          .poll(() => p.evaluate(() => (window as unknown as W).drawpaneEngineView?.last.exact), {
+            timeout: 15_000,
+          })
+          .toBe(true);
+        // Trigger a second redraw on the same translucent background to verify no accumulation.
+        await p.evaluate(() => (window as unknown as W).drawpaneFrames.redraw());
+        await p.waitForTimeout(400);
+        const result = await p.evaluate(async () => {
+          const w = window as unknown as W;
+          const v = w.drawpaneEngineView;
+          if (!v) throw new Error("no engine view");
+          const px = await v.pixels();
+          const fresh = await w.drawpaneEngine.render({
+            pageId: w.drawpane.s.pageId,
+            rect: { x: 0, y: 0, width: 1, height: 1 },
+            scale: 1,
+            width: 1,
+            height: 1,
+            background: [1, 0, 0, 128 / 255],
+            backend: "cpu",
+          });
+          if (!px.ok || !px.value || !fresh.ok || !fresh.rgba) throw new Error("read failed");
+          return {
+            shown: Array.from(px.value.slice(0, 4)),
+            rendered: [...atob(fresh.rgba)].map((c) => c.charCodeAt(0)),
+          };
+        });
+        expect(result.rendered).toEqual([255, 0, 0, 128]);
+        for (let ch = 0; ch < 4; ch++) {
+          expect(
+            Math.abs((result.shown[ch] ?? 0) - (result.rendered[ch] ?? 0)),
+          ).toBeLessThanOrEqual(2);
+        }
+      } finally {
+        await context.close();
+      }
+    });
+
+    test("preserves edits made while GPU rebuild is gated and renders them after recovery", async ({
+      browser,
+    }) => {
+      test.setTimeout(90_000);
+      const context = await browser.newContext({
+        baseURL: instance.url,
+        storageState: await instance.context.storageState(),
+      });
+      try {
+        const p = await context.newPage();
+        await p.addInitScript(() => {
+          localStorage.setItem("drawpane:debug", "1");
+          localStorage.setItem("drawpane:renderer", "engine-webgl");
+          localStorage.setItem("drawpane:engine-software", "allow");
+          localStorage.removeItem("drawpane:engine-present");
+          (window as unknown as W).recoveries = [];
+          window.addEventListener("drawpane:renderer-recovered", (e) =>
+            (window as unknown as W).recoveries?.push(
+              (e as CustomEvent).detail as NonNullable<W["recoveries"]>[number],
+            ),
+          );
+        });
+        await p.goto(page.url());
+        await expect
+          .poll(() => p.evaluate(() => (window as unknown as W).drawpaneEngineView?.backend), {
+            timeout: 45_000,
+          })
+          .toBe("webgl2");
+        await expect
+          .poll(() => showing(p), { timeout: 15_000 })
+          .toEqual({ engine: true, content: false });
+
+        // Gate attachGpu during recovery, trigger real context loss, make an edit WHILE recovering,
+        // verify the 2D cover renders non-blank content, then release recovery.
+        await p.evaluate(() => {
+          const w = window as unknown as W & { releaseRebuild?: () => void };
+          const eng = w.drawpaneEngineView?.engine;
+          if (!eng) throw new Error("no engine");
+          const origAttach = eng.attachGpu.bind(eng);
+          eng.attachGpu = (...args: Parameters<typeof origAttach>) =>
+            new Promise((resolve) => {
+              w.releaseRebuild = () => void origAttach(...args).then(resolve);
+            });
+          const gl = w.drawpaneEngineView?.canvas.getContext("webgl2");
+          gl?.getExtension("WEBGL_lose_context")?.loseContext();
+        });
+        // Wait for recovery cover to take over, then create a vivid cyan rectangle during rebuild.
+        await expect
+          .poll(() => showing(p), { timeout: 10_000 })
+          .toEqual({ engine: false, content: true });
+        await expect.poll(() => visibleCanvasPainted(p), { timeout: 10_000 }).toBe(true);
+        await p.evaluate(() => {
+          const e = (window as unknown as W).drawpane;
+          e.createLayer("rect", { x: 240, y: 180, width: 220, height: 140 }, e.s.pageId, {
+            fills: [{ type: "solid", color: "#00ffff" }],
+          });
+        });
+        await frames(p, 2);
+        // Release recovery and verify the edit created mid-rebuild is visibly rendered on WebGL2.
+        await p.evaluate(() => {
+          (window as unknown as { releaseRebuild?: () => void }).releaseRebuild?.();
+        });
+        await expect
+          .poll(() => p.evaluate(() => (window as unknown as W).recoveries?.length ?? 0), {
+            timeout: 20_000,
+          })
+          .toBe(1);
+        await expect
+          .poll(() => showing(p), { timeout: 15_000 })
+          .toEqual({ engine: true, content: false });
+        const cyanVisible = await p.evaluate(async () => {
+          const res = await (window as unknown as W).drawpaneEngineView?.pixels();
+          if (!res?.ok || !res.value) return 0;
+          let count = 0;
+          for (let i = 0; i < res.value.length; i += 4) {
+            if (
+              (res.value[i] ?? 255) < 10 &&
+              (res.value[i + 1] ?? 0) > 245 &&
+              (res.value[i + 2] ?? 0) > 245
+            ) {
+              count++;
+            }
+          }
+          return count;
+        });
+        expect(cyanVisible).toBeGreaterThan(1000);
+      } finally {
+        await context.close();
+      }
+    });
+
+    test("falls back cleanly to canvas when engine WASM chunks fail to load at startup", async ({
+      browser,
+    }) => {
+      const context = await browser.newContext({
+        baseURL: instance.url,
+        storageState: await instance.context.storageState(),
+      });
+      try {
+        const p = await context.newPage();
+        await p.route(/\.wasm(?:\?|$)/, (route) => route.abort("failed"));
+        await p.addInitScript(() => {
+          localStorage.setItem("drawpane:debug", "1");
+          localStorage.setItem("drawpane:renderer", "engine");
+          localStorage.setItem("drawpane:engine-software", "allow");
+          (window as unknown as W).fallbacks = [];
+          window.addEventListener("drawpane:renderer-fallback", (e) =>
+            (window as unknown as W).fallbacks?.push(
+              (e as CustomEvent).detail as NonNullable<W["fallbacks"]>[number],
+            ),
+          );
+        });
+        await p.goto(page.url());
+        await expect
+          .poll(() => p.evaluate(() => (window as unknown as W).fallbacks?.length ?? 0), {
+            timeout: 45_000,
+          })
+          .toBeGreaterThan(0);
+        const fbs = await p.evaluate(() => (window as unknown as W).fallbacks);
+        expect(fbs?.at(-1)?.to).toBe("canvas");
+        expect(await showing(p)).toEqual({ engine: false, content: true });
+        await expect.poll(() => visibleCanvasPainted(p), { timeout: 10_000 }).toBe(true);
+      } finally {
+        await context.close();
+      }
+    });
+
+    test("falls back to WebGL2 instead of terminal Canvas when WebGPU device request fails after canvas claim", async ({
+      browser,
+    }) => {
+      test.setTimeout(90_000);
+      const context = await browser.newContext({
+        baseURL: instance.url,
+        storageState: await instance.context.storageState(),
+      });
+      try {
+        const p = await context.newPage();
+        await p.addInitScript(() => {
+          localStorage.setItem("drawpane:debug", "1");
+          localStorage.setItem("drawpane:renderer", "engine");
+          localStorage.setItem("drawpane:engine-software", "allow");
+          localStorage.removeItem("drawpane:engine-present");
+          (window as unknown as W).fallbacks = [];
+          window.addEventListener("drawpane:renderer-fallback", (e) =>
+            (window as unknown as W).fallbacks?.push(
+              (e as CustomEvent).detail as NonNullable<W["fallbacks"]>[number],
+            ),
+          );
+          if (navigator.gpu) {
+            const origRequestAdapter = navigator.gpu.requestAdapter.bind(navigator.gpu);
+            navigator.gpu.requestAdapter = async (...args) => {
+              const adapter = await origRequestAdapter(...args);
+              if (adapter) {
+                adapter.requestDevice = async () => {
+                  throw new Error("fixture device request rejected");
+                };
+              }
+              return adapter;
+            };
+          }
+        });
+        await p.goto(page.url());
+        await expect
+          .poll(() => p.evaluate(() => (window as unknown as W).drawpaneEngineView?.backend), {
+            timeout: 45_000,
+          })
+          .toBe("webgl2");
+        await expect
+          .poll(() => showing(p), { timeout: 15_000 })
+          .toEqual({ engine: true, content: false });
+        await expect(p.locator(".canvas")).toHaveAttribute("data-renderer", "webgl2");
+        await expect.poll(() => visibleCanvasPainted(p), { timeout: 10_000 }).toBe(true);
+        const fbs = await p.evaluate(() => (window as unknown as W).fallbacks);
+        expect(fbs).toMatchObject([{ from: "webgpu", to: "webgl2" }]);
+      } finally {
+        await context.close();
+      }
+    });
+
+    test("runs phase 2 tile caching, edit invalidation, and drag settling in CPU worker mode", async ({
+      browser,
+    }) => {
+      test.setTimeout(90_000);
+      const context = await browser.newContext({
+        baseURL: instance.url,
+        storageState: await instance.context.storageState(),
+      });
+      try {
+        const p = await context.newPage();
+        await p.addInitScript(() => {
+          localStorage.setItem("drawpane:debug", "1");
+          localStorage.setItem("drawpane:renderer", "engine-cpu");
+        });
+        await p.goto(page.url());
+        await expect
+          .poll(
+            () =>
+              p.evaluate(() => {
+                const v = (window as unknown as W).drawpaneEngineView;
+                return v
+                  ? {
+                      backend: v.backend,
+                      exact: v.last.exact,
+                      held: v.last.tiles.held,
+                      pending: v.last.tiles.pending,
+                    }
+                  : null;
+              }),
+            { timeout: 45_000 },
+          )
+          .toMatchObject({ backend: "cpu-worker", exact: true, pending: 0 });
+        const initialTiles = await p.evaluate(
+          () => (window as unknown as W).drawpaneEngineView?.last.tiles,
+        );
+        expect(initialTiles?.held ?? 0).toBeGreaterThan(0);
+        expect((await screenMatchesFresh(p, "cpu")).mean).toBeLessThan(0.05);
+
+        // Create and drag a vivid layer through several moves: dirty tiles invalidate and settle
+        // exact, matching a fresh full CPU render.
+        const movedId = await p.evaluate(() => {
+          const e = (window as unknown as W).drawpane;
+          e.zoomTo(1);
+          e.centerOn({ x: 260, y: 160 });
+          return e.createLayer("rect", { x: 160, y: 120, width: 110, height: 70 }, e.s.pageId, {
+            fills: [{ type: "solid", color: "#e64980" }],
+            cornerRadius: 8,
+          });
+        });
+        await expect
+          .poll(() => p.evaluate(() => (window as unknown as W).drawpaneEngineView?.last.exact), {
+            timeout: 20_000,
+          })
+          .toBe(true);
+        for (let step = 1; step <= 4; step++) {
+          await p.evaluate(
+            ({ id, step }) => {
+              const e = (window as unknown as W).drawpane;
+              e.commit([
+                { op: "set", id, prop: "x", value: 160 + step * 28 },
+                { op: "set", id, prop: "y", value: 120 + step * 14 },
+              ]);
+            },
+            { id: movedId, step },
+          );
+          await frames(p, 2);
+        }
+        await expect
+          .poll(
+            () =>
+              p.evaluate(() => {
+                const v = (window as unknown as W).drawpaneEngineView;
+                return v ? { exact: v.last.exact, dragged: v.last.tiles.dragged } : null;
+              }),
+            { timeout: 25_000 },
+          )
+          .toEqual({ exact: true, dragged: 0 });
+        expect((await screenMatchesFresh(p, "cpu")).mean).toBeLessThan(0.05);
+
+        // Recoloring invalidates only touched tiles and settles exact.
+        await p.evaluate((id) => {
+          const e = (window as unknown as W).drawpane;
+          e.commit([
+            { op: "set", id, prop: "fills", value: [{ type: "solid", color: "#2b8a3e" }] },
+          ]);
+        }, movedId);
+        await expect
+          .poll(() => p.evaluate(() => (window as unknown as W).drawpaneEngineView?.last.exact), {
+            timeout: 20_000,
+          })
+          .toBe(true);
+        expect((await screenMatchesFresh(p, "cpu")).mean).toBeLessThan(0.05);
+      } finally {
+        await context.close();
+      }
     });
   });
