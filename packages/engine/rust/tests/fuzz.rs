@@ -337,6 +337,12 @@ fn bands_reproduce_the_whole_frame_where_a_run_of_glyphs_crosses_them() {
     bands_match(1_795_184_124_632_858_455, 27);
 }
 
+#[test]
+fn bands_reproduce_the_whole_frame_for_rotated_glyph_outlines() {
+    // CI found a one-level difference in an outline fill when a band culled other glyphs in the run.
+    bands_match(1_795_215_203_959_837_193, 212);
+}
+
 /// Case `case` of seed `seed`: a random page drawn whole and in bands, bitwise the same.
 fn bands_match(seed: u64, case: u32) {
     let mut r = Rng(seed.wrapping_add(u64::from(case) * 77) | 1);

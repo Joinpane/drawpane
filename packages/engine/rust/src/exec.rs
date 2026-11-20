@@ -3822,6 +3822,18 @@ impl<B: Backend> Walk<'_, B> {
         let mut placed: Vec<(std::sync::Arc<vello_cpu::Pixmap>, i32, i32)> = Vec::new();
         let mut of: Vec<usize> = Vec::new();
         let whole = self.backend.whole_runs();
+        // Keep the outline contours identical across CPU bands. Omitting an off-tile
+        // contour can change strip coverage by one level elsewhere in the same run.
+        let outline_viewport = if whole {
+            Rect::new(
+                -1.0,
+                -1.0,
+                f64::from(self.frame.width) + 1.0,
+                f64::from(self.frame.height) + 1.0,
+            )
+        } else {
+            self.viewport
+        };
         for (n, g) in glyphs.iter().enumerate() {
             let Some(glyph) = self.store.glyphs.get(g.glyph) else {
                 return Err(EngineError::unknown(format!("glyph {}", g.glyph)));
@@ -3832,7 +3844,7 @@ impl<B: Backend> Walk<'_, B> {
             let small = gb.width() * a.abs() <= self.glyph_mask_side && gb.height() * d.abs() <= self.glyph_mask_side;
             let maskable = masks && axis_aligned && small && e.abs() < 1.0e7 && f.abs() < 1.0e7;
             // Out of view, a glyph matters only to a whole run's image.
-            let in_view = overlaps(m.transform_rect_bbox(gb), self.viewport);
+            let in_view = overlaps(m.transform_rect_bbox(gb), outline_viewport);
             if !in_view && !(whole && maskable) {
                 continue;
             }
