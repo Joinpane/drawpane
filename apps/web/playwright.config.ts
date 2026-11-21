@@ -32,7 +32,7 @@ export default defineConfig({
           command: "node e2e/server.mjs",
           url: `http://localhost:${port}/api/health`,
           reuseExistingServer: false,
-          timeout: 120_000,
+          timeout: Number(process.env.E2E_SERVER_TIMEOUT ?? 120_000),
           // Stopped gently, so server.mjs removes the run's database (Playwright kills outright otherwise).
           gracefulShutdown: { signal: "SIGTERM", timeout: 10_000 },
         },

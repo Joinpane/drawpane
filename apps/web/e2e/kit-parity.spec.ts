@@ -35,11 +35,34 @@ import { type FrameScore, reportHtml, summarize } from "../../../tools/kit-parit
 import { addPasskey } from "./fresh-instance";
 import { importConverted } from "./import-converted";
 
-const OUT = process.env.E2E_KIT_PARITY;
+/**
+ * On the GPU bench (tools/gpu-bench `--file`), the uploaded folder is the out dir and the
+ * converted file at once: E2E_KIT_PARITY_FROM_BENCH=1 reads both from BENCH_FILE.
+ */
+const FROM_BENCH = process.env.E2E_KIT_PARITY_FROM_BENCH === "1";
+const OUT = process.env.E2E_KIT_PARITY ?? (FROM_BENCH ? process.env.BENCH_FILE : undefined);
 const STAGE = process.env.E2E_KIT_PARITY_STAGE ?? "render";
 /** Missing fonts listed, not failed: the run still scores, its text drawn in a fallback face. */
 const ALLOW_MISSING_FONTS = process.env.E2E_KIT_PARITY_ALLOW_MISSING_FONTS === "1";
 const fileSafe = (id: string) => id.replace(/:/g, "-").replace(/;/g, "_");
+/**
+ * Also draw each frame with the render engine (decision 0040), as exports draw it (the frame
+ * alone with its backdrop context): "cpu", "gpu" or "webgl", comma separated. Each backend's
+ * pictures go to a sibling run folder (`<run>-engine-<backend>`), so the compare stage scores it
+ * like any run. `E2E_KIT_PARITY_ENGINE_EVERY=<n>` draws only every n-th frame on the GPU backends.
+ */
+const ENGINE_BACKENDS = (process.env.E2E_KIT_PARITY_ENGINE ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter((s): s is "cpu" | "gpu" | "webgl" => s === "cpu" || s === "gpu" || s === "webgl");
+const ENGINE_EVERY = Number(process.env.E2E_KIT_PARITY_ENGINE_EVERY ?? 1);
+/**
+ * Score every frame in the page with decision 0040's metrics (packages/engine/src/compare.ts):
+ * the canvas renderer and each engine backend against Figma, the engine against the canvas, and
+ * CPU against WebGL2. Only scores are written (`scores.ndjson`), and the pictures of frames the
+ * engine draws worse than the canvas renderer, so a run's output stays small.
+ */
+const INLINE = process.env.E2E_KIT_PARITY_INLINE === "1";
 
 interface SampleFrame {
   readonly id: string;
@@ -201,7 +224,13 @@ if (OUT)
   test.use({
     // A 500,000-layer file in one tab.
     launchOptions: {
-      args: ["--js-flags=--max-old-space-size=8192"],
+      args: [
+        "--js-flags=--max-old-space-size=8192",
+        // WebGPU (SwiftShader here) for the engine's GPU backend, as the engine parity spec has it.
+        ...(ENGINE_BACKENDS.length > 0
+          ? ["--enable-unsafe-webgpu", "--enable-unsafe-swiftshader"]
+          : []),
+      ],
       ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
     },
     // No traces or screenshots: they'd hold hundreds of MB of import, and the file's content
@@ -218,7 +247,7 @@ test.describe
     test("render: Drawpane draws and lays out each sampled frame", async ({ browser }) => {
       test.skip(STAGE !== "render", "Stage render only.");
       test.setTimeout(6 * 60 * 60_000);
-      const cache = process.env.E2E_KIT_PARITY_CACHE;
+      const cache = process.env.E2E_KIT_PARITY_CACHE ?? (FROM_BENCH ? OUT : undefined);
       if (!cache) throw new Error("Set E2E_KIT_PARITY_CACHE to the converted file's folder.");
       const out = OUT as string;
       const sample = readJson<Sample>(join(out, "sample.json"));
@@ -232,6 +261,20 @@ test.describe
 
       const page = await signIn(browser, `http://localhost:${port}`);
       page.on("pageerror", (error) => console.log(`page error: ${error.message}`));
+      if (INLINE) {
+        const { stripTypeScriptTypes } = await import("node:module");
+        const source = readFileSync(
+          new URL("../../../packages/engine/src/compare.ts", import.meta.url),
+          "utf8",
+        );
+        const js = (stripTypeScriptTypes as (code: string) => string)(source).replace(
+          /^export /gm,
+          "",
+        );
+        await page.addInitScript({
+          content: `window.__kpCompare = (() => { ${js}; return { score, TILE, SEVERE }; })();`,
+        });
+      }
       await page.evaluate(() => localStorage.setItem("drawpane:debug", "1"));
       const fileId = await importConverted(page, cache);
       const importSeconds = seconds(started);
@@ -239,6 +282,20 @@ test.describe
       const frames = sample.frames.filter((f) =>
         existsSync(join(out, "figma", `${fileSafe(f.id)}.json`)),
       );
+      // E2E_KIT_PARITY_SHARD=k/n draws every n-th frame from the k-th, for parallel runs.
+      const [shardK, shardN] = (process.env.E2E_KIT_PARITY_SHARD ?? "1/1").split("/").map(Number);
+      if ((shardN ?? 1) > 1) {
+        const keep = frames.filter((_, i) => i % (shardN as number) === (shardK as number) - 1);
+        frames.length = 0;
+        frames.push(...keep);
+      }
+      // E2E_KIT_PARITY_PAGES=a,b keeps only frames on those pages (by name).
+      const onlyPages = process.env.E2E_KIT_PARITY_PAGES?.split(",").map((x) => x.trim());
+      if (onlyPages) {
+        const keep = frames.filter((f) => onlyPages.includes(f.pageName));
+        frames.length = 0;
+        frames.push(...keep);
+      }
       const withoutFigma = sample.frames.length - frames.length;
       const first = frames[0];
       if (!first) throw new Error("No sampled frame has Figma's truth yet: run the figma step.");
@@ -255,12 +312,81 @@ test.describe
       );
       const openSeconds = seconds(opening);
       console.log(`Imported in ${importSeconds} s, opened in ${openSeconds} s.`);
+      const engineDirs = new Map<string, string>();
+      for (const backend of ENGINE_BACKENDS) {
+        const dir = `${runDir}-engine-${backend}`;
+        mkdirSync(join(dir, "drawpane"), { recursive: true });
+        engineDirs.set(backend, dir);
+      }
+      if (
+        ENGINE_BACKENDS.length > 0 &&
+        (process.env.E2E_KIT_PARITY_SHARD ?? "1/").startsWith("1/")
+      ) {
+        await page.evaluate(() => localStorage.setItem("drawpane:engine-software", "allow"));
+        // Which pages the editor's live view would hand to the canvas renderer, and why.
+        const census = await page.evaluate(() => {
+          type E = {
+            drawpane: {
+              doc: {
+                pageIds(): readonly string[];
+                get(id: string): { type: string; props: { name?: unknown } } | undefined;
+              };
+            };
+            drawpaneEngine: {
+              list(pageId: string): { unsupported: Record<string, string[]>; records: number };
+            };
+          };
+          const w = window as unknown as E;
+          const pages = w.drawpane.doc.pageIds();
+          return pages.map((pageId) => {
+            const t0 = performance.now();
+            try {
+              const l = w.drawpaneEngine.list(pageId);
+              return {
+                pageId,
+                name: String(w.drawpane.doc.get(pageId)?.props.name ?? ""),
+                records: l.records,
+                buildMs: Math.round(performance.now() - t0),
+                unsupported: Object.fromEntries(
+                  Object.entries(l.unsupported).map(([k, ids]) => [k, ids.length]),
+                ),
+                examples: Object.fromEntries(
+                  Object.entries(l.unsupported).map(([k, ids]) => [k, ids.slice(0, 5)]),
+                ),
+              };
+            } catch (error) {
+              return { pageId, error: String(error) };
+            }
+          });
+        });
+        for (const dir of engineDirs.values())
+          writeFileSync(join(dir, "pages.json"), `${JSON.stringify(census, null, 2)}\n`);
+        console.log(`Engine page census: ${census.length} pages.`);
+      }
+      const engineFrames = new Map<string, Array<Record<string, unknown>>>();
 
       const missingFonts = new Map<string, string[]>();
       const notInDrawpane: string[] = [];
       let n = 0;
+      // E2E_KIT_PARITY_RELOAD_PER_PAGE=1: a fresh editor (and fresh debug engines, which keep every
+      // image they're given) for each kit page, so one page's images can't crowd out the next's.
+      let lastPage: string | null = null;
       for (const frame of frames) {
         const id = drawpaneId(frame.id);
+        if (process.env.E2E_KIT_PARITY_RELOAD_PER_PAGE === "1" && frame.pageName !== lastPage) {
+          if (lastPage !== null) {
+            await page.reload();
+            await page.waitForFunction(
+              (id) => {
+                const w = window as unknown as W;
+                return w.drawpane?.s.status === "live" && w.drawpaneParity?.has(id) === true;
+              },
+              id,
+              { timeout: 30 * 60_000, polling: 1000 },
+            );
+          }
+          lastPage = frame.pageName;
+        }
         const truth = readJson<FigmaTree>(join(out, "figma", `${fileSafe(frame.id)}.json`));
         const result = await page.evaluate(
           async ({ id, rect, scale, width, height }) => {
@@ -298,14 +424,306 @@ test.describe
           renderMs: result.render.ms,
           nodes: result.nodes,
         };
-        writeFileSync(
-          join(runDir, "drawpane", `${fileSafe(frame.id)}.png`),
-          Buffer.from(result.render.png, "base64"),
-        );
+        if (!INLINE)
+          writeFileSync(
+            join(runDir, "drawpane", `${fileSafe(frame.id)}.png`),
+            Buffer.from(result.render.png, "base64"),
+          );
         writeFileSync(
           join(runDir, "drawpane", `${fileSafe(frame.id)}.json`),
-          JSON.stringify(record),
+          JSON.stringify({ ...record, ...(INLINE ? { nodes: [] } : {}) }),
         );
+        const frameFacts: Record<string, Record<string, unknown>> = {};
+        for (const backend of ENGINE_BACKENDS) {
+          if (backend !== "cpu" && n % ENGINE_EVERY !== 0) continue;
+          const dir = engineDirs.get(backend) as string;
+          const r = await page.evaluate(
+            async ({ id, rect, scale, width, height, backend, inline }) => {
+              type E = {
+                drawpane: {
+                  doc: { get(id: string): { type: string; parent: string } | undefined };
+                };
+                drawpaneEngine: {
+                  render(o: Record<string, unknown>): Promise<{
+                    ok: boolean;
+                    error?: string;
+                    code?: number;
+                    rgba?: string;
+                    unsupported: Record<string, string[]>;
+                    ms?: { build: number; apply: number; render: number };
+                    stats?: unknown;
+                  }>;
+                };
+              };
+              const w = window as unknown as E;
+              let pageId = id;
+              for (
+                let n = w.drawpane.doc.get(id);
+                n && n.type !== "page";
+                n = w.drawpane.doc.get(n.parent)
+              )
+                pageId = n.parent;
+              const started = performance.now();
+              // Text with no outlines (a face neither loaded nor saved) is refused whole. The
+              // canvas step loaded this frame's fonts already: give the shaper its own 3 s face
+              // deadline, then record the refusal without the debug renderer's 20 s wait.
+              const listed = (
+                w.drawpaneEngine as unknown as {
+                  list(
+                    p: string,
+                    ids: string[],
+                    c: boolean,
+                  ): { unsupported: Record<string, string[]> };
+                }
+              ).list;
+              let pre = listed(pageId, [id], true).unsupported;
+              for (let t = 0; t < 3000 && pre.textWithoutOutlines; t += 250) {
+                await new Promise((r) => setTimeout(r, 250));
+                pre = listed(pageId, [id], true).unsupported;
+              }
+              if (Object.keys(pre).length > 0)
+                return {
+                  ok: false,
+                  error: "unsupported",
+                  unsupported: Object.fromEntries(
+                    Object.entries(pre).map(([k, ids]) => [k, ids.length]),
+                  ),
+                  examples: Object.fromEntries(
+                    Object.entries(pre).map(([k, ids]) => [k, ids.slice(0, 5)]),
+                  ),
+                  ms: null,
+                  png: null,
+                  wall: Math.round(performance.now() - started),
+                };
+              let out: Awaited<ReturnType<E["drawpaneEngine"]["render"]>>;
+              try {
+                out = await w.drawpaneEngine.render({
+                  pageId,
+                  ids: [id],
+                  context: true,
+                  rect,
+                  scale,
+                  width,
+                  height,
+                  backend,
+                  background: [0, 0, 0, 0],
+                });
+              } catch (error) {
+                return {
+                  ok: false,
+                  error: `threw: ${String(error)}`,
+                  unsupported: {},
+                  ms: null,
+                  png: null,
+                  wall: 0,
+                };
+              }
+              const wall = Math.round(performance.now() - started);
+              const unsupported = Object.fromEntries(
+                Object.entries(out.unsupported).map(([k, ids]) => [k, ids.length]),
+              );
+              if (!out.ok || !out.rgba)
+                return {
+                  ok: false,
+                  error: out.error ?? null,
+                  code: out.code ?? null,
+                  unsupported,
+                  ms: out.ms ?? null,
+                  png: null,
+                  wall,
+                };
+              const bytes = Uint8ClampedArray.from(atob(out.rgba), (ch) => ch.charCodeAt(0));
+              if (inline) {
+                const kw = window as unknown as { __kpEngine?: Record<string, Uint8ClampedArray> };
+                kw.__kpEngine ??= {};
+                kw.__kpEngine[backend] = bytes;
+                return { ok: true, unsupported, ms: out.ms ?? null, png: null, wall };
+              }
+              const c = new OffscreenCanvas(width, height);
+              (c.getContext("2d") as OffscreenCanvasRenderingContext2D).putImageData(
+                new ImageData(bytes, width, height),
+                0,
+                0,
+              );
+              const blob = await c.convertToBlob({ type: "image/png" });
+              const buf = new Uint8Array(await blob.arrayBuffer());
+              let s = "";
+              for (let i = 0; i < buf.length; i += 0x8000)
+                s += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+              return { ok: true, unsupported, ms: out.ms ?? null, png: btoa(s), wall };
+            },
+            {
+              id,
+              backend,
+              inline: INLINE,
+              rect: {
+                x: truth.box.x,
+                y: truth.box.y,
+                width: truth.png.width / scale,
+                height: truth.png.height / scale,
+              },
+              scale,
+              width: truth.png.width,
+              height: truth.png.height,
+            },
+          );
+          const { png, ...facts } = r;
+          const list = engineFrames.get(backend) ?? [];
+          const entry = { id: frame.id, name: frame.name, pageName: frame.pageName, ...facts };
+          list.push(entry);
+          engineFrames.set(backend, list);
+          writeFileSync(join(dir, "facts.ndjson"), `${JSON.stringify(entry)}\n`, { flag: "a" });
+          frameFacts[backend] = facts;
+          if (png) {
+            writeFileSync(
+              join(dir, "drawpane", `${fileSafe(frame.id)}.png`),
+              Buffer.from(png, "base64"),
+            );
+            writeFileSync(
+              join(dir, "drawpane", `${fileSafe(frame.id)}.json`),
+              JSON.stringify({ ...record, renderMs: facts.wall }),
+            );
+          }
+        }
+        if (INLINE) {
+          const figmaPng = readFileSync(join(out, "figma", `${fileSafe(frame.id)}.png`)).toString(
+            "base64",
+          );
+          const scored = await page.evaluate(
+            async ({ figma, canvas }) => {
+              type S = Record<string, unknown> & { heat?: unknown };
+              const kw = window as unknown as {
+                __kpEngine?: Record<string, Uint8ClampedArray>;
+                __kpCompare: {
+                  score(a: Uint8ClampedArray, b: Uint8ClampedArray, w: number, h: number): S;
+                };
+              };
+              const strip = (x: S) => {
+                const { heat: _, ...rest } = x;
+                return rest;
+              };
+              // Every side through the same 2D canvas round trip, so straight alpha rounds alike.
+              const viaCanvas = (data: Uint8ClampedArray, w: number, h: number) => {
+                const c = new OffscreenCanvas(w, h);
+                const ctx = c.getContext("2d") as OffscreenCanvasRenderingContext2D;
+                ctx.putImageData(new ImageData(new Uint8ClampedArray(data), w, h), 0, 0);
+                return ctx.getImageData(0, 0, w, h).data;
+              };
+              const decode = async (b64: string) => {
+                const bytes = Uint8Array.from(atob(b64), (ch) => ch.charCodeAt(0));
+                const bmp = await createImageBitmap(new Blob([bytes], { type: "image/png" }), {
+                  premultiplyAlpha: "none",
+                  colorSpaceConversion: "none",
+                });
+                const c = new OffscreenCanvas(bmp.width, bmp.height);
+                const ctx = c.getContext("2d") as OffscreenCanvasRenderingContext2D;
+                ctx.drawImage(bmp, 0, 0);
+                return {
+                  data: ctx.getImageData(0, 0, bmp.width, bmp.height).data,
+                  w: bmp.width,
+                  h: bmp.height,
+                };
+              };
+              const f = await decode(figma);
+              const c = await decode(canvas);
+              if (c.w !== f.w || c.h !== f.h)
+                return { error: `sizes differ: Figma ${f.w}x${f.h}, canvas ${c.w}x${c.h}` };
+              const score = (a: Uint8ClampedArray, b: Uint8ClampedArray) =>
+                strip(kw.__kpCompare.score(a, b, f.w, f.h));
+              const engines: Record<string, unknown> = {};
+              const px: Record<string, Uint8ClampedArray> = {};
+              for (const [backend, raw] of Object.entries(kw.__kpEngine ?? {})) {
+                if (raw.length !== f.w * f.h * 4) {
+                  engines[backend] = { error: "size differs" };
+                  continue;
+                }
+                const e = viaCanvas(raw, f.w, f.h);
+                px[backend] = e;
+                engines[backend] = { vsFigma: score(e, f.data), vsCanvas: score(e, c.data) };
+              }
+              const cpuWebgl =
+                px.cpu && px.webgl
+                  ? score(px.cpu, px.webgl)
+                  : px.cpu && px.gpu
+                    ? score(px.cpu, px.gpu)
+                    : null;
+              return { canvas: score(c.data, f.data), engines, cpuWebgl, w: f.w, h: f.h };
+            },
+            { figma: figmaPng, canvas: result.render.png },
+          );
+          type Sc = { mean: number; worstTile: number; alphaMean: number };
+          const worse: Record<string, string[]> = {};
+          if (!("error" in scored)) {
+            for (const [backend, e] of Object.entries(scored.engines)) {
+              const v = (e as { vsFigma?: Sc }).vsFigma;
+              if (!v) continue;
+              const c = scored.canvas as unknown as Sc;
+              const w: string[] = [];
+              if (v.mean > c.mean + 0.01) w.push("mean");
+              if (v.worstTile > c.worstTile + 1) w.push("worstTile");
+              if (v.alphaMean > c.alphaMean + 0.05) w.push("alpha");
+              worse[backend] = w;
+            }
+            // The pictures of frames the engine draws worse, for triage.
+            if (Object.values(worse).some((w) => w.length > 0)) {
+              writeFileSync(
+                join(runDir, "drawpane", `${fileSafe(frame.id)}.png`),
+                Buffer.from(result.render.png, "base64"),
+              );
+              for (const backend of Object.keys(worse)) {
+                const png = await page.evaluate(
+                  async ({ backend, w, h }) => {
+                    const kw = window as unknown as {
+                      __kpEngine?: Record<string, Uint8ClampedArray>;
+                    };
+                    const raw = kw.__kpEngine?.[backend];
+                    if (!raw) return null;
+                    const c = new OffscreenCanvas(w, h);
+                    (c.getContext("2d") as OffscreenCanvasRenderingContext2D).putImageData(
+                      new ImageData(new Uint8ClampedArray(raw), w, h),
+                      0,
+                      0,
+                    );
+                    const buf = new Uint8Array(
+                      await (await c.convertToBlob({ type: "image/png" })).arrayBuffer(),
+                    );
+                    let s = "";
+                    for (let i = 0; i < buf.length; i += 0x8000)
+                      s += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+                    return btoa(s);
+                  },
+                  { backend, w: scored.w, h: scored.h },
+                );
+                if (png)
+                  writeFileSync(
+                    join(
+                      engineDirs.get(backend) as string,
+                      "drawpane",
+                      `${fileSafe(frame.id)}.png`,
+                    ),
+                    Buffer.from(png, "base64"),
+                  );
+              }
+            }
+          }
+          await page.evaluate(() => {
+            delete (window as unknown as { __kpEngine?: unknown }).__kpEngine;
+          });
+          writeFileSync(
+            join(runDir, "scores.ndjson"),
+            `${JSON.stringify({
+              id: frame.id,
+              name: frame.name,
+              pageName: frame.pageName,
+              kind: frame.kind,
+              canvasMs: result.render.ms,
+              facts: frameFacts,
+              worse,
+              ...scored,
+            })}\n`,
+            { flag: "a" },
+          );
+        }
         if (++n % 25 === 0) console.log(`  ${n}/${frames.length} frames (${seconds(started)} s)`);
       }
       const run = {
@@ -320,6 +738,16 @@ test.describe
         seconds: { import: importSeconds, open: openSeconds, total: seconds(started) },
       };
       writeFileSync(join(runDir, "run.json"), `${JSON.stringify(run, null, 2)}\n`);
+      for (const [backend, dir] of engineDirs) {
+        writeFileSync(
+          join(dir, "run.json"),
+          `${JSON.stringify({ ...run, renderer: `engine-${backend}` }, null, 2)}\n`,
+        );
+        writeFileSync(
+          join(dir, "engine-frames.json"),
+          `${JSON.stringify(engineFrames.get(backend) ?? [], null, 1)}\n`,
+        );
+      }
       console.log(
         `Drew ${n} frames in ${seconds(started)} s into ${runDir}; ${withoutFigma} sampled frames have no Figma truth yet, ${notInDrawpane.length} aren't in Drawpane.`,
       );
