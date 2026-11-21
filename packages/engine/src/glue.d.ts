@@ -125,6 +125,27 @@ export class Engine {
   pngTake(): Uint8Array;
   pngEnd(): Uint8Array;
   pngAbort(): void;
+  blurCpu(
+    src: Uint8Array,
+    srcW: number,
+    srcH: number,
+    dstW: number,
+    dstH: number,
+    dstOx: number,
+    dstOy: number,
+    sigma: number,
+    edgeMode: number,
+    border: Float32Array,
+    clampX0: number,
+    clampY0: number,
+    clampX1: number,
+    clampY1: number,
+    dirtyX0: number,
+    dirtyY0: number,
+    dirtyX1: number,
+    dirtyY1: number,
+    reference: boolean,
+  ): Outcome;
   // The browser build only:
   attachGpu?(init: GpuInit): Outcome;
   detachGpu?(): void;
@@ -146,6 +167,28 @@ export class Engine {
   gpuFinished?(): Promise<Outcome | undefined>;
   /** Resolves to the pixels, or to an `Outcome` saying why not; never rejects. */
   gpuPixels?(): Promise<Uint8Array | Outcome>;
+  blurGpu?(
+    src: Uint8Array,
+    srcW: number,
+    srcH: number,
+    dstW: number,
+    dstH: number,
+    dstOx: number,
+    dstOy: number,
+    sigma: number,
+    edgeMode: number,
+    border: Float32Array,
+    clampX0: number,
+    clampY0: number,
+    clampX1: number,
+    clampY1: number,
+    dirtyX0: number,
+    dirtyY0: number,
+    dirtyX1: number,
+    dirtyY1: number,
+    sourceId: number,
+  ): Promise<Uint8Array | Outcome>;
+  blurGpuStats?(): Float64Array;
 }
 
 export function listVersion(): Uint32Array;

@@ -545,6 +545,8 @@ pub struct Gpu {
     mask_side: u32,
     /// Rasterises glyph masks (on the CPU, as the CPU backend does: the same coverage).
     raster: masks::Rasterizer,
+    /// Reusable reference Gaussian blur pass and shareable GPU blur pyramids.
+    pub blur: crate::blur::gpu::GpuBlur,
     pub health: Arc<Health>,
     pub adapter: String,
     pub backend: &'static str,
@@ -887,6 +889,8 @@ impl Gpu {
         bindings.insert(CHECKER_ID, checker.create_view(&Default::default()));
         let fallback_adapter = is_software_adapter(&info);
         let details = format_details(&info, &adapter_limits, adapter_features, backend_name, fallback_adapter);
+        let blur_fmt = crate::blur::gpu::preferred_intermediate_format(&adapter);
+        let blur = crate::blur::gpu::GpuBlur::new(&device, blur_fmt, 32 << 20);
         let mut gpu = Self {
             adapter: format!(
                 "{} ({:?}, {:?}){}",
@@ -939,6 +943,7 @@ impl Gpu {
             masks: MaskCache::new(mask_bytes),
             mask_side,
             raster: masks::Rasterizer::default(),
+            blur,
             health,
             submits: 0,
             bytes: (ATLAS_SIDE * ATLAS_SIDE * 4 + 16 * 16 * 4) as usize,
@@ -1101,13 +1106,13 @@ impl Gpu {
 
     /// GPU memory the engine has allocated.
     pub fn bytes(&self) -> usize {
-        self.bytes
+        self.bytes + self.blur.bytes()
     }
 
     /// Refuses an allocation of `bytes` (beside `freed`, about to go) past the budget.
     fn reserve(&self, bytes: usize, freed: usize, what: &str) -> Result<()> {
         // Read-back buffers in flight count until they land.
-        let held = self.bytes + self.readbacks.bytes.get();
+        let held = self.bytes() + self.readbacks.bytes.get();
         if held - freed + bytes > self.budget {
             return Err(EngineError::limit(format!(
                 "{what} would take the engine's GPU memory to {} MiB; the most is {} MiB",
@@ -1316,7 +1321,7 @@ impl Gpu {
 
     /// Bytes the engine holds on the GPU outside its tile pages.
     fn bytes_beside_tiles(&self) -> usize {
-        self.bytes.saturating_sub(self.pages.len() * PAGE_BYTES)
+        self.bytes().saturating_sub(self.pages.len() * PAGE_BYTES)
     }
 
     /// Fits the tiles kept to the budget: what's left of it beside everything else, at most
@@ -1405,6 +1410,7 @@ impl Gpu {
         self.ensure_frames(w, h)?;
         self.ensure_compositor();
         self.masks.begin_frame();
+        self.blur.begin_frame();
         let t0 = now();
         self.tiles.begin(background, halo);
         self.fit_tiles(store.limits.tile_bytes);
@@ -2638,6 +2644,147 @@ impl Gpu {
             h,
             row,
             InFlight::new(self.readbacks.clone(), row as usize * h as usize),
+        ))
+    }
+
+    /// Runs the GPU Gaussian blur pass on premultiplied RGBA8 pixels and starts reading the
+    /// result back through a buffer (for CPU-vs-GPU conformance tests).
+    #[allow(clippy::too_many_arguments)]
+    pub fn blur_probe(
+        &mut self,
+        src: &[u8],
+        src_size: (u32, u32),
+        dst_size: (u32, u32),
+        dst_origin: (i32, i32),
+        spec: &crate::blur::BlurSpec,
+        source_id: Option<u64>,
+    ) -> Result<ReadBack> {
+        self.check()?;
+        self.blur.begin_frame();
+        let (sw, sh) = src_size;
+        let (dw, dh) = dst_size;
+        let max_tex = self.device.limits().max_texture_dimension_2d;
+        if sw == 0 || sh == 0 || dw == 0 || dh == 0 {
+            return Err(EngineError::malformed("blur probe dimensions must be non-zero"));
+        }
+        if sw > max_tex || sh > max_tex || dw > max_tex || dh > max_tex {
+            return Err(EngineError::limit("blur probe dimensions exceed GPU texture limit"));
+        }
+        let src_bytes = (sw as usize)
+            .checked_mul(sh as usize)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or_else(|| EngineError::limit("blur probe source size overflow"))?;
+        if src.len() != src_bytes {
+            return Err(EngineError::malformed("blur probe pixels don't match size"));
+        }
+        let dst_bytes = (dw as usize)
+            .checked_mul(dh as usize)
+            .and_then(|n| n.checked_mul(4))
+            .ok_or_else(|| EngineError::limit("blur probe destination size overflow"))?;
+        if self.readbacks.count.get() >= READBACKS {
+            return Err(EngineError::new(
+                ErrorCode::State,
+                "read-backs already in flight: wait for one to land",
+            ));
+        }
+        let cb = spec.clamp_bounds.clamp(sw as i32, sh as i32);
+        crate::blur::validate_sigma(spec.sigma, cb, spec.edge)?;
+        let key = source_id.map(|id| crate::blur::PyramidKey::new(id, spec.clamp_bounds, spec.edge));
+        let blur_work = self.blur.estimate_work_bytes(src_size, dst_size, dst_origin, spec, key);
+        let row = (dw * 4).next_multiple_of(256);
+        let readback_bytes = (row as usize)
+            .checked_mul(dh as usize)
+            .ok_or_else(|| EngineError::limit("blur read-back size overflow"))?;
+        let total_need = src_bytes
+            .saturating_add(dst_bytes)
+            .saturating_add(readback_bytes)
+            .saturating_add(blur_work);
+        if self.reserve(total_need, 0, "a blur read-back").is_err() {
+            // Between submissions: release idle blur cache entries and re-estimate peak work.
+            self.blur.clear();
+            let blur_work = self.blur.estimate_work_bytes(src_size, dst_size, dst_origin, spec, key);
+            let total_need = src_bytes
+                .saturating_add(dst_bytes)
+                .saturating_add(readback_bytes)
+                .saturating_add(blur_work);
+            self.reserve(total_need, 0, "a blur read-back")?;
+        }
+        let src_tex = texture(
+            &self.device,
+            sw,
+            sh,
+            wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            "blur probe src",
+        );
+        write(&self.queue, &src_tex, 0, 0, sw, sh, src);
+        let src_view = src_tex.create_view(&Default::default());
+        let dst_tex = texture(
+            &self.device,
+            dw,
+            dh,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+            "blur probe dst",
+        );
+        // Zero-fill destination so callers can verify pixels outside `spec.dirty` are untouched.
+        let zeros = vec![0u8; (dw as usize) * (dh as usize) * 4];
+        write(&self.queue, &dst_tex, 0, 0, dw, dh, &zeros);
+        let dst_view = dst_tex.create_view(&Default::default());
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("blur probe"),
+        });
+        if let Err(e) = self.blur.encode(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &src_view,
+            src_size,
+            &dst_view,
+            dst_size,
+            dst_origin,
+            spec,
+            key,
+        ) {
+            drop(encoder);
+            self.blur.flush_retired();
+            return Err(e);
+        }
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("blur probe readback"),
+            size: u64::from(row) * u64::from(dh),
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        encoder.copy_texture_to_buffer(
+            wgpu::TexelCopyTextureInfo {
+                texture: &dst_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyBufferInfo {
+                buffer: &buffer,
+                layout: wgpu::TexelCopyBufferLayout {
+                    offset: 0,
+                    bytes_per_row: Some(row),
+                    rows_per_image: None,
+                },
+            },
+            wgpu::Extent3d {
+                width: dw,
+                height: dh,
+                depth_or_array_layers: 1,
+            },
+        );
+        self.queue.submit([encoder.finish()]);
+        self.submits += 1;
+        self.blur.flush_retired();
+        self.check()?;
+        Ok((
+            buffer,
+            dw,
+            dh,
+            row,
+            InFlight::new(self.readbacks.clone(), row as usize * dh as usize),
         ))
     }
 }

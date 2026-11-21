@@ -133,6 +133,44 @@ export interface GpuInfo {
   readonly fallback: boolean;
 }
 
+export type BlurEdge =
+  | { readonly kind: "zero" }
+  | { readonly kind: "clamp" }
+  | { readonly kind: "border"; readonly color: readonly [number, number, number, number] };
+
+export interface BlurRect {
+  readonly x0: number;
+  readonly y0: number;
+  readonly x1: number;
+  readonly y1: number;
+}
+
+export interface BlurProbeOptions {
+  /** Premultiplied RGBA8 source pixels. */
+  readonly src: Uint8Array;
+  readonly srcWidth: number;
+  readonly srcHeight: number;
+  readonly dstWidth?: number;
+  readonly dstHeight?: number;
+  readonly dstOriginX?: number;
+  readonly dstOriginY?: number;
+  readonly sigma: number;
+  readonly edge?: BlurEdge;
+  readonly clampBounds?: BlurRect;
+  readonly dirty?: BlurRect;
+  /** CPU only: force the full-resolution semantic reference above `DIRECT_SIGMA_MAX`. */
+  readonly reference?: boolean;
+  /** GPU only: non-zero shares/reuses a cached GPU blur pyramid across equal inputs. */
+  readonly sourceId?: number;
+}
+
+export interface BlurCacheStats {
+  readonly hits: number;
+  readonly misses: number;
+  readonly evicted: number;
+  readonly bytes: number;
+}
+
 /** The longest side the engine draws, and the largest export (2× of a 4,096 px frame). */
 export const MAX_SIDE = 8192;
 /** Rows a band export renders at once, at most. */
@@ -1137,6 +1175,95 @@ export class RenderEngine {
     return outcome(v) as Result<Uint8Array>;
   }
 
+  /** Runs the reference Gaussian blur on the CPU (premultiplied RGBA8, for conformance tests). */
+  blurCpu(options: BlurProbeOptions): Result<Uint8Array> {
+    const a = blurArgs(options);
+    return this.#call((e) => {
+      const res = outcome(
+        e.blurCpu(
+          options.src,
+          options.srcWidth,
+          options.srcHeight,
+          a.dstW,
+          a.dstH,
+          a.dstOx,
+          a.dstOy,
+          options.sigma,
+          a.edgeMode,
+          a.border,
+          a.cb.x0,
+          a.cb.y0,
+          a.cb.x1,
+          a.cb.y1,
+          a.dirty.x0,
+          a.dirty.y0,
+          a.dirty.x1,
+          a.dirty.y1,
+          options.reference ?? false,
+        ),
+      );
+      return res.ok ? { ok: true as const, value: e.pixels() } : res;
+    }) as Result<Uint8Array>;
+  }
+
+  /** Runs the GPU Gaussian blur pass (premultiplied RGBA8, for CPU-vs-GPU conformance tests). */
+  async blurGpu(options: BlurProbeOptions): Promise<Result<Uint8Array>> {
+    const a = blurArgs(options);
+    const p = this.#call((e) =>
+      e.blurGpu?.(
+        options.src,
+        options.srcWidth,
+        options.srcHeight,
+        a.dstW,
+        a.dstH,
+        a.dstOx,
+        a.dstOy,
+        options.sigma,
+        a.edgeMode,
+        a.border,
+        a.cb.x0,
+        a.cb.y0,
+        a.cb.x1,
+        a.cb.y1,
+        a.dirty.x0,
+        a.dirty.y0,
+        a.dirty.x1,
+        a.dirty.y1,
+        options.sourceId ?? 0,
+      ),
+    );
+    if (isFailure(p)) return p;
+    if (!(p instanceof Promise)) return fail(ErrorCode.NotAvailable, "no GPU");
+    let v: Uint8Array | Glue.Outcome;
+    try {
+      v = await p;
+    } catch (err) {
+      return this.#trapped(err);
+    }
+    if (!this.#live()) {
+      if (!(v instanceof Uint8Array)) unfinalized(v);
+      return this.#dead ?? fail(ErrorCode.State, "the engine was disposed");
+    }
+    if (v instanceof Uint8Array) return { ok: true, value: v };
+    return outcome(v) as Result<Uint8Array>;
+  }
+
+  /** GPU blur pyramid cache statistics. */
+  blurGpuStats(): Result<BlurCacheStats> {
+    return this.#value(() =>
+      this.#call((e) => {
+        if (!e.blurGpuStats) return fail(ErrorCode.NotAvailable, "no GPU");
+        const s = e.blurGpuStats();
+        return {
+          hits: s[0] ?? 0,
+          misses: s[1] ?? 0,
+          evicted: s[2] ?? 0,
+          bytes: s[3] ?? 0,
+        };
+      }),
+    );
+  }
+
   /** Frees the engine's memory (nothing, if its instance is gone). */
   dispose(): void {
     const e = this.#live();
@@ -1148,6 +1275,20 @@ export class RenderEngine {
     this.#engine = null;
     this.#dead ??= fail(ErrorCode.State, "the engine was disposed");
   }
+}
+
+function blurArgs(o: BlurProbeOptions) {
+  const dstW = o.dstWidth ?? o.srcWidth;
+  const dstH = o.dstHeight ?? o.srcHeight;
+  const dstOx = o.dstOriginX ?? 0;
+  const dstOy = o.dstOriginY ?? 0;
+  const cb: BlurRect = o.clampBounds ?? { x0: 0, y0: 0, x1: o.srcWidth, y1: o.srcHeight };
+  const dirty: BlurRect = o.dirty ?? { x0: dstOx, y0: dstOy, x1: dstOx + dstW, y1: dstOy + dstH };
+  const edge = o.edge ?? { kind: "zero" };
+  const edgeMode = edge.kind === "clamp" ? 1 : edge.kind === "border" ? 2 : 0;
+  const border =
+    edge.kind === "border" ? new Float32Array(edge.color) : new Float32Array([0, 0, 0, 0]);
+  return { dstW, dstH, dstOx, dstOy, cb, dirty, edgeMode, border };
 }
 
 function isFailure(v: unknown): v is Failure {

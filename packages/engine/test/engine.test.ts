@@ -188,6 +188,7 @@ describe.skipIf(!built("worker") && !process.env.CI)("the engine's modules", () 
         "pngAbort",
         "setLimit",
         "bandRows",
+        "blurCpu",
       ])
         expect(typeof proto[name], name).toBe("function");
       expect(Array.from(m.glue.listVersion())).toEqual([1, 2]);
@@ -201,8 +202,105 @@ describe.skipIf(!built("worker") && !process.env.CI)("the engine's modules", () 
     expect(worker.glue.gpuBackend()).toBe("");
     for (const m of [browser, webgl]) {
       const proto = m.glue.Engine.prototype as unknown as Record<string, unknown>;
-      for (const name of ["attachGpu", "renderGpu", "gpuCheck", "gpuPixels", "gpuFinished"])
+      for (const name of [
+        "attachGpu",
+        "renderGpu",
+        "gpuCheck",
+        "gpuPixels",
+        "gpuFinished",
+        "blurGpu",
+        "blurGpuStats",
+      ])
         expect(typeof proto[name], name).toBe("function");
+    }
+  });
+
+  it("run the reference Gaussian blur bit-identically in worker, WebGPU and WebGL2 CPU builds", () => {
+    const a = new RenderEngine(worker);
+    const b = new RenderEngine(browser);
+    const c = new RenderEngine(webgl);
+    const w = 97;
+    const h = 73;
+    const src = new Uint8Array(w * h * 4);
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = (y * w + x) * 4;
+        if (x === 0 || y === 0 || (x >= 20 && x < 70 && y >= 15 && y < 55)) {
+          src[i] = 220;
+          src[i + 1] = 130;
+          src[i + 2] = 60;
+          src[i + 3] = 255;
+        }
+      }
+    }
+    for (const sigma of [0, 3.5, 14, 28]) {
+      for (const edge of [
+        { kind: "zero" as const },
+        { kind: "clamp" as const },
+        { kind: "border" as const, color: [0.2, 0.4, 0.6, 0.9] as const },
+      ]) {
+        const ra = a.blurCpu({ src, srcWidth: w, srcHeight: h, sigma, edge });
+        const rb = b.blurCpu({ src, srcWidth: w, srcHeight: h, sigma, edge });
+        const rc = c.blurCpu({ src, srcWidth: w, srcHeight: h, sigma, edge });
+        if (!ra.ok || !rb.ok || !rc.ok) throw new Error("blurCpu failed");
+        expect(Buffer.from(ra.value).equals(Buffer.from(rb.value))).toBe(true);
+        expect(Buffer.from(ra.value).equals(Buffer.from(rc.value))).toBe(true);
+      }
+    }
+    a.dispose();
+    b.dispose();
+    c.dispose();
+  });
+
+  it("handles extreme Gaussian blur sigmas cleanly without trapping Wasm", () => {
+    for (const mod of [worker, browser, webgl]) {
+      const e = new RenderEngine(mod);
+      // 1x1 Clamp is an exact constant plane at any finite sigma, including 1e9.
+      const one = new Uint8Array([255, 255, 255, 255]);
+      for (const sigma of [1, 1e9]) {
+        const r = e.blurCpu({
+          src: one,
+          srcWidth: 1,
+          srcHeight: 1,
+          sigma,
+          edge: { kind: "clamp" },
+        });
+        expect(r.ok).toBe(true);
+        if (r.ok) expect(Array.from(r.value)).toEqual([255, 255, 255, 255]);
+      }
+      // 2x2 Clamp at sigma = 256 stays within bounded taps and succeeds.
+      const two = new Uint8Array([
+        255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+      ]);
+      const ok256 = e.blurCpu({
+        src: two,
+        srcWidth: 2,
+        srcHeight: 2,
+        sigma: 256,
+        edge: { kind: "clamp" },
+      });
+      expect(ok256.ok).toBe(true);
+      // Non-constant source past MAX_BLUR_SIGMA refuses with ErrorCode.Limit without trapping.
+      const refused = e.blurCpu({
+        src: two,
+        srcWidth: 2,
+        srcHeight: 2,
+        sigma: 1e9,
+        edge: { kind: "clamp" },
+      });
+      expect(refused.ok).toBe(false);
+      if (!refused.ok) expect(refused.code).toBe(ErrorCode.Limit);
+      // Shared Wasm instance stays healthy after the refusal.
+      const after = e.blurCpu({
+        src: one,
+        srcWidth: 1,
+        srcHeight: 1,
+        sigma: 2,
+        edge: { kind: "clamp" },
+      });
+      expect(after.ok).toBe(true);
+      if (after.ok) expect(Array.from(after.value)).toEqual([255, 255, 255, 255]);
+      e.dispose();
     }
   });
 

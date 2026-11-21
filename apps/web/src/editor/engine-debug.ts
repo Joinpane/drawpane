@@ -14,6 +14,9 @@ import {
   type Rect,
 } from "@drawpane/editor";
 import {
+  type BlurCacheStats,
+  type BlurEdge,
+  type BlurRect,
   type EngineModule,
   type FrameStats,
   type GpuInfo,
@@ -29,6 +32,13 @@ const toBase64 = (bytes: Uint8Array) => {
   for (let i = 0; i < bytes.length; i += 0x8000)
     s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   return btoa(s);
+};
+
+const fromBase64 = (b64: string) => {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+  return out;
 };
 
 export interface EngineRender {
@@ -395,6 +405,69 @@ export function engineDebug(editor: Editor) {
     ): Promise<GpuInfo | { error: string }> {
       const e = await engineFor(backend, compatibility);
       return typeof e === "string" ? { error: e } : (e.gpu ?? { error: "no GPU" });
+    },
+
+    /**
+     * Runs the reference Gaussian blur on CPU (full reference and pyramid) and GPU for the same
+     * premultiplied RGBA8 input (for CPU-vs-GPU conformance tests).
+     */
+    async blurProbe(options: {
+      src: string;
+      srcWidth: number;
+      srcHeight: number;
+      dstWidth?: number;
+      dstHeight?: number;
+      dstOriginX?: number;
+      dstOriginY?: number;
+      sigma: number;
+      edge?: BlurEdge;
+      clampBounds?: BlurRect;
+      dirty?: BlurRect;
+      sourceId?: number;
+      compatibility?: boolean;
+    }): Promise<{
+      ok: boolean;
+      error?: string;
+      cpuRef?: string;
+      cpuPyr?: string;
+      gpu?: string;
+      stats?: BlurCacheStats;
+      gpuInfo?: GpuInfo | null;
+    }> {
+      const e = await engineFor("gpu", options.compatibility ?? false);
+      if (typeof e === "string") return { ok: false, error: e };
+      const src = fromBase64(options.src);
+      const common = {
+        src,
+        srcWidth: options.srcWidth,
+        srcHeight: options.srcHeight,
+        sigma: options.sigma,
+        ...(options.dstWidth !== undefined ? { dstWidth: options.dstWidth } : {}),
+        ...(options.dstHeight !== undefined ? { dstHeight: options.dstHeight } : {}),
+        ...(options.dstOriginX !== undefined ? { dstOriginX: options.dstOriginX } : {}),
+        ...(options.dstOriginY !== undefined ? { dstOriginY: options.dstOriginY } : {}),
+        ...(options.edge !== undefined ? { edge: options.edge } : {}),
+        ...(options.clampBounds !== undefined ? { clampBounds: options.clampBounds } : {}),
+        ...(options.dirty !== undefined ? { dirty: options.dirty } : {}),
+      };
+      const cpuRef = e.blurCpu({ ...common, reference: true });
+      if (!cpuRef.ok) return { ok: false, error: cpuRef.message };
+      const cpuPyr = e.blurCpu({ ...common, reference: false });
+      if (!cpuPyr.ok) return { ok: false, error: cpuPyr.message };
+      const gpu = await e.blurGpu({
+        ...common,
+        ...(options.sourceId !== undefined ? { sourceId: options.sourceId } : {}),
+      });
+      if (!gpu.ok) return { ok: false, error: gpu.message, gpuInfo: e.gpu };
+      const stats = e.blurGpuStats();
+      return {
+        ok: true,
+        cpuRef: toBase64(cpuRef.value),
+        cpuPyr: toBase64(cpuPyr.value),
+        gpu: toBase64(gpu.value),
+        ...(stats.ok ? { stats: stats.value } : {}),
+        gpuInfo: e.gpu,
+      };
     },
 
     /** Builds the page's list and times a patch from a one-layer change (the bench's numbers). */

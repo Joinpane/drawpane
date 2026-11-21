@@ -14,7 +14,9 @@
  *   is that test here; the others read frames back through a buffer
  *   (`drawpane:engine-present` = "readback").
  */
-import { score } from "@drawpane/engine/compare";
+import { readFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { outsideTolerance, score } from "@drawpane/engine/compare";
 import { expect, type Page, test } from "@playwright/test";
 import { dropImage, freshInstance, type Instance } from "./fresh-instance";
 
@@ -76,6 +78,7 @@ type W = {
     unsupported(): Record<string, number>;
   };
   drawpaneEngine: {
+    blurProbe: ReturnType<typeof import("../src/editor/engine-debug").engineDebug>["blurProbe"];
     readbackPair(w: number, h: number): Promise<Array<{ ok: boolean; code?: number }>>;
     render(o: object): Promise<{ ok: boolean; rgba?: string; error?: string }>;
     canvasRender(o: object): Promise<string>;
@@ -854,6 +857,220 @@ test.describe
       await expect
         .poll(() => showing(page), { timeout: 15_000 })
         .toEqual({ engine: true, content: false });
+    });
+
+    test("reference Gaussian blur agrees across CPU reference, CPU pyramid, and GPU", async () => {
+      test.setTimeout(120_000);
+      const unpremul = (pre: Uint8Array): Uint8Array => {
+        const out = new Uint8Array(pre.length);
+        for (let i = 0; i < pre.length; i += 4) {
+          const a = pre[i + 3] as number;
+          out[i + 3] = a;
+          if (a === 0) continue;
+          if (a === 255) {
+            out[i] = pre[i] as number;
+            out[i + 1] = pre[i + 1] as number;
+            out[i + 2] = pre[i + 2] as number;
+          } else {
+            out[i] = Math.min(255, Math.round(((pre[i] as number) * 255) / a));
+            out[i + 1] = Math.min(255, Math.round(((pre[i + 1] as number) * 255) / a));
+            out[i + 2] = Math.min(255, Math.round(((pre[i + 2] as number) * 255) / a));
+          }
+        }
+        return out;
+      };
+      const makePattern = (w: number, h: number, kind: number): Uint8Array => {
+        const px = new Uint8Array(w * h * 4);
+        for (let y = 0; y < h; y++) {
+          for (let x = 0; x < w; x++) {
+            const i = (y * w + x) * 4;
+            let c: [number, number, number, number] = [0, 0, 0, 0];
+            if (kind === 0) {
+              if (x >= w / 4 && x < (3 * w) / 4 && y >= h / 4 && y < (3 * h) / 4)
+                c = [220, 120, 40, 255];
+            } else if (kind === 1) {
+              if (x < w / 2 && y < h / 2) c = [255, 255, 255, 255];
+              else if (x >= w / 2 && y < h / 2) c = [20, 40, 80, 255];
+              else if (x < w / 2 && y >= h / 2) c = [120, 30, 10, 140];
+            } else if (kind === 2) {
+              c =
+                x === 0 || y === 0 || x === w - 1 || y === h - 1
+                  ? [255, 255, 255, 255]
+                  : [16, 24, 32, 255];
+            } else if (kind === 3) {
+              c = Math.floor(x / 2) % 2 === 0 ? [240, 200, 100, 255] : [20, 30, 180, 255];
+            } else {
+              const r = Math.floor((x * 255) / w);
+              const g = Math.floor((y * 255) / h);
+              const a = 128 + Math.floor(((x + y) * 127) / (w + h));
+              c = [
+                Math.floor((r * a) / 255),
+                Math.floor((g * a) / 255),
+                Math.floor((180 * a) / 255),
+                a,
+              ];
+            }
+            px[i] = c[0];
+            px[i + 1] = c[1];
+            px[i + 2] = c[2];
+            px[i + 3] = c[3];
+          }
+        }
+        return px;
+      };
+
+      const w = 129;
+      const h = 97;
+      const edges = [
+        { kind: "zero" as const },
+        { kind: "clamp" as const },
+        { kind: "border" as const, color: [0.15, 0.35, 0.55, 0.8] as const },
+      ] as const;
+      const cases: Array<{ kind: number; edge: (typeof edges)[number]; sigma: number }> = [
+        { kind: 0, edge: edges[0], sigma: 0 },
+        { kind: 0, edge: edges[0], sigma: 0.5 },
+        { kind: 0, edge: edges[0], sigma: 4 },
+        { kind: 0, edge: edges[0], sigma: 16 },
+        { kind: 1, edge: edges[0], sigma: 8 },
+        { kind: 1, edge: edges[0], sigma: 24 },
+        { kind: 1, edge: edges[1], sigma: 14 },
+        { kind: 1, edge: edges[2], sigma: 32 },
+        { kind: 2, edge: edges[1], sigma: 6 },
+        { kind: 2, edge: edges[1], sigma: 28 },
+        { kind: 3, edge: edges[0], sigma: 18 },
+        { kind: 4, edge: edges[1], sigma: 40 },
+        { kind: 4, edge: edges[2], sigma: 16 },
+      ];
+      const pattern = (kind: number) => Buffer.from(makePattern(w, h, kind)).toString("base64");
+
+      let worstGpuVsPyr = 0;
+      let worstGpuVsRef = 0;
+      for (const c of cases) {
+        const res = await page.evaluate(
+          (args) => (window as unknown as W).drawpaneEngine.blurProbe(args),
+          { src: pattern(c.kind), srcWidth: w, srcHeight: h, sigma: c.sigma, edge: c.edge },
+        );
+        expect(res.ok, res.error).toBe(true);
+        const gpu = unpremul(Buffer.from(res.gpu ?? "", "base64"));
+        const cpuPyr = unpremul(Buffer.from(res.cpuPyr ?? "", "base64"));
+        const cpuRef = unpremul(Buffer.from(res.cpuRef ?? "", "base64"));
+        const sPyr = score(gpu, cpuPyr, w, h);
+        const sRef = score(gpu, cpuRef, w, h);
+        worstGpuVsPyr = Math.max(worstGpuVsPyr, sPyr.mean);
+        worstGpuVsRef = Math.max(worstGpuVsRef, sRef.mean);
+        expect(
+          outsideTolerance(sPyr),
+          `GPU vs CPU pyramid (kind=${c.kind} edge=${c.edge.kind} sigma=${c.sigma}): mean=${sPyr.mean.toFixed(4)} p99=${sPyr.p99} max=${sPyr.max} tile=${sPyr.worstTile.toFixed(3)}`,
+        ).toEqual([]);
+        expect(
+          outsideTolerance(sRef),
+          `GPU vs CPU reference (kind=${c.kind} edge=${c.edge.kind} sigma=${c.sigma}): mean=${sRef.mean.toFixed(4)} p99=${sRef.p99} max=${sRef.max} tile=${sRef.worstTile.toFixed(3)}`,
+        ).toEqual([]);
+      }
+
+      // Dirty subrect + offset destination matches BOTH cropped full GPU blur AND offset CPU.
+      const cb = { x0: 11, y0: 9, x1: 117, y1: 87 };
+      const dirty = { x0: 21, y0: 17, x1: 103, y1: 79 };
+      const dw = dirty.x1 - dirty.x0;
+      const dh = dirty.y1 - dirty.y0;
+      const full = await page.evaluate(
+        (args) => (window as unknown as W).drawpaneEngine.blurProbe(args),
+        {
+          src: pattern(1),
+          srcWidth: w,
+          srcHeight: h,
+          sigma: 20,
+          edge: edges[1],
+          clampBounds: cb,
+        },
+      );
+      expect(full.ok, full.error).toBe(true);
+      const fullGpu = unpremul(Buffer.from(full.gpu ?? "", "base64"));
+      const croppedFullGpu = new Uint8Array(dw * dh * 4);
+      for (let y = 0; y < dh; y++) {
+        const srcOff = ((dirty.y0 + y) * w + dirty.x0) * 4;
+        croppedFullGpu.set(fullGpu.subarray(srcOff, srcOff + dw * 4), y * dw * 4);
+      }
+      const sub = await page.evaluate(
+        (args) => (window as unknown as W).drawpaneEngine.blurProbe(args),
+        {
+          src: pattern(1),
+          srcWidth: w,
+          srcHeight: h,
+          dstWidth: dw,
+          dstHeight: dh,
+          dstOriginX: dirty.x0,
+          dstOriginY: dirty.y0,
+          sigma: 20,
+          edge: edges[1],
+          clampBounds: cb,
+          dirty,
+        },
+      );
+      expect(sub.ok, sub.error).toBe(true);
+      const subGpu = unpremul(Buffer.from(sub.gpu ?? "", "base64"));
+      const subVsCpu = score(subGpu, unpremul(Buffer.from(sub.cpuPyr ?? "", "base64")), dw, dh);
+      expect(
+        outsideTolerance(subVsCpu),
+        `offset GPU vs offset CPU: mean=${subVsCpu.mean.toFixed(4)} max=${subVsCpu.max}`,
+      ).toEqual([]);
+      const subVsFull = score(subGpu, croppedFullGpu, dw, dh);
+      expect(
+        outsideTolerance(subVsFull),
+        `offset GPU vs cropped full GPU: mean=${subVsFull.mean.toFixed(4)} max=${subVsFull.max}`,
+      ).toEqual([]);
+
+      // Shared GPU blur pyramid across two blurs with the same sourceId gets a cache hit.
+      const s1 = await page.evaluate(
+        (args) => (window as unknown as W).drawpaneEngine.blurProbe(args),
+        {
+          src: pattern(4),
+          srcWidth: w,
+          srcHeight: h,
+          sigma: 22,
+          edge: edges[1],
+          dirty: { x0: 8, y0: 8, x1: 80, y1: 80 },
+          sourceId: 77,
+        },
+      );
+      expect(s1.ok, s1.error).toBe(true);
+      const hitsBefore = s1.stats?.hits ?? 0;
+      const s2 = await page.evaluate(
+        (args) => (window as unknown as W).drawpaneEngine.blurProbe(args),
+        {
+          src: pattern(4),
+          srcWidth: w,
+          srcHeight: h,
+          sigma: 30,
+          edge: edges[1],
+          dirty: { x0: 16, y0: 16, x1: 72, y1: 72 },
+          sourceId: 77,
+        },
+      );
+      expect(s2.ok, s2.error).toBe(true);
+      expect(s2.stats?.hits ?? 0).toBeGreaterThan(hitsBefore);
+      expect(
+        outsideTolerance(
+          score(
+            unpremul(Buffer.from(s2.gpu ?? "", "base64")),
+            unpremul(Buffer.from(s2.cpuPyr ?? "", "base64")),
+            w,
+            h,
+          ),
+        ),
+      ).toEqual([]);
+      // Extreme sigmas on GPU: 1x1 Clamp succeeds at sigma=1e9; 2x2 at sigma=1e9 refuses cleanly.
+      const onePx = Buffer.from([255, 255, 255, 255]).toString("base64");
+      const oneHuge = await page.evaluate(
+        (args) => (window as unknown as W).drawpaneEngine.blurProbe(args),
+        { src: onePx, srcWidth: 1, srcHeight: 1, sigma: 1e9, edge: edges[1] },
+      );
+      expect(oneHuge.ok, oneHuge.error).toBe(true);
+      expect(Array.from(Buffer.from(oneHuge.gpu ?? "", "base64"))).toEqual([255, 255, 255, 255]);
+
+      console.log(
+        `reference Gaussian blur conformance: worst GPU vs CPU pyramid mean=${worstGpuVsPyr.toFixed(4)}, worst GPU vs CPU reference mean=${worstGpuVsRef.toFixed(4)}`,
+      );
     });
 
     test("recovers from device loss without losing edits, then steps down to WebGL2 on the 3rd loss", async () => {
@@ -1807,3 +2024,91 @@ test.describe
       }
     });
   });
+
+test.describe("GPU blur memory budget (PR #234)", () => {
+  test.skip(!!process.env.E2E_BASE_URL, "Serves local dist/browser/ engine directly.");
+
+  test("admits Gaussian pyramid peak work against the GPU memory budget before allocating", async ({
+    page,
+  }) => {
+    const root = fileURLToPath(new URL("../../../packages/engine/dist/browser/", import.meta.url));
+    const origin = "http://localhost:51389";
+    await page.route(`${origin}/**`, async (route) => {
+      const path = new URL(route.request().url()).pathname.substring(1);
+      if (!path) return route.fulfill({ body: "<!doctype html>", contentType: "text/html" });
+      return route.fulfill({
+        body: await readFile(root + path),
+        contentType: path.endsWith(".js") ? "text/javascript" : "application/wasm",
+      });
+    });
+    await page.goto(origin);
+    const reports = await page.evaluate(async () => {
+      const url = "/engine.js";
+      const glue = (await import(url)) as typeof import("@drawpane/engine/browser-glue");
+      await glue.default({ module_or_path: "/engine_bg.wasm" });
+      const limits = [20 * 1048576 + 131072, 192 * 1048576];
+      const out = [];
+      for (const budget of limits) {
+        const engine = new glue.Engine(0, 0);
+        const set = engine.setLimit("gpu_bytes", budget);
+        if (!set.ok) throw new Error(set.message);
+        set.free();
+        const device = await glue.createGpu(null, 0);
+        if (!device.ok || !engine.attachGpu || !engine.blurGpu || !engine.blurGpuStats) {
+          throw new Error(device.message);
+        }
+        const attach = engine.attachGpu(device);
+        device.free();
+        if (!attach.ok) throw new Error(attach.message);
+        attach.free();
+        const side = budget === limits[0] ? 1024 : 2048;
+        const source = new Uint8Array(side * side * 4).fill(255);
+        const rounds = budget === limits[0] ? 2 : 8;
+        const samples = [];
+        for (let i = 1; i <= rounds; i++) {
+          const rendered = await engine.blurGpu(
+            source,
+            side,
+            side,
+            8,
+            8,
+            32,
+            32,
+            16,
+            1,
+            new Float32Array(4),
+            0,
+            0,
+            side,
+            side,
+            32,
+            32,
+            40,
+            40,
+            i,
+          );
+          const outcome =
+            rendered instanceof Uint8Array
+              ? "OK"
+              : { code: rendered.code, message: rendered.message };
+          if (!(rendered instanceof Uint8Array)) rendered.free();
+          samples.push({ outcome, cache: [...engine.blurGpuStats()] });
+        }
+        engine.free();
+        out.push({ budget, side, samples });
+      }
+      return out;
+    });
+    // Under a 20.125 MiB budget (16 MiB atlas + 4 MiB src + 2.13 MiB pyramid > 20.125 MiB),
+    // call 1 must refuse cleanly with Limit (4) BEFORE allocating any pyramid.
+    expect(reports[0]?.samples[0]?.outcome).toMatchObject({ code: 4 });
+    expect(reports[0]?.samples[0]?.cache[3]).toBe(0);
+    expect(reports[0]?.samples[1]?.outcome).toMatchObject({ code: 4 });
+    expect(reports[0]?.samples[1]?.cache[3]).toBe(0);
+    // Under a 192 MiB budget, 8 distinct 2048x2048 sources all succeed within the 32 MiB pyramid cap.
+    expect(
+      reports[1]?.samples.every((s) => s.outcome === "OK" && (s.cache[3] ?? 0) <= 32 * 1048576),
+    ).toBe(true);
+    expect(reports[1]?.samples.at(-1)?.cache[2]).toBeGreaterThan(0);
+  });
+});

@@ -6,6 +6,7 @@
 //! code and message. Nothing panics across it: inputs are validated (`wire.rs`, `record.rs`),
 //! sizes are limited (`limits.rs`), and the fuzz tests (`tests/fuzz.rs`) hold that.
 
+pub mod blur;
 pub mod cpu;
 pub mod diamond;
 pub mod engine;
@@ -601,6 +602,147 @@ impl Engine {
     pub fn exporting_png(&self) -> bool {
         self.png.is_some()
     }
+
+    /// Runs the reference Gaussian blur on premultiplied RGBA8 pixels on the CPU (for conformance
+    /// tests): `edge_mode` is 0=Zero, 1=Clamp, 2=Border; `reference` forces the full-resolution
+    /// semantic oracle even above `DIRECT_SIGMA_MAX`. On success, premultiplied RGBA8 pixels are
+    /// ready in `pixels()`.
+    #[allow(clippy::too_many_arguments)]
+    #[wasm_bindgen(js_name = blurCpu)]
+    pub fn blur_cpu_probe(
+        &mut self,
+        src: &[u8],
+        src_w: u32,
+        src_h: u32,
+        dst_w: u32,
+        dst_h: u32,
+        dst_ox: i32,
+        dst_oy: i32,
+        sigma: f32,
+        edge_mode: u32,
+        border: Vec<f32>,
+        clamp_x0: i32,
+        clamp_y0: i32,
+        clamp_x1: i32,
+        clamp_y1: i32,
+        dirty_x0: i32,
+        dirty_y0: i32,
+        dirty_x1: i32,
+        dirty_y1: i32,
+        reference: bool,
+    ) -> Outcome {
+        let max_side = self.core.store.limits.texture_side;
+        if src_w == 0 || src_h == 0 || dst_w == 0 || dst_h == 0 {
+            return Outcome::err(EngineError::malformed("blur dimensions must be non-zero"));
+        }
+        if src_w > max_side || src_h > max_side || dst_w > max_side || dst_h > max_side {
+            return Outcome::err(EngineError::limit(format!(
+                "blur dimensions exceed maximum side {max_side}"
+            )));
+        }
+        let Some(src_bytes) = (src_w as usize)
+            .checked_mul(src_h as usize)
+            .and_then(|n| n.checked_mul(4))
+        else {
+            return Outcome::err(EngineError::limit("blur source size overflow"));
+        };
+        if src.len() != src_bytes {
+            return Outcome::err(EngineError::malformed(
+                "blur source pixel length does not match dimensions",
+            ));
+        }
+        let Some(dst_bytes) = (dst_w as usize)
+            .checked_mul(dst_h as usize)
+            .and_then(|n| n.checked_mul(4))
+        else {
+            return Outcome::err(EngineError::limit("blur destination size overflow"));
+        };
+        if !sigma.is_finite() || sigma < 0.0 {
+            return Outcome::err(EngineError::malformed("blur sigma must be finite and non-negative"));
+        }
+        let spec = blur_spec_from_args(
+            sigma, edge_mode, &border, clamp_x0, clamp_y0, clamp_x1, clamp_y1, dirty_x0, dirty_y0, dirty_x1, dirty_y1,
+        );
+        let cb = spec.clamp_bounds.clamp(src_w as i32, src_h as i32);
+        if let Err(e) = blur::validate_sigma(spec.sigma, cb, spec.edge) {
+            return Outcome::err(e);
+        }
+        let budget = self.core.store.limits.memory_bytes;
+        if budget > 0 {
+            let held = self.core.held_bytes();
+            let extra = if reference {
+                let r = blur::kernel_radius(spec.sigma) as usize;
+                let ih = (dst_h as usize).saturating_add(r.saturating_mul(2));
+                (dst_w as usize).saturating_mul(ih).saturating_mul(16)
+            } else {
+                // Worst-case level-1 pyramid + scratch working set estimate.
+                (src_bytes / 2).saturating_add(dst_bytes)
+            };
+            if held.saturating_add(dst_bytes).saturating_add(extra) > budget {
+                return Outcome::err(EngineError::limit("blur working set exceeds engine memory budget"));
+            }
+        }
+        self.pixels.clear();
+        self.pixels.resize(dst_bytes, 0);
+        if reference {
+            blur::blur_reference(
+                src,
+                (src_w, src_h),
+                &mut self.pixels,
+                (dst_w, dst_h),
+                (dst_ox, dst_oy),
+                &spec,
+            );
+        } else if let Err(e) = blur::try_blur_cpu(
+            src,
+            (src_w, src_h),
+            &mut self.pixels,
+            (dst_w, dst_h),
+            (dst_ox, dst_oy),
+            &spec,
+        ) {
+            self.pixels.clear();
+            return Outcome::err(e);
+        }
+        Outcome::ok()
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn blur_spec_from_args(
+    sigma: f32,
+    edge_mode: u32,
+    border: &[f32],
+    clamp_x0: i32,
+    clamp_y0: i32,
+    clamp_x1: i32,
+    clamp_y1: i32,
+    dirty_x0: i32,
+    dirty_y0: i32,
+    dirty_x1: i32,
+    dirty_y1: i32,
+) -> blur::BlurSpec {
+    let edge = match edge_mode {
+        1 => blur::EdgeMode::Clamp,
+        2 => blur::EdgeMode::Border(rgba(border)),
+        _ => blur::EdgeMode::Zero,
+    };
+    blur::BlurSpec {
+        sigma: if sigma.is_finite() { sigma.max(0.0) } else { 0.0 },
+        edge,
+        clamp_bounds: exec::IRect {
+            x0: clamp_x0,
+            y0: clamp_y0,
+            x1: clamp_x1,
+            y1: clamp_y1,
+        },
+        dirty: exec::IRect {
+            x0: dirty_x0,
+            y0: dirty_y0,
+            x1: dirty_x1,
+            y1: dirty_y1,
+        },
+    }
 }
 
 /// A failure as a JS value (an `Outcome`), for promises that resolve to one instead of rejecting.
@@ -858,5 +1000,71 @@ impl Engine {
                 Err(e) => Ok(failure(e)),
             }
         })
+    }
+
+    /// Runs the GPU Gaussian blur pass on premultiplied RGBA8 pixels and resolves to premultiplied
+    /// RGBA8 (or an `Outcome` on failure), for CPU-vs-GPU conformance tests.
+    /// `source_id`: non-zero shares/reuses the cached GPU blur pyramid across calls.
+    #[allow(clippy::too_many_arguments)]
+    #[wasm_bindgen(js_name = blurGpu)]
+    pub fn blur_gpu_probe(
+        &mut self,
+        src: &[u8],
+        src_w: u32,
+        src_h: u32,
+        dst_w: u32,
+        dst_h: u32,
+        dst_ox: i32,
+        dst_oy: i32,
+        sigma: f32,
+        edge_mode: u32,
+        border: Vec<f32>,
+        clamp_x0: i32,
+        clamp_y0: i32,
+        clamp_x1: i32,
+        clamp_y1: i32,
+        dirty_x0: i32,
+        dirty_y0: i32,
+        dirty_x1: i32,
+        dirty_y1: i32,
+        source_id: u32,
+    ) -> js_sys::Promise {
+        let spec = blur_spec_from_args(
+            sigma, edge_mode, &border, clamp_x0, clamp_y0, clamp_x1, clamp_y1, dirty_x0, dirty_y0, dirty_x1, dirty_y1,
+        );
+        let sid = (source_id != 0).then(|| u64::from(source_id));
+        let pair = self.core.gpu.as_ref().map(|g| (g.device.clone(), g.health.clone()));
+        let start = self
+            .core
+            .gpu
+            .as_mut()
+            .map(|g| g.blur_probe(src, (src_w, src_h), (dst_w, dst_h), (dst_ox, dst_oy), &spec, sid));
+        wasm_bindgen_futures::future_to_promise(async move {
+            let (Some((device, health)), Some(start)) = (pair, start) else {
+                return Ok(failure(EngineError::new(error::ErrorCode::State, "no GPU attached")));
+            };
+            let (buffer, w, h, row, flight) = match start {
+                Ok(s) => s,
+                Err(e) => return Ok(failure(e)),
+            };
+            match gpu::read_back_straight(device, health, buffer, w, h, row, flight, true).await {
+                Ok(px) => Ok(px.into()),
+                Err(e) => Ok(failure(e)),
+            }
+        })
+    }
+
+    /// GPU blur pyramid cache statistics: `[hits, misses, evicted, bytes]`.
+    #[wasm_bindgen(js_name = blurGpuStats)]
+    pub fn blur_gpu_stats(&self) -> Vec<f64> {
+        match self.core.gpu.as_ref() {
+            Some(g) => vec![
+                g.blur.stats.hits as f64,
+                g.blur.stats.misses as f64,
+                g.blur.stats.evicted as f64,
+                g.blur.stats.bytes as f64,
+            ],
+            None => vec![0.0; 4],
+        }
     }
 }
