@@ -1416,6 +1416,7 @@ function layoutClosure(
   ids: Iterable<string>,
   moved?: ReadonlySet<string>,
   changed: Iterable<string> = [],
+  whole: Iterable<string> = [],
 ): { roots: string[]; dirty: Set<string> } {
   const roots = new Set<string>();
   const dirty = new Set<string>();
@@ -1423,7 +1424,12 @@ function layoutClosure(
     let top: string | null = null;
     let node = doc.get(id);
     if (node && moved?.has(id)) {
-      if (!inFlow(node)) return null;
+      // A group is as big as everything in it, taking part in the flow or not: what decides
+      // is whether its outermost group does.
+      let member: NodeRecord = node;
+      for (let up = doc.get(node.parent); up?.type === "group"; up = doc.get(up.parent))
+        member = up;
+      if (!inFlow(member)) return null;
     } else if (isLayoutFrame(node)) {
       top = node.id;
       dirty.add(node.id);
@@ -1444,6 +1450,15 @@ function layoutClosure(
     if (top) roots.add(top);
   }
   for (const id of changed) walk(id);
+  // Everything under these is new (a swapped instance's layers): every layout frame in it.
+  for (const id of whole) {
+    walk(id);
+    const stack = [id];
+    for (let at = stack.pop(); at !== undefined; at = stack.pop()) {
+      if (isLayoutFrame(doc.get(at))) dirty.add(at);
+      for (const child of doc.childIds(at)) stack.push(child);
+    }
+  }
   // Each root is as far up as layout reaches from where the change was, so a
   // root inside another (an auto layout frame in a plain frame in an auto
   // layout frame) isn't covered by it: both run.
@@ -1567,7 +1582,8 @@ export function flexDistribution(doc: Doc, frame: NodeRecord): FlexDistribution 
  * hugs or has a size of its own, with no change in it, keeps what's inside
  * it as it is: laid out already, it would come out the same. `changed`
  * names every layer the edit's operations made so far, `moved` those whose
- * only change was their position (see `layoutClosure`).
+ * only change was their position, and `whole` layers everything under which
+ * is new, every frame of it laid out (see `layoutClosure`).
  */
 export function layoutOps(
   doc: Doc,
@@ -1575,11 +1591,21 @@ export function layoutOps(
   options: {
     shrinkEmpty?: ReadonlySet<string>;
     keepEmpty?: ReadonlySet<string>;
-    changes?: { readonly moved?: ReadonlySet<string>; readonly changed?: Iterable<string> };
+    changes?: {
+      readonly moved?: ReadonlySet<string>;
+      readonly changed?: Iterable<string>;
+      readonly whole?: Iterable<string>;
+    };
   } = {},
 ): Op[] {
   const { changes } = options;
-  const { roots, dirty } = layoutClosure(doc, ids, changes?.moved, changes?.changed);
+  const { roots, dirty } = layoutClosure(
+    doc,
+    ids,
+    changes?.moved,
+    changes?.changed,
+    changes?.whole,
+  );
   if (roots.length === 0) return [];
   const inexact = changes ? inexactFrames(doc) : null;
   const exact = (frame: NodeRecord) => dirty.has(frame.id) || !!inexact?.has(frame.id);

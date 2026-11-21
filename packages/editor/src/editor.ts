@@ -421,7 +421,10 @@ function layoutChanges(
     if (was === "other") continue;
     if (op.op !== "set") kinds.set(op.id, "other");
     else if (op.prop === "x" || op.prop === "y") kinds.set(op.id, "moved");
-    else if (LAYOUT_NEUTRAL.has(op.prop)) kinds.set(op.id, was ?? "neutral");
+    // A binding is neutral only by its own value: what it binds can be a layout input
+    // (visibility, a padding), resolving differently from the field it drives.
+    else if (LAYOUT_NEUTRAL.has(op.prop) && op.prop !== "bindings")
+      kinds.set(op.id, was ?? "neutral");
     else kinds.set(op.id, "other");
   }
   const moved = new Set<string>();
@@ -768,9 +771,21 @@ export class Editor {
           layoutTargets.delete(id);
           changed.delete(id);
         }
+        // A swapped (or unlinked) instance presents other layers, in its copies too: laid out
+        // whole, since none of them was laid out where it now is.
+        const whole = this.doc.tokens
+          .source()
+          .builtFrom(
+            roundOps.flatMap((op) =>
+              (op.op === "set" && op.prop === "instanceOf") ||
+              (op.op === "create" && op.props.instanceOf !== undefined)
+                ? [op.id]
+                : [],
+            ),
+          );
         const layout = layoutOps(this.doc, layoutTargets, {
           ...(shrinkEmpty.size > 0 ? { shrinkEmpty, keepEmpty: alreadyEmpty } : {}),
-          ...(this.#relayoutSubtree ? {} : { changes: { moved, changed } }),
+          ...(this.#relayoutSubtree ? {} : { changes: { moved, changed, whole } }),
         });
         layout.push(...constraintOps(this.doc, layout));
         layout.push(...pathResizeOps(this.doc, layout));
@@ -884,7 +899,9 @@ export class Editor {
     // inherited), each standing for its copies too (markAncestors).
     if (modeRoots.length > 0 && this.doc.tokens.boundCount() > 0) {
       const seen = new Set<string>();
-      const stack = modeRoots;
+      // From each root and every copy of it: a copy inherits the mode change, under its own
+      // bindings (a copy layer can bind what its main's doesn't).
+      const stack = [...this.doc.tokens.source().builtFrom(modeRoots)];
       for (let id = stack.pop(); id !== undefined; id = stack.pop()) {
         if (seen.has(id)) continue;
         seen.add(id);
