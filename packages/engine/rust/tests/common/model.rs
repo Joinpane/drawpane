@@ -193,6 +193,11 @@ pub fn gen_rec(r: &mut Rng, readers: bool) -> Rec {
     if !readers && r.chance(0.08) {
         rec.layer_blend = 1 + r.below(17);
     }
+    if !readers && !text && r.chance(0.07) {
+        rec.mask = 1 + r.below(5);
+    } else if !readers && r.chance(0.05) {
+        rec.flags |= 256;
+    }
     if !text && r.chance(0.6) {
         if r.chance(0.5) {
             rec.ops.push(Op::Clip {

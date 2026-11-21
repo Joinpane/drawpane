@@ -649,8 +649,23 @@ impl Engine {
                         }
                     }
                     crate::record::Op::Children => {
+                        let has_pic_mask = node.children.iter().any(|c| {
+                            self.store
+                                .nodes
+                                .get(c)
+                                .is_some_and(|n| !n.record.hidden() && n.record.is_picture_mask())
+                        });
+                        let child_iso = if has_pic_mask {
+                            let mask_iso = next_iso
+                                .saturating_add(next_tile_bytes.saturating_mul(2))
+                                .saturating_add(next_scene_bytes);
+                            peak_total = peak_total.max(mask_iso.saturating_add(next_tile_bytes));
+                            mask_iso
+                        } else {
+                            next_iso
+                        };
                         for &c in &node.children {
-                            stack.push((c, world, next_cols, next_rows, next_iso));
+                            stack.push((c, world, next_cols, next_rows, child_iso));
                         }
                     }
                     _ => {}

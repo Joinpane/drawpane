@@ -23,12 +23,17 @@ struct BlendParams {
     dst_origin_y: i32,
     mode: u32,
     opacity: f32,
+    mask_kind: u32,
+    _pad0: u32,
+    _pad1: u32,
+    _pad2: u32,
 };
 
 @group(0) @binding(0) var src_tex: texture_2d<f32>;
 @group(0) @binding(1) var backdrop_tex: texture_2d<f32>;
 @group(0) @binding(2) var clip_tex: texture_2d<f32>;
 @group(0) @binding(3) var<uniform> params: BlendParams;
+@group(0) @binding(4) var mask_tex: texture_2d<f32>;
 
 fn separable_ch(mode: u32, cb: f32, cs: f32) -> f32 {
     switch mode {
@@ -179,6 +184,20 @@ fn blend_pixel(mode: u32, s: vec4f, b: vec4f) -> vec4f {
     return clamp(vec4f(rgb, a), vec4f(0.0), vec4f(1.0));
 }
 
+fn picture_coverage(p: vec2i) -> f32 {
+    if (params.mask_kind == 0u) {
+        return 1.0;
+    }
+    let mask = textureLoad(mask_tex, p, 0);
+    if (params.mask_kind == 3u) {
+        return select(0.0, 1.0, mask.a > 0.0);
+    }
+    if (params.mask_kind == 5u) {
+        return clamp(dot(mask.rgb, vec3f(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+    }
+    return mask.a;
+}
+
 fn composite(s_raw: vec4f, b: vec4f, opacity: f32) -> vec4f {
     if (params.mode == 18u) {
         return clamp(b + (s_raw - b) * opacity, vec4f(0.0), vec4f(1.0));
@@ -202,7 +221,7 @@ fn fs_blend(in: VsOut) -> @location(0) vec4f {
     let p = vec2i(in.pos.xy) - vec2i(params.dst_origin_x, params.dst_origin_y);
     let s_raw = textureLoad(src_tex, p, 0);
     let b = textureLoad(backdrop_tex, p, 0);
-    return composite(s_raw, b, params.opacity);
+    return composite(s_raw, b, params.opacity * picture_coverage(p));
 }
 
 @fragment
@@ -211,5 +230,5 @@ fn fs_blend_clipped(in: VsOut) -> @location(0) vec4f {
     let clip_a = textureLoad(clip_tex, p, 0).a;
     let s_raw = textureLoad(src_tex, p, 0);
     let b = textureLoad(backdrop_tex, p, 0);
-    return composite(s_raw, b, params.opacity * clip_a);
+    return composite(s_raw, b, params.opacity * clip_a * picture_coverage(p));
 }

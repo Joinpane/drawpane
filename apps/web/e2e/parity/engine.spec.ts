@@ -56,9 +56,6 @@ const EXPECTED_CELL_FALLBACKS: Record<string, Record<string, readonly string[]>>
     "background-clear-12": ["backgroundBlur"],
     "background-ellipse-16": ["backgroundBlur"],
   },
-  corners: {
-    mask: ["mask"],
-  },
   "corners-glass": {
     "glass-ios": ["glass"],
     "glass-full": ["glass"],
@@ -99,7 +96,7 @@ const EXPECTED_CELL_FALLBACKS: Record<string, Record<string, readonly string[]>>
     "blur-burn-material": ["backgroundBlur"],
   },
 };
-/** Suites whose every cell needs a phase 3 feature (glass, masks, grain). */
+/** Suites whose every cell needs a phase 3 feature (glass, grain). */
 const PHASE_3 = new Set([
   "glass",
   "glass-dark",
@@ -107,7 +104,6 @@ const PHASE_3 = new Set([
   "glass-probe",
   "glass-probe-2",
   "glass-stack",
-  "masks",
   "grain",
 ]);
 /**
@@ -134,6 +130,7 @@ const MIN_DRAWN: Record<string, number> = {
   shadows: 15,
   blurs: 4,
   "linear-blends": 19,
+  masks: 7,
 };
 
 const WANT_BACKENDS = (process.env.ENGINE_PARITY_BACKENDS ?? "gpu,webgl")

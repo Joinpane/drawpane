@@ -634,6 +634,7 @@ pub struct Gpu {
     retired_shadows: Vec<GpuCachedShadow>,
     /// Blend shader pass (all 17 non-normal blend modes and `BLEND_LERP`).
     blend: crate::blend::gpu::GpuBlend,
+    /// Picture mask shader pass (outline picture, alpha, luminance).
     /// Root target state during `draw_into`.
     root_render: Option<RootRender>,
     /// Active offscreen isolation stack (top is the current render target).
@@ -4123,9 +4124,19 @@ impl Backend for Gpu {
         Ok(())
     }
 
-    fn pop_blended(&mut self, blend: u32, opacity: f32, open: &[Open]) -> Result<()> {
-        if self.offscreen_stack.last().is_some_and(|t| t.scene_pending) {
-            self.flush_active_scene()?;
+    fn pop_composited(&mut self, blend: u32, opacity: f32, mask_kind: Option<u32>, open: &[Open]) -> Result<()> {
+        let flushed = if self.offscreen_stack.last().is_some_and(|t| t.scene_pending) {
+            self.flush_active_scene()
+        } else {
+            Ok(())
+        };
+        let picture = mask_kind.and_then(|_| self.offscreen_stack.pop());
+        if let Err(e) = flushed {
+            if let Some(picture) = picture {
+                self.offscreen_pool.push(picture);
+                self.abort_isolated();
+            }
+            return Err(e);
         }
         let Some(top) = self.offscreen_stack.pop() else {
             return Ok(());
@@ -4135,6 +4146,7 @@ impl Backend for Gpu {
         let ah = u32::from(top.active_size.1);
         if alpha <= 0.0 || aw == 0 || ah == 0 {
             self.offscreen_pool.push(top);
+            self.offscreen_pool.extend(picture);
             let (pw, ph) = self.active_scene_size();
             self.scene.reset_and_resize(pw, ph);
             self.reopen_clips(open);
@@ -4151,6 +4163,7 @@ impl Backend for Gpu {
         })();
         if let Err(e) = prep {
             self.offscreen_pool.push(top);
+            self.offscreen_pool.extend(picture);
             let (pw, ph) = self.active_scene_size();
             self.scene.reset_and_resize(pw, ph);
             self.reopen_clips(open);
@@ -4266,6 +4279,7 @@ impl Backend for Gpu {
                 &top.view,
                 &backdrop.view,
                 clip_view,
+                picture.as_ref().zip(mask_kind).map(|(p, kind)| (&p.view, kind)),
                 parent_view,
                 dst_origin,
                 (aw, ah),
@@ -4276,6 +4290,7 @@ impl Backend for Gpu {
         })();
         if let Err(e) = res {
             self.offscreen_pool.push(top);
+            self.offscreen_pool.extend(picture);
             let (pw, ph) = self.active_scene_size();
             self.scene.reset_and_resize(pw, ph);
             self.reopen_clips(open);
@@ -4287,6 +4302,7 @@ impl Backend for Gpu {
             root.flush_ms += now() - t0;
         }
         self.offscreen_pool.push(top);
+        self.offscreen_pool.extend(picture);
         let (pw, ph) = self.active_scene_size();
         self.scene.reset_and_resize(pw, ph);
         self.reopen_clips(open);

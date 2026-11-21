@@ -23,7 +23,19 @@ pub const FLAG_PROVISIONAL: u32 = 8;
 pub const FLAG_POST: u32 = 32;
 /// Has a non-normal layer blend mode (`1..=17`, minor 1.4) encoded after `post_effects` (or `coarse`).
 pub const FLAG_BLEND: u32 = 64;
-const KNOWN_FLAGS: u32 = FLAG_HIDDEN | FLAG_ISOLATE | FLAG_GROUP | FLAG_PROVISIONAL | FLAG_POST | FLAG_BLEND;
+/// Layer is a mask (`1..=5`, minor 1.4) encoded after `blend` (or `post_effects` / `coarse`).
+pub const FLAG_MASK: u32 = 128;
+/// Layer ends an active sibling mask scope (visible clipping frame, minor 1.4).
+pub const FLAG_ENDS_MASK: u32 = 256;
+const KNOWN_FLAGS: u32 =
+    FLAG_HIDDEN | FLAG_ISOLATE | FLAG_GROUP | FLAG_PROVISIONAL | FLAG_POST | FLAG_BLEND | FLAG_MASK | FLAG_ENDS_MASK;
+
+/// Mask kind values when `FLAG_MASK` is set (matching `MASK` in `wire.ts`).
+pub const MASK_OUTLINE_NONZERO: u32 = 1;
+pub const MASK_OUTLINE_EVENODD: u32 = 2;
+pub const MASK_OUTLINE_PICTURE: u32 = 3;
+pub const MASK_ALPHA: u32 = 4;
+pub const MASK_LUMINANCE: u32 = 5;
 
 /// Bits of `Record::unsupported` (`UNSUPPORTED` in wire.ts) the engine sets itself, from what it
 /// decodes, so anything it would refuse while drawing refuses its page before any drawing, on
@@ -417,6 +429,8 @@ pub struct Record {
     pub post_effects: Vec<PostEffect>,
     /// Layer blend mode (`0` normal, `1..=17` per `BLEND` in `wire.ts`).
     pub blend: u32,
+    /// Mask kind (`0` none, `1..=5` per `MASK` in `wire.ts` when `FLAG_MASK` is set).
+    pub mask: u32,
     /// Features TypeScript found it needs that the engine doesn't draw (a bit set, see
     /// `UNSUPPORTED` in wire.ts). Held to report, never drawn around.
     pub unsupported: u32,
@@ -434,6 +448,15 @@ impl Record {
     }
     pub fn provisional(&self) -> bool {
         self.flags & FLAG_PROVISIONAL != 0
+    }
+    pub fn is_mask(&self) -> bool {
+        self.mask != 0
+    }
+    pub fn is_picture_mask(&self) -> bool {
+        self.mask >= MASK_OUTLINE_PICTURE
+    }
+    pub fn ends_mask(&self) -> bool {
+        self.flags & FLAG_ENDS_MASK != 0
     }
     /// The images its paints draw (by handle), for invalidating what shows them when one changes.
     pub fn images(&self) -> impl Iterator<Item = u32> + '_ {
@@ -528,6 +551,7 @@ impl Record {
     pub fn has_offscreen_pass(&self) -> bool {
         !self.post_effects.is_empty()
             || self.has_own_blend()
+            || self.is_picture_mask()
             || self
                 .ops
                 .iter()
@@ -562,6 +586,7 @@ impl Record {
             coarse: Vec::new(),
             post_effects: Vec::new(),
             blend: 0,
+            mask: 0,
             unsupported: 0,
         }
     }
@@ -1038,7 +1063,7 @@ pub fn decode(r: &mut Reader, limits: &Limits, minor: u16) -> Result<Record> {
         allowed_flags &= !FLAG_PROVISIONAL;
     }
     if minor < 4 {
-        allowed_flags &= !(FLAG_POST | FLAG_BLEND);
+        allowed_flags &= !(FLAG_POST | FLAG_BLEND | FLAG_MASK | FLAG_ENDS_MASK);
     }
     if flags & !allowed_flags != 0 {
         return Err(EngineError::malformed(format!(
@@ -1142,6 +1167,18 @@ pub fn decode(r: &mut Reader, limits: &Limits, minor: u16) -> Result<Record> {
     } else {
         0
     };
+    let mask = if flags & FLAG_MASK != 0 {
+        let kind = r.u32()?;
+        if !(MASK_OUTLINE_NONZERO..=MASK_LUMINANCE).contains(&kind) {
+            return Err(EngineError::malformed(format!("unknown mask kind {kind}")));
+        }
+        if matches!(kind, MASK_OUTLINE_NONZERO | MASK_OUTLINE_EVENODD) && paths.is_empty() {
+            return Err(EngineError::malformed("outline shape mask has no shape path"));
+        }
+        kind
+    } else {
+        0
+    };
     let record = Record {
         flags,
         opacity,
@@ -1154,6 +1191,7 @@ pub fn decode(r: &mut Reader, limits: &Limits, minor: u16) -> Result<Record> {
         coarse,
         post_effects,
         blend,
+        mask,
         unsupported: unsupported | derived,
     };
     if !record.coarse.is_empty() && record.ops.iter().any(|op| matches!(op, Op::Children)) {

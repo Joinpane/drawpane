@@ -234,6 +234,21 @@ pub fn blend_cpu(
     opacity: f32,
     clip: Option<&[u8]>,
 ) {
+    composite_cpu(src, dst, dst_size, src_size, offset, mode, opacity, clip, None);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn composite_cpu(
+    src: &[u8],
+    dst: &mut [u8],
+    dst_size: (u32, u32),
+    src_size: (u32, u32),
+    offset: (i32, i32),
+    mode: u32,
+    opacity: f32,
+    clip: Option<&[u8]>,
+    mask: Option<(&[u8], u32)>,
+) {
     let alpha = opacity.clamp(0.0, 1.0);
     if alpha <= 0.0 {
         return;
@@ -287,6 +302,13 @@ pub fn blend_cpu(
             } else {
                 alpha
             };
+            let scale = match mask {
+                Some((picture, kind)) => scale * crate::mask::coverage(&picture[si..si + 4], kind),
+                None => scale,
+            };
+            if scale <= 0.0 {
+                continue;
+            }
             if mode == 17 {
                 // Figma rounds half-byte linear-burn results up. Keep the calculation in
                 // byte units so an exact half such as 128 - 159 * 0.5 stays exact.
@@ -364,10 +386,11 @@ pub mod gpu {
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
                             has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new(16),
+                            min_binding_size: wgpu::BufferSize::new(32),
                         },
                         count: None,
                     },
+                    tex_entry(4),
                 ],
             });
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -406,7 +429,7 @@ pub mod gpu {
             let pipe_clipped = make_pipe("blend clipped", "fs_blend_clipped");
             let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
                 label: Some("blend params"),
-                size: 16,
+                size: 32,
                 usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
                 mapped_at_creation: false,
             });
@@ -446,6 +469,7 @@ pub mod gpu {
             src_view: &wgpu::TextureView,
             backdrop_view: &wgpu::TextureView,
             clip_view: Option<&wgpu::TextureView>,
+            picture: Option<(&wgpu::TextureView, u32)>,
             dst_view: &wgpu::TextureView,
             dst_origin: (u32, u32),
             size: (u32, u32),
@@ -455,11 +479,13 @@ pub mod gpu {
             if size.0 == 0 || size.1 == 0 {
                 return;
             }
-            let mut bytes = [0u8; 16];
+            let mut bytes = [0u8; 32];
             bytes[0..4].copy_from_slice(&(dst_origin.0 as i32).to_le_bytes());
             bytes[4..8].copy_from_slice(&(dst_origin.1 as i32).to_le_bytes());
             bytes[8..12].copy_from_slice(&mode.to_le_bytes());
             bytes[12..16].copy_from_slice(&opacity.clamp(0.0, 1.0).to_le_bytes());
+            let (picture_view, mask_kind) = picture.unwrap_or((&self.dummy_view, 0));
+            bytes[16..20].copy_from_slice(&mask_kind.to_le_bytes());
             queue.write_buffer(&self.uniform_buf, 0, &bytes);
             let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("blend bg"),
@@ -480,6 +506,10 @@ pub mod gpu {
                     wgpu::BindGroupEntry {
                         binding: 3,
                         resource: self.uniform_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(picture_view),
                     },
                 ],
             });

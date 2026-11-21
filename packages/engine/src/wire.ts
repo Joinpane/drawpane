@@ -37,6 +37,15 @@ export const FLAG = {
   provisional: 8,
   post: 32,
   blend: 64,
+  mask: 128,
+  endsMask: 256,
+} as const;
+export const MASK = {
+  outlineShapeNonZero: 1,
+  outlineShapeEvenOdd: 2,
+  outlinePicture: 3,
+  alpha: 4,
+  luminance: 5,
 } as const;
 export const POST = { layerBlur: 1 } as const;
 
@@ -295,6 +304,7 @@ export interface WireRecord {
   readonly coarse: readonly WireOp[];
   readonly postEffects?: readonly WirePostEffect[];
   readonly blend?: number;
+  readonly mask?: number;
 }
 
 const PAINT_KIND = PAINT;
@@ -444,6 +454,9 @@ export class ListWriter {
       }
       if (r.flags & FLAG.blend) {
         this.u32(r.blend ?? 0);
+      }
+      if (r.flags & FLAG.mask) {
+        this.u32(r.mask ?? 0);
       }
     });
   }
