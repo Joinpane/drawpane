@@ -226,50 +226,6 @@ fn full_image(
     }
 }
 
-/// Progressive JPEG retains 64 i16 coefficients per sampled block. The maxima
-/// set the MCU size, and each component occupies its own sampled, padded grid.
-fn progressive_bytes(mut bytes: &[u8], natural: (u32, u32)) -> Option<usize> {
-    bytes = bytes.strip_prefix(&[0xff, 0xd8])?;
-    loop {
-        bytes = bytes.strip_prefix(&[0xff])?;
-        while let Some(rest) = bytes.strip_prefix(&[0xff]) {
-            bytes = rest;
-        }
-        let (&marker, segment) = bytes.split_first()?;
-        if marker == 0xda || marker == 0xd9 {
-            return None;
-        }
-        let length = u16::from_be_bytes(segment.get(..2)?.try_into().ok()?) as usize;
-        let (head, rest) = segment.split_at_checked(length)?;
-        let payload = head.get(2..)?;
-        bytes = rest;
-        if marker != 0xc2 {
-            continue;
-        }
-        let count = usize::from(*payload.get(5)?);
-        let components = payload.get(6..)?;
-        if !(1..=4).contains(&count) || components.len() != count * 3 {
-            return None;
-        }
-        let mut max_h = 0;
-        let mut max_v = 0;
-        let mut blocks_per_mcu = 0;
-        for component in components.as_chunks::<3>().0 {
-            let horizontal = usize::from(component[1] >> 4);
-            let vertical = usize::from(component[1] & 15);
-            if !(1..=4).contains(&horizontal) || !(1..=4).contains(&vertical) {
-                return None;
-            }
-            max_h = max_h.max(horizontal);
-            max_v = max_v.max(vertical);
-            blocks_per_mcu += horizontal * vertical;
-        }
-        let columns = (natural.0 as usize).div_ceil(8 * max_h);
-        let rows = (natural.1 as usize).div_ceil(8 * max_v);
-        return Some(columns * rows * blocks_per_mcu * 64 * size_of::<i16>());
-    }
-}
-
 fn jpeg_scaled(natural: (u32, u32), target: (u32, u32), bytes: &[u8], room: usize) -> Result<Option<Vec<u8>>, JsError> {
     use jpeg_decoder::{CodingProcess, Decoder, PixelFormat};
 
@@ -287,10 +243,7 @@ fn jpeg_scaled(natural: (u32, u32), target: (u32, u32), bytes: &[u8], room: usiz
     }
     let coded = pixels(w.into(), h.into());
     let coefficients = match info.coding_process {
-        CodingProcess::DctSequential => 0,
-        CodingProcess::DctProgressive => {
-            progressive_bytes(bytes, natural).ok_or_else(|| JsError::new("invalid progressive JPEG frame"))?
-        }
+        CodingProcess::DctSequential | CodingProcess::DctProgressive => decoder.progressive_coefficient_bytes(),
         CodingProcess::Lossless => pixels(natural.0, natural.1) * 8,
     };
     let decode_peak = coded * 8 + coefficients;
@@ -349,5 +302,27 @@ pub fn decode_image(
         ImageFormat::Gif => gif_rows(natural, target, bytes, room),
         ImageFormat::WebP => full_image(natural, target, bytes, room, ImageFormat::WebP),
         _ => Err(JsError::new("unsupported image format")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn progressive_phone_photo_matches_unmodified_jpeg_at_each_reduced_scale() {
+        let bytes = include_bytes!("../../../../../apps/worker/test/fixtures/progressive-4032.jpg");
+        for (width, height) in [(504, 378), (1008, 756), (2016, 1512)] {
+            let mut dense = jpeg_decoder_reference::Decoder::new(bytes.as_slice());
+            assert_eq!(dense.scale(width, height).unwrap(), (width, height));
+            assert_eq!(
+                dense.info().unwrap().coding_process,
+                jpeg_decoder_reference::CodingProcess::DctProgressive
+            );
+            let mut compact = jpeg_decoder::Decoder::new(bytes.as_slice());
+            assert_eq!(compact.scale(width, height).unwrap(), (width, height));
+            assert!(
+                compact.decode().unwrap() == dense.decode().unwrap(),
+                "progressive pixels differ at {width} × {height}"
+            );
+        }
     }
 }
