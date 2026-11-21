@@ -103,6 +103,7 @@ const PHASE_3 = new Set([
   "glass-ellipses",
   "glass-probe",
   "glass-probe-2",
+  "glass-stack",
   "grain",
 ]);
 /**

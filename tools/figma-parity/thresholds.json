@@ -358,5 +358,22 @@
     "outside-hollow": 0.71,
     "outside-multipaint": 1.59,
     "outside-list": 0.88
+  },
+  "glass-stack": {
+    "partial-overlap": 9.54,
+    "partial-clear": 12.77,
+    "full-containment": 12.52,
+    "nested-glass": 12.49,
+    "nested-with-child": 7.13,
+    "between-sibling": 8.19,
+    "lower-fill-stroke": 7.18,
+    "diff-params": 7,
+    "three-stacked": 8.13,
+    "over-bg-blur": 4.1,
+    "opacity-half": 4.67,
+    "blend-multiply": 7.48,
+    "adjacent-frost": 2.52,
+    "bg-blur-over-glass": 4.91,
+    "lower-faded-group": 9.6
   }
 }
