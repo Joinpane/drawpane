@@ -358,6 +358,9 @@ impl Engine {
             if full {
                 g.forget_last();
             }
+            if full || drag_parts {
+                g.forget_motion_prefix();
+            }
         }
     }
 
@@ -1213,17 +1216,40 @@ impl Engine {
             },
         };
         let drag = self.drag_frame();
+        let simple_reader_drag =
+            options.moving && drag.as_ref().is_some_and(|d| d.split.is_none()) && self.store.nodes.len() <= 512;
+        let prefix = if simple_reader_drag && options.budget_ms > 0.0 {
+            self.dragging.as_ref().and_then(|d| {
+                let kids = &self.store.nodes.get(&crate::store::ROOT)?.children;
+                // The prefix must end at a root sibling boundary before every edited
+                // record and before any effect can require a live backdrop plane.
+                if self.store.has_context() || kids.iter().any(|id| self.store.nodes[id].record.is_mask()) {
+                    return None;
+                }
+                if !d.ids.iter().all(|id| kids.contains(id)) {
+                    return None;
+                }
+                let cut = kids
+                    .iter()
+                    .position(|id| d.ids.contains(id) || self.store.subtree_has_pass(*id))?;
+                (cut != 0).then_some((d.serial, cut))
+            })
+        } else {
+            None
+        };
         let gpu = self
             .gpu
             .as_mut()
             .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
         // One pass avoids rasterizing the same reader and prefix in each touched tile. For
         // interactive drags bound the scene walk. Dense pages use their retained tiles.
-        let simple_reader_drag =
-            options.moving && drag.as_ref().is_some_and(|d| d.split.is_none()) && self.store.nodes.len() <= 512;
         let whole = halo_opt != Some(0) && (options.budget_ms <= 0.0 || simple_reader_drag);
         let whole_stats = if whole {
-            match gpu.render_whole(&self.store, &frame, background, self.generation, options.moving) {
+            let mut result = gpu.render_whole(&self.store, &frame, background, self.generation, options.moving, prefix);
+            if prefix.is_some() && result.as_ref().is_err_and(|e| e.code == ErrorCode::Limit) {
+                result = gpu.render_whole(&self.store, &frame, background, self.generation, options.moving, None);
+            }
+            match result {
                 Ok(stats) => Some(stats),
                 Err(e) if e.code == ErrorCode::Limit && halo_opt.is_some() => None,
                 Err(e) => return Err(e),
@@ -1255,7 +1281,7 @@ impl Engine {
                 drag.as_ref(),
             )?
         } else {
-            gpu.render_whole(&self.store, &frame, background, self.generation, options.moving)?
+            gpu.render_whole(&self.store, &frame, background, self.generation, options.moving, None)?
         };
         // No frame is exact while text is still to come: it may paint past its box.
         if stats.exact && self.store.provisional_shown().is_some() {
@@ -1540,7 +1566,15 @@ impl Engine {
         };
         let limits = self.store.limits;
         let mut verbs = limits.frame_verbs;
-        let draw = exec::draw_split(&self.store, &mut self.cpu, &frame, &limits, &mut verbs, split);
+        let draw = exec::draw_split(
+            &self.store,
+            &mut self.cpu,
+            &frame,
+            &limits,
+            &mut verbs,
+            split,
+            frame.detail,
+        );
         self.cpu.finish();
         Ok(FrameStats {
             draw: draw?,

@@ -1071,6 +1071,16 @@ Phase 3B executes backdrop readers on CPU and GPU in the tiled renderer and band
   - Onscreen T4 WebGL2 measured 50.2 and 17.2 ms for the six-layer exact and coarse fence p95. Stacked drag content p95 was 11.1 ms, including 5.0 ms encoding and 4.0 ms rendering. Confirmed presentation intervals were 16.6 ms median, 19.5 ms p95 and 25.4 ms p99. The coarse six-layer fence and the drag work and presentation tails missed their gates.
 - **Open conformance coverage** includes desktop WebGPU presentation with hardware compositing and native Safari Metal and ANGLE-Metal.
 
+### Reader-only motion
+
+Whole-view motion draws ordinary paint at device resolution. The stand-in for an unclipped reader samples a half-resolution backdrop pyramid. A short top-level drag can reuse the stationary paint before the first affected layer or effect. The cache is limited to one view and is dropped when that paint may change or the view settles. An exact frame reruns the reader passes at full quality.
+
+In paired Chromium/WebGL2 runs on the T4, stacked drag main-thread p95 fell from 6.7 to 3.6 ms, including encoding from 3.3 to 1.2 ms. The six-layer coarse GPU fence p95 was 13.5 ms. Stacked drag frame intervals were 16.6 / 17.5 ms (p50 / p95), compared with 16.5 / 17.9 ms. The GPU-completion presentation proxy remained above the target at 18.0 ms p95. Chromium WebGPU readback and Firefox Xvfb both remained above 16.7 ms p95.
+
+The repeated paired run used the browser's animation-frame timestamp on both revisions. The timestamp marks the frame in which the benchmark observed a GPU completion. It excludes delay within that frame before the callback ran. Chromium WebGL2 met the presentation gate at 16.7 ms p95 using this clock. On the paired run, the six-layer coarse GPU fence p95 fell from 18.0 to 8.8 ms and stacked drag content p95 fell from 8.4 to 4.9 ms. Linux WebKit's drag content p95 improved from 17 to 13 ms. Its presentation p95 was still above the gate at 37 ms.
+
+The optional dense-text benchmark adds 550 text layers that qualify for stand-ins. Both revisions drew 20 tiles at p95 and presented at 33.4 ms p95 in the paired T4 WebGL2 run. Full-detail moving paint increased main-thread p95 from 28.3 to 31.5 ms. Encoding rose from 11.1 to 12.7 ms and render work from 16.9 to 18.1 ms. The repeat was interrupted by Modal's workspace spend limit. Run the same fixture with `BENCH_GLASS_DENSE_TEXT=1`.
+
 ### Frost mip phase
 
 Exact glass uses the same region split on CPU, WebGPU and WebGL2. Each chunk samples the original prefix. If the lens reads the same plane it writes, the GPU copies that plane once before drawing the first chunk. Otherwise it reads the existing glass-free plane directly.
