@@ -709,6 +709,7 @@ for (const build of ["browser", "webgl"] as const) {
       [
         { ...frame, budget: 0, moving: true },
         { ...frame, budget: 0 },
+        { ...frame, budget: 0, editorViewport: false },
       ],
       undefined,
       build,
