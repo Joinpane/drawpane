@@ -35,6 +35,7 @@ export function renderFonts(loadFile: FaceFileLoader): FontBytesLoader {
       weight: face.weight,
       italic: face.italic,
       ...(face.variable ? { variable: true } : {}),
+      ...(face.subset !== undefined ? { subset: face.subset } : {}),
     });
     if (!file) return null;
     return file instanceof ArrayBuffer ? file : file.bytes;

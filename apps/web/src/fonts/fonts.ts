@@ -170,6 +170,7 @@ type Listener = () => void;
 interface LocalFontData {
   readonly family: string;
   readonly style: string;
+  blob(): Promise<Blob>;
 }
 declare global {
   interface Window {
@@ -213,6 +214,10 @@ class FontRegistry implements FontResolver {
   #googleLoading: Promise<readonly FontFamily[]> | null = null;
   #googleEnabled: boolean | null = null;
   #local: readonly FontFamily[] | null = null;
+  #listingLocal: Promise<readonly FontFamily[]> | null = null;
+  readonly #localFaces = new Map<string, LocalFontData[]>();
+  readonly #localBytes = new WeakMap<LocalFontData, Promise<ArrayBuffer>>();
+  readonly #localListeners = new Set<(families: ReadonlySet<string>) => void>();
   readonly #stylesheets = new Set<string>();
   readonly #previews = new Map<string, Promise<string>>();
   readonly #listeners = new Set<Listener>();
@@ -474,9 +479,71 @@ class FontRegistry implements FontResolver {
   async loadLocal(): Promise<readonly FontFamily[]> {
     if (this.#local) return this.#local;
     if (!this.canListLocal || !window.queryLocalFonts) return [];
-    const faces = await window.queryLocalFonts();
+    this.#listingLocal ??= window
+      .queryLocalFonts()
+      .then((faces) => this.#registerLocal(faces))
+      .finally(() => {
+        this.#listingLocal = null;
+      });
+    return this.#listingLocal;
+  }
+
+  async #loadGrantedLocal(): Promise<void> {
+    if (this.#local || !this.canListLocal || !navigator.permissions) return;
+    try {
+      const permission = await navigator.permissions.query({
+        name: "local-fonts" as PermissionName,
+      });
+      if (permission.state === "granted") await this.loadLocal();
+    } catch {
+      // Permission is unavailable here. The browser can still lay text out in its own fonts.
+    }
+  }
+
+  onLocalFaces(listener: (families: ReadonlySet<string>) => void): void {
+    this.#localListeners.add(listener);
+  }
+
+  async localBytes(face: {
+    family: string;
+    weight: number;
+    italic: boolean;
+  }): Promise<ArrayBuffer | null> {
+    await this.#loadGrantedLocal();
+    const faces = this.#localFaces.get(face.family);
+    if (!faces?.length) return null;
+    const standard = faces.filter(
+      (f) => !/condens|compress|expand|extend|narrow|wide/i.test(f.style),
+    );
+    const widths = standard.length ? standard : faces;
+    const styled = widths.filter((f) => /italic|oblique/i.test(f.style) === face.italic);
+    const pool = styled.length ? styled : widths;
+    const weight = nearestWeight(
+      pool.map((f) => styleWeight(f.style)),
+      face.weight,
+    );
+    const selected = pool.find((f) => styleWeight(f.style) === weight);
+    if (!selected) return null;
+    let file = this.#localBytes.get(selected);
+    if (!file) {
+      file = selected
+        .blob()
+        .then((blob) => blob.arrayBuffer())
+        .catch((error) => {
+          this.#localBytes.delete(selected);
+          throw error;
+        });
+      this.#localBytes.set(selected, file);
+    }
+    return file;
+  }
+
+  #registerLocal(faces: readonly LocalFontData[]): readonly FontFamily[] {
     const byFamily = new Map<string, { upright: Set<number>; italic: Set<number> }>();
     for (const face of faces) {
+      const list = this.#localFaces.get(face.family) ?? [];
+      list.push(face);
+      this.#localFaces.set(face.family, list);
       const entry = byFamily.get(face.family) ?? { upright: new Set(), italic: new Set() };
       (/italic|oblique/i.test(face.style) ? entry.italic : entry.upright).add(
         styleWeight(face.style),
@@ -497,6 +564,7 @@ class FontRegistry implements FontResolver {
       );
     for (const f of list) this.#known.set(f.family, f);
     this.#local = list;
+    for (const listener of this.#localListeners) listener(new Set(byFamily.keys()));
     this.#changed();
     return list;
   }

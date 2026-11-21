@@ -1,6 +1,7 @@
 import type { ImageCache, ImageDemand, Size } from "@drawpane/editor";
 import type { RenderEngine } from "@drawpane/engine";
 import { sniffImage } from "@drawpane/model";
+import { colorBitmap } from "./color-glyphs";
 
 const MIB = 1024 * 1024;
 const MAX_DECODES = 4;
@@ -37,6 +38,7 @@ interface Source {
   readonly info: ImageInfo;
   version: number;
   blob?: Blob;
+  glyph?: () => ImageData | null;
   used: number;
 }
 
@@ -152,6 +154,27 @@ export class ViewImages {
 
   info(ref: string): ImageInfo | null {
     return this.#sources.get(ref)?.info ?? null;
+  }
+
+  /** Registers generated glyphs with the same handles, budget and lifetime as photos. */
+  colorGlyph(text: string, font: string, scale: number) {
+    const sprite = colorBitmap(text, font, scale);
+    if (!sprite) return null;
+    const { ref, x, y, width, height, pixels } = sprite;
+    let source = this.#sources.get(ref);
+    if (!source) {
+      source = {
+        info: { handle: this.#nextHandle++, width: pixels.width, height: pixels.height },
+        version: this.cache.encodedVersion(ref),
+        used: this.#clock,
+        glyph: () => {
+          const bitmap = colorBitmap(text, font, scale);
+          return bitmap?.ref === ref ? bitmap.pixels : null;
+        },
+      };
+      this.#sources.set(ref, source);
+    }
+    return { ref, handle: source.info.handle, x, y, width, height };
   }
 
   get residentBytes(): number {
@@ -557,13 +580,24 @@ export class ViewImages {
         const source = this.#sources.get(target.ref);
         if (!source) return;
         const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]);
-        const blob =
-          source.blob ?? (await untilAborted(this.cache.encoded(target.ref, signal), signal)).blob;
+        let input: ImageData | Blob | null;
+        if (source.glyph) {
+          input = source.glyph();
+        } else {
+          input =
+            source.blob ??
+            (await untilAborted(this.cache.encoded(target.ref, signal), signal)).blob;
+          source.blob = input;
+          this.#trimSources();
+        }
         if (abort.signal.aborted) return;
-        source.blob = blob;
-        this.#trimSources();
+        if (!input) {
+          this.#failed.set(target.ref, version);
+          this.changed();
+          return;
+        }
         bitmap = await untilAborted(
-          createImageBitmap(blob, {
+          createImageBitmap(input, {
             resizeWidth: target.width,
             resizeHeight: target.height,
             resizeQuality: "high",

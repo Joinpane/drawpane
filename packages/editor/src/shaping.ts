@@ -16,8 +16,8 @@
  * Shaping is synchronous once a face is ready, as drawing needs. Until then
  * `shape` answers null (the text draws without its features) and starts
  * loading; when the face is ready, listeners hear its family so the text is
- * measured and drawn again. A face whose bytes can't be had (a system or
- * local font) stays unavailable: the inspector says why.
+ * measured and drawn again. A face without accessible bytes stays unavailable:
+ * the inspector says why.
  *
  * A face's load has a deadline (`ShaperOptions.loadDeadlineMs`, 3 s by
  * default): one still loading then is unavailable, so its text isn't left
@@ -25,7 +25,7 @@
  * does, the face is ready then, and listeners hear it as they would have.
  * A face that failed or timed out is loaded again on `retry`.
  */
-import { type FontFeatures, GLYPH_UNITS } from "@drawpane/model";
+import { type FontFeatures, GLYPH_UNITS, scriptSlice } from "@drawpane/model";
 import { type Face, type FontBytesLoader, faceKey } from "@drawpane/raster";
 import { acquireFace, isHarfBuzzOutOfMemory, releaseFace } from "./harfbuzz-faces";
 import { isPrivateUse, MISSING_GLYPH_FAMILY, missingGlyphFont } from "./missing-glyph-font";
@@ -38,14 +38,10 @@ import type {
   ShapingRun,
   TextMeasurer,
 } from "./text";
-
-import {
-  FALLBACK_FAMILY,
-  type FontCoverage,
-  fontRuns,
-  lastResortText,
-  RIGHT_TO_LEFT,
-} from "./text-fallback";
+import { bidiText, type TextDirection } from "./text-bidi";
+import { FALLBACK_FAMILY, type FontCoverage, fontRuns, lastResortText } from "./text-fallback";
+import { transformPath } from "./vector/bounds";
+import { parsePath, serializePath } from "./vector/svg";
 
 type HarfBuzz = typeof import("harfbuzzjs");
 type HbFont = InstanceType<HarfBuzz["Font"]>;
@@ -150,6 +146,14 @@ export interface ShaperOptions {
   readonly makePath?: (d: string) => Path2D | null;
   /** How long a face may load before it's unavailable: `FACE_LOAD_DEADLINE_MS` by default. */
   readonly loadDeadlineMs?: number;
+  /** An outline face for a platform font whose bytes the browser cannot share. */
+  readonly substitute?: (face: ShapingFace) => ShapingFace | null;
+  /** Browser font name for the bundled outline, independent of a team font of the same name. */
+  readonly fallbackFamily?: string;
+  /** Bundled faces stay provisional on slow loads and retry I/O failures at these intervals. */
+  readonly bundledRetryMs?: readonly number[];
+  /** Prepared outline subsets that can cover characters after Instrument Sans. */
+  readonly fallbackFaces?: (text: string, run: ShapingRun) => readonly ShapingFace[];
 }
 
 export class Shaper {
@@ -157,11 +161,16 @@ export class Shaper {
   readonly #loadHarfBuzz: () => Promise<HarfBuzz>;
   readonly #makePath: (d: string) => Path2D | null;
   readonly #deadline: number;
+  readonly #bundledRetryMs: readonly number[];
+  readonly #fallbackFamily: string;
+  readonly #fallbackFaces: (text: string, run: ShapingRun) => readonly ShapingFace[];
+  readonly #faceRevisions = new Map<string, number>();
+  readonly #substitute: (face: ShapingFace) => ShapingFace | null;
   #harfBuzz: Promise<HarfBuzz> | null = null;
   readonly #faces = new Map<string, FaceEntry>();
   /** Shaped runs, and null for runs that can't be shaped faithfully (see #shape). */
   readonly #runs = new Map<string, ShapedText | null>();
-  readonly #engineRuns = new Map<string, EngineText>();
+  readonly #engineRuns = new Map<string, { result: EngineText; revision: number }>();
   readonly #normalized = new Map<string, string>();
   readonly #listeners = new Set<(family: string) => void>();
   #generation = 0;
@@ -170,6 +179,10 @@ export class Shaper {
     this.#loadBytes = loadBytes;
     this.#loadHarfBuzz = options.harfBuzz ?? (() => import("harfbuzzjs"));
     this.#deadline = options.loadDeadlineMs ?? FACE_LOAD_DEADLINE_MS;
+    this.#bundledRetryMs = options.bundledRetryMs ?? [];
+    this.#fallbackFamily = options.fallbackFamily ?? FALLBACK_FAMILY;
+    this.#fallbackFaces = options.fallbackFaces ?? (() => []);
+    this.#substitute = options.substitute ?? (() => null);
     this.#makePath =
       options.makePath ?? ((d) => (typeof Path2D === "undefined" ? null : new Path2D(d)));
   }
@@ -177,6 +190,17 @@ export class Shaper {
   /** Bumped each time a face becomes ready (or turns out not to be): earlier layouts are stale. */
   get generation(): number {
     return this.#generation;
+  }
+
+  faceRevision(key: string): number {
+    return this.#faceRevisions.get(key) ?? 0;
+  }
+
+  /** Start both bundled fallback families as soon as an engine view opens. */
+  preloadFallback(): void {
+    this.#entry({ family: MISSING_GLYPH_FAMILY, weight: 400, italic: false });
+    for (const italic of [false, true])
+      this.#entry({ family: this.#fallbackFamily, weight: 400, italic, variable: true });
   }
 
   /** Hears the family of each face that became ready or unavailable. */
@@ -215,6 +239,22 @@ export class Shaper {
     }
   }
 
+  /** A newly granted local-font permission can make earlier misses readable. */
+  retryUnavailable(families: ReadonlySet<string>): void {
+    for (const [key, entry] of this.#faces) {
+      if (entry.status === "unavailable" && families.has(key.split("\u0000")[0] ?? "")) {
+        this.#faces.delete(key);
+        this.#faceRevisions.set(key, ++this.#generation);
+      }
+    }
+  }
+
+  /** Widths in the browser can change independently of the outline file. */
+  invalidateMeasurements(families: ReadonlySet<string>): void {
+    const revision = ++this.#generation;
+    for (const family of families) this.#faceRevisions.set(`font:${family}`, revision);
+  }
+
   /**
    * Lets go of a ready face, freeing its fonts (and its file, when nothing
    * else holds it): the measurer's load that made it ran out of memory. The
@@ -230,7 +270,7 @@ export class Shaper {
     releaseFace(entry.hb, entry.bytes);
     this.#runs.clear();
     this.#engineRuns.clear();
-    this.#generation++;
+    this.#faceRevisions.set(key, ++this.#generation);
   }
 
   /** Waits for a face: ready, or unavailable. */
@@ -259,7 +299,7 @@ export class Shaper {
     // fallback: right-to-left text, and characters the font lacks, keep the
     // canvas's drawing (without their features) rather than come out reversed
     // or as boxes.
-    const shaped = RIGHT_TO_LEFT.test(text) ? null : this.#tryShape(entry, run, text);
+    const shaped = !run.direction && bidiText(text) ? null : this.#tryShape(entry, run, text);
     if (this.#runs.size >= MAX_RUNS) this.#runs.clear();
     this.#runs.set(key, shaped);
     return shaped;
@@ -272,87 +312,186 @@ export class Shaper {
 
   /** The canvas's fallback order, with a bundled outline wherever no face can draw a glyph. */
   shapeForEngine(text: string, run: ShapingRun, measure?: (text: string) => number): EngineText {
-    const key = `${run.key}\u0000${text}`;
-    let result = this.#engineRuns.get(key);
-    if (!result) {
-      result = this.#shapeForEngine(text, run, measure);
-      if (!("waiting" in result)) {
-        if (this.#engineRuns.size >= MAX_RUNS) this.#engineRuns.clear();
-        this.#engineRuns.set(key, result);
-      }
+    const key = `${run.key}\u0000${run.cjkRegion ?? ""}\u0000${text}`;
+    const hit = this.#engineRuns.get(key);
+    if (hit?.result.dependencies?.every((face) => this.faceRevision(face) <= hit.revision))
+      return hit.result;
+    const dependencies = new Set<string>();
+    const result: EngineText = {
+      ...this.#shapeForEngine(text, run, dependencies, measure),
+      dependencies: [...dependencies],
+    };
+    if (!("waiting" in result)) {
+      if (this.#engineRuns.size >= MAX_RUNS) this.#engineRuns.clear();
+      this.#engineRuns.set(key, { result, revision: this.#generation });
     }
     return result;
   }
 
-  #shapeForEngine(text: string, run: ShapingRun, measure?: (text: string) => number): EngineText {
+  #shapeForEngine(
+    text: string,
+    run: ShapingRun,
+    dependencies: Set<string>,
+    measure?: (text: string) => number,
+  ): EngineText {
+    const entryFor = (face: ShapingFace) => {
+      dependencies.add(faceKey(face));
+      return this.#entry(face);
+    };
     const wanted = shapingFace(run);
-    const entry = this.#entry(wanted);
+    dependencies.add(`font:${wanted.family}`);
+    const entry = entryFor(wanted);
     if (entry.status === "loading") return { waiting: faceKey(wanted) };
     const own = entry.status === "ready" ? entry : null;
     const exact = own ? this.shape(text, run) : null;
-    if (exact && exact.outlines !== false) return { shaped: exact, fallback: false };
+    if (exact && exact.outlines !== false) {
+      const styled = Object.keys(run.features).length > 0 || wanted.variable;
+      const width = styled ? exact.width : (measure?.(text) ?? exact.width);
+      const fitted =
+        !styled && measure && Math.abs(width - exact.width) > 0.01
+          ? this.#fitClusters(exact, text, run.direction, measure)
+          : exact;
+      return { shaped: this.#fit(fitted, width), fallback: false };
+    }
 
     // When the feature shaper cannot draw a whole run, the canvas draws it
     // with default features and axes. Apply those defaults to each face here.
     const plain = { ...run, features: {}, variations: {} };
     const primaryFace = shapingFace(plain);
-    const primary = wanted.variable ? this.#entry(primaryFace) : entry;
+    const primary = wanted.variable ? entryFor(primaryFace) : entry;
     if (primary.status === "loading") return { waiting: faceKey(primaryFace) };
     const primaryReady = primary.status === "ready" ? primary : null;
     const boxFace = { family: MISSING_GLYPH_FAMILY, weight: 400, italic: false };
     const fallbackFace = {
-      family: FALLBACK_FAMILY,
+      family: this.#fallbackFamily,
       weight: run.weight,
       italic: run.italic,
       variable: true,
     };
     const boxCoverage = { unicodes: { has: isPrivateUse } };
-    const first = fontRuns(text, [primaryReady, boxCoverage]);
-    const boxEntry = first.some((piece) => piece.face === 1) ? this.#entry(boxFace) : null;
-    const fallbackEntry = first.some((piece) => piece.face === -1)
-      ? this.#entry(fallbackFace)
-      : null;
+    const first = fontRuns(text, [primaryReady, boxCoverage], run.direction);
+    const boxEntry = first.some((piece) => piece.face === 1) ? entryFor(boxFace) : null;
+    const needsFallback = first.some((piece) => piece.face === -1);
+    if (needsFallback) dependencies.add(`font:${FALLBACK_FAMILY}`);
+    const substituteFace = needsFallback && !primaryReady ? this.#substitute(primaryFace) : null;
+    const substituteEntry = substituteFace ? entryFor(substituteFace) : null;
+    const fallbackEntry = needsFallback ? entryFor(fallbackFace) : null;
     if (boxEntry?.status === "loading") return { waiting: faceKey(boxFace) };
+    if (substituteFace && substituteEntry?.status === "loading")
+      return { waiting: faceKey(substituteFace) };
     if (fallbackEntry?.status === "loading") return { waiting: faceKey(fallbackFace) };
     const boxReady = boxEntry?.status === "ready" ? boxEntry : null;
+    const substitute = substituteEntry?.status === "ready" ? substituteEntry : null;
     const fallbackReady = fallbackEntry?.status === "ready" ? fallbackEntry : null;
-    const faces = [primaryReady, boxReady, fallbackReady];
-    // An unavailable box font still owns private-use characters. Render its
-    // last-resort outline instead of asking any other face to guess the symbol.
-    const pieces = fontRuns(text, [primaryReady, boxCoverage, fallbackReady]);
+    const coverage = [primaryReady, boxCoverage, substitute, fallbackReady];
+    const scriptText = fontRuns(text, coverage, run.direction)
+      .filter((piece) => piece.face < 0)
+      .map((piece) => piece.text)
+      .join("");
+    const scripts = scriptText ? this.#fallbackFaces(scriptText, run) : [];
+    const scriptEntries = scripts.map(entryFor);
+    for (const [index, entry] of scriptEntries.entries()) {
+      if (entry.status === "loading") return { waiting: faceKey(scripts[index] as ShapingFace) };
+    }
+    const outlines = scriptEntries.map((entry) => (entry.status === "ready" ? entry : null));
+    const faces = [primaryReady, boxReady, substitute, fallbackReady, ...outlines];
+    const pieces = fontRuns(text, [...coverage, ...outlines], run.direction);
     const glyphs: ShapedGlyph[] = [];
     const scale = run.size / GLYPH_UNITS;
     let width = 0;
     for (const piece of pieces) {
       const face = faces[piece.face];
-      const shaped = face ? this.#tryShape(face, plain, piece.text) : null;
+      const shaped = face
+        ? this.#tryShape(face, { ...plain, direction: piece.direction }, piece.text)
+        : null;
+      const before = measure?.(text.slice(0, piece.start)) ?? 0;
+      const measurePiece = measure
+        ? (prefix: string) => Math.max(0, measure(text.slice(0, piece.start) + prefix) - before)
+        : undefined;
+      const advance = measurePiece?.(piece.text);
+      // Same-file fallback already carries the browser's kerning. Fit cluster
+      // positions only where the platform resolved different advances or an
+      // explicit system substitute supplied the outlines.
+      const fitClusters =
+        measurePiece &&
+        shaped &&
+        advance !== undefined &&
+        (face === substitute || Math.abs(advance - shaped.width) > 0.05);
       const drawn =
         shaped && shaped.outlines !== false
-          ? shaped
-          : lastResortText(piece.text, run.size, measure);
-      for (const glyph of drawn.glyphs) {
+          ? fitClusters
+            ? this.#fitClusters(shaped, piece.text, piece.direction, measurePiece)
+            : shaped
+          : lastResortText(piece.text, run.size, measurePiece, piece.direction);
+      const fitted = this.#fit(drawn, advance ?? drawn.width, scale);
+      for (const glyph of fitted.glyphs) {
         glyphs.push({
           ...glyph,
-          path: null,
-          d: this.#normalize(glyph.d, drawn.scale / scale),
           x: glyph.x + width,
           cluster: glyph.cluster + piece.start,
         });
       }
-      width += drawn.width;
+      width += fitted.width;
     }
     return { shaped: { glyphs, width, scale }, fallback: true };
   }
 
+  /** Preserve ligatures and marks while aligning their cluster origins to the caret. */
+  #fitClusters(
+    shaped: ShapedText,
+    text: string,
+    direction: TextDirection | undefined,
+    measure: (prefix: string) => number,
+  ): ShapedText {
+    const width = measure(text);
+    const starts = [...new Set(shaped.glyphs.map((glyph) => glyph.cluster))].sort((a, b) => a - b);
+    const target = new Map<number, number>();
+    let startPx = 0;
+    for (const [index, start] of starts.entries()) {
+      const end = starts[index + 1] ?? text.length;
+      const endPx = end === text.length ? width : measure(text.slice(0, end));
+      target.set(start, direction === "rtl" ? width - endPx : startPx);
+      startPx = endPx;
+    }
+    const pens = new Map<number, number>();
+    for (const glyph of shaped.glyphs) {
+      if (glyph.penX !== undefined && !pens.has(glyph.cluster)) pens.set(glyph.cluster, glyph.penX);
+    }
+    return {
+      ...shaped,
+      width,
+      glyphs: shaped.glyphs.map((glyph) => {
+        const at = target.get(glyph.cluster);
+        const pen = pens.get(glyph.cluster);
+        return at === undefined || pen === undefined ? glyph : { ...glyph, x: at + glyph.x - pen };
+      }),
+    };
+  }
+
+  /** Put outlines in common units without changing their proportions or advance positions. */
+  #fit(shaped: ShapedText, width: number, scale = shaped.scale): ShapedText {
+    const units = shaped.scale / scale;
+    if (Math.abs(units - 1) < 1e-9) {
+      return width === shaped.width ? shaped : { ...shaped, width };
+    }
+    return {
+      width,
+      scale,
+      glyphs: shaped.glyphs.map((g) => ({
+        ...g,
+        path: null,
+        d: this.#normalize(g.d, units),
+      })),
+    };
+  }
+
   /** One scale per engine fill lets outlines from different faces overlap as one shape. */
-  #normalize(d: string, ratio: number): string {
-    if (!d || Math.abs(ratio - 1) < 1e-9) return d;
-    const key = `${ratio}|${d}`;
+  #normalize(d: string, units: number): string {
+    if (!d) return d;
+    const key = `${units}|${d}`;
     let normalized = this.#normalized.get(key);
     if (normalized === undefined) {
-      normalized = d.replace(/-?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?/gi, (n) =>
-        (Number(n) * ratio).toFixed(5),
-      );
+      normalized = serializePath(transformPath(parsePath(d), [units, 0, 0, units, 0, 0]));
       if (this.#normalized.size >= MAX_RUNS) this.#normalized.clear();
       this.#normalized.set(key, normalized);
     }
@@ -432,7 +571,7 @@ export class Shaper {
     return instance;
   }
 
-  #entry(face: ShapingFace): FaceEntry {
+  #entry(face: ShapingFace, attempt = 0): FaceEntry {
     const key = faceKey(face);
     let entry = this.#faces.get(key);
     if (!entry) {
@@ -442,12 +581,26 @@ export class Shaper {
       // Past the deadline the face is unavailable, marked late: its file, if it comes after
       // all, still makes it ready (unless it was retried or unloaded meanwhile).
       const late: FaceEntry = { status: "unavailable", late: true };
-      const timer = setTimeout(() => {
-        if (this.#faces.get(key) === loading) this.#settle(face, late);
-      }, this.#deadline);
+      const bundled =
+        face.family === MISSING_GLYPH_FAMILY ||
+        (face.family === this.#fallbackFamily && face.variable && this.#bundledRetryMs.length > 0);
+      const timer = bundled
+        ? undefined
+        : setTimeout(() => {
+            if (this.#faces.get(key) === loading) this.#settle(face, late);
+          }, this.#deadline);
       const done = (ready: ReadyFace | null) => {
         clearTimeout(timer);
         const now = this.#faces.get(key);
+        if (!ready && now === loading && bundled && this.#bundledRetryMs.length > 0) {
+          const delay = this.#bundledRetryMs[Math.min(attempt, this.#bundledRetryMs.length - 1)];
+          setTimeout(() => {
+            if (this.#faces.get(key) !== loading) return;
+            this.#faces.delete(key);
+            this.#entry(face, attempt + 1);
+          }, delay);
+          return;
+        }
         if (now === loading)
           this.#settle(face, ready ? { status: "ready", ...ready } : { status: "unavailable" });
         else if (now === late && ready) this.#settle(face, { status: "ready", ...ready });
@@ -459,9 +612,9 @@ export class Shaper {
   }
 
   #settle(face: ShapingFace, entry: FaceEntry): void {
-    this.#faces.set(faceKey(face), entry);
-    this.#engineRuns.clear();
-    this.#generation++;
+    const key = faceKey(face);
+    this.#faces.set(key, entry);
+    this.#faceRevisions.set(key, ++this.#generation);
     for (const listener of [...this.#listeners]) listener(face.family);
   }
 
@@ -479,6 +632,7 @@ export class Shaper {
     // Held for as long as the shaper lives: its fonts are made from it as runs need them.
     const shared = acquireFace(hb, bytes);
     const hbFace = shared.face;
+    const subset = face.subset === undefined ? null : scriptSlice(face.family, face.subset);
     try {
       const axes: Record<string, { min: number; default: number; max: number }> = {};
       for (const [tag, axis] of Object.entries(hbFace.getAxisInfos()))
@@ -491,7 +645,13 @@ export class Shaper {
         axes,
         instances: new Map(),
         get unicodes() {
-          return box ? { has: isPrivateUse } : shared.unicodes;
+          if (box) return { has: isPrivateUse };
+          return subset && subset !== "all"
+            ? {
+                has: (cp: number) =>
+                  cp >= subset.start && cp <= subset.end && shared.unicodes.has(cp),
+              }
+            : shared.unicodes;
         },
       };
     } catch (error) {
@@ -502,7 +662,14 @@ export class Shaper {
 
   #tryShape(face: ReadyFace, run: ShapingRun, text: string): ShapedText | null {
     try {
-      return this.#shape(face, this.#instance(face, run), text, run.size, run.features);
+      return this.#shape(
+        face,
+        this.#instance(face, run),
+        text,
+        run.size,
+        run.features,
+        run.direction,
+      );
     } catch (error) {
       if (isHarfBuzzOutOfMemory(error)) return null;
       throw error;
@@ -515,6 +682,7 @@ export class Shaper {
     text: string,
     size: number,
     features: FontFeatures,
+    direction?: TextDirection,
   ): ShapedText | null {
     const { hb, upem } = entry;
     const { font, paths } = instance;
@@ -525,6 +693,7 @@ export class Shaper {
     try {
       buffer.addText(text);
       buffer.guessSegmentProperties();
+      if (direction) buffer.setDirection(direction === "rtl" ? hb.Direction.RTL : hb.Direction.LTR);
       hb.shape(
         font,
         buffer,
@@ -565,6 +734,7 @@ export class Shaper {
         x: (pen + p.xOffset) * scale,
         y: (rise + p.yOffset) * scale,
         cluster: info.cluster,
+        penX: pen * scale,
       });
       pen += p.xAdvance;
       rise += p.yAdvance;
@@ -584,12 +754,25 @@ export class Shaper {
  * canvas has it.
  */
 export class ShapingMeasurer implements TextMeasurer {
+  #engineText = true;
+
   constructor(
-    readonly base: TextMeasurer & { invalidate(): void },
+    readonly base: TextMeasurer & { invalidate(bumpGeneration?: boolean): void },
     readonly shaper: Shaper,
     /** Font aliases (decision 0036): which family text is drawn in. */
     readonly fonts: FontResolver | null = null,
+    readonly scriptLocale = "",
   ) {}
+
+  get engineText(): boolean {
+    return this.#engineText;
+  }
+
+  setEngineText(enabled: boolean): void {
+    if (this.#engineText === enabled) return;
+    this.#engineText = enabled;
+    this.base.invalidate();
+  }
 
   family(family: string, size: number): string {
     return this.fonts ? this.fonts.family(family, size) : family;
@@ -599,9 +782,9 @@ export class ShapingMeasurer implements TextMeasurer {
     return this.fonts?.missing?.(family, size, weight, italic) ?? false;
   }
 
-  width(font: string, text: string, run?: ShapingRun | null): number {
+  width(font: string, text: string, run?: ShapingRun | null, direction?: TextDirection): number {
     const shaped = run ? this.shaper.shape(text, run) : null;
-    return shaped ? shaped.width : this.base.width(font, text);
+    return shaped ? shaped.width : this.base.width(font, text, null, direction);
   }
 
   shape(text: string, run: ShapingRun): ShapedText | null {
@@ -609,11 +792,17 @@ export class ShapingMeasurer implements TextMeasurer {
   }
 
   shapeForEngine(text: string, run: ShapingRun, font: string): EngineText {
-    return this.shaper.shapeForEngine(text, run, (piece) => this.base.width(font, piece));
+    return this.shaper.shapeForEngine(text, run, (piece) =>
+      this.base.width(font, piece, null, run.direction),
+    );
   }
 
   loading(run: ShapingRun): string | null {
     return this.shaper.loading(run);
+  }
+
+  faceRevision(key: string): number {
+    return this.shaper.faceRevision(key);
   }
 
   faceStatus(key: string): FaceStatus {
@@ -633,8 +822,13 @@ export class ShapingMeasurer implements TextMeasurer {
   }
 
   /** Call after web fonts load: earlier measurements used fallback fonts. */
-  invalidate(): void {
-    this.shaper.invalidateFallbackWidths();
-    this.base.invalidate();
+  invalidate(families?: ReadonlySet<string>): void {
+    if (families) {
+      this.shaper.invalidateMeasurements(families);
+      this.base.invalidate(false);
+    } else {
+      this.shaper.invalidateFallbackWidths();
+      this.base.invalidate();
+    }
   }
 }

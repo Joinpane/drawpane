@@ -74,6 +74,7 @@ vi.mock("@drawpane/editor", () => ({
     opening = false;
     setEditorState() {}
     setView() {}
+    setColorScale() {}
     openSlice(id: string) {
       return this.build(id);
     }

@@ -18,6 +18,7 @@
     "@drawpane/engine": "workspace:*",
     "@drawpane/model": "workspace:*",
     "@drawpane/raster": "workspace:*",
+    "bidi-js": "1.1.0",
     "harfbuzzjs": "1.6.4",
     "pathkit-wasm": "1.0.0",
     "zod": "catalog:"

@@ -10,7 +10,6 @@ import {
   CanvasRenderer,
   DisplayListBuilder,
   type Editor,
-  type EngineImage,
   imageRefs,
   type Rect,
 } from "@drawpane/editor";
@@ -109,11 +108,13 @@ export function engineDebug(editor: Editor) {
 
   let canvas: CanvasRenderer | null = null;
 
-  function builder(
-    _pageId: string,
-    image: (ref: string) => EngineImage | null = () => null,
-  ): DisplayListBuilder {
-    return new DisplayListBuilder(editor.scene, editor.measurer, { image });
+  function builder(images?: ViewImages, scale = 1): DisplayListBuilder {
+    const b = new DisplayListBuilder(editor.scene, editor.measurer, {
+      image: (ref) => images?.info(ref) ?? null,
+      colorGlyph: (text, font, bucket) => images?.colorGlyph(text, font, bucket) ?? null,
+    });
+    b.setColorScale(scale);
+    return b;
   }
 
   const unsupportedOf = (b: DisplayListBuilder) => {
@@ -149,12 +150,11 @@ export function engineDebug(editor: Editor) {
       const e = await engineFor(options.backend, options.compatibility ?? false);
       if (typeof e === "string") return { ok: false, error: e, unsupported: {} };
       const images = residency.get(e);
-      const image = (ref: string) => images?.info(ref) ?? null;
       // Text whose face is still loading can't be outlined yet: the shaper starts loading it on
       // the first try, and the list sends it provisional (bars) meanwhile. Wait for it (as the
       // canvas's parity spec waits for fonts), up to 20 s: what's drawn is the text itself.
       const make = () => {
-        const b = builder(options.pageId, image);
+        const b = builder(images, options.scale);
         return {
           b,
           list: options.ids
@@ -178,7 +178,7 @@ export function engineDebug(editor: Editor) {
       const t0 = performance.now();
       // A fresh list replaces whatever the engine held: made for a revision past the engine's
       // (fresh lists only move the revision forward).
-      const b = builder(options.pageId, image);
+      const b = builder(images, options.scale);
       b.acknowledge(false, e.revision);
       const list = options.ids
         ? b.buildLayers(options.ids, { context: options.context })
@@ -372,7 +372,7 @@ export function engineDebug(editor: Editor) {
       supported: boolean;
       waiting: number;
     } {
-      const b = builder(pageId);
+      const b = builder();
       const list = ids ? b.buildLayers(ids, { context }) : b.build(pageId);
       return {
         list: toBase64(list),
@@ -490,7 +490,7 @@ export function engineDebug(editor: Editor) {
 
     /** Builds the page's list and times a patch from a one-layer change (the bench's numbers). */
     timeBuild(pageId: string): { buildMs: number; records: number; bytes: number } {
-      const b = builder(pageId);
+      const b = builder();
       const t0 = performance.now();
       const list = b.build(pageId);
       return { buildMs: performance.now() - t0, records: b.stats.records, bytes: list.length };

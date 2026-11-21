@@ -30,6 +30,7 @@ import {
 import {
   type BlendMode,
   type Blur,
+  cjkRegionFor,
   GLYPH_UNITS,
   type Glass,
   getProp,
@@ -54,6 +55,7 @@ import { dropShadowCast } from "../shadows";
 import { isUniform, strokeRegion, strokeRegionPath, strokeWidths } from "../stroke-sides";
 import {
   decorationBar,
+  directionalRun,
   drawnBaseline,
   drawnFamily,
   layoutText,
@@ -69,6 +71,19 @@ import { nodePath } from "../vector/shapes";
 import { serializePath } from "../vector/svg";
 import { svgPathData } from "./svg-path";
 
+export interface ColorGlyph {
+  readonly ref: string;
+  readonly handle: number;
+  /** Bitmap bounds in text units, relative to the glyph origin and baseline. */
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+const emojiGraphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
+const EMOJI = /\p{Emoji_Presentation}|\ufe0f|\u20e3/u;
+
 export interface LayerContext {
   readonly scene: Scene;
   readonly measurer: TextMeasurer;
@@ -80,6 +95,7 @@ export interface LayerContext {
   glyph(d: string): number;
   /** The same for a shaped glyph, remembered by the glyph itself (the shaper keeps its runs). */
   shapedGlyph?(g: { readonly d: string }): number;
+  colorGlyph?(text: string, font: string): ColorGlyph | null;
   /** The text being edited: drawn from its live layout, every line. */
   readonly whole: string | null;
   /** Layers hidden while dragged into place. */
@@ -104,6 +120,8 @@ export interface EncodedLayer {
    * provisional, its coarse bars, and encoded again when they arrive.
    */
   readonly waiting: readonly string[];
+  readonly faceDependencies: readonly string[];
+  readonly colorGlyphs: readonly Pick<ColorGlyph, "ref" | "width" | "height">[];
 }
 
 const IDENTITY: Matrix = [1, 0, 0, 1, 0, 0];
@@ -289,6 +307,8 @@ class Builder {
   readonly images: string[] = [];
   unsupported = 0;
   textPending = false;
+  readonly colorGlyphs: Pick<ColorGlyph, "ref" | "width" | "height">[] = [];
+  readonly faceDependencies = new Set<string>();
   /** Sent ahead of its real drawing: deferred, or waiting for faces. */
   provisional = false;
   /** Sent ahead of its real drawing because text was deferred (`LayerContext.deferText`). */
@@ -596,6 +616,7 @@ function shapedGlyphs(
   shaped: ShapedText,
   text: string,
   spacing: number,
+  rtl: boolean,
   x: number,
   y: number,
   ctx: LayerContext,
@@ -611,16 +632,31 @@ function shapedGlyphs(
       before[i + 1] = n;
     }
   }
+  // RTL clusters advance from the right. Every glyph in the cluster gets
+  // the spacing of the clusters that precede it visually.
+  const visualBefore = new Map<number, number>();
+  if (before && rtl) {
+    const clusters = [...new Set(shaped.glyphs.map((g) => g.cluster))].sort((a, b) => a - b);
+    for (const [i, at] of clusters.entries()) {
+      const end = clusters[i + 1] ?? text.length;
+      visualBefore.set(at, (before[text.length] ?? 0) - (before[end] ?? 0));
+    }
+  }
   const out: number[] = [];
   for (const g of shaped.glyphs) {
     if (!g.d) continue;
     out.push(
       ctx.shapedGlyph ? ctx.shapedGlyph(g) : ctx.glyph(g.d),
-      x + g.x + (before ? spacing * (before[g.cluster] ?? 0) : 0),
+      x + g.x + spacing * (rtl ? (visualBefore.get(g.cluster) ?? 0) : (before?.[g.cluster] ?? 0)),
       y - g.y,
     );
   }
   return out;
+}
+
+interface ColorRun {
+  readonly color: WirePaint;
+  readonly entry: number;
 }
 
 interface TextRun {
@@ -639,12 +675,15 @@ function textRuns(
   node: NodeRecord,
   width: number,
   ctx: LayerContext,
-): { runs: TextRun[]; bars: Array<{ entry: number; paints: readonly Paint[] }> } {
+): {
+  runs: Array<TextRun | ColorRun>;
+  bars: Array<{ entry: number; paints: readonly Paint[] }>;
+} {
   const layerFills = getProp(node.props, "fills");
   const black: Paint[] = [{ type: "solid", color: "#000000" }];
   const paintsOf = (fills: readonly Paint[] | null | undefined) =>
     fills ?? (layerFills.length > 0 ? layerFills : black);
-  const runs: TextRun[] = [];
+  const runs: Array<TextRun | ColorRun> = [];
   const bars: Array<{ entry: number; paints: readonly Paint[] }> = [];
   const saved: SavedText | null =
     node.id === ctx.whole ? null : savedText(node, ctx.measurer, glyphTable(ctx.scene.doc));
@@ -712,6 +751,7 @@ function textRuns(
   });
   const dy = textBlockOffset(node, layout);
   const spans = textSpans(node);
+  const cjkRegion = cjkRegionFor(getProp(node.props, "characters"), ctx.measurer.scriptLocale);
   const spanAt = (i: number) =>
     spans.find((s) => s.start <= i && i < s.end) ?? spans[spans.length - 1];
   // A text layer composites as one shape, as Figma draws it (`text-overlap` in the parity
@@ -748,14 +788,19 @@ function textRuns(
     paints: readonly Paint[],
   ) => {
     const m = ctx.measurer;
-    const engine = m.shapeForEngine?.(text, run, font);
+    const engine = m.shapeForEngine?.(text, { ...run, cjkRegion }, font);
+    for (const key of engine?.dependencies ?? []) b.faceDependencies.add(key);
     const shaped = engine ? ("shaped" in engine ? engine.shaped : null) : m.shape?.(text, run);
     if (shaped && shaped.outlines !== false) {
       if (engine && "fallback" in engine && engine.fallback) {
-        b.textPending = true;
+        b.textPending ||= !engine.dependencies;
         b.unsupported |= UNSUPPORTED.textWithoutOutlines;
       }
-      add(shaped.scale, shapedGlyphs(shaped, text, spacing, x, y, ctx), paints);
+      add(
+        shaped.scale,
+        shapedGlyphs(shaped, text, spacing, run.direction === "rtl", x, y, ctx),
+        paints,
+      );
       return;
     }
     const face = engine && "waiting" in engine ? engine.waiting : m.loading?.(run);
@@ -765,8 +810,71 @@ function textRuns(
     }
     b.textPending = true;
     b.unsupported |= UNSUPPORTED.textWithoutOutlines;
-    const last = lastResortText(text, run.size, (piece) => m.width(font, piece));
-    add(last.scale, shapedGlyphs(last, text, spacing, x, y, ctx), paints);
+    const last = lastResortText(text, run.size, (piece) => m.width(font, piece), run.direction);
+    add(last.scale, shapedGlyphs(last, text, spacing, run.direction === "rtl", x, y, ctx), paints);
+  };
+  const drawWithEmoji = (
+    text: string,
+    run: ShapingRun,
+    font: string,
+    spacing: number,
+    x: number,
+    y: number,
+    paints: readonly Paint[],
+  ) => {
+    const raster = ctx.colorGlyph;
+    const paint = [...paints].reverse().find(shows);
+    if (!raster || !paint || !EMOJI.test(text)) {
+      draw(text, run, font, spacing, x, y, paints);
+      return;
+    }
+    // Each piece starts where the measured fragment puts it, including RTL
+    // text and spacing. Leave monochrome emoji in the outline shaper.
+    let start = 0;
+    const rtl = run.direction === "rtl";
+    const measure = (end: number) => {
+      const prefix = text.slice(0, end);
+      return ctx.measurer.width(font, prefix, null, run.direction) + spacing * [...prefix].length;
+    };
+    const total = rtl ? measure(text.length) : 0;
+    const left = (a: number, z: number) => x + (rtl ? total - measure(z) : measure(a));
+    const drawRange = (a: number, z: number) => {
+      if (a < z) draw(text.slice(a, z), run, font, spacing, left(a, z), y, paints);
+    };
+    for (const { segment, index } of emojiGraphemes.segment(text)) {
+      if (!EMOJI.test(segment)) continue;
+      const sprite = raster(segment, font);
+      if (!sprite) continue;
+      const end = index + segment.length;
+      drawRange(start, index);
+      flush();
+      b.colorGlyphs.push({ ref: sprite.ref, width: sprite.width, height: sprite.height });
+      b.faceDependencies.add(`font:${run.family}`);
+      b.images.push(sprite.ref);
+      const sx = left(index, end) + sprite.x;
+      const sy = y + sprite.y;
+      runs.push({
+        entry: b.path({
+          kind: "path",
+          path: new PathData()
+            .moveTo(sx, sy)
+            .lineTo(sx + sprite.width, sy)
+            .lineTo(sx + sprite.width, sy + sprite.height)
+            .lineTo(sx, sy + sprite.height)
+            .close(),
+        }),
+        color: {
+          kind: "image",
+          image: sprite.handle,
+          matrix: [sprite.width, 0, 0, sprite.height, sx, sy],
+          tile: false,
+          opacity: paint.opacity ?? 1,
+          blend: blendCode(paint.blendMode),
+        },
+      });
+      start = end;
+    }
+    drawRange(start, text.length);
   };
   for (const line of layout.lines) {
     const x0 = lineOffset(line, width, node.props);
@@ -783,10 +891,13 @@ function textRuns(
     for (const frag of line.fragments) {
       if (!frag.text) continue;
       const span = spanAt(frag.start);
-      const run = frag.run ?? runFor(span?.props ?? node.props, ctx.measurer);
+      const run = directionalRun(
+        frag.run ?? runFor(span?.props ?? node.props, ctx.measurer),
+        frag.direction,
+      );
       const x = x0 + frag.x;
       const paints = paintsOf(frag.fills);
-      draw(frag.text, run, frag.font, frag.letterSpacing, x, baseline, paints);
+      drawWithEmoji(frag.text, run, frag.font, frag.letterSpacing, x, baseline, paints);
       if (frag.decoration !== "none") {
         const bar = decorationBar(frag.decoration, baseline, frag.fontSize);
         bars.push({
@@ -938,7 +1049,8 @@ function text(
     }
   };
   // Drop shadows cast from all glyph runs and decoration bars combined (as render.ts does).
-  const shadowPaths = [...runs.runs.map((r) => r.entry), ...runs.bars.map((bar) => bar.entry)];
+  const outlines = runs.runs.filter((run) => "paints" in run);
+  const shadowPaths = [...outlines.map((r) => r.entry), ...runs.bars.map((bar) => bar.entry)];
   if (shadowPaths.length > 0) {
     for (const e of getProp(node.props, "effects")) {
       if (e.visible === false || e.type !== "drop-shadow") continue;
@@ -961,11 +1073,14 @@ function text(
   const g = glassOp(node, shadowPaths, false, width, height);
   if (g) b.ops.push(g);
   // The canvas fills each run in its paints, then its decorations in the same.
-  for (const r of runs.runs) fill(r.entry, r.paints);
+  for (const r of runs.runs) {
+    if ("color" in r) b.ops.push({ op: "fill", path: r.entry, evenOdd: false, paint: r.color });
+    else fill(r.entry, r.paints);
+  }
   for (const bar of runs.bars) fill(bar.entry, bar.paints);
   const strokes = getProp(node.props, "strokes").filter(shows);
   const weight = getProp(node.props, "strokeWeight");
-  if (strokes.length > 0 && weight > 0 && runs.runs.length > 0) {
+  if (strokes.length > 0 && weight > 0 && outlines.length > 0) {
     const align = getProp(node.props, "strokeAlign");
     const style = strokeStyle(
       align === "center" ? weight : weight * 2,
@@ -980,12 +1095,12 @@ function text(
       for (const paint of strokes) {
         const p = wirePaint(paint, width, height);
         if (!p) continue;
-        for (const r of runs.runs) {
+        for (const r of outlines) {
           b.ops.push({ op: "stroke", path: r.entry, style, paint: p });
         }
       }
       b.ops.push({ op: "layer", compose: COMPOSE.destOut });
-      for (const r of runs.runs) {
+      for (const r of outlines) {
         b.ops.push({
           op: "fill",
           path: r.entry,
@@ -999,7 +1114,7 @@ function text(
       for (const paint of strokes) {
         const p = wirePaint(paint, width, height);
         if (!p) continue;
-        for (const r of runs.runs) {
+        for (const r of outlines) {
           if (align === "inside") b.ops.push({ op: "clip", path: r.entry, evenOdd: false });
           b.ops.push({ op: "stroke", path: r.entry, style, paint: p });
           if (align === "inside") b.ops.push({ op: "unclip" });
@@ -1163,5 +1278,7 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
     textPending: b.textPending,
     deferred: b.deferred,
     waiting: [...b.waiting],
+    faceDependencies: [...b.faceDependencies],
+    colorGlyphs: b.colorGlyphs,
   };
 }

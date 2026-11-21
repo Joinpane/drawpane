@@ -15,18 +15,25 @@ import {
   Shaper,
   ShapingMeasurer,
 } from "@drawpane/editor";
+import { cjkRegionFor, scriptSubsetsFor } from "@drawpane/model";
 import instrumentSansUrl from "../fonts/fallback/InstrumentSans-Variable.ttf?url";
 import { faceFileUrl, variableFileUrl } from "../fonts/font-files";
 import { fonts } from "../fonts/fonts";
 
+const BUNDLED_FALLBACK = "Instrument Sans Variable";
 let instrumentSans: Promise<ArrayBuffer | null> | undefined;
 
 /** A face's TrueType or OpenType file: bundled, from the font proxy, or uploaded by the team. */
 export const fontBytes: FontBytesLoader = async (face) => {
+  if (face.subset !== undefined) {
+    const query = new URLSearchParams({ family: face.family, slice: face.subset });
+    return readFont(`/api/fonts/fallback?${query}`);
+  }
   if (
-    face.family === "Instrument Sans" &&
-    face.variable &&
-    fonts.get(face.family)?.source === "bundled"
+    face.family === BUNDLED_FALLBACK ||
+    (face.family === "Instrument Sans" &&
+      face.variable &&
+      fonts.get(face.family)?.source === "bundled")
   ) {
     instrumentSans ??= readFont(instrumentSansUrl).then(
       (bytes) => {
@@ -40,12 +47,17 @@ export const fontBytes: FontBytesLoader = async (face) => {
     );
     return instrumentSans;
   }
+  const source = fonts.get(face.family)?.source;
+  if (source === undefined || source === "system" || source === "local") {
+    const local = await fonts.localBytes(face);
+    if (local) return local;
+  }
   const url = face.variable ? await variableFileUrl(face) : await faceFileUrl(face, ["ttf", "otf"]);
   return url ? readFont(url) : null;
 };
 
 async function readFont(url: string): Promise<ArrayBuffer | null> {
-  const response = await fetch(url);
+  const response = await fetch(url, { signal: AbortSignal.timeout(30_000) });
   return response.ok ? response.arrayBuffer() : null;
 }
 
@@ -62,7 +74,29 @@ function faceDeadline(): { loadDeadlineMs: number } | Record<string, never> {
   }
 }
 
-export const shaper = new Shaper(fontBytes, faceDeadline());
+const systemSubstitutes = new Map([
+  ["Arial", "Arimo"],
+  ["Helvetica", "Arimo"],
+  ["Georgia", "Gelasio"],
+  ["Times New Roman", "Tinos"],
+  ["Courier New", "Cousine"],
+  ["system-ui", "Arimo"],
+]);
+
+export const shaper = new Shaper(fontBytes, {
+  ...faceDeadline(),
+  fallbackFamily: BUNDLED_FALLBACK,
+  bundledRetryMs: [250, 1000, 4000, 15_000, 30_000],
+  fallbackFaces: (text, run) =>
+    scriptSubsetsFor(text, run.cjkRegion ?? cjkRegionFor(text, globalThis.navigator?.language)).map(
+      (slice) => ({ ...slice, weight: 400, italic: false }),
+    ),
+  substitute: (face) => {
+    const family = systemSubstitutes.get(face.family);
+    return family && fonts.get(face.family)?.source === "system" ? { ...face, family } : null;
+  },
+});
+fonts.onLocalFaces((families) => shaper.retryUnavailable(families));
 
 let boxAdded = false;
 /**
@@ -88,5 +122,7 @@ export function addMissingGlyphFont(): void {
  */
 export function textMeasurer(): ShapingMeasurer {
   addMissingGlyphFont();
-  return new ShapingMeasurer(new CanvasTextMeasurer(), shaper, fonts);
+  const measurer = new ShapingMeasurer(new CanvasTextMeasurer(), shaper, fonts, navigator.language);
+  measurer.setEngineText(false);
+  return measurer;
 }

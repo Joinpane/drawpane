@@ -4,9 +4,10 @@ import {
   fontFileKey,
   googleStylesheetUrl,
   rewriteStylesheet,
+  SCRIPT_FONT_REQUESTS_PER_MINUTE,
   variableFiles,
 } from "../src/api/fonts";
-import { Browser } from "./helpers";
+import { Browser, signedInUser } from "./helpers";
 
 const WOFF2 = new Uint8Array([0x77, 0x4f, 0x46, 0x32, 1, 2, 3, 4]);
 const TTF = new Uint8Array([0x00, 0x01, 0x00, 0x00, 5, 6, 7, 8]);
@@ -144,6 +145,68 @@ describe("/api/fonts", () => {
     );
     expect((await browser.fetch("/api/fonts/google.css?family=Inter&text=Hello")).status).toBe(400);
     expect((await browser.fetch("/api/fonts/google.css?family=Nope")).status).toBe(404);
+  });
+
+  it("requires a session and populates one shared object for an immutable slice", async () => {
+    const requests: URL[] = [];
+    const fetch = globalThis.fetch;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.hostname === "fonts.googleapis.com") {
+        requests.push(url);
+        return new Response(
+          `@font-face{src:url(https://fonts.gstatic.com/l/font?kit=${"a".repeat(1071)}&skey=1234&v=v1)}`,
+        );
+      }
+      if (url.hostname === "fonts.gstatic.com") {
+        expect(init?.redirect).toBe("manual");
+        requests.push(url);
+        return new Response(TTF);
+      }
+      return fetch(input, init);
+    });
+    const path = (family: string, slice: string) =>
+      `/api/fonts/fallback?${new URLSearchParams({ family, slice })}`;
+    const valid = path("Noto Sans SC", "4e00");
+    expect((await new Browser().fetch(valid)).status).toBe(401);
+    const { browser } = await signedInUser();
+    expect((await browser.fetch(path("Unknown", "4e00"))).status).toBe(400);
+    expect((await browser.fetch(path("Noto Sans SC", "中漢"))).status).toBe(400);
+    expect((await browser.fetch(path("Noto Sans SC", "4e01"))).status).toBe(400);
+    expect((await browser.fetch(path("Noto Sans SC", "1000"))).status).toBe(400);
+    expect((await browser.fetch(`${valid}&characters=secret`)).status).toBe(400);
+    expect(requests).toHaveLength(0);
+    const first = await browser.fetch(valid);
+    expect(first.status).toBe(200);
+    expect(first.headers.get("content-type")).toBe("font/ttf");
+    expect(first.headers.get("cache-control")).toContain("private");
+    expect(first.headers.get("vary")).toContain("Cookie");
+    expect(new Uint8Array(await first.arrayBuffer())).toEqual(TTF);
+    const upstream = requests[0]?.searchParams.get("text") ?? "";
+    expect([...upstream].map((char) => char.codePointAt(0))).toEqual(
+      Array.from({ length: 256 }, (_, index) => 0x4e00 + index),
+    );
+    expect(await env.FILES.head("fonts/fallback/v1/Noto-Sans-SC/4e00.ttf")).not.toBeNull();
+    const another = await signedInUser();
+    expect((await another.browser.fetch(valid)).status).toBe(200);
+    expect(requests).toHaveLength(2);
+  });
+
+  it("limits fallback requests atomically per account, including cached slices", async () => {
+    const { browser, userId } = await signedInUser();
+    const now = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(now);
+    await env.FILES.put("fonts/fallback/v1/Noto-Sans-JP/3000.ttf", TTF);
+    await env.DB.prepare(
+      "INSERT INTO font_fallback_limits (user_id, window, requests) VALUES (?, ?, ?)",
+    )
+      .bind(userId, Math.floor(now / 60_000), SCRIPT_FONT_REQUESTS_PER_MINUTE - 1)
+      .run();
+    const path = "/api/fonts/fallback?family=Noto+Sans+JP&slice=3000";
+    const results = await Promise.all([browser.fetch(path), browser.fetch(path)]);
+    expect(results.map((response) => response.status).sort()).toEqual([200, 429]);
+    vi.mocked(Date.now).mockReturnValue(now + 60_000);
+    expect((await browser.fetch(path)).status).toBe(200);
   });
 
   it("copies a font file to R2 once, then serves it from there", async () => {

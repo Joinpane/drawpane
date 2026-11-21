@@ -19,6 +19,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Editor, ShapingMeasurer } from "@drawpane/editor";
 import { ErrorCode, RenderEngine } from "@drawpane/engine";
 import { CPU_GPU_TOLERANCE, outsideTolerance, score } from "@drawpane/engine/compare";
 import { loadNodeEngine } from "@drawpane/engine/node";
@@ -640,6 +641,104 @@ test.describe("Render engine parity", () => {
       expect(failures, `${suite.suite}: engine parity`).toEqual([]);
     });
   }
+
+  test("default canvas preserves its CJK and symbol layout and pixels", async () => {
+    const page = instance.page;
+    const requests: string[] = [];
+    const fallback = "**/api/fonts/fallback?*";
+    await page.route(fallback, async (route) => {
+      requests.push(route.request().url());
+      await route.abort();
+    });
+    try {
+      await page.goto("/?renderer=canvas");
+      await page.getByRole("button", { name: "New file" }).first().click();
+      await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
+      const characters = "中漢 コーヒー ❤ ⚠ ✓ ★ ⌘ →";
+      const originalFont =
+        '400 28px "Instrument Sans", "Instrument Sans Variable", "Drawpane Missing Glyph", "Instrument Sans Variable", system-ui, sans-serif';
+      const fontFile = readFileSync(
+        new URL("../../../../packages/editor/test/fixtures/NotoSansSC-Subset.ttf", import.meta.url),
+      ).toString("base64");
+      const result = await page.evaluate(
+        async ({ characters, originalFont, fontFile }) => {
+          const debug = window as unknown as {
+            drawpane: Editor;
+            drawpaneEngine: Engine["drawpaneEngine"];
+          };
+          const editor = debug.drawpane;
+          const pageId = editor.s.pageId as string;
+          await document.fonts.load('400 28px "Instrument Sans Variable"', "Aa");
+          const id = editor.createLayer("text", { x: 12, y: 6, width: 480, height: 56 }, pageId, {
+            characters,
+            fontFamily: "Instrument Sans",
+            fontSize: 28,
+            textAutoResize: "width",
+            fills: [{ type: "solid", color: "#151515" }],
+          }) as string;
+          const canvas = new OffscreenCanvas(1, 1).getContext("2d");
+          if (!canvas) throw new Error("Missing reference canvas");
+          canvas.font = originalFont;
+          const expectedFont = canvas.font;
+          canvas.font = originalFont.replace("28px", "1000px");
+          canvas.fontKerning = "normal";
+          canvas.textRendering = "geometricPrecision";
+          const referenceWidth = canvas.measureText(characters).width * 0.028;
+          const options = {
+            pageId,
+            rect: { x: 0, y: 0, width: 500, height: 80 },
+            width: 500,
+            height: 80,
+            background: "#ffffff",
+            scale: 1,
+          };
+          const used = new Set<string>();
+          const proto = OffscreenCanvasRenderingContext2D.prototype;
+          const original = proto.fillText;
+          proto.fillText = function (text, x, y, maxWidth) {
+            if (text === characters) used.add(this.font);
+            return maxWidth === undefined
+              ? original.call(this, text, x, y)
+              : original.call(this, text, x, y, maxWidth);
+          };
+          try {
+            const before = await debug.drawpaneEngine.canvasRender(options);
+            const width = editor.doc.get(id)?.props.width ?? 0;
+            const bytes = Uint8Array.from(atob(fontFile), (char) => char.charCodeAt(0));
+            const face = await new FontFace("Drawpane Noto Sans SC", bytes, {
+              unicodeRange: "U+4E2D,U+6F22",
+            }).load();
+            document.fonts.add(face);
+            try {
+              (editor.measurer as ShapingMeasurer).invalidate();
+              editor.refitText();
+              const after = await debug.drawpaneEngine.canvasRender(options);
+              return {
+                width,
+                referenceWidth,
+                expectedFont,
+                used: [...used],
+                samePixels: before === after,
+                sameWidth: width === editor.doc.get(id)?.props.width,
+              };
+            } finally {
+              document.fonts.delete(face);
+            }
+          } finally {
+            proto.fillText = original;
+          }
+        },
+        { characters, originalFont, fontFile },
+      );
+      expect(result.used).toEqual([result.expectedFont]);
+      expect(Math.abs(result.width - result.referenceWidth)).toBeLessThanOrEqual(1);
+      expect(result.samePixels).toBe(true);
+      expect(result.sameWidth).toBe(true);
+      expect(requests).toEqual([]);
+    } finally {
+      await page.unroute(fallback);
+    }
+  });
 
   test("missing faces draw with canvas fallback geometry", async () => {
     test.setTimeout(300_000);

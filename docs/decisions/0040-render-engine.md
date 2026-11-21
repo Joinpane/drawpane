@@ -1115,6 +1115,22 @@ Characters reachable only through browser system fonts draw with bundled last-re
 
 Loading faces still mark their records provisional. When a face reaches its deadline the record resolves through the fallback chain, and a later arrival queues the record again. The existing `textWithoutOutlines` bit counts layers that used fallback outlines. The builder and Rust engine exclude it when deciding whether a page can draw.
 
+### System faces, fallback files and bidirectional text
+
+The browser's measured advances determine glyph cluster positions when a requested face is inaccessible. Local Font Access supplies the matching font file when the browser grants access. Without access, the engine uses open substitutes for common system faces, fitted to the browser's advances. System UI glyph shapes still depend on the bytes available to the browser.
+
+The browser preloads Instrument Sans and the private-use box when the engine starts. Bundled face loads stay provisional until they finish, and failed downloads retry with bounded backoff. The display list indexes the faces each text layer uses so a settled face only requeues its dependants.
+
+Layout resolves Unicode bidi levels per paragraph and places each wrapped line in visual order. The canvas and HarfBuzz draw the resulting directional runs, and the caret and selection use the same fragment positions.
+
+After Instrument Sans, the engine uses open Noto outlines for Greek, Cyrillic, CJK, Arabic, Hebrew and symbols. The canvas stack keeps its platform fallbacks, and the engine uses the browser's measured cluster origins while keeping the outlines' native proportions. The first engine use of a slice starts its load, with the same per-face settlement tracking as other outlines.
+
+The browser engine and Worker use one fixed catalogue. CJK and emoji use 256-code-point Unicode blocks. Smaller script faces load whole so joining alphabets share a font file. Browser requests carry only family and slice identifiers. Google receives stock family requests or the catalogue's fixed Unicode ranges. The proxy requires a session, allows 240 requests per account per minute, and caches one TrueType object per catalogue entry in R2.
+
+Drawpane has no language field on a text layer. Kana anywhere in a layer selects Japanese Han forms, and Hangul selects Korean in a layer without kana. Otherwise the viewer locale selects Noto Sans JP, KR, SC or TC. Traditional Chinese locales include Hant, Taiwan, Hong Kong and Macao. Workers use the same text heuristic and default to SC without a viewer locale. The prolonged sound mark and Japanese middle dot always use the Japanese face.
+
+The browser uses its colour emoji renderer for supported graphemes and the engine holds those bitmaps as image resources at the current zoom bucket. Worker exports use monochrome emoji outlines when available.
+
 ## Amendment: opening a large page without blocking input
 
 A live GPU page opens over several revisions. Each frame admits a time-budgeted slice of the initial display list. Parents and sibling paint order are preserved. Descendants of branches in view are sent ahead of the distant branches. The application reports the preview as inexact while the list is incomplete, and sends text through the existing deferred shaping queue. That queue uses the same resolved-face and fallback shaping as a fresh display list. Only one opening preview is submitted at a time, so a long GPU queue cannot bury the first picture. A page switch or an edit affecting the opening page discards the incomplete build. Changes confined to other pages keep the current progress. A preview that misses its presentation deadline uses the renderer recovery path.
