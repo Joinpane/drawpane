@@ -291,6 +291,14 @@ describe("engine-cpu.worker tiled rendering, transfer credit, and error tagging"
       expect.objectContaining({ type: "done", jobId: 7, exact: false, limit: "injected limit" }),
     );
 
+    await send({ type: "tile-ack", jobId: 7 });
+    await render(8, 5, 128);
+    await waitTick();
+    expect(tiles(8)).toHaveLength(0);
+    expect(replies).toContainEqual(
+      expect.objectContaining({ type: "error", jobId: 8, revision: 5, code: 4 }),
+    );
+
     await send({ type: "dispose" });
   });
 

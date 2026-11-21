@@ -719,6 +719,26 @@ for (const build of ["browser", "webgl"] as const) {
           const settledPx = await e.gpuPixels?.();
           if (!(settledPx instanceof Uint8Array)) throw new Error("settled gpuPixels failed");
 
+          const pan = (x: number) => {
+            // Both moving cameras remain inside the same tile at 800%.
+            const draw = e.renderGpu?.(160, 96, 8, x, -548, 1, bg, true, 80, true);
+            if (!draw) throw new Error("no renderGpu");
+            const stats = { drawn: draw.tiles_drawn, held: draw.held };
+            if (!draw.ok) {
+              const message = draw.message;
+              draw.free();
+              throw new Error(message);
+            }
+            draw.free();
+            return stats;
+          };
+          pan(-548); // Change zoom and stop on the new tile grid.
+          await e.gpuPixels?.();
+          const panning = pan(-550);
+          await e.gpuPixels?.();
+          const reused = pan(-552);
+          await e.gpuPixels?.();
+
           e.apply(new Uint8Array(withoutGlass)).free();
           const plain = e.renderGpu?.(width, height, 1, 0, 0, 1, bg, false, 0);
           if (!plain) throw new Error("no renderGpu");
@@ -736,6 +756,8 @@ for (const build of ["browser", "webgl"] as const) {
             movingAccent: movingPx[accentAt] ?? 0,
             settledAccent: settledPx[accentAt] ?? 0,
             settledInfo,
+            panning,
+            reused,
             plainInfo,
             plainCentre,
           };
@@ -771,6 +793,8 @@ for (const build of ["browser", "webgl"] as const) {
     expect(res.movingCentre[3]).toBe(255);
     expect(res.settledInfo).toEqual({ ok: true, exact: true, reads: expect.any(Number) });
     expect(res.settledInfo.reads).toBeGreaterThan(0);
+    expect(res.panning).toEqual({ drawn: 1, held: 1 });
+    expect(res.reused).toEqual({ drawn: 0, held: 1 });
     expect(res.plainInfo).toEqual({ ok: true, exact: true, reads: 0 });
     expect(res.plainCentre[2]).toBeGreaterThan(200);
   });

@@ -41,6 +41,10 @@ pub const MIN_SIGMA: f32 = 1e-3;
 /// parity tolerance against `blur_reference` and against the continuous Gaussian.
 pub const DIRECT_SIGMA_MAX: f32 = 10.0;
 
+/// Viewport blurs this wide can use a lower-density backdrop without
+/// sampling a visibly sharp source on that grid.
+pub const VIEWPORT_HALO_MIN_SIGMA: f32 = 128.0;
+
 /// Kernel half-width in standard deviations (`±ceil(3.5 * sigma)`). At `3.5 * sigma`, the omitted
 /// Gaussian tail is 0.046% (0.12 / 255), avoiding both visible box-edge truncation shelves and
 /// truncation-step mismatches at pyramid level transitions.
@@ -927,7 +931,9 @@ impl CpuBlurPyramid {
         }
 
         for k in 2..=level {
-            let Some(rect) = to_build[k - 1] else { continue };
+            let Some(rect) = to_build[k - 1] else {
+                continue;
+            };
             let (left, right) = self.levels.split_at_mut(k - 1);
             let prev = &left[k - 2];
             let curr = &mut right[0];
@@ -2397,7 +2403,9 @@ pub mod gpu {
             }
 
             for k in 2..=level {
-                let Some(rect) = to_build[k - 1] else { continue };
+                let Some(rect) = to_build[k - 1] else {
+                    continue;
+                };
                 let (pw, ph) = {
                     let pyr = self.pyramids.get(&key).expect("present");
                     pyr.levels[k - 2].stored_size()

@@ -1751,6 +1751,7 @@ impl Backend for Cpu {
 
     fn glass(
         &mut self,
+        _key: (u32, usize),
         op: &GlassOp,
         paths: &[(BezPath, bool)],
         device: Affine,
@@ -1939,6 +1940,7 @@ impl Backend for Cpu {
     }
     fn background_blur(
         &mut self,
+        _key: Option<(u32, usize)>,
         op: &BackgroundBlurOp,
         paths: &[(BezPath, bool)],
         device: Affine,
@@ -2058,7 +2060,7 @@ impl Backend for Cpu {
                 even_odd: op.even_odd,
                 radius: op.start_radius.max(op.end_radius),
             };
-            return self.background_blur(&uniform, paths, device, size, alpha, coarse, open);
+            return self.background_blur(None, &uniform, paths, device, size, alpha, coarse, open);
         };
         self.flush_barrier(open);
         let frame_size = (i32::from(self.frame_size.0), i32::from(self.frame_size.1));

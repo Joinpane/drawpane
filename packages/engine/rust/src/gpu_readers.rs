@@ -164,6 +164,31 @@ impl MipTex {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct NativeRim {
+    pub area: IRect,
+    pub offset: (f32, f32),
+    pub params: GlassParams,
+}
+
+pub struct BlurHaloSample {
+    pub view: wgpu::TextureView,
+    pub size: (u32, u32),
+    pub inv: f32,
+    pub offset: (f32, f32),
+}
+
+pub struct GlassResolve<'a> {
+    pub divisor: f32,
+    pub rim: Option<NativeRim>,
+    pub optical_origin: (f32, f32),
+    pub native: Option<&'a wgpu::TextureView>,
+    pub native_origin: (f32, f32),
+    pub native_size: (u32, u32),
+    pub native_clip: Option<ClipWithin>,
+    pub source_origin: (i32, i32),
+}
+
 pub struct GpuReaders {
     // Bind group layouts
     copy_ext_bgl: wgpu::BindGroupLayout,
@@ -385,7 +410,8 @@ impl GpuReaders {
                 tex_binding(4, false),
                 tex_binding(5, false),
                 samp_binding(6),
-                uni_binding(7, 224),
+                uni_binding(7, 256),
+                tex_binding(8, true),
             ],
         });
         let coarse_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -410,7 +436,7 @@ impl GpuReaders {
                 tex_binding(1, false),
                 tex_binding(2, false),
                 tex_binding(3, false),
-                uni_binding(4, 16),
+                uni_binding(4, 48),
             ],
         });
         let prog_blur_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1314,6 +1340,7 @@ impl GpuReaders {
         coarse: bool,
         analytic_coarse: Option<CoarseAnalytic>,
         has_clip_mask: bool,
+        resolve: Option<GlassResolve<'_>>,
         max_bytes: usize,
     ) -> Result<()> {
         // GlassRegion's write rectangle is already local to the destination. Only
@@ -1692,9 +1719,14 @@ impl GpuReaders {
         };
 
         // 3. Rim height field: downsample mask by k x k, then separable blur_x + blur_y.
+        let native_rim = resolve.as_ref().and_then(|r| r.rim.as_ref());
+        let (rim_w, rim_h) = native_rim.map_or((region.rw, region.rh), |r| {
+            ((r.area.x1 - r.area.x0) as u32, (r.area.y1 - r.area.y0) as u32)
+        });
+        let params = native_rim.map_or(params, |r| &r.params);
         let k = glass::height_scale(params.sigma);
-        let lw = region.rw.div_ceil(k);
-        let lh = region.rh.div_ceil(k);
+        let lw = rim_w.div_ceil(k);
+        let lh = rim_h.div_ceil(k);
         let h_usage = wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING;
         let low_nw = lw.max(1).next_multiple_of(64);
         let low_nh = lh.max(1).next_multiple_of(64);
@@ -1735,7 +1767,7 @@ impl GpuReaders {
             mask_view
         } else {
             // Downsample mask -> low_0
-            let u_down = &[region.rw as f32, region.rh as f32, k as f32, 0.0];
+            let u_down = &[rim_w as f32, rim_h as f32, k as f32, 0.0];
             let (sd_idx, sd_off) = self.push_uniform(device, queue, u_down);
             let group_down = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
@@ -1872,31 +1904,60 @@ impl GpuReaders {
         }
 
         // 4. Final glass refraction, dispersion, splay, lighting, and premultiplied replace.
-        let low_tex = self.low_0.as_ref().expect("low_0");
-        let low_tw = low_tex.width as f32;
-        let low_th = low_tex.height as f32;
         let tune = DEFAULT_GLASS_TUNING;
+        let (divisor, optical_origin) = resolve
+            .as_ref()
+            .map_or((1.0, (mask_x0, mask_y0)), |r| (r.divisor, r.optical_origin));
+        let rim_scale = if native_rim.is_some() { divisor } else { 1.0 };
         let (is_box, to_box_x, to_box_y, radii, smoothing, box_unit_px) = match region.box_geom {
             Some(ref bg) => (
                 1.0f32,
-                [bg.to_box[0], bg.to_box[2], bg.to_box[4], bg.size[0]],
-                [bg.to_box[1], bg.to_box[3], bg.to_box[5], bg.size[1]],
+                [
+                    bg.to_box[0] / rim_scale,
+                    bg.to_box[2] / rim_scale,
+                    bg.to_box[4],
+                    bg.size[0],
+                ],
+                [
+                    bg.to_box[1] / rim_scale,
+                    bg.to_box[3] / rim_scale,
+                    bg.to_box[5],
+                    bg.size[1],
+                ],
                 bg.radii,
                 bg.smoothing,
-                bg.unit_px,
+                bg.unit_px * rim_scale,
             ),
             None => (0.0, [0.0; 4], [0.0; 4], [0.0; 4], [0.0; 4], params.unit_px),
         };
         let hairline_px = (tune.hairline * params.unit_px).max(1e-3);
+        let (rim_x, rim_y) = native_rim.map_or((0.0, 0.0), |r| r.offset);
+        let mut native_map = [0.0, 0.0, 0.0, divisor];
+        let mut native_bounds = [0.0; 4];
+        if let Some(r) = resolve.as_ref().filter(|r| r.native.is_some()) {
+            native_map = [r.native_origin.0, r.native_origin.1, 1.0, divisor];
+            let w = r.native_size.0 as f32;
+            let h = r.native_size.1 as f32;
+            let ox = r.source_origin.0 as f32;
+            let oy = r.source_origin.1 as f32;
+            native_bounds = r.native_clip.map_or([0.0, 0.0, w, h], |clip| {
+                [
+                    (clip.x0.floor() - ox).clamp(0.0, w),
+                    (clip.y0.floor() - oy).clamp(0.0, h),
+                    (clip.x1.ceil() - ox).clamp(0.0, w),
+                    (clip.y1.ceil() - oy).clamp(0.0, h),
+                ]
+            });
+        }
         let u_glass = &[
             // sizes
             region.rw as f32,
             region.rh as f32,
-            low_tw,
-            low_th,
+            rim_x,
+            rim_y,
             // origin
-            mask_x0,
-            mask_y0,
+            optical_origin.0,
+            optical_origin.1,
             out_x0 as f32,
             out_y0 as f32,
             // rim
@@ -1910,10 +1971,10 @@ impl GpuReaders {
             params.intensity,
             box_unit_px,
             // geom
-            region.center[0],
-            region.center[1],
-            region.half_size[0],
-            region.half_size[1],
+            region.center[0] * rim_scale,
+            region.center[1] * rim_scale,
+            region.half_size[0] * rim_scale,
+            region.half_size[1] * rim_scale,
             // light_box
             params.light[0],
             params.light[1],
@@ -1958,7 +2019,15 @@ impl GpuReaders {
             packed_flag,
             (dst_offset.0 & 1) as f32,
             (dst_offset.1 & 1) as f32,
-            0.0,
+            divisor / rim_scale,
+            native_map[0],
+            native_map[1],
+            native_map[2],
+            native_map[3],
+            native_bounds[0],
+            native_bounds[1],
+            native_bounds[2],
+            native_bounds[3],
         ];
         let (sg_idx, sg_off) = self.push_uniform(device, queue, u_glass);
         let clip_view = if has_clip_mask {
@@ -2003,8 +2072,14 @@ impl GpuReaders {
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                         buffer: &self.slabs[sg_idx],
                         offset: 0,
-                        size: wgpu::BufferSize::new(224),
+                        size: wgpu::BufferSize::new(256),
                     }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(
+                        resolve.as_ref().and_then(|r| r.native).unwrap_or(&self.white_1x1.view),
+                    ),
                 },
             ],
         });
@@ -2078,7 +2153,9 @@ impl GpuReaders {
                 h,
                 RGBA8,
                 4,
-                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
                 "reader blur_out",
             );
         }
@@ -2124,6 +2201,7 @@ impl GpuReaders {
         dirty: IRect,
         alpha: f32,
         has_clip_mask: bool,
+        halo: Option<&BlurHaloSample>,
         max_bytes: usize,
     ) -> Result<()> {
         let bw = (dirty.x1 - dirty.x0) as u32;
@@ -2153,8 +2231,30 @@ impl GpuReaders {
                 depth_or_array_layers: 1,
             },
         );
-        let u_bytes = &[x0 as f32, y0 as f32, alpha, if has_clip_mask { 1.0 } else { 0.0 }];
+        let (map, bound) = if let Some(halo) = halo {
+            (
+                [halo.offset.0, halo.offset.1, halo.inv, 0.0],
+                [halo.size.0 as f32, halo.size.1 as f32, 0.0, 0.0],
+            )
+        } else {
+            ([0.0; 4], [0.0; 4])
+        };
+        let u_bytes = &[
+            x0 as f32,
+            y0 as f32,
+            alpha,
+            if has_clip_mask { 1.0 } else { 0.0 },
+            map[0],
+            map[1],
+            map[2],
+            map[3],
+            bound[0],
+            bound[1],
+            bound[2],
+            bound[3],
+        ];
         let (slab_idx, u_off) = self.push_uniform(device, queue, u_bytes);
+        let blurred = halo.map_or_else(|| &self.blur_out.as_ref().expect("blur_out").view, |halo| &halo.view);
         let clip_view = if has_clip_mask {
             &self.clip_tex.as_ref().expect("clip").view
         } else {
@@ -2166,7 +2266,7 @@ impl GpuReaders {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.blur_out.as_ref().expect("blur_out").view),
+                    resource: wgpu::BindingResource::TextureView(blurred),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -2185,7 +2285,7 @@ impl GpuReaders {
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                         buffer: &self.slabs[slab_idx],
                         offset: 0,
-                        size: wgpu::BufferSize::new(16),
+                        size: wgpu::BufferSize::new(48),
                     }),
                 },
             ],

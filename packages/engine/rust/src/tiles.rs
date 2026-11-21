@@ -915,6 +915,7 @@ impl TileCache {
         zooming: bool,
         last: Option<Last>,
         prefetch: bool,
+        reuse_coarse: bool,
     ) -> Option<Plan> {
         let (level, origin) = Level::of(view)?;
         let id = self.level_id(level, false);
@@ -1013,7 +1014,7 @@ impl TileCache {
         for &(i, j) in &visible {
             let key = TileKey { level: id, i, j };
             let held = self.tiles.get(&key).copied();
-            if held.is_some_and(|e| e.current()) {
+            if held.is_some_and(|e| e.current() || (reuse_coarse && !e.stale)) {
                 continue;
             }
             let shown = Rect::new(
@@ -1443,7 +1444,7 @@ mod tests {
         let mut c = TileCache::new(64, 64);
         c.begin([1.0; 4], 0);
         let plan = c
-            .plan(cam(1.0, 10.0, 20.0), (100, 80), false, None, false)
+            .plan(cam(1.0, 10.0, 20.0), (100, 80), false, None, false, false)
             .expect("plan");
         // 100 × 80 from grid pixel (-10, -20): tiles -1..=1 by -1..=0.
         assert_eq!(plan.visible.len(), 6);
@@ -1461,7 +1462,7 @@ mod tests {
         c.begin([1.0; 4], 0);
         c.invalidate(plan.level, &[Rect::new(5.0, 5.0, 6.0, 6.0)]);
         let again = c
-            .plan(cam(1.0, 10.0, 20.0), (100, 80), false, None, false)
+            .plan(cam(1.0, 10.0, 20.0), (100, 80), false, None, false, false)
             .expect("plan");
         assert_eq!(again.jobs.len(), 1);
         assert!(!again.jobs[0].must, "a stale tile stands in for itself");
@@ -1476,17 +1477,19 @@ mod tests {
     fn a_whole_pixel_pan_reuses_tiles_and_a_fractional_one_does_not() {
         let mut c = TileCache::new(64, 64);
         c.begin([1.0; 4], 0);
-        let p = c.plan(cam(1.0, 0.0, 0.0), (100, 80), false, None, true).expect("plan");
+        let p = c
+            .plan(cam(1.0, 0.0, 0.0), (100, 80), false, None, true, false)
+            .expect("plan");
         draw_all(&mut c, &p);
         c.begin([1.0; 4], 0);
         let p2 = c
-            .plan(cam(1.0, -30.0, 7.0), (100, 80), false, None, false)
+            .plan(cam(1.0, -30.0, 7.0), (100, 80), false, None, false, false)
             .expect("plan");
         assert!(p2.jobs.is_empty(), "the ring was drawn: {:?}", p2.jobs);
         assert!(c.compose(&p2, None).exact);
         c.begin([1.0; 4], 0);
         let p3 = c
-            .plan(cam(1.0, -30.5, 7.0), (100, 80), false, None, false)
+            .plan(cam(1.0, -30.5, 7.0), (100, 80), false, None, false, false)
             .expect("plan");
         assert_ne!(p3.level, p.level);
         assert!(!c.compose(&p3, None).exact);
@@ -1496,7 +1499,9 @@ mod tests {
     fn zooming_draws_ladder_tiles_only_where_nothing_stands_in() {
         let mut c = TileCache::new(64, 256);
         c.begin([1.0; 4], 0);
-        let p = c.plan(cam(1.0, 0.0, 0.0), (100, 80), false, None, false).expect("plan");
+        let p = c
+            .plan(cam(1.0, 0.0, 0.0), (100, 80), false, None, false, false)
+            .expect("plan");
         draw_all(&mut c, &p);
         let last = Last {
             view: cam(1.0, 0.0, 0.0),
@@ -1505,7 +1510,7 @@ mod tests {
         // Zoomed in a little: the last frame covers the view, nothing is drawn.
         c.begin([1.0; 4], 0);
         let z = c
-            .plan(cam(1.1, -5.0, -4.0), (100, 80), true, Some(last), false)
+            .plan(cam(1.1, -5.0, -4.0), (100, 80), true, Some(last), false, false)
             .expect("plan");
         assert!(z.jobs.is_empty(), "{:?}", z.jobs);
         let comp = c.compose(&z, Some(last));
@@ -1513,7 +1518,7 @@ mod tests {
         // Zoomed far out: ladder tiles (level of detail on) where nothing covers.
         c.begin([1.0; 4], 0);
         let out = c
-            .plan(cam(0.3, 30.0, 20.0), (100, 80), true, Some(last), false)
+            .plan(cam(0.3, 30.0, 20.0), (100, 80), true, Some(last), false, false)
             .expect("plan");
         assert!(!out.jobs.is_empty());
         assert!(out.jobs.iter().all(|j| j.detail && j.must && j.key.level != out.level));
@@ -1527,12 +1532,14 @@ mod tests {
     fn eviction_spares_what_the_frame_shows_and_drops_other_levels_first() {
         let mut c = TileCache::new(64, 12);
         c.begin([1.0; 4], 0);
-        let a = c.plan(cam(2.0, 0.0, 0.0), (100, 80), false, None, false).expect("plan");
+        let a = c
+            .plan(cam(2.0, 0.0, 0.0), (100, 80), false, None, false, false)
+            .expect("plan");
         draw_all(&mut c, &a);
         assert_eq!(c.len(), 4);
         c.begin([1.0; 4], 0);
         let b = c
-            .plan(cam(1.0, 0.0, 0.0), (200, 150), false, None, false)
+            .plan(cam(1.0, 0.0, 0.0), (200, 150), false, None, false, false)
             .expect("plan");
         draw_all(&mut c, &b);
         // 4 + 12 > 12: the finer level's tiles went, the frame's own stayed.
@@ -1545,7 +1552,9 @@ mod tests {
     fn a_zoom_passing_through_scales_keeps_the_levels_that_stand_in() {
         let mut c = TileCache::new(64, 256);
         c.begin([1.0; 4], 0);
-        let p = c.plan(cam(1.0, 0.0, 0.0), (100, 80), false, None, false).expect("plan");
+        let p = c
+            .plan(cam(1.0, 0.0, 0.0), (100, 80), false, None, false, false)
+            .expect("plan");
         draw_all(&mut c, &p);
         let last = Last {
             view: cam(1.0, 0.0, 0.0),
@@ -1555,7 +1564,7 @@ mod tests {
         for i in 1..=40 {
             c.begin([1.0; 4], 0);
             let z = 1.0 + f64::from(i) * 0.01;
-            let _ = c.plan(cam(z, 0.0, 0.0), (100, 80), true, Some(last), false);
+            let _ = c.plan(cam(z, 0.0, 0.0), (100, 80), true, Some(last), false, false);
         }
         assert!(c.level(p.level).is_some(), "the drawn level stayed");
         assert_eq!(c.len(), p.visible.len());
@@ -1571,7 +1580,9 @@ mod tests {
         for k in 0..8 {
             c.begin([1.0; 4], 0);
             let z = 1.0 + f64::from(k) * 0.37;
-            let p = c.plan(cam(z, 0.0, 0.0), (100, 80), false, None, false).expect("plan");
+            let p = c
+                .plan(cam(z, 0.0, 0.0), (100, 80), false, None, false, false)
+                .expect("plan");
             draw_all(&mut c, &p);
             last = Some(Last {
                 view: cam(z, 0.0, 0.0),
@@ -1579,7 +1590,9 @@ mod tests {
             });
         }
         c.begin([1.0; 4], 0);
-        let z = c.plan(cam(5.3, 0.0, 0.0), (100, 80), true, last, false).expect("plan");
+        let z = c
+            .plan(cam(5.3, 0.0, 0.0), (100, 80), true, last, false, false)
+            .expect("plan");
         assert!(c.level(z.level).is_some(), "the frame's level survived its ladder");
         let comp = c.compose(&z, last);
         assert!(!comp.exact && comp.pending > 0, "{comp:?}");
@@ -1589,7 +1602,9 @@ mod tests {
     fn a_frame_at_rest_draws_a_coarser_level_ahead_for_a_zoom_out() {
         let mut c = TileCache::new(64, 256);
         c.begin([1.0; 4], 0);
-        let p = c.plan(cam(1.0, 0.0, 0.0), (128, 128), false, None, true).expect("plan");
+        let p = c
+            .plan(cam(1.0, 0.0, 0.0), (128, 128), false, None, true, false)
+            .expect("plan");
         let coarse: Vec<_> = p.jobs.iter().filter(|j| j.detail).collect();
         assert!(!coarse.is_empty(), "a coarser level is drawn ahead");
         draw_all(&mut c, &p);
@@ -1600,7 +1615,7 @@ mod tests {
         // Zoomed out to 60%: the coarse level stands in, nothing has to be drawn now.
         c.begin([1.0; 4], 0);
         let z = c
-            .plan(cam(0.6, 25.0, 25.0), (128, 128), true, Some(last), true)
+            .plan(cam(0.6, 25.0, 25.0), (128, 128), true, Some(last), true, false)
             .expect("plan");
         assert!(z.jobs.iter().all(|j| !j.must), "{:?}", z.jobs);
     }
@@ -1609,7 +1624,9 @@ mod tests {
     fn a_frame_too_large_for_the_budget_is_drawn_direct() {
         let mut c = TileCache::new(64, 4);
         c.begin([1.0; 4], 0);
-        let p = c.plan(cam(1.0, 0.0, 0.0), (200, 200), false, None, true).expect("plan");
+        let p = c
+            .plan(cam(1.0, 0.0, 0.0), (200, 200), false, None, true, false)
+            .expect("plan");
         assert!(p.direct);
         assert_eq!(p.jobs.len(), 16);
         assert!(p.jobs.iter().all(|j| j.must && !j.detail));
@@ -1619,7 +1636,9 @@ mod tests {
     fn what_nothing_stands_in_for_comes_before_what_waits() {
         let mut c = TileCache::new(64, 64);
         c.begin([1.0; 4], 0);
-        let p = c.plan(cam(1.0, 0.0, 0.0), (192, 64), false, None, false).expect("plan");
+        let p = c
+            .plan(cam(1.0, 0.0, 0.0), (192, 64), false, None, false, false)
+            .expect("plan");
         draw_all(&mut c, &p);
         let last = Last {
             view: cam(1.0, 0.0, 0.0),
@@ -1630,7 +1649,7 @@ mod tests {
         c.begin([1.0; 4], 0);
         c.invalidate_all();
         let q = c
-            .plan(cam(1.0, -64.0, 0.0), (192, 64), false, Some(last), false)
+            .plan(cam(1.0, -64.0, 0.0), (192, 64), false, Some(last), false, false)
             .expect("plan");
         let first_optional = q.jobs.iter().position(|j| !j.must).expect("stale tiles wait");
         assert!(q.jobs[..first_optional].iter().any(|j| j.key.i == 3), "{:?}", q.jobs);
@@ -1644,11 +1663,15 @@ mod tests {
         // least at rest), the frame becomes exact, never asking for a slot it can't have.
         let mut c = TileCache::new(64, 6);
         c.begin([1.0; 4], 0);
-        let a = c.plan(cam(2.0, 0.0, 0.0), (100, 80), false, None, false).expect("plan");
+        let a = c
+            .plan(cam(2.0, 0.0, 0.0), (100, 80), false, None, false, false)
+            .expect("plan");
         draw_all(&mut c, &a);
         for _ in 0..8 {
             c.begin([1.0; 4], 0);
-            let b = c.plan(cam(1.0, 0.0, 0.0), (100, 80), false, None, false).expect("plan");
+            let b = c
+                .plan(cam(1.0, 0.0, 0.0), (100, 80), false, None, false, false)
+                .expect("plan");
             let mut extra = 1;
             for j in &b.jobs {
                 if j.direct {
@@ -1674,11 +1697,15 @@ mod tests {
     fn a_background_or_reach_change_drops_everything() {
         let mut c = TileCache::new(64, 16);
         c.begin([1.0; 4], 0);
-        let p = c.plan(cam(1.0, 0.0, 0.0), (100, 80), false, None, false).expect("plan");
+        let p = c
+            .plan(cam(1.0, 0.0, 0.0), (100, 80), false, None, false, false)
+            .expect("plan");
         draw_all(&mut c, &p);
         c.begin([0.5, 0.5, 0.5, 1.0], 0);
         assert!(c.is_empty());
-        let p = c.plan(cam(1.0, 0.0, 0.0), (100, 80), false, None, false).expect("plan");
+        let p = c
+            .plan(cam(1.0, 0.0, 0.0), (100, 80), false, None, false, false)
+            .expect("plan");
         draw_all(&mut c, &p);
         c.begin([0.5, 0.5, 0.5, 1.0], 3);
         assert!(c.is_empty());

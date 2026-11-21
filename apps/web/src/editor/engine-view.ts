@@ -2293,6 +2293,8 @@ export class EngineView {
     if (!health.ok) return this.#handleGpuFailure(health, true);
     if (!this.#readback) this.#consecutiveTimeouts = 0;
     const f = frame.value;
+    if (f.plan === "reader-halo" && !this.#limitReason)
+      this.#limitReason = "reader samples beyond the viewport use reduced detail";
     if (!f.presented) {
       if (++this.#unpresented >= UNPRESENTED) {
         return this.#handleGpuFailure(

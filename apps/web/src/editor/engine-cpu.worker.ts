@@ -25,6 +25,9 @@ const MAX_INFLIGHT_TRANSFERS = 2;
 const MAX_INFLIGHT_BYTES = 16 * 1024 * 1024;
 /** Maximum cached CPU tiles retained in the worker's Phase 2 tile cache. */
 const CPU_TILE_SLOTS = 128;
+// A smaller CPU picture loses readable text. Let the viewport use Canvas
+// when the Worker cannot admit even this raster, and retry on the next view.
+const CPU_RASTER_FLOOR = 0.5;
 /** Tiles drawn per progressive slice at rest vs while moving. */
 const REST_SLICE_TILES = 4;
 const MOVING_SLICE_TILES = 2;
@@ -215,8 +218,20 @@ async function pump(): Promise<void> {
             limit = r.message;
             direct = true;
             const renderer = engine;
-            const retry = fitEngineRaster(width, height, camera, (raster) =>
-              renderer.renderCpu(raster.width, raster.height, raster.camera, job.background, false),
+            const retry = fitEngineRaster(
+              width,
+              height,
+              camera,
+              (raster) =>
+                renderer.renderCpu(
+                  raster.width,
+                  raster.height,
+                  raster.camera,
+                  job.background,
+                  false,
+                ),
+              1,
+              CPU_RASTER_FLOOR,
             );
             r = retry.result;
             if (r.ok && retry.raster.scale === 1) limit = undefined;

@@ -1354,11 +1354,13 @@ impl Engine {
         self.check_supported()?;
         let view = camera.view();
         let frame_rect = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
-        let (reach, samples) = self.reader_reach(view, Some(frame_rect));
+        let (reach, samples, native_samples) = self.reader_reach(view, Some(frame_rect));
         let halo_opt = self.limit_halo(reach).ok();
         let samples = (editor_viewport && !self.store.has_context())
             .then(|| IRect::around(samples))
             .filter(|sample| *sample != IRect::around(frame_rect));
+        let native_samples = samples
+            .and_then(|samples| (samples != IRect::around(native_samples)).then_some(IRect::around(native_samples)));
         if self.gpu.is_none() {
             return Err(EngineError::new(ErrorCode::State, "no GPU attached"));
         }
@@ -1412,6 +1414,7 @@ impl Engine {
                 options.moving,
                 prefix,
                 samples,
+                native_samples,
             );
             if prefix.is_some() && result.as_ref().is_err_and(|e| e.code == ErrorCode::Limit) {
                 result = gpu.render_whole(
@@ -1422,6 +1425,7 @@ impl Engine {
                     options.moving,
                     None,
                     samples,
+                    native_samples,
                 );
             }
             match result {
@@ -1464,6 +1468,7 @@ impl Engine {
                 options.moving,
                 None,
                 samples,
+                native_samples,
             )?
         };
         // No frame is exact while text is still to come: it may paint past its box.
@@ -1499,17 +1504,20 @@ impl Engine {
     }
 
     /// The dependency reach and the page pixels a reader may sample outside a view.
-    fn reader_reach(&self, view: Affine, crop: Option<Rect>) -> (f64, Rect) {
+    fn reader_reach(&self, view: Affine, crop: Option<Rect>) -> (f64, Rect, Rect) {
         let mut samples = crop.unwrap_or(Rect::ZERO);
+        let mut native_samples = samples;
         if self.store.readers().is_empty() {
-            return (0.0, samples);
+            return (0.0, samples, native_samples);
         }
         struct ReaderNode {
             paint: Rect,
             read: Rect,
             reach_px: f64,
             writes_backdrop: bool,
+            native_reads: bool,
         }
+        #[allow(clippy::too_many_arguments)]
         fn collect(
             store: &Store,
             view: Affine,
@@ -1517,6 +1525,7 @@ impl Engine {
             parent: Affine,
             alpha: f32,
             parent_context: bool,
+            inside_isolation: bool,
             out: &mut Vec<ReaderNode>,
         ) {
             let Some(node) = store.nodes.get(&id) else {
@@ -1538,6 +1547,8 @@ impl Engine {
                 return;
             }
             let inner = if r.isolate() && r.opacity < 1.0 { 1.0 } else { opacity };
+            let inside_isolation =
+                inside_isolation || (r.isolate() && r.opacity < 1.0) || !r.post_effects.is_empty() || r.blend != 0;
             let box_rect = Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1]));
             let local = r
                 .content_bounds(&|g| store.glyphs.bounds(g))
@@ -1548,7 +1559,7 @@ impl Engine {
                 match op {
                     crate::record::Op::Children => {
                         for &kid in &node.children {
-                            collect(store, view, kid, world, inner, is_context, out);
+                            collect(store, view, kid, world, inner, is_context, inside_isolation, out);
                         }
                     }
                     crate::record::Op::Glass(g) if !is_context => {
@@ -1559,6 +1570,7 @@ impl Engine {
                             read: paint.inflate(reach_px, reach_px),
                             reach_px,
                             writes_backdrop: false,
+                            native_reads: false,
                         });
                     }
                     crate::record::Op::Read { halo, .. } => {
@@ -1569,6 +1581,7 @@ impl Engine {
                             read: paint.inflate(reach_px, reach_px),
                             reach_px,
                             writes_backdrop: true,
+                            native_reads: true,
                         });
                     }
                     crate::record::Op::BackgroundBlur(b_op) => {
@@ -1580,6 +1593,10 @@ impl Engine {
                             read: paint.inflate(reach_px, reach_px),
                             reach_px,
                             writes_backdrop: true,
+                            native_reads: inside_isolation
+                                || crate::blur::sigma_from_radius(b_op.radius)
+                                    * (device.determinant().abs().sqrt() as f32)
+                                    < crate::blur::VIEWPORT_HALO_MIN_SIGMA,
                         });
                     }
                     crate::record::Op::ProgressiveBlur(p_op) => {
@@ -1592,6 +1609,7 @@ impl Engine {
                             read: paint.inflate(reach_px, reach_px),
                             reach_px,
                             writes_backdrop: true,
+                            native_reads: true,
                         });
                     }
                     _ => {}
@@ -1601,7 +1619,7 @@ impl Engine {
         let mut nodes = Vec::new();
         if let Some(root) = self.store.nodes.get(&crate::store::ROOT) {
             for &kid in &root.children {
-                collect(&self.store, view, kid, Affine::IDENTITY, 1.0, false, &mut nodes);
+                collect(&self.store, view, kid, Affine::IDENTITY, 1.0, false, false, &mut nodes);
             }
         }
         let overlaps = |a: Rect, b: Rect| a.x0 <= b.x1 && b.x0 <= a.x1 && a.y0 <= b.y1 && b.y0 <= a.y1;
@@ -1613,9 +1631,11 @@ impl Engine {
             .filter_map(|(i, node)| node.writes_backdrop.then_some(i))
             .collect();
         let mut needed_by_later = vec![0.0f64; nodes.len()];
+        let mut native_needed = vec![0.0f64; nodes.len()];
         let mut total = 0.0f64;
         for (i, node) in nodes.iter().enumerate().rev() {
             let downstream = needed_by_later[i];
+            let native_downstream = native_needed[i];
             if downstream == 0.0 && crop.is_some_and(|rect| !overlaps(node.paint, rect)) {
                 continue;
             }
@@ -1627,14 +1647,30 @@ impl Engine {
                     samples = samples.union(visible.inflate(node.reach_px, node.reach_px));
                 }
             }
+            let native_reach = if node.native_reads {
+                if let Some(crop) = crop {
+                    let visible = node.paint.intersect(crop.inflate(native_downstream, native_downstream));
+                    if visible.width() > 0.0 && visible.height() > 0.0 {
+                        native_samples = native_samples.union(visible.inflate(node.reach_px, node.reach_px));
+                        node.reach_px + native_downstream
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
             let earlier = writers.partition_point(|&writer| writer < i);
             for &writer in &writers[..earlier] {
                 if overlaps(nodes[writer].paint, node.read) {
                     needed_by_later[writer] = needed_by_later[writer].max(reach);
+                    native_needed[writer] = native_needed[writer].max(native_reach);
                 }
             }
         }
-        (total, samples)
+        (total, samples, native_samples)
     }
 
     /// Draws `area` of a `width` × `height` frame into the CPU target, extended by the readers'
@@ -1843,12 +1879,14 @@ impl Engine {
         };
         let result = (|| {
             let mut stats = TiledStats::default();
-            let Some(last) = tiles.last else { return Ok(stats) };
+            let Some(last) = tiles.last else {
+                return Ok(stats);
+            };
             let crop = Rect::new(0.0, 0.0, f64::from(last.size.0), f64::from(last.size.1));
             let tile = tiles.cache.tile;
             let halo = self.cpu_view_halo(last.view, crop, tile)?;
             tiles.cache.begin(background, halo);
-            let Some(plan) = tiles.cache.plan(last.view, last.size, false, Some(last), true) else {
+            let Some(plan) = tiles.cache.plan(last.view, last.size, false, Some(last), true, false) else {
                 return Ok(stats);
             };
             let t = tile as usize;
@@ -1910,7 +1948,7 @@ impl Engine {
         tiles.cache.opening = opening;
         let mut plan = tiles
             .cache
-            .plan(view, (width, height), zooming || opening, last, options.prefetch)
+            .plan(view, (width, height), zooming || opening, last, options.prefetch, false)
             .ok_or_else(|| EngineError::limit("a camera the tiles can't follow (too far out)"))?;
         let mut stats = TiledStats {
             direct: plan.direct,

@@ -278,7 +278,7 @@ fn fs_frost(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 // 6. Full glass refraction, dispersion, splay, lighting, and premul replace.
 // ---------------------------------------------------------------------------
 struct GlassU {
-    // (rw, rh, lw, lh)
+    // (backdrop width, backdrop height, rim mask x offset, rim mask y offset)
     sizes: vec4<f32>,
     // (region_x0_in_target, region_y0_in_target, dst_x0_in_target, dst_y0_in_target)
     origin: vec4<f32>,
@@ -304,8 +304,11 @@ struct GlassU {
     tune_b: vec4<f32>,
     // (shade, shade_reach, valid_lw, valid_lh)
     tune_c: vec4<f32>,
-    // (height_packed, 0, 0, 0)
-    tune_d: vec4<f32>, // (packed height, quad phase x, quad phase y, unused)
+    // (height_packed, quad phase x, quad phase y, device px per optical px)
+    tune_d: vec4<f32>,
+    // (native coordinate at the optical origin, native sampling enabled, backdrop divisor)
+    native_map: vec4<f32>,
+    native_bounds: vec4<f32>,
 };
 
 @group(0) @binding(0) var g_backdrop: texture_2d<f32>;
@@ -316,6 +319,7 @@ struct GlassU {
 @group(0) @binding(5) var g_clip: texture_2d<f32>;
 @group(0) @binding(6) var g_lin_samp: sampler;
 @group(0) @binding(7) var<uniform> gu: GlassU;
+@group(0) @binding(8) var g_native: texture_2d<f32>;
 
 fn safe_pow(base: f32, exponent: f32) -> f32 {
     // Metal/ANGLE pow(0.0, y) can be undefined or NaN; keep base strictly positive even on untaken lanes.
@@ -436,8 +440,8 @@ fn lens_sample(p: vec2<f32>) -> LensSample {
     let splay = gu.lens.y;
     let is_box = gu.light_box.z > 0.5;
     let valid_h = gu.tune_c.zw;
-    let h_px = clamp(p / k, vec2<f32>(0.5), max(valid_h - vec2<f32>(0.5), vec2<f32>(0.5)));
-    let h_uv = clamp(h_px / max(gu.sizes.zw, vec2<f32>(1.0)), vec2<f32>(0.0), vec2<f32>(1.0));
+    let h_px = clamp((p - gu.sizes.zw) / k, vec2<f32>(0.5), max(valid_h - vec2<f32>(0.5), vec2<f32>(0.5)));
+    let h_uv = clamp(h_px / vec2<f32>(textureDimensions(g_height)), vec2<f32>(0.0), vec2<f32>(1.0));
     let hs = textureSampleLevel(g_height, g_lin_samp, h_uv, 0.0).rgb;
     let grad_raw = select(hs.gb, (hs.gb - vec2<f32>(0.5)) * 2.0, gu.tune_d.x > 0.5);
     let grad = grad_raw / k;
@@ -458,7 +462,7 @@ fn lens_sample(p: vec2<f32>) -> LensSample {
     let rim = safe_pow(slope, gu.tune_a.x);
     let fall = select(
         rim,
-        safe_pow(clamp(1.0 - d / max(depth, 1.0), 0.0, 1.0), gu.tune_a.y),
+        safe_pow(clamp(1.0 - d / max(depth, 1.0 / gu.tune_d.w), 0.0, 1.0), gu.tune_a.y),
         is_box
     );
     let along = vec2<f32>(-inward.y, inward.x);
@@ -469,9 +473,26 @@ fn lens_sample(p: vec2<f32>) -> LensSample {
     return LensSample(bend, inward, d);
 }
 
+// Clear glass can sample unreduced backdrop pixels when the displaced ray
+// stays in the viewport. Fade over the last device pixel at the halo boundary.
+fn glass_color(uv: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>) -> vec4<f32> {
+    let halo_color = textureSampleGrad(g_backdrop, g_mip_samp, uv, dx, dy);
+    if (gu.native_map.z < 0.5) {
+        return halo_color;
+    }
+    let scale = gu.sizes.xy * gu.native_map.w;
+    let native_px = uv * scale + gu.native_map.xy;
+    let edge = min(native_px - gu.native_bounds.xy, gu.native_bounds.zw - native_px);
+    let footprint = max(length(dx * scale), length(dy * scale));
+    let blend = clamp(min(edge.x, edge.y) + 0.5, 0.0, 1.0)
+        * (1.0 - clamp((footprint - 1.0) / (gu.native_map.w - 1.0), 0.0, 1.0));
+    let uv_native = native_px / vec2<f32>(textureDimensions(g_native));
+    return mix(halo_color, textureSampleLevel(g_native, g_lin_samp, uv_native, 0.0), blend);
+}
+
 @fragment
 fn fs_glass(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let p = pos.xy - gu.origin.xy;
+    let p = (pos.xy - gu.origin.xy) / gu.tune_d.w;
     let rw = max(gu.sizes.x, 1.0);
     let rh = max(gu.sizes.y, 1.0);
     let depth = gu.rim.z;
@@ -480,7 +501,7 @@ fn fs_glass(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let lens = lens_sample(p);
     let d = lens.distance;
     let inward = lens.inward;
-    let inv_size = vec2<f32>(1.0 / rw, 1.0 / rh);
+    let inv_size = (gu.tune_d.w / gu.native_map.w) / vec2<f32>(rw, rh);
     let uv_r = (p + lens.bend * (1.0 + dispersion)) * inv_size;
     let uv_g = (p + lens.bend) * inv_size;
     let uv_b = (p + lens.bend * (1.0 - dispersion)) * inv_size;
@@ -494,7 +515,7 @@ fn fs_glass(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     // of the frame-aligned quad on any axis where hardware quads are out of phase.
     if (gu.tune_d.y > 0.5) {
         let step = select(-1.0, 1.0, (i32(pos.x) & 1) != 0);
-        let q = p + vec2<f32>(step, 0.0);
+        let q = p + vec2<f32>(step / gu.tune_d.w, 0.0);
         let bend = lens_sample(q).bend;
         dx_r = ((q + bend * (1.0 + dispersion)) * inv_size - uv_r) * step;
         dx_g = ((q + bend) * inv_size - uv_g) * step;
@@ -502,24 +523,24 @@ fn fs_glass(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     }
     if (gu.tune_d.z > 0.5) {
         let step = select(-1.0, 1.0, (i32(pos.y) & 1) != 0);
-        let q = p + vec2<f32>(0.0, step);
+        let q = p + vec2<f32>(0.0, step / gu.tune_d.w);
         let bend = lens_sample(q).bend;
         dy_r = ((q + bend * (1.0 + dispersion)) * inv_size - uv_r) * step;
         dy_g = ((q + bend) * inv_size - uv_g) * step;
         dy_b = ((q + bend * (1.0 - dispersion)) * inv_size - uv_b) * step;
     }
 
-    let red = textureSampleGrad(g_backdrop, g_mip_samp, uv_r, dx_r, dy_r);
-    let green = textureSampleGrad(g_backdrop, g_mip_samp, uv_g, dx_g, dy_g);
-    let blue = textureSampleGrad(g_backdrop, g_mip_samp, uv_b, dx_b, dy_b);
+    let red = glass_color(uv_r, dx_r, dy_r);
+    let green = glass_color(uv_g, dx_g, dy_g);
+    let blue = glass_color(uv_b, dx_b, dy_b);
 
     let dst_coord = vec2<i32>(floor(pos.xy - gu.origin.zw));
     let dst = textureLoad(g_dst, dst_coord, 0);
 
     let mask_coord = vec2<i32>(floor(p));
     let in_mask = mask_coord.x >= 0 && mask_coord.y >= 0 && mask_coord.x < i32(rw) && mask_coord.y < i32(rh);
-    var a = 0.0;
-    if (in_mask) {
+    var a = select(0.0, 1.0, gu.native_map.w > 1.0);
+    if (gu.native_map.w == 1.0 && in_mask) {
         a = textureLoad(g_mask, mask_coord, 0).a;
     }
     var clip_cov = 1.0;
@@ -534,9 +555,9 @@ fn fs_glass(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let seen_alpha = max(red.a, max(green.a, blue.a));
     var seen = vec3<f32>(red.r, green.g, blue.b);
     let facing = dot(-inward, gu.light_box.xy);
-    let hair = exp(-max(0.0, d - 0.5) / max(gu.tune_a.z, 1e-3));
+    let hair = exp(-max(0.0, d - 0.5 / gu.tune_d.w) / max(gu.tune_a.z, 1e-3));
     let edge = max(gu.tune_b.x * (facing - gu.tune_b.y), 0.0) + max(gu.tune_b.z * (-facing - gu.tune_b.w), 0.0);
-    let shading = intensity * gu.tune_c.x * facing * max(0.0, 1.0 - d / max(gu.tune_c.y * depth, 1.0));
+    let shading = intensity * gu.tune_c.x * facing * max(0.0, 1.0 - d / max(gu.tune_c.y * depth, 1.0 / gu.tune_d.w));
     seen = select(
         mix(seen, vec3<f32>(seen_alpha), -shading),
         mix(seen, vec3<f32>(0.0), shading),
@@ -645,6 +666,9 @@ fn fs_composite(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 struct BgBlurCompU {
     // (dirty_x0_in_target, dirty_y0_in_target, alpha, has_clip_mask)
     a: vec4<f32>,
+    // (coarse origin x/y, low pixels per device pixel, unused)
+    map: vec4<f32>,
+    size: vec4<f32>,
 };
 
 @group(0) @binding(0) var bg_blurred: texture_2d<f32>;
@@ -666,7 +690,19 @@ fn fs_bg_blur_composite(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<
     if (a_eff <= 0.0) {
         return dst;
     }
-    let blurred = textureLoad(bg_blurred, local, 0);
+    var blurred = textureLoad(bg_blurred, local, 0);
+    if (bgu.map.z > 0.0) {
+        let last = bgu.size.xy - vec2<f32>(1.0);
+        let p = clamp(pos.xy * bgu.map.z + bgu.map.xy - vec2<f32>(0.5), vec2<f32>(0.0), last);
+        let a = vec2<i32>(floor(p));
+        let b = vec2<i32>(min(vec2<f32>(a) + 1.0, last));
+        let f = fract(p);
+        blurred = mix(
+            mix(textureLoad(bg_blurred, a, 0), textureLoad(bg_blurred, vec2<i32>(b.x, a.y), 0), f.x),
+            mix(textureLoad(bg_blurred, vec2<i32>(a.x, b.y), 0), textureLoad(bg_blurred, b, 0), f.x),
+            f.y
+        );
+    }
     return dst * (1.0 - a_eff) + blurred * a_eff;
 }
 
