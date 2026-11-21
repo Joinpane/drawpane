@@ -962,6 +962,18 @@ Drop and inner shadows (`Op::DropShadow` opcode 13, `Op::InnerShadow` opcode 14,
   - `Switch` (820 layers, 311 shadows): first frame 131 ms, exact 167 ms (down from 601 ms; canvas 147 / 147 ms); `pan, whole` interval 29.7 / 33.5 ms (canvas 33.8 / 38.7); `zoom, whole` 33.3 / 36.1 ms (canvas 38.2 / 48.5); `pan, 50%` content 1.8 / 2.9 ms, interval 30.3 / 32.6 ms (canvas 2.1 / 9.6, 36.2 / 51.4); `pan, 100%` content 1.4 / 2.0 ms, interval 30.5 / 32.0 ms (canvas 3.5 / 9.3, 36.9 / 46.0).
   - `Checkbox` (955 layers, 115 shadows): `pan, 100%` interval 30.6 / 33.5 ms (canvas 32.7 / 35.6); `Slider` (189 layers, 53 shadows): `pan, 100%` 30.3 / 32.1 ms (canvas 31.8 / 35.7); `Input OTP` (410 layers, 170 shadows): `pan, 100%` 30.5 / 35.8 ms (canvas 34.4 / 44.3).
 
+**Stacked shadows.** When a record has multiple visible drop shadows, each uses a
+rasterized mask and the reference Gaussian. A single eligible drop shadow can use Vello's
+analytic rounded-box path. Its approximation error can accumulate where shadows overlap.
+In the two-shadow `drop-layered` parity cell, the stacked mask path scored 0.21 on CPU and
+0.23 on both T4 GPU backends against Figma (the live canvas scored 0.24). The fixed 0.23
+ceiling was the rounded GPU score itself. This cell uses the same Figma and live-canvas
+gates as the rest of the shadow suite, including the 0.01 mean allowance against live canvas.
+
+A normal-blend shadow draws its mask into the Vello scene. It can stay inside a Vello
+opacity layer, which keeps adding or removing the shadow from changing when unrelated
+pixels are quantized during a scene flush.
+
 ## Amendment: layer blur (phase 3A, 2026-11-20)
 
 Layer blur (`FLAG_POST = 32`, `POST.layerBlur = 1`, `PostEffect::LayerBlur`, wire version 1.4) is drawn by both backends, clearing `UNSUPPORTED.layerBlur`. Progressive blur remains behind `UNSUPPORTED.progressiveBlur` (phase 3B).

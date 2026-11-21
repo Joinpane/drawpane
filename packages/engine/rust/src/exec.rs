@@ -2049,7 +2049,7 @@ impl<B: Backend> Walk<'_, B> {
                     self.path(r, *of, device, 0.0)?
                 } else {
                     let p = r
-                        .entry_path(*of)
+                        .entry_path(*of, device)
                         .ok_or_else(|| EngineError::malformed(format!("no path {of}")))?;
                     self.spend(p.elements().len())?;
                     p
@@ -2070,7 +2070,7 @@ impl<B: Backend> Walk<'_, B> {
             }
             _ => {
                 let p = r
-                    .entry_path(i)
+                    .entry_path(i, device)
                     .ok_or_else(|| EngineError::malformed(format!("no path {i}")))?;
                 self.spend(p.elements().len())?;
                 Ok(p)

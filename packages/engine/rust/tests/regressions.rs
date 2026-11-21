@@ -623,3 +623,45 @@ fn an_outside_clips_shape_is_charged_to_the_budget() {
     roomy.apply(&list).unwrap();
     roomy.render_cpu(64, 64, camera(), [0.0; 4], true).unwrap();
 }
+
+#[test]
+fn canonical_shadow_pixels_do_not_depend_on_cache_admission() {
+    let mut cast = Rec::new([1.0, 0.0, 0.0, 1.0, 24.38, 21.72], [420.0, 420.0]);
+    cast.paths.push(Entry::Rect {
+        w: 420.0,
+        h: 420.0,
+        radii: [18.0; 4],
+    });
+    cast.ops.push(Op::DropShadow {
+        paths: vec![0],
+        even_odd: false,
+        dx: 0.0,
+        dy: 6.0,
+        blur: 24.0,
+        color: [0.0, 0.0, 0.0, 0.58],
+        blend: 0,
+    });
+    let mut list = W::new(ANY, 1);
+    list.reset();
+    list.set(1, 0, &cast);
+    let wire = list.finish();
+    let render = |memory_bytes| {
+        let mut engine = Engine::new(Limits {
+            memory_bytes,
+            ..Limits::default()
+        });
+        engine.apply(&wire).expect("scene");
+        engine
+            .render_cpu(128, 128, camera(), [0.0; 4], false)
+            .expect("shadow")
+            .0
+            .to_vec()
+    };
+    // The whole canonical mask fits in memory, but exceeds the 10 MiB engine's cache share.
+    let cached = render(0);
+    assert!(cached.iter().any(|&byte| byte != 0));
+    assert!(
+        cached == render(10 << 20),
+        "shadow pixels changed when the cache was too small"
+    );
+}

@@ -874,7 +874,7 @@ describe.skipIf(!built())("Direct Worker renderCpu memory bounds (PR #239)", () 
       bEng.dispose();
     }
 
-    // Fresh Worker instances at 25 MiB and 16 MiB must match the reference to one color level or refuse with Limit.
+    // Fresh Worker instances at 25 MiB and 16 MiB must match the reference exactly or refuse with Limit.
     for (const budget of [25 << 20, 16 << 20] as const) {
       const wMod = await loadNodeEngine("worker", { fresh: true });
       const e = new RenderEngine(wMod, { memoryBytes: budget });
@@ -899,7 +899,7 @@ describe.skipIf(!built())("Direct Worker renderCpu memory bounds (PR #239)", () 
           expect(
             max,
             `budget=${budget}, ${differences} differences, first=(${(first >> 2) % w},${Math.floor((first >> 2) / w)})`,
-          ).toBeLessThanOrEqual(1);
+          ).toBe(0);
         }
       } else {
         expect(r.code).toBe(ErrorCode.Limit);

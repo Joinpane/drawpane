@@ -222,6 +222,8 @@ struct Txn {
     /// the ancestor's whole extent joins the dirty set.
     iso_ancestors: Vec<IsoAncestor>,
     iso_seen: HashSet<u32>,
+    // A descendant edit can change where an offscreen pass quantizes this scope.
+    iso_replay: HashSet<u32>,
     full: bool,
 }
 
@@ -236,6 +238,7 @@ impl Txn {
             touched: Vec::new(),
             iso_ancestors: Vec::new(),
             iso_seen: HashSet::new(),
+            iso_replay: HashSet::new(),
             full: false,
         }
     }
@@ -401,7 +404,8 @@ impl Store {
         } in txn.iso_ancestors
         {
             if self.nodes.contains_key(&a)
-                && (self.subtree_has_pass(a) != had_pass
+                && (txn.iso_replay.contains(&a)
+                    || self.subtree_has_pass(a) != had_pass
                     || self.subtree_has_blend(a) != had_blend
                     || (self.bounds_and_pad(a).1 - had_pad).abs() > 1e-6)
             {
@@ -702,7 +706,15 @@ impl Store {
                 let new_ends = record.ends_mask();
                 if txn.track {
                     self.note_before(id, txn);
-                    self.note_iso_ancestors(parent, txn);
+                    let draws_children = record.ops.iter().any(|op| matches!(op, Op::Children));
+                    let may_flush = !record.hidden()
+                        && (record.has_offscreen_pass()
+                            || (draws_children
+                                && self
+                                    .nodes
+                                    .get(&id)
+                                    .is_some_and(|n| n.children.iter().any(|&child| self.subtree_has_pass(child)))));
+                    self.note_iso_ancestors(parent, txn, may_flush.then_some(id));
                     if let Some((old_parent, old_mask, old_ends)) = old_info
                         && (old_mask || (old_ends && self.parent_has_mask(old_parent)))
                     {
@@ -812,7 +824,6 @@ impl Store {
                     .map_or((false, false), |n| (n.record.is_mask(), n.record.ends_mask()));
                 if txn.track {
                     self.note_before(id, txn);
-                    self.note_iso_ancestors(parent, txn);
                     if old_mask || (old_ends && self.parent_has_mask(parent)) {
                         self.note_mask_siblings(parent, txn);
                     }
@@ -964,15 +975,21 @@ impl Store {
         }
     }
 
-    /// Notes isolated faded ancestors of `start` (inclusive) before an edit.
-    fn note_iso_ancestors(&mut self, mut at: u32, txn: &mut Txn) {
+    /// Notes isolated scopes before an edit. Adding or removing a descendant flush can change
+    /// rounding anywhere in the scope, and its layer blend can amplify that difference.
+    fn note_iso_ancestors(&mut self, mut at: u32, txn: &mut Txn, flush_origin: Option<u32>) {
         if !txn.track {
             return;
         }
         while at != ROOT {
             let Some(n) = self.nodes.get(&at) else { break };
             let parent = n.parent;
-            let iso = n.record.blend != 0 || (n.record.isolate() && n.record.opacity < 1.0);
+            let iso = n.record.blend != 0
+                || (n.record.isolate() && n.record.opacity < 1.0)
+                || !n.record.post_effects.is_empty();
+            if iso && flush_origin.is_some_and(|id| id != at) {
+                txn.iso_replay.insert(at);
+            }
             if iso && txn.iso_seen.insert(at) {
                 let had_pass = self.subtree_has_pass(at);
                 let had_pad = self.bounds_and_pad(at).1;
@@ -1016,7 +1033,8 @@ impl Store {
         if !self.nodes.contains_key(&id) {
             return;
         }
-        self.note_iso_ancestors(id, txn);
+        let may_flush = self.subtree_has_pass(id);
+        self.note_iso_ancestors(id, txn, may_flush.then_some(id));
         let (order, end) = self.order_of(id);
         if let Some(rect) = self.dirty_extent(id) {
             txn.before.push(Dirty {
@@ -1209,10 +1227,7 @@ impl Store {
             let b = match r.paths.get(p as usize)? {
                 PathEntry::Outside(_) => continue,
                 PathEntry::Glyphs { .. } => continue,
-                _ => {
-                    use vello_common::kurbo::Shape;
-                    r.entry_path(p)?.bounding_box()
-                }
+                _ => r.entry_bounds(p, &|g| self.glyphs.bounds(g))?,
             };
             out = Some(out.map_or(b, |o| o.intersect(b)));
         }

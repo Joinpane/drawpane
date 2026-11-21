@@ -59,10 +59,6 @@ fn tile_padded_rect(r: IRect, tb: IRect, scene_offset: (i32, i32)) -> Rect {
     Rect::new(x0, y0, x1, y1)
 }
 
-/// Byte cap on transient offscreen pixmaps held by the active CPU scene before an automatic flush
-/// releases them in bounded Worker exports.
-const WORKER_TEMP_FLUSH_BYTES: usize = 1 << 20;
-
 fn pixmap(width: u32, height: u32, pixels: Vec<u8>) -> Pixmap {
     Pixmap::from_parts(
         pixels,
@@ -181,7 +177,8 @@ impl Cpu {
         } else {
             4 << 20
         };
-        let _ = self.shadow_cache.set_budget(shadow_budget);
+        let evicted = self.shadow_cache.set_budget(shadow_budget);
+        self.account_for_evicted_shadows(evicted);
         let blur_budget = if budget > 0 {
             (budget / 12).min(2 << 20)
         } else {
@@ -203,6 +200,15 @@ impl Cpu {
         self.offscreen_stack.clear();
         self.temp_bytes = 0;
         self.scene.reset_and_resize(1, 1);
+    }
+
+    /// An evicted mask can still be referenced by a pending scene draw.
+    fn account_for_evicted_shadows(&mut self, evicted: Vec<Arc<Pixmap>>) {
+        for mask in evicted {
+            if Arc::strong_count(&mask) > 1 {
+                self.temp_bytes = self.temp_bytes.saturating_add(mask.data_as_u8_slice().len());
+            }
+        }
     }
 
     /// Bytes currently allocated inside `Cpu` (target, offscreen stack, images, caches, temp).
@@ -239,7 +245,8 @@ impl Cpu {
             .saturating_add(self.runtime_bytes())
             .saturating_add(need);
         if total > cap {
-            let _ = self.shadow_cache.clear();
+            let evicted = self.shadow_cache.clear();
+            self.account_for_evicted_shadows(evicted);
             self.blur.clear();
             self.noise.clear();
         }
@@ -371,7 +378,6 @@ impl Cpu {
         dirty: IRect,
         color: AlphaColor<Srgb>,
         transient_bytes: usize,
-        open: &[Open],
     ) {
         let tb = self.target_bounds();
         let so = self.scene_offset();
@@ -396,20 +402,7 @@ impl Cpu {
         self.scene.set_fill_rule(Fill::NonZero);
         self.scene.fill_rect(&tile_padded_rect(dirty, tb, so));
         self.scene.set_tint(None);
-        if transient_bytes > 0 {
-            self.temp_bytes += transient_bytes;
-            if self.memory_budget > 0
-                && self.temp_bytes >= WORKER_TEMP_FLUSH_BYTES
-                && !open.iter().any(|o| matches!(o, Open::Layer))
-            {
-                for _ in open {
-                    self.scene.pop_clip();
-                }
-                self.flush_current();
-                self.scene.reset();
-                self.reopen_clips(open);
-            }
-        }
+        self.temp_bytes = self.temp_bytes.saturating_add(transient_bytes);
     }
 }
 
@@ -922,18 +915,9 @@ impl Backend for Cpu {
         self.scene.set_fill_rule(Fill::NonZero);
         let tb = self.target_bounds();
         self.scene.fill_rect(&tile_padded_rect(rect, tb, so));
-        self.temp_bytes += bytes;
-        if self.memory_budget > 0
-            && self.temp_bytes >= WORKER_TEMP_FLUSH_BYTES
-            && !open.iter().any(|o| matches!(o, Open::Layer))
-        {
-            for _ in open {
-                self.scene.pop_clip();
-            }
-            self.flush_current();
-            self.scene.reset();
-            self.reopen_clips(open);
-        }
+        // Keep the same Vello flush boundaries in the browser and in budgeted bands.
+        // The pending pixmap stays charged until the next render-graph flush.
+        self.temp_bytes = self.temp_bytes.saturating_add(bytes);
         Ok(())
     }
 
@@ -1050,7 +1034,7 @@ impl Backend for Cpu {
         dirty: IRect,
         sigma: f32,
         color: AlphaColor<Srgb>,
-        open: &[Open],
+        _open: &[Open],
     ) -> Result<()> {
         let dirty = align4_padded(dirty).intersect(self.target_bounds());
         if dirty.is_empty() {
@@ -1067,80 +1051,82 @@ impl Backend for Cpu {
             EdgeMode::Zero,
         )?;
 
-        // Fast path: canonical rounded-box / ellipse mask cache (bit-identical across tiles because
-        // the cached mask depends only on the canonical shape, never on tile bounds).
+        // Canonical coordinates and sigma determine the pixels. Cache admission controls
+        // reuse only. If the mask cannot fit, return Limit instead of switching rasterizers.
         if let Some(canon) = canonical {
+            if let Some(entry) = self.shadow_cache.get(&canon.key) {
+                let pm = entry.value.clone();
+                let origin = (canon.anchor.0 + entry.origin.0, canon.anchor.1 + entry.origin.1);
+                self.stamp_shadow_pixmap(pm, origin, dirty, color, 0);
+                return Ok(());
+            }
             let cw = (canon.mask_rect.x1 - canon.mask_rect.x0) as u32;
             let ch = (canon.mask_rect.y1 - canon.mask_rect.y0) as u32;
             let cache_bytes = (cw as usize) * (ch as usize) * 4;
-            if self.shadow_cache.fits_budget(cache_bytes) {
-                if let Some(entry) = self.shadow_cache.get(&canon.key) {
-                    let pm = entry.value.clone();
-                    let origin = (canon.anchor.0 + entry.origin.0, canon.anchor.1 + entry.origin.1);
-                    self.stamp_shadow_pixmap(pm, origin, dirty, color, 0, open);
-                    return Ok(());
-                }
-                let need = cache_bytes
-                    .saturating_mul(3)
-                    .saturating_add(scene_estimate_bytes(cw, ch));
-                if self.check_memory(need, "a cached shadow mask").is_ok() {
-                    let mut mask_scene = RenderContext::new(cw as u16, ch as u16);
-                    mask_scene.set_transform(Affine::translate((
-                        -f64::from(canon.mask_rect.x0),
-                        -f64::from(canon.mask_rect.y0),
-                    )));
-                    mask_scene.set_paint(AlphaColor::<Srgb>::new([1.0, 1.0, 1.0, 1.0]));
-                    mask_scene.set_fill_rule(Fill::NonZero);
-                    mask_scene.fill_path(&canon.path);
-                    mask_scene.flush();
-                    let mut mask_pm = Pixmap::new(cw as u16, ch as u16);
-                    let settings = RasterizerSettings {
-                        render_mode: RenderMode::OptimizeQuality,
-                        ..Default::default()
-                    };
-                    mask_scene.render_with(&mut mask_pm, &mut self.resources, settings);
-                    let mut out = vec![0u8; cache_bytes];
-                    let full = IRect {
-                        x0: 0,
-                        y0: 0,
-                        x1: cw as i32,
-                        y1: ch as i32,
-                    };
-                    try_blur_cpu(
-                        mask_pm.data_as_u8_slice(),
-                        (cw, ch),
-                        &mut out,
-                        (cw, ch),
-                        (0, 0),
-                        &BlurSpec {
-                            sigma: canon.sigma,
-                            edge: EdgeMode::Zero,
-                            clamp_bounds: full,
-                            dirty: full,
-                        },
-                    )?;
-                    if invert {
-                        for px in out.as_chunks_mut::<4>().0.iter_mut() {
-                            px[0] = 0;
-                            px[1] = 0;
-                            px[2] = 0;
-                            px[3] = 255 - px[3];
-                        }
-                    }
-                    let pm = Arc::new(pixmap(cw, ch, out));
-                    let mask_origin = (canon.mask_rect.x0, canon.mask_rect.y0);
-                    let _ = self.shadow_cache.insert(
-                        canon.key,
-                        pm.clone(),
-                        mask_origin,
-                        (cw as u16, ch as u16),
-                        cache_bytes,
-                    );
-                    let origin = (canon.anchor.0 + mask_origin.0, canon.anchor.1 + mask_origin.1);
-                    self.stamp_shadow_pixmap(pm, origin, dirty, color, 0, open);
-                    return Ok(());
+            let blur_bytes = crate::blur::cpu_work_bytes((cw, ch), (cw, ch), canon.sigma);
+            let need = cache_bytes
+                .saturating_mul(2)
+                .saturating_add(blur_bytes)
+                .saturating_add(scene_estimate_bytes(cw, ch));
+            self.check_memory(need, "a canonical shadow mask")?;
+
+            let mut mask_scene = RenderContext::new(cw as u16, ch as u16);
+            mask_scene.set_transform(Affine::translate((
+                -f64::from(canon.mask_rect.x0),
+                -f64::from(canon.mask_rect.y0),
+            )));
+            mask_scene.set_paint(AlphaColor::<Srgb>::new([1.0, 1.0, 1.0, 1.0]));
+            mask_scene.set_fill_rule(Fill::NonZero);
+            mask_scene.fill_path(&canon.path);
+            mask_scene.flush();
+            let mut mask_pm = Pixmap::new(cw as u16, ch as u16);
+            let settings = RasterizerSettings {
+                render_mode: RenderMode::OptimizeQuality,
+                ..Default::default()
+            };
+            mask_scene.render_with(&mut mask_pm, &mut self.resources, settings);
+            let mut out = vec![0u8; cache_bytes];
+            let full = IRect {
+                x0: 0,
+                y0: 0,
+                x1: cw as i32,
+                y1: ch as i32,
+            };
+            try_blur_cpu(
+                mask_pm.data_as_u8_slice(),
+                (cw, ch),
+                &mut out,
+                (cw, ch),
+                (0, 0),
+                &BlurSpec {
+                    sigma: canon.sigma,
+                    edge: EdgeMode::Zero,
+                    clamp_bounds: full,
+                    dirty: full,
+                },
+            )?;
+            if invert {
+                for px in out.as_chunks_mut::<4>().0.iter_mut() {
+                    px[0] = 0;
+                    px[1] = 0;
+                    px[2] = 0;
+                    px[3] = 255 - px[3];
                 }
             }
+            let pm = Arc::new(pixmap(cw, ch, out));
+            let mask_origin = (canon.mask_rect.x0, canon.mask_rect.y0);
+            let transient_bytes = if self.shadow_cache.fits_budget(cache_bytes) {
+                let evicted =
+                    self.shadow_cache
+                        .insert(canon.key, pm.clone(), mask_origin, (cw as u16, ch as u16), cache_bytes);
+                self.account_for_evicted_shadows(evicted);
+                0
+            } else {
+                cache_bytes
+            };
+            let origin = (canon.anchor.0 + mask_origin.0, canon.anchor.1 + mask_origin.1);
+            self.stamp_shadow_pixmap(pm, origin, dirty, color, transient_bytes);
+            return Ok(());
         }
 
         let mask_rect_opt = match cast {
@@ -1372,7 +1358,7 @@ impl Backend for Cpu {
         // Ensure RGB doesn't matter under AlphaMask; keep alpha intact.
         let _ = &mut out;
         let shadow_pm = Arc::new(pixmap(dirty_w, dirty_h, out));
-        self.stamp_shadow_pixmap(shadow_pm, (dirty.x0, dirty.y0), dirty, color, bytes, open);
+        self.stamp_shadow_pixmap(shadow_pm, (dirty.x0, dirty.y0), dirty, color, bytes);
         Ok(())
     }
 

@@ -593,6 +593,8 @@ impl Record {
     /// scene (so an enclosing `isolate` opacity scope must use the engine's offscreen target stack
     /// instead of a Vello opacity layer).
     pub fn has_offscreen_pass(&self) -> bool {
+        // Normal shadows rasterize their masks separately and draw into the Vello scene.
+        // Their temporary buffers never trigger a flush inside a Vello opacity layer.
         !self.post_effects.is_empty()
             || self.has_own_blend()
             || self.is_picture_mask()
@@ -600,7 +602,7 @@ impl Record {
                 .ops
                 .iter()
                 .chain(&self.coarse)
-                .any(|op| matches!(op, Op::DropShadow { .. } | Op::InnerShadow { .. } | Op::Read { .. }))
+                .any(|op| matches!(op, Op::Read { .. }))
     }
 
     /// The length of an entry's outline, at most (a glyph run's isn't known here: None).
@@ -782,11 +784,11 @@ impl Record {
     }
 
     /// An entry as a path in the record's units (glyph runs are built by the glyph store).
-    pub fn entry_path(&self, i: u32) -> Option<BezPath> {
+    pub fn entry_path(&self, i: u32, device: Affine) -> Option<BezPath> {
         match self.paths.get(i as usize)? {
             PathEntry::Path(p) => Some(p.to_bez()),
             PathEntry::Rect { w, h, radii, smoothing } => Some(geometry::rounded_rect(*w, *h, *radii, *smoothing)),
-            PathEntry::Ellipse { w, h } => Some(geometry::ellipse(*w, *h)),
+            PathEntry::Ellipse { w, h } => Some(geometry::ellipse(*w, *h, device)),
             PathEntry::Box {
                 x,
                 y,
@@ -802,7 +804,7 @@ impl Record {
                 Some(p)
             }
             PathEntry::Oval { x, y, w, h } => {
-                let mut p = geometry::ellipse(*w, *h);
+                let mut p = geometry::ellipse(*w, *h, device);
                 if *x != 0.0 || *y != 0.0 {
                     p.apply_affine(Affine::translate((f64::from(*x), f64::from(*y))));
                 }
