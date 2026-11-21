@@ -281,7 +281,8 @@ version = "0.1.0"
 dependencies = [
  "gif",
  "image",
- "jpeg-decoder",
+ "jpeg-decoder 0.3.2",
+ "jpeg-decoder 0.3.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "png",
  "wasm-bindgen",
 ]
@@ -580,6 +581,10 @@ dependencies = [
  "quote",
  "syn 2.0.119",
 ]
+
+[[package]]
+name = "jpeg-decoder"
+version = "0.3.2"
 
 [[package]]
 name = "jpeg-decoder"

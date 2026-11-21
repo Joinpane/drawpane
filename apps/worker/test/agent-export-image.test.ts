@@ -23,6 +23,7 @@ import { snapshotStream } from "../src/rooms/snapshots";
 import ttfUrl from "./fixtures/InstrumentSans-Regular.ttf?inline";
 import interlacedGifUrl from "./fixtures/interlaced-2400.gif?inline";
 import progressiveJpegUrl from "./fixtures/progressive-2000.jpg?inline";
+import phoneJpegUrl from "./fixtures/progressive-4032.jpg?inline";
 import { signedInUser } from "./helpers";
 import { call, makeToken } from "./mcp-helpers";
 
@@ -446,6 +447,7 @@ describe("export_image, headless", () => {
 
   it.each([
     ["progressive JPEG", "image/jpeg", progressiveJpegUrl, 200, 200],
+    ["12 MP progressive JPEG", "image/jpeg", phoneJpegUrl, 1008, 756],
     ["interlaced GIF", "image/gif", interlacedGifUrl, 240, 180],
   ] as const)(
     "draws a large %s at its painted size",
@@ -487,15 +489,15 @@ describe("export_image, headless", () => {
       const id = await render(`<Rect w={${width}} h={${height}} fill={${fills}} />`);
       return picture(await call(token, "export_image", { fileId, id, scale: 1 }));
     };
-    // The progressive coefficient arrays raise the decoder's high-water mark above 13 MiB.
-    const first = await exportImage(inlineBytes(progressiveJpegUrl), "image/jpeg", 200, 200);
+    // Exercise the decoder at quarter scale before asking for a large PNG.
+    const first = await exportImage(inlineBytes(phoneJpegUrl), "image/jpeg", 1008, 756);
     expect(first.data.approximate).toBeUndefined();
 
     const color = [36, 108, 203, 255];
-    const next = await exportImage(solidPng(1280, 720, color), "image/png", 1280, 720);
-    expect(next.data).toMatchObject({ width: 1280, height: 720, scale: 1 });
+    const next = await exportImage(solidPng(1400, 800, color), "image/png", 1400, 800);
+    expect(next.data).toMatchObject({ width: 1400, height: 800, scale: 1 });
     expect(next.data.approximate).toBeUndefined();
-    expect(enginePngPixel(next.bytes, 640, 360)).toEqual(color);
+    expect(enginePngPixel(next.bytes, 700, 400)).toEqual(color);
   }, 120_000);
 
   it("explains what it can't draw", async () => {
