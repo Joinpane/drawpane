@@ -1070,3 +1070,9 @@ Phase 3B executes backdrop readers on CPU and GPU in the tiled renderer and band
   - The restacked T4 WebGPU readback benchmark passed both cases. The six-layer exact and coarse fence p95 values were 31.9 and 4.2 ms. Stacked drag content p95 was 6.0 ms, with 3.1 ms encoding and 1.8 ms rendering. Latest exact settlement took at most 122.2 ms.
   - Onscreen T4 WebGL2 measured 50.2 and 17.2 ms for the six-layer exact and coarse fence p95. Stacked drag content p95 was 11.1 ms, including 5.0 ms encoding and 4.0 ms rendering. Confirmed presentation intervals were 16.6 ms median, 19.5 ms p95 and 25.4 ms p99. The coarse six-layer fence and the drag work and presentation tails missed their gates.
 - **Open conformance coverage** includes desktop WebGPU presentation with hardware compositing and native Safari Metal and ANGLE-Metal.
+
+### Glass inside picture masks, layer blur and noise
+
+The `glass-scopes` Figma suite places glass across the edge of translucent interior paint, with opaque stripes behind the scope. Figma's blur carries the stripes into the lens in all three cells. The engine's isolated pictures supply only the interior paint to their lens. This gives a visible residual on the part of each lens outside that paint.
+
+On the T4, the CPU / WebGPU / WebGL2 means against Figma were 2.08 / 2.11 / 2.11 for the picture mask, 3.50 / 3.52 / 3.52 for layer blur, and 3.13 / 3.16 / 3.16 for noise. The new gate holds each result to its measured mean, p99 and worst-tile range. The picture-mask, layer-blur and noise cells had CPU/GPU means of 0.080, 0.096 and 0.078 on both GPU backends. The Worker was byte-identical to the browser CPU in all three.
