@@ -721,11 +721,17 @@ export class SyncEngine {
 
 /**
  * Drops `set` operations that a later `set` of the same property overrides,
- * unless a create, delete or move of that node sits between them.
+ * unless a create, delete or move of that node sits between them, or a
+ * create or move into it: what may go under a node can hang on its values
+ * then (an override record only goes under an instance, so undoing a detach
+ * and redoing it needs the instance it was in between).
  */
 export function compactOps(ops: readonly Op[]): Op[] {
   const keep = new Array<boolean>(ops.length).fill(true);
   const seen = new Set<string>();
+  const end = (id: string) => {
+    for (const key of seen) if (key.startsWith(`${id}\u0000`)) seen.delete(key);
+  };
   for (let i = ops.length - 1; i >= 0; i--) {
     const op = ops[i] as Op;
     if (op.op === "set") {
@@ -734,7 +740,8 @@ export function compactOps(ops: readonly Op[]): Op[] {
       else seen.add(key);
     } else {
       // A structural op on a node ends any run of sets that could be merged across it.
-      for (const key of seen) if (key.startsWith(`${op.id}\u0000`)) seen.delete(key);
+      end(op.id);
+      if (op.op === "create" || op.op === "move") end(op.parent);
     }
   }
   return ops.filter((_, i) => keep[i]);
