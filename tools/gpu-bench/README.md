@@ -229,7 +229,8 @@ baseline and a change on the same type.
 
 Set `BENCH_W4_REPLAY=1` with the real-file engine bench to capture motion
 pixels in a second, untimed run of each gesture. The harness captures each
-requested camera that was confirmed presented. It re-renders each selected camera at the original DPR in exact
+requested camera after its presentation, and waits for that readback before
+advancing the gesture. It re-renders each selected camera at the original DPR in exact
 mode. The final pair measures the change between motion and exact rendering
 at the stopping camera. The report includes tile content errors, sharpness,
 LDR FLIP, and sharpness changes for adjacent captured steps. The thresholds

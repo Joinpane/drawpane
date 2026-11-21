@@ -21,13 +21,13 @@ interface ReplayEntry {
   width: number;
   height: number;
   dpr: number;
-  shown: string;
-  exact: string;
+  phase: "shown" | "exact";
+  pixels: string;
 }
 
 /**
- * Repeats the camera inputs outside the interval benchmark. Each saved frame's GPU copy
- * is submitted with that frame and kept only when that sequence was confirmed presented.
+ * Repeats the camera inputs outside the interval benchmark, waiting for each frame to
+ * present and read back before sending another camera.
  */
 async function captureReplay(
   page: Page,
@@ -36,12 +36,11 @@ async function captureReplay(
   frames: number,
   dir: string,
 ): Promise<void> {
-  const manifest: Array<Omit<ReplayEntry, "shown" | "exact">> = [];
+  const manifest: Array<Omit<ReplayEntry, "phase" | "pixels">> = [];
   const binding = `drawpaneSaveReplayFrame${nextBinding++}`;
-  await page.exposeFunction(binding, ({ shown, exact, ...entry }: ReplayEntry) => {
-    writeFileSync(join(dir, `${entry.step}-shown.rgba`), Buffer.from(shown, "base64"));
-    writeFileSync(join(dir, `${entry.step}-exact.rgba`), Buffer.from(exact, "base64"));
-    manifest.push(entry);
+  await page.exposeFunction(binding, ({ phase, pixels, ...entry }: ReplayEntry) => {
+    writeFileSync(join(dir, `${entry.step}-${phase}.rgba`), Buffer.from(pixels, "base64"));
+    if (phase === "exact") manifest.push(entry);
   });
   const lastStep = await page.evaluate(
     async ({ binding, kind, zoom, frames, native, timeout }) => {
@@ -71,38 +70,78 @@ async function captureReplay(
         }
         return btoa(raw);
       };
-      type Capture = {
-        sequence: number;
+      type Frame = {
         camera: Camera;
         width: number;
         height: number;
         dpr: number;
-        data: Promise<Uint8Array | Error>;
       };
-      const samples = new Map<Camera, Capture>();
-      const wanted = new Map<Camera, number>();
-      const pending = new Map<number, Capture>();
-      const read = new Set<Camera>();
-      const capture = (admit: (camera: Camera, exact: boolean) => boolean): MotionCapture => ({
+      type Captured = Frame & { data: Promise<Uint8Array | Error> };
+      type Request = {
+        camera: Camera;
+        exact: boolean;
+        captured?: Captured;
+      };
+      let request: Request | null = null;
+      const pending = new Map<number, Frame & { pixels: () => Promise<Uint8Array> }>();
+      const capture: MotionCapture = {
         submitted(sequence, camera, width, height, exact, pixels) {
-          if (admit(camera, exact)) {
-            pending.set(sequence, {
-              sequence,
-              camera,
-              width,
-              height,
-              dpr: devicePixelRatio,
-              data: pixels().catch((error: unknown) => new Error(String(error))),
-            });
+          if (
+            !request ||
+            request.captured ||
+            (request.exact && !exact) ||
+            camera.x !== request.camera.x ||
+            camera.y !== request.camera.y ||
+            camera.zoom !== request.camera.zoom
+          ) {
+            return;
           }
+          pending.set(sequence, { camera, width, height, dpr: devicePixelRatio, pixels });
         },
         confirmed(sequence) {
           const frame = pending.get(sequence);
-          if (frame) samples.set(frame.camera, frame);
+          if (request && !request.captured && frame) {
+            const { pixels, ...viewport } = frame;
+            request.captured = {
+              ...viewport,
+              data: pixels().catch((error: unknown) => new Error(String(error))),
+            };
+          }
           // Presentation probes coalesce. Earlier submissions cannot be confirmed later.
           for (const n of pending.keys()) if (n <= sequence) pending.delete(n);
         },
-      });
+      };
+      const drawAndCapture = async (
+        camera: Camera,
+        step: number,
+        phase: ReplayEntry["phase"],
+        match?: Frame,
+      ): Promise<Frame> => {
+        pending.clear();
+        const wanted: Request = { camera, exact: phase === "exact" };
+        request = wanted;
+        e.state.set({ camera });
+        if (wanted.exact) stats.redraw();
+        await deadline(() => !!wanted.captured, `${phase} presentation at input ${step + 1}`);
+        const captured = wanted.captured;
+        if (!captured) throw new Error("Camera replay lost a confirmed frame");
+        const { data, ...frame } = captured;
+        const pixels = await data;
+        if (pixels instanceof Error) throw pixels;
+        if (
+          match &&
+          (frame.width !== match.width || frame.height !== match.height || frame.dpr !== match.dpr)
+        ) {
+          throw new Error("Camera replay reference changed its pixel grid");
+        }
+        if (pixels.length !== frame.width * frame.height * 4) {
+          throw new Error("Camera replay received incomplete pixels");
+        }
+        const { x, y, zoom } = frame.camera;
+        await save({ ...frame, step, camera: { x, y, zoom }, phase, pixels: rgba(pixels) });
+        request = null;
+        return frame;
+      };
 
       try {
         if (zoom === "fit") e.zoomToFit();
@@ -110,13 +149,10 @@ async function captureReplay(
         await raf();
         await deadline(() => stats.exact, "the starting exact view");
         stats.beginMotion(native);
-        stats.motionCapture = capture((camera) => {
-          if (!wanted.has(camera) || read.has(camera)) return false;
-          read.add(camera);
-          return true;
-        });
+        stats.motionCapture = capture;
 
         const centre = { x: e.s.viewport.width / 2, y: e.s.viewport.height / 2 };
+        const shown: Frame[] = [];
         for (let step = 0; step < frames; step++) {
           const forward = step % 120 < 60;
           const camera = e.s.camera;
@@ -124,53 +160,11 @@ async function captureReplay(
             kind === "zoom"
               ? camera.zoomAt(centre, camera.zoom * (forward ? 1.03 : 1 / 1.03))
               : camera.pan(forward ? 6 : -6, forward ? 3 : -3);
-          wanted.set(next, step);
-          e.state.set({ camera: next });
-          await raf();
+          shown.push(await drawAndCapture(next, step, "shown"));
         }
-        const lastCamera = e.s.camera;
-        await deadline(() => samples.has(lastCamera), "the last motion presentation");
-        const shown = [...samples.values()].sort((a, b) => a.sequence - b.sequence);
-        if (shown.length < 2) {
-          throw new Error("Camera replay confirmed fewer than two motion presentations");
-        }
-
-        pending.clear();
-        samples.clear();
         stats.beginMotion(true);
-        stats.motionCapture = capture((camera, exact) => exact && camera === e.s.camera);
-        for (const frame of shown) {
-          const step = wanted.get(frame.camera);
-          if (step === undefined) throw new Error("Presented camera lost its input step");
-          e.state.set({ camera: frame.camera });
-          stats.redraw();
-          await deadline(() => samples.has(frame.camera), "a native exact presentation");
-          const reference = samples.get(frame.camera);
-          samples.clear();
-          if (
-            !reference ||
-            reference.width !== frame.width ||
-            reference.height !== frame.height ||
-            reference.dpr !== frame.dpr
-          ) {
-            throw new Error("Camera replay reference changed its pixel grid");
-          }
-          const [pixels, exact] = await Promise.all([frame.data, reference.data]);
-          if (pixels instanceof Error) throw pixels;
-          if (exact instanceof Error) throw exact;
-          if (pixels.length !== frame.width * frame.height * 4 || exact.length !== pixels.length) {
-            throw new Error("Camera replay received incomplete pixels");
-          }
-          const { x, y, zoom } = frame.camera;
-          await save({
-            step,
-            camera: { x, y, zoom },
-            width: frame.width,
-            height: frame.height,
-            dpr: frame.dpr,
-            shown: rgba(pixels),
-            exact: rgba(exact),
-          });
+        for (const [step, frame] of shown.entries()) {
+          await drawAndCapture(frame.camera, step, "exact", frame);
         }
         return frames - 1;
       } finally {

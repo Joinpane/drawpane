@@ -1430,3 +1430,17 @@ A second fixture with 24 overlapping lenses reduced submissions from 49 to
 26 on both backends and WebGPU's Vello render passes from 73 to 27. Each
 backend differed from the serial path by one level in three color bytes
 out of 133,400. Its p99 difference was zero.
+
+The 24-request T4 pairs against main 4957f364 used hardware WebGL2
+presentation and submitted the same exact camera sequence on each arm.
+Mask batching and dual-plane paint measured 13.26/13.26 s and 12.57/13.20 s
+confirmed p95/p99. The paired baselines measured 13.86/13.90 s and
+14.01/14.35 s. Core WebGPU submitted the inputs with software presentation
+and confirmed zero readback frames.
+
+The first pixel replay version missed confirmation or scoring deadlines
+during those runs. The untimed replay now waits for each confirmation and
+readback before advancing, with the cadence run unchanged. A two-camera
+WebGL2 smoke run on T4 after #270 passed both same-camera comparisons at
+2× DPR. Content error and FLIP were zero and the sharpness ratio was 1.0,
+including at the stopping camera.
