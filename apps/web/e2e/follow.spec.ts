@@ -145,6 +145,7 @@ test.describe
       await ana.evaluate(() => (window as unknown as { drawpane: Debug }).drawpane.addPage());
       const anaPage = (await state(ana)).page;
       await expect.poll(async () => (await state(bo)).page).toBe(anaPage);
+      await expect.poll(() => new URL(bo.url()).searchParams.get("page-id")).toBe(anaPage);
       expect((await state(bo)).following).not.toBeNull();
     });
 

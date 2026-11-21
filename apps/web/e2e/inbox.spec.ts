@@ -88,12 +88,12 @@ test.describe
       await expect(item).toContainText("can we tighten the header spacing?");
       await expect(item).toContainText("Unread");
 
-      // It opens the file at the comment, and the address loses the link.
+      // It opens the file at the comment, then leaves its page in the address.
       await item.click();
       await expect(ana.getByRole("dialog", { name: /^Thread on/ })).toBeVisible({
         timeout: 15_000,
       });
-      await expect(ana).toHaveURL(new RegExp(`/f/${fileId}$`));
+      await expect(ana).toHaveURL(new RegExp(`/f/${fileId}\\?page-id=${pageId}$`));
 
       // Back on the dashboard: read, so no badge, and Unread is empty.
       await ana.goto("/");

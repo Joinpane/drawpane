@@ -5,10 +5,8 @@
  */
 import type { Editor } from "@drawpane/editor";
 import { useQueryClient } from "@tanstack/react-query";
-import { useNavigate, useSearch } from "@tanstack/react-router";
 import { useEffect } from "react";
 import { markRead } from "../../inbox/inbox";
-import { useEditorStateOutside } from "../hooks";
 import { clampPane, PANE, panelLayout } from "../panel-layout";
 import { useComments } from "./CommentsLayer";
 import { focusThread } from "./CommentsPanel";
@@ -33,30 +31,9 @@ export function openThread(
   return true;
 }
 
-export function useThreadLink(
-  editor: Editor,
-  store: CommentStore,
-  fileId: string,
-  insets: { left: number },
-): void {
+export function useMarkOpenThreadRead(store: CommentStore): void {
   const queryClient = useQueryClient();
-  const navigate = useNavigate();
-  const { thread: linked } = useSearch({ from: "/f/$fileId" });
-  const live = useEditorStateOutside(editor, (s) => s.status === "live");
-  const loaded = useComments(store, (s) => s.loaded);
   const openId = useComments(store, (s) => s.openId);
-
-  // Once the document and its comments are in: show the linked thread, then drop it from the address.
-  useEffect(() => {
-    if (!linked || !live || !loaded) return;
-    openThread(editor, store, linked, insets.left);
-    void navigate({
-      to: "/f/$fileId",
-      params: { fileId },
-      search: ({ thread: _, ...rest }) => rest,
-      replace: true,
-    });
-  }, [linked, live, loaded, store, editor, insets.left, navigate, fileId]);
 
   // Seen: a thread's notifications are read once it's open, and again when a
   // reply arrives while it is. Always asked: the count cached here can be stale.
