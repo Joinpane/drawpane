@@ -6,6 +6,7 @@
  */
 import { readFileSync } from "node:fs";
 import { type Download, expect, type Page, test } from "@playwright/test";
+import { engineCiStorage } from "./engine-ci-storage";
 import { addPasskey, freshInstance, type Instance } from "./fresh-instance";
 
 interface Debug {
@@ -219,7 +220,10 @@ test.describe
         });
         return (await response.json()).url as string;
       });
-      const context = await browser.newContext({ baseURL: instance.url });
+      const context = await browser.newContext({
+        baseURL: instance.url,
+        ...engineCiStorage(instance.url),
+      });
       const viewer = await context.newPage();
       await addPasskey(context, viewer);
       await viewer.goto(new URL(invite).pathname);

@@ -22,6 +22,8 @@
  * Frames are logged by wrapping the canvas's `drawpaneFrames.record`, which
  * the canvas calls once a frame after drawing.
  */
+
+import type { Editor } from "@drawpane/editor";
 import type { CDPSession, Page } from "@playwright/test";
 import { pan, type Summary, zoom } from "./frames";
 
@@ -39,7 +41,28 @@ export interface Answer {
   longTask: number | null;
 }
 
-export type CaseResult = Answer | Summary;
+export type CaseResult = Answer | Summary | { readonly error: string };
+
+class CaseTimeout extends Error {}
+
+export async function caseDeadline<T>(work: Promise<T>, timeout: number, name: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new CaseTimeout(`${name} timed out after ${timeout / 1000} s`)),
+          timeout,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+type DebugEditor = { drawpane: Editor; __probe: Probe };
 
 /** The layers a board's cases act on, chosen from the document. */
 export interface Targets {
@@ -62,6 +85,7 @@ type Probe = {
   overlay: number;
   longest: number;
   longTaskSupported: boolean;
+  observer?: MutationObserver;
   frames: number;
   /** When the last long task ended (any, armed or not). */
   lastTask: number;
@@ -162,12 +186,24 @@ async function arm(page: Page, want: string, programmatic = false): Promise<void
 type Reading = { answer: number; content: number; overlay: number; longest: number | null };
 
 /** Waits for the armed probe's answer. */
-async function answered(page: Page, timeout = 120_000): Promise<Reading> {
-  await page.waitForFunction(
-    () => (window as unknown as { __probe: Probe }).__probe.answered > 0,
-    undefined,
-    { timeout, polling: "raf" },
-  );
+async function answered(page: Page, timeout = 12_000): Promise<Reading> {
+  try {
+    await page.waitForFunction(
+      () => (window as unknown as { __probe: Probe }).__probe.answered > 0,
+      undefined,
+      { timeout, polling: "raf" },
+    );
+  } catch (error) {
+    if (error instanceof Error && error.name === "TimeoutError") {
+      const hadInput = await page.evaluate(
+        () => (window as unknown as DebugEditor).__probe.input > 0,
+      );
+      throw new Error(hadInput ? "Input produced no matching frame" : "Probe received no input", {
+        cause: error,
+      });
+    }
+    throw error;
+  }
   return page.evaluate(() => {
     const p = (window as unknown as { __probe: Probe }).__probe;
     p.armed = false;
@@ -185,16 +221,15 @@ async function exactAfter(page: Page, since: number): Promise<number> {
   await page.waitForFunction(
     () => (window as unknown as { drawpaneFrames: { exact: boolean } }).drawpaneFrames.exact,
     undefined,
-    { timeout: 600_000, polling: 100 },
+    { timeout: 25_000, polling: 100 },
   );
-  // A zoom or an image may settle a beat later; one more look.
+  const observed = await now(page);
+  // Verify a delayed redraw did not make the frame inexact again.
   await page.waitForTimeout(250);
-  await page.waitForFunction(
+  const stillExact = await page.evaluate(
     () => (window as unknown as { drawpaneFrames: { exact: boolean } }).drawpaneFrames.exact,
-    undefined,
-    { timeout: 600_000, polling: 100 },
   );
-  return page.evaluate((since) => performance.now() - since, since);
+  return stillExact ? observed - since : exactAfter(page, since);
 }
 
 const now = (page: Page) => page.evaluate(() => performance.now());
@@ -207,7 +242,7 @@ const now = (page: Page) => page.evaluate(() => performance.now());
 async function quietAfter(page: Page, since: number): Promise<After> {
   return page.evaluate(
     (since) =>
-      new Promise<After>((resolve) => {
+      new Promise<After>((resolve, reject) => {
         const p = (window as unknown as { __probe: Probe }).__probe;
         const QUIET = 1500;
         // A timer that fires late saw the main thread busy, whether or not the long task
@@ -228,6 +263,8 @@ async function quietAfter(page: Page, since: number): Promise<After> {
             for (const [start, duration] of p.tasks)
               if (start + duration >= since) longest = Math.max(longest, duration);
             resolve({ quiet: Math.max(0, end - since), longest });
+          } else if (now - since > 25_000) {
+            reject(new Error("Page did not go quiet within 25 s"));
           } else setTimeout(tick, 50);
         };
         setTimeout(tick, 50);
@@ -285,7 +322,7 @@ export async function settle(page: Page): Promise<void> {
 async function onScreen(
   page: Page,
   id: string,
-): Promise<{ x: number; y: number; w: number; h: number }> {
+): Promise<{ x: number; y: number; corner: { x: number; y: number }; safe: boolean }> {
   const r = await page.evaluate((id) => {
     type P = { x: number; y: number };
     const e = (
@@ -296,19 +333,26 @@ async function onScreen(
         };
       }
     ).drawpane;
-    const corners = e.scene.corners(id) ?? [];
-    const pts = corners.map((c) => e.s.camera.toScreen(c));
-    const xs = pts.map((p) => p.x);
-    const ys = pts.map((p) => p.y);
-    const canvas = document.querySelector("canvas") as HTMLCanvasElement;
-    const rect = canvas.getBoundingClientRect();
-    const l = Math.min(...xs);
-    const t = Math.min(...ys);
+    const corners = e.scene.corners(id);
+    const topLeft = corners?.[0];
+    const topRight = corners?.[1];
+    const bottomRight = corners?.[2];
+    if (!topLeft || !topRight || !bottomRight) throw new Error(`Layer ${id} has no bounds`);
+    const a = e.s.camera.toScreen(topLeft);
+    const b = e.s.camera.toScreen(topRight);
+    const c = e.s.camera.toScreen(bottomRight);
+    const rect = document.querySelector(".canvas")?.getBoundingClientRect();
+    if (!rect) throw new Error("No canvas");
+    const inside = ({ x, y }: P) =>
+      x >= 12 && y >= 12 && x < rect.width - 12 && y < rect.height - 12;
     return {
-      x: rect.left + (l + Math.max(...xs)) / 2,
-      y: rect.top + (t + Math.max(...ys)) / 2,
-      w: Math.max(...xs) - l,
-      h: Math.max(...ys) - t,
+      safe:
+        inside(c) &&
+        inside({ x: (a.x + c.x) / 2, y: (a.y + c.y) / 2 }) &&
+        Math.min(Math.hypot(b.x - a.x, b.y - a.y), Math.hypot(c.x - b.x, c.y - b.y)) >= 24,
+      x: rect.left + (a.x + c.x) / 2,
+      y: rect.top + (a.y + c.y) / 2,
+      corner: { x: rect.left + c.x, y: rect.top + c.y },
     };
   }, id);
   return r;
@@ -346,13 +390,13 @@ export async function focusOn(page: Page, id: string, zoom: number): Promise<voi
  */
 export async function pickTargets(page: Page, board: string): Promise<Targets> {
   return page.evaluate((board) => {
-    type Node = { id: string; type: string; props: Record<string, unknown> };
+    type Node = { id: string; parent: string; type: string; props: Record<string, unknown> };
     type Rect = { x: number; y: number; width: number; height: number };
     const e = (
       window as unknown as {
         drawpane: {
           doc: { get(id: string): Node | undefined; childIds(id: string): readonly string[] };
-          scene: { bounds(id: string): Rect | null; isVisible(id: string): boolean };
+          scene: { bounds(id: string): Rect | null; isLocked(id: string): boolean };
         };
       }
     ).drawpane;
@@ -380,10 +424,17 @@ export async function pickTargets(page: Page, board: string): Promise<Targets> {
     };
     const largest = (list: Node[]) =>
       list.sort((a, b) => (size(b)?.area ?? 0) - (size(a)?.area ?? 0))[0] ?? null;
-    const readers = all.filter(
-      (n) => fits(n) && effects(n).some((x) => x.type === "glass" || x.type === "background-blur"),
+    const canMove = (n: Node) => {
+      if (n.type === "group" || e.scene.isLocked(n.id)) return false;
+      const layout = e.doc.get(n.parent)?.props.layoutMode ?? "none";
+      return layout === "none" || n.props.positioning === "absolute";
+    };
+    const movable = all.filter((node) => fits(node) && canMove(node));
+    const readers = movable.filter((node) =>
+      effects(node).some((effect) => effect.type === "glass" || effect.type === "background-blur"),
     );
-    const move = largest(readers) ?? largest(all.filter(fits)) ?? e.doc.get(board);
+    const move = largest(readers) ?? largest(movable) ?? e.doc.get(board);
+    if (!move) throw new Error(`Board ${board} has no layer to edit`);
     const b = e.scene.bounds(board) as Rect;
     const mid = { x: b.x + b.width / 2, y: b.y + b.height / 2 };
     const near = all
@@ -414,13 +465,63 @@ export async function pickTargets(page: Page, board: string): Promise<Targets> {
       all.find((n) => fits(n) && shadowed(n)) ?? (self && shadowed(self) ? self : null);
     return {
       board,
-      move: (move as Node).id,
+      move: move.id,
       hover: (near ?? move ?? { id: board }).id,
       text: text?.id ?? null,
       fill: fill?.id ?? null,
       effect: effect?.id ?? null,
     };
   }, board);
+}
+
+type DragFrames = {
+  times: number[];
+  stop(): void;
+};
+
+async function startDragFrames(page: Page) {
+  await page.evaluate(() => {
+    const w = window as unknown as {
+      drawpaneFrames: { reset(): void; record(c: number, o: number): void };
+      __dragFrames?: DragFrames;
+    };
+    const stats = w.drawpaneFrames;
+    stats.reset();
+    const record = stats.record;
+    const times: number[] = [];
+    stats.record = (content, overlay) => {
+      record.call(stats, content, overlay);
+      times.push(performance.now());
+    };
+    w.__dragFrames = {
+      times,
+      stop: () => {
+        stats.record = record;
+        delete w.__dragFrames;
+      },
+    };
+  });
+}
+
+function finishDragFrames(page: Page): Promise<Summary> {
+  return page.evaluate(() => {
+    const w = window as unknown as {
+      drawpaneFrames: { summary(): Summary };
+      __dragFrames?: DragFrames;
+    };
+    const sample = w.__dragFrames;
+    if (!sample) throw new Error("No drag interval sample");
+    sample.stop();
+    const gaps = sample.times
+      .slice(1)
+      .map((t, i) => t - (sample.times[i] as number))
+      .sort((a, b) => a - b);
+    const at = (q: number) => Math.round((gaps[Math.floor(q * (gaps.length - 1))] ?? 0) * 10) / 10;
+    return {
+      ...w.drawpaneFrames.summary(),
+      interval: { p50: at(0.5), p95: at(0.95), p99: at(0.99), max: at(1) },
+    };
+  });
 }
 
 type Profiler = <T>(name: string, work: () => Promise<T>) => Promise<T>;
@@ -437,8 +538,8 @@ export interface GestureCheckpointSpec {
 }
 
 export interface GestureGate {
-  before(): Promise<unknown>;
-  verify(name: string, before: unknown, spec: GestureCheckpointSpec): Promise<void>;
+  before(page: Page): Promise<unknown>;
+  verify(page: Page, name: string, before: unknown, spec: GestureCheckpointSpec): Promise<void>;
 }
 
 /**
@@ -449,56 +550,110 @@ export interface GestureGate {
  * window. Leaves the document as it found it (each edit is undone).
  */
 export async function interactions(
-  page: Page,
+  firstPage: Page,
   targets: Targets,
   {
-    profile = noProfile,
+    profile = () => noProfile,
     zooms = [1, 2, 4],
     frames = 60,
     repeats = 8,
     gestureGate,
   }: {
-    profile?: Profiler;
+    profile?: (page: Page) => Profiler;
     zooms?: number[];
     frames?: number;
     repeats?: number;
     gestureGate?: GestureGate | undefined;
   } = {},
-): Promise<Record<string, CaseResult>> {
-  await installProbe(page);
-  const undoKey = (await page.evaluate(() => /Mac|iPhone|iPad/.test(navigator.platform)))
+): Promise<{ page: Page; results: Record<string, CaseResult> }> {
+  let active = firstPage;
+  await installProbe(active);
+  const pageId = await active.evaluate(() => (window as unknown as DebugEditor).drawpane.s.pageId);
+  if (!pageId) throw new Error("No page is open for interaction measurements");
+  const undoKey = (await active.evaluate(() => /Mac|iPhone|iPad/.test(navigator.platform)))
     ? "Meta+z"
     : "Control+z";
   const out: Record<string, CaseResult> = {};
-  const select = (ids: string[]) =>
-    page.evaluate(
-      (ids) =>
-        (window as unknown as { drawpane: { select(ids: string[]): void } }).drawpane.select(ids),
-      ids,
-    );
+  const select = (page: Page, ids: string[]) =>
+    page.evaluate((ids) => (window as unknown as DebugEditor).drawpane.select(ids), ids);
+  let framed: Page | undefined;
+  let prepareBoard: ((page: Page) => Promise<void>) | undefined;
   const run = async (
     name: string,
-    work: () => Promise<CaseResult>,
+    work: (page: Page) => Promise<Answer | Summary>,
     check?: GestureCheckpointSpec,
+    prepare?: (page: Page) => Promise<void>,
   ) => {
-    const before = gestureGate && check ? await gestureGate.before() : null;
-    out[name] = await profile(name, work);
-    await settle(page);
-    if (gestureGate && check && before !== null) {
-      await gestureGate.verify(name, before, check);
+    const page = active;
+    const runWork = async () => {
+      // This is a disposable bench file. A case owns the undo entries it makes.
+      await page.evaluate(() => {
+        (window as unknown as DebugEditor).drawpane.history.clear();
+      });
+      const before = gestureGate && check ? await gestureGate.before(page) : null;
+      await (prepare ?? prepareBoard)?.(page);
+      const result = await profile(page)(name, () => work(page));
+      if (gestureGate && check && before !== null)
+        await gestureGate.verify(page, name, before, check);
+      return result;
+    };
+    const restore = async () => {
+      await page.keyboard.up("Control");
+      await page.keyboard.press("Escape");
+      await page.mouse.up();
+      await page.evaluate(() => {
+        const { drawpane, __probe } = window as unknown as DebugEditor;
+        __probe.armed = false;
+        __probe.observer?.disconnect();
+        (window as unknown as { __dragFrames?: DragFrames }).__dragFrames?.stop();
+        drawpane.endTextEdit();
+        while (drawpane.history.canUndo) drawpane.undo();
+        drawpane.select([]);
+      });
+    };
+    try {
+      out[name] = await caseDeadline(runWork(), 120_000, name);
+      await caseDeadline(restore(), 20_000, "case cleanup");
+    } catch (error) {
+      const message =
+        (error instanceof Error ? error.message : String(error)).split("\n")[0] ?? "Failed";
+      out[name] = { error: message };
+      console.log(`Case ${name} failed: ${message}`);
+      framed = undefined;
+      // A responsive page can undo the failed case. A hung evaluate or crashed tab is
+      // discarded, so no pending input from this case can run against the next tab.
+      try {
+        if (error instanceof CaseTimeout || page.isClosed()) throw error;
+        await caseDeadline(restore(), 20_000, "case recovery");
+      } catch {
+        const url = page.url();
+        active = await page.context().newPage();
+        await page.close({ reason: "interaction case stopped" }).catch(() => undefined);
+        await active.goto(url, { timeout: 120_000 });
+        await active.waitForFunction(
+          () => (window as unknown as DebugEditor).drawpane?.s.status === "live",
+          undefined,
+          { timeout: 120_000, polling: 250 },
+        );
+        await active.evaluate(
+          (id) => (window as unknown as DebugEditor).drawpane.setPage(id),
+          pageId,
+        );
+        await installProbe(active);
+      }
     }
   };
   const panMinSubmitted = Math.max(1, Math.floor(frames / 2));
   const panMinPresented = Math.max(1, Math.floor(frames / 6));
 
   // Pans and zooms on the board, at fit and up close.
-  await run("pan, fit", () => pan(page, "fit", frames), {
+  await run("pan, fit", (page) => pan(page, "fit", frames), {
     minSubmitted: panMinSubmitted,
     minPresented: panMinPresented,
     requirePixelChange: true,
     pixelMatchMode: "coarse",
   });
-  await run("zoom, fit", () => zoom(page, frames), {
+  await run("zoom, fit", (page) => zoom(page, frames), {
     minSubmitted: panMinSubmitted,
     minPresented: panMinPresented,
     requirePixelChange: true,
@@ -507,22 +662,22 @@ export async function interactions(
   for (const level of zooms) {
     // Capture baseline before focusOn so even a full back-and-forth pan (frames % 120 === 0)
     // proves the engine rendered the new zoom level and view rather than staying frozen.
-    const beforeZoomPan = gestureGate ? await gestureGate.before() : null;
-    await focusOn(page, targets.board, level);
-    await run(`pan, ${level * 100}%`, () => pan(page, level, frames));
-    if (gestureGate && beforeZoomPan !== null) {
-      await gestureGate.verify(`pan, ${level * 100}%`, beforeZoomPan, {
+    await run(
+      `pan, ${level * 100}%`,
+      (page) => pan(page, level, frames),
+      {
         minSubmitted: panMinSubmitted,
         minPresented: panMinPresented,
         requirePixelChange: true,
         pixelMatchMode: "coarse",
-      });
-    }
+      },
+      (page) => focusOn(page, targets.board, level),
+    );
   }
 
   // The rest at 100% on the board (or fitting it, if it's larger than the screen).
-  const frame = async () => {
-    await focusOn(page, targets.board, 1);
+  prepareBoard = async (page) => {
+    if (framed === page) return;
     const fit = await page.evaluate((board) => {
       type Rect = { x: number; y: number; width: number; height: number };
       const e = (
@@ -538,12 +693,10 @@ export async function interactions(
         ? Math.min(1, (0.8 * e.s.viewport.height) / b.height, (0.8 * e.s.viewport.width) / b.width)
         : 1;
     }, targets.board);
-    if (fit < 1) await focusOn(page, targets.board, fit);
+    await focusOn(page, targets.board, fit);
+    await page.mouse.move(5, 450);
+    framed = page;
   };
-  await frame();
-  await select([]);
-  await page.mouse.move(5, 450);
-  await settle(page);
 
   // Hovering: the pointer onto a layer, then off it, each a repeat.
   const overlayOnlyCheck: GestureCheckpointSpec = {
@@ -553,7 +706,7 @@ export async function interactions(
   };
   await run(
     "hover",
-    async () => {
+    async (page) => {
       const at = await onScreen(page, targets.hover);
       const readings: Reading[] = [];
       for (let i = 0; i < repeats; i++) {
@@ -572,7 +725,7 @@ export async function interactions(
   // Clicking a layer on the canvas, then clicking empty canvas.
   await run(
     "select on canvas",
-    async () => {
+    async (page) => {
       const at = await onScreen(page, targets.hover);
       const readings: Reading[] = [];
       // Each click stays selected until the page is quiet (the inspector and its export
@@ -587,7 +740,7 @@ export async function interactions(
         readings.push(await answered(page));
         await page.mouse.up();
         after = mergeAfter(after, await quietAfter(page, t));
-        await select([]);
+        await select(page, []);
         await page.waitForTimeout(300);
       }
       return summarise(readings, 0, after);
@@ -600,7 +753,7 @@ export async function interactions(
   // The same layer a click there selects (a board's direct child, as in Figma), clicked again.
   await run(
     "export preview",
-    async () => {
+    async (page) => {
       const at = await onScreen(page, targets.hover);
       let after: After = { quiet: 0, longest: null };
       for (let i = 0; i < 2; i++) {
@@ -617,7 +770,7 @@ export async function interactions(
         });
         if (!found) throw new Error("The inspector shows no Export section");
         after = mergeAfter(after, await quietAfter(page, t));
-        await select([]);
+        await select(page, []);
         await page.waitForTimeout(300);
       }
       return summarise([], 0, after);
@@ -628,10 +781,10 @@ export async function interactions(
   // Clicking the moved layer's row in the layers panel.
   await run(
     "select in layers panel",
-    async () => {
-      await select([targets.move]);
+    async (page) => {
+      await select(page, [targets.move]);
       await page.waitForTimeout(800);
-      await select([]);
+      await select(page, []);
       await page.waitForTimeout(400);
       const row = page.locator(`.layers__scroll [data-layer-id="${targets.move}"] .dp-layer__name`);
       const box = await row.first().boundingBox();
@@ -652,6 +805,8 @@ export async function interactions(
               });
             }
           });
+          p.observer?.disconnect();
+          p.observer = seen;
           seen.observe(scroller, {
             subtree: true,
             attributes: true,
@@ -663,7 +818,7 @@ export async function interactions(
         await page.mouse.click(box.x + Math.min(20, box.width / 2), box.y + box.height / 2);
         readings.push(await answered(page));
         after = mergeAfter(after, await quietAfter(page, t));
-        await select([]);
+        await select(page, []);
         await page.waitForTimeout(300);
       }
       return summarise(readings, 0, after);
@@ -671,28 +826,41 @@ export async function interactions(
     overlayOnlyCheck,
   );
 
+  const moveStart = async (page: Page) => {
+    const initial = await onScreen(page, targets.move);
+    if (initial.safe) return initial;
+    // Fit can make the target smaller than its handles, or put it under the side panels.
+    await focusOn(page, targets.move, 1);
+    framed = undefined;
+    return onScreen(page, targets.move);
+  };
   // Dragging the layer by 12 steps of 8 px, one pointer move a frame.
-  const version = `(window.drawpane ?? {}).doc?.version`;
-  const changed = async () =>
-    `((v) => (e) => e.doc.version !== v)(${await page.evaluate(`${version}`)})`;
-  await run("drag", async () => {
-    await select([targets.move]);
+  const changed = async (page: Page) => {
+    const version = await page.evaluate(
+      () => (window as unknown as DebugEditor).drawpane.doc.version,
+    );
+    return `(e) => e.doc.version !== ${version}`;
+  };
+  await run("drag", async (page) => {
+    await select(page, [targets.move]);
     await page.waitForTimeout(300);
-    const before = gestureGate ? await gestureGate.before() : null;
-    const at = await onScreen(page, targets.move);
+    const before = gestureGate ? await gestureGate.before(page) : null;
+    const at = await moveStart(page);
     await page.mouse.move(at.x, at.y);
     await page.mouse.down();
+    await page.keyboard.down("Control");
     const readings: Reading[] = [];
     for (let i = 1; i <= 12; i++) {
-      await arm(page, await changed());
+      await arm(page, await changed(page));
       await page.mouse.move(at.x + i * 8, at.y + i * 4);
       readings.push(await answered(page));
     }
     const t = await now(page);
     await page.mouse.up();
+    await page.keyboard.up("Control");
     const result = summarise(readings, await exactAfter(page, t), await quietAfter(page, t));
     if (gestureGate && before !== null) {
-      await gestureGate.verify("drag", before, {
+      await gestureGate.verify(page, "drag", before, {
         minSubmitted: 6,
         minPresented: 1,
         requirePixelChange: true,
@@ -706,48 +874,20 @@ export async function interactions(
 
   // Dragging as a hand does: a pointer move every frame for 60 frames, without waiting for the
   // canvas, then what the frames took (interval: what you'd see).
-  await run("drag, 60 frames", async () => {
-    await select([targets.move]);
+  await run("drag, 60 frames", async (page) => {
+    await select(page, [targets.move]);
     await page.waitForTimeout(300);
-    const before = gestureGate ? await gestureGate.before() : null;
-    const at = await onScreen(page, targets.move);
+    const before = gestureGate ? await gestureGate.before(page) : null;
+    const at = await moveStart(page);
     await page.mouse.move(at.x, at.y);
     await page.mouse.down();
-    await page.evaluate(() => {
-      const w = window as unknown as {
-        drawpaneFrames: { reset(): void; record(c: number, o: number): void };
-        __times?: number[];
-      };
-      w.drawpaneFrames.reset();
-      const times: number[] = [];
-      w.__times = times;
-      const record = w.drawpaneFrames.record.bind(w.drawpaneFrames);
-      w.drawpaneFrames.record = (c: number, o: number) => {
-        record(c, o);
-        times.push(performance.now());
-      };
-    });
+    await startDragFrames(page);
     for (let i = 1; i <= 60; i++) {
       const d = i <= 30 ? i : 60 - i;
       await page.mouse.move(at.x + d * 6, at.y + d * 3);
       await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r(null))));
     }
-    const summary = await page.evaluate(() => {
-      const w = window as unknown as {
-        drawpaneFrames: { summary(): Summary };
-        __times: number[];
-      };
-      const gaps = w.__times
-        .slice(1)
-        .map((t, i) => t - (w.__times[i] as number))
-        .sort((a, b) => a - b);
-      const at = (q: number) =>
-        Math.round((gaps[Math.floor(q * (gaps.length - 1))] ?? 0) * 10) / 10;
-      return {
-        ...w.drawpaneFrames.summary(),
-        interval: { p50: at(0.5), p95: at(0.95), p99: at(0.99), max: at(1) },
-      };
-    });
+    const summary = await finishDragFrames(page);
     if (gestureGate && before !== null) {
       // Strictly outside timing: displace once before releasing so pixels differ from pre-drag.
       await page.mouse.move(at.x + 120, at.y + 60);
@@ -755,7 +895,7 @@ export async function interactions(
         () =>
           new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))),
       );
-      await gestureGate.verify("drag, 60 frames", before, {
+      await gestureGate.verify(page, "drag, 60 frames", before, {
         minSubmitted: 20,
         minPresented: 5,
         requirePixelChange: true,
@@ -772,53 +912,25 @@ export async function interactions(
   // Dragging into the next board: carried across, dropped there (the editor moves it into the
   // frame under the pointer on drop: a removal and an insertion at its real place in paint
   // order), then until the canvas is exact again.
-  await run("drag into the next board", async () => {
-    await select([targets.move]);
+  await run("drag into the next board", async (page) => {
+    await select(page, [targets.move]);
     await page.waitForTimeout(300);
-    const before = gestureGate ? await gestureGate.before() : null;
-    const at = await onScreen(page, targets.move);
+    const before = gestureGate ? await gestureGate.before(page) : null;
+    const at = await moveStart(page);
     await page.mouse.move(at.x, at.y);
     await page.mouse.down();
-    await page.evaluate(() => {
-      const w = window as unknown as {
-        drawpaneFrames: { reset(): void; record(c: number, o: number): void };
-        __times?: number[];
-      };
-      w.drawpaneFrames.reset();
-      const times: number[] = [];
-      w.__times = times;
-      const record = w.drawpaneFrames.record.bind(w.drawpaneFrames);
-      w.drawpaneFrames.record = (c: number, o: number) => {
-        record(c, o);
-        times.push(performance.now());
-      };
-    });
+    await startDragFrames(page);
     for (let i = 1; i <= 60; i++) {
       await page.mouse.move(at.x + i * 8, at.y + i * 2);
       await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => r(null))));
     }
-    const summary = await page.evaluate(() => {
-      const w = window as unknown as {
-        drawpaneFrames: { summary(): Summary };
-        __times: number[];
-      };
-      const gaps = w.__times
-        .slice(1)
-        .map((t, i) => t - (w.__times[i] as number))
-        .sort((a, b) => a - b);
-      const at = (q: number) =>
-        Math.round((gaps[Math.floor(q * (gaps.length - 1))] ?? 0) * 10) / 10;
-      return {
-        ...w.drawpaneFrames.summary(),
-        interval: { p50: at(0.5), p95: at(0.95), p99: at(0.99), max: at(1) },
-      };
-    });
+    const summary = await finishDragFrames(page);
     const t = await now(page);
     await page.mouse.up();
     const exact = await exactAfter(page, t);
     await settle(page);
     if (gestureGate && before !== null) {
-      await gestureGate.verify("drag into the next board", before, {
+      await gestureGate.verify(page, "drag into the next board", before, {
         minSubmitted: 20,
         minPresented: 5,
         requirePixelChange: true,
@@ -831,26 +943,28 @@ export async function interactions(
   });
 
   // Resizing by its bottom right handle.
-  await run("resize", async () => {
-    await select([targets.move]);
+  await run("resize", async (page) => {
+    await select(page, [targets.move]);
     await page.waitForTimeout(300);
-    const before = gestureGate ? await gestureGate.before() : null;
-    const at = await onScreen(page, targets.move);
-    const corner = { x: at.x + at.w / 2, y: at.y + at.h / 2 };
+    const before = gestureGate ? await gestureGate.before(page) : null;
+    const at = await moveStart(page);
+    const { corner } = at;
     await page.mouse.move(corner.x, corner.y);
     await page.waitForTimeout(100);
     await page.mouse.down();
+    await page.keyboard.down("Control");
     const readings: Reading[] = [];
     for (let i = 1; i <= 12; i++) {
-      await arm(page, await changed());
+      await arm(page, await changed(page));
       await page.mouse.move(corner.x + i * 6, corner.y + i * 4);
       readings.push(await answered(page));
     }
     const t = await now(page);
     await page.mouse.up();
+    await page.keyboard.up("Control");
     const result = summarise(readings, await exactAfter(page, t), await quietAfter(page, t));
     if (gestureGate && before !== null) {
-      await gestureGate.verify("resize", before, {
+      await gestureGate.verify(page, "resize", before, {
         minSubmitted: 6,
         minPresented: 1,
         requirePixelChange: true,
@@ -863,14 +977,15 @@ export async function interactions(
   });
 
   // Nudging with the arrow keys.
-  await run("nudge", async () => {
-    await select([targets.move]);
+  await run("nudge", async (page) => {
+    await select(page, [targets.move]);
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
     await page.mouse.move(5, 450);
     await page.waitForTimeout(300);
-    const before = gestureGate ? await gestureGate.before() : null;
+    const before = gestureGate ? await gestureGate.before(page) : null;
     const readings: Reading[] = [];
     for (let i = 0; i < repeats; i++) {
-      await arm(page, await changed());
+      await arm(page, await changed(page));
       await page.keyboard.press(i % 2 ? "ArrowLeft" : "ArrowRight");
       readings.push(await answered(page));
     }
@@ -884,7 +999,7 @@ export async function interactions(
         () =>
           new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))),
       );
-      await gestureGate.verify("nudge", before, {
+      await gestureGate.verify(page, "nudge", before, {
         minSubmitted: 2,
         minPresented: 1,
         requirePixelChange: true,
@@ -896,27 +1011,38 @@ export async function interactions(
     return result;
   });
 
-  // Undo, a step at a time (the nudges).
-  await run(
-    "undo",
-    async () => {
-      const readings: Reading[] = [];
-      for (let i = 0; i < repeats; i++) {
-        await arm(page, await changed());
-        await page.keyboard.press(undoKey);
-        readings.push(await answered(page));
-      }
-      const t = await now(page);
-      return summarise(readings, await exactAfter(page, t), await quietAfter(page, t));
-    },
-    { minSubmitted: 2, minPresented: 1, requirePixelChange: false },
-  );
+  // Stage fresh edits for undo. This case still works when nudging timed out.
+  await run("undo", async (page) => {
+    await select(page, [targets.move]);
+    await page.evaluate((repeats) => {
+      const { drawpane } = window as unknown as DebugEditor;
+      (document.activeElement as HTMLElement | null)?.blur();
+      for (let i = 0; i < repeats; i++) drawpane.nudge(i % 2 ? -1 : 1, 0);
+      if (!drawpane.history.canUndo) throw new Error("The undo target cannot be moved");
+    }, repeats);
+    await settle(page);
+    const before = gestureGate ? await gestureGate.before(page) : null;
+    const readings: Reading[] = [];
+    for (let i = 0; i < repeats; i++) {
+      await arm(page, await changed(page));
+      await page.keyboard.press(undoKey);
+      readings.push(await answered(page));
+    }
+    const t = await now(page);
+    if (gestureGate && before !== null)
+      await gestureGate.verify(page, "undo", before, {
+        minSubmitted: 2,
+        minPresented: 1,
+        requirePixelChange: false,
+      });
+    return summarise(readings, await exactAfter(page, t), await quietAfter(page, t));
+  });
 
   // Typing a word at the end of a text layer.
   if (targets.text) {
     const text = targets.text;
-    await run("type", async () => {
-      const before = gestureGate ? await gestureGate.before() : null;
+    await run("type", async (page) => {
+      const before = gestureGate ? await gestureGate.before(page) : null;
       await page.evaluate((id) => {
         const e = (
           window as unknown as {
@@ -939,7 +1065,7 @@ export async function interactions(
       await page.waitForTimeout(500);
       const readings: Reading[] = [];
       for (const ch of " drawn".slice(0, Math.max(2, repeats - 2))) {
-        await arm(page, await changed());
+        await arm(page, await changed(page));
         await page.keyboard.press(ch === " " ? "Space" : ch);
         readings.push(await answered(page));
       }
@@ -947,7 +1073,7 @@ export async function interactions(
       await page.keyboard.press("Escape");
       const result = summarise(readings, await exactAfter(page, t), await quietAfter(page, t));
       if (gestureGate && before !== null) {
-        await gestureGate.verify("type", before, {
+        await gestureGate.verify(page, "type", before, {
           minSubmitted: 2,
           minPresented: 1,
           requirePixelChange: true,
@@ -962,12 +1088,13 @@ export async function interactions(
   }
 
   // A fill's colour, and a shadow's blur, as the inspector sets them (a colour drag: several steps).
-  const edit = async (name: string, id: string, prop: "fills" | "effects") => {
-    const before = gestureGate ? await gestureGate.before() : null;
+  const edit = async (page: Page, name: string, id: string, prop: "fills" | "effects") => {
+    await select(page, [id]);
+    const before = gestureGate ? await gestureGate.before(page) : null;
     const readings: Reading[] = [];
     const t = await now(page);
     for (let i = 0; i < repeats / 2; i++) {
-      await arm(page, await changed(), true);
+      await arm(page, await changed(page), true);
       await page.evaluate(
         ({ id, prop, i }) => {
           type Paint = { type: string; color?: string };
@@ -1001,7 +1128,7 @@ export async function interactions(
     }
     const result = summarise(readings, await exactAfter(page, t), await quietAfter(page, t));
     if (gestureGate && before !== null) {
-      await gestureGate.verify(name, before, {
+      await gestureGate.verify(page, name, before, {
         minSubmitted: 2,
         minPresented: 1,
         requirePixelChange: true,
@@ -1014,16 +1141,13 @@ export async function interactions(
   };
   if (targets.fill) {
     const fill = targets.fill;
-    await select([fill]);
-    await run("change fill", () => edit("change fill", fill, "fills"));
+    await run("change fill", (page) => edit(page, "change fill", fill, "fills"));
   }
   if (targets.effect) {
     const effect = targets.effect;
-    await select([effect]);
-    await run("change effect", () => edit("change effect", effect, "effects"));
+    await run("change effect", (page) => edit(page, "change effect", effect, "effects"));
   }
-  await select([]);
-  return out;
+  return { page: active, results: out };
 }
 
 /** Shows a page whole: how long its first frame took, and until it was exact. */
@@ -1040,7 +1164,10 @@ export async function switchPage(page: Page, pageId: string): Promise<Answer> {
     await frame();
     await frame();
     const first = performance.now() - t;
-    while (!w.drawpaneFrames.exact) await frame();
+    while (!w.drawpaneFrames.exact) {
+      if (performance.now() - t > 25_000) throw new Error("Page remained inexact after 25 s");
+      await frame();
+    }
     return { first, exact: performance.now() - t };
   }, pageId);
   return {
@@ -1057,6 +1184,7 @@ export async function switchPage(page: Page, pageId: string): Promise<Answer> {
 /** One line per case for the console. */
 export function table(title: string, results: Record<string, CaseResult>): string {
   const rows = Object.entries(results).map(([name, r]) => {
+    if ("error" in r) return `${name.padEnd(24)} failed: ${r.error}`;
     if ("answer" in r)
       return `${name.padEnd(24)} answer ${String(r.answer.p50).padStart(7)} ms (worst ${String(r.answer.max).padStart(7)}) · content ${String(r.content.p50).padStart(6)} (${r.content.max}) · overlay ${String(r.overlay.p50).padStart(5)} · exact ${String(r.exact).padStart(6)} ms · quiet ${String(r.quiet).padStart(6)} ms · long task ${r.longTask === null ? "n/a" : `${r.longTask} ms`} · n ${r.n}`;
     return `${name.padEnd(24)} frame interval p50 ${r.interval?.p50} / p95 ${r.interval?.p95} / p99 ${r.interval?.p99} ms · content p50 ${String(r.content.p50).padStart(6)} · p95 ${String(r.content.p95).padStart(6)} · p99 ${String(r.content.p99 ?? "-").padStart(6)} · max ${String(r.content.max).padStart(6)} ms${r.exactMs !== undefined ? ` · exact after drop ${r.exactMs} ms` : ""}`;
@@ -1074,9 +1202,11 @@ export function profiler(
   if (!dir || !cdp) return noProfile;
   return async (name, work) => {
     await cdp.send("Profiler.start");
-    const result = await work();
-    const { profile } = await cdp.send("Profiler.stop");
-    save(`${prefix} ${name}`, profile);
-    return result;
+    try {
+      return await work();
+    } finally {
+      const { profile } = await cdp.send("Profiler.stop");
+      save(`${prefix} ${name}`, profile);
+    }
   };
 }

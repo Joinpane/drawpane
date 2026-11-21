@@ -182,7 +182,7 @@ test.describe
         const height = Math.round(frame.height * SCALE);
         const theirs = await original(page, text, width, height);
         const ours = await rendered(page, frame);
-        const diff = await compare(page, ours, theirs, width, height);
+        const diff = compare(ours, theirs, width, height);
         scores[name] = { mean: diff.mean, p99: diff.p99 };
         rows.push(
           `<tr><th>${name}<br><small>${diff.mean} · p99 ${diff.p99}</small></th><td><img src="${await encodePng(page, theirs, width, height)}"></td><td><img src="${await encodePng(page, ours, width, height)}"></td><td><img src="${await encodePng(page, diff.heat, width, height)}"></td></tr>`,

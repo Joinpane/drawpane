@@ -4,6 +4,7 @@
  * a thread you started arrives too, and Mark all read clears everything.
  */
 import { type BrowserContext, expect, type Page, test } from "@playwright/test";
+import { engineCiStorage } from "./engine-ci-storage";
 import { addPasskey, freshInstance, type Instance } from "./fresh-instance";
 
 type W = { drawpane: { s: { pageId: string } } };
@@ -42,7 +43,10 @@ test.describe
         return (await response.json()).url as string;
       });
       anaId = await ana.evaluate(async () => (await (await fetch("/api/session")).json()).user.id);
-      boContext = await browser.newContext({ baseURL: instance.url });
+      boContext = await browser.newContext({
+        baseURL: instance.url,
+        ...engineCiStorage(instance.url),
+      });
       bo = await boContext.newPage();
       await addPasskey(boContext, bo);
       await bo.goto(new URL(invite).pathname);

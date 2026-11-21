@@ -122,3 +122,32 @@ $OUT/
 ```
 
 Ids in file names spell `:` as `-` and `;` as `_`.
+
+
+## Render engine gate
+
+Set `E2E_KIT_PARITY_ENGINE=cpu,webgl` to draw the same sampled frames with the engine
+as exports draw them, with backdrop context. Add `E2E_KIT_PARITY_INLINE=1` to score
+those pictures while rendering. This writes `engine-scoreboard.json`, `scores.ndjson`,
+and `pages.json` in the run directory. Each engine backend also gets a sibling
+directory with `facts.ndjson` (including refusals and missing image references). PNGs
+are kept for frames that score worse. A failed frame is recorded and the harness
+reopens the file for the next frame. The inline stage reports the verdict after all
+frames. Set `E2E_KIT_PARITY_REQUIRE_PASS=1` to make the verdict fail the Playwright run.
+
+Run the same check on a Modal T4 with a converted kit directory that also contains
+`sample.json` and `figma/`. Use a new output directory for each run.
+
+```sh
+t3-vault run modal-token-id -- t3-vault run modal-token-secret -- \
+  pnpm gpu-bench --file "$KIT_FOLDER" --modes gpu --timeout 70 \
+  --env E2E_KIT_PARITY_FROM_BENCH=1 --env E2E_KIT_PARITY_STAGE=render \
+  --env E2E_KIT_PARITY_INLINE=1 --env E2E_KIT_PARITY_ENGINE=cpu,webgl \
+  --env E2E_KIT_PARITY_ALLOW_MISSING_FONTS=1 --env E2E_KIT_PARITY_RUN=/out/kitrun \
+  -- e2e/kit-parity.spec.ts
+```
+
+`E2E_KIT_PARITY_SHARD=k/n` draws the stable sample slice for shard `k`, starting at 1.
+For a shorter check, `E2E_KIT_PARITY_PAGES` accepts comma-separated page names.
+Use every shard for a full-kit verdict. Only shard 1 builds the page census.
+Keep kit inputs and the run folders private.

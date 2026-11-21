@@ -59,74 +59,99 @@ export interface Difference {
   readonly heat: string;
 }
 
+/**
+ * Separable Gaussian over RGB, with transparent black beyond the image. The grain suite
+ * calls this on opaque composites separately over white and black when the frame has alpha.
+ */
+function statisticalBlur(raw: Uint8Array, width: number, height: number, sigma: number) {
+  if (sigma <= 0) return raw;
+  const radius = Math.ceil(sigma * 3);
+  const weights = Array.from({ length: 2 * radius + 1 }, (_, i) =>
+    Math.exp(-0.5 * ((i - radius) / sigma) ** 2),
+  );
+  const total = weights.reduce((sum, weight) => sum + weight, 0);
+  const kernel = weights.map((weight) => weight / total);
+  const horizontal = new Float32Array(raw.length);
+  const blurred = new Uint8Array(raw.length);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      for (let c = 0; c < 3; c++) {
+        let value = 0;
+        for (
+          let offset = Math.max(-x, -radius);
+          offset <= Math.min(width - x - 1, radius);
+          offset++
+        )
+          value += (raw[(y * width + x + offset) * 4 + c] ?? 0) * (kernel[offset + radius] ?? 0);
+        horizontal[(y * width + x) * 4 + c] = value;
+      }
+    }
+  }
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      for (let c = 0; c < 3; c++) {
+        let value = 0;
+        for (
+          let offset = Math.max(-y, -radius);
+          offset <= Math.min(height - y - 1, radius);
+          offset++
+        )
+          value +=
+            (horizontal[((y + offset) * width + x) * 4 + c] ?? 0) * (kernel[offset + radius] ?? 0);
+        blurred[(y * width + x) * 4 + c] = Math.round(value);
+      }
+    }
+  }
+  return blurred;
+}
+
 /** Compares two RGBA buffers (base64) of the same size, optionally both blurred first. */
 export function compare(
-  page: Page,
   ours: string,
   theirs: string,
   width: number,
   height: number,
   blur = 0,
-): Promise<Difference> {
-  return page.evaluate(
-    async ({ ours, theirs, width, height, blur }) => {
-      const load = async (b64: string) => {
-        const raw = Uint8ClampedArray.from(atob(b64), (ch) => ch.charCodeAt(0));
-        if (blur <= 0) return raw;
-        const c = new OffscreenCanvas(width, height);
-        const ctx = c.getContext("2d") as OffscreenCanvasRenderingContext2D;
-        ctx.putImageData(new ImageData(raw, width, height), 0, 0);
-        const out = new OffscreenCanvas(width, height);
-        const octx = out.getContext("2d") as OffscreenCanvasRenderingContext2D;
-        octx.filter = `blur(${blur}px)`;
-        octx.drawImage(c, 0, 0);
-        return octx.getImageData(0, 0, width, height).data;
-      };
-      const a = await load(ours);
-      const b = await load(theirs);
-      const n = width * height;
-      const per = new Float32Array(n);
-      const heat = new Uint8ClampedArray(n * 4);
-      const cols = Math.ceil(width / 32);
-      const rows = Math.ceil(height / 32);
-      const tileSums = new Float64Array(cols * rows);
-      const tileCounts = new Uint32Array(cols * rows);
-      let sum = 0;
-      for (let i = 0; i < n; i++) {
-        const dr = Math.abs((a[i * 4] ?? 0) - (b[i * 4] ?? 0));
-        const dg = Math.abs((a[i * 4 + 1] ?? 0) - (b[i * 4 + 1] ?? 0));
-        const db = Math.abs((a[i * 4 + 2] ?? 0) - (b[i * 4 + 2] ?? 0));
-        const rgb = (dr + dg + db) / 3;
-        sum += rgb;
-        const x = i % width;
-        const y = (i - x) / width;
-        const ti = (y >> 5) * cols + (x >> 5);
-        tileSums[ti] = (tileSums[ti] ?? 0) + rgb;
-        tileCounts[ti] = (tileCounts[ti] ?? 0) + 1;
-        const d = Math.max(dr, dg, db);
-        per[i] = d;
-        const v = Math.min(255, d * 4);
-        heat[i * 4] = v;
-        heat[i * 4 + 1] = v;
-        heat[i * 4 + 2] = v;
-        heat[i * 4 + 3] = 255;
-      }
-      let worstTile = 0;
-      for (let i = 0; i < tileSums.length; i++) {
-        const c = tileCounts[i] ?? 0;
-        if (c > 0) worstTile = Math.max(worstTile, (tileSums[i] ?? 0) / c);
-      }
-      per.sort();
-      let s = "";
-      for (let i = 0; i < heat.length; i += 0x8000)
-        s += String.fromCharCode(...heat.subarray(i, i + 0x8000));
-      return {
-        mean: Math.round((sum / n) * 100) / 100,
-        p99: per[Math.floor(n * 0.99)] ?? 0,
-        worstTile: Math.round(worstTile * 100) / 100,
-        heat: btoa(s),
-      };
-    },
-    { ours, theirs, width, height, blur },
-  );
+): Difference {
+  const a = statisticalBlur(Buffer.from(ours, "base64"), width, height, blur);
+  const b = statisticalBlur(Buffer.from(theirs, "base64"), width, height, blur);
+  const n = width * height;
+  const per = new Float32Array(n);
+  const heat = new Uint8ClampedArray(n * 4);
+  const cols = Math.ceil(width / 32);
+  const rows = Math.ceil(height / 32);
+  const tileSums = new Float64Array(cols * rows);
+  const tileCounts = new Uint32Array(cols * rows);
+  let sum = 0;
+  for (let i = 0; i < n; i++) {
+    const dr = Math.abs((a[i * 4] ?? 0) - (b[i * 4] ?? 0));
+    const dg = Math.abs((a[i * 4 + 1] ?? 0) - (b[i * 4 + 1] ?? 0));
+    const db = Math.abs((a[i * 4 + 2] ?? 0) - (b[i * 4 + 2] ?? 0));
+    const rgb = (dr + dg + db) / 3;
+    sum += rgb;
+    const x = i % width;
+    const y = (i - x) / width;
+    const ti = (y >> 5) * cols + (x >> 5);
+    tileSums[ti] = (tileSums[ti] ?? 0) + rgb;
+    tileCounts[ti] = (tileCounts[ti] ?? 0) + 1;
+    const d = Math.max(dr, dg, db);
+    per[i] = d;
+    const v = Math.min(255, d * 4);
+    heat[i * 4] = v;
+    heat[i * 4 + 1] = v;
+    heat[i * 4 + 2] = v;
+    heat[i * 4 + 3] = 255;
+  }
+  let worstTile = 0;
+  for (let i = 0; i < tileSums.length; i++) {
+    const c = tileCounts[i] ?? 0;
+    if (c > 0) worstTile = Math.max(worstTile, (tileSums[i] ?? 0) / c);
+  }
+  per.sort();
+  return {
+    mean: Math.round((sum / n) * 100) / 100,
+    p99: per[Math.floor(n * 0.99)] ?? 0,
+    worstTile: Math.round(worstTile * 100) / 100,
+    heat: Buffer.from(heat).toString("base64"),
+  };
 }

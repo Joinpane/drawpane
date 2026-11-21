@@ -154,7 +154,7 @@ test.describe
           const width = cell.width * SCALE;
           const height = cell.height * SCALE;
           const theirs = await decodePng(page, golden);
-          const diff = await compare(page, shots[i] as string, theirs.data, width, height);
+          const diff = compare(shots[i] as string, theirs.data, width, height);
           (results[suite] as Record<string, number>)[cell.id] = diff.mean;
           const limit = recorded[suite]?.[cell.id];
           if (!updating && limit !== undefined && diff.mean > limit)

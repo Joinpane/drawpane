@@ -55,7 +55,28 @@ export interface EngineRender {
   readonly gpu?: GpuInfo | null;
 }
 
+export interface EngineRenderOptions {
+  pageId: string;
+  /** Just these layers, drawn alone as an export draws them; else the whole page. */
+  ids?: string[];
+  /** Export with page backdrop context for backdrop readers (decision 0039). */
+  context?: boolean;
+  rect: Rect;
+  scale: number;
+  width: number;
+  height: number;
+  backend: "cpu" | "gpu" | "webgl";
+  background?: [number, number, number, number];
+  compatibility?: boolean;
+}
+
+type EnginePixels = Omit<EngineRender, "rgba"> & {
+  readonly pixels?: Uint8Array;
+  readonly missingImages?: readonly string[];
+};
+
 export function engineDebug(editor: Editor) {
+  let nextImageHandle = 1;
   let browserModule: EngineModule | null = null;
   let webglModule: EngineModule | null = null;
   const engines: Partial<Record<"cpu" | "gpu" | "webgl", RenderEngine>> = {};
@@ -93,32 +114,38 @@ export function engineDebug(editor: Editor) {
     return e;
   }
 
-  /** Uploads every image the page's layers paint, once loaded, so the list can place them. */
-  async function images(e: RenderEngine, pageId: string): Promise<void> {
+  /** Keep only the images used by the next list, as the live view does on page changes. */
+  async function images(e: RenderEngine, refs: ReadonlySet<string>): Promise<void> {
     const uploaded = uploadedByEngine.get(e) ?? new Map();
     uploadedByEngine.set(e, uploaded);
     const cache = imagesFor(editor);
-    const refs = imageRefs(editor.doc, [pageId]);
+    for (const [ref, { handle }] of uploaded) {
+      if (refs.has(ref)) continue;
+      const dropped = e.dropImage(handle);
+      if (!dropped.ok) throw new Error(dropped.message);
+      uploaded.delete(ref);
+    }
     await cache.ready(refs, 30_000);
     for (const ref of refs) {
       const natural = cache.natural(ref);
       const view = cache.get(ref);
-      if (!natural || !view || uploaded.has(`${ref}`)) continue;
+      if (!natural || !view || uploaded.has(ref)) continue;
       const c = new OffscreenCanvas(view.bitmap.width, view.bitmap.height);
       const ctx = c.getContext("2d");
       if (!ctx) continue;
       ctx.drawImage(view.bitmap, 0, 0);
       const data = ctx.getImageData(0, 0, c.width, c.height).data;
-      const handle = uploaded.size + 1;
-      if (e.putImage(handle, c.width, c.height, new Uint8Array(data.buffer)).ok)
-        uploaded.set(ref, { handle, width: natural.width, height: natural.height });
+      const handle = nextImageHandle++;
+      const put = e.putImage(handle, c.width, c.height, new Uint8Array(data.buffer));
+      if (put.ok) uploaded.set(ref, { handle, width: natural.width, height: natural.height });
+      // A GPU upload can fail after the CPU has accepted the same handle.
+      else if (!e.dead) e.dropImage(handle);
     }
   }
 
   let canvas: CanvasRenderer | null = null;
 
   function builder(
-    _pageId: string,
     uploaded: Map<string, { handle: number; width: number; height: number }>,
   ): DisplayListBuilder {
     return new DisplayListBuilder(editor.scene, editor.measurer, {
@@ -137,97 +164,97 @@ export function engineDebug(editor: Editor) {
     return out;
   };
 
-  return {
-    /**
-     * `rect` of page `pageId` (page units) at `scale`, `width` × `height` device pixels, drawn
-     * by the engine on `backend`. `background` straight RGBA floats (transparent for exports).
-     */
-    async render(options: {
-      pageId: string;
-      /** Just these layers, drawn alone as an export draws them; else the whole page. */
-      ids?: string[];
-      /** Export with page backdrop context for backdrop readers (decision 0039). */
-      context?: boolean;
-      rect: Rect;
-      scale: number;
-      width: number;
-      height: number;
-      backend: "cpu" | "gpu" | "webgl";
-      background?: [number, number, number, number];
-      compatibility?: boolean;
-    }): Promise<EngineRender> {
-      const e = await engineFor(options.backend, options.compatibility ?? false);
-      if (typeof e === "string") return { ok: false, error: e, unsupported: {} };
-      await images(e, options.pageId);
-      const uploaded = uploadedByEngine.get(e) ?? new Map();
-      // Text whose face is still loading can't be outlined yet: the shaper starts loading it on
-      // the first try, and the list sends it provisional (bars) meanwhile. Wait for it (as the
-      // canvas's parity spec waits for fonts), up to 20 s: what's drawn is the text itself.
-      const make = () => {
-        const b = builder(options.pageId, uploaded);
-        return {
-          b,
-          list: options.ids
-            ? b.buildLayers(options.ids, { context: options.context })
-            : b.build(options.pageId),
-        };
-      };
-      const loading = (b: DisplayListBuilder) =>
-        b.waiting > 0 ||
-        [...b.unsupported.values()].some((bits) =>
-          unsupportedNames(bits).includes("textWithoutOutlines"),
-        );
-      for (let waited = 0; waited < 20_000 && loading(make().b); waited += 100)
-        await new Promise((r) => setTimeout(r, 100));
-      const t0 = performance.now();
-      // A fresh list replaces whatever the engine held: made for a revision past the engine's
-      // (fresh lists only move the revision forward).
-      const b = builder(options.pageId, uploaded);
+  function build(
+    b: DisplayListBuilder,
+    options: Pick<EngineRenderOptions, "pageId" | "ids" | "context">,
+  ) {
+    return options.ids
+      ? b.buildLayers(options.ids, { context: options.context })
+      : b.build(options.pageId);
+  }
+
+  async function renderPixels(options: EngineRenderOptions): Promise<EnginePixels> {
+    const e = await engineFor(options.backend, options.compatibility ?? false);
+    if (typeof e === "string") return { ok: false, error: e, unsupported: {} };
+    const uploaded = uploadedByEngine.get(e) ?? new Map();
+    const make = () => {
+      const b = builder(uploaded);
       b.acknowledge(false, e.revision);
-      const list = options.ids
-        ? b.buildLayers(options.ids, { context: options.context })
-        : b.build(options.pageId);
-      const t1 = performance.now();
-      const applied = e.apply(list);
-      const t2 = performance.now();
-      const unsupported = unsupportedOf(b);
-      if (!applied.ok)
-        return { ok: false, error: applied.message, code: applied.code, unsupported };
-      const camera = {
-        zoom: options.scale,
-        x: -options.rect.x * options.scale,
-        y: -options.rect.y * options.scale,
-        dpr: 1,
-      };
-      const bg = options.background ?? [1, 1, 1, 1];
-      if (options.backend === "cpu") {
-        const r = e.renderCpu(options.width, options.height, camera, bg, false);
-        const t3 = performance.now();
-        if (!r.ok) return { ok: false, error: r.message, code: r.code, unsupported };
-        return {
-          ok: true,
-          rgba: toBase64(r.value.pixels),
-          unsupported,
-          stats: r.value.stats,
-          ms: { build: t1 - t0, apply: t2 - t1, render: t3 - t2 },
-        };
-      }
-      const r = e.renderGpu(options.width, options.height, camera, bg, false);
-      if (!r.ok) return { ok: false, error: r.message, code: r.code, unsupported, gpu: e.gpu };
-      const fin = await e.gpuFinished();
-      if (!fin.ok)
-        return { ok: false, error: fin.message, code: fin.code, unsupported, gpu: e.gpu };
+      return { b, list: build(b, options) };
+    };
+    // A provisional list starts loading faces. A settled list with unsupported text can be
+    // refused immediately, since no more fonts are pending for it.
+    const deadline = performance.now() + 20_000;
+    let t0 = performance.now();
+    let { b, list } = make();
+    while (b.waiting > 0 && performance.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      t0 = performance.now();
+      ({ b, list } = make());
+    }
+    const unsupported = unsupportedOf(b);
+    if (b.waiting > 0) return { ok: false, error: "engine font loading timed out", unsupported };
+    const refs = b.imagesInUse();
+    if (refs.size > 0 || uploaded.size > 0) {
+      await images(e, refs);
+      t0 = performance.now();
+      ({ b, list } = make());
+    }
+    const missingImages = [...refs].filter((ref) => !uploaded.has(ref));
+    const t1 = performance.now();
+    const applied = e.apply(list);
+    const t2 = performance.now();
+    if (!applied.ok) return { ok: false, error: applied.message, code: applied.code, unsupported };
+    const camera = {
+      zoom: options.scale,
+      x: -options.rect.x * options.scale,
+      y: -options.rect.y * options.scale,
+      dpr: 1,
+    };
+    const bg = options.background ?? [1, 1, 1, 1];
+    if (options.backend === "cpu") {
+      const r = e.renderCpu(options.width, options.height, camera, bg, false);
       const t3 = performance.now();
-      const px = await e.gpuPixels();
-      if (!px.ok) return { ok: false, error: px.message, code: px.code, unsupported, gpu: e.gpu };
+      if (!r.ok) return { ok: false, error: r.message, code: r.code, unsupported };
       return {
         ok: true,
-        rgba: toBase64(px.value),
+        pixels: r.value.pixels,
+        missingImages,
         unsupported,
-        stats: r.value,
+        stats: r.value.stats,
         ms: { build: t1 - t0, apply: t2 - t1, render: t3 - t2 },
-        gpu: e.gpu,
       };
+    }
+    const r = e.renderGpu(options.width, options.height, camera, bg, false);
+    if (!r.ok) return { ok: false, error: r.message, code: r.code, unsupported, gpu: e.gpu };
+    const fin = await e.gpuFinished();
+    if (!fin.ok) return { ok: false, error: fin.message, code: fin.code, unsupported, gpu: e.gpu };
+    const t3 = performance.now();
+    const px = await e.gpuPixels();
+    if (!px.ok) return { ok: false, error: px.message, code: px.code, unsupported, gpu: e.gpu };
+    return {
+      ok: true,
+      pixels: px.value,
+      missingImages,
+      unsupported,
+      stats: r.value,
+      ms: { build: t1 - t0, apply: t2 - t1, render: t3 - t2 },
+      gpu: e.gpu,
+    };
+  }
+
+  return {
+    renderPixels,
+    async render(options: EngineRenderOptions): Promise<EngineRender> {
+      const { pixels, ...result } = await renderPixels(options);
+      return { ...result, ...(pixels ? { rgba: toBase64(pixels) } : {}) };
+    },
+
+    /** Census of a live-style page list, including faces that are still loading. */
+    inspect(pageId: string) {
+      const b = builder(new Map());
+      b.build(pageId);
+      return { unsupported: unsupportedOf(b), records: b.stats.records, waiting: b.waiting };
     },
 
     /**
@@ -370,7 +397,7 @@ export function engineDebug(editor: Editor) {
     ): { list: string; unsupported: Record<string, string[]>; records: number } {
       const cpu = engines.cpu;
       const uploaded = (cpu && uploadedByEngine.get(cpu)) || new Map();
-      const b = builder(pageId, uploaded);
+      const b = builder(uploaded);
       const list = ids ? b.buildLayers(ids, { context }) : b.build(pageId);
       return { list: toBase64(list), unsupported: unsupportedOf(b), records: b.stats.records };
     },
@@ -482,7 +509,7 @@ export function engineDebug(editor: Editor) {
 
     /** Builds the page's list and times a patch from a one-layer change (the bench's numbers). */
     timeBuild(pageId: string): { buildMs: number; records: number; bytes: number } {
-      const b = builder(pageId, new Map());
+      const b = builder(new Map());
       const t0 = performance.now();
       const list = b.build(pageId);
       return { buildMs: performance.now() - t0, records: b.stats.records, bytes: list.length };

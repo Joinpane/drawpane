@@ -105,7 +105,7 @@ jobs:
     env:
       WRANGLER_SEND_METRICS: "false"
       ENGINE_SKIP_BUILD: "1"
-    steps:
+    steps: &e2e_steps
       - uses: actions/checkout@v5
       - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v5
@@ -132,17 +132,43 @@ jobs:
       - name: Install Chromium's system libraries
         if: steps.browsers.outputs.cache-hit == 'true'
         run: pnpm --filter @drawpane/web exec playwright install-deps chromium
-      - name: Run the shard
+      - name: Run the canvas shard
+        if: env.E2E_ENGINE_ON != '1'
         run: pnpm --filter @drawpane/web exec playwright test --project=chromium --shard=${{ matrix.shard }}/4
+      - name: Run the engine shard
+        id: engine_shard
+        if: env.E2E_ENGINE_ON == '1'
+        continue-on-error: true
+        env:
+          PLAYWRIGHT_JSON_OUTPUT_FILE: test-results/engine-report.json
+        run: pnpm --filter @drawpane/web exec playwright test --project=chromium --shard=${{ matrix.shard }}/4 --reporter=list,html,json
+      - name: Report spec failures
+        if: env.E2E_ENGINE_ON == '1' && steps.engine_shard.outcome != 'skipped' && !cancelled()
+        run: node apps/web/e2e/engine-ci-report.mjs apps/web/test-results/engine-report.json "${{ steps.engine_shard.outcome }}"
       - name: Keep the report, traces and screenshots of failures
-        if: failure()
+        if: failure() || steps.engine_shard.outcome == 'failure'
         uses: actions/upload-artifact@v4
         with:
-          name: e2e-report-${{ matrix.shard }}
+          name: ${{ env.E2E_ENGINE_ON == '1' && 'e2e-engine-report' || 'e2e-report' }}-${{ matrix.shard }}
           path: |
             apps/web/playwright-report
             apps/web/test-results
           retention-days: 14
+
+  e2e-engine:
+    name: End to end, engine (${{ matrix.shard }}/4)
+    needs: engine
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
+    env:
+      WRANGLER_SEND_METRICS: "false"
+      E2E_ENGINE_ON: "1"
+      ENGINE_SKIP_BUILD: "1"
+    steps: *e2e_steps
 
   deploy:
     name: Deploy to the dogfooding instance

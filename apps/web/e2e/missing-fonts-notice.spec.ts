@@ -13,6 +13,7 @@ import { mkdirSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, type Locator, type Page, test } from "@playwright/test";
+import { engineCiStorage } from "./engine-ci-storage";
 import { addPasskey, freshInstance, type Instance } from "./fresh-instance";
 
 const fixture = (path: string) => fileURLToPath(new URL(path, import.meta.url));
@@ -217,7 +218,10 @@ test.describe
         });
         return (await response.json()).url as string;
       });
-      const context = await browser.newContext({ baseURL: instance.url });
+      const context = await browser.newContext({
+        baseURL: instance.url,
+        ...engineCiStorage(instance.url),
+      });
       const viewer = await context.newPage();
       await addPasskey(context, viewer);
       await viewer.goto(new URL(invite).pathname);

@@ -88,21 +88,21 @@ const MIN_DRAWN: Record<string, number> = {
   grain: 12,
 };
 
-// Engine scores on SwiftShader and T4 after the suite's statistical blur, with
-// 0.05 points or 5% of headroom, whichever is greater. Canvas has its own limits
-// because its texture sampler varies by raster backend.
+// Engine scores with the fixed 3 px Gaussian, replayed from the decision 0040 T4 audit
+// on CPU, WebGL2 and WebGPU. The limits keep 0.05 points or 5% of headroom, whichever
+// is greater, rounded up to the next hundredth.
 const GRAIN_LIMITS: Record<string, number> = {
-  "noise-mono": 0.44,
-  "noise-mono-large": 1.81,
+  "noise-mono": 0.47,
+  "noise-mono-large": 1.89,
   "noise-mono-sparse": 0.25,
-  "noise-mono-dense": 0.93,
-  "noise-mono-colour": 0.61,
-  "noise-duo": 1.03,
-  "noise-duo-strong": 3.84,
-  "noise-multi": 1.41,
-  "noise-on-dark": 0.77,
-  "texture-fine": 0.33,
-  "texture-coarse": 1.95,
+  "noise-mono-dense": 1.03,
+  "noise-mono-colour": 0.66,
+  "noise-duo": 1.13,
+  "noise-duo-strong": 4.14,
+  "noise-multi": 1.47,
+  "noise-on-dark": 0.83,
+  "texture-fine": 0.35,
+  "texture-coarse": 2.02,
   "texture-clipped": 0.97,
 };
 
@@ -366,15 +366,14 @@ test.describe("Render engine parity", () => {
         const theirs = await decodePng(page, golden);
         expect(theirs.width, `${cell.id} golden size`).toBe(width);
         // The canvas renderer's metric, as parity.spec.ts records thresholds with it.
-        const figma = async (ours: string) =>
-          clear
-            ? await Promise.all(
-                [255, 0].map((g) =>
-                  compare(page, over(ours, g), over(theirs.data, g), width, height, suite.blur),
-                ),
-              ).then(([a, b]) => Math.round((((a?.mean ?? 0) + (b?.mean ?? 0)) / 2) * 100) / 100)
-            : (await compare(page, ours, theirs.data, width, height, suite.blur)).mean;
-        const figmaCpu = await figma(cpu.rgba);
+        const figma = (ours: string) => {
+          if (!clear) return compare(ours, theirs.data, width, height, suite.blur).mean;
+          const [white, black] = [255, 0].map(
+            (g) => compare(over(ours, g), over(theirs.data, g), width, height, suite.blur).mean,
+          );
+          return Math.round((((white ?? 0) + (black ?? 0)) / 2) * 100) / 100;
+        };
+        const figmaCpu = figma(cpu.rgba);
         const limit =
           suite.suite === "grain" ? GRAIN_LIMITS[cell.id] : recorded[suite.suite]?.[cell.id];
         const figmaPx = Buffer.from(theirs.data, "base64");
@@ -424,7 +423,7 @@ test.describe("Render engine parity", () => {
             );
             continue;
           }
-          const f = await figma(out.rgba);
+          const f = figma(out.rgba);
           const px = Buffer.from(out.rgba, "base64");
           const cg = score(cpuPx, px, width, height);
           const vf = score(px, figmaPx, width, height);
@@ -472,7 +471,7 @@ test.describe("Render engine parity", () => {
             },
             { id: frames[i] as string, rect, scale: SCALE, width, height },
           );
-          figmaCanvas = await figma(canvasRgba);
+          figmaCanvas = figma(canvasRgba);
           vsFigmaCanvas = score(Buffer.from(canvasRgba, "base64"), figmaPx, width, height);
           // Grain uses the recorded engine limits above. Live canvas texture sampling
           // changes with the browser's raster backend.
