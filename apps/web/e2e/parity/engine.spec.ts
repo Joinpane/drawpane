@@ -645,7 +645,7 @@ test.describe("Render engine parity", () => {
   test("default canvas preserves its CJK and symbol layout and pixels", async () => {
     const page = instance.page;
     const requests: string[] = [];
-    const fallback = "**/api/fonts/fallback?*";
+    const fallback = "**/api/fonts/fallback*";
     await page.route(fallback, async (route) => {
       requests.push(route.request().url());
       await route.abort();

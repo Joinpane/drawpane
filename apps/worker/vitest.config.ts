@@ -14,7 +14,7 @@ const runnerDir = join(here, "../agent-runner");
  * The agent runner, built as it deploys (decision 0033): the tests run both
  * scripts, the runner as an auxiliary Worker the main one binds by name.
  */
-function buildRunner(): Array<{ type: "ESModule" | "CompiledWasm"; path: string }> {
+function buildRunner(): Array<{ type: "ESModule" | "CompiledWasm" | "Data"; path: string }> {
   // The capped WebAssembly the runner bundles (decision 0033, item 4.2).
   capWasm();
   const wrangler = join(
@@ -32,8 +32,11 @@ function buildRunner(): Array<{ type: "ESModule" | "CompiledWasm"; path: string 
   return [
     { type: "ESModule", path: join(outdir, "index.js") },
     ...readdirSync(outdir)
-      .filter((name) => name.endsWith(".wasm"))
-      .map((name) => ({ type: "CompiledWasm" as const, path: join(outdir, name) })),
+      .filter((name) => name.endsWith(".wasm") || name.endsWith(".ttf"))
+      .map((name) => ({
+        type: name.endsWith(".wasm") ? ("CompiledWasm" as const) : ("Data" as const),
+        path: join(outdir, name),
+      })),
   ];
 }
 

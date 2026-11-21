@@ -4,6 +4,7 @@ export * from "./agent/tools";
 export * from "./camera";
 export * from "./camera-motion";
 export * from "./code";
+export { ENGINE_EMOJI_FACE } from "./color-emoji";
 export * from "./components";
 export * from "./constraints";
 export * from "./contrast";

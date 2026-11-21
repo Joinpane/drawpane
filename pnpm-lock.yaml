@@ -462,6 +462,9 @@ importers:
       harfbuzzjs:
         specifier: 1.6.4
         version: 1.6.4(patch_hash=992c2d8785a3ce62750631a3420455f4cb7346eb7966c2501cb3498fe8d6db57)
+      opentype.js:
+        specifier: 2.0.0
+        version: 2.0.0
       pathkit-wasm:
         specifier: 1.0.0
         version: 1.0.0
@@ -2126,6 +2129,10 @@ packages:
     resolution: {integrity: sha512-5vvB5+W7ePv+p3uqxi+RcW1XAzLW0/hxt3/4X4Lc4qHudzOhmBiBwOY6DRob4WnanAEGvNcLjF+KNOufrUoEQw==}
     engines: {node: '>=12.20.0'}
 
+  opentype.js@2.0.0:
+    resolution: {integrity: sha512-kCyjv6xdDY1W/jLWZ/L3QhhTlKUqDZMQ5+Jdlw12b3dXkKNpYBqqlMMj0YDQPShWFTMwgZI1hG14kN3XUDSg/A==}
+    hasBin: true
+
   pako@2.2.0:
     resolution: {integrity: sha512-zJq6RP/5q+TO2OpFV3FHzlPnFjmkb7Nc99a5SNjJE+uu/PkpChs+NIZSSzbBoD+6kjiISXjfYdwj1ZRQ81dz/w==}
 
@@ -3608,6 +3615,8 @@ snapshots:
   nanoid@3.3.20: {}
 
   obug@3.0.0: {}
+
+  opentype.js@2.0.0: {}
 
   pako@2.2.0: {}
 

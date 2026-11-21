@@ -37,6 +37,7 @@ import {
   type NodeRecord,
   type Paint,
 } from "@drawpane/model";
+import { ENGINE_EMOJI_KEY, emojiPiecePositions, emojiPieces, hasColorEmoji } from "../color-emoji";
 import { fitCorners } from "../corner-geometry";
 import { layerCorners, spreadRadii } from "../corners";
 import { boxOutline, ellipseOutline, fitDashes } from "../dashes";
@@ -71,19 +72,6 @@ import { nodePath } from "../vector/shapes";
 import { serializePath } from "../vector/svg";
 import { svgPathData } from "./svg-path";
 
-export interface ColorGlyph {
-  readonly ref: string;
-  readonly handle: number;
-  /** Bitmap bounds in text units, relative to the glyph origin and baseline. */
-  readonly x: number;
-  readonly y: number;
-  readonly width: number;
-  readonly height: number;
-}
-
-const emojiGraphemes = new Intl.Segmenter(undefined, { granularity: "grapheme" });
-const EMOJI = /\p{Emoji_Presentation}|\ufe0f|\u20e3/u;
-
 export interface LayerContext {
   readonly scene: Scene;
   readonly measurer: TextMeasurer;
@@ -98,7 +86,6 @@ export interface LayerContext {
   glyph(d: string): number;
   /** The same for a shaped glyph, remembered by the glyph itself (the shaper keeps its runs). */
   shapedGlyph?(g: { readonly d: string }): number;
-  colorGlyph?(text: string, font: string): ColorGlyph | null;
   /** The text being edited: drawn from its live layout, every line. */
   readonly whole: string | null;
   /** Layers hidden while dragged into place. */
@@ -124,7 +111,6 @@ export interface EncodedLayer {
    */
   readonly waiting: readonly string[];
   readonly faceDependencies: readonly string[];
-  readonly colorGlyphs: readonly Pick<ColorGlyph, "ref" | "width" | "height">[];
 }
 
 const IDENTITY: Matrix = [1, 0, 0, 1, 0, 0];
@@ -310,7 +296,6 @@ class Builder {
   readonly images: string[] = [];
   unsupported = 0;
   textPending = false;
-  readonly colorGlyphs: Pick<ColorGlyph, "ref" | "width" | "height">[] = [];
   readonly faceDependencies = new Set<string>();
   /** Sent ahead of its real drawing: deferred, or waiting for faces. */
   provisional = false;
@@ -755,7 +740,8 @@ function textRuns(
   });
   const dy = textBlockOffset(node, layout);
   const spans = textSpans(node);
-  const cjkRegion = cjkRegionFor(getProp(node.props, "characters"), ctx.measurer.scriptLocale);
+  const cjkRegion =
+    layout.cjkRegion ?? cjkRegionFor(getProp(node.props, "characters"), ctx.measurer.scriptLocale);
   const spanAt = (i: number) =>
     spans.find((s) => s.start <= i && i < s.end) ?? spans[spans.length - 1];
   // A text layer composites as one shape, as Figma draws it (`text-overlap` in the parity
@@ -826,59 +812,57 @@ function textRuns(
     y: number,
     paints: readonly Paint[],
   ) => {
-    const raster = ctx.colorGlyph;
+    const measurer = ctx.measurer;
     const paint = [...paints].reverse().find(shows);
-    if (!raster || !paint || !EMOJI.test(text)) {
+    if (!measurer.colorEmoji || !paint || !hasColorEmoji(text)) {
       draw(text, run, font, spacing, x, y, paints);
       return;
     }
-    // Each piece starts where the measured fragment puts it, including RTL
-    // text and spacing. Leave monochrome emoji in the outline shaper.
-    let start = 0;
-    const rtl = run.direction === "rtl";
-    const measure = (end: number) => {
-      const prefix = text.slice(0, end);
-      return ctx.measurer.width(font, prefix, null, run.direction) + spacing * [...prefix].length;
-    };
-    const total = rtl ? measure(text.length) : 0;
-    const left = (a: number, z: number) => x + (rtl ? total - measure(z) : measure(a));
-    const drawRange = (a: number, z: number) => {
-      if (a < z) draw(text.slice(a, z), run, font, spacing, left(a, z), y, paints);
-    };
-    for (const { segment, index } of emojiGraphemes.segment(text)) {
-      if (!EMOJI.test(segment)) continue;
-      const sprite = raster(segment, font);
-      if (!sprite) continue;
-      const end = index + segment.length;
-      drawRange(start, index);
-      flush();
-      b.colorGlyphs.push({ ref: sprite.ref, width: sprite.width, height: sprite.height });
-      b.faceDependencies.add(`font:${run.family}`);
-      b.images.push(sprite.ref);
-      const sx = left(index, end) + sprite.x;
-      const sy = y + sprite.y;
-      runs.push({
-        entry: b.path({
-          kind: "path",
-          path: new PathData()
-            .moveTo(sx, sy)
-            .lineTo(sx + sprite.width, sy)
-            .lineTo(sx + sprite.width, sy + sprite.height)
-            .lineTo(sx, sy + sprite.height)
-            .close(),
-        }),
-        color: {
-          kind: "image",
-          image: sprite.handle,
-          matrix: [sprite.width, 0, 0, sprite.height, sx, sy],
-          tile: false,
-          opacity: paint.opacity ?? 1,
-          blend: blendCode(paint.blendMode),
-        },
-      });
-      start = end;
+    b.faceDependencies.add(ENGINE_EMOJI_KEY);
+    const pieces = emojiPieces(text, (segment) => measurer.colorEmoji?.(segment, run.size) ?? null);
+    if (pieces.length === 0) {
+      if (measurer.faceStatus?.(ENGINE_EMOJI_KEY) === "loading") b.waiting.add(ENGINE_EMOJI_KEY);
+      draw(text, run, font, spacing, x, y, paints);
+      return;
     }
-    drawRange(start, text.length);
+    for (const piece of emojiPiecePositions(
+      pieces,
+      text,
+      font,
+      spacing,
+      run.direction,
+      measurer,
+      cjkRegion,
+    )) {
+      if (!piece.shaped) {
+        draw(text.slice(piece.start, piece.end), run, font, spacing, x + piece.x, y, paints);
+        continue;
+      }
+      flush();
+      for (const glyph of piece.shaped.glyphs) {
+        for (const layer of glyph.colorLayers ?? []) {
+          if (!layer.d) continue;
+          const path = ctx.shapedGlyph?.(layer) ?? ctx.glyph(layer.d);
+          const entry = b.path({
+            kind: "glyphs",
+            scale: piece.shaped.scale,
+            glyphs: [path, x + piece.x + glyph.x, y - glyph.y],
+          });
+          if (layer.color) {
+            runs.push({
+              entry,
+              color: {
+                kind: "solid",
+                color: rgba(layer.color, paint.opacity ?? 1),
+                blend: blendCode(paint.blendMode),
+              },
+            });
+          } else {
+            runs.push({ entry, paints: [paint] });
+          }
+        }
+      }
+    }
   };
   for (const line of layout.lines) {
     const x0 = lineOffset(line, width, node.props);
@@ -1283,6 +1267,5 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
     deferred: b.deferred,
     waiting: [...b.waiting],
     faceDependencies: [...b.faceDependencies],
-    colorGlyphs: b.colorGlyphs,
   };
 }

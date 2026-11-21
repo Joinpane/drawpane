@@ -151,7 +151,7 @@ export function parseFont(font: string): ParsedFont | null {
     /\s*(?:"([^"]*)"|'([^']*)'|([^,]+))\s*,?/g,
   )) {
     const raw = (dq ?? sq ?? bare ?? "").trim();
-    if (!raw || GENERIC.has(raw.toLowerCase()) || raw.startsWith("Drawpane Noto ")) continue;
+    if (!raw || GENERIC.has(raw.toLowerCase())) continue;
     // Self-hosted variable fonts register as "<Family> Variable".
     const name = raw.replace(/ Variable$/, "");
     if (!families.includes(name)) families.push(name);
@@ -259,6 +259,15 @@ interface Cached<T> {
 const MAX_WIDTHS = 20_000;
 
 export class HarfBuzzMeasurer implements TextMeasurer {
+  readonly engineText = true;
+
+  colorEmoji(text: string, size: number): ShapedText | null {
+    return this.shaper.colorEmoji(text, size);
+  }
+
+  prepareColorEmoji(): Promise<void> {
+    return this.shaper.prepareColorEmoji();
+  }
   /** Runs with OpenType features or variable axes, shaped as the browser shapes them. */
   readonly shaper: Shaper;
   readonly fallbackFamily: string;
@@ -403,7 +412,13 @@ export class HarfBuzzMeasurer implements TextMeasurer {
     this.#generation++;
   }
 
-  width(font: string, text: string, run?: ShapingRun | null, direction?: TextDirection): number {
+  width(
+    font: string,
+    text: string,
+    run?: ShapingRun | null,
+    direction?: TextDirection,
+    region = run?.cjkRegion,
+  ): number {
     // As ShapingMeasurer: shaped when the run's face is at hand, else as the canvas has it.
     if (run) {
       const shaped = this.shaper.shape(text, run);
@@ -411,10 +426,14 @@ export class HarfBuzzMeasurer implements TextMeasurer {
       if (this.shaper.status(shapingFace(run)) === "loading") this.#approximate(run, "face");
     }
     this.#fresh();
-    return this.#cached(this.#widths, `${font}\u0000${direction ?? ""}\u0000${text}`, () => {
-      const parsed = parseFont(font);
-      return parsed ? this.#measure(parsed, text, direction) : 0;
-    });
+    return this.#cached(
+      this.#widths,
+      `${font}\u0000${direction ?? ""}\u0000${region ?? ""}\u0000${text}`,
+      () => {
+        const parsed = parseFont(font);
+        return parsed ? this.#measure(parsed, text, direction, region) : 0;
+      },
+    );
   }
 
   shape(text: string, run: ShapingRun): ShapedText | null {
@@ -538,8 +557,13 @@ export class HarfBuzzMeasurer implements TextMeasurer {
     return chain;
   }
 
-  #measure(parsed: ParsedFont, text: string, direction?: TextDirection): number {
-    const chain = this.#chainForText(parsed, text, cjkRegionFor(text, this.scriptLocale));
+  #measure(
+    parsed: ParsedFont,
+    text: string,
+    direction?: TextDirection,
+    region = cjkRegionFor(text, this.scriptLocale),
+  ): number {
+    const chain = this.#chainForText(parsed, text, region);
     if (chain[0] === null)
       this.#approximate({ ...parsed, family: parsed.families[0] ?? "" }, "face");
     let total = 0;

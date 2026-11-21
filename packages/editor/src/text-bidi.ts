@@ -19,16 +19,27 @@ interface DirectionalRange {
 export function bidiText(text: string) {
   if (!RIGHT_TO_LEFT.test(text) && !BIDI_CONTROL.test(text)) return null;
   const embedding = bidi.getEmbeddingLevels(text);
+  const paragraphAt = (at: number) => {
+    let lo = 0;
+    let hi = embedding.paragraphs.length;
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1;
+      if ((embedding.paragraphs[mid]?.end ?? -1) < at) lo = mid + 1;
+      else hi = mid;
+    }
+    return lo;
+  };
   const line = (start: number, end: number): DirectionalRange[] => {
     if (start >= end) return [];
-    const paragraphs = embedding.paragraphs
-      .filter((paragraph) => start <= paragraph.end && end > paragraph.start)
-      .map((paragraph) => {
-        let trailing = Math.min(end, paragraph.end + 1);
-        const first = Math.max(start, paragraph.start);
-        while (trailing > first && TRAILING.test(text[trailing - 1] ?? "")) trailing--;
-        return { ...paragraph, trailing };
-      });
+    const paragraphs = [];
+    for (let index = paragraphAt(start); index < embedding.paragraphs.length; index++) {
+      const paragraph = embedding.paragraphs[index];
+      if (!paragraph || paragraph.start >= end) break;
+      let trailing = Math.min(end, paragraph.end + 1);
+      const first = Math.max(start, paragraph.start);
+      while (trailing > first && TRAILING.test(text[trailing - 1] ?? "")) trailing--;
+      paragraphs.push({ ...paragraph, trailing });
+    }
     const levels = embedding.levels.slice(start, end);
     for (const paragraph of paragraphs)
       levels.fill(paragraph.level, paragraph.trailing - start, paragraph.end + 1 - start);
@@ -67,7 +78,8 @@ export function bidiText(text: string) {
   return {
     line,
     paragraphDirection: (index: number): TextDirection =>
-      embedding.paragraphs.findLast((paragraph) => index >= paragraph.start)?.level === 1
+      embedding.paragraphs[Math.min(paragraphAt(index), embedding.paragraphs.length - 1)]?.level ===
+      1
         ? "rtl"
         : "ltr",
   };

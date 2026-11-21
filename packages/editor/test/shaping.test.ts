@@ -4,8 +4,11 @@
  * exist here, so outlines are kept as their path data.
  */
 import { readFileSync } from "node:fs";
+import { RenderEngine } from "@drawpane/engine";
+import { built, loadNodeEngine } from "@drawpane/engine/node";
 import { ROOT_ID } from "@drawpane/model";
 import { describe, expect, it, vi } from "vitest";
+import { ENGINE_EMOJI_FACE } from "../src/color-emoji";
 import { Editor } from "../src/editor";
 import { DisplayListBuilder } from "../src/engine/display-list";
 import { MISSING_GLYPH_FAMILY } from "../src/missing-glyph-font";
@@ -78,7 +81,7 @@ describe("Shaper", () => {
     expect(result.shaped.width).toBeCloseTo(kerned.shaped.width + 7 + 10 + figures.shaped.width, 5);
   });
 
-  it("fits substitute glyph clusters to the same prefix advances used by the caret", async () => {
+  it("keeps substitute letter spacing in the measured caret run", async () => {
     const shaper = new Shaper(async ({ family }) => (family === "Arimo" ? bytes() : null), {
       makePath,
       substitute: () => ({ family: "Arimo", weight: 400, italic: false }),
@@ -98,8 +101,10 @@ describe("Shaper", () => {
     const result = shaper.shapeForEngine("AVH", arial, (prefix) => widths.get(prefix) ?? 0);
     if ("waiting" in result) throw new Error("Faces already settled");
     expect(result.shaped.width).toBe(68);
-    expect(result.shaped.glyphs.map((glyph) => glyph.x)).toEqual([0, 18, 41]);
     const original = shaper.shape("AVH", run({}, 36, "Arimo"));
+    expect(result.shaped.glyphs.map((glyph) => glyph.x)).toEqual(
+      original?.glyphs.map((glyph) => glyph.x),
+    );
     expect(result.shaped.glyphs.map((glyph) => glyph.d)).toEqual(
       original?.glyphs.map((glyph) => glyph.d),
     );
@@ -506,8 +511,16 @@ describe("text dependencies in display lists", () => {
     expect(builder.stats.records).toBe(1);
   });
 
-  it("uses one image for a colour emoji sequence and swaps its zoom bucket", () => {
-    const measurer = { width: (_font: string, text: string) => [...text].length * 10 };
+  it("encodes a colour emoji grapheme as vector layers at large sizes", async () => {
+    const file = readFileSync(new URL("../assets/Twemoji_GlyfColr0.ttf", import.meta.url));
+    const shaper = new Shaper(async (face) =>
+      face.family === ENGINE_EMOJI_FACE.family
+        ? file.buffer.slice(file.byteOffset, file.byteOffset + file.byteLength)
+        : null,
+    );
+    await shaper.prepareColorEmoji();
+    const colorEmoji = vi.fn((text: string, size: number) => shaper.colorEmoji(text, size));
+    const measurer = { width: (_font: string, text: string) => [...text].length * 100, colorEmoji };
     const editor = new Editor({ measurer, clientId: "t" });
     editor.doc.apply([
       { op: "create", id: "p", type: "page", parent: ROOT_ID, key: "a0", props: {} },
@@ -517,26 +530,30 @@ describe("text dependencies in display lists", () => {
         type: "text",
         parent: "p",
         key: "a0",
-        props: { characters: "A👩‍🔬B", width: 100, height: 30 },
+        props: { characters: "A👩🏽‍🔬B", width: 2000, height: 1100, fontSize: 1024 },
       },
     ]);
-    const raster = vi.fn((_: string, _font: string, scale: number) => ({
-      ref: `emoji-${scale}`,
-      handle: scale,
-      x: 0,
-      y: -16,
-      width: 16,
-      height: 16,
-    }));
-    const builder = new DisplayListBuilder(editor.scene, measurer, { colorGlyph: raster });
-    builder.build("p");
-    expect(raster.mock.calls.map(([text, _, scale]) => [text, scale])).toEqual([["👩‍🔬", 1]]);
-    expect([...builder.imagesInUse()]).toEqual(["emoji-1"]);
-    expect([...builder.imageDemands({ x: 0, y: 0, width: 100, height: 100 }, 0)]).toEqual([
-      { ref: "emoji-1", visible: true, span: { width: 16, height: 16 } },
-    ]);
-    builder.setColorScale(1.5);
-    expect(builder.update()).not.toBeNull();
-    expect([...builder.imagesInUse()]).toEqual(["emoji-2"]);
+    const builder = new DisplayListBuilder(editor.scene, measurer);
+    const list = builder.build("p");
+    expect(colorEmoji.mock.calls).toEqual([["👩🏽‍🔬", 1024]]);
+    expect([...builder.imagesInUse()]).toEqual([]);
+    const small = shaper.colorEmoji("👩🏽‍🔬", 16);
+    const large = shaper.colorEmoji("👩🏽‍🔬", 1024);
+    expect(small?.glyphs).toHaveLength(1);
+    expect(small?.glyphs[0]?.colorLayers?.length).toBeGreaterThan(3);
+    expect(large?.glyphs[0]?.colorLayers).toBe(small?.glyphs[0]?.colorLayers);
+    expect(large?.scale).toBe((small?.scale ?? 0) * 64);
+    if (built("worker")) {
+      const engine = new RenderEngine(await loadNodeEngine("worker"));
+      try {
+        expect(engine.apply(list).ok).toBe(true);
+        const frame = engine.renderCpu(1250, 1200, { zoom: 1, x: 0, y: 0, dpr: 1 }, [0, 0, 0, 0]);
+        if (!frame.ok) throw new Error(frame.message);
+        const pixels = frame.value.pixels;
+        expect(pixels.some((r, i) => i % 4 === 0 && r > 0 && r !== pixels[i + 2])).toBe(true);
+      } finally {
+        engine.dispose();
+      }
+    }
   });
 });

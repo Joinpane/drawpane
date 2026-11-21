@@ -7,7 +7,8 @@
   "type": "module",
   "sideEffects": false,
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./emoji-font.ttf": "./assets/Twemoji_GlyfColr0.ttf"
   },
   "scripts": {
     "typecheck": "tsc -p .",
@@ -20,6 +21,7 @@
     "@drawpane/raster": "workspace:*",
     "bidi-js": "1.1.0",
     "harfbuzzjs": "1.6.4",
+    "opentype.js": "2.0.0",
     "pathkit-wasm": "1.0.0",
     "zod": "catalog:"
   },

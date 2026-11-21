@@ -8,6 +8,7 @@
  */
 import {
   CanvasTextMeasurer,
+  ENGINE_EMOJI_FACE,
   type FontBytesLoader,
   MISSING_GLYPH_FAMILY,
   missingGlyphFont,
@@ -15,20 +16,21 @@ import {
   Shaper,
   ShapingMeasurer,
 } from "@drawpane/editor";
+import emojiUrl from "@drawpane/editor/emoji-font.ttf?url";
 import { cjkRegionFor, scriptSubsetsFor } from "@drawpane/model";
 import instrumentSansUrl from "../fonts/fallback/InstrumentSans-Variable.ttf?url";
+import { fallbackSliceLoader } from "../fonts/fallback-client";
 import { faceFileUrl, variableFileUrl } from "../fonts/font-files";
 import { fonts } from "../fonts/fonts";
 
 const BUNDLED_FALLBACK = "Instrument Sans Variable";
 let instrumentSans: Promise<ArrayBuffer | null> | undefined;
+const loadFallbackSlice = fallbackSliceLoader();
 
 /** A face's TrueType or OpenType file: bundled, from the font proxy, or uploaded by the team. */
 export const fontBytes: FontBytesLoader = async (face) => {
-  if (face.subset !== undefined) {
-    const query = new URLSearchParams({ family: face.family, slice: face.subset });
-    return readFont(`/api/fonts/fallback?${query}`);
-  }
+  if (face.family === ENGINE_EMOJI_FACE.family) return readFont(emojiUrl);
+  if (face.subset !== undefined) return loadFallbackSlice(face.family, face.subset);
   if (
     face.family === BUNDLED_FALLBACK ||
     (face.family === "Instrument Sans" &&
@@ -122,7 +124,5 @@ export function addMissingGlyphFont(): void {
  */
 export function textMeasurer(): ShapingMeasurer {
   addMissingGlyphFont();
-  const measurer = new ShapingMeasurer(new CanvasTextMeasurer(), shaper, fonts, navigator.language);
-  measurer.setEngineText(false);
-  return measurer;
+  return new ShapingMeasurer(new CanvasTextMeasurer(), shaper, fonts, navigator.language);
 }

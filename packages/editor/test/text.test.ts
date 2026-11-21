@@ -181,37 +181,83 @@ describe("wrapping in a narrow box", () => {
 });
 
 describe("bidirectional layout", () => {
+  const engine = { ...measurer, engineText: true };
+
+  it("keeps logical fragments for a measurer that has not opted in", () => {
+    const layout = layoutText(textNode("سعر 100"), measurer, null);
+    expect(layout.lines[0]?.fragments.map(({ text, direction }) => [text, direction])).toEqual([
+      ["سعر 100", undefined],
+    ]);
+  });
+
+  it("keeps node-level Han context in wrapped measurements and the caret", () => {
+    const regions = new Set<string | undefined>();
+    const regional: import("../src/text").TextMeasurer = {
+      engineText: true,
+      scriptLocale: "zh-TW",
+      width: (font, text, _run, _direction, region) => {
+        if (text.includes("骨")) regions.add(region);
+        return measurer.width(font, text);
+      },
+    };
+    const node = textNode("骨 骨\nコーヒー");
+    const layout = layoutText(node, regional, 30);
+    expect(layout.cjkRegion).toBe("JP");
+    caretBox(node, layout, regional, 1);
+    expect([...regions]).toEqual(["JP"]);
+
+    const han = textNode("骨・");
+    expect(layoutText(han, regional, null).cjkRegion).toBe("TC");
+    expect(layoutText(han, regional, null, { scriptLocale: "ko-KR" }).cjkRegion).toBe("KR");
+  });
+
   it.each(["מחיר", "سعر"])("reorders %s as a paragraph and retains the digits' order", (label) => {
     const node = textNode(`${label} 100
 Latin ${label}`);
-    const layout = layoutText(node, measurer, null);
+    const layout = layoutText(node, engine, null);
     expect(layout.lines[0]?.fragments.map((frag) => [frag.text, frag.direction])).toEqual([
       ["100", "ltr"],
       [`${label} `, "rtl"],
     ]);
     expect(layout.lines[1]?.fragments.map((frag) => frag.text)).toEqual(["Latin ", label]);
-    expect(caretBox(node, layout, measurer, label.length + 2).x).toBe(10);
-    expect(caretBox(node, layout, measurer, 0).x).toBe((label.length + 4) * 10);
+    expect(caretBox(node, layout, engine, label.length + 2).x).toBe(10);
+    expect(caretBox(node, layout, engine, 0).x).toBe((label.length + 4) * 10);
   });
 
   it("preserves paragraph direction across wrapped lines and rich text boundaries", () => {
     const node = textNode("אבג 100 XYZ", {
       textRuns: [{ start: 1, end: 2, fontWeight: 700 }],
     });
-    const layout = layoutText(node, measurer, 75);
+    const layout = layoutText(node, engine, 75);
     expect(layout.lines.map((line) => line.text)).toEqual(["אבג 100", "XYZ"]);
     expect(layout.lines[0]?.fragments.map((frag) => frag.text)).toEqual(["100", "ג ", "ב", "א"]);
   });
 
+  it("measures local prefixes when a long RTL word wraps", () => {
+    const word = "س".repeat(2000);
+    let units = 0;
+    const bidiMeasurer = {
+      engineText: true,
+      width: (_font: string, text: string) => {
+        units += text.length;
+        return text.length * 10;
+      },
+    };
+    const layout = layoutText(textNode(`س ${word}`), bidiMeasurer, 100);
+    expect(layout.lines).toHaveLength(201);
+    expect(layout.lines[1]?.text).toBe("س".repeat(10));
+    expect(units).toBeLessThan(20 * word.length);
+  });
+
   it("puts the truncation mark at the visual end of an RTL paragraph", () => {
     const node = textNode("אבג 100 XYZ", { maxLines: 1 });
-    const layout = layoutText(node, measurer, 75);
+    const layout = layoutText(node, engine, 75);
     expect(layout.lines[0]?.fragments[0]).toMatchObject({ text: "…", x: 0 });
   });
 
   it("honours bidi isolates without reversing enclosed digits", () => {
     const node = textNode("A ⁧אב 100⁩ B");
-    const layout = layoutText(node, measurer, null);
+    const layout = layoutText(node, engine, null);
     const visible = layout.lines[0]?.fragments.map((frag) =>
       frag.text.replace(/\p{Bidi_Control}/gu, ""),
     );

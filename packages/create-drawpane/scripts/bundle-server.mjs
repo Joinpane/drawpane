@@ -46,13 +46,14 @@ async function template(app) {
   return `${JSON.stringify(config, null, 2)}\n`;
 }
 
-/** A built Worker: its module, source map, and the WebAssembly it imports as modules of their own. */
+/** A built Worker and its imported WebAssembly and font modules. */
 async function copyWorker(app, into) {
   await mkdir(into, { recursive: true });
   await cp(join(app, "dist/index.js"), join(into, "index.js"));
   await cp(join(app, "dist/index.js.map"), join(into, "index.js.map")).catch(() => {});
   for (const name of await readdir(join(app, "dist")))
-    if (name.endsWith(".wasm")) await cp(join(app, "dist", name), join(into, name));
+    if (name.endsWith(".wasm") || name.endsWith(".ttf"))
+      await cp(join(app, "dist", name), join(into, name));
 }
 
 await rm(out, { recursive: true, force: true });

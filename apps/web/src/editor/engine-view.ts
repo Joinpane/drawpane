@@ -1115,7 +1115,6 @@ export class EngineView {
     this.#cpu2d = init.cpu2d;
     this.#builder = new DisplayListBuilder(editor.scene, measurer, {
       image: (ref) => this.#images.info(ref),
-      colorGlyph: (text, font, scale) => this.#images.colorGlyph(text, font, scale),
     });
     if (this.#cpuWorker) this.#wireCpuWorker(this.#cpuWorker);
     this.#attachImages();
@@ -1696,7 +1695,6 @@ export class EngineView {
         if (this.#cpuWorker) this.#wireCpuWorker(this.#cpuWorker);
         this.#builder = new DisplayListBuilder(this.#editor.scene, this.#measurer, {
           image: (ref) => this.#images.info(ref),
-          colorGlyph: (text, font, scale) => this.#images.colorGlyph(text, font, scale),
         });
         this.#recovering = null;
         this.#attachImages();
@@ -2111,7 +2109,6 @@ export class EngineView {
     this.#builder.setEditorState(state);
     // What's in view, in page units: text still to send whole goes there first.
     const z = camera.zoom > 0 ? camera.zoom : 1;
-    this.#builder.setColorScale(z * dpr);
     this.#builder.setView({
       x0: -camera.x / z,
       y0: -camera.y / z,
@@ -2342,7 +2339,6 @@ export class EngineView {
     const t0 = performance.now();
     this.#builder.setEditorState(state);
     const z = camera.zoom > 0 ? camera.zoom : 1;
-    this.#builder.setColorScale(z * dpr);
     this.#builder.setView({
       x0: -camera.x / z,
       y0: -camera.y / z,

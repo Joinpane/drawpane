@@ -11,6 +11,7 @@ import {
   WORKER_LIMITS,
 } from "@drawpane/engine";
 import { getProp, type NodeRecord, type Paint, scriptSubsets } from "@drawpane/model";
+import { hasColorEmoji } from "./color-emoji";
 import type { Doc } from "./doc";
 import { DisplayListBuilder, type EngineImage } from "./engine/display-list";
 import { rgba } from "./engine/layer";
@@ -225,11 +226,15 @@ export function createHeadlessRenderer(deps: HeadlessEngineDeps) {
       checkDeadline();
       await deps.prepareFonts?.(text);
       checkDeadline();
+      const characters = text.map((layer) => getProp(layer.props, "characters"));
       if (deps.measurer.prepareScriptFallbacks) {
-        const characters = text.map((layer) => getProp(layer.props, "characters"));
         await deps.measurer.prepareScriptFallbacks(
           scriptSubsets(characters, deps.measurer.scriptLocale),
         );
+        checkDeadline();
+      }
+      if (characters.some(hasColorEmoji)) {
+        await deps.measurer.prepareColorEmoji?.();
         checkDeadline();
       }
     } catch (error) {

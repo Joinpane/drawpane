@@ -205,8 +205,35 @@ describe("/api/fonts", () => {
     const path = "/api/fonts/fallback?family=Noto+Sans+JP&slice=3000";
     const results = await Promise.all([browser.fetch(path), browser.fetch(path)]);
     expect(results.map((response) => response.status).sort()).toEqual([200, 429]);
+    expect(
+      Number(results.find((response) => response.status === 429)?.headers.get("retry-after")),
+    ).toBeGreaterThan(0);
     vi.mocked(Date.now).mockReturnValue(now + 60_000);
     expect((await browser.fetch(path)).status).toBe(200);
+  });
+
+  it("batches fixed slices and shares Google's confirmed misses with other callers", async () => {
+    const good = { family: "Noto Sans JP", slice: "3100" };
+    const missing = { family: "Noto Sans TC", slice: "32000" };
+    await env.FILES.put("fonts/fallback/v1/Noto-Sans-JP/3100.ttf", TTF);
+    const lookup = vi
+      .spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(
+        new Response("No requested characters in this font.", { status: 400 }),
+      );
+    const path = "/api/fonts/fallback";
+    const args = { method: "POST", json: [missing, good] };
+    expect((await new Browser().fetch(path, args)).status).toBe(401);
+    const { browser } = await signedInUser();
+    const response = await browser.fetch(path, args);
+    expect(response.status).toBe(200);
+    const form = await response.formData();
+    expect(form.get("0")).toBeNull();
+    const file = form.get("1");
+    expect(file).toBeInstanceOf(Blob);
+    expect(new Uint8Array(await (file as Blob).arrayBuffer())).toEqual(TTF);
+    expect((await browser.fetch(path, args)).status).toBe(200);
+    expect(lookup).toHaveBeenCalledTimes(1);
   });
 
   it("copies a font file to R2 once, then serves it from there", async () => {

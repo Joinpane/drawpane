@@ -21,8 +21,10 @@
  *
  * Self-hosters who don't want any traffic to Google set `GOOGLE_FONTS=off`.
  */
-import { scriptSlice } from "@drawpane/model";
-import { Hono } from "hono";
+import { SCRIPT_SLICE_BATCH_SIZE, scriptSlice } from "@drawpane/model";
+import { type Context, Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
+import { z } from "zod";
 import { requireUser } from "../auth/session";
 import type { AppContext } from "../env";
 import { badRequest, HttpError, notFound, rateLimited } from "../lib/http";
@@ -51,6 +53,8 @@ const FIXED_KIT = /^[A-Za-z0-9_-]{1,4096}$/;
 const SKEY = /^[a-f0-9]{1,64}$/;
 const VERSION = /^v\d{1,4}$/;
 const FONT_MAX_BYTES = 8 * 1024 * 1024;
+const SLICE_MAX_BYTES = 1024 * 1024;
+const SLICE_MISSING_MS = 24 * 60 * 60_000;
 
 const STYLESHEET_CACHE = "public, max-age=86400";
 const IMMUTABLE = "public, max-age=31536000, immutable";
@@ -250,7 +254,18 @@ export async function scriptFontFile(
   if (env.GOOGLE_FONTS === "off" || !slice) return null;
   const key = `fonts/fallback/v1/${family.replaceAll(" ", "-")}/${subset}.ttf`;
   const stored = await env.FILES.get(key);
-  if (stored) return stored.arrayBuffer();
+  if (stored) {
+    const absentUntil = stored.customMetadata?.absentUntil;
+    if (!absentUntil) return stored.arrayBuffer();
+    await stored.body.cancel();
+    if (Number(absentUntil) > Date.now()) return null;
+  }
+  const missing = async () => {
+    await env.FILES.put(key, new Uint8Array(0), {
+      customMetadata: { absentUntil: String(Date.now() + SLICE_MISSING_MS) },
+    });
+    return null;
+  };
   // Google receives a fixed catalogue range. The file and its R2 key are
   // identical for every page that needs any character in that range.
   const characters =
@@ -265,18 +280,43 @@ export async function scriptFontFile(
     signal,
     redirect: "manual",
   });
+  if (css.status === 400 || css.status === 404) return missing();
   if (!css.ok) return null;
   const href = /url\((https:\/\/fonts\.gstatic\.com\/[^)]+)\)/.exec(await css.text())?.[1];
-  if (!href) return null;
+  if (!href) return missing();
   const asset = new URL(href);
   if (!googleFileKey(asset.pathname.slice(1), asset.searchParams, FIXED_KIT)) return null;
   const response = await fetch(asset, { signal, redirect: "manual" });
+  if (response.status === 404) return missing();
   if (!response.ok) return null;
   const bytes = await response.arrayBuffer();
-  if (bytes.byteLength > FONT_MAX_BYTES || fontFormat(new Uint8Array(bytes)) !== "ttf") return null;
+  if (bytes.byteLength > SLICE_MAX_BYTES || fontFormat(new Uint8Array(bytes)) !== "ttf")
+    return null;
   await env.FILES.put(key, bytes, { httpMetadata: { contentType: MIME.ttf } });
   return bytes;
 }
+
+async function countFallbackSlices(c: Context<AppContext>, userId: string, count: number) {
+  const now = Date.now();
+  const window = Math.floor(now / 60_000);
+  const result = await c.env.DB.prepare(
+    `INSERT INTO font_fallback_limits (user_id, window, requests) VALUES (?1, ?2, ?3)
+     ON CONFLICT (user_id) DO UPDATE SET window = ?2,
+       requests = CASE WHEN font_fallback_limits.window = ?2 THEN requests + ?3 ELSE ?3 END
+     WHERE font_fallback_limits.window <> ?2 OR font_fallback_limits.requests + ?3 <= ?4`,
+  )
+    .bind(userId, window, count, SCRIPT_FONT_REQUESTS_PER_MINUTE)
+    .run();
+  if (result.meta.changes === 0) {
+    c.header("retry-after", String(60 - (Math.floor(now / 1000) % 60)));
+    throw rateLimited("Too many fallback font requests. Try again shortly.");
+  }
+}
+
+const sliceBatch = z
+  .array(z.strictObject({ family: z.string(), slice: z.string() }))
+  .min(1)
+  .max(SCRIPT_SLICE_BATCH_SIZE);
 
 export const fonts = new Hono<AppContext>()
   /** What the font picker may offer on this server. */
@@ -328,19 +368,7 @@ export const fonts = new Hono<AppContext>()
       Object.keys(c.req.queries()).some((key) => key !== "family" && key !== "slice")
     )
       throw badRequest("Name a fixed fallback font slice.");
-    const window = Math.floor(Date.now() / 60_000);
-    const result = await c.env.DB.prepare(
-      `INSERT INTO font_fallback_limits (user_id, window, requests) VALUES (?1, ?2, 1)
-       ON CONFLICT (user_id) DO UPDATE SET window = ?2,
-         requests = CASE WHEN font_fallback_limits.window = ?2 THEN requests + 1 ELSE 1 END
-       WHERE font_fallback_limits.window <> ?2 OR font_fallback_limits.requests < ?3`,
-    )
-      .bind(user.id, window, SCRIPT_FONT_REQUESTS_PER_MINUTE)
-      .run();
-    if (result.meta.changes === 0) {
-      c.header("retry-after", String(60 - (Math.floor(Date.now() / 1000) % 60)));
-      throw rateLimited("Too many fallback font requests. Try again shortly.");
-    }
+    await countFallbackSlices(c, user.id, 1);
     const bytes = await scriptFontFile(c.env, family, subset);
     if (!bytes) throw notFound("No outline font is available for this slice.");
     return new Response(bytes, {
@@ -350,6 +378,31 @@ export const fonts = new Hono<AppContext>()
         vary: "Cookie",
       },
     });
+  })
+
+  .post("/fallback", bodyLimit({ maxSize: 2048 }), async (c) => {
+    const user = requireUser(c);
+    requireEnabled(c.env);
+    const batch = sliceBatch.safeParse(await c.req.json().catch(() => null));
+    if (!batch.success || batch.data.some(({ family, slice }) => !scriptSlice(family, slice)))
+      throw badRequest("Name only fixed fallback font slices.");
+    const seen = new Map<string, Promise<ArrayBuffer | null>>();
+    await countFallbackSlices(c, user.id, batch.data.length);
+    const files = await Promise.all(
+      batch.data.map(({ family, slice }) => {
+        const key = `${family}\u0000${slice}`;
+        let file = seen.get(key);
+        if (!file) {
+          file = scriptFontFile(c.env, family, slice);
+          seen.set(key, file);
+        }
+        return file;
+      }),
+    );
+    const body = new FormData();
+    for (const [index, bytes] of files.entries())
+      if (bytes) body.set(String(index), new Blob([bytes], { type: MIME.ttf }), "slice.ttf");
+    return new Response(body, { headers: { "cache-control": "private, no-store" } });
   })
 
   .get("/gstatic/*", async (c) => {

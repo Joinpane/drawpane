@@ -6,6 +6,7 @@
  */
 import {
   type CjkRegion,
+  cjkRegionFor,
   type FontFeatures,
   type FontVariations,
   getProp,
@@ -14,6 +15,7 @@ import {
   type Props,
   type ScriptSubset,
 } from "@drawpane/model";
+import type { ColorGlyphLayer } from "./color-emoji";
 import { MISSING_GLYPH_FAMILY } from "./missing-glyph-font";
 import { type TextSpan, textSpans } from "./rich-text";
 import { bidiText, type TextDirection } from "./text-bidi";
@@ -28,7 +30,13 @@ export interface TextMeasurer {
    * `run`, as shaped with its OpenType features when the measurer can (else
    * as the canvas has it).
    */
-  width(font: string, text: string, run?: ShapingRun | null, direction?: TextDirection): number;
+  width(
+    font: string,
+    text: string,
+    run?: ShapingRun | null,
+    direction?: TextDirection,
+    region?: CjkRegion,
+  ): number;
   /**
    * The glyphs for `text` with the run's OpenType features, or null when
    * they can't be shaped (no shaper, the font's bytes aren't at hand or are
@@ -39,6 +47,8 @@ export interface TextMeasurer {
   shapeForEngine?(text: string, run: ShapingRun, font: string): EngineText;
   /** Prepares an export's script subsets before synchronous layout. */
   prepareScriptFallbacks?(subsets: readonly ScriptSubset[]): Promise<void>;
+  colorEmoji?(text: string, size: number): ShapedText | null;
+  prepareColorEmoji?(): Promise<void>;
   /**
    * The font's own ascent and descent in px (no leading), for a canvas `font`
    * string: what "auto" line height and the baseline come from, as in Figma.
@@ -129,8 +139,7 @@ export interface ShapedGlyph {
   readonly y: number;
   /** The first character it came from (a UTF-16 index into the run's text). */
   readonly cluster: number;
-  /** Pen position before applying the glyph offset, in px. */
-  readonly penX?: number;
+  readonly colorLayers?: readonly ColorGlyphLayer[];
 }
 
 export interface ShapedText {
@@ -262,6 +271,7 @@ export const LIST_INDENT_EM = 1.5;
 export const LIST_NUMBER_GAP_EM = 0.375;
 
 export interface TextLayout {
+  readonly cjkRegion?: CjkRegion;
   /** The layer's own font (rich text may use others; see each fragment). */
   readonly font: string;
   readonly lines: readonly TextLine[];
@@ -418,6 +428,7 @@ class RangeMeasure {
     readonly text: string,
     readonly styles: readonly SpanStyle[],
     readonly measurer: TextMeasurer,
+    readonly region?: CjkRegion,
   ) {}
 
   /** The index of the style at character `i` (the last style for the end). */
@@ -446,7 +457,9 @@ class RangeMeasure {
       if (y <= x) continue;
       const drawn = caseSlice(this.text, x, y, s.span.props);
       const run = s.run ? directionalRun(s.run, direction) : null;
-      total += this.measurer.width(s.font, drawn, run, direction) + s.spacing * [...drawn].length;
+      total +=
+        this.measurer.width(s.font, drawn, run, direction, this.region) +
+        s.spacing * [...drawn].length;
     }
     return total;
   }
@@ -457,6 +470,7 @@ interface CachedLayout {
   readonly generation: number;
   readonly maxWidth: number | null;
   readonly whole: boolean;
+  readonly scriptLocale: string | undefined;
   readonly layout: TextLayout;
 }
 /**
@@ -479,23 +493,26 @@ export function layoutText(
 ): TextLayout {
   const generation = measurer.generation ?? 0;
   const whole = options.whole ?? false;
+  const scriptLocale = options.scriptLocale ?? measurer.scriptLocale;
   const hit = layoutCache.get(node.props);
   if (
     hit &&
     hit.measurer === measurer &&
     hit.generation === generation &&
     hit.maxWidth === maxWidth &&
-    hit.whole === whole
+    hit.whole === whole &&
+    hit.scriptLocale === scriptLocale
   )
     return hit.layout;
-  const layout = computeLayout(node, measurer, maxWidth, whole);
-  layoutCache.set(node.props, { measurer, generation, maxWidth, whole, layout });
+  const layout = computeLayout(node, measurer, maxWidth, whole, scriptLocale);
+  layoutCache.set(node.props, { measurer, generation, maxWidth, whole, scriptLocale, layout });
   return layout;
 }
 
 export interface LayoutOptions {
   /** Every line, even past `maxLines`: while the text is being edited, all of it shows. */
   readonly whole?: boolean;
+  readonly scriptLocale?: string;
 }
 
 function computeLayout(
@@ -503,12 +520,14 @@ function computeLayout(
   measurer: TextMeasurer,
   maxWidth: number | null,
   whole: boolean,
+  scriptLocale: string | undefined,
 ): TextLayout {
   const props = node.props;
   const text = getProp(props, "characters");
   const styles = spanStyles(node, measurer);
-  const m = new RangeMeasure(text, styles, measurer);
-  const visualRuns = measurer.engineText === false ? null : bidiText(text);
+  const region = measurer.engineText === true ? cjkRegionFor(text, scriptLocale) : undefined;
+  const m = new RangeMeasure(text, styles, measurer, region);
+  const visualRuns = measurer.engineText === true ? bidiText(text) : null;
   const widthOf = (a: number, b: number) =>
     visualRuns
       ? visualRuns
@@ -570,6 +589,25 @@ function computeLayout(
       }
       return -1;
     };
+    // Grow from the start of an oversized word, then bisect the local
+    // range. Measuring each shrinking tail would reshape most of it once
+    // per line, including bidi itemization and HarfBuzz shaping.
+    const fittingPrefix = (a: number, b: number, width: number) => {
+      const boundary = (at: number) => (at < b && isLow(text.charCodeAt(at)) ? at - 1 : at);
+      let lo = a + (isLow(text.charCodeAt(a + 1)) ? 2 : 1);
+      let hi = Math.min(b, lo + 1);
+      while (lo < hi && widthOf(a, boundary(hi)) <= width) {
+        if (hi === b) return b;
+        lo = hi;
+        hi = Math.min(b, a + (hi - a) * 2);
+      }
+      while (hi - lo > 1) {
+        const mid = (lo + hi) >> 1;
+        if (widthOf(a, boundary(mid)) <= width) lo = mid;
+        else hi = mid;
+      }
+      return boundary(lo);
+    };
     const lines = breaks.length;
     if (room === null || pEnd === paragraph) {
       breaks.push({ start: paragraph, end: trimEnd(paragraph, pEnd), next: after, para });
@@ -611,12 +649,9 @@ function computeLayout(
         }
         // Break words that don't fit on a line of their own.
         if (lineWidth > room) {
-          while (end > start && widthOf(start, end) > room) {
-            let cut = end - 1;
-            while (cut > start + 1 && widthOf(start, cut) > room) cut--;
-            if (cut > start + 1 && isLow(text.charCodeAt(cut))) cut--;
-            // One character wider than the line is left: it's the line (cutting before it would never end).
-            if (cut <= start) break;
+          while (start < end) {
+            const cut = fittingPrefix(start, end, room);
+            if (cut === end) break;
             breaks.push({ start, end: cut, next: cut });
             start = cut;
           }
@@ -807,6 +842,7 @@ function computeLayout(
   const last = trimmed.lines[trimmed.lines.length - 1];
   const width = lines.reduce((w, l) => Math.max(w, l.indent + l.width), 0);
   return {
+    ...(region ? { cjkRegion: region } : {}),
     font: fontString(props, measurer),
     lines: trimmed.lines,
     lineHeight: lineHeightPx(props, measurer),
@@ -948,8 +984,13 @@ export function lineOf(layout: TextLayout, index: number): number {
   return k;
 }
 
-function measureFor(node: NodeRecord, measurer: TextMeasurer): RangeMeasure {
-  return new RangeMeasure(getProp(node.props, "characters"), spanStyles(node, measurer), measurer);
+function measureFor(node: NodeRecord, measurer: TextMeasurer, layout: TextLayout): RangeMeasure {
+  return new RangeMeasure(
+    getProp(node.props, "characters"),
+    spanStyles(node, measurer),
+    measurer,
+    layout.cjkRegion,
+  );
 }
 
 /** A caret within a directional fragment, relative to the line origin. */
@@ -967,7 +1008,7 @@ export function caretBox(
 ): CaretBox {
   const line = layout.lines[lineOf(layout, index)] as TextLine;
   const width = getProp(node.props, "width");
-  const m = measureFor(node, measurer);
+  const m = measureFor(node, measurer, layout);
   const f = line.fragments.some((f) => f.direction)
     ? (line.fragments.find((f) => f.start <= index && index < f.end) ??
       line.fragments.find((f) => f.end === line.end))
@@ -1008,7 +1049,7 @@ export function indexOnLine(
   px: number,
 ): number {
   const line = layout.lines[Math.max(0, Math.min(k, layout.lines.length - 1))] as TextLine;
-  const m = measureFor(node, measurer);
+  const m = measureFor(node, measurer, layout);
   const x = px - lineOffset(line, getProp(node.props, "width"), node.props);
   if (line.fragments.some((f) => f.direction)) {
     const f = line.fragments.find((f) => x <= f.x + f.width) ?? line.fragments.at(-1);
@@ -1054,7 +1095,7 @@ export function selectionBoxes(
   const start = Math.min(a, b);
   const end = Math.max(a, b);
   if (start === end) return [];
-  const m = measureFor(node, measurer);
+  const m = measureFor(node, measurer, layout);
   const width = getProp(node.props, "width");
   const dy = textBlockOffset(node, layout);
   const out: Array<{ x: number; y: number; width: number; height: number }> = [];

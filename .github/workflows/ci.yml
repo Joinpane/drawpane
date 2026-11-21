@@ -89,7 +89,7 @@ jobs:
         run: pnpm --filter @drawpane/worker test test/agent-export-image.test.ts --maxWorkers=1
         env:
           AGENT_TEST_LIVE_FONTS: "1"
-      - name: Han fallback outlines in the real agent runner
+      - name: Han fallback outlines and colour emoji in the real agent runner
         run: pnpm --filter @drawpane/worker test test/agent-export-image.test.ts --maxWorkers=1 -t 'Han fallback outlines'
         env:
           AGENT_TEST_FALLBACK_FONTS: "1"
@@ -151,6 +151,33 @@ jobs:
             apps/web/playwright-report
             apps/web/test-results
           retention-days: 14
+
+  system-text:
+    name: System text (${{ matrix.os }})
+    needs: engine
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine-dist
+          path: packages/engine/dist
+      - run: pnpm install --frozen-lockfile
+      - if: runner.os == 'Linux'
+        run: pnpm --filter @drawpane/web exec playwright install --with-deps chromium
+      - if: runner.os != 'Linux'
+        run: pnpm --filter @drawpane/web exec playwright install chromium
+      - run: pnpm --filter @drawpane/web exec playwright test --config playwright.system-text.config.ts
 
   deploy:
     name: Deploy to the dogfooding instance
