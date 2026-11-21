@@ -2347,7 +2347,7 @@ impl Gpu {
                 standin: true,
                 ..DrawStats::default()
             };
-            return self.finish_frame(self.cur, stats, now());
+            return self.finish_frame(self.cur.expect("unchanged frame"), stats, now());
         }
         let result = self.draw_whole_pass(store, frame, background, generation, moving, prefix, samples);
         let (Some(samples), Some(native)) = (samples, native_samples) else {
