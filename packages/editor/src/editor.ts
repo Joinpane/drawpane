@@ -30,6 +30,7 @@ import {
 import { MIN_TAP_TARGET } from "./accessibility";
 import { Camera, type Insets, MAX_ZOOM, NO_INSETS } from "./camera";
 import { type CameraPath, cameraPath, easeOut, motionDuration } from "./camera-motion";
+import { LAYOUT_NEUTRAL } from "./compact-copies";
 import {
   componentSetOf,
   copyConstraintOps,
@@ -302,6 +303,13 @@ export interface EditorOptions {
   readonly frames?: FrameClock;
   /** True when the person asked for less motion (defaults to prefers-reduced-motion). */
   readonly reducedMotion?: () => boolean;
+  /**
+   * What an edit lays out again: what it can change (`changes`, the default:
+   * the frames from each change up to its outermost layout frame, and what
+   * they size), or everything under those outermost frames (`subtree`, as
+   * before; for comparing the two).
+   */
+  readonly relayout?: "changes" | "subtree";
 }
 
 /** Calls back once on the next frame with its time in ms, like requestAnimationFrame. */
@@ -359,6 +367,72 @@ function commonPrefix(names: readonly string[]): string {
 
 /** Bound on derived-write rounds (sync, text, layout) per commit; real files settle in two or three. */
 const MAX_FIXUP_ROUNDS = 8;
+
+/** What a layer's place in its parent's flow depends on (`inFlow`), or what changes which layers a copy has. */
+const FLOW_PROPS: ReadonlySet<string> = new Set([
+  "visible",
+  "positioning",
+  "bindings",
+  "instanceOf",
+  "unset",
+]);
+
+/** Whether an operation can take layers out of a flow, and so leave a layout frame empty. */
+function mayEmpty(op: Op): boolean {
+  switch (op.op) {
+    case "delete":
+    case "move":
+      return true;
+    case "create":
+      return op.type === "override";
+    case "set":
+      return FLOW_PROPS.has(op.prop);
+  }
+}
+
+/** The layers operations changed, and the parents whose children they changed. */
+function changedBy(ops: readonly Op[]): Set<string> {
+  const out = new Set<string>();
+  for (const op of ops) {
+    out.add(op.id);
+    if (op.op === "create" || op.op === "move") out.add(op.parent);
+  }
+  return out;
+}
+
+/**
+ * What layout needs to know about the layers `ops` changed: those whose only
+ * change is their position (`moved`: what's inside them moves without being
+ * laid out again), and those changed only in ways no layout reads
+ * (`neutral`, `LAYOUT_NEUTRAL`: a fill, a name). A layer whose children came
+ * or went (in `ops`, or in `inverses`, which undo what's been applied) is
+ * neither.
+ */
+function layoutChanges(
+  ops: readonly Op[],
+  inverses: readonly Op[],
+): { moved: Set<string>; neutral: Set<string> } {
+  const kinds = new Map<string, "moved" | "neutral" | "other">();
+  const structural = new Set<string>();
+  for (const op of inverses) if (op.op === "create" || op.op === "move") structural.add(op.parent);
+  for (const op of ops) {
+    if (op.op === "create" || op.op === "move") structural.add(op.parent);
+    const was = kinds.get(op.id);
+    if (was === "other") continue;
+    if (op.op !== "set") kinds.set(op.id, "other");
+    else if (op.prop === "x" || op.prop === "y") kinds.set(op.id, "moved");
+    else if (LAYOUT_NEUTRAL.has(op.prop)) kinds.set(op.id, was ?? "neutral");
+    else kinds.set(op.id, "other");
+  }
+  const moved = new Set<string>();
+  const neutral = new Set<string>();
+  for (const [id, kind] of kinds) {
+    if (structural.has(id)) continue;
+    if (kind === "moved") moved.add(id);
+    else if (kind === "neutral") neutral.add(id);
+  }
+  return { moved, neutral };
+}
 
 const ALIGN_EDGES = ["left", "center", "right", "top", "middle", "bottom"] as const;
 export type AlignEdge = (typeof ALIGN_EDGES)[number];
@@ -449,6 +523,8 @@ export class Editor {
   readonly #cameras = new Map<string, Camera>();
   /** Text this editor has measured (sized after an edit): what a font arriving late can correct. */
   readonly #measuredHere = new Set<string>();
+  /** Lay out everything under the outermost layout frames an edit reaches (`EditorOptions.relayout`). */
+  readonly #relayoutSubtree: boolean;
   readonly #frames: FrameClock;
   readonly #reducedMotion: () => boolean;
   #motion: CameraMotion | null = null;
@@ -457,6 +533,7 @@ export class Editor {
 
   constructor(options: EditorOptions) {
     this.measurer = options.measurer;
+    this.#relayoutSubtree = options.relayout === "subtree";
     this.#booleanLoader = options.booleanEngine ?? (() => loadPathKitEngine());
     this.#frames = options.frames ?? browserFrames;
     this.#reducedMotion = options.reducedMotion ?? prefersReducedMotion;
@@ -552,9 +629,8 @@ export class Editor {
   /** Keeps UI state valid after the document changes (remote deletes, page removal). */
   #reconcile(): void {
     const { pageId, selection, hover, editingText } = this.s;
-    const pages = this.doc.pageIds();
     const patch: { -readonly [K in keyof EditorState]?: EditorState[K] } = {};
-    if (!pageId || !this.doc.has(pageId)) patch.pageId = pages[0] ?? null;
+    if (!pageId || !this.doc.has(pageId)) patch.pageId = this.doc.pageIds()[0] ?? null;
     const alive = selection.filter((id) => this.doc.has(id));
     if (alive.length !== selection.length) patch.selection = alive;
     if (hover && !this.doc.has(hover)) patch.hover = null;
@@ -627,7 +703,8 @@ export class Editor {
       let touched = this.#touchedBy([...ops, ...emptied], inverse);
       // Layers whose bound layout values now resolve differently (a padding variable, a mode
       // switch) are laid out here, by the client that made the change (decision 0034).
-      for (const id of this.doc.takeTokenLayout()) touched.add(id);
+      const tokenLayout = this.doc.takeTokenLayout();
+      for (const id of tokenLayout) touched.add(id);
       let lastOps: readonly Op[] = first;
       // Text styles this deleted (their inverse makes them again): the only deletes whose
       // followers are looked for (an agent run's commit depends on what that reads).
@@ -668,11 +745,29 @@ export class Editor {
         const afterSync =
           derived.length > 0 ? this.#touchedBy(derived, roundInverse) : new Set<string>();
         const layoutTargets = new Set([...live, ...afterSync, ...relayout.layout]);
-        const layout = layoutOps(
-          this.doc,
-          layoutTargets,
-          shrinkEmpty.size > 0 ? { shrinkEmpty, keepEmpty: alreadyEmpty } : undefined,
-        );
+        // Laid out inside: whatever this round's operations changed (constraints and fix-ups
+        // included), except layers they only moved, whose insides stay laid out as they are,
+        // and layers they changed only in ways no layout reads (a fill), laid out not at all.
+        const roundOps = [...lastOps, ...derived];
+        const { moved, neutral } = layoutChanges(roundOps, [...inverse, ...roundInverse]);
+        for (const id of relayout.layout) {
+          moved.delete(id);
+          neutral.delete(id);
+        }
+        if (round === 0)
+          for (const id of tokenLayout) {
+            moved.delete(id);
+            neutral.delete(id);
+          }
+        const changed = changedBy(roundOps);
+        for (const id of neutral) {
+          layoutTargets.delete(id);
+          changed.delete(id);
+        }
+        const layout = layoutOps(this.doc, layoutTargets, {
+          ...(shrinkEmpty.size > 0 ? { shrinkEmpty, keepEmpty: alreadyEmpty } : {}),
+          ...(this.#relayoutSubtree ? {} : { changes: { moved, changed } }),
+        });
         layout.push(...constraintOps(this.doc, layout));
         layout.push(...pathResizeOps(this.doc, layout));
         const layoutInverse = layout.length > 0 ? this.sync.commit(layout) : [];
@@ -724,10 +819,15 @@ export class Editor {
       }
     };
     const changedVars = new Set<string>();
-    let modeChanged = false;
+    /** Layers under which modes may apply differently: moved, or setting (or unsetting) a mode. */
+    const modeRoots: string[] = [];
     for (const op of ops) {
-      markAncestors(op.id);
-      if (op.op === "move") markAncestors(op.parent);
+      // Only what can take a layer out of a flow can leave a frame empty: the frames around
+      // anything else are inspected through the operation that empties them, if one does.
+      if (mayEmpty(op)) {
+        markAncestors(op.id);
+        if (op.op === "move") markAncestors(op.parent);
+      }
       if (op.op === "set" && op.value === "hug") {
         if (op.prop === "sizingH") markHugSwitch(op.id, "h");
         else if (op.prop === "sizingV") markHugSwitch(op.id, "v");
@@ -765,7 +865,7 @@ export class Editor {
         (op.op === "set" && (op.prop === "variableModes" || op.prop === "unset")) ||
         op.op === "move"
       ) {
-        modeChanged = true;
+        modeRoots.push(op.id);
       }
     }
     if (changedVars.size > 0) {
@@ -776,10 +876,18 @@ export class Editor {
           if (raw && getProp(raw.props, "bindings").visible) markAncestors(boundId);
         }
     }
-    if (modeChanged) {
-      for (const boundId of this.doc.tokens.boundIds()) {
-        const raw = this.doc.getUnresolved(boundId);
-        if (raw && getProp(raw.props, "bindings").visible) markAncestors(boundId);
+    // Only the layers under them can resolve a bound visibility differently (modes are
+    // inherited), each standing for its copies too (markAncestors).
+    if (modeRoots.length > 0 && this.doc.tokens.boundCount() > 0) {
+      const seen = new Set<string>();
+      const stack = modeRoots;
+      for (let id = stack.pop(); id !== undefined; id = stack.pop()) {
+        if (seen.has(id)) continue;
+        seen.add(id);
+        const raw = this.doc.getUnresolved(id);
+        if (!raw) continue;
+        if (getProp(raw.props, "bindings").visible) markAncestors(id);
+        for (const child of this.doc.childIds(id)) stack.push(child);
       }
     }
   }
