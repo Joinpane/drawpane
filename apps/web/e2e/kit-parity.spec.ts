@@ -436,6 +436,18 @@ test.describe
         const frameFacts: Record<string, Record<string, unknown>> = {};
         for (const backend of ENGINE_BACKENDS) {
           if (backend !== "cpu" && n % ENGINE_EVERY !== 0) continue;
+          // Huge frames go through the page as base64 strings several times; past this many
+          // pixels (E2E_KIT_PARITY_ENGINE_MAX_PIXELS) they can crash the tab, so they're skipped.
+          const maxPixels = Number(process.env.E2E_KIT_PARITY_ENGINE_MAX_PIXELS ?? Infinity);
+          if (truth.png.width * truth.png.height > maxPixels) {
+            frameFacts[backend] = { ok: false, error: "skipped: too large for the harness" };
+            writeFileSync(
+              join(engineDirs.get(backend) as string, "facts.ndjson"),
+              `${JSON.stringify({ id: frame.id, name: frame.name, pageName: frame.pageName, ...frameFacts[backend] })}\n`,
+              { flag: "a" },
+            );
+            continue;
+          }
           const dir = engineDirs.get(backend) as string;
           const r = await page.evaluate(
             async ({ id, rect, scale, width, height, backend, inline }) => {
