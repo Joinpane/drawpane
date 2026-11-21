@@ -54,6 +54,12 @@ const REPLACEMENT_SUITES = new Set(["shadows", "blurs", "linear-blends", "masks"
 const ENGINE_CELL_CAP: Record<string, number> = {
   "glass-stack": 4.5,
 };
+// Both GPU backends on the T4, with the grain smoothed for the mean only.
+const GLASS_SCOPE_LIMITS: Record<string, { mean: number; p99: number; worstTile: number }> = {
+  "picture-mask": { mean: 2.25, p99: 55, worstTile: 28 },
+  "layer-blur": { mean: 3.7, p99: 67, worstTile: 33 },
+  noise: { mean: 3.35, p99: 76, worstTile: 36 },
+};
 const ENGINE_SUITE_MEAN_CAP: Record<string, number> = {
   "glass-stack": 3.5,
 };
@@ -83,6 +89,7 @@ const MIN_DRAWN: Record<string, number> = {
   "glass-probe": 14,
   "glass-probe-2": 31,
   "glass-stack": 15,
+  "glass-scopes": 3,
   "linear-blends": 19,
   masks: 7,
   grain: 12,
@@ -380,17 +387,21 @@ test.describe("Render engine parity", () => {
         const figmaPx = Buffer.from(theirs.data, "base64");
         const cpuPx = Buffer.from(cpu.rgba, "base64");
         const vsFigma = score(cpuPx, figmaPx, width, height);
-        const checkStackTail = (label: string, residual: ReturnType<typeof score>) => {
-          if (suite.suite !== "glass-stack") return;
-          const p99Limit = cell.id === "diff-params" ? 125 : 95;
-          if (residual.p99 > p99Limit || residual.worstTile > 46) {
+        const scopeLimit = suite.suite === "glass-scopes" ? GLASS_SCOPE_LIMITS[cell.id] : undefined;
+        const tailLimit =
+          suite.suite === "glass-stack"
+            ? { p99: cell.id === "diff-params" ? 125 : 95, worstTile: 46 }
+            : scopeLimit;
+        const checkFigmaTail = (label: string, residual: ReturnType<typeof score>) => {
+          if (!tailLimit) return;
+          if (residual.p99 > tailLimit.p99 || residual.worstTile > tailLimit.worstTile) {
             failures.push(
               `${cell.id}: ${label} residual p99 ${residual.p99} and worst tile ${residual.worstTile.toFixed(2)}`,
             );
           }
         };
-        checkStackTail("CPU", vsFigma);
-        const suiteCap = ENGINE_CELL_CAP[suite.suite];
+        checkFigmaTail("CPU", vsFigma);
+        const suiteCap = scopeLimit?.mean ?? ENGINE_CELL_CAP[suite.suite];
         const effectiveLimit =
           suiteCap === undefined ? limit : Math.min(limit ?? Infinity, suiteCap);
         if (effectiveLimit !== undefined && figmaCpu > effectiveLimit)
@@ -428,7 +439,7 @@ test.describe("Render engine parity", () => {
           const px = Buffer.from(out.rgba, "base64");
           const cg = score(cpuPx, px, width, height);
           const vf = score(px, figmaPx, width, height);
-          checkStackTail(label, vf);
+          checkFigmaTail(label, vf);
           const worse = outsideTolerance(cg, CPU_GPU_TOLERANCE);
           if (worse.length > 0)
             failures.push(`${cell.id}: CPU against ${label} ${worse.join(", ")}`);
