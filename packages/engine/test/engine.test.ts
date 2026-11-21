@@ -552,15 +552,16 @@ describe.skipIf(!built("worker") && !process.env.CI)("the engine's modules", () 
     [
       "three progressive and uniform readers",
       0,
+      13,
       ["progressiveBlur", "backgroundBlur", "progressiveBlur"],
     ],
-    ["three uniform readers", 0, ["backgroundBlur", "backgroundBlur", "backgroundBlur"]],
-    ["one reader inside seven fades", 7, ["backgroundBlur"]],
+    ["three uniform readers", 0, 40, ["backgroundBlur", "backgroundBlur", "backgroundBlur"]],
+    ["one reader inside seven fades", 7, 13, ["backgroundBlur"]],
   ] as const)(
     "safely admits or refuses a full-width Worker blur export with %s",
-    async (_description, depth, readers) => {
+    async (_description, depth, radius, readers) => {
       const mod = await loadNodeEngine("worker", { fresh: true });
-      await streamBlurExport(mod, 1988, 605, blurExportScene(1988, 605, depth, readers, 13));
+      await streamBlurExport(mod, 1988, 605, blurExportScene(1988, 605, depth, readers, radius));
     },
   );
 
