@@ -6,6 +6,10 @@ import { colorBitmap } from "./color-glyphs";
 const MIB = 1024 * 1024;
 const MAX_DECODES = 4;
 const PREFETCH_LEVELS = 2;
+const DECODE_BYTES = 64 * MIB;
+const ZOOM_SAMPLE_MS = 100;
+const ZOOM_LOOKAHEAD_MS = 180;
+const MAX_ZOOM_LOOKAHEAD = 8;
 const UPLOAD_SLICE_BYTES = 12 * MIB;
 const REQUEST_TIMEOUT_MS = 8000;
 const SOURCE_BUDGET = 64 * MIB;
@@ -16,7 +20,7 @@ export const CPU_IMAGE_SIDE = MAX_BITMAP_SIDE;
 export function deviceImageBudget(max: number): number {
   const memory = (globalThis.navigator as (Navigator & { deviceMemory?: number }) | undefined)
     ?.deviceMemory;
-  const bytes = memory && memory > 0 ? Math.max(16, memory * 32) * MIB : 128 * MIB;
+  const bytes = memory && memory > 0 ? Math.max(16, memory * 48) * MIB : 192 * MIB;
   return Math.min(max, bytes);
 }
 
@@ -46,6 +50,7 @@ interface Target extends Size {
   readonly ref: string;
   readonly handle: number;
   readonly priority: number;
+  readonly forecast?: boolean;
 }
 
 interface Resident extends Target {
@@ -60,6 +65,12 @@ interface ImageBackend {
 
 const bytes = ({ width, height }: Size) => width * height * 4;
 const keyOf = ({ handle, width }: Target) => `${handle}/${width}`;
+const resize = ({ width, height }: Size): ImageBitmapOptions => ({
+  resizeWidth: width,
+  resizeHeight: height,
+  resizeQuality: "high",
+  premultiplyAlpha: "premultiply",
+});
 
 function fits(level: Size, needed: Size): boolean {
   return level.width >= needed.width && level.height >= needed.height;
@@ -70,12 +81,36 @@ function levels(size: Size, maxSide: number): Size[] {
   let width = Math.max(1, Math.floor(size.width * fit));
   let height = Math.max(1, Math.floor(size.height * fit));
   const out = [{ width, height }];
-  while (width >= 2 && height >= 2 && Math.max(width, height) >= 64) {
+  while (width >= 2 && Math.max(width, height) >= 64) {
     width = Math.floor(width / 2);
-    height = Math.floor(height / 2);
+    height = Math.max(1, Math.floor(height / 2));
     out.push({ width, height });
   }
-  return out;
+  // Large photos on high-DPR displays could round up to nearly four times the
+  // visible pixel count. Stable 256 px steps keep headroom without decoding a
+  // different size on every camera tick.
+  if (Math.max(size.width, size.height) < 3072) return out;
+  const largest = out[0];
+  if (!largest) return out;
+  const side = Math.max(largest.width, largest.height);
+  const byWidth = new Map(out.map((level) => [level.width, level]));
+  for (let step = 1280; step < side; step += 256) {
+    const smaller = {
+      width: Math.ceil((largest.width * step) / side),
+      height: Math.ceil((largest.height * step) / side),
+    };
+    if (!byWidth.has(smaller.width)) byWidth.set(smaller.width, smaller);
+  }
+  return [...byWidth.values()].sort((a, b) => b.width - a.width);
+}
+
+function levelFor(pyramid: readonly Size[], span: Size, scale: number): number {
+  return Math.max(
+    0,
+    pyramid.findLastIndex(
+      (size) => size.width >= span.width * scale && size.height >= span.height * scale,
+    ),
+  );
 }
 
 /** Rejects abandoned work promptly and closes a bitmap that resolves after cancellation. */
@@ -127,11 +162,13 @@ async function naturalSize(blob: Blob, signal: AbortSignal): Promise<Size> {
 export class ViewImages {
   readonly #sources = new Map<string, Source>();
   readonly #residents = new Map<string, Resident>();
-  readonly #jobs = new Map<string, AbortController>();
+  readonly #jobs = new Map<string, { ref: string; abort: AbortController; target?: Target }>();
   readonly #retryAt = new Map<string, { at: number; attempts: number; version: number }>();
   readonly #denied = new Set<string>();
   readonly #failed = new Map<string, number>();
   readonly #protected = new Set<string>();
+  #fallbacks = new Map<string, Target>();
+  #primary = new Map<string, Target>();
   #visible = new Set<string>();
   #targets = new Map<string, Target>();
   #metadata = new Map<string, boolean>();
@@ -141,10 +178,13 @@ export class ViewImages {
   #uploadedThisFrame = 0;
   #uploadFrame: Promise<void> | undefined;
   #inflightBytes = 0;
+  #uploadTail = Promise.resolve();
   #residentBytes = 0;
   #clock = 0;
   #nextHandle = 1;
   #retryTimer: ReturnType<typeof setTimeout> | undefined;
+  #zoomSample: { scale: number; at: number } | undefined;
+  #forecastScale = 0;
 
   constructor(
     private readonly cache: Pick<ImageCache, "encoded" | "encodedVersion">,
@@ -196,27 +236,59 @@ export class ViewImages {
   }
 
   /** Releases pixel memory and cancels work which could bring it back while hidden. */
-  evict(): void {
-    for (const job of this.#jobs.values()) job.abort();
-    for (const key of this.#residents.keys()) this.#drop(key);
+  evict(keepVisible = false): void {
+    for (const { abort } of this.#jobs.values()) abort.abort();
+    const keep = new Map<string, Resident>();
+    if (keepVisible) {
+      for (const level of this.#residents.values()) {
+        if (!this.#visible.has(level.ref)) continue;
+        const previous = keep.get(level.ref);
+        if (!previous || level.width < previous.width) keep.set(level.ref, level);
+      }
+    }
+    for (const [key, level] of this.#residents) {
+      if (keep.get(level.ref) !== level) this.#drop(key);
+    }
     this.#targets.clear();
     this.#metadata.clear();
-    this.#visible.clear();
+    if (!keepVisible) this.#visible.clear();
+    this.#primary.clear();
+    this.#fallbacks.clear();
     this.#protected.clear();
+    this.#zoomSample = undefined;
+    this.#forecastScale = 0;
     clearTimeout(this.#retryTimer);
     this.#retryTimer = undefined;
   }
 
   retain(used: ReadonlySet<string>): void {
+    for (const { ref, abort } of this.#jobs.values()) if (!used.has(ref)) abort.abort();
     for (const ref of this.#sources.keys()) if (!used.has(ref)) this.#sources.delete(ref);
+    for (const ref of this.#metadata.keys()) if (!used.has(ref)) this.#metadata.delete(ref);
+    for (const [key, target] of this.#targets) if (!used.has(target.ref)) this.#targets.delete(key);
     for (const [key, level] of this.#residents) if (!used.has(level.ref)) this.#drop(key);
+  }
+
+  #predictScale(scale: number, now: number): number {
+    const previous = this.#zoomSample;
+    const elapsed = previous ? now - previous.at : Infinity;
+    if (!previous || elapsed >= ZOOM_SAMPLE_MS || scale < previous.scale) {
+      this.#forecastScale = scale;
+    } else if (scale > previous.scale && elapsed > 0) {
+      const velocity = Math.log(scale / previous.scale) / Math.max(elapsed, 8);
+      const growth = Math.min(MAX_ZOOM_LOOKAHEAD, Math.exp(velocity * ZOOM_LOOKAHEAD_MS));
+      this.#forecastScale = scale * growth;
+    }
+    if (!previous || scale !== previous.scale || elapsed >= ZOOM_SAMPLE_MS)
+      this.#zoomSample = { scale, at: now };
+    return this.#forecastScale;
   }
 
   update(
     demands: Iterable<ImageDemand>,
     scale: number,
-    zoomingIn: boolean,
     limits: { side: number; bytes: number },
+    now = performance.now(),
   ): boolean {
     if (!this.#backend) return true;
     const budget = deviceImageBudget(limits.bytes);
@@ -225,10 +297,19 @@ export class ViewImages {
     const candidates = new Map<string, Target>();
     const metadata = new Map<string, boolean>();
     const ideal = new Map<string, Target>();
+    const forecasts = new Map<string, Target>();
+    const fallbacks = new Map<string, Target>();
     const pyramids = new Map<string, Size[]>();
+    const heldByHandle = new Map<number, Resident[]>();
+    for (const level of this.#residents.values()) {
+      const held = heldByHandle.get(level.handle) ?? [];
+      held.push(level);
+      heldByHandle.set(level.handle, held);
+    }
     const visible = new Set<string>();
     const reduced = new Set<string>();
     const clock = ++this.#clock;
+    const forecastScale = this.#predictScale(scale, now);
 
     for (const { ref, visible: onScreen, span } of demands) {
       if (onScreen) visible.add(ref);
@@ -256,19 +337,25 @@ export class ViewImages {
         pyramid = levels(source.info, maxSide);
         pyramids.set(ref, pyramid);
       }
-      const needed = { width: span.width * scale, height: span.height * scale };
-      const current = Math.max(
-        0,
-        pyramid.findLastIndex((level) => fits(level, needed)),
-      );
+      const current = levelFor(pyramid, span, scale);
+      const ahead = levelFor(pyramid, span, forecastScale);
       const handle = source.info.handle;
       const size = pyramid[current];
       if (!size) continue;
       const wanted = { ...size, ref, handle, priority: onScreen ? 0 : 3 };
       if (onScreen) ideal.set(keyOf(wanted), wanted);
-      const available = pyramid
+      let available = pyramid
         .slice(current)
         .find((level) => !this.#denied.has(keyOf({ ...wanted, ...level })));
+      if (onScreen && available) {
+        // A prefetched level can satisfy the current view. Charge its real
+        // size to the plan so it still gives way under budget pressure.
+        let held: Resident | undefined;
+        for (const level of heldByHandle.get(handle) ?? []) {
+          if (fits(level, available) && (!held || level.width < held.width)) held = level;
+        }
+        if (held) available = held;
+      }
       if (available) {
         const target = { ...wanted, ...available };
         const key = keyOf(target);
@@ -276,19 +363,46 @@ export class ViewImages {
         if (!previous || target.priority < previous.priority) candidates.set(key, target);
       }
       if (onScreen) {
+        const coarse = pyramid.at(-1);
+        if (coarse) fallbacks.set(ref, { ...coarse, ref, handle, priority: 0 });
+        const projected = pyramid[ahead];
+        if (ahead < current && projected) {
+          const forecast = { ...projected, ref, handle, priority: 1, forecast: true };
+          const previous = forecasts.get(ref);
+          if ((!previous || forecast.width > previous.width) && !this.#denied.has(keyOf(forecast)))
+            forecasts.set(ref, forecast);
+        }
         for (let ahead = 1; ahead <= PREFETCH_LEVELS; ahead++) {
           const finer = pyramid[current - ahead];
           if (!finer) break;
-          const target = { ...finer, ref, handle, priority: zoomingIn ? ahead : 3 + ahead };
+          const target = { ...finer, ref, handle, priority: 3 + ahead };
           const key = keyOf(target);
           if (!candidates.has(key) && !this.#denied.has(key)) candidates.set(key, target);
         }
       }
     }
 
+    for (const [key, { target, abort }] of this.#jobs) {
+      if (!target?.forecast || abort.signal.aborted || candidates.get(key)?.priority === 0)
+        continue;
+      const useful = [...candidates.values()].some(
+        (level) =>
+          level.priority === 0 &&
+          level.ref === target.ref &&
+          fits(target, level) &&
+          !this.#residents.has(keyOf(level)),
+      );
+      if (forecasts.has(target.ref) || useful) {
+        forecasts.set(target.ref, target);
+      }
+    }
+
     const targets = new Map<string, Target>();
     const primary = [...candidates.values()].filter((target) => target.priority === 0);
-    let planned = primary.reduce((sum, target) => sum + bytes(target), 0);
+    const fallbackBytes = [...fallbacks.values()].reduce((sum, level) => sum + bytes(level), 0);
+    const plannedBytes = (target: Target) =>
+      target.width === fallbacks.get(target.ref)?.width ? 0 : bytes(target);
+    let planned = primary.reduce((sum, target) => sum + plannedBytes(target), fallbackBytes);
     // Fit all visible images before allocating space for speculative detail.
     while (planned > budget) {
       let largest = -1;
@@ -308,37 +422,69 @@ export class ViewImages {
         replacement = { ...target, ...smaller };
       }
       if (largest < 0 || !replacement) break;
-      planned -= largestBytes;
+      const removed = primary[largest];
+      if (!removed) break;
+      planned -= plannedBytes(removed);
       if (primary.some((other, i) => i !== largest && keyOf(other) === keyOf(replacement))) {
         primary.splice(largest, 1);
       } else {
-        planned += bytes(replacement);
+        planned += plannedBytes(replacement);
         primary[largest] = replacement;
       }
     }
 
-    planned = 0;
+    planned = Math.min(fallbackBytes, budget);
+    const primaryByRef = new Map<string, Target>();
     const ordered = [
       ...primary,
+      ...forecasts.values(),
       ...[...candidates.values()]
         .filter((target) => target.priority > 0)
         .sort((a, b) => a.priority - b.priority),
     ];
-    for (const target of ordered) {
+    for (let target of ordered) {
+      const current = primaryByRef.get(target.ref);
+      const credit = target.forecast && current ? plannedBytes(current) : 0;
+      if (planned + plannedBytes(target) - credit > budget) {
+        if (!target.forecast || !current) continue;
+        const affordable = pyramids.get(target.ref)?.find((level) => {
+          const choice = { ...target, ...level };
+          return (
+            level.width <= target.width &&
+            level.width > current.width &&
+            planned + plannedBytes(choice) - credit <= budget &&
+            !this.#denied.has(keyOf(choice))
+          );
+        });
+        if (!affordable) continue;
+        target = { ...target, ...affordable };
+      }
       const key = keyOf(target);
-      if (targets.has(key) || planned + bytes(target) > budget) continue;
+      if (targets.has(key)) continue;
       targets.set(key, target);
-      planned += bytes(target);
+      planned += plannedBytes(target) - credit;
+      if (target.priority === 0 && (!current || target.width > current.width))
+        primaryByRef.set(target.ref, target);
       const resident = this.#residents.get(key);
       if (resident) resident.used = clock;
+    }
+    // A photo decoded in the neighbouring ring can already be sharp when it
+    // enters the view. Give it a thumbnail without waiting for another zoom.
+    for (const [ref, fallback] of fallbacks) {
+      const primary = primaryByRef.get(ref);
+      const key = keyOf(fallback);
+      if (primary && this.#residents.has(keyOf(primary)) && !this.#residents.has(key))
+        targets.set(key, { ...fallback, priority: 2 });
     }
 
     this.#budget = budget;
     this.#targets = targets;
+    this.#primary = primaryByRef;
+    this.#fallbacks = fallbacks;
     this.#metadata = metadata;
     this.#visible = visible;
-    for (const [key, job] of this.#jobs) {
-      if (key.startsWith("source:") ? !metadata.has(key.slice(7)) : !targets.has(key)) job.abort();
+    for (const [key, { ref, abort, target }] of this.#jobs) {
+      if (target ? !targets.has(key) : !metadata.has(ref)) abort.abort();
     }
     this.#pump();
 
@@ -348,19 +494,17 @@ export class ViewImages {
     for (const [ref, onScreen] of metadata) {
       if (onScreen && !this.#retryAt.has(ref)) pending.add(ref);
     }
-    for (const target of targets.values()) {
-      const key = keyOf(target);
-      if (
-        target.priority === 0 &&
-        !this.#residents.has(key) &&
-        (this.#jobs.has(key) || this.#canMakeRoom(target))
-      )
-        pending.add(target.ref);
-    }
     const sharp = new Map<string, Resident>();
     for (const resident of this.#residents.values()) {
       const previous = sharp.get(resident.ref);
       if (!previous || previous.width < resident.width) sharp.set(resident.ref, resident);
+    }
+    for (const target of targets.values()) {
+      if (target.priority !== 0) continue;
+      const resident = sharp.get(target.ref);
+      if (resident && fits(resident, target)) continue;
+      if (this.#jobs.has(keyOf(target)) || this.#room(target, this.#missingFallback(target)))
+        pending.add(target.ref);
     }
     for (const target of ideal.values()) {
       const resident = sharp.get(target.ref);
@@ -373,36 +517,86 @@ export class ViewImages {
 
   #refreshProtection(): void {
     this.#protected.clear();
-    const represented = new Set<string>();
-    for (const [key, target] of this.#targets) {
-      if (target.priority === 0 && this.#residents.has(key)) {
-        this.#protected.add(key);
-        represented.add(target.ref);
-      }
-    }
+    const nearest = new Map<string, Resident>();
     for (const [key, resident] of this.#residents) {
-      if (this.#visible.has(resident.ref) && !represented.has(resident.ref)) {
+      if (!this.#visible.has(resident.ref)) continue;
+      const wanted = this.#primary.get(resident.ref);
+      const previous = nearest.get(resident.ref);
+      if (
+        !previous ||
+        (wanted && fits(previous, wanted)
+          ? fits(resident, wanted) && resident.width < previous.width
+          : resident.width > previous.width)
+      )
+        nearest.set(resident.ref, resident);
+      if (
+        this.#targets.get(key)?.priority === 0 ||
+        this.#fallbacks.get(resident.ref)?.width === resident.width
+      )
         this.#protected.add(key);
-        represented.add(resident.ref);
+    }
+    for (const resident of nearest.values()) this.#protected.add(keyOf(resident));
+  }
+
+  #missingFallback(target: Target): Target | undefined {
+    if (target.priority !== 0 && !target.forecast) return;
+    const fallback = this.#fallbacks.get(target.ref);
+    if (
+      fallback &&
+      fallback.width < target.width &&
+      !this.#residents.has(keyOf(fallback)) &&
+      !this.#denied.has(keyOf(fallback))
+    )
+      return fallback;
+  }
+
+  #room(target: Target, missingFallback?: Target): Resident[] | null {
+    const available = this.#budget - this.#residentBytes;
+    const extra = missingFallback ? bytes(missingFallback) : 0;
+    const need = bytes(target) + extra - available;
+    if (need <= 0) return [];
+    const optional: Resident[] = [];
+    const replaceable: Resident[] = [];
+    const fallback = this.#fallbacks.get(target.ref);
+    const mayReplace = Boolean(
+      (target.priority === 0 || target.forecast) &&
+        fallback &&
+        (missingFallback || this.#residents.has(keyOf(fallback))),
+    );
+    for (const [key, resident] of this.#residents) {
+      if (
+        !this.#protected.has(key) &&
+        (this.#targets.get(key)?.priority ?? Infinity) > target.priority
+      ) {
+        optional.push(resident);
+      } else if (
+        mayReplace &&
+        resident.ref === target.ref &&
+        resident.width !== fallback?.width &&
+        (fits(target, resident) ||
+          (target.priority === 0 && this.#targets.get(key)?.priority !== 0))
+      ) {
+        replaceable.push(resident);
       }
     }
-  }
-
-  #evictable(target: Target): [string, Resident][] {
-    return [...this.#residents].filter(
-      ([key]) =>
-        !this.#protected.has(key) &&
-        (this.#targets.get(key)?.priority ?? Infinity) > target.priority,
-    );
-  }
-
-  #canMakeRoom(target: Target): boolean {
-    // In-flight reservations eventually become residents or go away.
-    // Count only the residents that this target must preserve.
-    const need = this.#residentBytes + bytes(target) - this.#budget;
-    return (
-      need <= 0 || this.#evictable(target).reduce((sum, [, level]) => sum + bytes(level), 0) >= need
-    );
+    optional.sort((a, b) => a.used - b.used);
+    replaceable.sort((a, b) => a.width - b.width);
+    let freed = 0;
+    const evict: Resident[] = [];
+    for (const level of optional) {
+      evict.push(level);
+      freed += bytes(level);
+      if (freed >= need) return evict;
+    }
+    // A swap can use the old sharp level's space only after its small stand-in
+    // is resident. The stand-in itself must fit beside the old sharp level.
+    if (available + freed < extra) return null;
+    for (const level of replaceable) {
+      evict.push(level);
+      freed += bytes(level);
+      if (freed >= need) return evict;
+    }
+    return null;
   }
 
   /** An actual backend allocation refusal can reclaim optional and off-screen levels. */
@@ -423,21 +617,6 @@ export class ViewImages {
     this.#residents.delete(key);
     this.#residentBytes -= bytes(resident);
     this.#backend?.drop(resident.handle, resident.width);
-  }
-
-  #makeRoom(target: Target): boolean {
-    const need = bytes(target);
-    if (this.#residentBytes + this.#inflightBytes + need <= this.#budget) return true;
-    const evictable = this.#evictable(target);
-    const available = this.#budget - this.#residentBytes - this.#inflightBytes;
-    if (available + evictable.reduce((sum, [, level]) => sum + bytes(level), 0) < need)
-      return false;
-    evictable.sort(([, a], [, b]) => a.used - b.used);
-    for (const [key] of evictable) {
-      if (this.#residentBytes + this.#inflightBytes + need <= this.#budget) break;
-      this.#drop(key);
-    }
-    return this.#residentBytes + this.#inflightBytes + need <= this.#budget;
   }
 
   async #paceUpload(need: number, signal: AbortSignal): Promise<void> {
@@ -471,38 +650,57 @@ export class ViewImages {
     }
   }
 
+  #scheduleLevel(target: Target): void {
+    const backend = this.#backend;
+    const key = keyOf(target);
+    if (
+      !backend ||
+      this.#residents.has(key) ||
+      this.#jobs.has(key) ||
+      this.#denied.has(key) ||
+      this.#failed.get(target.ref) === this.cache.encodedVersion(target.ref)
+    )
+      return;
+    if (this.#inflightBytes > 0 && this.#inflightBytes + bytes(target) > DECODE_BYTES) return;
+    // A finer bitmap already in flight or resident can serve this level as well.
+    if (target.priority > 0 && target.width !== this.#fallbacks.get(target.ref)?.width) {
+      for (const resident of this.#residents.values()) {
+        if (resident.ref === target.ref && fits(resident, target)) return;
+      }
+    }
+    for (const { target: pending, abort } of this.#jobs.values()) {
+      if (
+        pending?.ref === target.ref &&
+        !abort.signal.aborted &&
+        fits(pending, target) &&
+        (pending.forecast ||
+          (target.priority > 0 && target.width !== this.#fallbacks.get(target.ref)?.width))
+      )
+        return;
+    }
+    if (this.#room(target, this.#missingFallback(target))) this.#requestLevel(key, target, backend);
+  }
+
   #pump(): void {
     if (!this.#backend) return;
     this.#refreshProtection();
     if (this.#jobs.size >= MAX_DECODES) return;
     const ordered = [...this.#targets.values()].sort((a, b) => a.priority - b.priority);
     for (const target of ordered) {
-      const key = keyOf(target);
-      if (
-        target.priority !== 0 ||
-        this.#failed.get(target.ref) === this.cache.encodedVersion(target.ref)
-      )
-        continue;
-      if (this.#residents.has(key) || this.#jobs.has(key) || this.#denied.has(key)) continue;
-      if (!this.#canMakeRoom(target) || !this.#makeRoom(target)) continue;
-      this.#requestLevel(key, target, this.#backend);
+      if (target.priority === 0) this.#scheduleLevel(target);
       if (this.#jobs.size >= MAX_DECODES) return;
+    }
+    for (const target of ordered) {
+      if (this.#jobs.size >= MAX_DECODES - 1) break;
+      if (target.forecast) this.#scheduleLevel(target);
     }
     for (const [ref, visible] of this.#metadata) {
       if (visible) this.#requestMetadata(ref);
       if (this.#jobs.size >= MAX_DECODES) return;
     }
     for (const target of ordered) {
-      const key = keyOf(target);
-      if (
-        target.priority === 0 ||
-        this.#jobs.size >= MAX_DECODES - 1 ||
-        this.#failed.get(target.ref) === this.cache.encodedVersion(target.ref)
-      )
-        continue;
-      if (this.#residents.has(key) || this.#jobs.has(key) || this.#denied.has(key)) continue;
-      if (!this.#canMakeRoom(target) || !this.#makeRoom(target)) continue;
-      this.#requestLevel(key, target, this.#backend);
+      if (this.#jobs.size >= MAX_DECODES - 1) break;
+      if (target.priority > 0 && !target.forecast) this.#scheduleLevel(target);
     }
     for (const [ref, visible] of this.#metadata) {
       if (!visible) this.#requestMetadata(ref);
@@ -528,7 +726,7 @@ export class ViewImages {
     )
       return;
     const abort = new AbortController();
-    this.#jobs.set(key, abort);
+    this.#jobs.set(key, { ref, abort });
     void (async () => {
       const version = this.cache.encodedVersion(ref);
       try {
@@ -568,9 +766,77 @@ export class ViewImages {
     })();
   }
 
+  async #uploadLevel(
+    target: Target,
+    bitmap: ImageBitmap,
+    backend: ImageBackend,
+    signal: AbortSignal,
+  ): Promise<void> {
+    let uploaded = await backend.upload(target.handle, bitmap);
+    if (!uploaded && !signal.aborted && backend === this.#backend) {
+      const reclaimed = this.releasePressure();
+      if (reclaimed && backend.retryUpload) {
+        await this.#paceUpload(bytes(target), signal);
+        if (!signal.aborted) uploaded = await backend.upload(target.handle, bitmap);
+      }
+    }
+    if (signal.aborted || backend !== this.#backend) {
+      if (uploaded) backend.drop(target.handle, target.width);
+      return;
+    }
+    const key = keyOf(target);
+    if (uploaded) {
+      this.#residents.set(key, { ...target, used: this.#clock });
+      this.#residentBytes += bytes(target);
+    } else {
+      this.#denied.add(key);
+    }
+    this.changed();
+  }
+
+  async #commit(
+    target: Target,
+    bitmap: ImageBitmap,
+    backend: ImageBackend,
+    signal: AbortSignal,
+  ): Promise<void> {
+    if (signal.aborted) return;
+    const fallback = this.#missingFallback(target);
+    if (fallback) {
+      // Reuse the decoded pixels. Restoring a tab needs no second full decode.
+      let thumbnail: ImageBitmap | undefined;
+      try {
+        thumbnail = await untilAborted(createImageBitmap(bitmap, resize(fallback)), signal, (b) =>
+          b.close(),
+        );
+        await this.#paceUpload(bytes(fallback), signal);
+        this.#refreshProtection();
+        const room = this.#room(target, fallback);
+        if (!room || signal.aborted) return;
+        for (const level of room) {
+          if (this.#residentBytes + bytes(fallback) <= this.#budget) break;
+          this.#drop(keyOf(level));
+        }
+        await this.#uploadLevel(fallback, thumbnail, backend, signal);
+      } catch {
+        // The optional copy must not mark otherwise usable source bytes corrupt.
+        if (!signal.aborted) this.#denied.add(keyOf(fallback));
+      } finally {
+        thumbnail?.close();
+      }
+    }
+    await this.#paceUpload(bytes(target), signal);
+    if (signal.aborted) return;
+    this.#refreshProtection();
+    const room = this.#room(target);
+    if (!room) return;
+    for (const level of room) this.#drop(keyOf(level));
+    await this.#uploadLevel(target, bitmap, backend, signal);
+  }
+
   #requestLevel(key: string, target: Target, backend: ImageBackend): void {
     const abort = new AbortController();
-    this.#jobs.set(key, abort);
+    this.#jobs.set(key, { ref: target.ref, abort, target });
     const need = bytes(target);
     this.#inflightBytes += need;
     void (async () => {
@@ -579,7 +845,8 @@ export class ViewImages {
       try {
         const source = this.#sources.get(target.ref);
         if (!source) return;
-        const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]);
+        const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
+        const signal = AbortSignal.any([abort.signal, timeout]);
         let input: ImageData | Blob | null;
         if (source.glyph) {
           input = source.glyph();
@@ -596,38 +863,17 @@ export class ViewImages {
           this.changed();
           return;
         }
-        bitmap = await untilAborted(
-          createImageBitmap(input, {
-            resizeWidth: target.width,
-            resizeHeight: target.height,
-            resizeQuality: "high",
-            premultiplyAlpha: "premultiply",
-          }),
-          signal,
-          (bitmap) => bitmap.close(),
+        // Bitmap decodes cannot be interrupted. Keep the slot until the native
+        // work returns instead of starting a new decode on every camera tick.
+        bitmap = await untilAborted(createImageBitmap(input, resize(target)), timeout, (b) =>
+          b.close(),
         );
-        await this.#paceUpload(need, abort.signal);
-        if (abort.signal.aborted) return;
-        let uploaded = await backend.upload(target.handle, bitmap);
-        if (!uploaded && !abort.signal.aborted && backend === this.#backend) {
-          const reclaimed = this.releasePressure();
-          if (reclaimed && backend.retryUpload) {
-            await this.#paceUpload(need, abort.signal);
-            if (!abort.signal.aborted) uploaded = await backend.upload(target.handle, bitmap);
-          }
-        }
-        if (abort.signal.aborted || backend !== this.#backend) {
-          if (uploaded) backend.drop(target.handle, target.width);
-          return;
-        }
-        if (!uploaded) {
-          this.#denied.add(key);
-          this.changed();
-          return;
-        }
-        this.#residents.set(key, { ...target, used: this.#clock });
-        this.#residentBytes += need;
-        this.changed();
+        const decoded = bitmap;
+        const upload = this.#uploadTail.then(() =>
+          this.#commit(target, decoded, backend, abort.signal),
+        );
+        this.#uploadTail = upload.catch(() => {});
+        await upload;
       } catch {
         if (!abort.signal.aborted) {
           this.#failed.set(target.ref, version);

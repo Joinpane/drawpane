@@ -170,7 +170,7 @@ export function engineDebug(editor: Editor) {
         images.retain(probe.imagesInUse());
         if (!limits.ok) return { ok: false, error: limits.message, unsupported: {} };
         const update = () =>
-          images.update(probe.imageDemands(options.rect, 0), options.scale, false, limits.value);
+          images.update(probe.imageDemands(options.rect, 0), options.scale, limits.value);
         for (let waited = 0; waited < 30_000 && !update(); waited += 25)
           await new Promise((resolve) => setTimeout(resolve, 25));
       }
