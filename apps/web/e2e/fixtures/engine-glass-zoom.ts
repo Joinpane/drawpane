@@ -69,7 +69,16 @@ export async function drawExtremeZoom(choice: RendererChoice) {
         { hidden: new Set(), whole: null },
         true,
       );
-      if (!draw.drawn) throw new Error(`engine handed off at ${zoom * 100}% (${view.backend})`);
+      if (!draw.drawn) {
+        throw new Error(
+          `engine handed off at ${zoom * 100}%: ${JSON.stringify({
+            backend: view.backend,
+            recovering: view.recovering,
+            limit: view.limitReason,
+            fallbacks,
+          })}`,
+        );
+      }
       if (draw.settled && draw.ready) {
         displayed = true;
         break;
@@ -84,21 +93,21 @@ export async function drawExtremeZoom(choice: RendererChoice) {
       throw new Error(`no new settled engine picture at ${zoom * 100}%`);
     if (view.backend !== backend)
       throw new Error(`backend changed at ${zoom * 100}%: ${JSON.stringify(fallbacks)}`);
-    const pixels = await view.pixels();
-    if (!pixels.ok) throw new Error(pixels.message);
     const w = view.canvas.width;
     const h = view.canvas.height;
-    if (pixels.value.length !== w * h * 4) throw new Error("wrong readback dimensions");
-    const center = (Math.floor(h / 2) * w + Math.floor(w / 2)) * 4;
+    const ctx = view.canvas.getContext("2d");
+    if (!ctx) throw new Error("no readback canvas");
+    const center = ctx.getImageData(Math.floor(w / 2), Math.floor(h / 2), 1, 1);
     return {
       zoom,
       exact: view.last.exact,
       limit: view.limitReason,
-      pixel: [...pixels.value.subarray(center, center + 4)],
+      pixel: Array.from(center.data),
     };
   }
 
   try {
+    await frame(1, 65, 18);
     const rim = [];
     for (const zoom of [26, 100, 256]) rim.push(await frame(zoom, 65, 0.65));
     const interior = await frame(256, 65, 18);

@@ -2612,15 +2612,24 @@ export class EngineView {
       if (!px.ok) {
         // Keep the existing timeout backoff in charge of waking the next opening slice.
         if (this.#openingFrame === want.n) this.#clearOpeningFrame();
-        if (px.code === ErrorCode.Limit) {
-          if (want.epoch === this.#epoch && want.n === this.#frame) {
+        const limited = this.#gpuRaster?.key === want.rasterKey;
+        if (px.code === ErrorCode.Limit || (limited && px.code === ErrorCode.Timeout)) {
+          if (want.epoch === this.#epoch && (want.n === this.#frame || limited)) {
+            const health = engine.gpuCheck();
+            if (!health.ok && health.code !== ErrorCode.Limit) {
+              this.#handleGpuFailure(health, true);
+              return;
+            }
             const smaller = want.width > 1 || want.height > 1;
+            const scale = smaller ? want.rasterScale / 2 : want.rasterScale;
             this.#gpuRaster = {
               key: want.rasterKey,
-              scale: smaller ? want.rasterScale / 2 : want.rasterScale,
+              scale: Math.min(scale, this.#gpuRaster?.scale ?? scale),
               reason: px.message,
             };
             this.#limitReason = px.message;
+            this.#want = null;
+            this.#consecutiveTimeouts = 0;
             if (smaller) this.onChange();
           } else {
             this.#readNext();

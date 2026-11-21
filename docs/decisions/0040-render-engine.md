@@ -1161,3 +1161,6 @@ reports reduced detail. CPU view mode likewise retries a limited tiled render
 as a smaller direct frame. An irreducible content limit retains the last usable
 picture for that page. The engine can draw again after the camera or document
 changes.
+
+Software GPU adapters have a tighter budget for padded views. A healthy device
+whose reduced frame times out in readback retries at a smaller raster.

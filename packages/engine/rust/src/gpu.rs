@@ -57,8 +57,8 @@ use vello_common::kurbo::{Affine, BezPath, PathEl, Rect};
 use vello_common::paint::{Image, ImageSource, TextureRegion, Tint, TintMode};
 use vello_common::peniko::{Extend, Fill, ImageQuality, ImageSampler};
 use vello_gpu::{
-    ClearSettings, RenderOptions, RenderSize, RenderTarget, RenderTargetConfig, Renderer, Resources, Scene, TargetInit,
-    TextureBindings,
+    ClearSettings, RenderError, RenderOptions, RenderSize, RenderTarget, RenderTargetConfig, Renderer, Resources,
+    Scene, TargetInit, TextureBindings,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -442,6 +442,18 @@ const PER_PAGE: u32 = PER_ROW * PER_ROW;
 const PAGE_BYTES: usize = (PAGE * PAGE * 4) as usize;
 /// Kept free under the budget for what a frame allocates on the way (read-backs, images).
 const HEADROOM: usize = 32 << 20;
+/// SwiftShader can exhaust its frame deadline before it exhausts the texture
+/// budget. Bound the extra viewport work on a software adapter.
+const SOFTWARE_PADDED_PIXELS: usize = 2 << 20;
+
+fn vello_error(error: RenderError) -> EngineError {
+    match error {
+        RenderError::IntermediateTexture(_) | RenderError::ResourceTextureTooLarge { .. } => {
+            EngineError::limit(error.to_string())
+        }
+        _ => EngineError::new(ErrorCode::Gpu, error.to_string()),
+    }
+}
 
 /// The compositor: textured quads (a stand-in scaled: the last frame, another level's tiles),
 /// bilinear, each sampled inside its own source rectangle so neighbours in a page never bleed
@@ -2292,6 +2304,11 @@ impl Gpu {
             // In addition to colour/depth scratch, the padded view must have room
             // for its backdrop plane. Do not begin a frame that cannot hold both.
             let pixels = (size.0 as usize).saturating_mul(size.1 as usize);
+            if self.fallback_adapter && pixels > SOFTWARE_PADDED_PIXELS.max(width as usize * height as usize) {
+                return Err(EngineError::limit(
+                    "viewport readers exceed the software GPU raster budget",
+                ));
+            }
             let scratch_bytes = self.scratches[1]
                 .as_ref()
                 .map_or(0, |s| s.width as usize * s.height as usize * 8);
@@ -3134,7 +3151,7 @@ impl Gpu {
                     &self.bindings,
                     options,
                 )
-                .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+                .map_err(vello_error)?;
             if dual {
                 let (w, h) = self.active_scene_size();
                 for backdrop in [false, true] {
@@ -3327,7 +3344,7 @@ impl Gpu {
                     &self.bindings,
                     options,
                 )
-                .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+                .map_err(vello_error)?;
             self.stash_encoder(encoder);
         }
         let mut encoder = self.take_encoder(!analytic, "backdrop blur");
@@ -3365,7 +3382,7 @@ impl Gpu {
                     &self.bindings,
                     options,
                 )
-                .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+                .map_err(vello_error)?;
         }
         self.mask_scene.reset();
         Ok((encoder, clipped))
@@ -3477,7 +3494,7 @@ impl Gpu {
                     &self.bindings,
                     options,
                 )
-                .map_err(|err| EngineError::new(ErrorCode::Gpu, format!("{err:?}")))?;
+                .map_err(vello_error)?;
         }
 
         for backdrop in [false, true] {
@@ -5311,7 +5328,7 @@ impl Backend for Gpu {
                         &self.bindings,
                         options,
                     )
-                    .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+                    .map_err(vello_error)?;
                 self.stash_encoder(enc);
                 self.mask_scene.reset();
             }
@@ -5381,7 +5398,7 @@ impl Backend for Gpu {
                             &self.bindings,
                             options,
                         )
-                        .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+                        .map_err(vello_error)?;
                 }
                 self.mask_scene.reset();
             }
@@ -5734,7 +5751,7 @@ impl Backend for Gpu {
                                 &self.bindings,
                                 options,
                             )
-                            .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+                            .map_err(vello_error)?;
                         if !invert {
                             self.blur.encode(
                                 &self.device,
@@ -5950,7 +5967,7 @@ impl Backend for Gpu {
                         &self.bindings,
                         options,
                     )
-                    .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+                    .map_err(vello_error)?;
                 if !invert {
                     self.blur.encode(
                         &self.device,
@@ -6073,7 +6090,7 @@ impl Backend for Gpu {
                         &self.bindings,
                         options,
                     )
-                    .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+                    .map_err(vello_error)?;
                 self.blur.encode(
                     &self.device,
                     &self.queue,

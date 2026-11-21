@@ -38,6 +38,11 @@ for (const backend of ["webgpu", "webgl2"] as const) {
     const entry = files.find((file) => file.type === "chunk" && file.isEntry);
     if (!entry) throw new Error("no engine fixture bundle");
 
+    const gpuMessages: string[] = [];
+    page.on("console", (message) => {
+      if (message.type() === "error" || message.text().startsWith("Drawpane:"))
+        gpuMessages.push(message.text());
+    });
     await page.route(`${origin}/**`, async (route) => {
       const filename = new URL(route.request().url()).pathname.slice(1);
       const file = files.find((output) => output.fileName === filename);
@@ -57,15 +62,19 @@ for (const backend of ["webgpu", "webgl2"] as const) {
       });
     });
     await page.goto(`${origin}/?present=readback`);
-    const outcome = await page.evaluate(
-      async ({ filename, backend }) => {
-        const { drawExtremeZoom } = (await import(filename)) as {
-          drawExtremeZoom: typeof drawFixture;
-        };
-        return drawExtremeZoom(backend === "webgpu" ? "engine" : "engine-webgl");
-      },
-      { filename: `/${entry.fileName}`, backend },
-    );
+    const outcome = await page
+      .evaluate(
+        async ({ filename, backend }) => {
+          const { drawExtremeZoom } = (await import(filename)) as {
+            drawExtremeZoom: typeof drawFixture;
+          };
+          return drawExtremeZoom(backend === "webgpu" ? "engine" : "engine-webgl");
+        },
+        { filename: `/${entry.fileName}`, backend },
+      )
+      .catch((error) => {
+        throw new Error(gpuMessages.join("\n"), { cause: error });
+      });
     expect(outcome.fallbacks).toEqual([]);
     expect(outcome.backend).toBe(backend);
     expect(outcome.rim.some((frame) => frame.limit && !frame.exact)).toBe(true);
