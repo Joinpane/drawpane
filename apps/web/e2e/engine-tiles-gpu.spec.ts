@@ -724,3 +724,145 @@ for (const build of ["browser", "webgl"] as const) {
     expect(crop?.pixel[0]).toBeLessThanOrEqual(1);
   });
 }
+
+for (const build of ["browser", "webgl"] as const) {
+  test(`resident image levels rebuild identically on ${build}`, async ({ page }) => {
+    const makeList = (revision: number, base: number, x: number) => {
+      const list = new ListWriter(base, revision);
+      if (base === 0xffffffff) list.reset();
+      list.set(1, ROOT, {
+        flags: 0,
+        transform: [1, 0, 0, 1, x, 0],
+        opacity: 1,
+        width: 64,
+        height: 64,
+        coarseBelow: 0,
+        reach: 0,
+        unsupported: 0,
+        paths: [{ kind: "rect", w: 64, h: 64, radii: [0, 0, 0, 0], smoothing: 0 }],
+        ops: [
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: {
+              kind: "image",
+              image: 1,
+              matrix: [64, 0, 0, 64, 0, 0],
+              tile: false,
+              opacity: 1,
+            },
+          },
+        ],
+        coarse: [],
+      });
+      return [...list.finish()];
+    };
+    await page.route(`${origin}/**`, async (route) => {
+      const name = new URL(route.request().url()).pathname.slice(1);
+      if (name === "engine.js" || name === "engine_bg.wasm") {
+        await route.fulfill({
+          body: await readFile(ROOTS[build] + name),
+          contentType: name.endsWith(".js") ? "text/javascript" : "application/wasm",
+        });
+      } else {
+        await route.fulfill({ body: "<!doctype html>", contentType: "text/html" });
+      }
+    });
+    await page.goto(origin);
+    const result = await page.evaluate(
+      async ({ initial, patch, fresh }) => {
+        const name = "/engine.js";
+        const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+        await glue.default({ module_or_path: "/engine_bg.wasm" });
+        const engine = new glue.Engine(0, 0);
+        const checked = (outcome: { ok: boolean; message: string; free(): void }) => {
+          const { ok, message } = outcome;
+          outcome.free();
+          if (!ok) throw new Error(message);
+        };
+        const device = await glue.createGpu(null, 0);
+        const canvas = new OffscreenCanvas(64, 64);
+        const ctx = canvas.getContext("2d");
+        if (
+          !ctx ||
+          !engine.attachGpu ||
+          !engine.putGpuImageLevel ||
+          !engine.renderGpu ||
+          !engine.gpuPixels
+        )
+          throw new Error("GPU image upload is unavailable");
+        ctx.fillStyle = "rgba(255, 0, 0, 0.5)";
+        ctx.fillRect(0, 0, 64, 32);
+        ctx.fillStyle = "#0080ff";
+        ctx.fillRect(0, 32, 64, 32);
+        const rgba = new Uint8Array(ctx.getImageData(0, 0, 64, 64).data.buffer);
+        const bitmap = await createImageBitmap(canvas, { premultiplyAlpha: "premultiply" });
+        const bg = new Float32Array(4);
+        const equal = (a: Uint8Array, b: Uint8Array) =>
+          a.length === b.length && a.every((value, i) => value === b[i]);
+        const drawGpu = async () => {
+          const outcome = engine.renderGpu?.(96, 64, 1, 0, 0, 1, bg, false, 0);
+          if (!outcome) throw new Error("GPU drawing is unavailable");
+          checked(outcome);
+          const pixels = await engine.gpuPixels?.();
+          if (!(pixels instanceof Uint8Array)) throw new Error(pixels?.message ?? "no GPU pixels");
+          return pixels;
+        };
+        try {
+          if (!device.ok) throw new Error(device.message);
+          checked(engine.attachGpu(device));
+          device.free();
+          engine.enableViewImages();
+          checked(engine.apply(new Uint8Array(initial)));
+          checked(engine.putGpuImageLevel(1, bitmap));
+          bitmap.close();
+          const heldBeforeCpuUpload = engine.imageBytes;
+          checked(engine.putCpuImageLevel(1, 64, 64, rgba));
+          const before = await drawGpu();
+          checked(engine.apply(new Uint8Array(patch)));
+          const patched = await drawGpu();
+          checked(engine.apply(new Uint8Array(fresh)));
+          const rebuilt = await drawGpu();
+          checked(engine.renderCpu(96, 64, 1, 0, 0, 1, bg, true));
+          const cpu = engine.pixels();
+          checked(engine.dropImageLevel(1, 64));
+          engine.clearViewCaches();
+          await drawGpu();
+          const restored = await createImageBitmap(canvas, { premultiplyAlpha: "premultiply" });
+          try {
+            checked(engine.putGpuImageLevel(1, restored));
+          } finally {
+            restored.close();
+          }
+          const afterPressure = await drawGpu();
+          return {
+            heldBeforeCpuUpload,
+            moved: !equal(before, patched),
+            freshMatches: equal(patched, rebuilt) && equal(rebuilt, afterPressure),
+            top: [...rebuilt.subarray((16 * 96 + 32) * 4, (16 * 96 + 32) * 4 + 4)],
+            bottom: [...rebuilt.subarray((48 * 96 + 32) * 4, (48 * 96 + 32) * 4 + 4)],
+            maxDelta: rebuilt.reduce(
+              (max, value, i) => Math.max(max, Math.abs(value - (cpu[i] ?? 0))),
+              0,
+            ),
+          };
+        } finally {
+          bitmap.close();
+          engine.free();
+        }
+      },
+      {
+        initial: makeList(1, 0xffffffff, 0),
+        patch: makeList(2, 1, 16),
+        fresh: makeList(3, 0xffffffff, 16),
+      },
+    );
+    expect(result.heldBeforeCpuUpload).toBe(0);
+    expect(result.moved).toBe(true);
+    expect(result.freshMatches).toBe(true);
+    expect(result.top).toEqual([255, 0, 0, 128]);
+    expect(result.bottom).toEqual([0, 128, 255, 255]);
+    expect(result.maxDelta).toBeLessThanOrEqual(1);
+  });
+}

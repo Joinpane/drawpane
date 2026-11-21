@@ -27,15 +27,7 @@ pub fn levels(width: u32, height: u32, rgba: &[u8], premultiplied: bool, max_sid
     if rgba.len() != (width as usize) * (height as usize) * 4 {
         return Err(EngineError::new(ErrorCode::Image, "image bytes don't match its size"));
     }
-    let mut pixels = rgba.to_vec();
-    if !premultiplied {
-        for p in pixels.as_chunks_mut::<4>().0.iter_mut() {
-            let a = u32::from(p[3]);
-            for c in &mut p[..3] {
-                *c = ((u32::from(*c) * a + 127) / 255) as u8;
-            }
-        }
-    }
+    let pixels = premultiply(rgba, premultiplied);
     let mut out = vec![Level { width, height, pixels }];
     loop {
         let last = out.last().expect("one level");
@@ -83,13 +75,23 @@ pub fn bytes(levels: &[Level]) -> usize {
     levels.iter().map(|l| l.pixels.len()).sum()
 }
 
-/// The smallest level at least `px` wide, else the largest.
-pub fn pick(widths: impl DoubleEndedIterator<Item = u32>, px: f64) -> usize {
-    let widths: Vec<u32> = widths.collect();
-    for (i, w) in widths.iter().enumerate().rev() {
-        if f64::from(*w) >= px {
-            return i;
+pub fn premultiply(rgba: &[u8], premultiplied: bool) -> Vec<u8> {
+    let mut pixels = rgba.to_vec();
+    if !premultiplied {
+        for pixel in pixels.as_chunks_mut::<4>().0 {
+            let alpha = u32::from(pixel[3]);
+            for channel in &mut pixel[..3] {
+                *channel = ((u32::from(*channel) * alpha + 127) / 255) as u8;
+            }
         }
     }
-    0
+    pixels
+}
+
+/// The smallest resident level at least `px` wide, else the largest.
+pub fn pick(widths: impl Iterator<Item = u32>, px: f64) -> usize {
+    widths
+        .take_while(|&width| f64::from(width) >= px)
+        .count()
+        .saturating_sub(1)
 }

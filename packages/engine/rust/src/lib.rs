@@ -398,6 +398,50 @@ impl Engine {
             .collect()
     }
 
+    #[wasm_bindgen(js_name = clearViewCaches)]
+    pub fn clear_view_caches(&mut self) {
+        self.core.clear_view_caches();
+    }
+
+    #[wasm_bindgen(js_name = enableViewImages)]
+    pub fn enable_view_images(&mut self) {
+        self.core.store.view_images = true;
+    }
+
+    #[wasm_bindgen(js_name = viewImageLimits)]
+    pub fn view_image_limits(&self) -> Vec<u32> {
+        let limits = self.core.limits();
+        #[cfg(feature = "gpu-common")]
+        if let Some(gpu) = self.core.gpu.as_ref() {
+            let (side, bytes) = gpu.image_limits();
+            return vec![side.min(limits.texture_side), bytes.min(limits.image_bytes) as u32];
+        }
+        vec![limits.texture_side, limits.image_bytes as u32]
+    }
+
+    #[wasm_bindgen(js_name = putCpuImageLevel)]
+    pub fn put_cpu_image_level(&mut self, id: u32, width: u32, height: u32, rgba: &[u8]) -> Outcome {
+        if let Some(o) = self.exporting() {
+            return o;
+        }
+        outcome(self.core.put_cpu_image_level(id, width, height, rgba))
+    }
+
+    #[cfg(all(target_arch = "wasm32", feature = "gpu-common"))]
+    #[wasm_bindgen(js_name = putGpuImageLevel)]
+    pub fn put_gpu_image_level(&mut self, id: u32, bitmap: &web_sys::ImageBitmap) -> Outcome {
+        outcome(self.core.put_gpu_image_level(id, bitmap))
+    }
+
+    #[wasm_bindgen(js_name = dropImageLevel)]
+    pub fn drop_image_level(&mut self, id: u32, width: u32) -> Outcome {
+        if let Some(o) = self.exporting() {
+            return o;
+        }
+        self.core.drop_image_level(id, width);
+        Outcome::ok()
+    }
+
     /// Uploads an image (RGBA8, straight unless `premultiplied`) under `id`.
     #[wasm_bindgen(js_name = putImage)]
     pub fn put_image(&mut self, id: u32, width: u32, height: u32, rgba: &[u8], premultiplied: bool) -> Outcome {

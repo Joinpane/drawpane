@@ -93,6 +93,7 @@ vi.mock("@drawpane/editor", () => ({
     }
     acknowledge() {}
     imageReady() {}
+    *imageDemands() {}
     imagesInUse() {
       return new Set<string>();
     }
@@ -126,6 +127,10 @@ vi.mock("@drawpane/engine", () => ({
       fallback: boolean;
     } | null = null;
     revision = 1;
+    enableViewImages() {}
+    viewImageLimits() {
+      return { ok: true, value: { side: 4096, bytes: 128 << 20 } };
+    }
     apply() {
       return { ok: true, value: { changes: new Float64Array(), full: true } };
     }
@@ -317,7 +322,11 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
 
     Object.defineProperty(globalThis, "document", {
       configurable: true,
-      value: { createElement: () => new FakeCanvas(false) },
+      value: {
+        createElement: () => new FakeCanvas(false),
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      },
     });
     Object.defineProperty(globalThis, "localStorage", {
       configurable: true,
@@ -331,6 +340,8 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
       configurable: true,
       value: {
         location: { href: "https://drawpane.test/?present=readback" },
+        addEventListener: () => {},
+        removeEventListener: () => {},
         dispatchEvent: (e: CustomEvent) => {
           if (e.type === "drawpane:renderer-recovered") recoveries.push(e.detail);
           if (e.type === "drawpane:renderer-fallback") fallbacks.push(e.detail);

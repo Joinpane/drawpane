@@ -3181,10 +3181,13 @@ impl<B: Backend> Walk<'_, B> {
                 // Device pixels the image's width spans: pick a level at least that wide.
                 let span = (device * *matrix).as_coeffs();
                 let px = span[0].hypot(span[1]);
-                let view = self
-                    .backend
-                    .image(*image, px)
-                    .ok_or_else(|| EngineError::unknown(format!("image {image} isn't held")))?;
+                let Some(view) = self.backend.image(*image, px) else {
+                    if !self.store.view_images {
+                        return Err(EngineError::unknown(format!("image {image} isn't held")));
+                    }
+                    self.stats.coarse += 1;
+                    return self.set_paint(&Paint::Placeholder(*opacity), device, alpha, region);
+                };
                 let texel =
                     *matrix * Affine::scale_non_uniform(1.0 / f64::from(view.width), 1.0 / f64::from(view.height));
                 if !sampleable(device, texel, region, *tile) {

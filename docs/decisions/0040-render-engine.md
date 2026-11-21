@@ -1123,3 +1123,23 @@ its backend holds the pixels. If no level fits, that image remains pending
 until a later upload attempt can fit it. Image admission never changes the
 view's renderer. The strict raw-pixel upload used by exports retains its
 existing validation and admission semantics.
+
+## Amendment: on-demand image levels in the editor (2026-11-21)
+
+The editor keeps compressed sources and assigns image handles independently
+of the resident pixels. A view requests levels for the painted image's
+projected width, including crop and repeat, within the viewport and its
+neighbouring tiles. One finer level is eligible for prefetch and gets higher
+priority during zoom-in. The cache evicts least recently used levels first
+outside the requested set. If the visible levels alone exceed the budget,
+it downscales the largest ones first. The cap uses the GPU's buffer limit and
+the engine's GPU budget, with a smaller allowance on devices that report less
+memory. The CPU view worker has an independent pixel allowance.
+
+WebGPU copies resized ImageBitmaps directly to textures. The wgpu WebGL2
+backend uses the bitmap overload of texSubImage2D. Only the CPU view worker
+reads RGBA pixels. The shared display list keeps each image's original size
+for placement. Uploading or evicting a level invalidates the affected tiles.
+Visibility changes and memory pressure release levels and view caches. An
+already displayed sharp GPU frame can stay visible while the image levels for
+the next frame arrive.

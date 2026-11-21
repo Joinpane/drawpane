@@ -200,6 +200,19 @@ impl CpuTiles {
     }
 }
 
+fn image_level_size(width: u32, height: u32, max_side: u32) -> Result<usize> {
+    if width == 0 || height == 0 {
+        return Err(EngineError::new(ErrorCode::Image, "an image with no pixels"));
+    }
+    if width > max_side || height > max_side {
+        return Err(EngineError::limit("image exceeds the texture size limit"));
+    }
+    (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| EngineError::limit("image exceeds the address space"))
+}
+
 pub struct Engine {
     pub store: Store,
     /// Changes whenever what's drawn may have (a message applied, an image put or dropped): a
@@ -369,6 +382,21 @@ impl Engine {
         self.cpu_tiles = Some(CpuTiles::new(tile, max_slots));
     }
 
+    pub fn clear_view_caches(&mut self) {
+        self.cpu.clear_view_caches();
+        if let Some(tiles) = self.cpu_tiles.as_mut() {
+            tiles.cache.clear();
+            tiles.forget();
+            tiles.slots = Vec::new();
+            tiles.frame = Vec::new();
+            tiles.frame_last = Vec::new();
+        }
+        #[cfg(feature = "gpu-common")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.clear_view_caches();
+        }
+    }
+
     pub fn limits(&self) -> &Limits {
         &self.store.limits
     }
@@ -430,6 +458,44 @@ impl Engine {
         self.generation += 1;
         self.invalidate_image(id);
         Ok(())
+    }
+
+    pub fn put_cpu_image_level(&mut self, id: u32, width: u32, height: u32, rgba: &[u8]) -> Result<()> {
+        let bytes = image_level_size(width, height, self.store.limits.texture_side)?;
+        if bytes != rgba.len() {
+            return Err(EngineError::new(ErrorCode::Image, "image bytes don't match its size"));
+        }
+        let held = self.cpu.image_bytes() - self.cpu.image_level_bytes(id, width);
+        if held.saturating_add(bytes) > self.store.limits.image_bytes {
+            return Err(EngineError::limit("images over their budget"));
+        }
+        self.cpu.put_image_level(id, width, height, rgba);
+        self.generation += 1;
+        self.invalidate_image(id);
+        Ok(())
+    }
+
+    #[cfg(all(target_arch = "wasm32", feature = "gpu-common"))]
+    pub fn put_gpu_image_level(&mut self, id: u32, bitmap: &web_sys::ImageBitmap) -> Result<()> {
+        let gpu = self
+            .gpu
+            .as_mut()
+            .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
+        image_level_size(bitmap.width(), bitmap.height(), self.store.limits.texture_side)?;
+        gpu.put_image_bitmap(id, bitmap, self.store.limits.image_bytes)?;
+        self.generation += 1;
+        self.invalidate_image(id);
+        Ok(())
+    }
+
+    pub fn drop_image_level(&mut self, id: u32, width: u32) {
+        self.cpu.drop_image_level(id, width);
+        #[cfg(feature = "gpu-common")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.drop_image_level(id, width);
+        }
+        self.generation += 1;
+        self.invalidate_image(id);
     }
 
     pub fn drop_image(&mut self, id: u32) {

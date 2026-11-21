@@ -190,6 +190,8 @@ pub struct Store {
     unsupported: HashSet<u32>,
     /// Records that paint an image, so an image changing invalidates only what shows it.
     image_records: HashSet<u32>,
+    /// A view can draw an image whose independently managed texture is still arriving.
+    pub view_images: bool,
     /// Number of direct mask children under each parent, so `endsMask` edits in unmasked
     /// containers stay O(1) instead of scanning all siblings.
     masked_parents: HashMap<u32, usize>,
@@ -276,6 +278,7 @@ impl Store {
             context: HashSet::new(),
             unsupported: HashSet::new(),
             image_records: HashSet::new(),
+            view_images: false,
             masked_parents: HashMap::new(),
             bytes: 0,
             order: None,

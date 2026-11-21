@@ -673,6 +673,43 @@ export class RenderEngine {
     }) as Result;
   }
 
+  clearViewCaches(): void {
+    this.#call((e) => e.clearViewCaches());
+  }
+
+  enableViewImages(): void {
+    this.#call((e) => e.enableViewImages());
+  }
+
+  viewImageLimits(): Result<{ side: number; bytes: number }> {
+    return this.#value(() =>
+      this.#call((e) => {
+        const [side = 0, bytes = 0] = e.viewImageLimits();
+        return { side, bytes };
+      }),
+    );
+  }
+
+  putCpuImageLevel(id: number, width: number, height: number, rgba: Uint8Array): Result {
+    return this.#call((e) => {
+      if (rgba.length > e.imageBudget - e.imageBytes)
+        return fail(ErrorCode.Limit, "images over their budget");
+      return outcome(e.putCpuImageLevel(id, width, height, rgba));
+    }) as Result;
+  }
+
+  putGpuImageLevel(id: number, bitmap: ImageBitmap): Result {
+    return this.#call((e) =>
+      e.putGpuImageLevel
+        ? outcome(e.putGpuImageLevel(id, bitmap))
+        : fail(ErrorCode.NotAvailable, "no GPU image upload"),
+    ) as Result;
+  }
+
+  dropImageLevel(id: number, width: number): Result {
+    return this.#call((e) => outcome(e.dropImageLevel(id, width))) as Result;
+  }
+
   /** Lets an image's pixels go (refused while an export streams). */
   dropImage(id: number): Result {
     return this.#call((e) => outcome(e.dropImage(id))) as Result;
