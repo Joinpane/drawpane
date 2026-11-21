@@ -1076,3 +1076,9 @@ Phase 3B executes backdrop readers on CPU and GPU in the tiled renderer and band
 Exact glass uses the same region split on CPU, WebGPU and WebGL2. Each chunk samples the original prefix. If the lens reads the same plane it writes, the GPU copies that plane once before drawing the first chunk. Otherwise it reads the existing glass-free plane directly.
 
 On the T4, all 31 `glass-probe-2` cells and all 15 `glass-stack` cells passed on both backends. The `frost-100` CPU/GPU mean fell from 0.295 to 0.021, with p99 and maximum of 1. Its CPU, WebGPU and WebGL2 means against Figma were all 2.53. The cell uses the standard 0.25 mean cap.
+
+### Glass inside picture masks, layer blur and noise
+
+The `glass-scopes` Figma suite places glass across the edge of translucent interior paint, with opaque stripes behind the scope. Figma's blur carries the stripes into the lens in all three cells. The engine's isolated pictures supply only the interior paint to their lens. This gives a visible residual on the part of each lens outside that paint.
+
+On the T4, the CPU / WebGPU / WebGL2 means against Figma were 2.08 / 2.11 / 2.11 for the picture mask, 3.50 / 3.52 / 3.52 for layer blur, and 3.13 / 3.16 / 3.16 for noise. The new gate holds each result to its measured mean, p99 and worst-tile range. The picture-mask, layer-blur and noise cells had CPU/GPU means of 0.080, 0.096 and 0.078 on both GPU backends. The Worker was byte-identical to the browser CPU in all three.
