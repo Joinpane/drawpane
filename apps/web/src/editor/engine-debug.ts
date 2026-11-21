@@ -10,6 +10,7 @@ import {
   CanvasRenderer,
   DisplayListBuilder,
   type Editor,
+  type EngineImage,
   imageRefs,
   type Rect,
 } from "@drawpane/editor";
@@ -25,6 +26,7 @@ import {
   RenderEngine,
   unsupportedNames,
 } from "@drawpane/engine";
+import { uploadCpuLevel, ViewImages } from "./engine-image";
 import { imagesFor } from "./media";
 
 const toBase64 = (bytes: Uint8Array) => {
@@ -53,16 +55,14 @@ export interface EngineRender {
   /** Milliseconds: building the list, applying it, rendering (GPU: until the GPU finished). */
   readonly ms?: { build: number; apply: number; render: number };
   readonly gpu?: GpuInfo | null;
+  readonly images?: { bytes: number; budget: number };
 }
 
 export function engineDebug(editor: Editor) {
   let browserModule: EngineModule | null = null;
   let webglModule: EngineModule | null = null;
   const engines: Partial<Record<"cpu" | "gpu" | "webgl", RenderEngine>> = {};
-  const uploadedByEngine = new WeakMap<
-    RenderEngine,
-    Map<string, { handle: number; width: number; height: number }>
-  >();
+  const residency = new WeakMap<RenderEngine, ViewImages>();
 
   async function moduleFor(backend: "cpu" | "gpu" | "webgl"): Promise<EngineModule> {
     if (backend === "webgl") {
@@ -89,41 +89,31 @@ export function engineDebug(editor: Editor) {
       }
     }
     engines[backend] = e;
-    uploadedByEngine.set(e, new Map());
+    e.enableViewImages();
+    const images = new ViewImages(
+      imagesFor(editor),
+      () => {},
+      () => {},
+    );
+    images.setBackend({
+      upload: (handle, bitmap) =>
+        (backend === "cpu" ? uploadCpuLevel(e, handle, bitmap) : e.putGpuImageLevel(handle, bitmap))
+          .ok,
+      drop: (handle, width) => {
+        e.dropImageLevel(handle, width);
+      },
+    });
+    residency.set(e, images);
     return e;
-  }
-
-  /** Uploads every image the page's layers paint, once loaded, so the list can place them. */
-  async function images(e: RenderEngine, pageId: string): Promise<void> {
-    const uploaded = uploadedByEngine.get(e) ?? new Map();
-    uploadedByEngine.set(e, uploaded);
-    const cache = imagesFor(editor);
-    const refs = imageRefs(editor.doc, [pageId]);
-    await cache.ready(refs, 30_000);
-    for (const ref of refs) {
-      const natural = cache.natural(ref);
-      const view = cache.get(ref);
-      if (!natural || !view || uploaded.has(`${ref}`)) continue;
-      const c = new OffscreenCanvas(view.bitmap.width, view.bitmap.height);
-      const ctx = c.getContext("2d");
-      if (!ctx) continue;
-      ctx.drawImage(view.bitmap, 0, 0);
-      const data = ctx.getImageData(0, 0, c.width, c.height).data;
-      const handle = uploaded.size + 1;
-      if (e.putImage(handle, c.width, c.height, new Uint8Array(data.buffer)).ok)
-        uploaded.set(ref, { handle, width: natural.width, height: natural.height });
-    }
   }
 
   let canvas: CanvasRenderer | null = null;
 
   function builder(
     _pageId: string,
-    uploaded: Map<string, { handle: number; width: number; height: number }>,
+    image: (ref: string) => EngineImage | null = () => null,
   ): DisplayListBuilder {
-    return new DisplayListBuilder(editor.scene, editor.measurer, {
-      image: (ref) => uploaded.get(ref) ?? null,
-    });
+    return new DisplayListBuilder(editor.scene, editor.measurer, { image });
   }
 
   const unsupportedOf = (b: DisplayListBuilder) => {
@@ -158,13 +148,13 @@ export function engineDebug(editor: Editor) {
     }): Promise<EngineRender> {
       const e = await engineFor(options.backend, options.compatibility ?? false);
       if (typeof e === "string") return { ok: false, error: e, unsupported: {} };
-      await images(e, options.pageId);
-      const uploaded = uploadedByEngine.get(e) ?? new Map();
+      const images = residency.get(e);
+      const image = (ref: string) => images?.info(ref) ?? null;
       // Text whose face is still loading can't be outlined yet: the shaper starts loading it on
       // the first try, and the list sends it provisional (bars) meanwhile. Wait for it (as the
       // canvas's parity spec waits for fonts), up to 20 s: what's drawn is the text itself.
       const make = () => {
-        const b = builder(options.pageId, uploaded);
+        const b = builder(options.pageId, image);
         return {
           b,
           list: options.ids
@@ -174,10 +164,21 @@ export function engineDebug(editor: Editor) {
       };
       for (let waited = 0; waited < 20_000 && make().b.waiting > 0; waited += 100)
         await new Promise((r) => setTimeout(r, 100));
+      if (images) {
+        const { b: probe } = make();
+        const limits = e.viewImageLimits();
+        images.retain(probe.imagesInUse());
+        if (!limits.ok) return { ok: false, error: limits.message, unsupported: {} };
+        const update = () =>
+          images.update(probe.imageDemands(options.rect, 0), options.scale, false, limits.value);
+        for (let waited = 0; waited < 30_000 && !update(); waited += 25)
+          await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      const imageStats = images && { bytes: images.residentBytes, budget: images.budget };
       const t0 = performance.now();
       // A fresh list replaces whatever the engine held: made for a revision past the engine's
       // (fresh lists only move the revision forward).
-      const b = builder(options.pageId, uploaded);
+      const b = builder(options.pageId, image);
       b.acknowledge(false, e.revision);
       const list = options.ids
         ? b.buildLayers(options.ids, { context: options.context })
@@ -201,6 +202,7 @@ export function engineDebug(editor: Editor) {
         if (!r.ok) return { ok: false, error: r.message, code: r.code, unsupported };
         return {
           ok: true,
+          ...(imageStats ? { images: imageStats } : {}),
           rgba: toBase64(r.value.pixels),
           unsupported,
           stats: r.value.stats,
@@ -217,6 +219,7 @@ export function engineDebug(editor: Editor) {
       if (!px.ok) return { ok: false, error: px.message, code: px.code, unsupported, gpu: e.gpu };
       return {
         ok: true,
+        ...(imageStats ? { images: imageStats } : {}),
         rgba: toBase64(px.value),
         unsupported,
         stats: r.value,
@@ -369,9 +372,7 @@ export function engineDebug(editor: Editor) {
       supported: boolean;
       waiting: number;
     } {
-      const cpu = engines.cpu;
-      const uploaded = (cpu && uploadedByEngine.get(cpu)) || new Map();
-      const b = builder(pageId, uploaded);
+      const b = builder(pageId);
       const list = ids ? b.buildLayers(ids, { context }) : b.build(pageId);
       return {
         list: toBase64(list),
@@ -489,7 +490,7 @@ export function engineDebug(editor: Editor) {
 
     /** Builds the page's list and times a patch from a one-layer change (the bench's numbers). */
     timeBuild(pageId: string): { buildMs: number; records: number; bytes: number } {
-      const b = builder(pageId, new Map());
+      const b = builder(pageId);
       const t0 = performance.now();
       const list = b.build(pageId);
       return { buildMs: performance.now() - t0, records: b.stats.records, bytes: list.length };

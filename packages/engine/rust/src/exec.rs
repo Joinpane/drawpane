@@ -272,7 +272,7 @@ pub trait Backend {
     /// Active target bounds in device pixels.
     fn target_bounds(&self) -> IRect;
     /// An image's level at least `px` device pixels wide (or its largest).
-    fn image(&mut self, id: u32, px: f64) -> Option<ImageView>;
+    fn image(&mut self, id: u32, span: (f64, f64)) -> Option<ImageView>;
     /// The loading checkerboard, 16 × 16 device pixels, repeated.
     fn checker(&mut self) -> ImageSource;
     /// A glyph's coverage mask, made if it isn't held and fits (`masks::coverage`).
@@ -3178,19 +3178,24 @@ impl<B: Backend> Walk<'_, B> {
                 if opacity * alpha <= 0.0 || !bounded(*matrix, 1e12) || !finite(*matrix) {
                     return Ok(false);
                 }
-                // Device pixels the image's width spans: pick a level at least that wide.
-                let span = (device * *matrix).as_coeffs();
-                let px = span[0].hypot(span[1]);
-                let view = self
-                    .backend
-                    .image(*image, px)
-                    .ok_or_else(|| EngineError::unknown(format!("image {image} isn't held")))?;
+                let (x, y) = crate::images::span(device * *matrix);
+                // Keep the strict raw-image API's width-based sampling. The view
+                // uses both axes to match its independently streamed levels.
+                let span = (x, if self.store.view_images { y } else { 0.0 });
+                let Some(view) = self.backend.image(*image, span) else {
+                    if !self.store.view_images {
+                        return Err(EngineError::unknown(format!("image {image} isn't held")));
+                    }
+                    // The view marks pending image loads provisional. A failed
+                    // image's checkerboard is a settled paint at this residency.
+                    return self.set_paint(&Paint::Placeholder(*opacity), device, alpha, region);
+                };
                 let texel =
                     *matrix * Affine::scale_non_uniform(1.0 / f64::from(view.width), 1.0 / f64::from(view.height));
                 if !sampleable(device, texel, region, *tile) {
                     return Ok(false);
                 }
-                let quality = if px > f64::from(view.width) {
+                let quality = if span.0 > f64::from(view.width) || span.1 > f64::from(view.height) {
                     ImageQuality::High
                 } else {
                     ImageQuality::Medium

@@ -262,7 +262,7 @@ async function prepare(file: File, cache: ImageCache): Promise<Prepared | string
     bitmap.close();
     bitmap = smaller;
   }
-  cache.put(sha, { bitmap, naturalWidth: width, naturalHeight: height });
+  cache.put(sha, { bitmap, naturalWidth: width, naturalHeight: height, source: file });
   return { file, sha, width, height };
 }
 

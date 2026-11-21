@@ -200,6 +200,19 @@ impl CpuTiles {
     }
 }
 
+fn image_level_size(width: u32, height: u32, max_side: u32) -> Result<usize> {
+    if width == 0 || height == 0 {
+        return Err(EngineError::new(ErrorCode::Image, "an image with no pixels"));
+    }
+    if width > max_side || height > max_side {
+        return Err(EngineError::limit("image exceeds the texture size limit"));
+    }
+    (width as usize)
+        .checked_mul(height as usize)
+        .and_then(|pixels| pixels.checked_mul(4))
+        .ok_or_else(|| EngineError::limit("image exceeds the address space"))
+}
+
 pub struct Engine {
     pub store: Store,
     /// Changes whenever what's drawn may have (a message applied, an image put or dropped): a
@@ -325,6 +338,16 @@ impl Engine {
     /// every reader they reach, transitively (`Store::dirty`). A fresh list drops them all, and
     /// the last frame with them: it shows a page that's gone.
     fn invalidate_tiles(&mut self, changes: &[Dirty], full: bool, drag_parts: bool) {
+        self.invalidate_tiles_at(changes, full, drag_parts, None);
+    }
+
+    fn invalidate_tiles_at(
+        &mut self,
+        changes: &[Dirty],
+        full: bool,
+        drag_parts: bool,
+        at: Option<&dyn Fn(f64) -> bool>,
+    ) {
         let store = &mut self.store;
         let mut each = |cache: &mut TileCache| {
             if full {
@@ -335,6 +358,9 @@ impl Engine {
                 return;
             }
             for (id, level) in cache.levels() {
+                if at.is_some_and(|select| !select(level.scale)) {
+                    continue;
+                }
                 let rects: Vec<Rect> = store.dirty(changes, level.grid(), 1.5);
                 cache.invalidate(id, &rects);
                 // An edit beside a drag: its parts around the selection are drawn again there.
@@ -342,7 +368,7 @@ impl Engine {
                     cache.drag_invalidate(id, &rects);
                 }
             }
-            if store.provisional_shown().is_none() {
+            if at.is_none() && store.provisional_shown().is_none() {
                 cache.invalidate_inexact_full();
             }
         };
@@ -358,7 +384,9 @@ impl Engine {
             if full {
                 g.forget_last();
             }
-            if full || drag_parts {
+            if full
+                || drag_parts && at.is_none_or(|select| g.last().is_some_and(|last| select(last.view.as_coeffs()[0])))
+            {
                 g.forget_motion_prefix();
             }
         }
@@ -367,6 +395,21 @@ impl Engine {
     /// Keeps tiles on the CPU of `tile` device pixels a side, at most `max_slots` at once.
     pub fn use_cpu_tiles(&mut self, tile: u32, max_slots: usize) {
         self.cpu_tiles = Some(CpuTiles::new(tile, max_slots));
+    }
+
+    pub fn clear_view_caches(&mut self) {
+        self.cpu.clear_view_caches();
+        if let Some(tiles) = self.cpu_tiles.as_mut() {
+            tiles.cache.clear();
+            tiles.forget();
+            tiles.slots = Vec::new();
+            tiles.frame = Vec::new();
+            tiles.frame_last = Vec::new();
+        }
+        #[cfg(feature = "gpu-common")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.clear_view_caches();
+        }
     }
 
     pub fn limits(&self) -> &Limits {
@@ -417,19 +460,95 @@ impl Engine {
         if let Some(gpu) = self.gpu.as_ref() {
             gpu.check_texture_size(width, height, "an image")?;
         }
-        self.generation += 1;
-        self.invalidate_image(id);
         let levels = images::levels(width, height, rgba, premultiplied, limits.texture_side)?;
+        // GPU admission can fail independently of the CPU image cap. Commit neither
+        // backend's new copy until the GPU has accepted the upload.
+        #[cfg(feature = "gpu-common")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.put_image(id, &levels, limits.image_bytes)?;
+        }
         self.cpu.put_image(id, &levels, limits.image_bytes)?;
         #[cfg(feature = "gpu-common")]
-        {
-            let levels = std::rc::Rc::new(levels);
-            if let Some(gpu) = self.gpu.as_mut() {
-                gpu.put_image(id, &levels, limits.image_bytes)?;
-            }
-            self.image_levels.insert(id, levels);
-        }
+        self.image_levels.insert(id, std::rc::Rc::new(levels));
+        self.generation += 1;
+        self.invalidate_image(id);
         Ok(())
+    }
+
+    /// An upload invalidates the cached scales whose sampler now chooses different pixels.
+    fn image_levels_changed(
+        &mut self,
+        id: u32,
+        before: &[(u32, u32)],
+        after: &[(u32, u32)],
+        replaced: Option<(u32, u32)>,
+    ) {
+        if before == after && replaced.is_none() {
+            return;
+        }
+        let users = self.store.image_users(id);
+        if users.is_empty() {
+            return;
+        }
+        let spans = self.store.image_spans(id);
+        let both_axes = self.store.view_images;
+        let at = |scale| {
+            spans.iter().any(|&(x, y)| {
+                let span = (x * scale, if both_axes { y * scale } else { 0.0 });
+                let selected = |levels: &[(u32, u32)]| levels.get(images::pick(levels.iter().copied(), span)).copied();
+                let old = selected(before);
+                let new = selected(after);
+                old != new || replaced.is_some_and(|size| new == Some(size))
+            })
+        };
+        self.generation += 1;
+        self.invalidate_tiles_at(&users, false, true, Some(&at));
+    }
+
+    pub fn put_cpu_image_level(&mut self, id: u32, width: u32, height: u32, rgba: &[u8]) -> Result<()> {
+        let bytes = image_level_size(width, height, self.store.limits.texture_side)?;
+        if bytes != rgba.len() {
+            return Err(EngineError::new(ErrorCode::Image, "image bytes don't match its size"));
+        }
+        let held = self.cpu.image_bytes() - self.cpu.image_level_bytes(id, width);
+        if held.saturating_add(bytes) > self.store.limits.image_bytes {
+            return Err(EngineError::limit("images over their budget"));
+        }
+        let before = self.cpu.image_sizes(id);
+        self.cpu.put_image_level(id, width, height, rgba);
+        let after = self.cpu.image_sizes(id);
+        let replaced = before.contains(&(width, height)).then_some((width, height));
+        self.image_levels_changed(id, &before, &after, replaced);
+        Ok(())
+    }
+
+    #[cfg(all(target_arch = "wasm32", feature = "gpu-common"))]
+    pub fn put_gpu_image_level(&mut self, id: u32, bitmap: &web_sys::ImageBitmap) -> Result<()> {
+        let gpu = self
+            .gpu
+            .as_mut()
+            .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
+        image_level_size(bitmap.width(), bitmap.height(), self.store.limits.texture_side)?;
+        let size = (bitmap.width(), bitmap.height());
+        let before = gpu.image_sizes(id);
+        gpu.put_image_bitmap(id, bitmap, self.store.limits.image_bytes)?;
+        let after = gpu.image_sizes(id);
+        let replaced = before.contains(&size).then_some(size);
+        self.image_levels_changed(id, &before, &after, replaced);
+        Ok(())
+    }
+
+    pub fn drop_image_level(&mut self, id: u32, width: u32) {
+        let before = self.cpu.image_sizes(id);
+        self.cpu.drop_image_level(id, width);
+        self.image_levels_changed(id, &before, &self.cpu.image_sizes(id), None);
+        #[cfg(feature = "gpu-common")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            let before = gpu.image_sizes(id);
+            gpu.drop_image_level(id, width);
+            let after = gpu.image_sizes(id);
+            self.image_levels_changed(id, &before, &after, None);
+        }
     }
 
     pub fn drop_image(&mut self, id: u32) {

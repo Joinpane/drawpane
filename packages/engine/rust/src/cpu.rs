@@ -340,6 +340,14 @@ impl Cpu {
         Ok(())
     }
 
+    pub fn clear_view_caches(&mut self) {
+        self.masks.clear();
+        let evicted = self.shadow_cache.clear();
+        self.account_for_evicted_shadows(evicted);
+        self.blur.clear();
+        self.noise.clear();
+    }
+
     pub fn image_bytes(&self) -> usize {
         self.image_bytes
     }
@@ -367,6 +375,41 @@ impl Cpu {
         self.images.insert(id, pixmaps);
         self.image_bytes = self.image_bytes - freed + bytes;
         Ok(())
+    }
+
+    pub fn image_sizes(&self, id: u32) -> Vec<(u32, u32)> {
+        self.images
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .map(|l| (u32::from(l.width()), u32::from(l.height())))
+            .collect()
+    }
+
+    pub fn image_level_bytes(&self, id: u32, width: u32) -> usize {
+        self.images
+            .get(&id)
+            .and_then(|levels| levels.iter().find(|level| u32::from(level.width()) == width))
+            .map_or(0, |level| level.data_as_u8_slice().len())
+    }
+
+    pub fn put_image_level(&mut self, id: u32, width: u32, height: u32, rgba: &[u8]) {
+        self.drop_image_level(id, width);
+        let levels = self.images.entry(id).or_default();
+        let at = levels.partition_point(|level| u32::from(level.width()) > width);
+        levels.insert(at, Arc::new(pixmap(width, height, images::premultiply(rgba, false))));
+        self.image_bytes += rgba.len();
+    }
+
+    pub fn drop_image_level(&mut self, id: u32, width: u32) {
+        if let Some(levels) = self.images.get_mut(&id) {
+            if let Some(at) = levels.iter().position(|level| u32::from(level.width()) == width) {
+                self.image_bytes -= levels.remove(at).data_as_u8_slice().len();
+            }
+            if levels.is_empty() {
+                self.images.remove(&id);
+            }
+        }
     }
 
     pub fn drop_image(&mut self, id: u32) {
@@ -881,9 +924,12 @@ impl Backend for Cpu {
         }
     }
 
-    fn image(&mut self, id: u32, px: f64) -> Option<ImageView> {
+    fn image(&mut self, id: u32, span: (f64, f64)) -> Option<ImageView> {
         let levels = self.images.get(&id)?;
-        let i = images::pick(levels.iter().map(|l| u32::from(l.width())), px);
+        let i = images::pick(
+            levels.iter().map(|l| (u32::from(l.width()), u32::from(l.height()))),
+            span,
+        );
         let l = levels.get(i)?;
         Some(ImageView {
             source: ImageSource::Pixmap(l.clone()),

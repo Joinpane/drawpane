@@ -204,6 +204,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           adapter: engine.adapter,
           compatibility: engine.compatibility,
           software: engine.software,
+          reducedImages: engine.reducedImages,
         });
         return;
       }

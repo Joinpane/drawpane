@@ -51,6 +51,7 @@ import {
   unsupportedNames,
 } from "@drawpane/engine";
 import type { CpuWorkerReply, CpuWorkerRequest } from "./engine-cpu.worker";
+import { CPU_IMAGE_BUDGET, CPU_IMAGE_SIDE, ViewImages } from "./engine-image";
 import {
   type PresentationMode,
   presentation,
@@ -611,6 +612,7 @@ interface CpuJobMeta {
   readonly camera: Camera;
   readonly background: string;
   readonly exact: boolean;
+  readonly imagesExact: boolean;
   readonly epoch: number;
   firstTile: boolean;
 }
@@ -939,7 +941,14 @@ export class EngineView {
   #canvas: HTMLCanvasElement;
   readonly #editor: Editor;
   readonly #measurer: TextMeasurer;
-  readonly #images: ImageCache;
+  readonly #images: ViewImages;
+  #imageLimits = { side: CPU_IMAGE_SIDE, bytes: CPU_IMAGE_BUDGET };
+  readonly #imageUploads = new Map<number, { done(uploaded: boolean): void; cancel(): void }>();
+  #imageTicket = 0;
+  #imageScale = 0;
+  #imageVersion = 0;
+  #hiddenImageTimer: ReturnType<typeof setTimeout> | undefined;
+  readonly #offImageSource: () => void;
   readonly #choice: RendererChoice;
   #backend: EngineBackend;
   #adapter: string;
@@ -950,10 +959,6 @@ export class EngineView {
   #cpuWorker: Worker | null;
   #cpu2d: CanvasRenderingContext2D | null;
   #builder: DisplayListBuilder;
-  /** Image refs whose pixels the active backend holds, by handle. */
-  readonly #uploaded = new Map<string, { handle: number; width: number; height: number }>();
-  readonly #pending = new Set<string>();
-  #uploadFailure: { readonly message: string; readonly code: ErrorCode | null } | null = null;
   /** Monotonic device generation incremented on every GPU detach/reattach/replacement. */
   #deviceGeneration = 0;
   /** The latest GPU frame drawn, the one being read back, and whether one is on its way. */
@@ -986,8 +991,6 @@ export class EngineView {
    */
   #epoch = 0;
   #presenting: { pageId: string; width: number; height: number } | null = null;
-  #nextImage = 1;
-  #offImages: () => void;
   #dead = false;
   #unpresented = 0;
   /** Async device/context recovery or backend step-down in flight. */
@@ -1092,7 +1095,17 @@ export class EngineView {
     this.#canvas = init.canvas;
     this.#editor = editor;
     this.#measurer = measurer;
-    this.#images = images;
+    this.#images = new ViewImages(
+      images,
+      (ref) => {
+        this.#builder.imageReady(ref);
+        this.onChange();
+      },
+      () => {
+        this.#imageVersion++;
+        this.onChange();
+      },
+    );
     this.#choice = choice;
     this.#backend = init.backend;
     this.#adapter = init.adapter;
@@ -1103,12 +1116,12 @@ export class EngineView {
     this.#cpuWorker = init.cpuWorker;
     this.#cpu2d = init.cpu2d;
     this.#builder = new DisplayListBuilder(editor.scene, measurer, {
-      image: (ref) => this.#image(ref),
+      image: (ref) => this.#images.info(ref),
     });
     if (this.#cpuWorker) this.#wireCpuWorker(this.#cpuWorker);
-    this.#offImages = images.subscribe(() => {
-      void this.#upload();
-    });
+    this.#attachImages();
+    document.addEventListener("visibilitychange", this.#imageVisibility);
+    this.#offImageSource = images.subscribe(() => this.onChange());
     // A GPU device or WebGL context can be lost between frames: poll without waiting for the
     // next frame so an idle page recovers or steps down cleanly.
     this.#health = window.setInterval(() => {
@@ -1300,6 +1313,11 @@ export class EngineView {
     worker.onmessage = (e: MessageEvent<CpuWorkerReply>) => {
       if (this.#dead || this.#cpuWorker !== worker) return;
       const msg = e.data;
+      if (msg.type === "image-result") {
+        this.#imageUploads.get(msg.ticket)?.done(msg.uploaded);
+        this.#imageUploads.delete(msg.ticket);
+        return;
+      }
       if (msg.type === "apply-result") {
         if (!msg.ok) {
           this.#supersede();
@@ -1429,7 +1447,8 @@ export class EngineView {
             camera: msg.camera,
           };
         }
-        const frameExact = msg.exact && job.exact && this.#builder.pendingVisible === 0;
+        const frameExact =
+          msg.exact && job.exact && job.imagesExact && this.#builder.pendingVisible === 0;
         const at = performance.now();
         this.#cpuHasPage = job.pageId;
         this.#cpuCompletedKey = job.sceneKey;
@@ -1527,6 +1546,7 @@ export class EngineView {
     }
     this.onRecovering(true);
     try {
+      this.#detachImages();
       engine.detachGpu();
       const candidate = createCandidateCanvas(this.#canvas);
       const useReadback = presentation() === "readback";
@@ -1569,8 +1589,7 @@ export class EngineView {
       this.#adapter = gpu.value.adapter;
       this.#adapterClass = adapterClass;
       this.#recovering = null;
-      // Flush any images that finished decoding while recovery was in flight.
-      if (!this.#upload() || this.#dead || this.#recovering) return;
+      this.#attachImages();
       console.info(
         `Drawpane: render engine recovered on ${backend} (${gpu.value.adapter}) after device loss (attempt ${attempt}/${MAX_RECOVERIES_IN_WINDOW} in 60 s).`,
       );
@@ -1601,6 +1620,7 @@ export class EngineView {
     this.#bumpDeviceGeneration();
 
     // Release the failing backend's resources before allocating the next one.
+    this.#detachImages();
     this.#engine?.dispose();
     this.#engine = null;
     this.#readback = null;
@@ -1675,17 +1695,11 @@ export class EngineView {
         this.#cpuCompletedExact = false;
         this.#bumpDeviceGeneration();
         if (this.#cpuWorker) this.#wireCpuWorker(this.#cpuWorker);
-        // Rebuild the display list from the live editor scene and re-upload every known image
-        // AFTER clearing `#recovering` so ready images are never left as checkers.
-        const prevRefs = new Set([...this.#uploaded.keys(), ...this.#pending]);
-        this.#uploaded.clear();
-        for (const ref of prevRefs) this.#pending.add(ref);
         this.#builder = new DisplayListBuilder(this.#editor.scene, this.#measurer, {
-          image: (ref) => this.#image(ref),
+          image: (ref) => this.#images.info(ref),
         });
         this.#recovering = null;
-        const flushOk = this.#upload();
-        if (!flushOk || this.#dead || this.#recovering) return;
+        this.#attachImages();
         const summary = summarizeFailures(failed);
         EngineView.#report({
           from: summary.from,
@@ -1727,144 +1741,111 @@ export class EngineView {
     this.dispose();
   }
 
-  /** Uploads one ready image ref to the active backend if decoded in `ImageCache`. */
-  #uploadRef(ref: string): "uploaded" | "pending" | "failed" {
-    const natural = this.#images.natural(ref);
-    const view = natural ? this.#images.get(ref) : null;
-    if (!natural || !view) return "pending";
-    const { bitmap } = view;
-    const surface =
-      typeof OffscreenCanvas !== "undefined"
-        ? new OffscreenCanvas(bitmap.width, bitmap.height)
-        : Object.assign(document.createElement("canvas"), {
-            width: bitmap.width,
-            height: bitmap.height,
-          });
-    const ctx = surface.getContext("2d") as
-      | OffscreenCanvasRenderingContext2D
-      | CanvasRenderingContext2D
-      | null;
-    if (!ctx) return "pending";
-    ctx.drawImage(bitmap, 0, 0);
-    const data = ctx.getImageData(0, 0, bitmap.width, bitmap.height).data;
-    const handle = this.#nextImage++;
-    if (this.#engine) {
-      const r = this.#engine.putImage(
-        handle,
-        bitmap.width,
-        bitmap.height,
-        new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
-        false,
-      );
-      if (!r.ok) {
-        this.#uploadFailure = { message: r.message, code: r.code };
-        return "failed";
-      }
-    } else if (this.#cpuWorker) {
-      const copy = new Uint8Array(data.length);
-      copy.set(data);
-      this.#cpuWorker.postMessage(
-        {
-          type: "put-image",
-          handle,
-          width: bitmap.width,
-          height: bitmap.height,
-          bytes: copy.buffer,
-          premultiplied: false,
-        } satisfies CpuWorkerRequest,
-        [copy.buffer],
-      );
+  #detachImages(): void {
+    this.#images.setBackend(null);
+    for (const upload of this.#imageUploads.values()) upload.cancel();
+    this.#imageUploads.clear();
+  }
+
+  #attachImages(): void {
+    const engine = this.#engine;
+    const worker = this.#cpuWorker;
+    this.#imageScale = 0;
+    if (engine) {
+      engine.enableViewImages();
+      const limits = engine.viewImageLimits();
+      if (limits.ok) this.#imageLimits = limits.value;
+      this.#images.setBackend({
+        retryUpload: true,
+        upload: (handle, bitmap) => {
+          const result = engine.putGpuImageLevel(handle, bitmap);
+          if (!result.ok && result.code === ErrorCode.Trap) this.#handleGpuFailure(result, false);
+          return result.ok;
+        },
+        drop: (handle, width) => {
+          engine.dropImageLevel(handle, width);
+        },
+      });
+    } else if (worker) {
+      this.#imageLimits = { side: CPU_IMAGE_SIDE, bytes: CPU_IMAGE_BUDGET };
+      this.#images.setBackend({
+        upload: (handle, bitmap) =>
+          new Promise<boolean>((done) => {
+            const ticket = ++this.#imageTicket;
+            const width = bitmap.width;
+            worker.postMessage(
+              { type: "put-image", handle, ticket, bitmap } satisfies CpuWorkerRequest,
+              [bitmap],
+            );
+            this.#imageUploads.set(ticket, {
+              done,
+              cancel: () => {
+                worker.postMessage({
+                  type: "drop-image-level",
+                  handle,
+                  width,
+                } satisfies CpuWorkerRequest);
+                done(false);
+              },
+            });
+          }),
+        drop: (handle, width) => {
+          worker.postMessage({
+            type: "drop-image-level",
+            handle,
+            width,
+          } satisfies CpuWorkerRequest);
+        },
+      });
+    }
+  }
+
+  #evictImages = (): void => {
+    this.#images.evict();
+    this.#engine?.clearViewCaches();
+    this.#cpuWorker?.postMessage({ type: "clear-view-caches" } satisfies CpuWorkerRequest);
+    this.#imageVersion++;
+    this.#cpuBacking = null;
+    this.#supersede();
+    if (document.visibilityState !== "hidden") this.onChange();
+  };
+
+  #imageVisibility = (): void => {
+    clearTimeout(this.#hiddenImageTimer);
+    if (document.visibilityState === "hidden") {
+      this.#hiddenImageTimer = setTimeout(this.#evictImages, 30_000);
     } else {
-      return "pending";
+      this.onChange();
     }
-    this.#uploaded.set(ref, { handle, width: natural.width, height: natural.height });
-    this.#pending.delete(ref);
-    return "uploaded";
+  };
+
+  #updateImages(camera: Camera, width: number, height: number): boolean {
+    if (document.visibilityState === "hidden") return false;
+    const scale = camera.zoom * camera.dpr;
+    const region = {
+      x: -camera.x / camera.zoom,
+      y: -camera.y / camera.zoom,
+      width: width / scale,
+      height: height / scale,
+    };
+    const zoomingIn = this.#imageScale > 0 && scale > this.#imageScale;
+    this.#imageScale = scale;
+    // The image cache covers the visible tiles plus the neighbouring tile ring.
+    const demands = this.#builder.imageDemands(region, 1024 / scale);
+    return this.#images.update(demands, scale, zoomingIn, this.#imageLimits);
   }
 
-  #image(ref: string) {
-    const held = this.#uploaded.get(ref);
-    if (held) return held;
-    this.#pending.add(ref);
-    if (!this.#dead && !this.#recovering) {
-      try {
-        const status = this.#uploadRef(ref);
-        if (status === "uploaded") return this.#uploaded.get(ref) ?? null;
-      } catch (err) {
-        this.#uploadFailure = { message: String(err), code: null };
-      }
-    } else {
-      // Starts its load; the cache tells us when it's ready.
-      this.#images.natural(ref);
-    }
-    return null;
-  }
-
-  /**
-   * Sends the active backend every image the builder asked for that has finished loading.
-   * Returns false if uploading triggered a backend failure.
-   */
-  #upload(): boolean {
-    if (this.#dead || this.#recovering) return true;
-    try {
-      let any = false;
-      for (const ref of [...this.#pending]) {
-        const status = this.#uploadRef(ref);
-        if (status === "failed") {
-          const failure = this.#uploadFailure ?? {
-            message: "failed to upload image",
-            code: ErrorCode.Image,
-          };
-          this.#uploadFailure = null;
-          this.#handleGpuFailure(failure, false);
-          return false;
-        }
-        if (status === "uploaded") {
-          this.#builder.imageReady(ref);
-          any = true;
-        }
-      }
-      if (any) this.onChange();
-      return true;
-    } catch (err) {
-      this.#handleGpuFailure({ message: String(err), code: null }, false);
-      return false;
-    }
-  }
-
-  /** Lets go of the images (and waits for images) no record on the page paints any more. */
-  #dropUnused(): void {
-    const used = this.#builder.imagesInUse();
-    for (const [ref, held] of this.#uploaded) {
-      if (used.has(ref)) continue;
-      if (this.#engine) {
-        const r = this.#engine.dropImage(held.handle);
-        if (!r.ok) return;
-      } else if (this.#cpuWorker) {
-        this.#cpuWorker.postMessage({
-          type: "drop-image",
-          handle: held.handle,
-        } satisfies CpuWorkerRequest);
-      }
-      this.#uploaded.delete(ref);
-    }
-    for (const ref of this.#pending) if (!used.has(ref)) this.#pending.delete(ref);
+  get reducedImages(): number {
+    return this.#images.reduced;
   }
 
   /** The first message of the last fresh list: building and applying it, in ms (benches). */
   opened: { pageId: string; buildMs: number; applyMs: number; records: number } | null = null;
 
-  #takeUploadFailure(): { readonly message: string; readonly code: ErrorCode | null } | null {
-    const failure = this.#uploadFailure;
-    this.#uploadFailure = null;
-    return failure;
-  }
-
   /** Applies the builder's next message to a GPU engine; false if it failed. */
   #patchGpu(pageId: string, textMs?: number): boolean {
     const engine = this.#engine;
     if (!engine) return false;
-    this.#uploadFailure = null;
     const t0 = performance.now();
     // A page shown afresh sends geometry in slices and leaves its text provisional until
     // the whole structure is in view. The first frame need not wait for the full list.
@@ -1872,15 +1853,6 @@ export class EngineView {
       this.#builder.pageId !== pageId || this.#builder.opening
         ? this.#builder.openSlice(pageId)
         : this.#builder.update(textMs, true);
-    const uploadErr = this.#takeUploadFailure();
-    if (uploadErr) {
-      if (uploadErr.code === ErrorCode.Limit) {
-        this.#limitReason = uploadErr.message;
-        return false;
-      }
-      this.#handleGpuFailure(uploadErr, false);
-      return false;
-    }
     if (!message) return true;
     const t1 = performance.now();
     let r = engine.apply(message);
@@ -1901,7 +1873,9 @@ export class EngineView {
       this.#handleGpuFailure(r, false);
       return false;
     }
-    if (this.#builder.stats.fresh || !this.#builder.opening) this.#dropUnused();
+    if (this.#builder.stats.fresh || !this.#builder.opening) {
+      this.#images.retain(this.#builder.imagesInUse());
+    }
     return true;
   }
 
@@ -1909,17 +1883,11 @@ export class EngineView {
   #patchCpu(pageId: string, textMs?: number): boolean {
     const worker = this.#cpuWorker;
     if (!worker) return false;
-    this.#uploadFailure = null;
     const t0 = performance.now();
     const message =
       this.#builder.pageId === pageId
         ? this.#builder.update(textMs)
         : this.#builder.build(pageId, undefined, { deferText: true });
-    const uploadErr = this.#takeUploadFailure();
-    if (uploadErr) {
-      this.#stepDown(uploadErr);
-      return false;
-    }
     if (!message) return true;
     const t1 = performance.now();
     // Wire header bytes 12..16 hold the message's target revision (docs/decisions/0040-display-list.md).
@@ -1949,7 +1917,7 @@ export class EngineView {
         applyMs: performance.now() - t1,
         records: this.#builder.stats.records,
       };
-    this.#dropUnused();
+    this.#images.retain(this.#builder.imagesInUse());
     return true;
   }
 
@@ -2160,25 +2128,31 @@ export class EngineView {
       this.#pageSupported(pageId, false);
       return NOT_DRAWN;
     }
+    const cam: Camera = { zoom: camera.zoom, x: camera.x, y: camera.y, dpr };
+    const imagesExact = this.#updateImages(cam, width, height);
     if (this.#canvas.width !== width || this.#canvas.height !== height) {
       this.#canvas.width = width;
       this.#canvas.height = height;
     }
-    const cam: Camera = { zoom: camera.zoom, x: camera.x, y: camera.y, dpr };
     // While text in view is still to be sent whole, a frame draws only what nothing stands in
     // for (as while moving): a tile drawn now would be stale again when the text arrives, and the
     // time between frames sends the text first.
     const opening = this.#builder.opening;
     const textFirst = opening || this.#builder.pendingVisible > 0;
-    const frame = engine.renderGpu(
-      width,
-      height,
-      cam,
-      colour(background),
-      !exact || textFirst,
-      textFirst ? NO_OPTIONAL_MS : budgetMs,
-      true,
-    );
+    const drawFrame = () =>
+      engine.renderGpu(
+        width,
+        height,
+        cam,
+        colour(background),
+        !exact || textFirst,
+        textFirst ? NO_OPTIONAL_MS : budgetMs,
+        true,
+      );
+    let frame = drawFrame();
+    if (!frame.ok && frame.code === ErrorCode.Limit && this.#images.releasePressure()) {
+      frame = drawFrame();
+    }
     if (!frame.ok) {
       if (frame.code === ErrorCode.Unsupported) {
         this.last = { ...this.last, supported: false };
@@ -2224,7 +2198,7 @@ export class EngineView {
     this.#unpresented = 0;
     // Exact only when the list holds what the page shows: text in view still to be sent again
     // (fonts arrived) leaves the frame a stand-in, whatever the engine drew.
-    const shownExact = f.exact && !opening && this.#builder.pendingVisible === 0;
+    const shownExact = f.exact && !opening && imagesExact && this.#builder.pendingVisible === 0;
     const n = ++this.#frame;
     if (opening) {
       this.#openingFrame = n;
@@ -2389,7 +2363,8 @@ export class EngineView {
     const renderW = bounded.width;
     const renderH = bounded.height;
     const cam: Camera = { zoom: camera.zoom, x: camera.x, y: camera.y, dpr: bounded.dpr };
-    const sceneKey = `${pageId}|${this.#cpuRevision}|${renderW}x${renderH}|${cam.zoom}|${cam.x}|${cam.y}|${cam.dpr}|${background}`;
+    const imagesExact = this.#updateImages(cam, renderW, renderH);
+    const sceneKey = `${pageId}|${this.#cpuRevision}|${this.#imageVersion}|${renderW}x${renderH}|${cam.zoom}|${cam.x}|${cam.y}|${cam.dpr}|${background}`;
     const hasPendingText = this.#builder.pending > 0;
     const textFirst = this.#builder.pendingVisible > 0;
 
@@ -2401,14 +2376,14 @@ export class EngineView {
     this.#limitReason = null;
 
     // Deduplicate against an already completed frame for identical inputs.
-    if (this.#cpuCompletedKey === sceneKey && (this.#cpuCompletedExact || !exact)) {
+    if (this.#cpuCompletedKey === sceneKey && (this.#cpuCompletedExact || !exact || !imagesExact)) {
       const doneExact = this.#cpuCompletedExact && !textFirst;
       return {
         drawn: true,
         ready: true,
         exact: doneExact,
         ahead: hasPendingText,
-        settled: !textFirst && (doneExact || !exact),
+        settled: !textFirst && (doneExact || !exact || !imagesExact),
       };
     }
 
@@ -2467,6 +2442,7 @@ export class EngineView {
       camera: cam,
       background,
       exact: exact && !textFirst,
+      imagesExact,
       epoch: this.#epoch,
       firstTile: true,
     };
@@ -2634,7 +2610,10 @@ export class EngineView {
     this.#dead = true;
     this.#lifecycle.abort();
     this.#bumpDeviceGeneration();
-    this.#offImages();
+    document.removeEventListener("visibilitychange", this.#imageVisibility);
+    clearTimeout(this.#hiddenImageTimer);
+    this.#offImageSource();
+    this.#detachImages();
     this.#engine?.dispose();
     this.#engine = null;
     if (this.#cpuWorker) {
