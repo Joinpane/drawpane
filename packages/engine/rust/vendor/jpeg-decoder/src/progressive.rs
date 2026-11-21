@@ -1,4 +1,4 @@
-//! Drawpane: compact the coefficients that survive a scaled IDCT.
+//! Added by Drawpane: compact the coefficients that survive a scaled IDCT.
 use crate::parser::Component;
 use core::mem::size_of;
 

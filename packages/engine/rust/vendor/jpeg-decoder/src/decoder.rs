@@ -1,3 +1,4 @@
+// Modified by Drawpane: compact progressive coefficient storage for reduced-scale IDCT.
 use crate::error::{Error, Result, UnsupportedFeature};
 use crate::huffman::{fill_default_mjpeg_tables, HuffmanDecoder, HuffmanTable};
 use crate::marker::Marker;

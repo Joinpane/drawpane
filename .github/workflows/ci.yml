@@ -37,7 +37,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - name: Format
         working-directory: packages/engine/rust
-        run: cargo fmt --check
+        run: cargo fmt --check && cargo fmt --manifest-path vendor/jpeg-decoder/Cargo.toml -- --check
       - name: Clippy (CPU, with the test kernels)
         working-directory: packages/engine/rust
         run: cargo clippy --locked --workspace --all-targets --features test-kernels -- -D warnings
@@ -49,7 +49,7 @@ jobs:
         run: cargo clippy --locked --features webgl --target wasm32-unknown-unknown -- -D warnings
       - name: Tests, and a short seeded fuzz
         working-directory: packages/engine/rust
-        run: cargo test --locked --workspace && FUZZ_CASES=300 FUZZ_SEED=random cargo test --locked --test fuzz
+        run: cargo test --locked --workspace && cargo test --locked -p "path+file://$PWD/vendor/jpeg-decoder#0.3.2" --lib && FUZZ_CASES=300 FUZZ_SEED=random cargo test --locked --test fuzz
       - name: Build all engine modules, held to their size budgets
         run: pnpm --filter @drawpane/engine build
       - name: The Worker build in workerd beside the agent runner's set, under its caps

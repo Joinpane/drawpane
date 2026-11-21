@@ -1,3 +1,4 @@
+// Modified by Drawpane: drop obsolete asmjs cfg and gate multithreaded worker on not(wasm32).
 mod immediate;
 #[cfg(not(target_arch = "wasm32"))]
 mod multithreaded;

@@ -162,6 +162,68 @@ describe.skipIf(!built())("the capped headless PNG renderer", () => {
     expect(enginePngPixel(result.png, 50, 40)[3]).toBe(255);
   });
 
+  it("refuses a many-scan progressive JPEG through the placeholder path", async () => {
+    // 7000x7000 grayscale progressive JPEG with 1 initial DC scan and 1,000 empty refinement scans.
+    const width = 7000;
+    const height = 7000;
+    const extraScans = 1000;
+    const header = [
+      0xff,
+      0xd8,
+      0xff,
+      0xdb,
+      0x00,
+      0x43,
+      0x00,
+      ...Array<number>(64).fill(1),
+      0xff,
+      0xc2,
+      0x00,
+      0x0b,
+      0x08,
+      height >> 8,
+      height & 0xff,
+      width >> 8,
+      width & 0xff,
+      0x01,
+      0x01,
+      0x11,
+      0x00,
+      0xff,
+      0xc4,
+      0x00,
+      0x14,
+      0x00,
+      0x01,
+      ...Array<number>(15).fill(0),
+      0x00,
+      0xff,
+      0xda,
+      0x00,
+      0x08,
+      0x01,
+      0x01,
+      0x00,
+      0x00,
+      0x00,
+      0x01,
+    ];
+    const scan = [0xff, 0xda, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x00, 0x10];
+    const bytes = new Uint8Array(header.length + extraScans * scan.length + 2);
+    bytes.set(header, 0);
+    for (let i = 0; i < extraScans; i++) bytes.set(scan, header.length + i * scan.length);
+    bytes.set([0xff, 0xd9], bytes.length - 2);
+
+    const doc = picture([{ type: "image", ref: large, scaleMode: "fill" }]);
+    const renderer = headlessEngine(measure, {
+      images: async () => ({ bytes, type: "image/jpeg", width, height }),
+    });
+    const result = await renderer.renderPng(doc, "p", { scale: 1 });
+    expect(result.missingImages).toEqual([]);
+    expect(result.skippedImages).toEqual([large]);
+    expect(enginePngPixel(result.png, 50, 40)[3]).toBe(255);
+  });
+
   it("refuses an unsupported effect before starting the stream", async () => {
     const doc = picture([{ type: "solid", color: "#3366cc" }]);
     doc.apply([
