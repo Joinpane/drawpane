@@ -1192,11 +1192,11 @@ impl Engine {
         self.check_supported()?;
         let view = camera.view();
         let frame_rect = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
-        let halo_opt = match self.halo_for_rect(view, frame_rect) {
-            Ok(h) => Some(h),
-            Err(e) if e.code == ErrorCode::Limit => None,
-            Err(e) => return Err(e),
-        };
+        let (reach, samples) = self.reader_reach(view, Some(frame_rect));
+        let halo_opt = self.limit_halo(reach).ok();
+        let samples = (!self.store.has_context())
+            .then(|| IRect::around(samples))
+            .filter(|sample| *sample != IRect::around(frame_rect));
         if self.gpu.is_none() {
             return Err(EngineError::new(ErrorCode::State, "no GPU attached"));
         }
@@ -1223,7 +1223,14 @@ impl Engine {
             options.moving && drag.as_ref().is_some_and(|d| d.split.is_none()) && self.store.nodes.len() <= 512;
         let whole = halo_opt != Some(0) && (options.budget_ms <= 0.0 || simple_reader_drag);
         let whole_stats = if whole {
-            match gpu.render_whole(&self.store, &frame, background, self.generation, options.moving) {
+            match gpu.render_whole(
+                &self.store,
+                &frame,
+                background,
+                self.generation,
+                options.moving,
+                samples,
+            ) {
                 Ok(stats) => Some(stats),
                 Err(e) if e.code == ErrorCode::Limit && halo_opt.is_some() => None,
                 Err(e) => return Err(e),
@@ -1255,7 +1262,14 @@ impl Engine {
                 drag.as_ref(),
             )?
         } else {
-            gpu.render_whole(&self.store, &frame, background, self.generation, options.moving)?
+            gpu.render_whole(
+                &self.store,
+                &frame,
+                background,
+                self.generation,
+                options.moving,
+                samples,
+            )?
         };
         // No frame is exact while text is still to come: it may paint past its box.
         if stats.exact && self.store.provisional_shown().is_some() {
@@ -1269,19 +1283,31 @@ impl Engine {
     /// disjoint readers take their maximum reach rather than summing, and glass never feeds into
     /// later readers (decision 0007).
     pub fn halo(&self, view: Affine) -> Result<i32> {
-        self.halo_in(view, None)
+        self.limit_halo(self.reader_reach(view, None).0)
     }
 
     /// Longest geometric backdrop-dependency reach affecting `crop` (in device pixels): unrelated
     /// readers outside `crop` (that don't transitively feed a reader overlapping `crop`) never
     /// inflate an export's halo.
     pub fn halo_for_rect(&self, view: Affine, crop: Rect) -> Result<i32> {
-        self.halo_in(view, Some(crop))
+        self.limit_halo(self.reader_reach(view, Some(crop)).0)
     }
 
-    fn halo_in(&self, view: Affine, crop: Option<Rect>) -> Result<i32> {
+    fn limit_halo(&self, total: f64) -> Result<i32> {
+        if total > f64::from(self.store.limits.halo) {
+            return Err(EngineError::limit(format!(
+                "backdrop readers reach {total:.0} px past a band; the most is {}",
+                self.store.limits.halo
+            )));
+        }
+        Ok(total.ceil() as i32)
+    }
+
+    /// The dependency reach and the page pixels a reader may sample outside a view.
+    fn reader_reach(&self, view: Affine, crop: Option<Rect>) -> (f64, Rect) {
+        let mut samples = crop.unwrap_or(Rect::ZERO);
         if self.store.readers().is_empty() {
-            return Ok(0);
+            return (0.0, samples);
         }
         struct ReaderNode {
             paint: Rect,
@@ -1383,9 +1409,6 @@ impl Engine {
                 collect(&self.store, view, kid, Affine::IDENTITY, 1.0, false, &mut nodes);
             }
         }
-        if nodes.is_empty() {
-            return Ok(0);
-        }
         let overlaps = |a: Rect, b: Rect| a.x0 <= b.x1 && b.x0 <= a.x1 && a.y0 <= b.y1 && b.y0 <= a.y1;
         // A reader contributes only when its output reaches the crop or a later relevant
         // reader. Glass can be a sink but never a source of another reader's backdrop.
@@ -1403,6 +1426,12 @@ impl Engine {
             }
             let reach = node.reach_px + downstream;
             total = total.max(reach);
+            if let Some(crop) = crop {
+                let visible = node.paint.intersect(crop.inflate(downstream, downstream));
+                if visible.width() > 0.0 && visible.height() > 0.0 {
+                    samples = samples.union(visible.inflate(node.reach_px, node.reach_px));
+                }
+            }
             let earlier = writers.partition_point(|&writer| writer < i);
             for &writer in &writers[..earlier] {
                 if overlaps(nodes[writer].paint, node.read) {
@@ -1410,13 +1439,7 @@ impl Engine {
                 }
             }
         }
-        if total > f64::from(self.store.limits.halo) {
-            return Err(EngineError::limit(format!(
-                "backdrop readers reach {total:.0} px past a band; the most is {}",
-                self.store.limits.halo
-            )));
-        }
-        Ok(total.ceil() as i32)
+        (total, samples)
     }
 
     /// Draws `area` of a `width` × `height` frame into the CPU target, extended by the readers'

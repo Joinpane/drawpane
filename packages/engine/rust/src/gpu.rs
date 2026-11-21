@@ -2035,18 +2035,30 @@ impl Gpu {
         background: [f32; 4],
         generation: u64,
         detail: bool,
+        samples: Option<IRect>,
     ) -> Result<DrawStats> {
         self.check()?;
         if store.readers().is_empty() && !store.has_context() && self.readers.bytes() > 0 {
             self.readers.evict_frame_scratch();
         }
         let (width, height) = (u32::from(frame.width), u32::from(frame.height));
-        let (w, h) = if detail {
-            (width.div_ceil(2), height.div_ceil(2))
-        } else {
-            (width, height)
-        };
+        let (mut x, mut y, mut full_w, mut full_h) = samples.map_or((0, 0, width, height), |bounds| {
+            // Raster strips and the sampling quads keep their phase at the viewport origin.
+            let x = ((-bounds.x0) as u32).next_multiple_of(4);
+            let y = ((-bounds.y0) as u32).next_multiple_of(4);
+            (x, y, bounds.x1 as u32 + x, bounds.y1 as u32 + y)
+        });
         self.ensure_frames(width, height)?;
+        let render_size = |w: u32, h: u32| {
+            if detail { (w.div_ceil(2), h.div_ceil(2)) } else { (w, h) }
+        };
+        let (mut w, mut h) = render_size(full_w, full_h);
+        if self.ensure_scratch_size(w, h).is_err() && samples.is_some() {
+            // Extremely large effects may fill the adapter. Keep the previous clamped
+            // fallback available when there is no room for the pixels outside the viewport.
+            (x, y, full_w, full_h) = (0, 0, width, height);
+            (w, h) = render_size(width, height);
+        }
         self.ensure_scratch_size(w, h)?;
         let t0 = now();
         let view = frame.view;
@@ -2090,7 +2102,9 @@ impl Gpu {
         let whole = Frame {
             width: w as u16,
             height: h as u16,
-            view: Affine::scale_non_uniform(f64::from(w) / f64::from(width), f64::from(h) / f64::from(height)) * view,
+            view: Affine::scale_non_uniform(f64::from(w) / f64::from(full_w), f64::from(h) / f64::from(full_h))
+                * Affine::translate((f64::from(x), f64::from(y)))
+                * view,
             detail,
             area: IRect {
                 x0: 0,
@@ -2116,7 +2130,7 @@ impl Gpu {
         }
         let mut encoder = self.take_encoder(false, "whole copy");
         if detail {
-            if let Err(e) = self.scale_scratch_to_frame(&mut encoder, dst) {
+            if let Err(e) = self.scale_scratch_to_frame(&mut encoder, dst, (x, y), (full_w, full_h)) {
                 drop(encoder);
                 self.discard_draw();
                 return Err(e);
@@ -2127,9 +2141,9 @@ impl Gpu {
                 &mut encoder,
                 &scratch.texture,
                 &self.frames[dst].texture,
+                (x, y),
                 (0, 0),
-                (0, 0),
-                (w, h),
+                (width, height),
             );
         }
         self.stash_encoder(encoder);
@@ -2154,7 +2168,13 @@ impl Gpu {
     }
 
     /// Presents the half-resolution reader stand-in through the tile compositor's bilinear pass.
-    fn scale_scratch_to_frame(&mut self, encoder: &mut wgpu::CommandEncoder, dst: usize) -> Result<()> {
+    fn scale_scratch_to_frame(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: usize,
+        start: (u32, u32),
+        full: (u32, u32),
+    ) -> Result<()> {
         self.ensure_compositor();
         let compositor = self.compositor.as_ref().expect("compositor");
         let source = self.scratches[self.active_scratch]
@@ -2169,10 +2189,10 @@ impl Gpu {
             0.0,
             width,
             height,
-            0.0,
-            0.0,
-            1.0,
-            1.0,
+            start.0 as f32 / full.0 as f32,
+            start.1 as f32 / full.1 as f32,
+            (start.0 as f32 + width) / full.0 as f32,
+            (start.1 as f32 + height) / full.1 as f32,
             edge.0,
             edge.1,
             1.0 - edge.0,
