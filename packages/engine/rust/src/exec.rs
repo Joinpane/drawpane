@@ -11,7 +11,7 @@ use crate::error::{EngineError, Result};
 use crate::geometry;
 use crate::limits::Limits;
 use crate::masks::{MaskKey, PHASES};
-use crate::record::{ComposeMode, GradientKind, Op, Paint, PathEntry, Record, Rgba, StrokeStyle};
+use crate::record::{ComposeMode, GradientKind, Op, Paint, PathEntry, PostEffect, Record, Rgba, StrokeStyle};
 use crate::store::Store;
 use vello_common::color::{AlphaColor, Srgb};
 use vello_common::kurbo::{Affine, BezPath, Cap, Join, Rect, Stroke};
@@ -228,10 +228,23 @@ pub trait Backend {
     /// Runs a backdrop reader over what's drawn so far (`open` is open in the scene).
     fn read(&mut self, kernel: u32, paints: IRect, reads: IRect, open: &[Open]) -> Result<()>;
     /// Pushes a transparent offscreen target covering `area` (device pixels), flushing the active
-    /// scene first. Returns `false` if `area` doesn't intersect the active target.
-    fn push_isolated(&mut self, area: IRect, open: &[Open]) -> Result<bool>;
-    /// Flushes and pops the active offscreen target, reopens parent `open` clips, and draws it
-    /// onto the parent scene with `SrcOver` at `opacity`.
+    /// scene first. When `clip_to_parent` is true, `area` is intersected with `target_bounds()`;
+    /// when false (e.g. layer blur needing halo pixels outside a tile or frame edge), `area` is
+    /// used as-is and `scene_origin_hint` provides a tile-independent CPU scene origin.
+    /// Returns `false` if the resulting target is empty.
+    fn push_isolated(
+        &mut self,
+        area: IRect,
+        clip_to_parent: bool,
+        scene_origin_hint: Option<(i32, i32)>,
+        open: &[Open],
+    ) -> Result<bool>;
+    /// Flushes the active offscreen target (if pending), applies a chain of reference Gaussian
+    /// blurs (`EdgeMode::Zero`) for `(out_area, sigma)` in sequence, and replaces the top of the
+    /// offscreen stack with the final blurred result.
+    fn blur_isolated(&mut self, steps: &[(IRect, f32)]) -> Result<()>;
+    /// Flushes (if pending) and pops the active offscreen target, reopens parent `open` clips,
+    /// and draws it onto the parent scene with `SrcOver` at `opacity`.
     fn pop_isolated(&mut self, opacity: f32, open: &[Open]) -> Result<()>;
     /// Discards the active offscreen target on error unwind without compositing.
     fn abort_isolated(&mut self);
@@ -550,9 +563,13 @@ fn subtree_would_flush(
     let (Some(bounds), page_pad) = store.bounds_and_pad(id) else {
         return false;
     };
-    let dev_bbox = device
-        .transform_rect_bbox(bounds)
-        .inflate(page_pad * scale_of(frame.view), page_pad * scale_of(frame.view));
+    let view_scale = scale_of(frame.view);
+    let pad_dev = if page_pad > 0.0 {
+        page_pad * view_scale + 2.0
+    } else {
+        0.0
+    };
+    let dev_bbox = device.transform_rect_bbox(bounds).inflate(pad_dev, pad_dev);
     if !overlaps(dev_bbox, full_viewport) {
         return false;
     }
@@ -560,12 +577,56 @@ fn subtree_would_flush(
     if opacity <= 0.0 {
         return false;
     }
-    let isolate = r.isolate() && r.opacity < 1.0;
+    let has_post = r.post_effects.iter().any(|pe| match *pe {
+        PostEffect::LayerBlur { radius } => {
+            (f64::from(crate::blur::sigma_from_radius(radius)) * view_scale) as f32 >= 1e-4
+        }
+    });
+    let isolate = has_post || (r.isolate() && r.opacity < 1.0);
+    if has_post {
+        let raw_out = IRect::around(dev_bbox.inflate(1.0, 1.0));
+        let out_area = IRect {
+            x0: raw_out.x0.div_euclid(4) * 4 - 4,
+            y0: raw_out.y0.div_euclid(4) * 4 - 4,
+            x1: (raw_out.x1 + 3).div_euclid(4) * 4 + 4,
+            y1: (raw_out.y1 + 3).div_euclid(4) * 4 + 4,
+        }
+        .intersect(full_frame);
+        if !out_area.is_empty() {
+            let inner_pad = (page_pad - r.post_pad()).max(0.0);
+            let inner_pad_dev = if inner_pad > 0.0 {
+                inner_pad * view_scale + 2.0
+            } else {
+                0.0
+            };
+            let content_bbox = device.transform_rect_bbox(bounds).inflate(inner_pad_dev, inner_pad_dev);
+            let content_rect = IRect::around(content_bbox).inflate(2, 2);
+            let mut total_blur_pad = 0i32;
+            for pe in &r.post_effects {
+                match *pe {
+                    PostEffect::LayerBlur { radius } => {
+                        let sigma = (f64::from(crate::blur::sigma_from_radius(radius)) * view_scale) as f32;
+                        if sigma >= 1e-4 {
+                            total_blur_pad = total_blur_pad.saturating_add(crate::shadow::blur_support_pad(sigma));
+                        }
+                    }
+                }
+            }
+            if !content_rect
+                .intersect(out_area.inflate(total_blur_pad, total_blur_pad))
+                .is_empty()
+            {
+                return true;
+            }
+        }
+        return false;
+    }
     if isolate && store.subtree_has_pass(id) {
         let iso_area = IRect::around(dev_bbox.inflate(1.0, 1.0)).intersect(full_frame);
         if !iso_area.is_empty() {
             return true;
         }
+        return false;
     }
     let inner = if isolate { 1.0 } else { opacity };
     for op in &r.ops {
@@ -625,6 +686,47 @@ fn scale_of(m: Affine) -> f64 {
 
 fn color(c: Rgba, alpha: f32) -> AlphaColor<Srgb> {
     AlphaColor::new([c[0], c[1], c[2], c[3] * alpha])
+}
+
+/// Snaps `raw` outward to a `step`-pixel grid whose phase matches the page origin under `view`,
+/// so tiles of any size (including non-power-of-two test tiles) share identical pyramid block
+/// boundaries with a whole-frame render.
+fn align_area_checked(raw: IRect, step: i32, phase: (i32, i32), max_side: i32) -> Result<IRect> {
+    let step = step.max(1);
+    let align_down = |v: i32, p: i32| (v - p).div_euclid(step) * step + p;
+    let align_up = |v: i32, p: i32| (v - p + step - 1).div_euclid(step) * step + p;
+    let r = IRect {
+        x0: align_down(raw.x0, phase.0),
+        y0: align_down(raw.y0, phase.1),
+        x1: align_up(raw.x1, phase.0),
+        y1: align_up(raw.y1, phase.1),
+    };
+    if r.x1 - r.x0 > max_side || r.y1 - r.y0 > max_side {
+        return Err(EngineError::limit(format!(
+            "layer blur source {} x {} px exceeds maximum target size {max_side} px",
+            r.x1 - r.x0,
+            r.y1 - r.y0
+        )));
+    }
+    Ok(r)
+}
+
+fn view_grid_phase(view: Affine, step: i32) -> (i32, i32) {
+    let s = f64::from(step.max(1));
+    let [.., e, f] = view.as_coeffs();
+    (e.floor().rem_euclid(s) as i32, f.floor().rem_euclid(s) as i32)
+}
+
+struct PostIsoState {
+    prev_open: Vec<Open>,
+    prev_viewport: Rect,
+    prev_full_frame: IRect,
+    prev_full_viewport: Rect,
+    out_area: IRect,
+    content_rect: IRect,
+    blurs: Vec<f32>,
+    max_step: i32,
+    phase: (i32, i32),
 }
 
 impl<B: Backend> Walk<'_, B> {
@@ -705,11 +807,14 @@ impl<B: Backend> Walk<'_, B> {
             return Ok(());
         };
         let view_scale = scale_of(self.frame.view);
-        let pad_dev = page_pad * view_scale;
+        let pad_dev = if page_pad > 0.0 {
+            page_pad * view_scale + 2.0
+        } else {
+            0.0
+        };
         let dev_bbox = device.transform_rect_bbox(bounds).inflate(pad_dev, pad_dev);
         if !overlaps(dev_bbox, self.viewport) {
             if self.tiled
-                && self.backend.scene_offset() == (0, 0)
                 && subtree_would_flush(
                     store,
                     &self.frame,
@@ -744,26 +849,178 @@ impl<B: Backend> Walk<'_, B> {
         if opacity <= 0.0 {
             return Ok(());
         }
-        let isolate = r.isolate() && r.opacity < 1.0;
-        let use_offscreen = isolate && store.subtree_has_pass(id);
+        let active_blurs: Vec<f32> = r
+            .post_effects
+            .iter()
+            .filter_map(|pe| match *pe {
+                PostEffect::LayerBlur { radius } => {
+                    let sigma = (f64::from(crate::blur::sigma_from_radius(radius)) * view_scale) as f32;
+                    (sigma >= 1e-4).then_some(sigma)
+                }
+            })
+            .collect();
+        let has_post = !active_blurs.is_empty();
+        let isolate = has_post || (r.isolate() && r.opacity < 1.0);
+        let use_offscreen = has_post || (isolate && store.subtree_has_pass(id));
         let inner = if isolate { 1.0 } else { opacity };
-        let saved_open = if use_offscreen {
+        let mut post_state: Option<PostIsoState> = None;
+        let saved_open = if has_post {
+            self.scope()?;
+            let parent_tb = self.backend.target_bounds();
+            let raw_out = IRect::around(dev_bbox.inflate(1.0, 1.0));
+            let padded_out = IRect {
+                x0: raw_out.x0.div_euclid(4) * 4 - 4,
+                y0: raw_out.y0.div_euclid(4) * 4 - 4,
+                x1: (raw_out.x1 + 3).div_euclid(4) * 4 + 4,
+                y1: (raw_out.y1 + 3).div_euclid(4) * 4 + 4,
+            };
+            let out_area = if raw_out.intersect(parent_tb).is_empty() {
+                IRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: 0,
+                    y1: 0,
+                }
+            } else {
+                padded_out.intersect(parent_tb)
+            };
+            let inner_pad = (page_pad - r.post_pad()).max(0.0);
+            let inner_pad_dev = if inner_pad > 0.0 {
+                inner_pad * view_scale + 2.0
+            } else {
+                0.0
+            };
+            let content_bbox = device.transform_rect_bbox(bounds).inflate(inner_pad_dev, inner_pad_dev);
+            let content_rect = IRect::around(content_bbox).inflate(2, 2);
+            let mut total_blur_pad = 0i32;
+            let mut max_step = 4i32;
+            for &sigma in &active_blurs {
+                if !out_area.is_empty() {
+                    crate::blur::validate_sigma(
+                        sigma,
+                        IRect {
+                            x0: 0,
+                            y0: 0,
+                            x1: (out_area.x1 - out_area.x0).max(1),
+                            y1: (out_area.y1 - out_area.y0).max(1),
+                        },
+                        crate::blur::EdgeMode::Zero,
+                    )?;
+                }
+                total_blur_pad = total_blur_pad.saturating_add(crate::shadow::blur_support_pad(sigma));
+                if sigma > crate::blur::DIRECT_SIGMA_MAX {
+                    let (lvl, _) = crate::blur::choose_level(sigma, crate::blur::MAX_PYRAMID_LEVELS);
+                    max_step = max_step.max(1i32 << lvl.min(8));
+                }
+            }
+            let whole_out = padded_out.intersect(self.full_frame);
+            let whole_raw_src = if whole_out.is_empty() {
+                IRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: 0,
+                    y1: 0,
+                }
+            } else {
+                content_rect.intersect(whole_out.inflate(total_blur_pad, total_blur_pad))
+            };
+            let whole_would_flush = !whole_raw_src.is_empty();
+            if out_area.is_empty() {
+                if self.tiled && whole_would_flush {
+                    self.backend.flush_barrier(&self.open);
+                }
+                return Ok(());
+            }
+            let raw_src = content_rect.intersect(out_area.inflate(total_blur_pad, total_blur_pad));
+            if raw_src.is_empty() {
+                if self.tiled && whole_would_flush {
+                    self.backend.flush_barrier(&self.open);
+                }
+                return Ok(());
+            }
+            let max_side = self.store.limits.texture_side as i32;
+            let phase = view_grid_phase(self.frame.view, max_step);
+            let src_area = align_area_checked(raw_src, max_step, phase, max_side)?;
+            let step = max_step.max(1);
+            let scene_hint = (
+                ((content_rect.x0 - phase.0).div_euclid(step) * step + phase.0).div_euclid(4) * 4,
+                ((content_rect.y0 - phase.1).div_euclid(step) * step + phase.1).div_euclid(4) * 4,
+            );
+            if !self
+                .backend
+                .push_isolated(src_area, false, Some(scene_hint), &self.open)?
+            {
+                if self.tiled && whole_would_flush {
+                    self.backend.flush_barrier(&self.open);
+                }
+                return Ok(());
+            }
+            let prev_viewport = self.viewport;
+            let prev_full_frame = self.full_frame;
+            let prev_full_viewport = self.full_viewport;
+            self.viewport = Rect::new(
+                f64::from(src_area.x0) - 1.0,
+                f64::from(src_area.y0) - 1.0,
+                f64::from(src_area.x1) + 1.0,
+                f64::from(src_area.y1) + 1.0,
+            );
+            let whole_src = if whole_raw_src.is_empty() {
+                src_area
+            } else {
+                align_area_checked(whole_raw_src, max_step, phase, max_side).unwrap_or(src_area)
+            };
+            self.full_frame = whole_src;
+            self.full_viewport = Rect::new(
+                f64::from(whole_src.x0) - 1.0,
+                f64::from(whole_src.y0) - 1.0,
+                f64::from(whole_src.x1) + 1.0,
+                f64::from(whole_src.y1) + 1.0,
+            );
+            post_state = Some(PostIsoState {
+                prev_open: std::mem::take(&mut self.open),
+                prev_viewport,
+                prev_full_frame,
+                prev_full_viewport,
+                out_area,
+                content_rect,
+                blurs: active_blurs,
+                max_step,
+                phase,
+            });
+            None
+        } else if use_offscreen {
             self.scope()?;
             let raw_iso = IRect::around(dev_bbox.inflate(1.0, 1.0));
             let iso_area = raw_iso.intersect(self.backend.target_bounds());
+            let whole_iso = {
+                let r = raw_iso.intersect(self.full_frame);
+                if r.is_empty() {
+                    r
+                } else {
+                    IRect {
+                        x0: r.x0.div_euclid(4) * 4 - 4,
+                        y0: r.y0.div_euclid(4) * 4 - 4,
+                        x1: (r.x1 + 3).div_euclid(4) * 4 + 4,
+                        y1: (r.y1 + 3).div_euclid(4) * 4 + 4,
+                    }
+                    .intersect(self.full_frame)
+                }
+            };
             if iso_area.is_empty() {
-                if self.tiled && !raw_iso.intersect(self.full_frame).is_empty() {
+                if self.tiled && !whole_iso.is_empty() {
                     self.backend.flush_barrier(&self.open);
                 }
                 return Ok(());
             }
-            if !self.backend.push_isolated(iso_area, &self.open)? {
-                if self.tiled && !raw_iso.intersect(self.full_frame).is_empty() {
+            if !self.backend.push_isolated(iso_area, true, None, &self.open)? {
+                if self.tiled && !whole_iso.is_empty() {
                     self.backend.flush_barrier(&self.open);
                 }
                 return Ok(());
             }
-            Some(std::mem::take(&mut self.open))
+            let prev_full_frame = self.full_frame;
+            self.full_frame = whole_iso;
+            Some((std::mem::take(&mut self.open), prev_full_frame))
         } else {
             if isolate {
                 self.scope()?;
@@ -923,7 +1180,60 @@ impl<B: Backend> Walk<'_, B> {
             }
             Ok(())
         })();
-        if let Some(prev_open) = saved_open {
+        if let Some(post) = post_state {
+            self.viewport = post.prev_viewport;
+            self.full_frame = post.prev_full_frame;
+            self.full_viewport = post.prev_full_viewport;
+            while let Some(o) = self.open.pop() {
+                match o {
+                    Open::Clip { .. } => self.backend.scene().pop_clip(),
+                    Open::Layer => self.backend.scene().pop_layer(),
+                }
+            }
+            self.open = post.prev_open;
+            if res.is_ok() {
+                let max_side = self.store.limits.texture_side as i32;
+                let mut steps = Vec::with_capacity(post.blurs.len());
+                let mut blur_res = Ok(());
+                let mut grown = 0i32;
+                for (idx, &sigma) in post.blurs.iter().enumerate() {
+                    grown = grown.saturating_add(crate::shadow::blur_support_pad(sigma));
+                    let step_out = if idx + 1 == post.blurs.len() {
+                        Ok(post.out_area)
+                    } else {
+                        let rem: i32 = post.blurs[idx + 1..]
+                            .iter()
+                            .map(|&s| crate::shadow::blur_support_pad(s))
+                            .sum();
+                        let raw = post
+                            .content_rect
+                            .inflate(grown, grown)
+                            .intersect(post.out_area.inflate(rem, rem));
+                        align_area_checked(raw, post.max_step, post.phase, max_side)
+                    };
+                    match step_out {
+                        Ok(area) => steps.push((area, sigma)),
+                        Err(e) => {
+                            blur_res = Err(e);
+                            break;
+                        }
+                    }
+                }
+                if blur_res.is_ok() {
+                    blur_res = self.backend.blur_isolated(&steps);
+                }
+                if let Err(e) = blur_res {
+                    self.backend.abort_isolated();
+                    return Err(e);
+                }
+                self.backend.pop_isolated(opacity, &self.open)?;
+            } else {
+                self.backend.abort_isolated();
+            }
+            return res;
+        }
+        if let Some((prev_open, prev_full_frame)) = saved_open {
+            self.full_frame = prev_full_frame;
             while let Some(o) = self.open.pop() {
                 match o {
                     Open::Clip { .. } => self.backend.scene().pop_clip(),

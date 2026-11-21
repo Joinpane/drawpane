@@ -55,6 +55,9 @@ pub fn gen_rec(r: &mut Rng, readers: bool) -> Rec {
     if r.chance(0.12) {
         let mut g = Rec::group();
         g.transform = ident();
+        if !readers && r.chance(0.12) {
+            g.post.push(Post::LayerBlur(r.range(2.0, 14.0)));
+        }
         return g;
     }
     let (w, h) = (r.range(4.0, 80.0), r.range(4.0, 60.0));
@@ -181,6 +184,10 @@ pub fn gen_rec(r: &mut Rng, readers: bool) -> Rec {
             color: [r.unit(), r.unit(), r.unit(), r.range(0.15, 0.7)],
             blend: 0,
         });
+    }
+    if !readers && r.chance(0.10) {
+        rec.post
+            .push(Post::LayerBlur(if r.chance(0.2) { 0.0 } else { r.range(2.0, 14.0) }));
     }
     if !text && r.chance(0.6) {
         if r.chance(0.5) {

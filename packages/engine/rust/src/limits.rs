@@ -86,6 +86,9 @@ impl Default for Limits {
             open_scopes: 512,
             gpu_bytes: 768 * 1024 * 1024,
             tile_bytes: 256 * 1024 * 1024,
+            #[cfg(all(target_arch = "wasm32", not(feature = "gpu-common")))]
+            memory_bytes: 25 * 1024 * 1024,
+            #[cfg(not(all(target_arch = "wasm32", not(feature = "gpu-common"))))]
             memory_bytes: 0,
             export_tile: 1024,
             halo: 512,

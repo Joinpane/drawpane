@@ -30,28 +30,32 @@ impl_draw!(RenderContext);
 struct CpuTarget {
     pixmap: Pixmap,
     origin: (i32, i32),
+    scene_origin: (i32, i32),
+    scene_size: (u16, u16),
+    scene_pending: bool,
 }
 
-/// Aligns `r` outward to 4-pixel boundaries (matching `vello_cpu`'s 4x4 strip cells) so an
-/// offscreen target's compositing rect never straddles a strip cell boundary and switches between
-/// `vello_cpu`'s sparse-strip and solid-interior paths when unrelated siblings resize `iso_area`.
-fn align4(r: IRect) -> IRect {
+/// Aligns `r` outward to 4-pixel boundaries and adds a 4-pixel guard band (matching `vello_cpu`'s
+/// 4x4 strip cells) so every painted pixel inside `r` stays strictly interior to the compositing
+/// rect, never switching between `vello_cpu`'s edge-strip and solid-interior paths across tiles or
+/// unrelated sibling edits.
+fn align4_padded(r: IRect) -> IRect {
     IRect {
-        x0: r.x0.div_euclid(4) * 4,
-        y0: r.y0.div_euclid(4) * 4,
-        x1: (r.x1 + 3).div_euclid(4) * 4,
-        y1: (r.y1 + 3).div_euclid(4) * 4,
+        x0: r.x0.div_euclid(4) * 4 - 4,
+        y0: r.y0.div_euclid(4) * 4 - 4,
+        x1: (r.x1 + 3).div_euclid(4) * 4 + 4,
+        y1: (r.y1 + 3).div_euclid(4) * 4 + 4,
     }
 }
 
 /// Expands an integer rect 4 px past any side that touches `tb`'s boundary (discarded outside the
 /// target) so `vello_cpu`'s 4x4 strip cells at tile seams stay strictly interior to the rect,
 /// matching whole-frame rendering bit-for-bit.
-fn tile_padded_rect(r: IRect, tb: IRect) -> Rect {
-    let x0 = f64::from(r.x0) - if r.x0 == tb.x0 { 4.0 } else { 0.0 };
-    let y0 = f64::from(r.y0) - if r.y0 == tb.y0 { 4.0 } else { 0.0 };
-    let x1 = f64::from(r.x1) + if r.x1 == tb.x1 { 4.0 } else { 0.0 };
-    let y1 = f64::from(r.y1) + if r.y1 == tb.y1 { 4.0 } else { 0.0 };
+fn tile_padded_rect(r: IRect, tb: IRect, scene_offset: (i32, i32)) -> Rect {
+    let x0 = f64::from(r.x0 - scene_offset.0) - if r.x0 == tb.x0 { 4.0 } else { 0.0 };
+    let y0 = f64::from(r.y0 - scene_offset.1) - if r.y0 == tb.y0 { 4.0 } else { 0.0 };
+    let x1 = f64::from(r.x1 - scene_offset.0) + if r.x1 == tb.x1 { 4.0 } else { 0.0 };
+    let y1 = f64::from(r.y1 - scene_offset.1) + if r.y1 == tb.y1 { 4.0 } else { 0.0 };
     Rect::new(x0, y0, x1, y1)
 }
 
@@ -95,6 +99,8 @@ pub struct Cpu {
     pub target: Pixmap,
     /// The device pixel the target's top left is.
     pub origin: (i32, i32),
+    /// Whole frame size in device pixels (for restoring root scene dimensions).
+    frame_size: (u16, u16),
     scene: RenderContext,
     resources: Resources,
     /// Rasterises glyph masks.
@@ -140,6 +146,7 @@ impl Cpu {
         Self {
             target: Pixmap::new(1, 1),
             origin: (0, 0),
+            frame_size: (1, 1),
             scene: RenderContext::new(1, 1),
             resources: Resources::new(),
             raster: masks::Rasterizer::default(),
@@ -182,6 +189,17 @@ impl Cpu {
 
     pub fn set_external_bytes(&mut self, bytes: usize) {
         self.external_bytes = bytes;
+    }
+
+    /// Shrinks the reusable target pixmap and scene buffers to minimal size so stale full-frame
+    /// allocations do not occupy bounded Worker memory before admitting a new render.
+    pub fn shrink_target(&mut self) {
+        if self.target.width() > 1 || self.target.height() > 1 {
+            self.target = Pixmap::new(1, 1);
+        }
+        self.offscreen_stack.clear();
+        self.temp_bytes = 0;
+        self.scene.reset_and_resize(1, 1);
     }
 
     /// Bytes currently allocated inside `Cpu` (target, offscreen stack, images, caches, temp).
@@ -277,6 +295,7 @@ impl Cpu {
             self.target = Pixmap::new(cols, rows);
         }
         self.origin = (area.x0, area.y0);
+        self.frame_size = (width, height);
         self.offscreen_stack.clear();
         self.temp_bytes = 0;
         for p in self.target.data_as_u8_slice_mut().as_chunks_mut::<4>().0.iter_mut() {
@@ -288,16 +307,21 @@ impl Cpu {
         self.blur.begin_frame();
     }
 
+    fn active_scene_size(&self) -> (u16, u16) {
+        self.offscreen_stack.last().map_or(self.frame_size, |t| t.scene_size)
+    }
+
     /// Lays the scene drawn since the last flush onto the active target (top offscreen target, or
-    /// the root tile target). The scene always keeps the whole frame's size and `(0, 0)` origin so
-    /// geometry lands on the exact same floating-point coordinates in tiled exports and whole frames.
+    /// the root tile target). The scene keeps `(0, 0)` origin whenever the target lies within the
+    /// frame bounds so geometry lands on identical floating-point coordinates in tiled exports and
+    /// whole frames.
     fn flush_current(&mut self) {
         self.scene.flush();
         if let Some(top) = self.offscreen_stack.last_mut() {
             let settings = RasterizerSettings {
                 render_mode: RenderMode::OptimizeQuality,
                 target_init: TargetInit::SrcOver,
-                offset: (-top.origin.0, -top.origin.1),
+                offset: (top.scene_origin.0 - top.origin.0, top.scene_origin.1 - top.origin.1),
                 ..Default::default()
             };
             self.scene.render_with(&mut top.pixmap, &mut self.resources, settings);
@@ -345,6 +369,7 @@ impl Cpu {
         open: &[Open],
     ) {
         let tb = self.target_bounds();
+        let so = self.scene_offset();
         self.scene.set_transform(Affine::IDENTITY);
         self.scene.set_paint(Image {
             image: ImageSource::Pixmap(pm),
@@ -355,14 +380,16 @@ impl Cpu {
                 alpha: 1.0,
             },
         });
-        self.scene
-            .set_paint_transform(Affine::translate((f64::from(origin.0), f64::from(origin.1))));
+        self.scene.set_paint_transform(Affine::translate((
+            f64::from(origin.0 - so.0),
+            f64::from(origin.1 - so.1),
+        )));
         self.scene.set_tint(Some(Tint {
             color,
             mode: TintMode::AlphaMask,
         }));
         self.scene.set_fill_rule(Fill::NonZero);
-        self.scene.fill_rect(&tile_padded_rect(dirty, tb));
+        self.scene.fill_rect(&tile_padded_rect(dirty, tb, so));
         self.scene.set_tint(None);
         if transient_bytes > 0 {
             self.temp_bytes += transient_bytes;
@@ -401,7 +428,7 @@ impl Backend for Cpu {
     }
 
     fn scene_offset(&self) -> (i32, i32) {
-        (0, 0)
+        self.offscreen_stack.last().map_or((0, 0), |t| t.scene_origin)
     }
 
     fn target_bounds(&self) -> IRect {
@@ -490,20 +517,70 @@ impl Backend for Cpu {
         Ok(Some(ImageSource::Pixmap(Arc::new(pm))))
     }
 
-    fn push_isolated(&mut self, area: IRect, open: &[Open]) -> Result<bool> {
+    fn push_isolated(
+        &mut self,
+        area: IRect,
+        clip_to_parent: bool,
+        scene_origin_hint: Option<(i32, i32)>,
+        open: &[Open],
+    ) -> Result<bool> {
         if open.iter().any(|o| matches!(o, Open::Layer)) {
             return Err(EngineError::unsupported(
                 "offscreen isolation inside a Vello opacity layer",
             ));
         }
-        let area = align4(area).intersect(self.target_bounds());
+        let area = if clip_to_parent {
+            align4_padded(area).intersect(self.target_bounds())
+        } else {
+            area
+        };
         if area.is_empty() {
             return Ok(false);
         }
         let w = (area.x1 - area.x0) as u16;
         let h = (area.y1 - area.y0) as u16;
         let bytes = usize::from(w) * usize::from(h) * 4;
-        self.check_memory(bytes, "an isolated layer target")?;
+        let (scene_origin, scene_size) = if let Some((hx, hy)) = scene_origin_hint {
+            let aligned = (area.x0.div_euclid(4) * 4, area.y0.div_euclid(4) * 4);
+            let cx = hx.min(aligned.0);
+            let cy = hy.min(aligned.1);
+            let sox = if area.x1 - cx <= 8192 { cx } else { aligned.0 };
+            let soy = if area.y1 - cy <= 8192 { cy } else { aligned.1 };
+            if sox == 0
+                && soy == 0
+                && area.x1 <= i32::from(self.frame_size.0)
+                && area.y1 <= i32::from(self.frame_size.1)
+            {
+                ((0, 0), self.frame_size)
+            } else {
+                let sw = (area.x1 - sox).clamp(1, 8192) as u16;
+                let sh = (area.y1 - soy).clamp(1, 8192) as u16;
+                ((sox, soy), (sw, sh))
+            }
+        } else if let Some(parent) = self.offscreen_stack.last()
+            && area.x0 >= parent.scene_origin.0
+            && area.y0 >= parent.scene_origin.1
+            && area.x1 <= parent.scene_origin.0 + i32::from(parent.scene_size.0)
+            && area.y1 <= parent.scene_origin.1 + i32::from(parent.scene_size.1)
+        {
+            (parent.scene_origin, parent.scene_size)
+        } else if area.x0 >= 0
+            && area.y0 >= 0
+            && area.x1 <= i32::from(self.frame_size.0)
+            && area.y1 <= i32::from(self.frame_size.1)
+        {
+            ((0, 0), self.frame_size)
+        } else {
+            let sox = area.x0.div_euclid(4) * 4;
+            let soy = area.y0.div_euclid(4) * 4;
+            let sw = (area.x1 - sox).clamp(1, 8192) as u16;
+            let sh = (area.y1 - soy).clamp(1, 8192) as u16;
+            ((sox, soy), (sw, sh))
+        };
+        self.check_memory(
+            bytes.saturating_add(scene_estimate_bytes(u32::from(scene_size.0), u32::from(scene_size.1))),
+            "an isolated layer target",
+        )?;
         for _ in open {
             self.scene.pop_clip();
         }
@@ -511,17 +588,98 @@ impl Backend for Cpu {
         self.offscreen_stack.push(CpuTarget {
             pixmap: Pixmap::new(w, h),
             origin: (area.x0, area.y0),
+            scene_origin,
+            scene_size,
+            scene_pending: true,
         });
-        self.scene.reset();
+        if self.scene.width() != scene_size.0 || self.scene.height() != scene_size.1 {
+            self.scene.reset_and_resize(scene_size.0, scene_size.1);
+        } else {
+            self.scene.reset();
+        }
         Ok(true)
     }
 
+    fn blur_isolated(&mut self, steps: &[(IRect, f32)]) -> Result<()> {
+        if steps.is_empty() {
+            return Ok(());
+        }
+        if self.offscreen_stack.last().is_some_and(|t| t.scene_pending) {
+            self.flush_current();
+            self.scene.reset();
+        }
+        let Some(mut src) = self.offscreen_stack.pop() else {
+            return Ok(());
+        };
+        for &(out_area, sigma) in steps {
+            if out_area.is_empty() {
+                return Ok(());
+            }
+            let src_w = u32::from(src.pixmap.width());
+            let src_h = u32::from(src.pixmap.height());
+            let dst_w = (out_area.x1 - out_area.x0).max(1) as u32;
+            let dst_h = (out_area.y1 - out_area.y0).max(1) as u32;
+            let dst_origin = (out_area.x0 - src.origin.0, out_area.y0 - src.origin.1);
+            let spec = BlurSpec {
+                sigma,
+                edge: EdgeMode::Zero,
+                clamp_bounds: IRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: src_w as i32,
+                    y1: src_h as i32,
+                },
+                dirty: IRect {
+                    x0: dst_origin.0,
+                    y0: dst_origin.1,
+                    x1: dst_origin.0 + dst_w as i32,
+                    y1: dst_origin.1 + dst_h as i32,
+                },
+            };
+            crate::blur::validate_sigma(sigma, spec.clamp_bounds, spec.edge)?;
+            let src_bytes = (src_w as usize).saturating_mul(src_h as usize).saturating_mul(4);
+            let dst_bytes = (dst_w as usize)
+                .checked_mul(dst_h as usize)
+                .and_then(|n| n.checked_mul(4))
+                .ok_or_else(|| EngineError::limit("layer blur output size overflow"))?;
+            // Charge blurred output plus intermediate pyramid/scratch bytes beside current src.
+            let scratch = crate::blur::cpu_work_bytes((src_w, src_h), (dst_w, dst_h), sigma);
+            let need = src_bytes.saturating_add(dst_bytes).saturating_add(scratch);
+            self.check_memory(need, "a layer blur pass")?;
+            let mut out = vec![0u8; dst_bytes];
+            try_blur_cpu(
+                src.pixmap.data_as_u8_slice(),
+                (src_w, src_h),
+                &mut out,
+                (dst_w, dst_h),
+                dst_origin,
+                &spec,
+            )?;
+            src = CpuTarget {
+                pixmap: pixmap(dst_w, dst_h, out),
+                origin: (out_area.x0, out_area.y0),
+                scene_origin: (0, 0),
+                scene_size: self.frame_size,
+                scene_pending: false,
+            };
+        }
+        self.offscreen_stack.push(src);
+        Ok(())
+    }
+
     fn pop_isolated(&mut self, opacity: f32, open: &[Open]) -> Result<()> {
-        self.flush_current();
+        if self.offscreen_stack.last().is_some_and(|t| t.scene_pending) {
+            self.flush_current();
+        }
         let Some(mut top) = self.offscreen_stack.pop() else {
             return Ok(());
         };
-        self.scene.reset();
+        let (pw, ph) = self.active_scene_size();
+        if self.scene.width() != pw || self.scene.height() != ph {
+            self.scene.reset_and_resize(pw, ph);
+        } else {
+            self.scene.reset();
+        }
         self.reopen_clips(open);
         let alpha = opacity.clamp(0.0, 1.0);
         if alpha <= 0.0 {
@@ -537,8 +695,9 @@ impl Backend for Cpu {
                 }
             }
         }
-        let x = f64::from(top.origin.0);
-        let y = f64::from(top.origin.1);
+        let so = self.scene_offset();
+        let x = f64::from(top.origin.0 - so.0);
+        let y = f64::from(top.origin.1 - so.1);
         let rect = IRect {
             x0: top.origin.0,
             y0: top.origin.1,
@@ -561,7 +720,7 @@ impl Backend for Cpu {
         self.scene.set_tint(None);
         self.scene.set_fill_rule(Fill::NonZero);
         let tb = self.target_bounds();
-        self.scene.fill_rect(&tile_padded_rect(rect, tb));
+        self.scene.fill_rect(&tile_padded_rect(rect, tb, so));
         self.temp_bytes += bytes;
         if self.memory_budget > 0
             && self.temp_bytes >= WORKER_TEMP_FLUSH_BYTES
@@ -579,7 +738,12 @@ impl Backend for Cpu {
 
     fn abort_isolated(&mut self) {
         self.offscreen_stack.pop();
-        self.scene.reset();
+        let (pw, ph) = self.active_scene_size();
+        if self.scene.width() != pw || self.scene.height() != ph {
+            self.scene.reset_and_resize(pw, ph);
+        } else {
+            self.scene.reset();
+        }
         self.temp_bytes = 0;
     }
 
@@ -593,7 +757,7 @@ impl Backend for Cpu {
         color: AlphaColor<Srgb>,
         open: &[Open],
     ) -> Result<()> {
-        let dirty = align4(dirty).intersect(self.target_bounds());
+        let dirty = align4_padded(dirty).intersect(self.target_bounds());
         if dirty.is_empty() {
             return Ok(());
         }
@@ -691,12 +855,13 @@ impl Backend for Cpu {
         let Some(mask_rect) = mask_rect_opt else {
             if invert {
                 let tb = self.target_bounds();
+                let so = self.scene_offset();
                 self.scene.set_transform(Affine::IDENTITY);
                 self.scene.reset_paint_transform();
                 self.scene.set_tint(None);
                 self.scene.set_paint(color);
                 self.scene.set_fill_rule(Fill::NonZero);
-                self.scene.fill_rect(&tile_padded_rect(dirty, tb));
+                self.scene.fill_rect(&tile_padded_rect(dirty, tb, so));
             }
             return Ok(());
         };
@@ -711,7 +876,6 @@ impl Backend for Cpu {
             .ok_or_else(|| EngineError::limit("shadow output size overflow"))?;
         let shift = shadow_raster_shift(sigma);
         let dst_origin = (dirty.x0 - mask_rect.x0, dirty.y0 - mask_rect.y0);
-
         let mut out = if shift == 0 {
             let mask_bytes = (mask_w as usize)
                 .checked_mul(mask_h as usize)
@@ -968,13 +1132,14 @@ impl Backend for Cpu {
                     clip.push_clip_path(path);
                 }
             }
+            let so = self.scene_offset();
             clip.set_transform(Affine::IDENTITY);
             clip.set_paint(vello_common::color::palette::css::WHITE);
             clip.fill_rect(&Rect::new(
-                f64::from(paints.x0),
-                f64::from(paints.y0),
-                f64::from(paints.x1),
-                f64::from(paints.y1),
+                f64::from(paints.x0 - so.0),
+                f64::from(paints.y0 - so.1),
+                f64::from(paints.x1 - so.0),
+                f64::from(paints.y1 - so.1),
             ));
             for o in open {
                 if matches!(o, Open::Clip { .. }) {
@@ -985,7 +1150,7 @@ impl Backend for Cpu {
             let mut mask = Pixmap::new(w as u16, h as u16);
             let settings = RasterizerSettings {
                 render_mode: RenderMode::OptimizeQuality,
-                offset: (-target_origin.0, -target_origin.1),
+                offset: (so.0 - target_origin.0, so.1 - target_origin.1),
                 ..Default::default()
             };
             clip.render_with(&mut mask, &mut self.resources, settings);

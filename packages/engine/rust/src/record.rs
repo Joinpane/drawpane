@@ -18,7 +18,10 @@ pub const FLAG_GROUP: u32 = 4;
 /// Sent ahead of its real drawing (text not shaped yet, while a page opens): drawn as its coarse
 /// ops at every scale, and never exact. Its record is sent again whole soon after.
 pub const FLAG_PROVISIONAL: u32 = 8;
-const KNOWN_FLAGS: u32 = FLAG_HIDDEN | FLAG_ISOLATE | FLAG_GROUP | FLAG_PROVISIONAL;
+// Bit 16 (1 << 4) is reserved for phase 3B's `context` flag.
+/// Has an ordered list of post-effects (`post_effects`) encoded after `coarse`.
+pub const FLAG_POST: u32 = 32;
+const KNOWN_FLAGS: u32 = FLAG_HIDDEN | FLAG_ISOLATE | FLAG_GROUP | FLAG_PROVISIONAL | FLAG_POST;
 
 /// Bits of `Record::unsupported` (`UNSUPPORTED` in wire.ts) the engine sets itself, from what it
 /// decodes, so anything it would refuse while drawing refuses its page before any drawing, on
@@ -381,6 +384,14 @@ pub enum Op {
     },
 }
 
+/// An ordered post-effect applied to a record's finished picture (fills, strokes, shadows, and
+/// children together), matching `packages/editor/src/post-effects.ts`.
+#[derive(Clone, Debug)]
+pub enum PostEffect {
+    /// Gaussian layer blur with Figma `radius` (page units; `sigma = radius / 2 * view_scale`).
+    LayerBlur { radius: f32 },
+}
+
 #[derive(Clone, Debug)]
 pub struct Record {
     pub flags: u32,
@@ -399,6 +410,8 @@ pub struct Record {
     pub paths: Vec<PathEntry>,
     pub ops: Vec<Op>,
     pub coarse: Vec<Op>,
+    /// Ordered post-effects applied to the record's finished picture.
+    pub post_effects: Vec<PostEffect>,
     /// Features TypeScript found it needs that the engine doesn't draw (a bit set, see
     /// `UNSUPPORTED` in wire.ts). Held to report, never drawn around.
     pub unsupported: u32,
@@ -464,6 +477,7 @@ impl Record {
                     _ => 0,
                 };
         }
+        b += self.post_effects.capacity() * size_of::<PostEffect>();
         b
     }
 
@@ -479,14 +493,30 @@ impl Record {
         pad
     }
 
-    /// True if this record contains ops that may flush the active Vello scene (so an enclosing
-    /// `isolate` opacity scope must use the engine's offscreen target stack instead of a Vello
-    /// opacity layer).
+    /// Page-unit reach added by post-effects (`layer-blur`) outside the finished layer picture.
+    pub fn post_pad(&self) -> f64 {
+        let mut pad = 0.0f64;
+        for pe in &self.post_effects {
+            match *pe {
+                PostEffect::LayerBlur { radius } if radius > 0.0 => {
+                    pad += f64::from(radius) * 2.25 + 6.0;
+                }
+                _ => {}
+            }
+        }
+        pad
+    }
+
+    /// True if this record contains ops or post-effects that may flush the active Vello scene
+    /// (so an enclosing `isolate` opacity scope must use the engine's offscreen target stack
+    /// instead of a Vello opacity layer).
     pub fn has_offscreen_pass(&self) -> bool {
-        self.ops
-            .iter()
-            .chain(&self.coarse)
-            .any(|op| matches!(op, Op::DropShadow { .. } | Op::InnerShadow { .. } | Op::Read { .. }))
+        !self.post_effects.is_empty()
+            || self
+                .ops
+                .iter()
+                .chain(&self.coarse)
+                .any(|op| matches!(op, Op::DropShadow { .. } | Op::InnerShadow { .. } | Op::Read { .. }))
     }
 
     /// The length of an entry's outline, at most (a glyph run's isn't known here: None).
@@ -514,6 +544,7 @@ impl Record {
             paths: Vec::new(),
             ops: vec![Op::Children],
             coarse: Vec::new(),
+            post_effects: Vec::new(),
             unsupported: 0,
         }
     }
@@ -983,11 +1014,13 @@ fn ops(
 
 pub fn decode(r: &mut Reader, limits: &Limits, minor: u16) -> Result<Record> {
     let flags = r.u32()?;
-    let allowed_flags = if minor >= 1 {
-        KNOWN_FLAGS
-    } else {
-        KNOWN_FLAGS & !FLAG_PROVISIONAL
-    };
+    let mut allowed_flags = KNOWN_FLAGS;
+    if minor < 1 {
+        allowed_flags &= !FLAG_PROVISIONAL;
+    }
+    if minor < 4 {
+        allowed_flags &= !FLAG_POST;
+    }
     if flags & !allowed_flags != 0 {
         return Err(EngineError::malformed(format!(
             "record flags {flags:#x} not allowed in display list 1.{minor}"
@@ -1067,6 +1100,20 @@ pub fn decode(r: &mut Reader, limits: &Limits, minor: u16) -> Result<Record> {
     }
     let ops_list = ops(r, limits, paths.len(), true, &mut derived, minor)?;
     let coarse = ops(r, limits, paths.len(), false, &mut derived, minor)?;
+    let mut post_effects = Vec::new();
+    if flags & FLAG_POST != 0 {
+        let count = r.count(limits.record_items, "post effects", 4)?;
+        post_effects.reserve(count);
+        for _ in 0..count {
+            match r.u32()? {
+                1 => {
+                    let radius = r.f32_nonneg()?;
+                    post_effects.push(PostEffect::LayerBlur { radius });
+                }
+                k => return Err(EngineError::malformed(format!("unknown post effect kind {k}"))),
+            }
+        }
+    }
     let record = Record {
         flags,
         opacity,
@@ -1077,6 +1124,7 @@ pub fn decode(r: &mut Reader, limits: &Limits, minor: u16) -> Result<Record> {
         paths,
         ops: ops_list,
         coarse,
+        post_effects,
         unsupported: unsupported | derived,
     };
     if !record.coarse.is_empty() && record.ops.iter().any(|op| matches!(op, Op::Children)) {

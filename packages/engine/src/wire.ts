@@ -28,8 +28,10 @@ export const COMMAND = {
 /**
  * Record flags. `provisional`: sent ahead of its real drawing (text not shaped yet while a page
  * opens), drawn as its coarse ops at every scale and never exact; sent again whole soon after.
+ * Bit 16 is reserved for phase 3B's `context` flag.
  */
-export const FLAG = { hidden: 1, isolate: 2, group: 4, provisional: 8 } as const;
+export const FLAG = { hidden: 1, isolate: 2, group: 4, provisional: 8, post: 32 } as const;
+export const POST = { layerBlur: 1 } as const;
 
 export const PATH = {
   path: 1,
@@ -265,6 +267,8 @@ export type WireOp =
       readonly blend: number;
     };
 
+export type WirePostEffect = { readonly kind: "layerBlur"; readonly radius: number };
+
 export interface WireRecord {
   readonly flags: number;
   readonly opacity: number;
@@ -280,6 +284,7 @@ export interface WireRecord {
   readonly paths: readonly PathEntry[];
   readonly ops: readonly WireOp[];
   readonly coarse: readonly WireOp[];
+  readonly postEffects?: readonly WirePostEffect[];
 }
 
 const PAINT_KIND = PAINT;
@@ -415,6 +420,18 @@ export class ListWriter {
       for (const p of r.paths) this.#entry(p);
       this.#ops(r.ops);
       this.#ops(r.coarse);
+      if (r.flags & FLAG.post) {
+        const post = r.postEffects ?? [];
+        this.u32(post.length);
+        for (const pe of post) {
+          switch (pe.kind) {
+            case "layerBlur":
+              this.u32(POST.layerBlur);
+              this.f32(Math.max(0, pe.radius));
+              break;
+          }
+        }
+      }
     });
   }
 

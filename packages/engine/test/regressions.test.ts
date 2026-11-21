@@ -6,6 +6,7 @@ import {
   type EngineBuild,
   type EngineModule,
   ErrorCode,
+  FLAG,
   ListWriter,
   loadEngineSync,
   RenderEngine,
@@ -292,58 +293,135 @@ describe.skipIf(!built())("Recovery and stream lifetimes", () => {
     extreme.dispose();
   });
 
-  it("matches whole-frame and 73-row banded CPU renders bit-for-bit across shadow seams", async () => {
+  it("handles large-radius layer blurs in the 25 MiB Worker without trapping Wasm", async () => {
+    const module = await loadNodeEngine("worker", { fresh: true });
+    const w = 4096;
+    const h = 1800;
+    const cam = { zoom: 1, x: 0, y: 0, dpr: 1 };
+    for (const radius of [128, 256, 384, 700, 10000]) {
+      const e = new RenderEngine(module);
+      const list = new ListWriter(0xffffffff, 1);
+      list.reset();
+      list.set(1, ROOT, {
+        flags: FLAG.post,
+        opacity: 1,
+        transform: [1, 0, 0, 1, 0, 0],
+        width: w,
+        height: h,
+        coarseBelow: 0,
+        reach: 0,
+        unsupported: 0,
+        paths: [{ kind: "rect", w, h, radii: [0, 0, 0, 0], smoothing: 0 }],
+        ops: [
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: { kind: "solid", color: [1, 0.3, 0.2, 1] },
+          },
+        ],
+        coarse: [],
+        postEffects: [{ kind: "layerBlur", radius }],
+      });
+      expect(e.apply(list.finish()).ok).toBe(true);
+      const started = e.renderPngStream(w, h, cam, clear);
+      if (radius >= 700) {
+        expect(started).toMatchObject({ ok: false, code: ErrorCode.Limit });
+      } else if (started.ok) {
+        const reader = started.value.getReader();
+        let chunks = 0;
+        try {
+          for (let i = 0; i < 6; i++) {
+            const r = await reader.read();
+            if (r.done) break;
+            chunks++;
+          }
+        } finally {
+          await reader.cancel().catch(() => {});
+        }
+        expect(chunks).toBeGreaterThan(0);
+      } else {
+        expect(started.code).toBe(ErrorCode.Limit);
+      }
+      expect(e.dead).toBe(false);
+      expect(module.trapped).not.toBe(true);
+      e.dispose();
+    }
+  });
+
+  it("matches whole-frame and 73-row banded CPU renders bit-for-bit across shadow and layer-blur seams", async () => {
     const module = await loadNodeEngine("worker");
-    const e = new RenderEngine(module);
     const w = 1157;
     const h = 305;
-    const list = new ListWriter(0xffffffff, 1);
-    list.reset();
-    list.set(1, ROOT, {
-      flags: 0,
-      opacity: 1,
-      transform: [1.19, 0.22, -0.26, 0.91, 650.37, 79.53],
-      width: 312,
-      height: 108,
-      coarseBelow: 0,
-      reach: 0,
-      unsupported: 0,
-      paths: [{ kind: "rect", w: 312, h: 108, radii: [9, 9, 9, 9], smoothing: 0 }],
-      ops: [
-        {
-          op: "dropShadow",
-          paths: [0],
-          evenOdd: false,
-          dx: 19,
-          dy: -11,
-          blur: 89,
-          color: [0, 0, 0, 0.78],
-          blend: 0,
-        },
-        { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [1, 0.3, 0.2, 1] } },
-      ],
-      coarse: [],
-    });
-    expect(e.apply(list.finish()).ok).toBe(true);
     const cam = { zoom: 1, x: 13.42, y: -7.57, dpr: 1.35 };
-    const full = e.renderCpu(w, h, cam, clear, false);
-    if (!full.ok) throw new Error(full.message);
-    let diffs = 0;
-    const banded = e.renderBands(
-      w,
-      h,
-      cam,
-      clear,
-      (y0, _rows, part) => {
-        for (let i = 0; i < part.length; i++) {
-          if (part[i] !== full.value.pixels[y0 * w * 4 + i]) diffs++;
-        }
-      },
-      73,
-    );
-    expect(banded.ok).toBe(true);
-    expect(diffs).toBe(0);
-    e.dispose();
+    const cases: Array<{ name: string; shadow?: number; blurs?: number[] }> = [
+      { name: "shadow only", shadow: 35 },
+      { name: "blur only odd", blurs: [24] },
+      { name: "blur plus shadow", blurs: [32], shadow: 68 },
+      { name: "two successive blurs", blurs: [17, 43] },
+      { name: "large blur plus shadow", blurs: [280], shadow: 89 },
+    ];
+    for (const c of cases) {
+      const e = new RenderEngine(module);
+      const list = new ListWriter(0xffffffff, 1);
+      list.reset();
+      list.set(1, ROOT, {
+        flags: c.blurs ? FLAG.post : 0,
+        opacity: 1,
+        transform: [1.19, 0.22, -0.26, 0.91, 650.37, 79.53],
+        width: 312,
+        height: 108,
+        coarseBelow: 0,
+        reach: 0,
+        unsupported: 0,
+        paths: [{ kind: "rect", w: 312, h: 108, radii: [9, 9, 9, 9], smoothing: 0 }],
+        ops: [
+          ...(c.shadow
+            ? [
+                {
+                  op: "dropShadow" as const,
+                  paths: [0],
+                  evenOdd: false,
+                  dx: 19,
+                  dy: -11,
+                  blur: c.shadow,
+                  color: [0, 0, 0, 0.78] as const,
+                  blend: 0,
+                },
+              ]
+            : []),
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: { kind: "solid", color: [1, 0.3, 0.2, 1] },
+          },
+        ],
+        coarse: [],
+        ...(c.blurs
+          ? { postEffects: c.blurs.map((radius) => ({ kind: "layerBlur" as const, radius })) }
+          : {}),
+      });
+      expect(e.apply(list.finish()).ok, c.name).toBe(true);
+      const full = e.renderCpu(w, h, cam, clear, false);
+      if (!full.ok) throw new Error(`${c.name}: ${full.message}`);
+      let diffs = 0;
+      const banded = e.renderBands(
+        w,
+        h,
+        cam,
+        clear,
+        (y0, _rows, part) => {
+          for (let i = 0; i < part.length; i++) {
+            if (part[i] !== full.value.pixels[y0 * w * 4 + i]) diffs++;
+          }
+        },
+        73,
+      );
+      expect(banded.ok, c.name).toBe(true);
+      expect(diffs, c.name).toBe(0);
+      e.dispose();
+    }
   });
 });
 
@@ -401,6 +479,162 @@ describe.skipIf(!built())(
     });
   },
 );
+
+describe.skipIf(!built())("Direct Worker renderCpu memory bounds (PR #239)", () => {
+  it("renders or refuses cleanly without trapping Wasm across 25 MiB, 16 MiB, tight budgets, and raw glue", async () => {
+    const w = 848;
+    const h = 1202;
+    const cam = { zoom: 1, x: 0, y: 0, dpr: 1 };
+    const bg = [0, 0, 0, 0] as const;
+    const list = new ListWriter(0xffffffff, 1);
+    list.reset();
+    // Build a multi-shadow + multi-layer-blur frame matching the Drawer fixture's 848x1202 footprint.
+    const order: number[] = [];
+    list.set(1, ROOT, {
+      flags: 0,
+      opacity: 1,
+      transform: [1, 0, 0, 1, 0, 0],
+      width: w,
+      height: h,
+      coarseBelow: 0,
+      reach: 0,
+      unsupported: 0,
+      paths: [{ kind: "rect", w, h, radii: [16, 16, 16, 16], smoothing: 0 }],
+      ops: [
+        {
+          op: "fill",
+          path: 0,
+          evenOdd: false,
+          paint: { kind: "solid", color: [0.96, 0.96, 0.97, 1] },
+        },
+      ],
+      coarse: [],
+    });
+    order.push(1);
+    for (let i = 0; i < 16; i++) {
+      const id = 10 + i;
+      const y = 32 + i * 70;
+      list.set(id, ROOT, {
+        flags: i % 3 === 0 ? FLAG.post : 0,
+        opacity: 1,
+        transform: [1, 0, 0, 1, 24, y],
+        width: 800,
+        height: 54,
+        coarseBelow: 0,
+        reach: 0,
+        unsupported: 0,
+        paths: [{ kind: "rect", w: 800, h: 54, radii: [10, 10, 10, 10], smoothing: 0 }],
+        ops: [
+          {
+            op: "dropShadow",
+            paths: [0],
+            evenOdd: false,
+            dx: 0,
+            dy: 6,
+            blur: 24,
+            color: [0, 0, 0, 0.35],
+            blend: 0,
+          },
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: { kind: "solid", color: [0.2 + (i % 4) * 0.15, 0.45, 0.78, 1] },
+          },
+        ],
+        coarse: [],
+        ...(i % 3 === 0 ? { postEffects: [{ kind: "layerBlur", radius: 22 }] } : {}),
+      });
+      order.push(id);
+    }
+    list.order(ROOT, order);
+    const wire = list.finish();
+
+    // Browser uncapped reference pixels.
+    let refPixels: Uint8Array | null = null;
+    if (built("browser")) {
+      const bMod = await loadNodeEngine("browser", { fresh: true });
+      const bEng = new RenderEngine(bMod);
+      expect(bEng.apply(wire).ok).toBe(true);
+      const bRes = bEng.renderCpu(w, h, cam, bg, false);
+      if (!bRes.ok) throw new Error(bRes.message);
+      refPixels = bRes.value.pixels;
+      bEng.dispose();
+    }
+
+    // Fresh Worker instances at 25 MiB and 16 MiB must match the reference to one color level or refuse with Limit.
+    for (const budget of [25 << 20, 16 << 20] as const) {
+      const wMod = await loadNodeEngine("worker", { fresh: true });
+      const e = new RenderEngine(wMod, { memoryBytes: budget });
+      expect(e.apply(wire).ok).toBe(true);
+      const r = e.renderCpu(w, h, cam, bg, false);
+      expect(e.dead, `budget=${budget}`).toBe(false);
+      expect(wMod.trapped, `budget=${budget}`).not.toBe(true);
+      if (r.ok) {
+        expect(r.value.pixels.length).toBe(w * h * 4);
+        if (refPixels) {
+          let differences = 0;
+          let max = 0;
+          let first = -1;
+          for (const [i, value] of r.value.pixels.entries()) {
+            const delta = Math.abs(value - (refPixels[i] as number));
+            if (delta > 0) {
+              if (first < 0) first = i;
+              differences++;
+              max = Math.max(max, delta);
+            }
+          }
+          expect(
+            max,
+            `budget=${budget}, ${differences} differences, first=(${(first >> 2) % w},${Math.floor((first >> 2) / w)})`,
+          ).toBeLessThanOrEqual(1);
+        }
+      } else {
+        expect(r.code).toBe(ErrorCode.Limit);
+      }
+      e.dispose();
+    }
+
+    // Tight budget smaller than the framebuffer alone refuses cleanly with Limit before allocating.
+    {
+      const wMod = await loadNodeEngine("worker", { fresh: true });
+      const e = new RenderEngine(wMod, { memoryBytes: 4 << 20 });
+      expect(e.apply(wire).ok).toBe(true);
+      const r = e.renderCpu(w, h, cam, bg, false);
+      expect(r).toMatchObject({ ok: false, code: ErrorCode.Limit });
+      expect(e.dead).toBe(false);
+      expect(wMod.trapped).not.toBe(true);
+      e.dispose();
+    }
+
+    // Raw worker glue (without RenderEngine facade) also enforces the 25 MiB cap and never traps.
+    {
+      const wMod = await loadNodeEngine("worker", { fresh: true });
+      const raw = new wMod.glue.Engine(0, 0);
+      const applied = raw.apply(wire);
+      expect(applied.ok, applied.message).toBe(true);
+      applied.free();
+      const rendered = raw.renderCpu(
+        w,
+        h,
+        cam.zoom,
+        cam.x,
+        cam.y,
+        cam.dpr,
+        new Float32Array(bg),
+        false,
+      );
+      if (rendered.ok) {
+        const px = raw.pixels();
+        expect(px.length).toBe(w * h * 4);
+      } else {
+        expect(rendered.code).toBe(ErrorCode.Limit);
+      }
+      rendered.free();
+      raw.free();
+    }
+  });
+});
 
 describe.skipIf(!built())("Engines sharing a module (re-check of PR 216)", () => {
   const fresh = (revision: number) => {

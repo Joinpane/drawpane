@@ -433,11 +433,10 @@ fn diamond_export_and_cpu_render_track_temporary_paint_memory() {
         matches!(admission, Err(ref e) if e.code == drawpane_engine::error::ErrorCode::Limit),
         "expected Limit for 10x 1 MiB diamond rasters under 8 MiB budget: {admission:?}"
     );
-    let rendered = engine.render_cpu(1024, 256, camera, [1.0, 1.0, 1.0, 1.0], false);
-    assert!(
-        matches!(rendered, Err(ref e) if e.code == drawpane_engine::error::ErrorCode::Limit),
-        "expected CPU runtime Limit before allocating > 8 MiB of diamond rasters: {rendered:?}"
-    );
+    let err = engine
+        .render_band(1024, 256, camera, [1.0; 4], 0, 256)
+        .expect_err("one 256-row band must refuse ten full-sized diamond rasters within 8 MiB");
+    assert_eq!(err.code, drawpane_engine::error::ErrorCode::Limit);
 }
 
 #[test]

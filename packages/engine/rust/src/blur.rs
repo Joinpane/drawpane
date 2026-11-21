@@ -1141,6 +1141,39 @@ pub fn try_blur_cpu(
     Ok(())
 }
 
+/// Upper bound on the transient CPU buffers for an uncached blur, apart from source and
+/// destination pixels. The dirty rect can only reduce this bound.
+pub(crate) fn cpu_work_bytes(src: (u32, u32), dst: (u32, u32), sigma: f32) -> usize {
+    let radius = kernel_radius(sigma) as u32;
+    if radius == 0 {
+        return 0;
+    }
+    let (level, level_sigma) = choose_level(sigma, max_pyramid_level(src.0, src.1));
+    let (columns, rows, pyramid_bytes, weights) = if level == 0 {
+        (dst.0, src.1.min(dst.1.saturating_add(2 * radius)), 0, radius)
+    } else {
+        let step = 1u32 << level;
+        let w = dst.0.div_ceil(step).saturating_add(2);
+        let h = dst.1.div_ceil(step).saturating_add(2);
+        let (_, level_h) = level_logical_size(src.0, src.1, level);
+        let level_radius = kernel_radius(level_sigma) as u32;
+        let scratch_rows = level_h
+            .saturating_add(2 * PYRAMID_APRON as u32)
+            .min(h.saturating_add(2 * level_radius));
+        (
+            w,
+            h.saturating_add(scratch_rows),
+            cpu_pyramid_levels_bytes(src.0, src.1, 0, level),
+            level_radius,
+        )
+    };
+    (columns as usize)
+        .saturating_mul(rows as usize)
+        .saturating_mul(std::mem::size_of::<[f32; 4]>())
+        .saturating_add(pyramid_bytes)
+        .saturating_add(((2 * weights + 1) as usize) * (std::mem::size_of::<f64>() + std::mem::size_of::<f32>()))
+}
+
 /// Stateless production CPU Gaussian blur: direct for `sigma <= DIRECT_SIGMA_MAX`, pyramid above.
 /// Clamps extreme sigmas on non-constant sources to `MAX_BLUR_SIGMA` so kernel radius never
 /// exceeds `MAX_KERNEL_RADIUS`; callers needing an explicit `ErrorCode::Limit` refusal should use

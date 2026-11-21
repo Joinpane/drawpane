@@ -17,7 +17,6 @@ gpu-common = [
   "dep:wgpu",
   "dep:wasm-bindgen-futures",
   "dep:web-sys",
-  "dep:js-sys",
   "dep:futures-channel",
 ]
 # The primary browser build: vello_gpu on wgpu's WebGPU backend. It always carries the CPU backend
@@ -38,7 +37,7 @@ wgpu = { version = "30.0.2", default-features = false, features = ["std", "wgsl"
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 wasm-bindgen = "=0.2.130"
 wasm-bindgen-futures = { version = "0.4", optional = true }
-js-sys = { version = "0.3", optional = true }
+js-sys = "0.3"
 futures-channel = { version = "0.3", optional = true }
 web-sys = { version = "0.3", optional = true, features = ["Document", "Element", "Event", "EventTarget", "HtmlCanvasElement", "OffscreenCanvas", "console", "Window", "Performance"] }
 

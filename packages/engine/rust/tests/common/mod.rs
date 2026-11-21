@@ -206,6 +206,11 @@ pub enum Op {
 }
 
 #[derive(Clone, Debug)]
+pub enum Post {
+    LayerBlur(f32),
+}
+
+#[derive(Clone, Debug)]
 pub struct Rec {
     pub flags: u32,
     pub opacity: f32,
@@ -216,6 +221,7 @@ pub struct Rec {
     pub paths: Vec<Entry>,
     pub ops: Vec<Op>,
     pub coarse: Vec<Op>,
+    pub post: Vec<Post>,
     /// The blend mode written on every paint (0 normal), and every rect entry's smoothing.
     pub blend: u32,
     pub smoothing: f32,
@@ -233,6 +239,7 @@ impl Rec {
             paths: vec![],
             ops: vec![],
             coarse: vec![],
+            post: vec![],
             blend: 0,
             smoothing: 0.0,
         }
@@ -383,7 +390,8 @@ impl Rec {
         }
     }
     pub fn write(&self, w: &mut W) {
-        w.u32(self.flags);
+        let flags = self.flags | if self.post.is_empty() { 0 } else { 32 };
+        w.u32(flags);
         w.f32(self.opacity);
         w.m(self.transform);
         w.f32(self.size[0]);
@@ -448,6 +456,17 @@ impl Rec {
         }
         Self::ops(w, &self.ops, self.blend);
         Self::ops(w, &self.coarse, self.blend);
+        if !self.post.is_empty() {
+            w.u32(self.post.len() as u32);
+            for pe in &self.post {
+                match pe {
+                    Post::LayerBlur(radius) => {
+                        w.u32(1);
+                        w.f32(*radius);
+                    }
+                }
+            }
+        }
     }
 }
 

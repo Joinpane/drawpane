@@ -661,10 +661,16 @@ fn drag_run(s: u64, counts: &mut DragCounts) {
             .render_cpu_tiled(W, H, c, BG, TiledOptions { max_jobs: 1, ..rest })
             .expect("rest frame");
         if stats.exact {
-            assert!(
-                diff(px, &fresh(&model, revision, 0, c)).is_none(),
-                "seed {s}: rest frame differs"
-            );
+            let want = fresh(&model, revision, 0, c);
+            if let Some((x, y)) = diff(px, &want) {
+                let i = ((y * W + x) * 4) as usize;
+                let (worst, over) = spread(px, &want);
+                panic!(
+                    "seed {s}: rest frame differs at ({x}, {y}): got {:?} want {:?} (worst {worst}, over {over})",
+                    &px[i..i + 4],
+                    &want[i..i + 4],
+                );
+            }
             exact = true;
             break;
         }

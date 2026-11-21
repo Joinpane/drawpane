@@ -421,11 +421,9 @@ impl Engine {
         let bg = rgba(&background);
         match self
             .core
-            .render_cpu(width, height, Camera { zoom, x, y, dpr }, bg, detail)
+            .render_cpu_into(&mut self.pixels, width, height, Camera { zoom, x, y, dpr }, bg, detail)
         {
-            Ok((px, stats)) => {
-                self.pixels.clear();
-                self.pixels.extend_from_slice(px);
+            Ok(stats) => {
                 engine::unpremultiply(&mut self.pixels);
                 Outcome::stats(stats)
             }
@@ -500,6 +498,15 @@ impl Engine {
     }
 
     /// The last CPU frame or band, straight RGBA8.
+    /// Copies directly out of Wasm memory into a JS `Uint8Array` without cloning a second full
+    /// framebuffer inside Wasm linear memory.
+    #[cfg(target_arch = "wasm32")]
+    pub fn pixels(&self) -> js_sys::Uint8Array {
+        js_sys::Uint8Array::from(self.pixels.as_slice())
+    }
+
+    /// The last CPU frame or band, straight RGBA8.
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn pixels(&self) -> Vec<u8> {
         self.pixels.clone()
     }
