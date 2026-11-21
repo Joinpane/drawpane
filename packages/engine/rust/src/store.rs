@@ -1430,11 +1430,17 @@ impl Store {
                     .content_bounds(&|g| self.glyphs.bounds(g))
                     .map_or(box_rect, |cb| cb.union(box_rect));
                 let device = view * self.world(id);
+                let paint = device.transform_rect_bbox(b);
+                // A reader's result passes through its own and enclosing layer effects.
+                // Include that expanded output in damage and in later reader dependencies.
+                let paint = self
+                    .dirty_extent(id)
+                    .map_or(paint, |extent| paint.union(view.transform_rect_bbox(extent)));
                 readers.push(Reader {
                     order,
                     end,
                     reads: device.transform_rect_bbox(b.inflate(halo, halo)).inflate(slop, slop),
-                    paints: device.transform_rect_bbox(b).inflate(slop, slop),
+                    paints: paint.inflate(slop, slop),
                     // Its own subtree's changes are above it, unless it reads (any of its reads)
                     // after its children are drawn.
                     after_children: r

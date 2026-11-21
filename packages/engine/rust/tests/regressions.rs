@@ -1315,3 +1315,41 @@ fn wire_minor_version_gates_flags_and_reader_opcodes() {
     let mut e = Engine::new(Limits::default());
     assert_eq!(e.apply(&bad_flag_w.finish()).unwrap_err().code, ErrorCode::Malformed);
 }
+#[test]
+fn backdrop_edit_invalidates_the_blurred_output_of_a_glass_reader() {
+    let mut engine = Engine::new(Limits::default());
+    let mut list = W::new(ANY, 1);
+    list.reset();
+    let mut input = positioned_rect(31.0, 12.0, 4.0, 36.0, Some([0.2, 0.3, 0.4, 1.0]));
+    list.set(1, 0, &input);
+    let mut glass = tuned_glass(24.0, 12.0, 20.0, 36.0, 0.0, 0.0, 0.0);
+    glass.layer_blend = 1; // Multiply.
+    glass.post.push(common::Post::LayerBlur(12.0));
+    list.set(2, 0, &glass);
+    engine.apply(&list.finish()).unwrap();
+    let view = camera();
+    let before = engine.render_cpu(64, 64, view, [1.0; 4], false).unwrap().0.to_vec();
+
+    input.ops[0] = Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.8, 0.7, 0.6, 1.0]),
+    };
+    let mut patch = W::new(1, 2);
+    patch.set(1, 0, &input);
+    let changes = engine.apply(&patch.finish()).unwrap().changes;
+    let after = engine.render_cpu(64, 64, view, [1.0; 4], false).unwrap().0;
+    let x = 21;
+    let y = 32;
+    let index = (y * 64 + x) * 4;
+    assert_ne!(
+        after[index..index + 4],
+        before[index..index + 4],
+        "the post blur spreads the changed lens"
+    );
+    let damage = engine.store.dirty(&changes, view.view(), 1.5);
+    assert!(
+        damage.iter().any(|r| r.contains((x as f64 + 0.5, y as f64 + 0.5))),
+        "{damage:?}"
+    );
+}
