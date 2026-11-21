@@ -464,6 +464,10 @@ float boxDistance(vec2 p) {
 void main() {
   vec2 p = gl_FragCoord.xy - origin;
   float a = canvasAt(mask, p).a;
+  float boxEdge = box == 1 ? boxDistance(p) : 0.0;
+  // The destination clips reduced boxes using the original path. Keep a texel
+  // past its edge for interpolation so upsampling retains the bright rim.
+  if (box == 1 && tuneA.w < 1.0) a = boxEdge >= -1.5 ? 1.0 : 0.0;
   if (a <= 0.0) { color = vec4(0.0); return; }
   // The rim: its slope, in full pixels, from the smooth height field.
   vec3 hs = texture(height, (p / k) / heightTexSize).rgb;
@@ -473,7 +477,7 @@ void main() {
   // rim's height is the Gaussian's cumulative distribution of it, so its inverse gives it back
   // (to a fraction of a pixel), though it reads short at a convex corner.
   float d = box == 1
-    ? max(0.0, boxDistance(p))
+    ? max(0.0, boxEdge)
     : max(0.0, 1.4142136 * sigma * erfinv(clamp(2.0 * hs.r - 1.0, -0.99999, 0.99999)));
   // 1 at a straight edge, falling smoothly to 0 in the flat middle: for a box, the blurred
   // edge's slope at that distance (the same along a side, and square at a square corner).
@@ -483,7 +487,7 @@ void main() {
   float rim = pow(slope, tuneA.x);
   // How much of the bend this pixel gets: a box's measured falloff from its exact edge (as
   // Figma's: the cube of the way in), else its slope's share.
-  float fall = box == 1 ? pow(clamp(1.0 - d / max(depth, 1.0), 0.0, 1.0), tuneA.y) : rim;
+  float fall = box == 1 ? pow(clamp(1.0 - d / max(depth, tuneA.w), 0.0, 1.0), tuneA.y) : rim;
 
   // Splay pulls each ray along its edge toward the edge's middle, as far as it is from it.
   vec2 along = vec2(-inward.y, inward.x);
@@ -503,9 +507,9 @@ void main() {
   // rim, darker facing the light and lighter away, fading in toward the middle.
   vec2 l = vec2(light.x, -light.y);
   float facing = dot(-inward, l);
-  float hair = exp(-max(0.0, d - 0.5) / max(tuneA.z, 1e-3));
+  float hair = exp(-max(0.0, d - 0.5 * tuneA.w) / max(tuneA.z, 1e-3));
   float edge = max(tuneB.x * (facing - tuneB.y), 0.0) + max(tuneB.z * (-facing - tuneB.w), 0.0);
-  float shading = intensity * tuneC.x * facing * max(0.0, 1.0 - d / max(tuneC.y * depth, 1.0));
+  float shading = intensity * tuneC.x * facing * max(0.0, 1.0 - d / max(tuneC.y * depth, tuneA.w));
   seen = shading > 0.0 ? mix(seen, vec3(0.0), shading) : mix(seen, vec3(seenAlpha), -shading);
   seen = mix(seen, vec3(seenAlpha), clamp(intensity * edge * hair, 0.0, 1.0));
   color = vec4(seen, seenAlpha) * a;
@@ -659,6 +663,11 @@ export interface GlassKey {
   readonly generation: number;
 }
 
+// The backdrop, mask, mip chain and drawing buffer all use this raster.
+const MAX_GLASS_SIDE = 4096;
+const MAX_GLASS_PIXELS = 4 * 1024 * 1024;
+const MAX_RIM_SIGMA = (64 * 8) / 3;
+
 export class GlassPainter {
   #gl: Gl | null | undefined;
   /** By layer, most recently drawn last. */
@@ -668,6 +677,7 @@ export class GlassPainter {
   #keptPixels = 0;
   #backdrop: AnyCanvas | null = null;
   #shape: AnyCanvas | null = null;
+  #softwareFrost: AnyCanvas | null = null;
 
   /** WebGL2 with half-float render targets, made on first use; null where there's none. */
   #webgl(): Gl | null {
@@ -747,7 +757,9 @@ export class GlassPainter {
       source,
     } = options;
     const t = ctx.getTransform();
-    const p = glassParams(glass, scale, glassTuning(), inradius, corners ? "box" : kind);
+    const tune = glassTuning();
+    const shapeKind = corners ? "box" : kind;
+    const full = glassParams(glass, scale, tune, inradius, shapeKind);
     // The layer's reach on the device, with the margin rays bend into, within the canvas.
     const xs: number[] = [];
     const ys: number[] = [];
@@ -762,29 +774,42 @@ export class GlassPainter {
     }
     // Past the canvas's edges too, as far as the rim's shape and a ray's reach count for what's
     // on it: cut at the edge, the shape would grow a rim along it, and the backdrop fade there.
-    const pad = p.margin + Math.ceil(3 * p.sigma);
-    const x0 = Math.max(-pad, Math.floor(Math.min(...xs)) - p.margin);
-    const y0 = Math.max(-pad, Math.floor(Math.min(...ys)) - p.margin);
-    const x1 = Math.min(ctx.canvas.width + pad, Math.ceil(Math.max(...xs)) + p.margin);
-    const y1 = Math.min(ctx.canvas.height + pad, Math.ceil(Math.max(...ys)) + p.margin);
-    const rw = x1 - x0;
-    const rh = y1 - y0;
-    if (rw <= 0 || rh <= 0 || rw * rh > 24_000_000) return;
+    const pad = full.margin + Math.ceil(3 * full.sigma);
+    const x0 = Math.max(-pad, Math.floor(Math.min(...xs)) - full.margin);
+    const y0 = Math.max(-pad, Math.floor(Math.min(...ys)) - full.margin);
+    const x1 = Math.min(ctx.canvas.width + pad, Math.ceil(Math.max(...xs)) + full.margin);
+    const y1 = Math.min(ctx.canvas.height + pad, Math.ceil(Math.max(...ys)) + full.margin);
+    const width = x1 - x0;
+    const height = y1 - y0;
+    if (width <= 0 || height <= 0) return;
     if (x1 <= 0 || y1 <= 0 || x0 >= ctx.canvas.width || y0 >= ctx.canvas.height) return;
+    // Keep the halo in device space. When it or the viewport is too large to raster
+    // at device resolution, scale the whole sampling region and the lens together.
+    const gl = this.#webgl();
+    const side = Math.min(gl?.maxTexture ?? MAX_GLASS_SIDE, MAX_GLASS_SIDE);
+    const raster = Math.min(
+      1,
+      side / Math.max(width, height),
+      Math.sqrt(MAX_GLASS_PIXELS / (width * height)),
+      MAX_RIM_SIGMA / full.sigma,
+    );
+    const rw = Math.ceil(width * raster);
+    const rh = Math.ceil(height * raster);
+    const p = raster === 1 ? full : glassParams(glass, scale * raster, tune, inradius, shapeKind);
     // The layer's centre, in the region's pixels with y up (as the shader works).
     const centre = {
-      x: (Math.min(...xs) + Math.max(...xs)) / 2 - x0,
-      y: rh - ((Math.min(...ys) + Math.max(...ys)) / 2 - y0),
+      x: ((Math.min(...xs) + Math.max(...xs)) / 2 - x0) * raster,
+      y: rh - ((Math.min(...ys) + Math.max(...ys)) / 2 - y0) * raster,
     };
     // Its half width and height on the device: how far along an edge its middle is (for splay).
     const halfSize = {
-      x: (Math.max(...xs) - Math.min(...xs)) / 2,
-      y: (Math.max(...ys) - Math.min(...ys)) / 2,
+      x: ((Math.max(...xs) - Math.min(...xs)) / 2) * raster,
+      y: ((Math.max(...ys) - Math.min(...ys)) / 2) * raster,
     };
 
     // All it reads is on the canvas: what it draws can be kept, or what was kept is good.
-    const whole = x0 >= 0 && y0 >= 0 && x1 <= ctx.canvas.width && y1 <= ctx.canvas.height;
-    const tune = glassTuning();
+    const whole =
+      raster === 1 && x0 >= 0 && y0 >= 0 && x1 <= ctx.canvas.width && y1 <= ctx.canvas.height;
     const kept = key ? this.#drawn.get(key.id) : undefined;
     if (
       opaque &&
@@ -823,8 +848,8 @@ export class GlassPainter {
         backdrop,
         x0 - source.x,
         y0 - source.y,
-        rw,
-        rh,
+        width,
+        height,
         within && {
           ...within,
           x0: within.x0 - source.x,
@@ -832,8 +857,9 @@ export class GlassPainter {
           x1: within.x1 - source.x,
           y1: within.y1 - source.y,
         },
+        raster,
       );
-    else copyExtended(ctx.canvas, backdrop, x0, y0, rw, rh, within);
+    else copyExtended(ctx.canvas, backdrop, x0, y0, width, height, within, raster);
     // The shape, anti-aliased.
     this.#shape = scratch(this.#shape, rw, rh);
     const mask = this.#shape?.getContext("2d") as Ctx | null | undefined;
@@ -841,12 +867,18 @@ export class GlassPainter {
     mask.setTransform(1, 0, 0, 1, 0, 0);
     mask.globalCompositeOperation = "source-over";
     mask.clearRect(0, 0, rw, rh);
-    mask.setTransform(t.a, t.b, t.c, t.d, t.e - x0, t.f - y0);
+    mask.setTransform(
+      t.a * raster,
+      t.b * raster,
+      t.c * raster,
+      t.d * raster,
+      (t.e - x0) * raster,
+      (t.f - y0) * raster,
+    );
     mask.fillStyle = "#fff";
     if (typeof shape === "function") shape(mask);
     else mask.fill(shape);
 
-    const gl = this.#webgl();
     // A box: the map from the region's pixels (y up, as the shader works) to the box's units.
     let box: BoxUniforms | null = null;
     const det = t.a * t.d - t.b * t.c;
@@ -854,12 +886,22 @@ export class GlassPainter {
       const [ia, ib, ic, id] = [t.d / det, -t.b / det, -t.c / det, t.a / det];
       const ie = (t.c * t.f - t.d * t.e) / det;
       const jf = (t.b * t.e - t.a * t.f) / det;
-      const top = y0 + rh;
+      const top = y0 + rh / raster;
       // The corners as drawn: radii and smoothing cut to the space each has.
       const fitted = fitCorners(w, h, corners, smoothing);
       box = {
         // Column-major: device (x0 + px, y0 + rh − py) taken back through the layer's transform.
-        toBox: [ia, ib, 0, -ic, -id, 0, ia * x0 + ic * top + ie, ib * x0 + id * top + jf, 1],
+        toBox: [
+          ia / raster,
+          ib / raster,
+          0,
+          -ic / raster,
+          -id / raster,
+          0,
+          ia * x0 + ic * top + ie,
+          ib * x0 + id * top + jf,
+          1,
+        ],
         size: [w, h],
         radii: fitted.map((c) => c.radius) as unknown as readonly [number, number, number, number],
         smoothing: fitted.map((c) => c.smoothing) as unknown as readonly [
@@ -868,19 +910,28 @@ export class GlassPainter {
           number,
           number,
         ],
-        unitPx: Math.sqrt(Math.abs(det)),
+        unitPx: Math.sqrt(Math.abs(det)) * raster,
       };
     }
-    if (!gl || !fits(gl, rw, rh) || !this.#draw(gl, p, rw, rh, centre, halfSize, box)) {
-      this.#fallback(ctx, shape, p, x0, y0, rw, rh, opaque);
+    if (!gl || !fits(gl, rw, rh) || !this.#draw(gl, p, rw, rh, centre, halfSize, box, raster)) {
+      this.#fallback(ctx, shape, p, x0, y0, rw, rh, raster, opaque);
       return;
     }
+    // Upsampling must not spread the effect beyond the original outline.
+    const clip = raster < 1 && typeof shape !== "function";
+    if (clip) {
+      ctx.save();
+      ctx.clip(shape);
+      ctx.imageSmoothingEnabled = true;
+    }
     if (!opaque && ctx.globalCompositeOperation === "source-over") {
-      this.#replace(ctx, gl.canvas, x0, y0, rw, rh);
+      this.#replace(ctx, gl.canvas, x0, y0, rw, rh, raster, clip && box !== null);
+      if (clip) ctx.restore();
       if (key) this.#forget(key.id);
       return;
     }
-    this.#place(ctx, gl.canvas, x0, y0, rw, rh);
+    this.#place(ctx, gl.canvas, x0, y0, rw, rh, raster);
+    if (clip) ctx.restore();
     // Kept only once it's been drawn twice against the same content (a pan, not a drag, whose
     // every frame is new): copying it would cost every frame of a drag for nothing.
     const steady = key !== null && this.#drawnAt.get(key.id) === key.generation;
@@ -943,11 +994,11 @@ export class GlassPainter {
   }
 
   /** Draws the top left rw × rh of `picture` at (x0, y0) on the device. */
-  #place(ctx: Ctx, picture: AnyCanvas, x0: number, y0: number, rw: number, rh: number) {
+  #place(ctx: Ctx, picture: AnyCanvas, x0: number, y0: number, rw: number, rh: number, raster = 1) {
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.filter = "none";
-    ctx.drawImage(picture, 0, 0, rw, rh, x0, y0, rw, rh);
+    ctx.drawImage(picture, 0, 0, rw, rh, x0, y0, rw / raster, rh / raster);
     ctx.restore();
   }
 
@@ -956,15 +1007,29 @@ export class GlassPainter {
    * out by the mask, then the glass (premultiplied, already cut by the mask) added in. The
    * context's opacity applies to both, so a faded glass mixes with what was there.
    */
-  #replace(ctx: Ctx, picture: AnyCanvas, x0: number, y0: number, rw: number, rh: number) {
+  #replace(
+    ctx: Ctx,
+    picture: AnyCanvas,
+    x0: number,
+    y0: number,
+    rw: number,
+    rh: number,
+    raster: number,
+    boxClip: boolean,
+  ) {
     if (!this.#shape) return;
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.filter = "none";
     ctx.globalCompositeOperation = "destination-out";
-    ctx.drawImage(this.#shape, 0, 0, rw, rh, x0, y0, rw, rh);
+    if (boxClip) {
+      ctx.fillStyle = "#fff";
+      ctx.fillRect(x0, y0, rw / raster, rh / raster);
+    } else {
+      ctx.drawImage(this.#shape, 0, 0, rw, rh, x0, y0, rw / raster, rh / raster);
+    }
     ctx.globalCompositeOperation = "lighter";
-    ctx.drawImage(picture, 0, 0, rw, rh, x0, y0, rw, rh);
+    ctx.drawImage(picture, 0, 0, rw, rh, x0, y0, rw / raster, rh / raster);
     ctx.restore();
   }
 
@@ -1035,15 +1100,17 @@ export class GlassPainter {
     centre: { x: number; y: number },
     halfSize: { x: number; y: number },
     box: BoxUniforms | null,
+    raster: number,
   ): boolean {
     const { gl } = g;
     // The rim's height, at a resolution its blur can spare.
     const k = heightScale(p.sigma);
     const lw = Math.ceil(rw / k);
     const lh = Math.ceil(rh / k);
-    if (g.lowSize.w < lw || g.lowSize.h < lh) {
-      const w = Math.max(lw, g.lowSize.w);
-      const h = Math.max(lh, g.lowSize.h);
+    const oversized = Math.max(g.lowSize.w, lw) * Math.max(g.lowSize.h, lh) > 4 * lw * lh;
+    if (oversized || g.lowSize.w < lw || g.lowSize.h < lh) {
+      const w = oversized ? lw : Math.max(lw, g.lowSize.w);
+      const h = oversized ? lh : Math.max(lh, g.lowSize.h);
       for (const tex of g.low) {
         gl.bindTexture(gl.TEXTURE_2D, tex);
         gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA16F, w, h, 0, gl.RGBA, gl.HALF_FLOAT, null);
@@ -1148,12 +1215,14 @@ export class GlassPainter {
       gl.uniform1f(u("unitPx"), box.unitPx);
     }
     const tune = glassTuning();
-    gl.uniform4f(u("tuneA"), tune.profile, p.falloff, tune.hairline * p.unitPx, 0);
+    gl.uniform4f(u("tuneA"), tune.profile, p.falloff, tune.hairline * p.unitPx, raster);
     gl.uniform4f(u("tuneB"), tune.front, tune.frontStart, tune.back, tune.backStart);
     gl.uniform4f(u("tuneC"), tune.shade, tune.shadeReach, 0, 0);
     gl.uniform2f(u("halfSize"), halfSize.x, halfSize.y);
     draw(g);
-    return true;
+    // A large upload can fail even when its dimensions fit the reported limits.
+    // An incomplete sampler reads black. Keep it out of the destination.
+    return !gl.isContextLost() && (rw * rh < 1_000_000 || gl.getError() === gl.NO_ERROR);
   }
 
   /** No WebGL2: the frosted backdrop inside the shape, and a highlight along the lit rim. */
@@ -1165,9 +1234,10 @@ export class GlassPainter {
     y0: number,
     rw: number,
     rh: number,
+    raster: number,
     opaque: boolean,
   ) {
-    const backdrop = this.#backdrop;
+    let backdrop = this.#backdrop;
     if (!backdrop) return;
     const t = ctx.getTransform();
     ctx.save();
@@ -1186,7 +1256,7 @@ export class GlassPainter {
       mask.filter = "none";
       mask.globalCompositeOperation = "source-over";
       ctx.setTransform(1, 0, 0, 1, 0, 0);
-      ctx.drawImage(this.#shape, 0, 0, rw, rh, x0, y0, rw, rh);
+      ctx.drawImage(this.#shape, 0, 0, rw, rh, x0, y0, rw / raster, rh / raster);
       ctx.restore();
       return;
     }
@@ -1195,15 +1265,25 @@ export class GlassPainter {
     // What may be see-through behind is replaced, not drawn over (see `GlassPaintOptions.opaque`).
     if (!opaque && ctx.globalCompositeOperation === "source-over" && ctx.globalAlpha >= 1)
       ctx.globalCompositeOperation = "copy";
-    ctx.filter = p.frost > 0 ? `blur(${p.frost}px)` : "none";
-    ctx.drawImage(backdrop, 0, 0, rw, rh, x0, y0, rw, rh);
+    if (p.frost > 0 && raster < 1) {
+      this.#softwareFrost = scratch(this.#softwareFrost, rw, rh);
+      const frost = this.#softwareFrost?.getContext("2d") as Ctx | null | undefined;
+      if (this.#softwareFrost && frost) {
+        frost.globalCompositeOperation = "copy";
+        frost.filter = `blur(${p.frost}px)`;
+        frost.drawImage(backdrop, 0, 0);
+        backdrop = this.#softwareFrost;
+      }
+    }
+    ctx.filter = p.frost > 0 && raster === 1 ? `blur(${p.frost}px)` : "none";
+    ctx.drawImage(backdrop, 0, 0, rw, rh, x0, y0, rw / raster, rh / raster);
     ctx.filter = "none";
     ctx.globalCompositeOperation = "source-over";
     ctx.setTransform(t);
     if (p.intensity > 0 && p.depth > 0) {
       ctx.globalAlpha *= p.intensity * 0.6;
       ctx.strokeStyle = "#fff";
-      ctx.lineWidth = Math.max(1, p.depth / Math.max(1e-6, Math.hypot(t.a, t.b)) / 2);
+      ctx.lineWidth = Math.max(1, p.depth / Math.max(1e-6, Math.hypot(t.a, t.b) * raster) / 2);
       ctx.stroke(shape);
     }
     ctx.restore();
