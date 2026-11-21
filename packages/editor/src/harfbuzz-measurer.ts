@@ -51,6 +51,7 @@ import {
   shapingRun,
   type TextMeasurer,
 } from "./text";
+import { FALLBACK_FAMILY, fontRuns, lastResortWidth } from "./text-fallback";
 
 type HarfBuzz = typeof import("harfbuzzjs");
 type HbFont = InstanceType<HarfBuzz["Font"]>;
@@ -271,7 +272,7 @@ export class HarfBuzzMeasurer implements TextMeasurer {
   constructor(loadFile: FaceFileLoader, options: HarfBuzzMeasurerOptions = {}) {
     this.#loadFile = loadFile;
     this.#loadHarfBuzz = options.harfBuzz ?? (() => import("harfbuzzjs"));
-    this.fallbackFamily = options.fallbackFamily ?? "Instrument Sans";
+    this.fallbackFamily = options.fallbackFamily ?? FALLBACK_FAMILY;
     const bytesOnly: FontBytesLoader = async (face) => {
       const file = await loadFile(face);
       return file === null || file instanceof ArrayBuffer ? file : file.bytes;
@@ -441,9 +442,10 @@ export class HarfBuzzMeasurer implements TextMeasurer {
 
   /** The font's families, then the fallback family. */
   #families(parsed: ParsedFont): readonly string[] {
-    return parsed.families.includes(this.fallbackFamily)
-      ? parsed.families
-      : [...parsed.families, this.fallbackFamily];
+    const [first, ...others] = parsed.families;
+    return [
+      ...new Set([...(first ? [first] : []), MISSING_GLYPH_FAMILY, ...others, this.fallbackFamily]),
+    ];
   }
 
   /** The font's families as faces, then the fallback family; null where one isn't ready. */
@@ -460,11 +462,11 @@ export class HarfBuzzMeasurer implements TextMeasurer {
     if (chain[0] === null)
       this.#approximate({ ...parsed, family: parsed.families[0] ?? "" }, "face");
     let total = 0;
-    for (const piece of pieces(text, chain)) {
+    for (const piece of fontRuns(text, chain)) {
       const face = piece.face === -1 ? null : chain[piece.face];
       if (face) total += (advance(face, piece.text) / face.em) * parsed.size;
       else {
-        total += estimate(piece.text) * parsed.size;
+        total += lastResortWidth(piece.text) * parsed.size;
         this.#approximate({ ...parsed, family: parsed.families[0] ?? "" }, "glyphs");
       }
     }
@@ -595,13 +597,6 @@ function advance(face: CanvasFace, text: string): number {
   }
 }
 
-/** Strong right-to-left characters (as shaping.ts has them). */
-const RIGHT_TO_LEFT =
-  /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]|[\u{10800}-\u{10fff}]|[\u{1e800}-\u{1efff}]/u;
-/** Characters that belong with the one before: marks, joiners and variation selectors. */
-const ATTACHED = /\p{M}|\u200c|\u200d|[\ufe00-\ufe0f]|[\u{e0100}-\u{e01ef}]/u;
-const LETTER = /\p{L}/u;
-
 /** Which of a file's subsets draws each character: the last listing it, as CSS has it, or -1. */
 function subsetOf(
   subsets: ReadonlyArray<ReadonlyArray<readonly [number, number]>>,
@@ -617,61 +612,6 @@ function subsetOf(
     }
     return hit;
   };
-}
-
-/**
- * `text` split where the file drawing it changes (the first face in `chain`
- * that has each character, -1 for none, and its subset there) or its
- * direction does, as the browser splits text into runs before shaping each.
- */
-function pieces(
-  text: string,
-  chain: ReadonlyArray<CanvasFace | null>,
-): Array<{ text: string; face: number }> {
-  const out: Array<{ text: string; face: number; subset: number; rtl: boolean | null }> = [];
-  for (const char of text) {
-    const last = out[out.length - 1];
-    if (last && ATTACHED.test(char)) {
-      last.text += char;
-      continue;
-    }
-    const cp = char.codePointAt(0) as number;
-    let subset = -1;
-    const face = chain.findIndex((f) => {
-      if (!f?.unicodes.has(cp)) return false;
-      subset = f.subset(cp);
-      return subset !== -1;
-    });
-    const rtl = RIGHT_TO_LEFT.test(char) ? true : LETTER.test(char) ? false : null;
-    if (
-      last &&
-      last.face === face &&
-      last.subset === subset &&
-      (rtl === null || last.rtl === null || last.rtl === rtl)
-    ) {
-      last.text += char;
-      last.rtl ??= rtl;
-    } else out.push({ text: char, face, subset, rtl });
-  }
-  return out;
-}
-
-/** Wide characters: CJK, Hangul, kana, fullwidth forms and emoji, a full em in any font. */
-const WIDE =
-  /[\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\uf900-\ufaff\ufe30-\ufe4f\uff00-\uff60\uffe0-\uffe6]|[\u{1f000}-\u{1faff}]|[\u{20000}-\u{3fffd}]|\p{Extended_Pictographic}/u;
-
-/**
- * An estimate, in em, for characters none of the files has: wide ones a
- * full em, Arabic and Hebrew letters 0.4 (joined, they run narrow), the
- * rest 0.55.
- */
-function estimate(text: string): number {
-  let em = 0;
-  for (const char of text) {
-    if (ATTACHED.test(char)) continue;
-    em += WIDE.test(char) ? 1 : RIGHT_TO_LEFT.test(char) ? 0.4 : 0.55;
-  }
-  return em;
 }
 
 /**

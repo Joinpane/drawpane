@@ -294,13 +294,36 @@ describe.skipIf(!built("worker") && !process.env.CI)("the engine's tiles", () =>
       }
     });
 
-    it("never coming falls back to the canvas renderer, typed", () => {
+    it("finishes provisional text with counted fallback outlines when its face never arrives", () => {
       const { doc, m, settle } = faces();
-      settle("unavailable");
-      const builder = new DisplayListBuilder(new Scene(doc), m);
-      builder.build("p");
-      expect(builder.supported).toBe(false);
-      expect(builder.waiting).toBe(0);
+      const scene = new Scene(doc);
+      const builder = new DisplayListBuilder(scene, m);
+      const e = new RenderEngine(mod);
+      try {
+        expect(e.apply(builder.build("p")).ok).toBe(true);
+        expect(builder.waiting).toBe(1);
+        settle("unavailable");
+        const patch = builder.update();
+        expect(patch).not.toBeNull();
+        if (patch) expect(e.apply(patch).ok).toBe(true);
+        expect(builder.supported).toBe(true);
+        expect(builder.waiting).toBe(0);
+        expect(builder.unsupported.size).toBe(1);
+        expect(builder.update()).toBeNull();
+        const r = e.renderCpuTiled(W, H, camera, BG, TILES);
+        if (!r.ok) throw new Error(r.message);
+        expect(r.value.stats.exact).toBe(true);
+        expect(same(tiled(e), fresh(mod, scene, m))).toBe(true);
+
+        settle("ready");
+        const late = builder.update();
+        expect(late).not.toBeNull();
+        if (late) expect(e.apply(late).ok).toBe(true);
+        expect(builder.unsupported.size).toBe(0);
+        expect(same(tiled(e), fresh(mod, scene, m))).toBe(true);
+      } finally {
+        e.dispose();
+      }
     });
 
     it("at hand is left alone when other faces arrive", () => {

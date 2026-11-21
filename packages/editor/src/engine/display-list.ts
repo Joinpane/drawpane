@@ -24,6 +24,7 @@ import {
   ListWriter,
   type PathData,
   ROOT,
+  refusingBits,
   type WireRecord,
 } from "@drawpane/engine/wire";
 import { getProp, type NodeRecord } from "@drawpane/model";
@@ -109,6 +110,7 @@ export class DisplayListBuilder {
   /** The image refs each layer's record paints. */
   readonly #imagesBy = new Map<string, readonly string[]>();
   readonly #texts = new Set<string>();
+  /** Text using a fallback: a face that arrives late can replace it. */
   readonly #pendingText = new Set<string>();
   /**
    * Text to encode whole a few at a time: sent provisional when a page opened (`build`'s
@@ -153,8 +155,9 @@ export class DisplayListBuilder {
   #newGlyphs: Array<[number, string]> = [];
   #hidden: ReadonlySet<string> = new Set();
   #whole: string | null = null;
-  /** Layers on the page whose features the engine doesn't draw, with their bits. */
+  /** Layers on the page with unsupported features or text fallback notes. */
   readonly unsupported = new Map<string, number>();
+  readonly #refused = new Set<string>();
   stats: BuildStats = {
     records: 0,
     transforms: 0,
@@ -198,7 +201,7 @@ export class DisplayListBuilder {
 
   /** Whether everything on the page is something the engine draws. */
   get supported(): boolean {
-    return this.unsupported.size === 0;
+    return this.#refused.size === 0;
   }
 
   /** Layers hidden while dragged, and the text being edited: their records change with these. */
@@ -267,6 +270,8 @@ export class DisplayListBuilder {
     this.#useImages(node.id, e.images);
     if (e.record.unsupported) this.unsupported.set(node.id, e.record.unsupported);
     else this.unsupported.delete(node.id);
+    if (refusingBits(e.record.unsupported)) this.#refused.add(node.id);
+    else this.#refused.delete(node.id);
     return e.record;
   }
 
@@ -693,6 +698,7 @@ export class DisplayListBuilder {
     this.#waitingOn.clear();
     this.#extra.clear();
     this.unsupported.clear();
+    this.#refused.clear();
     this.#glyphs = new Map();
     this.#glyphData = new Map();
     this.#glyphRefs = new Map();
@@ -803,6 +809,7 @@ export class DisplayListBuilder {
       this.#visible.delete(at);
       this.#wait(at, []);
       this.unsupported.delete(at);
+      this.#refused.delete(at);
       this.#useGlyphs(at, null);
       this.#useImages(at, []);
       const kids = this.#kids.get(at);
@@ -861,17 +868,16 @@ export class DisplayListBuilder {
         for (const [face, ids] of this.#waitingOn)
           if ((this.#measurer.faceStatus?.(face) ?? "ready") !== "loading")
             for (const id of ids) this.#defer(id);
-        for (const id of this.#pendingText) forced.add(id);
+        for (const id of this.#pendingText) this.#defer(id);
       } else {
         // Fonts, aliases or the catalog changed: every text's layout may have moved. Encoded
         // again a few at a time, what's in view first (`pendingVisible`: a frame isn't exact
         // until what's in view is), never all in one long frame.
         for (const id of this.#texts) this.#defer(id);
-        for (const id of this.#pendingText) forced.add(id);
       }
       this.#generation = generation;
       this.#faceGeneration = faces;
-    } else for (const id of this.#pendingText) forced.add(id);
+    }
     // A glyph set changed (a file's saved outlines): text drawn from them may draw differently.
     const table = glyphTable(doc).version;
     if (table !== this.#glyphTable) {

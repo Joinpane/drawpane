@@ -1100,3 +1100,11 @@ On the T4, all 31 `glass-probe-2` cells and all 15 `glass-stack` cells passed on
 The `glass-scopes` Figma suite places glass across the edge of translucent interior paint, with opaque stripes behind the scope. Figma's blur carries the stripes into the lens in all three cells. The engine's isolated pictures supply only the interior paint to their lens. This gives a visible residual on the part of each lens outside that paint.
 
 On the T4, the CPU / WebGPU / WebGL2 means against Figma were 2.08 / 2.11 / 2.11 for the picture mask, 3.50 / 3.52 / 3.52 for layer blur, and 3.13 / 3.16 / 3.16 for noise. The new gate holds each result to its measured mean, p99 and worst-tile range. The picture-mask, layer-blur and noise cells had CPU/GPU means of 0.080, 0.096 and 0.078 on both GPU backends. The Worker was byte-identical to the browser CPU in all three.
+
+## Amendment for text with missing faces
+
+Saved outlines still draw as before. For live text, the engine shapes the run's resolved face, then itemizes by character coverage when shaping the whole run fails. Private-use code points that lack their own glyph use the box from decision 0036. Other characters fall through to Instrument Sans. The web build bundles its variable TrueType file so the fallback's outlines are available without the font proxy. List markers use the same chain.
+
+Characters reachable only through browser system fonts draw with bundled last-resort outlines and retain the advances the browser measured. The headless measurer shares the coverage partitioner and uses em estimates for characters beyond its font files. Supporting the system scripts in full and sharing one layout measurer across browsers are part of W6.
+
+Loading faces still mark their records provisional. When a face reaches its deadline the record resolves through the fallback chain, and a later arrival queues the record again. The existing `textWithoutOutlines` bit counts layers that used fallback outlines. The builder and Rust engine exclude it when deciding whether a page can draw.

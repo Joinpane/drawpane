@@ -47,6 +47,7 @@ import {
   loadWebglEngine,
   RenderEngine,
   type Result,
+  refusingBits,
   unsupportedNames,
 } from "@drawpane/engine";
 import type { CpuWorkerReply, CpuWorkerRequest } from "./engine-cpu.worker";
@@ -1956,7 +1957,7 @@ export class EngineView {
     }
     if (this.#refused.has(pageId)) return;
     this.#refused.add(pageId);
-    const features = this.unsupported();
+    const features = this.unsupported(false);
     window.dispatchEvent(
       new CustomEvent("drawpane:renderer-page-fallback", { detail: { pageId, features } }),
     );
@@ -2562,11 +2563,12 @@ export class EngineView {
     });
   }
 
-  /** What the page holds that the engine doesn't draw yet: feature names and layer counts. */
-  unsupported(): Record<string, number> {
+  /** Unsupported features and optional diagnostic notes, by layer count. */
+  unsupported(includeNotes = true): Record<string, number> {
     const out: Record<string, number> = {};
     for (const bits of this.#builder.unsupported.values())
-      for (const name of unsupportedNames(bits)) out[name] = (out[name] ?? 0) + 1;
+      for (const name of unsupportedNames(includeNotes ? bits : refusingBits(bits)))
+        out[name] = (out[name] ?? 0) + 1;
     return out;
   }
 

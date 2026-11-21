@@ -206,7 +206,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           switchOn: true,
           choice,
           active: "canvas",
-          reason: { kind: "unsupported", features: Object.keys(engine.unsupported()) },
+          reason: { kind: "unsupported", features: Object.keys(engine.unsupported(false)) },
         });
         return;
       }

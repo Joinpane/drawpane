@@ -186,7 +186,7 @@ pub struct Store {
     provisional: Cell<Option<(u32, Option<u32>)>>,
     /// Records with `FLAG_CONTEXT` (export context, decision 0039).
     context: HashSet<u32>,
-    /// Records holding features the engine doesn't draw (their `unsupported` bits).
+    /// Records holding unsupported features or diagnostic text fallback notes.
     unsupported: HashSet<u32>,
     /// Records that paint an image, so an image changing invalidates only what shows it.
     image_records: HashSet<u32>,
@@ -1232,7 +1232,7 @@ impl Store {
         if !r.hidden() {
             // What the engine doesn't draw still counts where it may paint, so it's refused
             // wherever it could show rather than culled away.
-            if r.unsupported != 0 {
+            if r.refusing_bits() != 0 {
                 let reach = f64::from(r.reach);
                 let b = Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1])).inflate(reach, reach);
                 out = Some(out.map_or(b, |o| o.union(b)));
@@ -1640,7 +1640,7 @@ impl Store {
         &self.readers
     }
 
-    /// Records whose features TypeScript flagged as not drawn by the engine.
+    /// Unsupported features and diagnostic notes, by record.
     pub fn unsupported(&self) -> Vec<(u32, u32)> {
         let mut out: Vec<(u32, u32)> = self
             .unsupported
@@ -1656,8 +1656,10 @@ impl Store {
     pub fn refusal(&self) -> Option<(u32, u32)> {
         self.unsupported
             .iter()
-            .filter(|id| self.drawn(**id))
-            .filter_map(|id| self.nodes.get(id).map(|n| (*id, n.record.unsupported)))
+            .filter_map(|id| {
+                let bits = self.nodes.get(id)?.record.refusing_bits();
+                (bits != 0 && self.drawn(*id)).then_some((*id, bits))
+            })
             .min()
     }
 }

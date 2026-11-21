@@ -58,6 +58,9 @@ pub mod derived {
     pub const BACKDROP_READER: u32 = 1 << 13;
 }
 
+/// The diagnostic text fallback bit (wire.ts UNSUPPORTED.textWithoutOutlines).
+const TEXT_WITHOUT_OUTLINES: u32 = 1 << 8;
+
 #[derive(Clone, Debug)]
 pub struct GlyphInstance {
     pub glyph: u32,
@@ -517,11 +520,15 @@ pub struct Record {
     /// Mask kind (`0` none, `1..=5` per `MASK` in `wire.ts` when `FLAG_MASK` is set).
     pub mask: u32,
     /// Features TypeScript found it needs that the engine doesn't draw (a bit set, see
-    /// `UNSUPPORTED` in wire.ts). Held to report, never drawn around.
+    /// `UNSUPPORTED` in wire.ts). Includes bit 8, a diagnostic text fallback note.
     pub unsupported: u32,
 }
 
 impl Record {
+    /// Features that prevent this record from drawing.
+    pub(crate) fn refusing_bits(&self) -> u32 {
+        self.unsupported & !TEXT_WITHOUT_OUTLINES
+    }
     pub fn hidden(&self) -> bool {
         self.flags & FLAG_HIDDEN != 0
     }

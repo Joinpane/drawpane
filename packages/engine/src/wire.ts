@@ -123,9 +123,8 @@ export const JOIN = { miter: 0, round: 1, bevel: 2 } as const;
 export const CAP = { butt: 0, round: 1, square: 2 } as const;
 
 /**
- * Features a record needs that the engine doesn't draw yet (a bit each). The builder sets them;
- * the engine refuses to draw a record with any (`ErrorCode.Unsupported`), so a page holding one
- * falls back to the canvas renderer whole.
+ * Features a record needs that the engine doesn't draw yet (a bit each). The builder sets them.
+ * A page holding a refusing feature falls back to the canvas renderer whole.
  */
 export const UNSUPPORTED = {
   shadow: 1 << 0,
@@ -136,6 +135,7 @@ export const UNSUPPORTED = {
   texture: 1 << 5,
   mask: 1 << 6,
   blend: 1 << 7,
+  /** Diagnostic only: the engine draws text using fallback outlines. */
   textWithoutOutlines: 1 << 8,
   /** Retired in phase 3C (corner smoothing is drawn natively). Kept for bit stability. */
   cornerSmoothing: 1 << 9,
@@ -151,6 +151,11 @@ export type UnsupportedFeature = keyof typeof UNSUPPORTED;
 
 export function unsupportedNames(bits: number): UnsupportedFeature[] {
   return (Object.keys(UNSUPPORTED) as UnsupportedFeature[]).filter((k) => bits & UNSUPPORTED[k]);
+}
+
+/** Diagnostic notes are counted alongside unsupported features but never refuse a frame. */
+export function refusingBits(bits: number): number {
+  return bits & ~UNSUPPORTED.textWithoutOutlines;
 }
 
 export type Matrix = readonly [number, number, number, number, number, number];

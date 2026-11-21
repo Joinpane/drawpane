@@ -14,6 +14,7 @@ import {
 } from "@drawpane/model";
 import { MISSING_GLYPH_FAMILY } from "./missing-glyph-font";
 import { type TextSpan, textSpans } from "./rich-text";
+import { FALLBACK_FAMILY } from "./text-fallback";
 
 export interface TextMeasurer {
   /**
@@ -28,6 +29,8 @@ export interface TextMeasurer {
    * still loading): the text then draws without them. See decision 0005.
    */
   shape?(text: string, run: ShapingRun): ShapedText | null;
+  /** The engine needs outlines for plain text as well, using fallbacks when a face lacks them. */
+  shapeForEngine?(text: string, run: ShapingRun, font: string): EngineText;
   /**
    * The font's own ascent and descent in px (no leading), for a canvas `font`
    * string: what "auto" line height and the baseline come from, as in Figma.
@@ -128,6 +131,11 @@ export interface ShapedText {
    */
   readonly outlines?: false;
 }
+
+/** A run shaped for the engine, or the face whose load will complete it. */
+export type EngineText =
+  | { readonly waiting: string }
+  | { readonly shaped: ShapedText; readonly fallback: boolean };
 
 /** A run's settings as a stable string: sorted tags, so the same settings share a cache entry. */
 function settingsKey(
@@ -245,7 +253,7 @@ export interface TextLayout {
  * 0036), then the editor's fallback. The box font covers nothing else, so
  * every other character falls through to the fallback as before.
  */
-const FALLBACKS = `"${MISSING_GLYPH_FAMILY}", "Instrument Sans Variable", system-ui, sans-serif`;
+const FALLBACKS = `"${MISSING_GLYPH_FAMILY}", "${FALLBACK_FAMILY} Variable", system-ui, sans-serif`;
 
 /** A canvas font string for `props`, in the family it's drawn in (`fonts`'s aliases, when given). */
 export function fontString(props: Props, fonts?: Pick<TextMeasurer, "family"> | null): string {

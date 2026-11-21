@@ -3,9 +3,8 @@
  * renderer draws for it (`render.ts`, `#drawLayer`), resolved here, in TypeScript, where the
  * document and every rule about *what* is drawn live. The engine only draws.
  *
- * What phase 1's engine doesn't draw (effects, masks, blend modes other than normal, text
- * whose outlines aren't to hand) is flagged in the record's `unsupported` bits, never drawn
- * around: a page with any falls back to the canvas renderer whole.
+ * The record's `unsupported` bits describe features that require the canvas renderer and
+ * count text that draws with fallback outlines.
  */
 import {
   BLEND,
@@ -64,6 +63,7 @@ import {
   type TextMeasurer,
   textBlockOffset,
 } from "../text";
+import { lastResortText } from "../text-fallback";
 import { isClosedPath } from "../vector/cache";
 import { nodePath } from "../vector/shapes";
 import { serializePath } from "../vector/svg";
@@ -639,7 +639,7 @@ function textRuns(
   node: NodeRecord,
   width: number,
   ctx: LayerContext,
-): { runs: TextRun[]; bars: Array<{ entry: number; paints: readonly Paint[] }> } | null {
+): { runs: TextRun[]; bars: Array<{ entry: number; paints: readonly Paint[] }> } {
   const layerFills = getProp(node.props, "fills");
   const black: Paint[] = [{ type: "solid", color: "#000000" }];
   const paintsOf = (fills: readonly Paint[] | null | undefined) =>
@@ -706,8 +706,6 @@ function textRuns(
     }
     return { runs, bars };
   }
-  const shape = ctx.measurer.shape?.bind(ctx.measurer);
-  if (!shape) return null;
   const mode = getProp(node.props, "textAutoResize");
   const layout = layoutText(node, ctx.measurer, mode === "width" ? null : width, {
     whole: node.id === ctx.whole,
@@ -716,7 +714,6 @@ function textRuns(
   const spans = textSpans(node);
   const spanAt = (i: number) =>
     spans.find((s) => s.start <= i && i < s.end) ?? spans[spans.length - 1];
-  let missing = false;
   // A text layer composites as one shape, as Figma draws it (`text-overlap` in the parity
   // suites): where its glyphs overlap, across lines too, they're covered once. Glyphs in a row
   // with the same paints and scale go in one run, which the engine covers once (one fill of its
@@ -741,42 +738,55 @@ function textRuns(
     }
     for (const v of glyphs) open.glyphs.push(v);
   };
+  const draw = (
+    text: string,
+    run: ShapingRun,
+    font: string,
+    spacing: number,
+    x: number,
+    y: number,
+    paints: readonly Paint[],
+  ) => {
+    const m = ctx.measurer;
+    const engine = m.shapeForEngine?.(text, run, font);
+    const shaped = engine ? ("shaped" in engine ? engine.shaped : null) : m.shape?.(text, run);
+    if (shaped && shaped.outlines !== false) {
+      if (engine && "fallback" in engine && engine.fallback) {
+        b.textPending = true;
+        b.unsupported |= UNSUPPORTED.textWithoutOutlines;
+      }
+      add(shaped.scale, shapedGlyphs(shaped, text, spacing, x, y, ctx), paints);
+      return;
+    }
+    const face = engine && "waiting" in engine ? engine.waiting : m.loading?.(run);
+    if (face && !shaped) {
+      b.waiting.add(face);
+      return;
+    }
+    b.textPending = true;
+    b.unsupported |= UNSUPPORTED.textWithoutOutlines;
+    const last = lastResortText(text, run.size, (piece) => m.width(font, piece));
+    add(last.scale, shapedGlyphs(last, text, spacing, x, y, ctx), paints);
+  };
   for (const line of layout.lines) {
     const x0 = lineOffset(line, width, node.props);
     const baseline = drawnBaseline(line, dy);
     const marker = line.marker;
     if (marker) {
       const span = spanAt(line.start);
-      const run = span ? runFor(span.props, ctx.measurer) : null;
-      const shaped = run ? shape(marker.text, run) : null;
-      if (!shaped || shaped.outlines === false) {
-        const face = run && !shaped ? (ctx.measurer.loading?.(run) ?? null) : null;
-        if (face) b.waiting.add(face);
-        else missing = true;
-      } else {
-        add(
-          shaped.scale,
-          shapedGlyphs(shaped, marker.text, 0, x0 + marker.x, baseline, ctx),
-          paintsOf(marker.fills),
-        );
-      }
+      const run = runFor(
+        { ...(span?.props ?? node.props), fontFeatures: {}, fontVariations: {} },
+        ctx.measurer,
+      );
+      draw(marker.text, run, marker.font, 0, x0 + marker.x, baseline, paintsOf(marker.fills));
     }
     for (const frag of line.fragments) {
       if (!frag.text) continue;
       const span = spanAt(frag.start);
-      const run = frag.run ?? (span ? runFor(span.props, ctx.measurer) : null);
-      const shaped = run ? shape(frag.text, run) : null;
+      const run = frag.run ?? runFor(span?.props ?? node.props, ctx.measurer);
       const x = x0 + frag.x;
-      if (!shaped || shaped.outlines === false) {
-        // A face still loading: provisional until it arrives. One that won't: not drawn here.
-        const face = run && !shaped ? (ctx.measurer.loading?.(run) ?? null) : null;
-        if (face) b.waiting.add(face);
-        else missing = true;
-        continue;
-      }
-      const glyphs = shapedGlyphs(shaped, frag.text, frag.letterSpacing, x, baseline, ctx);
       const paints = paintsOf(frag.fills);
-      add(shaped.scale, glyphs, paints);
+      draw(frag.text, run, frag.font, frag.letterSpacing, x, baseline, paints);
       if (frag.decoration !== "none") {
         const bar = decorationBar(frag.decoration, baseline, frag.fontSize);
         bars.push({
@@ -795,10 +805,7 @@ function textRuns(
     }
   }
   flush();
-  if (missing) {
-    b.unsupported |= UNSUPPORTED.textWithoutOutlines;
-    b.textPending = true;
-  } else if (b.waiting.size > 0) b.provisional = true;
+  if (b.waiting.size > 0) b.provisional = true;
   return { runs, bars };
 }
 
@@ -922,10 +929,6 @@ function text(
   if (ctx.deferText) {
     b.provisional = true;
     b.deferred = true;
-  }
-  if (!runs) {
-    b.unsupported |= UNSUPPORTED.textWithoutOutlines;
-    return;
   }
   const fill = (entry: number, paints: readonly Paint[]) => {
     for (const paint of paints) {

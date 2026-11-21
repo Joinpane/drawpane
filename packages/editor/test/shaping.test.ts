@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 import { ROOT_ID } from "@drawpane/model";
 import { describe, expect, it, vi } from "vitest";
 import { Editor } from "../src/editor";
+import { MISSING_GLYPH_FAMILY } from "../src/missing-glyph-font";
 import { axisSettings, Shaper, ShapingMeasurer, shapingFace } from "../src/shaping";
 import { autoSize, layoutText, type ShapingRun, shapingRun, type TextMeasurer } from "../src/text";
 
@@ -37,6 +38,33 @@ describe("Shaper", () => {
     expect(heard).toHaveBeenCalledWith("Instrument Sans");
     expect(shaper.generation).toBe(1);
     expect(shaper.shape("1111", run({ tnum: true }))).not.toBeNull();
+  });
+
+  it("keeps default kerning and UTF-16 clusters across missing symbols and scripts", async () => {
+    const shaper = new Shaper(
+      async (face) => (face.family === "Instrument Sans" ? bytes() : null),
+      { makePath },
+    );
+    const missing = run({ tnum: true }, 10, "SF Pro");
+    expect(shaper.shapeForEngine("AV", missing)).toHaveProperty("waiting");
+    expect(await shaper.load(shapingFace(missing))).toBe("unavailable");
+    await Promise.all([
+      shaper.load({ family: "Instrument Sans", weight: 400, italic: false, variable: true }),
+      shaper.load({ family: MISSING_GLYPH_FAMILY, weight: 400, italic: false }),
+    ]);
+    const result = shaper.shapeForEngine("AV\u{100001}漢111", missing, () => 10);
+    if ("waiting" in result) throw new Error("Fallback faces are ready");
+    expect(result.fallback).toBe(true);
+    const glyphs = result.shaped.glyphs;
+    expect(glyphs.map((g) => g.cluster)).toEqual([0, 1, 2, 4, 5, 6, 7]);
+    expect(glyphs.every((g) => g.d.length > 0)).toBe(true);
+    const kerned = shaper.shapeForEngine("AV", missing);
+    if ("waiting" in kerned) throw new Error("Fallback faces are ready");
+    const figures = shaper.shapeForEngine("111", missing);
+    if ("waiting" in figures) throw new Error("Fallback faces are ready");
+    expect(glyphs[2]?.x).toBeCloseTo(kerned.shaped.width, 5);
+    expect(figures.shaped.width).toBeLessThan(18);
+    expect(result.shaped.width).toBeCloseTo(kerned.shaped.width + 7 + 10 + figures.shaped.width, 5);
   });
 
   it("applies features: tabular figures are wider, ligatures can be turned off", async () => {
