@@ -378,14 +378,7 @@ test.describe
           ]);
           expect(headless.missingFonts, `${cell.id} fonts`).toEqual([]);
           expect(headless.missingImages, `${cell.id} images`).toEqual([]);
-          const diff = await compare(
-            page,
-            ours.data,
-            theirs.data,
-            ours.width,
-            ours.height,
-            suite.blur,
-          );
+          const diff = compare(ours.data, theirs.data, ours.width, ours.height, suite.blur);
           scores[cell.id] = diff.mean;
           const limit = recorded[suite.suite]?.[cell.id];
           if (!updating && limit !== undefined && diff.mean > limit)

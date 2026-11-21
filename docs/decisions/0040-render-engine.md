@@ -1076,3 +1076,17 @@ Phase 3B executes backdrop readers on CPU and GPU in the tiled renderer and band
 Exact glass uses the same region split on CPU, WebGPU and WebGL2. Each chunk samples the original prefix. If the lens reads the same plane it writes, the GPU copies that plane once before drawing the first chunk. Otherwise it reads the existing glass-free plane directly.
 
 On the T4, all 31 `glass-probe-2` cells and all 15 `glass-stack` cells passed on both backends. The `frost-100` CPU/GPU mean fell from 0.295 to 0.021, with p99 and maximum of 1. Its CPU, WebGPU and WebGL2 means against Figma were all 2.53. The cell uses the standard 0.25 mean cap.
+
+
+## Amendment: repeatable default-on measurements
+
+The [kit parity harness](../../tools/kit-parity/README.md#render-engine-gate) uses the
+same crop and backdrop context for the canvas and engine. It records the settled page
+census, per-frame refusals, image placeholders, Figma scores and CPU/GPU agreement.
+Frames count against the gate if their references are missing or their tab crashes.
+The grain comparison uses a separable Gaussian on the Node process so a change in
+Chromium's canvas raster backend cannot change the statistical blur.
+
+The engine-on e2e shards run alongside the canvas suite and record their failures in
+the job summary. See [the CI follow-ups](../plans/engine-default-on.md#engine-on-ci-follow-ups) and
+[the laptop protocol](../renderer-laptop-check.md) for the remaining default-on checks.

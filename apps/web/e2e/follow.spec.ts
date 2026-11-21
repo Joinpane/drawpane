@@ -4,6 +4,7 @@
  * spotlight; when she leaves, he's told. Runs on its own throwaway instance.
  */
 import { type Browser, expect, type Page, test } from "@playwright/test";
+import { engineCiStorage } from "./engine-ci-storage";
 import { freshInstance, type Instance } from "./fresh-instance";
 
 type View = { x: number; y: number; width: number; height: number };
@@ -40,7 +41,7 @@ const state = (page: Page) =>
   });
 
 async function joinAs(browser: Browser, url: string, invite: string, name: string): Promise<Page> {
-  const context = await browser.newContext({ baseURL: url });
+  const context = await browser.newContext({ baseURL: url, ...engineCiStorage(url) });
   const page = await context.newPage();
   const cdp = await context.newCDPSession(page);
   await cdp.send("WebAuthn.enable");

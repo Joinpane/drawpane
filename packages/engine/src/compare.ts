@@ -37,27 +37,16 @@ export interface Score {
 export const TILE = 32;
 export const SEVERE = 16;
 
-/** `rgba` laid over a solid grey level (255 white, 0 black), as RGB. */
-function over(rgba: Uint8Array | Uint8ClampedArray, level: number): Float32Array {
-  const n = rgba.length / 4;
-  const out = new Float32Array(n * 3);
-  for (let i = 0; i < n; i++) {
-    const a = (rgba[i * 4 + 3] as number) / 255;
-    for (let c = 0; c < 3; c++)
-      out[i * 3 + c] = Math.round((rgba[i * 4 + c] as number) * a + level * (1 - a));
-  }
-  return out;
-}
-
 export function score(
   ours: Uint8Array | Uint8ClampedArray,
   theirs: Uint8Array | Uint8ClampedArray,
   width: number,
   height: number,
+  includeHeat = true,
 ): Score & { heat: Uint8Array } {
   const n = width * height;
   if (ours.length !== n * 4 || theirs.length !== n * 4) throw new Error("Sizes differ");
-  const backgrounds = [255, 0].map((level) => [over(ours, level), over(theirs, level)] as const);
+  const backgrounds = [255, 0];
   const tilesX = Math.ceil(width / TILE);
   const tilesY = Math.ceil(height / TILE);
   const tileSum = new Float64Array(tilesX * tilesY * 2);
@@ -65,7 +54,7 @@ export function score(
   const tileSevere = new Uint32Array(tilesX * tilesY);
   const histograms = [new Uint32Array(256), new Uint32Array(256)];
   const sums = [0, 0];
-  const heat = new Uint8Array(n * 4);
+  const heat = new Uint8Array(includeHeat ? n * 4 : 0);
   let changedWhite = 0;
   let max = 0;
   let alphaSum = 0;
@@ -76,15 +65,31 @@ export function score(
     const y = Math.floor(i / width);
     const tile = Math.floor(y / TILE) * tilesX + Math.floor(x / TILE);
     tileCount[tile] = (tileCount[tile] ?? 0) + 1;
-    const da = Math.abs((ours[i * 4 + 3] as number) - (theirs[i * 4 + 3] as number));
+    const at = i * 4;
+    const oa = ours[at + 3] as number;
+    const ta = theirs[at + 3] as number;
+    const da = Math.abs(oa - ta);
+    const o = oa / 255;
+    const t = ta / 255;
     alphaSum += da;
     if (da > alphaMax) alphaMax = da;
     let worst = da;
     for (let b = 0; b < 2; b++) {
-      const [a, t] = backgrounds[b] as readonly [Float32Array, Float32Array];
-      const dr = Math.abs((a[i * 3] as number) - (t[i * 3] as number));
-      const dg = Math.abs((a[i * 3 + 1] as number) - (t[i * 3 + 1] as number));
-      const db = Math.abs((a[i * 3 + 2] as number) - (t[i * 3 + 2] as number));
+      const level = backgrounds[b] as number;
+      const backO = level * (1 - o);
+      const backT = level * (1 - t);
+      const dr = Math.abs(
+        Math.round((ours[at] as number) * o + backO) -
+          Math.round((theirs[at] as number) * t + backT),
+      );
+      const dg = Math.abs(
+        Math.round((ours[at + 1] as number) * o + backO) -
+          Math.round((theirs[at + 1] as number) * t + backT),
+      );
+      const db = Math.abs(
+        Math.round((ours[at + 2] as number) * o + backO) -
+          Math.round((theirs[at + 2] as number) * t + backT),
+      );
       const mean = (dr + dg + db) / 3;
       sums[b] = (sums[b] as number) + mean;
       tileSum[tile * 2 + b] = (tileSum[tile * 2 + b] as number) + mean;
@@ -99,11 +104,13 @@ export function score(
       severe++;
       tileSevere[tile] = (tileSevere[tile] ?? 0) + 1;
     }
-    const v = Math.min(255, worst * 4);
-    heat[i * 4] = v;
-    heat[i * 4 + 1] = v;
-    heat[i * 4 + 2] = v;
-    heat[i * 4 + 3] = 255;
+    if (includeHeat) {
+      const v = Math.min(255, worst * 4);
+      heat[at] = v;
+      heat[at + 1] = v;
+      heat[at + 2] = v;
+      heat[at + 3] = 255;
+    }
   }
   const p99Of = (h: Uint32Array) => {
     const at = Math.floor(n * 0.99);

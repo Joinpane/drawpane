@@ -1,4 +1,5 @@
 import { defineConfig, devices } from "@playwright/test";
+import { engineCiStorage } from "./e2e/engine-ci-storage";
 
 /**
  * End-to-end tests. By default Playwright builds nothing: run `pnpm build`
@@ -9,6 +10,9 @@ import { defineConfig, devices } from "@playwright/test";
 const external = process.env.E2E_BASE_URL;
 /** Override with E2E_PORT to run several suites side by side. */
 const port = process.env.E2E_PORT ?? "8788";
+const baseURL = external ?? `http://localhost:${port}`;
+const engineOn = process.env.E2E_ENGINE_ON === "1";
+const benchChannel = process.env.BENCH_BROWSER_CHANNEL;
 /** On CI: a stray `.only` fails the run, a test gets one retry (and is reported as flaky), and failures keep an HTML report. */
 const ci = !!process.env.CI;
 export default defineConfig({
@@ -20,7 +24,7 @@ export default defineConfig({
   retries: ci ? 1 : 0,
   reporter: ci ? [["list"], ["github"], ["html", { open: "never" }]] : [["list"]],
   use: {
-    baseURL: external ?? `http://localhost:${port}`,
+    baseURL,
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     viewport: { width: 1440, height: 900 },
@@ -32,7 +36,7 @@ export default defineConfig({
           command: "node e2e/server.mjs",
           url: `http://localhost:${port}/api/health`,
           reuseExistingServer: false,
-          timeout: 120_000,
+          timeout: Number(process.env.E2E_SERVER_TIMEOUT ?? 120_000),
           // Stopped gently, so server.mjs removes the run's database (Playwright kills outright otherwise).
           gracefulShutdown: { signal: "SIGTERM", timeout: 10_000 },
         },
@@ -44,9 +48,19 @@ export default defineConfig({
       use: {
         ...devices["Desktop Chrome"],
         viewport: { width: 1440, height: 900 },
-        ...(process.env.CHROMIUM_PATH
-          ? { launchOptions: { executablePath: process.env.CHROMIUM_PATH } }
-          : {}),
+        ...engineCiStorage(baseURL),
+        launchOptions: {
+          ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
+          ...(engineOn
+            ? {
+                args: [
+                  "--enable-unsafe-webgpu",
+                  "--enable-unsafe-swiftshader",
+                  "--use-angle=swiftshader",
+                ],
+              }
+            : {}),
+        },
       },
     },
     {
@@ -90,6 +104,7 @@ export default defineConfig({
         viewport: { width: 1440, height: 900 },
         // A retina laptop: twice the pixels to fill.
         deviceScaleFactor: 2,
+        ...(benchChannel ? { channel: benchChannel, headless: false } : {}),
         ...(process.env.CHROMIUM_PATH
           ? { launchOptions: { executablePath: process.env.CHROMIUM_PATH } }
           : {}),

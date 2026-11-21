@@ -274,6 +274,10 @@ Owners are open. Each workstream lists its scope, what it depends on, and the te
 - **Depends on:** nothing.
 - **Acceptance:** a scheduled kit parity run on both kits posts its scoreboard and the gate's verdict; the engine-on CI matrix is green and required; one laptop run per device class is recorded against the gates.
 
+#### Engine-on CI follow-ups
+
+The four engine-on Chromium shards run with SwiftShader and the editor's engine switch enabled. Each shard reports failed specs in its job summary. Each exception in `apps/web/e2e/engine-ci-allowed.json` needs an observed failure and a follow-up below. An unexpected spec failure fails the engine-on check.
+
 ### W6. Text layout through HarfBuzz (P1)
 
 - **Scope:** "Cross-browser text" above: `HarfBuzzMeasurer` as the browser's layout measurer, byte-loaded faces, fallback faces for scripts the app can't read, no relayout on open.

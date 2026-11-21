@@ -23,7 +23,7 @@
  */
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
-import { join, relative } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { drawpaneId } from "@drawpane/figma";
 import { type Browser, expect, type Page, test } from "@playwright/test";
 import {
@@ -34,12 +34,30 @@ import {
 import { type FrameScore, reportHtml, summarize } from "../../../tools/kit-parity/src/report";
 import { addPasskey } from "./fresh-instance";
 import { importConverted } from "./import-converted";
+import {
+  type Backend,
+  type Debug,
+  installScoring,
+  pageCensus,
+  pngTransfer,
+  renderFrame,
+} from "./kit-engine";
 
-const OUT = process.env.E2E_KIT_PARITY;
+/**
+ * On the GPU bench (tools/gpu-bench `--file`), the uploaded folder is the out dir and the
+ * converted file at once: E2E_KIT_PARITY_FROM_BENCH=1 reads both from BENCH_FILE.
+ */
+const FROM_BENCH = process.env.E2E_KIT_PARITY_FROM_BENCH === "1";
+const OUT = process.env.E2E_KIT_PARITY ?? (FROM_BENCH ? process.env.BENCH_FILE : undefined);
 const STAGE = process.env.E2E_KIT_PARITY_STAGE ?? "render";
 /** Missing fonts listed, not failed: the run still scores, its text drawn in a fallback face. */
 const ALLOW_MISSING_FONTS = process.env.E2E_KIT_PARITY_ALLOW_MISSING_FONTS === "1";
 const fileSafe = (id: string) => id.replace(/:/g, "-").replace(/;/g, "_");
+/** Draw the same export crop with these engine backends, then score it alongside the canvas. */
+const ENGINE_BACKENDS = [
+  ...new Set((process.env.E2E_KIT_PARITY_ENGINE ?? "").split(",").filter(Boolean)),
+];
+const INLINE = process.env.E2E_KIT_PARITY_INLINE === "1";
 
 interface SampleFrame {
   readonly id: string;
@@ -72,24 +90,22 @@ interface DrawpaneFrame {
   readonly nodes: readonly DrawpaneNode[];
 }
 
-type W = {
-  drawpane?: { s: { status: string } };
-  drawpaneParity?: {
-    has(id: string): boolean;
-    fonts(id: string): Promise<{ faces: string[]; missing: string[] }>;
-    layout(id: string): DrawpaneNode[];
-    render(
-      id: string,
-      rect: { x: number; y: number; width: number; height: number },
-      scale: number,
-      width: number,
-      height: number,
-    ): Promise<{ png: string; ms: number }>;
-  };
-};
-
 const readJson = <T>(file: string): T => JSON.parse(readFileSync(file, "utf8")) as T;
 const seconds = (since: number) => Math.round((Date.now() - since) / 1000);
+
+async function beforeDeadline<T>(work: Promise<T>, label: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      work,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(`${label} exceeded 3 minutes`)), 180_000);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 function latestRun(): string {
   const runs = join(OUT as string, "runs");
@@ -101,7 +117,7 @@ function latestRun(): string {
 
 /** Signs a new owner into this run's fresh instance with a virtual passkey. */
 async function signIn(browser: Browser, baseURL: string): Promise<Page> {
-  const context = await browser.newContext({ baseURL });
+  const context = await browser.newContext({ baseURL, bypassCSP: true });
   const page = await context.newPage();
   await addPasskey(context, page);
   await page.goto("/setup");
@@ -201,7 +217,13 @@ if (OUT)
   test.use({
     // A 500,000-layer file in one tab.
     launchOptions: {
-      args: ["--js-flags=--max-old-space-size=8192"],
+      args: [
+        "--js-flags=--max-old-space-size=8192",
+        // WebGPU (SwiftShader here) for the engine's GPU backend, as the engine parity spec has it.
+        ...(ENGINE_BACKENDS.length > 0
+          ? ["--enable-unsafe-webgpu", "--enable-unsafe-swiftshader"]
+          : []),
+      ],
       ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
     },
     // No traces or screenshots: they'd hold hundreds of MB of import, and the file's content
@@ -218,121 +240,358 @@ test.describe
     test("render: Drawpane draws and lays out each sampled frame", async ({ browser }) => {
       test.skip(STAGE !== "render", "Stage render only.");
       test.setTimeout(6 * 60 * 60_000);
-      const cache = process.env.E2E_KIT_PARITY_CACHE;
-      if (!cache) throw new Error("Set E2E_KIT_PARITY_CACHE to the converted file's folder.");
-      const out = OUT as string;
+      const cache = process.env.E2E_KIT_PARITY_CACHE ?? (FROM_BENCH ? OUT : undefined);
+      if (!cache || !OUT)
+        throw new Error("Set E2E_KIT_PARITY_CACHE to the converted file's folder.");
+      if (FROM_BENCH && !process.env.E2E_KIT_PARITY_RUN)
+        throw new Error("Set E2E_KIT_PARITY_RUN to a writable folder outside BENCH_FILE.");
+      const isBackend = (s: string): s is Backend => s === "cpu" || s === "gpu" || s === "webgl";
+      const backends = ENGINE_BACKENDS.filter(isBackend);
+      if (backends.length !== ENGINE_BACKENDS.length)
+        throw new Error("Use cpu, gpu or webgl as backends.");
+      // CPU is drawn first so it can be compared to each selected GPU backend.
+      backends.sort((a, b) => Number(b === "cpu") - Number(a === "cpu"));
+
+      const out = OUT;
       const sample = readJson<Sample>(join(out, "sample.json"));
       const scale = sample.createdWith.scale;
-      const runDir =
+      const runDir = resolve(
         process.env.E2E_KIT_PARITY_RUN ??
-        join(out, "runs", new Date().toISOString().replace(/[:.]/g, "-"));
+          join(out, "runs", new Date().toISOString().replace(/[:.]/g, "-")),
+      );
+      const engineDirs = Object.fromEntries(
+        backends.map((backend) => [backend, `${runDir}-engine-${backend}`]),
+      );
+      const scores = join(runDir, "scores.ndjson");
       mkdirSync(join(runDir, "drawpane"), { recursive: true });
+      if (INLINE) writeFileSync(scores, "");
+      for (const dir of Object.values(engineDirs)) {
+        mkdirSync(join(dir, "drawpane"), { recursive: true });
+        writeFileSync(join(dir, "facts.ndjson"), "");
+      }
+
+      // Shard the stable sample, including missing references, so each frame is accounted for.
+      const [shardK, shardN] = (process.env.E2E_KIT_PARITY_SHARD ?? "1/1").split("/").map(Number);
+      if (
+        !shardK ||
+        !shardN ||
+        !Number.isInteger(shardK) ||
+        !Number.isInteger(shardN) ||
+        shardK < 1 ||
+        shardK > shardN
+      )
+        throw new Error("E2E_KIT_PARITY_SHARD must be k/n, with 1 ≤ k ≤ n.");
+      const onlyPages = process.env.E2E_KIT_PARITY_PAGES?.split(",").map((name) => name.trim());
+      const frames = sample.frames.filter(
+        (f, index) =>
+          index % shardN === shardK - 1 && (!onlyPages || onlyPages.includes(f.pageName)),
+      );
+      if (frames.length === 0) throw new Error("No sampled frames selected.");
+
       const started = Date.now();
-      const port = process.env.E2E_PORT ?? "8788";
-
-      const page = await signIn(browser, `http://localhost:${port}`);
-      page.on("pageerror", (error) => console.log(`page error: ${error.message}`));
-      await page.evaluate(() => localStorage.setItem("drawpane:debug", "1"));
-      const fileId = await importConverted(page, cache);
-      const importSeconds = seconds(started);
-
-      const frames = sample.frames.filter((f) =>
-        existsSync(join(out, "figma", `${fileSafe(f.id)}.json`)),
-      );
-      const withoutFigma = sample.frames.length - frames.length;
-      const first = frames[0];
-      if (!first) throw new Error("No sampled frame has Figma's truth yet: run the figma step.");
-
-      const opening = Date.now();
-      await page.goto(`/f/${fileId}`);
-      await page.waitForFunction(
-        (id) => {
-          const w = window as unknown as W;
-          return w.drawpane?.s.status === "live" && w.drawpaneParity?.has(id) === true;
-        },
-        drawpaneId(first.id),
-        { timeout: 30 * 60_000, polling: 1000 },
-      );
-      const openSeconds = seconds(opening);
-      console.log(`Imported in ${importSeconds} s, opened in ${openSeconds} s.`);
-
+      const origin = `http://localhost:${process.env.E2E_PORT ?? "8788"}`;
+      const dashboard = await signIn(browser, origin);
+      const context = dashboard.context();
+      const transfer = await pngTransfer(origin);
+      const errors: Array<{ id: string; error: string }> = [];
       const missingFonts = new Map<string, string[]>();
+      const missingReference: string[] = [];
+      const mismatchedReference: string[] = [];
       const notInDrawpane: string[] = [];
-      let n = 0;
-      for (const frame of frames) {
-        const id = drawpaneId(frame.id);
-        const truth = readJson<FigmaTree>(join(out, "figma", `${fileSafe(frame.id)}.json`));
-        const result = await page.evaluate(
-          async ({ id, rect, scale, width, height }) => {
-            const p = (window as unknown as W).drawpaneParity;
-            if (!p?.has(id)) return null;
-            const fonts = await p.fonts(id);
-            const nodes = p.layout(id);
-            const render = await p.render(id, rect, scale, width, height);
-            return { fonts, nodes, render };
-          },
+      const counts = Object.fromEntries(
+        backends.map((backend) => [
+          backend,
           {
-            id,
-            rect: {
-              x: truth.box.x,
-              y: truth.box.y,
-              width: truth.png.width / scale,
-              height: truth.png.height / scale,
-            },
-            scale,
-            width: truth.png.width,
-            height: truth.png.height,
+            drawn: 0,
+            refused: 0,
+            missingImages: 0,
+            worse: 0,
+            comparedToCpu: 0,
+            outsideCpuTolerance: 0,
+            worseBy: { mean: 0, worstTile: 0, alpha: 0 },
+            canvasMeans: [] as number[],
+            engineMeans: [] as number[],
           },
-        );
-        if (!result) {
-          notInDrawpane.push(frame.id);
-          continue;
+        ]),
+      );
+      let n = 0;
+      let census: Awaited<ReturnType<typeof pageCensus>> = [];
+      let censusAttempted = false;
+      let censusError: string | undefined;
+      let openSeconds: number | undefined;
+      try {
+        await context.addInitScript(() => {
+          localStorage.setItem("drawpane:debug", "1");
+          localStorage.setItem("drawpane:engine-software", "allow");
+        });
+        if (INLINE) await installScoring(context);
+        const fileId = await importConverted(dashboard, cache);
+        const importSeconds = seconds(started);
+        const openEditor = async () => {
+          const opening = Date.now();
+          const tab = await context.newPage();
+          try {
+            await tab.goto(`/f/${fileId}`, { timeout: 180_000 });
+            await tab.waitForFunction(
+              () =>
+                (window as unknown as Debug).drawpane?.s.status === "live" &&
+                !!(window as unknown as Debug).drawpaneParity,
+              undefined,
+              { timeout: 180_000, polling: 500 },
+            );
+          } catch (error) {
+            await tab.close().catch(() => undefined);
+            throw error;
+          }
+          openSeconds ??= seconds(opening);
+          return tab;
+        };
+        // Keep the authenticated context. A crashed tab is replaced before the next frame.
+        let page: Page | undefined;
+        for (const frame of frames) {
+          const safe = fileSafe(frame.id);
+          const figmaPng = join(out, "figma", `${safe}.png`);
+          const figmaJson = join(out, "figma", `${safe}.json`);
+          const appendScore = (value: Record<string, unknown>) => {
+            if (INLINE)
+              writeFileSync(
+                scores,
+                `${JSON.stringify({ id: frame.id, ...value })}
+`,
+                { flag: "a" },
+              );
+          };
+          if (!existsSync(figmaPng) || !existsSync(figmaJson)) {
+            missingReference.push(frame.id);
+            appendScore({ error: "missing Figma reference" });
+            continue;
+          }
+          const id = drawpaneId(frame.id);
+          try {
+            const truth = readJson<FigmaTree>(figmaJson);
+            if (INLINE && (truth.id !== frame.id || truth.matchesSample === false)) {
+              mismatchedReference.push(frame.id);
+              appendScore({ error: "Figma reference does not match sample" });
+              continue;
+            }
+            page ??= await openEditor();
+            if (!censusAttempted && backends.length > 0 && shardK === 1) {
+              censusAttempted = true;
+              try {
+                census = await beforeDeadline(pageCensus(page), "engine page census");
+                writeFileSync(
+                  join(runDir, "pages.json"),
+                  `${JSON.stringify(census, null, 2)}
+`,
+                );
+              } catch (error) {
+                censusError = String(error);
+                await page.close({ reason: "kit page census failed" }).catch(() => undefined);
+                page = undefined;
+                page = await openEditor();
+              }
+            }
+            const { width, height } = truth.png;
+            const outputs = Object.fromEntries([
+              ["canvas", join(runDir, "drawpane", `${safe}.png`)],
+              ...backends.map((backend) => [
+                backend,
+                join(engineDirs[backend] as string, "drawpane", `${safe}.png`),
+              ]),
+            ]);
+            const result = await beforeDeadline(
+              renderFrame(page, {
+                id,
+                backends,
+                inline: INLINE,
+                url: transfer.frame(figmaPng, outputs),
+                rect: {
+                  x: truth.box.x,
+                  y: truth.box.y,
+                  width: width / scale,
+                  height: height / scale,
+                },
+                scale,
+                width,
+                height,
+              }),
+              "frame draw",
+            );
+            if (!result) {
+              notInDrawpane.push(frame.id);
+              appendScore({ error: "frame missing from imported kit" });
+              continue;
+            }
+            for (const face of result.missing) {
+              const ids = missingFonts.get(face) ?? [];
+              ids.push(frame.id);
+              missingFonts.set(face, ids);
+            }
+            const frameData: DrawpaneFrame = {
+              id: frame.id,
+              drawpaneId: id,
+              faces: result.faces,
+              missingFonts: result.missing,
+              renderMs: result.ms,
+              nodes: result.nodes,
+            };
+            if (!INLINE)
+              writeFileSync(join(runDir, "drawpane", `${safe}.json`), JSON.stringify(frameData));
+            for (const backend of backends) {
+              const dir = engineDirs[backend] as string;
+              const fact = result.facts[backend];
+              const totals = counts[backend];
+              if (!fact || !totals) continue;
+              writeFileSync(
+                join(dir, "facts.ndjson"),
+                `${JSON.stringify({ id: frame.id, ...fact })}
+`,
+                { flag: "a" },
+              );
+              if (fact.ok && Object.keys(fact.unsupported).length === 0) {
+                totals.drawn++;
+                if (fact.missingImages?.length) totals.missingImages++;
+                if (!INLINE)
+                  writeFileSync(
+                    join(dir, "drawpane", `${safe}.json`),
+                    JSON.stringify({ ...frameData, renderMs: fact.wallMs }),
+                  );
+              } else {
+                totals.refused++;
+              }
+              const parity = result.metrics?.engines[backend];
+              if (parity && result.metrics) {
+                totals.canvasMeans.push(result.metrics.canvas.mean);
+                totals.engineMeans.push(parity.vsFigma.mean);
+                if (parity.worse.length) totals.worse++;
+                for (const key of Object.keys(totals.worseBy) as Array<
+                  keyof typeof totals.worseBy
+                >) {
+                  if (parity.worse.includes(key)) totals.worseBy[key]++;
+                }
+              }
+              const agreement = result.metrics?.cpuVsGpu[backend];
+              if (agreement) {
+                totals.comparedToCpu++;
+                if (agreement.failures.length) totals.outsideCpuTolerance++;
+              }
+            }
+            appendScore({ ...result.metrics, canvasMs: result.ms, facts: result.facts });
+            if (++n % 25 === 0)
+              console.log(`  ${n}/${frames.length} frames (${seconds(started)} s)`);
+          } catch (error) {
+            const issue = { id: frame.id, error: String(error) };
+            errors.push(issue);
+            appendScore(issue);
+            console.log(`Frame ${frame.id} failed; continuing with a new tab.`);
+            await page?.close({ reason: "kit parity frame failed" }).catch(() => undefined);
+            page = undefined;
+          }
         }
-        for (const face of result.fonts.missing)
-          missingFonts.set(face, [...(missingFonts.get(face) ?? []), frame.id]);
-        const record: DrawpaneFrame = {
-          id: frame.id,
-          drawpaneId: id,
-          faces: result.fonts.faces,
-          missingFonts: result.fonts.missing,
-          renderMs: result.render.ms,
-          nodes: result.nodes,
+        const run = {
+          startedAt: new Date(started).toISOString(),
+          git: git(),
+          cache: relative(out, cache),
+          scale,
+          frames: n,
+          withoutFigma: missingReference.length,
+          missingReference,
+          mismatchedReference,
+          notInDrawpane,
+          errors,
+          missingFonts: Object.fromEntries(missingFonts),
+          seconds: { import: importSeconds, open: openSeconds, total: seconds(started) },
         };
         writeFileSync(
-          join(runDir, "drawpane", `${fileSafe(frame.id)}.png`),
-          Buffer.from(result.render.png, "base64"),
+          join(runDir, "run.json"),
+          `${JSON.stringify(run, null, 2)}
+`,
         );
-        writeFileSync(
-          join(runDir, "drawpane", `${fileSafe(frame.id)}.json`),
-          JSON.stringify(record),
-        );
-        if (++n % 25 === 0) console.log(`  ${n}/${frames.length} frames (${seconds(started)} s)`);
+        for (const [backend, dir] of Object.entries(engineDirs))
+          writeFileSync(
+            join(dir, "run.json"),
+            `${JSON.stringify({ ...run, renderer: `engine-${backend}` }, null, 2)}
+`,
+          );
+
+        if (INLINE) {
+          const summarizeMeans = (values: number[]) => {
+            if (values.length === 0) return null;
+            const middle = Math.floor(values.length / 2);
+            values.sort((a, b) => a - b);
+            const median =
+              ((values[middle] as number) + (values[Math.ceil(values.length / 2) - 1] as number)) /
+              2;
+            return { median, mean: values.reduce((sum, value) => sum + value, 0) / values.length };
+          };
+          const engines = Object.fromEntries(
+            Object.entries(counts).map(([backend, { canvasMeans, engineMeans, ...totals }]) => [
+              backend,
+              {
+                ...totals,
+                canvas: summarizeMeans(canvasMeans),
+                engine: summarizeMeans(engineMeans),
+              },
+            ]),
+          );
+          const blockedPages = census.filter(
+            ({ unsupported, waiting }) => waiting || Object.keys(unsupported).length,
+          ).length;
+          const failed =
+            missingReference.length > 0 ||
+            mismatchedReference.length > 0 ||
+            notInDrawpane.length > 0 ||
+            errors.length > 0 ||
+            blockedPages > 0 ||
+            !!censusError ||
+            Object.values(engines).some(
+              (totals) =>
+                totals.drawn !== frames.length ||
+                totals.worse > 0 ||
+                totals.missingImages > 0 ||
+                totals.outsideCpuTolerance > 0,
+            );
+          const complete =
+            shardN === 1 &&
+            !onlyPages &&
+            backends.includes("cpu") &&
+            (backends.includes("gpu") || backends.includes("webgl"));
+          const scoreboard = {
+            verdict: failed ? "fail" : complete ? "pass" : "partial",
+            sampled: frames.length,
+            canvasDrawn: n,
+            missingReference: missingReference.length,
+            mismatchedReference: mismatchedReference.length,
+            notInDrawpane: notInDrawpane.length,
+            frameErrors: errors.length,
+            engines,
+            census: { pages: census.length, blockedPages, error: censusError },
+            seconds: run.seconds,
+          };
+          writeFileSync(
+            join(runDir, "engine-scoreboard.json"),
+            `${JSON.stringify(scoreboard, null, 2)}
+`,
+          );
+          console.log(JSON.stringify(scoreboard, null, 2));
+          if (process.env.E2E_KIT_PARITY_REQUIRE_PASS === "1")
+            expect(scoreboard.verdict, "Decision 0040 kit gate").toBe("pass");
+        } else {
+          expect(errors, "Kit frames that failed to draw").toEqual([]);
+        }
+        if (ALLOW_MISSING_FONTS && missingFonts.size > 0)
+          console.log(
+            `Missing in Drawpane, allowed: ${[...missingFonts].map(([face, ids]) => `${face} (${ids.length} frames)`).join(", ")}.`,
+          );
+        else
+          expect(
+            [...missingFonts.keys()],
+            "Make all missing faces available before scoring.",
+          ).toEqual([]);
+      } finally {
+        transfer.close();
+        await context.close();
       }
-      const run = {
-        startedAt: new Date(started).toISOString(),
-        git: git(),
-        cache: relative(out, cache),
-        scale,
-        frames: n,
-        withoutFigma,
-        notInDrawpane,
-        missingFonts: Object.fromEntries(missingFonts),
-        seconds: { import: importSeconds, open: openSeconds, total: seconds(started) },
-      };
-      writeFileSync(join(runDir, "run.json"), `${JSON.stringify(run, null, 2)}\n`);
-      console.log(
-        `Drew ${n} frames in ${seconds(started)} s into ${runDir}; ${withoutFigma} sampled frames have no Figma truth yet, ${notInDrawpane.length} aren't in Drawpane.`,
-      );
-      await page.context().close();
-      if (ALLOW_MISSING_FONTS && missingFonts.size > 0)
-        console.log(
-          `Missing in Drawpane, allowed: ${[...missingFonts].map(([face, ids]) => `${face} (${ids.length} frames)`).join(", ")}.`,
-        );
-      else
-        expect(
-          [...missingFonts.keys()],
-          "Fonts missing in Drawpane would swamp every other difference: make them available first.",
-        ).toEqual([]);
     });
 
     test("compare: scores, scoreboard.json and report.html", async ({ browser }) => {

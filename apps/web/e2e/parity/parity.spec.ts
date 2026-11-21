@@ -195,26 +195,28 @@ test.describe
           const height = exportRect(suite, i).height * SCALE;
           const theirs = await decodePng(page, golden);
           expect(theirs.width, `${cell.id} golden size`).toBe(width);
-          const diff = clear
-            ? // Over white and over black, so alpha counts as much as colour.
-              await Promise.all(
-                [255, 0].map((grey) =>
-                  compare(
-                    page,
-                    over(ours[i] as string, grey),
-                    over(theirs.data, grey),
-                    width,
-                    height,
-                    suite.blur,
-                  ),
-                ),
-              ).then(([white, black]) => ({
-                mean: Math.round((((white?.mean ?? 0) + (black?.mean ?? 0)) / 2) * 100) / 100,
-                p99: Math.max(white?.p99 ?? 0, black?.p99 ?? 0),
-                worstTile: Math.max(white?.worstTile ?? 0, black?.worstTile ?? 0),
-                heat: white?.heat ?? "",
-              }))
-            : await compare(page, ours[i] as string, theirs.data, width, height, suite.blur);
+          const compareOn = (grey: number) =>
+            compare(
+              over(ours[i] as string, grey),
+              over(theirs.data, grey),
+              width,
+              height,
+              suite.blur,
+            );
+          let diff: ReturnType<typeof compare>;
+          if (clear) {
+            // Over white and over black, so alpha counts as much as colour.
+            const white = compareOn(255);
+            const black = compareOn(0);
+            diff = {
+              mean: Math.round(((white.mean + black.mean) / 2) * 100) / 100,
+              p99: Math.max(white.p99, black.p99),
+              worstTile: Math.max(white.worstTile, black.worstTile),
+              heat: white.heat,
+            };
+          } else {
+            diff = compare(ours[i] as string, theirs.data, width, height, suite.blur);
+          }
           // Drawpane's render, as a file next to the report: for fitting against the golden.
           mkdirSync(join(OUT, suite.suite), { recursive: true });
           const ourPng = await encodePng(page, ours[i] as string, width, height);

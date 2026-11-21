@@ -11,6 +11,7 @@ import { connect as netConnect } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { type Browser, type BrowserContext, expect, type Page } from "@playwright/test";
+import { engineCiStorage } from "./engine-ci-storage";
 
 export interface Instance {
   readonly url: string;
@@ -491,6 +492,7 @@ export async function freshInstance(
   try {
     const context = await browser.newContext({
       baseURL: url,
+      ...engineCiStorage(url),
       acceptDownloads: true,
       ...(isWebkit ? { ignoreHTTPSErrors: true } : {}),
     });

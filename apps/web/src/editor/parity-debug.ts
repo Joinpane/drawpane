@@ -65,7 +65,28 @@ export function parityDebug(editor: Editor) {
   };
   let renderer: CanvasRenderer | null = null;
 
+  async function renderCanvas(
+    id: string,
+    rect: Rect,
+    scale: number,
+    width: number,
+    height: number,
+  ) {
+    renderer ??= new CanvasRenderer(editor.scene, editor.measurer, {
+      images: imagesFor(editor),
+    });
+    await renderer.images.ready(imageRefs(editor.doc, [id]), 30_000);
+    const canvas = new OffscreenCanvas(width, height);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) throw new Error("No 2D context");
+    const started = performance.now();
+    renderer.renderNodes(ctx, [id], rect, scale, null, false, true);
+    const ms = Math.round(performance.now() - started);
+    return { canvas, ms };
+  }
+
   return {
+    renderCanvas,
     /** Whether the layer is in the document. */
     has: (id: string) => editor.doc.get(id) !== undefined && editor.doc.get(id) !== null,
 
@@ -129,16 +150,7 @@ export function parityDebug(editor: Editor) {
       width: number,
       height: number,
     ): Promise<{ png: string; ms: number; bounds: Rect | null }> {
-      renderer ??= new CanvasRenderer(editor.scene, editor.measurer, {
-        images: imagesFor(editor),
-      });
-      await renderer.images.ready(imageRefs(editor.doc, [id]), 30_000);
-      const canvas = new OffscreenCanvas(width, height);
-      const ctx = canvas.getContext("2d");
-      if (!ctx) throw new Error("No 2D context");
-      const started = performance.now();
-      renderer.renderNodes(ctx, [id], rect, scale, null, false, true);
-      const ms = Math.round(performance.now() - started);
+      const { canvas, ms } = await renderCanvas(id, rect, scale, width, height);
       const blob = await canvas.convertToBlob({ type: "image/png" });
       return {
         png: toBase64(new Uint8Array(await blob.arrayBuffer())),

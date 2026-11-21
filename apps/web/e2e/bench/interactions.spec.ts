@@ -44,6 +44,7 @@ import {
 } from "./engine-gate";
 import {
   type CaseResult,
+  caseDeadline,
   type GestureCheckpointSpec,
   type GestureGate,
   installProbe,
@@ -173,11 +174,13 @@ async function busiestBoard(page: Page): Promise<string> {
 test.describe("Interactions", () => {
   test.skip(!!process.env.E2E_BASE_URL, "Needs its own local instance.");
   let instance: Instance;
+  let benchPage: Page;
 
   test.beforeAll(async ({ browser }) => {
     test.setTimeout(180_000);
     instance = await freshInstance(browser, { port: PORT, inspectorPort: PORT + 540 });
     const page = instance.page;
+    benchPage = page;
     page.on("pageerror", (error) => console.log(`page error: ${error.message}`));
     await installFallbackRecorder(page);
     await page.evaluate(() => localStorage.setItem("drawpane:debug", "1"));
@@ -191,10 +194,23 @@ test.describe("Interactions", () => {
     if (PROFILE) console.log(summarizeProfile(PROFILE, name, profile));
   };
 
+  const sessions = new WeakMap<Page, ReturnType<typeof maybeCdp>>();
+  const profileFor =
+    (prefix: string) =>
+    (page: Page) =>
+    async <T>(name: string, work: () => Promise<T>) => {
+      let session = sessions.get(page);
+      if (!session) {
+        session = maybeCdp(page);
+        sessions.set(page, session);
+      }
+      return profiler(await session, PROFILE, prefix, save)(name, work);
+    };
+
   test("on a simple 10,000-layer file", async () => {
     test.skip(!!ONLY && !ONLY.includes("simple"), "Not in BENCH_ONLY.");
     test.setTimeout(60 * 60_000);
-    const page = instance.page;
+    let page = benchPage;
     for (const renderer of RENDERERS) {
       const isEngine = renderer !== "canvas";
       await useRenderer(page, renderer);
@@ -208,7 +224,6 @@ test.describe("Interactions", () => {
       await settle(page);
       await installProbe(page);
       const beforeRenderer = await captureRendererState(page);
-      const cdp = await maybeCdp(page);
       const board = await page.evaluate(() => {
         const e = (
           window as unknown as {
@@ -236,8 +251,13 @@ test.describe("Interactions", () => {
       > = {};
       const gestureGate: GestureGate | undefined = isEngine
         ? {
-            before: () => captureRendererState(page, { sampleSurface: true }),
-            verify: async (name: string, before: unknown, spec: GestureCheckpointSpec) => {
+            before: (page) => captureRendererState(page, { sampleSurface: true }),
+            verify: async (
+              page: Page,
+              name: string,
+              before: unknown,
+              spec: GestureCheckpointSpec,
+            ) => {
               const cp = await verifyScenarioCheckpoint(
                 page,
                 before as DomRendererSnapshot,
@@ -257,18 +277,27 @@ test.describe("Interactions", () => {
             },
           }
         : undefined;
-      const results = await interactions(page, targets, {
+      const measured = await interactions(page, targets, {
         frames: FRAMES,
-        profile: profiler(cdp, PROFILE, reportKey, save),
+        profile: profileFor(reportKey),
         gestureGate,
       });
-      const presentation = isEngine
-        ? await verifyEngineBenchmark(page, beforeRenderer, "bench/interactions.spec.ts (simple)", {
-            minSubmittedFrames: 100,
-            minFrames: 30,
-            checkCameraDelta: true,
-          })
-        : null;
+      const results = measured.results;
+      page = measured.page;
+      benchPage = page;
+      const presentation =
+        isEngine && !Object.values(results).some((result) => "error" in result)
+          ? await verifyEngineBenchmark(
+              page,
+              beforeRenderer,
+              "bench/interactions.spec.ts (simple)",
+              {
+                minSubmittedFrames: 100,
+                minFrames: 30,
+                checkCameraDelta: true,
+              },
+            )
+          : null;
       const workload = {
         renderer,
         layers: 10_000,
@@ -302,13 +331,17 @@ test.describe("Interactions", () => {
         ...(engineMeta ? { engine: engineMeta } : {}),
         ...(presentation ? { presentation } : {}),
       });
+      expect(
+        Object.entries(results).filter(([, result]) => "error" in result),
+        "Failed interactions are listed in the benchmark report",
+      ).toEqual([]);
     }
   });
 
   test("on a generated effect-heavy file", async () => {
     test.skip(!!ONLY && !ONLY.includes("effects"), "Not in BENCH_ONLY.");
     test.setTimeout(60 * 60_000);
-    const page = instance.page;
+    const page = benchPage;
     await useRenderer(page, RENDERERS.at(-1) ?? "canvas");
     await page.goto("/");
     const kit = generateEffectKit();
@@ -317,7 +350,6 @@ test.describe("Interactions", () => {
     await page.waitForTimeout(3000);
     await settle(page);
     await installProbe(page);
-    const cdp = await maybeCdp(page);
     const results: Record<string, CaseResult | number> = { open };
     // From the light page to the heavy one, as a designer goes to work on it.
     await switchPage(page, kit.pages[1] as string);
@@ -327,13 +359,12 @@ test.describe("Interactions", () => {
     const targets = await pickTargets(page, await busiestBoard(page));
     const who = await drawnBy(page);
     console.log(`Effect-heavy file drawn by: ${JSON.stringify(who)}`);
-    Object.assign(
-      results,
-      await interactions(page, targets, {
-        frames: FRAMES,
-        profile: profiler(cdp, PROFILE, "effects", save),
-      }),
-    );
+    const measured = await interactions(page, targets, {
+      frames: FRAMES,
+      profile: profileFor("effects"),
+    });
+    benchPage = measured.page;
+    Object.assign(results, measured.results);
     const { open: _open, ...cases } = results;
     console.log(
       table(
@@ -353,43 +384,40 @@ test.describe("Interactions", () => {
     const pages = NAMED
       ? all.filter((p) => NAMED.includes(p.name) || NAMED.includes(p.id))
       : all.slice(0, PAGE_COUNT);
-    const page = instance.page;
+    let page = benchPage;
     await page.goto("/");
     const fileId = await importConverted(page, folder, "Bench");
     const open = await openFile(page, fileId);
     // Fonts and images arrive after the file opens.
     await page.waitForTimeout(5000);
-    await settle(page);
-    await installProbe(page);
-    const cdp = await maybeCdp(page);
     const out: Record<string, unknown> = { open };
     console.log(`Opened in ${open} ms.`);
     for (const info of pages) {
       const results: Record<string, CaseResult> = {};
-      results["switch page"] = await profiler(
-        cdp,
-        PROFILE,
-        info.name,
-        save,
-      )("switch page", () => switchPage(page, info.id));
-      await settle(page);
+      const profile = profileFor(info.name);
+      try {
+        results["switch page"] = await caseDeadline(
+          profile(page)("switch page", () => switchPage(page, info.id)),
+          60_000,
+          "switch page",
+        );
+      } catch (error) {
+        results["switch page"] = { error: String(error).split("\n")[0] ?? "Failed" };
+      }
       const board = info.busiest ?? (await busiestBoard(page));
       const targets = await pickTargets(page, board);
       console.log(`${info.name}: targets ${JSON.stringify(targets)}`);
-      Object.assign(
-        results,
-        await interactions(page, targets, {
-          frames: FRAMES,
-          profile: profiler(cdp, PROFILE, info.name, save),
-        }),
-      );
+      const measured = await interactions(page, targets, { frames: FRAMES, profile });
+      Object.assign(results, measured.results);
+      page = measured.page;
+      benchPage = page;
       console.log(
         table(
           `Interactions, ${info.name}: ${info.layers} layers, ${info.readers} reading the backdrop, ${info.shadows} shadows`,
           results,
         ),
       );
-      out[info.name] = results;
+      out[info.name] = { ...results, renderer: await drawnBy(page) };
     }
     report("file", out);
   });

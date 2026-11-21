@@ -5,6 +5,7 @@
  * tests (apps/worker/test/members.test.ts).
  */
 import { type BrowserContext, expect, type Page, test } from "@playwright/test";
+import { engineCiStorage } from "./engine-ci-storage";
 import { addPasskey, freshInstance, type Instance } from "./fresh-instance";
 
 test.describe
@@ -20,7 +21,10 @@ test.describe
       test.setTimeout(180_000);
       instance = await freshInstance(browser, { port: 8845, inspectorPort: 9385 });
       ana = instance.page;
-      boContext = await browser.newContext({ baseURL: instance.url });
+      boContext = await browser.newContext({
+        baseURL: instance.url,
+        ...engineCiStorage(instance.url),
+      });
       bo = await boContext.newPage();
       await addPasskey(boContext, bo);
     });
