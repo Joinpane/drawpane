@@ -8,7 +8,13 @@
  * none. Apple's own files are licensed and never in the repo.
  */
 import { readFileSync } from "node:fs";
-import { fontAliasIndex, type NodeRecord, type Props, resolveFontFamily } from "@drawpane/model";
+import {
+  fontAliasIndex,
+  type NodeRecord,
+  type Props,
+  resolveFontFamily,
+  SCRIPT_FALLBACK_FAMILIES,
+} from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { Doc } from "../src/doc";
 import {
@@ -77,9 +83,19 @@ async function ready(available = here) {
 describe("font strings", () => {
   it("name the cut the size calls for, then the missing-glyph box, then the fallback", () => {
     const fonts = { family: (f: string, size: number) => resolveFontFamily(f, size, here) };
-    expect(fontString({ fontFamily: "SF Pro", fontSize: 17 }, fonts)).toBe(
-      `400 17px "SF Pro Text", "SF Pro Text Variable", "${MISSING_GLYPH_FAMILY}", "Instrument Sans Variable", system-ui, sans-serif`,
-    );
+    expect(fontString({ fontFamily: "SF Pro", fontSize: 17 }, fonts).split(", ")).toEqual([
+      '400 17px "SF Pro Text"',
+      '"SF Pro Text Variable"',
+      `"${MISSING_GLYPH_FAMILY}"`,
+      '"Instrument Sans Variable"',
+      ...SCRIPT_FALLBACK_FAMILIES.filter((name) => name !== "Noto Emoji").map(
+        (name) => `"Drawpane ${name}"`,
+      ),
+      "emoji",
+      '"Drawpane Noto Emoji"',
+      "system-ui",
+      "sans-serif",
+    ]);
     expect(parseFont(fontString({ fontFamily: "SF Pro", fontSize: 34 }, fonts))?.families).toEqual([
       "SF Pro Display",
       MISSING_GLYPH_FAMILY,
