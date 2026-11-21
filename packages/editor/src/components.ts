@@ -249,35 +249,37 @@ export function listComponents(doc: Doc): NodeRecord[] {
   return out;
 }
 
-/** Would placing an instance of `componentId` under `parent` make a component contain itself? */
+/**
+ * Would placing an instance of `componentId` under `parent` make a component
+ * contain itself? It would inside any component the placed one shows, itself
+ * or one it holds an instance of however deep, and inside an instance of one
+ * of those: a nested instance swapped there shows in it, so swapping the
+ * nested instance in an instance of B to B would show B in B forever.
+ */
 export function wouldCycle(doc: Doc, componentId: string, parent: string): boolean {
-  const seen = new Set<string>();
-  const containsInstanceOf = (rootId: string, target: string): boolean => {
-    if (seen.has(rootId)) return false;
-    seen.add(rootId);
-    const stack = [rootId];
-    while (stack.length > 0) {
-      const id = stack.pop() as string;
-      const node = doc.getUnresolved(id);
-      if (!node) continue;
-      const of = node.type === "frame" ? getProp(node.props, "instanceOf") : null;
-      if (of === target) return true;
-      if (of && containsInstanceOf(of, target)) return true;
-      stack.push(...doc.childIds(id));
-    }
-    return false;
-  };
-  // Placing inside the component itself, or inside any component that the
-  // placed component (transitively) contains.
+  // What's above, as components: a main itself, or what an instance shows. Most places are in
+  // neither, and need nothing more read.
+  const above: string[] = [];
   for (
     let node = doc.getUnresolved(parent);
     node && node.type !== "page";
     node = doc.getUnresolved(node.parent)
   ) {
-    if (node.id === componentId) return true;
-    if (isMainComponent(node) && containsInstanceOf(componentId, node.id)) return true;
+    if (isMainComponent(node)) above.push(node.id);
+    const of = node.type === "frame" ? getProp(node.props, "instanceOf") : null;
+    if (of) above.push(of);
   }
-  return false;
+  if (above.length === 0) return false;
+  // Every component an instance of `componentId` shows, however nested, itself included.
+  const shown = new Set([componentId]);
+  const queue = [componentId];
+  for (let i = 0; i < queue.length; i++)
+    for (const of of instancedIn(doc, queue[i] as string))
+      if (!shown.has(of)) {
+        shown.add(of);
+        queue.push(of);
+      }
+  return above.some((id) => shown.has(id));
 }
 
 /** The components a subtree holds instances of. */

@@ -312,6 +312,26 @@ describe("components and instances", () => {
     expect(getProp(props(editor, instance), "instanceOf")).toBe(card);
   });
 
+  it("offers no swap that would show a component in itself through one of its instances", () => {
+    // Card holds a Button; in an instance of Card, that Button can't become a Card: the Card
+    // it would show holds the same Button, swapped again, forever (the edit-layout oracle).
+    const card = editor.createLayer("frame", { x: 400, y: 0, width: 200, height: 100 }, "p", {
+      name: "Card",
+    }) as string;
+    editor.select([card]);
+    editor.createComponent();
+    editor.insertInstance(button.frame, { x: 450, y: 50 });
+    const cardInstance = editor.insertInstance(card, { x: 400, y: 300 }) as string;
+    const nested = editor.doc
+      .childIds(cardInstance)
+      .find((id) => getProp(props(editor, id), "instanceOf") === button.frame) as string;
+    expect(nested).toBeTruthy();
+    expect(swapTargets(editor.doc, nested)).toEqual([]);
+    editor.swapInstance(nested, card);
+    expect(getProp(props(editor, nested), "instanceOf")).toBe(button.frame);
+    expect(editor.s.notice?.text).toBe("A component can't contain an instance of itself.");
+  });
+
   it("inserts an instance beside its component when the component is selected", () => {
     editor.select([button.frame]);
     const made = editor.insertInstance(button.frame) as string;

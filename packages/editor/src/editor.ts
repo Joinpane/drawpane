@@ -2677,6 +2677,15 @@ export class Editor {
    * swaps in one transaction, then the sync that fills them in.
    */
   #swapInstances(instanceIds: readonly string[], componentId: string, label: string): void {
+    // The swap menu offers no swap that would show a component in itself; asked anyway, none.
+    const cyclic = instanceIds.some((id) => {
+      const instance = this.doc.getUnresolved(id);
+      return !!instance && wouldCycle(this.doc, componentId, instance.parent);
+    });
+    if (cyclic) {
+      this.notify("A component can't contain an instance of itself.");
+      return;
+    }
     const ops = instanceIds.flatMap((id) => swapInstanceOps(this.doc, id, componentId));
     if (ops.length === 0) return;
     this.beginGesture(label);
