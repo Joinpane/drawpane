@@ -57,3 +57,7 @@ The canvas renderer sizes glass scratch to the visible lens and its optical reac
 When that crop exceeds its raster budget, it samples the same region at a lower
 resolution. The lens center, edge distance and refraction stay tied to the
 original geometry. The full-resolution outline clips the enlarged result.
+
+The WebGL glass pass computes ray gradients before discarding transparent
+pixels. A pixel at the lens edge can share a derivative quad with pixels
+outside the outline. Their rays keep mip selection defined at the edge.

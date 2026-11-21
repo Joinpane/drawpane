@@ -38,5 +38,8 @@ test("Canvas glass drag erases the old footprint before drawing the next", async
       expect(frame.lensPixels, `current glass on drag step ${index + 1}`).toBeGreaterThan(100);
   }
   expect(outcome.pending).toBe(false);
-  expect(outcome.settled.differentPixels, "settled pixels differing from a fresh draw").toBe(0);
+  expect(
+    outcome.settled.differentPixels,
+    `settled pixels differing from a fresh draw (sample ${JSON.stringify(outcome.settled.sample)})`,
+  ).toBe(0);
 });

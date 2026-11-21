@@ -92,7 +92,7 @@ export async function compareGlassDrag() {
   const backdrop = pixels(expected);
   fresh.hidden = new Set();
 
-  const compare = (p: Point) => {
+  const compare = (p: Point, reportDiff = false) => {
     fresh.invalidate();
     fresh.render(expected, pageId, camera, viewport, 1, { exact: true });
     const seen = pixels(actual);
@@ -104,6 +104,7 @@ export async function compareGlassDrag() {
     let oldPixels = 0;
     let lensPixels = 0;
     let differentPixels = 0;
+    const sample: Array<{ x: number; y: number; actual: number[]; expected: number[] }> = [];
     for (let y = 0; y < viewport.height; y++) {
       for (let x = 0; x < viewport.width; x++) {
         const i = (y * viewport.width + x) * 4;
@@ -113,6 +114,14 @@ export async function compareGlassDrag() {
           Math.abs((seen[i + 2] as number) - (oracle[i + 2] as number)) > 2 ||
           Math.abs((seen[i + 3] as number) - (oracle[i + 3] as number)) > 2;
         differentPixels += Number(different);
+        if (reportDiff && different && sample.length < 8) {
+          sample.push({
+            x,
+            y,
+            actual: Array.from(seen.subarray(i, i + 4)),
+            expected: Array.from(oracle.subarray(i, i + 4)),
+          });
+        }
         if (x < x0 - 2 || x >= x1 + 2 || y < y0 - 2 || y >= y1 + 2) {
           oldPixels += Number(different);
         } else if (
@@ -124,7 +133,7 @@ export async function compareGlassDrag() {
         }
       }
     }
-    return { oldPixels, lensPixels, differentPixels, visible: x0 < viewport.width };
+    return { oldPixels, lensPixels, differentPixels, visible: x0 < viewport.width, sample };
   };
   kept.render(actual, pageId, camera, viewport, 1, { exact: true });
   const end = { x: 75, y: 96 };
@@ -143,5 +152,5 @@ export async function compareGlassDrag() {
   editor.endGesture();
   for (let i = 0; kept.pending && i < 20; i++)
     kept.render(actual, pageId, camera, viewport, 1, { exact: true, budget: 8 });
-  return { frames, pending: kept.pending, settled: compare(end) };
+  return { frames, pending: kept.pending, settled: compare(end, true) };
 }
