@@ -15,18 +15,20 @@ import {
   Shaper,
   ShapingMeasurer,
 } from "@drawpane/editor";
+import { cjkRegionFor, scriptSubsetsFor } from "@drawpane/model";
 import instrumentSansUrl from "../fonts/fallback/InstrumentSans-Variable.ttf?url";
 import { faceFileUrl, variableFileUrl } from "../fonts/font-files";
 import { fonts } from "../fonts/fonts";
-import { scriptFallbackBytes, scriptFallbackFaces } from "../fonts/script-fallbacks";
 
 const BUNDLED_FALLBACK = "Instrument Sans Variable";
 let instrumentSans: Promise<ArrayBuffer | null> | undefined;
 
 /** A face's TrueType or OpenType file: bundled, from the font proxy, or uploaded by the team. */
 export const fontBytes: FontBytesLoader = async (face) => {
-  if (face.subset !== undefined)
-    return scriptFallbackBytes({ family: face.family, subset: face.subset });
+  if (face.subset !== undefined) {
+    const query = new URLSearchParams({ family: face.family, slice: face.subset });
+    return readFont(`/api/fonts/fallback?${query}`);
+  }
   if (
     face.family === BUNDLED_FALLBACK ||
     (face.family === "Instrument Sans" &&
@@ -85,7 +87,10 @@ export const shaper = new Shaper(fontBytes, {
   ...faceDeadline(),
   fallbackFamily: BUNDLED_FALLBACK,
   bundledRetryMs: [250, 1000, 4000, 15_000, 30_000],
-  fallbackFaces: scriptFallbackFaces,
+  fallbackFaces: (text, run) =>
+    scriptSubsetsFor(text, run.cjkRegion ?? cjkRegionFor(text, globalThis.navigator?.language)).map(
+      (slice) => ({ ...slice, weight: 400, italic: false }),
+    ),
   substitute: (face) => {
     const family = systemSubstitutes.get(face.family);
     return family && fonts.get(face.family)?.source === "system" ? { ...face, family } : null;
@@ -117,5 +122,7 @@ export function addMissingGlyphFont(): void {
  */
 export function textMeasurer(): ShapingMeasurer {
   addMissingGlyphFont();
-  return new ShapingMeasurer(new CanvasTextMeasurer(), shaper, fonts);
+  const measurer = new ShapingMeasurer(new CanvasTextMeasurer(), shaper, fonts, navigator.language);
+  measurer.setEngineText(false);
+  return measurer;
 }

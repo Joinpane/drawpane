@@ -113,7 +113,8 @@ describe("renderPng", () => {
     const requested: Face[] = [];
     const load = async (face: Face) => {
       requested.push(face);
-      if (face.family === "Noto Sans SC" && face.subset === "中漢") return noto;
+      if (face.family === "Noto Sans SC" && (face.subset === "4e00" || face.subset === "6f00"))
+        return noto;
       return face.family === "Instrument Sans" ? fallback : null;
     };
     const shaper = new HarfBuzzMeasurer(load);
@@ -135,8 +136,10 @@ describe("renderPng", () => {
     ]);
     const out = await r.renderPng(d, "p");
     expect(requested.filter((face) => face.subset).map((face) => face.subset)).toEqual([
-      "中漢",
-      "中漢",
+      "4e00",
+      "6f00",
+      "4e00",
+      "6f00",
     ]);
     expect(shaper.approximations.some((face) => face.reason === "glyphs")).toBe(false);
     const png = `data:image/png;base64,${base64(out.png)}`;

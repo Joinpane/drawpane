@@ -28,20 +28,34 @@ import {
   type WireRecord,
 } from "@drawpane/engine/wire";
 import { getProp, type NodeRecord } from "@drawpane/model";
-import type { Rect } from "../geometry";
+import { boxOf, type Rect } from "../geometry";
 import { glassParams } from "../glass";
+import { imagePlacement, type Size } from "../images";
 import { isActiveMask } from "../masks";
 import { blurSigma } from "../post-effects";
 import { glyphTable } from "../saved-glyphs";
 import type { Scene } from "../scene";
 import type { TextMeasurer } from "../text";
-import { type ColorGlyph, encodeLayer, type LayerContext, localTransform } from "./layer";
+import {
+  type ColorGlyph,
+  type EncodedLayer,
+  encodeLayer,
+  type LayerContext,
+  localTransform,
+} from "./layer";
 import { svgPathData } from "./svg-path";
 
 export interface EngineImage {
   readonly handle: number;
   readonly width: number;
   readonly height: number;
+}
+
+export interface ImageDemand {
+  readonly ref: string;
+  readonly visible: boolean;
+  /** Projected dimensions in page units, before camera zoom and device pixel ratio. */
+  readonly span: Size | null;
 }
 
 export interface DisplayListOptions {
@@ -104,7 +118,7 @@ export class DisplayListBuilder {
   readonly #measurer: TextMeasurer;
   readonly #image: (ref: string) => EngineImage | null;
   readonly #colorGlyph: DisplayListOptions["colorGlyph"];
-  readonly #colorText = new Set<string>();
+  readonly #colorText = new Map<string, EncodedLayer["colorGlyphs"]>();
   #colorScale = 1;
   #page: string | null = null;
   #revision = 0;
@@ -127,6 +141,7 @@ export class DisplayListBuilder {
   readonly #imagesOf = new Map<string, Set<string>>();
   /** The image refs each layer's record paints. */
   readonly #imagesBy = new Map<string, readonly string[]>();
+  readonly #imageReach = new Map<string, number>();
   readonly #texts = new Set<string>();
   /** Text using a fallback: a face that arrives late can replace it. */
   readonly #pendingText = new Set<string>();
@@ -300,8 +315,9 @@ export class DisplayListBuilder {
     else this.#waits.delete(node.id);
     this.#watchFaces(node.id, [...new Set([...e.waiting, ...e.faceDependencies])]);
     this.#useImages(node.id, e.images);
-    if (e.hasColorGlyphs) this.#colorText.add(node.id);
+    if (e.colorGlyphs.length) this.#colorText.set(node.id, e.colorGlyphs);
     else this.#colorText.delete(node.id);
+    if (e.images.length) this.#imageReach.set(node.id, e.record.reach);
     if (e.record.unsupported) this.unsupported.set(node.id, e.record.unsupported);
     else this.unsupported.delete(node.id);
     if (refusingBits(e.record.unsupported)) this.#refused.add(node.id);
@@ -401,7 +417,7 @@ export class DisplayListBuilder {
     const bucket = Math.max(1, Math.min(16, 2 ** Math.ceil(Math.log2(deviceScale))));
     if (bucket === this.#colorScale) return;
     this.#colorScale = bucket;
-    for (const id of this.#colorText) this.#extra.add(id);
+    for (const id of this.#colorText.keys()) this.#extra.add(id);
   }
 
   /** Notes the images a layer's record paints now, forgetting those it painted before. */
@@ -417,12 +433,62 @@ export class DisplayListBuilder {
       set.add(id);
     }
     if (refs.length > 0) this.#imagesBy.set(id, refs);
-    else this.#imagesBy.delete(id);
+    else {
+      this.#imagesBy.delete(id);
+      this.#imageReach.delete(id);
+    }
   }
 
   /** The image refs the page's records paint now: the engine may let the others go. */
   imagesInUse(): ReadonlySet<string> {
     return new Set(this.#imagesOf.keys());
+  }
+
+  /**
+   * Image uses on or near the view. A null span requests metadata before a layer
+   * can be encoded. The image's full transform matters for zoom, including crop and repeat.
+   */
+  *imageDemands(view: Rect, margin: number): Iterable<ImageDemand> {
+    const scene = this.#scene;
+    for (const [id, refs] of this.#imagesBy) {
+      if (this.#hidden.has(id) || !scene.isVisible(id)) continue;
+      const b = scene.bounds(id);
+      const layer = this.#nodes.get(id);
+      if (!b || !layer || layer.type === "page" || layer.type === "group") continue;
+      const reach = this.#imageReach.get(id) ?? 0;
+      const distance =
+        Math.max(
+          view.x - (b.x + b.width),
+          b.x - (view.x + view.width),
+          view.y - (b.y + b.height),
+          b.y - (view.y + view.height),
+        ) - reach;
+      if (distance > margin) continue;
+      const visible = distance <= 0;
+      const box = boxOf(layer);
+      const matrix = scene.worldMatrix(id);
+      const wx = Math.hypot(matrix[0], matrix[1]);
+      const wy = Math.hypot(matrix[2], matrix[3]);
+      for (const glyph of this.#colorText.get(id) ?? [])
+        yield {
+          ref: glyph.ref,
+          visible,
+          span: { width: glyph.width * wx, height: glyph.height * wy },
+        };
+      for (const paint of getProp(layer.props, "fills")) {
+        if (
+          paint.type !== "image" ||
+          !refs.includes(paint.ref) ||
+          paint.visible === false ||
+          paint.opacity === 0
+        )
+          continue;
+        const meta = this.#image(paint.ref);
+        const place = meta && imagePlacement(paint.scaleMode, box, meta, paint.crop);
+        const span = place && { width: place.width * wx, height: place.height * wy };
+        yield { ref: paint.ref, visible, span };
+      }
+    }
   }
 
   /** Counts the glyphs a layer's new record uses, and lets go of those its old one did. */
@@ -730,6 +796,7 @@ export class DisplayListBuilder {
     this.#kids.clear();
     this.#imagesOf.clear();
     this.#imagesBy.clear();
+    this.#imageReach.clear();
     this.#texts.clear();
     this.#colorText.clear();
     this.#pendingText.clear();

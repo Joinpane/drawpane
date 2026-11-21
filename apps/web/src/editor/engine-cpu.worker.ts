@@ -17,6 +17,7 @@ import {
   loadBrowserEngine,
   RenderEngine,
 } from "@drawpane/engine";
+import { CPU_IMAGE_BUDGET, uploadCpuLevel } from "./engine-image";
 
 /** Maximum unacknowledged frame transfers in flight between the worker and the main thread. */
 const MAX_INFLIGHT_TRANSFERS = 2;
@@ -38,12 +39,11 @@ export type CpuWorkerRequest =
   | {
       readonly type: "put-image";
       readonly handle: number;
-      readonly width: number;
-      readonly height: number;
-      readonly bytes: ArrayBuffer;
-      readonly premultiplied: boolean;
+      readonly ticket: number;
+      readonly bitmap: ImageBitmap;
     }
-  | { readonly type: "drop-image"; readonly handle: number }
+  | { readonly type: "drop-image-level"; readonly handle: number; readonly width: number }
+  | { readonly type: "clear-view-caches" }
   | {
       readonly type: "render";
       readonly jobId: number;
@@ -60,6 +60,11 @@ export type CpuWorkerRequest =
 
 export type CpuWorkerReply =
   | { readonly type: "ready" }
+  | {
+      readonly type: "image-result";
+      readonly ticket: number;
+      readonly uploaded: boolean;
+    }
   | {
       readonly type: "apply-result";
       readonly ok: boolean;
@@ -361,11 +366,15 @@ scope.onmessage = async ({ data }) => {
     if (data.type === "init") {
       const mod = await loadBrowserEngine();
       if (disposed) return;
-      engine = new RenderEngine(mod, { glyphMaskBytes: 16 << 20 });
+      engine = new RenderEngine(mod, {
+        glyphMaskBytes: 16 << 20,
+        imageBytes: CPU_IMAGE_BUDGET,
+      });
       if (engine.failure) {
         post({ type: "error", code: engine.failure.code, message: engine.failure.message });
         return;
       }
+      engine.enableViewImages();
       committedRevision = engine.revision;
       applyRejected = false;
       post({ type: "ready" });
@@ -407,18 +416,29 @@ scope.onmessage = async ({ data }) => {
       return;
     }
     if (data.type === "put-image") {
-      const r = engine.putImage(
-        data.handle,
-        data.width,
-        data.height,
-        new Uint8Array(data.bytes),
-        data.premultiplied,
-      );
-      if (!r.ok) post({ type: "error", code: r.code, message: r.message });
+      try {
+        const r = uploadCpuLevel(engine, data.handle, data.bitmap);
+        post({ type: "image-result", ticket: data.ticket, uploaded: r.ok });
+        if (!r.ok && r.code === ErrorCode.Trap) {
+          post({ type: "error", code: r.code, message: r.message });
+        }
+      } catch {
+        // A browser bitmap read can run out of memory independently of wasm.
+        post({ type: "image-result", ticket: data.ticket, uploaded: false });
+      } finally {
+        data.bitmap.close();
+      }
       return;
     }
-    if (data.type === "drop-image") {
-      engine.dropImage(data.handle);
+    if (data.type === "drop-image-level") {
+      engine.dropImageLevel(data.handle, data.width);
+      return;
+    }
+    if (data.type === "clear-view-caches") {
+      latestJobId++;
+      pendingRender = null;
+      wakeCredit();
+      engine.clearViewCaches();
       return;
     }
     if (data.type === "tile-ack") {

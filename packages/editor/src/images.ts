@@ -99,6 +99,8 @@ export interface LoadedImage {
   /** The image's own size, which may be larger than a bitmap capped for memory. */
   readonly naturalWidth: number;
   readonly naturalHeight: number;
+  /** Encoded bytes already available for an image placed before its upload completes. */
+  readonly source?: Blob;
 }
 
 /** What the renderer draws: a bitmap (maybe downscaled) and the image's natural size. */
@@ -204,6 +206,10 @@ export class ImageCache {
   readonly #entries = new Map<string, Entry>();
   readonly #listeners = new Set<() => void>();
   readonly #load: NonNullable<ImageCacheOptions["load"]>;
+  readonly #url: (sha: string) => string;
+  readonly #encodedVersions = new Map<string, number>();
+  readonly #localSources = new Map<string, { blob: Blob; size: Size }>();
+  #localBytes = 0;
   readonly #resize: NonNullable<ImageCacheOptions["resize"]>;
   readonly #maxBytes: number;
   readonly #retryMs: number;
@@ -213,6 +219,7 @@ export class ImageCache {
   #notifyQueued = false;
 
   constructor(options: ImageCacheOptions = {}) {
+    this.#url = options.url ?? mediaUrl;
     this.#resize = options.resize ?? defaultResize;
     this.#load = options.load ?? defaultLoader(options.maxSide ?? 4096, this.#resize, options.url);
     this.#maxBytes = options.maxBytes ?? 384 * 1024 * 1024;
@@ -283,8 +290,38 @@ export class ImageCache {
     return view(best);
   }
 
+  /** Changes when locally supplied encoded data becomes available. */
+  encodedVersion(sha: string): number {
+    return this.#encodedVersions.get(sha) ?? 0;
+  }
+
+  /** Reads stored media without populating the canvas renderer's decoded cache. */
+  async encoded(sha: string, signal: AbortSignal): Promise<{ blob: Blob; size?: Size }> {
+    const local = this.#localSources.get(sha);
+    if (local) return local;
+    const response = await fetch(this.#url(sha), { credentials: "same-origin", signal });
+    if (!response.ok) throw new Error(`Image ${sha} answered ${response.status}`);
+    return { blob: await response.blob() };
+  }
+
   /** Adds an image decoded elsewhere (a file just dropped), so it draws before its upload ends. */
   put(sha: string, image: LoadedImage): void {
+    if (image.source) {
+      this.#encodedVersions.set(sha, this.encodedVersion(sha) + 1);
+      const existing = this.#localSources.get(sha);
+      if (existing) this.#localBytes -= existing.blob.size;
+      this.#localSources.delete(sha);
+      this.#localSources.set(sha, {
+        blob: image.source,
+        size: { width: image.naturalWidth, height: image.naturalHeight },
+      });
+      this.#localBytes += image.source.size;
+      for (const [ref, source] of this.#localSources) {
+        if (this.#localBytes <= 32 * 1024 * 1024) break;
+        this.#localSources.delete(ref);
+        this.#localBytes -= source.blob.size;
+      }
+    }
     const existing = this.#entries.get(sha);
     if (existing) this.#drop(sha, existing);
     const entry = this.#newEntry();
@@ -326,6 +363,9 @@ export class ImageCache {
 
   /** Releases every bitmap and cancels loads. */
   clear(): void {
+    this.#localSources.clear();
+    this.#encodedVersions.clear();
+    this.#localBytes = 0;
     for (const [sha, entry] of this.#entries) this.#drop(sha, entry);
   }
 

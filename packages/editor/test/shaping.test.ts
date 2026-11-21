@@ -99,7 +99,10 @@ describe("Shaper", () => {
     if ("waiting" in result) throw new Error("Faces already settled");
     expect(result.shaped.width).toBe(68);
     expect(result.shaped.glyphs.map((glyph) => glyph.x)).toEqual([0, 18, 41]);
-    expect(result.shaped.glyphs.every((glyph) => glyph.d)).toBe(true);
+    const original = shaper.shape("AVH", run({}, 36, "Arimo"));
+    expect(result.shaped.glyphs.map((glyph) => glyph.d)).toEqual(
+      original?.glyphs.map((glyph) => glyph.d),
+    );
     expect(result.dependencies?.some((key) => key.startsWith("Arimo"))).toBe(true);
   });
 
@@ -172,12 +175,11 @@ describe("Shaper", () => {
   it("uses script outlines after Instrument Sans and changes only runs with that coverage", async () => {
     const fixture = readFileSync(new URL("./fixtures/NotoSansSC-Subset.ttf", import.meta.url));
     const noto = fixture.buffer.slice(fixture.byteOffset, fixture.byteOffset + fixture.byteLength);
-    const script = { family: "Noto Sans SC", subset: "中漢", weight: 400, italic: false };
-    let prepared = false;
+    const script = { family: "Noto Sans SC", subset: "4e00", weight: 400, italic: false };
     const shaper = new Shaper(
       async (face) =>
         face.subset === script.subset ? noto : face.family === "Instrument Sans" ? bytes() : null,
-      { fallbackFaces: () => (prepared ? [script] : []) },
+      { fallbackFaces: () => [script] },
     );
     const missing = run({}, 24, "Missing");
     await Promise.all([
@@ -185,15 +187,13 @@ describe("Shaper", () => {
       shaper.load({ family: "Instrument Sans", weight: 400, italic: false, variable: true }),
     ]);
     const latin = shaper.shapeForEngine("A", missing);
-    const first = shaper.shapeForEngine("漢中", missing);
-    expect(first.dependencies).toContain("script:漢");
-    prepared = true;
+    const first = shaper.shapeForEngine("中", missing);
+    expect(first).toHaveProperty("waiting");
+    expect(first.dependencies?.some((key) => key.endsWith("4e00"))).toBe(true);
     await shaper.load(script);
-    shaper.invalidateMeasurements(new Set(), script.subset);
-    const result = shaper.shapeForEngine("漢中", missing);
-    if ("waiting" in result || "waiting" in first) throw new Error("Faces already settled");
-    expect(result.shaped.glyphs[0]?.d).not.toBe(first.shaped.glyphs[0]?.d);
-    expect(result.shaped.glyphs[0]?.d).not.toBe(result.shaped.glyphs[1]?.d);
+    const result = shaper.shapeForEngine("中", missing);
+    if ("waiting" in result) throw new Error("Faces already settled");
+    expect(result.shaped.glyphs[0]?.d.length).toBeGreaterThan(100);
     expect(shaper.shapeForEngine("A", missing)).toBe(latin);
   });
 
@@ -517,6 +517,9 @@ describe("text dependencies in display lists", () => {
     builder.build("p");
     expect(raster.mock.calls.map(([text, _, scale]) => [text, scale])).toEqual([["👩‍🔬", 1]]);
     expect([...builder.imagesInUse()]).toEqual(["emoji-1"]);
+    expect([...builder.imageDemands({ x: 0, y: 0, width: 100, height: 100 }, 0)]).toEqual([
+      { ref: "emoji-1", visible: true, span: { width: 16, height: 16 } },
+    ]);
     builder.setColorScale(1.5);
     expect(builder.update()).not.toBeNull();
     expect([...builder.imagesInUse()]).toEqual(["emoji-2"]);

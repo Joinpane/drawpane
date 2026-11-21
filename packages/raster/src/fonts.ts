@@ -21,7 +21,7 @@ export interface Face {
    * helps pick among a team's uploads.
    */
   readonly variable?: boolean;
-  /** An allowlisted script fallback subset, in canonical code point order. */
+  /** A fixed script fallback slice ID. */
   readonly subset?: string;
 }
 

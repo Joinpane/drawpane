@@ -512,8 +512,12 @@ class FontRegistry implements FontResolver {
     await this.#loadGrantedLocal();
     const faces = this.#localFaces.get(face.family);
     if (!faces?.length) return null;
-    const styled = faces.filter((f) => /italic|oblique/i.test(f.style) === face.italic);
-    const pool = styled.length ? styled : faces;
+    const standard = faces.filter(
+      (f) => !/condens|compress|expand|extend|narrow|wide/i.test(f.style),
+    );
+    const widths = standard.length ? standard : faces;
+    const styled = widths.filter((f) => /italic|oblique/i.test(f.style) === face.italic);
+    const pool = styled.length ? styled : widths;
     const weight = nearestWeight(
       pool.map((f) => styleWeight(f.style)),
       face.weight,

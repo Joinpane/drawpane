@@ -80,6 +80,12 @@ export class Engine {
     premultiplied: boolean,
   ): Outcome;
   dropImage(id: number): Outcome;
+  clearViewCaches(): void;
+  enableViewImages(): void;
+  viewImageLimits(): Uint32Array;
+  putCpuImageLevel(id: number, width: number, height: number, rgba: Uint8Array): Outcome;
+  putGpuImageLevel?(id: number, bitmap: ImageBitmap): Outcome;
+  dropImageLevel(id: number, width: number): Outcome;
   renderCpu(
     width: number,
     height: number,

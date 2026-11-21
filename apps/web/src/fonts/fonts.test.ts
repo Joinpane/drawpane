@@ -27,8 +27,10 @@ describe("fonts", () => {
   it("reads the matching local face only after permission has been granted", async () => {
     const regular = vi.fn(async () => new Blob(["regular"]));
     const boldItalic = vi.fn(async () => new Blob(["bold italic"]));
+    const condensed = vi.fn(async () => new Blob(["condensed bold italic"]));
     const queryLocalFonts = vi.fn(async () => [
       { family: "A Local Family", style: "Regular", blob: regular },
+      { family: "A Local Family", style: "Condensed Bold Italic", blob: condensed },
       { family: "A Local Family", style: "Bold Italic", blob: boldItalic },
     ]);
     let state = "prompt";
@@ -46,6 +48,7 @@ describe("fonts", () => {
       expect(queryLocalFonts).toHaveBeenCalledTimes(1);
       expect(boldItalic).toHaveBeenCalledTimes(1);
       expect(regular).not.toHaveBeenCalled();
+      expect(condensed).not.toHaveBeenCalled();
     } finally {
       vi.unstubAllGlobals();
     }

@@ -5,13 +5,13 @@
  * file stores.
  */
 import {
+  type CjkRegion,
   type FontFeatures,
   type FontVariations,
   getProp,
   type NodeRecord,
   type Paint,
   type Props,
-  SCRIPT_FALLBACK_FAMILIES,
   type ScriptSubset,
 } from "@drawpane/model";
 import { MISSING_GLYPH_FAMILY } from "./missing-glyph-font";
@@ -20,6 +20,9 @@ import { bidiText, type TextDirection } from "./text-bidi";
 import { FALLBACK_FAMILY } from "./text-fallback";
 
 export interface TextMeasurer {
+  /** Browser editors opt in when the engine is selected. */
+  readonly engineText?: boolean;
+  readonly scriptLocale?: string;
   /**
    * Width of `text` in CSS pixels for a canvas `font` string; with a feature
    * `run`, as shaped with its OpenType features when the measurer can (else
@@ -110,6 +113,7 @@ export interface ShapingRun {
   /** Variable axes it sets (decision 0009); may be empty when it sets features. */
   readonly variations: FontVariations;
   readonly direction?: TextDirection;
+  readonly cjkRegion?: CjkRegion;
   /** Everything above as one string, for caches. */
   readonly key: string;
 }
@@ -275,25 +279,18 @@ export interface TextLayout {
  * 0036), then the editor's fallback. The box font covers nothing else, so
  * every other character falls through to the fallback as before.
  */
-const scriptFallbacks = SCRIPT_FALLBACK_FAMILIES.filter((name) => name !== "Noto Emoji").map(
-  (name) => `"Drawpane ${name}"`,
-);
-const FALLBACKS = [
-  `"${MISSING_GLYPH_FAMILY}"`,
-  `"${FALLBACK_FAMILY} Variable"`,
-  ...scriptFallbacks,
-  "emoji",
-  '"Drawpane Noto Emoji"',
-  "system-ui",
-  "sans-serif",
-].join(", ");
+const FALLBACKS = `"${MISSING_GLYPH_FAMILY}", "${FALLBACK_FAMILY} Variable", system-ui, sans-serif`;
 
 /** A canvas font string for `props`, in the family it's drawn in (`fonts`'s aliases, when given). */
-export function fontString(props: Props, fonts?: Pick<TextMeasurer, "family"> | null): string {
+export function fontString(
+  props: Props,
+  fonts?: Pick<TextMeasurer, "family" | "engineText"> | null,
+): string {
   const style = getProp(props, "fontStyle") === "italic" ? "italic " : "";
   const name = drawnFamily(props, fonts).replace(/"/g, "");
   // Self-hosted variable fonts register as "<Family> Variable"; list both so either resolves.
-  const requested = name === "system-ui" ? name : `"${name}", "${name} Variable"`;
+  const requested =
+    name === "system-ui" && fonts?.engineText ? name : `"${name}", "${name} Variable"`;
   return `${style}${getProp(props, "fontWeight")} ${getProp(props, "fontSize")}px ${requested}, ${FALLBACKS}`;
 }
 
@@ -511,7 +508,7 @@ function computeLayout(
   const text = getProp(props, "characters");
   const styles = spanStyles(node, measurer);
   const m = new RangeMeasure(text, styles, measurer);
-  const visualRuns = bidiText(text);
+  const visualRuns = measurer.engineText === false ? null : bidiText(text);
   const widthOf = (a: number, b: number) =>
     visualRuns
       ? visualRuns

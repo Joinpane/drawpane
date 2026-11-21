@@ -1123,7 +1123,13 @@ The browser preloads Instrument Sans and the private-use box when the engine sta
 
 Layout resolves Unicode bidi levels per paragraph and places each wrapped line in visual order. The canvas and HarfBuzz draw the resulting directional runs, and the caret and selection use the same fragment positions.
 
-After Instrument Sans, open Noto outline subsets cover Greek, Cyrillic, CJK, Arabic, Hebrew and symbols. The browser and Worker request the same allowlisted subsets through the font proxy, in batches of at most 128 unique code points. The proxy receives these in code point order and caches the TrueType file in R2. Han uses Noto Sans SC, kana uses Noto Sans JP, and Hangul uses Noto Sans KR. The browser uses its colour emoji renderer for supported graphemes and the engine holds those bitmaps as image resources at the current zoom bucket. Worker exports use monochrome emoji outlines when available.
+After Instrument Sans, the engine uses open Noto outlines for Greek, Cyrillic, CJK, Arabic, Hebrew and symbols. The canvas stack keeps its platform fallbacks, and the engine uses the browser's measured cluster origins while keeping the outlines' native proportions. The first engine use of a slice starts its load, with the same per-face settlement tracking as other outlines.
+
+The browser engine and Worker use one fixed catalogue. CJK and emoji use 256-code-point Unicode blocks. Smaller script faces load whole so joining alphabets share a font file. Browser requests carry only family and slice identifiers. Google receives stock family requests or the catalogue's fixed Unicode ranges. The proxy requires a session, allows 240 requests per account per minute, and caches one TrueType object per catalogue entry in R2.
+
+Drawpane has no language field on a text layer. Kana anywhere in a layer selects Japanese Han forms, and Hangul selects Korean in a layer without kana. Otherwise the viewer locale selects Noto Sans JP, KR, SC or TC. Traditional Chinese locales include Hant, Taiwan, Hong Kong and Macao. Workers use the same text heuristic and default to SC without a viewer locale. The prolonged sound mark and Japanese middle dot always use the Japanese face.
+
+The browser uses its colour emoji renderer for supported graphemes and the engine holds those bitmaps as image resources at the current zoom bucket. Worker exports use monochrome emoji outlines when available.
 
 ## Amendment: opening a large page without blocking input
 
@@ -1132,3 +1138,27 @@ A live GPU page opens over several revisions. Each frame admits a time-budgeted 
 In a local SwiftShader reproduction using the Examples records without media, the page switch itself returned in 1.4 ms. The fresh list of 17,922 records took 3,159 ms to build and 506 ms to apply. The longest browser task took 42,954 ms, with WebGPU buffer and texture uploads dominating the sampled CPU profile. The run used the main revision before the missing-face fallback. It previously refused unoutlined text. The fallback amendment above removed that refusal.
 
 With sliced opening, the first message took 15.5 ms to build and 1.1 ms to apply. The longest task in the candidate run was 324 ms. The first GPU preview reached the readback canvas after 5.44 s on this loaded software renderer. This run verifies that opening yields to browser tasks and reduces the blocking work. It leaves the 1 s first-image target open on the real page.
+
+## Amendment: on-demand image levels in the editor (2026-11-21)
+
+The editor retains compressed sources and assigns image handles independently
+of resident pixels. It requests levels for both projected axes of each paint,
+including crop and repeat, on screen and in the neighbouring tile ring. Two
+finer levels can be prefetched. Visible work has priority, uploads are paced
+across frames, and an oversized individual texture gets its own upload slice.
+
+The device budget combines adapter limits and reported device memory. The
+browser CPU Worker has a separate cap. Under pressure, the cache evicts
+off-screen and speculative levels, protecting a visible image's last level
+until a replacement is resident. If the visible set exceeds the cap, the
+largest levels are reduced first. The view follows every camera and edit with
+the best resident pixels, and a permanent reduction can settle at that detail.
+The renderer chip reports reductions including unavailable media.
+
+WebGPU copies resized ImageBitmaps directly. WebGL2 uses the bitmap overload
+of texSubImage2D. Only the CPU view Worker reads RGBA into WebAssembly.
+A level change dirties raster scales whose image sampler would choose
+different pixels. The view releases its caches after 30 seconds continuously
+hidden. Allocation refusals reclaim optional levels. Missing sources back off
+and corrupt bytes are retried only when the source changes or the view reloads.
+The strict raw-pixel export API retains its admission checks.

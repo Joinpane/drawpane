@@ -25,7 +25,7 @@
  * does, the face is ready then, and listeners hear it as they would have.
  * A face that failed or timed out is loaded again on `retry`.
  */
-import { type FontFeatures, GLYPH_UNITS, scriptFallbackFamily } from "@drawpane/model";
+import { type FontFeatures, GLYPH_UNITS, scriptSlice } from "@drawpane/model";
 import { type Face, type FontBytesLoader, faceKey } from "@drawpane/raster";
 import { acquireFace, isHarfBuzzOutOfMemory, releaseFace } from "./harfbuzz-faces";
 import { isPrivateUse, MISSING_GLYPH_FAMILY, missingGlyphFont } from "./missing-glyph-font";
@@ -153,7 +153,7 @@ export interface ShaperOptions {
   /** Bundled faces stay provisional on slow loads and retry I/O failures at these intervals. */
   readonly bundledRetryMs?: readonly number[];
   /** Prepared outline subsets that can cover characters after Instrument Sans. */
-  readonly fallbackFaces?: (text: string) => readonly ShapingFace[];
+  readonly fallbackFaces?: (text: string, run: ShapingRun) => readonly ShapingFace[];
 }
 
 export class Shaper {
@@ -163,7 +163,7 @@ export class Shaper {
   readonly #deadline: number;
   readonly #bundledRetryMs: readonly number[];
   readonly #fallbackFamily: string;
-  readonly #fallbackFaces: (text: string) => readonly ShapingFace[];
+  readonly #fallbackFaces: (text: string, run: ShapingRun) => readonly ShapingFace[];
   readonly #faceRevisions = new Map<string, number>();
   readonly #substitute: (face: ShapingFace) => ShapingFace | null;
   #harfBuzz: Promise<HarfBuzz> | null = null;
@@ -250,10 +250,9 @@ export class Shaper {
   }
 
   /** Widths in the browser can change independently of the outline file. */
-  invalidateMeasurements(families: ReadonlySet<string>, script?: string): void {
+  invalidateMeasurements(families: ReadonlySet<string>): void {
     const revision = ++this.#generation;
     for (const family of families) this.#faceRevisions.set(`font:${family}`, revision);
-    if (script) for (const char of script) this.#faceRevisions.set(`script:${char}`, revision);
   }
 
   /**
@@ -313,7 +312,7 @@ export class Shaper {
 
   /** The canvas's fallback order, with a bundled outline wherever no face can draw a glyph. */
   shapeForEngine(text: string, run: ShapingRun, measure?: (text: string) => number): EngineText {
-    const key = `${run.key}\u0000${text}`;
+    const key = `${run.key}\u0000${run.cjkRegion ?? ""}\u0000${text}`;
     const hit = this.#engineRuns.get(key);
     if (hit?.result.dependencies?.every((face) => this.faceRevision(face) <= hit.revision))
       return hit.result;
@@ -389,9 +388,7 @@ export class Shaper {
       .filter((piece) => piece.face < 0)
       .map((piece) => piece.text)
       .join("");
-    for (const char of scriptText)
-      if (scriptFallbackFamily(char)) dependencies.add(`script:${char}`);
-    const scripts = scriptText ? this.#fallbackFaces(scriptText) : [];
+    const scripts = scriptText ? this.#fallbackFaces(scriptText, run) : [];
     const scriptEntries = scripts.map(entryFor);
     for (const [index, entry] of scriptEntries.entries()) {
       if (entry.status === "loading") return { waiting: faceKey(scripts[index] as ShapingFace) };
@@ -448,49 +445,33 @@ export class Shaper {
   ): ShapedText {
     const width = measure(text);
     const starts = [...new Set(shaped.glyphs.map((glyph) => glyph.cluster))].sort((a, b) => a - b);
-    const target = new Map<number, { x: number; width: number }>();
+    const target = new Map<number, number>();
     let startPx = 0;
     for (const [index, start] of starts.entries()) {
       const end = starts[index + 1] ?? text.length;
       const endPx = end === text.length ? width : measure(text.slice(0, end));
-      target.set(start, {
-        x: direction === "rtl" ? width - endPx : startPx,
-        width: endPx - startPx,
-      });
+      target.set(start, direction === "rtl" ? width - endPx : startPx);
       startPx = endPx;
     }
     const pens = new Map<number, number>();
     for (const glyph of shaped.glyphs) {
       if (glyph.penX !== undefined && !pens.has(glyph.cluster)) pens.set(glyph.cluster, glyph.penX);
     }
-    const nextPen = new Map<number, number>();
-    const visual = [...pens];
-    for (const [index, [cluster]] of visual.entries())
-      nextPen.set(cluster, visual[index + 1]?.[1] ?? shaped.width);
     return {
       ...shaped,
       width,
       glyphs: shaped.glyphs.map((glyph) => {
         const at = target.get(glyph.cluster);
         const pen = pens.get(glyph.cluster);
-        if (!at || pen === undefined) return glyph;
-        const advance = (nextPen.get(glyph.cluster) ?? pen) - pen;
-        const stretch = advance > 0 && at.width > 0 ? at.width / advance : 1;
-        return {
-          ...glyph,
-          path: null,
-          x: at.x + (glyph.x - pen) * stretch,
-          d: this.#normalize(glyph.d, stretch, 1),
-        };
+        return at === undefined || pen === undefined ? glyph : { ...glyph, x: at + glyph.x - pen };
       }),
     };
   }
 
-  /** Aligns the outlines with the same advance the caret and line layout use. */
+  /** Put outlines in common units without changing their proportions or advance positions. */
   #fit(shaped: ShapedText, width: number, scale = shaped.scale): ShapedText {
-    const stretch = shaped.width > 0 && width > 0 ? width / shaped.width : 1;
     const units = shaped.scale / scale;
-    if (Math.abs(stretch - 1) < 1e-5 && Math.abs(units - 1) < 1e-9) {
+    if (Math.abs(units - 1) < 1e-9) {
       return width === shaped.width ? shaped : { ...shaped, width };
     }
     return {
@@ -499,19 +480,18 @@ export class Shaper {
       glyphs: shaped.glyphs.map((g) => ({
         ...g,
         path: null,
-        x: g.x * stretch,
-        d: this.#normalize(g.d, units * stretch, units),
+        d: this.#normalize(g.d, units),
       })),
     };
   }
 
   /** One scale per engine fill lets outlines from different faces overlap as one shape. */
-  #normalize(d: string, x: number, y: number): string {
-    if (!d || (Math.abs(x - 1) < 1e-9 && Math.abs(y - 1) < 1e-9)) return d;
-    const key = `${x}|${y}|${d}`;
+  #normalize(d: string, units: number): string {
+    if (!d) return d;
+    const key = `${units}|${d}`;
     let normalized = this.#normalized.get(key);
     if (normalized === undefined) {
-      normalized = serializePath(transformPath(parsePath(d), [x, 0, 0, y, 0, 0]));
+      normalized = serializePath(transformPath(parsePath(d), [units, 0, 0, units, 0, 0]));
       if (this.#normalized.size >= MAX_RUNS) this.#normalized.clear();
       this.#normalized.set(key, normalized);
     }
@@ -652,10 +632,7 @@ export class Shaper {
     // Held for as long as the shaper lives: its fonts are made from it as runs need them.
     const shared = acquireFace(hb, bytes);
     const hbFace = shared.face;
-    const subset =
-      face.subset === undefined
-        ? null
-        : new Set([...face.subset].map((char) => char.codePointAt(0)));
+    const subset = face.subset === undefined ? null : scriptSlice(face.family, face.subset);
     try {
       const axes: Record<string, { min: number; default: number; max: number }> = {};
       for (const [tag, axis] of Object.entries(hbFace.getAxisInfos()))
@@ -669,8 +646,11 @@ export class Shaper {
         instances: new Map(),
         get unicodes() {
           if (box) return { has: isPrivateUse };
-          return subset
-            ? { has: (cp: number) => subset.has(cp) && shared.unicodes.has(cp) }
+          return subset && subset !== "all"
+            ? {
+                has: (cp: number) =>
+                  cp >= subset.start && cp <= subset.end && shared.unicodes.has(cp),
+              }
             : shared.unicodes;
         },
       };
@@ -774,12 +754,25 @@ export class Shaper {
  * canvas has it.
  */
 export class ShapingMeasurer implements TextMeasurer {
+  #engineText = true;
+
   constructor(
     readonly base: TextMeasurer & { invalidate(bumpGeneration?: boolean): void },
     readonly shaper: Shaper,
     /** Font aliases (decision 0036): which family text is drawn in. */
     readonly fonts: FontResolver | null = null,
+    readonly scriptLocale = "",
   ) {}
+
+  get engineText(): boolean {
+    return this.#engineText;
+  }
+
+  setEngineText(enabled: boolean): void {
+    if (this.#engineText === enabled) return;
+    this.#engineText = enabled;
+    this.base.invalidate();
+  }
 
   family(family: string, size: number): string {
     return this.fonts ? this.fonts.family(family, size) : family;
@@ -829,9 +822,9 @@ export class ShapingMeasurer implements TextMeasurer {
   }
 
   /** Call after web fonts load: earlier measurements used fallback fonts. */
-  invalidate(families?: ReadonlySet<string>, script?: string): void {
-    if (families || script) {
-      this.shaper.invalidateMeasurements(families ?? new Set(), script);
+  invalidate(families?: ReadonlySet<string>): void {
+    if (families) {
+      this.shaper.invalidateMeasurements(families);
       this.base.invalidate(false);
     } else {
       this.shaper.invalidateFallbackWidths();

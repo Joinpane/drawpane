@@ -20,7 +20,6 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { isMac } from "../app/format";
 import { loadedFamilies, watchDocumentFonts } from "../fonts/document-fonts";
 import { fonts } from "../fonts/fonts";
-import { watchScriptFallbacks } from "../fonts/script-fallbacks";
 import { COMPONENT_DRAG_MIME } from "./AssetsPanel";
 import { passesToCanvas } from "./canvas-gestures";
 import { invalidateColorBitmaps } from "./color-glyphs";
@@ -134,6 +133,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     const lctx = labelsCanvas.getContext("2d");
     const octx = overlayCanvas.getContext("2d");
     if (!cctx || !pctx || !lctx || !octx) return;
+    measurer.setEngineText(choice !== "canvas");
     const overlayRenderer = new OverlayRenderer();
     let labelsEnabled = true;
     // The retained pixel grid shares the labels surface's size and overscan;
@@ -206,6 +206,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           adapter: engine.adapter,
           compatibility: engine.compatibility,
           software: engine.software,
+          reducedImages: engine.reducedImages,
         });
         return;
       }
@@ -813,14 +814,6 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       fontsChanged();
     };
     document.fonts.addEventListener("loadingdone", onFonts);
-    const offScriptFonts = watchScriptFallbacks(editor, (subset) => {
-      measurer.invalidate(undefined, subset.subset);
-      const chars = new Set(subset.subset);
-      editor.refitText(undefined, (node) =>
-        [...getProp(node.props, "characters")].some((char) => chars.has(char)),
-      );
-      fontsChanged();
-    });
     // A face for OpenType features became ready: its text is shaped now, so measure and draw it again.
     const offShaper = shaper.subscribe((family) => {
       editor.refitText(new Set([family]));
@@ -883,7 +876,6 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       offState();
       document.fonts.removeEventListener("loadingdone", onFonts);
       offRegistry();
-      offScriptFonts();
       offShaper();
       offFonts();
       if (frame) cancelAnimationFrame(frame);

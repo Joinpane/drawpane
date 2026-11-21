@@ -30,6 +30,7 @@ import {
 import {
   type BlendMode,
   type Blur,
+  cjkRegionFor,
   GLYPH_UNITS,
   type Glass,
   getProp,
@@ -120,7 +121,7 @@ export interface EncodedLayer {
    */
   readonly waiting: readonly string[];
   readonly faceDependencies: readonly string[];
-  readonly hasColorGlyphs: boolean;
+  readonly colorGlyphs: readonly Pick<ColorGlyph, "ref" | "width" | "height">[];
 }
 
 const IDENTITY: Matrix = [1, 0, 0, 1, 0, 0];
@@ -306,7 +307,7 @@ class Builder {
   readonly images: string[] = [];
   unsupported = 0;
   textPending = false;
-  hasColorGlyphs = false;
+  readonly colorGlyphs: Pick<ColorGlyph, "ref" | "width" | "height">[] = [];
   readonly faceDependencies = new Set<string>();
   /** Sent ahead of its real drawing: deferred, or waiting for faces. */
   provisional = false;
@@ -750,6 +751,7 @@ function textRuns(
   });
   const dy = textBlockOffset(node, layout);
   const spans = textSpans(node);
+  const cjkRegion = cjkRegionFor(getProp(node.props, "characters"), ctx.measurer.scriptLocale);
   const spanAt = (i: number) =>
     spans.find((s) => s.start <= i && i < s.end) ?? spans[spans.length - 1];
   // A text layer composites as one shape, as Figma draws it (`text-overlap` in the parity
@@ -786,7 +788,7 @@ function textRuns(
     paints: readonly Paint[],
   ) => {
     const m = ctx.measurer;
-    const engine = m.shapeForEngine?.(text, run, font);
+    const engine = m.shapeForEngine?.(text, { ...run, cjkRegion }, font);
     for (const key of engine?.dependencies ?? []) b.faceDependencies.add(key);
     const shaped = engine ? ("shaped" in engine ? engine.shaped : null) : m.shape?.(text, run);
     if (shaped && shaped.outlines !== false) {
@@ -846,9 +848,8 @@ function textRuns(
       const end = index + segment.length;
       drawRange(start, index);
       flush();
-      b.hasColorGlyphs = true;
+      b.colorGlyphs.push({ ref: sprite.ref, width: sprite.width, height: sprite.height });
       b.faceDependencies.add(`font:${run.family}`);
-      for (const char of segment) b.faceDependencies.add(`script:${char}`);
       b.images.push(sprite.ref);
       const sx = left(index, end) + sprite.x;
       const sy = y + sprite.y;
@@ -1278,6 +1279,6 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
     deferred: b.deferred,
     waiting: [...b.waiting],
     faceDependencies: [...b.faceDependencies],
-    hasColorGlyphs: b.hasColorGlyphs,
+    colorGlyphs: b.colorGlyphs,
   };
 }

@@ -32,6 +32,7 @@
  *   flexbox
  */
 import {
+  cjkRegionFor,
   getProp,
   type NodeRecord,
   type Paint,
@@ -1317,6 +1318,7 @@ export function exportSvg(
         ? Math.round((mf + y) * grid) / grid - mf
         : y;
     const base = node.props;
+    const regionalFont = `Noto Sans ${cjkRegionFor(getProp(base, "characters"))}`;
     const align = getProp(base, "textAlign");
     const anchor = align === "center" ? "middle" : align === "right" ? "end" : null;
     const lineX = align === "center" ? w / 2 : align === "right" ? w : 0;
@@ -1326,7 +1328,12 @@ export function exportSvg(
       const drawn = drawnFamily(props, measurer).replace(/['"]/g, "");
       const stack = drawn !== named ? [drawn, named] : [named];
       if (grid)
-        stack.push("Drawpane Missing Glyph", "Instrument Sans", ...SCRIPT_FALLBACK_FAMILIES);
+        stack.push(
+          "Drawpane Missing Glyph",
+          "Instrument Sans",
+          regionalFont,
+          ...SCRIPT_FALLBACK_FAMILIES.filter((family) => family !== regionalFont),
+        );
       return `${stack.map((family) => `'${family}'`).join(", ")}, sans-serif`;
     };
     const decorationOf = (d: string) =>

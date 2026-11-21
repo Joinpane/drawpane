@@ -8,13 +8,7 @@
  * none. Apple's own files are licensed and never in the repo.
  */
 import { readFileSync } from "node:fs";
-import {
-  fontAliasIndex,
-  type NodeRecord,
-  type Props,
-  resolveFontFamily,
-  SCRIPT_FALLBACK_FAMILIES,
-} from "@drawpane/model";
+import { fontAliasIndex, type NodeRecord, type Props, resolveFontFamily } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { Doc } from "../src/doc";
 import {
@@ -88,11 +82,6 @@ describe("font strings", () => {
       '"SF Pro Text Variable"',
       `"${MISSING_GLYPH_FAMILY}"`,
       '"Instrument Sans Variable"',
-      ...SCRIPT_FALLBACK_FAMILIES.filter((name) => name !== "Noto Emoji").map(
-        (name) => `"Drawpane ${name}"`,
-      ),
-      "emoji",
-      '"Drawpane Noto Emoji"',
       "system-ui",
       "sans-serif",
     ]);

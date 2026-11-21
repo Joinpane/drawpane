@@ -190,6 +190,8 @@ pub struct Store {
     unsupported: HashSet<u32>,
     /// Records that paint an image, so an image changing invalidates only what shows it.
     image_records: HashSet<u32>,
+    /// A view can draw an image whose independently managed texture is still arriving.
+    pub view_images: bool,
     /// Number of direct mask children under each parent, so `endsMask` edits in unmasked
     /// containers stay O(1) instead of scanning all siblings.
     masked_parents: HashMap<u32, usize>,
@@ -276,6 +278,7 @@ impl Store {
             context: HashSet::new(),
             unsupported: HashSet::new(),
             image_records: HashSet::new(),
+            view_images: false,
             masked_parents: HashMap::new(),
             bytes: 0,
             order: None,
@@ -1542,6 +1545,21 @@ impl Store {
             id = n.parent;
         }
         true
+    }
+
+    /// Projected image axes in page units, before a tile's raster scale.
+    pub fn image_spans(&self, image: u32) -> Vec<(f64, f64)> {
+        let mut spans = Vec::new();
+        for id in &self.image_records {
+            if let Some(node) = self.nodes.get(id) {
+                for paint in node.record.image_paints() {
+                    if paint.image == image && paint.opacity > 0.0 {
+                        spans.push(crate::images::span(self.world(*id) * paint.matrix));
+                    }
+                }
+            }
+        }
+        spans
     }
 
     /// Where the records painting image `id` may change pixels, including outward spread from

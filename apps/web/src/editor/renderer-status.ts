@@ -28,6 +28,7 @@ export type RendererStatus =
       readonly adapter: string | null;
       readonly compatibility: boolean;
       readonly software: boolean;
+      readonly reducedImages?: number;
     }
   | {
       readonly switchOn: true;
@@ -81,7 +82,8 @@ export function sameRendererStatus(a: RendererStatus, b: RendererStatus): boolea
       a.backend === b.backend &&
       a.adapter === b.adapter &&
       a.compatibility === b.compatibility &&
-      a.software === b.software
+      a.software === b.software &&
+      a.reducedImages === b.reducedImages
     );
   }
   if (a.active === "canvas" && b.active === "canvas") {
@@ -121,14 +123,19 @@ export function fallbackToReason(event: FallbackEvent): RendererFallbackReason {
 }
 
 export function rendererChipLabel(status: ActiveRendererStatus): string {
-  return status.active === "engine" ? `Engine · ${status.backend}` : "Canvas renderer";
+  if (status.active !== "engine") return "Canvas renderer";
+  const note = status.reducedImages ? " · Images reduced" : "";
+  return `Engine · ${status.backend}${note}`;
 }
 
 export function formatRendererReason(status: ActiveRendererStatus): string {
   if (status.active === "engine") {
-    return status.adapter
-      ? `Drawing with ${status.backend} (${status.adapter})`
-      : `Drawing with ${status.backend}`;
+    const renderer = status.adapter ? `${status.backend} (${status.adapter})` : status.backend;
+    const reduced = status.reducedImages ?? 0;
+    const note = reduced
+      ? `. ${reduced} ${reduced === 1 ? "image" : "images"} at reduced detail`
+      : "";
+    return `Drawing with ${renderer}${note}`;
   }
   switch (status.reason.kind) {
     case "starting":

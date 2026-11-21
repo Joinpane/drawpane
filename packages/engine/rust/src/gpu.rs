@@ -1395,6 +1395,13 @@ impl Gpu {
         Ok(())
     }
 
+    pub fn image_limits(&self) -> (u32, usize) {
+        (
+            self.max_texture_2d,
+            (self.max_buffer_size / 2).min((self.budget / 2) as u64) as usize,
+        )
+    }
+
     /// GPU memory the engine has allocated.
     pub fn bytes(&self) -> usize {
         self.bytes
@@ -1754,6 +1761,94 @@ impl Gpu {
         Ok(())
     }
 
+    #[cfg(target_arch = "wasm32")]
+    pub fn put_image_bitmap(&mut self, id: u32, bitmap: &web_sys::ImageBitmap, budget: usize) -> Result<()> {
+        let (width, height) = (bitmap.width(), bitmap.height());
+        self.check_texture_size(width, height, "an image")?;
+        let bytes = width as usize * height as usize * 4;
+        let freed = self
+            .images
+            .get(&id)
+            .and_then(|levels| levels.iter().find(|(_, _, w, _)| *w == width))
+            .map_or(0, |(_, _, w, h)| (*w * *h * 4) as usize);
+        if self.image_bytes - freed + bytes > budget {
+            return Err(EngineError::limit("images over their budget"));
+        }
+        self.reserve_or_trim(bytes, freed, "an image")?;
+        self.drop_image_level(id, width);
+        let tex = texture(
+            &self.device,
+            width,
+            height,
+            wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
+            "resident image",
+        );
+        // The WebGPU queue copies the bitmap directly. wgpu's WebGL queue uses
+        // the ImageBitmap overload of texSubImage2D on its own context.
+        let webgl = self.backend == "webgl2";
+        self.queue.copy_external_image_to_texture(
+            &wgpu::CopyExternalImageSourceInfo {
+                source: wgpu::ExternalImageSource::ImageBitmap(bitmap.clone()),
+                origin: wgpu::Origin2d::ZERO,
+                flip_y: false,
+            },
+            wgpu::CopyExternalImageDestInfo {
+                texture: &tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+                color_space: wgpu::PredefinedColorSpace::Srgb,
+                // WebGL uses the bitmap's own premultiplication and rejects converting it.
+                premultiplied_alpha: !webgl,
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
+        if webgl {
+            // wgpu records bitmap copies until the next submit. Execute this one
+            // before the caller closes its source bitmap.
+            self.queue.submit([]);
+        }
+        let tid = TextureId((1 << 50) | (u64::from(id) << 16) | u64::from(width));
+        self.bindings.insert(tid, tex.create_view(&Default::default()));
+        let levels = self.images.entry(id).or_default();
+        let at = levels.partition_point(|(_, _, w, _)| *w > width);
+        levels.insert(at, (tid, tex, width, height));
+        self.image_bytes += bytes;
+        self.bytes += bytes;
+        Ok(())
+    }
+
+    pub fn image_sizes(&self, id: u32) -> Vec<(u32, u32)> {
+        self.images
+            .get(&id)
+            .into_iter()
+            .flatten()
+            .map(|level| (level.2, level.3))
+            .collect()
+    }
+
+    pub fn drop_image_level(&mut self, id: u32, width: u32) {
+        if let Some(levels) = self.images.get_mut(&id) {
+            if let Some(at) = levels.iter().position(|(_, _, w, _)| *w == width) {
+                let (tid, tex, w, h) = levels.remove(at);
+                self.bindings.remove(tid);
+                let bytes = (w * h * 4) as usize;
+                self.image_bytes -= bytes;
+                self.bytes -= bytes;
+                tex.destroy();
+            }
+            if levels.is_empty() {
+                self.images.remove(&id);
+            }
+        }
+    }
+
     pub fn drop_image(&mut self, id: u32) {
         if let Some(levels) = self.images.remove(&id) {
             for (tid, tex, w, h) in levels {
@@ -1885,6 +1980,17 @@ impl Gpu {
     pub fn clear_tiles(&mut self) {
         self.tiles.clear();
         self.shown = None;
+    }
+
+    pub fn clear_view_caches(&mut self) {
+        self.clear_tiles();
+        self.fit_tiles(0);
+        self.forget_last();
+        self.forget_motion_prefix();
+        self.trim_pools(0);
+        self.readers.evict_frame_scratch();
+        self.blur.clear();
+        self.masks.clear();
     }
 
     /// Bytes the engine holds on the GPU outside its tile pages.
@@ -4872,9 +4978,9 @@ impl Backend for Gpu {
         Ok(())
     }
 
-    fn image(&mut self, id: u32, px: f64) -> Option<ImageView> {
+    fn image(&mut self, id: u32, span: (f64, f64)) -> Option<ImageView> {
         let levels = self.images.get(&id)?;
-        let i = images::pick(levels.iter().map(|l| l.2), px);
+        let i = images::pick(levels.iter().map(|l| (l.2, l.3)), span);
         let (tid, _, w, h) = levels.get(i)?;
         Some(ImageView {
             source: ImageSource::external_texture(*tid, TextureRegion::Full, true),

@@ -555,13 +555,17 @@ impl Record {
     }
     /// The images its paints draw (by handle), for invalidating what shows them when one changes.
     pub fn images(&self) -> impl Iterator<Item = u32> + '_ {
+        self.image_paints().map(|p| p.image)
+    }
+
+    pub fn image_paints(&self) -> impl Iterator<Item = &ImagePaint> + '_ {
         self.ops.iter().chain(self.coarse.iter()).filter_map(|op| match op {
             Op::Fill {
                 paint: Paint::Image(i), ..
             }
             | Op::Stroke {
                 paint: Paint::Image(i), ..
-            } => Some(i.image),
+            } => Some(&**i),
             _ => None,
         })
     }

@@ -36,7 +36,7 @@
  * through a loader, so this file stays free of any platform.
  */
 import type { NodeRecord, ScriptSubset } from "@drawpane/model";
-import { getProp } from "@drawpane/model";
+import { cjkRegionFor, getProp, scriptSlice, scriptSubsetsFor } from "@drawpane/model";
 import { acquireFace, isHarfBuzzOutOfMemory, releaseFace } from "./harfbuzz-faces";
 import { isPrivateUse, MISSING_GLYPH_FAMILY, missingGlyphFont } from "./missing-glyph-font";
 import { textSpans } from "./rich-text";
@@ -482,9 +482,9 @@ export class HarfBuzzMeasurer implements TextMeasurer {
     const chain = this.#chain(parsed);
     if (chain[0] === null)
       this.#approximate({ ...parsed, family: parsed.families[0] ?? "" }, "face");
-    for (const script of this.#scriptFaces.values()) {
-      if (!script.subset || ![...text].some((char) => script.subset?.includes(char))) continue;
-      const entry = this.#faces.get(measuredKey(script));
+    for (const slice of scriptSubsetsFor(text, cjkRegionFor(text))) {
+      const key = measuredKey({ ...slice, weight: 400, italic: false, canvas: true });
+      const entry = this.#faces.get(key);
       if (entry?.status === "ready") chain.push(entry.face);
     }
     let total = 0;
@@ -584,21 +584,19 @@ export class HarfBuzzMeasurer implements TextMeasurer {
           new hb.Variation("wght", Math.min(wght.max, Math.max(wght.min, weight ?? face.weight))),
         ]);
       made.setScale(upem * PRECISION, upem * PRECISION);
-      const allowed =
-        face.subset === undefined
-          ? null
-          : new Set([...face.subset].map((char) => char.codePointAt(0)));
+      const allowed = face.subset === undefined ? null : scriptSlice(face.family, face.subset);
       const ready: CanvasFace = {
         hb,
         font: made,
         em: upem * PRECISION,
         // Every private-use character, without listing them (over 130,000).
         unicodes: box ? { has: isPrivateUse } : shared.unicodes,
-        subset: allowed
-          ? (cp) => (allowed.has(cp) ? 0 : -1)
-          : subsets
-            ? subsetOf(subsets)
-            : () => 0,
+        subset:
+          allowed && allowed !== "all"
+            ? (cp) => (cp >= allowed.start && cp <= allowed.end ? 0 : -1)
+            : subsets
+              ? subsetOf(subsets)
+              : () => 0,
         metrics: verticalMetrics(hb, hbFace, made, upem),
         release,
       };

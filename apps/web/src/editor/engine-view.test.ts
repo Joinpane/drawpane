@@ -24,6 +24,14 @@ const state = vi.hoisted(() => ({
   builderPendingOffscreen: 0,
   builderSupported: true,
   builderRev: 1,
+  imageDemands: [] as Array<{
+    ref: string;
+    visible: boolean;
+    span: { width: number; height: number };
+  }>,
+  cameraX: 0,
+  paintedX: -1,
+  uploadedWidths: [] as number[],
   gpuFinishedFixture: null as null | (() => Promise<{ ok: boolean }>),
 }));
 
@@ -98,8 +106,11 @@ vi.mock("@drawpane/editor", () => ({
     }
     acknowledge() {}
     imageReady() {}
+    imageDemands() {
+      return state.imageDemands;
+    }
     imagesInUse() {
-      return new Set<string>();
+      return new Set(state.imageDemands.map(({ ref }) => ref));
     }
   },
 }));
@@ -131,6 +142,10 @@ vi.mock("@drawpane/engine", () => ({
       fallback: boolean;
     } | null = null;
     revision = 1;
+    enableViewImages() {}
+    viewImageLimits() {
+      return { ok: true, value: { side: 4096, bytes: 128 << 20 } };
+    }
     apply() {
       return { ok: true, value: { changes: new Float64Array(), full: true } };
     }
@@ -144,7 +159,13 @@ vi.mock("@drawpane/engine", () => ({
     detachGpu() {
       this.gpu = null;
     }
-    renderGpu() {
+    putGpuImageLevel(_handle: number, bitmap: ImageBitmap) {
+      state.uploadedWidths.push(bitmap.width);
+      return { ok: true };
+    }
+    dropImageLevel() {}
+    renderGpu(_width: number, _height: number, camera: { x: number }) {
+      state.cameraX = camera.x;
       return {
         ok: true,
         value: {
@@ -196,7 +217,9 @@ vi.mock("@drawpane/engine", () => ({
       if (state.readbackError) {
         return { ok: false, code: 8, message: "old device read-back failed" };
       }
-      return { ok: true, value: new Uint8Array(65 * 17 * 4) };
+      const value = new Uint8Array(65 * 17 * 4);
+      if (state.imageDemands.length > 0) value[state.cameraX * 4] = 255;
+      return { ok: true, value };
     }
     dispose() {}
   },
@@ -249,7 +272,9 @@ class FakeCanvas {
         clearRect() {},
         fillRect() {},
         drawImage() {},
-        putImageData() {},
+        putImageData(image: ImageData) {
+          if (state.imageDemands.length > 0) state.paintedX = image.data.indexOf(255) / 4;
+        },
         getImageData: (_x: number, _y: number, w: number, h: number) => ({
           data: new Uint8ClampedArray(w * h * 4),
         }),
@@ -316,13 +341,21 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
     state.rendererExposed = true;
     state.workerMessages = [];
     state.lastWorker = null;
+    state.imageDemands = [];
+    state.cameraX = 0;
+    state.paintedX = -1;
+    state.uploadedWidths = [];
     healthTick = null;
     recoveries = [];
     fallbacks = [];
 
     Object.defineProperty(globalThis, "document", {
       configurable: true,
-      value: { createElement: () => new FakeCanvas(false) },
+      value: {
+        createElement: () => new FakeCanvas(false),
+        addEventListener: () => {},
+        removeEventListener: () => {},
+      },
     });
     Object.defineProperty(globalThis, "localStorage", {
       configurable: true,
@@ -336,6 +369,8 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
       configurable: true,
       value: {
         location: { href: "https://drawpane.test/?present=readback" },
+        addEventListener: () => {},
+        removeEventListener: () => {},
         dispatchEvent: (e: CustomEvent) => {
           if (e.type === "drawpane:renderer-recovered") recoveries.push(e.detail);
           if (e.type === "drawpane:renderer-fallback") fallbacks.push(e.detail);
@@ -366,6 +401,62 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
     restore("localStorage", origLocalStorage);
     restore("sessionStorage", origSessionStorage);
     restore("Worker", origWorker);
+    vi.unstubAllGlobals();
+  });
+
+  it("moves presented content pixels with the camera while a sharper image decodes", async () => {
+    vi.stubGlobal("navigator", {
+      gpu: { requestAdapter: async () => ({ info: { description: "NVIDIA T4" } }) },
+    });
+    vi.stubGlobal(
+      "ImageData",
+      class {
+        constructor(readonly data: Uint8ClampedArray) {}
+      },
+    );
+    const fine = Promise.withResolvers<void>();
+    const started = vi.fn();
+    vi.stubGlobal("createImageBitmap", async (_blob: Blob, o: ImageBitmapOptions) => {
+      if ((o.resizeWidth ?? 0) >= 896) {
+        started();
+        await fine.promise;
+      }
+      return { width: o.resizeWidth, height: o.resizeHeight, close() {} };
+    });
+    state.readbackError = false;
+    state.imageDemands = [{ ref: "photo", visible: true, span: { width: 100, height: 100 } }];
+    const view = await EngineView.create(
+      new FakeCanvas(true) as unknown as HTMLCanvasElement,
+      { scene: {} } as never,
+      {} as never,
+      {
+        subscribe: () => () => {},
+        encodedVersion: () => 0,
+        encoded: async () => ({ blob: new Blob(), size: { width: 1792, height: 2400 } }),
+      } as never,
+      "engine",
+    );
+    expect(view).not.toBeNull();
+    const draw = (zoom: number, x: number) =>
+      view?.draw("page-1", { zoom, x, y: 0 }, 65, 17, 1, "#ffffff", {
+        hidden: new Set(),
+        whole: null,
+      });
+    try {
+      await vi.waitFor(() => expect(draw(1, 0)?.exact).toBe(true));
+      await vi.waitFor(() => expect(state.paintedX).toBe(0));
+      expect(draw(5.1, 8)).toMatchObject({ drawn: true, exact: false });
+      await vi.waitFor(() => expect(started).toHaveBeenCalled());
+      expect(state.uploadedWidths).not.toContain(896);
+      await vi.waitFor(() => expect(state.paintedX).toBe(8));
+      expect(view?.backend).toBe("webgpu");
+      expect(fallbacks).toEqual([]);
+      fine.resolve();
+      await vi.waitFor(() => expect(draw(5.1, 8)?.exact).toBe(true));
+    } finally {
+      fine.resolve();
+      view?.dispose();
+    }
   });
 
   it("consumes only one recovery attempt when a delayed read-back failure races with health recovery", async () => {
