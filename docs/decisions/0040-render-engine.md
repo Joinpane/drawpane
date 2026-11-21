@@ -1252,6 +1252,22 @@ settle with the reader halo when needed. The CPU Worker retries up to half of
 device resolution. If it cannot fit that view it reports a viewport limit so
 Canvas can draw the view while the Worker stays available.
 
+Progressive backdrop blur keeps its narrow Gaussian stops on the device
+grid. Wide stops share a cropped atlas from the lower-density replay,
+with the same stop ladder in both passes. The device pass evaluates the
+gradient and interpolates variance between stops in device coordinates.
+The sharp end can therefore use the original backdrop pixels.
+
+Wide backdrop blur also captures the glass-free backdrop inside an
+isolated picture. Patch coordinates use the picture's origin, and the
+device pass still applies the shape, clips, and group opacity. The replay
+includes the full Gaussian support when the radius exceeds the native
+kernel limit.
+
+A backdrop blur feeding a spatial post-effect keeps its native padding.
+The post-effect may sample the isolated picture beyond the captured
+output patch.
+
 ## Amendment: exact camera motion (W4, 2026-11-21)
 
 Pan and zoom on Examples and Toolbars from a large iOS UI kit and on shadcn Combobox must present zero degraded frames, with frame intervals at most 16.7 ms at p95 and 20 ms at p99. This tightens the quality requirement during camera motion. Coarse readers, half-resolution pictures, incomplete coverage, and stand-ins outside a measured scale and sampling phase fail the fidelity gate. Count unpresented camera requests too, since keeping the last exact picture on screen can still leave the camera stalled.

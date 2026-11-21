@@ -9,7 +9,7 @@
  */
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { ListWriter, PathData, ROOT } from "@drawpane/engine/wire";
+import { FLAG, ListWriter, PathData, ROOT, type WireRecord } from "@drawpane/engine/wire";
 import { expect, type Page, test } from "@playwright/test";
 
 test.use({
@@ -174,7 +174,7 @@ async function sample(
           const pixels = await engine.gpuPixels();
           if (!(pixels instanceof Uint8Array)) throw new Error(pixels.message);
           const at = (frame.pixel[1] * width + frame.pixel[0]) * 4;
-          sampled.push({ ...stats, pixel: [...pixels.subarray(at, at + 4)] });
+          sampled.push({ ...stats, bytes: pixels.length, pixel: [...pixels.subarray(at, at + 4)] });
         }
         return sampled;
       } finally {
@@ -864,6 +864,112 @@ for (const build of ["browser", "webgl"] as const) {
     expect(whole?.pixel).toEqual(tiled?.pixel);
     expect(crop?.exact).toBe(true);
     expect(crop?.pixel[0]).toBeLessThanOrEqual(1);
+  });
+}
+
+for (const build of ["browser", "webgl"] as const) {
+  test(`wide progressive and isolated backdrop blur keep device pixels (${build})`, async ({
+    page,
+  }) => {
+    test.setTimeout(180_000);
+    const list = new ListWriter(0xffffffff, 1);
+    list.reset();
+    let id = 1;
+    const rect = (
+      parent: number,
+      x: number,
+      width: number,
+      ops: WireRecord["ops"],
+      flags = 0,
+      opacity = 1,
+    ) => {
+      const key = id++;
+      list.set(key, parent, {
+        flags,
+        transform: [1, 0, 0, 1, x, 0],
+        opacity,
+        width,
+        height: 200,
+        coarseBelow: 0,
+        reach: 0,
+        unsupported: 0,
+        paths: [{ kind: "rect", w: width, h: 200, radii: [0, 0, 0, 0], smoothing: 0 }],
+        ops,
+        coarse: [],
+      });
+      return key;
+    };
+    const fill = (color: readonly [number, number, number, number]): WireRecord["ops"] => [
+      { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color } },
+    ];
+    rect(ROOT, 0, 1_200, fill([1, 0, 0, 1]));
+    for (const [offset, isolated, progressive] of [
+      [0, false, true],
+      [500, true, false],
+      [1_000, true, true],
+    ] as const) {
+      const parent = isolated
+        ? rect(ROOT, offset, 200, [{ op: "children" }], FLAG.isolate, 0.75)
+        : ROOT;
+      const x = isolated ? 0 : offset;
+      rect(parent, x, 200, fill([1, 1, 1, 1]));
+      rect(parent, x, 100, fill([0, 0, 0, 1]));
+      rect(
+        parent,
+        x,
+        200,
+        progressive
+          ? [
+              {
+                op: "progressiveBlur",
+                paths: [0],
+                evenOdd: false,
+                startRadius: 0,
+                endRadius: 40,
+                start: [0, 0.25],
+                end: [0, 0.75],
+              },
+            ]
+          : [{ op: "backgroundBlur", paths: [0], evenOdd: false, radius: 40 }],
+      );
+    }
+
+    const frame = (x: number, y: number, pixelX = 320, zoom = 100): Frame => ({
+      camera: [zoom, 160 - x * zoom, 96 - y * zoom, 2],
+      size: [640, 384],
+      pixel: [pixelX, 192],
+      moving: false,
+      budget: 0,
+      editorViewport: true,
+    });
+    const points = await sample(
+      page,
+      [...list.finish()],
+      [
+        frame(100, 25, 319),
+        frame(100, 25),
+        frame(100, 125),
+        frame(600, 125),
+        frame(1_100, 125, 320, 256),
+      ],
+      undefined,
+      build,
+    );
+    expect(points.map((point) => point.bytes)).toEqual(Array(5).fill(640 * 384 * 4));
+    expect(points[0]?.pixel).toEqual([0, 0, 0, 255]);
+    expect(points[1]?.pixel).toEqual([255, 255, 255, 255]);
+    for (const [point, reference] of [
+      [points[2], [128, 128, 128, 255]],
+      [points[3], [160, 96, 96, 255]],
+      [points[4], [160, 96, 96, 255]],
+    ] as const) {
+      expect(point?.pixel).toHaveLength(4);
+      for (const [i, channel] of reference.entries())
+        expect(
+          Math.abs((point?.pixel[i] ?? 0) - channel),
+          `pixel ${point?.pixel}`,
+        ).toBeLessThanOrEqual(3);
+    }
   });
 }
 

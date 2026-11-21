@@ -178,6 +178,13 @@ pub struct BlurHaloSample {
     pub offset: (f32, f32),
 }
 
+pub struct ProgressiveHaloSample {
+    pub sample: BlurHaloSample,
+    pub cell_size: (u32, u32),
+    pub first: usize,
+    pub cols: u32,
+}
+
 pub struct GlassResolve<'a> {
     pub divisor: f32,
     pub rim: Option<NativeRim>,
@@ -446,7 +453,8 @@ impl GpuReaders {
                 tex_binding(1, false),
                 tex_binding(2, false),
                 tex_binding(3, false),
-                uni_binding(4, 128),
+                uni_binding(4, 160),
+                tex_binding(5, false),
             ],
         });
 
@@ -2327,6 +2335,7 @@ impl GpuReaders {
         atlas_cols: u32,
         alpha: f32,
         has_clip_mask: bool,
+        halo: Option<&ProgressiveHaloSample>,
         max_bytes: usize,
     ) -> Result<()> {
         let tw = (tile.x1 - tile.x0) as u32;
@@ -2357,6 +2366,17 @@ impl GpuReaders {
             },
         );
         let stops = plan.padded_stops();
+        let (halo_map, halo_atlas) = halo.map_or(([0.0; 4], [0.0; 4]), |halo| {
+            (
+                [
+                    halo.sample.offset.0,
+                    halo.sample.offset.1,
+                    halo.sample.inv,
+                    halo.first as f32,
+                ],
+                [halo.cell_size.0 as f32, halo.cell_size.1 as f32, halo.cols as f32, 0.0],
+            )
+        });
         let u_bytes = &[
             // tile
             x0 as f32,
@@ -2395,6 +2415,14 @@ impl GpuReaders {
             frame_origin.1 as f32,
             0.0,
             0.0,
+            halo_map[0],
+            halo_map[1],
+            halo_map[2],
+            halo_map[3],
+            halo_atlas[0],
+            halo_atlas[1],
+            halo_atlas[2],
+            halo_atlas[3],
         ];
         let (slab_idx, u_off) = self.push_uniform(device, queue, u_bytes);
         let clip_view = if has_clip_mask {
@@ -2427,8 +2455,14 @@ impl GpuReaders {
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                         buffer: &self.slabs[slab_idx],
                         offset: 0,
-                        size: wgpu::BufferSize::new(128),
+                        size: wgpu::BufferSize::new(160),
                     }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(
+                        halo.map_or(&self.white_1x1.view, |halo| &halo.sample.view),
+                    ),
                 },
             ],
         });

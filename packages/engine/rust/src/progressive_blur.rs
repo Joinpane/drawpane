@@ -172,6 +172,25 @@ pub struct ProgressivePlan {
     pub stops: Vec<f32>,
 }
 
+/// Preserve small radii on the device grid, including the sharp end of a gradient.
+#[cfg(feature = "gpu-common")]
+pub(crate) const VIEWPORT_NATIVE_SIGMA: f32 = 32.0;
+
+#[cfg(feature = "gpu-common")]
+pub(crate) fn viewport_native_sigma(start: f32, end: f32) -> Option<f32> {
+    let (lo, hi) = (start.min(end), start.max(end));
+    if hi < blur::VIEWPORT_HALO_MIN_SIGMA {
+        return None;
+    }
+    Some(
+        choose_stops(lo, hi)
+            .into_iter()
+            .take_while(|sigma| *sigma < VIEWPORT_NATIVE_SIGMA)
+            .last()
+            .unwrap_or(0.0),
+    )
+}
+
 /// Builds a monotonic ladder of `2..=MAX_PROGRESSIVE_STOPS` sigma stops spanning `[min_s, max_s]`.
 pub fn choose_stops(min_s: f32, max_s: f32) -> Vec<f32> {
     let lo = min_s.max(0.0);

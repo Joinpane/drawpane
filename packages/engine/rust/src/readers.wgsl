@@ -724,6 +724,10 @@ struct ProgBlurU {
     stops2: vec4<f32>,
     // (frame_x_of_target, frame_y_of_target, unused, unused)
     frame_origin: vec4<f32>,
+    // (coarse patch offset x/y, inverse replay divisor, first coarse sigma stop)
+    halo_map: vec4<f32>,
+    // (stop cell width and height, atlas columns, unused)
+    halo_atlas: vec4<f32>,
 };
 
 @group(0) @binding(0) var pb_atlas: texture_2d<f32>;
@@ -731,6 +735,7 @@ struct ProgBlurU {
 @group(0) @binding(2) var pb_dst: texture_2d<f32>;
 @group(0) @binding(3) var pb_clip: texture_2d<f32>;
 @group(0) @binding(4) var<uniform> pbu: ProgBlurU;
+@group(0) @binding(5) var pb_halo: texture_2d<f32>;
 
 fn prog_stop(i: i32) -> f32 {
     if (i < 4) {
@@ -749,6 +754,27 @@ fn prog_stop(i: i32) -> f32 {
     if (i == 9) { return pbu.stops2.y; }
     if (i == 10) { return pbu.stops2.z; }
     return pbu.stops2.w;
+}
+
+fn sample_progressive_stop(stop: i32, local: vec2<i32>, pos: vec2<f32>) -> vec4<f32> {
+    if (pbu.halo_map.z > 0.0 && stop >= i32(pbu.halo_map.w)) {
+        let cell = stop - i32(pbu.halo_map.w);
+        let cols = max(1, i32(pbu.halo_atlas.z));
+        let start = vec2<i32>(cell % cols, cell / cols) * vec2<i32>(pbu.halo_atlas.xy);
+        let last = pbu.halo_atlas.xy - vec2<f32>(1.0);
+        let p = clamp(pos * pbu.halo_map.z + pbu.halo_map.xy - vec2<f32>(0.5), vec2<f32>(0.0), last);
+        let a = vec2<i32>(floor(p)) + start;
+        let b = vec2<i32>(min(floor(p) + 1.0, last)) + start;
+        let f = fract(p);
+        return mix(
+            mix(textureLoad(pb_halo, a, 0), textureLoad(pb_halo, vec2<i32>(b.x, a.y), 0), f.x),
+            mix(textureLoad(pb_halo, vec2<i32>(a.x, b.y), 0), textureLoad(pb_halo, b, 0), f.x),
+            f.y
+        );
+    }
+    let cols = max(1, i32(pbu.params.w));
+    let start = vec2<i32>(stop % cols, stop / cols) * vec2<i32>(pbu.tile.zw);
+    return textureLoad(pb_atlas, start + local, 0);
 }
 
 @fragment
@@ -788,13 +814,8 @@ fn fs_progressive_blur(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f
         let v_hi = s_hi * s_hi;
         frac = clamp((sigma * sigma - v_lo) / max(v_hi - v_lo, 1e-6), 0.0, 1.0);
     }
-    let cols = max(1, i32(pbu.params.w));
-    let tw = i32(pbu.tile.z);
-    let th = i32(pbu.tile.w);
-    let c0_org = vec2<i32>((lo % cols) * tw, (lo / cols) * th);
-    let c1_org = vec2<i32>((hi % cols) * tw, (hi / cols) * th);
-    let c0 = textureLoad(pb_atlas, c0_org + local, 0);
-    let c1 = textureLoad(pb_atlas, c1_org + local, 0);
+    let c0 = sample_progressive_stop(lo, local, pos.xy);
+    let c1 = sample_progressive_stop(hi, local, pos.xy);
     let blurred = mix(c0, c1, frac);
     return dst * (1.0 - a_eff) + blurred * a_eff;
 }
