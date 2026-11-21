@@ -907,6 +907,7 @@ impl Engine {
         background: Vec<f32>,
         moving: bool,
         budget_ms: f64,
+        editor_viewport: Option<bool>,
     ) -> Outcome {
         let bg = rgba(&background);
         let options = engine::TiledOptions {
@@ -914,10 +915,14 @@ impl Engine {
             budget_ms: if budget_ms.is_finite() { budget_ms } else { 0.0 },
             ..engine::TiledOptions::default()
         };
-        match self
-            .core
-            .render_gpu(width, height, Camera { zoom, x, y, dpr }, bg, options)
-        {
+        match self.core.render_gpu(
+            width,
+            height,
+            Camera { zoom, x, y, dpr },
+            bg,
+            options,
+            editor_viewport.unwrap_or(false),
+        ) {
             Ok(draw) => {
                 let masks = self.core.gpu.as_ref().map(|g| g.masks.stats).unwrap_or_default();
                 let mut o = Outcome::stats(engine::FrameStats { draw, masks });

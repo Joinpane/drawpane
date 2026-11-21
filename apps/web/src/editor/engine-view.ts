@@ -2146,6 +2146,7 @@ export class EngineView {
       colour(background),
       !exact || textFirst,
       textFirst ? NO_OPTIONAL_MS : budgetMs,
+      true,
     );
     if (!frame.ok) {
       if (frame.code === ErrorCode.Unsupported) {

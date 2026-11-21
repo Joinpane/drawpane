@@ -38,6 +38,7 @@ type Frame = {
   pixel: [x: number, y: number];
   moving: boolean;
   budget: number;
+  editorViewport?: boolean;
   /** Applied before the frame. */
   patch?: number[];
   /** Idle tile slice (`renderGpuAhead`) run before the frame. */
@@ -136,6 +137,7 @@ async function sample(
             new Float32Array(4),
             frame.moving,
             frame.budget,
+            frame.editorViewport,
           );
           const stats = {
             exact: outcome.exact,
@@ -653,5 +655,72 @@ for (const build of ["browser", "webgl"] as const) {
     expect(res.settledInfo.reads).toBeGreaterThan(0);
     expect(res.plainInfo).toEqual({ ok: true, exact: true, reads: 0 });
     expect(res.plainCentre[2]).toBeGreaterThan(200);
+  });
+}
+
+for (const build of ["browser", "webgl"] as const) {
+  test(`reader fallback samples the same backdrop beyond the view edge (${build})`, async ({
+    page,
+  }) => {
+    const list = new ListWriter(0xffffffff, 1);
+    list.reset();
+    const paint = (id: number, x: number, width: number, color: [number, number, number, number]) =>
+      list.set(id, ROOT, {
+        flags: 0,
+        transform: [1, 0, 0, 1, x, 0],
+        opacity: 1,
+        width,
+        height: 224,
+        coarseBelow: 0,
+        reach: 0,
+        unsupported: 0,
+        paths: [{ kind: "rect", w: width, h: 224, radii: [0, 0, 0, 0], smoothing: 0 }],
+        ops: [{ op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color } }],
+        coarse: [],
+      });
+    paint(1, 0, 80, [1, 0.2, 0.1, 1]);
+    paint(2, 80, 304, [0, 0.1, 1, 1]);
+    list.set(3, ROOT, {
+      flags: 0,
+      transform: [1, 0, 0, 1, 60, 32],
+      opacity: 1,
+      width: 156,
+      height: 160,
+      coarseBelow: 0,
+      reach: 128,
+      unsupported: 0,
+      paths: [{ kind: "rect", w: 156, h: 160, radii: [0, 0, 0, 0], smoothing: 0 }],
+      ops: [{ op: "backgroundBlur", paths: [0], evenOdd: false, radius: 48 }],
+      coarse: [],
+    });
+    const frame: Frame = {
+      camera: [1, -80, 0, 1],
+      size: [224, 224],
+      pixel: [4, 110],
+      moving: false,
+      budget: 200,
+      editorViewport: true,
+    };
+    const bytes = [...list.finish()];
+    const [, tiled] = await sample(page, bytes, [frame, frame], undefined, build);
+    const [moving, whole, crop] = await sample(
+      page,
+      bytes,
+      [
+        { ...frame, budget: 0, moving: true },
+        { ...frame, budget: 0 },
+        { ...frame, budget: 0, editorViewport: false },
+      ],
+      undefined,
+      build,
+    );
+    expect(moving?.exact).toBe(false);
+    expect(moving?.pixel[0]).toBeGreaterThan(40);
+    expect(tiled?.exact).toBe(true);
+    expect(whole?.exact).toBe(true);
+    expect(tiled?.pixel[0]).toBeGreaterThan(40);
+    expect(whole?.pixel).toEqual(tiled?.pixel);
+    expect(crop?.exact).toBe(true);
+    expect(crop?.pixel[0]).toBeLessThanOrEqual(1);
   });
 }

@@ -704,6 +704,8 @@ pub struct Gpu {
     last_scale: Option<f64>,
     /// The engine's generation and background the frame shown was made at, and whether it's exact.
     shown: Option<(u64, [u32; 4], bool)>,
+    /// The requested reader bounds of the last whole draw, if it fit.
+    whole_samples: Option<Option<IRect>>,
     /// Milliseconds a tile has lately taken to draw (a running average).
     tile_ms: f64,
     blit: Option<wgpu::RenderPipeline>,
@@ -1200,6 +1202,7 @@ impl Gpu {
             last: None,
             last_scale: None,
             shown: None,
+            whole_samples: None,
             tile_ms: 0.0,
             blit,
             images: HashMap::new(),
@@ -2058,7 +2061,7 @@ impl Gpu {
     ) -> Result<Option<Split>> {
         let active = self.active.as_ref().expect("whole-frame draw");
         let (width, height) = (active.width, active.height);
-        let dst = active.frame_dst.expect("whole-frame destination");
+        let target = self.root_plane(false)?.0.clone();
         let mut split = Split {
             pass: Pass::Below,
             parent: crate::store::ROOT,
@@ -2066,10 +2069,13 @@ impl Gpu {
             last: cut - 1,
             path: Vec::new(),
         };
-        let reuse = self
-            .motion_prefix
-            .as_ref()
-            .is_some_and(|p| p.serial == serial && p.cut == cut && p.view == frame.view && p.background == background);
+        let reuse = self.motion_prefix.as_ref().is_some_and(|p| {
+            p.serial == serial
+                && p.cut == cut
+                && p.view == frame.view
+                && p.background == background
+                && (p.texture.width(), p.texture.height()) == (width, height)
+        });
         if !reuse {
             self.forget_motion_prefix();
             let bytes = width as usize * height as usize * 4;
@@ -2097,26 +2103,12 @@ impl Gpu {
             self.scene.reset();
             let mut encoder = self.take_encoder(false, "cache motion prefix");
             let cached = &self.motion_prefix.as_ref().expect("cached prefix").texture;
-            copy_rect(
-                &mut encoder,
-                &self.frames[dst].texture,
-                cached,
-                (0, 0),
-                (0, 0),
-                (width, height),
-            );
+            copy_rect(&mut encoder, &target, cached, (0, 0), (0, 0), (width, height));
             self.stash_encoder(encoder);
         } else {
             let mut encoder = self.take_encoder(false, "restore motion prefix");
             let cached = &self.motion_prefix.as_ref().expect("cached prefix").texture;
-            copy_rect(
-                &mut encoder,
-                cached,
-                &self.frames[dst].texture,
-                (0, 0),
-                (0, 0),
-                (width, height),
-            );
+            copy_rect(&mut encoder, cached, &target, (0, 0), (0, 0), (width, height));
             self.stash_encoder(encoder);
             self.active.as_mut().expect("whole-frame draw").needs_clear = false;
         }
@@ -2124,8 +2116,8 @@ impl Gpu {
         Ok(Some(split))
     }
 
-    /// Draws the whole frame untiled directly into `self.frames[dst]`, used when a backdrop
-    /// reader's reach exceeds the per-tile halo limit (e.g. maximum glass settings at 2x).
+    /// Draws an untiled frame when a reader exceeds the tile halo or a whole draw is cheaper.
+    #[allow(clippy::too_many_arguments)]
     pub fn render_whole(
         &mut self,
         store: &Store,
@@ -2134,6 +2126,7 @@ impl Gpu {
         generation: u64,
         moving: bool,
         prefix: Option<(u64, usize)>,
+        samples: Option<IRect>,
     ) -> Result<DrawStats> {
         self.check()?;
         if prefix.is_none() {
@@ -2156,24 +2149,50 @@ impl Gpu {
         if !moving
             && self.last.is_some_and(|l| l.view == view && l.size == (width, height))
             && self.shown == Some((generation, bg_bits, true))
+            && self.whole_samples == Some(samples)
         {
             stats.exact = true;
             stats.plan = 3;
             return self.finish_frame(stats, t0);
         }
         let dst = (self.cur + 1) % FRAMES;
-        self.ensure_scratch_size(width, height)?;
+        let padded = samples.and_then(|bounds| {
+            // Keep the same strip phase at the original viewport origin.
+            let x = bounds.x0.unsigned_abs().next_multiple_of(4);
+            let y = bounds.y0.unsigned_abs().next_multiple_of(4);
+            let size = (bounds.x1 as u32 + x, bounds.y1 as u32 + y);
+            self.ensure_scratch_size(size.0, size.1).ok()?;
+            Some(((x, y), size))
+        });
+        let whole = if let Some(((x, y), (w, h))) = padded {
+            Frame {
+                width: w as u16,
+                height: h as u16,
+                view: Affine::translate((f64::from(x), f64::from(y))) * view,
+                area: IRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: w as i32,
+                    y1: h as i32,
+                },
+                ..*frame
+            }
+        } else {
+            self.ensure_scratch_size(width, height)?;
+            *frame
+        };
+        let (w, h) = (u32::from(whole.width), u32::from(whole.height));
         self.masks.begin_frame();
         self.blur.begin_frame();
         self.shadow.begin_frame();
         self.atlas.at = (0, 0, 0);
-        self.scene.reset_and_resize(frame.width, frame.height);
+        self.scene.reset_and_resize(whole.width, whole.height);
         self.readers.begin_frame();
         self.backdrop_gen += 1;
         self.active = Some(ActiveDraw {
-            frame_dst: Some(dst),
-            width,
-            height,
+            frame_dst: padded.is_none().then_some(dst),
+            width: w,
+            height: h,
             background,
             detail: moving,
             needs_clear: true,
@@ -2188,14 +2207,14 @@ impl Gpu {
         let limits = store.limits;
         let mut verbs = limits.frame_verbs;
         let split = match prefix {
-            Some(prefix) => self.prepare_motion_prefix(store, frame, bg_bits, prefix, &mut verbs, &mut stats),
+            Some(prefix) => self.prepare_motion_prefix(store, &whole, bg_bits, prefix, &mut verbs, &mut stats),
             None => Ok(None),
         };
         let draw = split.and_then(|split| {
             exec::draw_split(
                 store,
                 self,
-                frame,
+                &whole,
                 &limits,
                 &mut verbs,
                 &split.unwrap_or_else(Split::all),
@@ -2216,6 +2235,22 @@ impl Gpu {
             self.discard_draw();
             return Err(e);
         }
+        if let Some((start, _)) = padded {
+            let mut encoder = self.take_encoder(false, "crop padded frame");
+            let source = &self.scratches[self.active_scratch]
+                .as_ref()
+                .expect("padded frame")
+                .texture;
+            copy_rect(
+                &mut encoder,
+                source,
+                &self.frames[dst].texture,
+                start,
+                (0, 0),
+                (width, height),
+            );
+            self.stash_encoder(encoder);
+        }
         self.submit_active_encoder();
         let active = self.active.take().expect("active draw");
         self.recycle_scene_textures();
@@ -2232,6 +2267,7 @@ impl Gpu {
             size: (width, height),
         });
         self.last_scale = Some(scale);
+        self.whole_samples = (padded.is_some() == samples.is_some()).then_some(samples);
         self.shown = Some((generation, bg_bits, stats.exact));
         self.finish_frame(stats, t0)
     }
@@ -2419,6 +2455,7 @@ impl Gpu {
         self.cur = dst;
         self.last = Some(Last { view, size: (w, h) });
         self.last_scale = Some(scale);
+        self.whole_samples = None;
         self.shown = Some((generation, bg_bits, stats.exact));
         self.finish_frame(stats, t0)
     }
