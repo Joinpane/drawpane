@@ -247,6 +247,22 @@ pub fn compute_regions(
     if full_rw <= 0 || full_rh <= 0 || full_x1 <= 0 || full_y1 <= 0 || full_x0 >= fw || full_y0 >= fh {
         return Ok(Vec::new());
     }
+    let k = i64::from(height_scale(params.sigma));
+    // A wide, clear lens can reach mip level three at its rim. Preserve the mip
+    // phase even when the lens is sliced: odd mip dimensions would stretch the
+    // sampling grid to the slice's full width. The alignment also preserves the
+    // low-resolution height grid when k is six.
+    let align_mips =
+        params.frost <= 0.4 && params.refraction > 0.0 && full_rw.max(full_rh) > i64::from(DEFAULT_CHUNK_SIDE);
+    let alignment = if align_mips { if k == 6 { 24 } else { 8 } } else { k };
+    let align_up = |edge: i64, origin: i64| edge + (origin - edge).rem_euclid(alignment);
+    let (full_x1, full_y1) = if align_mips {
+        (align_up(full_x1, full_x0), align_up(full_y1, full_y0))
+    } else {
+        (full_x1, full_y1)
+    };
+    let full_rw = full_x1 - full_x0;
+    let full_rh = full_y1 - full_y0;
 
     // Output pixels that can have mask alpha > 0, plus 2 px for 2x2 quad derivatives.
     let paint_x0 = (min_x.floor().clamp(-1e12, 1e12) as i64 - 2).clamp(full_x0, full_x1);
@@ -325,9 +341,9 @@ pub fn compute_regions(
     }
 
     // Frame-anchored chunking for large glass layers.
-    let k = i64::from(height_scale(params.sigma));
     let support = m + rim_pad + k * 2 + 16;
-    let avail_side = i64::from(hard_max_side) - 2 * support - k;
+    let grid_pad = if align_mips { alignment * 2 } else { k };
+    let avail_side = i64::from(hard_max_side) - 2 * support - grid_pad;
     let step = if avail_side >= 64 {
         i64::from(chunk_side.max(64)).min(avail_side)
     } else {
@@ -350,8 +366,9 @@ pub fn compute_regions(
             continue;
         }
         let cy0_raw = (ty0 - support).max(full_y0);
-        let cy0 = (cy0_raw - (cy0_raw - full_y0).rem_euclid(k)).max(full_y0);
+        let cy0 = (cy0_raw - (cy0_raw - full_y0).rem_euclid(alignment)).max(full_y0);
         let cy1 = (ty1 + support).min(full_y1);
+        let cy1 = if align_mips { align_up(cy1, full_y0) } else { cy1 };
         let ch = cy1 - cy0;
         for ix in ix0..=ix1 {
             let tx0 = paint_x0 + ix * step;
@@ -362,8 +379,9 @@ pub fn compute_regions(
                 continue;
             }
             let cx0_raw = (tx0 - support).max(full_x0);
-            let cx0 = (cx0_raw - (cx0_raw - full_x0).rem_euclid(k)).max(full_x0);
+            let cx0 = (cx0_raw - (cx0_raw - full_x0).rem_euclid(alignment)).max(full_x0);
             let cx1 = (tx1 + support).min(full_x1);
+            let cx1 = if align_mips { align_up(cx1, full_x0) } else { cx1 };
             let cw = cx1 - cx0;
             if cw <= 0
                 || ch <= 0
@@ -1666,6 +1684,104 @@ mod tests {
         }
         let r = largest_inscribed_radius(&inside, side, side);
         assert!((r - 20.5).abs() < 1.0, "got {r}");
+    }
+
+    #[test]
+    fn large_clear_lens_chunks_keep_the_same_mip_grid() {
+        let op = GlassOp {
+            paths: vec![0],
+            even_odd: false,
+            kind: KIND_BOX,
+            inradius: 450.0,
+            angle: -45.0,
+            intensity: 70.0,
+            refraction: 100.0,
+            depth: 40.0,
+            dispersion: 100.0,
+            frost: 0.0,
+            splay: 0.0,
+            box_radii: [60.0; 4],
+            box_smoothing: [0.0; 4],
+            measured_inradius: std::cell::Cell::new(-1.0),
+        };
+        let params = glass_params(&op, 1.0, op.inradius);
+        let view = Affine::translate((50.0, 40.0));
+        let size = [1300.0, 900.0];
+        let frame = (1400, 1000);
+        let whole = compute_region(&op, &params, view, size, frame, (0, 0), frame).unwrap();
+        let chunks = compute_regions(
+            &op,
+            &params,
+            view,
+            size,
+            frame,
+            (0, 0),
+            frame,
+            HARD_MAX_REGION_SIDE,
+            HARD_MAX_REGION_PIXELS,
+            EXACT_SPLIT_SIDE,
+            EXACT_SPLIT_PIXELS,
+            EXACT_CHUNK_SIDE,
+        )
+        .unwrap();
+        assert!(chunks.len() > 1);
+        assert_eq!((whole.rw % 8, whole.rh % 8), (0, 0));
+        for chunk in &chunks {
+            assert_eq!((chunk.rw % 8, chunk.rh % 8), (0, 0));
+            assert_eq!(((chunk.x0 - whole.x0) % 8, (chunk.y0 - whole.y0) % 8), (0, 0));
+        }
+
+        let mut backdrop = Vec::new();
+        for y in 0..frame.1 {
+            for x in 0..frame.0 {
+                let color = if y % 33 < 5 {
+                    [240, 30, 20, 255]
+                } else if x % 12 < 6 {
+                    [30, 60, 200, 255]
+                } else {
+                    [220, 200, 60, 255]
+                };
+                backdrop.extend_from_slice(&color);
+            }
+        }
+        let draw = |regions: &[GlassRegion]| {
+            let mut output = backdrop.clone();
+            for region in regions {
+                let mut mask = Vec::new();
+                for y in 0..region.rh as i32 {
+                    for x in 0..region.rw as i32 {
+                        let px = (region.x0 + x - 50) as f32 + 0.5;
+                        let py = (region.y0 + y - 40) as f32 + 0.5;
+                        let dx = (px - 650.0).abs() - 590.0;
+                        let dy = (py - 450.0).abs() - 390.0;
+                        let distance = dx.max(0.0).hypot(dy.max(0.0)) + dx.max(dy).min(0.0) - 60.0;
+                        mask.extend_from_slice(&[(0.5 - distance).clamp(0.0, 1.0).mul_add(255.0, 0.5) as u8; 4]);
+                    }
+                }
+                shade_glass_cpu(
+                    &mut output,
+                    frame.0,
+                    (0, 0),
+                    &backdrop,
+                    frame.0,
+                    frame.1,
+                    (0, 0),
+                    frame,
+                    &mask,
+                    None,
+                    &params,
+                    region,
+                    None,
+                    1.0,
+                );
+            }
+            output
+        };
+        let single = draw(std::slice::from_ref(&whole));
+        let chunked = draw(&chunks);
+        assert_ne!(single, backdrop);
+        let worst = single.iter().zip(&chunked).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
+        assert!(worst <= 1, "chunked lens differs by {worst} levels");
     }
 
     #[test]
