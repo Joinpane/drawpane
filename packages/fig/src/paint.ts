@@ -193,7 +193,14 @@ export function convertEffect(
       return {
         type: type === "BACKGROUND_BLUR" ? "BACKGROUND_BLUR" : "LAYER_BLUR",
         radius: e.radius,
-        ...(same?.blurOpType === "PROGRESSIVE" ? { blurType: "PROGRESSIVE" as const } : {}),
+        ...(same?.blurOpType === "PROGRESSIVE"
+          ? {
+              blurType: "PROGRESSIVE" as const,
+              ...(same.startRadius !== undefined ? { startRadius: same.startRadius } : {}),
+              ...(same.startOffset ? { startOffset: same.startOffset } : {}),
+              ...(same.endOffset ? { endOffset: same.endOffset } : {}),
+            }
+          : {}),
         ...visible,
         ...effectBinds(raw?.type === e.type ? raw : undefined, aliasOf, { radiusVar: "radius" }),
       };

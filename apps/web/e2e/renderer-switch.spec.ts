@@ -7,8 +7,8 @@
  *   pages, toggling branch review, and a sign-out/sign-in redirect;
  * - `?renderer=canvas` turns the switch back off for the session;
  * - the chip reports "Engine · WebGPU" on a plain page and "Canvas renderer"
- *   with the reason on a page with a background blur, on a software GPU when not
- *   allowed, and in a browser without WebGPU.
+ *   with the reason on a page with progressive layer blur, on a software GPU
+ *   when disallowed, and in a browser without WebGPU.
  */
 import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "./fresh-instance";
@@ -88,7 +88,7 @@ test.describe
       await expect(rendererChip(page)).toBeVisible({ timeout: 30_000 });
       await expect(rendererChip(page)).toContainText("Engine · WebGPU", { timeout: 30_000 });
 
-      // Add a plain rect on Page 1, then create Page 2 with a background blur.
+      // Add a plain rect on Page 1, then create Page 2 with progressive layer blur.
       const pages = await page.evaluate(() => {
         const e = (window as unknown as W).drawpane;
         const plain = e.s.pageId;
@@ -99,23 +99,29 @@ test.describe
         const fallback = e.s.pageId;
         e.createLayer("rect", { x: 40, y: 40, width: 160, height: 100 }, fallback, {
           fills: [{ type: "solid", color: "#ffffff" }],
-          effects: [{ type: "background-blur", radius: 12 }],
+          effects: [
+            {
+              type: "layer-blur",
+              radius: 12,
+              blurType: "progressive",
+              startRadius: 0,
+              startOffset: { x: 0, y: 0 },
+              endOffset: { x: 1, y: 1 },
+            },
+          ],
         });
         return { plain, fallback };
       });
       plainPageId = pages.plain;
       fallbackPageId = pages.fallback;
 
-      // Background blur page: chip reports Canvas renderer and names background blur in its popover.
+      // The fallback page reports Canvas renderer and names layer blur in its popover.
       await expect(rendererChip(page)).toContainText("Canvas renderer", { timeout: 15_000 });
-      await expect(rendererChip(page)).toHaveAttribute(
-        "aria-label",
-        /this page uses background blur/,
-      );
+      await expect(rendererChip(page)).toHaveAttribute("aria-label", /this page uses layer blur/);
       await rendererChip(page).click();
       const popover = page.getByRole("dialog", { name: "Renderer status" });
       await expect(popover).toBeVisible();
-      await expect(popover).toContainText("this page uses background blur");
+      await expect(popover).toContainText("this page uses layer blur");
       await page.keyboard.press("Escape");
       await expect(popover).toHaveCount(0);
       await expect(rendererChip(page)).toBeFocused();

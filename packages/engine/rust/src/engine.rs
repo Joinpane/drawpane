@@ -489,6 +489,7 @@ impl Engine {
         let view_scale = view.determinant().abs().sqrt();
         let max_tex = self.store.limits.texture_side as usize;
         let mut peak_total = 0usize;
+        let mut expanded_reader_work = 0usize;
         // Stack entries: (id, parent_world, cur_cols, cur_rows, live_iso_bytes).
         let mut stack: Vec<(u32, Affine, usize, usize, usize)> =
             vec![(crate::store::ROOT, Affine::IDENTITY, cols, tile_rows, 0)];
@@ -796,6 +797,18 @@ impl Engine {
                             stack.push((c, world, next_cols, next_rows, child_iso));
                         }
                     }
+                    crate::record::Op::BackgroundBlur(_) | crate::record::Op::ProgressiveBlur(_)
+                        if next_cols > cols || next_rows > tile_rows =>
+                    {
+                        // A layer effect can expand the source beyond the halo-grown export tile.
+                        // In that case reserve the blur scratch and copies for the expanded scope.
+                        let source = (next_cols as u32, next_rows as u32);
+                        let device = view * world;
+                        let scale = device.determinant().abs().sqrt() as f32;
+                        let copies = crate::cpu::reader_copy_bytes(source, Some((next_cols, next_rows)));
+                        expanded_reader_work = expanded_reader_work
+                            .max(copies.saturating_add(exec::background_reader_work_bytes(op, source, source, scale)));
+                    }
                     _ => {}
                 }
             }
@@ -805,7 +818,7 @@ impl Engine {
         if !self.store.readers().is_empty() || self.store.has_context() {
             peak_total = peak_total.saturating_mul(2);
         }
-        Ok(peak_total)
+        Ok(peak_total.saturating_add(expanded_reader_work))
     }
 
     /// Refuses an export of a `width` × `height` frame before it starts when its working set
@@ -864,11 +877,13 @@ impl Engine {
         if !metrics.has_readers && !metrics.needs_backdrop {
             return 0;
         }
-        let copy_count = 1 + usize::from(metrics.has_clipped_reader) + usize::from(metrics.needs_backdrop);
-        // Effects admission includes one plane for all 3A scopes and reader fades. Add the
-        // second plane for reader fades only if live, and include the glass/blur scratch.
+        let clip_scene = metrics.has_clipped_reader.then_some((width as usize, height as usize));
+        let copies = crate::cpu::reader_copy_bytes((tile.0 as u32, tile.1 as u32), clip_scene);
         let target_bytes = tile.0 as u64 * tile.1 as u64 * 4;
-        target_bytes * (copy_count + metrics.max_iso_surfaces) as u64 + metrics.max_reader_work_bytes as u64 + (3 << 20)
+        target_bytes * (usize::from(metrics.needs_backdrop) + metrics.max_iso_surfaces) as u64
+            + copies as u64
+            + metrics.max_reader_work_bytes as u64
+            + (3 << 20)
     }
 
     /// Upper bound on retained temporary diamond-gradient raster bytes for one export tile of
@@ -1202,8 +1217,24 @@ impl Engine {
             .gpu
             .as_mut()
             .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
-        let mut stats = match halo_opt {
-            Some(halo) => gpu.render(
+        // One pass avoids rasterizing the same reader and prefix in each touched tile. For
+        // interactive drags bound the scene walk. Dense pages use their retained tiles.
+        let simple_reader_drag =
+            options.moving && drag.as_ref().is_some_and(|d| d.split.is_none()) && self.store.nodes.len() <= 512;
+        let whole = halo_opt != Some(0) && (options.budget_ms <= 0.0 || simple_reader_drag);
+        let whole_stats = if whole {
+            match gpu.render_whole(&self.store, &frame, background, self.generation, options.moving) {
+                Ok(stats) => Some(stats),
+                Err(e) if e.code == ErrorCode::Limit && halo_opt.is_some() => None,
+                Err(e) => return Err(e),
+            }
+        } else {
+            None
+        };
+        let mut stats = if let Some(stats) = whole_stats {
+            stats
+        } else if let Some(halo) = halo_opt {
+            gpu.render(
                 &self.store,
                 &frame,
                 background,
@@ -1211,10 +1242,20 @@ impl Engine {
                 halo,
                 options,
                 drag.as_ref(),
-            )?,
-            // When a reader's reach exceeds the per-tile halo cap (e.g. maximum glass settings at
-            // 2x), draw the frame untiled into the frame target directly (as `render_cpu` does).
-            None => gpu.render_whole(&self.store, &frame, background, self.generation, options.moving)?,
+            )?
+        } else if options.moving && options.budget_ms > 0.0 {
+            // Coarse tiles do not need an exact halo. At rest this view draws whole.
+            gpu.render(
+                &self.store,
+                &frame,
+                background,
+                self.generation,
+                i32::try_from(self.store.limits.halo.max(1)).unwrap_or(i32::MAX),
+                options,
+                drag.as_ref(),
+            )?
+        } else {
+            gpu.render_whole(&self.store, &frame, background, self.generation, options.moving)?
         };
         // No frame is exact while text is still to come: it may paint past its box.
         if stats.exact && self.store.provisional_shown().is_some() {
@@ -1310,7 +1351,8 @@ impl Engine {
                         });
                     }
                     crate::record::Op::BackgroundBlur(b_op) => {
-                        let reach_px = (f64::from((b_op.radius * 1.5).ceil() + 2.0) * scale).ceil() + 2.0;
+                        let sigma_px = crate::blur::sigma_from_radius(b_op.radius) * scale as f32;
+                        let reach_px = f64::from(crate::blur::blur_reach(sigma_px)).ceil() + 2.0;
                         let paint = device.transform_rect_bbox(local);
                         out.push(ReaderNode {
                             paint,
@@ -1321,7 +1363,8 @@ impl Engine {
                     }
                     crate::record::Op::ProgressiveBlur(p_op) => {
                         let r = p_op.start_radius.max(p_op.end_radius);
-                        let reach_px = (f64::from((r * 1.5).ceil() + 2.0) * scale).ceil() + 2.0;
+                        let sigma_px = crate::blur::sigma_from_radius(r) * scale as f32;
+                        let reach_px = f64::from(crate::blur::blur_reach(sigma_px)).ceil() + 2.0;
                         let paint = device.transform_rect_bbox(local);
                         out.push(ReaderNode {
                             paint,
@@ -1344,36 +1387,29 @@ impl Engine {
             return Ok(0);
         }
         let overlaps = |a: Rect, b: Rect| a.x0 <= b.x1 && b.x0 <= a.x1 && a.y0 <= b.y1 && b.y0 <= a.y1;
-        let n = nodes.len();
-        let mut chain = vec![0.0f64; n];
-        for i in 0..n {
-            let mut dep = 0.0f64;
-            for k in 0..i {
-                if nodes[k].writes_backdrop && overlaps(nodes[k].paint, nodes[i].read) {
-                    dep = dep.max(chain[k]);
+        // A reader contributes only when its output reaches the crop or a later relevant
+        // reader. Glass can be a sink but never a source of another reader's backdrop.
+        let writers: Vec<_> = nodes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, node)| node.writes_backdrop.then_some(i))
+            .collect();
+        let mut needed_by_later = vec![0.0f64; nodes.len()];
+        let mut total = 0.0f64;
+        for (i, node) in nodes.iter().enumerate().rev() {
+            let downstream = needed_by_later[i];
+            if downstream == 0.0 && crop.is_some_and(|rect| !overlaps(node.paint, rect)) {
+                continue;
+            }
+            let reach = node.reach_px + downstream;
+            total = total.max(reach);
+            let earlier = writers.partition_point(|&writer| writer < i);
+            for &writer in &writers[..earlier] {
+                if overlaps(nodes[writer].paint, node.read) {
+                    needed_by_later[writer] = needed_by_later[writer].max(reach);
                 }
             }
-            chain[i] = nodes[i].reach_px + dep;
         }
-        let total = match crop {
-            None => chain.into_iter().fold(0.0f64, f64::max),
-            Some(crop_rect) => {
-                let mut relevant = vec![false; n];
-                for i in (0..n).rev() {
-                    if overlaps(nodes[i].paint, crop_rect) {
-                        relevant[i] = true;
-                    }
-                    if relevant[i] {
-                        for k in 0..i {
-                            if nodes[k].writes_backdrop && overlaps(nodes[k].paint, nodes[i].read) {
-                                relevant[k] = true;
-                            }
-                        }
-                    }
-                }
-                (0..n).filter(|&i| relevant[i]).map(|i| chain[i]).fold(0.0f64, f64::max)
-            }
-        };
         if total > f64::from(self.store.limits.halo) {
             return Err(EngineError::limit(format!(
                 "backdrop readers reach {total:.0} px past a band; the most is {}",

@@ -83,6 +83,10 @@ export interface Effect {
   readonly blendMode?: string;
   readonly showShadowBehindNode?: boolean;
   readonly blurType?: "NORMAL" | "PROGRESSIVE";
+  /** Progressive blur: start radius and normalized box endpoints (0..1); end radius is `radius`. */
+  readonly startRadius?: number;
+  readonly startOffset?: Vector;
+  readonly endOffset?: Vector;
   readonly noiseType?: "MONOTONE" | "DUOTONE" | "MULTITONE";
   readonly noiseSize?: number;
   readonly density?: number;

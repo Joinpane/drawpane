@@ -116,6 +116,21 @@ pub fn validate_sigma(sigma: f32, cb: IRect, edge: EdgeMode) -> Result<()> {
     Ok(())
 }
 
+/// Maximum device-pixel reach from an output pixel needed so split tiles/bands produce
+/// bit-identical Gaussian blur output (kernel half-width, downsample cascade, and alignment slack).
+pub fn blur_reach(sigma: f32) -> f32 {
+    if !sigma.is_finite() || sigma < MIN_SIGMA {
+        return 0.0;
+    }
+    let (lvl, lvl_sigma) = choose_level(sigma.min(MAX_BLUR_SIGMA), MAX_PYRAMID_LEVELS);
+    let r = kernel_radius(lvl_sigma);
+    if lvl == 0 {
+        (r + 2) as f32
+    } else {
+        ((r + 4) * (1i32 << lvl)) as f32
+    }
+}
+
 /// Normalised 1D discrete Gaussian weights for integer taps `-r..=r`, where `r = kernel_radius(sigma)`.
 pub fn gaussian_weights(sigma: f32) -> Vec<f32> {
     let r = kernel_radius(sigma);

@@ -24,7 +24,7 @@
 //!   so the editor recovers or falls back.
 //! - Glass samples a backdrop plane that excludes prior glass draws.
 
-use crate::blur::{BlurSpec, EdgeMode, validate_sigma};
+use crate::blur::{self, BlurSpec, EdgeMode, validate_sigma};
 use crate::engine::{DragFrame, TiledOptions};
 use crate::error::{EngineError, ErrorCode, Result};
 use crate::exec::{
@@ -35,7 +35,8 @@ use crate::glass;
 use crate::gpu_readers::{CoarseAnalytic, GpuReaders};
 use crate::images::{self, Level};
 use crate::masks::{self, MaskCache, MaskKey};
-use crate::record::GlassOp;
+use crate::progressive_blur;
+use crate::record::{BackgroundBlurOp, GlassOp, ProgressiveBlurOp};
 use crate::shadow::{
     CanonicalShadow, ShadowMaskCache, compute_mask_rect, compute_mask_rect_bounds, reduced_dirty_rect,
     scaled_shadow_sigma, shadow_raster_shift,
@@ -52,7 +53,7 @@ use std::sync::{Arc, Mutex};
 use vello_common::TextureId;
 use vello_common::color::{AlphaColor, Srgb};
 use vello_common::geometry::RectU16;
-use vello_common::kurbo::{Affine, BezPath, Rect};
+use vello_common::kurbo::{Affine, BezPath, PathEl, Rect};
 use vello_common::paint::{Image, ImageSource, TextureRegion, Tint, TintMode};
 use vello_common::peniko::{Extend, Fill, ImageQuality, ImageSampler};
 use vello_gpu::{
@@ -459,7 +460,8 @@ struct V {
   let c = vec2<f32>(f32(i & 1u), f32((i >> 1u) & 1u));
   let p = mix(dst.xy, dst.zw, c);
   var o: V;
-  o.pos = vec4<f32>(p.x / u.size.x * 2.0 - 1.0, 1.0 - p.y / u.size.y * 2.0, 0.0, 1.0);
+  let size = max(u.size.xy, vec2<f32>(1.0));
+  o.pos = vec4<f32>(p.x / size.x * 2.0 - 1.0, 1.0 - p.y / size.y * 2.0, 0.0, 1.0);
   o.uv = mix(uvr.xy, uvr.zw, c);
   o.lim = lim;
   return o;
@@ -611,6 +613,45 @@ struct ActiveDraw {
     /// must submit `before` first so `vello_hybrid`'s shared GPU staging buffers are not overwritten.
     encoder_has_vello: bool,
     flush_ms: f64,
+}
+
+struct BlurReaderPlane {
+    texture: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
+struct BlurReaderDraw {
+    frame_size: (i32, i32),
+    origin: (i32, i32),
+    size: (u32, u32),
+    dirty: IRect,
+    source: BlurReaderPlane,
+    source_is_frame: bool,
+    source_written: bool,
+    targets: [Option<BlurReaderPlane>; 2],
+}
+
+impl BlurReaderDraw {
+    fn dirty_size(&self) -> (u32, u32) {
+        (
+            (self.dirty.x1 - self.dirty.x0) as u32,
+            (self.dirty.y1 - self.dirty.y0) as u32,
+        )
+    }
+
+    fn frame_dirty_origin(&self) -> (i32, i32) {
+        (self.origin.0 + self.dirty.x0, self.origin.1 + self.dirty.y0)
+    }
+
+    fn bounds_and_edge(&self, within: Option<glass::ClipWithin>, sigma: f32) -> (IRect, EdgeMode) {
+        progressive_blur::blur_bounds_and_edge(
+            within,
+            self.frame_size,
+            (-self.origin.0, -self.origin.1),
+            (self.size.0 as i32, self.size.1 as i32),
+            sigma,
+        )
+    }
 }
 
 pub struct Gpu {
@@ -1900,6 +1941,7 @@ impl Gpu {
         if let Some(active) = self.active.as_mut() {
             if let Some(encoder) = active.before.take() {
                 self.queue.submit([encoder.finish()]);
+                self.blur.flush_retired();
                 self.submits += 1;
             }
             active.encoder_has_vello = false;
@@ -1914,6 +1956,7 @@ impl Gpu {
             a.before = Some(encoder);
         } else {
             self.queue.submit([encoder.finish()]);
+            self.blur.flush_retired();
             self.submits += 1;
         }
     }
@@ -1997,8 +2040,13 @@ impl Gpu {
         if store.readers().is_empty() && !store.has_context() && self.readers.bytes() > 0 {
             self.readers.evict_frame_scratch();
         }
-        let (w, h) = (u32::from(frame.width), u32::from(frame.height));
-        self.ensure_frames(w, h)?;
+        let (width, height) = (u32::from(frame.width), u32::from(frame.height));
+        let (w, h) = if detail {
+            (width.div_ceil(2), height.div_ceil(2))
+        } else {
+            (width, height)
+        };
+        self.ensure_frames(width, height)?;
         self.ensure_scratch_size(w, h)?;
         let t0 = now();
         let view = frame.view;
@@ -2010,7 +2058,7 @@ impl Gpu {
             ..DrawStats::default()
         };
         if !detail
-            && self.last.is_some_and(|l| l.view == view && l.size == (w, h))
+            && self.last.is_some_and(|l| l.view == view && l.size == (width, height))
             && self.shown == Some((generation, bg_bits, true))
         {
             stats.exact = true;
@@ -2042,7 +2090,7 @@ impl Gpu {
         let whole = Frame {
             width: w as u16,
             height: h as u16,
-            view,
+            view: Affine::scale_non_uniform(f64::from(w) / f64::from(width), f64::from(h) / f64::from(height)) * view,
             detail,
             area: IRect {
                 x0: 0,
@@ -2067,15 +2115,23 @@ impl Gpu {
             return Err(e);
         }
         let mut encoder = self.take_encoder(false, "whole copy");
-        let scratch = self.scratches[self.active_scratch].as_ref().expect("scratch");
-        copy_rect(
-            &mut encoder,
-            &scratch.texture,
-            &self.frames[dst].texture,
-            (0, 0),
-            (0, 0),
-            (w, h),
-        );
+        if detail {
+            if let Err(e) = self.scale_scratch_to_frame(&mut encoder, dst) {
+                drop(encoder);
+                self.discard_draw();
+                return Err(e);
+            }
+        } else {
+            let scratch = self.scratches[self.active_scratch].as_ref().expect("scratch");
+            copy_rect(
+                &mut encoder,
+                &scratch.texture,
+                &self.frames[dst].texture,
+                (0, 0),
+                (0, 0),
+                (w, h),
+            );
+        }
         self.stash_encoder(encoder);
         self.submit_active_encoder();
         let active = self.active.take().expect("active draw");
@@ -2083,15 +2139,85 @@ impl Gpu {
         let render_ms = active.flush_ms + now() - t1;
         stats.encode_ms += (now() - t0 - render_ms).max(0.0);
         stats.render_ms += render_ms;
-        stats.exact = s.exact();
+        stats.exact = !detail && s.exact();
         stats.standin = !stats.exact;
         stats.held = self.tiles.len() as u32;
         stats.evicted = self.tiles.stats.evicted;
         self.cur = dst;
-        self.last = Some(Last { view, size: (w, h) });
+        self.last = Some(Last {
+            view,
+            size: (width, height),
+        });
         self.last_scale = Some(scale);
         self.shown = Some((generation, bg_bits, stats.exact));
         self.finish_frame(stats, t0)
+    }
+
+    /// Presents the half-resolution reader stand-in through the tile compositor's bilinear pass.
+    fn scale_scratch_to_frame(&mut self, encoder: &mut wgpu::CommandEncoder, dst: usize) -> Result<()> {
+        self.ensure_compositor();
+        let compositor = self.compositor.as_ref().expect("compositor");
+        let source = self.scratches[self.active_scratch]
+            .as_ref()
+            .ok_or_else(|| EngineError::new(ErrorCode::State, "no scratch tile"))?;
+        let dst = &self.frames[dst];
+        let (width, height) = (dst.width as f32, dst.height as f32);
+        let edge = (0.5 / source.width as f32, 0.5 / source.height as f32);
+        let bounds = [width, height, 0.0, 0.0];
+        let quad = [
+            0.0,
+            0.0,
+            width,
+            height,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            edge.0,
+            edge.1,
+            1.0 - edge.0,
+            1.0 - edge.1,
+        ];
+        let bounds_bytes: Vec<_> = bounds.into_iter().flat_map(f32::to_le_bytes).collect();
+        let quad_bytes: Vec<_> = quad.into_iter().flat_map(f32::to_le_bytes).collect();
+        self.queue.write_buffer(&compositor.uniforms, 0, &bounds_bytes);
+        self.queue.write_buffer(&compositor.instances, 0, &quad_bytes);
+        let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("coarse reader frame"),
+            layout: &compositor.pipeline.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&source.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&compositor.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: compositor.uniforms.as_entire_binding(),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("coarse reader frame"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &dst.view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        pass.set_pipeline(&compositor.pipeline);
+        pass.set_bind_group(0, &group, &[]);
+        pass.set_vertex_buffer(0, compositor.instances.slice(..));
+        pass.draw(0..4, 0..1);
+        Ok(())
     }
 
     /// Draws a frame made of tiles (decision 0040, phase 2): draws the tiles it needs, as many as
@@ -2115,7 +2241,6 @@ impl Gpu {
             self.readers.evict_frame_scratch();
         }
         let (w, h) = (u32::from(frame.width), u32::from(frame.height));
-        let side = TILE + 2 * halo.max(0) as u32;
         self.ensure_frames(w, h)?;
         self.ensure_compositor();
         self.masks.begin_frame();
@@ -2192,7 +2317,6 @@ impl Gpu {
                 continue;
             }
             let target = if plan.direct {
-                self.ensure_scratch(side)?;
                 TileTarget::Scratch
             } else if job.direct {
                 late.push(*job);
@@ -2247,9 +2371,6 @@ impl Gpu {
             stats.plan = if comp.complete { 0 } else { 1 };
             self.composite(&comp, dst, background, w, h)?;
             stats.render_ms += now() - t1;
-            if !late.is_empty() {
-                self.ensure_scratch(side)?;
-            }
             for job in &late {
                 let tile_detail = job.detail || coarse_moving;
                 direct_exact &= self.draw_job(
@@ -2539,6 +2660,7 @@ impl Gpu {
         self.atlas.at = (0, 0, 0);
         self.scene.reset_and_resize(side as u16, side as u16);
         self.readers.begin_frame();
+        self.blur.begin_frame();
         self.backdrop_gen += 1;
         self.active = Some(ActiveDraw {
             width: side,
@@ -2685,6 +2807,7 @@ impl Gpu {
 
     fn discard_draw(&mut self) {
         self.active = None;
+        self.blur.flush_retired();
         while let Some(scope) = self.offscreen_stack.pop() {
             self.offscreen_pool.push(scope.main);
             self.offscreen_pool.extend(scope.backdrop);
@@ -2874,6 +2997,200 @@ impl Gpu {
         };
         retired.push(scope.main);
         retired.extend(scope.backdrop);
+    }
+
+    fn readable_backdrop_plane(&self, active: &ActiveDraw) -> bool {
+        self.offscreen_stack
+            .last()
+            .map_or(active.backdrop_live, |scope| scope.backdrop.is_some())
+    }
+
+    /// The draw region and both destination prefixes live in the current scope's coordinates.
+    fn prepare_blur_reader(
+        &mut self,
+        paths: &[(BezPath, bool)],
+        device: Affine,
+        coarse: bool,
+        open: &[Open],
+    ) -> Result<Option<BlurReaderDraw>> {
+        self.flush_preserving_clips(open, true)?;
+        let Some(active) = self.active.as_ref() else {
+            return Ok(None);
+        };
+        let scope = self.offscreen_stack.last();
+        let source_is_frame = scope.is_none();
+        let shared = scope.is_some_and(|scope| scope.backdrop.is_none());
+        let (write_main, write_backdrop) = if shared {
+            (active.write_main || active.write_backdrop, false)
+        } else {
+            (
+                active.write_main,
+                active.write_backdrop && !(source_is_frame && coarse && active.detail),
+            )
+        };
+        if !write_main && !write_backdrop {
+            return Ok(None);
+        }
+        let frame_size = (active.width as i32, active.height as i32);
+        let origin = self.scene_offset();
+        let (width, height) = self.active_scene_size();
+        let size = (u32::from(width), u32::from(height));
+        let Some(dirty) = progressive_blur::blur_dirty_rect(
+            paths,
+            device,
+            frame_size,
+            (-origin.0, -origin.1),
+            (i32::from(width), i32::from(height)),
+        ) else {
+            return Ok(None);
+        };
+        let read_backdrop = self.readable_backdrop_plane(active);
+        let clone_plane = |backdrop| -> Result<BlurReaderPlane> {
+            let (texture, view, _) = self.plane(backdrop)?;
+            Ok(BlurReaderPlane {
+                texture: texture.clone(),
+                view: view.clone(),
+            })
+        };
+        Ok(Some(BlurReaderDraw {
+            frame_size,
+            origin,
+            size,
+            dirty,
+            source: clone_plane(read_backdrop)?,
+            source_is_frame,
+            source_written: if read_backdrop { write_backdrop } else { write_main },
+            targets: [
+                write_main.then(|| clone_plane(false)).transpose()?,
+                write_backdrop.then(|| clone_plane(true)).transpose()?,
+            ],
+        }))
+    }
+
+    fn encode_blur_reader_masks(
+        &mut self,
+        draw: &BlurReaderDraw,
+        paths: &[(BezPath, bool)],
+        device: Affine,
+        analytic: bool,
+        open: &[Open],
+    ) -> Result<(wgpu::CommandEncoder, bool)> {
+        let (w, h) = draw.dirty_size();
+        let mut options = RenderOptions::default();
+        options.target_init = TargetInit::Clear(ClearSettings::Viewport {
+            color: AlphaColor::TRANSPARENT,
+        });
+        let clipped = open.iter().any(|o| {
+            matches!(
+                o,
+                Open::Clip {
+                    active_on_scene: true,
+                    context_only: false,
+                    ..
+                }
+            )
+        });
+        if clipped {
+            let budget = self.reader_budget_room();
+            self.readers.ensure_vello_tex_budgeted(
+                true,
+                &self.device,
+                &self.renderer,
+                w,
+                h,
+                "blur reader clip",
+                budget,
+            )?;
+            self.mask_scene.reset_and_resize(w as u16, h as u16);
+            let shift = Affine::translate((-f64::from(draw.dirty.x0), -f64::from(draw.dirty.y0)));
+            raster_clips(&mut self.mask_scene, open, shift, (w, h), true);
+            let mut encoder = self.take_encoder(true, "blur reader clip");
+            let clip = self.readers.clip_tex.as_ref().expect("blur reader clip");
+            self.renderer
+                .render(
+                    &self.mask_scene,
+                    &mut self.resources,
+                    &mut encoder,
+                    RenderTarget {
+                        view: &clip.view,
+                        depth_view: Some(&clip.depth),
+                    },
+                    &self.bindings,
+                    options,
+                )
+                .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+            self.stash_encoder(encoder);
+        }
+        let mut encoder = self.take_encoder(!analytic, "backdrop blur");
+        if !analytic {
+            let budget = self.reader_budget_room();
+            self.readers.ensure_vello_tex_budgeted(
+                false,
+                &self.device,
+                &self.renderer,
+                w,
+                h,
+                "blur reader shape",
+                budget,
+            )?;
+            self.mask_scene.reset_and_resize(w as u16, h as u16);
+            let (x, y) = draw.frame_dirty_origin();
+            let shift = Affine::translate((-f64::from(x), -f64::from(y)));
+            self.mask_scene.set_transform(shift * device);
+            self.mask_scene.set_paint(vello_common::color::palette::css::WHITE);
+            for (path, even_odd) in paths {
+                self.mask_scene
+                    .set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
+                self.mask_scene.fill_path(path);
+            }
+            let mask = self.readers.mask_tex.as_ref().expect("blur reader shape");
+            self.renderer
+                .render(
+                    &self.mask_scene,
+                    &mut self.resources,
+                    &mut encoder,
+                    RenderTarget {
+                        view: &mask.view,
+                        depth_view: Some(&mask.depth),
+                    },
+                    &self.bindings,
+                    options,
+                )
+                .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+        }
+        self.mask_scene.reset();
+        Ok((encoder, clipped))
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_blur_reader_slice(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        source: &wgpu::TextureView,
+        source_size: (u32, u32),
+        dst_origin: (i32, i32),
+        spec: &BlurSpec,
+        key: Option<blur::PyramidKey>,
+    ) -> Result<()> {
+        let out = self.readers.blur_out.as_ref().expect("blur reader output");
+        let out_size = (out.width, out.height);
+        let work = self
+            .blur
+            .estimate_work_bytes(source_size, out_size, dst_origin, spec, key);
+        self.reserve_or_trim(work, 0, "backdrop Gaussian working textures")?;
+        let out = self.readers.blur_out.as_ref().expect("blur reader output");
+        self.blur.encode(
+            &self.device,
+            &self.queue,
+            encoder,
+            source,
+            source_size,
+            &out.view,
+            out_size,
+            dst_origin,
+            spec,
+            key,
+        )
     }
 
     fn composite_scope(
@@ -3166,7 +3483,6 @@ impl Gpu {
         })();
         self.stash_encoder(encoder);
         self.submit_active_encoder();
-        self.blur.flush_retired();
         self.noise.flush_retired();
         self.active.as_mut().expect("active draw").flush_ms += now() - t0;
         let output = if matches!(result, Ok(true)) {
@@ -5587,4 +5903,390 @@ impl Backend for Gpu {
         self.mark_dirty();
         Ok(())
     }
+
+    fn background_blur(
+        &mut self,
+        op: &BackgroundBlurOp,
+        paths: &[(BezPath, bool)],
+        device: Affine,
+        size: [f32; 2],
+        alpha: f32,
+        coarse: bool,
+        open: &[Open],
+    ) -> Result<()> {
+        if open.iter().any(|o| matches!(o, Open::Layer)) {
+            return Err(EngineError::unsupported(
+                "a backdrop reader inside a layer that fades as one",
+            ));
+        }
+        let scale = device.determinant().abs().sqrt() as f32;
+        if !(scale > 0.0 && scale.is_finite()) {
+            return Ok(());
+        }
+        let Some(draw) = self.prepare_blur_reader(paths, device, coarse, open)? else {
+            return Ok(());
+        };
+        let analytic = if coarse {
+            analytic_box_from_paths(paths, device, size, draw.frame_dirty_origin())
+        } else {
+            None
+        };
+        let (mut encoder, clipped) = self.encode_blur_reader_masks(&draw, paths, device, analytic.is_some(), open)?;
+        let sigma = blur::sigma_from_radius(op.radius) * scale;
+        let within = glass::clip_within_from_open(open);
+        if coarse {
+            let budget = self.reader_budget_room();
+            self.readers.encode_coarse_blur(
+                &self.device,
+                &self.queue,
+                &mut encoder,
+                &draw.source.texture,
+                &draw.source.view,
+                draw.targets.iter().flatten().map(|t| (&t.texture, &t.view)),
+                draw.size,
+                draw.frame_size,
+                (-draw.origin.0, -draw.origin.1),
+                self.backdrop_gen,
+                draw.source_is_frame,
+                draw.dirty,
+                sigma,
+                within,
+                alpha,
+                analytic,
+                clipped,
+                budget,
+            )?;
+        } else {
+            let (width, height) = draw.dirty_size();
+            let budget = self.reader_budget_room();
+            self.readers
+                .ensure_blur_out_budgeted(&self.device, width, height, budget)?;
+            let (clamp_bounds, edge) = draw.bounds_and_edge(within, sigma);
+            let key = draw
+                .source_is_frame
+                .then(|| blur::PyramidKey::new(self.backdrop_gen, clamp_bounds, edge));
+            let spec = BlurSpec {
+                sigma,
+                edge,
+                clamp_bounds,
+                dirty: draw.dirty,
+            };
+            self.encode_blur_reader_slice(
+                &mut encoder,
+                &draw.source.view,
+                draw.size,
+                (draw.dirty.x0, draw.dirty.y0),
+                &spec,
+                key,
+            )?;
+            let budget = self.reader_budget_room();
+            for target in draw.targets.iter().flatten() {
+                self.readers.encode_bg_blur_composite(
+                    &self.device,
+                    &self.queue,
+                    &mut encoder,
+                    &target.texture,
+                    &target.view,
+                    draw.dirty,
+                    alpha,
+                    clipped,
+                    budget,
+                )?;
+            }
+        }
+        if draw.source_is_frame && draw.source_written {
+            self.backdrop_gen += 1;
+        }
+        self.stash_encoder(encoder);
+        Ok(())
+    }
+
+    fn progressive_blur(
+        &mut self,
+        op: &ProgressiveBlurOp,
+        paths: &[(BezPath, bool)],
+        device: Affine,
+        size: [f32; 2],
+        alpha: f32,
+        coarse: bool,
+        open: &[Open],
+    ) -> Result<()> {
+        if open.iter().any(|o| matches!(o, Open::Layer)) {
+            return Err(EngineError::unsupported(
+                "a backdrop reader inside a layer that fades as one",
+            ));
+        }
+        let scale = device.determinant().abs().sqrt() as f32;
+        if !(scale > 0.0 && scale.is_finite()) {
+            return Ok(());
+        }
+        let plan = progressive_blur::ProgressivePlan::new(op, device, size, scale);
+        let plan = match plan {
+            Some(plan) if !coarse => plan,
+            fallback => {
+                let radius = if fallback.is_some() {
+                    0.5 * (op.start_radius + op.end_radius)
+                } else {
+                    op.start_radius.max(op.end_radius)
+                };
+                let uniform = BackgroundBlurOp {
+                    paths: op.paths.clone(),
+                    even_odd: op.even_odd,
+                    radius,
+                };
+                return self.background_blur(&uniform, paths, device, size, alpha, coarse, open);
+            }
+        };
+        let Some(draw) = self.prepare_blur_reader(paths, device, false, open)? else {
+            return Ok(());
+        };
+        let (mut encoder, clipped) = self.encode_blur_reader_masks(&draw, paths, device, false, open)?;
+        let (clamp_bounds, edge) =
+            draw.bounds_and_edge(glass::clip_within_from_open(open), plan.start_sigma.max(plan.end_sigma));
+        let key = draw
+            .source_is_frame
+            .then(|| blur::PyramidKey::new(self.backdrop_gen, clamp_bounds, edge));
+        let cols = (plan.stops.len() as u32).clamp(1, 4);
+        let rows = (plan.stops.len() as u32).div_ceil(cols).max(1);
+        let tile_side = progressive_blur::PROGRESSIVE_TILE_MAX
+            .min(self.max_texture_2d / 4)
+            .max(1);
+        let (width, height) = draw.dirty_size();
+        let budget = self.reader_budget_room();
+        self.readers.ensure_blur_out_budgeted(
+            &self.device,
+            width.min(tile_side) * cols,
+            height.min(tile_side) * rows,
+            budget,
+        )?;
+        // Each tile reads the same prefix. Keep a copy when a previous tile can have
+        // replaced part of the source used by the next tile's Gaussian.
+        let source = if draw.source_written && (width > tile_side || height > tile_side) {
+            let budget = self.reader_budget_room();
+            self.readers
+                .ensure_blur_source_budgeted(&self.device, draw.size, budget)?;
+            let snapshot = self.readers.blur_source.as_ref().expect("blur reader source");
+            copy_rect(
+                &mut encoder,
+                &draw.source.texture,
+                &snapshot.texture,
+                (0, 0),
+                (0, 0),
+                draw.size,
+            );
+            &snapshot.view
+        } else {
+            &draw.source.view
+        }
+        .clone();
+
+        let dirty = draw.dirty;
+        let side = tile_side as i32;
+        for y0 in (dirty.y0..dirty.y1).step_by(tile_side as usize) {
+            for x0 in (dirty.x0..dirty.x1).step_by(tile_side as usize) {
+                let tile = IRect {
+                    x0,
+                    y0,
+                    x1: (x0 + side).min(dirty.x1),
+                    y1: (y0 + side).min(dirty.y1),
+                };
+                let (tw, th) = (tile.x1 - x0, tile.y1 - y0);
+                for (stop, &sigma) in plan.stops.iter().enumerate() {
+                    let col = (stop as u32 % cols) as i32;
+                    let row = (stop as u32 / cols) as i32;
+                    let spec = BlurSpec {
+                        sigma,
+                        edge,
+                        clamp_bounds,
+                        dirty: tile,
+                    };
+                    self.encode_blur_reader_slice(
+                        &mut encoder,
+                        &source,
+                        draw.size,
+                        (x0 - col * tw, y0 - row * th),
+                        &spec,
+                        key,
+                    )?;
+                }
+                let budget = self.reader_budget_room();
+                for target in draw.targets.iter().flatten() {
+                    self.readers.encode_progressive_composite(
+                        &self.device,
+                        &self.queue,
+                        &mut encoder,
+                        &target.texture,
+                        &target.view,
+                        tile,
+                        dirty,
+                        draw.origin,
+                        &plan,
+                        cols,
+                        alpha,
+                        clipped,
+                        budget,
+                    )?;
+                }
+            }
+        }
+        if draw.source_is_frame && draw.source_written {
+            self.backdrop_gen += 1;
+        }
+        self.stash_encoder(encoder);
+        Ok(())
+    }
+}
+
+/// Detects a single closed axis-aligned rectangle or rounded rectangle in `[0..w] x [0..h]` so
+/// interactive coarse background blur can evaluate coverage analytically without a `vello_gpu`
+/// mask rasterization pass. Arbitrary paths return `None` and rasterize through `mask_tex`.
+fn analytic_box_from_paths(
+    paths: &[(BezPath, bool)],
+    device: Affine,
+    size: [f32; 2],
+    origin: (i32, i32),
+) -> Option<CoarseAnalytic> {
+    if paths.len() != 1 || !(size[0] > 0.0 && size[1] > 0.0) {
+        return None;
+    }
+    let w = f64::from(size[0]);
+    let h = f64::from(size[1]);
+    let [da, db, dc, dd, de, df] = device.as_coeffs();
+    let det = da * dd - db * dc;
+    if !(det.abs() > 1e-12 && det.is_finite()) {
+        return None;
+    }
+    let eps = 1e-2;
+    let on_edge = |p: vello_common::kurbo::Point| -> u8 {
+        let mut m = 0u8;
+        if p.y.abs() <= eps {
+            m |= 1; // top
+        }
+        if (p.x - w).abs() <= eps {
+            m |= 2; // right
+        }
+        if (p.y - h).abs() <= eps {
+            m |= 4; // bottom
+        }
+        if p.x.abs() <= eps {
+            m |= 8; // left
+        }
+        m
+    };
+    let in_bounds =
+        |p: vello_common::kurbo::Point| -> bool { p.x >= -eps && p.x <= w + eps && p.y >= -eps && p.y <= h + eps };
+    let mut moves = 0usize;
+    let mut closed = false;
+    let mut cur = vello_common::kurbo::Point::ZERO;
+    let mut top = (f64::INFINITY, f64::NEG_INFINITY);
+    let mut bot = (f64::INFINITY, f64::NEG_INFINITY);
+    let mut left = (f64::INFINITY, f64::NEG_INFINITY);
+    let mut right = (f64::INFINITY, f64::NEG_INFINITY);
+    let mut record = |p: vello_common::kurbo::Point, require_edge: bool| -> bool {
+        if !in_bounds(p) {
+            return false;
+        }
+        let m = on_edge(p);
+        if m == 0 {
+            return !require_edge;
+        }
+        if (m & 1) != 0 {
+            top.0 = top.0.min(p.x);
+            top.1 = top.1.max(p.x);
+        }
+        if (m & 2) != 0 {
+            right.0 = right.0.min(p.y);
+            right.1 = right.1.max(p.y);
+        }
+        if (m & 4) != 0 {
+            bot.0 = bot.0.min(p.x);
+            bot.1 = bot.1.max(p.x);
+        }
+        if (m & 8) != 0 {
+            left.0 = left.0.min(p.y);
+            left.1 = left.1.max(p.y);
+        }
+        true
+    };
+    for el in paths[0].0.elements() {
+        match *el {
+            PathEl::MoveTo(p) => {
+                moves += 1;
+                if moves > 1 || !record(p, true) {
+                    return None;
+                }
+                cur = p;
+            }
+            PathEl::LineTo(p) => {
+                if !record(p, true) {
+                    return None;
+                }
+                if (p - cur).hypot2() > 1e-6 && (on_edge(cur) & on_edge(p)) == 0 {
+                    return None;
+                }
+                cur = p;
+            }
+            PathEl::QuadTo(p1, p2) => {
+                // Multi-segment corner arcs have intermediate endpoints strictly inside the box.
+                if !in_bounds(p1) || !record(p2, false) {
+                    return None;
+                }
+                cur = p2;
+            }
+            PathEl::CurveTo(p1, p2, p3) => {
+                if !in_bounds(p1) || !in_bounds(p2) || !record(p3, false) {
+                    return None;
+                }
+                cur = p3;
+            }
+            PathEl::ClosePath => {
+                closed = true;
+            }
+        }
+    }
+    if moves != 1 || !closed || !top.0.is_finite() || !bot.0.is_finite() || !left.0.is_finite() || !right.0.is_finite()
+    {
+        return None;
+    }
+    let corner = |a: f64, b: f64| -> Option<f32> {
+        if a < -0.5 || b < -0.5 || (a - b).abs() > 0.5 {
+            return None;
+        }
+        Some((0.5 * (a + b)).max(0.0) as f32)
+    };
+    let r_tl = corner(top.0, left.0)?;
+    let r_tr = corner(w - top.1, right.0)?;
+    let r_br = corner(w - bot.1, h - right.1)?;
+    let r_bl = corner(bot.0, h - left.1)?;
+    if f64::from(r_tl + r_tr) > w + 0.5
+        || f64::from(r_bl + r_br) > w + 0.5
+        || f64::from(r_tl + r_bl) > h + 0.5
+        || f64::from(r_tr + r_br) > h + 0.5
+    {
+        return None;
+    }
+    let ia = dd / det;
+    let ib = -db / det;
+    let ic = -dc / det;
+    let id = da / det;
+    let ie = (dc * df - dd * de) / det;
+    let jf = (db * de - da * df) / det;
+    let unit_px = det.abs().sqrt() as f32;
+    let fx0 = f64::from(origin.0);
+    let fy0 = f64::from(origin.1);
+    Some(CoarseAnalytic {
+        mode: 1,
+        to_box: [
+            ia as f32,
+            ib as f32,
+            ic as f32,
+            id as f32,
+            (ia * fx0 + ic * fy0 + ie) as f32,
+            (ib * fx0 + id * fy0 + jf) as f32,
+        ],
+        size,
+        radii: [r_tl, r_tr, r_br, r_bl],
+        smoothing: [0.0; 4],
+        unit_px,
+    })
 }

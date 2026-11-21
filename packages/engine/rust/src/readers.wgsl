@@ -622,3 +622,127 @@ fn fs_composite(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let p = vec2<i32>(floor(pos.xy)) - vec2<i32>(comp_u.info.yz);
     return textureLoad(comp_src, p, 0) * comp_u.info.x;
 }
+
+// ---------------------------------------------------------------------------
+// 9. Background blur masked premultiplied replace (decision 0039 / 0040).
+// ---------------------------------------------------------------------------
+struct BgBlurCompU {
+    // (dirty_x0_in_target, dirty_y0_in_target, alpha, has_clip_mask)
+    a: vec4<f32>,
+};
+
+@group(0) @binding(0) var bg_blurred: texture_2d<f32>;
+@group(0) @binding(1) var bg_mask: texture_2d<f32>;
+@group(0) @binding(2) var bg_dst: texture_2d<f32>;
+@group(0) @binding(3) var bg_clip: texture_2d<f32>;
+@group(0) @binding(4) var<uniform> bgu: BgBlurCompU;
+
+@fragment
+fn fs_bg_blur_composite(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let local = vec2<i32>(floor(pos.xy - bgu.a.xy));
+    let dst = textureLoad(bg_dst, local, 0);
+    let m = textureLoad(bg_mask, local, 0).a;
+    var clip_cov = 1.0;
+    if (bgu.a.w > 0.5) {
+        clip_cov = textureLoad(bg_clip, local, 0).a;
+    }
+    let a_eff = clamp(m * clip_cov * bgu.a.z, 0.0, 1.0);
+    if (a_eff <= 0.0) {
+        return dst;
+    }
+    let blurred = textureLoad(bg_blurred, local, 0);
+    return dst * (1.0 - a_eff) + blurred * a_eff;
+}
+
+// ---------------------------------------------------------------------------
+// 10. Progressive background blur from slice atlas + masked premultiplied replace.
+// ---------------------------------------------------------------------------
+struct ProgBlurU {
+    // (tile_x0_in_target, tile_y0_in_target, tile_w, tile_h)
+    tile: vec4<f32>,
+    // (mask_off_x, mask_off_y, alpha, has_clip_mask)
+    mask_info: vec4<f32>,
+    // (start_x_in_frame, start_y_in_frame, dir_x_div_len2, dir_y_div_len2)
+    grad: vec4<f32>,
+    // (start_sigma, end_sigma, stop_count, atlas_cols)
+    params: vec4<f32>,
+    // Up to 12 monotonic sigma stops
+    stops0: vec4<f32>,
+    stops1: vec4<f32>,
+    stops2: vec4<f32>,
+    // (frame_x_of_target, frame_y_of_target, unused, unused)
+    frame_origin: vec4<f32>,
+};
+
+@group(0) @binding(0) var pb_atlas: texture_2d<f32>;
+@group(0) @binding(1) var pb_mask: texture_2d<f32>;
+@group(0) @binding(2) var pb_dst: texture_2d<f32>;
+@group(0) @binding(3) var pb_clip: texture_2d<f32>;
+@group(0) @binding(4) var<uniform> pbu: ProgBlurU;
+
+fn prog_stop(i: i32) -> f32 {
+    if (i < 4) {
+        if (i == 0) { return pbu.stops0.x; }
+        if (i == 1) { return pbu.stops0.y; }
+        if (i == 2) { return pbu.stops0.z; }
+        return pbu.stops0.w;
+    }
+    if (i < 8) {
+        if (i == 4) { return pbu.stops1.x; }
+        if (i == 5) { return pbu.stops1.y; }
+        if (i == 6) { return pbu.stops1.z; }
+        return pbu.stops1.w;
+    }
+    if (i == 8) { return pbu.stops2.x; }
+    if (i == 9) { return pbu.stops2.y; }
+    if (i == 10) { return pbu.stops2.z; }
+    return pbu.stops2.w;
+}
+
+@fragment
+fn fs_progressive_blur(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let local = vec2<i32>(floor(pos.xy - pbu.tile.xy));
+    let dst = textureLoad(pb_dst, local, 0);
+    let mask_coord = local + vec2<i32>(i32(pbu.mask_info.x), i32(pbu.mask_info.y));
+    let m = textureLoad(pb_mask, mask_coord, 0).a;
+    var clip_cov = 1.0;
+    if (pbu.mask_info.w > 0.5) {
+        clip_cov = textureLoad(pb_clip, mask_coord, 0).a;
+    }
+    let a_eff = clamp(m * clip_cov * pbu.mask_info.z, 0.0, 1.0);
+    if (a_eff <= 0.0) {
+        return dst;
+    }
+    let t = clamp(dot(pos.xy + pbu.frame_origin.xy - pbu.grad.xy, pbu.grad.zw), 0.0, 1.0);
+    let sigma = pbu.params.x + (pbu.params.y - pbu.params.x) * t;
+    let count = i32(pbu.params.z);
+    var lo = 0;
+    var hi = 0;
+    var frac = 0.0;
+    if (count > 1) {
+        lo = count - 2;
+        hi = count - 1;
+        for (var i = 0; i < 11; i = i + 1) {
+            if (i + 1 >= count) { break; }
+            if (sigma <= prog_stop(i + 1)) {
+                lo = i;
+                hi = i + 1;
+                break;
+            }
+        }
+        let s_lo = prog_stop(lo);
+        let s_hi = prog_stop(hi);
+        let v_lo = s_lo * s_lo;
+        let v_hi = s_hi * s_hi;
+        frac = clamp((sigma * sigma - v_lo) / max(v_hi - v_lo, 1e-6), 0.0, 1.0);
+    }
+    let cols = max(1, i32(pbu.params.w));
+    let tw = i32(pbu.tile.z);
+    let th = i32(pbu.tile.w);
+    let c0_org = vec2<i32>((lo % cols) * tw, (lo / cols) * th);
+    let c1_org = vec2<i32>((hi % cols) * tw, (hi / cols) * th);
+    let c0 = textureLoad(pb_atlas, c0_org + local, 0);
+    let c1 = textureLoad(pb_atlas, c1_org + local, 0);
+    let blurred = mix(c0, c1, frac);
+    return dst * (1.0 - a_eff) + blurred * a_eff;
+}

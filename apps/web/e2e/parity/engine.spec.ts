@@ -4,9 +4,7 @@
  *
  * - every cell is drawn by the engine on the CPU and on the GPU (SwiftShader here: the same
  *   shaders a GPU runs; its timings mean nothing), read back through a buffer;
- * - a cell holding anything the engine doesn't draw yet must be refused (it falls back to the
- *   canvas renderer), never drawn: a supported suite's cell may only fall back where it's
- *   listed below with its reason;
+ * - every browser cell must draw, and a refusal reports its feature reasons;
  * - every cell the engine draws must be no further from Figma than the canvas renderer is
  *   allowed to be on the same golden (`thresholds.json`, the same metric as parity.spec.ts);
  * - CPU against GPU within decision 0040's tolerance (mean, p99, worst 32 × 32 tile, severe
@@ -22,7 +20,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ErrorCode, RenderEngine } from "@drawpane/engine";
-import { outsideTolerance, score } from "@drawpane/engine/compare";
+import { CPU_GPU_TOLERANCE, outsideTolerance, score } from "@drawpane/engine/compare";
 import { loadNodeEngine } from "@drawpane/engine/node";
 import { expect, test } from "@playwright/test";
 import { freshInstance, type Instance } from "../fresh-instance";
@@ -43,40 +41,6 @@ const OUT =
   process.env.ENGINE_PARITY_OUT ??
   fileURLToPath(new URL("../../test-results/engine-parity", import.meta.url));
 
-/**
- * Per-cell expected fallbacks for supported and partially supported suites. Every other cell
- * must draw, and each listed cell must fall back with these exact feature reasons.
- */
-const EXPECTED_CELL_FALLBACKS: Record<string, Record<string, readonly string[]>> = {
-  blurs: {
-    "background-4": ["backgroundBlur"],
-    "background-12": ["backgroundBlur"],
-    "background-32": ["backgroundBlur"],
-    "background-clear-12": ["backgroundBlur"],
-    "background-ellipse-16": ["backgroundBlur"],
-  },
-  "corners-glass": {
-    "background-blur": ["backgroundBlur"],
-  },
-  "glass-context": {
-    blur: ["backgroundBlur"],
-    "blur-no-fill": ["backgroundBlur"],
-    "blur-text": ["backgroundBlur"],
-    "blur-text-dodge": ["backgroundBlur"],
-    "blur-text-faint": ["backgroundBlur"],
-  },
-  "glass-stack": {
-    "over-bg-blur": ["backgroundBlur"],
-    "bg-blur-over-glass": ["backgroundBlur"],
-  },
-  "glass-alpha": {
-    "blur-dark-material": ["backgroundBlur"],
-    "blur-light-material": ["backgroundBlur"],
-    "blur-no-fill-half": ["backgroundBlur"],
-    "blur-dark-half": ["backgroundBlur"],
-    "blur-burn-material": ["backgroundBlur"],
-  },
-};
 /**
  * Suites gated against the live current canvas renderer baseline (decision 0040 replacement gate:
  * mean not worse by more than 0.01, worst 32 x 32 tile not worse by more than 1, alpha not worse).
@@ -110,7 +74,7 @@ const MIN_DRAWN: Record<string, number> = {
   lists: 6,
   "vertical-trim": 12,
   shadows: 15,
-  blurs: 4,
+  blurs: 10,
   glass: 10,
   "glass-alpha": 12,
   "glass-context": 8,
@@ -118,7 +82,7 @@ const MIN_DRAWN: Record<string, number> = {
   "glass-ellipses": 20,
   "glass-probe": 14,
   "glass-probe-2": 31,
-  "glass-stack": 13,
+  "glass-stack": 15,
   "linear-blends": 19,
   masks: 7,
   grain: 12,
@@ -359,7 +323,6 @@ test.describe("Render engine parity", () => {
           failures.push(`${cell.id}: missing Figma golden at ${golden}`);
           continue;
         }
-        const expectedFallback = EXPECTED_CELL_FALLBACKS[suite.suite]?.[cell.id];
         const rect = exportRect(suite, i);
         const width = rect.width * SCALE;
         const height = rect.height * SCALE;
@@ -387,22 +350,9 @@ test.describe("Render engine parity", () => {
           .map(([name]) => name)
           .sort();
         if (!cpu.ok) {
-          // Refused: it must be for what the builder flagged in this cell, and allowed here.
-          if (cpu.code !== ErrorCode.Unsupported || reasons.length === 0)
-            failures.push(`${cell.id}: refused without a reason it flagged (${cpu.error})`);
-          else {
-            if (!expectedFallback)
-              failures.push(
-                `${cell.id}: unexpected fallback (${reasons.join(", ")}) on a drawable cell`,
-              );
-            else {
-              const want = [...expectedFallback].sort();
-              if (reasons.length !== want.length || reasons.some((r, k) => r !== want[k]))
-                failures.push(
-                  `${cell.id}: fallback reasons [${reasons.join(", ")}] differ from expected [${want.join(", ")}]`,
-                );
-            }
-          }
+          failures.push(
+            `${cell.id}: CPU refused a drawable cell (${cpu.error ?? cpu.code}${reasons.length ? `: ${reasons.join(", ")}` : ""})`,
+          );
           results.push({ cell: cell.id, status: "fallback", reasons });
           rows.push(
             `<tr><th>${cell.id}<br><small>falls back: ${reasons.join(", ")}</small></th></tr>`,
@@ -413,10 +363,6 @@ test.describe("Render engine parity", () => {
           failures.push(`${cell.id}: CPU render returned no pixels`);
           continue;
         }
-        if (expectedFallback)
-          failures.push(
-            `${cell.id}: drew cleanly, remove from EXPECTED_CELL_FALLBACKS (expected ${expectedFallback.join(", ")})`,
-          );
         const theirs = await decodePng(page, golden);
         expect(theirs.width, `${cell.id} golden size`).toBe(width);
         // The canvas renderer's metric, as parity.spec.ts records thresholds with it.
@@ -485,9 +431,11 @@ test.describe("Render engine parity", () => {
           checkStackTail(label, vf);
           // Maximum frost samples a high-contrast step through differently phased mip grids.
           // The observed 0.289 mean comes with p99 1, max 2 and no severe pixels (decision 0040).
-          const maxFrost = suite.suite === "glass-probe-2" && cell.id === "frost-100";
-          const worse = outsideTolerance(maxFrost ? { ...cg, mean: 0 } : cg);
-          if (maxFrost && cg.mean > 0.3) worse.unshift(`mean ${cg.mean.toFixed(3)} > 0.3`);
+          const tolerance =
+            suite.suite === "glass-probe-2" && cell.id === "frost-100"
+              ? { ...CPU_GPU_TOLERANCE, mean: 0.3 }
+              : CPU_GPU_TOLERANCE;
+          const worse = outsideTolerance(cg, tolerance);
           if (worse.length > 0)
             failures.push(`${cell.id}: CPU against ${label} ${worse.join(", ")}`);
           if (effectiveLimit !== undefined && f > effectiveLimit)

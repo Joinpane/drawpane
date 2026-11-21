@@ -257,9 +257,16 @@ export const Shadow = z.object({
 export const Blur = z.object({
   type: z.enum(["layer-blur", "background-blur"]),
   radius: nonNegative,
+  /** "progressive" interpolates from `startRadius` at `startOffset` to `radius` at `endOffset`. */
+  blurType: z.enum(["normal", "progressive"]).optional(),
+  startRadius: nonNegative.optional(),
+  /** Normalized layer-box coordinates (0,0 top-left to 1,1 bottom-right). */
+  startOffset: Point.optional(),
+  endOffset: Point.optional(),
   visible: z.boolean().optional(),
   bind: z.object({ radius: VariableRef.optional(), visible: VariableRef.optional() }).optional(),
 });
+export type Blur = z.infer<typeof Blur>;
 /** 0–100: how much of a glass property (refraction, dispersion, light…). */
 const amount = ranged(
   finite.refine((n) => n >= 0 && n <= 100, "must be between 0 and 100"),

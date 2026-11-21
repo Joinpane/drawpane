@@ -70,7 +70,7 @@ fn fs_blur_1d(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     return sample_src(center, cb, mode, u.border);
   }
   let dir = vec2<i32>(i32(u.p0.x), i32(u.p0.y));
-  let k2 = u.p0.z;
+  let k2 = clamp(u.p0.z, 0.0, 1e12);
   var acc = sample_src(center, cb, mode, u.border);
   var wsum = 1.0;
   for (var k: i32 = 1; k <= r; k = k + 1) {
@@ -81,7 +81,7 @@ fn fs_blur_1d(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     acc = acc + (s_pos + s_neg) * w;
     wsum = wsum + 2.0 * w;
   }
-  return clamp(acc / wsum, vec4<f32>(0.0), vec4<f32>(1.0));
+  return clamp(acc / max(wsum, 1.0), vec4<f32>(0.0), vec4<f32>(1.0));
 }
 
 // Level 0 -> Level 1 4x4 separable [1, 3, 3, 1]/8 downsample into a 2-texel-aproned level.

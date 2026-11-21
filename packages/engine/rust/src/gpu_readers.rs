@@ -5,7 +5,9 @@
 //! refraction + premultiplied replace) records into a single `CommandEncoder`.
 
 use crate::error::{EngineError, Result};
+use crate::exec::IRect;
 use crate::glass::{self, ClipWithin, DEFAULT_GLASS_TUNING, GlassParams, GlassRegion};
+use crate::progressive_blur::ProgressivePlan;
 use vello_gpu::{RenderSize, Renderer};
 
 const SHADER: &str = include_str!("readers.wgsl");
@@ -151,6 +153,8 @@ pub struct GpuReaders {
     glass_bgl: wgpu::BindGroupLayout,
     coarse_bgl: wgpu::BindGroupLayout,
     comp_bgl: wgpu::BindGroupLayout,
+    bg_blur_bgl: wgpu::BindGroupLayout,
+    prog_blur_bgl: wgpu::BindGroupLayout,
 
     // Pipelines
     copy_ext_pipe: wgpu::RenderPipeline,
@@ -163,6 +167,8 @@ pub struct GpuReaders {
     coarse_pipe: wgpu::RenderPipeline,
     comp_pipe: wgpu::RenderPipeline,
     lerp_pipe: wgpu::RenderPipeline,
+    bg_blur_pipe: wgpu::RenderPipeline,
+    prog_blur_pipe: wgpu::RenderPipeline,
 
     // Height field format (Rgba16Float or packed Rgba8Unorm fallback)
     pub height_format: wgpu::TextureFormat,
@@ -196,6 +202,8 @@ pub struct GpuReaders {
     low_1: Option<PlainTex>,
     pub mask_tex: Option<VelloTex>,
     pub clip_tex: Option<VelloTex>,
+    pub blur_out: Option<PlainTex>,
+    pub blur_source: Option<PlainTex>,
     dst_copy: Option<PlainTex>,
 }
 
@@ -379,6 +387,26 @@ impl GpuReaders {
             label: Some("composite bgl"),
             entries: &[tex_binding(0, false), uni_binding(1, 16)],
         });
+        let bg_blur_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("bg_blur_comp bgl"),
+            entries: &[
+                tex_binding(0, false),
+                tex_binding(1, false),
+                tex_binding(2, false),
+                tex_binding(3, false),
+                uni_binding(4, 16),
+            ],
+        });
+        let prog_blur_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("prog_blur bgl"),
+            entries: &[
+                tex_binding(0, false),
+                tex_binding(1, false),
+                tex_binding(2, false),
+                tex_binding(3, false),
+                uni_binding(4, 128),
+            ],
+        });
 
         let copy_ext_pipe = make_pipeline(
             device,
@@ -458,6 +486,24 @@ impl GpuReaders {
             Some(lerp_blend),
             "reader lerp",
         );
+        let bg_blur_pipe = make_pipeline(
+            device,
+            &bg_blur_bgl,
+            &module,
+            "fs_bg_blur_composite",
+            RGBA8,
+            None,
+            "reader bg_blur_comp",
+        );
+        let prog_blur_pipe = make_pipeline(
+            device,
+            &prog_blur_bgl,
+            &module,
+            "fs_progressive_blur",
+            RGBA8,
+            None,
+            "reader prog_blur",
+        );
 
         let lin_samp = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("reader linear"),
@@ -518,6 +564,8 @@ impl GpuReaders {
             glass_bgl,
             coarse_bgl,
             comp_bgl,
+            bg_blur_bgl,
+            prog_blur_bgl,
             copy_ext_pipe,
             mip_pipe,
             down_pipe,
@@ -528,6 +576,8 @@ impl GpuReaders {
             coarse_pipe,
             comp_pipe,
             lerp_pipe,
+            bg_blur_pipe,
+            prog_blur_pipe,
             height_format,
             height_bpp,
             height_packed,
@@ -549,6 +599,8 @@ impl GpuReaders {
             low_1: None,
             mask_tex: None,
             clip_tex: None,
+            blur_out: None,
+            blur_source: None,
             dst_copy: None,
         }
     }
@@ -592,6 +644,12 @@ impl GpuReaders {
         if let Some(t) = &self.clip_tex {
             total += t.bytes();
         }
+        if let Some(t) = &self.blur_out {
+            total += t.bytes();
+        }
+        if let Some(t) = &self.blur_source {
+            total += t.bytes();
+        }
         if let Some(t) = &self.dst_copy {
             total += t.bytes();
         }
@@ -606,6 +664,7 @@ impl GpuReaders {
     pub fn clear_frame_targets(&mut self) {
         self.backdrop_frame = None;
         self.delta_frame = None;
+        self.blur_source = None;
         self.shared_coarse_mips = None;
         self.shared_coarse_key = None;
     }
@@ -619,6 +678,7 @@ impl GpuReaders {
         self.low_1 = None;
         self.mask_tex = None;
         self.clip_tex = None;
+        self.blur_out = None;
         self.dst_copy = None;
     }
 
@@ -1865,6 +1925,556 @@ impl GpuReaders {
         pass.set_pipeline(&self.glass_pipe);
         pass.set_bind_group(0, &group_glass, &[sg_off]);
         pass.draw(0..3, 0..1);
+        Ok(())
+    }
+
+    /// A progressive draw can write the same plane that it reads. Keep a bounded
+    /// copy of that scope while all its output tiles are encoded.
+    pub fn ensure_blur_source_budgeted(
+        &mut self,
+        device: &wgpu::Device,
+        size: (u32, u32),
+        max_bytes: usize,
+    ) -> Result<()> {
+        let (w, h) = size;
+        if self.blur_source.as_ref().is_some_and(|t| (t.width, t.height) == size) {
+            return Ok(());
+        }
+        let freed = self.blur_source.as_ref().map_or(0, PlainTex::bytes);
+        self.reserve_bytes(w as usize * h as usize * 4, freed, "progressive blur prefix", max_bytes)?;
+        self.blur_source = Some(make_plain(
+            device,
+            w,
+            h,
+            RGBA8,
+            4,
+            wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            "progressive blur prefix",
+        ));
+        Ok(())
+    }
+
+    /// Ensures the growable scratch target `blur_out` (for uniform or progressive blur slices)
+    /// is at least `w x h` pixels, checking `max_bytes` before allocating.
+    pub fn ensure_blur_out_budgeted(&mut self, device: &wgpu::Device, w: u32, h: u32, max_bytes: usize) -> Result<()> {
+        let nw = w.max(1).next_multiple_of(64);
+        let nh = h.max(1).next_multiple_of(64);
+        let reuse = self.blur_out.as_ref().is_some_and(|t| {
+            t.width >= w
+                && t.height >= h
+                && (t.width as usize * t.height as usize) <= (nw as usize * nh as usize * 4).max(1_048_576)
+        });
+        if !reuse {
+            let freed = self.blur_out.as_ref().map_or(0, PlainTex::bytes);
+            let add = nw as usize * nh as usize * 4;
+            self.reserve_bytes(add, freed, "reader blur_out", max_bytes)?;
+            Self::ensure_growable_plain(
+                &mut self.blur_out,
+                device,
+                w,
+                h,
+                RGBA8,
+                4,
+                wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+                "reader blur_out",
+            );
+        }
+        Ok(())
+    }
+
+    fn ensure_dst_copy_budgeted(&mut self, device: &wgpu::Device, w: u32, h: u32, max_bytes: usize) -> Result<()> {
+        let nw = w.max(1).next_multiple_of(64);
+        let nh = h.max(1).next_multiple_of(64);
+        let reuse = self.dst_copy.as_ref().is_some_and(|t| {
+            t.width >= w
+                && t.height >= h
+                && (t.width as usize * t.height as usize) <= (nw as usize * nh as usize * 4).max(1_048_576)
+        });
+        if !reuse {
+            let freed = self.dst_copy.as_ref().map_or(0, PlainTex::bytes);
+            let add = nw as usize * nh as usize * 4;
+            self.reserve_bytes(add, freed, "reader dst_copy", max_bytes)?;
+            Self::ensure_growable_plain(
+                &mut self.dst_copy,
+                device,
+                w,
+                h,
+                RGBA8,
+                4,
+                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                "reader dst_copy",
+            );
+        }
+        Ok(())
+    }
+
+    /// Snapshots `dst_tex[dirty]` and composites `blur_out` onto `dst_view` masked by
+    /// `mask_tex * clip_tex * alpha` via premultiplied replace.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_bg_blur_composite(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        dst_tex: &wgpu::Texture,
+        dst_view: &wgpu::TextureView,
+        dirty: IRect,
+        alpha: f32,
+        has_clip_mask: bool,
+        max_bytes: usize,
+    ) -> Result<()> {
+        let bw = (dirty.x1 - dirty.x0) as u32;
+        let bh = (dirty.y1 - dirty.y0) as u32;
+        if bw == 0 || bh == 0 {
+            return Ok(());
+        }
+        let x0 = dirty.x0 as u32;
+        let y0 = dirty.y0 as u32;
+        self.ensure_dst_copy_budgeted(device, bw, bh, max_bytes)?;
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: dst_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: x0, y: y0, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.dst_copy.as_ref().expect("dst_copy").texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: bw,
+                height: bh,
+                depth_or_array_layers: 1,
+            },
+        );
+        let u_bytes = floats_to_bytes(&[x0 as f32, y0 as f32, alpha, if has_clip_mask { 1.0 } else { 0.0 }]);
+        let (slab_idx, u_off) = self.push_uniform(device, queue, &u_bytes);
+        let clip_view = if has_clip_mask {
+            &self.clip_tex.as_ref().expect("clip").view
+        } else {
+            &self.white_1x1.view
+        };
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.bg_blur_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.blur_out.as_ref().expect("blur_out").view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.mask_tex.as_ref().expect("mask").view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&self.dst_copy.as_ref().expect("dst_copy").view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(clip_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &self.slabs[slab_idx],
+                        offset: 0,
+                        size: wgpu::BufferSize::new(16),
+                    }),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("reader bg_blur_comp"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: dst_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        pass.set_scissor_rect(x0, y0, bw, bh);
+        pass.set_pipeline(&self.bg_blur_pipe);
+        pass.set_bind_group(0, &group, &[u_off]);
+        pass.draw(0..3, 0..1);
+        Ok(())
+    }
+
+    /// Snapshots `dst_tex[tile]` and blends bracketing progressive blur slices from `blur_out`
+    /// onto `dst_view` masked by `mask_tex * clip_tex * alpha`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_progressive_composite(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        dst_tex: &wgpu::Texture,
+        dst_view: &wgpu::TextureView,
+        tile: IRect,
+        dirty: IRect,
+        frame_origin: (i32, i32),
+        plan: &ProgressivePlan,
+        atlas_cols: u32,
+        alpha: f32,
+        has_clip_mask: bool,
+        max_bytes: usize,
+    ) -> Result<()> {
+        let tw = (tile.x1 - tile.x0) as u32;
+        let th = (tile.y1 - tile.y0) as u32;
+        if tw == 0 || th == 0 {
+            return Ok(());
+        }
+        let x0 = tile.x0 as u32;
+        let y0 = tile.y0 as u32;
+        self.ensure_dst_copy_budgeted(device, tw, th, max_bytes)?;
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: dst_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: x0, y: y0, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.dst_copy.as_ref().expect("dst_copy").texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width: tw,
+                height: th,
+                depth_or_array_layers: 1,
+            },
+        );
+        let stops = plan.padded_stops();
+        let u_bytes = floats_to_bytes(&[
+            // tile
+            x0 as f32,
+            y0 as f32,
+            tw as f32,
+            th as f32,
+            // mask_info
+            (tile.x0 - dirty.x0) as f32,
+            (tile.y0 - dirty.y0) as f32,
+            alpha,
+            if has_clip_mask { 1.0 } else { 0.0 },
+            // Gradient coordinates are relative to the frame, not the isolation.
+            plan.start[0],
+            plan.start[1],
+            plan.dir_inv_len2[0],
+            plan.dir_inv_len2[1],
+            // params
+            plan.start_sigma,
+            plan.end_sigma,
+            plan.stops.len() as f32,
+            atlas_cols as f32,
+            // stops0..2
+            stops[0],
+            stops[1],
+            stops[2],
+            stops[3],
+            stops[4],
+            stops[5],
+            stops[6],
+            stops[7],
+            stops[8],
+            stops[9],
+            stops[10],
+            stops[11],
+            frame_origin.0 as f32,
+            frame_origin.1 as f32,
+            0.0,
+            0.0,
+        ]);
+        let (slab_idx, u_off) = self.push_uniform(device, queue, &u_bytes);
+        let clip_view = if has_clip_mask {
+            &self.clip_tex.as_ref().expect("clip").view
+        } else {
+            &self.white_1x1.view
+        };
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.prog_blur_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&self.blur_out.as_ref().expect("blur_out").view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&self.mask_tex.as_ref().expect("mask").view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&self.dst_copy.as_ref().expect("dst_copy").view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(clip_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &self.slabs[slab_idx],
+                        offset: 0,
+                        size: wgpu::BufferSize::new(128),
+                    }),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("reader prog_blur"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: dst_view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        pass.set_scissor_rect(x0, y0, tw, th);
+        pass.set_pipeline(&self.prog_blur_pipe);
+        pass.set_bind_group(0, &group, &[u_off]);
+        pass.draw(0..3, 0..1);
+        Ok(())
+    }
+
+    /// Interactive coarse background blur (mip-sampled stand-in) masked by `analytic_coarse` or
+    /// `mask_tex`, times `clip_tex * alpha`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_coarse_blur<'a>(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        backdrop_tex: &wgpu::Texture,
+        backdrop_view: &wgpu::TextureView,
+        targets: impl Iterator<Item = (&'a wgpu::Texture, &'a wgpu::TextureView)>,
+        tex_size: (u32, u32),
+        frame_size: (i32, i32),
+        offset: (i32, i32),
+        backdrop_gen: u64,
+        backdrop_is_frame: bool,
+        dirty: IRect,
+        sigma: f32,
+        within: Option<ClipWithin>,
+        alpha: f32,
+        analytic_coarse: Option<CoarseAnalytic>,
+        has_clip_mask: bool,
+        max_bytes: usize,
+    ) -> Result<()> {
+        let bw = (dirty.x1 - dirty.x0) as u32;
+        let bh = (dirty.y1 - dirty.y0) as u32;
+        if bw == 0 || bh == 0 {
+            return Ok(());
+        }
+        let x0 = dirty.x0 as u32;
+        let y0 = dirty.y0 as u32;
+        self.ensure_dst_copy_budgeted(device, bw, bh, max_bytes)?;
+        let use_shared = backdrop_is_frame
+            && within.is_none()
+            && offset == (0, 0)
+            && tex_size.0 as i32 == frame_size.0
+            && tex_size.1 as i32 == frame_size.1;
+        let (uv_ox, uv_oy, inv_bw, inv_bh, max_mip, region_idx) = if use_shared {
+            self.ensure_shared_coarse_mips(
+                device,
+                encoder,
+                backdrop_tex,
+                tex_size.0,
+                tex_size.1,
+                backdrop_gen,
+                max_bytes,
+            )?;
+            let mips = self.shared_coarse_mips.as_ref().expect("shared");
+            (
+                x0 as f32,
+                y0 as f32,
+                1.0 / (mips.width as f32),
+                1.0 / (mips.height as f32),
+                (mips.mip_views.len() - 1) as f32,
+                None,
+            )
+        } else {
+            let region = GlassRegion {
+                x0: dirty.x0 - offset.0,
+                y0: dirty.y0 - offset.1,
+                rw: bw,
+                rh: bh,
+                out_x0: dirty.x0,
+                out_y0: dirty.y0,
+                out_x1: dirty.x1,
+                out_y1: dirty.y1,
+                center: [0.0, 0.0],
+                half_size: [1.0, 1.0],
+                box_geom: None,
+            };
+            let idx = self.encode_copy_extended_and_mips(
+                device,
+                queue,
+                encoder,
+                backdrop_view,
+                (tex_size.0 as i32, tex_size.1 as i32),
+                frame_size,
+                offset,
+                &region,
+                within,
+                max_bytes,
+            )?;
+            let m = &self.mip_pool[idx];
+            (
+                0.0,
+                0.0,
+                1.0 / (m.width as f32),
+                1.0 / (m.height as f32),
+                (m.mip_views.len() - 1) as f32,
+                Some(idx),
+            )
+        };
+        let lod = (sigma * 1.5).max(1.0).log2().min(max_mip);
+        let (mask_mode, unit_px, to_box_x, to_box_y, radii, smoothing) = match analytic_coarse {
+            Some(ca) => (
+                f32::from(ca.mode),
+                ca.unit_px,
+                [ca.to_box[0], ca.to_box[2], ca.to_box[4], ca.size[0]],
+                [ca.to_box[1], ca.to_box[3], ca.to_box[5], ca.size[1]],
+                ca.radii,
+                ca.smoothing,
+            ),
+            None => (0.0, 0.0, [0.0; 4], [0.0; 4], [0.0; 4], [0.0; 4]),
+        };
+        // Matches 128-byte CoarseU in readers.wgsl.
+        let u_bytes = floats_to_bytes(&[
+            bw as f32,
+            bh as f32,
+            lod,
+            alpha,
+            x0 as f32,
+            y0 as f32,
+            x0 as f32,
+            y0 as f32,
+            if has_clip_mask { 1.0 } else { 0.0 },
+            mask_mode,
+            unit_px,
+            0.0,
+            uv_ox,
+            uv_oy,
+            inv_bw,
+            inv_bh,
+            to_box_x[0],
+            to_box_x[1],
+            to_box_x[2],
+            to_box_x[3],
+            to_box_y[0],
+            to_box_y[1],
+            to_box_y[2],
+            to_box_y[3],
+            radii[0],
+            radii[1],
+            radii[2],
+            radii[3],
+            smoothing[0],
+            smoothing[1],
+            smoothing[2],
+            smoothing[3],
+        ]);
+        let (slab_idx, u_off) = self.push_uniform(device, queue, &u_bytes);
+        let b_view = match region_idx {
+            Some(i) => &self.mip_pool[i].full_view,
+            None => &self.shared_coarse_mips.as_ref().expect("shared").full_view,
+        };
+        let mask_view = if analytic_coarse.is_some() {
+            &self.white_1x1.view
+        } else {
+            &self.mask_tex.as_ref().expect("mask").view
+        };
+        let clip_view = if has_clip_mask {
+            &self.clip_tex.as_ref().expect("clip").view
+        } else {
+            &self.white_1x1.view
+        };
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.coarse_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(b_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.mip_lin_samp),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(mask_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&self.dst_copy.as_ref().expect("dst_copy").view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(clip_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &self.slabs[slab_idx],
+                        offset: 0,
+                        size: wgpu::BufferSize::new(128),
+                    }),
+                },
+            ],
+        });
+        for (dst_tex, dst_view) in targets {
+            encoder.copy_texture_to_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: dst_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: x0, y: y0, z: 0 },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::TexelCopyTextureInfo {
+                    texture: &self.dst_copy.as_ref().expect("dst_copy").texture,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d::ZERO,
+                    aspect: wgpu::TextureAspect::All,
+                },
+                wgpu::Extent3d {
+                    width: bw,
+                    height: bh,
+                    depth_or_array_layers: 1,
+                },
+            );
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("reader coarse_blur"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: dst_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_scissor_rect(x0, y0, bw, bh);
+            pass.set_pipeline(&self.coarse_pipe);
+            pass.set_bind_group(0, &group, &[u_off]);
+            pass.draw(0..3, 0..1);
+        }
         Ok(())
     }
 }

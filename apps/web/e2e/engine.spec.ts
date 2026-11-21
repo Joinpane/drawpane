@@ -6,7 +6,7 @@
  * - after edits (patches) and camera moves, what's on screen equals a fresh engine's render of
  *   the same page and camera (read back through a buffer, never through the canvas);
  * - on the e2e scene, the engine agrees with the canvas renderer within a bound;
- * - a page holding what the engine doesn't draw yet (a background blur) is drawn by the canvas renderer,
+ * - a page holding a progressive layer blur is drawn by the canvas renderer,
  *   and the engine takes over again when it's gone;
  * - a lost device, and a browser without WebGPU, fall back to the canvas renderer with a
  *   console note and a `drawpane:renderer-fallback` event, never a blank canvas. A headless
@@ -16,10 +16,13 @@
  */
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { RenderEngine } from "@drawpane/engine";
 import { outsideTolerance, score } from "@drawpane/engine/compare";
+import { loadNodeEngine } from "@drawpane/engine/node";
 import { OP } from "@drawpane/engine/wire";
 import { expect, type Page, test } from "@playwright/test";
 import { dropImage, freshInstance, type Instance } from "./fresh-instance";
+import { decodePng } from "./parity/pixels";
 
 if (!process.env.ENGINE_BROWSER || process.env.ENGINE_BROWSER === "chromium") {
   test.use({
@@ -84,7 +87,19 @@ type W = {
   drawpaneEngine: {
     blurProbe: ReturnType<typeof import("../src/editor/engine-debug").engineDebug>["blurProbe"];
     readbackPair(w: number, h: number): Promise<Array<{ ok: boolean; code?: number }>>;
-    render(o: object): Promise<{ ok: boolean; code?: number; rgba?: string; error?: string }>;
+    render(o: object): Promise<{
+      ok: boolean;
+      code?: number;
+      rgba?: string;
+      error?: string;
+      stats?: { records: number; reads: number };
+      gpu?: { backend: "webgpu" | "webgl2" };
+    }>;
+    list(
+      pageId: string,
+      ids?: string[],
+      context?: boolean,
+    ): { list: string; unsupported: Record<string, string[]>; records: number };
     canvasRender(o: object): Promise<string>;
   };
 
@@ -808,7 +823,16 @@ test.describe
         const e = (window as unknown as W).drawpane;
         return e.createLayer("rect", { x: 40, y: 420, width: 100, height: 60 }, e.s.pageId, {
           fills: [{ type: "solid", color: "#ffffff" }],
-          effects: [{ type: "background-blur", radius: 12 }],
+          effects: [
+            {
+              type: "layer-blur",
+              radius: 12,
+              blurType: "progressive",
+              startRadius: 0,
+              startOffset: { x: 0.5, y: 0 },
+              endOffset: { x: 0.5, y: 1 },
+            },
+          ],
         });
       });
       await expect
@@ -839,19 +863,28 @@ test.describe
         const e = (window as unknown as W).drawpane;
         return e.createLayer("rect", { x: 40, y: 420, width: 100, height: 60 }, e.s.pageId, {
           fills: [{ type: "solid", color: "#ffffff" }],
-          effects: [{ type: "background-blur", radius: 12 }],
+          effects: [
+            {
+              type: "layer-blur",
+              radius: 12,
+              blurType: "progressive",
+              startRadius: 0,
+              startOffset: { x: 0.5, y: 0 },
+              endOffset: { x: 0.5, y: 1 },
+            },
+          ],
         });
       });
       await frames(page);
       expect(await showing(page)).toEqual({ engine: false, content: true });
       expect(
         await page.evaluate(() => (window as unknown as W).drawpaneEngineView?.unsupported()),
-      ).toEqual({ backgroundBlur: 1 });
+      ).toEqual({ layerBlur: 1 });
       // The page's fallback is reported, with what it holds (an earlier one may be from while its
       // fonts loaded, when its text couldn't be outlined yet).
       expect(await page.evaluate(() => (window as unknown as W).pageFallbacks?.at(-1))).toEqual({
         pageId: expect.any(String),
-        features: { backgroundBlur: 1 },
+        features: { layerBlur: 1 },
       });
       await page.evaluate(
         (id) => (window as unknown as W).drawpane.commit([{ op: "delete", id }]),
@@ -1781,6 +1814,411 @@ test.describe
         await page.evaluate(
           (id) => (window as unknown as W).drawpane.commit([{ op: "delete", id }]),
           scene.root,
+        );
+      }
+    });
+
+    test("export context follows a lower blur to its backdrop inputs", async ({ browser }) => {
+      test.setTimeout(120_000);
+      const context = await browser.newContext({
+        baseURL: instance.url,
+        storageState: await instance.context.storageState(),
+      });
+      try {
+        const p = await context.newPage();
+        await p.goto("/");
+        await p.evaluate(() => localStorage.setItem("drawpane:debug", "1"));
+        await p.getByRole("button", { name: "New file" }).first().click();
+        await expect(p.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
+          timeout: 15_000,
+        });
+        const m = await p.evaluate(async () => {
+          const w = window as unknown as W;
+          const editor = w.drawpane;
+          const engine = w.drawpaneEngine;
+          const parent = editor.s.pageId;
+          const add = (x: number, width: number, props: object) =>
+            editor.createLayer("rect", { x, y: 0, width, height: 100 }, parent, props);
+          const solid = (color: string) => [{ type: "solid", color }];
+          add(0, 160, { fills: solid("#000000") });
+          add(52, 12, { fills: solid("#ffffff") });
+          add(68, 25, {
+            fills: solid("#00000001"),
+            effects: [{ type: "background-blur", radius: 44 }],
+          });
+          const id = add(80, 60, {
+            fills: solid("#00000001"),
+            effects: [{ type: "background-blur", radius: 6 }],
+          });
+          const args = {
+            pageId: parent,
+            rect: { x: 0, y: 0, width: 160, height: 100 },
+            scale: 1,
+            width: 160,
+            height: 100,
+            background: [0, 0, 0, 0],
+          };
+          const at = (b64: string) =>
+            [...atob(b64).slice((50 * 160 + 81) * 4, (50 * 160 + 81) * 4 + 4)].map((byte) =>
+              byte.charCodeAt(0),
+            );
+          const run = async (backend: "cpu" | "gpu") => {
+            const whole = await engine.render({ ...args, backend });
+            const crop = await engine.render({ ...args, backend, ids: [id], context: true });
+            return {
+              whole: whole.ok && whole.rgba ? at(whole.rgba) : whole.error,
+              crop: crop.ok && crop.rgba ? at(crop.rgba) : crop.error,
+              wholeRecords: whole.stats?.records,
+              cropRecords: crop.stats?.records,
+            };
+          };
+          return { cpu: await run("cpu"), gpu: await run("gpu") };
+        });
+        expect(m.cpu.wholeRecords).toBe(4);
+        expect(m.cpu.cropRecords).toBe(4);
+        expect(Array.isArray(m.cpu.whole) && (m.cpu.whole[0] ?? 0) > 10).toBe(true);
+        expect(m.cpu.crop).toEqual(m.cpu.whole);
+        expect(m.gpu.cropRecords).toBeGreaterThanOrEqual(4);
+        expect(Array.isArray(m.gpu.whole) && Array.isArray(m.gpu.crop)).toBe(true);
+        if (Array.isArray(m.gpu.whole) && Array.isArray(m.gpu.crop)) {
+          expect(m.gpu.whole[0]).toBeGreaterThan(10);
+          for (let c = 0; c < 4; c++) {
+            expect(Math.abs((m.gpu.crop[c] ?? 0) - (m.gpu.whole[c] ?? 0))).toBeLessThanOrEqual(2);
+          }
+        }
+      } finally {
+        await context.close();
+      }
+    });
+
+    test("background and progressive blur conform across CPU, GPU, and Worker with direction, clip, and uniform controls", async () => {
+      test.setTimeout(120_000);
+      const scale = 2;
+      const w = 320;
+      const h = 240;
+      // Helper to measure horizontal stripe contrast (std-dev of luminance) inside a box (device px).
+      const regionContrast = (
+        px: Buffer,
+        imgW: number,
+        x0: number,
+        y0: number,
+        rw: number,
+        rh: number,
+      ) => {
+        let sum = 0;
+        let sum2 = 0;
+        const n = rw * rh;
+        for (let y = y0; y < y0 + rh; y++) {
+          for (let x = x0; x < x0 + rw; x++) {
+            const i = (y * imgW + x) * 4;
+            const lum = 0.299 * (px[i] ?? 0) + 0.587 * (px[i + 1] ?? 0) + 0.114 * (px[i + 2] ?? 0);
+            sum += lum;
+            sum2 += lum * lum;
+          }
+        }
+        const mean = sum / n;
+        return Math.sqrt(Math.max(0, sum2 / n - mean * mean));
+      };
+      const cropBox = (
+        px: Buffer,
+        imgW: number,
+        x0: number,
+        y0: number,
+        rw: number,
+        rh: number,
+      ) => {
+        const out = Buffer.alloc(rw * rh * 4);
+        for (let y = 0; y < rh; y++) {
+          const off = ((y0 + y) * imgW + x0) * 4;
+          px.copy(out, y * rw * 4, off, off + rw * 4);
+        }
+        return out;
+      };
+
+      const ids = await page.evaluate(
+        ({ w, h }) => {
+          const e = (window as unknown as W).drawpane;
+          const x0 = 2400;
+          const y0 = 0;
+          const frame = e.createLayer("frame", { x: x0, y: y0, width: w, height: h }, e.s.pageId, {
+            cornerRadius: 16,
+            clipContent: true,
+            fills: [
+              {
+                type: "linear",
+                from: { x: 0, y: 0 },
+                to: { x: 1, y: 1 },
+                stops: [
+                  { position: 0, color: "#ff7a45" },
+                  { position: 1, color: "#2b6cb0" },
+                ],
+              },
+            ],
+          });
+          // High-contrast stripes so blur kernel and progressive direction discriminate sharply.
+          for (let y = 0; y < h; y += 12)
+            e.createLayer("rect", { x: x0, y: y0 + y, width: w, height: 6 }, frame, {
+              fills: [{ type: "solid", color: "#111111" }],
+            });
+          for (let x = 0; x < w; x += 20)
+            e.createLayer("rect", { x: x0 + x, y: y0, width: 4, height: h }, frame, {
+              fills: [{ type: "solid", color: "#ffffffcc" }],
+            });
+          // 1. Uniform background blur (legacy absent blurType/offsets).
+          const uniformLayer = e.createLayer(
+            "rect",
+            { x: x0 + 12, y: y0 + 12, width: 120, height: 80 },
+            frame,
+            {
+              cornerRadius: 12,
+              fills: [{ type: "solid", color: "#ffffff26" }],
+              effects: [{ type: "background-blur", radius: 24 }],
+            },
+          );
+          // 2. Vertical progressive background blur: sharp top (startRadius 0 at y=0) to blurred bottom (radius 24 at y=1).
+          const progLayer = e.createLayer(
+            "rect",
+            { x: x0 + 150, y: y0 + 12, width: 158, height: 80 },
+            frame,
+            {
+              cornerRadius: 12,
+              fills: [{ type: "solid", color: "#ffffff26" }],
+              effects: [
+                {
+                  type: "background-blur",
+                  blurType: "progressive",
+                  startRadius: 0,
+                  radius: 24,
+                  startOffset: { x: 0.5, y: 0 },
+                  endOffset: { x: 0.5, y: 1 },
+                },
+              ],
+            },
+          );
+          // 3. Large diagonal progressive background blur (2 -> 36; 592 x 256 device px at 2x).
+          e.createLayer("rect", { x: x0 + 12, y: y0 + 104, width: 296, height: 124 }, frame, {
+            cornerRadius: 18,
+            fills: [{ type: "solid", color: "#ffffff26" }],
+            effects: [
+              {
+                type: "background-blur",
+                blurType: "progressive",
+                startRadius: 2,
+                radius: 36,
+                startOffset: { x: 0, y: 0 },
+                endOffset: { x: 1, y: 1 },
+              },
+            ],
+          });
+          // 4. Foreground badge painted AFTER the progressive blur (paint-order control: stays sharp).
+          e.createLayer("rect", { x: x0 + 200, y: y0 + 40, width: 40, height: 20 }, frame, {
+            fills: [{ type: "solid", color: "#00ff44" }],
+          });
+          return { frame, uniformLayer, progLayer };
+        },
+        { w, h },
+      );
+      try {
+        const rect = { x: 2400, y: 0, width: w, height: h };
+        const width = w * scale;
+        const height = h * scale;
+        const background: [number, number, number, number] = [1, 1, 1, 1];
+        const renderAll = async () =>
+          page.evaluate(
+            async ({ frameId, rect, scale, width, height, background }) => {
+              const w = window as unknown as W;
+              const opts = {
+                pageId: w.drawpane.s.pageId,
+                rect,
+                scale,
+                width,
+                height,
+                background,
+                ids: [frameId],
+              };
+              const cpu = await w.drawpaneEngine.render({ ...opts, backend: "cpu" });
+              const gpu = await w.drawpaneEngine.render({ ...opts, backend: "gpu" });
+              const webgl = await w.drawpaneEngine.render({ ...opts, backend: "webgl" });
+              const list = w.drawpaneEngine.list(w.drawpane.s.pageId, [frameId]);
+              return { cpu, gpu, webgl, list };
+            },
+            { frameId: ids.frame, rect, scale, width, height, background },
+          );
+
+        const main = await renderAll();
+        expect(main.cpu.ok, main.cpu.error).toBe(true);
+        expect(main.gpu.ok, main.gpu.error).toBe(true);
+        const cpuPx = Buffer.from(main.cpu.rgba ?? "", "base64");
+        expect(main.gpu.gpu?.backend).toBe("webgpu");
+        expect(main.webgl.ok, main.webgl.error).toBe(true);
+        expect(main.webgl.gpu?.backend).toBe("webgl2");
+        const cg = score(cpuPx, Buffer.from(main.gpu.rgba ?? "", "base64"), width, height);
+        const gl = score(cpuPx, Buffer.from(main.webgl.rgba ?? "", "base64"), width, height);
+        expect(outsideTolerance(gl), "progressive blur CPU vs WebGL2").toEqual([]);
+        expect(
+          outsideTolerance(cg),
+          `progressive blur CPU vs GPU: mean=${cg.mean.toFixed(4)} p99=${cg.p99} max=${cg.max} tile=${cg.worstTile.toFixed(3)} severe=${cg.severeInTile}`,
+        ).toEqual([]);
+
+        // Figma exported this scene at 2x, with both panes using its progressive blur.
+        const figma = await decodePng(
+          page,
+          fileURLToPath(
+            new URL(
+              "../../../tools/figma-parity/goldens/progressive-background.png",
+              import.meta.url,
+            ),
+          ),
+        );
+        expect([figma.width, figma.height]).toEqual([width, height]);
+        const figmaPx = Buffer.from(figma.data, "base64");
+        for (const [direction, x, y, rw, rh, meanCap] of [
+          ["vertical", 324, 30, 120, 148, 1.6],
+          ["diagonal", 88, 232, 464, 192, 1.2],
+        ] as const) {
+          const comparison = score(
+            cropBox(cpuPx, width, x, y, rw, rh),
+            cropBox(figmaPx, width, x, y, rw, rh),
+            rw,
+            rh,
+          );
+          expect(
+            comparison.mean,
+            `${direction} progressive blur vs Figma mean`,
+          ).toBeLessThanOrEqual(meanCap);
+          expect(comparison.p99, `${direction} progressive blur vs Figma p99`).toBeLessThanOrEqual(
+            6,
+          );
+          expect(
+            comparison.worstTile,
+            `${direction} progressive blur vs Figma worst tile`,
+          ).toBeLessThanOrEqual(2.5);
+        }
+
+        // Worker CPU matches browser CPU bit-for-bit.
+        const worker = new RenderEngine(await loadNodeEngine("worker"));
+        const applied = worker.apply(Uint8Array.from(Buffer.from(main.list.list, "base64")));
+        expect(applied.ok, applied.ok ? "" : applied.message).toBe(true);
+        const wr = worker.renderCpu(
+          width,
+          height,
+          { zoom: scale, x: -rect.x * scale, y: -rect.y * scale, dpr: 1 },
+          background,
+          false,
+        );
+        expect(wr.ok).toBe(true);
+        expect(wr.ok && Buffer.from(wr.value.pixels).equals(cpuPx)).toBe(true);
+        worker.dispose();
+
+        // Paint-order control: foreground green badge above progressive blur stays pure #00ff44.
+        const badgeIdx = (50 * scale * width + 220 * scale) * 4;
+        expect([cpuPx[badgeIdx], cpuPx[badgeIdx + 1], cpuPx[badgeIdx + 2]]).toEqual([0, 255, 68]);
+        // Clip control: corner outside the rounded clip frame stays pure white background.
+        expect([cpuPx[0], cpuPx[1], cpuPx[2]]).toEqual([255, 255, 255]);
+
+        // Direction oracle on the vertical progressive blur (x=150..308, y=12..92 -> device 300..616, 24..184):
+        // Symmetric 6 px inset bands at top (30..58) and bottom (150..178).
+        // Top band near startOffset (y=0, r=0) must stay crisp; bottom band near endOffset (y=1, r=24) must blur strongly.
+        const topContrast = regionContrast(cpuPx, width, 324, 30, 120, 28);
+        const botContrast = regionContrast(cpuPx, width, 324, 150, 120, 28);
+        expect(topContrast, "progressive start end must stay sharp").toBeGreaterThan(45);
+        expect(botContrast, "progressive end must blur stripes heavily").toBeLessThan(
+          topContrast * 0.45,
+        );
+
+        // Reversed endpoints control: flipping startOffset/endOffset reverses sharp and blurred bands.
+        await page.evaluate((progId) => {
+          (window as unknown as W).drawpane.commit([
+            {
+              op: "set",
+              id: progId,
+              prop: "effects",
+              value: [
+                {
+                  type: "background-blur",
+                  blurType: "progressive",
+                  startRadius: 0,
+                  radius: 24,
+                  startOffset: { x: 0.5, y: 1 },
+                  endOffset: { x: 0.5, y: 0 },
+                },
+              ],
+            },
+          ]);
+        }, ids.progLayer);
+        const flipped = await renderAll();
+        expect(flipped.cpu.ok, flipped.cpu.error).toBe(true);
+        const flipPx = Buffer.from(flipped.cpu.rgba ?? "", "base64");
+        const flipTop = regionContrast(flipPx, width, 324, 30, 120, 28);
+        const flipBot = regionContrast(flipPx, width, 324, 150, 120, 28);
+        expect(flipBot, "flipped progressive start (bottom) must stay sharp").toBeGreaterThan(35);
+        expect(
+          flipBot,
+          "flipped bottom must be much sharper than unflipped bottom",
+        ).toBeGreaterThan(botContrast * 1.8);
+        expect(flipTop, "flipped progressive end (top) must blur stripes heavily").toBeLessThan(
+          flipBot * 0.45,
+        );
+        expect(flipTop, "flipped top must be much blurrier than unflipped top").toBeLessThan(
+          topContrast * 0.45,
+        );
+
+        // Sharp control (radius 0.01) vs uniform-when-absent (radius 24) proves nonzero blur.
+        await page.evaluate(
+          ({ uniformId, progId }) => {
+            (window as unknown as W).drawpane.commit([
+              {
+                op: "set",
+                id: uniformId,
+                prop: "effects",
+                value: [{ type: "background-blur", radius: 0.01 }],
+              },
+              {
+                op: "set",
+                id: progId,
+                prop: "effects",
+                value: [{ type: "background-blur", radius: 0.01 }],
+              },
+            ]);
+          },
+          { uniformId: ids.uniformLayer, progId: ids.progLayer },
+        );
+        const sharp = await renderAll();
+        expect(sharp.cpu.ok, sharp.cpu.error).toBe(true);
+        const sharpPx = Buffer.from(sharp.cpu.rgba ?? "", "base64");
+        const uniformDiff = score(
+          cropBox(cpuPx, width, 40, 40, 200, 120),
+          cropBox(sharpPx, width, 40, 40, 200, 120),
+          200,
+          120,
+        );
+        expect(
+          uniformDiff.mean,
+          "uniform blur must differ strongly from sharp control",
+        ).toBeGreaterThan(20);
+        // Top of original progressive blur (near startOffset y=0) closely tracks the sharp control;
+        // bottom (near endOffset y=1) diverges strongly.
+        const progTopVsSharp = score(
+          cropBox(cpuPx, width, 324, 24, 120, 20),
+          cropBox(sharpPx, width, 324, 24, 120, 20),
+          120,
+          20,
+        );
+        const progBotVsSharp = score(
+          cropBox(cpuPx, width, 324, 160, 120, 20),
+          cropBox(sharpPx, width, 324, 160, 120, 20),
+          120,
+          20,
+        );
+        expect(progBotVsSharp.mean).toBeGreaterThan(progTopVsSharp.mean * 3);
+
+        console.log(
+          `progressive background blur conformance: CPU vs GPU mean=${cg.mean.toFixed(4)} p99=${cg.p99} max=${cg.max} worstTile=${cg.worstTile.toFixed(3)} · contrast top=${topContrast.toFixed(1)} bot=${botContrast.toFixed(1)} flippedTop=${flipTop.toFixed(1)} flippedBot=${flipBot.toFixed(1)} · uniformVsSharp=${uniformDiff.mean.toFixed(1)} (Worker bit-identical)`,
+        );
+      } finally {
+        await page.evaluate(
+          (id) => (window as unknown as W).drawpane.commit([{ op: "delete", id }]),
+          ids.frame,
         );
       }
     });

@@ -30,6 +30,7 @@ import {
 } from "@drawpane/engine/wire";
 import {
   type BlendMode,
+  type Blur,
   GLYPH_UNITS,
   type Glass,
   getProp,
@@ -852,6 +853,62 @@ function glassOp(
   };
 }
 
+/** Whether a layer paints anything of its own: a visible fill or stroke that isn't fully clear. */
+function paintsSomething(node: NodeRecord): boolean {
+  const visible = (p: Paint) =>
+    p.visible !== false &&
+    (p.opacity ?? 1) > 0 &&
+    !(p.type === "solid" && p.color.length === 9 && p.color.endsWith("00"));
+  return getProp(node.props, "fills").some(visible) || getProp(node.props, "strokes").some(visible);
+}
+
+/** A paint that hides whatever is beneath it (render.ts `hidesWhatsUnder`). */
+function hidesWhatsUnder(paint: Paint): boolean {
+  if (paint.visible === false || paint.type !== "solid" || (paint.opacity ?? 1) < 1) return false;
+  if (!/^#[0-9a-f]{6}(ff)?$/i.test(paint.color.trim())) return false;
+  const mode = paint.blendMode ?? "normal";
+  if (mode === "normal") return true;
+  const hex = paint.color.slice(1, 7).toLowerCase();
+  if (hex === "ffffff") return ["linear-dodge", "screen", "lighten"].includes(mode);
+  if (hex === "000000") return ["linear-burn", "multiply", "darken"].includes(mode);
+  return false;
+}
+
+/** Resolves a layer's visible background blur (even or progressive) into a wire op, or null. */
+function backgroundBlurOp(
+  node: NodeRecord,
+  paths: readonly number[],
+  evenOdd: boolean,
+): WireOp | null {
+  if (paths.length === 0) return null;
+  const blur = getProp(node.props, "effects").find(
+    (e): e is Blur => e.type === "background-blur" && e.visible !== false,
+  );
+  if (!blur) return null;
+  // As in Figma, background blur shows only where the layer paints something of its own.
+  if (!paintsSomething(node)) return null;
+  if (node.type === "text" && getProp(node.props, "fills").some(hidesWhatsUnder)) return null;
+  if (blur.blurType === "progressive" && blur.startOffset && blur.endOffset) {
+    const startRadius = Math.max(0, blur.startRadius ?? 0);
+    const endRadius = Math.max(0, blur.radius);
+    if (startRadius <= 0 && endRadius <= 0) return null;
+    if (Math.abs(startRadius - endRadius) < 1e-4) {
+      return { op: "backgroundBlur", paths, evenOdd, radius: endRadius };
+    }
+    return {
+      op: "progressiveBlur",
+      paths,
+      evenOdd,
+      startRadius,
+      endRadius,
+      start: [blur.startOffset.x, blur.startOffset.y],
+      end: [blur.endOffset.x, blur.endOffset.y],
+    };
+  }
+  if (blur.radius <= 0) return null;
+  return { op: "backgroundBlur", paths, evenOdd, radius: blur.radius };
+}
+
 /** Text: its glyphs filled in each run's paints, in order, then its strokes around the glyphs. */
 function text(
   b: Builder,
@@ -896,6 +953,8 @@ function text(
       });
     }
   }
+  const bg = backgroundBlurOp(node, shadowPaths, false);
+  if (bg) b.ops.push(bg);
   const g = glassOp(node, shadowPaths, false, width, height);
   if (g) b.ops.push(g);
   // The canvas fills each run in its paints, then its decorations in the same.
@@ -979,16 +1038,6 @@ function text(
   }
 }
 
-/** Effects the engine doesn't draw yet: their bits. */
-function unsupportedOf(node: NodeRecord): number {
-  let bits = 0;
-  for (const e of getProp(node.props, "effects")) {
-    if (e.visible === false) continue;
-    if (e.type === "background-blur") bits |= UNSUPPORTED.backgroundBlur;
-  }
-  return bits;
-}
-
 /** The layer as a record: what the canvas renderer draws for it, resolved. */
 export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
   const b = new Builder();
@@ -1015,13 +1064,21 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
             : MASK.outlinePicture;
     }
   }
-  b.unsupported |= unsupportedOf(node);
   const w = node.type === "group" ? 0 : getProp(node.props, "width");
   const h = node.type === "group" ? 0 : getProp(node.props, "height");
   const wirePost: WirePostEffect[] = [];
   for (const pe of postEffects(getProp(node.props, "effects"))) {
-    if (pe.type === "layer-blur" && pe.radius > 0) {
-      wirePost.push({ kind: "layerBlur", radius: pe.radius });
+    if (pe.type === "layer-blur") {
+      if (
+        pe.blurType === "progressive" &&
+        pe.startOffset &&
+        pe.endOffset &&
+        Math.abs((pe.startRadius ?? 0) - pe.radius) >= 1e-4
+      ) {
+        b.unsupported |= UNSUPPORTED.layerBlur;
+      } else if (pe.radius > 0) {
+        wirePost.push({ kind: "layerBlur", radius: pe.radius });
+      }
     } else if (pe.type === "noise" && pe.size > 0 && pe.density > 0) {
       wirePost.push({
         kind: "noise",
@@ -1059,6 +1116,8 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
     const evenOdd = node.type === "path" && getProp(node.props, "windingRule") === "evenodd";
     emitDropShadows(b, node, shape, evenOdd, w, h);
     if (node.type !== "line") {
+      const bg = backgroundBlurOp(node, [shape], evenOdd);
+      if (bg) b.ops.push(bg);
       const g = glassOp(node, [shape], evenOdd, w, h);
       if (g) b.ops.push(g);
       for (const paint of getProp(node.props, "fills")) {
