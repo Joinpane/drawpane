@@ -844,6 +844,10 @@ The engine follows drags from the messages themselves: no editor API. The editor
 - **What the bench can't measure.** The GPU bench's Chromium composites in software and can't present a WebGPU canvas, so frames there are read back: shown is later than a laptop would show them, and presenting on hardware isn't measured. The scale bench strips effects, and glass and blur are phase 3: opening a page with them is unmeasured.
 - **Measured on the T4** (`webgpu` mode, the 500,000-layer corpus without effects, its largest page of 40,401 layers at fit, 2,880 × 1,800): first frame 820 ms (the fresh list built in 376 ms, applied in 125); text sent whole between 0.9 and 1.9 s (16,675 records, 707 ms of slices); the four densest tiles (about 15,000 records and 85,000 glyphs each) 930 ms; the exact frame drawn at 2,998 to 3,060 ms over two runs and shown at 3,434 to 3,540 (headless browsers read it back). No fallback: the engine drew the exact frame. Before this round it was 4,018 ms, through the canvas renderer. On the same build, the 10,000-layer file's exact frame after pans was drawn 12 to 16 ms after the pan's last frame, and after a zoom 234 to 258 ms.
 
+### Mip phase on large clear glass
+
+Large clear lenses align the near and far bounds of each chunk to the same three-level mip grid. The grid also preserves the rim-height downsample phase. Odd-sized levels would otherwise stretch the sampled stripe pattern differently in each chunk. For the 1,300 × 900 rounded lens at refraction 100, dispersion 100 and depth 40, the CPU chunked and single-region renders now differ by at most one level over the full frame, with 94 of 1.4 million pixels differing. The previous maximum difference was 17 levels.
+
 ## Amendment: phase 3C cross-browser work (2026-11-20)
 
 Phase 3C completed the WebGL2 backend, automatic backend selection and loss recovery, tiled CPU Worker view mode, the three remaining geometry items from phase 1, cross-browser Modal T4 testing (Chromium, Firefox, WebKit), and the standalone `/diagnostics/renderer` page.
