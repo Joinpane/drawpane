@@ -1000,6 +1000,7 @@ export class RenderEngine {
    *   another level scaled, the last frame moved), and a zoom draws no tiles of a passing scale.
    * - `budgetMs`: milliseconds the frame may spend drawing tiles beyond those nothing else can
    *   stand in for. 0: no limit, so a frame at rest comes back exact.
+   * - `editorViewport`: whole-view readers can sample page paint beyond the displayed viewport.
    *
    * While the answer isn't `exact`, draw again (at rest, a frame a time under a budget): each
    * draws more of what's missing, never in one long frame.
@@ -1011,6 +1012,7 @@ export class RenderEngine {
     background: readonly [number, number, number, number],
     moving = true,
     budgetMs = 0,
+    editorViewport = false,
   ): Result<FrameStats> {
     return this.#call((e) => {
       if (!e.renderGpu) return fail(ErrorCode.NotAvailable, "no GPU backend");
@@ -1024,6 +1026,7 @@ export class RenderEngine {
         bg(background),
         moving,
         budgetMs,
+        editorViewport,
       );
       const s = stats(o, true);
       const r = outcome(o);

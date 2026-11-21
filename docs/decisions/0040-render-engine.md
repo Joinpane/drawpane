@@ -238,7 +238,7 @@ Vello's glyph path takes font files and marks its atlas experimental (`glifo` 0.
 | Mask by one filled shape's outline | Vello clip path |
 | Drop and inner shadows | Source (normal blend) or reader (any other blend): the shape grown or shrunk by spread, blurred by the reference Gaussian, offset, cut out where `dropShadowCast` says (0031). Vello's analytic blurred rounded rectangle may stand in for boxes only where it matches the reference within the tolerance. |
 | Layer blur | Filter: the reference Gaussian, σ = radius ÷ 2 (decision 0013). Vello's own blur (repeated decimation, clipped at 3σ) is not used: the spike shows box edges around the kit's 13 px shadows. |
-| Background blur | Reader: its prefix within its reach (repeated at the canvas's edge, stopped at clipping frames), blurred, cut to the shape (to the glyphs under text, skipped under a fill that hides what's under it), before the layer's fills (decision 0039) |
+| Background blur | Reader: its prefix within its reach (clamped at export crops and CPU frame edges, extended past the viewport in GPU editor views when the working set fits, stopped at clipping frames), blurred, cut to the shape (to the glyphs under text, skipped under a fill that hides what's under it), before the layer's fills (decision 0039) |
 | Progressive blur | Reader: a Gaussian whose σ follows the gradient. The reference evaluates it per pixel; the GPU may interpolate between mip levels within the tolerance. Not drawn today; becomes possible here. |
 | Glass | Reader, every rule of decisions 0007 and 0039, ported from `glass.ts`'s shader: the rim's height field, the exact box distance, the bend `(1 − d/depth)^falloff` with Figma's measured profiles for boxes, ellipses and other shapes, dispersion, splay, frost, the hairline and shade, the depth clamped to the inradius. Premultiplied throughout, keeping the prefix's alpha; on a canvas that may be see-through it *replaces* what's under its shape. Each glyph is its own lens. |
 | What an export's readers see (0039) | The prefix of the export's top scope: the page beneath the exported layers, without its background |
@@ -259,7 +259,7 @@ The rules both backends follow. Without them, two implementations could agree on
 - **Sampling:**
   - pixel centres at half-integers;
   - bilinear filtering where a pass samples between pixels;
-  - edges clamped (repeated) unless a pass says otherwise (decision 0039's clipping-frame rule is "otherwise").
+  - Repeat edge pixels at the export crop or CPU frame boundary. GPU editor views sample page pixels beyond the viewport when the working set fits. Decision 0039's clipping-frame rule still limits that reach.
 - **The reference Gaussian:**
   - a normalised discrete kernel over ±⌈3σ⌉;
   - separable, edges as above.
@@ -270,6 +270,12 @@ The rules both backends follow. Without them, two implementations could agree on
   - **The Rust reference passes** are the semantic oracle. They are readable first and fast second, and the production CPU path may be a faster equivalent checked against them.
   - **Figma's goldens and kit renders** are the product oracle.
   - **Both are needed:** paired passes can share a mistake.
+
+### Backdrop sampling at the viewport edge
+
+GPU editor tiles already draw page paint beyond the viewport to supply reader halos. A whole GPU editor view draws the reachable off-viewport area into full-resolution scratch and copies the viewport back. The draw uses the frame texture directly when no padding is needed. The stationary motion prefix uses the padded view and size when it is cached. If padded scratch cannot fit, the previous clamped whole-frame draw remains available. GPU crop renders, export lists with context and CPU frames use their crop edge.
+
+On the T4 WebGL2 edge fixture, the tiled blur sampled [106, 36, 159, 255] at the viewport edge. Before padding, the whole view sampled [0, 26, 255, 255]. Padding makes the two samples match.
 
 ## The CPU backend and exports
 

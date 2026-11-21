@@ -160,6 +160,7 @@ export class Engine {
     background: Float32Array,
     moving: boolean,
     budgetMs: number,
+    editorViewport?: boolean,
   ): Outcome;
   renderGpuAhead?(background: Float32Array, budgetMs: number): Outcome;
   clearTiles?(): void;
