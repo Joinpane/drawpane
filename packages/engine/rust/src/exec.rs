@@ -2365,6 +2365,7 @@ impl<B: Backend> Walk<'_, B> {
             && (store.subtree_has_blend(id) || reader_fade || crosses_context);
         let use_offscreen = has_post || layer_blend != 0 || through || (isolate && store.subtree_has_pass(id));
         let mut isolation = self.isolation(has_reader, through);
+        isolation.inherit_glass = has_reader;
         if crosses_context {
             isolation.on_main = true;
             isolation.separate = true;
@@ -2481,11 +2482,6 @@ impl<B: Backend> Walk<'_, B> {
                 ((content_rect.x0 - phase.0).div_euclid(step) * step + phase.0).div_euclid(4) * 4,
                 ((content_rect.y0 - phase.1).div_euclid(step) * step + phase.1).div_euclid(4) * 4,
             );
-            isolation.inherit_glass = has_reader
-                && layer_blend == 0
-                && active
-                    .iter()
-                    .any(|effect| matches!(effect, ActivePost::LayerBlur { .. } | ActivePost::Noise { .. }));
             if !self
                 .backend
                 .push_isolated(src_area, false, Some(scene_hint), isolation, &self.open)?

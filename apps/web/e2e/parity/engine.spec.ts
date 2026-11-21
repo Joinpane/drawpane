@@ -61,6 +61,10 @@ const GLASS_SCOPE_LIMITS: Record<string, { mean: number; p99: number; worstTile:
   "picture-mask": { mean: 0.6, p99: 12, worstTile: 4.8 },
   "layer-blur": { mean: 0.8, p99: 11, worstTile: 4.2 },
   noise: { mean: 0.95, p99: 35, worstTile: 6.7 },
+  "blend-in-blur": { mean: 0.82, p99: 11, worstTile: 4.6 },
+  "blur-multiply": { mean: 2.8, p99: 48, worstTile: 27.5 },
+  "mask-in-multiply": { mean: 2.25, p99: 40, worstTile: 22 },
+  texture: { mean: 1.35, p99: 73, worstTile: 15.3 },
 };
 const ENGINE_SUITE_MEAN_CAP: Record<string, number> = {
   "glass-stack": 3.5,
@@ -91,9 +95,9 @@ const MIN_DRAWN: Record<string, number> = {
   "glass-probe": 14,
   "glass-probe-2": 31,
   "glass-stack": 15,
-  "glass-scopes": 3,
+  "glass-scopes": 7,
   "linear-blends": 19,
-  masks: 7,
+  masks: 8,
   grain: 12,
 };
 

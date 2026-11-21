@@ -113,7 +113,7 @@ A list of **layer records**, each keyed by a handle (a 32-bit index plus a gener
 
 ## The render graph
 
-A board picture is reusable only while everything its pixels depend on is unchanged. Pass-through blends and backdrop readers make a layer's pixels depend on drawing outside its own subtree (decisions 0038 and 0039); masks and faded frames cut that dependency off (decision 0016). So caching follows a graph of what reads what, not the layer tree.
+A board picture is reusable only while everything its pixels depend on is unchanged. Pass-through blends and backdrop readers make a layer's pixels depend on drawing outside its own subtree (decisions 0038 and 0039). Isolation controls how the finished picture composites. Glass inside an isolated picture can still depend on paint outside it. So caching follows a graph of what reads what, not the layer tree.
 
 ### Nodes
 
@@ -122,7 +122,7 @@ A board picture is reusable only while everything its pixels depend on is unchan
   - The page is a scope.
   - So is every layer that isolates: fading as one, a mask group (masked layers are drawn apart, 0016), a layer blur, a layer that blends as one.
   - A frame that doesn't isolate is not a scope: blending passes through it.
-- **Backdrop prefix:** for a reader at paint position *p* in scope *S*, the composition of everything before *p* in *S*, restricted to the reader's read region (its extent grown by its reach).
+- **Backdrop prefix:** for a reader at paint position *p* in scope *S*, the paint available before *p*, restricted to the reader's read region (its extent grown by its reach). Ordinary blends use the current scope's prefix. Glass inherits the parent prefix beneath an isolated picture and composites the picture's preceding glass-free paint over it.
   - For an export with context (decision 0039), the page beneath the exported layers, without the page's background, is the prefix of the export's top scope.
 - **Reader:** a pass whose output depends on its prefix: glass, background blur, every non-normal blend, and the copy a faded pass-through frame holding a blend draws over (0038). Its output region is its extent.
 - **Filter:** a pass over a scope's own result (layer blur, noise, texture, mask application).
@@ -1117,11 +1117,15 @@ Exact glass uses the same region split on CPU, WebGPU and WebGL2. Each chunk sam
 
 On the T4, all 31 `glass-probe-2` cells and all 15 `glass-stack` cells passed on both backends. The `frost-100` CPU/GPU mean fell from 0.295 to 0.021, with p99 and maximum of 1. Its CPU, WebGPU and WebGL2 means against Figma were all 2.53. The cell uses the standard 0.25 mean cap.
 
-### Glass inside picture masks, layer blur and noise
+### Glass inside isolated pictures
 
-A lens inside a picture mask or a normal-blend layer blur or noise picture samples the page prefix beneath the picture with the interior paint so far composited over it. Both inputs use the glass-free planes. Explicit blend pictures bound the inherited prefix, and a pass-through fade that already copied its immediate parent contributes that paint once. The mask or post effect still operates on the scope's transparent picture, including the lens.
+A lens inside a picture mask, an explicitly blended layer, or a layer blur, noise or texture picture samples the page prefix beneath the picture with the interior paint so far composited over it. Both inputs use the glass-free planes. A pass-through fade that already copied its immediate parent contributes that paint once. The mask, post effect or blend still operates on the scope's transparent picture, including the lens.
 
-The `glass-scopes` fixtures put the lens across the edge of translucent interior paint over opaque stripes. In a paired Worker render, mean error from Figma went from 2.15 to 0.42 for the mask, 3.59 to 0.61 for layer blur and 3.23 to 0.73 for noise. The unfiltered p99 went from 53 to 9, 64 to 7 and 71 to 30. The native nested mask and layer blur test checks the sampled page and interior pixels, an explicit blend boundary, patch/fresh equality and banded export equality.
+The `glass-scopes` fixtures put the lens across the edge of translucent interior paint over opaque stripes. In a paired Worker render, mean error from Figma went from 2.15 to 0.42 for the mask, 3.59 to 0.61 for layer blur and 3.23 to 0.73 for noise. The unfiltered p99 went from 53 to 9, 64 to 7 and 71 to 30. The native nested mask and layer blur test checks the sampled page and interior pixels, the outer scope's multiply composite, patch/fresh equality and banded export equality.
+
+The added cells measure glass in a mask under multiply, in a layer-blurred multiply frame, in a multiply frame under layer blur, and in a texture picture. Their measured Worker mean differences from Figma are 1.99, 2.50, 0.61 and 1.08. The largest remaining differences in the two outer multiply cells occur where translucent interior paint overlaps the lens.
+
+A translucent luminance mask uses the Rec. 709 luminance of its premultiplied picture multiplied by the picture's alpha. The Figma masks fixture varies the luminance at constant 80% opacity, making the white end cover about 64% of the content.
 
 ## Amendment for text with missing faces
 

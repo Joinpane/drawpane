@@ -1777,8 +1777,13 @@ fn nested_mask_and_layer_blur_let_glass_see_the_page_prefix() {
     }
     assert_eq!(patched, banded, "banded export changed pixels");
 
-    // An explicit blend on the outer scope is a boundary for the same nested lens.
-    let mut isolated = Engine::new(Limits::default());
-    isolated.apply(&make(red, 1)).unwrap();
-    assert_eq!(pixel(&render(&mut isolated), 65, 48), [0, 0, 255, 255]);
+    // The nested lens samples the stripe transition before the scope multiplies.
+    let mut blended = Engine::new(Limits::default());
+    blended.apply(&make(red, 1)).unwrap();
+    let lens = pixel(&render(&mut blended), 65, 48);
+    assert_eq!((lens[0], lens[1], lens[3]), (0, 0, 255));
+    assert!(
+        (40..230).contains(&lens[2]),
+        "multiply over refracted stripes: {lens:?}"
+    );
 }

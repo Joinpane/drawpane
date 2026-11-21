@@ -5111,8 +5111,8 @@ impl Backend for Gpu {
         };
         let (aw, ah) = (active.width, active.height);
         let frame_size = (aw as i32, ah as i32);
-        // An explicitly blended layer contributes one transparent picture, but its own
-        // glass sees the parent's glass-free prefix. Readers in its children see their scope.
+        // A lens on an explicitly blended layer reads from its parent. A child lens
+        // inherits that prefix with any preceding glass-free paint from the blend scope.
         let (base, interiors) =
             exec::glass_backdrop_layers(&self.offscreen_stack, read_parent, |scope| scope.isolation);
         let backdrop_is_frame = base.is_none() && interiors.is_empty();

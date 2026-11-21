@@ -1,6 +1,6 @@
 {
   "suite": "glass-scopes",
-  "about": "Glass inside an alpha picture mask, a layer-blurred frame and a noise frame",
+  "about": "Glass inside picture masks, layer blur, noise, explicit blends and texture",
   "cell": {
     "width": 240,
     "height": 160,
@@ -244,6 +244,341 @@
               ]
             }
           ]
+        }
+      ]
+    },
+    {
+      "id": "blend-in-blur",
+      "layers": [
+        {
+          "type": "frame",
+          "name": "Blur over multiply",
+          "x": 32,
+          "y": 23,
+          "width": 176,
+          "height": 116,
+          "clipContent": false,
+          "fills": [],
+          "effects": [
+            {
+              "type": "layer-blur",
+              "radius": 5
+            }
+          ],
+          "children": [
+            {
+              "type": "frame",
+              "name": "Multiply",
+              "x": 0,
+              "y": 0,
+              "width": 176,
+              "height": 116,
+              "clipContent": false,
+              "fills": [],
+              "effects": [],
+              "children": [
+                {
+                  "type": "rect",
+                  "name": "Paint",
+                  "x": 0,
+                  "y": 26,
+                  "width": 96,
+                  "height": 64,
+                  "fills": [
+                    {
+                      "type": "solid",
+                      "color": "#46a7debd"
+                    }
+                  ]
+                },
+                {
+                  "type": "rect",
+                  "name": "Paint",
+                  "x": 78,
+                  "y": 12,
+                  "width": 18,
+                  "height": 92,
+                  "fills": [
+                    {
+                      "type": "solid",
+                      "color": "#552b73cf"
+                    }
+                  ]
+                },
+                {
+                  "type": "rect",
+                  "name": "Lens",
+                  "x": 44,
+                  "y": 16,
+                  "width": 128,
+                  "height": 82,
+                  "cornerRadius": 16,
+                  "fills": [],
+                  "effects": [
+                    {
+                      "type": "glass",
+                      "angle": -45,
+                      "intensity": 45,
+                      "refraction": 60,
+                      "depth": 18,
+                      "dispersion": 16,
+                      "frost": 6,
+                      "splay": 0
+                    }
+                  ]
+                }
+              ],
+              "blendMode": "multiply"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "blur-multiply",
+      "layers": [
+        {
+          "type": "frame",
+          "name": "Multiply blur",
+          "x": 32,
+          "y": 23,
+          "width": 176,
+          "height": 116,
+          "clipContent": false,
+          "fills": [],
+          "effects": [
+            {
+              "type": "layer-blur",
+              "radius": 5
+            }
+          ],
+          "children": [
+            {
+              "type": "rect",
+              "name": "Paint",
+              "x": 0,
+              "y": 26,
+              "width": 96,
+              "height": 64,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#46a7debd"
+                }
+              ]
+            },
+            {
+              "type": "rect",
+              "name": "Paint",
+              "x": 78,
+              "y": 12,
+              "width": 18,
+              "height": 92,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#552b73cf"
+                }
+              ]
+            },
+            {
+              "type": "rect",
+              "name": "Lens",
+              "x": 44,
+              "y": 16,
+              "width": 128,
+              "height": 82,
+              "cornerRadius": 16,
+              "fills": [],
+              "effects": [
+                {
+                  "type": "glass",
+                  "angle": -45,
+                  "intensity": 45,
+                  "refraction": 60,
+                  "depth": 18,
+                  "dispersion": 16,
+                  "frost": 6,
+                  "splay": 0
+                }
+              ]
+            }
+          ],
+          "blendMode": "multiply"
+        }
+      ]
+    },
+    {
+      "id": "texture",
+      "layers": [
+        {
+          "type": "frame",
+          "name": "Texture",
+          "x": 32,
+          "y": 23,
+          "width": 176,
+          "height": 116,
+          "clipContent": false,
+          "fills": [],
+          "effects": [
+            {
+              "type": "texture",
+              "size": 2,
+              "radius": 4,
+              "clipToShape": false
+            }
+          ],
+          "children": [
+            {
+              "type": "rect",
+              "name": "Paint",
+              "x": 0,
+              "y": 26,
+              "width": 96,
+              "height": 64,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#46a7debd"
+                }
+              ]
+            },
+            {
+              "type": "rect",
+              "name": "Paint",
+              "x": 78,
+              "y": 12,
+              "width": 18,
+              "height": 92,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#552b73cf"
+                }
+              ]
+            },
+            {
+              "type": "rect",
+              "name": "Lens",
+              "x": 44,
+              "y": 16,
+              "width": 128,
+              "height": 82,
+              "cornerRadius": 16,
+              "fills": [],
+              "effects": [
+                {
+                  "type": "glass",
+                  "angle": -45,
+                  "intensity": 45,
+                  "refraction": 60,
+                  "depth": 18,
+                  "dispersion": 16,
+                  "frost": 6,
+                  "splay": 0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "mask-in-multiply",
+      "layers": [
+        {
+          "type": "frame",
+          "name": "Multiply over mask",
+          "x": 32,
+          "y": 23,
+          "width": 176,
+          "height": 116,
+          "clipContent": false,
+          "fills": [],
+          "effects": [],
+          "children": [
+            {
+              "type": "frame",
+              "name": "Masked",
+              "x": 0,
+              "y": 0,
+              "width": 176,
+              "height": 116,
+              "clipContent": false,
+              "fills": [],
+              "effects": [],
+              "children": [
+                {
+                  "type": "rect",
+                  "name": "Mask",
+                  "x": 8,
+                  "y": 8,
+                  "width": 152,
+                  "height": 97,
+                  "fills": [
+                    {
+                      "type": "solid",
+                      "color": "#ffffffcc"
+                    }
+                  ],
+                  "cornerRadius": 22,
+                  "isMask": true,
+                  "maskType": "alpha"
+                },
+                {
+                  "type": "rect",
+                  "name": "Paint",
+                  "x": 0,
+                  "y": 26,
+                  "width": 96,
+                  "height": 64,
+                  "fills": [
+                    {
+                      "type": "solid",
+                      "color": "#46a7debd"
+                    }
+                  ]
+                },
+                {
+                  "type": "rect",
+                  "name": "Paint",
+                  "x": 78,
+                  "y": 12,
+                  "width": 18,
+                  "height": 92,
+                  "fills": [
+                    {
+                      "type": "solid",
+                      "color": "#552b73cf"
+                    }
+                  ]
+                },
+                {
+                  "type": "rect",
+                  "name": "Lens",
+                  "x": 44,
+                  "y": 16,
+                  "width": 128,
+                  "height": 82,
+                  "cornerRadius": 16,
+                  "fills": [],
+                  "effects": [
+                    {
+                      "type": "glass",
+                      "angle": -45,
+                      "intensity": 45,
+                      "refraction": 60,
+                      "depth": 18,
+                      "dispersion": 16,
+                      "frost": 6,
+                      "splay": 0
+                    }
+                  ]
+                }
+              ]
+            }
+          ],
+          "blendMode": "multiply"
         }
       ]
     }
