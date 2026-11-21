@@ -2,13 +2,15 @@ import { getProp, type Op, type Props, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { constrainSpan } from "../src/constraints";
 import { Editor } from "../src/editor";
-import type { TextMeasurer } from "../src/text";
+import { autoSize, type TextMeasurer } from "../src/text";
 
 const measurer: TextMeasurer = { width: (_font, text) => text.length * 8 };
 
 /** A 200×100 frame with the given children (rects unless `type` says otherwise). */
 function setup(
-  children: Array<Props & { id: string; type?: "rect" | "frame" | "group"; parent?: string }>,
+  children: Array<
+    Props & { id: string; type?: "rect" | "frame" | "group" | "text"; parent?: string }
+  >,
   frame: Props = {},
 ) {
   const editor = new Editor({ measurer, clientId: "test" });
@@ -161,6 +163,118 @@ describe("constraints when a frame is resized", () => {
       { op: "set", id: "a", prop: "x", value: 5 },
     ]);
     expect(box("a")[0]).toBe(5);
+  });
+});
+
+// Decision 0043, from Figma resizing only the parent (2026-11-21): a text layer a constraint
+// resizes stops sizing itself on that axis. Its width the constraint's, it wraps.
+describe("text a constraint resizes", () => {
+  /** "Words wrap here": 120 wide on one line, three lines at 40. */
+  const words = { characters: "Words wrap here", fontSize: 16, x: 20, y: 10 };
+  function text(props: Props) {
+    const made = setup([{ id: "t", type: "text", width: 120, height: 10, ...words, ...props }]);
+    const { editor } = made;
+    const node = () => editor.doc.get("t") ?? (undefined as never);
+    const mode = () => getProp(node().props, "textAutoResize");
+    // The size it measures at as it stands: what an auto-sized text keeps.
+    const measured = () => autoSize(node(), measurer);
+    return { ...made, mode, measured };
+  }
+  /** One line's height, as the text measures on one line. */
+  const line = text({ textAutoResize: "width" }).measured()?.height ?? 0;
+
+  it.each(["stretch", "scale"] as const)(
+    "turns auto width into auto height when %s narrows it, and wraps",
+    (constraintH) => {
+      const { box, resize, mode, measured } = text({ textAutoResize: "width", constraintH });
+      resize(120, 100);
+      expect(mode()).toBe("height");
+      const [, , width, height] = box("t");
+      expect(width).toBeLessThan(120);
+      expect(height).toBeGreaterThan(line);
+      expect(measured()).toEqual({ width, height });
+    },
+  );
+
+  it("follows the constraint back out, the height fitting the words again", () => {
+    const { box, resize, mode, measured } = text({
+      textAutoResize: "width",
+      constraintH: "stretch",
+    });
+    resize(120, 100);
+    resize(280, 100);
+    expect(mode()).toBe("height");
+    expect(box("t")).toEqual([20, 10, 200, line]);
+    expect(measured()).toEqual({ width: 200, height: line });
+  });
+
+  it("grows an auto height text it narrows", () => {
+    const { box, resize, mode, measured } = text({
+      textAutoResize: "height",
+      height: 0,
+      constraintH: "stretch",
+    });
+    resize(120, 100);
+    expect(mode()).toBe("height");
+    expect(box("t")[2]).toBe(40);
+    expect(box("t")[3]).toBe(3 * line);
+    expect(measured()).toEqual({ width: 40, height: 3 * line });
+  });
+
+  it("wraps what's typed after at the width the constraint gave it", () => {
+    const { editor, box, resize, measured } = text({
+      textAutoResize: "width",
+      constraintH: "stretch",
+    });
+    resize(240, 100);
+    editor.setProp(["t"], "characters", "Words wrap here, and more of them");
+    expect(box("t")[2]).toBe(160);
+    expect(box("t")[3]).toBeGreaterThan(line);
+    expect(measured()).toEqual({ width: 160, height: box("t")[3] });
+  });
+
+  it("makes it fixed when a constraint sets its height", () => {
+    const { box, resize, mode } = text({
+      textAutoResize: "width",
+      height: line,
+      constraintV: "stretch",
+    });
+    resize(200, 140);
+    expect(mode()).toBe("none");
+    expect(box("t")[3]).toBe(line + 40);
+  });
+
+  it.each(["start", "center", "end"] as const)(
+    "leaves auto width alone when %s only moves it",
+    (constraintH) => {
+      const { box, resize, mode, measured } = text({ textAutoResize: "width", constraintH });
+      resize(120, 100);
+      expect(mode()).toBe("width");
+      expect(box("t")[2]).toBe(120);
+      expect(measured()?.width).toBe(120);
+    },
+  );
+
+  it("leaves it alone on an axis the resize didn't change", () => {
+    const { resize, mode } = text({ textAutoResize: "width", constraintH: "stretch" });
+    resize(200, 160);
+    expect(mode()).toBe("width");
+  });
+
+  it("is undone with the resize, and keeps what the same edit sets", () => {
+    const { editor, box, resize, mode } = text({
+      textAutoResize: "width",
+      constraintH: "stretch",
+    });
+    resize(120, 100);
+    editor.undo();
+    expect(mode()).toBe("width");
+    expect(box("t")).toEqual([20, 10, 120, line]);
+    editor.commit([
+      { op: "set", id: "f", prop: "width", value: 120 },
+      { op: "set", id: "t", prop: "textAutoResize", value: "none" },
+    ]);
+    expect(mode()).toBe("none");
   });
 });
 

@@ -7,10 +7,15 @@
  * absolutely positioned children of one with it. The fix-up runs inside the
  * commit, so resizing by handle, inspector, command bar or a preset all
  * follow it, and undo restores children with their frame in one step.
+ *
+ * A text layer a constraint resizes stops sizing itself on that axis, as in
+ * Figma (decision 0043): auto width becomes auto height, wrapping at the
+ * width it's given, and a height it's given makes it fixed.
  */
 import { constrainSpan, getProp, type NodeRecord, type Op } from "@drawpane/model";
 import type { Doc } from "./doc";
 import { round2 } from "./geometry";
+import { textResizeWhenSized } from "./layout";
 
 type Axis = "h" | "v";
 type Constraint = "start" | "end" | "center" | "stretch" | "scale";
@@ -73,9 +78,20 @@ export function constraintOps(doc: Doc, ops: readonly Op[]): Op[] {
   const next = new Map<string, Map<"x" | "y" | "width" | "height", number>>();
   const read = (node: NodeRecord, prop: "x" | "y" | "width" | "height"): number =>
     next.get(node.id)?.get(prop) ?? getProp(node.props, prop);
+  /** Text layers resized, on each axis. */
+  const sizedText = new Map<string, Set<Axis>>();
   const write = (node: NodeRecord, prop: "x" | "y" | "width" | "height", value: number) => {
     const props = next.get(node.id) ?? new Map<"x" | "y" | "width" | "height", number>();
     next.set(node.id, props);
+    if (
+      node.type === "text" &&
+      (prop === "width" || prop === "height") &&
+      round2(value) !== round2(read(node, prop))
+    ) {
+      const axes = sizedText.get(node.id) ?? new Set<Axis>();
+      axes.add(prop === "width" ? "h" : "v");
+      sizedText.set(node.id, axes);
+    }
     props.set(prop, round2(value));
   };
   const keeps = (id: string, axis: Axis) => {
@@ -121,6 +137,13 @@ export function constraintOps(doc: Doc, ops: readonly Op[]): Op[] {
     for (const [prop, value] of props) {
       if (value !== round2(getProp(node.props, prop))) out.push({ op: "set", id, prop, value });
     }
+  }
+  for (const [id, axes] of sizedText) {
+    const node = doc.get(id);
+    if (!node || explicit.get(id)?.has("textAutoResize")) continue;
+    const mode = getProp(node.props, "textAutoResize");
+    const now = textResizeWhenSized(mode, axes);
+    if (now !== mode) out.push({ op: "set", id, prop: "textAutoResize", value: now });
   }
   return out;
 }

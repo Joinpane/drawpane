@@ -746,6 +746,8 @@ export class Editor {
           ...live,
           ...derivedSoFar.map((o) => o.id),
           ...relayout.text,
+          // Text the edit's constraints resized (later rounds' are in `touched`).
+          ...(round === 0 ? constrained.map((o) => o.id) : []),
         ]);
         if (text.length > 0) roundInverse = [...this.sync.commit(text), ...roundInverse];
         const derived = [...derivedSoFar, ...text];

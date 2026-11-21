@@ -7,6 +7,7 @@ import { getProp, type NodeRecord, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { Editor } from "../src/editor";
 import { layoutOps } from "../src/layout";
+import { autoSize } from "../src/text";
 
 const measurer = { width: (_font: string, text: string) => text.length * 7 };
 
@@ -357,6 +358,48 @@ describe("edits that leave layout as a full layout would", () => {
     editor.redo();
     expect(shown()).toEqual([24, 24]);
   });
+
+  // Decision 0043: an instance resized gives its constrained text the width, which it wraps at.
+  it.each(["materialized", "compact"] as const)(
+    "wraps an instance's stretched auto width text when the instance narrows (copies %s)",
+    (copies) => {
+      const editor = make(
+        [
+          page,
+          node("main", "frame", "p", { isComponent: true, width: 160, height: 60 }),
+          node("label", "text", "main", {
+            x: 10,
+            y: 10,
+            width: 105,
+            height: 20,
+            characters: "Words wrap here",
+            fontSize: 16,
+            textAutoResize: "width",
+            constraintH: "stretch",
+          }),
+        ],
+        copies,
+      );
+      const instance = editor.insertInstance("main", { x: 0, y: 200 }) as string;
+      const label = editor.doc.childIds(instance)[0] as string;
+      const shown = () => {
+        const n = editor.doc.get(label);
+        return [getProp(n?.props ?? {}, "textAutoResize"), prop(editor, label, "width")];
+      };
+      expect(shown()).toEqual(["width", 105]);
+      editor.resize([instance], "width", 100);
+      expect(shown()).toEqual(["height", 45]);
+      const text = editor.doc.get(label);
+      expect(text && autoSize(text, measurer)).toEqual({ width: 45, height: 60 });
+      expect(getProp(editor.doc.get("label")?.props ?? {}, "textAutoResize")).toBe("width");
+      const reopened = make(editor.doc.stored(), copies);
+      const again = reopened.doc.get(label);
+      expect(again && [getProp(again.props, "textAutoResize"), autoSize(again, measurer)]).toEqual([
+        "height",
+        { width: 45, height: 60 },
+      ]);
+    },
+  );
 
   // A main set to a mode passes it to its instances; materialized ones are written it in a
   // later round of the commit, and what then reads other values is laid out too.

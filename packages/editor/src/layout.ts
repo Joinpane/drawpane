@@ -1338,12 +1338,7 @@ export class LayoutEngine {
       const node = this.#doc.get(id);
       if (!node) continue;
       const mode = getProp(node.props, "textAutoResize");
-      const next =
-        axes.has("v") && mode !== "none"
-          ? "none"
-          : axes.has("h") && mode === "width"
-            ? "height"
-            : mode;
+      const next = textResizeWhenSized(mode, axes);
       if (next !== mode) ops.push({ op: "set", id, prop: "textAutoResize", value: next });
     }
     for (const [id, at] of moved) {
@@ -1364,6 +1359,21 @@ export class LayoutEngine {
     }
     return ops;
   }
+}
+
+/**
+ * A text layer's auto-resize once something else sizes it on `axes` (auto
+ * layout's Fill or stretch, a constraint), as Figma has it: auto width
+ * becomes auto height when its width is taken, and any auto size becomes
+ * fixed when its height is (decision 0043).
+ */
+export function textResizeWhenSized(
+  mode: "none" | "width" | "height",
+  axes: ReadonlySet<"h" | "v">,
+): "none" | "width" | "height" {
+  if (axes.has("v") && mode !== "none") return "none";
+  if (axes.has("h") && mode === "width") return "height";
+  return mode;
 }
 
 /** A grid frame's tracks and cells as they stand, or null for anything else. */
