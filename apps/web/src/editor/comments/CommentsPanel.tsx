@@ -1,7 +1,7 @@
 import { Camera, type Editor } from "@drawpane/editor";
 import type { CommentThread } from "@drawpane/model";
 import { Button, IconButton, SegmentedControl } from "@drawpane/ui";
-import { useDocVersion, useEditor, useEditorState } from "../hooks";
+import { useDeferredDocVersion, useEditor, useEditorState } from "../hooks";
 import { anchorLabel, resolveAnchor } from "./anchor";
 import { useComments } from "./CommentsLayer";
 import { Avatar, CommentText, displayName, When } from "./people";
@@ -45,7 +45,7 @@ export interface CommentsPanelProps {
 /** Every thread on this page (or in the file), most recent first. */
 export function CommentsPanel({ store, insets, onClose }: CommentsPanelProps) {
   const editor = useEditor();
-  useDocVersion();
+  useDeferredDocVersion();
   const pageId = useEditorState((s) => s.pageId);
   const threads = useComments(store, (s) => s.threads);
   const filter = useComments(store, (s) => s.filter);

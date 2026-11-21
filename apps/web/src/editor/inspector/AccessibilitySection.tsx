@@ -11,13 +11,13 @@ import { getProp, type NodeRecord } from "@drawpane/model";
 import { Button, Icon, IconButton, PropertySection, Switch } from "@drawpane/ui";
 import { useRef } from "react";
 import { useCopy } from "../../app/CopyField";
-import { useDocVersion, useEditor, useEditorState } from "../hooks";
+import { useDeferredDocVersion, useEditor, useEditorState } from "../hooks";
 
 const n = (v: number) => (Number.isInteger(v) ? String(v) : v.toFixed(1));
 
 export function AccessibilitySection({ nodes }: { nodes: readonly NodeRecord[] }) {
   const editor = useEditor();
-  useDocVersion();
+  useDeferredDocVersion();
   const only = nodes.length === 1 ? nodes[0] : undefined;
   if (!only) return null;
   const issue = tapTargetIssue(editor, only.id);

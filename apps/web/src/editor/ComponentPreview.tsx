@@ -3,7 +3,7 @@ import { Camera, CanvasRenderer, type Editor } from "@drawpane/editor";
 import type { NodeRecord } from "@drawpane/model";
 import { useEffect, useMemo, useRef } from "react";
 import { useResolvedTheme } from "../app/theme";
-import { useDocVersion, useEditor } from "./hooks";
+import { useDeferredDocVersion, useEditor } from "./hooks";
 
 const PREVIEW = { width: 112, height: 72 };
 
@@ -14,7 +14,7 @@ const PREVIEW = { width: 112, height: 72 };
 export function ComponentPreview({ node, source }: { node: NodeRecord; source?: Editor }) {
   const live = useEditor();
   const editor = source ?? live;
-  const version = useDocVersion();
+  const version = useDeferredDocVersion();
   const ref = useRef<HTMLCanvasElement>(null);
   const renderer = useMemo(() => new CanvasRenderer(editor.scene, editor.measurer), [editor]);
   const theme = useResolvedTheme();

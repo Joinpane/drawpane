@@ -19,7 +19,7 @@ import { api } from "../../api/client";
 import { Dialog } from "../../app/Dialog";
 import { ComponentPreview } from "../ComponentPreview";
 import { whenPhrase } from "../history/labels";
-import { useDocVersion, useEditor } from "../hooks";
+import { useDeferredDocVersion, useDocVersion, useEditor } from "../hooks";
 import { LIBRARY_DRAG_MIME, type LibraryDrag, librarySource, refOf } from "./sources";
 
 /** A library's publishes, newest first: the one a file has, and the latest. */
@@ -34,7 +34,7 @@ export function useLibraryHistory(libraryFileId: string) {
 /** The libraries this file uses, a section each; `query` filters their components by name. */
 export function LibrarySections({ query }: { query: string }) {
   const editor = useEditor();
-  const version = useDocVersion();
+  const version = useDeferredDocVersion();
   const used = useMemo(() => usedLibraries(editor.doc), [editor, version]);
   return (
     <>

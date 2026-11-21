@@ -17,7 +17,7 @@ import {
 } from "react";
 import { isMac } from "../app/format";
 import { shortcutFor } from "./actions";
-import { useDocVersion, useEditor, useEditorState } from "./hooks";
+import { useDeferredDocVersion, useEditor, useEditorState } from "./hooks";
 import {
   aimDrop,
   containersWithin,
@@ -70,7 +70,7 @@ interface DragState {
 
 export function LayersPanel() {
   const editor = useEditor();
-  const version = useDocVersion();
+  const version = useDeferredDocVersion();
   const pageId = useEditorState((s) => s.pageId);
   const selection = useEditorState((s) => s.selection);
   const peers = useEditorState((s) => s.peers);

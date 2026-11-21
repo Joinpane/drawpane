@@ -13,7 +13,7 @@ import { useEffect, useRef, useState, useSyncExternalStore } from "react";
 import { isMac } from "../app/format";
 import { shortcutFor } from "./actions";
 import { type ExportSettings, exportName, exportSelection, exportSettings } from "./exporting";
-import { useDocVersion, useEditor, useEditorState } from "./hooks";
+import { useDeferredDocVersion, useEditor, useEditorState } from "./hooks";
 import { imagesFor } from "./media";
 import "./media.css";
 
@@ -186,7 +186,7 @@ export function ExportSection({
  */
 export function ExportPanel() {
   const editor = useEditor();
-  const version = useDocVersion();
+  const version = useDeferredDocVersion();
   const selection = useEditorState((s) => s.selection);
   const nodes = selection.map((id) => editor.doc.get(id)).filter((n): n is NodeRecord => !!n);
   if (nodes.length === 0) return null;

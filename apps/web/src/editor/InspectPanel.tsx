@@ -16,7 +16,7 @@ import { Badge, IconButton, PropertySection, SegmentedControl } from "@drawpane/
 import { useEffect, useState } from "react";
 import { modKey } from "../app/format";
 import { imageRefs } from "./export-assets";
-import { useDocVersion, useEditor, useEditorState } from "./hooks";
+import { useDeferredDocVersion, useEditor, useEditorState } from "./hooks";
 import { imagesFor } from "./media";
 
 const KIND: Record<string, string> = {
@@ -38,7 +38,7 @@ const n = (v: number) => String(Math.round(v * 100) / 100);
  */
 export function InspectPanel() {
   const editor = useEditor();
-  const version = useDocVersion();
+  const version = useDeferredDocVersion();
   const selection = useEditorState((s) => s.selection);
   const node = selection.length === 1 ? editor.doc.get(selection[0] as string) : undefined;
   const [format, setFormat] = useState<"css" | "tailwind" | "jsx" | "svg">("css");

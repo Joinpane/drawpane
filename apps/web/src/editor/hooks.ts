@@ -1,5 +1,14 @@
 import type { Doc, Editor, EditorState } from "@drawpane/editor";
-import { createContext, useCallback, useContext, useRef, useSyncExternalStore } from "react";
+import {
+  createContext,
+  startTransition,
+  useCallback,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 
 export const EditorContext = createContext<Editor | null>(null);
 
@@ -37,6 +46,33 @@ export function useDocVersion(active = true): number {
     [editor, active],
   );
   return useSyncExternalStore(subscribe, () => (active ? editor.doc.version : -1));
+}
+
+/**
+ * The document version, for panels beside the canvas (layers, inspector,
+ * assets). Outside a gesture it's `useDocVersion`: the panel renders with
+ * the edit. During one (a drag, a scrub, typing), whose every frame is an
+ * edit, it follows as a React transition instead, so rendering the panel
+ * never holds up the canvas's next frame: the panel catches up as soon as
+ * the main thread is free, and at once when the gesture ends.
+ */
+export function useDeferredDocVersion(): number {
+  const editor = useEditor();
+  const gesture = useEditorState((s) => s.gesture);
+  const subscribe = useCallback(
+    (cb: () => void) => (gesture ? () => {} : editor.doc.subscribe(cb)),
+    [editor, gesture],
+  );
+  // Constant during a gesture, so a transition's render never reads it torn.
+  const live = useSyncExternalStore(subscribe, () => (gesture ? -1 : editor.doc.version));
+  const [followed, setFollowed] = useState(() => editor.doc.version);
+  useEffect(() => {
+    if (!gesture) return;
+    const follow = () => startTransition(() => setFollowed(editor.doc.version));
+    follow();
+    return editor.doc.subscribe(follow);
+  }, [editor, gesture]);
+  return gesture ? followed : live;
 }
 
 /**

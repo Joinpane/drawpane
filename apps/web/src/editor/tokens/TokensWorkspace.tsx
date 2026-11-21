@@ -11,7 +11,7 @@ import {
 import { bindingVariable, getProp, type NodeRecord, type VariableValue } from "@drawpane/model";
 import { Button, Icon, IconButton, SegmentedControl } from "@drawpane/ui";
 import { type KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
-import { useDocVersion, useEditor } from "../hooks";
+import { useDeferredDocVersion, useEditor } from "../hooks";
 import { evaluate } from "../property-syntax";
 
 /**
@@ -21,7 +21,7 @@ import { evaluate } from "../property-syntax";
  */
 export function TokensWorkspace({ onShowLayer }: { onShowLayer: (id: string) => void }) {
   const editor = useEditor();
-  const version = useDocVersion();
+  const version = useDeferredDocVersion();
   const collections = useMemo(() => {
     void version;
     return listCollections(editor.doc);
@@ -430,7 +430,7 @@ function VariableTable({
 /** How many layers bind each variable. */
 function useUseCounts(): Map<string, number> {
   const editor = useEditor();
-  const version = useDocVersion();
+  const version = useDeferredDocVersion();
   return useMemo(() => {
     void version;
     const counts = new Map<string, number>();
@@ -559,7 +559,7 @@ function VariableDetail({
   onShowLayer: (id: string) => void;
 }) {
   const editor = useEditor();
-  const version = useDocVersion();
+  const version = useDeferredDocVersion();
   const [tab, setTab] = useState<"css" | "dtcg">("css");
   const name = getProp(variable.props, "name");
   const description = getProp(variable.props, "description");
