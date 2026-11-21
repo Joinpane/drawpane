@@ -15,16 +15,39 @@ import {
   Shaper,
   ShapingMeasurer,
 } from "@drawpane/editor";
+import instrumentSansUrl from "../fonts/fallback/InstrumentSans-Variable.ttf?url";
 import { faceFileUrl, variableFileUrl } from "../fonts/font-files";
 import { fonts } from "../fonts/fonts";
 
-/** A face's TrueType or OpenType file, through the font proxy (Google, built-in) or the team's fonts. */
+let instrumentSans: Promise<ArrayBuffer | null> | undefined;
+
+/** A face's TrueType or OpenType file: bundled, from the font proxy, or uploaded by the team. */
 export const fontBytes: FontBytesLoader = async (face) => {
+  if (
+    face.family === "Instrument Sans" &&
+    face.variable &&
+    fonts.get(face.family)?.source === "bundled"
+  ) {
+    instrumentSans ??= readFont(instrumentSansUrl).then(
+      (bytes) => {
+        if (!bytes) instrumentSans = undefined;
+        return bytes;
+      },
+      () => {
+        instrumentSans = undefined;
+        return null;
+      },
+    );
+    return instrumentSans;
+  }
   const url = face.variable ? await variableFileUrl(face) : await faceFileUrl(face, ["ttf", "otf"]);
-  if (!url) return null;
+  return url ? readFont(url) : null;
+};
+
+async function readFont(url: string): Promise<ArrayBuffer | null> {
   const response = await fetch(url);
   return response.ok ? response.arrayBuffer() : null;
-};
+}
 
 /**
  * How long a face may load before its text goes without it (`Shaper`'s 3 s), unless the debug

@@ -47,7 +47,7 @@ export interface EngineRender {
   readonly code?: number;
   /** Straight RGBA8, base64. */
   readonly rgba?: string;
-  /** Layers on the page the engine doesn't draw, by feature. */
+  /** Unsupported features and text fallback notes, by layer. */
   readonly unsupported: Record<string, string[]>;
   readonly stats?: FrameStats;
   /** Milliseconds: building the list, applying it, rendering (GPU: until the GPU finished). */
@@ -172,12 +172,7 @@ export function engineDebug(editor: Editor) {
             : b.build(options.pageId),
         };
       };
-      const loading = (b: DisplayListBuilder) =>
-        b.waiting > 0 ||
-        [...b.unsupported.values()].some((bits) =>
-          unsupportedNames(bits).includes("textWithoutOutlines"),
-        );
-      for (let waited = 0; waited < 20_000 && loading(make().b); waited += 100)
+      for (let waited = 0; waited < 20_000 && make().b.waiting > 0; waited += 100)
         await new Promise((r) => setTimeout(r, 100));
       const t0 = performance.now();
       // A fresh list replaces whatever the engine held: made for a revision past the engine's
@@ -367,12 +362,24 @@ export function engineDebug(editor: Editor) {
       pageId: string,
       ids?: string[],
       context?: boolean,
-    ): { list: string; unsupported: Record<string, string[]>; records: number } {
+    ): {
+      list: string;
+      unsupported: Record<string, string[]>;
+      records: number;
+      supported: boolean;
+      waiting: number;
+    } {
       const cpu = engines.cpu;
       const uploaded = (cpu && uploadedByEngine.get(cpu)) || new Map();
       const b = builder(pageId, uploaded);
       const list = ids ? b.buildLayers(ids, { context }) : b.build(pageId);
-      return { list: toBase64(list), unsupported: unsupportedOf(b), records: b.stats.records };
+      return {
+        list: toBase64(list),
+        unsupported: unsupportedOf(b),
+        records: b.stats.records,
+        supported: b.supported,
+        waiting: b.waiting,
+      };
     },
 
     /**

@@ -45,7 +45,7 @@ Each glyph definition gets a serial no other definition has, in any engine, acro
 | width, height | f32 × 2 | Its box, for the speck rule (layers under half a device pixel both ways are skipped on screen). |
 | coarse below | f32 | Below this many device pixels per unit, its coarse ops are drawn instead (text too small to read, as bars). 0: never. Screen only; exports always draw the ops. |
 | reach | f32 | How far it may paint past its box, in its units (strokes, effects, overhanging type). A record the engine refuses counts its box grown by this, so it's refused wherever it could show, never culled away. |
-| unsupported | u32 | Features the builder found it needs that the engine doesn't draw yet (`UNSUPPORTED` in wire.ts). The engine derives additional flags while decoding, such as for backdrop readers outside the tests. A page holding a shown record with any unsupported features is refused whole, wherever the record is. |
+| unsupported | u32 | Features the builder found it needs that the engine doesn't draw yet (`UNSUPPORTED` in wire.ts). The engine derives additional flags while decoding, such as for backdrop readers outside the tests. A page holding a shown record with a refusing feature is refused whole, wherever the record is. Bit 8 (`textWithoutOutlines`) counts text using fallback outlines. |
 | paths | u32 count, entries | Its shapes, referred to by index |
 | ops | u32 count, ops | What it draws, in order |
 | coarse | u32 count, ops | Drawn instead of `ops` below `coarse below` (no `children`) |

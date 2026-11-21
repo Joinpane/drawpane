@@ -54,10 +54,9 @@ function loadHarfBuzz(): Promise<HarfBuzz> {
 const base = harfBuzzMeasurerWith(async () => interFile.slice(0), loadHarfBuzz);
 
 /**
- * In a Worker, HarfBuzz shapes and measures, but can't give glyph outlines: its outline callbacks
- * need WebAssembly compiled at run time, which a Worker forbids (the shaper then says so, and the
- * builder refuses the text). Outlines reach a Worker as a file's saved outlines do (decision
- * 0037): here, the harness shapes in Node and posts the runs this Worker asked for.
+ * HarfBuzz's outline callbacks need runtime WebAssembly compilation, which Workers forbid.
+ * The test supplies outlines shaped in Node for the runs this Worker requests, as a file
+ * supplies its saved outlines (decision 0037).
  */
 const shapes = new Map<string, ShapedText>();
 const wanted = new Map<string, { text: string; run: ShapingRun }>();
@@ -132,13 +131,12 @@ async function handle(request: Request): Promise<Response> {
     const builder = new DisplayListBuilder(new Scene(doc), measurer);
     const list = builder.build("P");
     // Text whose runs aren't shaped here yet: answer which, for the harness to shape and post.
-    if (builder.unsupported.size === 0 && url.searchParams.has("probe"))
-      return new Response(null, { status: 204 });
-    if (builder.unsupported.size > 0 && wanted.size > 0)
+    if (wanted.size > 0)
       return Response.json(
         { wanted: [...wanted].map(([key, w]) => ({ key, ...w })) },
         { status: 409 },
       );
+    if (url.searchParams.has("probe")) return new Response(null, { status: 204 });
     // A fresh engine per render, as decision 0033 gives every render a fresh instance's worth of
     // state (one module instance per isolate: its memory is the cap, reused).
     // The Worker build's budgets (WORKER_LIMITS) apply: the shipped module's memory is capped at

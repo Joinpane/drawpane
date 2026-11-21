@@ -22,7 +22,7 @@ import { fileURLToPath } from "node:url";
 import { ErrorCode, RenderEngine } from "@drawpane/engine";
 import { CPU_GPU_TOLERANCE, outsideTolerance, score } from "@drawpane/engine/compare";
 import { loadNodeEngine } from "@drawpane/engine/node";
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "../fresh-instance";
 import { compare, decodePng, encodePng } from "./pixels";
 import {
@@ -33,6 +33,7 @@ import {
   ROOT,
   recorded,
   SCALE,
+  type Suite,
   suites,
   waitForFonts,
 } from "./suites";
@@ -154,6 +155,14 @@ type Engine = {
       unsupported: Record<string, string[]>;
       gpu?: { adapter: string; backend: "webgpu" | "webgl2"; fallback: boolean } | null;
     }>;
+    canvasRender(o: {
+      pageId: string;
+      rect: { x: number; y: number; width: number; height: number };
+      scale: number;
+      width: number;
+      height: number;
+      background: string;
+    }): Promise<string>;
     gpu(
       compatibility?: boolean,
       backend?: "gpu" | "webgl",
@@ -261,6 +270,35 @@ test.describe("Render engine parity", () => {
     );
   });
 
+  async function parityBackends(page: Page) {
+    if (!activeBackends) {
+      const probe = await page.evaluate(async () => {
+        const eng = (window as unknown as Engine).drawpaneEngine;
+        const tries: Array<{ backend: GpuBackend; compatibility: boolean }> = [
+          { backend: "gpu", compatibility: false },
+          { backend: "gpu", compatibility: true },
+          { backend: "webgl", compatibility: false },
+        ];
+        let software: {
+          backend: GpuBackend;
+          compatibility: boolean;
+          info: { adapter: string; backend: "webgpu" | "webgl2"; fallback: boolean };
+        } | null = null;
+        for (const t of tries) {
+          const info = await eng.gpu(t.compatibility, t.backend);
+          if ("error" in info) continue;
+          if (!info.fallback) return { ...t, info };
+          software ??= { ...t, info };
+        }
+        return software;
+      });
+      if (!probe) throw new Error("No working GPU backend (WebGPU or WebGL2) in auto mode");
+      activeBackends = [{ backend: probe.backend, compatibility: probe.compatibility }];
+      adapters[probe.backend] = `${probe.info.adapter}${probe.info.fallback ? " (software)" : ""}`;
+    }
+    return activeBackends;
+  }
+
   for (const suite of suites) {
     test(`${suite.suite}: ${suite.about}`, async () => {
       test.setTimeout(300_000);
@@ -294,32 +332,7 @@ test.describe("Render engine parity", () => {
         });
       }, frames);
       const workerModule = await loadNodeEngine("worker");
-      if (!activeBackends) {
-        const probe = await page.evaluate(async () => {
-          const eng = (window as unknown as Engine).drawpaneEngine;
-          const tries: Array<{ backend: GpuBackend; compatibility: boolean }> = [
-            { backend: "gpu", compatibility: false },
-            { backend: "gpu", compatibility: true },
-            { backend: "webgl", compatibility: false },
-          ];
-          let software: {
-            backend: GpuBackend;
-            compatibility: boolean;
-            info: { adapter: string; backend: "webgpu" | "webgl2"; fallback: boolean };
-          } | null = null;
-          for (const t of tries) {
-            const info = await eng.gpu(t.compatibility, t.backend);
-            if ("error" in info) continue;
-            if (!info.fallback) return { ...t, info };
-            software ??= { ...t, info };
-          }
-          return software;
-        });
-        if (!probe) throw new Error("No working GPU backend (WebGPU or WebGL2) in auto mode");
-        activeBackends = [{ backend: probe.backend, compatibility: probe.compatibility }];
-        adapters[probe.backend] =
-          `${probe.info.adapter}${probe.info.fallback ? " (software)" : ""}`;
-      }
+      const backends = await parityBackends(page);
 
       const results: CellResult[] = [];
       const failures: string[] = [];
@@ -416,7 +429,7 @@ test.describe("Render engine parity", () => {
         const backendImgs: string[] = [];
         const backendNotes: string[] = [];
 
-        for (const { backend, compatibility } of activeBackends) {
+        for (const { backend, compatibility } of backends) {
           const label = backend === "webgl" ? "WebGL2" : "WebGPU";
           const out = await page.evaluate(
             (o) => (window as unknown as Engine).drawpaneEngine.render(o),
@@ -600,7 +613,7 @@ test.describe("Render engine parity", () => {
       const mw = mean("figmaWebgl");
       if (mg !== null) summaryParts.push(`WebGPU ${mg.toFixed(2)}`);
       if (mw !== null) summaryParts.push(`WebGL2 ${mw.toFixed(2)}`);
-      const cols = activeBackends
+      const cols = backends
         .map((b) => `<th>${b.backend === "webgl" ? "WebGL2" : "WebGPU"}</th>`)
         .join("");
       report.push(
@@ -627,6 +640,108 @@ test.describe("Render engine parity", () => {
       expect(failures, `${suite.suite}: engine parity`).toEqual([]);
     });
   }
+
+  test("missing faces draw with canvas fallback geometry", async () => {
+    test.setTimeout(300_000);
+    const page = instance.page;
+    await page.goto("/");
+    await page.getByRole("button", { name: "New file" }).first().click();
+    await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
+      timeout: 15_000,
+    });
+    const suite: Suite = {
+      suite: "missing-faces",
+      about: "Fallback text with no saved glyphs",
+      cell: { width: 250, height: 62, gap: 8, columns: 2 },
+      cells: [
+        { id: "sf-pro-features", characters: "Office 111 AV" },
+        { id: "sf-symbols", characters: "AV \uE100 \u{100001} Tool" },
+        { id: "mixed-scripts", characters: "Łódź Ω 漢 AV" },
+        { id: "list-markers", characters: "One\nTwo", listType: "number" },
+      ].map(({ id, characters, listType }) => ({
+        id,
+        layers: [
+          {
+            type: "text",
+            x: 12,
+            y: 6,
+            width: 226,
+            height: 50,
+            fontFamily: "SF Pro",
+            fontSize: listType ? 19 : 24,
+            fontWeight: 500,
+            fontFeatures: { tnum: true, liga: false },
+            textAutoResize: "none",
+            ...(listType ? { listType } : {}),
+            characters,
+            fills: [{ type: "solid", color: "#151515" }],
+          },
+        ],
+      })),
+    };
+    const limits: Record<string, number> = {
+      "sf-pro-features": 2,
+      "sf-symbols": 2,
+      "mixed-scripts": 10,
+      "list-markers": 2,
+    };
+    const ids = await build(page, suite);
+    await page.evaluate(async () => {
+      await document.fonts.load('500 24px "Instrument Sans Variable"', "Łódź Office");
+      await document.fonts.ready;
+    });
+    const pageId = await page.evaluate(() => (window as unknown as Engine).drawpane.s.pageId);
+    const backends = await parityBackends(page);
+    const results = [];
+    for (const [i, cell] of suite.cells.entries()) {
+      const rect = exportRect(suite, i);
+      const width = rect.width * SCALE;
+      const height = rect.height * SCALE;
+      const opts = { pageId, rect, scale: SCALE, width, height };
+      const engineOpts = {
+        ...opts,
+        ids: [ids[i] as string],
+        background: [1, 1, 1, 1] as [number, number, number, number],
+      };
+      const cpu = await page.evaluate(
+        (o) => (window as unknown as Engine).drawpaneEngine.render({ ...o, backend: "cpu" }),
+        engineOpts,
+      );
+      expect(cpu.ok, cpu.error).toBe(true);
+      expect(cpu.unsupported.textWithoutOutlines, cell.id).toHaveLength(1);
+      const canvas = await page.evaluate(
+        (o) =>
+          (window as unknown as Engine).drawpaneEngine.canvasRender({ ...o, background: "#fff" }),
+        opts,
+      );
+      const px = Buffer.from(cpu.rgba ?? "", "base64");
+      const reference = Buffer.from(canvas, "base64");
+      const cpuCanvas = strip(score(px, reference, width, height));
+      expect(cpuCanvas.mean, cell.id).toBeLessThan(limits[cell.id] ?? 0);
+      const gpuScores: Record<string, Omit<ReturnType<typeof score>, "heat">> = {};
+      for (const { backend, compatibility } of backends) {
+        const gpu = await page.evaluate(
+          (o) => (window as unknown as Engine).drawpaneEngine.render(o),
+          { ...engineOpts, backend, compatibility },
+        );
+        expect(gpu.ok, gpu.error).toBe(true);
+        const gpuPx = Buffer.from(gpu.rgba ?? "", "base64");
+        expect(
+          outsideTolerance(score(px, gpuPx, width, height), CPU_GPU_TOLERANCE),
+          cell.id,
+        ).toEqual([]);
+        gpuScores[backend] = strip(score(gpuPx, reference, width, height));
+        expect(gpuScores[backend].mean, cell.id).toBeLessThan(limits[cell.id] ?? 0);
+      }
+      results.push({ cell: cell.id, cpuCanvas, gpuCanvas: gpuScores });
+    }
+    mkdirSync(OUT, { recursive: true });
+    writeFileSync(join(OUT, "missing-faces.json"), `${JSON.stringify(results, null, 2)}\n`);
+    console.log(
+      "Missing faces, mean against canvas:",
+      results.map(({ cell, cpuCanvas }) => `${cell} ${cpuCanvas.mean.toFixed(3)}`).join(", "),
+    );
+  });
 
   test("visible canvas presentation matches readback on active WebGL2 surface", async () => {
     const page = instance.page;

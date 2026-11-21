@@ -1973,10 +1973,10 @@ impl<B: Backend> Walk<'_, B> {
                     self.backend.scene().pop_clip();
                     clipping = false;
                 }
-                if cr.unsupported != 0 {
+                let refused = cr.refusing_bits();
+                if refused != 0 {
                     return Err(EngineError::unsupported(format!(
-                        "record {cid} needs features {:#x}",
-                        cr.unsupported
+                        "record {cid} needs features {refused:#x}"
                     )));
                 }
                 match cr.mask {
@@ -2285,10 +2285,10 @@ impl<B: Backend> Walk<'_, B> {
                 return Ok(());
             }
         }
-        if r.unsupported != 0 {
+        let refused = r.refusing_bits();
+        if refused != 0 {
             return Err(EngineError::unsupported(format!(
-                "record {id} needs features {:#x}",
-                r.unsupported
+                "record {id} needs features {refused:#x}"
             )));
         }
         self.stats.records += 1;
