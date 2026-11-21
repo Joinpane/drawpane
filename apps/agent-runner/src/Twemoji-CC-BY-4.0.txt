@@ -1,3 +1,15 @@
+Twemoji artwork © Twitter, Inc. and other contributors.
+Licensed under Creative Commons Attribution 4.0 International (CC BY 4.0).
+https://creativecommons.org/licenses/by/4.0/
+
+Artwork source
+https://github.com/jdecked/twemoji/tree/388f518b756404152f128a3539f5e7f9a6f1ebd6
+
+Font conversion by twemoji-colr-font v0.0.2
+https://github.com/Nerixyz/twemoji-colr-font/releases/tag/v0.0.2
+
+Drawpane added attribution to the font's name table. The emoji artwork is unchanged.
+
 Attribution 4.0 International
 
 =======================================================================
@@ -391,9 +403,3 @@ the avoidance of doubt, this paragraph does not form part of the public
 licenses.
 
 Creative Commons may be contacted at creativecommons.org.
-
-Artwork credit
-Twemoji artwork © Twitter, Inc. and other contributors.
-https://github.com/jdecked/twemoji/tree/388f518b756404152f128a3539f5e7f9a6f1ebd6
-Converted into an OpenType font by twemoji-colr-font v0.0.2.
-https://github.com/Nerixyz/twemoji-colr-font/releases/tag/v0.0.2

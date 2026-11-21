@@ -14,7 +14,10 @@ const runnerDir = join(here, "../agent-runner");
  * The agent runner, built as it deploys (decision 0033): the tests run both
  * scripts, the runner as an auxiliary Worker the main one binds by name.
  */
-function buildRunner(): Array<{ type: "ESModule" | "CompiledWasm" | "Data"; path: string }> {
+function buildRunner(): Array<{
+  type: "ESModule" | "CompiledWasm" | "Data" | "Text";
+  path: string;
+}> {
   // The capped WebAssembly the runner bundles (decision 0033, item 4.2).
   capWasm();
   const wrangler = join(
@@ -28,13 +31,20 @@ function buildRunner(): Array<{ type: "ESModule" | "CompiledWasm" | "Data"; path
     [wrangler, "deploy", "--dry-run", "--outdir", outdir, "-c", join(runnerDir, "wrangler.jsonc")],
     { cwd: runnerDir, stdio: ["ignore", "ignore", "inherit"] },
   );
-  // The script and the WebAssembly it imports from beside it, as modules of their own.
+  // Preserve the script's Wasm, fonts and attribution as separate modules.
   return [
     { type: "ESModule", path: join(outdir, "index.js") },
     ...readdirSync(outdir)
-      .filter((name) => name.endsWith(".wasm") || name.endsWith(".ttf"))
+      .filter(
+        (name) =>
+          name.endsWith(".wasm") || name.endsWith(".ttf") || name === "Twemoji-CC-BY-4.0.txt",
+      )
       .map((name) => ({
-        type: name.endsWith(".wasm") ? ("CompiledWasm" as const) : ("Data" as const),
+        type: name.endsWith(".wasm")
+          ? ("CompiledWasm" as const)
+          : name.endsWith(".ttf")
+            ? ("Data" as const)
+            : ("Text" as const),
         path: join(outdir, name),
       })),
   ];

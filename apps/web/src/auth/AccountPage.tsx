@@ -7,6 +7,7 @@ import { Button, Icon, IconButton, Logo, TextField } from "@drawpane/ui";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useSearch } from "@tanstack/react-router";
 import { type FormEvent, useEffect, useState } from "react";
+import twemojiLicence from "../../../agent-runner/src/Twemoji-CC-BY-4.0.txt?url";
 import { api, type User } from "../api/client";
 import { initials, timeAgo } from "../app/format";
 import { EmailPreferences } from "./EmailPreferences";
@@ -201,6 +202,16 @@ export function AccountPage() {
             Email
           </h2>
           <EmailPreferences />
+        </section>
+
+        <section className="account__section" aria-labelledby="licences-title">
+          <h2 id="licences-title" className="account__heading">
+            Third-party licences
+          </h2>
+          <p className="account__hint">
+            Twemoji artwork © Twitter, Inc. and other contributors.{" "}
+            <a href={twemojiLicence}>CC BY 4.0 licence and credits</a>
+          </p>
         </section>
       </main>
     </div>
