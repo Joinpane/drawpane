@@ -254,8 +254,40 @@ pub struct Isolation {
     pub on_backdrop: bool,
     pub separate: bool,
     pub copy_parent: bool,
+    /// This picture's nested glass can see the prefix behind the picture.
+    pub inherit_glass: bool,
     /// An export selection crosses this faded context scope and keeps its own opacity.
     pub unfaded_main: bool,
+}
+
+/// Glass samples the base prefix (the root for None) with the listed glass-free interiors
+/// composited over it in paint order.
+pub fn glass_backdrop_layers<T>(
+    scopes: &[T],
+    read_parent: bool,
+    isolation: impl Fn(&T) -> Isolation,
+) -> (Option<usize>, Vec<usize>) {
+    let mut base = None;
+    let mut interiors = Vec::new();
+    let mut copied = false;
+    for (index, scope) in scopes.iter().enumerate().rev().skip(usize::from(read_parent)) {
+        if !copied && let Some(interior) = base.replace(index) {
+            interiors.push(interior);
+        }
+        let scope = isolation(scope);
+        // A fading pass-through picture starts with the immediate parent's pixels. Keep
+        // following that parent's scope rule, without blending those pixels into it again.
+        copied = scope.copy_parent;
+        if !scope.inherit_glass && !copied {
+            interiors.reverse();
+            return (base, interiors);
+        }
+    }
+    if !copied {
+        interiors.extend(base.take());
+    }
+    interiors.reverse();
+    (base, interiors)
 }
 
 pub trait Backend {
@@ -1862,6 +1894,7 @@ impl<B: Backend> Walk<'_, B> {
             on_backdrop,
             separate: on_backdrop && (has_reader || copy_parent),
             copy_parent,
+            inherit_glass: false,
             unfaded_main: false,
         }
     }
@@ -2110,8 +2143,13 @@ impl<B: Backend> Walk<'_, B> {
             return Ok(());
         }
         self.scope()?;
-        let paired = self.isolation(has_reader, false).separate;
-        if !self.isolate_area(mask_area, true, None, has_reader, false)? {
+        let mut isolation = self.isolation(has_reader, false);
+        isolation.inherit_glass = content_has_reader;
+        let paired = isolation.separate;
+        if !self
+            .backend
+            .push_isolated(mask_area, true, None, isolation, &self.open)?
+        {
             if self.tiled && !whole_mask.is_empty() {
                 self.backend.flush_barrier(&self.open);
             }
@@ -2443,7 +2481,15 @@ impl<B: Backend> Walk<'_, B> {
                 ((content_rect.x0 - phase.0).div_euclid(step) * step + phase.0).div_euclid(4) * 4,
                 ((content_rect.y0 - phase.1).div_euclid(step) * step + phase.1).div_euclid(4) * 4,
             );
-            if !self.isolate_area(src_area, false, Some(scene_hint), has_reader, false)? {
+            isolation.inherit_glass = has_reader
+                && layer_blend == 0
+                && active
+                    .iter()
+                    .any(|effect| matches!(effect, ActivePost::LayerBlur { .. } | ActivePost::Noise { .. }));
+            if !self
+                .backend
+                .push_isolated(src_area, false, Some(scene_hint), isolation, &self.open)?
+            {
                 if self.tiled && whole_would_flush {
                     self.backend.flush_barrier(&self.open);
                 }

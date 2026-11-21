@@ -1968,7 +1968,10 @@ impl GpuReaders {
             h,
             RGBA8,
             4,
-            wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
+            wgpu::TextureUsages::COPY_DST
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::RENDER_ATTACHMENT,
             "reader prefix snapshot",
         ));
         Ok(())

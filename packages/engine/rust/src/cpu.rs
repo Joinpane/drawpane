@@ -9,8 +9,8 @@
 use crate::blur;
 use crate::blur::{BlurSpec, EdgeMode, try_blur_cpu, validate_sigma};
 use crate::error::{EngineError, Result};
-use crate::exec::resolve_inradius;
 use crate::exec::{Backend, GlyphMask, IRect, ImageView, Isolation, Open, PostStep, ShadowCast, impl_draw};
+use crate::exec::{glass_backdrop_layers, resolve_inradius};
 use crate::glass;
 use crate::images::{self, Level};
 use crate::kernels;
@@ -531,8 +531,13 @@ impl Cpu {
             })
     }
 
-    fn readable_backdrop(&self, read_parent: bool) -> ((i32, i32), &Pixmap) {
-        if let Some(scope) = self.offscreen_stack.iter().rev().nth(usize::from(read_parent)) {
+    fn readable_backdrop(&self) -> ((i32, i32), &Pixmap) {
+        self.backdrop_layer(self.offscreen_stack.len().checked_sub(1))
+    }
+
+    fn backdrop_layer(&self, layer: Option<usize>) -> ((i32, i32), &Pixmap) {
+        if let Some(layer) = layer {
+            let scope = &self.offscreen_stack[layer];
             let target = scope.backdrop.as_ref().unwrap_or(&scope.main);
             (target.origin, &target.pixmap)
         } else if self.backdrop_live
@@ -1115,7 +1120,7 @@ impl Backend for Cpu {
             }
         };
         let main = make(self.main());
-        let backdrop = isolation.separate.then(|| make(self.readable_backdrop(false)));
+        let backdrop = isolation.separate.then(|| make(self.readable_backdrop()));
         let parent_writes = (self.write_main, self.write_backdrop);
         self.offscreen_stack.push(CpuScope {
             main,
@@ -1709,14 +1714,14 @@ impl Backend for Cpu {
             ));
         }
         self.flush_barrier(open);
-        let (origin, backdrop) = self.readable_backdrop(false);
+        let (origin, backdrop) = self.readable_backdrop();
         let (w, h) = (i32::from(backdrop.width()), i32::from(backdrop.height()));
         let buffers = if open.iter().any(reader_clip) { 3 } else { 2 };
         self.check_memory(w as usize * h as usize * 4 * buffers, "a backdrop reader kernel")?;
         let halo = (i64::from(reads.x1) - i64::from(paints.x1))
             .max(i64::from(paints.x0) - i64::from(reads.x0))
             .clamp(0, 512) as i32;
-        let src = self.readable_backdrop(false).1.data_as_u8_slice().to_vec();
+        let src = self.readable_backdrop().1.data_as_u8_slice().to_vec();
         let mut out = src.clone();
         kernels::run(kernel, &src, &mut out, w, h, origin, paints, reads, halo)?;
         let clip_mask = self.rasterize_open_clips(paints, open);
@@ -1770,7 +1775,8 @@ impl Backend for Cpu {
         let frame_size = (i32::from(self.frame_size.0), i32::from(self.frame_size.1));
         let (origin, target) = self.main();
         let target_size = (i32::from(target.width()), i32::from(target.height()));
-        let (source_origin, source) = self.readable_backdrop(read_parent);
+        let (base, interiors) = glass_backdrop_layers(&self.offscreen_stack, read_parent, |scope| scope.isolation);
+        let (source_origin, source) = self.backdrop_layer(base);
         let source_size = (i32::from(source.width()), i32::from(source.height()));
         let regions = glass::compute_regions(
             op,
@@ -1807,7 +1813,20 @@ impl Backend for Cpu {
             self.check_memory(copies.saturating_add(scratch), "glass working set")?;
         }
         let within = glass::clip_within_from_open(open);
-        let backdrop_src = self.readable_backdrop(read_parent).1.data_as_u8_slice().to_vec();
+        let mut backdrop_src = self.backdrop_layer(base).1.data_as_u8_slice().to_vec();
+        for layer in interiors {
+            let (origin, paint) = self.backdrop_layer(Some(layer));
+            crate::blend::blend_cpu(
+                paint.data_as_u8_slice(),
+                &mut backdrop_src,
+                (source_size.0 as u32, source_size.1 as u32),
+                (u32::from(paint.width()), u32::from(paint.height())),
+                (origin.0 - source_origin.0, origin.1 - source_origin.1),
+                0,
+                1.0,
+                None,
+            );
+        }
         let target_w = target_size.0;
         // Rasterize open non-context clip mask once over the union of all chunk outputs.
         let mut union_paints = IRect {
@@ -1939,7 +1958,7 @@ impl Backend for Cpu {
             return Ok(());
         }
         let frame_size = (i32::from(self.frame_size.0), i32::from(self.frame_size.1));
-        let (origin, backdrop) = self.readable_backdrop(false);
+        let (origin, backdrop) = self.readable_backdrop();
         let source = (u32::from(backdrop.width()), u32::from(backdrop.height()));
         let target_size = (source.0 as i32, source.1 as i32);
         let shift = (-origin.0, -origin.1);
@@ -1987,7 +2006,7 @@ impl Backend for Cpu {
             clamp_bounds,
             dirty,
         };
-        let backdrop_src = self.readable_backdrop(false).1.data_as_u8_slice().to_vec();
+        let backdrop_src = self.readable_backdrop().1.data_as_u8_slice().to_vec();
         let mut blurred = vec![0u8; buf_bytes];
         self.blur.try_blur(
             self.backdrop_gen,
@@ -2043,7 +2062,7 @@ impl Backend for Cpu {
         };
         self.flush_barrier(open);
         let frame_size = (i32::from(self.frame_size.0), i32::from(self.frame_size.1));
-        let (origin, backdrop) = self.readable_backdrop(false);
+        let (origin, backdrop) = self.readable_backdrop();
         let source = (u32::from(backdrop.width()), u32::from(backdrop.height()));
         let target_size = (source.0 as i32, source.1 as i32);
         let shift = (-origin.0, -origin.1);
@@ -2085,7 +2104,7 @@ impl Backend for Cpu {
         let max_sigma = plan.start_sigma.max(plan.end_sigma);
         let (clamp_bounds, edge) =
             progressive_blur::blur_bounds_and_edge(within, frame_size, shift, target_size, max_sigma);
-        let backdrop_src = self.readable_backdrop(false).1.data_as_u8_slice().to_vec();
+        let backdrop_src = self.readable_backdrop().1.data_as_u8_slice().to_vec();
         let mut blurred = vec![0u8; buf_bytes];
         progressive_blur::eval_progressive_cpu(
             &mut self.blur,

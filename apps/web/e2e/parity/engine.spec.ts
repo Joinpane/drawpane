@@ -56,11 +56,11 @@ const REPLACEMENT_SUITES = new Set(["shadows", "blurs", "linear-blends", "masks"
 const ENGINE_CELL_CAP: Record<string, number> = {
   "glass-stack": 4.5,
 };
-// Both GPU backends on the T4, with the grain smoothed for the mean only.
+// Figma residuals after inheriting the page prefix. Smooth grain for the mean only.
 const GLASS_SCOPE_LIMITS: Record<string, { mean: number; p99: number; worstTile: number }> = {
-  "picture-mask": { mean: 2.25, p99: 55, worstTile: 28 },
-  "layer-blur": { mean: 3.7, p99: 67, worstTile: 33 },
-  noise: { mean: 3.35, p99: 76, worstTile: 36 },
+  "picture-mask": { mean: 0.6, p99: 12, worstTile: 4.8 },
+  "layer-blur": { mean: 0.8, p99: 11, worstTile: 4.2 },
+  noise: { mean: 0.95, p99: 35, worstTile: 6.7 },
 };
 const ENGINE_SUITE_MEAN_CAP: Record<string, number> = {
   "glass-stack": 3.5,

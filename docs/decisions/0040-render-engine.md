@@ -1119,9 +1119,9 @@ On the T4, all 31 `glass-probe-2` cells and all 15 `glass-stack` cells passed on
 
 ### Glass inside picture masks, layer blur and noise
 
-The `glass-scopes` Figma suite places glass across the edge of translucent interior paint, with opaque stripes behind the scope. Figma's blur carries the stripes into the lens in all three cells. The engine's isolated pictures supply only the interior paint to their lens. This gives a visible residual on the part of each lens outside that paint.
+A lens inside a picture mask or a normal-blend layer blur or noise picture samples the page prefix beneath the picture with the interior paint so far composited over it. Both inputs use the glass-free planes. Explicit blend pictures bound the inherited prefix, and a pass-through fade that already copied its immediate parent contributes that paint once. The mask or post effect still operates on the scope's transparent picture, including the lens.
 
-On the T4, the CPU / WebGPU / WebGL2 means against Figma were 2.08 / 2.11 / 2.11 for the picture mask, 3.50 / 3.52 / 3.52 for layer blur, and 3.13 / 3.16 / 3.16 for noise. The new gate holds each result to its measured mean, p99 and worst-tile range. The picture-mask, layer-blur and noise cells had CPU/GPU means of 0.080, 0.096 and 0.078 on both GPU backends. The Worker was byte-identical to the browser CPU in all three.
+The `glass-scopes` fixtures put the lens across the edge of translucent interior paint over opaque stripes. In a paired Worker render, mean error from Figma went from 2.15 to 0.42 for the mask, 3.59 to 0.61 for layer blur and 3.23 to 0.73 for noise. The unfiltered p99 went from 53 to 9, 64 to 7 and 71 to 30. The native nested mask and layer blur test checks the sampled page and interior pixels, an explicit blend boundary, patch/fresh equality and banded export equality.
 
 ## Amendment for text with missing faces
 
