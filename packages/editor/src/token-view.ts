@@ -263,6 +263,19 @@ export class TokenView {
     for (const node of this.#source.storedNodes()) this.#add(node.id, node, true);
   }
 
+  /**
+   * Whether two presented layers show some collection's variables in
+   * different modes (an instance in Dark, its main in Light), so a value
+   * bound in one can resolve otherwise in the other. False at once in a
+   * file that binds nothing.
+   */
+  modesDiffer(a: string, b: string): boolean {
+    if (this.#bound === 0) return false;
+    for (const collection of this.#variablesOf.keys())
+      if (this.resolver.modeAt(a, collection) !== this.resolver.modeAt(b, collection)) return true;
+    return false;
+  }
+
   /** Layers whose resolved layout values may have changed since asked last; forgets them. */
   takeLayout(): Set<string> {
     const out = this.#layout;

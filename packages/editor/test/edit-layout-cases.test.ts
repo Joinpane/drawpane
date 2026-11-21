@@ -401,6 +401,50 @@ describe("edits that leave layout as a full layout would", () => {
     },
   );
 
+  // An instance in Light stores nothing while its main is in Light too; moved into Dark, the
+  // main lays out its own layers, which the instance would otherwise show (the oracle).
+  it("keeps an instance laid out in its own mode when its main moves into another", () => {
+    const editor = make(
+      [
+        page,
+        modes,
+        node("pad", "variable", "c", { variableType: "number", values: { light: 4, dark: 12 } }),
+        node("main", "frame", "p", {
+          isComponent: true,
+          layoutMode: "row",
+          width: 100,
+          height: 30,
+        }),
+        node("inner", "frame", "main", {
+          layoutMode: "row",
+          width: 100,
+          height: 30,
+          paddingLeft: 4,
+          bindings: { paddingLeft: "pad" },
+        }),
+        node("dot", "rect", "inner", { x: 4, width: 10, height: 10 }),
+        node(
+          "dark",
+          "frame",
+          "p",
+          { variableModes: { c: "dark" }, x: 400, width: 200, height: 200 },
+          "a2",
+        ),
+      ],
+      "compact",
+    );
+    const instance = editor.insertInstance("main", { x: 0, y: 300 }) as string;
+    const inner = editor.doc.childIds(instance)[0] as string;
+    const dot = editor.doc.childIds(inner)[0] as string;
+    expect(prop(editor, dot, "x")).toBe(4);
+    expect(editor.commit([{ op: "move", id: "main", parent: "dark", key: "a0" }])).toBe(true);
+    expect(prop(editor, "dot", "x")).toBe(12);
+    expect([prop(editor, inner, "paddingLeft"), prop(editor, dot, "x")]).toEqual([4, 4]);
+    expect(unsettled(editor)).toEqual([]);
+    const reopened = make(editor.doc.stored(), "compact");
+    expect(prop(reopened, dot, "x")).toBe(4);
+  });
+
   // A main set to a mode passes it to its instances; materialized ones are written it in a
   // later round of the commit, and what then reads other values is laid out too.
   it.each(["materialized", "compact"] as const)(

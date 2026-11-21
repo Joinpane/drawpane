@@ -686,9 +686,10 @@ export function copyConstraintOps(doc: Doc, ops: readonly Op[]): Op[] {
  * only two kinds of instance need it:
  *
  * - one whose layout differs from its main's (it stores a value a layout
- *   reads: a text, a size, a hidden layer), when its main's layout inside
- *   may have changed: frames place their children and affected texts
- *   measure themselves;
+ *   reads: a text, a size, a hidden layer; or it shows another mode than
+ *   its main, so bound values resolve otherwise), when its main's layout
+ *   inside may have changed: frames place their children and affected
+ *   texts measure themselves;
  * - one whose main changed size, so its parent's layout places it again.
  *
  * A main whose instances (inside it, as the icon in a button) changed size
@@ -778,7 +779,11 @@ export function relayoutTargets(
     for (const root of doc.instanceRoots(componentId)) {
       if (seen.has(root) || !doc.has(root)) continue;
       if (doc.ancestors(root).some((a) => a.id === componentId)) continue;
-      if (doc.layoutDiffers(root) && inner.has(componentId)) {
+      // Laid out otherwise than its main: by what it stores, or by being shown in another mode
+      // (whose layout values its main's changes don't carry: a main moved into Dark lays out
+      // its own layers, and an instance in Light that stores nothing would show them so).
+      const differs = doc.layoutDiffers(root) || doc.tokens.modesDiffer(root, componentId);
+      if (differs && inner.has(componentId)) {
         seen.add(root);
         differing.push(root);
       } else if (sized.has(componentId)) layout.push(root);
