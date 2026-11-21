@@ -71,6 +71,26 @@ describe("edits that leave layout as a full layout would", () => {
     expect(unsettled(editor)).toEqual([]);
   });
 
+  it("lays out inside an auto layout frame a constraint resized", () => {
+    const editor = make([
+      page,
+      node("outer", "frame", "p", { width: 100, height: 60 }),
+      node("inner", "frame", "outer", {
+        x: 10,
+        y: 10,
+        width: 80,
+        height: 20,
+        layoutMode: "row",
+        constraintH: "stretch",
+      }),
+      node("bar", "rect", "inner", { width: 80, height: 10, sizingH: "fill" }),
+    ]);
+    editor.resize(["outer"], "width", 140);
+    expect(prop(editor, "inner", "width")).toBe(120);
+    expect(prop(editor, "bar", "width")).toBe(120);
+    expect(unsettled(editor)).toEqual([]);
+  });
+
   it("makes room when binding visibility hides a layer", () => {
     const editor = make([
       page,

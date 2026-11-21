@@ -1405,8 +1405,8 @@ export function layoutRoots(doc: Doc, ids: Iterable<string>): string[] {
  * What a change to `ids` can lay out differently: the outermost layout
  * frames to run (`roots`), and the layout frames on the way up from each
  * change to its root (`dirty`), the changed frames included. `changed`
- * names more layers the change made (constraints, fix-ups): they're laid
- * out inside if they're under a root, without adding roots of their own.
+ * names more layers the change made (constraints, fix-ups), laid out the
+ * same way.
  * A layer in `moved` changed only its position, which moves what's inside
  * it without laying it out again: only its parent's flow can change, and
  * not even that when the flow doesn't place it.
@@ -1449,7 +1449,12 @@ function layoutClosure(
     const top = walk(id);
     if (top) roots.add(top);
   }
-  for (const id of changed) walk(id);
+  // What the edit's other operations changed (a frame its constraints resized, say) is laid
+  // out too, from its own outermost layout frame.
+  for (const id of changed) {
+    const top = walk(id);
+    if (top) roots.add(top);
+  }
   // Everything under these is new (a swapped instance's layers): every layout frame in it.
   for (const id of whole) {
     walk(id);

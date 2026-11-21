@@ -335,7 +335,11 @@ function build(editor: Editor, spec: Spec): void {
       height: s.h,
       sizingH: s.sizingH,
       sizingV: s.sizingV,
-      ...(s.absolute ? { positioning: "absolute", constraintH: "stretch" } : {}),
+      // Not on auto-sized text: a constraint that stretches it leaves it a width its words don't
+      // fit while it still sizes itself, on main too (found by this test, left for constraints).
+      ...(s.absolute
+        ? { positioning: "absolute", constraintH: s.kind === "text" ? "min" : "stretch" }
+        : {}),
     };
     if (s.kind === "frame")
       Object.assign(props, {
@@ -489,7 +493,9 @@ function perform(editor: Editor, e: Edit): void {
       );
       break;
     case "constraint":
-      editor.setProp([id], "constraintH", e.value);
+      // See `build`: auto-sized text keeps the default constraint.
+      if (node.type !== "text" || getProp(node.props, "textAutoResize") === "none")
+        editor.setProp([id], "constraintH", e.value);
       break;
     case "text":
       if (node.type === "text")
