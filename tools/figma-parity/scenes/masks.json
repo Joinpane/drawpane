@@ -486,6 +486,83 @@
           ]
         }
       ]
+    },
+    {
+      "id": "luminance-translucent",
+      "layers": [
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 120,
+          "cornerRadius": 16,
+          "fills": [
+            {
+              "type": "linear",
+              "from": {
+                "x": 0,
+                "y": 0.5
+              },
+              "to": {
+                "x": 1,
+                "y": 0.5
+              },
+              "stops": [
+                {
+                  "position": 0,
+                  "color": "#ffffffcc"
+                },
+                {
+                  "position": 1,
+                  "color": "#000000cc"
+                }
+              ]
+            }
+          ],
+          "isMask": true,
+          "maskType": "luminance"
+        },
+        {
+          "type": "rect",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 120,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#e8590c"
+            }
+          ]
+        },
+        {
+          "type": "ellipse",
+          "x": 110,
+          "y": 30,
+          "width": 100,
+          "height": 100,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#2b4fd6"
+            }
+          ]
+        },
+        {
+          "type": "rect",
+          "x": 30,
+          "y": 70,
+          "width": 120,
+          "height": 24,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#ffffff"
+            }
+          ]
+        }
+      ]
     }
   ]
 }

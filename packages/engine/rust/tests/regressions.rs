@@ -1707,3 +1707,83 @@ fn glass_samples_the_alpha_of_an_image() {
     assert!((1..128).contains(&rgba[transition + 3]));
     assert_eq!(&rgba[clear..clear + 4], &[0; 4]);
 }
+
+#[test]
+fn nested_mask_and_layer_blur_let_glass_see_the_page_prefix() {
+    let make = |page_color, blend| {
+        let mut list = W::new(ANY, 1);
+        list.reset();
+        list.set(1, 0, &positioned_rect(0.0, 0.0, 64.0, 96.0, Some(page_color)));
+        list.set(
+            2,
+            0,
+            &positioned_rect(64.0, 0.0, 64.0, 96.0, Some([0.0, 0.0, 1.0, 1.0])),
+        );
+        let mut scope = positioned_rect(8.0, 8.0, 112.0, 80.0, None);
+        scope.layer_blend = blend;
+        scope.post.push(common::Post::LayerBlur(4.0));
+        scope.ops.push(Op::Children);
+        list.set(3, 0, &scope);
+        let mut mask = positioned_rect(8.0, 8.0, 96.0, 64.0, Some([1.0; 4]));
+        mask.mask = drawpane_engine::record::MASK_ALPHA;
+        list.set(4, 3, &mask);
+        list.set(
+            5,
+            3,
+            &positioned_rect(16.0, 16.0, 18.0, 48.0, Some([0.0, 1.0, 0.0, 1.0])),
+        );
+        list.set(6, 3, &tuned_glass(16.0, 12.0, 80.0, 56.0, 0.0, 16.0, 0.0));
+        list.finish()
+    };
+    let red = [1.0, 0.0, 0.0, 1.0];
+    let white = [1.0; 4];
+    let render = |engine: &mut Engine| {
+        engine
+            .render_cpu(128, 96, camera(), [0.0; 4], false)
+            .unwrap()
+            .0
+            .to_vec()
+    };
+    let pixel = |rgba: &[u8], x: usize, y: usize| {
+        let i = (y * 128 + x) * 4;
+        <[u8; 4]>::try_from(&rgba[i..i + 4]).unwrap()
+    };
+    let mut engine = Engine::new(Limits::default());
+    engine.apply(&make(red, 0)).unwrap();
+    let before = render(&mut engine);
+    let lens = pixel(&before, 65, 48);
+    assert!(lens[0] > 40 && lens[2] > 40, "lens across page stripes: {lens:?}");
+    let interior = pixel(&before, 34, 48);
+    assert!(interior[1] > 180, "lens sees interior paint as well: {interior:?}");
+    assert_eq!(pixel(&before, 65, 0), [0, 0, 255, 255]);
+
+    let mut patch = W::new(1, 2);
+    patch.set(1, 0, &positioned_rect(0.0, 0.0, 64.0, 96.0, Some(white)));
+    engine.apply(&patch.finish()).unwrap();
+    let patched = render(&mut engine);
+    assert!(pixel(&patched, 65, 48)[1] > 40);
+    let mut fresh = Engine::new(Limits::default());
+    fresh.apply(&make(white, 0)).unwrap();
+    assert_eq!(patched, render(&mut fresh));
+
+    fresh.store.limits.export_tile = 31;
+    let mut banded = Vec::new();
+    for y in (0..96).step_by(19) {
+        banded.extend_from_slice(
+            fresh
+                .render_band(128, 96, camera(), [0.0; 4], y, 19.min(96 - y))
+                .unwrap(),
+        );
+    }
+    assert_eq!(patched, banded, "banded export changed pixels");
+
+    // The nested lens samples the stripe transition before the scope multiplies.
+    let mut blended = Engine::new(Limits::default());
+    blended.apply(&make(red, 1)).unwrap();
+    let lens = pixel(&render(&mut blended), 65, 48);
+    assert_eq!((lens[0], lens[1], lens[3]), (0, 0, 255));
+    assert!(
+        (40..230).contains(&lens[2]),
+        "multiply over refracted stripes: {lens:?}"
+    );
+}

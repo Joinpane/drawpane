@@ -56,11 +56,15 @@ const REPLACEMENT_SUITES = new Set(["shadows", "blurs", "linear-blends", "masks"
 const ENGINE_CELL_CAP: Record<string, number> = {
   "glass-stack": 4.5,
 };
-// Both GPU backends on the T4, with the grain smoothed for the mean only.
+// Figma residuals after inheriting the page prefix. Smooth grain for the mean only.
 const GLASS_SCOPE_LIMITS: Record<string, { mean: number; p99: number; worstTile: number }> = {
-  "picture-mask": { mean: 2.25, p99: 55, worstTile: 28 },
-  "layer-blur": { mean: 3.7, p99: 67, worstTile: 33 },
-  noise: { mean: 3.35, p99: 76, worstTile: 36 },
+  "picture-mask": { mean: 0.6, p99: 12, worstTile: 4.8 },
+  "layer-blur": { mean: 0.8, p99: 11, worstTile: 4.2 },
+  noise: { mean: 0.95, p99: 35, worstTile: 6.7 },
+  "blend-in-blur": { mean: 0.82, p99: 11, worstTile: 4.6 },
+  "blur-multiply": { mean: 2.8, p99: 48, worstTile: 27.5 },
+  "mask-in-multiply": { mean: 2.25, p99: 40, worstTile: 22 },
+  texture: { mean: 1.35, p99: 73, worstTile: 15.3 },
 };
 const ENGINE_SUITE_MEAN_CAP: Record<string, number> = {
   "glass-stack": 3.5,
@@ -91,9 +95,9 @@ const MIN_DRAWN: Record<string, number> = {
   "glass-probe": 14,
   "glass-probe-2": 31,
   "glass-stack": 15,
-  "glass-scopes": 3,
+  "glass-scopes": 7,
   "linear-blends": 19,
-  masks: 7,
+  masks: 8,
   grain: 12,
 };
 
@@ -401,7 +405,12 @@ test.describe("Render engine parity", () => {
         const figmaPx = Buffer.from(theirs.data, "base64");
         const cpuPx = Buffer.from(cpu.rgba, "base64");
         const vsFigma = score(cpuPx, figmaPx, width, height);
-        const scopeLimit = suite.suite === "glass-scopes" ? GLASS_SCOPE_LIMITS[cell.id] : undefined;
+        const scopeLimit =
+          suite.suite === "masks" && cell.id === "luminance-translucent"
+            ? { mean: 0.4, p99: 5, worstTile: 2 }
+            : suite.suite === "glass-scopes"
+              ? GLASS_SCOPE_LIMITS[cell.id]
+              : undefined;
         const tailLimit =
           suite.suite === "glass-stack"
             ? { p99: cell.id === "diff-params" ? 125 : 95, worstTile: 46 }

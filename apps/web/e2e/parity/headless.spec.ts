@@ -343,11 +343,15 @@ test.describe("Render parity: canvas and headless", () => {
           },
           { frame, scale: SCALE },
         );
-        // The circular edge in this cell exposes Skia's platform-dependent CSS blur.
-        // Judge the engine against the same captured Figma pixels on every host.
+        // The circle exposes platform-dependent CSS blur. The translucent mask
+        // tests Figma's coverage rule directly.
         const figmaBlur = suite.suite === "corners" && cell.id === "layer-blur";
-        const referencePng = figmaBlur
-          ? readFileSync(join(FIGMA, "../goldens/corners/layer-blur.png")).toString("base64")
+        const figmaMask = suite.suite === "masks" && cell.id === "luminance-translucent";
+        const fromFigma = figmaBlur || figmaMask;
+        const referencePng = fromFigma
+          ? readFileSync(join(FIGMA, "../goldens", suite.suite, `${cell.id}.png`)).toString(
+              "base64",
+            )
           : canvasPng;
         const theirs = await rgba(page, referencePng);
         const ours = await rgba(page, headless.png);
@@ -365,9 +369,9 @@ test.describe("Render parity: canvas and headless", () => {
           suite.blur,
         );
         scores[cell.id] = diff.mean;
-        if (figmaBlur) {
-          expect(diff.p99, "Figma blur p99").toBeLessThanOrEqual(5);
-          expect(diff.worstTile, "Figma blur worst tile").toBeLessThanOrEqual(2);
+        if (fromFigma) {
+          expect(diff.p99, "Figma p99").toBeLessThanOrEqual(5);
+          expect(diff.worstTile, "Figma worst tile").toBeLessThanOrEqual(2);
         }
         const limit = recorded[suite.suite]?.[cell.id];
         if (!updating && limit !== undefined && diff.mean > limit)
@@ -378,7 +382,7 @@ test.describe("Render parity: canvas and headless", () => {
           ? `<br><small>approximate: ${headless.approximate.join(", ")}</small>`
           : "";
         rows.push(
-          `<tr><th>${cell.id}<br><small>${figmaBlur ? "Figma · " : ""}${diff.mean} · p99 ${diff.p99} · worst tile ${diff.worstTile}${limit !== undefined ? ` · max ${limit}` : ""}</small>${note}</th><td><img src="data:image/png;base64,${referencePng}"></td><td><img src="data:image/png;base64,${headless.png}"></td><td><img src="${await img(diff.heat)}"></td></tr>`,
+          `<tr><th>${cell.id}<br><small>${fromFigma ? "Figma · " : ""}${diff.mean} · p99 ${diff.p99} · worst tile ${diff.worstTile}${limit !== undefined ? ` · max ${limit}` : ""}</small>${note}</th><td><img src="data:image/png;base64,${referencePng}"></td><td><img src="data:image/png;base64,${headless.png}"></td><td><img src="${await img(diff.heat)}"></td></tr>`,
         );
       }
       const values = Object.values(scores);

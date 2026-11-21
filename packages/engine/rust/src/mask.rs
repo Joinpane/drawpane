@@ -8,7 +8,10 @@ pub(crate) fn coverage(pixel: &[u8], kind: u32) -> f32 {
     match kind {
         MASK_OUTLINE_PICTURE => f32::from(u8::from(pixel[3] != 0)),
         MASK_LUMINANCE => {
-            (0.2126 * f32::from(pixel[0]) + 0.7152 * f32::from(pixel[1]) + 0.0722 * f32::from(pixel[2])) / 255.0
+            // Figma applies opacity to the luminance of the premultiplied picture.
+            let luminance =
+                (0.2126 * f32::from(pixel[0]) + 0.7152 * f32::from(pixel[1]) + 0.0722 * f32::from(pixel[2])) / 255.0;
+            luminance * (f32::from(pixel[3]) / 255.0)
         }
         _ => f32::from(pixel[3]) / 255.0,
     }
@@ -39,11 +42,14 @@ mod tests {
     }
 
     #[test]
-    fn luminance_uses_rec709_premultiplied_weights() {
+    fn luminance_uses_rec709_premultiplied_weights_and_opacity() {
         assert_eq!(coverage(&[255, 255, 255, 255], MASK_LUMINANCE), 1.0);
         assert_eq!(coverage(&[0, 0, 0, 255], MASK_LUMINANCE), 0.0);
         assert_eq!(coverage(&[0, 255, 0, 255], MASK_LUMINANCE), 0.7152);
-        assert_eq!(coverage(&[128, 128, 128, 128], MASK_LUMINANCE), 128.0 / 255.0);
+        assert_eq!(
+            coverage(&[128, 128, 128, 128], MASK_LUMINANCE),
+            (128.0f32 / 255.0).powi(2)
+        );
     }
 
     #[test]

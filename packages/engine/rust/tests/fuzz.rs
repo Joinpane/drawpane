@@ -58,6 +58,13 @@ fn cases(default: u32) -> u32 {
         .unwrap_or(default)
 }
 
+/// The SplitMix64 finalizer spreads adjacent case keys across the xorshift state.
+fn case_rng(key: u64) -> Rng {
+    let key = (key ^ (key >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    let key = (key ^ (key >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    Rng((key ^ (key >> 31)).max(1))
+}
+
 fn run_sequences(readers: bool, effects: bool, default_cases: u32) {
     let base = seed() ^ if readers { 0xabcd } else { 0 };
     let mut changed_pixels = 0u64;
@@ -68,7 +75,7 @@ fn run_sequences(readers: bool, effects: bool, default_cases: u32) {
         {
             continue;
         }
-        let mut r = Rng(s | 1);
+        let mut r = case_rng(s);
         let n = 4 + r.below(24);
         let mut model = Model::new_with_features(&mut r, n, readers, effects);
         let cam = Camera {
@@ -248,7 +255,7 @@ fn cycles_and_bad_orders_are_refused() {
 
 #[test]
 fn random_bytes_never_panic() {
-    let mut r = Rng(seed() | 1);
+    let mut r = case_rng(seed());
     let model = Model::new(&mut r, 20, true);
     let good = model.fresh(1);
     for _ in 0..cases(3000) {
@@ -325,8 +332,10 @@ fn limits_are_enforced() {
 
 #[test]
 fn tiles_reproduce_the_whole_frame() {
+    let seed = seed();
     for case in 0..cases(20) {
-        bands_match(seed(), case);
+        let key = seed.wrapping_add(u64::from(case) * 77);
+        bands_match(case_rng(key), case);
     }
 }
 
@@ -334,18 +343,17 @@ fn tiles_reproduce_the_whole_frame() {
 fn bands_reproduce_the_whole_frame_where_a_run_of_glyphs_crosses_them() {
     // CI's random seed that found a run's image, cut to a band, a level off the whole frame's
     // (vello_cpu rounds an image's pixels by its size): the CPU draws a run's masks one by one.
-    bands_match(1_795_184_124_632_858_455, 27);
+    bands_match(Rng(1_795_184_124_632_860_535), 27);
 }
 
 #[test]
 fn bands_reproduce_the_whole_frame_for_rotated_glyph_outlines() {
     // CI found a one-level difference in an outline fill when a band culled other glyphs in the run.
-    bands_match(1_795_215_203_959_837_193, 212);
+    bands_match(Rng(1_795_215_203_959_853_517), 212);
 }
 
-/// Case `case` of seed `seed`: a random page drawn whole and in bands, bitwise the same.
-fn bands_match(seed: u64, case: u32) {
-    let mut r = Rng(seed.wrapping_add(u64::from(case) * 77) | 1);
+/// Draws the given case whole and in bands. Historical regressions pass their original RNG state.
+fn bands_match(mut r: Rng, case: u32) {
     let model = Model::new(&mut r, 24, case.is_multiple_of(2));
     let mut e = engine();
     // Tiles narrower than the frame, so a band is several tiles.

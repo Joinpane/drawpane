@@ -5111,12 +5111,13 @@ impl Backend for Gpu {
         };
         let (aw, ah) = (active.width, active.height);
         let frame_size = (aw as i32, ah as i32);
-        // An explicitly blended layer contributes one transparent picture, but its own
-        // glass sees the parent's glass-free prefix. Readers in its children see their scope.
-        let scope = self.offscreen_stack.iter().rev().nth(usize::from(read_parent));
-        let backdrop_is_frame = scope.is_none();
-        let (source_origin, source_size, source_tex, source_view) = if let Some(scope) = scope {
-            let target = scope.plane(true);
+        // A lens on an explicitly blended layer reads from its parent. A child lens
+        // inherits that prefix with any preceding glass-free paint from the blend scope.
+        let (base, interiors) =
+            exec::glass_backdrop_layers(&self.offscreen_stack, read_parent, |scope| scope.isolation);
+        let backdrop_is_frame = base.is_none() && interiors.is_empty();
+        let (source_origin, source_size, source_tex, source_view) = if let Some(base) = base {
+            let target = self.offscreen_stack[base].plane(true);
             (
                 target.origin,
                 (u32::from(target.active_size.0), u32::from(target.active_size.1)),
@@ -5165,29 +5166,51 @@ impl Backend for Gpu {
             return Ok(());
         }
 
-        // A single lens can read and write the same plane. Freeze its prefix before
-        // the first chunk, since later chunks' frost and refraction overlap earlier writes.
+        // Compose inherited paint in scratch so it does not become part of the isolated picture.
+        // The same scratch freezes an aliased prefix before any glass chunks write into it.
         let (dst_tex, dst_view, _) = self.plane(false)?;
         let (dst_tex, dst_view) = (dst_tex.clone(), dst_view.clone());
-        let (_, source_view) = if regions.len() > 1 && source_tex == dst_tex {
+        let source_view = if !interiors.is_empty() || (regions.len() > 1 && source_tex == dst_tex) {
             let budget = self.reader_budget_room();
             self.readers
                 .ensure_blur_source_budgeted(&self.device, source_size, budget)?;
             let mut encoder = self.take_encoder(false, "glass prefix snapshot");
             let snapshot = self.readers.blur_source.as_ref().expect("glass prefix snapshot");
-            copy_rect(
-                &mut encoder,
-                &source_tex,
-                &snapshot.texture,
-                (0, 0),
-                (0, 0),
-                source_size,
-            );
-            let source = (snapshot.texture.clone(), snapshot.view.clone());
+            let (tex, view) = (snapshot.texture.clone(), snapshot.view.clone());
+            copy_rect(&mut encoder, &source_tex, &tex, (0, 0), (0, 0), source_size);
+            for layer in interiors {
+                let paint = self.offscreen_stack[layer].plane(true);
+                let offset = (paint.origin.0 - source_origin.0, paint.origin.1 - source_origin.1);
+                let visible = IRect {
+                    x0: offset.0,
+                    y0: offset.1,
+                    x1: offset.0 + i32::from(paint.active_size.0),
+                    y1: offset.1 + i32::from(paint.active_size.1),
+                }
+                .clamp(source_size.0 as i32, source_size.1 as i32);
+                if !visible.is_empty() {
+                    self.readers.encode_composite(
+                        &self.device,
+                        &self.queue,
+                        &mut encoder,
+                        &paint.view,
+                        &view,
+                        offset,
+                        (
+                            visible.x0 as u32,
+                            visible.y0 as u32,
+                            (visible.x1 - visible.x0) as u32,
+                            (visible.y1 - visible.y0) as u32,
+                        ),
+                        1.0,
+                        false,
+                    );
+                }
+            }
             self.stash_encoder(encoder);
-            source
+            view
         } else {
-            (source_tex, source_view)
+            source_view
         };
 
         let has_clip_mask = open.iter().any(|o| {

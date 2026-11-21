@@ -193,7 +193,7 @@ fn picture_coverage(p: vec2i) -> f32 {
         return select(0.0, 1.0, mask.a > 0.0);
     }
     if (params.mask_kind == 5u) {
-        return clamp(dot(mask.rgb, vec3f(0.2126, 0.7152, 0.0722)), 0.0, 1.0);
+        return clamp(dot(mask.rgb, vec3f(0.2126, 0.7152, 0.0722)) * mask.a, 0.0, 1.0);
     }
     return mask.a;
 }

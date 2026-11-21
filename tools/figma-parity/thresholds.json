@@ -145,7 +145,8 @@
     "alpha-translucent": 0.72,
     "alpha-blurred": 1.32,
     "alpha-opacity": 0.4,
-    "luminance-spot": 0.52
+    "luminance-spot": 0.52,
+    "luminance-translucent": 6.1
   },
   "lists": {
     "list-bullets": 4.07,
