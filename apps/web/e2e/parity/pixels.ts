@@ -53,6 +53,8 @@ export interface Difference {
   readonly mean: number;
   /** The 99th percentile of per-pixel difference (max over RGB): local defects show here. */
   readonly p99: number;
+  /** Worst mean RGB error across any 32 × 32 pixel tile. */
+  readonly worstTile: number;
   /** A heat map of the difference, as RGBA base64 (black: same; white: 64 or more apart). */
   readonly heat: string;
 }
@@ -85,12 +87,22 @@ export function compare(
       const n = width * height;
       const per = new Float32Array(n);
       const heat = new Uint8ClampedArray(n * 4);
+      const cols = Math.ceil(width / 32);
+      const rows = Math.ceil(height / 32);
+      const tileSums = new Float64Array(cols * rows);
+      const tileCounts = new Uint32Array(cols * rows);
       let sum = 0;
       for (let i = 0; i < n; i++) {
         const dr = Math.abs((a[i * 4] ?? 0) - (b[i * 4] ?? 0));
         const dg = Math.abs((a[i * 4 + 1] ?? 0) - (b[i * 4 + 1] ?? 0));
         const db = Math.abs((a[i * 4 + 2] ?? 0) - (b[i * 4 + 2] ?? 0));
-        sum += (dr + dg + db) / 3;
+        const rgb = (dr + dg + db) / 3;
+        sum += rgb;
+        const x = i % width;
+        const y = (i - x) / width;
+        const ti = (y >> 5) * cols + (x >> 5);
+        tileSums[ti] = (tileSums[ti] ?? 0) + rgb;
+        tileCounts[ti] = (tileCounts[ti] ?? 0) + 1;
         const d = Math.max(dr, dg, db);
         per[i] = d;
         const v = Math.min(255, d * 4);
@@ -99,6 +111,11 @@ export function compare(
         heat[i * 4 + 2] = v;
         heat[i * 4 + 3] = 255;
       }
+      let worstTile = 0;
+      for (let i = 0; i < tileSums.length; i++) {
+        const c = tileCounts[i] ?? 0;
+        if (c > 0) worstTile = Math.max(worstTile, (tileSums[i] ?? 0) / c);
+      }
       per.sort();
       let s = "";
       for (let i = 0; i < heat.length; i += 0x8000)
@@ -106,6 +123,7 @@ export function compare(
       return {
         mean: Math.round((sum / n) * 100) / 100,
         p99: per[Math.floor(n * 0.99)] ?? 0,
+        worstTile: Math.round(worstTile * 100) / 100,
         heat: btoa(s),
       };
     },

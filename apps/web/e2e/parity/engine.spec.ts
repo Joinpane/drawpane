@@ -97,7 +97,14 @@ const EXPECTED_CELL_FALLBACKS: Record<string, Record<string, readonly string[]>>
   },
 };
 /** Suites whose every cell needs a phase 3B backdrop reader feature (glass). */
-const PHASE_3 = new Set(["glass", "glass-dark", "glass-ellipses", "glass-probe", "glass-probe-2"]);
+const PHASE_3 = new Set([
+  "glass",
+  "glass-dark",
+  "glass-ellipses",
+  "glass-probe",
+  "glass-probe-2",
+  "glass-stack",
+]);
 /**
  * Suites gated against the live current canvas renderer baseline (decision 0040 replacement gate:
  * mean not worse by more than 0.01, worst 32 x 32 tile not worse by more than 1, alpha not worse).
