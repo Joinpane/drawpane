@@ -135,6 +135,15 @@ pub fn blur_reach(sigma: f32) -> f32 {
     }
 }
 
+/// The viewport replay can draw radii above the native kernel limit by reducing its density.
+pub(crate) fn replay_reach(sigma: f32) -> f32 {
+    if !sigma.is_finite() {
+        return blur_reach(sigma);
+    }
+    let ratio = (sigma / MAX_BLUR_SIGMA).max(1.0);
+    blur_reach(sigma / ratio) * ratio
+}
+
 /// Normalised 1D discrete Gaussian weights for integer taps `-r..=r`, where `r = kernel_radius(sigma)`.
 pub fn gaussian_weights(sigma: f32) -> Vec<f32> {
     let r = kernel_radius(sigma);

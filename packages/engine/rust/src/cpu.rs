@@ -2037,6 +2037,7 @@ impl Backend for Cpu {
 
     fn progressive_blur(
         &mut self,
+        _key: (u32, usize),
         op: &ProgressiveBlurOp,
         paths: &[(BezPath, bool)],
         device: Affine,

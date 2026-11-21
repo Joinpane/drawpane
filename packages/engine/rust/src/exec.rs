@@ -198,6 +198,15 @@ impl IRect {
             y1: self.y1.min(o.y1),
         }
     }
+    #[cfg(feature = "gpu-common")]
+    pub(crate) fn translate(self, x: i32, y: i32) -> Self {
+        Self {
+            x0: self.x0 + x,
+            y0: self.y0 + y,
+            x1: self.x1 + x,
+            y1: self.y1 + y,
+        }
+    }
     pub fn inflate(self, dx: i32, dy: i32) -> Self {
         Self {
             x0: self.x0.saturating_sub(dx),
@@ -250,6 +259,9 @@ pub enum PostStep {
 /// How an isolated picture reads and where its result goes when the scope closes.
 #[derive(Clone, Copy, Debug)]
 pub struct Isolation {
+    /// The isolated source extends past the region the parent will display.
+    pub source_for_post_effect: bool,
+
     pub on_main: bool,
     pub on_backdrop: bool,
     pub separate: bool,
@@ -370,6 +382,7 @@ pub trait Backend {
     #[allow(clippy::too_many_arguments)]
     fn progressive_blur(
         &mut self,
+        key: (u32, usize),
         op: &ProgressiveBlurOp,
         paths: &[(BezPath, bool)],
         device: Affine,
@@ -1896,6 +1909,7 @@ impl<B: Backend> Walk<'_, B> {
         let reading = self.needs_backdrop && self.reader_seq < self.last_reader_seq;
         let on_backdrop = reading && (self.backdrop_live || self.isolated_backdrop_depth != 0 || has_reader);
         Isolation {
+            source_for_post_effect: false,
             on_main: !self.current_context,
             on_backdrop,
             separate: on_backdrop && (has_reader || copy_parent),
@@ -2371,6 +2385,7 @@ impl<B: Backend> Walk<'_, B> {
             && (store.subtree_has_blend(id) || reader_fade || crosses_context);
         let use_offscreen = has_post || layer_blend != 0 || through || (isolate && store.subtree_has_pass(id));
         let mut isolation = self.isolation(has_reader, through);
+        isolation.source_for_post_effect = has_post;
         isolation.inherit_glass = has_reader;
         if crosses_context {
             isolation.on_main = true;
@@ -2802,8 +2817,16 @@ impl<B: Backend> Walk<'_, B> {
                             self.stats.coarse += 1;
                         }
                         let open = self.reader_open();
-                        self.backend
-                            .progressive_blur(pb, &paths, device, r.size, inner, blur_coarse, &open)?;
+                        self.backend.progressive_blur(
+                            (id, at),
+                            pb,
+                            &paths,
+                            device,
+                            r.size,
+                            inner,
+                            blur_coarse,
+                            &open,
+                        )?;
                         self.sync_targets(is_context)?;
                     }
                     Op::DropShadow {

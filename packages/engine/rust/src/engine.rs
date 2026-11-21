@@ -1515,7 +1515,7 @@ impl Engine {
             read: Rect,
             reach_px: f64,
             writes_backdrop: bool,
-            native_reads: bool,
+            native_reach_px: f64,
         }
         #[allow(clippy::too_many_arguments)]
         fn collect(
@@ -1525,7 +1525,7 @@ impl Engine {
             parent: Affine,
             alpha: f32,
             parent_context: bool,
-            inside_isolation: bool,
+            inside_post_scope: bool,
             out: &mut Vec<ReaderNode>,
         ) {
             let Some(node) = store.nodes.get(&id) else {
@@ -1547,8 +1547,8 @@ impl Engine {
                 return;
             }
             let inner = if r.isolate() && r.opacity < 1.0 { 1.0 } else { opacity };
-            let inside_isolation =
-                inside_isolation || (r.isolate() && r.opacity < 1.0) || !r.post_effects.is_empty() || r.blend != 0;
+            // Post-effects can sample outside the nominal target of a reader in the picture.
+            let inside_post_scope = inside_post_scope || !r.post_effects.is_empty();
             let box_rect = Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1]));
             let local = r
                 .content_bounds(&|g| store.glyphs.bounds(g))
@@ -1559,7 +1559,7 @@ impl Engine {
                 match op {
                     crate::record::Op::Children => {
                         for &kid in &node.children {
-                            collect(store, view, kid, world, inner, is_context, inside_isolation, out);
+                            collect(store, view, kid, world, inner, is_context, inside_post_scope, out);
                         }
                     }
                     crate::record::Op::Glass(g) if !is_context => {
@@ -1570,7 +1570,7 @@ impl Engine {
                             read: paint.inflate(reach_px, reach_px),
                             reach_px,
                             writes_backdrop: false,
-                            native_reads: false,
+                            native_reach_px: 0.0,
                         });
                     }
                     crate::record::Op::Read { halo, .. } => {
@@ -1581,35 +1581,59 @@ impl Engine {
                             read: paint.inflate(reach_px, reach_px),
                             reach_px,
                             writes_backdrop: true,
-                            native_reads: true,
+                            native_reach_px: reach_px,
                         });
                     }
                     crate::record::Op::BackgroundBlur(b_op) => {
                         let sigma_px = crate::blur::sigma_from_radius(b_op.radius) * scale as f32;
-                        let reach_px = f64::from(crate::blur::blur_reach(sigma_px)).ceil() + 2.0;
+                        let reach_px = f64::from(crate::blur::replay_reach(sigma_px)).ceil() + 2.0;
                         let paint = device.transform_rect_bbox(local);
                         out.push(ReaderNode {
                             paint,
                             read: paint.inflate(reach_px, reach_px),
                             reach_px,
                             writes_backdrop: true,
-                            native_reads: inside_isolation
+                            native_reach_px: if inside_post_scope
                                 || crate::blur::sigma_from_radius(b_op.radius)
                                     * (device.determinant().abs().sqrt() as f32)
-                                    < crate::blur::VIEWPORT_HALO_MIN_SIGMA,
+                                    < crate::blur::VIEWPORT_HALO_MIN_SIGMA
+                            {
+                                reach_px
+                            } else {
+                                0.0
+                            },
                         });
                     }
                     crate::record::Op::ProgressiveBlur(p_op) => {
                         let r = p_op.start_radius.max(p_op.end_radius);
                         let sigma_px = crate::blur::sigma_from_radius(r) * scale as f32;
-                        let reach_px = f64::from(crate::blur::blur_reach(sigma_px)).ceil() + 2.0;
+                        let reach_px = f64::from(crate::blur::replay_reach(sigma_px)).ceil() + 2.0;
                         let paint = device.transform_rect_bbox(local);
+                        #[cfg(feature = "gpu-common")]
+                        let native_reach_px = if inside_post_scope {
+                            reach_px
+                        } else {
+                            let factor = device.determinant().abs().sqrt() as f32;
+                            let sigma = crate::progressive_blur::viewport_native_sigma(
+                                crate::blur::sigma_from_radius(p_op.start_radius) * factor,
+                                crate::blur::sigma_from_radius(p_op.end_radius) * factor,
+                            );
+                            sigma.map_or(reach_px, |sigma| {
+                                if sigma > 0.0 {
+                                    f64::from(crate::blur::blur_reach(sigma)).ceil() + 2.0
+                                } else {
+                                    0.0
+                                }
+                            })
+                        };
+                        #[cfg(not(feature = "gpu-common"))]
+                        let native_reach_px = reach_px;
                         out.push(ReaderNode {
                             paint,
                             read: paint.inflate(reach_px, reach_px),
                             reach_px,
                             writes_backdrop: true,
-                            native_reads: true,
+                            native_reach_px,
                         });
                     }
                     _ => {}
@@ -1647,12 +1671,13 @@ impl Engine {
                     samples = samples.union(visible.inflate(node.reach_px, node.reach_px));
                 }
             }
-            let native_reach = if node.native_reads {
+            let native_reach = if node.native_reach_px > 0.0 {
                 if let Some(crop) = crop {
                     let visible = node.paint.intersect(crop.inflate(native_downstream, native_downstream));
                     if visible.width() > 0.0 && visible.height() > 0.0 {
-                        native_samples = native_samples.union(visible.inflate(node.reach_px, node.reach_px));
-                        node.reach_px + native_downstream
+                        let reach = node.native_reach_px;
+                        native_samples = native_samples.union(visible.inflate(reach, reach));
+                        reach + native_downstream
                     } else {
                         0.0
                     }
