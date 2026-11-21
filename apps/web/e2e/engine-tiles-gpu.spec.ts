@@ -603,8 +603,7 @@ for (const build of ["browser", "webgl"] as const) {
     expect(res.tightCode).toBe(4);
     expect(res.movingInfo).toMatchObject({ ok: true, exact: false });
     expect(res.movingPixelCount).toBe(513 * 511);
-    expect(res.movingAccent).toBeGreaterThan(26);
-    expect(res.movingAccent).toBeLessThan(255);
+    expect(res.movingAccent).toBe(255);
     expect(res.settledAccent).toBe(255);
     expect(res.movingInfo.reads).toBeGreaterThan(0);
     expect(res.movingCentre[3]).toBe(255);

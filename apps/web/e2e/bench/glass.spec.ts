@@ -597,7 +597,7 @@ test.describe("Glass cost", () => {
       const w = window as unknown as W;
       const view = w.drawpaneEngineView;
       const useEngine = !!view?.last.supported;
-      const frame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
+      const frame = () => new Promise<number>((resolve) => requestAnimationFrame(resolve));
       await frame();
       await frame();
       w.drawpaneFrames.reset();
@@ -621,12 +621,14 @@ test.describe("Glass cost", () => {
             { op: "set", id: cardId, prop: "x", value: x },
             { op: "set", id: cardId, prop: "y", value: y },
           ]);
-          await frame();
-          times.push(performance.now());
+          const presentedAt = await frame();
+          times.push(presentedAt);
           if (useEngine && view) {
             if (view.shown.n > lastShown) {
               lastShown = view.shown.n;
-              shownTimes.push(view.shown.at);
+              // The first animation frame that observes GPU completion. The browser's
+              // frame clock excludes variation in when main-thread callbacks execute.
+              shownTimes.push(presentedAt);
             }
             if (view.last.n > lastDrawn) {
               lastDrawn = view.last.n;

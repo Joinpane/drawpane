@@ -1070,3 +1070,11 @@ Phase 3B executes backdrop readers on CPU and GPU in the tiled renderer and band
   - The restacked T4 WebGPU readback benchmark passed both cases. The six-layer exact and coarse fence p95 values were 31.9 and 4.2 ms. Stacked drag content p95 was 6.0 ms, with 3.1 ms encoding and 1.8 ms rendering. Latest exact settlement took at most 122.2 ms.
   - Onscreen T4 WebGL2 measured 50.2 and 17.2 ms for the six-layer exact and coarse fence p95. Stacked drag content p95 was 11.1 ms, including 5.0 ms encoding and 4.0 ms rendering. Confirmed presentation intervals were 16.6 ms median, 19.5 ms p95 and 25.4 ms p99. The coarse six-layer fence and the drag work and presentation tails missed their gates.
 - **Open conformance coverage** includes desktop WebGPU presentation with hardware compositing and native Safari Metal and ANGLE-Metal.
+
+### Reader-only motion
+
+Whole-view motion draws ordinary paint at device resolution. The stand-in for an unclipped reader samples a half-resolution backdrop pyramid. A short top-level drag can reuse the stationary paint before the first affected layer or effect. The cache is limited to one view and is dropped when that paint may change or the view settles. An exact frame reruns the reader passes at full quality.
+
+In paired Chromium/WebGL2 runs on the T4, stacked drag main-thread p95 fell from 6.7 to 3.6 ms, including encoding from 3.3 to 1.2 ms. The six-layer coarse GPU fence p95 was 13.5 ms. Stacked drag frame intervals were 16.6 / 17.5 ms (p50 / p95), compared with 16.5 / 17.9 ms. The GPU-completion presentation proxy remained above the target at 18.0 ms p95. Chromium WebGPU readback and Firefox Xvfb both remained above 16.7 ms p95.
+
+The repeated paired run used the browser's animation-frame timestamp on both revisions. The timestamp marks the frame in which the benchmark observed a GPU completion. It excludes delay within that frame before the callback ran. Chromium WebGL2 passed with 16.7 ms presentation p95 (main 16.8 ms), 8.8 ms six-layer coarse GPU fence p95 (main 18.0 ms) and 4.9 ms stacked drag content p95 (main 8.4 ms). Linux WebKit's drag content p95 improved from 17 to 13 ms. Its presentation p95 was still above the gate at 37 ms.
