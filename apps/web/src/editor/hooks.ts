@@ -84,18 +84,18 @@ export function useDocSelector<T>(
   equal: (a: T, b: T) => boolean = Object.is,
 ): T {
   const editor = useEditor();
-  const cache = useRef<{ version: number; value: T } | null>(null);
+  // Kept for one document and one selector: two documents (a version's preview and the live
+  // file) can be at the same version number.
+  const cache = useRef<{ doc: Doc; select: unknown; version: number; value: T } | null>(null);
   const getSnapshot = useCallback(() => {
     const doc = editor.doc;
-    const known = cache.current;
+    const known =
+      cache.current?.doc === doc && cache.current.select === select ? cache.current : null;
     if (known && known.version === doc.version) return known.value;
     const next = select(doc);
-    if (known && equal(known.value, next)) {
-      cache.current = { version: doc.version, value: known.value };
-      return known.value;
-    }
-    cache.current = { version: doc.version, value: next };
-    return next;
+    const value = known && equal(known.value, next) ? known.value : next;
+    cache.current = { doc, select, version: doc.version, value };
+    return value;
   }, [editor, select, equal]);
   const subscribe = useCallback((cb: () => void) => editor.doc.subscribe(cb), [editor]);
   return useSyncExternalStore(subscribe, getSnapshot);
