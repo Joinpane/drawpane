@@ -35,7 +35,7 @@ import { blurSigma } from "../post-effects";
 import { glyphTable } from "../saved-glyphs";
 import type { Scene } from "../scene";
 import type { TextMeasurer } from "../text";
-import { encodeLayer, type LayerContext, localTransform } from "./layer";
+import { type ColorGlyph, encodeLayer, type LayerContext, localTransform } from "./layer";
 import { svgPathData } from "./svg-path";
 
 export interface EngineImage {
@@ -47,6 +47,7 @@ export interface EngineImage {
 export interface DisplayListOptions {
   /** An image's engine handle and natural size, once the engine holds its pixels; else null. */
   readonly image?: (ref: string) => EngineImage | null;
+  readonly colorGlyph?: (text: string, font: string, scale: number) => ColorGlyph | null;
 }
 
 export interface BuildStats {
@@ -88,6 +89,9 @@ export class DisplayListBuilder {
   readonly #scene: Scene;
   readonly #measurer: TextMeasurer;
   readonly #image: (ref: string) => EngineImage | null;
+  readonly #colorGlyph: DisplayListOptions["colorGlyph"];
+  readonly #colorText = new Set<string>();
+  #colorScale = 1;
   #page: string | null = null;
   #revision = 0;
   /** The engine refused a message: the next one is a fresh list. */
@@ -135,8 +139,9 @@ export class DisplayListBuilder {
   >();
   /** The page rectangle in view (`setView`), for ordering the queue. */
   #view: { x0: number; y0: number; x1: number; y1: number } | null = null;
-  /** Faces each layer's text waits for, and the layers each face is waited for by. */
-  readonly #waits = new Map<string, readonly string[]>();
+  /** Layers whose frame is provisional and the faces each encoded layer depends on. */
+  readonly #waits = new Set<string>();
+  readonly #dependencies = new Map<string, readonly string[]>();
   readonly #waitingOn = new Map<string, Set<string>>();
   /** The measurer's face generation (`TextMeasurer.faceGeneration`) text was last encoded at. */
   #faceGeneration = 0;
@@ -172,6 +177,7 @@ export class DisplayListBuilder {
     this.#scene = scene;
     this.#measurer = measurer;
     this.#image = options.image ?? (() => null);
+    this.#colorGlyph = options.colorGlyph;
   }
 
   get pageId(): string | null {
@@ -234,11 +240,15 @@ export class DisplayListBuilder {
       }
       return g;
     };
+    const raster = this.#colorGlyph;
     return {
       scene: this.#scene,
       measurer: this.#measurer,
       image: (ref) => this.#image(ref),
       glyph,
+      ...(raster
+        ? { colorGlyph: (text: string, font: string) => raster(text, font, this.#colorScale) }
+        : {}),
       shapedGlyph: (g) => {
         let h = this.#shaped.get(g);
         // A handle freed since is gone: intern the outline again.
@@ -266,8 +276,12 @@ export class DisplayListBuilder {
       this.#deferred.delete(node.id);
       this.#visible.delete(node.id);
     }
-    this.#wait(node.id, e.waiting);
+    if (e.waiting.length) this.#waits.add(node.id);
+    else this.#waits.delete(node.id);
+    this.#watchFaces(node.id, [...new Set([...e.waiting, ...e.faceDependencies])]);
     this.#useImages(node.id, e.images);
+    if (e.hasColorGlyphs) this.#colorText.add(node.id);
+    else this.#colorText.delete(node.id);
     if (e.record.unsupported) this.unsupported.set(node.id, e.record.unsupported);
     else this.unsupported.delete(node.id);
     if (refusingBits(e.record.unsupported)) this.#refused.add(node.id);
@@ -282,18 +296,18 @@ export class DisplayListBuilder {
     this.#queue.push(id);
   }
 
-  /** Notes the faces a layer's text waits for now, forgetting those it waited for before. */
-  #wait(id: string, faces: readonly string[]): void {
-    for (const face of this.#waits.get(id) ?? []) {
+  /** Indexes faces that can change a layer's shaping, including late replacements. */
+  #watchFaces(id: string, faces: readonly string[]): void {
+    for (const face of this.#dependencies.get(id) ?? []) {
       const ids = this.#waitingOn.get(face);
       ids?.delete(id);
       if (ids?.size === 0) this.#waitingOn.delete(face);
     }
     if (faces.length === 0) {
-      this.#waits.delete(id);
+      this.#dependencies.delete(id);
       return;
     }
-    this.#waits.set(id, faces);
+    this.#dependencies.set(id, faces);
     for (const face of faces) {
       const ids = this.#waitingOn.get(face) ?? new Set<string>();
       this.#waitingOn.set(face, ids);
@@ -360,6 +374,14 @@ export class DisplayListBuilder {
       return;
     this.#view = view;
     if (this.#deferred.size > 0) this.#rescan();
+  }
+
+  /** Keep bitmap emoji sharp at a new zoom without reshaping other text. */
+  setColorScale(deviceScale: number): void {
+    const bucket = Math.max(1, Math.min(16, 2 ** Math.ceil(Math.log2(deviceScale))));
+    if (bucket === this.#colorScale) return;
+    this.#colorScale = bucket;
+    for (const id of this.#colorText) this.#extra.add(id);
   }
 
   /** Notes the images a layer's record paints now, forgetting those it painted before. */
@@ -688,6 +710,7 @@ export class DisplayListBuilder {
     this.#imagesOf.clear();
     this.#imagesBy.clear();
     this.#texts.clear();
+    this.#colorText.clear();
     this.#pendingText.clear();
     this.#deferred.clear();
     this.#queue = [];
@@ -695,6 +718,7 @@ export class DisplayListBuilder {
     this.#rescan();
     this.#bounds.clear();
     this.#waits.clear();
+    this.#dependencies.clear();
     this.#waitingOn.clear();
     this.#extra.clear();
     this.unsupported.clear();
@@ -804,10 +828,12 @@ export class DisplayListBuilder {
       if (node) this.#kids.get(node.parent)?.delete(at);
       this.#nodes.delete(at);
       this.#texts.delete(at);
+      this.#colorText.delete(at);
       this.#pendingText.delete(at);
       this.#deferred.delete(at);
       this.#visible.delete(at);
-      this.#wait(at, []);
+      this.#waits.delete(at);
+      this.#watchFaces(at, []);
       this.unsupported.delete(at);
       this.#refused.delete(at);
       this.#useGlyphs(at, null);
@@ -866,8 +892,13 @@ export class DisplayListBuilder {
         // Only faces arrived (or turned out unavailable): what waited for them is encoded again,
         // a few at a time, what's in view first; nothing else's layout depended on them.
         for (const [face, ids] of this.#waitingOn)
-          if ((this.#measurer.faceStatus?.(face) ?? "ready") !== "loading")
+          if (
+            this.#measurer.faceRevision
+              ? this.#measurer.faceRevision(face) > this.#faceGeneration
+              : this.#measurer.faceStatus?.(face) !== "loading"
+          ) {
             for (const id of ids) this.#defer(id);
+          }
         for (const id of this.#pendingText) this.#defer(id);
       } else {
         // Fonts, aliases or the catalog changed: every text's layout may have moved. Encoded

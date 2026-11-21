@@ -5,6 +5,7 @@ import { nodeRasteriser } from "@drawpane/raster/node";
 import { RESVG_MAX_BYTES } from "@drawpane/raster/wasm-limits";
 import { beforeAll, describe, expect, it } from "vitest";
 import { Doc } from "../src/doc";
+import { HarfBuzzMeasurer } from "../src/harfbuzz-measurer";
 import {
   approximations,
   base64,
@@ -103,6 +104,49 @@ describe("renderPng", () => {
       { scale: 1, fonts: [] },
     );
     expect([...px.data.subarray(0, 4)]).toEqual([255, 0, 0, 255]);
+  });
+
+  it("measures and paints a Noto subset for Han text in an unavailable face", async () => {
+    const fixture = readFileSync(new URL("./fixtures/NotoSansSC-Subset.ttf", import.meta.url));
+    const noto = fixture.buffer.slice(fixture.byteOffset, fixture.byteOffset + fixture.byteLength);
+    const fallback = font.buffer.slice(font.byteOffset, font.byteOffset + font.byteLength);
+    const requested: Face[] = [];
+    const load = async (face: Face) => {
+      requested.push(face);
+      if (face.family === "Noto Sans SC" && face.subset === "中漢") return noto;
+      return face.family === "Instrument Sans" ? fallback : null;
+    };
+    const shaper = new HarfBuzzMeasurer(load);
+    const r = createHeadlessRenderer({
+      measurer: shaper,
+      rasteriser,
+      fonts: load,
+      images: async () => null,
+    });
+    const d = doc([
+      layer("shown", "text", {
+        characters: "漢中漢",
+        fontFamily: "Missing",
+        fontSize: 24,
+        width: 90,
+        height: 42,
+      }),
+      layer("hidden", "text", { characters: "日", visible: false }),
+    ]);
+    const out = await r.renderPng(d, "p");
+    expect(requested.filter((face) => face.subset).map((face) => face.subset)).toEqual([
+      "中漢",
+      "中漢",
+    ]);
+    expect(shaper.approximations.some((face) => face.reason === "glyphs")).toBe(false);
+    const png = `data:image/png;base64,${base64(out.png)}`;
+    const rendered = rasteriser.pixels(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="90" height="42"><image width="90" height="42" href="${png}"/></svg>`,
+      { scale: 1, fonts: [] },
+    );
+    expect(
+      rendered.data.filter((alpha, index) => index % 4 === 3 && alpha > 0).length,
+    ).toBeGreaterThan(300);
   });
 
   it("draws a page's layers together", async () => {

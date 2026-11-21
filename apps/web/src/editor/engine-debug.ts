@@ -25,6 +25,7 @@ import {
   RenderEngine,
   unsupportedNames,
 } from "@drawpane/engine";
+import { colorBitmap } from "./color-glyphs";
 import { imagesFor } from "./media";
 
 const toBase64 = (bytes: Uint8Array) => {
@@ -118,12 +119,29 @@ export function engineDebug(editor: Editor) {
   let canvas: CanvasRenderer | null = null;
 
   function builder(
-    _pageId: string,
     uploaded: Map<string, { handle: number; width: number; height: number }>,
+    e?: RenderEngine,
+    scale = 1,
   ): DisplayListBuilder {
-    return new DisplayListBuilder(editor.scene, editor.measurer, {
+    const b = new DisplayListBuilder(editor.scene, editor.measurer, {
       image: (ref) => uploaded.get(ref) ?? null,
+      colorGlyph: (text, font, rasterScale) => {
+        if (!e) return null;
+        const sprite = colorBitmap(text, font, rasterScale);
+        if (!sprite) return null;
+        let held = uploaded.get(sprite.ref);
+        if (!held) {
+          const { width, height, data } = sprite.pixels;
+          const handle = uploaded.size + 1;
+          if (!e.putImage(handle, width, height, new Uint8Array(data.buffer)).ok) return null;
+          held = { handle, width: sprite.width, height: sprite.height };
+          uploaded.set(sprite.ref, held);
+        }
+        return { ...sprite, ...held };
+      },
     });
+    b.setColorScale(scale);
+    return b;
   }
 
   const unsupportedOf = (b: DisplayListBuilder) => {
@@ -164,7 +182,7 @@ export function engineDebug(editor: Editor) {
       // the first try, and the list sends it provisional (bars) meanwhile. Wait for it (as the
       // canvas's parity spec waits for fonts), up to 20 s: what's drawn is the text itself.
       const make = () => {
-        const b = builder(options.pageId, uploaded);
+        const b = builder(uploaded, e, options.scale);
         return {
           b,
           list: options.ids
@@ -177,7 +195,7 @@ export function engineDebug(editor: Editor) {
       const t0 = performance.now();
       // A fresh list replaces whatever the engine held: made for a revision past the engine's
       // (fresh lists only move the revision forward).
-      const b = builder(options.pageId, uploaded);
+      const b = builder(uploaded, e, options.scale);
       b.acknowledge(false, e.revision);
       const list = options.ids
         ? b.buildLayers(options.ids, { context: options.context })
@@ -371,7 +389,7 @@ export function engineDebug(editor: Editor) {
     } {
       const cpu = engines.cpu;
       const uploaded = (cpu && uploadedByEngine.get(cpu)) || new Map();
-      const b = builder(pageId, uploaded);
+      const b = builder(uploaded);
       const list = ids ? b.buildLayers(ids, { context }) : b.build(pageId);
       return {
         list: toBase64(list),
@@ -489,7 +507,7 @@ export function engineDebug(editor: Editor) {
 
     /** Builds the page's list and times a patch from a one-layer change (the bench's numbers). */
     timeBuild(pageId: string): { buildMs: number; records: number; bytes: number } {
-      const b = builder(pageId, new Map());
+      const b = builder(new Map());
       const t0 = performance.now();
       const list = b.build(pageId);
       return { buildMs: performance.now() - t0, records: b.stats.records, bytes: list.length };

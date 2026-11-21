@@ -36,7 +36,7 @@
  * render parity suite (apps/web/e2e/parity/headless.spec.ts) measures how
  * closely.
  */
-import { getProp, type NodeRecord } from "@drawpane/model";
+import { getProp, type NodeRecord, type ScriptSubset, scriptSubsets } from "@drawpane/model";
 import type { Face, FontBytesLoader, Rasteriser } from "@drawpane/raster";
 import type { Doc } from "./doc";
 import { ExportError, exportBounds, fitScale, imageRefs, snapToPixels } from "./export";
@@ -212,6 +212,20 @@ export function facesUsed(
   return [...faces.values()];
 }
 
+/** The outline subsets a snapshot can use, including descendants of its selected layers. */
+export function scriptSubsetsUsed(doc: Doc, ids: readonly string[]): ScriptSubset[] {
+  const text: string[] = [];
+  const stack = [...ids];
+  while (stack.length) {
+    const id = stack.pop() as string;
+    const node = doc.get(id);
+    if (!node || node.props.visible === false) continue;
+    if (node.type === "text") text.push(getProp(node.props, "characters"));
+    for (const child of doc.childIds(id)) stack.push(child);
+  }
+  return scriptSubsets(text);
+}
+
 /** The effects in these layers that SVG approximates. */
 export function approximations(doc: Doc, ids: readonly string[]): RenderApproximation[] {
   const found = new Set<RenderApproximation>();
@@ -248,7 +262,7 @@ export function createHeadlessRenderer(deps: HeadlessRenderDeps) {
   const fallback = deps.fallbackFamily ?? DEFAULT_FALLBACK;
 
   /** Font files for the faces, in the fallback family where a family has none. */
-  const fontsFor = async (faces: readonly Face[]) => {
+  const fontsFor = async (faces: readonly Face[], scripts: readonly ScriptSubset[]) => {
     const missing: Face[] = [];
     const files = await Promise.all(
       faces.map(async (face): Promise<Uint8Array | null> => {
@@ -272,7 +286,13 @@ export function createHeadlessRenderer(deps: HeadlessRenderDeps) {
     // draws as a box, as in the editor.
     const unique = new Map<ArrayBufferLike, Uint8Array>();
     const box = faces.length > 0 ? [new Uint8Array(missingGlyphFont())] : [];
-    for (const f of [...files, ...stand, ...box])
+    const outlines = await Promise.all(
+      scripts.map(async (subset) => {
+        const bytes = await deps.fonts({ ...subset, italic: false, weight: 400 }).catch(() => null);
+        return bytes ? new Uint8Array(bytes) : null;
+      }),
+    );
+    for (const f of [...files, ...stand, ...box, ...outlines])
       if (f && !unique.has(f.buffer)) unique.set(f.buffer, f);
     return { fonts: [...unique.values()], missing: missing.map(faceName) };
   };
@@ -387,7 +407,9 @@ export function createHeadlessRenderer(deps: HeadlessRenderDeps) {
       const longest = Math.max(width, height);
       const smallest =
         longest > MIN_HEADLESS_SIDE ? roundScale((scale * MIN_HEADLESS_SIDE) / longest) : scale;
-      const fonts = await fontsFor(facesUsed(doc, ids, deps.measurer));
+      const scripts = scriptSubsetsUsed(doc, ids);
+      await deps.measurer.prepareScriptFallbacks?.(scripts).catch(() => {});
+      const fonts = await fontsFor(facesUsed(doc, ids, deps.measurer), scripts);
       let fixed = RASTER_BASE_BYTES + fonts.fonts.reduce((n, f) => n + f.length, 0);
       const least = perPixel * pixels(smallest);
       if (memory !== undefined && fixed + least > memory)

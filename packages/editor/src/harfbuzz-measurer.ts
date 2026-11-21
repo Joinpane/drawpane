@@ -35,7 +35,7 @@
  * says which families were, so a caller can report it. Font bytes come
  * through a loader, so this file stays free of any platform.
  */
-import type { NodeRecord } from "@drawpane/model";
+import type { NodeRecord, ScriptSubset } from "@drawpane/model";
 import { getProp } from "@drawpane/model";
 import { acquireFace, isHarfBuzzOutOfMemory, releaseFace } from "./harfbuzz-faces";
 import { isPrivateUse, MISSING_GLYPH_FAMILY, missingGlyphFont } from "./missing-glyph-font";
@@ -51,6 +51,7 @@ import {
   shapingRun,
   type TextMeasurer,
 } from "./text";
+import type { TextDirection } from "./text-bidi";
 import { FALLBACK_FAMILY, fontRuns, lastResortWidth } from "./text-fallback";
 
 type HarfBuzz = typeof import("harfbuzzjs");
@@ -149,7 +150,7 @@ export function parseFont(font: string): ParsedFont | null {
     /\s*(?:"([^"]*)"|'([^']*)'|([^,]+))\s*,?/g,
   )) {
     const raw = (dq ?? sq ?? bare ?? "").trim();
-    if (!raw || GENERIC.has(raw.toLowerCase())) continue;
+    if (!raw || GENERIC.has(raw.toLowerCase()) || raw.startsWith("Drawpane Noto ")) continue;
     // Self-hosted variable fonts register as "<Family> Variable".
     const name = raw.replace(/ Variable$/, "");
     if (!families.includes(name)) families.push(name);
@@ -190,9 +191,11 @@ export function measuredFaces(
  * draws it at any, so it's keyed by its family alone.
  */
 const measuredKey = (f: MeasuredFace) =>
-  f.canvas && f.family === MISSING_GLYPH_FAMILY
-    ? `canvas\u0000${f.family}`
-    : `${f.canvas ? "canvas" : f.variable ? "variable" : "static"}\u0000${f.family}\u0000${f.weight}\u0000${f.italic}`;
+  f.subset !== undefined
+    ? `canvas\u0000${f.family}\u0000${f.subset}`
+    : f.canvas && f.family === MISSING_GLYPH_FAMILY
+      ? `canvas\u0000${f.family}`
+      : `${f.canvas ? "canvas" : f.variable ? "variable" : "static"}\u0000${f.family}\u0000${f.weight}\u0000${f.italic}`;
 
 /**
  * What a face leaves free in HarfBuzz's memory, at least, once it has
@@ -259,6 +262,7 @@ export class HarfBuzzMeasurer implements TextMeasurer {
   readonly #loadHarfBuzz: () => Promise<HarfBuzz>;
   #harfBuzz: Promise<HarfBuzz> | null = null;
   readonly #faces = new Map<string, CanvasEntry>();
+  readonly #scriptFaces = new Map<string, MeasuredFace>();
   /** Widths and metrics taken, with what was approximated taking them (noted again on each use). */
   readonly #widths = new Map<string, Cached<number>>();
   readonly #metrics = new Map<string, Cached<FontMetrics | null>>();
@@ -297,6 +301,23 @@ export class HarfBuzzMeasurer implements TextMeasurer {
     this.#approximations.clear();
   }
 
+  async prepareScriptFallbacks(subsets: readonly ScriptSubset[]): Promise<void> {
+    const faces = subsets.map((subset) => ({
+      ...subset,
+      weight: 400,
+      italic: false,
+      canvas: true,
+    }));
+    const keys = new Set(faces.map(measuredKey));
+    for (const [key, face] of this.#scriptFaces) {
+      if (keys.has(key)) continue;
+      this.#unload([face]);
+      this.#scriptFaces.delete(key);
+    }
+    for (const face of faces) this.#scriptFaces.set(measuredKey(face), face);
+    await this.load(faces);
+  }
+
   /** Whether a face is ready to measure in, still loading, or has no file. */
   status(face: MeasuredFace): "loading" | "ready" | "unavailable" {
     if (!face.canvas) return this.shaper.status(face);
@@ -318,7 +339,7 @@ export class HarfBuzzMeasurer implements TextMeasurer {
     const all = new Map<string, MeasuredFace>();
     for (const face of list) {
       all.set(measuredKey(face), face);
-      if (face.canvas) {
+      if (face.canvas && face.subset === undefined) {
         const fallback = { ...face, family: this.fallbackFamily };
         all.set(measuredKey(fallback), fallback);
         const box = { ...face, family: MISSING_GLYPH_FAMILY };
@@ -367,7 +388,7 @@ export class HarfBuzzMeasurer implements TextMeasurer {
     this.#generation++;
   }
 
-  width(font: string, text: string, run?: ShapingRun | null): number {
+  width(font: string, text: string, run?: ShapingRun | null, direction?: TextDirection): number {
     // As ShapingMeasurer: shaped when the run's face is at hand, else as the canvas has it.
     if (run) {
       const shaped = this.shaper.shape(text, run);
@@ -375,9 +396,9 @@ export class HarfBuzzMeasurer implements TextMeasurer {
       if (this.shaper.status(shapingFace(run)) === "loading") this.#approximate(run, "face");
     }
     this.#fresh();
-    return this.#cached(this.#widths, `${font}\u0000${text}`, () => {
+    return this.#cached(this.#widths, `${font}\u0000${direction ?? ""}\u0000${text}`, () => {
       const parsed = parseFont(font);
-      return parsed ? this.#measure(parsed, text) : 0;
+      return parsed ? this.#measure(parsed, text, direction) : 0;
     });
   }
 
@@ -457,14 +478,19 @@ export class HarfBuzzMeasurer implements TextMeasurer {
     });
   }
 
-  #measure(parsed: ParsedFont, text: string): number {
+  #measure(parsed: ParsedFont, text: string, direction?: TextDirection): number {
     const chain = this.#chain(parsed);
     if (chain[0] === null)
       this.#approximate({ ...parsed, family: parsed.families[0] ?? "" }, "face");
+    for (const script of this.#scriptFaces.values()) {
+      if (!script.subset || ![...text].some((char) => script.subset?.includes(char))) continue;
+      const entry = this.#faces.get(measuredKey(script));
+      if (entry?.status === "ready") chain.push(entry.face);
+    }
     let total = 0;
-    for (const piece of fontRuns(text, chain)) {
+    for (const piece of fontRuns(text, chain, direction)) {
       const face = piece.face === -1 ? null : chain[piece.face];
-      if (face) total += (advance(face, piece.text) / face.em) * parsed.size;
+      if (face) total += (advance(face, piece.text, piece.direction) / face.em) * parsed.size;
       else {
         total += lastResortWidth(piece.text) * parsed.size;
         this.#approximate({ ...parsed, family: parsed.families[0] ?? "" }, "glyphs");
@@ -558,13 +584,21 @@ export class HarfBuzzMeasurer implements TextMeasurer {
           new hb.Variation("wght", Math.min(wght.max, Math.max(wght.min, weight ?? face.weight))),
         ]);
       made.setScale(upem * PRECISION, upem * PRECISION);
+      const allowed =
+        face.subset === undefined
+          ? null
+          : new Set([...face.subset].map((char) => char.codePointAt(0)));
       const ready: CanvasFace = {
         hb,
         font: made,
         em: upem * PRECISION,
         // Every private-use character, without listing them (over 130,000).
         unicodes: box ? { has: isPrivateUse } : shared.unicodes,
-        subset: subsets ? subsetOf(subsets) : () => 0,
+        subset: allowed
+          ? (cp) => (allowed.has(cp) ? 0 : -1)
+          : subsets
+            ? subsetOf(subsets)
+            : () => 0,
         metrics: verticalMetrics(hb, hbFace, made, upem),
         release,
       };
@@ -581,13 +615,14 @@ export class HarfBuzzMeasurer implements TextMeasurer {
 }
 
 /** The advance of `text` in one face, in its positions (`em` per em). */
-function advance(face: CanvasFace, text: string): number {
+function advance(face: CanvasFace, text: string, direction: TextDirection): number {
   const { hb, font } = face;
   // Freed here, not when collected: HarfBuzz's memory is capped, and a long text takes a lot of it.
   const buffer = new hb.Buffer();
   try {
     buffer.addText(text);
     buffer.guessSegmentProperties();
+    buffer.setDirection(direction === "rtl" ? hb.Direction.RTL : hb.Direction.LTR);
     hb.shape(font, buffer);
     let pen = 0;
     for (const p of buffer.getGlyphPositions()) pen += p.xAdvance;

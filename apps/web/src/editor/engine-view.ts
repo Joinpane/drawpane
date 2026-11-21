@@ -50,6 +50,7 @@ import {
   refusingBits,
   unsupportedNames,
 } from "@drawpane/engine";
+import { colorBitmap } from "./color-glyphs";
 import type { CpuWorkerReply, CpuWorkerRequest } from "./engine-cpu.worker";
 import {
   type PresentationMode,
@@ -1099,6 +1100,7 @@ export class EngineView {
     this.#cpu2d = init.cpu2d;
     this.#builder = new DisplayListBuilder(editor.scene, measurer, {
       image: (ref) => this.#image(ref),
+      colorGlyph: (text, font, scale) => this.#colorGlyph(text, font, scale),
     });
     if (this.#cpuWorker) this.#wireCpuWorker(this.#cpuWorker);
     this.#offImages = images.subscribe(() => {
@@ -1674,9 +1676,10 @@ export class EngineView {
         // AFTER clearing `#recovering` so ready images are never left as checkers.
         const prevRefs = new Set([...this.#uploaded.keys(), ...this.#pending]);
         this.#uploaded.clear();
-        for (const ref of prevRefs) this.#pending.add(ref);
+        for (const ref of prevRefs) if (!ref.startsWith("\0emoji:")) this.#pending.add(ref);
         this.#builder = new DisplayListBuilder(this.#editor.scene, this.#measurer, {
           image: (ref) => this.#image(ref),
+          colorGlyph: (text, font, scale) => this.#colorGlyph(text, font, scale),
         });
         this.#recovering = null;
         const flushOk = this.#upload();
@@ -1741,13 +1744,33 @@ export class EngineView {
       | null;
     if (!ctx) return "pending";
     ctx.drawImage(bitmap, 0, 0);
-    const data = ctx.getImageData(0, 0, bitmap.width, bitmap.height).data;
+    const pixels = ctx.getImageData(0, 0, bitmap.width, bitmap.height);
+    const status = this.#uploadPixels(ref, pixels, natural);
+    if (status === "uploaded") this.#pending.delete(ref);
+    return status;
+  }
+
+  #colorGlyph(text: string, font: string, scale: number) {
+    if (this.#dead || this.#recovering) return null;
+    const sprite = colorBitmap(text, font, scale);
+    if (!sprite) return null;
+    let held = this.#uploaded.get(sprite.ref);
+    if (!held && this.#uploadPixels(sprite.ref, sprite.pixels, sprite) === "uploaded")
+      held = this.#uploaded.get(sprite.ref);
+    return held ? { ...sprite, ...held } : null;
+  }
+
+  #uploadPixels(
+    ref: string,
+    { width, height, data }: ImageData,
+    size: { width: number; height: number },
+  ): "uploaded" | "pending" | "failed" {
     const handle = this.#nextImage++;
     if (this.#engine) {
       const r = this.#engine.putImage(
         handle,
-        bitmap.width,
-        bitmap.height,
+        width,
+        height,
         new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
         false,
       );
@@ -1762,8 +1785,8 @@ export class EngineView {
         {
           type: "put-image",
           handle,
-          width: bitmap.width,
-          height: bitmap.height,
+          width,
+          height,
           bytes: copy.buffer,
           premultiplied: false,
         } satisfies CpuWorkerRequest,
@@ -1772,8 +1795,7 @@ export class EngineView {
     } else {
       return "pending";
     }
-    this.#uploaded.set(ref, { handle, width: natural.width, height: natural.height });
-    this.#pending.delete(ref);
+    this.#uploaded.set(ref, { handle, width: size.width, height: size.height });
     return "uploaded";
   }
 
@@ -2116,6 +2138,7 @@ export class EngineView {
     this.#builder.setEditorState(state);
     // What's in view, in page units: text still to send whole goes there first.
     const z = camera.zoom > 0 ? camera.zoom : 1;
+    this.#builder.setColorScale(z * dpr);
     this.#builder.setView({
       x0: -camera.x / z,
       y0: -camera.y / z,
@@ -2318,6 +2341,7 @@ export class EngineView {
     const t0 = performance.now();
     this.#builder.setEditorState(state);
     const z = camera.zoom > 0 ? camera.zoom : 1;
+    this.#builder.setColorScale(z * dpr);
     this.#builder.setView({
       x0: -camera.x / z,
       y0: -camera.y / z,

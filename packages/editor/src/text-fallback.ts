@@ -1,4 +1,5 @@
 import type { ShapedText } from "./text";
+import { bidiText, RIGHT_TO_LEFT, type TextDirection } from "./text-bidi";
 
 /** The first general-purpose fallback in the canvas font stack. */
 export const FALLBACK_FAMILY = "Instrument Sans";
@@ -13,14 +14,10 @@ interface FontRun {
   text: string;
   readonly start: number;
   readonly face: number;
+  readonly direction: TextDirection;
 }
-
-/** Strong right-to-left characters (as shaping.ts has them). */
-export const RIGHT_TO_LEFT =
-  /[\u0590-\u08ff\ufb1d-\ufdff\ufe70-\ufefc]|[\u{10800}-\u{10fff}]|[\u{1e800}-\u{1efff}]/u;
 /** Characters that belong with the one before: marks, joiners and variation selectors. */
 const ATTACHED = /\p{M}|\u200c|\u200d|[\ufe00-\ufe0f]|[\u{e0100}-\u{e01ef}]/u;
-const LETTER = /\p{L}/u;
 const IGNORABLE = /\p{Default_Ignorable_Code_Point}/u;
 
 /**
@@ -28,36 +25,38 @@ const IGNORABLE = /\p{Default_Ignorable_Code_Point}/u;
  * that has each character, -1 for none, and its subset there) or its
  * direction does, as the browser splits text into runs before shaping each.
  */
-export function fontRuns(text: string, chain: ReadonlyArray<FontCoverage | null>): FontRun[] {
-  const out: Array<FontRun & { subset: number; rtl: boolean | null }> = [];
-  let offset = 0;
-  for (const char of text) {
-    const start = offset;
-    offset += char.length;
-    const last = out[out.length - 1];
-    const cp = char.codePointAt(0) as number;
-    let subset = -1;
-    const face = chain.findIndex((f) => {
-      if (!f?.unicodes.has(cp)) return false;
-      subset = f.subset?.(cp) ?? 0;
-      return subset !== -1;
-    });
-    if (last && (IGNORABLE.test(char) || (last.face === face && ATTACHED.test(char)))) {
-      last.text += char;
-      continue;
+export function fontRuns(
+  text: string,
+  chain: ReadonlyArray<FontCoverage | null>,
+  direction?: TextDirection,
+): FontRun[] {
+  const bidi = direction ? null : bidiText(text);
+  const ranges = bidi?.line(0, text.length) ?? [
+    { start: 0, end: text.length, direction: direction ?? "ltr" },
+  ];
+  const result: FontRun[] = [];
+  for (const range of ranges) {
+    const pieces: Array<FontRun & { subset: number }> = [];
+    let offset = range.start;
+    for (const char of text.slice(range.start, range.end)) {
+      const start = offset;
+      offset += char.length;
+      const last = pieces.at(-1);
+      const cp = char.codePointAt(0) as number;
+      let subset = -1;
+      const face = chain.findIndex((f) => {
+        if (!f?.unicodes.has(cp)) return false;
+        subset = f.subset?.(cp) ?? 0;
+        return subset !== -1;
+      });
+      if (last && (IGNORABLE.test(char) || (last.face === face && last.subset === subset)))
+        last.text += char;
+      else pieces.push({ text: char, start, face, subset, direction: range.direction });
     }
-    const rtl = RIGHT_TO_LEFT.test(char) ? true : LETTER.test(char) ? false : null;
-    if (
-      last &&
-      last.face === face &&
-      last.subset === subset &&
-      (rtl === null || last.rtl === null || last.rtl === rtl)
-    ) {
-      last.text += char;
-      last.rtl ??= rtl;
-    } else out.push({ text: char, start, face, subset, rtl });
+    if (range.direction === "rtl") pieces.reverse();
+    result.push(...pieces);
   }
-  return out;
+  return result;
 }
 
 /** Wide characters: CJK, Hangul, kana, fullwidth forms and emoji, a full em in any font. */
@@ -93,6 +92,7 @@ export function lastResortText(
   text: string,
   size: number,
   measure?: (text: string) => number,
+  direction?: TextDirection,
 ): ShapedText {
   const glyphs: ShapedText["glyphs"][number][] = [];
   const estimated = lastResortWidth(text);
@@ -100,17 +100,22 @@ export function lastResortText(
   const unit = estimated > 0 ? width / estimated : size;
   let pen = 0;
   for (const { segment, index } of graphemes.segment(text)) {
-    const advance = lastResortWidth(segment) * unit;
+    const next = measure
+      ? measure(text.slice(0, index + segment.length))
+      : pen + lastResortWidth(segment) * unit;
+    const advance = Math.max(0, next - pen);
+    const left = direction === "rtl" ? width - next : pen;
     if (!SPACE_OR_CONTROL.test(segment)) {
       glyphs.push({
         d: LAST_RESORT_BOX,
         path: null,
-        x: pen + (advance - size * 0.55) / 2,
+        x: left + (advance - size * 0.55) / 2,
         y: 0,
         cluster: index,
       });
     }
-    pen += advance;
+    pen = next;
   }
+  if (direction === "rtl") glyphs.reverse();
   return { glyphs, scale: size / 1000, width };
 }

@@ -20,6 +20,12 @@
  *
  * Self-hosters who don't want any traffic to Google set `GOOGLE_FONTS=off`.
  */
+import {
+  SCRIPT_FALLBACK_FAMILIES,
+  SCRIPT_SUBSET_LIMIT,
+  type ScriptFallbackFamily,
+  scriptFallbackFamily,
+} from "@drawpane/model";
 import { Hono } from "hono";
 import type { AppContext } from "../env";
 import { badRequest, HttpError, notFound } from "../lib/http";
@@ -228,6 +234,55 @@ export async function copyFromGoogle(
   return bytes;
 }
 
+/** Only canonical character sets for the allowlisted outline families reach the upstream. */
+export function validScriptSubset(family: string, subset: string): family is ScriptFallbackFamily {
+  const chars = [...subset];
+  if (
+    !SCRIPT_FALLBACK_FAMILIES.some((name) => family === name) ||
+    !chars.length ||
+    chars.length > SCRIPT_SUBSET_LIMIT
+  )
+    return false;
+  let last = -1;
+  for (const char of chars) {
+    const cp = char.codePointAt(0) ?? -1;
+    if (cp <= last || scriptFallbackFamily(char) !== family) return false;
+    last = cp;
+  }
+  return true;
+}
+
+export async function scriptFontFile(
+  env: { FILES: R2Bucket; GOOGLE_FONTS?: string },
+  family: string,
+  subset: string,
+): Promise<ArrayBuffer | null> {
+  if (env.GOOGLE_FONTS === "off" || !validScriptSubset(family, subset)) return null;
+  const digest = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(subset)),
+  );
+  const sha = [...digest].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  const key = `fonts/fallback/${family.replaceAll(" ", "-")}/${sha}.ttf`;
+  const stored = await env.FILES.get(key);
+  if (stored) return stored.arrayBuffer();
+  const signal = AbortSignal.timeout(15_000);
+  const css = await fetch(googleStylesheetUrl(family, ["400"], subset), {
+    headers: { "user-agent": PLAIN_UA },
+    signal,
+  });
+  if (!css.ok) return null;
+  const href = /url\((https:\/\/fonts\.gstatic\.com\/[^)]+)\)/.exec(await css.text())?.[1];
+  if (!href) return null;
+  const asset = new URL(href);
+  if (!fontFileKey(asset.pathname.slice(1), asset.searchParams)) return null;
+  const response = await fetch(asset, { signal, redirect: "manual" });
+  if (!response.ok) return null;
+  const bytes = await response.arrayBuffer();
+  if (bytes.byteLength > 1024 * 1024 || fontFormat(new Uint8Array(bytes)) !== "ttf") return null;
+  await env.FILES.put(key, bytes, { httpMetadata: { contentType: MIME.ttf } });
+  return bytes;
+}
+
 export const fonts = new Hono<AppContext>()
   /** What the font picker may offer on this server. */
   .get("/config", (c) =>
@@ -266,6 +321,19 @@ export const fonts = new Hono<AppContext>()
     const out = await googleVariableFiles(family, (p) => c.executionCtx.waitUntil(p));
     if (!out) throw notFound(`Google Fonts has no family called ${family}.`);
     return out;
+  })
+
+  .get("/fallback", async (c) => {
+    requireEnabled(c.env);
+    const family = c.req.query("family") ?? "";
+    const subset = c.req.query("characters") ?? "";
+    if (!validScriptSubset(family, subset))
+      throw badRequest("Provide a bounded, sorted set of fallback code points.");
+    const bytes = await scriptFontFile(c.env, family, subset);
+    if (!bytes) throw notFound("No outline font is available for this subset.");
+    return new Response(bytes, {
+      headers: { "content-type": MIME.ttf, "cache-control": STYLESHEET_CACHE },
+    });
   })
 
   .get("/gstatic/*", async (c) => {

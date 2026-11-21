@@ -65,6 +65,7 @@ vi.mock("@drawpane/editor", () => ({
     stats = { fresh: true, records: 1 };
     setEditorState() {}
     setView() {}
+    setColorScale() {}
     build(id: string) {
       this.pageId = id;
       this.supported = state.builderSupported;

@@ -872,12 +872,12 @@ export class Editor {
    * with, so opening a file doesn't change it (an import keeps the layout
    * it came with, a teammate's text stays as they measured it).
    */
-  refitText(families?: ReadonlySet<string>): void {
+  refitText(families?: ReadonlySet<string>, matches?: (node: NodeRecord) => boolean): void {
     if (!this.canEdit) return;
     const ids: string[] = [];
     for (const id of this.#measuredHere) {
       const node = this.doc.get(id);
-      if (node?.type !== "text") continue;
+      if (node?.type !== "text" || (matches && !matches(node))) continue;
       // Its own family or any of its runs' (a word in another font).
       if (families && !textFaces(node).some((face) => families.has(face.family))) continue;
       ids.push(node.id);

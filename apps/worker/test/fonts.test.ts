@@ -146,6 +146,42 @@ describe("/api/fonts", () => {
     expect((await browser.fetch("/api/fonts/google.css?family=Nope")).status).toBe(404);
   });
 
+  it("proxies only canonical, bounded Noto subsets and caches the SFNT for both renderers", async () => {
+    const requests: URL[] = [];
+    const fetch = globalThis.fetch;
+    vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
+      const url = new URL(input instanceof Request ? input.url : String(input));
+      if (url.hostname === "fonts.googleapis.com") {
+        requests.push(url);
+        return new Response("@font-face{src:url(https://fonts.gstatic.com/s/notosanssc/v1/a.ttf)}");
+      }
+      if (url.hostname === "fonts.gstatic.com") {
+        expect(init?.redirect).toBe("manual");
+        requests.push(url);
+        return new Response(TTF);
+      }
+      return fetch(input, init);
+    });
+    const browser = new Browser();
+    const path = (family: string, characters: string) =>
+      `/api/fonts/fallback?${new URLSearchParams({ family, characters })}`;
+    expect((await browser.fetch(path("Unknown", "中漢"))).status).toBe(400);
+    expect((await browser.fetch(path("Noto Sans SC", "漢中"))).status).toBe(400);
+    expect((await browser.fetch(path("Noto Sans SC", "中А"))).status).toBe(400);
+    const tooMany = Array.from({ length: 129 }, (_, i) => String.fromCodePoint(0x4e00 + i)).join(
+      "",
+    );
+    expect((await browser.fetch(path("Noto Sans SC", tooMany))).status).toBe(400);
+    expect(requests).toHaveLength(0);
+    const first = await browser.fetch(path("Noto Sans SC", "中漢"));
+    expect(first.status).toBe(200);
+    expect(first.headers.get("content-type")).toBe("font/ttf");
+    expect(new Uint8Array(await first.arrayBuffer())).toEqual(TTF);
+    expect(requests[0]?.searchParams.get("text")).toBe("中漢");
+    expect((await browser.fetch(path("Noto Sans SC", "中漢"))).status).toBe(200);
+    expect(requests).toHaveLength(2);
+  });
+
   it("copies a font file to R2 once, then serves it from there", async () => {
     const calls = stubGoogle();
     const browser = new Browser();

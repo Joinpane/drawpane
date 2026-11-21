@@ -33,7 +33,8 @@ export function harfBuzzMeasurerWith(
     ...(fonts?.standIns(face.family) ?? []).map((family) => canvasFace({ ...face, family })),
   ];
   return {
-    width: (font, text, run) => measurer.width(font, text, run),
+    width: (font, text, run, direction) => measurer.width(font, text, run, direction),
+    prepareScriptFallbacks: (subsets) => measurer.prepareScriptFallbacks(subsets),
     // Runs with OpenType features or axes, as glyphs: what the headless renderer outlines.
     shape: (text, run) => measurer.shape(text, run),
     metrics: (font) => measurer.metrics(font),

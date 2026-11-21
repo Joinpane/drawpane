@@ -1114,3 +1114,13 @@ Saved outlines still draw as before. For live text, the engine shapes the run's 
 Characters reachable only through browser system fonts draw with bundled last-resort outlines and retain the advances the browser measured. The headless measurer shares the coverage partitioner and uses em estimates for characters beyond its font files. Supporting the system scripts in full and sharing one layout measurer across browsers are part of W6.
 
 Loading faces still mark their records provisional. When a face reaches its deadline the record resolves through the fallback chain, and a later arrival queues the record again. The existing `textWithoutOutlines` bit counts layers that used fallback outlines. The builder and Rust engine exclude it when deciding whether a page can draw.
+
+### System faces, fallback files and bidirectional text
+
+The browser's measured advances determine glyph cluster positions when a requested face is inaccessible. Local Font Access supplies the matching font file when the browser grants access. Without access, the engine uses open substitutes for common system faces, fitted to the browser's advances. System UI glyph shapes still depend on the bytes available to the browser.
+
+The browser preloads Instrument Sans and the private-use box when the engine starts. Bundled face loads stay provisional until they finish, and failed downloads retry with bounded backoff. The display list indexes the faces each text layer uses so a settled face only requeues its dependants.
+
+Layout resolves Unicode bidi levels per paragraph and places each wrapped line in visual order. The canvas and HarfBuzz draw the resulting directional runs, and the caret and selection use the same fragment positions.
+
+After Instrument Sans, open Noto outline subsets cover Greek, Cyrillic, CJK, Arabic, Hebrew and symbols. The browser and Worker request the same allowlisted subsets through the font proxy, in batches of at most 128 unique code points. The proxy receives these in code point order and caches the TrueType file in R2. Han uses Noto Sans SC, kana uses Noto Sans JP, and Hangul uses Noto Sans KR. The browser uses its colour emoji renderer for supported graphemes and the engine holds those bitmaps as image resources at the current zoom bucket. Worker exports use monochrome emoji outlines when available.

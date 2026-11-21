@@ -3085,12 +3085,16 @@ export class CanvasRenderer {
         const marker = line.marker;
         if (marker) {
           typeset(c, marker.font);
+          c.direction = "ltr";
+          c.textAlign = "left";
           if (spaced) (c as Ctx & { letterSpacing: string }).letterSpacing = "0px";
           paint(null, { text: marker.text } as TextFragment, x0 + marker.x, y);
         }
         for (const frag of line.fragments) {
           if (!frag.text) continue;
           typeset(c, frag.font);
+          c.direction = frag.direction ?? "ltr";
+          c.textAlign = "left";
           if (spaced)
             (c as Ctx & { letterSpacing: string }).letterSpacing = `${frag.letterSpacing}px`;
           const x = x0 + frag.x;
@@ -3346,11 +3350,15 @@ export class CanvasRenderer {
         const marker = line.marker;
         if (marker && !(this.#detail && marker.fontSize * scale < GREEK_BELOW)) {
           typeset(c, marker.font);
+          c.direction = "ltr";
+          c.textAlign = "left";
           if (spaced) (c as Ctx & { letterSpacing: string }).letterSpacing = "0px";
           each(paintsOf(marker.fills), () => c.fillText(marker.text, x0 + marker.x, baseline));
         }
         for (const frag of line.fragments) {
           typeset(c, frag.font);
+          c.direction = frag.direction ?? "ltr";
+          c.textAlign = "left";
           if (spaced)
             (c as Ctx & { letterSpacing: string }).letterSpacing = `${frag.letterSpacing}px`;
           const x = x0 + frag.x;

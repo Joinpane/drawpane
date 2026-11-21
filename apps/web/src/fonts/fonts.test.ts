@@ -1,5 +1,5 @@
 import type { TeamFontFace } from "@drawpane/model";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { matchRank } from "../editor/inspector/FontPicker";
 import { loadedFamilies } from "./document-fonts";
 import { describeFamily, fonts, nearestWeight, teamFamilies } from "./fonts";
@@ -22,6 +22,33 @@ describe("fonts", () => {
     // Bundled families keep their bundled entry.
     expect(fonts.get("Instrument Sans")?.source).toBe("bundled");
     expect(await fonts.resolve("Definitely Not A Font")).toBeNull();
+  });
+
+  it("reads the matching local face only after permission has been granted", async () => {
+    const regular = vi.fn(async () => new Blob(["regular"]));
+    const boldItalic = vi.fn(async () => new Blob(["bold italic"]));
+    const queryLocalFonts = vi.fn(async () => [
+      { family: "A Local Family", style: "Regular", blob: regular },
+      { family: "A Local Family", style: "Bold Italic", blob: boldItalic },
+    ]);
+    let state = "prompt";
+    const query = vi.fn(async () => ({ state }));
+    vi.stubGlobal("window", { queryLocalFonts });
+    vi.stubGlobal("navigator", { permissions: { query } });
+    try {
+      const face = { family: "A Local Family", weight: 700, italic: true };
+      expect(await fonts.localBytes(face)).toBeNull();
+      expect(queryLocalFonts).not.toHaveBeenCalled();
+      state = "granted";
+      const buffer = await fonts.localBytes(face);
+      expect(new TextDecoder().decode(buffer ?? undefined)).toBe("bold italic");
+      expect(await fonts.localBytes(face)).toBe(buffer);
+      expect(queryLocalFonts).toHaveBeenCalledTimes(1);
+      expect(boldItalic).toHaveBeenCalledTimes(1);
+      expect(regular).not.toHaveBeenCalled();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 
   it("picks the nearest weight, heavier on a tie", () => {
