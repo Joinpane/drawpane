@@ -51,7 +51,7 @@ import {
   openThread,
   useCommentStore,
   useComments,
-  useThreadLink,
+  useMarkOpenThreadRead,
 } from "./comments";
 import { connectFile } from "./connection";
 import { ExplainCard } from "./ExplainCard";
@@ -105,6 +105,7 @@ import { Toolbar } from "./Toolbar";
 import { useThumbnailPublisher } from "./thumbnail";
 import { TokensWorkspace } from "./tokens/TokensWorkspace";
 import { uiFor, useUi } from "./ui-state";
+import { useEditorLink } from "./useEditorLink";
 import { useViewPreferences } from "./view-preferences";
 import { XrayLegend } from "./XrayLegend";
 import "./editor.css";
@@ -187,7 +188,10 @@ function FileEditor({ fileId }: { fileId: string }) {
   const branch = meta.data?.branch ?? null;
   const mainFile =
     meta.data?.main ?? (meta.data ? { id: fileId, name: meta.data.file.name } : null);
-  const { review: reviewAsked } = useSearch({ from: "/f/$fileId" });
+  const reviewAsked = useSearch({ from: "/f/$fileId", select: (search) => search.review });
+  const [reviewLinkedNode] = useState(() =>
+    reviewAsked ? new URLSearchParams(window.location.search).get("node-id") : null,
+  );
   const reviewing =
     reviewAsked === true && view === "design" && !viewing && branch !== null && !branch.merged;
   const setReviewing = useCallback(
@@ -242,9 +246,14 @@ function FileEditor({ fileId }: { fileId: string }) {
       return;
     }
     if (fittedReview.current === compareMode || !reviewRows) return;
+    const openingReview = fittedReview.current === null;
     fittedReview.current = compareMode;
     let frame = requestAnimationFrame(() => {
       frame = requestAnimationFrame(() => {
+        if (openingReview && reviewLinkedNode && editor.s.selection.includes(reviewLinkedNode)) {
+          editor.zoomToSelection();
+          return;
+        }
         const bounds = changedBounds(
           editor,
           reviewRows.map((r) => r.id),
@@ -255,7 +264,7 @@ function FileEditor({ fileId }: { fileId: string }) {
       });
     });
     return () => cancelAnimationFrame(frame);
-  }, [comparing, compareMode, reviewRows, editor]);
+  }, [comparing, compareMode, reviewRows, reviewLinkedNode, editor]);
   // What the room says about merges, read from the latest of these.
   const branchRef = useRef({ branch, mainFile, openMain });
   branchRef.current = { branch, mainFile, openMain };
@@ -388,7 +397,7 @@ function FileEditor({ fileId }: { fileId: string }) {
       }),
     [editor, fileId, comments.store, queryClient],
   );
-  useThreadLink(editor, comments.store, fileId, insets);
+  useMarkOpenThreadRead(comments.store);
   useThumbnailPublisher(editor, fileId, meta.data?.file.thumbnailAt, meta.data?.file.updatedAt);
 
   // The file's team fonts: the picker lists them, and text set in them loads them.
@@ -458,6 +467,7 @@ function FileEditor({ fileId }: { fileId: string }) {
     check();
     return editor.state.subscribe(check);
   }, [editor]);
+  useEditorLink(editor, fileId, comments.store, insets.left);
 
   useEffect(() => {
     if (meta.data)

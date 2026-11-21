@@ -11,7 +11,8 @@
  * Stylesheets are small and keyed by what was asked, so they go to the edge
  * cache, not R2. Font files are immutable (their URLs carry a version), so
  * R2 holds each once. A preview stylesheet may only subset a family to its
- * own name, which keeps the number of distinct files bounded by the catalog.
+ * own name. Engine fallbacks use a separate, fixed catalogue of Unicode
+ * slices. Requests name a catalogue entry and never carry document characters.
  *
  * Browsers get woff2. `format=ttf` asks for TrueType instead, one static
  * file per weight, for embedding in exported PDFs. `/google-variable` names a
@@ -20,9 +21,11 @@
  *
  * Self-hosters who don't want any traffic to Google set `GOOGLE_FONTS=off`.
  */
+import { scriptSlice } from "@drawpane/model";
 import { Hono } from "hono";
+import { requireUser } from "../auth/session";
 import type { AppContext } from "../env";
-import { badRequest, HttpError, notFound } from "../lib/http";
+import { badRequest, HttpError, notFound, rateLimited } from "../lib/http";
 
 const GOOGLE_CSS = "https://fonts.googleapis.com/css2";
 /** What fonts.google.com's download button reads: a family's files, variable ones included. */
@@ -43,6 +46,8 @@ const VARIANT = /^([1-9]00)(i?)$/;
 const STATIC_FILE = /^s\/[a-z0-9]+\/v\d+\/[A-Za-z0-9_-]+\.(woff2|ttf)$/;
 /** The parts of a kit Google builds for a `text=` subset. */
 const KIT = /^[A-Za-z0-9_-]{1,1024}$/;
+/** Google encodes a complete, fixed 256-code-point slice in its generated URL. */
+const FIXED_KIT = /^[A-Za-z0-9_-]{1,4096}$/;
 const SKEY = /^[a-f0-9]{1,64}$/;
 const VERSION = /^v\d{1,4}$/;
 const FONT_MAX_BYTES = 8 * 1024 * 1024;
@@ -124,12 +129,16 @@ export function rewriteStylesheet(css: string): string {
 
 /** The R2 key for a gstatic path, or null when it isn't one we serve. */
 export function fontFileKey(path: string, search: URLSearchParams): string | null {
+  return googleFileKey(path, search, KIT);
+}
+
+function googleFileKey(path: string, search: URLSearchParams, kitPattern: RegExp): string | null {
   if (STATIC_FILE.test(path)) return `fonts/gstatic/${path}`;
   if (path === "l/font") {
     const kit = search.get("kit") ?? "";
     const skey = search.get("skey") ?? "";
     const v = search.get("v") ?? "";
-    if (KIT.test(kit) && SKEY.test(skey) && VERSION.test(v))
+    if (kitPattern.test(kit) && SKEY.test(skey) && VERSION.test(v))
       return `fonts/gstatic/l/${v}/${skey}/${kit}.woff2`;
   }
   return null;
@@ -228,6 +237,47 @@ export async function copyFromGoogle(
   return bytes;
 }
 
+/** Signed-in viewers can request a page's slices at once. One counter per account. */
+export const SCRIPT_FONT_REQUESTS_PER_MINUTE = 240;
+
+/** Returns the same fixed outline file to the browser engine and Worker exports. */
+export async function scriptFontFile(
+  env: { FILES: R2Bucket; GOOGLE_FONTS?: string },
+  family: string,
+  subset: string,
+): Promise<ArrayBuffer | null> {
+  const slice = scriptSlice(family, subset);
+  if (env.GOOGLE_FONTS === "off" || !slice) return null;
+  const key = `fonts/fallback/v1/${family.replaceAll(" ", "-")}/${subset}.ttf`;
+  const stored = await env.FILES.get(key);
+  if (stored) return stored.arrayBuffer();
+  // Google receives a fixed catalogue range. The file and its R2 key are
+  // identical for every page that needs any character in that range.
+  const characters =
+    slice === "all"
+      ? null
+      : Array.from({ length: slice.end - slice.start + 1 }, (_, offset) =>
+          String.fromCodePoint(slice.start + offset),
+        ).join("");
+  const signal = AbortSignal.timeout(15_000);
+  const css = await fetch(googleStylesheetUrl(family, ["400"], characters), {
+    headers: { "user-agent": PLAIN_UA },
+    signal,
+    redirect: "manual",
+  });
+  if (!css.ok) return null;
+  const href = /url\((https:\/\/fonts\.gstatic\.com\/[^)]+)\)/.exec(await css.text())?.[1];
+  if (!href) return null;
+  const asset = new URL(href);
+  if (!googleFileKey(asset.pathname.slice(1), asset.searchParams, FIXED_KIT)) return null;
+  const response = await fetch(asset, { signal, redirect: "manual" });
+  if (!response.ok) return null;
+  const bytes = await response.arrayBuffer();
+  if (bytes.byteLength > FONT_MAX_BYTES || fontFormat(new Uint8Array(bytes)) !== "ttf") return null;
+  await env.FILES.put(key, bytes, { httpMetadata: { contentType: MIME.ttf } });
+  return bytes;
+}
+
 export const fonts = new Hono<AppContext>()
   /** What the font picker may offer on this server. */
   .get("/config", (c) =>
@@ -266,6 +316,40 @@ export const fonts = new Hono<AppContext>()
     const out = await googleVariableFiles(family, (p) => c.executionCtx.waitUntil(p));
     if (!out) throw notFound(`Google Fonts has no family called ${family}.`);
     return out;
+  })
+
+  .get("/fallback", async (c) => {
+    const user = requireUser(c);
+    requireEnabled(c.env);
+    const family = c.req.query("family") ?? "";
+    const subset = c.req.query("slice") ?? "";
+    if (
+      !scriptSlice(family, subset) ||
+      Object.keys(c.req.queries()).some((key) => key !== "family" && key !== "slice")
+    )
+      throw badRequest("Name a fixed fallback font slice.");
+    const window = Math.floor(Date.now() / 60_000);
+    const result = await c.env.DB.prepare(
+      `INSERT INTO font_fallback_limits (user_id, window, requests) VALUES (?1, ?2, 1)
+       ON CONFLICT (user_id) DO UPDATE SET window = ?2,
+         requests = CASE WHEN font_fallback_limits.window = ?2 THEN requests + 1 ELSE 1 END
+       WHERE font_fallback_limits.window <> ?2 OR font_fallback_limits.requests < ?3`,
+    )
+      .bind(user.id, window, SCRIPT_FONT_REQUESTS_PER_MINUTE)
+      .run();
+    if (result.meta.changes === 0) {
+      c.header("retry-after", String(60 - (Math.floor(Date.now() / 1000) % 60)));
+      throw rateLimited("Too many fallback font requests. Try again shortly.");
+    }
+    const bytes = await scriptFontFile(c.env, family, subset);
+    if (!bytes) throw notFound("No outline font is available for this slice.");
+    return new Response(bytes, {
+      headers: {
+        "content-type": MIME.ttf,
+        "cache-control": "private, max-age=86400",
+        vary: "Cookie",
+      },
+    });
   })
 
   .get("/gstatic/*", async (c) => {

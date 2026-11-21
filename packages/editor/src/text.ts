@@ -5,24 +5,30 @@
  * file stores.
  */
 import {
+  type CjkRegion,
   type FontFeatures,
   type FontVariations,
   getProp,
   type NodeRecord,
   type Paint,
   type Props,
+  type ScriptSubset,
 } from "@drawpane/model";
 import { MISSING_GLYPH_FAMILY } from "./missing-glyph-font";
 import { type TextSpan, textSpans } from "./rich-text";
+import { bidiText, type TextDirection } from "./text-bidi";
 import { FALLBACK_FAMILY } from "./text-fallback";
 
 export interface TextMeasurer {
+  /** Browser editors opt in when the engine is selected. */
+  readonly engineText?: boolean;
+  readonly scriptLocale?: string;
   /**
    * Width of `text` in CSS pixels for a canvas `font` string; with a feature
    * `run`, as shaped with its OpenType features when the measurer can (else
    * as the canvas has it).
    */
-  width(font: string, text: string, run?: ShapingRun | null): number;
+  width(font: string, text: string, run?: ShapingRun | null, direction?: TextDirection): number;
   /**
    * The glyphs for `text` with the run's OpenType features, or null when
    * they can't be shaped (no shaper, the font's bytes aren't at hand or are
@@ -31,6 +37,8 @@ export interface TextMeasurer {
   shape?(text: string, run: ShapingRun): ShapedText | null;
   /** The engine needs outlines for plain text as well, using fallbacks when a face lacks them. */
   shapeForEngine?(text: string, run: ShapingRun, font: string): EngineText;
+  /** Prepares an export's script subsets before synchronous layout. */
+  prepareScriptFallbacks?(subsets: readonly ScriptSubset[]): Promise<void>;
   /**
    * The font's own ascent and descent in px (no leading), for a canvas `font`
    * string: what "auto" line height and the baseline come from, as in Figma.
@@ -59,6 +67,8 @@ export interface TextMeasurer {
   loading?(run: ShapingRun): string | null;
   /** Where a face `loading` named is now. */
   faceStatus?(key: string): "loading" | "ready" | "unavailable";
+  /** The last shaping-face update affecting this key. */
+  faceRevision?(key: string): number;
   /** Bumped when only faces arrived (or turned out unavailable): `generation` counts these too. */
   readonly faceGeneration?: number;
 }
@@ -102,6 +112,8 @@ export interface ShapingRun {
   readonly features: FontFeatures;
   /** Variable axes it sets (decision 0009); may be empty when it sets features. */
   readonly variations: FontVariations;
+  readonly direction?: TextDirection;
+  readonly cjkRegion?: CjkRegion;
   /** Everything above as one string, for caches. */
   readonly key: string;
 }
@@ -117,6 +129,8 @@ export interface ShapedGlyph {
   readonly y: number;
   /** The first character it came from (a UTF-16 index into the run's text). */
   readonly cluster: number;
+  /** Pen position before applying the glyph offset, in px. */
+  readonly penX?: number;
 }
 
 export interface ShapedText {
@@ -133,9 +147,13 @@ export interface ShapedText {
 }
 
 /** A run shaped for the engine, or the face whose load will complete it. */
-export type EngineText =
+export type EngineText = (
   | { readonly waiting: string }
-  | { readonly shaped: ShapedText; readonly fallback: boolean };
+  | { readonly shaped: ShapedText; readonly fallback: boolean }
+) & {
+  /** Faces whose arrival could change this run, including late replacements. */
+  readonly dependencies?: readonly string[];
+};
 
 /** A run's settings as a stable string: sorted tags, so the same settings share a cache entry. */
 function settingsKey(
@@ -174,6 +192,13 @@ export function shapingRun(
   };
 }
 
+/** Keeps the shaping cache separate for the two directions of the same text. */
+export function directionalRun(run: ShapingRun, direction?: TextDirection): ShapingRun {
+  return direction && run.direction !== direction
+    ? { ...run, direction, key: `${run.key}|${direction}` }
+    : run;
+}
+
 /** A stretch of a line in one style. */
 export interface TextFragment {
   /** Where it comes from in `characters`: [start, end). */
@@ -192,6 +217,7 @@ export interface TextFragment {
   readonly fills: readonly Paint[] | null;
   /** Its OpenType features and variable axes, when it sets any: drawn from shaped glyphs. */
   readonly run: ShapingRun | null;
+  readonly direction?: TextDirection;
 }
 
 export interface TextLine {
@@ -256,11 +282,16 @@ export interface TextLayout {
 const FALLBACKS = `"${MISSING_GLYPH_FAMILY}", "${FALLBACK_FAMILY} Variable", system-ui, sans-serif`;
 
 /** A canvas font string for `props`, in the family it's drawn in (`fonts`'s aliases, when given). */
-export function fontString(props: Props, fonts?: Pick<TextMeasurer, "family"> | null): string {
+export function fontString(
+  props: Props,
+  fonts?: Pick<TextMeasurer, "family" | "engineText"> | null,
+): string {
   const style = getProp(props, "fontStyle") === "italic" ? "italic " : "";
   const name = drawnFamily(props, fonts).replace(/"/g, "");
   // Self-hosted variable fonts register as "<Family> Variable"; list both so either resolves.
-  return `${style}${getProp(props, "fontWeight")} ${getProp(props, "fontSize")}px "${name}", "${name} Variable", ${FALLBACKS}`;
+  const requested =
+    name === "system-ui" && fonts?.engineText ? name : `"${name}", "${name} Variable"`;
+  return `${style}${getProp(props, "fontWeight")} ${getProp(props, "fontSize")}px ${requested}, ${FALLBACKS}`;
 }
 
 export interface FontMetrics {
@@ -404,7 +435,7 @@ class RangeMeasure {
   }
 
   /** The advance of [a, b): glyphs plus letter spacing. */
-  width(a: number, b: number): number {
+  width(a: number, b: number, direction?: TextDirection): number {
     if (b <= a) return 0;
     let total = 0;
     for (let k = this.styleAt(a); k < this.styles.length; k++) {
@@ -414,7 +445,8 @@ class RangeMeasure {
       const y = Math.min(b, s.span.end);
       if (y <= x) continue;
       const drawn = caseSlice(this.text, x, y, s.span.props);
-      total += this.measurer.width(s.font, drawn, s.run) + s.spacing * [...drawn].length;
+      const run = s.run ? directionalRun(s.run, direction) : null;
+      total += this.measurer.width(s.font, drawn, run, direction) + s.spacing * [...drawn].length;
     }
     return total;
   }
@@ -476,6 +508,13 @@ function computeLayout(
   const text = getProp(props, "characters");
   const styles = spanStyles(node, measurer);
   const m = new RangeMeasure(text, styles, measurer);
+  const visualRuns = measurer.engineText === false ? null : bidiText(text);
+  const widthOf = (a: number, b: number) =>
+    visualRuns
+      ? visualRuns
+          .line(a, b)
+          .reduce((width, run) => width + m.width(run.start, run.end, run.direction), 0)
+      : m.width(a, b);
   /**
    * `para`: the line ends a paragraph that another follows (paragraph spacing goes after it).
    * `indent`: its paragraph's list indent; `marker`: the bullet or number its first line has.
@@ -527,7 +566,7 @@ function computeLayout(
     const hyphenBreak = (a: number, b: number, width: number): number => {
       for (let p = b - 1; p > a + 1; p--) {
         if (!HYPHENS.has(text[p - 1] as string) || /[\d\s]/.test(text[p] as string)) continue;
-        if (m.width(a, p) <= width) return p;
+        if (widthOf(a, p) <= width) return p;
       }
       return -1;
     };
@@ -548,7 +587,7 @@ function computeLayout(
         const a = paragraph + match.index;
         const b = a + match[0].length;
         const space = /\s/.test(match[0]);
-        const tokenWidth = m.width(a, b);
+        const tokenWidth = widthOf(a, b);
         // Spaces never push a line over: trailing spaces don't count.
         const fits = space || lineWidth + tokenWidth <= room;
         if (fits || (end === start && hyphenBreak(a, b, room) === -1)) {
@@ -562,7 +601,7 @@ function computeLayout(
           breaks.push({ start, end: cut, next: cut });
           start = cut;
           end = b;
-          lineWidth = m.width(cut, b);
+          lineWidth = widthOf(cut, b);
         } else {
           breaks.push({ start, end: trimEnd(start, end), next: a });
           // A line never starts with the spaces that ended the one before.
@@ -572,16 +611,16 @@ function computeLayout(
         }
         // Break words that don't fit on a line of their own.
         if (lineWidth > room) {
-          while (end > start && m.width(start, end) > room) {
+          while (end > start && widthOf(start, end) > room) {
             let cut = end - 1;
-            while (cut > start + 1 && m.width(start, cut) > room) cut--;
+            while (cut > start + 1 && widthOf(start, cut) > room) cut--;
             if (cut > start + 1 && isLow(text.charCodeAt(cut))) cut--;
             // One character wider than the line is left: it's the line (cutting before it would never end).
             if (cut <= start) break;
             breaks.push({ start, end: cut, next: cut });
             start = cut;
           }
-          lineWidth = m.width(start, end);
+          lineWidth = widthOf(start, end);
         }
       }
       breaks.push({ start, end: trimEnd(start, end), next: after, para });
@@ -602,6 +641,7 @@ function computeLayout(
     shown: string,
     x: number,
     width: number,
+    direction?: TextDirection,
   ): TextFragment => ({
     start: a,
     end: b,
@@ -613,7 +653,8 @@ function computeLayout(
     letterSpacing: s.spacing,
     decoration: getProp(s.span.props, "textDecoration"),
     fills: s.span.own.fills ?? null,
-    run: s.run,
+    run: s.run ? directionalRun(s.run, direction) : null,
+    ...(direction ? { direction } : {}),
   });
 
   /**
@@ -630,7 +671,7 @@ function computeLayout(
     // what the line break left on this line (a word broken after a hyphen would end it early).
     const nl = text.indexOf("\n", br.start);
     const paraEnd = nl === -1 ? text.length : nl;
-    const fits = (at: number) => m.width(br.start, at) + dots(at).width <= room;
+    const fits = (at: number) => widthOf(br.start, at) + dots(at).width <= room;
     let lo = br.start;
     let hi = Math.max(br.end, paraEnd);
     while (lo < hi) {
@@ -644,14 +685,18 @@ function computeLayout(
     while (cut > br.start && /\s/.test(text[cut - 1] as string)) cut--;
     const line = makeLine({ ...br, end: cut }, top);
     const { s, width } = dots(cut);
-    const fragment = fragmentOf(s, cut, cut, "…", line.width, width);
+    const direction = visualRuns?.paragraphDirection(br.start);
+    const rtl = direction === "rtl";
+    const fragment = fragmentOf(s, cut, cut, "…", rtl ? 0 : line.width, width, direction);
     return {
       ...line,
       text: `${line.text}…`,
       width: line.width + width,
       baseline: line.fragments.length > 0 ? line.baseline : top + s.ascent,
       height: Math.max(line.height, s.ascent + s.descent),
-      fragments: [...line.fragments, fragment],
+      fragments: rtl
+        ? [fragment, ...line.fragments.map((frag) => ({ ...frag, x: frag.x + width }))]
+        : [...line.fragments, fragment],
     };
   };
 
@@ -692,15 +737,34 @@ function computeLayout(
       descent = Math.max(descent, s.descent);
       step = Math.max(step, s.lineHeight);
       cap = Math.max(cap, s.cap);
-      const a = Math.max(br.start, s.span.start);
-      const b = Math.min(br.end, s.span.end);
-      if (b <= a) continue;
-      const width = m.width(a, b);
-      fragments.push(fragmentOf(s, a, b, caseSlice(text, a, b, s.span.props), x, width));
-      x += width;
+    }
+    const ranges = visualRuns?.line(br.start, br.end) ?? [
+      { start: br.start, end: br.end, direction: undefined },
+    ];
+    for (const range of ranges) {
+      const visualFragments: TextFragment[] = [];
+      for (let k = m.styleAt(range.start); k <= last; k++) {
+        const s = styles[k] as SpanStyle;
+        const a = Math.max(range.start, s.span.start);
+        const b = Math.min(range.end, s.span.end);
+        if (s.span.start >= range.end) break;
+        if (b <= a) continue;
+        const width = m.width(a, b, range.direction);
+        visualFragments.push(
+          fragmentOf(s, a, b, caseSlice(text, a, b, s.span.props), 0, width, range.direction),
+        );
+      }
+      if (range.direction === "rtl") visualFragments.reverse();
+      for (const f of visualFragments) {
+        fragments.push({ ...f, x });
+        x += f.width;
+      }
     }
     return {
-      text: fragments.map((f) => f.text).join(""),
+      text: [...fragments]
+        .sort((a, b) => a.start - b.start)
+        .map((f) => f.text)
+        .join(""),
       width: x,
       baseline: top + ascent,
       top,
@@ -888,6 +952,12 @@ function measureFor(node: NodeRecord, measurer: TextMeasurer): RangeMeasure {
   return new RangeMeasure(getProp(node.props, "characters"), spanStyles(node, measurer), measurer);
 }
 
+/** A caret within a directional fragment, relative to the line origin. */
+function fragmentCaret(m: RangeMeasure, f: TextFragment, index: number): number {
+  const advance = m.width(f.start, index, f.direction);
+  return f.x + (f.direction === "rtl" ? f.width - advance : advance);
+}
+
 /** The caret before character `index`. */
 export function caretBox(
   node: NodeRecord,
@@ -897,9 +967,15 @@ export function caretBox(
 ): CaretBox {
   const line = layout.lines[lineOf(layout, index)] as TextLine;
   const width = getProp(node.props, "width");
-  const x =
-    lineOffset(line, width, node.props) +
-    measureFor(node, measurer).width(line.start, Math.max(line.start, index));
+  const m = measureFor(node, measurer);
+  const f = line.fragments.some((f) => f.direction)
+    ? (line.fragments.find((f) => f.start <= index && index < f.end) ??
+      line.fragments.find((f) => f.end === line.end))
+    : undefined;
+  const advance = f
+    ? fragmentCaret(m, f, Math.min(index, f.end))
+    : m.width(line.start, Math.max(line.start, index));
+  const x = lineOffset(line, width, node.props) + advance;
   return { x, y: line.top + textBlockOffset(node, layout), height: line.height };
 }
 
@@ -934,6 +1010,22 @@ export function indexOnLine(
   const line = layout.lines[Math.max(0, Math.min(k, layout.lines.length - 1))] as TextLine;
   const m = measureFor(node, measurer);
   const x = px - lineOffset(line, getProp(node.props, "width"), node.props);
+  if (line.fragments.some((f) => f.direction)) {
+    const f = line.fragments.find((f) => x <= f.x + f.width) ?? line.fragments.at(-1);
+    if (f) {
+      let lo = f.start;
+      let hi = f.end;
+      const rtl = f.direction === "rtl";
+      while (hi - lo > 1) {
+        const mid = (lo + hi) >> 1;
+        if (fragmentCaret(m, f, mid) <= x !== rtl) lo = mid;
+        else hi = mid;
+      }
+      const at =
+        Math.abs(x - fragmentCaret(m, f, lo)) < Math.abs(x - fragmentCaret(m, f, hi)) ? lo : hi;
+      return isLow(m.text.charCodeAt(at)) ? at - 1 : at;
+    }
+  }
   // The widest the caret can go on this line: its end, or the line break.
   let lo = line.start;
   let hi = line.end;
@@ -972,6 +1064,22 @@ export function selectionBoxes(
     const from = Math.max(start, line.start);
     const to = Math.min(end, line.end);
     const x0 = lineOffset(line, width, node.props);
+    if (line.fragments.some((f) => f.direction)) {
+      for (const f of line.fragments) {
+        const a = Math.max(from, f.start);
+        const b = Math.min(to, f.end);
+        if (a >= b) continue;
+        const x1 = fragmentCaret(m, f, a);
+        const x2 = fragmentCaret(m, f, b);
+        out.push({
+          x: x0 + Math.min(x1, x2),
+          y: line.top + dy,
+          width: Math.abs(x2 - x1),
+          height: line.height,
+        });
+      }
+      continue;
+    }
     const x1 = x0 + m.width(line.start, from);
     let x2 = x0 + m.width(line.start, Math.max(from, to));
     // A selection running on past the line shows its line break or spaces.
@@ -1003,10 +1111,11 @@ export class CanvasTextMeasurer implements TextMeasurer {
       (this.#ctx as { textRendering: string }).textRendering = "geometricPrecision";
   }
 
-  width(font: string, text: string, _run?: ShapingRun | null): number {
-    const key = `${font}\u0000${text}`;
+  width(font: string, text: string, _run?: ShapingRun | null, direction?: TextDirection): number {
+    const key = `${font}\u0000${direction ?? ""}\u0000${text}`;
     let w = this.#cache.get(key);
     if (w === undefined) {
+      this.#ctx.direction = direction ?? "ltr";
       // Where glyphs aren't positioned to fractions of a pixel (Linux, say), the browser
       // rounds each advance at the size it measures, which adds up along a line: measured
       // at 1000 px and scaled, the advances are the font's own, as Figma lays type out.
@@ -1063,9 +1172,9 @@ export class CanvasTextMeasurer implements TextMeasurer {
   }
 
   /** Call after web fonts load: earlier measurements used fallback fonts. */
-  invalidate(): void {
+  invalidate(bumpGeneration = true): void {
     this.#cache.clear();
     this.#metrics.clear();
-    this.#generation++;
+    if (bumpGeneration) this.#generation++;
   }
 }

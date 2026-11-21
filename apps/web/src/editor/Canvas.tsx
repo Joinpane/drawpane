@@ -10,8 +10,8 @@ import {
   overlayStateChanged,
   type PointerInput,
   placedGuides,
+  type ShapingMeasurer,
   selectionTarget,
-  type TextMeasurer,
 } from "@drawpane/editor";
 import { getProp } from "@drawpane/model";
 import { colors } from "@drawpane/ui";
@@ -22,6 +22,7 @@ import { loadedFamilies, watchDocumentFonts } from "../fonts/document-fonts";
 import { fonts } from "../fonts/fonts";
 import { COMPONENT_DRAG_MIME } from "./AssetsPanel";
 import { passesToCanvas } from "./canvas-gestures";
+import { invalidateColorBitmaps } from "./color-glyphs";
 import {
   EngineView,
   engineFallback,
@@ -103,7 +104,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
   const choice = useMemo(() => rendererChoice(searchStr), [searchStr]);
   const present = useMemo(() => presentation(searchStr), [searchStr]);
   // The editor's measurer re-measures after web fonts load (EditorPage gives it one that does).
-  const measurer = editor.measurer as TextMeasurer & { invalidate(): void };
+  const measurer = editor.measurer as ShapingMeasurer;
   const renderer = useMemo(
     () => new CanvasRenderer(editor.scene, measurer, { images: imagesFor(editor) }),
     [editor, measurer],
@@ -132,6 +133,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     const lctx = labelsCanvas.getContext("2d");
     const octx = overlayCanvas.getContext("2d");
     if (!cctx || !pctx || !lctx || !octx) return;
+    measurer.setEngineText(choice !== "canvas");
     const overlayRenderer = new OverlayRenderer();
     let labelsEnabled = true;
     // The retained pixel grid shares the labels surface's size and overscan;
@@ -284,6 +286,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     syncRendererAttr();
     syncRendererStatus();
     if (choice !== "canvas") {
+      shaper.preloadFallback();
       void EngineView.create(
         engineSlotEl,
         editor,
@@ -783,18 +786,25 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     // Web fonts arrive after first paint: re-measure and repaint when they do,
     // and fix the stored size of text that was measured with a fallback.
     const offFonts = watchDocumentFonts(editor.doc);
-    const onFonts = (event?: FontFaceSetLoadEvent) => {
-      measurer.invalidate();
+    const fontsChanged = () => {
       overlayRenderer.invalidate(true);
-      if (event) {
-        const families = loadedFamilies(event.fontfaces);
-        // Text named by an alias ("SF Pro") is drawn in what just loaded ("SF Pro Text") too.
-        for (const family of [...families])
-          for (const from of fonts.aliasedTo(family)) families.add(from);
-        if (families.size > 0) editor.refitText(families);
-      }
       contentDirty = overlayDirty = changed = true;
       schedule();
+    };
+    const onFonts = (event?: FontFaceSetLoadEvent) => {
+      const families = event && loadedFamilies(event.fontfaces);
+      if (families) {
+        // Text named by an alias is drawn in the face that just loaded.
+        for (const family of [...families])
+          for (const from of fonts.aliasedTo(family)) families.add(from);
+        if (families.size === 0) return;
+        invalidateColorBitmaps();
+        measurer.invalidate(families);
+        editor.refitText(families);
+      } else {
+        measurer.invalidate();
+      }
+      fontsChanged();
     };
     document.fonts.addEventListener("loadingdone", onFonts);
     // A face for OpenType features became ready: its text is shaped now, so measure and draw it again.

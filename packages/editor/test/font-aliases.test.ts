@@ -77,9 +77,14 @@ async function ready(available = here) {
 describe("font strings", () => {
   it("name the cut the size calls for, then the missing-glyph box, then the fallback", () => {
     const fonts = { family: (f: string, size: number) => resolveFontFamily(f, size, here) };
-    expect(fontString({ fontFamily: "SF Pro", fontSize: 17 }, fonts)).toBe(
-      `400 17px "SF Pro Text", "SF Pro Text Variable", "${MISSING_GLYPH_FAMILY}", "Instrument Sans Variable", system-ui, sans-serif`,
-    );
+    expect(fontString({ fontFamily: "SF Pro", fontSize: 17 }, fonts).split(", ")).toEqual([
+      '400 17px "SF Pro Text"',
+      '"SF Pro Text Variable"',
+      `"${MISSING_GLYPH_FAMILY}"`,
+      '"Instrument Sans Variable"',
+      "system-ui",
+      "sans-serif",
+    ]);
     expect(parseFont(fontString({ fontFamily: "SF Pro", fontSize: 34 }, fonts))?.families).toEqual([
       "SF Pro Display",
       MISSING_GLYPH_FAMILY,

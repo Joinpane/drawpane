@@ -21,6 +21,8 @@ export interface Face {
    * helps pick among a team's uploads.
    */
   readonly variable?: boolean;
+  /** A fixed script fallback slice ID. */
+  readonly subset?: string;
 }
 
 /** The bytes of a face's font file (TrueType or OpenType), or null when there are none to have. */
@@ -28,9 +30,11 @@ export type FontBytesLoader = (face: Face) => Promise<ArrayBuffer | null>;
 
 /** One key per file a face can load: a variable file covers every weight. */
 export const faceKey = (f: Face): string =>
-  f.variable
-    ? `${f.family}\u0000variable\u0000${f.italic}`
-    : `${f.family}\u0000${f.weight}\u0000${f.italic}`;
+  f.subset !== undefined
+    ? `${f.family}\u0000subset\u0000${f.subset}`
+    : f.variable
+      ? `${f.family}\u0000variable\u0000${f.italic}`
+      : `${f.family}\u0000${f.weight}\u0000${f.italic}`;
 
 /**
  * A loader that asks for each face once and remembers the answer, failures

@@ -17,6 +17,7 @@ import {
 } from "@drawpane/editor";
 import type { IconName } from "@drawpane/ui";
 import { isMac } from "../app/format";
+import { copyEditorLink, currentEditorSearch } from "./editor-link";
 import { copySelectionAs, exportPageAsPdf, exportSelection } from "./exporting";
 import { openTextStyles } from "./inspector/TextStyles";
 import { getOverrides } from "./shortcuts-store";
@@ -188,6 +189,15 @@ export const ACTIONS: readonly Action[] = [
     defaultShortcut: { key: "c", mod: true },
     enabled: hasSelection,
     run: ({ copy }) => copy(),
+  },
+  {
+    id: "edit.copySelectionLink",
+    label: "Copy link to selection",
+    group: "Edit",
+    icon: "link",
+    defaultShortcut: { key: "l", mod: true },
+    enabled: (editor) => editor.sync.revn !== null && !!currentEditorSearch(editor)["node-id"],
+    run: ({ editor }) => void copyEditorLink(editor, currentEditorSearch(editor)),
   },
   {
     id: "edit.cut",

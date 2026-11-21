@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 import { ROOT_ID } from "@drawpane/model";
 import { describe, expect, it, vi } from "vitest";
 import { Editor } from "../src/editor";
+import { DisplayListBuilder } from "../src/engine/display-list";
 import { MISSING_GLYPH_FAMILY } from "../src/missing-glyph-font";
 import { axisSettings, Shaper, ShapingMeasurer, shapingFace } from "../src/shaping";
 import { autoSize, layoutText, type ShapingRun, shapingRun, type TextMeasurer } from "../src/text";
@@ -18,7 +19,17 @@ const bytes = () => FONT.buffer.slice(FONT.byteOffset, FONT.byteOffset + FONT.by
 const makePath = (d: string) => ({ d }) as unknown as Path2D;
 
 function run(features: Record<string, boolean>, size = 10, family = "Instrument Sans") {
-  return shapingRun({ fontFamily: family, fontSize: size, fontFeatures: features }) as ShapingRun;
+  return (
+    shapingRun({ fontFamily: family, fontSize: size, fontFeatures: features }) ?? {
+      family,
+      weight: 400,
+      italic: false,
+      size,
+      features,
+      variations: {},
+      key: `${family}|${size}`,
+    }
+  );
 }
 
 async function ready(loader = async () => bytes()) {
@@ -52,7 +63,7 @@ describe("Shaper", () => {
       shaper.load({ family: "Instrument Sans", weight: 400, italic: false, variable: true }),
       shaper.load({ family: MISSING_GLYPH_FAMILY, weight: 400, italic: false }),
     ]);
-    const result = shaper.shapeForEngine("AV\u{100001}漢111", missing, () => 10);
+    const result = shaper.shapeForEngine("AV\u{100001}漢111", missing);
     if ("waiting" in result) throw new Error("Fallback faces are ready");
     expect(result.fallback).toBe(true);
     const glyphs = result.shaped.glyphs;
@@ -65,6 +76,125 @@ describe("Shaper", () => {
     expect(glyphs[2]?.x).toBeCloseTo(kerned.shaped.width, 5);
     expect(figures.shaped.width).toBeLessThan(18);
     expect(result.shaped.width).toBeCloseTo(kerned.shaped.width + 7 + 10 + figures.shaped.width, 5);
+  });
+
+  it("fits substitute glyph clusters to the same prefix advances used by the caret", async () => {
+    const shaper = new Shaper(async ({ family }) => (family === "Arimo" ? bytes() : null), {
+      makePath,
+      substitute: () => ({ family: "Arimo", weight: 400, italic: false }),
+    });
+    const arial = run({}, 36, "Arial");
+    await Promise.all([
+      shaper.load(shapingFace(arial)),
+      shaper.load({ family: "Arimo", weight: 400, italic: false }),
+      shaper.load({ family: "Instrument Sans", weight: 400, italic: false, variable: true }),
+    ]);
+    const widths = new Map([
+      ["", 0],
+      ["A", 18],
+      ["AV", 41],
+      ["AVH", 68],
+    ]);
+    const result = shaper.shapeForEngine("AVH", arial, (prefix) => widths.get(prefix) ?? 0);
+    if ("waiting" in result) throw new Error("Faces already settled");
+    expect(result.shaped.width).toBe(68);
+    expect(result.shaped.glyphs.map((glyph) => glyph.x)).toEqual([0, 18, 41]);
+    const original = shaper.shape("AVH", run({}, 36, "Arimo"));
+    expect(result.shaped.glyphs.map((glyph) => glyph.d)).toEqual(
+      original?.glyphs.map((glyph) => glyph.d),
+    );
+    expect(result.dependencies?.some((key) => key.startsWith("Arimo"))).toBe(true);
+  });
+
+  it("preloads bundled fallbacks and waits past the ordinary face deadline", async () => {
+    await import("harfbuzzjs");
+    vi.useFakeTimers();
+    try {
+      const loader = vi.fn(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 4000));
+        return bytes();
+      });
+      const shaper = new Shaper(loader, {
+        fallbackFamily: "Instrument Sans Variable",
+        bundledRetryMs: [250],
+        makePath,
+      });
+      const face = {
+        family: "Instrument Sans Variable",
+        weight: 400,
+        italic: false,
+        variable: true,
+      };
+      shaper.preloadFallback();
+      expect(loader).toHaveBeenCalledWith(face);
+      expect(shaper.started({ family: MISSING_GLYPH_FAMILY, weight: 400, italic: false })).toBe(
+        true,
+      );
+      await vi.advanceTimersByTimeAsync(3001);
+      expect(shaper.status(face)).toBe("loading");
+      await vi.advanceTimersByTimeAsync(999);
+      expect(await shaper.load(face)).toBe("ready");
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("retries a failed bundled download with backoff and keeps the text provisional", async () => {
+    await import("harfbuzzjs");
+    vi.useFakeTimers();
+    try {
+      const loader = vi.fn().mockRejectedValueOnce(new Error("offline")).mockResolvedValue(bytes());
+      const shaper = new Shaper(loader, { bundledRetryMs: [250, 1000], makePath });
+      const face = { family: "Instrument Sans", weight: 400, italic: false, variable: true };
+      const status = shaper.load(face);
+      await vi.advanceTimersByTimeAsync(249);
+      expect(shaper.status(face)).toBe("loading");
+      expect(loader).toHaveBeenCalledTimes(1);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(await status).toBe("ready");
+      expect(loader).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("draws RTL runs in visual order without reversing European digits", async () => {
+    const shaper = new Shaper(async ({ family }) =>
+      family === "Instrument Sans" ? bytes() : null,
+    );
+    const missing = run({}, 16, "Unknown Hebrew Font");
+    await Promise.all([
+      shaper.load(shapingFace(missing)),
+      shaper.load({ family: "Instrument Sans", weight: 400, italic: false, variable: true }),
+    ]);
+    const result = shaper.shapeForEngine("מחיר 100", missing);
+    if ("waiting" in result) throw new Error("Faces already settled");
+    expect(result.shaped.glyphs.map((glyph) => glyph.cluster)).toEqual([5, 6, 7, 4, 3, 2, 1, 0]);
+  });
+
+  it("uses script outlines after Instrument Sans and changes only runs with that coverage", async () => {
+    const fixture = readFileSync(new URL("./fixtures/NotoSansSC-Subset.ttf", import.meta.url));
+    const noto = fixture.buffer.slice(fixture.byteOffset, fixture.byteOffset + fixture.byteLength);
+    const script = { family: "Noto Sans SC", subset: "4e00", weight: 400, italic: false };
+    const shaper = new Shaper(
+      async (face) =>
+        face.subset === script.subset ? noto : face.family === "Instrument Sans" ? bytes() : null,
+      { fallbackFaces: () => [script] },
+    );
+    const missing = run({}, 24, "Missing");
+    await Promise.all([
+      shaper.load(shapingFace(missing)),
+      shaper.load({ family: "Instrument Sans", weight: 400, italic: false, variable: true }),
+    ]);
+    const latin = shaper.shapeForEngine("A", missing);
+    const first = shaper.shapeForEngine("中", missing);
+    expect(first).toHaveProperty("waiting");
+    expect(first.dependencies?.some((key) => key.endsWith("4e00"))).toBe(true);
+    await shaper.load(script);
+    const result = shaper.shapeForEngine("中", missing);
+    if ("waiting" in result) throw new Error("Faces already settled");
+    expect(result.shaped.glyphs[0]?.d.length).toBeGreaterThan(100);
+    expect(shaper.shapeForEngine("A", missing)).toBe(latin);
   });
 
   it("applies features: tabular figures are wider, ligatures can be turned off", async () => {
@@ -311,5 +441,87 @@ describe("variable fonts (decision 0009)", () => {
     expect(shapingFace(axesRun({ wdth: 75 })).variable).toBe(true);
     expect(shapingFace(run({ tnum: true })).variable).toBeUndefined();
     expect(shapingRun({ fontFamily: "Inter" })).toBeNull();
+  });
+});
+
+describe("text dependencies in display lists", () => {
+  it.each(["fresh", "sliced"])("re-encodes only dependent layers after a %s open", (opening) => {
+    let revision = 0;
+    const shapeForEngine = vi.fn((text: string) => ({
+      shaped: { glyphs: [], width: 10, scale: 0.01 },
+      fallback: true,
+      dependencies: [text],
+    }));
+    const measurer: TextMeasurer = {
+      width: () => 10,
+      shapeForEngine,
+      get generation() {
+        return revision;
+      },
+      get faceGeneration() {
+        return revision;
+      },
+      faceRevision: (key) => (key === "first" ? revision : 0),
+    };
+    const editor = new Editor({ measurer, clientId: "t" });
+    editor.doc.apply([
+      { op: "create", id: "p", type: "page", parent: ROOT_ID, key: "a0", props: {} },
+      ...["first", "second"].map((text, index) => ({
+        op: "create" as const,
+        id: text,
+        parent: "p",
+        key: `a${index}`,
+        type: "text" as const,
+        props: { characters: text, width: 100, height: 30 },
+      })),
+    ]);
+    const builder = new DisplayListBuilder(editor.scene, measurer);
+    if (opening === "sliced") {
+      builder.openSlice("p");
+      while (builder.opening) builder.openSlice("p");
+      builder.update(100);
+    } else {
+      builder.build("p");
+    }
+    expect(shapeForEngine.mock.calls.map(([text]) => text)).toEqual(["first", "second"]);
+    shapeForEngine.mockClear();
+    revision++;
+    expect(builder.update()).not.toBeNull();
+    expect(shapeForEngine.mock.calls.map(([text]) => text)).toEqual(["first"]);
+    expect(builder.stats.records).toBe(1);
+  });
+
+  it("uses one image for a colour emoji sequence and swaps its zoom bucket", () => {
+    const measurer = { width: (_font: string, text: string) => [...text].length * 10 };
+    const editor = new Editor({ measurer, clientId: "t" });
+    editor.doc.apply([
+      { op: "create", id: "p", type: "page", parent: ROOT_ID, key: "a0", props: {} },
+      {
+        op: "create",
+        id: "t",
+        type: "text",
+        parent: "p",
+        key: "a0",
+        props: { characters: "A👩‍🔬B", width: 100, height: 30 },
+      },
+    ]);
+    const raster = vi.fn((_: string, _font: string, scale: number) => ({
+      ref: `emoji-${scale}`,
+      handle: scale,
+      x: 0,
+      y: -16,
+      width: 16,
+      height: 16,
+    }));
+    const builder = new DisplayListBuilder(editor.scene, measurer, { colorGlyph: raster });
+    builder.build("p");
+    expect(raster.mock.calls.map(([text, _, scale]) => [text, scale])).toEqual([["👩‍🔬", 1]]);
+    expect([...builder.imagesInUse()]).toEqual(["emoji-1"]);
+    expect([...builder.imageDemands({ x: 0, y: 0, width: 100, height: 100 }, 0)]).toEqual([
+      { ref: "emoji-1", visible: true, span: { width: 16, height: 16 } },
+    ]);
+    builder.setColorScale(1.5);
+    expect(builder.update()).not.toBeNull();
+    expect([...builder.imagesInUse()]).toEqual(["emoji-2"]);
   });
 });

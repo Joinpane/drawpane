@@ -19,6 +19,7 @@ export * from "./protocol";
 export * from "./prototype";
 export * from "./references";
 export * from "./schema";
+export * from "./script-fallbacks";
 export * from "./search";
 export * from "./sha256";
 export * from "./snapshot";

@@ -1,7 +1,7 @@
 import { type NodeRecord, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { Editor } from "../src/editor";
-import { autoSize, layoutText } from "../src/text";
+import { autoSize, caretBox, layoutText } from "../src/text";
 
 /** 10px a character at size 16 (the default). */
 const measurer = {
@@ -177,5 +177,44 @@ describe("wrapping in a narrow box", () => {
       "b",
       "c",
     ]);
+  });
+});
+
+describe("bidirectional layout", () => {
+  it.each(["מחיר", "سعر"])("reorders %s as a paragraph and retains the digits' order", (label) => {
+    const node = textNode(`${label} 100
+Latin ${label}`);
+    const layout = layoutText(node, measurer, null);
+    expect(layout.lines[0]?.fragments.map((frag) => [frag.text, frag.direction])).toEqual([
+      ["100", "ltr"],
+      [`${label} `, "rtl"],
+    ]);
+    expect(layout.lines[1]?.fragments.map((frag) => frag.text)).toEqual(["Latin ", label]);
+    expect(caretBox(node, layout, measurer, label.length + 2).x).toBe(10);
+    expect(caretBox(node, layout, measurer, 0).x).toBe((label.length + 4) * 10);
+  });
+
+  it("preserves paragraph direction across wrapped lines and rich text boundaries", () => {
+    const node = textNode("אבג 100 XYZ", {
+      textRuns: [{ start: 1, end: 2, fontWeight: 700 }],
+    });
+    const layout = layoutText(node, measurer, 75);
+    expect(layout.lines.map((line) => line.text)).toEqual(["אבג 100", "XYZ"]);
+    expect(layout.lines[0]?.fragments.map((frag) => frag.text)).toEqual(["100", "ג ", "ב", "א"]);
+  });
+
+  it("puts the truncation mark at the visual end of an RTL paragraph", () => {
+    const node = textNode("אבג 100 XYZ", { maxLines: 1 });
+    const layout = layoutText(node, measurer, 75);
+    expect(layout.lines[0]?.fragments[0]).toMatchObject({ text: "…", x: 0 });
+  });
+
+  it("honours bidi isolates without reversing enclosed digits", () => {
+    const node = textNode("A ⁧אב 100⁩ B");
+    const layout = layoutText(node, measurer, null);
+    const visible = layout.lines[0]?.fragments.map((frag) =>
+      frag.text.replace(/\p{Bidi_Control}/gu, ""),
+    );
+    expect(visible?.filter(Boolean)).toEqual(["A ", "100", "אב ", " B"]);
   });
 });

@@ -1,8 +1,14 @@
 import type { ImageCache, ImageDemand } from "@drawpane/editor";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { colorBitmap } from "./color-glyphs";
 import { ViewImages } from "./engine-image";
 
-afterEach(() => vi.unstubAllGlobals());
+vi.mock("./color-glyphs", () => ({ colorBitmap: vi.fn() }));
+
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.mocked(colorBitmap).mockReset();
+});
 
 const demand = (
   refs: readonly string[],
@@ -81,6 +87,33 @@ const tick = () => new Promise((done) => setTimeout(done, 0));
 const eventually = (check: () => void) => vi.waitFor(check, { timeout: 3500, interval: 5 });
 
 describe("image residency", () => {
+  it("uploads and evicts a generated colour glyph without requesting a media file", async () => {
+    const ref = "emoji";
+    const pixels = {
+      ref,
+      width: 64,
+      height: 64,
+      colorSpace: "srgb" as const,
+      data: new Uint8ClampedArray(64 * 64 * 4),
+    };
+    vi.mocked(colorBitmap).mockReturnValue({ ref, pixels, width: 32, height: 32, x: 0, y: -32 });
+    const r = photoRig({ missing: new Set([ref]) });
+    try {
+      const glyph = r.images.colorGlyph("😀", "32px sans-serif", 2);
+      expect(glyph).toMatchObject({ ref, height: 32 });
+      expect(r.images.colorGlyph("😀", "32px sans-serif", 2)?.handle).toBe(glyph?.handle);
+      const uses = demand([ref], 32);
+      expect(r.images.update(uses, 2, false, limit(8))).toBe(false);
+      await eventually(() => expect(r.images.update(uses, 2, false, limit(8))).toBe(true));
+      expect(r.held(ref)?.has(64)).toBe(true);
+      r.images.retain(new Set());
+      expect(r.images.info(ref)).toBeNull();
+      expect(r.images.residentBytes).toBe(0);
+    } finally {
+      r.images.setBackend(null);
+    }
+  });
+
   it("settles a 40-photo page through slow and corrupt decodes, then rebuilds under budget", async () => {
     const refs = Array.from({ length: 39 }, (_, i) => String(i));
     const photos = demand([...refs, "bad"]);

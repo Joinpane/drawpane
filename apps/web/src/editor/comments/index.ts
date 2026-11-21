@@ -52,4 +52,4 @@ export function useCommentStore(editor: Editor, fileId: string) {
 
   return { store, people: people.data?.people ?? [] };
 }
-export { openThread, useThreadLink } from "./useThreadLink";
+export { openThread, useMarkOpenThreadRead } from "./useThreadLink";

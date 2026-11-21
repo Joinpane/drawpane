@@ -37,6 +37,7 @@ import {
   googleStylesheet,
   googleStylesheetUrl,
   googleVariableFiles,
+  scriptFontFile,
 } from "@drawpane/worker/src/api/fonts";
 import { teamFontKey } from "@drawpane/worker/src/api/team-fonts";
 import type { Env } from "./env";
@@ -48,6 +49,7 @@ export interface HeadlessFace {
   readonly italic: boolean;
   /** Its family's variable file, for text that sets axes. */
   readonly variable?: boolean;
+  readonly subset?: string;
   /** The file the canvas draws it from. */
   readonly canvas?: boolean;
 }
@@ -364,6 +366,13 @@ export function headlessFontLoader(
   };
 
   return async (face) => {
+    if (face.subset !== undefined) {
+      const subset = face.subset;
+      return keep(`script\0${face.family}\0${subset}`, async () => {
+        const bytes = await scriptFontFile(env, face.family, subset);
+        return bytes ? new Uint8Array(bytes) : null;
+      });
+    }
     // A team font wins over any other family of its name.
     const team = await teamFaces(face.family);
     if (team.length > 0) {

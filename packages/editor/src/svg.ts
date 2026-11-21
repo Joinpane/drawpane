@@ -31,7 +31,14 @@
  * - auto layout: positions are exported as they are on the canvas, not as
  *   flexbox
  */
-import { getProp, type NodeRecord, type Paint, type Props } from "@drawpane/model";
+import {
+  cjkRegionFor,
+  getProp,
+  type NodeRecord,
+  type Paint,
+  type Props,
+  SCRIPT_FALLBACK_FAMILIES,
+} from "@drawpane/model";
 import {
   arcPathData,
   fitCorners,
@@ -1311,6 +1318,7 @@ export function exportSvg(
         ? Math.round((mf + y) * grid) / grid - mf
         : y;
     const base = node.props;
+    const regionalFont = `Noto Sans ${cjkRegionFor(getProp(base, "characters"))}`;
     const align = getProp(base, "textAlign");
     const anchor = align === "center" ? "middle" : align === "right" ? "end" : null;
     const lineX = align === "center" ? w / 2 : align === "right" ? w : 0;
@@ -1318,7 +1326,15 @@ export function exportSvg(
     const family = (props: Props) => {
       const named = getProp(props, "fontFamily").replace(/['"]/g, "");
       const drawn = drawnFamily(props, measurer).replace(/['"]/g, "");
-      return drawn !== named ? `'${drawn}', '${named}', sans-serif` : `'${named}', sans-serif`;
+      const stack = drawn !== named ? [drawn, named] : [named];
+      if (grid)
+        stack.push(
+          "Drawpane Missing Glyph",
+          "Instrument Sans",
+          regionalFont,
+          ...SCRIPT_FALLBACK_FAMILIES.filter((family) => family !== regionalFont),
+        );
+      return `${stack.map((family) => `'${family}'`).join(", ")}, sans-serif`;
     };
     const decorationOf = (d: string) =>
       d === "strikethrough" ? "line-through" : d === "underline" ? "underline" : "none";
@@ -1365,6 +1381,7 @@ export function exportSvg(
       const p = propsAt(frag.start);
       let own = "";
       if (family(p) !== family(base)) own += attr("font-family", family(p));
+      if (frag.direction) own += attr("direction", frag.direction) + attr("unicode-bidi", "embed");
       if (frag.fontSize !== getProp(base, "fontSize")) own += attr("font-size", frag.fontSize);
       if (getProp(p, "fontWeight") !== getProp(base, "fontWeight"))
         own += attr("font-weight", getProp(p, "fontWeight"));
@@ -1392,17 +1409,22 @@ export function exportSvg(
             return fill ?? ' fill="none"';
           };
           const y = round2(baselineY(drawnBaseline(line, dy)));
-          // A line with outlined runs (PDF): its other fragments are placed one by one, where
-          // the layout put them, since the viewer measures text without the outlined runs' features.
-          if (line.fragments.some((f) => outlined.has(f))) {
+          // Outlined and bidi runs already have explicit positions in the layout.
+          // Each text chunk is independently anchored at its visual left edge.
+          if (line.fragments.some((f) => outlined.has(f) || f.direction)) {
             const x0 = lineOffset(line, w, base);
-            return line.fragments
+            const marker = line.marker
+              ? `<tspan${attr("x", round2(x0 + line.marker.x))}${attr("y", y)} text-anchor="start">${escapeXml(line.marker.text)}</tspan>`
+              : "";
+            const text = [...line.fragments]
+              .sort((a, b) => a.start - b.start)
               .filter((frag) => !outlined.has(frag) && frag.text)
-              .map(
-                (frag) =>
-                  `<tspan${attr("x", round2(x0 + frag.x))}${attr("y", y)} text-anchor="start"${typeOf(frag)}${fillOf(frag)}>${escapeXml(frag.text)}</tspan>`,
-              )
+              .map((frag) => {
+                const anchor = frag.direction === "rtl" ? "end" : "start";
+                return `<tspan${attr("x", round2(x0 + frag.x))}${attr("y", y)}${attr("text-anchor", anchor)}${typeOf(frag)}${fillOf(frag)}>${escapeXml(frag.text)}</tspan>`;
+              })
               .join("");
+            return marker + text;
           }
           const inner = line.fragments
             .map((frag) => {

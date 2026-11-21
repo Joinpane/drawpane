@@ -23,6 +23,12 @@ import { UnsubscribePage } from "./auth/UnsubscribePage";
 import { DashboardPage } from "./dashboard/DashboardPage";
 import { isTeamView, type TeamView } from "./dashboard/views";
 import {
+  type EditorSearch,
+  editorSearch,
+  parseAppSearch,
+  stringifyAppSearch,
+} from "./editor/editor-link";
+import {
   type EngineSearch,
   engineSearch,
   rememberRendererSwitches,
@@ -216,12 +222,13 @@ const fileRoute = createRoute({
   // `renderer` and `present`: render engine switches (engine-view.ts).
   validateSearch: (
     search: Record<string, unknown>,
-  ): { thread?: string; review?: true } & EngineSearch => ({
+  ): { thread?: string; review?: true } & EngineSearch & EditorSearch => ({
     ...(typeof search.thread === "string" ? { thread: search.thread } : {}),
     ...(search.review === true || search.review === "1" || search.review === 1
       ? { review: true as const }
       : {}),
     ...engineSearch(search),
+    ...editorSearch(search),
   }),
   component: () => (
     <Suspense fallback={<div className="app-loading" aria-busy="true" />}>
@@ -306,6 +313,8 @@ export const router = createRouter({
   defaultPreload: "intent",
   defaultErrorComponent: ErrorPage,
   scrollRestoration: true,
+  parseSearch: parseAppSearch,
+  stringifySearch: stringifyAppSearch,
 });
 
 declare module "@tanstack/react-router" {
