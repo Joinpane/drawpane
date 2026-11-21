@@ -405,7 +405,12 @@ test.describe("Render engine parity", () => {
         const figmaPx = Buffer.from(theirs.data, "base64");
         const cpuPx = Buffer.from(cpu.rgba, "base64");
         const vsFigma = score(cpuPx, figmaPx, width, height);
-        const scopeLimit = suite.suite === "glass-scopes" ? GLASS_SCOPE_LIMITS[cell.id] : undefined;
+        const scopeLimit =
+          suite.suite === "masks" && cell.id === "luminance-translucent"
+            ? { mean: 0.4, p99: 5, worstTile: 2 }
+            : suite.suite === "glass-scopes"
+              ? GLASS_SCOPE_LIMITS[cell.id]
+              : undefined;
         const tailLimit =
           suite.suite === "glass-stack"
             ? { p99: cell.id === "diff-params" ? 125 : 95, worstTile: 46 }

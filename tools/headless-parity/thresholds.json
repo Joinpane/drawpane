@@ -79,7 +79,8 @@
     "alpha-translucent": 0.43,
     "alpha-blurred": 0.71,
     "alpha-opacity": 0.33,
-    "luminance-spot": 0.51
+    "luminance-spot": 0.51,
+    "luminance-translucent": 0.4
   },
   "shadows": {
     "drop-soft": 0.4,
