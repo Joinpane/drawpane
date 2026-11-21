@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "license": "MPL-2.0",
-  "description": "PNGs without a canvas: SVG rasterised by resvg in WebAssembly, with the font files and images a render needs supplied by the caller. Runs in a Worker, in Node and in a browser.",
+  "description": "Shared font identities and WebAssembly limits, with a Node rasteriser for SVG export tests.",
   "type": "module",
   "sideEffects": false,
   "exports": {
@@ -15,10 +15,8 @@
     "typecheck": "tsc -p .",
     "test": "vitest run"
   },
-  "dependencies": {
-    "@resvg/resvg-wasm": "2.6.2"
-  },
   "devDependencies": {
+    "@resvg/resvg-wasm": "2.6.2",
     "@types/node": "26.6.6",
     "typescript": "catalog:",
     "vitest": "catalog:"

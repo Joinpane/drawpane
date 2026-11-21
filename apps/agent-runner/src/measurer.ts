@@ -14,7 +14,7 @@ import type { NodeRecord } from "@drawpane/model";
 
 /** A measurer that fetches fonts first: everything async happens in `load`, never while measuring. */
 export interface HeadlessMeasurer extends TextMeasurer {
-  /** The export client's preferred language, when it supplies one. */
+  /** Temporarily selects the Han locale explicitly requested for an export. */
   setScriptLocale?(locale: string): void;
   /** Whether text in `face` measures as it will in the browser now (its font is loaded, or can't be). */
   has(face: TextFace): boolean;

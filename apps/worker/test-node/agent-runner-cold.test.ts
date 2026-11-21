@@ -10,8 +10,8 @@
  * refused. It now builds the editor a page at a time as the stream is read,
  * so the meter stops it partway, as it stops the paged engine.
  *
- * The runner's font and render adapters (HarfBuzz and resvg, as
- * WebAssembly) aren't used by a refused load, and are replaced here.
+ * A refused load never reaches HarfBuzz or the CPU renderer, so this
+ * test replaces their adapters with guards.
  */
 import { getHeapStatistics } from "node:v8";
 import { checkNode, ROOT_ID } from "@drawpane/model";

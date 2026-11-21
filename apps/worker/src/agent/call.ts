@@ -252,12 +252,7 @@ async function runAndCommit(
 /** Runs a read tool (get_jsx, export_image) on a file: nothing is committed or recorded. */
 export async function callReadTool(
   deps: AgentDeps,
-  call: {
-    readonly fileId: string;
-    readonly tool: string;
-    readonly input: unknown;
-    readonly scriptLocale?: string | undefined;
-  },
+  call: Pick<AgentRunRequest, "fileId" | "tool" | "input">,
 ): Promise<AgentCallResult> {
   const tool = findTool(call.tool);
   if (!tool || tool.level === "write")
@@ -305,7 +300,7 @@ type RunDone = Exclude<AgentRunAnswer, { again: true }>;
  */
 async function runOnFile(
   deps: AgentDeps,
-  call: Pick<AgentRunRequest, "fileId" | "tool" | "input" | "scriptLocale">,
+  call: Pick<AgentRunRequest, "fileId" | "tool" | "input">,
   first: AgentFileSource | undefined,
 ): Promise<RunDone> {
   const { fileId } = call;

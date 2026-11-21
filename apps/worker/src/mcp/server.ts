@@ -78,7 +78,6 @@ class ToolError extends Error {}
 // Tools
 
 interface ToolContext {
-  readonly scriptLocale?: string | undefined;
   readonly env: Env;
   readonly user: User;
   /** The token asking, and what it may do. */
@@ -404,7 +403,6 @@ function agentTool(t: AgentTool): Tool {
           fileId: file.id,
           tool: t.name,
           input,
-          scriptLocale: ctx.scriptLocale,
         });
         if (!out.ok) throw new ToolError(out.message);
         return out.image ? new WithImage(out.result, out.image) : out.result;
@@ -693,7 +691,6 @@ export const mcp = new Hono<AppContext>()
           tokenId: auth.tokenId,
           scope: auth.scope,
           callId: newId(),
-          scriptLocale: c.req.header("accept-language")?.match(/^\s*([a-z\d-]{1,64})\b/i)?.[1],
         },
         request,
       );

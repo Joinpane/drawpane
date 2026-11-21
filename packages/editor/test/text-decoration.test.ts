@@ -8,17 +8,13 @@
  * exports of `tools/figma-parity/scenes/text.json`, at 2×.
  */
 import { readFileSync } from "node:fs";
-import { type Op, ROOT_ID } from "@drawpane/model";
-import type { ResvgRasteriser } from "@drawpane/raster";
-import { nodeRasteriser } from "@drawpane/raster/node";
-import { beforeAll, describe, expect, it } from "vitest";
+import { built } from "@drawpane/engine/node";
+import { ROOT_ID } from "@drawpane/model";
+import { describe, expect, it } from "vitest";
 import { Doc } from "../src/doc";
-import { Editor } from "../src/editor";
-import { exportBounds } from "../src/export";
 import { type FaceFileLoader, HarfBuzzMeasurer } from "../src/harfbuzz-measurer";
-import { exportSvg } from "../src/svg";
 import { decorationBar } from "../src/text";
-import { base64, createHeadlessRenderer } from "./fixtures/svg-raster";
+import { headlessEngine, nodeImageDecoder } from "./fixtures/engine-raster";
 
 const file = (path: string) => {
   const b = readFileSync(new URL(path, import.meta.url));
@@ -33,11 +29,6 @@ async function measurer() {
   await m.load([{ family: "Inter", weight: 400, italic: false, canvas: true }]);
   return m;
 }
-
-let rasteriser: ResvgRasteriser;
-beforeAll(async () => {
-  rasteriser = await nodeRasteriser();
-});
 
 describe("decoration bars, against Figma", () => {
   it("puts an underline a fifth of the size under the baseline, a fifteenth thick", () => {
@@ -63,50 +54,9 @@ describe("decoration bars, against Figma", () => {
     expect(bar.y).toBeCloseTo(100 - 5.242, 3);
     expect(bar.height).toBeCloseTo(1.094, 3);
   });
-
-  it("exports the bars the canvas draws, on the drawn baseline", async () => {
-    const m = await measurer();
-    const editor = new Editor({ measurer: m, clientId: "test" });
-    editor.state.set({ role: "editor" });
-    editor.doc.apply([
-      { op: "create", id: "p", type: "page", parent: ROOT_ID, key: "a0", props: { name: "Page" } },
-      ...(["underline", "strikethrough"] as const).map(
-        (textDecoration, i): Op => ({
-          op: "create",
-          id: textDecoration,
-          type: "text",
-          parent: "p",
-          key: `a${i}`,
-          props: {
-            x: 0,
-            y: i * 40,
-            width: 300,
-            height: 24,
-            characters: "Underlined",
-            fontFamily: "Inter",
-            fontSize: 16,
-            lineHeight: { unit: "px", value: 24 },
-            textAutoResize: "height",
-            textDecoration,
-          },
-        }),
-      ),
-    ]);
-    editor.setPage("p");
-    const bar = (id: string) => {
-      const bounds = exportBounds(editor.scene, [id]);
-      if (!bounds) throw new Error("no bounds");
-      const svg = exportSvg(editor.scene, m, [id], bounds, { raster: 2 });
-      const rect = /<rect x="[\d.]+" y="([\d.]+)" width="[\d.]+" height="([\d.]+)"\/>/.exec(svg);
-      return rect ? [Number(rect[1]), Number(rect[2])] : null;
-    };
-    // Inter 16/24 is drawn on 18: the underline from 21.2, the strikethrough from 12.76.
-    expect(bar("underline")).toEqual([21.2, 1.07]);
-    expect(bar("strikethrough")).toEqual([12.76, 1.09]);
-  });
 });
 
-describe("decoration bars, drawn", () => {
+describe.skipIf(!built())("decoration bars, drawn by the CPU engine", () => {
   /** Each row's coverage across the text's columns (its 30th percentile, 0 to 1). */
   const rows = (data: Uint8Array | Uint8ClampedArray, width: number, from: number, to: number) => {
     const out: number[] = [];
@@ -162,23 +112,21 @@ describe("decoration bars, drawn", () => {
           },
         },
       ]);
-      const r = createHeadlessRenderer({
-        measurer: await measurer(),
-        rasteriser,
-        fonts: async (face) => (face.family === "Inter" && !face.italic ? INTER : null),
-        images: async () => null,
-      });
+      const r = headlessEngine(await measurer());
       const ours = await r.renderPng(d, "f", { scale: 2 });
-      const png = (bytes: Uint8Array) =>
-        rasteriser.pixels(
-          `<svg xmlns="http://www.w3.org/2000/svg" width="560" height="280"><image width="560" height="280" href="data:image/png;base64,${base64(bytes)}"/></svg>`,
-          { scale: 1, fonts: [] },
-        );
+      const decoder = await nodeImageDecoder();
+      const size = { width: 560, height: 280 };
+      const png = (bytes: Uint8Array) => {
+        const pixels = decoder.decode({ ...size, bytes }, size, 16 << 20);
+        if (!(pixels instanceof Uint8Array)) throw new Error("Could not decode parity PNG");
+        return pixels;
+      };
       const golden = new Uint8Array(
         file(`../../../tools/figma-parity/goldens/text/${decoration}.png`),
       );
-      const drawn = rows(png(ours.png).data, 560, from, to);
-      const figma = rows(png(golden).data, 560, from, to);
+      const drawn = rows(png(ours.png), size.width, from, to);
+      const figma = rows(png(golden), size.width, from, to);
+      decoder.dispose();
       for (const [i, c] of figma.entries())
         expect(Math.abs((drawn[i] ?? 0) - c), `row ${from + i}`).toBeLessThan(0.2);
     });

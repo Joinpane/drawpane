@@ -19,7 +19,6 @@
   "dependencies": {
     "@drawpane/editor": "workspace:*",
     "@drawpane/model": "workspace:*",
-    "@drawpane/raster": "workspace:*",
     "@simplewebauthn/server": "14.1.0",
     "hono": "4.13.18",
     "zod": "catalog:"
@@ -28,6 +27,7 @@
     "@cloudflare/vitest-plugin": "1.8.1",
     "@cloudflare/workers-types": "5.20261113.1",
     "@drawpane/corpus": "workspace:*",
+    "@drawpane/raster": "workspace:*",
     "@simplewebauthn/browser": "14.0.0",
     "fast-check": "catalog:",
     "harfbuzzjs": "1.6.4",

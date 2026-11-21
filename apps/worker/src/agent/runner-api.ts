@@ -173,7 +173,6 @@ export type AgentSourceAnswer =
   | { readonly ok: false; readonly busy: true };
 
 export interface AgentRunRequest {
-  readonly scriptLocale?: string | undefined;
   readonly v: number;
   readonly fileId: string;
   readonly tool: string;

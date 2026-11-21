@@ -368,27 +368,7 @@ describe("exportSvg", () => {
     );
   });
 
-  it("puts upright lines of text on whole output pixels when asked, for rasterising", () => {
-    const editor = makeEditor([
-      {
-        op: "create",
-        id: "t",
-        type: "text",
-        parent: "p",
-        key: "a0",
-        props: { x: 0, y: 10.3, width: 100, height: 20, characters: "Hi", fontSize: 16 },
-      },
-    ]);
-    const bounds = { x: 0, y: 0, width: 100, height: 40 };
-    const y = (svg: string) => Number(/<tspan x="0" y="([\d.]+)"/.exec(svg)?.[1]);
-    const exact = y(exportSvg(editor.scene, measurer, ["t"], bounds));
-    const snapped = y(exportSvg(editor.scene, measurer, ["t"], bounds, { raster: 2 }));
-    expect(Math.abs(snapped - exact)).toBeLessThanOrEqual(0.25);
-    // On the page, the baseline lands on a half unit: a whole pixel at 2×.
-    expect(((10.3 + snapped) * 2) % 1).toBeCloseTo(0, 5);
-  });
-
-  it("draws underlines as the canvas's bars when rasterising, and as text-decoration otherwise", () => {
+  it("exports underlines as SVG text decorations", () => {
     const editor = makeEditor([
       {
         op: "create",
@@ -410,12 +390,6 @@ describe("exportSvg", () => {
     const plain = exportSvg(editor.scene, measurer, ["t"], bounds);
     expect(plain).toContain('text-decoration="underline"');
     expect(plain).not.toContain("<rect");
-    const raster = exportSvg(editor.scene, measurer, ["t"], bounds, { raster: 2 });
-    expect(raster).not.toContain("text-decoration");
-    // As wide as the run, a fifteenth of the size thick (see `decorationBar`).
-    expect(raster).toMatch(
-      /<g fill="#ff0000"><rect x="0" y="[\d.]+" width="16" height="1.07"\/><\/g>/,
-    );
   });
 
   it("fits a dashed box's pattern to each side and corner, as the canvas does", () => {

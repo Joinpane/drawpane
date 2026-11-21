@@ -275,9 +275,6 @@ importers:
       '@drawpane/penpot':
         specifier: workspace:*
         version: link:../../packages/penpot
-      '@drawpane/raster':
-        specifier: workspace:*
-        version: link:../../packages/raster
       '@drawpane/svg':
         specifier: workspace:*
         version: link:../../packages/svg
@@ -348,9 +345,6 @@ importers:
       '@drawpane/model':
         specifier: workspace:*
         version: link:../../packages/model
-      '@drawpane/raster':
-        specifier: workspace:*
-        version: link:../../packages/raster
       '@simplewebauthn/server':
         specifier: 14.1.0
         version: 14.1.0
@@ -370,6 +364,9 @@ importers:
       '@drawpane/corpus':
         specifier: workspace:*
         version: link:../../packages/corpus
+      '@drawpane/raster':
+        specifier: workspace:*
+        version: link:../../packages/raster
       '@simplewebauthn/browser':
         specifier: 14.0.0
         version: 14.0.0
@@ -601,11 +598,10 @@ importers:
         version: 5.1.0(@types/node@26.6.6)(jsdom@31.0.0(@noble/hashes@2.4.0))(vite@8.3.8(@types/node@26.6.6)(esbuild@0.28.2))
 
   packages/raster:
-    dependencies:
+    devDependencies:
       '@resvg/resvg-wasm':
         specifier: 2.6.2
         version: 2.6.2(patch_hash=561eb2b1a88ceee099dfbf375efdc11487565b9538769fcf6fea959d851b5e23)
-    devDependencies:
       '@types/node':
         specifier: 26.6.6
         version: 26.6.6

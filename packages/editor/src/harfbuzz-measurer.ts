@@ -238,6 +238,8 @@ type CanvasEntry =
   | { readonly status: "ready"; readonly face: CanvasFace };
 
 export interface HarfBuzzMeasurerOptions {
+  /** The document's locale for Han-only text. Defaults to Simplified Chinese. */
+  readonly scriptLocale?: string;
   /** HarfBuzz itself; by default the `harfbuzzjs` package, imported on first use. */
   readonly harfBuzz?: () => Promise<HarfBuzz>;
   /** The family the editor falls back to (`fontString`'s fallbacks): Instrument Sans. */
@@ -285,10 +287,11 @@ export class HarfBuzzMeasurer implements TextMeasurer {
   #generation = 0;
   /** The generation the caches were filled at. */
   #filledAt = 0;
-  #scriptLocale = "";
+  #scriptLocale: string;
 
   constructor(loadFile: FaceFileLoader, options: HarfBuzzMeasurerOptions = {}) {
     this.#loadFile = loadFile;
+    this.#scriptLocale = options.scriptLocale ?? "zh-Hans";
     this.#loadHarfBuzz = options.harfBuzz ?? (() => import("harfbuzzjs"));
     this.fallbackFamily = options.fallbackFamily ?? FALLBACK_FAMILY;
     const bytesOnly: FontBytesLoader = async (face) => {

@@ -1,19 +1,15 @@
 import { env } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { pickFace, stylesheetFaces, workerFontLoader } from "../../agent-runner/src/raster/fonts";
-import { workerImageLoader } from "../../agent-runner/src/raster/media";
+import { headlessFontLoader } from "../../agent-runner/src/font-files";
+import variableUrl from "../../web/e2e/fixtures/InstrumentSans-Variable.ttf?inline";
 import { teamFontKey } from "../src/api/team-fonts";
 import ttfUrl from "./fixtures/InstrumentSans-Regular.ttf?inline";
 
 const TEAM = "team_render";
-const SHA = "e".repeat(64);
-const bytesOf = (dataUrl: string) =>
-  Uint8Array.from(atob(dataUrl.slice(dataUrl.indexOf(",") + 1)), (c) => c.charCodeAt(0));
-const TTF = bytesOf(ttfUrl);
-// A 1×1 blue PNG.
-const PNG = bytesOf(
-  "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGNgYPgPAAEDAQAIicLsAAAAAElFTkSuQmCC",
-);
+const bytes = (url: string) =>
+  Uint8Array.from(atob(url.slice(url.indexOf(",") + 1)), (c) => c.charCodeAt(0));
+const TTF = bytes(ttfUrl);
+const VARIABLE = bytes(variableUrl);
 
 beforeAll(async () => {
   const now = Date.now();
@@ -28,46 +24,33 @@ beforeAll(async () => {
     ).bind(TEAM, "f".repeat(64), TTF.byteLength, now),
     env.DB.prepare(
       `INSERT INTO team_fonts (id, team_id, family, style, weight, weight_max, italic, format, sha, bytes, created_at)
-       VALUES ('font_v', ?, 'Brand Sans', 'Variable', 100, 900, 0, 'ttf', ?, 16, ?)`,
-    ).bind(TEAM, "a".repeat(64), now),
-    env.DB.prepare(
-      "INSERT INTO media (sha, team_id, mime, width, height, bytes, created_at) VALUES (?, ?, 'image/png', 1, 1, ?, ?)",
-    ).bind(SHA, TEAM, PNG.byteLength, now),
+       VALUES ('font_v', ?, 'Brand Sans', 'Variable', 100, 900, 0, 'ttf', ?, ?, ?)`,
+    ).bind(TEAM, "a".repeat(64), VARIABLE.byteLength, now),
   ]);
   await env.FILES.put(teamFontKey("f".repeat(64)), TTF);
-  await env.FILES.put(teamFontKey("a".repeat(64)), new Uint8Array(16));
-  await env.FILES.put(`media/${SHA}`, PNG);
+  await env.FILES.put(teamFontKey("a".repeat(64)), VARIABLE);
 });
 
 afterEach(() => vi.restoreAllMocks());
 
-describe("headless rendering in the Worker", () => {
-  it("reads a team's fonts and images from R2, and only its own", async () => {
-    const fonts = workerFontLoader(env, TEAM);
-    const font = await fonts({ family: "Brand Sans", weight: 700, italic: true });
-    // The static face for a weight; the variable file only for text that sets axes.
-    expect(font?.byteLength).toBe(TTF.byteLength);
-    const variable = await fonts({
-      family: "Brand Sans",
-      weight: 400,
-      italic: false,
-      variable: true,
-    });
-    expect(variable?.byteLength).toBe(16);
-    const image = await workerImageLoader(env, TEAM)(SHA);
-    expect(image).toMatchObject({ type: "image/png", width: 1, height: 1 });
-    expect(await workerImageLoader(env, "team_other")(SHA)).toBeNull();
+describe("fonts for headless rendering", () => {
+  it("reads the team's static and variable font files from R2", async () => {
+    const storage = { DB: env.DB, FILES: env.FILES, GOOGLE_FONTS: "off" };
+    const fonts = headlessFontLoader({ env: storage, teamId: TEAM });
+    const face = { family: "Brand Sans", weight: 400, italic: false };
+    expect(await fonts(face)).toEqual(TTF.buffer);
+    expect(await fonts({ ...face, variable: true })).toEqual(VARIABLE.buffer);
+    const other = headlessFontLoader({ env: storage, teamId: "team_other" });
+    expect(await other(face)).toBeNull();
   });
 
-  it("finds Google faces as TrueType, the nearest the family has", async () => {
+  it("uses the nearest offered Google weight and shares the proxy's cached bytes", async () => {
     const asked: string[] = [];
     const real = globalThis.fetch;
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const url = input instanceof Request ? input.url : String(input);
       if (url.startsWith("https://fonts.googleapis.com/")) {
         asked.push(decodeURIComponent(url));
-        // A static family with only a regular weight: Google refuses the bold.
-        if (!url.includes("family=Static+Sans&")) return new Response("no", { status: 400 });
         return new Response(
           "@font-face { font-family: 'Static Sans'; font-style: normal; font-weight: 400; src: url(https://fonts.gstatic.com/s/staticsans/v1/Regular.ttf) format('truetype'); }",
         );
@@ -75,36 +58,15 @@ describe("headless rendering in the Worker", () => {
       if (url.startsWith("https://fonts.gstatic.com/")) return new Response(TTF);
       return real(input, init);
     });
-    const fonts = workerFontLoader(env, TEAM);
-    const font = await fonts({ family: "Static Sans", weight: 700, italic: false });
-    expect(font?.byteLength).toBe(TTF.byteLength);
-    expect(asked).toEqual([
-      expect.stringContaining("family=Static+Sans:wght@700"),
-      expect.stringContaining("family=Static+Sans&"),
-    ]);
-    // Stored where the font proxy keeps it.
+    const fonts = headlessFontLoader({
+      env,
+      teamId: TEAM,
+      google: async (family) =>
+        family === "Static Sans" ? { weights: [400], italics: [], variable: false } : null,
+    });
+    expect(await fonts({ family: "Static Sans", weight: 700, italic: false })).toEqual(TTF.buffer);
+    expect(asked).toEqual([expect.stringContaining("family=Static+Sans&")]);
     expect(await env.FILES.head("fonts/gstatic/s/staticsans/v1/Regular.ttf")).not.toBeNull();
-    // A family Google doesn't have: nothing, and the renderer falls back.
     expect(await fonts({ family: "Nowhere", weight: 400, italic: false })).toBeNull();
-  });
-});
-
-describe("picking a face", () => {
-  it("keeps the style, then takes the nearest weight", () => {
-    const faces = [
-      { weight: 400, italic: false },
-      { weight: 700, italic: false },
-      { weight: 400, italic: true },
-    ];
-    expect(pickFace(faces, { weight: 600, italic: false })).toEqual({ weight: 700, italic: false });
-    expect(pickFace(faces, { weight: 800, italic: true })).toEqual({ weight: 400, italic: true });
-  });
-
-  it("reads a stylesheet's faces", () => {
-    expect(
-      stylesheetFaces(
-        "@font-face { font-style: italic; font-weight: 600; src: url(https://fonts.gstatic.com/s/x/v1/a.ttf) format('truetype'); }",
-      ),
-    ).toEqual([{ weight: 600, italic: true, url: "https://fonts.gstatic.com/s/x/v1/a.ttf" }]);
   });
 });

@@ -169,7 +169,6 @@ export class FileRunner implements Omit<AgentRunnerApi, "reset" | "strike"> {
     const write = tool.level === "write";
     const { source } = request;
     try {
-      engine.measurer.setScriptLocale?.(request.scriptLocale ?? "");
       const editor = await this.#editorAt(engine, source);
       // The fonts the file is set in, loaded before anything is measured (or drawn).
       if (write || request.tool === "export_image") {
@@ -180,11 +179,14 @@ export class FileRunner implements Omit<AgentRunnerApi, "reset" | "strike"> {
         ? {}
         : {
             renderPng: async (id, options, locale) => {
-              if (locale) engine.measurer.setScriptLocale?.(locale);
+              const previous = engine.measurer.scriptLocale;
+              if (!locale || previous === undefined)
+                return this.#renderer(engine).renderPng(editor.doc, id, options);
+              engine.measurer.setScriptLocale?.(locale);
               try {
                 return await this.#renderer(engine).renderPng(editor.doc, id, options);
               } finally {
-                if (locale) engine.measurer.setScriptLocale?.(request.scriptLocale ?? "");
+                engine.measurer.setScriptLocale?.(previous);
               }
             },
           };

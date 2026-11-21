@@ -26,6 +26,7 @@ async function acquireEngine(trap = false) {
   await previous;
   const instance = glue.__drawpaneCreateGlue();
   const release = () => {
+    images.dispose();
     instance.__drawpaneQuiesce();
     slot.resolve();
   };

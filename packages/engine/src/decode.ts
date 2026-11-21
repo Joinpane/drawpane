@@ -3,11 +3,17 @@ import type * as Glue from "./decoder-glue";
 const MAX_BYTES = 16 << 20;
 const RESERVE_BYTES = 2 << 20;
 
-/** One bounded decoder per host. The renderer charges its retained Wasm pages. */
+/** A bounded decoder with a fresh instance for each export lease. */
 export function imageDecoder(glue: typeof Glue, wasm: WebAssembly.Module) {
   let instance: typeof Glue | undefined;
+  const dispose = () => {
+    const current = instance;
+    instance = undefined;
+    current?.__drawpaneQuiesce();
+  };
   return {
     memoryBytes: () => instance?.memoryBytes() ?? 0,
+    dispose,
     decode(
       file: { width: number; height: number; bytes: Uint8Array },
       target: { width: number; height: number },
@@ -33,10 +39,7 @@ export function imageDecoder(glue: typeof Glue, wasm: WebAssembly.Module) {
           ) ?? "too-large"
         );
       } catch (error) {
-        if (error instanceof WebAssembly.RuntimeError) {
-          instance?.__drawpaneQuiesce();
-          instance = undefined;
-        }
+        if (error instanceof WebAssembly.RuntimeError) dispose();
         return null;
       }
     },
