@@ -215,7 +215,7 @@ describe.skipIf(!built("worker") && !process.env.CI)("the engine's tiles", () =>
 
   describe("text whose face is", () => {
     /** Two texts: one in a face that's loading (until `arrive`), one in a face at hand. */
-    function faces() {
+    function faces(engineShaping = false) {
       const doc = page();
       for (const [id, family, y] of [
         ["late", "Late", 4],
@@ -258,6 +258,15 @@ describe.skipIf(!built("worker") && !process.env.CI)("the engine's tiles", () =>
         shape: (_text, run) => (run.family === "Late" && status !== "ready" ? null : shaped),
         loading: (run) => (run.family === "Late" && status === "loading" ? "face:Late" : null),
         faceStatus: () => status,
+        ...(engineShaping
+          ? {
+              shapeForEngine: (_text, run) => {
+                if (run.family !== "Late" || status === "ready") return { shaped, fallback: false };
+                if (status === "loading") return { waiting: "face:Late" };
+                return { shaped: { ...shaped, scale: shaped.scale / 2 }, fallback: true };
+              },
+            }
+          : {}),
       };
       const settle = (to: "ready" | "unavailable") => {
         status = to;
@@ -294,37 +303,51 @@ describe.skipIf(!built("worker") && !process.env.CI)("the engine's tiles", () =>
       }
     });
 
-    it("finishes provisional text with counted fallback outlines when its face never arrives", () => {
-      const { doc, m, settle } = faces();
-      const scene = new Scene(doc);
-      const builder = new DisplayListBuilder(scene, m);
-      const e = new RenderEngine(mod);
-      try {
-        expect(e.apply(builder.build("p")).ok).toBe(true);
-        expect(builder.waiting).toBe(1);
-        settle("unavailable");
-        const patch = builder.update();
-        expect(patch).not.toBeNull();
-        if (patch) expect(e.apply(patch).ok).toBe(true);
-        expect(builder.supported).toBe(true);
-        expect(builder.waiting).toBe(0);
-        expect(builder.unsupported.size).toBe(1);
-        expect(builder.update()).toBeNull();
-        const r = e.renderCpuTiled(W, H, camera, BG, TILES);
-        if (!r.ok) throw new Error(r.message);
-        expect(r.value.stats.exact).toBe(true);
-        expect(same(tiled(e), fresh(mod, scene, m))).toBe(true);
+    it.each(["fresh", "sliced"])(
+      "finishes a %s open with counted fallback outlines when a face never arrives",
+      (kind) => {
+        const { doc, m, settle } = faces(kind === "sliced");
+        const scene = new Scene(doc);
+        const builder = new DisplayListBuilder(scene, m);
+        const e = new RenderEngine(mod);
+        try {
+          if (kind === "sliced") {
+            do {
+              expect(e.apply(builder.openSlice("p")).ok).toBe(true);
+            } while (builder.opening);
+            expect(builder.pending).toBe(2);
+            expect(builder.waiting).toBe(0);
+            const deferred = builder.update();
+            if (!deferred) throw new Error("Expected deferred text");
+            expect(e.apply(deferred).ok).toBe(true);
+          } else {
+            expect(e.apply(builder.build("p")).ok).toBe(true);
+          }
+          expect(builder.waiting).toBe(1);
+          settle("unavailable");
+          const patch = builder.update();
+          expect(patch).not.toBeNull();
+          if (patch) expect(e.apply(patch).ok).toBe(true);
+          expect(builder.supported).toBe(true);
+          expect(builder.waiting).toBe(0);
+          expect(builder.unsupported.size).toBe(1);
+          expect(builder.update()).toBeNull();
+          const r = e.renderCpuTiled(W, H, camera, BG, TILES);
+          if (!r.ok) throw new Error(r.message);
+          expect(r.value.stats.exact).toBe(true);
+          expect(same(tiled(e), fresh(mod, scene, m))).toBe(true);
 
-        settle("ready");
-        const late = builder.update();
-        expect(late).not.toBeNull();
-        if (late) expect(e.apply(late).ok).toBe(true);
-        expect(builder.unsupported.size).toBe(0);
-        expect(same(tiled(e), fresh(mod, scene, m))).toBe(true);
-      } finally {
-        e.dispose();
-      }
-    });
+          settle("ready");
+          const late = builder.update();
+          expect(late).not.toBeNull();
+          if (late) expect(e.apply(late).ok).toBe(true);
+          expect(builder.unsupported.size).toBe(0);
+          expect(same(tiled(e), fresh(mod, scene, m))).toBe(true);
+        } finally {
+          e.dispose();
+        }
+      },
+    );
 
     it("at hand is left alone when other faces arrive", () => {
       const { doc, m, settle } = faces();
