@@ -27,3 +27,7 @@ Tried first and dropped, on a T4 with the large iOS UI kit: the same glass shade
 - No frame shows a reader without its effect, or in two states across a seam. While something moves, glass looks frosted rather than bent and lit, without its blended inner shadows; it comes back exact within a few frames of stopping.
 - A costly frame draws the readers touching what changed whole, where it drew only what changed before. Numbers in the pull request.
 - `e2e/glass-drag.spec.ts` drags glass among glass and background blur, and pans and zooms, with the canvas's budget made tiny (`drawpaneFrames.budget`, a test knob), and checks that every frame keeps frosted glass frosted. On main the drag check fails.
+
+## Repaint reader damage together
+
+Canvas changes that touch a backdrop reader's old or new footprint repaint the dirty rectangles together. Scheduling those rectangles as separate optional tiles can keep bands from earlier positions on screen while the reader draws at its new position. The renderer can still use its coarse reader pass when exact optics exceed the frame budget. It settles the optics separately once the shape and the exposed backdrop are in the right place.
