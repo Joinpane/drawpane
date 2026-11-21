@@ -184,6 +184,10 @@ A board picture is reusable only while everything its pixels depend on is unchan
 
   Over budget, the engine lowers cache detail in order: reader results first, then off-screen tiles, then the coarser of two scales. It never bypasses the frame budget by drawing everything directly. Allocation failure and device loss rebuild from the canonical display list (see "Fallbacks").
 
+### Reader scratch on WebGL2
+
+The T4 WebGL2 test uses the same 513 × 511 view and 320 × 240 reader for glass, uniform blur and progressive blur. It tests the engine's allocation accounting through `gpu_bytes` before drawing and checks for a typed `Limit` on refusal. Ordinary paint fits at 21 MiB. At that cap the glass mask allocation is refused, and the same glass draws at 28 MiB. Uniform blur refuses at 22 MiB and draws at 24 MiB. At 22 MiB progressive blur is refused before allocating its output atlas, and it draws at 28 MiB. The caps include the glyph atlas and the render targets.
+
 ## Text: saved outlines and shaped glyphs
 
 Vello's glyph path takes font files and marks its atlas experimental (`glifo` 0.5.0). A request to cache custom outlines was closed as not planned, with caller-side caching recommended (linebender/vello#2041). Saved outlines (decision 0037) have no font file, by design. So Drawpane owns the cache, on both backends. Interning the paths saves transport and parsing, but not rasterisation: the kit has 9,079 text layers with saved layouts over 947 distinct glyphs, and filling each occurrence's path rebuilds its strips every time a tile is rebuilt.

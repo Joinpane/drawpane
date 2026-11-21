@@ -433,7 +433,11 @@ for (const build of ["browser", "webgl"] as const) {
   test(`glass scratch budget and moving reader frames (${build})`, async ({ page }) => {
     const root = ROOTS[build];
     const expectedBackend = build === "webgl" ? "webgl2" : "webgpu";
-    const glassScene = (base = 0xffffffff, revision = 1, withGlass = true) => {
+    const glassScene = (
+      base = 0xffffffff,
+      revision = 1,
+      kind: "glass" | "uniform" | "progressive" | "plain" = "glass",
+    ) => {
       const w = new ListWriter(base, revision);
       w.reset();
       w.set(1, ROOT, {
@@ -463,7 +467,7 @@ for (const build of ["browser", "webgl"] as const) {
         ],
         coarse: [],
       });
-      if (withGlass) {
+      if (kind !== "plain") {
         w.set(2, ROOT, {
           flags: 0,
           transform: [1, 0, 0, 1, 64, 64],
@@ -474,24 +478,39 @@ for (const build of ["browser", "webgl"] as const) {
           reach: 0,
           unsupported: 0,
           paths: [{ kind: "rect", w: 320, h: 240, radii: [24, 24, 24, 24], smoothing: 0 }],
-          ops: [
-            {
-              op: "glass",
-              paths: [0],
-              evenOdd: false,
-              kind: 0,
-              inradius: 120,
-              angle: -45,
-              intensity: 80,
-              refraction: 75,
-              depth: 20,
-              dispersion: 50,
-              frost: 4,
-              splay: 0,
-              boxRadii: [24, 24, 24, 24],
-              boxSmoothing: [0, 0, 0, 0],
-            },
-          ],
+          ops:
+            kind === "glass"
+              ? [
+                  {
+                    op: "glass",
+                    paths: [0],
+                    evenOdd: false,
+                    kind: 0,
+                    inradius: 120,
+                    angle: -45,
+                    intensity: 80,
+                    refraction: 75,
+                    depth: 20,
+                    dispersion: 50,
+                    frost: 4,
+                    splay: 0,
+                    boxRadii: [24, 24, 24, 24],
+                    boxSmoothing: [0, 0, 0, 0],
+                  },
+                ]
+              : kind === "uniform"
+                ? [{ op: "backgroundBlur", paths: [0], evenOdd: false, radius: 24 }]
+                : [
+                    {
+                      op: "progressiveBlur",
+                      paths: [0],
+                      evenOdd: false,
+                      startRadius: 2,
+                      endRadius: 36,
+                      start: [0, 0],
+                      end: [1, 1],
+                    },
+                  ],
           coarse: [],
         });
       }
@@ -512,7 +531,7 @@ for (const build of ["browser", "webgl"] as const) {
     await page.goto(origin);
 
     const res = await page.evaluate(
-      async ({ withGlass, withoutGlass, expectedBackend }) => {
+      async ({ withGlass, uniform, progressive, withoutGlass, expectedBackend }) => {
         const name = "/engine.js";
         const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
         await glue.default({ module_or_path: "/engine_bg.wasm" });
@@ -521,25 +540,39 @@ for (const build of ["browser", "webgl"] as const) {
         const width = 513;
         const height = 511;
 
-        // 1. Tight gpu_bytes budget must refuse oversized reader scratch with Limit (code 4).
-        const tightDev = await glue.createGpu(null, 0);
-        if (!tightDev.ok) throw new Error(tightDev.message);
-        const tight = new glue.Engine(0, 0);
-        let tightCode = 0;
-        let tightOk = true;
-        try {
-          tight.setLimit("gpu_bytes", 1 << 20).free();
-          tight.apply(new Uint8Array(withGlass)).free();
-          tight.attachGpu?.(tightDev).free();
-          const o = tight.renderGpu?.(512, 512, 1, 0, 0, 1, bg, false, 0);
-          if (!o) throw new Error("no renderGpu");
-          tightOk = o.ok;
-          tightCode = o.code;
-          o.free();
-        } finally {
-          tight.free();
-          tightDev.free();
-        }
+        const measure = async (list: number[], mib: number) => {
+          const device = await glue.createGpu(null, 0);
+          if (!device.ok) throw new Error(device.message);
+          const engine = new glue.Engine(0, 0);
+          const check = (out: { ok: boolean; message: string; free(): void }) => {
+            const { ok, message } = out;
+            out.free();
+            if (!ok) throw new Error(message);
+          };
+          try {
+            check(engine.setLimit("gpu_bytes", mib << 20));
+            check(engine.apply(new Uint8Array(list)));
+            if (!engine.attachGpu) throw new Error("no attachGpu");
+            check(engine.attachGpu(device));
+            const draw = engine.renderGpu?.(width, height, 1, 0, 0, 1, bg, false, 0);
+            if (!draw) throw new Error("no renderGpu");
+            const result = { mib, ok: draw.ok, code: draw.code, message: draw.message };
+            draw.free();
+            return result;
+          } finally {
+            engine.free();
+            device.free();
+          }
+        };
+        const budgets = {
+          plain: await measure(withoutGlass, 21),
+          glassLimited: await measure(withGlass, 21),
+          glassFits: await measure(withGlass, 28),
+          uniformLimited: await measure(uniform, 22),
+          uniformFits: await measure(uniform, 24),
+          progressiveLimited: await measure(progressive, 22),
+          progressiveFits: await measure(progressive, 28),
+        };
 
         // 2. Normal budget: moving frame draws analytic coarse glass (reads > 0), settles to exact,
         // then switching to a readerless list evicts scratch and renders cleanly.
@@ -576,8 +609,7 @@ for (const build of ["browser", "webgl"] as const) {
           const plainCentre = [...plainPx.subarray(cAt, cAt + 4)];
 
           return {
-            tightOk,
-            tightCode,
+            budgets,
             movingInfo,
             movingCentre,
             movingPixelCount: movingPx.length / 4,
@@ -593,14 +625,23 @@ for (const build of ["browser", "webgl"] as const) {
         }
       },
       {
-        withGlass: glassScene(0xffffffff, 1, true),
-        withoutGlass: glassScene(0xffffffff, 2, false),
+        withGlass: glassScene(),
+        uniform: glassScene(0xffffffff, 1, "uniform"),
+        progressive: glassScene(0xffffffff, 1, "progressive"),
+        withoutGlass: glassScene(0xffffffff, 2, "plain"),
         expectedBackend,
       },
     );
 
-    expect(res.tightOk).toBe(false);
-    expect(res.tightCode).toBe(4);
+    expect(res.budgets.plain.ok).toBe(true);
+    expect(res.budgets.glassLimited).toMatchObject({ ok: false, code: 4 });
+    expect(res.budgets.glassLimited.message).toContain("reader mask");
+    expect(res.budgets.glassFits.ok).toBe(true);
+    expect(res.budgets.uniformLimited).toMatchObject({ ok: false, code: 4 });
+    expect(res.budgets.uniformFits.ok).toBe(true);
+    expect(res.budgets.progressiveLimited).toMatchObject({ ok: false, code: 4 });
+    expect(res.budgets.progressiveLimited.message).toContain("reader blur_out");
+    expect(res.budgets.progressiveFits.ok).toBe(true);
     expect(res.movingInfo).toMatchObject({ ok: true, exact: false });
     expect(res.movingPixelCount).toBe(513 * 511);
     expect(res.movingAccent).toBeGreaterThan(26);
