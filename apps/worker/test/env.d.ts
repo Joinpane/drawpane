@@ -5,6 +5,8 @@ declare global {
   namespace Cloudflare {
     interface Env extends WorkerEnv {
       readonly TEST_MIGRATIONS: D1Migration[];
+      readonly TEST_LIVE_FONTS: boolean;
+      readonly TEST_FALLBACK_FONTS: boolean;
     }
   }
 }

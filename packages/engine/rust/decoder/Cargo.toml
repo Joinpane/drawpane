@@ -1,0 +1,15 @@
+[package]
+name = "drawpane-image-decoder"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+image = { version = "0.25", default-features = false, features = ["png", "webp", "gif"] }
+jpeg-decoder = { version = "0.3.2", default-features = false }
+png = "0.18"
+wasm-bindgen = "=0.2.130"

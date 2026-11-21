@@ -20,14 +20,11 @@ import { mkdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { getHeapStatistics } from "node:v8";
-import {
-  createHeadlessRenderer,
-  HEADLESS_IMAGE_BYTES,
-  imageCost,
-  ToolFailure,
-} from "@drawpane/editor";
+import { ToolFailure } from "@drawpane/editor";
 import { applyTransaction, checkNode, type NodeRecord, type Op, ROOT_ID } from "@drawpane/model";
 import { afterAll, describe, expect, it } from "vitest";
+import { headlessEngine } from "../../../packages/editor/test/fixtures/engine-raster";
+import { solidPng } from "../../../packages/editor/test/fixtures/png";
 import { AgentEngine } from "../../agent-runner/src/engine";
 import { STANDIN } from "../../agent-runner/src/measurer";
 import { answerDocument, SqlFileDoc } from "../src/mcp/document";
@@ -411,7 +408,7 @@ describe(`the headless editor following edits (heap capped at ${HEAP_MB} MB)`, {
 describe(`export_image on a small file of large images (heap capped at ${HEAP_MB} MB)`, {
   timeout: 1_800_000,
 }, () => {
-  it("draws the images past what a render may hold as placeholders, one file at a time", async () => {
+  it("draws the images through the capped renderer, reading one encoded file at a time", async () => {
     // #173's review: a 100 × 100 rectangle with 32 image fills of 4 MiB files. Every file was
     // read at once and kept as a data: URL, and the room aborted before rasterising.
     const fills = Array.from({ length: 32 }, (_, i) => ({
@@ -433,23 +430,14 @@ describe(`export_image on a small file of large images (heap capped at ${HEAP_MB
     const engine = new AgentEngine(STANDIN, { limit: LIMIT });
     const editor = build(engine, r, "materialized");
     let read = 0;
-    const renderer = createHeadlessRenderer({
-      measurer: STANDIN,
-      fonts: async () => null,
-      // The review's loader: ignores what it may hold and hands every file over.
-      images: async (ref) => {
+    const png = solidPng(1600, 900, [35, 110, 205, 255]);
+    const renderer = headlessEngine(STANDIN, {
+      images: async () => {
         read++;
         const bytes = new Uint8Array(4 << 20);
-        bytes.set(
-          Buffer.from(
-            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
-            "base64",
-          ),
-        );
-        bytes[bytes.length - 1] = Number(ref);
-        return { bytes, type: "image/png", width: 1, height: 1 };
+        bytes.set(png);
+        return { bytes, type: "image/png", width: 1600, height: 900 };
       },
-      rasteriser: { rasterise: () => ({ png: new Uint8Array(), width: 100, height: 100 }) },
     });
     const { result, peak } = await measured(() =>
       engine
@@ -462,12 +450,7 @@ describe(`export_image on a small file of large images (heap capped at ${HEAP_MB
         .catch((e: unknown) => e),
     );
     report("export_image of 32 image fills of 4 MiB", peak);
-    // Three fit in what a render may hold; the rest are let go of as they're read, and drawn as
-    // placeholders the answer lists.
-    const fit = Math.floor(HEADLESS_IMAGE_BYTES / imageCost(4 << 20, 1, 1));
-    const notes = (result as { result: { data: { approximate: string[] } } }).result.data
-      .approximate;
-    expect(notes).toEqual([expect.stringContaining(`${32 - fit} image(s) are too large`)]);
+    expect(result).toMatchObject({ result: { data: { width: 200, height: 200 } } });
     expect(read).toBe(32);
     engine.drop();
     r.close();

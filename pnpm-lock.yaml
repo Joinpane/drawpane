@@ -202,7 +202,7 @@ patchedDependencies:
   '@open-pencil/fig@0.16.0': a487ec4a36a5a924b4b305600341fa7af817be58d42e3509a533b8cce5f880bf
   '@open-pencil/scene-graph@0.16.0': 637e589bdd33d6bd3834d84808f7e15bbb495dcc2f0a5c21a427ff71773994ad
   '@resvg/resvg-wasm@2.6.2': 561eb2b1a88ceee099dfbf375efdc11487565b9538769fcf6fea959d851b5e23
-  harfbuzzjs@1.6.4: 7b7038d604df7729f2c80b98e41961f9a8aaebf0a59503a6df5e919ddb05292e
+  harfbuzzjs@1.6.4: 992c2d8785a3ce62750631a3420455f4cb7346eb7966c2501cb3498fe8d6db57
 
 importers:
 
@@ -226,6 +226,9 @@ importers:
       '@drawpane/editor':
         specifier: workspace:*
         version: link:../../packages/editor
+      '@drawpane/engine':
+        specifier: workspace:*
+        version: link:../../packages/engine
       '@drawpane/model':
         specifier: workspace:*
         version: link:../../packages/model
@@ -235,12 +238,9 @@ importers:
       '@drawpane/worker':
         specifier: workspace:*
         version: link:../worker
-      '@resvg/resvg-wasm':
-        specifier: 2.6.2
-        version: 2.6.2(patch_hash=561eb2b1a88ceee099dfbf375efdc11487565b9538769fcf6fea959d851b5e23)
       harfbuzzjs:
         specifier: 1.6.4
-        version: 1.6.4(patch_hash=7b7038d604df7729f2c80b98e41961f9a8aaebf0a59503a6df5e919ddb05292e)
+        version: 1.6.4(patch_hash=992c2d8785a3ce62750631a3420455f4cb7346eb7966c2501cb3498fe8d6db57)
     devDependencies:
       '@cloudflare/workers-types':
         specifier: 5.20261113.1
@@ -370,9 +370,6 @@ importers:
       '@drawpane/corpus':
         specifier: workspace:*
         version: link:../../packages/corpus
-      '@resvg/resvg-wasm':
-        specifier: 2.6.2
-        version: 2.6.2(patch_hash=561eb2b1a88ceee099dfbf375efdc11487565b9538769fcf6fea959d851b5e23)
       '@simplewebauthn/browser':
         specifier: 14.0.0
         version: 14.0.0
@@ -381,7 +378,7 @@ importers:
         version: 4.10.2
       harfbuzzjs:
         specifier: 1.6.4
-        version: 1.6.4(patch_hash=7b7038d604df7729f2c80b98e41961f9a8aaebf0a59503a6df5e919ddb05292e)
+        version: 1.6.4(patch_hash=992c2d8785a3ce62750631a3420455f4cb7346eb7966c2501cb3498fe8d6db57)
       typescript:
         specifier: 'catalog:'
         version: 7.0.2
@@ -464,7 +461,7 @@ importers:
         version: 1.1.0
       harfbuzzjs:
         specifier: 1.6.4
-        version: 1.6.4(patch_hash=7b7038d604df7729f2c80b98e41961f9a8aaebf0a59503a6df5e919ddb05292e)
+        version: 1.6.4(patch_hash=992c2d8785a3ce62750631a3420455f4cb7346eb7966c2501cb3498fe8d6db57)
       pathkit-wasm:
         specifier: 1.0.0
         version: 1.0.0
@@ -715,7 +712,7 @@ importers:
         version: 26.6.6
       harfbuzzjs:
         specifier: 1.6.4
-        version: 1.6.4(patch_hash=7b7038d604df7729f2c80b98e41961f9a8aaebf0a59503a6df5e919ddb05292e)
+        version: 1.6.4(patch_hash=992c2d8785a3ce62750631a3420455f4cb7346eb7966c2501cb3498fe8d6db57)
       typescript:
         specifier: 'catalog:'
         version: 7.0.2
@@ -776,7 +773,7 @@ importers:
         version: 6.4.0
       harfbuzzjs:
         specifier: 1.6.4
-        version: 1.6.4(patch_hash=7b7038d604df7729f2c80b98e41961f9a8aaebf0a59503a6df5e919ddb05292e)
+        version: 1.6.4(patch_hash=992c2d8785a3ce62750631a3420455f4cb7346eb7966c2501cb3498fe8d6db57)
     devDependencies:
       '@cloudflare/workers-types':
         specifier: 5.20261113.1
@@ -3465,7 +3462,7 @@ snapshots:
 
   fzstd@0.1.1: {}
 
-  harfbuzzjs@1.6.4(patch_hash=7b7038d604df7729f2c80b98e41961f9a8aaebf0a59503a6df5e919ddb05292e): {}
+  harfbuzzjs@1.6.4(patch_hash=992c2d8785a3ce62750631a3420455f4cb7346eb7966c2501cb3498fe8d6db57): {}
 
   hono@4.13.18: {}
 

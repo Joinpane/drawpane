@@ -948,38 +948,77 @@ impl Engine {
     /// zero: no check). The working set is a band of output, a tile of target (with the readers'
     /// reach round it), the scene's rows, peak shadow/isolated offscreen passes, and the compressor.
     pub fn admit_export(&self, width: u32, height: u32, camera: Camera) -> Result<()> {
+        self.plan_export_rows(width, height, camera, self.band_rows(width), false)
+            .map(|_| ())
+    }
+
+    /// Chooses an output band height before the first PNG byte. Shorter bands draw exactly the
+    /// same pixels and keep large exports at their requested resolution when possible.
+    pub(crate) fn export_rows(&self, width: u32, height: u32, camera: Camera, requested: u32) -> Result<u32> {
+        self.plan_export_rows(width, height, camera, requested, true)
+    }
+
+    fn plan_export_rows(&self, width: u32, height: u32, camera: Camera, requested: u32, adaptive: bool) -> Result<u32> {
         self.check_size(width, height)?;
         camera.check()?;
         self.check_supported()?;
         self.check_settled()?;
         let limits = &self.store.limits;
-        let rows = self.band_rows(width).min(height) as usize;
+        let mut rows = requested.clamp(1, self.band_rows(width)).min(height);
         let view = camera.view();
         let crop = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
         let halo = self.halo_for_rect(view, crop)? as usize;
         let cols = (limits.export_tile.max(1).min(width) as usize + 2 * halo).min(width as usize);
-        let tile_rows = (rows + 2 * halo).min(height as usize);
-        let effects = self.export_effect_working_set(cols, tile_rows, view)?;
         let budget = limits.memory_bytes;
-        if budget == 0 {
-            return Ok(());
-        }
-        let band = rows as u64 * u64::from(width) * 4;
-        let tile = cols as u64 * tile_rows as u64 * 4 * 2;
         let scene = crate::cpu::scene_work_bytes((width as usize, height as usize)) as u64;
-        let readers = self.export_reader_working_set(width, height, view, (cols, tile_rows));
-        let diamond = self.export_diamond_bytes(width, height, view, cols, tile_rows);
-        let need = band + tile + scene + effects as u64 + (512 << 10) + diamond as u64 + readers;
         let held = self.held_bytes() as u64;
-        if held + need > budget as u64 {
-            return Err(EngineError::limit(format!(
-                "an export {width} × {height} px needs {} MiB beside the {} MiB the engine holds; it may hold {} MiB",
-                need.div_ceil(1 << 20),
-                held.div_ceil(1 << 20),
-                budget >> 20,
-            )));
+        let runtime_headroom = if adaptive {
+            (budget - crate::cpu::runtime_memory_cap(budget)) as u64
+        } else {
+            0
+        };
+        let minimum = if adaptive { rows.min(32) } else { rows };
+        loop {
+            let tile_rows = (rows as usize + 2 * halo).min(height as usize);
+            let effects = self.export_effect_working_set(cols, tile_rows, view)?;
+            if budget == 0 {
+                return Ok(rows);
+            }
+            let band = u64::from(rows) * u64::from(width) * 4;
+            let tile = cols as u64 * tile_rows as u64 * 4;
+            let readers = self.export_reader_working_set(width, height, view, (cols, tile_rows));
+            let diamond = self.export_diamond_bytes(width, height, view, cols, tile_rows);
+            let draw = band + tile + scene + effects as u64 + diamond as u64 + readers;
+            // PNG encoding follows drawing. A high-entropy band can grow the outgoing buffer
+            // while its old allocation and the uncompressed band are still live.
+            let encode = 4 * band + 2 * tile + scene;
+            // Drawing must also fit the CPU's runtime guard. The second tile in the physical
+            // budget covers target replacement, outside the guarded effect passes.
+            let need = (draw + tile.max(runtime_headroom)).max(encode) + (512 << 10);
+            if held + need <= budget as u64 {
+                if adaptive {
+                    // Tiling repeats halo and effect work. Bound that work separately from
+                    // the peak allocation, which only accounts for one tile at a time.
+                    let tiles = u64::from(width.div_ceil(limits.export_tile.max(1))) * u64::from(height.div_ceil(rows));
+                    let pass_pixels = (tile + effects as u64 + diamond as u64 + readers) / 4;
+                    if tiles.saturating_mul(pass_pixels) > 1_000_000_000 {
+                        return Err(EngineError::limit(
+                            "this export needs too much rendering work at this scale",
+                        ));
+                    }
+                }
+                return Ok(rows);
+            }
+            if rows <= minimum {
+                return Err(EngineError::limit(format!(
+                    "an export {width} × {height} px needs {} MiB beside the {} MiB the engine holds; it may hold {} MiB",
+                    need.div_ceil(1 << 20),
+                    held.div_ceil(1 << 20),
+                    budget >> 20,
+                )));
+            }
+            rows = (rows / 2).max(minimum);
         }
-        Ok(())
     }
 
     fn export_reader_working_set(&self, width: u32, height: u32, view: Affine, tile: (usize, usize)) -> u64 {
@@ -1151,7 +1190,7 @@ impl Engine {
         let held = self.held_bytes();
         // Match `Cpu::check_memory`'s headroom for Wasm static data, stack, allocator overhead,
         // and transient `vello_cpu` strip buffers.
-        let cap = budget.saturating_sub(4 << 20).max(budget / 2);
+        let cap = crate::cpu::runtime_memory_cap(budget);
 
         let mut band_h = self.band_rows(width).min(128).min(height).max(1);
         let chosen_rows = loop {

@@ -1,8 +1,9 @@
-// Builds the engine's three WebAssembly modules into dist/ (never committed), then holds them to
+// Builds the engine's WebAssembly modules into dist/ (never committed), then holds them to
 // their size budgets (gzipped):
 //   dist/worker/   the CPU backend alone, for Workers                 at most 400 KB
 //   dist/browser/  the WebGPU backend and the CPU backend             at most 1 MB
 //   dist/webgl/    the WebGL2 backend (naga + GL) and CPU (lazy)      at most 1.4 MB
+//   dist/decoder/  image decoding for headless exports               at most 200 KB
 // The toolchain is this package's mise.toml (Rust with the wasm32 target, wasm-bindgen).
 // ENGINE_SKIP_BUILD=1 keeps whatever dist/ holds (CI restores it from its cache).
 import { execFileSync } from "node:child_process";
@@ -13,7 +14,12 @@ import { gzipSync } from "node:zlib";
 
 const here = join(dirname(fileURLToPath(import.meta.url)), "..");
 const rust = join(here, "rust");
-const BUDGETS = { worker: 400 * 1000, browser: 1000 * 1000, webgl: 1400 * 1000 };
+const BUDGETS = {
+  worker: 400 * 1000,
+  browser: 1000 * 1000,
+  webgl: 1400 * 1000,
+  decoder: 200 * 1000,
+};
 
 /**
  * The Worker build's linear memory may grow to 25 MiB and no further (decision 0040, "Worker
@@ -29,6 +35,14 @@ const all = [
   },
   { name: "browser", features: ["--features", "gpu"], rustflags: "" },
   { name: "webgl", features: ["--features", "webgl"], rustflags: "" },
+  {
+    name: "decoder",
+    features: [],
+    rustflags: `-C link-arg=--max-memory=${16 << 20}`,
+    crate: "drawpane-image-decoder",
+    entry: "decodeImage",
+    output: "image_decoder",
+  },
 ];
 
 /**
@@ -39,7 +53,7 @@ const all = [
  * silences timers, closures, and finalizers from the trapped generation so stale async callbacks
  * can never re-enter trapped memory or touch a renewed instance.
  */
-function addRenew(file) {
+function addRenew(file, entry = "Engine") {
   let js = readFileSync(file, "utf8");
   if (js.includes("__drawpaneCreateGlue")) return;
   for (const name of [
@@ -57,9 +71,9 @@ function addRenew(file) {
     exportedNames.push(name);
     return `${kind} ${name}`;
   });
-  if (!exportedNames.includes("Engine")) {
+  if (!exportedNames.includes(entry)) {
     throw new Error(
-      "wasm-bindgen's glue changed (missing Engine export): update addRenew in build.mjs",
+      `wasm-bindgen's glue changed (missing ${entry} export): update addRenew in build.mjs`,
     );
   }
   const cachedMemoryViews = [...js.matchAll(/^let (cached\w+Memory\d+)\s*=/gm)].map((m) => m[1]);
@@ -180,7 +194,7 @@ export default __defaultGlue.default;
 `;
   writeFileSync(file, wrapped);
 }
-// ENGINE_ONLY=worker builds one module (while iterating); the size check reads both.
+// ENGINE_ONLY=worker builds and checks just that module while iterating.
 const builds = process.env.ENGINE_ONLY
   ? all.filter((b) => b.name === process.env.ENGINE_ONLY)
   : all;
@@ -191,7 +205,7 @@ function run(cmd, args, options = {}) {
 
 const skip =
   process.env.ENGINE_SKIP_BUILD === "1" &&
-  builds.every((b) => existsSync(join(here, "dist", b.name, "engine_bg.wasm")));
+  builds.every((b) => existsSync(join(here, "dist", b.name, `${b.output ?? "engine"}_bg.wasm`)));
 if (!skip) {
   try {
     execFileSync("mise", ["--version"], { stdio: "ignore" });
@@ -206,6 +220,8 @@ if (!skip) {
     execFileSync("mise", ["trust", "--quiet", join(here, "mise.toml")], { stdio: "ignore" });
   } catch {}
   for (const b of builds) {
+    const crate = b.crate ?? "drawpane-engine";
+    const output = b.output ?? "engine";
     const env = { ...process.env, RUSTFLAGS: `-C target-feature=+simd128 ${b.rustflags}`.trim() };
     run(
       "mise",
@@ -214,6 +230,8 @@ if (!skip) {
         "--",
         "cargo",
         "build",
+        "--package",
+        crate,
         "--release",
         "--locked",
         "--target",
@@ -236,18 +254,26 @@ if (!skip) {
       "--out-dir",
       join(here, "dist", b.name),
       "--out-name",
-      "engine",
-      join(rust, "target", b.name, "wasm32-unknown-unknown", "release", "drawpane_engine.wasm"),
+      output,
+      join(
+        rust,
+        "target",
+        b.name,
+        "wasm32-unknown-unknown",
+        "release",
+        `${crate.replaceAll("-", "_")}.wasm`,
+      ),
     ]);
-    addRenew(join(here, "dist", b.name, "engine.js"));
+    addRenew(join(here, "dist", b.name, `${output}.js`), b.entry);
   }
 }
 
 const sizes = {};
 let over = false;
-for (const b of all) {
-  const wasm = readFileSync(join(here, "dist", b.name, "engine_bg.wasm"));
-  const js = readFileSync(join(here, "dist", b.name, "engine.js"));
+for (const b of builds) {
+  const output = b.output ?? "engine";
+  const wasm = readFileSync(join(here, "dist", b.name, `${output}_bg.wasm`));
+  const js = readFileSync(join(here, "dist", b.name, `${output}.js`));
   const gz = gzipSync(wasm, { level: 9 }).length;
   sizes[b.name] = {
     wasm: wasm.length,

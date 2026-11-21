@@ -277,15 +277,23 @@ export class Shaper {
   async load(face: ShapingFace): Promise<FaceStatus> {
     const entry = this.#entry(face);
     if (entry.status !== "loading") return entry.status;
+    return this.waitForFace(faceKey(face));
+  }
+
+  /** Waits for a face already requested by the display-list builder. */
+  async waitForFace(key: string): Promise<FaceStatus> {
+    const entry = this.#faces.get(key);
+    if (!entry) return "unavailable";
+    if (entry.status !== "loading") return entry.status;
     await new Promise<void>((resolve) => {
       const off = this.subscribe(() => {
-        if (this.status(face) !== "loading") {
+        if (this.#faces.get(key)?.status !== "loading") {
           off();
           resolve();
         }
       });
     });
-    return this.status(face);
+    return this.#faces.get(key)?.status ?? "unavailable";
   }
 
   /** `text` with the run's features and axes, or null while its face loads or when it can't be shaped. */
@@ -347,8 +355,10 @@ export class Shaper {
     if (exact && exact.outlines !== false) {
       const styled = Object.keys(run.features).length > 0 || wanted.variable;
       const width = styled ? exact.width : (measure?.(text) ?? exact.width);
+      // A measured prefix leaves out kerning into the next cluster. Keep the
+      // exact face's left-to-right glyph origins and use the measured extent.
       const fitted =
-        !styled && measure && Math.abs(width - exact.width) > 0.01
+        run.direction === "rtl" && !styled && measure && Math.abs(width - exact.width) > 0.01
           ? this.#fitClusters(exact, text, run.direction, measure)
           : exact;
       return { shaped: this.#fit(fitted, width), fallback: false };

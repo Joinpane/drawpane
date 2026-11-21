@@ -16,9 +16,9 @@ import { Doc } from "../src/doc";
 import { Editor } from "../src/editor";
 import { exportBounds } from "../src/export";
 import { type FaceFileLoader, HarfBuzzMeasurer } from "../src/harfbuzz-measurer";
-import { base64, createHeadlessRenderer } from "../src/headless-render";
 import { exportSvg } from "../src/svg";
 import { decorationBar } from "../src/text";
+import { base64, createHeadlessRenderer } from "./fixtures/svg-raster";
 
 const file = (path: string) => {
   const b = readFileSync(new URL(path, import.meta.url));

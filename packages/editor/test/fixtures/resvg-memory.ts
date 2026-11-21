@@ -29,9 +29,9 @@
  * measured it came out above what resvg took.
  */
 import { getProp, type NodeRecord } from "@drawpane/model";
-import { paintOutset } from "./export";
-import type { Rect } from "./geometry";
-import type { Scene } from "./scene";
+import { paintOutset } from "../../src/export";
+import type { Rect } from "../../src/geometry";
+import type { Scene } from "../../src/scene";
 
 /** What any render holds in resvg before its picture: the module's own memory and its glue. */
 export const RASTER_BASE_BYTES = 2.5 * (1 << 20);

@@ -46,7 +46,6 @@ export * from "./properties";
 export * from "./prototype";
 export * from "./reading-order";
 export * from "./render";
-export * from "./render-memory";
 export * from "./replace-fonts";
 export * from "./rich-text";
 export * from "./saved-glyphs";

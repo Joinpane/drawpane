@@ -30,7 +30,7 @@ import {
 import { getProp, type NodeRecord } from "@drawpane/model";
 import { boxOf, type Rect } from "../geometry";
 import { glassParams } from "../glass";
-import { imagePlacement, type Size } from "../images";
+import { imageDrawnSize, type Size } from "../images";
 import { isActiveMask } from "../masks";
 import { blurSigma } from "../post-effects";
 import { glyphTable } from "../saved-glyphs";
@@ -59,8 +59,8 @@ export interface ImageDemand {
 }
 
 export interface DisplayListOptions {
-  /** An image's engine handle and natural size, once the engine holds its pixels; else null. */
-  readonly image?: (ref: string) => EngineImage | null;
+  /** `null` draws a placeholder. `undefined` omits an unavailable image from an export. */
+  readonly image?: (ref: string) => EngineImage | null | undefined;
   readonly colorGlyph?: (text: string, font: string, scale: number) => ColorGlyph | null;
 }
 
@@ -116,7 +116,7 @@ function openingLevel(ids: readonly string[]): OpeningLevel {
 export class DisplayListBuilder {
   readonly #scene: Scene;
   readonly #measurer: TextMeasurer;
-  readonly #image: (ref: string) => EngineImage | null;
+  readonly #image: (ref: string) => EngineImage | null | undefined;
   readonly #colorGlyph: DisplayListOptions["colorGlyph"];
   readonly #colorText = new Map<string, EncodedLayer["colorGlyphs"]>();
   #colorScale = 1;
@@ -467,13 +467,15 @@ export class DisplayListBuilder {
       const visible = distance <= 0;
       const box = boxOf(layer);
       const matrix = scene.worldMatrix(id);
-      const wx = Math.hypot(matrix[0], matrix[1]);
-      const wy = Math.hypot(matrix[2], matrix[3]);
+      const scale = {
+        width: Math.hypot(matrix[0], matrix[1]),
+        height: Math.hypot(matrix[2], matrix[3]),
+      };
       for (const glyph of this.#colorText.get(id) ?? [])
         yield {
           ref: glyph.ref,
           visible,
-          span: { width: glyph.width * wx, height: glyph.height * wy },
+          span: { width: glyph.width * scale.width, height: glyph.height * scale.height },
         };
       for (const paint of getProp(layer.props, "fills")) {
         if (
@@ -484,8 +486,7 @@ export class DisplayListBuilder {
         )
           continue;
         const meta = this.#image(paint.ref);
-        const place = meta && imagePlacement(paint.scaleMode, box, meta, paint.crop);
-        const span = place && { width: place.width * wx, height: place.height * wy };
+        const span = meta ? imageDrawnSize(paint.scaleMode, box, meta, scale, paint.crop) : null;
         yield { ref: paint.ref, visible, span };
       }
     }
@@ -563,20 +564,42 @@ export class DisplayListBuilder {
     ids: readonly string[],
     options?: { readonly context?: boolean | undefined },
   ): Uint8Array {
+    return this.planLayers(ids, options).build();
+  }
+
+  /** Plans the selected layers and their reader context before a headless host loads their assets. */
+  planLayers(ids: readonly string[], options?: { readonly context?: boolean | undefined }) {
     const doc = this.#scene.doc;
     const first = ids.map((id) => doc.get(id)).find((n) => n !== undefined);
     const pageId = first ? this.#pageOf(first.id) : null;
-    if (options?.context && pageId) {
-      const parts = this.#readerContextParts(ids);
-      if (parts.length > 0) {
-        const list = this.#buildWithContext(pageId, ids, parts);
+    const parts = options?.context && pageId ? this.#readerContextParts(ids) : [];
+    const context = pageId && parts.length > 0 ? this.#contextPrefix(pageId, ids, parts) : null;
+    return {
+      *visibleNodes(): IterableIterator<NodeRecord> {
+        const seen = new Set<string>();
+        const stack = [...ids];
+        while (stack.length > 0) {
+          const id = stack.pop() as string;
+          const node = doc.get(id);
+          if (!node || node.props.visible === false || seen.has(id)) continue;
+          seen.add(id);
+          yield node;
+          for (const child of doc.childIds(id)) stack.push(child);
+        }
+        for (const id of context ?? []) {
+          const node = doc.get(id);
+          if (node && node.props.visible !== false && !seen.has(id)) yield node;
+        }
+      },
+      build: () => {
+        const list =
+          context && pageId
+            ? this.#buildWithContext(pageId, ids, context)
+            : this.build(pageId ?? "", ids);
         this.#page = null;
         return list;
-      }
-    }
-    const list = this.build(pageId ?? "", ids);
-    this.#page = null;
-    return list;
+      },
+    };
   }
 
   /**
@@ -648,27 +671,15 @@ export class DisplayListBuilder {
   }
 
   /**
-   * Builds a fresh export list containing `ids` (without `FLAG.context`) plus the page prefix
-   * transitively feeding them (marked `FLAG.context`), preserving ancestor frames so `clipWithin`
-   * and transforms match the page (decision 0039). Prefix selection runs in reverse paint order
-   * so an earlier backdrop-writing blur pulls in its own backdrop inputs transitively.
+   * Finds the page prefix feeding the selected layers' readers, including ancestor clips and
+   * transforms (decision 0039). Reverse paint order lets an earlier blur pull in its own inputs.
    */
-  #buildWithContext(
+  #contextPrefix(
     pageId: string,
     ids: readonly string[],
     initialParts: readonly Rect[],
-  ): Uint8Array {
-    const t0 = performance.now();
+  ): ReadonlySet<string> {
     const doc = this.#scene.doc;
-    this.#resetState(pageId);
-    const ctx = this.#context();
-    const revision = this.#revision + 1;
-    const w = new ListWriter(
-      ANY_REVISION,
-      revision,
-      Math.max(1 << 20, Math.ceil(this.#lastFresh * 1.1)),
-    );
-    w.reset();
     const exported = new Set(ids);
     const remaining = new Set(ids);
     const ancestors = new Set<string>();
@@ -744,8 +755,27 @@ export class DisplayListBuilder {
         if (blurReach) needParts.push(blurReach);
       }
     }
+    return keptContext;
+  }
 
-    // 3. Emit kept context nodes (flagged `FLAG.context`) and exported nodes in paint order.
+  #buildWithContext(
+    pageId: string,
+    ids: readonly string[],
+    keptContext: ReadonlySet<string>,
+  ): Uint8Array {
+    const t0 = performance.now();
+    const doc = this.#scene.doc;
+    this.#resetState(pageId);
+    const ctx = this.#context();
+    const revision = this.#revision + 1;
+    const w = new ListWriter(
+      ANY_REVISION,
+      revision,
+      Math.max(1 << 20, Math.ceil(this.#lastFresh * 1.1)),
+    );
+    w.reset();
+    const exported = new Set(ids);
+    // Emit kept context nodes (flagged `FLAG.context`) and exported nodes in paint order.
     let records = 0;
     let glyphs = 0;
     const emitRemaining = new Set(ids);
@@ -1040,6 +1070,11 @@ export class DisplayListBuilder {
   /** Layers whose text waits for faces still loading (sent provisional meanwhile). */
   get waiting(): number {
     return this.#waits.size;
+  }
+
+  /** Font requests the encoded text is currently waiting on. */
+  waitingFaces(): Iterable<string> {
+    return this.#waitingOn.keys();
   }
 
   /**

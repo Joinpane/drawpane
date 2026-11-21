@@ -10,36 +10,25 @@
  * lets the package take it).
  */
 import type { FaceFileLoader } from "@drawpane/editor";
-// HarfBuzz's module with its memory capped, written by scripts/cap-wasm.ts.
 import hbWasm from "../wasm/harfbuzz.wasm";
+// HarfBuzz's module with its memory capped, written by scripts/cap-wasm.ts.
+import hbDrawWasm from "../wasm/harfbuzz-draw.wasm";
 import type { Env } from "./env";
 import { type HeadlessFontResolver, headlessFontResolver } from "./font-aliases";
 import { headlessFontLoader } from "./font-files";
+import { type HarfBuzzWasmOptions, harfBuzzWasmOptions } from "./harfbuzz-draw";
 import { harfBuzzMeasurerWith } from "./harfbuzz-measurer";
 import { type HeadlessMeasurer, STANDIN } from "./measurer";
 
 type HarfBuzz = typeof import("harfbuzzjs");
-
-/** Emscripten's hook for instantiating its module itself, from the bundled one. */
-interface EmscriptenOptions {
-  instantiateWasm(
-    imports: WebAssembly.Imports,
-    done: (instance: WebAssembly.Instance, module: WebAssembly.Module) => void,
-  ): Record<string, never>;
-}
 
 let harfBuzz: Promise<HarfBuzz> | null = null;
 
 /** HarfBuzz, instantiated from the bundled module once per isolate. */
 function loadHarfBuzz(): Promise<HarfBuzz> {
   if (!harfBuzz) {
-    const options: EmscriptenOptions = {
-      instantiateWasm(imports, done) {
-        void WebAssembly.instantiate(hbWasm, imports).then((instance) => done(instance, hbWasm));
-        return {};
-      },
-    };
-    (globalThis as { __drawpaneHarfBuzz?: EmscriptenOptions }).__drawpaneHarfBuzz = options;
+    (globalThis as { __drawpaneHarfBuzz?: HarfBuzzWasmOptions }).__drawpaneHarfBuzz =
+      harfBuzzWasmOptions(hbWasm, hbDrawWasm);
     harfBuzz = import("harfbuzzjs").catch((error: unknown) => {
       harfBuzz = null;
       throw error;

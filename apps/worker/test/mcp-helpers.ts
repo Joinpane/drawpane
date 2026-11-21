@@ -45,13 +45,22 @@ export async function rpc(
 }
 
 let nextId = 1;
-export async function call(token: string, name: string, args: Record<string, unknown> = {}) {
-  const { body } = await rpc(token, {
-    jsonrpc: "2.0",
-    id: nextId++,
-    method: "tools/call",
-    params: { name, arguments: args },
-  });
+export async function call(
+  token: string,
+  name: string,
+  args: Record<string, unknown> = {},
+  headers?: Record<string, string>,
+) {
+  const { body } = await rpc(
+    token,
+    {
+      jsonrpc: "2.0",
+      id: nextId++,
+      method: "tools/call",
+      params: { name, arguments: args },
+    },
+    headers,
+  );
   return body.result as {
     isError: boolean;
     structuredContent: Record<string, unknown>;

@@ -1,7 +1,7 @@
 /**
  * The agent runner's Worker (decision 0033): the `AgentRunner` Durable
  * Object, one per file (`idFromName(fileId)`), which runs agent tools with
- * the headless editor, HarfBuzz and resvg, in isolates of this script's own.
+ * the headless editor, HarfBuzz and the CPU render engine, in isolates of this script's own.
  * When a call runs out of memory, this isolate is reset and the main
  * Worker's call fails; the file's room, in the main Worker's script, never
  * notices (step 0, `0033-agent-runner-step0.md`).
@@ -56,6 +56,7 @@ export class AgentRunner extends DurableObject<Env> {
   #for(fileId: string): FileRunner {
     this.#runner ??= new FileRunner(this.env, fileId, {
       midRun: () => this.#hooks.midRun(),
+      renderTrap: () => this.#hooks.renderTrap(),
     });
     return this.#runner;
   }

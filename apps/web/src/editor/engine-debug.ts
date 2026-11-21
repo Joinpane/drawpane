@@ -20,11 +20,10 @@ import {
   type EngineModule,
   type FrameStats,
   type GpuInfo,
-  loadBrowserEngine,
-  loadWebglEngine,
   RenderEngine,
   unsupportedNames,
 } from "@drawpane/engine";
+import { loadBrowserEngine, loadWebglEngine } from "@drawpane/engine/browser";
 import { uploadCpuLevel, ViewImages } from "./engine-image";
 import { imagesFor } from "./media";
 

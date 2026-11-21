@@ -1,9 +1,7 @@
 import { env } from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import rasterPackage from "../../../packages/raster/package.json";
-import runnerPackage from "../../agent-runner/package.json";
-import { renderDeps, workerRasteriser } from "../../agent-runner/src/raster";
-import { pickFace, stylesheetFaces } from "../../agent-runner/src/raster/fonts";
+import { pickFace, stylesheetFaces, workerFontLoader } from "../../agent-runner/src/raster/fonts";
+import { workerImageLoader } from "../../agent-runner/src/raster/media";
 import { teamFontKey } from "../src/api/team-fonts";
 import ttfUrl from "./fixtures/InstrumentSans-Regular.ttf?inline";
 
@@ -44,32 +42,21 @@ beforeAll(async () => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("headless rendering in the Worker", () => {
-  it("sets resvg up from the bundled WebAssembly and draws", async () => {
-    const r = await workerRasteriser();
-    const out = await r.rasterise(
-      `<svg xmlns="http://www.w3.org/2000/svg" width="20" height="10" viewBox="0 0 20 10"><rect width="20" height="10" fill="#2b4fd6"/></svg>`,
-      { scale: 2, fonts: [] },
-    );
-    expect([out.width, out.height]).toEqual([40, 20]);
-    expect(String.fromCharCode(...out.png.subarray(1, 4))).toBe("PNG");
-  });
-
   it("reads a team's fonts and images from R2, and only its own", async () => {
-    const deps = await renderDeps(env, TEAM);
-    const font = await deps.fonts({ family: "Brand Sans", weight: 700, italic: true });
+    const fonts = workerFontLoader(env, TEAM);
+    const font = await fonts({ family: "Brand Sans", weight: 700, italic: true });
     // The static face for a weight; the variable file only for text that sets axes.
     expect(font?.byteLength).toBe(TTF.byteLength);
-    const variable = await deps.fonts({
+    const variable = await fonts({
       family: "Brand Sans",
       weight: 400,
       italic: false,
       variable: true,
     });
     expect(variable?.byteLength).toBe(16);
-    const image = await deps.images(SHA);
+    const image = await workerImageLoader(env, TEAM)(SHA);
     expect(image).toMatchObject({ type: "image/png", width: 1, height: 1 });
-    const other = await renderDeps(env, "team_other");
-    expect(await other.images(SHA)).toBeNull();
+    expect(await workerImageLoader(env, "team_other")(SHA)).toBeNull();
   });
 
   it("finds Google faces as TrueType, the nearest the family has", async () => {
@@ -88,8 +75,8 @@ describe("headless rendering in the Worker", () => {
       if (url.startsWith("https://fonts.gstatic.com/")) return new Response(TTF);
       return real(input, init);
     });
-    const deps = await renderDeps(env, TEAM);
-    const font = await deps.fonts({ family: "Static Sans", weight: 700, italic: false });
+    const fonts = workerFontLoader(env, TEAM);
+    const font = await fonts({ family: "Static Sans", weight: 700, italic: false });
     expect(font?.byteLength).toBe(TTF.byteLength);
     expect(asked).toEqual([
       expect.stringContaining("family=Static+Sans:wght@700"),
@@ -98,15 +85,7 @@ describe("headless rendering in the Worker", () => {
     // Stored where the font proxy keeps it.
     expect(await env.FILES.head("fonts/gstatic/s/staticsans/v1/Regular.ttf")).not.toBeNull();
     // A family Google doesn't have: nothing, and the renderer falls back.
-    expect(await deps.fonts({ family: "Nowhere", weight: 400, italic: false })).toBeNull();
-  });
-});
-
-describe("the rasteriser's WebAssembly", () => {
-  it("is the version @drawpane/raster's glue was written for", () => {
-    expect(runnerPackage.dependencies["@resvg/resvg-wasm"]).toBe(
-      rasterPackage.dependencies["@resvg/resvg-wasm"],
-    );
+    expect(await fonts({ family: "Nowhere", weight: 400, italic: false })).toBeNull();
   });
 });
 

@@ -1,3 +1,7 @@
+[workspace]
+members = ["decoder"]
+resolver = "3"
+
 [package]
 name = "drawpane-engine"
 version = "0.1.0"

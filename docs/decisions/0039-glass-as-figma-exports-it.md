@@ -30,7 +30,7 @@ And a few one-off probes in the parity file: a page with a grey background, a se
 2. **On a canvas that may be see-through, glass replaces what's under its shape**: the shape's coverage cut out of the canvas, then the glass added in (the canvas's `destination-out`, then `lighter`), both at the layer's opacity. The screen, filled with an opaque page background, draws as before, keeping pictures for pans; so does any canvas the renderer knows is opaque (decision 0038's list).
 3. **Exports see what's under them.** `renderNodes` takes `context`: when the exported layers hold glass or background blur, the page is first drawn, without its background, up to and including them into a second canvas, keeping what each of their glass and background blur layers reads there; drawing the export itself, those layers read what was kept instead of the export's canvas. PNG and JPEG export, the export panel's preview and the kit parity harness use it. Exports without glass or background blur draw once, as before.
 4. **The `.fig` importer brings glass's settings** by the record's names above; the REST importer still can't (its API leaves them out) and keeps the defaults and the note.
-5. **SVG export, and so the headless renderer**, still can't see behind a layer, so glass stays a lit rim there, but now masked by the alpha of what's under the layer in its group: over nothing there's no light, as on the canvas and in Figma. They don't see what's outside the exported layers.
+5. **SVG export** draws glass as a lit rim masked by the alpha of what's under the layer in its group. Over nothing there's no light, as on the canvas and in Figma. Headless PNG uses rule 3 through the CPU engine (decision 0040, phase 4).
 6. **Background blur under text shows under its glyphs**, as in Figma, not across the text's box. It used to cover the box, unseen while an export's backdrop was empty; seeing what's under the layer made it a grey box behind the kit's lock screen widgets' text. Figma's layer is its fills over the blur, cut to the glyphs once, so under a fill that comes out the same whatever is under it (opaque and normal, or white added by linear dodge as Apple's vibrant text is, or black multiplied) none of the blur shows, not even at the glyphs' anti-aliased edges: there it's skipped (`glass-context`'s `blur-text`, `blur-text-dodge` and `blur-text-faint`).
 7. **Parity suites** can export a cell with no background (`"background": "none"`, compared over white and over black so alpha counts) or a named layer of each cell (`"export"`), drawn as an export draws it.
 
@@ -39,7 +39,7 @@ And a few one-off probes in the parity file: a page with a grey background, a se
 - Numbers in the pull request (both kits, before and after on the same base).
 - Documents drawn on screen look the same; exports of layers with glass or background blur over transparency or on dark boards change, toward Figma.
 - An export holding glass or background blur draws what's beneath it on the page once more, bounded by the export's rect, and keeps a copy of each such layer's backdrop region. Panning is untouched.
-- SVG export and the headless renderer still show glass without its bend or frost, and without what's outside the exported layers.
+- SVG export shows the glass rim within the exported layers.
 
 ## Revision: the export preview's cost (2026-11-19)
 

@@ -9,74 +9,36 @@
  * `x-engine-report` header; /noop loads everything and answers; /health answers "ok". Local only
  * (`wrangler dev`, scripts/workerd.mjs), never deployed.
  */
-import {
-  DisplayListBuilder,
-  Doc,
-  Scene,
-  type ShapedText,
-  type ShapingRun,
-  type TextMeasurer,
-} from "@drawpane/editor";
+import { DisplayListBuilder, Doc, Scene } from "@drawpane/editor";
 import { type EngineModule, ErrorCode, loadEngineSync, RenderEngine } from "@drawpane/engine";
 import * as glue from "@drawpane/engine/worker-glue";
+import {
+  type HarfBuzzWasmOptions,
+  harfBuzzWasmOptions,
+} from "../../apps/agent-runner/src/harfbuzz-draw";
 import { harfBuzzMeasurerWith } from "../../apps/agent-runner/src/harfbuzz-measurer";
 import interFile from "../../apps/web/e2e/fixtures/Inter-Variable.ttf";
 import { scene } from "./scene";
 import engineWasm from "./wasm/engine.wasm";
 import hbWasm from "./wasm/harfbuzz.wasm";
+import drawWasm from "./wasm/harfbuzz-draw.wasm";
 
 type HarfBuzz = typeof import("harfbuzzjs");
-interface EmscriptenOptions {
-  instantiateWasm(
-    imports: WebAssembly.Imports,
-    done: (instance: WebAssembly.Instance, module: WebAssembly.Module) => void,
-  ): Record<string, never>;
-}
-
 let hbMemory: WebAssembly.Memory | null = null;
 let harfBuzz: Promise<HarfBuzz> | null = null;
 function loadHarfBuzz(): Promise<HarfBuzz> {
   harfBuzz ??= (() => {
-    (globalThis as { __drawpaneHarfBuzz?: EmscriptenOptions }).__drawpaneHarfBuzz = {
-      instantiateWasm(imports, done) {
-        void WebAssembly.instantiate(hbWasm, imports).then((instance) => {
-          hbMemory = instance.exports.memory as WebAssembly.Memory;
-          done(instance, hbWasm);
-        });
-        return {};
-      },
-    };
+    (globalThis as { __drawpaneHarfBuzz?: HarfBuzzWasmOptions }).__drawpaneHarfBuzz =
+      harfBuzzWasmOptions(hbWasm, drawWasm, (memory) => {
+        hbMemory = memory;
+      });
     return import("harfbuzzjs");
   })();
   return harfBuzz;
 }
 
-const base = harfBuzzMeasurerWith(async () => interFile.slice(0), loadHarfBuzz);
-
-/**
- * HarfBuzz's outline callbacks need runtime WebAssembly compilation, which Workers forbid.
- * The test supplies outlines shaped in Node for the runs this Worker requests, as a file
- * supplies its saved outlines (decision 0037).
- */
-const shapes = new Map<string, ShapedText>();
-const wanted = new Map<string, { text: string; run: ShapingRun }>();
-const measurer: TextMeasurer & { load: typeof base.load } = {
-  width: (font, text, run) => base.width(font, text, run),
-  metrics: (font) => base.metrics?.(font) ?? null,
-  family: (family, size) => base.family?.(family, size) ?? family,
-  missing: (family, size, weight, italic) => base.missing?.(family, size, weight, italic) ?? false,
-  get generation() {
-    return (base.generation ?? 0) + shapes.size;
-  },
-  shape(text, run) {
-    const key = `${run.key}\u0000${text}`;
-    const hit = shapes.get(key);
-    if (hit) return hit;
-    wanted.set(key, { text, run });
-    return null;
-  },
-  load: (faces) => base.load(faces),
-};
+const inter = interFile.slice(0);
+const measurer = harfBuzzMeasurerWith(async () => inter, loadHarfBuzz);
 let module: EngineModule | null = null;
 
 export default {
@@ -111,16 +73,6 @@ async function handle(request: Request): Promise<Response> {
         engineMemory: module.memoryBytes(),
         harfBuzzMemory: hbMemory?.buffer.byteLength ?? null,
       });
-    if (url.pathname === "/shapes" && request.method === "POST") {
-      for (const { key, shaped } of (await request.json()) as Array<{
-        key: string;
-        shaped: ShapedText;
-      }>) {
-        shapes.set(key, shaped);
-        wanted.delete(key);
-      }
-      return Response.json({ shapes: shapes.size });
-    }
     if (url.pathname !== "/export") return new Response("not found", { status: 404 });
     const width = Number(url.searchParams.get("width") ?? 1024);
     const height = Number(url.searchParams.get("height") ?? 1024);
@@ -130,13 +82,6 @@ async function handle(request: Request): Promise<Response> {
     doc.apply(scene(cards, seed));
     const builder = new DisplayListBuilder(new Scene(doc), measurer);
     const list = builder.build("P");
-    // Text whose runs aren't shaped here yet: answer which, for the harness to shape and post.
-    if (wanted.size > 0)
-      return Response.json(
-        { wanted: [...wanted].map(([key, w]) => ({ key, ...w })) },
-        { status: 409 },
-      );
-    if (url.searchParams.has("probe")) return new Response(null, { status: 204 });
     // A fresh engine per render, as decision 0033 gives every render a fresh instance's worth of
     // state (one module instance per isolate: its memory is the cap, reused).
     // The Worker build's budgets (WORKER_LIMITS) apply: the shipped module's memory is capped at

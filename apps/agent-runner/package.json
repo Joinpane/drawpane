@@ -3,7 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "license": "MPL-2.0",
-  "description": "The agent runner (decision 0033): a Worker of its own whose AgentRunner Durable Object runs agent tools, with the headless editor, HarfBuzz and resvg, outside the file's room.",
+  "description": "The agent runner (decision 0033): a Worker of its own whose AgentRunner Durable Object runs agent tools, with the headless editor, HarfBuzz and the render engine, outside the file's room.",
   "type": "module",
   "scripts": {
     "types": "wrangler types --include-runtime=false src/worker-configuration.d.ts",
@@ -13,10 +13,10 @@
   },
   "dependencies": {
     "@drawpane/editor": "workspace:*",
+    "@drawpane/engine": "workspace:*",
     "@drawpane/model": "workspace:*",
     "@drawpane/raster": "workspace:*",
     "@drawpane/worker": "workspace:*",
-    "@resvg/resvg-wasm": "2.6.2",
     "harfbuzzjs": "1.6.4"
   },
   "devDependencies": {

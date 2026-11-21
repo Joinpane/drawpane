@@ -24,10 +24,14 @@ const require = createRequire(join(here, "package.json"));
 const { withMemoryMaximum, memoryLimits, HARFBUZZ_MAX_BYTES } = await import(
   pathToFileURL(join(here, "../../packages/raster/src/wasm-limits.ts")).href
 );
+const { harfBuzzDrawWasm } = await import(
+  pathToFileURL(join(here, "../../apps/agent-runner/scripts/harfbuzz-draw.ts")).href
+);
 const ENGINE_MAX_BYTES = 25 * 1024 * 1024;
 const ISOLATE_BYTES = 128 * 1000 * 1000;
 const wasmDir = join(here, "wasm");
 mkdirSync(wasmDir, { recursive: true });
+writeFileSync(join(wasmDir, "harfbuzz-draw.wasm"), harfBuzzDrawWasm());
 // The shipped Worker module must carry its own maximum: the harness tests those bytes.
 {
   const shipped = new Uint8Array(
@@ -128,6 +132,8 @@ function checkPng(buf) {
 }
 
 const base = `http://127.0.0.1:${port}`;
+const request = (path, timeout = 180_000) =>
+  fetch(`${base}${path}`, { signal: AbortSignal.timeout(timeout) });
 
 /**
  * The isolate's JavaScript heap through the inspector (what Cloudflare counts toward the 128 MB
@@ -140,7 +146,9 @@ const pending = new Map();
 async function connectInspector() {
   for (let i = 0; i < 60 && !inspector; i++) {
     try {
-      const targets = await (await fetch(`http://127.0.0.1:${inspectorPort}/json`)).json();
+      const targets = await (
+        await fetch(`http://127.0.0.1:${inspectorPort}/json`, { signal: AbortSignal.timeout(2500) })
+      ).json();
       const url = targets.find((t) => t.webSocketDebuggerUrl)?.webSocketDebuggerUrl;
       if (url) {
         // Wrangler's inspector proxy wants an Origin, which Node's own WebSocket can't send: the
@@ -175,48 +183,11 @@ function send(method, params = {}) {
 }
 const heapUsed = async () => (await send("Runtime.getHeapUsage"))?.usedSize ?? null;
 
-// Shapes in Node, where HarfBuzz gives outlines, with the editor's own shaper.
-const vite = await import(pathToFileURL(require.resolve("vite")).href);
-const { module: shaping } = await vite.runnerImport(
-  join(here, "../../packages/editor/src/shaping.ts"),
-  {
-    configFile: false,
-    logLevel: "error",
-    root: join(here, "../../packages/editor"),
-  },
-);
-const inter = readFileSync(join(here, "../../apps/web/e2e/fixtures/Inter-Variable.ttf"));
-const shaper = new shaping.Shaper(
-  async () => inter.buffer.slice(inter.byteOffset, inter.byteOffset + inter.byteLength),
-  {
-    makePath: () => null,
-    // HarfBuzz from Node's own loader: the module runner doesn't load its WebAssembly.
-    harfBuzz: () =>
-      import(
-        pathToFileURL(
-          require.resolve("harfbuzzjs", { paths: [join(here, "../../packages/editor")] }),
-        ).href
-      ),
-  },
-);
-async function shapeFor(wanted) {
-  const out = [];
-  for (const { key, text, run } of wanted) {
-    await shaper.load(shaping.shapingFace(run));
-    const shaped = shaper.shape(text, run);
-    if (shaped)
-      out.push({ key, shaped: { ...shaped, glyphs: shaped.glyphs.map(({ path, ...g }) => g) } });
-  }
-  const res = await fetch(`${base}/shapes`, { method: "POST", body: JSON.stringify(out) });
-  if (!res.ok) throw new Error(`posting shapes: ${res.status}`);
-  if (process.env.ENGINE_WORKERD_DEBUG)
-    console.error(`shaped ${out.length} of ${wanted.length}:`, await res.text());
-}
 const failures = [];
 try {
   for (let i = 0; ; i++) {
     try {
-      if ((await fetch(`${base}/health`)).ok) break;
+      if ((await request("/health", 2000)).ok) break;
     } catch {}
     if (i > 360) throw new Error(`wrangler dev didn't start:\n${log}`);
     await new Promise((r) => setTimeout(r, 500));
@@ -224,7 +195,9 @@ try {
   await connectInspector();
   const pids = workerds(wrangler.pid);
   const idles = pids.map(memoryOf);
-  const noop = await (await fetch(`${base}/noop`)).json();
+  const noopResponse = await request("/noop", 45_000);
+  if (!noopResponse.ok) throw new Error(`Worker startup: ${await noopResponse.text()}`);
+  const noop = await noopResponse.json();
   const warms = pids.map(memoryOf);
   const which = warms.reduce(
     (best, m, i) => (m.rss - idles[i].rss > warms[best].rss - idles[best].rss ? i : best),
@@ -248,20 +221,10 @@ try {
     }
   };
   const runOnce = async (query) => {
-    // Shapes first: the Worker answers 409 with the runs it needs (once per text), 204 when it
-    // has them all (a probe draws nothing).
-    for (let i = 0; i < 4; i++) {
-      const probe = await fetch(`${base}/export?${query}&probe=1`);
-      if (probe.status !== 409) {
-        await probe.arrayBuffer();
-        break;
-      }
-      await shapeFor((await probe.json()).wanted);
-    }
     await send("HeapProfiler.collectGarbage");
     let heapPeak = (await heapUsed()) ?? 0;
     const t = performance.now();
-    const res = await fetch(`${base}/export?${query}`);
+    const res = await request(`/export?${query}`);
     // The PNG streams in: read it a chunk at a time, sampling the isolate's heap as it goes.
     const parts = [];
     const reader = res.body.getReader();
@@ -278,7 +241,7 @@ try {
     const body = Buffer.concat(parts);
     const ms = performance.now() - t;
     heapPeak = Math.max(heapPeak, (await heapUsed()) ?? 0);
-    const wasm = await (await fetch(`${base}/memory`)).json();
+    const wasm = await (await request("/memory", 45_000)).json();
     const header = res.headers.get("x-engine-report");
     return {
       status: res.status,
@@ -293,6 +256,8 @@ try {
   if (big.status !== 200)
     failures.push(`the 8192 × 8192 export failed: ${JSON.stringify(big.report)}`);
   else {
+    if (!(big.report.glyphs?.count > 0) || big.report.unsupported !== 0)
+      failures.push("workerd did not draw live HarfBuzz text");
     const size = checkPng(big.body);
     if (size.width !== 8192 || size.height !== 8192)
       failures.push(`the PNG is ${size.width} × ${size.height}`);

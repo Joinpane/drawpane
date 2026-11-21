@@ -120,15 +120,26 @@ export class Engine {
     y0: number,
     rows: number,
   ): Outcome;
-  pngBegin(width: number, height: number, zoom: number, x: number, y: number, dpr: number): Outcome;
-  pngBand(
+  pngBegin(
+    width: number,
+    height: number,
     zoom: number,
     x: number,
     y: number,
     dpr: number,
-    background: Float32Array,
     rows: number,
   ): Outcome;
+  pngRows(): number;
+  checkPng(
+    width: number,
+    height: number,
+    zoom: number,
+    x: number,
+    y: number,
+    dpr: number,
+    rows: number,
+  ): Outcome;
+  pngBand(background: Float32Array): Outcome;
   pngTake(): Uint8Array;
   pngEnd(): Uint8Array;
   pngAbort(): void;

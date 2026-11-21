@@ -1,53 +1,68 @@
-/**
- * The headless engine's renderer (decisions 0021 and 0023): `export_image`
- * with no editor open. A layer is written out by the SVG export and drawn by
- * resvg, with the file's own font files and images:
- *
- * - fonts as the shaper reads them (the static file for a weight, or the
- *   family's variable file), which is what the render parity suite measured
- *   the renderer with;
- * - images from R2 by content hash, with the type and size recorded when
- *   they were uploaded.
- *
- * resvg is WebAssembly, bundled as a module (a Worker can't compile it at
- * run time) with its memory capped (`scripts/cap-wasm.ts`), and each
- * picture is drawn in an instance of its own (`@drawpane/raster`).
- */
 import {
   createHeadlessRenderer,
-  type FaceFileLoader,
+  HeadlessRenderError,
   type HeadlessRenderer,
   type ImageBytesLoader,
-  imageCost,
-  type TextMeasurer,
 } from "@drawpane/editor";
-import { cachedFontLoader, type FontBytesLoader, resvgRasteriser } from "@drawpane/raster";
+import { ErrorCode, loadEngineSync, RenderEngine } from "@drawpane/engine";
+import { imageDecoder } from "@drawpane/engine/decode";
+import decoderWasm from "@drawpane/engine/decoder.wasm";
+import * as decoder from "@drawpane/engine/decoder-glue";
+import wasm from "@drawpane/engine/worker.wasm";
+import * as glue from "@drawpane/engine/worker-glue";
 import { mediaKey } from "@drawpane/worker/src/api/media";
-// resvg's module with its memory capped, written by scripts/cap-wasm.ts.
-import resvgWasm from "../wasm/resvg.wasm";
 import type { Env } from "./env";
+import type { HeadlessMeasurer } from "./measurer";
 
-/** Font files for the renderer, from the measurer's loader: the shaper's faces, not the canvas's. */
-export function renderFonts(loadFile: FaceFileLoader): FontBytesLoader {
-  return cachedFontLoader(async (face) => {
-    const file = await loadFile({
-      family: face.family,
-      weight: face.weight,
-      italic: face.italic,
-      ...(face.variable ? { variable: true } : {}),
-      ...(face.subset !== undefined ? { subset: face.subset } : {}),
+const images = imageDecoder(decoder, decoderWasm);
+
+let renderFinished: Promise<void> = Promise.resolve();
+
+/** One fresh 25 MiB instance at a time, including across rooms sharing a runner isolate. */
+async function acquireEngine(trap = false) {
+  const previous = renderFinished;
+  const slot = Promise.withResolvers<void>();
+  renderFinished = slot.promise;
+  await previous;
+  const instance = glue.__drawpaneCreateGlue();
+  const release = () => {
+    instance.__drawpaneQuiesce();
+    slot.resolve();
+  };
+  try {
+    const engine = new RenderEngine(loadEngineSync(instance, wasm, "worker"), {
+      // High-diversity text can exceed the interactive outline ceiling without needing an atlas.
+      glyphOutlineBytes: 8 << 20,
+      ...(trap ? { messageBytes: 32 << 20 } : {}),
     });
-    if (!file) return null;
-    return file instanceof ArrayBuffer ? file : file.bytes;
-  });
+    if (trap) {
+      // The armed chaos hook bypasses message admission to exercise a real Wasm memory trap.
+      const result = engine.apply(new Uint8Array(32 << 20));
+      if (!result.ok) throw new HeadlessRenderError(result);
+      engine.dispose();
+      throw new Error("The render-trap test hook did not trap.");
+    }
+    if (engine.dead)
+      throw new HeadlessRenderError({
+        ok: false,
+        code: ErrorCode.Trap,
+        message: "Could not start the render engine.",
+      });
+    return {
+      engine,
+      release,
+    };
+  } catch (error) {
+    release();
+    throw error;
+  }
 }
 
 /**
  * A file's images by hash: the bytes from R2, the type and size from when
  * its team uploaded them. Another team's images aren't drawn, as they can't
- * be fetched from the file's editor either. One whose `imageCost` is past
- * `room` is "too-large", known from its record (and its object's size)
- * before its bytes are read.
+ * be fetched from the file's editor either. Bound the encoded bytes before
+ * reading R2. Decoded pixels are charged separately at the chosen level.
  */
 export function renderImages(env: Env, fileId: string): ImageBytesLoader {
   return async (ref, room) => {
@@ -58,10 +73,11 @@ export function renderImages(env: Env, fileId: string): ImageBytesLoader {
       .bind(fileId, ref)
       .first<{ mime: string; width: number; height: number; bytes: number }>();
     if (!row) return null;
-    if (imageCost(row.bytes, row.width, row.height) > room) return "too-large";
+    const encodedRoom = room - (2 << 20);
+    if (row.bytes > encodedRoom) return "too-large";
     const object = await env.FILES.get(mediaKey(ref));
     if (!object) return null;
-    if (imageCost(object.size, row.width, row.height) > room) {
+    if (object.size > encodedRoom) {
       await object.body.cancel();
       return "too-large";
     }
@@ -75,16 +91,21 @@ export function renderImages(env: Env, fileId: string): ImageBytesLoader {
 }
 
 /** A file's renderer: text laid out by `measurer`, drawn with its font files and images. */
-export async function headlessRenderer(
+export function headlessRenderer(
   env: Env,
   fileId: string,
-  measurer: TextMeasurer,
-  loadFile: FaceFileLoader,
-): Promise<HeadlessRenderer> {
+  measurer: HeadlessMeasurer,
+  renderTrap?: () => Promise<boolean>,
+): HeadlessRenderer {
   return createHeadlessRenderer({
     measurer,
-    fonts: renderFonts(loadFile),
     images: renderImages(env, fileId),
-    rasteriser: await resvgRasteriser(resvgWasm),
+    decodeImage: images.decode,
+    decodeMemoryBytes: images.memoryBytes,
+    timeoutMs: 45_000,
+    acquireEngine: async () => acquireEngine(await renderTrap?.()),
+    async prepareFonts(nodes) {
+      await measurer.prepareRenderFonts?.(nodes);
+    },
   });
 }

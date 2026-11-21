@@ -84,6 +84,11 @@ pub fn scene_estimate_bytes(w: u32, h: u32) -> usize {
         .saturating_mul(64)
 }
 
+/// Leaves room for the Wasm runtime, stack, and allocator fragmentation.
+pub(crate) fn runtime_memory_cap(budget: usize) -> usize {
+    budget.saturating_sub(4 << 20).max(budget / 2)
+}
+
 /// The loading placeholder: two greys in 8-pixel cells (the canvas renderer's `PLACEHOLDER`).
 pub fn checker_pixels() -> Vec<u8> {
     let (light, dark) = ([0xec, 0xec, 0xea, 0xff], [0xdf, 0xdf, 0xdc, 0xff]);
@@ -314,8 +319,7 @@ impl Cpu {
         if self.memory_budget == 0 {
             return Ok(());
         }
-        // Keep headroom for Wasm runtime, stack, and allocator fragmentation (about 4 MiB).
-        let cap = self.memory_budget.saturating_sub(4 << 20).max(self.memory_budget / 2);
+        let cap = runtime_memory_cap(self.memory_budget);
         let total = self
             .external_bytes
             .saturating_add(self.runtime_bytes())

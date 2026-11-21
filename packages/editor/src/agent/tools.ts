@@ -46,7 +46,7 @@ export interface ToolResult {
 /**
  * What a tool needs from its engine besides the editor. Rendering is the
  * engine's own: the open editor draws with its canvas, the headless one
- * with resvg (decision 0023).
+ * with the headless CPU engine (decision 0040).
  */
 export interface ToolServices {
   /** Draws a layer, or every layer on a page, as a PNG. */
@@ -216,8 +216,8 @@ const exportImage = defineTool({
   description: [
     "Renders a layer, or a whole page by its id, as a PNG you can see: look at your work after render or set_props,",
     "and check spacing, alignment, contrast and text wrapping as a person would.",
-    `Without a scale, it's sized to about ${EXPORT_IMAGE_FIT} px on its longest side (up to 2×). A picture too large for the memory rendering has is drawn smaller, and \`reduced\` says so. Returns the image, its size,`,
-    "and anything drawn only approximately or left out (a font or image that couldn't be had, or an image too large to draw here, shown as a grey crossed placeholder).",
+    `Without a scale, it's sized to about ${EXPORT_IMAGE_FIT} px on its longest side (up to 2×). If the requested size exceeds the rendering limits, the picture is drawn smaller and \`reduced\` gives the new size. Returns the image, its size,`,
+    "and any unavailable font or image. An image too large to draw here gets a grey placeholder.",
   ].join(" "),
   input: z.object({
     id,
@@ -243,12 +243,16 @@ const exportImage = defineTool({
     const notes = [
       ...png.approximate.map((a) => APPROXIMATE[a]),
       ...png.missingFonts.map((f) => `${f} isn't available, so its text is drawn in the fallback`),
+      ...(png.fallbackText ? ["Some text uses fallback glyph outlines."] : []),
+      ...(png.reducedImages?.length
+        ? [`${png.reducedImages.length} image(s) were drawn at a lower resolution to fit.`]
+        : []),
       ...(png.missingImages.length > 0
         ? [`${png.missingImages.length} image(s) couldn't be loaded and are left out`]
         : []),
       ...(png.skippedImages.length > 0
         ? [
-            `${png.skippedImages.length} image(s) are too large to draw here, so they're drawn as grey crossed placeholders (${png.skippedImages.join(", ")}); the rest of the picture is as it is`,
+            `${png.skippedImages.length} image(s) are too large to draw here and appear as grey placeholders (${png.skippedImages.join(", ")}).`,
           ]
         : []),
     ];
@@ -262,7 +266,7 @@ const exportImage = defineTool({
         bounds: png.bounds,
         ...(reduced
           ? {
-              reduced: `Drawn smaller than asked, at ${png.width} × ${png.height} (scale ${png.scale}) instead of ${reduced.width} × ${reduced.height} (scale ${reduced.scale}): the full size needs more memory than rendering here has. Export a smaller layer to see it in more detail.`,
+              reduced: `Drawn smaller than asked, at ${png.width} × ${png.height} (scale ${png.scale}) instead of ${reduced.width} × ${reduced.height} (scale ${reduced.scale}). The full size exceeds the rendering limits. Export a smaller layer to see it in more detail.`,
             }
           : {}),
         ...(notes.length > 0 ? { approximate: notes } : {}),

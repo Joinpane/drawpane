@@ -99,12 +99,12 @@ impl BandPng {
                 line[i + 1] = row[i].wrapping_sub(left);
             }
             self.deflate(&line, TDEFLFlush::None)?;
+            if self.pending.len() >= 32 * 1024 {
+                chunk(&mut self.out, b"IDAT", &self.pending);
+                self.pending.clear();
+            }
         }
         self.rows_written += rows;
-        if self.pending.len() >= 32 * 1024 {
-            let data = std::mem::take(&mut self.pending);
-            chunk(&mut self.out, b"IDAT", &data);
-        }
         Ok(())
     }
 

@@ -522,27 +522,29 @@ describe.skipIf(!built("worker") && !process.env.CI)("the engine's modules", () 
     return w.finish();
   }
 
-  async function streamBlurExport(
+  async function checkBlurExport(
     mod: EngineModule,
     width: number,
     height: number,
     list: Uint8Array,
+    draw = true,
   ): Promise<boolean> {
     const e = new RenderEngine(mod);
     try {
       expect(e.apply(list).ok).toBe(true);
       const camera = { zoom: 1, x: 0, y: 0, dpr: 1 };
-      const stream = e.renderPngStream(width, height, camera, BG);
-      if (stream.ok) {
+      const stream = draw ? e.renderPngStream(width, height, camera, BG) : undefined;
+      const result = stream ?? e.checkPng(width, height, camera);
+      if (!result.ok) {
+        expect(result.code, result.message).toBe(ErrorCode.Limit);
+      } else if (stream?.ok) {
         const bytes = new Uint8Array(await new Response(stream.value).arrayBuffer());
         expect([...bytes.subarray(-8, -4)]).toEqual([73, 69, 78, 68]); // IEND
-      } else {
-        expect(stream.code, stream.message).toBe(ErrorCode.Limit);
       }
       expect(e.dead).toBe(false);
       const retry = e.renderPng(16, 16, camera, BG, () => {});
       expect(retry.ok).toBe(true);
-      return stream.ok;
+      return result.ok;
     } finally {
       e.dispose();
     }
@@ -561,19 +563,32 @@ describe.skipIf(!built("worker") && !process.env.CI)("the engine's modules", () 
     "safely admits or refuses a full-width Worker blur export with %s",
     async (_description, depth, radius, readers) => {
       const mod = await loadNodeEngine("worker", { fresh: true });
-      await streamBlurExport(mod, 1988, 605, blurExportScene(1988, 605, depth, readers, radius));
+      await checkBlurExport(mod, 1988, 605, blurExportScene(1988, 605, depth, readers, radius));
     },
   );
 
-  it("streams every admitted Worker blur export across seeded sizes, counts and group depths", async () => {
+  it("streams a 2k-wide export with a backdrop blur inside three fades at full scale", async () => {
+    const mod = await loadNodeEngine("worker", { fresh: true });
+    expect(
+      await checkBlurExport(mod, 2048, 640, blurExportScene(2048, 640, 3, ["backgroundBlur"], 38)),
+    ).toBe(true);
+    expect(mod.memoryBytes()).toBeLessThanOrEqual(25 << 20);
+  }, 120_000);
+
+  it("checks seeded Worker blur exports across sizes, reader counts and group depths", async () => {
     const mod = await loadNodeEngine("worker", { fresh: true });
     let seed = 232240;
     const next = (bound: number) => {
       seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
       return (seed >>> 12) % bound;
     };
-    const cases = 20;
+    const cases = 40;
+    // CI checks admission for every seed and streams a sample. The full run also draws the
+    // remaining admitted cases, which can take tens of minutes on a shared VM.
+    const streamLimit = process.env.ENGINE_EXPORT_FUZZ_FULL === "1" ? cases : 6;
     let admitted = 0;
+    let streamed = 0;
+    let peakCpuMs = 0;
     for (let i = 0; i < cases; i++) {
       const width = 128 + next(1900);
       const height = 128 + next(1000);
@@ -581,18 +596,32 @@ describe.skipIf(!built("worker") && !process.env.CI)("the engine's modules", () 
       const readers = Array.from({ length: 1 + next(4) }, () =>
         next(2) === 0 ? ("backgroundBlur" as const) : ("progressiveBlur" as const),
       );
-      admitted += Number(
-        await streamBlurExport(
+      const draw = streamed < streamLimit;
+      const start = process.cpuUsage();
+      if (
+        await checkBlurExport(
           mod,
           width,
           height,
           blurExportScene(width, height, depth, readers, 2 + next(52)),
-        ),
-      );
+          draw,
+        )
+      ) {
+        admitted++;
+        if (draw) {
+          streamed++;
+          const cpu = process.cpuUsage(start);
+          peakCpuMs = Math.max(peakCpuMs, (cpu.user + cpu.system) / 1000);
+        }
+      }
     }
-    expect(admitted).toBeGreaterThan(3);
-    expect(admitted).toBeLessThan(cases);
-  }, 180_000);
+    console.info(
+      `Worker PNG admission: ${admitted}/${cases} admitted, ${streamed} streamed, peak ${(mod.memoryBytes() / (1 << 20)).toFixed(2)} MiB, slowest completed seed ${Math.round(peakCpuMs)} ms process CPU`,
+    );
+    expect(admitted).toBeGreaterThan(17);
+    expect(streamed).toBe(Math.min(admitted, streamLimit));
+    expect(mod.memoryBytes()).toBeLessThanOrEqual(25 << 20);
+  }, 1_800_000);
 
   it("refuses a deeply isolated whole render whose working set exceeds the Wasm address space", async () => {
     const mod = await loadNodeEngine("worker", { fresh: true });

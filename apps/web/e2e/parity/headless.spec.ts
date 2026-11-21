@@ -1,31 +1,7 @@
-/**
- * Render parity between the canvas and the headless renderer (decision
- * 0023): what an agent's `export_image` shows with an editor open, and with
- * none. Every cell of the Figma parity scenes (tools/figma-parity/scenes)
- * (smoothed corners included) and of the headless ones (tools/headless-parity/scenes: radii and open
- * ends, auto layout cards in Inter and Instrument Sans, rich text, image
- * fills) is built in the editor, then exported at 2× both ways:
- *
- * - by the canvas renderer, as the open editor exports a PNG;
- * - by `renderPng`, as the Worker does: the SVG export, with the font files
- *   and images it needs, rasterised by resvg in Node, the same WebAssembly
- *   the Worker imports (`@drawpane/raster`).
- *
- * Both draw the same document, laid out by this tab, so this measures the
- * SVG export and the rasteriser; text layout (canvas against HarfBuzz) has
- * a test of its own. Each cell's mean difference must stay within
- * tools/headless-parity/thresholds.json; record them again with
- *
- *   UPDATE_THRESHOLDS=1 npx playwright test e2e/parity/headless.spec.ts
- *
- * The report (canvas, headless and a heat map, per cell) goes to
- * PARITY_OUT, by default test-results/parity/headless.html.
- */
+/** The open editor's canvas export compared with the headless CPU engine at 2×. */
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import type { ResvgRasteriser } from "@drawpane/raster";
-import { nodeRasteriser } from "@drawpane/raster/node";
 import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "../fresh-instance";
 import { compare, encodePng } from "./pixels";
@@ -271,148 +247,154 @@ function rgba(page: Page, png: string): Promise<{ data: string; width: number; h
   }, png);
 }
 
-test.describe
-  .serial("Render parity: canvas and headless", () => {
-    test.skip(!!process.env.E2E_BASE_URL, "Needs its own local instance.");
+test.describe("Render parity: canvas and headless", () => {
+  test.skip(!!process.env.E2E_BASE_URL, "Needs its own local instance.");
 
-    let instance: Instance;
-    let rasteriser: ResvgRasteriser;
-    const fonts = new Map<number, Uint8Array>();
-    const results: Thresholds = {};
-    const report: string[] = [];
-    const summary: string[] = [];
+  let instance: Instance;
+  const results: Thresholds = {};
+  const report: string[] = [];
+  const summary: string[] = [];
 
-    test.beforeAll(async ({ browser }) => {
-      test.setTimeout(180_000);
-      rasteriser = await nodeRasteriser();
-      instance = await freshInstance(browser, { port: 9005, inspectorPort: 9545 });
-      // The page's headless renderer hands its SVG here: resvg, as the Worker runs it.
-      await instance.page.exposeFunction(
-        "drawpaneRasterise",
-        (
-          svg: string,
-          options: {
-            scale: number;
-            fonts: { id: number; data?: string }[];
-            fallbackFamily: string | null;
-            background: string | null;
-            images: { href: string; data: string }[];
-          },
-        ) => {
-          for (const f of options.fonts)
-            if (f.data) fonts.set(f.id, new Uint8Array(Buffer.from(f.data, "base64")));
-          const out = rasteriser.rasterise(svg, {
-            scale: options.scale,
-            fonts: options.fonts.map((f) => fonts.get(f.id) as Uint8Array),
-            ...(options.fallbackFamily ? { fallbackFamily: options.fallbackFamily } : {}),
-            background: options.background,
-            images: new Map(
-              options.images.map((i) => [i.href, new Uint8Array(Buffer.from(i.data, "base64"))]),
-            ),
-          });
-          return {
-            png: Buffer.from(out.png).toString("base64"),
-            width: out.width,
-            height: out.height,
-          };
-        },
+  test.beforeAll(async ({ browser }) => {
+    test.setTimeout(180_000);
+    const port = Number(process.env.HEADLESS_PARITY_PORT ?? 9005);
+    instance = await freshInstance(browser, { port, inspectorPort: port + 540 });
+    // The canvas loads its web fonts. The outline pass reads deterministic TrueType fixtures.
+    const fontFixtures = {
+      Inter: ["Inter-Variable.ttf", "Inter-Italic-Variable.ttf"],
+      "Instrument Sans": ["InstrumentSans-Variable.ttf"],
+    } as const;
+    for (const file of Object.values(fontFixtures).flat()) {
+      const bytes = readFileSync(fileURLToPath(new URL(`../fixtures/${file}`, import.meta.url)));
+      await instance.page.route(`**/parity/${file}`, (route) =>
+        route.fulfill({ body: bytes, contentType: "font/ttf" }),
       );
-      await instance.page.evaluate(() => localStorage.setItem("drawpane:debug", "1"));
-    });
-
-    test.afterAll(async () => {
-      await instance?.stop();
-      mkdirSync(OUT, { recursive: true });
-      writeFileSync(
-        join(OUT, "headless.html"),
-        `<!doctype html><meta charset="utf-8"><title>Headless render parity</title><style>body{font:13px system-ui;margin:24px;background:#f4f3ef}img{width:240px;display:block}td,th{padding:4px 8px;vertical-align:top;text-align:left}h2{margin-top:32px}small{color:#666}</style><h1>Render parity: canvas and headless</h1><p>Each cell exported at 2× by the canvas renderer and by the headless renderer (SVG export rasterised by resvg). Mean difference over RGB (0–255) and its 99th percentile; the heat map is white where the two are 64 or more apart.</p><pre>${summary.join("\n")}</pre>${report.join("")}`,
-      );
-      if (updating) {
-        const next: Thresholds = { ...recorded };
-        // A little headroom over today's score, as parity.spec.ts records: drift beyond it fails.
-        for (const [suite, cells] of Object.entries(results))
-          next[suite] = Object.fromEntries(
-            Object.entries(cells).map(([id, mean]) => [
-              id,
-              Math.round((mean * 1.1 + 0.3) * 100) / 100,
-            ]),
-          );
-        writeFileSync(THRESHOLDS, `${JSON.stringify(next, null, 2)}\n`);
-      }
-      console.log(summary.join("\n"));
-    });
-
-    for (const suite of suites) {
-      test(`${suite.suite}: ${suite.about}`, async () => {
-        test.setTimeout(300_000);
-        const page = instance.page;
-        await page.goto("/");
-        await page.getByRole("button", { name: "New file" }).first().click();
-        await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
-          timeout: 15_000,
-        });
-        const image = suite.image ? await uploadImage(page, suite.image) : null;
-        const frames = await build(page, suite, image);
-        await waitForFonts(page, suite);
-        // Late fonts re-measure text and lay auto layout out again.
-        await page.waitForTimeout(1500);
-
-        const rows: string[] = [];
-        const failures: string[] = [];
-        const scores: Record<string, number> = {};
-        results[suite.suite] = scores;
-        for (const [i, cell] of suite.cells.entries()) {
-          const frame = frames[i] as string;
-          const [canvasPng, headless] = await page.evaluate(
-            async ({ frame, scale }) => {
-              const h = (window as unknown as W).drawpaneHeadless;
-              return Promise.all([h.canvas(frame, scale, null), h.headless(frame, scale, null)]);
-            },
-            { frame, scale: SCALE },
-          );
-          const theirs = await rgba(page, canvasPng);
-          const ours = await rgba(page, headless.png);
-          expect([ours.width, ours.height], `${cell.id} size`).toEqual([
-            theirs.width,
-            theirs.height,
-          ]);
-          expect(headless.missingFonts, `${cell.id} fonts`).toEqual([]);
-          expect(headless.missingImages, `${cell.id} images`).toEqual([]);
-          const diff = await compare(
-            page,
-            ours.data,
-            theirs.data,
-            ours.width,
-            ours.height,
-            suite.blur,
-          );
-          scores[cell.id] = diff.mean;
-          const limit = recorded[suite.suite]?.[cell.id];
-          if (!updating && limit !== undefined && diff.mean > limit)
-            failures.push(`${cell.id}: ${diff.mean} (allowed ${limit})`);
-          if (!updating && limit === undefined) failures.push(`${cell.id}: no threshold recorded`);
-          const img = (b64: string) => encodePng(page, b64, ours.width, ours.height);
-          const note = headless.approximate.length
-            ? `<br><small>approximate: ${headless.approximate.join(", ")}</small>`
-            : "";
-          rows.push(
-            `<tr><th>${cell.id}<br><small>${diff.mean} · p99 ${diff.p99}${limit !== undefined ? ` · max ${limit}` : ""}</small>${note}</th><td><img src="data:image/png;base64,${canvasPng}"></td><td><img src="data:image/png;base64,${headless.png}"></td><td><img src="${await img(diff.heat)}"></td></tr>`,
-          );
-        }
-        const values = Object.values(scores);
-        const mean = values.reduce((a, b) => a + b, 0) / Math.max(1, values.length);
-        const worst = Object.entries(scores)
-          .sort((a, b) => b[1] - a[1])
-          .slice(0, 3)
-          .map(([id, v]) => `${id} ${v}`)
-          .join(", ");
-        summary.push(
-          `${suite.suite}: mean ${mean.toFixed(2)} over ${values.length} cells; worst ${worst}`,
-        );
-        report.push(
-          `<h2>${suite.suite} <small>mean ${mean.toFixed(2)} over ${values.length} cells</small></h2><p>${suite.about}</p><table><tr><th></th><th>Canvas</th><th>Headless</th><th>Difference</th></tr>${rows.join("")}</table>`,
-        );
-        expect(failures, `${suite.suite} drifted between canvas and headless`).toEqual([]);
-      });
     }
+    await instance.page.route("**/api/fonts/google.css?**", (route) => {
+      const query = new URL(route.request().url()).searchParams;
+      const family = query.get("family") as keyof typeof fontFixtures;
+      if (!Object.hasOwn(fontFixtures, family) || query.get("format") !== "ttf")
+        return route.continue();
+      const weights = (query.get("variants") ?? "400").split(",");
+      const body = weights
+        .map((weight) => {
+          const [upright, italic] = fontFixtures[family];
+          const file = weight.endsWith("i") ? italic : upright;
+          return file
+            ? `@font-face { font-weight: ${parseInt(weight, 10)}; font-style: ${file === italic ? "italic" : "normal"}; src: url(/parity/${file}) format('truetype'); }`
+            : "";
+        })
+        .join("\n");
+      return route.fulfill({ body, contentType: "text/css" });
+    });
+    await instance.page.evaluate(() => {
+      localStorage.setItem("drawpane:debug", "1");
+      localStorage.setItem("drawpane:face-deadline-ms", "20000");
+    });
   });
+
+  test.afterAll(async () => {
+    await instance?.stop();
+    mkdirSync(OUT, { recursive: true });
+    writeFileSync(
+      join(OUT, "headless.html"),
+      `<!doctype html><meta charset="utf-8"><title>Headless render parity</title><style>body{font:13px system-ui;margin:24px;background:#f4f3ef}img{width:240px;display:block}td,th{padding:4px 8px;vertical-align:top;text-align:left}h2{margin-top:32px}small{color:#666}</style><h1>Render parity: canvas and headless</h1><p>Each cell exported at 2× by the canvas renderer and by the headless CPU engine. Mean difference over RGB (0–255) and its 99th percentile; the heat map is white where the two are 64 or more apart.</p><pre>${summary.join("\n")}</pre>${report.join("")}`,
+    );
+    if (updating) {
+      const next: Thresholds = { ...recorded };
+      // A little headroom over today's score, as parity.spec.ts records: drift beyond it fails.
+      for (const [suite, cells] of Object.entries(results))
+        next[suite] = Object.fromEntries(
+          Object.entries(cells).map(([id, mean]) => [
+            id,
+            Math.round((mean * 1.1 + 0.3) * 100) / 100,
+          ]),
+        );
+      writeFileSync(THRESHOLDS, `${JSON.stringify(next, null, 2)}\n`);
+    }
+    console.log(summary.join("\n"));
+  });
+
+  for (const suite of suites) {
+    test(`${suite.suite}: ${suite.about}`, async () => {
+      test.setTimeout(300_000);
+      const page = instance.page;
+      await page.goto("/");
+      await page.getByRole("button", { name: "New file" }).first().click();
+      await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
+        timeout: 15_000,
+      });
+      const image = suite.image ? await uploadImage(page, suite.image) : null;
+      const frames = await build(page, suite, image);
+      await waitForFonts(page, suite);
+      // Late fonts re-measure text and lay auto layout out again.
+      await page.waitForTimeout(1500);
+
+      const rows: string[] = [];
+      const failures: string[] = [];
+      const scores: Record<string, number> = {};
+      results[suite.suite] = scores;
+      for (const [i, cell] of suite.cells.entries()) {
+        const frame = frames[i] as string;
+        const [canvasPng, headless] = await page.evaluate(
+          async ({ frame, scale }) => {
+            const h = (window as unknown as W).drawpaneHeadless;
+            return Promise.all([h.canvas(frame, scale, null), h.headless(frame, scale, null)]);
+          },
+          { frame, scale: SCALE },
+        );
+        // The circular edge in this cell exposes Skia's platform-dependent CSS blur.
+        // Judge the engine against the same captured Figma pixels on every host.
+        const figmaBlur = suite.suite === "corners" && cell.id === "layer-blur";
+        const referencePng = figmaBlur
+          ? readFileSync(join(FIGMA, "../goldens/corners/layer-blur.png")).toString("base64")
+          : canvasPng;
+        const theirs = await rgba(page, referencePng);
+        const ours = await rgba(page, headless.png);
+        expect([ours.width, ours.height], `${cell.id} size`).toEqual([theirs.width, theirs.height]);
+        // Instrument Sans tops out at 700. This cell also checks the missing-weight note.
+        const missingFonts = cell.id === "instrument-40-800" ? ["Instrument Sans 800"] : [];
+        expect(headless.missingFonts, `${cell.id} fonts`).toEqual(missingFonts);
+        expect(headless.missingImages, `${cell.id} images`).toEqual([]);
+        const diff = await compare(
+          page,
+          ours.data,
+          theirs.data,
+          ours.width,
+          ours.height,
+          suite.blur,
+        );
+        scores[cell.id] = diff.mean;
+        if (figmaBlur) {
+          expect(diff.p99, "Figma blur p99").toBeLessThanOrEqual(5);
+          expect(diff.worstTile, "Figma blur worst tile").toBeLessThanOrEqual(2);
+        }
+        const limit = recorded[suite.suite]?.[cell.id];
+        if (!updating && limit !== undefined && diff.mean > limit)
+          failures.push(`${cell.id}: ${diff.mean} (allowed ${limit})`);
+        if (!updating && limit === undefined) failures.push(`${cell.id}: no threshold recorded`);
+        const img = (b64: string) => encodePng(page, b64, ours.width, ours.height);
+        const note = headless.approximate.length
+          ? `<br><small>approximate: ${headless.approximate.join(", ")}</small>`
+          : "";
+        rows.push(
+          `<tr><th>${cell.id}<br><small>${figmaBlur ? "Figma · " : ""}${diff.mean} · p99 ${diff.p99} · worst tile ${diff.worstTile}${limit !== undefined ? ` · max ${limit}` : ""}</small>${note}</th><td><img src="data:image/png;base64,${referencePng}"></td><td><img src="data:image/png;base64,${headless.png}"></td><td><img src="${await img(diff.heat)}"></td></tr>`,
+        );
+      }
+      const values = Object.values(scores);
+      const mean = values.reduce((a, b) => a + b, 0) / Math.max(1, values.length);
+      const worst = Object.entries(scores)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, 3)
+        .map(([id, v]) => `${id} ${v}`)
+        .join(", ");
+      summary.push(
+        `${suite.suite}: mean ${mean.toFixed(2)} over ${values.length} cells; worst ${worst}`,
+      );
+      report.push(
+        `<h2>${suite.suite} <small>mean ${mean.toFixed(2)} over ${values.length} cells</small></h2><p>${suite.about}</p><table><tr><th></th><th>Reference</th><th>Headless</th><th>Difference</th></tr>${rows.join("")}</table>`,
+      );
+      expect(failures, `${suite.suite} drifted between canvas and headless`).toEqual([]);
+    });
+  }
+});

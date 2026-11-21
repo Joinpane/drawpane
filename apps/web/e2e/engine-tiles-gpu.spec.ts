@@ -393,8 +393,8 @@ for (const build of ["browser", "webgl"] as const) {
               worstAlpha = Math.max(worstAlpha, Math.abs((cpu[k] ?? 0) - (gpu[k] ?? 0)));
             let png: number[] | null = null;
             if (i === 0) {
-              check(e.pngBegin(96, 64, 1, 0, 0, 1));
-              check(e.pngBand(1, 0, 0, 1, bg, 64));
+              check(e.pngBegin(96, 64, 1, 0, 0, 1, 64));
+              check(e.pngBand(bg));
               const img = await createImageBitmap(
                 new Blob([new Uint8Array(e.pngTake()), new Uint8Array(e.pngEnd())], {
                   type: "image/png",
