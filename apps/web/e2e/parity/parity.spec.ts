@@ -211,6 +211,7 @@ test.describe
               ).then(([white, black]) => ({
                 mean: Math.round((((white?.mean ?? 0) + (black?.mean ?? 0)) / 2) * 100) / 100,
                 p99: Math.max(white?.p99 ?? 0, black?.p99 ?? 0),
+                worstTile: Math.max(white?.worstTile ?? 0, black?.worstTile ?? 0),
                 heat: white?.heat ?? "",
               }))
             : await compare(page, ours[i] as string, theirs.data, width, height, suite.blur);
@@ -227,7 +228,7 @@ test.describe
             failures.push(`${cell.id}: ${diff.mean} (allowed ${limit})`);
           const img = (b64: string) => encodePng(page, b64, width, height);
           rows.push(
-            `<tr><th>${cell.id}<br><small>${diff.mean} · p99 ${diff.p99}${limit !== undefined ? ` · max ${limit}` : ""}</small></th><td><img src="data:image/png;base64,${readFileSync(golden).toString("base64")}"></td><td><img src="${await img(ours[i] as string)}"></td><td><img src="${await img(diff.heat)}"></td></tr>`,
+            `<tr><th>${cell.id}<br><small>${diff.mean} · p99 ${diff.p99} · tile ${diff.worstTile}${limit !== undefined ? ` · max ${limit}` : ""}</small></th><td><img src="data:image/png;base64,${readFileSync(golden).toString("base64")}"></td><td><img src="${await img(ours[i] as string)}"></td><td><img src="${await img(diff.heat)}"></td></tr>`,
           );
         }
         const scores = Object.values(results[suite.suite] as Record<string, number>);
