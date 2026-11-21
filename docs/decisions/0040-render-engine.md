@@ -1228,3 +1228,51 @@ have a smaller padded work budget. A rejected display list or a view that still
 exceeds the raster floor uses Canvas for the affected page or view while the
 engine stays active. CPU view mode admits tiles by their working target and
 tries a direct viewport render at full resolution before reducing it.
+
+## Amendment: exact camera motion (W4, 2026-11-21)
+
+Pan and zoom on Examples and Toolbars from a large iOS UI kit and on shadcn Combobox must present zero degraded frames, with frame intervals at most 16.7 ms at p95 and 20 ms at p99. This tightens the quality requirement during camera motion. Coarse readers, half-resolution pictures, incomplete coverage, and stand-ins outside a measured scale and sampling phase fail the fidelity gate. Count unpresented camera requests too, since keeping the last exact picture on screen can still leave the camera stalled.
+
+In two earlier paired T4 runs, every arm submitted 120 degraded zoom frames on each of the three pages. Both WebGL2 hardware presentation and WebGPU readback missed the motion and fidelity gates. The earlier reader-upload experiment and its main baseline measured these WebGL2 zoom frame intervals across the two runs.
+
+| Page | Main p95 / p99 | Earlier experiment p95 / p99 |
+| --- | --- | --- |
+| Examples | 5.50–5.60 s / 5.92–5.97 s | 5.60–5.64 s / 6.00–6.01 s |
+| Toolbars | 3.18–3.70 s / 3.26–3.75 s | 3.25–3.83 s / 3.28–3.89 s |
+| Combobox | 32.0–36.7 ms / 42.5–51.0 ms | 29.6–81.3 ms / 41.5–99.0 ms |
+
+
+### What resampling changes
+
+A frosted rounded lens over stripes and one-pixel black paint on white were rasterized at the source scale, bilinearly resampled, and compared with a fresh native raster at the destination. The table reports the worst observed mean and p99 errors in each crop across 1× and 2× device pixel ratios and integer and quarter-device-pixel phases. The aligned 1× control scored zero. The decision's thresholds are 0.25 mean and 4 p99 on the 0 to 255 scale.
+
+| Destination scale | Frosted glass mean / p99 | Sharp paint mean / p99 |
+| --- | --- | --- |
+| 0.80× | 1.776 / 14 | 6.250 / 19 |
+| 0.99× | 0.666 / 21 | 1.213 / 35 |
+| 1.01× | 0.736 / 26 | 1.689 / 60 |
+| 1.25× | 0.187 / 8 | 4.000 / 15 |
+
+The real Toolbars crops at 2× device pixel ratio scored 0.869 / 32 at 0.8× and 1.035 / 30 at 1.25×. Examples exceeded the thresholds at 0.97× and 1.03×. A quarter-device-pixel translation alone exceeded them on the sharp-paint fixture. Individual images and transforms can qualify. These results give no shared band for either composited pictures or unrestricted ordinary paint.
+
+Device-space rasterization computes coverage of glyphs and edges on the destination grid. Resampling interpolates coverage already integrated on the source grid. Glass also depends on scale at the point of shading: refraction, rim height and frost use device-pixel parameters. Recalculation can change the integer frost mip, height-field resolution, reader bounds, and derivative-driven refraction LOD. Odd-sized mip levels use centered sampling tied to those bounds. Resampling the finished lens retains the old decisions. The 1% measurements show that the combined differences can exceed tolerance close to native scale.
+
+### Design
+
+Examples has 630 glass layers and 291 background blurs. If all 630 lenses draw, a 16.7 ms frame leaves an average of 26.5 µs per lens before ordinary paint, blur, or presentation. Toolbars has 164 glass layers and four background blurs. Combobox's four readers are all background blurs. A glass-only improvement therefore needs separate validation of background blur and native paint costs.
+
+Rasterize sharp paint at the requested device scale and phase, and accelerate native glass separately. Share an exact backdrop only between readers with the same scope, source paint prefix, extension and clamp rules, region grid, and filter parameters. Non-glass paint and other backdrop-writing effects advance the source prefix. A single unconditional blur pyramid for the frame would read through intervening paint and change the filtering around reader boundaries. Keep independently reusable source work, such as geometry and mask inputs, separate from reader output that depends on the prefix.
+
+Start by reducing redundant work inside the exact reader path. Preserve the CPU reference, including its intermediate rounding, and keep fragment passes as the common backend. Compare fused compute on WebGPU if it can preserve these rules and reduce measured cost. Recomputing the existing exact path at every camera change costs seconds on the largest cold views, including on T4 WebGPU, so it cannot meet the frame budget as built.
+
+Retain completed tiles where the revision, camera scale and device phase match. A finite scale ladder is useful for revisits and integral-device-pixel pans, but it cannot cover continuous zoom and fractional phase with the measured fidelity. Predict the device-space viewport from pan velocity and the rate of change of log zoom, and prioritize work that will cover it soon. Use an explicit encoding and in-flight GPU budget for background preparation. Charge prediction and reader scratch to the engine's 768 MiB default GPU budget and charge retained frames to its 256 MiB tile cap within that budget. Evict speculative work before visible coverage. If a cold camera jump outruns preparation, a held frame counts as a missed presentation. This keeps the gate honest while the exact path is too slow.
+
+Figma publicly describes retained GPU rendering through WebGPU and WebGL. Its visible motion is consistent with keeping geometry and working textures resident, rerasterizing sharp edges, and batching effect work across compatible sources. That is a hypothesis about the internal renderer. The acceptance evidence here is paired T4 runs with hardware presentation in WebGL2 and GPU execution measured separately through WebGPU readback.
+
+### Measurement
+
+Use `BENCH_W4_CAMERA_GATE=1` with `bench/file.spec.ts` in both T4 modes. `BENCH_W4_NATIVE=1` draws the whole reader viewport at its requested device scale and phase during the sampled gestures. Use it on both arms to isolate exact rendering changes from the established motion policy. The gate counts submissions, confirmed presentations, and camera requests without a new frame. The frame-interval thresholds apply to hardware-composited presentation. Readback on the T4 exposes WebGPU work and fidelity with software compositing.
+
+The first exact-reader change skips the mask reduction pass when its factor is one, applying the same height-format conversion in the horizontal filter. It builds the original backdrop only through the integer level frost samples. Refraction still has the full frosted chain. Retained mip bind groups and one reader-uniform write per encoder submission reduce recording work. The rim and frost shaders iterate only the taps in their Gaussian radius.
+
+In a 230 × 145 SwiftShader WebGL2 fixture with six lenses, the final RGBA readback was byte-identical on main and the candidate. The independent SwiftShader comparison found byte equality in 339 of 341 matching cell renders, including all matching WebGL2 cells. On WebGPU, two text-shaped lenses changed by one to two 8-bit levels because the factor-one path moves half-float rounding from the attachment write to the horizontal filter. Both cells stayed within CPU/GPU tolerance and moved slightly closer to the CPU reference. Framebuffer attachments fell from 1,437 to 1,017 per frame and buffer uploads from 77 to 42. Both arms issued 13 fences, which still follow Vello staging boundaries. Fence timing varied substantially in software and WebGPU startup probes timed out. These results quantify the work removed. The real-page motion gates remain open.

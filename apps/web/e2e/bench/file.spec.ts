@@ -52,6 +52,9 @@ const NAMED = process.env.BENCH_PAGES
 /** A folder for a CPU profile of each measurement (`.cpuprofile`, for Chrome's performance panel). */
 const PROFILE = process.env.BENCH_PROFILE;
 /** Which renderer draws: "canvas" (default) or "engine" (decision 0040's switch). */
+const PRESENT = process.env.BENCH_ENGINE_PRESENT;
+const VERIFIED = process.env.BENCH_VERIFIED_BACKENDS;
+const READBACK = PRESENT === "readback" || (PRESENT === "auto" && VERIFIED === "webgpu");
 const RENDERER = process.env.BENCH_RENDERER === "engine" ? "engine" : "canvas";
 /** Decision 0040's confirmed targets on the heaviest page, on real GPU hardware. */
 const USEFUL_IMAGE_MS = 1000;
@@ -62,6 +65,7 @@ interface EngineFacts {
   renderer: "engine" | "canvas";
   unsupported: Record<string, number>;
   adapter: string | null;
+  backend?: string;
   software: boolean;
   /** GPU time per frame while panning, from submit to `onSubmittedWorkDone` (ms). */
   gpuMs: { p50: number; p95: number; max: number } | null;
@@ -82,7 +86,10 @@ async function engineFacts(page: Page, frames: number): Promise<EngineFacts> {
     type View = {
       last: { supported: boolean };
       unsupported(): Record<string, number>;
-      engine: { gpu: { adapter: string; fallback: boolean } | null; gpuFinished(): Promise<void> };
+      engine: {
+        gpu: { adapter: string; fallback: boolean; backend: string } | null;
+        gpuFinished(): Promise<void>;
+      };
     };
     const w = window as unknown as {
       drawpaneEngineView?: View;
@@ -127,6 +134,7 @@ async function engineFacts(page: Page, frames: number): Promise<EngineFacts> {
       renderer: "engine" as const,
       unsupported,
       adapter: gpu?.adapter ?? null,
+      ...(gpu ? { backend: gpu.backend } : {}),
       software: !!gpu?.fallback,
       gpuMs: { p50: at(0.5), p95: at(0.95), max: at(1) },
       ...(gpu?.fallback ? { note: "software adapter: GPU timings not representative" } : {}),
@@ -205,14 +213,16 @@ test.describe("A real file", () => {
     }
     page.on("pageerror", (error) => console.log(`page error: ${error.message}`));
     await page.evaluate(
-      ({ renderer, present }) => {
+      ({ renderer, present, software }) => {
         localStorage.setItem("drawpane:debug", "1");
         localStorage.setItem("drawpane:renderer", renderer);
         localStorage.setItem("drawpane:engine-present", present);
+        if (software) localStorage.setItem("drawpane:engine-software", "allow");
       },
       {
         renderer: RENDERER,
-        present: process.env.BENCH_ENGINE_PRESENT === "readback" ? "readback" : "webgpu",
+        present: READBACK ? "readback" : "webgpu",
+        software: process.env.BENCH_ALLOW_SOFTWARE === "1",
       },
     );
     const started = Date.now();
@@ -285,6 +295,40 @@ test.describe("A real file", () => {
     if (process.env.BENCH_OUT)
       writeFileSync(process.env.BENCH_OUT, `${JSON.stringify(report, null, 1)}\n`);
     expect(results.length).toBeGreaterThan(0);
+    if (RENDERER === "engine" && process.env.BENCH_W4_CAMERA_GATE === "1") {
+      for (const result of results) {
+        expect.soft(result.engine?.renderer, result.page.name).toBe("engine");
+        if (VERIFIED === "webgl2" || VERIFIED === "webgpu")
+          expect.soft(result.engine?.backend, result.page.name).toBe(VERIFIED);
+        if (process.env.BENCH_ALLOW_SOFTWARE !== "1")
+          expect.soft(result.engine?.software, result.page.name).toBe(false);
+        for (const [gesture, summary] of Object.entries(result.canvas)) {
+          const label = `${result.page.name}, ${gesture}`;
+          const motion = summary.motion;
+          expect.soft(motion, `${label} motion samples`).toBeDefined();
+          if (!motion) continue;
+          expect.soft(motion.degradedConfirmed, `${label} degraded presentations`).toBe(0);
+          expect.soft(motion.degradedSubmitted, `${label} degraded submissions`).toBe(0);
+          expect.soft(motion.fallback, `${label} renderer fallbacks`).toBe(0);
+          expect.soft(motion.missed, `${label} camera requests without a frame`).toBe(0);
+          expect.soft(motion.confirmed, `${label} confirmed presentations`).toBeGreaterThan(1);
+          if (!READBACK && process.env.BENCH_ALLOW_SOFTWARE !== "1") {
+            expect
+              .soft(summary.presentedInterval?.p95, `${label} confirmed presentation interval p95`)
+              .toBeLessThanOrEqual(16.7);
+            expect
+              .soft(summary.presentedInterval?.p99, `${label} confirmed presentation interval p99`)
+              .toBeLessThanOrEqual(20);
+            expect
+              .soft(summary.interval?.p95, `${label} frame interval p95`)
+              .toBeLessThanOrEqual(16.7);
+            expect
+              .soft(summary.interval?.p99, `${label} frame interval p99`)
+              .toBeLessThanOrEqual(20);
+          }
+        }
+      }
+    }
     // Decision 0040's confirmed targets, on the heaviest page measured, on real hardware: shown
     // (the frame on screen), never a lighter page in its place.
     const gated = results[0];

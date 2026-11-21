@@ -2122,6 +2122,7 @@ impl Gpu {
     fn submit_active_encoder(&mut self) {
         if let Some(active) = self.active.as_mut() {
             if let Some(encoder) = active.before.take() {
+                self.readers.flush_uniforms(&self.queue);
                 self.queue.submit([encoder.finish()]);
                 self.blur.flush_retired();
                 self.submits += 1;
@@ -2137,6 +2138,7 @@ impl Gpu {
         if let Some(a) = self.active.as_mut() {
             a.before = Some(encoder);
         } else {
+            self.readers.flush_uniforms(&self.queue);
             self.queue.submit([encoder.finish()]);
             self.blur.flush_retired();
             self.submits += 1;
@@ -3069,6 +3071,7 @@ impl Gpu {
 
     fn discard_draw(&mut self) {
         self.active = None;
+        self.readers.discard_uniforms();
         self.blur.flush_retired();
         while let Some(scope) = self.offscreen_stack.pop() {
             self.offscreen_pool.push(scope.main);
