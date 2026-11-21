@@ -18,6 +18,7 @@ import type { ImageCache } from "./images";
 import type { Interaction } from "./interaction";
 import { type FrameLabel, frameLabelsInRect, LABEL_FONT } from "./labels";
 import { trackLabel } from "./layout";
+import { drawPixelGrid } from "./pixel-grid";
 import { drawPrototypeOverlay } from "./prototype/overlay";
 import { readingOrderOf } from "./reading-order";
 import { PILL_FONT, PILL_MODE_FONT, sizePill } from "./size-pill";
@@ -161,16 +162,19 @@ export function drawOverlay(
   dpr: number,
   /** The app's image cache, for the image shown around a crop. */
   images?: ImageCache,
+  /** Draw the pixel grid here too (off when a retained canvas owns it). */
+  includePixelGrid = true,
 ): void {
   ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
   if (!editor.s.pageId) return;
-  drawOverlayContent(ctx, editor, interaction, theme, dpr, images, true);
+  drawOverlayContent(ctx, editor, interaction, theme, dpr, images, true, includePixelGrid);
 }
 
 /**
  * Draws the overlay without clearing `ctx` first, optionally omitting artboard labels
- * (when a separate retained label canvas owns them). Used by `OverlayRenderer` for
+ * (when a separate retained label canvas owns them) and the pixel grid (when a
+ * separate retained grid canvas owns it). Used by `OverlayRenderer` for
  * dirty-region transient redraws and by `drawOverlay` for full single-canvas draws.
  */
 export function drawOverlayContent(
@@ -181,6 +185,7 @@ export function drawOverlayContent(
   dpr: number,
   images: ImageCache | undefined,
   includeLabels: boolean,
+  includePixelGrid = false,
 ): void {
   const {
     camera,
@@ -201,6 +206,13 @@ export function drawOverlayContent(
   } = editor.s;
   if (!pageId) return;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  // The pixel grid sits above the design and below everything else the
+  // overlay draws (selection, handles, guides), so chrome stays readable.
+  if (includePixelGrid && editor.s.pixelGrid) {
+    const w = ctx.canvas.width > 0 ? ctx.canvas.width / dpr : editor.s.viewport.width;
+    const h = ctx.canvas.height > 0 ? ctx.canvas.height / dpr : editor.s.viewport.height;
+    drawPixelGrid(ctx, camera, w, h, dpr);
+  }
   const scene = editor.scene;
   const doc = editor.doc;
   const toScreen = (p: Point) => camera.toScreen(p);

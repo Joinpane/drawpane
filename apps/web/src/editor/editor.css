@@ -24,7 +24,8 @@
 .canvas__engine-slot {
   pointer-events: none;
 }
-.canvas__labels {
+.canvas__labels,
+.canvas__pixel-grid {
   position: absolute;
   left: 0;
   top: 0;

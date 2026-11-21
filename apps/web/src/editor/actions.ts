@@ -846,6 +846,17 @@ export const ACTIONS: readonly Action[] = [
     run: ({ editor }) => editor.state.set({ layoutGrids: !editor.s.layoutGrids }),
   },
   {
+    id: "view.pixelGrid",
+    label: "Pixel grid",
+    group: "View",
+    icon: "pixel-grid",
+    defaultShortcut: { key: "'", shift: true },
+    // Figma's help also lists ⌘' for this; ⇧' is the one shown in menus.
+    also: [{ key: "'", mod: true }],
+    keywords: "pixel grid pixels show zoom whole",
+    run: ({ editor }) => editor.state.set({ pixelGrid: !editor.s.pixelGrid }),
+  },
+  {
     id: "view.pixelSnap",
     label: "Snap to pixel grid",
     group: "View",

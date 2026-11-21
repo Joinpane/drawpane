@@ -39,6 +39,7 @@ export * from "./names";
 export * from "./noise";
 export * from "./overlay";
 export * from "./overlay-renderer";
+export * from "./pixel-grid";
 export * from "./post-effects";
 export * from "./presets";
 export * from "./properties";

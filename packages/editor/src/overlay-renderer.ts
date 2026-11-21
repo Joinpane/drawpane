@@ -23,6 +23,16 @@
  *      collaborator selections/cursors, clearing only those dirty regions instead
  *      of the whole viewport (with automatic full clear on resize, complex modes,
  *      or large dirty area).
+ *
+ * 3. **Retained pixel grid layer (`pixelGridCtx`, when given):**
+ *    - The whole-pixel lines shown from 400% zoom are baked once into an
+ *      overscanned canvas in a single fill, and same-zoom panning translates
+ *      that canvas with CSS `translate3d`, exactly like the label layer, so
+ *      a pan at high zoom writes no grid pixels at all. A zoom (which also
+ *      changes the grid's fade) rebakes; panning past the overscan rebakes.
+ *    - Without a grid canvas (a display too large for another retained
+ *      surface, or the single-canvas fallback), the transient layer draws
+ *      the grid itself in one fill, as a full-canvas ("complex") redraw.
  */
 import { getProp, type NodeRecord } from "@drawpane/model";
 import type { Editor, EditorState } from "./editor";
@@ -49,6 +59,7 @@ import {
   type OverlayTheme,
   resolveLabelInks,
 } from "./overlay";
+import { drawPixelGrid, pixelGridFade } from "./pixel-grid";
 import { sizePill } from "./size-pill";
 
 export interface DeviceRect {
@@ -84,6 +95,9 @@ export interface OverlayRenderStats {
   transientDirtyClears: number;
   transientSkipped: number;
   transientClearedPixels: number;
+  pixelGridFullDraws: number;
+  pixelGridTranslations: number;
+  pixelGridSkipped: number;
 }
 
 interface AtlasRegion {
@@ -297,6 +311,7 @@ export function overlayStateChanged(prev: EditorState, next: EditorState): boole
     prev.prototyping !== next.prototyping ||
     prev.connecting !== next.connecting ||
     prev.layoutGrids !== next.layoutGrids ||
+    prev.pixelGrid !== next.pixelGrid ||
     prev.showReadingOrder !== next.showReadingOrder ||
     prev.guideDraft !== next.guideDraft ||
     prev.following !== next.following ||
@@ -356,6 +371,19 @@ export class OverlayRenderer {
   #transientState: EditorState | null = null;
   #transientPenPreview: unknown = null;
 
+  // Retained state for the pixel grid layer.
+  #pixelGridValid = false;
+  #pixelGridEmpty = true;
+  #pixelGridW = 0;
+  #pixelGridH = 0;
+  #pixelGridDpr = 0;
+  #pixelGridOverscan = 0;
+  #pixelGridZoom = 0;
+  #pixelGridAnchorCamX = 0;
+  #pixelGridAnchorCamY = 0;
+  #pixelGridTransformX = 0;
+  #pixelGridTransformY = 0;
+
   // Retained state for single-canvas fallback mode.
   #singleValid = false;
   #singleW = 0;
@@ -377,6 +405,9 @@ export class OverlayRenderer {
     transientDirtyClears: 0,
     transientSkipped: 0,
     transientClearedPixels: 0,
+    pixelGridFullDraws: 0,
+    pixelGridTranslations: 0,
+    pixelGridSkipped: 0,
   };
 
   constructor(options: OverlayRendererOptions = {}) {
@@ -390,6 +421,7 @@ export class OverlayRenderer {
     if (next === this.#overscanCss) return;
     this.#overscanCss = next;
     this.#labelsValid = false;
+    this.#pixelGridValid = false;
   }
 
   /** Drops all cached pixel state and optionally clears the sprite atlas. */
@@ -407,6 +439,8 @@ export class OverlayRenderer {
     this.#transientFull = true;
     this.#transientRects = [];
     this.#transientState = null;
+    this.#pixelGridValid = false;
+    this.#pixelGridEmpty = false;
     this.#singleValid = false;
     this.#singleState = null;
     if (clearSprites) this.#resetAtlas();
@@ -423,11 +457,17 @@ export class OverlayRenderer {
     this.stats.transientDirtyClears = 0;
     this.stats.transientSkipped = 0;
     this.stats.transientClearedPixels = 0;
+    this.stats.pixelGridFullDraws = 0;
+    this.stats.pixelGridTranslations = 0;
+    this.stats.pixelGridSkipped = 0;
   }
 
   /**
-   * Draws both the retained label layer (`labelsCtx`) and transient overlay layer (`overlayCtx`).
+   * Draws the retained label layer (`labelsCtx`), the retained pixel grid
+   * layer (`pixelGridCtx`, when given) and the transient overlay layer
+   * (`overlayCtx`).
    * When `labelsCtx` is null, falls back cleanly to single-canvas `drawOverlay` with unchanged-frame skipping.
+   * When `pixelGridCtx` is null, the pixel grid is drawn on the overlay layer instead.
    */
   draw(
     labelsCtx: CanvasRenderingContext2D | null,
@@ -437,6 +477,7 @@ export class OverlayRenderer {
     theme: OverlayTheme,
     dpr: number,
     images?: ImageCache,
+    pixelGridCtx?: CanvasRenderingContext2D | null,
   ): void {
     const measurerGen = editor.measurer.generation ?? 0;
     if (measurerGen !== this.#spriteMeasurerGen) {
@@ -444,13 +485,106 @@ export class OverlayRenderer {
       this.#spriteMeasurerGen = measurerGen;
     }
 
+    if (pixelGridCtx) this.#drawPixelGrid(pixelGridCtx, editor, dpr);
+
     if (!labelsCtx) {
-      this.#drawSingle(overlayCtx, editor, interaction, theme, dpr, images, measurerGen);
+      this.#drawSingle(
+        overlayCtx,
+        editor,
+        interaction,
+        theme,
+        dpr,
+        images,
+        measurerGen,
+        !pixelGridCtx,
+      );
       return;
     }
 
     this.#drawLabels(labelsCtx, editor, theme, dpr, measurerGen);
-    this.#drawTransient(overlayCtx, editor, interaction, theme, dpr, images);
+    this.#drawTransient(overlayCtx, editor, interaction, theme, dpr, images, !pixelGridCtx);
+  }
+
+  /**
+   * The retained pixel grid: baked into its overscanned canvas in one fill
+   * at an anchor camera, then moved with that canvas (CSS translate) while
+   * panning at the same zoom, like the label layer. Hidden, toggled off or
+   * below its zoom, the canvas is cleared once and then left alone.
+   */
+  #drawPixelGrid(ctx: CanvasRenderingContext2D, editor: Editor, dpr: number): void {
+    const cw = ctx.canvas.width;
+    const ch = ctx.canvas.height;
+    const pad = this.#overscanCss;
+    const { pageId, camera, pixelGrid } = editor.s;
+    const shown = !!pageId && pixelGrid && pixelGridFade(camera.zoom) > 0;
+    const sizeMatch =
+      this.#pixelGridValid &&
+      this.#pixelGridW === cw &&
+      this.#pixelGridH === ch &&
+      this.#pixelGridDpr === dpr &&
+      this.#pixelGridOverscan === pad;
+
+    if (!shown) {
+      if (sizeMatch && this.#pixelGridEmpty) {
+        this.stats.pixelGridSkipped++;
+        return;
+      }
+      setCanvasTransform(ctx.canvas, 0, 0);
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.clearRect(0, 0, cw, ch);
+      this.#pixelGridValid = true;
+      this.#pixelGridEmpty = true;
+      this.#pixelGridW = cw;
+      this.#pixelGridH = ch;
+      this.#pixelGridDpr = dpr;
+      this.#pixelGridOverscan = pad;
+      this.#pixelGridZoom = camera.zoom;
+      this.#pixelGridAnchorCamX = camera.x;
+      this.#pixelGridAnchorCamY = camera.y;
+      this.#pixelGridTransformX = 0;
+      this.#pixelGridTransformY = 0;
+      return;
+    }
+
+    if (sizeMatch && !this.#pixelGridEmpty && this.#pixelGridZoom === camera.zoom) {
+      const shiftPxX = Math.round((camera.x - this.#pixelGridAnchorCamX) * dpr);
+      const shiftPxY = Math.round((camera.y - this.#pixelGridAnchorCamY) * dpr);
+      const tx = shiftPxX / dpr;
+      const ty = shiftPxY / dpr;
+      const canCssTranslate =
+        (shiftPxX === 0 && shiftPxY === 0) ||
+        (pad > 0 && hasDomStyle(ctx.canvas) && Math.abs(tx) <= pad - 1 && Math.abs(ty) <= pad - 1);
+      if (canCssTranslate) {
+        if (tx === this.#pixelGridTransformX && ty === this.#pixelGridTransformY) {
+          this.stats.pixelGridSkipped++;
+          return;
+        }
+        setCanvasTransform(ctx.canvas, tx, ty);
+        this.#pixelGridTransformX = tx;
+        this.#pixelGridTransformY = ty;
+        this.stats.pixelGridTranslations++;
+        return;
+      }
+    }
+
+    // Bake (or rebake after a zoom, a resize, or a pan past the overscan):
+    // one clear and one fill for every line on the overscanned canvas.
+    setCanvasTransform(ctx.canvas, 0, 0);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, cw, ch);
+    drawPixelGrid(ctx, camera, cw / dpr, ch / dpr, dpr, pad);
+    this.stats.pixelGridFullDraws++;
+    this.#pixelGridValid = true;
+    this.#pixelGridEmpty = false;
+    this.#pixelGridW = cw;
+    this.#pixelGridH = ch;
+    this.#pixelGridDpr = dpr;
+    this.#pixelGridOverscan = pad;
+    this.#pixelGridZoom = camera.zoom;
+    this.#pixelGridAnchorCamX = camera.x;
+    this.#pixelGridAnchorCamY = camera.y;
+    this.#pixelGridTransformX = 0;
+    this.#pixelGridTransformY = 0;
   }
 
   #resetAtlas(): void {
@@ -673,6 +807,7 @@ export class OverlayRenderer {
     dpr: number,
     images: ImageCache | undefined,
     measurerGen: number,
+    includePixelGrid: boolean,
   ): void {
     const cw = ctx.canvas.width;
     const ch = ctx.canvas.height;
@@ -693,7 +828,7 @@ export class OverlayRenderer {
       this.stats.transientSkipped++;
       return;
     }
-    drawOverlay(ctx, editor, interaction, theme, dpr, images);
+    drawOverlay(ctx, editor, interaction, theme, dpr, images, includePixelGrid);
     this.stats.transientFullClears++;
     this.stats.transientClearedPixels += cw * ch;
     this.#singleValid = true;
@@ -1234,6 +1369,7 @@ export class OverlayRenderer {
     theme: OverlayTheme,
     dpr: number,
     images: ImageCache | undefined,
+    includePixelGrid: boolean,
   ): void {
     const cw = ctx.canvas.width;
     const ch = ctx.canvas.height;
@@ -1279,8 +1415,12 @@ export class OverlayRenderer {
     const hasHover = s.hover !== null && !s.gesture;
     const hasPen = s.tool === "pen" && (s.vectorPointer !== null || penPreview !== null);
     const hasReadingOrder = s.showReadingOrder && !s.gesture;
+    // Only when no retained canvas owns it: with one, the grid never makes
+    // this layer draw, so panning with no selection still writes nothing here.
+    const hasPixelGrid = includePixelGrid && s.pixelGrid && pixelGridFade(s.camera.zoom) > 0;
 
     const hasTransient =
+      hasPixelGrid ||
       hasGrids ||
       hasRulerGuides ||
       compSets.length > 0 ||
@@ -1352,6 +1492,7 @@ export class OverlayRenderer {
     }
 
     const complex =
+      hasPixelGrid ||
       hasGrids ||
       hasRulerGuides ||
       s.xray ||
@@ -1379,7 +1520,7 @@ export class OverlayRenderer {
         for (const r of dirty) ctx.clearRect(r.x, r.y, r.w, r.h);
         this.stats.transientDirtyClears++;
         this.stats.transientClearedPixels += dirtyArea;
-        drawOverlayContent(ctx, editor, interaction, theme, dpr, images, false);
+        drawOverlayContent(ctx, editor, interaction, theme, dpr, images, false, includePixelGrid);
         this.#transientValid = true;
         this.#transientEmpty = false;
         this.#transientFull = false;
@@ -1400,7 +1541,7 @@ export class OverlayRenderer {
     ctx.clearRect(0, 0, cw, ch);
     this.stats.transientFullClears++;
     this.stats.transientClearedPixels += cw * ch;
-    drawOverlayContent(ctx, editor, interaction, theme, dpr, images, false);
+    drawOverlayContent(ctx, editor, interaction, theme, dpr, images, false, includePixelGrid);
     const nextRects = complex
       ? []
       : coalesceRects(

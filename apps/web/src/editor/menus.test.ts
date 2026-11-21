@@ -86,6 +86,7 @@ describe("context menus", () => {
       "—",
       "Show rulers",
       "Show layout grids",
+      "Show pixel grid",
       "Snap to pixel grid",
       "Minimap",
       "Show comments",
@@ -218,10 +219,15 @@ describe("context menus", () => {
 
   it("checks the view toggles that are on", () => {
     const { editor, host } = setup();
-    editor.state.set({ rulers: true, layoutGrids: false });
+    editor.state.set({ rulers: true, layoutGrids: false, pixelGrid: false });
     const items = menuFor(host, { kind: "canvas", x: 0, y: 0, point: { x: 900, y: 900 } });
     expect(find(items, "Show rulers")?.checked).toBe(true);
     expect(find(items, "Show layout grids")?.checked).toBe(false);
+    // The pixel grid is on by default, next to snapping to it, and its item turns it back on.
+    expect(find(items, "Show pixel grid")?.checked).toBe(false);
+    expect(find(items, "Snap to pixel grid")?.checked).toBe(true);
+    find(items, "Show pixel grid")?.onSelect?.();
+    expect(editor.s.pixelGrid).toBe(true);
   });
 
   it("offers page actions, and never deleting the last page", () => {

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ACTIONS, matches } from "./actions";
+import { ACTIONS, matches, triggers } from "./actions";
 
 describe("actions", () => {
   it("have unique ids", () => {
@@ -40,5 +40,15 @@ describe("actions", () => {
     expect(matches(pixel, event({ key: "'", code: "Quote", metaKey: true, ctrlKey: true }))).toBe(
       false,
     );
+
+    // ⇧' toggles the pixel grid itself, and ⌘' (Figma's other spelling) does too,
+    // while ⇧⌘' stays snapping's alone.
+    const grid = ACTIONS.find((a) => a.id === "view.pixelGrid");
+    if (!grid) throw new Error("no pixel grid action");
+    expect(triggers(grid, event({ key: '"', code: "Quote", shiftKey: true }))).toBe(true);
+    expect(triggers(grid, event({ key: "'", code: "Quote", metaKey: true, ctrlKey: true }))).toBe(
+      true,
+    );
+    expect(triggers(grid, event({ key: '"', code: "Quote", ...both }))).toBe(false);
   });
 });

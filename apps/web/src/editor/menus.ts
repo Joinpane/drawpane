@@ -225,6 +225,7 @@ export function canvasMenu(host: MenuHost, request: MenuRequest): ContextMenuEnt
   const focus = action(host, "view.focus", "Hide other people's cursors");
   const rulers = action(host, "view.rulers", "Show rulers");
   const grids = action(host, "view.layoutGrids", "Show layout grids");
+  const pixelGrid = action(host, "view.pixelGrid", "Show pixel grid");
   const pixels = action(host, "view.pixelSnap");
   const minimapMode = uiFor(editor).get().minimap;
   const modeItem = (id: string, label: string, mode: string): ContextMenuAction | null => {
@@ -243,6 +244,7 @@ export function canvasMenu(host: MenuHost, request: MenuRequest): ContextMenuEnt
     [
       toggle(rulers, editor.s.rulers),
       toggle(grids, editor.s.layoutGrids),
+      toggle(pixelGrid, editor.s.pixelGrid),
       toggle(pixels, editor.s.pixelSnap),
       minimap,
       toggle(comments, host.commentsShown),

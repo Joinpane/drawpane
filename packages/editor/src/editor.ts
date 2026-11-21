@@ -213,6 +213,8 @@ export interface EditorState {
   readonly rulers: boolean;
   /** Frames' layout grids on the canvas (⇧G). */
   readonly layoutGrids: boolean;
+  /** Whole-pixel lines on the canvas at high zoom (⇧'); drawn from 400% up. */
+  readonly pixelGrid: boolean;
   /**
    * Drawing, moving and resizing land on whole pixels (⇧⌘'), before smart
    * guides snap: so pointer-made geometry is never 408.4 × 79.2 at odd zooms.
@@ -427,6 +429,7 @@ export class Editor {
     connecting: null,
     rulers: false,
     layoutGrids: true,
+    pixelGrid: true,
     pixelSnap: true,
     showReadingOrder: false,
     guideDraft: null,

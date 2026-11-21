@@ -1,7 +1,7 @@
 /**
  * View preferences that follow a person between files, in this browser:
- * rulers, layout grids, pixel-grid snapping, the Selection Lens and the
- * minimap. Read once when an editor
+ * rulers, layout grids, the pixel grid, pixel-grid snapping, the
+ * Selection Lens and the minimap. Read once when an editor
  * opens, written whenever they change.
  */
 import type { Editor } from "@drawpane/editor";
@@ -13,6 +13,7 @@ const KEY = "drawpane:view";
 interface ViewPreferences {
   readonly rulers: boolean;
   readonly layoutGrids: boolean;
+  readonly pixelGrid: boolean;
   readonly pixelSnap: boolean;
   readonly lens: boolean;
   readonly minimap: MinimapMode;
@@ -23,6 +24,7 @@ const MINIMAP_MODES: readonly MinimapMode[] = ["auto", "always", "off"];
 const SWITCHES = [
   "rulers",
   "layoutGrids",
+  "pixelGrid",
   "pixelSnap",
   "lens",
 ] as const satisfies readonly (keyof ViewPreferences)[];
@@ -62,6 +64,7 @@ export function useViewPreferences(editor: Editor): void {
     const current = (): ViewPreferences => ({
       rulers: editor.s.rulers,
       layoutGrids: editor.s.layoutGrids,
+      pixelGrid: editor.s.pixelGrid,
       pixelSnap: editor.s.pixelSnap,
       lens: ui.get().lens,
       minimap: ui.get().minimap,
