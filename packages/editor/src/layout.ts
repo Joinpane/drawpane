@@ -1450,6 +1450,63 @@ function layoutClosure(
   return { roots: [...roots], dirty };
 }
 
+/** Whether a layer is turned at an angle that isn't a multiple of 90 degrees. */
+function oblique(node: NodeRecord | undefined): boolean {
+  return !!node && getProp(node.props, "rotation") % 90 !== 0;
+}
+
+/** Each document's layers turned obliquely, as stored (override records too), kept with its changes. */
+const turnedByDoc = new WeakMap<Doc, { version: number; ids: Set<string> }>();
+
+function turnedLayers(doc: Doc): Set<string> {
+  let known = turnedByDoc.get(doc);
+  const changes = known ? doc.changesSince(known.version) : null;
+  const stored = doc.storedReader();
+  const note = (ids: Iterable<string>, into: Set<string>) => {
+    for (const id of ids) {
+      if (oblique(stored.get(id))) into.add(id);
+      else into.delete(id);
+    }
+  };
+  if (!known || !changes || changes.some((c) => c.reset)) {
+    known = { version: doc.version, ids: new Set<string>() };
+    for (const node of doc.tokens.source().storedNodes()) if (oblique(node)) known.ids.add(node.id);
+    turnedByDoc.set(doc, known);
+  } else {
+    for (const change of changes) note(change.ids, known.ids);
+    known.version = doc.version;
+  }
+  // A commit lays out inside its batch, before its changes are logged.
+  note(doc.unflushedIds(), known.ids);
+  return known.ids;
+}
+
+/**
+ * The layout frames whose size layout works out from an obliquely turned
+ * layer's box (in its flow, and up through the flows above): stored
+ * rounded, they don't read back as layout computes them, so wherever a
+ * run reaches them they're laid out inside, as laying out the whole tree
+ * would. Turned layers are few, so this is cheap to find.
+ */
+function inexactFrames(doc: Doc): Set<string> {
+  const out = new Set<string>();
+  const turned = turnedLayers(doc);
+  if (turned.size === 0) return out;
+  for (const id of doc.tokens.source().builtFrom(turned)) {
+    let node = doc.get(id);
+    if (!node || !inFlow(node)) continue;
+    while (node) {
+      let parent = doc.get(node.parent);
+      while (parent?.type === "group") parent = doc.get(parent.parent);
+      if (!isLayoutFrame(parent) || out.has(parent.id)) break;
+      out.add(parent.id);
+      if (!inFlow(parent)) break;
+      node = parent;
+    }
+  }
+  return out;
+}
+
 /**
  * Whether a layer's size can come from its parent's layout: it fills, or
  * its parent stretches it, on either axis. When its parent is laid out
@@ -1524,13 +1581,15 @@ export function layoutOps(
   const { changes } = options;
   const { roots, dirty } = layoutClosure(doc, ids, changes?.moved, changes?.changed);
   if (roots.length === 0) return [];
+  const inexact = changes ? inexactFrames(doc) : null;
+  const exact = (frame: NodeRecord) => dirty.has(frame.id) || !!inexact?.has(frame.id);
   const engine = new LayoutEngine(doc, {
     ...(options.shrinkEmpty ? { shrinkEmpty: options.shrinkEmpty } : {}),
     ...(options.keepEmpty ? { keepEmpty: options.keepEmpty } : {}),
     ...(changes
       ? {
-          enters: (frame: NodeRecord) => dirty.has(frame.id) || sizeFromParent(doc, frame),
-          settled: (frame: NodeRecord) => !dirty.has(frame.id),
+          enters: (frame: NodeRecord) => exact(frame) || sizeFromParent(doc, frame),
+          settled: (frame: NodeRecord) => !exact(frame),
         }
       : {}),
   });

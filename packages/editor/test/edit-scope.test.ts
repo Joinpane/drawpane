@@ -57,6 +57,7 @@ interface LeafSpec {
   sizingV: Sizing;
   w: number;
   h: number;
+  rotation: number;
 }
 type Spec = FrameSpec | LeafSpec;
 
@@ -67,6 +68,8 @@ const leaf: fc.Arbitrary<LeafSpec> = fc.record({
   sizingV: fc.constantFrom<Sizing>("fixed", "fill"),
   w: fc.integer({ min: 4, max: 60 }),
   h: fc.integer({ min: 4, max: 40 }),
+  // Turned leaves size their frames by their turned box: obliquely, not to two decimals.
+  rotation: fc.constantFrom(0, 0, 0, 15, 45, 90),
 });
 const tree = fc.letrec<{ node: Spec; frame: FrameSpec }>((tie) => ({
   node: fc.oneof({ depthSize: "small", withCrossShrink: true }, leaf, tie("frame")),
@@ -113,6 +116,7 @@ function build(editor: Editor, spec: FrameSpec): string[] {
       });
     }
     if (s.kind === "text") Object.assign(props, { characters: "Some words here", fontSize: 12 });
+    if (s.kind !== "frame" && s.rotation !== 0) props.rotation = s.rotation;
     editor.commit([
       { op: "create", id, type: s.kind, parent, key: `a${String(n).padStart(3, "0")}`, props },
     ]);
@@ -131,6 +135,7 @@ type Edit =
   | { kind: "absolute"; at: number }
   | { kind: "text"; at: number; words: number }
   | { kind: "nudge"; at: number; dx: number }
+  | { kind: "rotate"; at: number; rotation: number }
   | { kind: "move"; at: number; into: number }
   | { kind: "delete"; at: number }
   | { kind: "undo" };
@@ -161,6 +166,11 @@ const edit: fc.Arbitrary<Edit> = fc.oneof(
     kind: fc.constant("nudge" as const),
     at: fc.nat(40),
     dx: fc.integer({ min: -9, max: 9 }),
+  }),
+  fc.record({
+    kind: fc.constant("rotate" as const),
+    at: fc.nat(40),
+    rotation: fc.constantFrom(0, 15, 30, 90),
   }),
   fc.record({ kind: fc.constant("move" as const), at: fc.nat(40), into: fc.nat(40) }),
   fc.record({ kind: fc.constant("delete" as const), at: fc.nat(40) }),
@@ -206,6 +216,8 @@ function opsFor(editor: Editor, ids: readonly string[], e: Edit): Op[] | "undo" 
       ];
     case "nudge":
       return [{ op: "set", id, prop: "x", value: getProp(node.props, "x") + e.dx }];
+    case "rotate":
+      return [{ op: "set", id, prop: "rotation", value: e.rotation }];
     case "move": {
       const frames = live.filter((f) => editor.doc.get(f)?.type === "frame" && f !== id);
       const into = frames[e.into % Math.max(1, frames.length)];
