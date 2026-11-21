@@ -10,13 +10,8 @@
  * ImageBitmap with bounded worker-wide credit backpressure, and yields between slices so a
  * newer camera or edit cancels stale work at once.
  */
-import {
-  type Camera,
-  ErrorCode,
-  type FrameStats,
-  loadBrowserEngine,
-  RenderEngine,
-} from "@drawpane/engine";
+import { type Camera, ErrorCode, type FrameStats, RenderEngine } from "@drawpane/engine";
+import { loadBrowserEngine } from "@drawpane/engine/browser";
 import { CPU_IMAGE_BUDGET, uploadCpuLevel } from "./engine-image";
 import { fitEngineRaster } from "./engine-raster";
 

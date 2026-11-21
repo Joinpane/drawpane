@@ -312,6 +312,13 @@ export function imageLevelsBytes(width: number, height: number): number {
   }
 }
 
+/** The next smaller mip level, with the same floor as the engine's image pyramid. */
+export function smallerImageLevel(width: number, height: number) {
+  const w = Math.max(1, Math.floor(width / 2));
+  const h = Math.max(1, Math.floor(height / 2));
+  return Math.max(w, h) >= 32 && (w < width || h < height) ? { width: w, height: h } : null;
+}
+
 interface GlueState {
   epoch: number;
   trapped: boolean;
@@ -500,6 +507,16 @@ export class RenderEngine {
   /** Bytes the engine holds, roughly: its graph, images and glyph masks. */
   get heldBytes(): number {
     return this.#live()?.heldBytes ?? 0;
+  }
+
+  /** Allocated Wasm pages, including freed space retained by the allocator. */
+  get memoryBytes(): number {
+    return this.#module.memoryBytes();
+  }
+
+  /** Updates the render budget before applying a display list. */
+  setMemoryBudget(bytes: number): Result {
+    return this.#call((e) => outcome(e.setLimit("memory_bytes", bytes))) as Result;
   }
 
   /** Whether the instance trapped (or was disposed): every call fails from then on. */
@@ -793,13 +810,11 @@ export class RenderEngine {
     onChunk: (bytes: Uint8Array) => void,
     rows = bandRows(width),
   ): Result {
-    const begun = this.#begin(width, height, camera);
+    const begun = this.#begin(width, height, camera, rows);
     if (!begun.ok) return begun;
-    rows = Math.max(1, Math.min(rows, this.bandRows(width)));
     try {
-      for (let y0 = 0; y0 < height; y0 += rows) {
-        const n = Math.min(rows, height - y0);
-        const r = this.#band(camera, background, n);
+      for (let y0 = 0; y0 < height; y0 += begun.value) {
+        const r = this.#band(background);
         if (!r.ok) return r;
         if (r.value.length > 0) onChunk(r.value);
       }
@@ -812,21 +827,25 @@ export class RenderEngine {
     }
   }
 
-  #begin(width: number, height: number, camera: Camera): Result {
+  #begin(width: number, height: number, camera: Camera, rows: number): Result<number> {
+    return this.#call((e) => {
+      const res = outcome(
+        e.pngBegin(width, height, camera.zoom, camera.x, camera.y, camera.dpr, rows),
+      );
+      return res.ok ? { ok: true, value: e.pngRows() } : res;
+    }) as Result<number>;
+  }
+
+  /** Checks the PNG bounds and working set without opening a stream. */
+  checkPng(width: number, height: number, camera: Camera, rows = bandRows(width)): Result {
     return this.#call((e) =>
-      outcome(e.pngBegin(width, height, camera.zoom, camera.x, camera.y, camera.dpr)),
+      outcome(e.checkPng(width, height, camera.zoom, camera.x, camera.y, camera.dpr, rows)),
     ) as Result;
   }
 
-  #band(
-    camera: Camera,
-    background: readonly [number, number, number, number],
-    rows: number,
-  ): Result<Uint8Array> {
+  #band(background: readonly [number, number, number, number]): Result<Uint8Array> {
     return this.#call((e) => {
-      const res = outcome(
-        e.pngBand(camera.zoom, camera.x, camera.y, camera.dpr, bg(background), rows),
-      );
+      const res = outcome(e.pngBand(bg(background)));
       return res.ok ? { ok: true as const, value: e.pngTake() } : res;
     }) as Result<Uint8Array>;
   }
@@ -851,22 +870,37 @@ export class RenderEngine {
     background: readonly [number, number, number, number],
     rows = bandRows(width),
     onEnd: () => void = () => {},
+    beforeBand?: () => void | Promise<void>,
+    signal?: AbortSignal,
   ): Result<ReadableStream<Uint8Array>> {
-    const begun = this.#begin(width, height, camera);
+    const begun = this.#begin(width, height, camera, rows);
     if (!begun.ok) return begun;
-    rows = Math.max(1, Math.min(rows, this.bandRows(width)));
     let y0 = 0;
     let ended = false;
+    let unlisten: (() => void) | undefined;
     const end = () => {
       if (ended) return;
       ended = true;
+      unlisten?.();
       this.#call((e) => e.pngAbort());
       onEnd();
     };
     const stream = new ReadableStream<Uint8Array>({
+      start: (controller) => {
+        if (!signal) return;
+        const abort = () => {
+          end();
+          controller.error(signal.reason);
+        };
+        if (signal.aborted) abort();
+        else {
+          signal.addEventListener("abort", abort, { once: true });
+          unlisten = () => signal.removeEventListener("abort", abort);
+        }
+      },
       // Each pull draws bands until there are bytes to hand on (the compressor holds small
       // outputs back): a pull that enqueues nothing isn't always called again.
-      pull: (controller) => {
+      pull: async (controller) => {
         try {
           for (;;) {
             if (y0 >= height) {
@@ -877,16 +911,18 @@ export class RenderEngine {
               controller.close();
               return;
             }
-            const n = Math.min(rows, height - y0);
-            const r = this.#band(camera, background, n);
+            if (beforeBand) await beforeBand();
+            if (ended) return;
+            const r = this.#band(background);
             if (!r.ok) throw new EngineFailure(r);
-            y0 += n;
+            y0 += begun.value;
             if (r.value.length > 0) {
               controller.enqueue(r.value);
               return;
             }
           }
         } catch (err) {
+          if (ended) return;
           end();
           controller.error(
             err instanceof EngineFailure
@@ -1387,23 +1423,14 @@ async function withFeatureLevel<T>(
   }
 }
 
-/** Loads the browser WebGPU build (WebGPU and CPU). Vite bundles its glue and WebAssembly. */
-export async function loadBrowserEngine(): Promise<EngineModule> {
-  const glue = (await import("@drawpane/engine/browser-glue")) as typeof Glue;
+/** Initialises browser-hosted Wasm, then wraps the instance shared by its engines. */
+export async function loadEngineAsync(
+  glue: typeof Glue,
+  build: EngineBuild,
+): Promise<EngineModule> {
   const state = glueState(glue);
   if (state.epoch === 0) await glue.default();
-  return makeModule(glue, "browser");
-}
-
-/**
- * Loads the WebGL2 fallback build (wgpu GL + naga + CPU). Kept in its own module so browsers
- * with working WebGPU never download it (decision 0040, "Fallbacks").
- */
-export async function loadWebglEngine(): Promise<EngineModule> {
-  const glue = (await import("@drawpane/engine/webgl-glue")) as typeof Glue;
-  const state = glueState(glue);
-  if (state.epoch === 0) await glue.default();
-  return makeModule(glue, "webgl");
+  return makeModule(glue, build);
 }
 
 /** Loads a build from its glue and WebAssembly bytes or module (Node, Workers, tests). */

@@ -20,11 +20,10 @@ import {
   type EngineModule,
   type FrameStats,
   type GpuInfo,
-  loadBrowserEngine,
-  loadWebglEngine,
   RenderEngine,
   unsupportedNames,
 } from "@drawpane/engine";
+import { loadBrowserEngine, loadWebglEngine } from "@drawpane/engine/browser";
 import { uploadCpuLevel, ViewImages } from "./engine-image";
 import { imagesFor } from "./media";
 
@@ -170,7 +169,7 @@ export function engineDebug(editor: Editor) {
         images.retain(probe.imagesInUse());
         if (!limits.ok) return { ok: false, error: limits.message, unsupported: {} };
         const update = () =>
-          images.update(probe.imageDemands(options.rect, 0), options.scale, false, limits.value);
+          images.update(probe.imageDemands(options.rect, 0), options.scale, limits.value);
         for (let waited = 0; waited < 30_000 && !update(); waited += 25)
           await new Promise((resolve) => setTimeout(resolve, 25));
       }

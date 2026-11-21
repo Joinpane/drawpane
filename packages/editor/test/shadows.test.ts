@@ -3,9 +3,9 @@ import type { ResvgRasteriser } from "@drawpane/raster";
 import { nodeRasteriser } from "@drawpane/raster/node";
 import { beforeAll, describe, expect, it } from "vitest";
 import { Doc } from "../src/doc";
-import { base64, createHeadlessRenderer } from "../src/headless-render";
 import { dropShadowCast } from "../src/shadows";
 import type { TextMeasurer } from "../src/text";
+import { base64, createHeadlessRenderer } from "./fixtures/svg-raster";
 
 const ring = (props: { showBehind?: boolean } = {}): Effect => ({
   type: "drop-shadow",

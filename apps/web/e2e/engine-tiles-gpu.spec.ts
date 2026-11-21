@@ -495,8 +495,8 @@ for (const build of ["browser", "webgl"] as const) {
               worstAlpha = Math.max(worstAlpha, Math.abs((cpu[k] ?? 0) - (gpu[k] ?? 0)));
             let png: number[] | null = null;
             if (i === 0) {
-              check(e.pngBegin(96, 64, 1, 0, 0, 1));
-              check(e.pngBand(1, 0, 0, 1, bg, 64));
+              check(e.pngBegin(96, 64, 1, 0, 0, 1, 64));
+              check(e.pngBand(bg));
               const img = await createImageBitmap(
                 new Blob([new Uint8Array(e.pngTake()), new Uint8Array(e.pngEnd())], {
                   type: "image/png",
@@ -687,7 +687,9 @@ for (const build of ["browser", "webgl"] as const) {
           // fits at 21 MiB, leaving the glass mask itself to exercise admission.
           glassLimited: await measure(deepFrost, 21, 4),
           glassFits: await measure(deepFrost, 128, 4),
-          uniformLimited: await measure(uniform, 22),
+          // A first draw holds one frame texture, leaving one MiB more for
+          // the Gaussian working set than the old eager two-frame setup.
+          uniformLimited: await measure(uniform, 21),
           uniformFits: await measure(uniform, 24),
           progressiveLimited: await measure(progressive, 22),
           progressiveFits: await measure(progressive, 28),

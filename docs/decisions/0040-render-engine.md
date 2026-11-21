@@ -343,6 +343,22 @@ On the kit board, the GPU against the CPU is a mean of 0.13 (see the spike's tab
 
 **SVG and PDF export stay separate,** as vector outputs, with their documented approximations of backdrop effects. CPU-against-GPU parity doesn't validate them; their own suites stay.
 
+## Amendment: phase 4 headless rendering
+
+- `renderPng` prepares the export's display list and assets, then renders through the CPU engine. `renderPngStream` hands the PNG bands to a host as they are compressed. The MCP tool buffers up to 6 MiB of compressed PNG because its response carries a single base64 image. Each runner export leases one fresh 25 MiB engine instance.
+- Selected layers use the display-list builder's reader context (decision 0039). It prepares the assets of the selection and its relevant page prefix, and excludes the page background from reader inputs. Unsupported operations produce typed refusals. A render whose reach or memory demand exceeds the cap can be reduced to the largest admitted scale down to the 256 px floor. The maximum requested side is 8,192 px.
+- PNG admission picks an output band height before producing bytes. The camera is pinned with the revision. Shorter bands keep the same device coordinates, so they preserve resolution. Compressed bytes move out of the encoder's pending buffer as rows are written. Admission budgets for the peak of drawing and encoding and reserves the same runtime headroom as the CPU pass guard.
+- HarfBuzz still computes glyph advances, substitutions and outlines. Workerd compiles a small callback module with the runner so the HarfBuzz function table can call the JavaScript draw callbacks. The bridge adds 251 bytes of WebAssembly (154 gzipped), and the CPU render build measures 362 KB gzipped against its 400 KB limit.
+- The runner chooses an image level from the projected paint size and retains the natural dimensions for crop, fill and tile placement. Ordinary PNGs are decoded by row and averaged into that level. JPEG uses a scaled IDCT, and interlaced PNG, WebP and GIF use bounded whole-image decoders. The single reusable decoder is 162 KB gzipped against its 200 KB limit. Its retained linear memory counts against the combined 25 MiB for decoding and rendering. When the requested image level cannot fit, the runner tries smaller levels and reports the reduction. Missing and over-budget images are reported separately. SVG and PDF keep their separate vector exports.
+- Headless text uses the same font itemizer and fixed Unicode fallback slices as the browser engine. Kana and Hangul in the layer select Japanese and Korean Han forms, respectively. The first MCP `Accept-Language` entry selects the locale for Han-only text. Documents have no author locale field, so requests without a locale use Simplified Chinese forms. The CPU export allows up to 8 MiB of unique outlines, charged to the engine's cap. If the text still exceeds the outline budget, the error asks for a smaller portion of the text to export.
+- Worker PNG admission bounds the projected number of processed pixels across tiles and passes in addition to the peak working set. The full runner checks a 45-second deadline between font loading, image decoding and drawing steps. The deadline also releases the engine when a PNG stream goes unread. Local wall time can vary with machine load and request I/O.
+- On 40 seeded blur and isolation cases, main streamed 17 PNGs and refused 23. Adaptive bands streamed 22 and refused 18. Every admitted export completed inside the 25 MiB module maximum. The 2,048 × 640 fixture with three faded groups and one backdrop blur streams at full resolution.
+- Run `ENGINE_EXPORT_FUZZ_FULL=1 pnpm --filter @drawpane/engine test -t 'seeded Worker blur'` to stream every admitted case. Routine CI checks all 40 admissions and streams six cases.
+- The 8,192 × 8,192 workerd fixture drew 7,200 records and 41 unique live glyph outlines with 18.2 MiB of engine memory. The full runner's live-font test exports images and backdrop readers with two Noto Sans SC weights and Noto Sans JP beside roughly 46.5 MiB of document text payload.
+- Run `AGENT_TEST_LIVE_FONTS=1 pnpm --filter @drawpane/worker test test/agent-export-image.test.ts --maxWorkers=1` to exercise the real runner with the pinned CJK font files.
+- The translucent-mask cell's headless-versus-canvas comparison measures 0.374 mean, 1 at p99 and 0.84 on the worst tile. Unpremultiplication amplifies integer rounding at low alpha. The old resvg-based mean ceiling was 0.32. The headless cell allows 0.43, and the browser-engine parity and exact CPU comparisons keep their criteria.
+- The `corners/layer-blur` headless cell compares directly with the frozen Figma capture because Chromium's Canvas CSS blur result varies across platforms. Headless against Figma measures 0.314 mean, 4 at p99 and 1.46 on the worst tile. In that capture run Canvas against Figma measures 0.951 mean. The headless gate for this cell is 0.45 mean, 5 at p99 and 2 on the worst tile.
+
 ## Fallbacks
 
 **Where WebGPU is** (the gpuweb implementation status wiki, last edited 2026-10-02; caniuse's source table):
@@ -1162,6 +1178,30 @@ different pixels. The view releases its caches after 30 seconds continuously
 hidden. Allocation refusals reclaim optional levels. Missing sources back off
 and corrupt bytes are retried only when the source changes or the view reloads.
 The strict raw-pixel export API retains its admission checks.
+
+## Amendment for photo detail during zoom and tab restore
+
+While zooming in, the editor projects the recent logarithmic zoom velocity
+180 ms ahead. It starts the predicted level while the current level can
+still draw and carries an in-flight prediction forward when it can serve
+the current view. Up to four decode jobs can run, with a separate 64 MiB
+limit on their requested bitmap sizes. Uploads use the existing frame budget.
+Speculative levels use the power-of-two pyramid to cover roughly 2× and
+4× the current zoom. Active zoom and velocity predictions use the same
+pyramid to avoid a new decode at every small step.
+
+The closest useful resident level stays available through decode. A sharper
+decoded bitmap can replace that level under the same residency cap, using a
+tiny resident copy as the fallback during the swap. After 30 seconds hidden
+the view drops nearby and speculative levels and keeps the drawn level of
+each visible photo. A backend allocation refusal while hidden can reclaim
+those levels down to their thumbnails.
+
+At rest, large sources use 256-device-pixel size steps above 1024 px to avoid
+rounding a 5K viewport's photos up to a full 4096 px level. The image budget
+scales at 48 MiB per reported GiB of device memory. When memory is unknown,
+it defaults to 128 MiB on mobile and touch devices and 192 MiB elsewhere.
+Adapter and renderer caps still apply, including 64 MiB on the CPU Worker.
 
 ## Amendment: high zoom raster limits in the editor
 

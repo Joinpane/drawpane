@@ -28,7 +28,6 @@
     "@cloudflare/vitest-plugin": "1.8.1",
     "@cloudflare/workers-types": "5.20261113.1",
     "@drawpane/corpus": "workspace:*",
-    "@resvg/resvg-wasm": "2.6.2",
     "@simplewebauthn/browser": "14.0.0",
     "fast-check": "catalog:",
     "harfbuzzjs": "1.6.4",

@@ -11,7 +11,8 @@
  *   using decision 0040's tolerance (`CPU_GPU_TOLERANCE`) and warm per-frame timings;
  * - one-click "Copy report" exporting structured Markdown + JSON.
  */
-import { type GpuInfo, loadBrowserEngine, loadWebglEngine, RenderEngine } from "@drawpane/engine";
+import { type GpuInfo, RenderEngine } from "@drawpane/engine";
+import { loadBrowserEngine, loadWebglEngine } from "@drawpane/engine/browser";
 import { CPU_GPU_TOLERANCE, outsideTolerance, type Score, score } from "@drawpane/engine/compare";
 import { Badge, Button, Logo, SegmentedControl } from "@drawpane/ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";

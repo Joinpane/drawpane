@@ -93,11 +93,18 @@ export function lastResortText(
   size: number,
   measure?: (text: string) => number,
   direction?: TextDirection,
+  unitsPerEm = 1000,
 ): ShapedText {
   const glyphs: ShapedText["glyphs"][number][] = [];
   const estimated = lastResortWidth(text);
   const width = measure?.(text) ?? estimated * size;
   const unit = estimated > 0 ? width / estimated : size;
+  const outline =
+    unitsPerEm === 1000
+      ? LAST_RESORT_BOX
+      : LAST_RESORT_BOX.replace(/\d+/g, (coordinate) =>
+          String((Number(coordinate) * unitsPerEm) / 1000),
+        );
   let pen = 0;
   for (const { segment, index } of graphemes.segment(text)) {
     const next = measure
@@ -107,7 +114,7 @@ export function lastResortText(
     const left = direction === "rtl" ? width - next : pen;
     if (!SPACE_OR_CONTROL.test(segment)) {
       glyphs.push({
-        d: LAST_RESORT_BOX,
+        d: outline,
         path: null,
         x: left + (advance - size * 0.55) / 2,
         y: 0,
@@ -117,5 +124,5 @@ export function lastResortText(
     pen = next;
   }
   if (direction === "rtl") glyphs.reverse();
-  return { glyphs, scale: size / 1000, width };
+  return { glyphs, scale: size / unitsPerEm, width };
 }

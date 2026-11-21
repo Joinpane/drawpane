@@ -40,6 +40,8 @@ function buildRunner(): Array<{ type: "ESModule" | "CompiledWasm"; path: string 
 export default defineConfig(async () => {
   const migrations = await readD1Migrations("./migrations");
   const runner = buildRunner();
+  const liveFonts = process.env.AGENT_TEST_LIVE_FONTS === "1";
+  const fallbackFonts = process.env.AGENT_TEST_FALLBACK_FONTS === "1";
   return {
     plugins: [
       cloudflareTest({
@@ -47,6 +49,8 @@ export default defineConfig(async () => {
         miniflare: {
           bindings: {
             TEST_MIGRATIONS: migrations,
+            TEST_LIVE_FONTS: liveFonts,
+            TEST_FALLBACK_FONTS: fallbackFonts,
             SESSION_SECRET: "test-session-secret-0123456789abcdef",
             SETUP_TOKEN: "test-setup-token",
             PUBLIC_ORIGIN: "https://design.example.com",
@@ -72,7 +76,8 @@ export default defineConfig(async () => {
               r2Buckets: { FILES: "drawpane-files" },
               bindings: {
                 // Agent tools with the deterministic stand-in measurer (agent-runner/src/measurer.ts).
-                AGENT_MEASURER: "standin",
+                AGENT_MEASURER: liveFonts || fallbackFonts ? "harfbuzz" : "standin",
+                ...(liveFonts && !fallbackFonts ? { GOOGLE_FONTS: "off" } : {}),
                 // The chaos hooks (agent-runner/src/hooks.ts), for tests only.
                 AGENT_RUNNER_TEST_HOOKS: "on",
               },

@@ -57,7 +57,7 @@ async function copyWorker(app, into) {
 
 await rm(out, { recursive: true, force: true });
 await copyWorker(worker, join(out, "worker"));
-// HarfBuzz and resvg live in the runner now (docs/decisions/0033-agent-runner.md).
+// HarfBuzz and the CPU render engine live in the runner now (docs/decisions/0033-agent-runner.md).
 await copyWorker(runner, join(out, "agent-runner"));
 await cp(web, join(out, "assets"), { recursive: true });
 await cp(join(worker, "migrations"), join(out, "migrations"), { recursive: true });

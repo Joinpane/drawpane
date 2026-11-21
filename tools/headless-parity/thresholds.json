@@ -76,7 +76,7 @@
     "alpha-fade": 0.54,
     "luminance-fade": 0.59,
     "outline-translucent": 0.39,
-    "alpha-translucent": 0.32,
+    "alpha-translucent": 0.43,
     "alpha-blurred": 0.71,
     "alpha-opacity": 0.33,
     "luminance-spot": 0.51
@@ -268,7 +268,7 @@
     "shadow-spread": 0.51,
     "shadow-shrink": 0.38,
     "inner-shadow": 0.63,
-    "layer-blur": 0.66,
+    "layer-blur": 0.45,
     "mask": 0.44
   }
 }

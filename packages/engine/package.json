@@ -10,6 +10,8 @@
     ".": "./src/index.ts",
     "./wire": "./src/wire.ts",
     "./compare": "./src/compare.ts",
+    "./browser": "./src/browser.ts",
+    "./decode": "./src/decode.ts",
     "./node": "./src/node.ts",
     "./browser-glue": {
       "types": "./src/glue.d.ts",
@@ -24,6 +26,11 @@
       "default": "./dist/worker/engine.js"
     },
     "./worker.wasm": "./dist/worker/engine_bg.wasm",
+    "./decoder-glue": {
+      "types": "./src/decoder-glue.d.ts",
+      "default": "./dist/decoder/image_decoder.js"
+    },
+    "./decoder.wasm": "./dist/decoder/image_decoder_bg.wasm",
     "./browser.wasm": "./dist/browser/engine_bg.wasm",
     "./webgl.wasm": "./dist/webgl/engine_bg.wasm"
   },

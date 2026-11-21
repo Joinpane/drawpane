@@ -17,6 +17,10 @@ const workerState = vi.hoisted(() => ({
   allowReducedRender: false,
 }));
 
+vi.mock("@drawpane/engine/browser", () => ({
+  loadBrowserEngine: async () => ({}),
+}));
+
 vi.mock("@drawpane/engine", () => ({
   ErrorCode: {
     Revision: 3,
@@ -25,7 +29,6 @@ vi.mock("@drawpane/engine", () => ({
     Gpu: 7,
     Trap: 100,
   },
-  loadBrowserEngine: async () => ({}),
   RenderEngine: class {
     revision = 1;
     enableViewImages() {}
