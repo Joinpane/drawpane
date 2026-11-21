@@ -1342,6 +1342,79 @@ export class RenderEngine {
     );
   }
 
+  /**
+   * SPIKE: Renders an exact frame through Vello's full GPU compute pipeline with the camera
+   * transform applied on the GPU (no CPU re-encode on zoom/pan). `aaMode`: 0 = Area, 1 = Msaa16.
+   */
+  spikeVelloComputeRender(
+    width: number,
+    height: number,
+    camera: Camera,
+    background: readonly [number, number, number, number],
+    aaMode: 0 | 1 = 0,
+  ): Result<FrameStats> {
+    return this.#call((e) => {
+      if (!e.spikeVelloComputeRender)
+        return fail(ErrorCode.NotAvailable, "no WebGPU compute spike in this build");
+      const o = e.spikeVelloComputeRender(
+        width,
+        height,
+        camera.zoom,
+        camera.x,
+        camera.y,
+        camera.dpr,
+        bg(background),
+        aaMode,
+      );
+      const s = stats(o, true);
+      const r = outcome(o);
+      return r.ok ? { ok: true as const, value: s } : r;
+    }) as Result<FrameStats>;
+  }
+
+  /** SPIKE: Drops the retained GPU scene so the next render measures cold scene encode. */
+  spikeVelloComputeReset(): void {
+    this.#call((e) => e.spikeVelloComputeReset?.());
+  }
+
+  /** SPIKE: Reads back the last Vello compute spike frame as straight RGBA8. */
+  async spikeVelloComputePixels(): Promise<Result<Uint8Array>> {
+    const p = this.#call((e) => e.spikeVelloComputePixels?.());
+    if (isFailure(p)) return p;
+    if (!(p instanceof Promise)) return fail(ErrorCode.NotAvailable, "no WebGPU compute spike");
+    let v: Uint8Array | Glue.Outcome;
+    try {
+      v = await p;
+    } catch (err) {
+      return this.#trapped(err);
+    }
+    if (!this.#live()) {
+      if (!(v instanceof Uint8Array)) unfinalized(v);
+      return this.#dead ?? fail(ErrorCode.State, "the engine was disposed");
+    }
+    if (v instanceof Uint8Array) return { ok: true, value: v };
+    return outcome(v) as Result<Uint8Array>;
+  }
+
+  /** SPIKE: Reads back GPU bump allocator counters and scene stats as parsed JSON. */
+  async spikeVelloComputeStats(): Promise<Result<Record<string, unknown>>> {
+    const p = this.#call((e) => e.spikeVelloComputeStats?.());
+    if (isFailure(p)) return p;
+    if (!(p instanceof Promise)) return fail(ErrorCode.NotAvailable, "no WebGPU compute spike");
+    let v: string | Glue.Outcome;
+    try {
+      v = await p;
+    } catch (err) {
+      return this.#trapped(err);
+    }
+    if (!this.#live()) {
+      if (typeof v !== "string") unfinalized(v);
+      return this.#dead ?? fail(ErrorCode.State, "the engine was disposed");
+    }
+    if (typeof v === "string") return { ok: true, value: JSON.parse(v) as Record<string, unknown> };
+    return outcome(v) as Result<Record<string, unknown>>;
+  }
+
   /** Frees the engine's memory (nothing, if its instance is gone). */
   dispose(): void {
     const e = this.#live();

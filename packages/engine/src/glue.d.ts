@@ -208,6 +208,20 @@ export class Engine {
     sourceId: number,
   ): Promise<Uint8Array | Outcome>;
   blurGpuStats?(): Float64Array;
+  // SPIKE (WebGPU core browser build only): Vello full compute prototype.
+  spikeVelloComputeRender?(
+    width: number,
+    height: number,
+    zoom: number,
+    x: number,
+    y: number,
+    dpr: number,
+    background: Float32Array,
+    aaMode: number,
+  ): Outcome;
+  spikeVelloComputeReset?(): void;
+  spikeVelloComputePixels?(): Promise<Uint8Array | Outcome>;
+  spikeVelloComputeStats?(): Promise<string | Outcome>;
 }
 
 export function listVersion(): Uint32Array;

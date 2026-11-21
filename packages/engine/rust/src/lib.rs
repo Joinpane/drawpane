@@ -33,6 +33,8 @@ pub mod shadow;
 pub mod store;
 pub mod texture;
 pub mod tiles;
+#[cfg(feature = "gpu")]
+pub mod vello_compute_spike;
 pub mod wire;
 
 use engine::{Camera, Engine as Core};
@@ -1177,5 +1179,127 @@ impl Engine {
             ],
             None => vec![0.0; 4],
         }
+    }
+}
+
+/// SPIKE: Vello full GPU compute renderer with GPU-side view transform (WebGPU core build only).
+#[cfg(feature = "gpu")]
+#[wasm_bindgen]
+impl Engine {
+    /// SPIKE: Renders an exact frame via Vello's GPU compute pipeline, applying the camera view
+    /// transform on the GPU without re-encoding the scene on the CPU. `aa_mode`: 0 = Area, 1 = Msaa16.
+    #[allow(clippy::too_many_arguments)]
+    #[wasm_bindgen(js_name = spikeVelloComputeRender)]
+    pub fn spike_vello_compute_render(
+        &mut self,
+        width: u32,
+        height: u32,
+        zoom: f64,
+        x: f64,
+        y: f64,
+        dpr: f64,
+        background: Vec<f32>,
+        aa_mode: u32,
+    ) -> Outcome {
+        let camera = Camera { zoom, x, y, dpr };
+        if let Err(e) = camera.check() {
+            return Outcome::err(e);
+        }
+        let bg = rgba(&background);
+        let Some(g) = self.core.gpu.as_mut() else {
+            return Outcome::err(EngineError::new(error::ErrorCode::State, "no GPU attached"));
+        };
+        if let Err(e) = g.check() {
+            return Outcome::err(e);
+        }
+        let spike = g
+            .vello_spike
+            .get_or_insert_with(|| vello_compute_spike::VelloComputeSpike::new(&g.device, &g.queue));
+        match spike.render(
+            &g.device,
+            &g.queue,
+            &self.core.store,
+            self.core.generation,
+            width,
+            height,
+            camera.view(),
+            bg,
+            aa_mode,
+        ) {
+            Ok(s) => {
+                let mut o = Outcome::ok();
+                o.exact = true;
+                o.standin = false;
+                o.records = s.n_paths;
+                o.glyphs_outlined = s.glyphs;
+                o.encode_ms = s.encode_ms;
+                o.render_ms = s.render_ms;
+                o.submit_ms = s.submit_ms;
+                o.cpu_ms = s.cpu_ms;
+                o
+            }
+            Err(e) => Outcome::err(e),
+        }
+    }
+
+    /// SPIKE: Clears the retained Vello compute GPU scene so the next frame measures cold encode.
+    #[wasm_bindgen(js_name = spikeVelloComputeReset)]
+    pub fn spike_vello_compute_reset(&mut self) {
+        if let Some(g) = self.core.gpu.as_mut()
+            && let Some(spike) = g.vello_spike.as_mut()
+        {
+            spike.reset();
+        }
+    }
+
+    /// SPIKE: Reads back the last Vello compute spike frame as straight RGBA8.
+    #[wasm_bindgen(js_name = spikeVelloComputePixels)]
+    pub fn spike_vello_compute_pixels(&self) -> js_sys::Promise {
+        let pair = self.core.gpu.as_ref().map(|g| (g.device.clone(), g.health.clone()));
+        let start = self.core.gpu.as_ref().map(|g| {
+            let Some(spike) = g.vello_spike.as_ref() else {
+                return Err(EngineError::new(error::ErrorCode::State, "no spike frame rendered yet"));
+            };
+            spike.read_back_start(&g.device, &g.queue, g.readbacks.clone())
+        });
+        wasm_bindgen_futures::future_to_promise(async move {
+            let (Some((device, health)), Some(start)) = (pair, start) else {
+                return Ok(failure(EngineError::new(error::ErrorCode::State, "no GPU attached")));
+            };
+            let (buffer, w, h, row, flight) = match start {
+                Ok(s) => s,
+                Err(e) => return Ok(failure(e)),
+            };
+            // fine.wgsl already outputs unpremultiplied (straight) RGBA8, so pass opaque=true.
+            match gpu::read_back_straight(device, health, buffer, w, h, row, flight, true).await {
+                Ok(px) => Ok(px.into()),
+                Err(e) => Ok(failure(e)),
+            }
+        })
+    }
+
+    /// SPIKE: Reads back GPU bump allocator counters and scene metadata as a JSON string.
+    #[wasm_bindgen(js_name = spikeVelloComputeStats)]
+    pub fn spike_vello_compute_stats(&self) -> js_sys::Promise {
+        let pair = self.core.gpu.as_ref().map(|g| (g.device.clone(), g.health.clone()));
+        let start = self.core.gpu.as_ref().map(|g| {
+            let Some(spike) = g.vello_spike.as_ref() else {
+                return Err(EngineError::new(error::ErrorCode::State, "no spike scene uploaded yet"));
+            };
+            spike.start_stats_readback(&g.device, &g.queue)
+        });
+        wasm_bindgen_futures::future_to_promise(async move {
+            let (Some((device, health)), Some(start)) = (pair, start) else {
+                return Ok(failure(EngineError::new(error::ErrorCode::State, "no GPU attached")));
+            };
+            let (staging, meta) = match start {
+                Ok(s) => s,
+                Err(e) => return Ok(failure(e)),
+            };
+            match vello_compute_spike::finish_stats_readback(device, health, staging, meta).await {
+                Ok(json) => Ok(JsValue::from_str(&json)),
+                Err(e) => Ok(failure(e)),
+            }
+        })
     }
 }

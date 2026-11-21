@@ -268,13 +268,16 @@ dependencies = [
 name = "drawpane-engine"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "drawpane-engine",
  "futures-channel",
  "js-sys",
  "miniz_oxide 0.8.9",
  "vello_common",
  "vello_cpu",
+ "vello_encoding",
  "vello_gpu",
+ "vello_shaders",
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
@@ -493,6 +496,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6b17e70c989c36bad147b27a58d148c0741c51448aa5653436547323e524d0ab"
 dependencies = [
  "euclid",
+ "svg_fmt",
 ]
 
 [[package]]
@@ -1304,6 +1308,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "svg_fmt"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0193cc4331cfd2f3d2011ef287590868599a2f33c3e69bc22c1a3d3acf9e02fb"
+
+[[package]]
 name = "syn"
 version = "2.0.119"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1444,6 +1454,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "vello_encoding"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eca1013292b6e92b218ccf93b90b940dda36c87d1aba6b8f6e7d5f7839c45268"
+dependencies = [
+ "bytemuck",
+ "guillotiere",
+ "peniko",
+ "skrifa",
+ "smallvec",
+]
+
+[[package]]
 name = "vello_gpu"
 version = "0.4.0"
 dependencies = [
@@ -1467,6 +1490,17 @@ dependencies = [
  "wesl-macros",
  "wgsl-parse",
  "wgsl-types",
+]
+
+[[package]]
+name = "vello_shaders"
+version = "0.12.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8af58dc04b4e7b87a9688fa12443a49d5916814fe78fa64d93f5b2d3f3e5bcac"
+dependencies = [
+ "log",
+ "naga",
+ "thiserror",
 ]
 
 [[package]]

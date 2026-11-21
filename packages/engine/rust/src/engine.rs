@@ -26,7 +26,7 @@ impl Camera {
         let z = self.zoom * self.dpr;
         Affine::new([z, 0.0, 0.0, z, self.x * self.dpr, self.y * self.dpr])
     }
-    fn check(&self) -> Result<()> {
+    pub(crate) fn check(&self) -> Result<()> {
         let ok =
             [self.zoom, self.x, self.y, self.dpr].iter().all(|v| v.is_finite()) && self.zoom > 0.0 && self.dpr > 0.0;
         if ok {

@@ -354,7 +354,7 @@ impl Health {
         false
     }
 
-    fn stop_error(&self) -> Option<EngineError> {
+    pub(crate) fn stop_error(&self) -> Option<EngineError> {
         if self.lost.load(Ordering::SeqCst) {
             let reason = self.lost_reason.lock().map(|r| r.clone()).unwrap_or_default();
             return Some(EngineError::new(
@@ -504,7 +504,7 @@ struct DiamondPipeline {
 }
 
 /// Milliseconds now, for the frame's breakdown.
-fn now() -> f64 {
+pub(crate) fn now() -> f64 {
     web_sys::window().and_then(|w| w.performance()).map_or(0.0, |p| p.now())
 }
 
@@ -768,7 +768,10 @@ pub struct Gpu {
     max_texture_2d: u32,
     max_buffer_size: u64,
     /// Read-backs in flight.
-    readbacks: Rc<Flights>,
+    pub(crate) readbacks: Rc<Flights>,
+    /// SPIKE: Vello full compute renderer for GPU-side zoom transform benchmarking.
+    #[cfg(feature = "gpu")]
+    pub(crate) vello_spike: Option<crate::vello_compute_spike::VelloComputeSpike>,
 }
 
 impl Drop for Gpu {
@@ -796,6 +799,8 @@ impl Drop for Gpu {
                 tex.destroy();
             }
         }
+        #[cfg(feature = "gpu")]
+        drop(self.vello_spike.take());
         self.atlas.texture.destroy();
         self.device.destroy();
     }
@@ -1242,6 +1247,8 @@ impl Gpu {
             max_texture_2d: device_limits.max_texture_dimension_2d,
             max_buffer_size: device_limits.max_buffer_size,
             readbacks: Rc::new(Flights::default()),
+            #[cfg(feature = "gpu")]
+            vello_spike: None,
         };
         gpu.ensure_compositor();
         gpu.ensure_diamond();
@@ -4554,7 +4561,7 @@ pub struct InFlight {
 }
 
 impl InFlight {
-    fn new(flights: Rc<Flights>, bytes: usize) -> Self {
+    pub(crate) fn new(flights: Rc<Flights>, bytes: usize) -> Self {
         flights.count.set(flights.count.get() + 1);
         flights.bytes.set(flights.bytes.get() + bytes);
         Self { flights, bytes }
@@ -4643,7 +4650,7 @@ fn ensure_poll_driver(device: &wgpu::Device, health: &Arc<Health>) {
 
 /// Waits for a wgpu callback with a hard timeout and cancellation tied to `Health` (device loss
 /// or `Gpu` drop). On WebGL2, shares one non-blocking poll driver across all active waits.
-async fn pump<T>(
+pub(crate) async fn pump<T>(
     device: &wgpu::Device,
     health: &Arc<Health>,
     mut rx: futures_channel::oneshot::Receiver<T>,
