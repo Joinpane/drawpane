@@ -350,9 +350,17 @@ fn wire_version_and_layer_scope_validation() {
         );
     }
 
-    // 1.2 header accepts balanced layer ops; 1.3 is rejected.
-    assert!(Engine::new(Limits::default()).apply(&msg(2, &record)).is_ok());
-    assert!(Engine::new(Limits::default()).apply(&msg(3, &record)).is_err());
+    // Both the original 1.2 and current headers accept balanced layer ops.
+    let current = drawpane_engine::wire::MINOR;
+    for supported_minor in [2, current] {
+        assert!(
+            Engine::new(Limits::default())
+                .apply(&msg(supported_minor, &record))
+                .is_ok()
+        );
+    }
+    let newer_header = Engine::new(Limits::default()).apply(&msg(current + 1, &record));
+    assert!(matches!(newer_header, Err(e) if e.code == drawpane_engine::error::ErrorCode::Version));
 
     // Crossed clip/layer, unclosed layer, and excess scope depth are rejected.
     let tight = Limits {

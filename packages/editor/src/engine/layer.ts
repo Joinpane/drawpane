@@ -8,6 +8,7 @@
  * around: a page with any falls back to the canvas renderer whole.
  */
 import {
+  BLEND,
   CAP,
   COMPOSE,
   FLAG,
@@ -23,8 +24,9 @@ import {
   type WirePaint,
   type WireRecord,
 } from "@drawpane/engine/wire";
-import { GLYPH_UNITS, getProp, type NodeRecord, type Paint } from "@drawpane/model";
-import { layerCorners } from "../corners";
+import { type BlendMode, GLYPH_UNITS, getProp, type NodeRecord, type Paint } from "@drawpane/model";
+import { fitCorners } from "../corner-geometry";
+import { layerCorners, spreadRadii } from "../corners";
 import { boxOutline, ellipseOutline, fitDashes } from "../dashes";
 import { boxOf, localMatrix } from "../geometry";
 import { gradientMatrix } from "../gradients";
@@ -37,6 +39,7 @@ import { fadesAsOne, GREEK_BELOW, greekLines, largestFontSize } from "../render"
 import { textSpans } from "../rich-text";
 import { glyphTable, type SavedText, savedText } from "../saved-glyphs";
 import type { Scene } from "../scene";
+import { dropShadowCast } from "../shadows";
 import { isUniform, strokeRegion, strokeRegionPath, strokeWidths } from "../stroke-sides";
 import {
   decorationBar,
@@ -119,6 +122,143 @@ function wirePaint(paint: Paint, w: number, h: number, alpha = 1): WirePaint | n
 
 function blendOf(paint: Paint): boolean {
   return paint.blendMode !== undefined && paint.blendMode !== "normal";
+}
+
+function blendCode(mode: BlendMode | undefined): number {
+  if (!mode || mode === "normal") return BLEND.normal;
+  return BLEND[mode] ?? BLEND.normal;
+}
+
+/**
+ * The layer's shape grown (or shrunk, for negative spread) by `spread` on every side, matching
+ * `render.ts`'s `#spreadShape`. Returns `null` when a box or ellipse shrinks to empty.
+ */
+function spreadEntry(
+  b: Builder,
+  node: NodeRecord,
+  shape: number,
+  w: number,
+  h: number,
+  spread: number,
+): number | null {
+  if (spread === 0) return shape;
+  const gw = Math.max(0, w + spread * 2);
+  const gh = Math.max(0, h + spread * 2);
+  if (node.type === "ellipse") {
+    if (gw <= 0 || gh <= 0) return null;
+    return b.path({ kind: "oval", x: -spread, y: -spread, w: gw, h: gh });
+  }
+  if (node.type === "rect" || node.type === "frame") {
+    if (gw <= 0 || gh <= 0) return null;
+    const { radii, smoothing } = layerCorners(node);
+    const sr = spreadRadii(w, h, radii, smoothing, spread);
+    const fitted = fitCorners(gw, gh, sr, 0);
+    return b.path({
+      kind: "box",
+      x: -spread,
+      y: -spread,
+      w: gw,
+      h: gh,
+      radii: [fitted[0].radius, fitted[1].radius, fitted[2].radius, fitted[3].radius],
+      smoothing: 0,
+    });
+  }
+  return shape;
+}
+
+function emitDropShadows(
+  b: Builder,
+  node: NodeRecord,
+  shape: number,
+  evenOdd: boolean,
+  w: number,
+  h: number,
+): void {
+  const open =
+    node.type === "line" ||
+    (node.type === "path" && !isClosedPath(getProp(node.props, "pathData")));
+  const openStrokeOnly = open && !getProp(node.props, "fills").some(shows);
+  const castStroke = (() => {
+    if (!openStrokeOnly) return null;
+    const strokes = getProp(node.props, "strokes").filter(shows);
+    const weight = getProp(node.props, "strokeWeight");
+    if (strokes.length === 0 || weight <= 0) return null;
+    const cap = getProp(node.props, "strokeCap");
+    return strokeStyle(
+      weight,
+      getProp(node.props, "strokeJoin"),
+      cap === "none" ? "butt" : cap,
+      getProp(node.props, "strokeDashes"),
+    );
+  })();
+  let outside: number | null = null;
+  for (const e of getProp(node.props, "effects")) {
+    if (e.visible === false || e.type !== "drop-shadow") continue;
+    const col = rgba(e.color);
+    if (col[3] <= 0) continue;
+    if (openStrokeOnly) {
+      if (!castStroke) continue;
+      b.ops.push({
+        op: "dropShadow",
+        paths: [shape],
+        evenOdd: false,
+        dx: e.x,
+        dy: e.y,
+        blur: Math.max(0, e.blur),
+        color: col,
+        blend: blendCode(e.blendMode),
+        stroke: castStroke,
+      });
+      continue;
+    }
+    const cast = dropShadowCast(node, e);
+    // Focus ring (spread, no offset, no blur) round a see-through field draws nothing (0031).
+    if (cast.cutOut && cast.spread === 0 && e.x === 0 && e.y === 0 && e.blur === 0) continue;
+    const castPath = spreadEntry(b, node, shape, w, h, cast.spread);
+    if (castPath === null) continue;
+    if (cast.cutOut) {
+      if (outside === null) outside = b.path({ kind: "outside", of: shape });
+      b.ops.push({ op: "clip", path: outside, evenOdd: true });
+    }
+    b.ops.push({
+      op: "dropShadow",
+      paths: [castPath],
+      evenOdd,
+      dx: e.x,
+      dy: e.y,
+      blur: Math.max(0, e.blur),
+      color: col,
+      blend: blendCode(e.blendMode),
+    });
+    if (cast.cutOut) b.ops.push({ op: "unclip" });
+  }
+}
+
+function emitInnerShadows(
+  b: Builder,
+  node: NodeRecord,
+  shape: number,
+  evenOdd: boolean,
+  w: number,
+  h: number,
+): void {
+  for (const e of getProp(node.props, "effects")) {
+    if (e.visible === false || e.type !== "inner-shadow") continue;
+    const col = rgba(e.color);
+    if (col[3] <= 0) continue;
+    const hole = spreadEntry(b, node, shape, w, h, -e.spread);
+    b.ops.push({
+      op: "innerShadow",
+      shape,
+      hole,
+      evenOdd,
+      dx: e.x,
+      dy: e.y,
+      blur: Math.max(0, e.blur),
+      color: col,
+      blend: blendCode(e.blendMode),
+    });
+  }
 }
 
 /**
@@ -674,6 +814,25 @@ function text(
       if (p) b.ops.push({ op: "fill", path: entry, evenOdd: false, paint: p });
     }
   };
+  // Drop shadows cast from all glyph runs and decoration bars combined (as render.ts does).
+  const shadowPaths = [...runs.runs.map((r) => r.entry), ...runs.bars.map((bar) => bar.entry)];
+  if (shadowPaths.length > 0) {
+    for (const e of getProp(node.props, "effects")) {
+      if (e.visible === false || e.type !== "drop-shadow") continue;
+      const col = rgba(e.color);
+      if (col[3] <= 0) continue;
+      b.ops.push({
+        op: "dropShadow",
+        paths: shadowPaths,
+        evenOdd: false,
+        dx: e.x,
+        dy: e.y,
+        blur: Math.max(0, e.blur),
+        color: col,
+        blend: blendCode(e.blendMode),
+      });
+    }
+  }
   // The canvas fills each run in its paints, then its decorations in the same.
   for (const r of runs.runs) fill(r.entry, r.paints);
   for (const bar of runs.bars) fill(bar.entry, bar.paints);
@@ -756,13 +915,14 @@ function text(
   }
 }
 
-/** Effects, masks and blends phase 1's engine doesn't draw: their bits. */
+/** Effects, masks and blends the engine doesn't draw yet: their bits. */
 function unsupportedOf(node: NodeRecord, scene: Scene): number {
   let bits = 0;
   for (const e of getProp(node.props, "effects")) {
     if (e.visible === false) continue;
-    if (e.type === "drop-shadow" || e.type === "inner-shadow") bits |= UNSUPPORTED.shadow;
-    else if (e.type === "layer-blur") bits |= UNSUPPORTED.layerBlur;
+    if (e.type === "drop-shadow" || e.type === "inner-shadow") {
+      if (e.blendMode !== undefined && e.blendMode !== "normal") bits |= UNSUPPORTED.blend;
+    } else if (e.type === "layer-blur") bits |= UNSUPPORTED.layerBlur;
     else if (e.type === "background-blur") bits |= UNSUPPORTED.backgroundBlur;
     else if (e.type === "glass") bits |= UNSUPPORTED.glass;
     else if (e.type === "noise") bits |= UNSUPPORTED.noise;
@@ -802,6 +962,7 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
   } else {
     const shape = b.path(shapeEntry(node, w, h));
     const evenOdd = node.type === "path" && getProp(node.props, "windingRule") === "evenodd";
+    emitDropShadows(b, node, shape, evenOdd, w, h);
     if (node.type !== "line")
       for (const paint of getProp(node.props, "fills")) {
         if (!shows(paint)) continue;
@@ -811,6 +972,7 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
           if (p) b.ops.push({ op: "fill", path: shape, evenOdd, paint: p });
         }
       }
+    emitInnerShadows(b, node, shape, evenOdd, w, h);
     if (node.type === "frame") {
       const clip = getProp(node.props, "clipContent");
       if (clip) b.ops.push({ op: "clip", path: shape, evenOdd: false });

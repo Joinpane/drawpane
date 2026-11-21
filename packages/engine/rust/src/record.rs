@@ -178,6 +178,24 @@ impl CompactPath {
     }
 }
 
+/// Canonical primitive geometry extracted from a `PathEntry` for shadow mask caching.
+#[derive(Clone, Copy, Debug)]
+pub enum CanonicalShadowShape {
+    Box {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radii: [f32; 4],
+    },
+    Oval {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    },
+}
+
 /// One of a record's shapes, referred to by its ops by index.
 #[derive(Clone, Debug)]
 pub enum PathEntry {
@@ -203,6 +221,23 @@ pub enum PathEntry {
     /// Everything outside another entry: a huge box with it cut out, filled even-odd. What an
     /// outside stroke is clipped to.
     Outside(u32),
+    /// A positioned rounded box at `(x, y)` of size `w` x `h` (e.g. a spread shadow shape),
+    /// preserving uniform corner radii metadata for analytic shadow rendering.
+    Box {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+        radii: [f32; 4],
+        smoothing: f32,
+    },
+    /// A positioned ellipse inscribed in `(x, y, w, h)` (e.g. a spread ellipse shadow).
+    Oval {
+        x: f32,
+        y: f32,
+        w: f32,
+        h: f32,
+    },
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -318,6 +353,32 @@ pub enum Op {
         compose: ComposeMode,
     },
     Unlayer,
+    /// Drop shadow cast from `paths` (one spread shape, an open stroked path, or a text layer's
+    /// glyph runs and decoration bars), offset in page units by `(dx, dy)` and blurred with
+    /// Figma's calibrated blur sigma. Cut-out rules (decision 0031) are expressed by an enclosing
+    /// `Clip(Outside(shape))`.
+    DropShadow {
+        paths: Vec<u32>,
+        even_odd: bool,
+        dx: f32,
+        dy: f32,
+        blur: f32,
+        color: Rgba,
+        blend: u32,
+        stroke: Option<Box<StrokeStyle>>,
+    },
+    /// Inner shadow clipped to `shape`: the complement of `hole` (`None` when spread shrinks the
+    /// hole to empty), offset in page units by `(dx, dy)` and blurred with `sigma = blur / 2`.
+    InnerShadow {
+        shape: u32,
+        hole: Option<u32>,
+        even_odd: bool,
+        dx: f32,
+        dy: f32,
+        blur: f32,
+        color: Rgba,
+        blend: u32,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -394,10 +455,38 @@ impl Record {
                         size_of::<StrokeStyle>() + style.dashes.capacity() * 4 + paint_bytes(paint)
                     }
                     Op::Fill { paint, .. } => paint_bytes(paint),
+                    Op::DropShadow { paths, stroke, .. } => {
+                        paths.capacity() * 4
+                            + stroke
+                                .as_ref()
+                                .map_or(0, |s| size_of::<StrokeStyle>() + s.dashes.capacity() * 4)
+                    }
                     _ => 0,
                 };
         }
         b
+    }
+
+    /// Page-unit reach added by drop shadows (`dx, dy, blur`) outside local geometry bounds.
+    pub fn page_pad(&self) -> f64 {
+        let mut pad = 0.0f64;
+        for op in self.ops.iter().chain(&self.coarse) {
+            if let Op::DropShadow { dx, dy, blur, .. } = op {
+                let p = f64::from(*dx).abs().max(f64::from(*dy).abs()) + f64::from(*blur) * 1.75 + 2.0;
+                pad = pad.max(p);
+            }
+        }
+        pad
+    }
+
+    /// True if this record contains ops that may flush the active Vello scene (so an enclosing
+    /// `isolate` opacity scope must use the engine's offscreen target stack instead of a Vello
+    /// opacity layer).
+    pub fn has_offscreen_pass(&self) -> bool {
+        self.ops
+            .iter()
+            .chain(&self.coarse)
+            .any(|op| matches!(op, Op::DropShadow { .. } | Op::InnerShadow { .. } | Op::Read { .. }))
     }
 
     /// The length of an entry's outline, at most (a glyph run's isn't known here: None).
@@ -405,9 +494,10 @@ impl Record {
         match self.paths.get(i as usize)? {
             PathEntry::Path(p) => Some(p.polygon_length()),
             // An ellipse's perimeter is shorter than its box's.
-            PathEntry::Rect { w, h, .. } | PathEntry::Ellipse { w, h } => {
-                Some(2.0 * (f64::from(w.abs()) + f64::from(h.abs())))
-            }
+            PathEntry::Rect { w, h, .. }
+            | PathEntry::Ellipse { w, h }
+            | PathEntry::Box { w, h, .. }
+            | PathEntry::Oval { w, h, .. } => Some(2.0 * (f64::from(w.abs()) + f64::from(h.abs()))),
             _ => None,
         }
     }
@@ -436,13 +526,32 @@ impl Record {
         let mut add = |r: Rect| out = Some(out.map_or(r, |o| o.union(r)));
         for list in [&self.ops, &self.coarse] {
             for op in list.iter() {
-                let (path, grow) = match op {
-                    Op::Fill { path, .. } => (*path, 0.0),
-                    Op::Stroke { path, style, .. } => (*path, style.reach()),
-                    _ => continue,
-                };
-                if let Some(b) = self.entry_bounds(path, glyph_bounds) {
-                    add(b.inflate(grow, grow));
+                match op {
+                    Op::Fill { path, .. } => {
+                        if let Some(b) = self.entry_bounds(*path, glyph_bounds) {
+                            add(b);
+                        }
+                    }
+                    Op::Stroke { path, style, .. } => {
+                        let grow = style.reach();
+                        if let Some(b) = self.entry_bounds(*path, glyph_bounds) {
+                            add(b.inflate(grow, grow));
+                        }
+                    }
+                    Op::DropShadow { paths, stroke, .. } => {
+                        let grow = stroke.as_ref().map_or(0.0, |s| s.reach());
+                        for p in paths {
+                            if let Some(b) = self.entry_bounds(*p, glyph_bounds) {
+                                add(if grow > 0.0 { b.inflate(grow, grow) } else { b });
+                            }
+                        }
+                    }
+                    Op::InnerShadow { shape, .. } => {
+                        if let Some(b) = self.entry_bounds(*shape, glyph_bounds) {
+                            add(b);
+                        }
+                    }
+                    _ => {}
                 }
             }
         }
@@ -455,6 +564,12 @@ impl Record {
             PathEntry::Rect { w, h, .. } | PathEntry::Ellipse { w, h } => {
                 Some(Rect::new(0.0, 0.0, f64::from(*w), f64::from(*h)))
             }
+            PathEntry::Box { x, y, w, h, .. } | PathEntry::Oval { x, y, w, h } => Some(Rect::new(
+                f64::from(*x),
+                f64::from(*y),
+                f64::from(*x + *w),
+                f64::from(*y + *h),
+            )),
             PathEntry::Glyphs { scale, glyphs } => {
                 let s = f64::from(*scale);
                 let mut out: Option<Rect> = None;
@@ -472,12 +587,110 @@ impl Record {
         }
     }
 
+    /// If path entry `i` is an unsmoothed rounded box or ellipse with positive size, returns its
+    /// canonical primitive geometry (for shadow mask caching).
+    pub fn entry_canonical_shape(&self, i: u32) -> Option<CanonicalShadowShape> {
+        match self.paths.get(i as usize)? {
+            PathEntry::Rect { w, h, radii, smoothing } if *smoothing == 0.0 && *w > 0.0 && *h > 0.0 => {
+                let f = geometry::fit_radii(f64::from(*w), f64::from(*h), radii.map(f64::from));
+                Some(CanonicalShadowShape::Box {
+                    x: 0.0,
+                    y: 0.0,
+                    w: *w,
+                    h: *h,
+                    radii: f.map(|v| v as f32),
+                })
+            }
+            PathEntry::Box {
+                x,
+                y,
+                w,
+                h,
+                radii,
+                smoothing,
+            } if *smoothing == 0.0 && *w > 0.0 && *h > 0.0 => {
+                let f = geometry::fit_radii(f64::from(*w), f64::from(*h), radii.map(f64::from));
+                Some(CanonicalShadowShape::Box {
+                    x: *x,
+                    y: *y,
+                    w: *w,
+                    h: *h,
+                    radii: f.map(|v| v as f32),
+                })
+            }
+            PathEntry::Ellipse { w, h } if *w > 0.0 && *h > 0.0 => Some(CanonicalShadowShape::Oval {
+                x: 0.0,
+                y: 0.0,
+                w: *w,
+                h: *h,
+            }),
+            PathEntry::Oval { x, y, w, h } if *w > 0.0 && *h > 0.0 => Some(CanonicalShadowShape::Oval {
+                x: *x,
+                y: *y,
+                w: *w,
+                h: *h,
+            }),
+            _ => None,
+        }
+    }
+
+    /// If path entry `i` is an unsmoothed uniform-radius rounded rectangle with positive size,
+    /// returns its local `Rect` and fitted corner radius (for analytic box shadow rendering).
+    pub fn entry_uniform_rect(&self, i: u32) -> Option<(Rect, f32)> {
+        let (x, y, w, h, radii, smoothing) = match self.paths.get(i as usize)? {
+            PathEntry::Rect { w, h, radii, smoothing } => (0.0f32, 0.0f32, *w, *h, *radii, *smoothing),
+            PathEntry::Box {
+                x,
+                y,
+                w,
+                h,
+                radii,
+                smoothing,
+            } => (*x, *y, *w, *h, *radii, *smoothing),
+            _ => return None,
+        };
+        if smoothing != 0.0 || w <= 0.0 || h <= 0.0 {
+            return None;
+        }
+        let fitted = geometry::fit_radii(f64::from(w), f64::from(h), radii.map(f64::from));
+        let r0 = fitted[0];
+        if fitted.iter().all(|&r| (r - r0).abs() <= 1e-4) {
+            Some((
+                Rect::new(f64::from(x), f64::from(y), f64::from(x + w), f64::from(y + h)),
+                r0 as f32,
+            ))
+        } else {
+            None
+        }
+    }
+
     /// An entry as a path in the record's units (glyph runs are built by the glyph store).
     pub fn entry_path(&self, i: u32) -> Option<BezPath> {
         match self.paths.get(i as usize)? {
             PathEntry::Path(p) => Some(p.to_bez()),
             PathEntry::Rect { w, h, radii, smoothing } => Some(geometry::rounded_rect(*w, *h, *radii, *smoothing)),
             PathEntry::Ellipse { w, h } => Some(geometry::ellipse(*w, *h)),
+            PathEntry::Box {
+                x,
+                y,
+                w,
+                h,
+                radii,
+                smoothing,
+            } => {
+                let mut p = geometry::rounded_rect(*w, *h, *radii, *smoothing);
+                if *x != 0.0 || *y != 0.0 {
+                    p.apply_affine(Affine::translate((f64::from(*x), f64::from(*y))));
+                }
+                Some(p)
+            }
+            PathEntry::Oval { x, y, w, h } => {
+                let mut p = geometry::ellipse(*w, *h);
+                if *x != 0.0 || *y != 0.0 {
+                    p.apply_affine(Affine::translate((f64::from(*x), f64::from(*y))));
+                }
+                Some(p)
+            }
             // Built where it's drawn, around the viewport (`exec.rs`).
             PathEntry::Outside(_) | PathEntry::Glyphs { .. } => None,
         }
@@ -669,6 +882,95 @@ fn ops(
                 }
                 Op::Unlayer
             }
+            13 => {
+                if minor < 4 {
+                    return Err(EngineError::new(
+                        crate::error::ErrorCode::Version,
+                        "drop shadow op requires display list 1.4",
+                    ));
+                }
+                let count = r.count(limits.record_items, "shadow paths", 4)?;
+                let mut shadow_paths = Vec::with_capacity(count);
+                for _ in 0..count {
+                    shadow_paths.push(path_index(r)?);
+                }
+                let shadow_flags = r.u32()?;
+                if shadow_flags & !3 != 0 {
+                    return Err(EngineError::malformed(format!(
+                        "unknown drop shadow flags {shadow_flags:#x}"
+                    )));
+                }
+                let even_odd = shadow_flags & 1 != 0;
+                let has_stroke = shadow_flags & 2 != 0;
+                let dx = r.f32()?;
+                let dy = r.f32()?;
+                let blur = r.f32_nonneg()?;
+                let color = r.rgba()?;
+                let blend = r.u32()?;
+                if blend > 17 {
+                    return Err(EngineError::malformed(format!("unknown shadow blend mode {blend}")));
+                }
+                if blend != 0 {
+                    *derived |= derived::BLEND;
+                }
+                let stroke = if has_stroke {
+                    Some(Box::new(stroke_style(r, limits)?))
+                } else {
+                    None
+                };
+                Op::DropShadow {
+                    paths: shadow_paths,
+                    even_odd,
+                    dx,
+                    dy,
+                    blur,
+                    color,
+                    blend,
+                    stroke,
+                }
+            }
+            14 => {
+                if minor < 4 {
+                    return Err(EngineError::new(
+                        crate::error::ErrorCode::Version,
+                        "inner shadow op requires display list 1.4",
+                    ));
+                }
+                let shape = path_index(r)?;
+                let hole_raw = r.u32()?;
+                let hole = if hole_raw == u32::MAX {
+                    None
+                } else {
+                    if hole_raw as usize >= paths {
+                        return Err(EngineError::malformed(format!(
+                            "an op names path {hole_raw} of {paths}"
+                        )));
+                    }
+                    Some(hole_raw)
+                };
+                let even_odd = r.u32()? == 1;
+                let dx = r.f32()?;
+                let dy = r.f32()?;
+                let blur = r.f32_nonneg()?;
+                let color = r.rgba()?;
+                let blend = r.u32()?;
+                if blend > 17 {
+                    return Err(EngineError::malformed(format!("unknown shadow blend mode {blend}")));
+                }
+                if blend != 0 {
+                    *derived |= derived::BLEND;
+                }
+                Op::InnerShadow {
+                    shape,
+                    hole,
+                    even_odd,
+                    dx,
+                    dy,
+                    blur,
+                    color,
+                    blend,
+                }
+            }
             k => return Err(EngineError::malformed(format!("unknown op {k}"))),
         };
         out.push(op);
@@ -681,8 +983,15 @@ fn ops(
 
 pub fn decode(r: &mut Reader, limits: &Limits, minor: u16) -> Result<Record> {
     let flags = r.u32()?;
-    if flags & !KNOWN_FLAGS != 0 {
-        return Err(EngineError::malformed(format!("unknown record flags {flags:#x}")));
+    let allowed_flags = if minor >= 1 {
+        KNOWN_FLAGS
+    } else {
+        KNOWN_FLAGS & !FLAG_PROVISIONAL
+    };
+    if flags & !allowed_flags != 0 {
+        return Err(EngineError::malformed(format!(
+            "record flags {flags:#x} not allowed in display list 1.{minor}"
+        )));
     }
     let opacity = r.f32()?.clamp(0.0, 1.0);
     let transform = r.affine()?;
@@ -726,6 +1035,33 @@ pub fn decode(r: &mut Reader, limits: &Limits, minor: u16) -> Result<Record> {
                 }
                 PathEntry::Outside(of)
             }
+            6 => {
+                if minor < 4 {
+                    return Err(EngineError::malformed("box path kind requires display list 1.4"));
+                }
+                let (x, y, w, h) = (r.f32()?, r.f32()?, r.f32()?, r.f32()?);
+                let radii = [r.f32_nonneg()?, r.f32_nonneg()?, r.f32_nonneg()?, r.f32_nonneg()?];
+                let smoothing = r.f32()?.clamp(0.0, 1.0);
+                PathEntry::Box {
+                    x,
+                    y,
+                    w,
+                    h,
+                    radii,
+                    smoothing,
+                }
+            }
+            7 => {
+                if minor < 4 {
+                    return Err(EngineError::malformed("oval path kind requires display list 1.4"));
+                }
+                PathEntry::Oval {
+                    x: r.f32()?,
+                    y: r.f32()?,
+                    w: r.f32()?,
+                    h: r.f32()?,
+                }
+            }
             k => return Err(EngineError::malformed(format!("unknown path kind {k}"))),
         });
     }
@@ -750,10 +1086,24 @@ pub fn decode(r: &mut Reader, limits: &Limits, minor: u16) -> Result<Record> {
         return Err(EngineError::malformed("a group record with paint of its own"));
     }
     for op in record.ops.iter().chain(&record.coarse) {
-        if let Op::Stroke { path, style, .. } = op
-            && let Some(length) = record.entry_length(*path)
-        {
-            check_dashes(style, length, limits)?;
+        match op {
+            Op::Stroke { path, style, .. } => {
+                if let Some(length) = record.entry_length(*path) {
+                    check_dashes(style, length, limits)?;
+                }
+            }
+            Op::DropShadow {
+                paths: sp,
+                stroke: Some(style),
+                ..
+            } => {
+                for p in sp {
+                    if let Some(length) = record.entry_length(*p) {
+                        check_dashes(style, length, limits)?;
+                    }
+                }
+            }
+            _ => {}
         }
     }
     Ok(record)

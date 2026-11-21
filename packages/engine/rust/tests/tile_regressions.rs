@@ -1044,3 +1044,117 @@ fn a_see_through_run_covers_its_overlaps_once() {
     banded.extend_from_slice(e.render_band(96, 64, c, [0.0; 4], 20, 44).unwrap());
     assert!(banded == whole, "bands differ from the whole frame");
 }
+
+#[test]
+fn drop_shadow_halo_matches_across_tile_seam_and_invalidates_neighbor_tile() {
+    // Shape lies wholly in the left tile (x = 4..28 on 48 px tiles), while its offset blurred
+    // drop shadow reaches well into the right tile (x >= 48). Both initial tiled rendering and
+    // moving the shape away must keep the right tile exact.
+    let mut caster = Rec::new([1.0, 0.0, 0.0, 1.0, 4.0, 12.0], [24.0, 24.0]);
+    caster.paths.push(Entry::Rect {
+        w: 24.0,
+        h: 24.0,
+        radii: [4.0; 4],
+    });
+    caster.ops.push(Op::DropShadow {
+        paths: vec![0],
+        even_odd: false,
+        dx: 24.0,
+        dy: 0.0,
+        blur: 18.0,
+        color: [0.0, 0.0, 0.0, 0.85],
+        blend: 0,
+    });
+    caster.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.9, 0.2, 0.2, 1.0]),
+    });
+
+    let mut msg = W::new(ANY, 1);
+    msg.reset();
+    msg.set(1, 0, &caster);
+    let mut e = Engine::new(Limits::default());
+    e.use_cpu_tiles(48, 64);
+    e.apply(&msg.finish()).unwrap();
+    let cam = camera(1.0, 0.0, 0.0);
+    let whole = e.render_cpu(96, 64, cam, [1.0; 4], false).unwrap().0.to_vec();
+    let (tiled, stats) = e
+        .render_cpu_tiled(96, 64, cam, [1.0; 4], TiledOptions::default())
+        .unwrap();
+    assert!(stats.exact);
+    let worst = whole.iter().zip(tiled).map(|(a, b)| a.abs_diff(*b)).max().unwrap_or(0);
+    assert!(worst <= 1, "drop shadow tile seam mismatch: worst {worst}");
+    // Right tile actually contains shadow pixels (not pure white).
+    let right_dark = tiled
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .enumerate()
+        .any(|(i, px)| (i as u32 % 96) >= 48 && px[0] < 245);
+    assert!(right_dark, "drop shadow did not reach across the tile seam");
+
+    // Moving the caster far left must invalidate the right tile so no stale shadow remains.
+    let mut move_away = W::new(1, 2);
+    move_away.transform(1, [1.0, 0.0, 0.0, 1.0, -200.0, 12.0]);
+    e.apply(&move_away.finish()).unwrap();
+    let whole_after = e.render_cpu(96, 64, cam, [1.0; 4], false).unwrap().0.to_vec();
+    let (tiled_after, _) = e
+        .render_cpu_tiled(96, 64, cam, [1.0; 4], TiledOptions::default())
+        .unwrap();
+    assert_eq!(tiled_after, whole_after, "stale shadow survived in neighboring tile");
+}
+
+#[test]
+fn clipped_frame_keeps_clip_when_child_has_drop_shadow() {
+    // Child box lies well inside the parent's clipped box, but its drop shadow extends outside:
+    // clip elision must not drop the parent's clip.
+    let mut parent = Rec::new([1.0, 0.0, 0.0, 1.0, 16.0, 16.0], [48.0, 48.0]);
+    parent.paths.push(Entry::Rect {
+        w: 48.0,
+        h: 48.0,
+        radii: [0.0; 4],
+    });
+    parent.ops.push(Op::Clip {
+        path: 0,
+        even_odd: false,
+    });
+    parent.ops.push(Op::Children);
+    parent.ops.push(Op::Unclip);
+
+    let mut child = Rec::new([1.0, 0.0, 0.0, 1.0, 12.0, 12.0], [20.0, 20.0]);
+    child.paths.push(Entry::Rect {
+        w: 20.0,
+        h: 20.0,
+        radii: [0.0; 4],
+    });
+    child.ops.push(Op::DropShadow {
+        paths: vec![0],
+        even_odd: false,
+        dx: 24.0,
+        dy: 0.0,
+        blur: 10.0,
+        color: [0.0, 0.0, 0.0, 1.0],
+        blend: 0,
+    });
+    child.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.2, 0.4, 0.9, 1.0]),
+    });
+
+    let mut msg = W::new(ANY, 1);
+    msg.reset();
+    msg.set(1, 0, &parent);
+    msg.set(2, 1, &child);
+    let mut e = Engine::new(Limits::default());
+    e.apply(&msg.finish()).unwrap();
+    let px = e
+        .render_cpu(96, 80, camera(1.0, 0.0, 0.0), [1.0; 4], false)
+        .unwrap()
+        .0
+        .to_vec();
+    // Pixel (68, 38) is 4 px outside the parent's right edge (x = 64): must stay pure white.
+    let at = (38 * 96 + 68) * 4;
+    assert_eq!(&px[at..at + 4], &[255, 255, 255, 255], "shadow escaped parent clip");
+}

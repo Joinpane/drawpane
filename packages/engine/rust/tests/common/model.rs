@@ -82,6 +82,57 @@ pub fn gen_rec(r: &mut Rng, readers: bool) -> Rec {
     };
     let text = matches!(shape, Entry::Glyphs { .. });
     rec.paths.push(shape);
+    if !readers && r.chance(0.22) {
+        let blur = if r.chance(0.25) { 0.0 } else { r.range(2.0, 20.0) };
+        let dx = r.range(-10.0, 10.0);
+        let dy = r.range(-10.0, 10.0);
+        let spread = if !text && r.chance(0.4) {
+            r.range(-4.0, 6.0)
+        } else {
+            0.0
+        };
+        let cast_idx = if spread != 0.0 && matches!(rec.paths[0], Entry::Rect { .. }) {
+            let gw = (w + spread * 2.0).max(0.0);
+            let gh = (h + spread * 2.0).max(0.0);
+            if gw > 0.0 && gh > 0.0 {
+                rec.paths.push(Entry::Box {
+                    x: -spread,
+                    y: -spread,
+                    w: gw,
+                    h: gh,
+                    radii: [0.0; 4],
+                });
+                Some(rec.paths.len() as u32 - 1)
+            } else {
+                None
+            }
+        } else {
+            Some(0)
+        };
+        if let Some(cast_path) = cast_idx {
+            let cut_out = !text && r.chance(0.3);
+            if cut_out {
+                rec.paths.push(Entry::Outside(0));
+                let out_idx = rec.paths.len() as u32 - 1;
+                rec.ops.push(Op::Clip {
+                    path: out_idx,
+                    even_odd: true,
+                });
+            }
+            rec.ops.push(Op::DropShadow {
+                paths: vec![cast_path],
+                even_odd: false,
+                dx,
+                dy,
+                blur,
+                color: [r.unit(), r.unit(), r.unit(), r.range(0.15, 0.7)],
+                blend: 0,
+            });
+            if cut_out {
+                rec.ops.push(Op::Unclip);
+            }
+        }
+    }
     if readers && r.chance(0.15) {
         rec.ops.push(Op::Read {
             halo: r.range(0.0, 3.0).round(),
@@ -97,6 +148,40 @@ pub fn gen_rec(r: &mut Rng, readers: bool) -> Rec {
         even_odd: r.chance(0.2),
         paint,
     });
+    if !readers && !text && r.chance(0.18) {
+        let blur = if r.chance(0.25) { 0.0 } else { r.range(2.0, 16.0) };
+        let dx = r.range(-8.0, 8.0);
+        let dy = r.range(-8.0, 8.0);
+        let spread = if r.chance(0.4) { r.range(-3.0, 6.0) } else { 0.0 };
+        let hole = if spread != 0.0 && matches!(rec.paths[0], Entry::Rect { .. }) {
+            let gw = (w - spread * 2.0).max(0.0);
+            let gh = (h - spread * 2.0).max(0.0);
+            if gw > 0.0 && gh > 0.0 {
+                rec.paths.push(Entry::Box {
+                    x: spread,
+                    y: spread,
+                    w: gw,
+                    h: gh,
+                    radii: [0.0; 4],
+                });
+                Some(rec.paths.len() as u32 - 1)
+            } else {
+                None
+            }
+        } else {
+            Some(0)
+        };
+        rec.ops.push(Op::InnerShadow {
+            shape: 0,
+            hole,
+            even_odd: false,
+            dx,
+            dy,
+            blur,
+            color: [r.unit(), r.unit(), r.unit(), r.range(0.15, 0.7)],
+            blend: 0,
+        });
+    }
     if !text && r.chance(0.6) {
         if r.chance(0.5) {
             rec.ops.push(Op::Clip {

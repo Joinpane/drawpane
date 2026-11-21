@@ -183,6 +183,36 @@ pub fn box_commands(w: f64, h: f64, radii: [f64; 4], smoothing: f64) -> Vec<BoxC
 
 /// A box `w` x `h` with corner radii (top left, top right, bottom right, bottom left) and Figma
 /// corner smoothing (`0..=1`), each cut to its share of its sides (`fit_corners`).
+/// Fixed number of exact circular cubic Bezier segments per quarter-ellipse arc.
+///
+/// `kurbo::Ellipse::to_path` ignores tolerance and always emits one cubic per quarter, which
+/// causes Vello's fixed `0.25 px` flattener to leave visible flat chords at cardinal extrema.
+/// Using eight sub-cubics per quarter keeps every 11.25 degree
+/// endpoint on the true curve (cubic radial error ~1e-7 * r) while remaining identical under
+/// uniform scaling (e.g. device-size stroke flattening).
+const ELLIPSE_QUARTER_SEGMENTS: usize = 8;
+
+/// Appends a quarter-ellipse arc centered at `c` with radii `(rx, ry)` starting at `start`
+/// radians (clockwise in y-down coordinates) using `ELLIPSE_QUARTER_SEGMENTS` exact cubics.
+fn push_quarter_arc(p: &mut BezPath, c: Point, rx: f64, ry: f64, start: f64) {
+    let n = ELLIPSE_QUARTER_SEGMENTS;
+    let step = core::f64::consts::FRAC_PI_2 / n as f64;
+    let h = (4.0 / 3.0) * (step * 0.25).tan();
+    for i in 0..n {
+        let a0 = start + step * i as f64;
+        let a1 = start + step * (i + 1) as f64;
+        let (s0, c0) = a0.sin_cos();
+        let (s1, c1) = a1.sin_cos();
+        let p1 = Point::new(c.x + rx * (c0 - h * s0), c.y + ry * (s0 + h * c0));
+        let p2 = Point::new(c.x + rx * (c1 + h * s1), c.y + ry * (s1 - h * c1));
+        let p3 = Point::new(c.x + rx * c1, c.y + ry * s1);
+        p.curve_to(p1, p2, p3);
+    }
+}
+
+/// A box `w` × `h` with corner radii (top left, top right, bottom right, bottom left), each cut to
+/// its share of its sides (`fit_radii`), as the canvas renderer cuts them (`corners.ts`).
+/// Without radii it is the plain box path (`rect()`), which strokes even at zero height.
 ///
 /// Without radii it is the plain box path (`rect()`), which strokes even at zero height.
 /// With smoothing 0 on every fitted corner it uses quarter-circle arcs (matching `roundRect`);
@@ -294,7 +324,20 @@ fn quarter(r: f64, which: usize, mut out: impl FnMut(Vec2, Vec2, Vec2)) {
 /// `ellipse(w/2, h/2, w/2, h/2, 0, 0, 2π)`).
 pub fn ellipse(w: f32, h: f32) -> BezPath {
     let (w, h) = (f64::from(w), f64::from(h));
-    Ellipse::new((w / 2.0, h / 2.0), (w.abs() / 2.0, h.abs() / 2.0), 0.0).to_path(tolerance(w.abs().max(h.abs()) / 2.0))
+    let (rx, ry) = (w.abs() / 2.0, h.abs() / 2.0);
+    if !rx.is_finite() || !ry.is_finite() || (rx == 0.0 && ry == 0.0) {
+        return Ellipse::new((w / 2.0, h / 2.0), (rx, ry), 0.0).to_path(tolerance(rx.max(ry)));
+    }
+    use core::f64::consts::{FRAC_PI_2, PI};
+    let c = Point::new(w / 2.0, h / 2.0);
+    let mut p = BezPath::new();
+    p.move_to((c.x + rx, c.y));
+    push_quarter_arc(&mut p, c, rx, ry, 0.0);
+    push_quarter_arc(&mut p, c, rx, ry, FRAC_PI_2);
+    push_quarter_arc(&mut p, c, rx, ry, PI);
+    push_quarter_arc(&mut p, c, rx, ry, 3.0 * FRAC_PI_2);
+    p.close_path();
+    p
 }
 
 /// A box as a path, clockwise.

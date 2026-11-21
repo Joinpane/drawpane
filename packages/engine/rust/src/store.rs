@@ -33,13 +33,18 @@ pub struct Node {
     pub record: Record,
     pub parent: u32,
     pub children: Vec<u32>,
-    /// Subtree bounds in the record's own units: unknown (None) until computed.
-    bounds: Cell<Option<Option<Rect>>>,
-    /// Its shown children's bounds in its units, before any clip: computed with `bounds`.
-    kids: Cell<Option<Option<Rect>>>,
+    /// Subtree bounds in the record's own units plus unclipped page-space effect reach (shadows,
+    /// blur): unknown (None) until computed.
+    bounds: Cell<Option<(Option<Rect>, f64)>>,
+    /// Its shown children's bounds in its units (before any clip) plus their max unclipped
+    /// page-space effect reach: computed with `bounds`.
+    kids: Cell<Option<(Option<Rect>, f64)>>,
     /// A hash of the record's bytes as they arrived: a set of the very same record where it
     /// already is changes nothing (the builder re-sends text still waiting for its faces).
     hash: u64,
+    /// Whether this record or any visible descendant has an offscreen pass that may flush the
+    /// active Vello scene (shadows, readers, filters, blends, masks).
+    has_pass: Cell<Option<bool>>,
 }
 
 impl Node {
@@ -51,6 +56,7 @@ impl Node {
             bounds: Cell::new(None),
             kids: Cell::new(None),
             hash,
+            has_pass: Cell::new(None),
         }
     }
 }
@@ -186,6 +192,13 @@ pub struct Store {
     structure: u64,
 }
 
+struct IsoAncestor {
+    id: u32,
+    had_pass: bool,
+    before_rect: Option<Rect>,
+    order: (u32, u32),
+}
+
 /// What one message's commands do as they're applied: the undo log and where pixels change. A
 /// fresh list is built into a staged graph that isn't tracked (it's dropped whole on failure).
 struct Txn {
@@ -193,6 +206,11 @@ struct Txn {
     undo: Vec<Undo>,
     before: Vec<Dirty>,
     touched: Vec<u32>,
+    /// Isolated faded ancestors of touched nodes, recorded before edits so if a descendant's
+    /// edit flips `subtree_has_pass` (switching between Vello opacity and offscreen isolation),
+    /// the ancestor's whole extent joins the dirty set.
+    iso_ancestors: Vec<IsoAncestor>,
+    iso_seen: HashSet<u32>,
     full: bool,
 }
 
@@ -203,6 +221,8 @@ impl Txn {
             undo: Vec::new(),
             before: Vec::new(),
             touched: Vec::new(),
+            iso_ancestors: Vec::new(),
+            iso_seen: HashSet::new(),
             full: false,
         }
     }
@@ -342,6 +362,25 @@ impl Store {
                 structural: true,
                 touched: Vec::new(),
             });
+        }
+        for IsoAncestor {
+            id: a,
+            had_pass,
+            before_rect,
+            order: (order, end),
+        } in txn.iso_ancestors
+        {
+            if self.nodes.contains_key(&a) && self.subtree_has_pass(a) != had_pass {
+                if let Some(rect) = before_rect {
+                    txn.before.push(Dirty {
+                        rect,
+                        order,
+                        end,
+                        stale: false,
+                    });
+                }
+                txn.touched.push(a);
+            }
         }
         if self.structure != before_structure {
             for d in &mut txn.before {
@@ -517,6 +556,7 @@ impl Store {
         for n in self.nodes.values() {
             n.bounds.set(None);
             n.kids.set(None);
+            n.has_pass.set(None);
         }
     }
 
@@ -611,6 +651,7 @@ impl Store {
                 }
                 if txn.track {
                     self.note_before(id, txn);
+                    self.note_iso_ancestors(parent, txn);
                 }
                 let reads = record.reads().is_some();
                 let unsupported = record.unsupported != 0;
@@ -626,6 +667,7 @@ impl Store {
                     node.parent = parent;
                     node.bounds.set(None);
                     node.kids.set(None);
+                    node.has_pass.set(None);
                     self.bytes = self.bytes + cost - old.heap_bytes();
                     self.glyphs.release(&old);
                     if structural {
@@ -696,6 +738,7 @@ impl Store {
                     .parent;
                 if txn.track {
                     self.note_before(id, txn);
+                    self.note_iso_ancestors(parent, txn);
                 }
                 let index = self.detach(id, parent);
                 self.dirty_up(parent);
@@ -822,16 +865,41 @@ impl Store {
         self.dirty_up(parent);
     }
 
-    /// Forgets cached bounds of `id` and every ancestor.
+    /// Forgets cached bounds and pass flags of `id` and every ancestor.
     fn dirty_up(&self, mut id: u32) {
         loop {
             let Some(n) = self.nodes.get(&id) else { return };
             n.bounds.set(None);
             n.kids.set(None);
+            n.has_pass.set(None);
             if id == ROOT {
                 return;
             }
             id = n.parent;
+        }
+    }
+
+    /// Notes isolated faded ancestors of `start` (inclusive) before an edit.
+    fn note_iso_ancestors(&mut self, mut at: u32, txn: &mut Txn) {
+        if !txn.track {
+            return;
+        }
+        while at != ROOT {
+            let Some(n) = self.nodes.get(&at) else { break };
+            let parent = n.parent;
+            let iso = n.record.isolate() && n.record.opacity < 1.0;
+            if iso && txn.iso_seen.insert(at) {
+                let had_pass = self.subtree_has_pass(at);
+                let rect = self.world_extent(at);
+                let ord = self.order_of(at);
+                txn.iso_ancestors.push(IsoAncestor {
+                    id: at,
+                    had_pass,
+                    before_rect: rect,
+                    order: ord,
+                });
+            }
+            at = parent;
         }
     }
 
@@ -841,6 +909,7 @@ impl Store {
         if !self.nodes.contains_key(&id) {
             return;
         }
+        self.note_iso_ancestors(id, txn);
         let (order, end) = self.order_of(id);
         if let Some(rect) = self.world_extent(id) {
             txn.before.push(Dirty {
@@ -900,10 +969,31 @@ impl Store {
         chain.iter().rev().fold(Affine::IDENTITY, |m, t| m * *t)
     }
 
-    /// Where a record's subtree paints, in its own units: its ops' bounds and its visible
-    /// children's, kept to the clip its children are drawn in. None when it paints nothing.
-    pub fn bounds(&self, id: u32) -> Option<Rect> {
-        let node = self.nodes.get(&id)?;
+    /// Whether `id` or any visible descendant contains an offscreen pass that may flush Vello.
+    pub fn subtree_has_pass(&self, id: u32) -> bool {
+        let Some(node) = self.nodes.get(&id) else {
+            return false;
+        };
+        if let Some(v) = node.has_pass.get() {
+            return v;
+        }
+        let v = if node.record.hidden() {
+            false
+        } else {
+            let draws_children = node.record.ops.iter().any(|op| matches!(op, Op::Children));
+            node.record.has_offscreen_pass()
+                || (draws_children && node.children.iter().any(|c| self.subtree_has_pass(*c)))
+        };
+        node.has_pass.set(Some(v));
+        v
+    }
+
+    /// Where a record's subtree paints, in its own units, plus any unclipped page-space effect
+    /// reach (drop shadows, layer blur).
+    pub fn bounds_and_pad(&self, id: u32) -> (Option<Rect>, f64) {
+        let Some(node) = self.nodes.get(&id) else {
+            return (None, 0.0);
+        };
         if let Some(b) = node.bounds.get() {
             return b;
         }
@@ -914,6 +1004,7 @@ impl Store {
         } else {
             r.content_bounds(&glyph_bounds)
         };
+        let mut pad = if r.hidden() { 0.0 } else { r.page_pad() };
         if !r.hidden() {
             // What the engine doesn't draw still counts where it may paint, so it's refused
             // wherever it could show rather than culled away.
@@ -936,23 +1027,39 @@ impl Store {
                 out = Some(out.map_or(b, |o| o.union(b)));
             }
             let mut children: Option<Rect> = None;
-            for c in &node.children {
-                if let (Some(b), Some(cn)) = (self.bounds(*c), self.nodes.get(c)) {
-                    let t = cn.record.transform.transform_rect_bbox(b);
-                    children = Some(children.map_or(t, |o| o.union(t)));
+            let mut child_pad = 0.0f64;
+            if r.ops.iter().any(|op| matches!(op, Op::Children)) {
+                for c in &node.children {
+                    let (cb, cp) = self.bounds_and_pad(*c);
+                    if let (Some(b), Some(cn)) = (cb, self.nodes.get(c)) {
+                        let t = cn.record.transform.transform_rect_bbox(b);
+                        children = Some(children.map_or(t, |o| o.union(t)));
+                        child_pad = child_pad.max(cp);
+                    }
                 }
             }
-            node.kids.set(Some(children));
+            node.kids.set(Some((children, child_pad)));
             if let (Some(mut ch), Some(clip)) = (children, self.children_clip(r)) {
-                ch = ch.intersect(clip);
+                // Children clipped to `clip` cannot paint outside `clip`, even with their own
+                // page-space shadows; if any child has page-space reach, `clip` bounds it
+                // regardless of local scale.
+                ch = if child_pad > 0.0 { clip } else { ch.intersect(clip) };
                 children = (ch.width() >= 0.0 && ch.height() >= 0.0).then_some(ch);
+            } else {
+                pad = pad.max(child_pad);
             }
             if let Some(ch) = children {
                 out = Some(out.map_or(ch, |o| o.union(ch)));
             }
         }
-        node.bounds.set(Some(out));
-        out
+        node.bounds.set(Some((out, pad)));
+        (out, pad)
+    }
+
+    /// Where a record's subtree paints, in its own units: its ops' bounds and its visible
+    /// children's, kept to the clip its children are drawn in. None when it paints nothing.
+    pub fn bounds(&self, id: u32) -> Option<Rect> {
+        self.bounds_and_pad(id).0
     }
 
     /// The bounds of the innermost clip open where a record draws its children, if any.
@@ -983,16 +1090,18 @@ impl Store {
         out
     }
 
-    /// Where a record's shown children paint, in its units, before any clip it draws them in.
-    pub fn children_extent(&self, id: u32) -> Option<Rect> {
-        self.bounds(id);
-        self.nodes.get(&id)?.kids.get().flatten()
+    /// Where a record's shown children paint, in its units, before any clip it draws them in,
+    /// along with their maximum unclipped page-space effect reach.
+    pub fn children_extent_and_pad(&self, id: u32) -> (Option<Rect>, f64) {
+        self.bounds_and_pad(id);
+        self.nodes.get(&id).and_then(|n| n.kids.get()).unwrap_or((None, 0.0))
     }
 
     /// Where a record's subtree paints, in page units.
     pub fn world_extent(&self, id: u32) -> Option<Rect> {
-        let b = self.bounds(id)?;
-        Some(self.world(id).transform_rect_bbox(b))
+        let (b, pad) = self.bounds_and_pad(id);
+        let r = self.world(id).transform_rect_bbox(b?);
+        Some(if pad > 0.0 { r.inflate(pad, pad) } else { r })
     }
 
     /// Where the touched records paint now, added to where they painted before.

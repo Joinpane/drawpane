@@ -192,6 +192,159 @@ describe.skipIf(!built())("Recovery and stream lifetimes", () => {
     expect(engine.apply(patch.finish()).ok).toBe(true);
     engine.dispose();
   });
+
+  it("handles large-radius drop shadows in the 25 MiB Worker without trapping Wasm", async () => {
+    const module = await loadNodeEngine("worker", { fresh: true });
+    const w = 4096;
+    const h = 1800;
+    for (const radius of [128, 256, 384, 700]) {
+      const e = new RenderEngine(module);
+      const list = new ListWriter(0xffffffff, 1);
+      list.reset();
+      list.set(1, ROOT, {
+        flags: 0,
+        opacity: 1,
+        transform: [1, 0, 0, 1, 0, 0],
+        width: w,
+        height: h,
+        coarseBelow: 0,
+        reach: 0,
+        unsupported: 0,
+        paths: [{ kind: "rect", w, h, radii: [0, 0, 0, 0], smoothing: 0 }],
+        ops: [
+          {
+            op: "dropShadow",
+            paths: [0],
+            evenOdd: false,
+            dx: 4,
+            dy: 4,
+            blur: radius,
+            color: [0, 0, 0, 0.8],
+            blend: 0,
+          },
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: { kind: "solid", color: [1, 0.3, 0.2, 1] },
+          },
+        ],
+        coarse: [],
+      });
+      expect(e.apply(list.finish()).ok).toBe(true);
+      const started = e.renderPngStream(w, h, camera, clear);
+      if (started.ok) {
+        const reader = started.value.getReader();
+        let chunks = 0;
+        try {
+          for (let i = 0; i < 8; i++) {
+            const r = await reader.read();
+            if (r.done) break;
+            chunks++;
+          }
+        } finally {
+          await reader.cancel().catch(() => {});
+        }
+        expect(chunks).toBeGreaterThan(0);
+      } else {
+        expect(started.code).toBe(ErrorCode.Limit);
+      }
+      expect(e.dead).toBe(false);
+      expect(module.trapped).not.toBe(true);
+      e.dispose();
+    }
+    // Extreme sigma past MAX_BLUR_SIGMA refuses cleanly at admission without trapping Wasm.
+    const extreme = new RenderEngine(module);
+    const list = new ListWriter(0xffffffff, 1);
+    list.reset();
+    list.set(1, ROOT, {
+      flags: 0,
+      opacity: 1,
+      transform: [1, 0, 0, 1, 0, 0],
+      width: 64,
+      height: 64,
+      coarseBelow: 0,
+      reach: 0,
+      unsupported: 0,
+      paths: [{ kind: "rect", w: 64, h: 64, radii: [0, 0, 0, 0], smoothing: 0 }],
+      ops: [
+        {
+          op: "dropShadow",
+          paths: [0],
+          evenOdd: false,
+          dx: 0,
+          dy: 0,
+          blur: 10000,
+          color: [0, 0, 0, 0.5],
+          blend: 0,
+        },
+        { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [1, 0, 0, 1] } },
+      ],
+      coarse: [],
+    });
+    expect(extreme.apply(list.finish()).ok).toBe(true);
+    expect(extreme.renderPngStream(64, 64, camera, clear)).toMatchObject({
+      ok: false,
+      code: ErrorCode.Limit,
+    });
+    expect(extreme.dead).toBe(false);
+    expect(module.trapped).not.toBe(true);
+    extreme.dispose();
+  });
+
+  it("matches whole-frame and 73-row banded CPU renders bit-for-bit across shadow seams", async () => {
+    const module = await loadNodeEngine("worker");
+    const e = new RenderEngine(module);
+    const w = 1157;
+    const h = 305;
+    const list = new ListWriter(0xffffffff, 1);
+    list.reset();
+    list.set(1, ROOT, {
+      flags: 0,
+      opacity: 1,
+      transform: [1.19, 0.22, -0.26, 0.91, 650.37, 79.53],
+      width: 312,
+      height: 108,
+      coarseBelow: 0,
+      reach: 0,
+      unsupported: 0,
+      paths: [{ kind: "rect", w: 312, h: 108, radii: [9, 9, 9, 9], smoothing: 0 }],
+      ops: [
+        {
+          op: "dropShadow",
+          paths: [0],
+          evenOdd: false,
+          dx: 19,
+          dy: -11,
+          blur: 89,
+          color: [0, 0, 0, 0.78],
+          blend: 0,
+        },
+        { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [1, 0.3, 0.2, 1] } },
+      ],
+      coarse: [],
+    });
+    expect(e.apply(list.finish()).ok).toBe(true);
+    const cam = { zoom: 1, x: 13.42, y: -7.57, dpr: 1.35 };
+    const full = e.renderCpu(w, h, cam, clear, false);
+    if (!full.ok) throw new Error(full.message);
+    let diffs = 0;
+    const banded = e.renderBands(
+      w,
+      h,
+      cam,
+      clear,
+      (y0, _rows, part) => {
+        for (let i = 0; i < part.length; i++) {
+          if (part[i] !== full.value.pixels[y0 * w * 4 + i]) diffs++;
+        }
+      },
+      73,
+    );
+    expect(banded.ok).toBe(true);
+    expect(diffs).toBe(0);
+    e.dispose();
+  });
 });
 
 describe.skipIf(!built())(

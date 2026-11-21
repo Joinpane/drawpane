@@ -32,6 +32,7 @@ pub trait Draw {
     fn set_stroke(&mut self, s: Stroke);
     fn fill_path(&mut self, p: &BezPath);
     fn fill_rect(&mut self, r: &Rect);
+    fn fill_blurred_rounded_rect_in(&mut self, p: &BezPath, r: &Rect, radius: f32, std_dev: f32, invert: bool);
     fn stroke_path(&mut self, p: &BezPath);
     fn push_clip_path(&mut self, p: &BezPath);
     fn pop_clip(&mut self);
@@ -69,6 +70,16 @@ macro_rules! impl_draw {
             }
             fn fill_rect(&mut self, r: &vello_common::kurbo::Rect) {
                 <$t>::fill_rect(self, r);
+            }
+            fn fill_blurred_rounded_rect_in(
+                &mut self,
+                p: &vello_common::kurbo::BezPath,
+                r: &vello_common::kurbo::Rect,
+                radius: f32,
+                std_dev: f32,
+                invert: bool,
+            ) {
+                <$t>::fill_blurred_rounded_rect_in(self, p, r, radius, std_dev, invert);
             }
             fn stroke_path(&mut self, p: &vello_common::kurbo::BezPath) {
                 <$t>::stroke_path(self, p);
@@ -150,11 +161,49 @@ impl IRect {
     pub fn is_empty(&self) -> bool {
         self.x1 <= self.x0 || self.y1 <= self.y0
     }
+    pub fn intersect(self, o: Self) -> Self {
+        Self {
+            x0: self.x0.max(o.x0),
+            y0: self.y0.max(o.y0),
+            x1: self.x1.min(o.x1),
+            y1: self.y1.min(o.y1),
+        }
+    }
+    pub fn inflate(self, dx: i32, dy: i32) -> Self {
+        Self {
+            x0: self.x0.saturating_sub(dx),
+            y0: self.y0.saturating_sub(dy),
+            x1: self.x1.saturating_add(dx),
+            y1: self.y1.saturating_add(dy),
+        }
+    }
+}
+
+pub enum ShadowCast<'a> {
+    /// Filled device-space paths (general shapes, spread shapes, text runs + decoration bars).
+    Fill { paths: &'a [BezPath], even_odd: bool },
+    /// Stroked local-space paths under `transform` (open stroke-only layers).
+    Stroke {
+        paths: &'a [BezPath],
+        transform: Affine,
+        stroke: Stroke,
+        /// Approximate device-space bounding box of the stroked paths.
+        bbox: Rect,
+    },
 }
 
 pub trait Backend {
     type Scene: Draw;
     fn scene(&mut self) -> &mut Self::Scene;
+    /// Flushes pending scene draws on tiled CPU renders when a culled subtree would have flushed
+    /// on the whole frame, preserving `f32 -> u8` flush boundaries under `vello_cpu`'s
+    /// `f32_pipeline`.
+    fn flush_barrier(&mut self, _open: &[Open]) {}
+    /// Device-pixel offset of the active scene's `(0, 0)` (zero on root target, `origin` on
+    /// pushed offscreen targets).
+    fn scene_offset(&self) -> (i32, i32);
+    /// Active target bounds in device pixels.
+    fn target_bounds(&self) -> IRect;
     /// An image's level at least `px` device pixels wide (or its largest).
     fn image(&mut self, id: u32, px: f64) -> Option<ImageView>;
     /// The loading checkerboard, 16 × 16 device pixels, repeated.
@@ -178,6 +227,28 @@ pub trait Backend {
     ) -> Result<Option<ImageSource>>;
     /// Runs a backdrop reader over what's drawn so far (`open` is open in the scene).
     fn read(&mut self, kernel: u32, paints: IRect, reads: IRect, open: &[Open]) -> Result<()>;
+    /// Pushes a transparent offscreen target covering `area` (device pixels), flushing the active
+    /// scene first. Returns `false` if `area` doesn't intersect the active target.
+    fn push_isolated(&mut self, area: IRect, open: &[Open]) -> Result<bool>;
+    /// Flushes and pops the active offscreen target, reopens parent `open` clips, and draws it
+    /// onto the parent scene with `SrcOver` at `opacity`.
+    fn pop_isolated(&mut self, opacity: f32, open: &[Open]) -> Result<()>;
+    /// Discards the active offscreen target on error unwind without compositing.
+    fn abort_isolated(&mut self);
+    /// Renders a Gaussian-blurred shadow mask over `dirty` (device pixels) and draws it into the
+    /// active scene tinted with `color` (`SrcOver`, respecting open clips). When `canonical` is
+    /// provided, backends may satisfy the shadow from their bounded `ShadowMaskCache`.
+    #[allow(clippy::too_many_arguments)]
+    fn draw_blurred_shadow(
+        &mut self,
+        cast: &ShadowCast<'_>,
+        canonical: Option<&crate::shadow::CanonicalShadow>,
+        invert: bool,
+        dirty: IRect,
+        sigma: f32,
+        color: AlphaColor<Srgb>,
+        open: &[Open],
+    ) -> Result<()>;
 }
 
 /// The frame being drawn: its size, the page-to-device transform, and whether screen-only
@@ -329,6 +400,13 @@ pub fn draw_split<B: Backend>(
     budget: &mut usize,
     split: &Split,
 ) -> Result<DrawStats> {
+    let full_frame = IRect {
+        x0: 0,
+        y0: 0,
+        x1: i32::from(frame.width),
+        y1: i32::from(frame.height),
+    };
+    let tiled = frame.area != full_frame;
     let mut walk = Walk {
         split,
         phase: Phase::Before,
@@ -341,6 +419,9 @@ pub fn draw_split<B: Backend>(
             f64::from(frame.area.x1) + 1.0,
             f64::from(frame.area.y1) + 1.0,
         ),
+        full_frame,
+        full_viewport: Rect::new(-1.0, -1.0, f64::from(frame.width) + 1.0, f64::from(frame.height) + 1.0),
+        tiled,
         open: Vec::new(),
         stats: DrawStats::default(),
         glyph_mask_side: f64::from(limits.glyph_mask_side),
@@ -370,6 +451,9 @@ struct Walk<'a, B: Backend> {
     backend: &'a mut B,
     frame: Frame,
     viewport: Rect,
+    full_frame: IRect,
+    full_viewport: Rect,
+    tiled: bool,
     open: Vec<Open>,
     stats: DrawStats,
     glyph_mask_side: f64,
@@ -438,6 +522,66 @@ fn sampleable(device: Affine, texel: Affine, region: Option<Rect>, repeat: bool)
         let p = inv * vello_common::kurbo::Point::from(corner);
         p.x.is_finite() && p.y.is_finite() && p.x.abs() <= REPEAT_POSITIONS && p.y.abs() <= REPEAT_POSITIONS
     })
+}
+
+/// True when a subtree culled from the current tile would have flushed the root scene on a
+/// whole-frame render (so tiled `f32_pipeline` renders emit a matching `flush_barrier`).
+fn subtree_would_flush(
+    store: &Store,
+    frame: &Frame,
+    full_frame: IRect,
+    full_viewport: Rect,
+    id: u32,
+    parent: Affine,
+    alpha: f32,
+) -> bool {
+    let Some(node) = store.nodes.get(&id) else {
+        return false;
+    };
+    let r = &node.record;
+    if r.hidden() {
+        return false;
+    }
+    let world = parent * r.transform;
+    let device = frame.view * world;
+    if !finite(device) {
+        return false;
+    }
+    let (Some(bounds), page_pad) = store.bounds_and_pad(id) else {
+        return false;
+    };
+    let dev_bbox = device
+        .transform_rect_bbox(bounds)
+        .inflate(page_pad * scale_of(frame.view), page_pad * scale_of(frame.view));
+    if !overlaps(dev_bbox, full_viewport) {
+        return false;
+    }
+    let opacity = alpha * r.opacity;
+    if opacity <= 0.0 {
+        return false;
+    }
+    let isolate = r.isolate() && r.opacity < 1.0;
+    if isolate && store.subtree_has_pass(id) {
+        let iso_area = IRect::around(dev_bbox.inflate(1.0, 1.0)).intersect(full_frame);
+        if !iso_area.is_empty() {
+            return true;
+        }
+    }
+    let inner = if isolate { 1.0 } else { opacity };
+    for op in &r.ops {
+        match op {
+            Op::Read { .. } => return true,
+            Op::Children => {
+                for &c in &node.children {
+                    if subtree_would_flush(store, frame, full_frame, full_viewport, c, world, inner) {
+                        return true;
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn finite(m: Affine) -> bool {
@@ -516,6 +660,14 @@ impl<B: Backend> Walk<'_, B> {
         Ok(())
     }
 
+    fn scene_device(&self, device: Affine) -> Affine {
+        let (sox, soy) = self.backend.scene_offset();
+        if sox == 0 && soy == 0 {
+            device
+        } else {
+            Affine::translate((-f64::from(sox), -f64::from(soy))) * device
+        }
+    }
     fn node(&mut self, id: u32, parent: Affine, alpha: f32) -> Result<()> {
         let on_path = self.split.pass != Pass::All && self.split.path.contains(&id);
         // A subtree that isn't on the selection's path lies wholly in one part: skipped when
@@ -549,8 +701,27 @@ impl<B: Backend> Walk<'_, B> {
                 "record {id}'s transform overflows on the device"
             )));
         }
-        let Some(bounds) = store.bounds(id) else { return Ok(()) };
-        if !overlaps(device.transform_rect_bbox(bounds), self.viewport) {
+        let (Some(bounds), page_pad) = store.bounds_and_pad(id) else {
+            return Ok(());
+        };
+        let view_scale = scale_of(self.frame.view);
+        let pad_dev = page_pad * view_scale;
+        let dev_bbox = device.transform_rect_bbox(bounds).inflate(pad_dev, pad_dev);
+        if !overlaps(dev_bbox, self.viewport) {
+            if self.tiled
+                && self.backend.scene_offset() == (0, 0)
+                && subtree_would_flush(
+                    store,
+                    &self.frame,
+                    self.full_frame,
+                    self.full_viewport,
+                    id,
+                    parent,
+                    alpha,
+                )
+            {
+                self.backend.flush_barrier(&self.open);
+            }
             self.stats.culled += 1;
             return Ok(());
         }
@@ -574,94 +745,200 @@ impl<B: Backend> Walk<'_, B> {
             return Ok(());
         }
         let isolate = r.isolate() && r.opacity < 1.0;
+        let use_offscreen = isolate && store.subtree_has_pass(id);
         let inner = if isolate { 1.0 } else { opacity };
-        if isolate {
+        let saved_open = if use_offscreen {
             self.scope()?;
-            self.backend.scene().push_opacity(opacity);
-            self.open.push(Open::Layer);
-        }
+            let raw_iso = IRect::around(dev_bbox.inflate(1.0, 1.0));
+            let iso_area = raw_iso.intersect(self.backend.target_bounds());
+            if iso_area.is_empty() {
+                if self.tiled && !raw_iso.intersect(self.full_frame).is_empty() {
+                    self.backend.flush_barrier(&self.open);
+                }
+                return Ok(());
+            }
+            if !self.backend.push_isolated(iso_area, &self.open)? {
+                if self.tiled && !raw_iso.intersect(self.full_frame).is_empty() {
+                    self.backend.flush_barrier(&self.open);
+                }
+                return Ok(());
+            }
+            Some(std::mem::take(&mut self.open))
+        } else {
+            if isolate {
+                self.scope()?;
+                self.backend.scene().push_opacity(opacity);
+                self.open.push(Open::Layer);
+            }
+            None
+        };
         let coarse = r.provisional()
             || self.frame.detail && r.coarse_below > 0.0 && scale_of(device) < f64::from(r.coarse_below);
         if coarse {
             self.stats.coarse += 1;
         }
         let ops = if coarse { &r.coarse } else { &r.ops };
+        // Evaluate only on records that actually draw a drop shadow.
+        let mut layered_shadows = None;
         let depth = self.open.len();
         let mut active_alpha = inner;
         let mut layer_stack: Vec<(f32, bool)> = Vec::new();
         let mut mask_depth = 0usize;
-        for (at, op) in ops.iter().enumerate() {
-            self.stats.ops += 1;
-            match op {
-                Op::Fill { .. } | Op::Stroke { .. } | Op::Read { .. } if !self.paints() => {}
-                Op::Fill { path, even_odd, paint } => {
-                    self.fill(r, *path, device, *even_odd, paint, active_alpha, mask_depth == 0)?;
-                }
-                Op::Stroke { path, style, paint } => self.stroke(r, *path, device, style, paint, active_alpha)?,
-                Op::Clip { path, .. } if self.clip_changes_nothing(id, r, &ops[at + 1..], *path, device) => {
-                    // Left out: the same pixels (see `clip_changes_nothing`), and what's drawn
-                    // under no clip takes the renderers' fast paths.
-                }
-                Op::Clip { path, even_odd } => {
-                    self.scope()?;
-                    let p = self.path(r, *path, device, 0.0)?;
-                    let scene = self.backend.scene();
-                    scene.set_transform(device);
-                    scene.set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
-                    scene.push_clip_path(&p);
-                    self.open.push(Open::Clip {
-                        transform: device,
-                        path: p,
-                        even_odd: *even_odd,
-                    });
-                }
-                Op::Unclip => {
-                    if self.open.len() > depth {
-                        self.open.pop();
-                        self.backend.scene().pop_clip();
+        let res = (|| -> Result<()> {
+            for (at, op) in ops.iter().enumerate() {
+                self.stats.ops += 1;
+                match op {
+                    Op::Fill { .. }
+                    | Op::Stroke { .. }
+                    | Op::Read { .. }
+                    | Op::DropShadow { .. }
+                    | Op::InnerShadow { .. }
+                        if !self.paints() => {}
+                    Op::Fill { path, even_odd, paint } => {
+                        self.fill(r, *path, device, *even_odd, paint, active_alpha, mask_depth == 0)?
                     }
-                }
-                Op::Layer { compose } => {
-                    self.scope()?;
-                    let (vello_compose, is_mask, layer_opacity) = match compose {
-                        ComposeMode::SrcOver => (Compose::SrcOver, false, (active_alpha < 1.0).then_some(active_alpha)),
-                        ComposeMode::DestOut => (Compose::DestOut, true, None),
-                        ComposeMode::DestIn => (Compose::DestIn, true, None),
-                    };
-                    self.backend.scene().push_layer(vello_compose, layer_opacity);
-                    self.open.push(Open::Layer);
-                    layer_stack.push((active_alpha, is_mask));
-                    // Inside an isolated SrcOver layer, opacity is applied once on pop; inside a
-                    // DestOut/DestIn mask layer, the mask draws at full coverage regardless of opacity.
-                    active_alpha = 1.0;
-                    if is_mask {
-                        mask_depth += 1;
+                    Op::Stroke { path, style, paint } => self.stroke(r, *path, device, style, paint, active_alpha)?,
+                    Op::Clip { path, .. } if self.clip_changes_nothing(id, r, &ops[at + 1..], *path, device) => {
+                        // Left out: the same pixels (see `clip_changes_nothing`), and what's drawn
+                        // under no clip takes the renderers' fast paths.
                     }
-                }
-                Op::Unlayer => {
-                    if self.open.len() > depth {
-                        self.open.pop();
-                        self.backend.scene().pop_layer();
-                        if let Some((prev_alpha, is_mask)) = layer_stack.pop() {
-                            active_alpha = prev_alpha;
-                            if is_mask {
-                                mask_depth = mask_depth.saturating_sub(1);
+                    Op::Clip { path, even_odd } => {
+                        self.scope()?;
+                        let p = self.path(r, *path, device, 0.0)?;
+                        let sd = self.scene_device(device);
+                        let scene = self.backend.scene();
+                        scene.set_transform(sd);
+                        scene.set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
+                        scene.push_clip_path(&p);
+                        self.open.push(Open::Clip {
+                            transform: sd,
+                            path: p,
+                            even_odd: *even_odd,
+                        });
+                    }
+                    Op::Unclip => {
+                        if self.open.len() > depth {
+                            self.open.pop();
+                            self.backend.scene().pop_clip();
+                        }
+                    }
+                    Op::Layer { compose } => {
+                        self.scope()?;
+                        let (vello_compose, is_mask, layer_opacity) = match compose {
+                            ComposeMode::SrcOver => {
+                                (Compose::SrcOver, false, (active_alpha < 1.0).then_some(active_alpha))
+                            }
+                            ComposeMode::DestOut => (Compose::DestOut, true, None),
+                            ComposeMode::DestIn => (Compose::DestIn, true, None),
+                        };
+                        self.backend.scene().push_layer(vello_compose, layer_opacity);
+                        self.open.push(Open::Layer);
+                        layer_stack.push((active_alpha, is_mask));
+                        // Inside an isolated SrcOver layer, opacity is applied once on pop; inside a
+                        // DestOut/DestIn mask layer, the mask draws at full coverage regardless of opacity.
+                        active_alpha = 1.0;
+                        if is_mask {
+                            mask_depth += 1;
+                        }
+                    }
+                    Op::Unlayer => {
+                        if self.open.len() > depth {
+                            self.open.pop();
+                            self.backend.scene().pop_layer();
+                            if let Some((prev_alpha, is_mask)) = layer_stack.pop() {
+                                active_alpha = prev_alpha;
+                                if is_mask {
+                                    mask_depth = mask_depth.saturating_sub(1);
+                                }
                             }
                         }
                     }
-                }
-                Op::Children => self.children(id, &node.children, world, active_alpha)?,
-                Op::Read { kernel, halo } => {
-                    self.stats.reads += 1;
-                    let b = Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1]));
-                    let h = f64::from(*halo);
-                    let paints = IRect::around(device.transform_rect_bbox(b));
-                    let reads = IRect::around(device.transform_rect_bbox(b.inflate(h, h)));
-                    let open = self.open.clone();
-                    self.backend.read(*kernel, paints, reads, &open)?;
+                    Op::Children => self.children(id, &node.children, world, active_alpha)?,
+                    Op::Read { kernel, halo } => {
+                        self.stats.reads += 1;
+                        let b = Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1]));
+                        let h = f64::from(*halo);
+                        let paints = IRect::around(device.transform_rect_bbox(b));
+                        let reads = IRect::around(device.transform_rect_bbox(b.inflate(h, h)));
+                        let open = self.open.clone();
+                        self.backend.read(*kernel, paints, reads, &open)?;
+                    }
+                    Op::DropShadow {
+                        paths,
+                        even_odd,
+                        dx,
+                        dy,
+                        blur,
+                        color: shadow_color,
+                        blend,
+                        stroke,
+                    } => {
+                        let layered = *layered_shadows.get_or_insert_with(|| {
+                            ops.iter()
+                                .filter(|op| matches!(op, Op::DropShadow { color, .. } if color[3] > 0.0))
+                                .take(2)
+                                .count()
+                                > 1
+                        });
+                        self.drop_shadow(
+                            r,
+                            paths,
+                            *even_odd,
+                            *dx,
+                            *dy,
+                            *blur,
+                            *shadow_color,
+                            *blend,
+                            stroke.as_deref(),
+                            device,
+                            active_alpha,
+                            layered,
+                        )?;
+                    }
+                    Op::InnerShadow {
+                        shape,
+                        hole,
+                        even_odd,
+                        dx,
+                        dy,
+                        blur,
+                        color: shadow_color,
+                        blend,
+                    } => {
+                        self.inner_shadow(
+                            r,
+                            *shape,
+                            *hole,
+                            *even_odd,
+                            *dx,
+                            *dy,
+                            *blur,
+                            *shadow_color,
+                            *blend,
+                            device,
+                            active_alpha,
+                        )?;
+                    }
                 }
             }
+            Ok(())
+        })();
+        if let Some(prev_open) = saved_open {
+            while let Some(o) = self.open.pop() {
+                match o {
+                    Open::Clip { .. } => self.backend.scene().pop_clip(),
+                    Open::Layer => self.backend.scene().pop_layer(),
+                }
+            }
+            self.open = prev_open;
+            if res.is_ok() {
+                self.backend.pop_isolated(opacity, &self.open)?;
+            } else {
+                self.backend.abort_isolated();
+            }
+            return res;
         }
+        res?;
         if isolate {
             self.open.pop();
             self.backend.scene().pop_layer();
@@ -691,9 +968,12 @@ impl<B: Backend> Walk<'_, B> {
         {
             return false;
         }
-        let Some(e) = self.store.children_extent(id) else {
+        let (Some(e), child_pad) = self.store.children_extent_and_pad(id) else {
             return true;
         };
+        if child_pad > 0.0 {
+            return false;
+        }
         // A device pixel and a half to spare: anti-aliasing, and the flattened arc lying inside
         // the true one by up to a quarter pixel.
         let (px, py) = (1.5 / a.abs(), 1.5 / d.abs());
@@ -976,8 +1256,9 @@ impl<B: Backend> Walk<'_, B> {
         if !self.set_paint(paint, device, alpha, self.region(r, i, 0.0))? {
             return Ok(());
         }
+        let sd = self.scene_device(device);
         let scene = self.backend.scene();
-        scene.set_transform(device);
+        scene.set_transform(sd);
         scene.set_fill_rule(if even_odd { Fill::EvenOdd } else { Fill::NonZero });
         scene.fill_path(&p);
         Ok(())
@@ -1000,8 +1281,9 @@ impl<B: Backend> Walk<'_, B> {
             if !self.set_paint(paint, device, alpha, self.region(r, i, style.reach()))? {
                 return Ok(());
             }
+            let sd = self.scene_device(device);
             let scene = self.backend.scene();
-            scene.set_transform(device);
+            scene.set_transform(sd);
             scene.set_fill_rule(Fill::EvenOdd);
             scene.fill_path(&ring);
             return Ok(());
@@ -1069,11 +1351,363 @@ impl<B: Backend> Walk<'_, B> {
                 style.dashes.iter().map(|d| f64::from(*d) * k),
             );
         }
+        let sd = self.scene_device(transform);
         let scene = self.backend.scene();
-        scene.set_transform(transform);
+        scene.set_transform(sd);
         scene.set_stroke(s);
         scene.stroke_path(&p);
         Ok(())
+    }
+
+    fn make_kurbo_stroke(style: &StrokeStyle) -> Stroke {
+        let mut s = Stroke::new(f64::from(style.width))
+            .with_join(match style.join {
+                1 => Join::Round,
+                2 => Join::Bevel,
+                _ => Join::Miter,
+            })
+            .with_caps(match style.cap {
+                1 => Cap::Round,
+                2 => Cap::Square,
+                _ => Cap::Butt,
+            })
+            .with_miter_limit(f64::from(style.miter.max(1.0)));
+        if !style.dashes.is_empty() {
+            s = s.with_dashes(f64::from(style.dash_offset), style.dashes.iter().map(|d| f64::from(*d)));
+        }
+        s
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn drop_shadow(
+        &mut self,
+        r: &Record,
+        paths: &[u32],
+        even_odd: bool,
+        dx: f32,
+        dy: f32,
+        blur: f32,
+        shadow_color: Rgba,
+        blend: u32,
+        stroke_style: Option<&StrokeStyle>,
+        device: Affine,
+        alpha: f32,
+        layered: bool,
+    ) -> Result<()> {
+        let eff_alpha = shadow_color[3] * alpha;
+        if eff_alpha <= 0.0 || paths.is_empty() {
+            return Ok(());
+        }
+        if blend != 0 {
+            return Err(EngineError::unsupported("blended drop shadow"));
+        }
+        if let Some(st) = stroke_style
+            && st.width <= 0.0
+        {
+            return Ok(());
+        }
+        let view_scale = scale_of(self.frame.view);
+        let dx_dev = f64::from(dx) * view_scale;
+        let dy_dev = f64::from(dy) * view_scale;
+        let sigma_dev = crate::blur::sigma_from_radius(blur) * view_scale as f32;
+        let shifted_device = Affine::translate((dx_dev, dy_dev)) * device;
+        let tint = color(shadow_color, alpha);
+
+        // Zero blur: draw shadow geometry directly with no offscreen pass.
+        if crate::blur::kernel_radius(sigma_dev) == 0 {
+            let mut combined = BezPath::new();
+            let reach = stroke_style.map_or(0.0, |st| f64::from(st.width) * f64::from(st.miter.max(1.0)) + 1.0);
+            for &pi in paths {
+                let p = self.path(r, pi, shifted_device, reach)?;
+                combined.extend(p);
+            }
+            if combined.is_empty() {
+                return Ok(());
+            }
+            if let Some(st) = stroke_style {
+                if !st.dashes.is_empty() {
+                    let length = polygon_length(&combined);
+                    crate::record::check_dashes(
+                        st,
+                        length,
+                        &crate::limits::Limits {
+                            frame_verbs: self.verbs_left,
+                            ..self.store.limits
+                        },
+                    )?;
+                    let period: f64 = st.dashes.iter().map(|d| f64::from(*d)).sum();
+                    self.spend((length / period * st.dashes.len() as f64).ceil() as usize)?;
+                }
+                let s = Self::make_kurbo_stroke(st);
+                let sd = self.scene_device(shifted_device);
+                let scene = self.backend.scene();
+                scene.reset_paint_transform();
+                scene.set_paint(tint.into());
+                scene.set_transform(sd);
+                scene.set_stroke(s);
+                scene.stroke_path(&combined);
+            } else {
+                let sd = self.scene_device(shifted_device);
+                let scene = self.backend.scene();
+                scene.reset_paint_transform();
+                scene.set_paint(tint.into());
+                scene.set_transform(sd);
+                scene.set_fill_rule(if even_odd { Fill::EvenOdd } else { Fill::NonZero });
+                scene.fill_path(&combined);
+            }
+            return Ok(());
+        }
+
+        // Stacked shadows accumulate the analytic approximation's error. Use the
+        // reference masks for the stack, retaining the fast path for single shadows.
+        if !layered
+            && stroke_style.is_none()
+            && paths.len() == 1
+            && let Some((rect, radius)) = r.entry_uniform_rect(paths[0])
+            && let Some(local_scale) = crate::shadow::similarity_scale(device)
+        {
+            let w_dev = (rect.width() * local_scale) as f32;
+            let h_dev = (rect.height() * local_scale) as f32;
+            let r_dev = (f64::from(radius) * local_scale) as f32;
+            if crate::shadow::can_use_analytic_shadow(w_dev, h_dev, r_dev, sigma_dev, eff_alpha, false) {
+                let pad_local = (f64::from(crate::blur::kernel_radius(sigma_dev)) + 2.0) / local_scale;
+                let outer = geometry::rect_path(rect.inflate(pad_local, pad_local));
+                let std_dev = (f64::from(sigma_dev) / local_scale) as f32 * core::f32::consts::SQRT_2;
+                let sd = self.scene_device(shifted_device);
+                let scene = self.backend.scene();
+                scene.reset_paint_transform();
+                scene.set_paint(tint.into());
+                scene.set_transform(sd);
+                scene.set_fill_rule(Fill::NonZero);
+                scene.fill_blurred_rounded_rect_in(&outer, &rect, radius, std_dev, false);
+                return Ok(());
+            }
+        }
+
+        // General reference Gaussian blur over the rasterised cast mask (with canonical caching).
+        let margin_local = {
+            let s = scale_of(device).max(1e-6);
+            (f64::from(crate::shadow::blur_support_pad(sigma_dev)) + 2.0) / s
+        };
+        if let Some(st) = stroke_style {
+            let stroke_grow = f64::from(st.width) * f64::from(st.miter.max(1.0)) + 1.0;
+            let mut local_paths = Vec::with_capacity(paths.len());
+            let mut bbox: Option<Rect> = None;
+            for &pi in paths {
+                let p = self.path(r, pi, shifted_device, margin_local + stroke_grow)?;
+                if p.is_empty() {
+                    continue;
+                }
+                if !st.dashes.is_empty() {
+                    let length = polygon_length(&p);
+                    crate::record::check_dashes(
+                        st,
+                        length,
+                        &crate::limits::Limits {
+                            frame_verbs: self.verbs_left,
+                            ..self.store.limits
+                        },
+                    )?;
+                    let period: f64 = st.dashes.iter().map(|d| f64::from(*d)).sum();
+                    self.spend((length / period * st.dashes.len() as f64).ceil() as usize)?;
+                }
+                use vello_common::kurbo::Shape;
+                let b = shifted_device.transform_rect_bbox(p.bounding_box().inflate(stroke_grow, stroke_grow));
+                bbox = Some(bbox.map_or(b, |o| o.union(b)));
+                local_paths.push(p);
+            }
+            let Some(bbox) = bbox else {
+                return Ok(());
+            };
+            let reach = f64::from(crate::blur::kernel_radius(sigma_dev)) + 2.0;
+            let dirty = IRect::around(bbox.inflate(reach, reach)).intersect(self.backend.target_bounds());
+            if dirty.is_empty() {
+                return Ok(());
+            }
+            let cast = ShadowCast::Stroke {
+                paths: &local_paths,
+                transform: shifted_device,
+                stroke: Self::make_kurbo_stroke(st),
+                bbox,
+            };
+            let open = self.open.clone();
+            return self
+                .backend
+                .draw_blurred_shadow(&cast, None, false, dirty, sigma_dev, tint, &open);
+        }
+
+        let canonical = if paths.len() == 1 {
+            r.entry_canonical_shape(paths[0])
+                .and_then(|sh| crate::shadow::canonical_shadow(sh, shifted_device, sigma_dev, false))
+        } else {
+            None
+        };
+
+        let mut dev_paths = Vec::with_capacity(paths.len());
+        let mut bbox: Option<Rect> = None;
+        for &pi in paths {
+            let mut p = self.path(r, pi, shifted_device, margin_local)?;
+            if p.is_empty() {
+                continue;
+            }
+            p.apply_affine(shifted_device);
+            use vello_common::kurbo::Shape;
+            let b = p.bounding_box();
+            bbox = Some(bbox.map_or(b, |o| o.union(b)));
+            dev_paths.push(p);
+        }
+        let Some(bbox) = bbox else {
+            return Ok(());
+        };
+        let reach = f64::from(crate::blur::kernel_radius(sigma_dev)) + 2.0;
+        let dirty = IRect::around(bbox.inflate(reach, reach)).intersect(self.backend.target_bounds());
+        if dirty.is_empty() {
+            return Ok(());
+        }
+        let cast = ShadowCast::Fill {
+            paths: &dev_paths,
+            even_odd,
+        };
+        let open = self.open.clone();
+        self.backend
+            .draw_blurred_shadow(&cast, canonical.as_ref(), false, dirty, sigma_dev, tint, &open)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn inner_shadow(
+        &mut self,
+        r: &Record,
+        shape: u32,
+        hole: Option<u32>,
+        even_odd: bool,
+        dx: f32,
+        dy: f32,
+        blur: f32,
+        shadow_color: Rgba,
+        blend: u32,
+        device: Affine,
+        alpha: f32,
+    ) -> Result<()> {
+        let eff_alpha = shadow_color[3] * alpha;
+        if eff_alpha <= 0.0 {
+            return Ok(());
+        }
+        if blend != 0 {
+            return Err(EngineError::unsupported("blended inner shadow"));
+        }
+        let shape_local = self.path(r, shape, device, 0.0)?;
+        if shape_local.is_empty() {
+            return Ok(());
+        }
+        let tint = color(shadow_color, alpha);
+
+        // Spread shrank the hole to empty: the entire shape fills with shadow color.
+        let Some(hole_idx) = hole else {
+            let sd = self.scene_device(device);
+            let scene = self.backend.scene();
+            scene.reset_paint_transform();
+            scene.set_paint(tint.into());
+            scene.set_transform(sd);
+            scene.set_fill_rule(if even_odd { Fill::EvenOdd } else { Fill::NonZero });
+            scene.fill_path(&shape_local);
+            return Ok(());
+        };
+
+        let view_scale = scale_of(self.frame.view);
+        let dx_dev = f64::from(dx) * view_scale;
+        let dy_dev = f64::from(dy) * view_scale;
+        let sigma_dev = crate::blur::sigma_from_radius(blur) * view_scale as f32;
+        let shifted_device = Affine::translate((dx_dev, dy_dev)) * device;
+
+        // Zero blur: clip to `shape`, fill outer box minus shifted `hole` (even-odd).
+        if crate::blur::kernel_radius(sigma_dev) == 0 {
+            use vello_common::kurbo::Shape;
+            let mut shape_dev = shape_local.clone();
+            shape_dev.apply_affine(device);
+            let mut hole_dev = self.path(r, hole_idx, shifted_device, 0.0)?;
+            hole_dev.apply_affine(shifted_device);
+            let outer = shape_dev
+                .bounding_box()
+                .union(hole_dev.bounding_box())
+                .inflate(4.0, 4.0);
+            let mut ring_dev = geometry::rect_path(outer);
+            ring_dev.extend(hole_dev);
+            let (sox, soy) = self.backend.scene_offset();
+            let scene_shift = Affine::translate((-f64::from(sox), -f64::from(soy)));
+            self.scope()?;
+            let scene = self.backend.scene();
+            scene.set_transform(scene_shift * device);
+            scene.set_fill_rule(if even_odd { Fill::EvenOdd } else { Fill::NonZero });
+            scene.push_clip_path(&shape_local);
+            scene.reset_paint_transform();
+            scene.set_paint(tint.into());
+            scene.set_transform(scene_shift);
+            scene.set_fill_rule(Fill::EvenOdd);
+            scene.fill_path(&ring_dev);
+            scene.pop_clip();
+            return Ok(());
+        }
+
+        // Measured Vello analytic fast path for uniform rounded rectangle holes.
+        if let Some((hole_rect, hole_radius)) = r.entry_uniform_rect(hole_idx)
+            && let Some(local_scale) = crate::shadow::similarity_scale(device)
+        {
+            let w_dev = (hole_rect.width() * local_scale) as f32;
+            let h_dev = (hole_rect.height() * local_scale) as f32;
+            let r_dev = (f64::from(hole_radius) * local_scale) as f32;
+            if crate::shadow::can_use_analytic_shadow(w_dev, h_dev, r_dev, sigma_dev, eff_alpha, true) {
+                let std_dev = (f64::from(sigma_dev) / local_scale) as f32 * core::f32::consts::SQRT_2;
+                let mut shape_in_shifted = shape_local.clone();
+                shape_in_shifted.apply_affine(shifted_device.inverse() * device);
+                let sd = self.scene_device(shifted_device);
+                let scene = self.backend.scene();
+                scene.reset_paint_transform();
+                scene.set_paint(tint.into());
+                scene.set_transform(sd);
+                scene.set_fill_rule(if even_odd { Fill::EvenOdd } else { Fill::NonZero });
+                scene.fill_blurred_rounded_rect_in(&shape_in_shifted, &hole_rect, hole_radius, std_dev, true);
+                return Ok(());
+            }
+        }
+
+        // General reference Gaussian blur of shifted hole mask, inverted, clipped to `shape`.
+        use vello_common::kurbo::Shape;
+        let mut shape_dev = shape_local.clone();
+        shape_dev.apply_affine(device);
+        let dirty = IRect::around(shape_dev.bounding_box().inflate(1.0, 1.0)).intersect(self.backend.target_bounds());
+        if dirty.is_empty() {
+            return Ok(());
+        }
+        let canonical = r
+            .entry_canonical_shape(hole_idx)
+            .and_then(|sh| crate::shadow::canonical_shadow(sh, shifted_device, sigma_dev, true));
+        let mut hole_dev = self.path(r, hole_idx, shifted_device, 0.0)?;
+        hole_dev.apply_affine(shifted_device);
+        self.scope()?;
+        let sd = self.scene_device(device);
+        {
+            let scene = self.backend.scene();
+            scene.set_transform(sd);
+            scene.set_fill_rule(if even_odd { Fill::EvenOdd } else { Fill::NonZero });
+            scene.push_clip_path(&shape_local);
+        }
+        self.open.push(Open::Clip {
+            transform: sd,
+            path: shape_local,
+            even_odd,
+        });
+        let open = self.open.clone();
+        let hole_slice = [hole_dev];
+        let cast = ShadowCast::Fill {
+            paths: &hole_slice,
+            even_odd,
+        };
+        let res = self
+            .backend
+            .draw_blurred_shadow(&cast, canonical.as_ref(), true, dirty, sigma_dev, tint, &open);
+        self.open.pop();
+        self.backend.scene().pop_clip();
+        res
     }
 
     /// A run of glyphs in one solid colour: each from the glyph cache where it can be, else
@@ -1169,10 +1803,11 @@ impl<B: Backend> Walk<'_, B> {
             }
         }
         if !outlines.is_empty() {
+            let sd = self.scene_device(device);
             let scene = self.backend.scene();
             scene.reset_paint_transform();
             scene.set_paint(tint.into());
-            scene.set_transform(device);
+            scene.set_transform(sd);
             scene.set_fill_rule(Fill::NonZero);
             scene.fill_path(&outlines);
         }
@@ -1226,6 +1861,11 @@ impl<B: Backend> Walk<'_, B> {
         let Some(source) = self.backend.run_image(w, h, pixels) else {
             return false;
         };
+        let (sox, soy) = self.backend.scene_offset();
+        let rx0 = f64::from(x0 - sox);
+        let ry0 = f64::from(y0 - soy);
+        let rx1 = f64::from(x1 - sox);
+        let ry1 = f64::from(y1 - soy);
         let scene = self.backend.scene();
         scene.set_paint(
             Image {
@@ -1244,8 +1884,8 @@ impl<B: Backend> Walk<'_, B> {
             color: tint,
             mode: TintMode::AlphaMask,
         }));
-        scene.set_paint_transform(Affine::translate((f64::from(x0), f64::from(y0))));
-        scene.fill_rect(&Rect::new(f64::from(x0), f64::from(y0), f64::from(x1), f64::from(y1)));
+        scene.set_paint_transform(Affine::translate((rx0, ry0)));
+        scene.fill_rect(&Rect::new(rx0, ry0, rx1, ry1));
         scene.set_tint(None);
         self.stats.glyphs_masked += placed.len() as u32;
         true
