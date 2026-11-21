@@ -422,6 +422,9 @@ scope.onmessage = async ({ data }) => {
         if (!r.ok && r.code === ErrorCode.Trap) {
           post({ type: "error", code: r.code, message: r.message });
         }
+      } catch {
+        // A browser bitmap read can run out of memory independently of wasm.
+        post({ type: "image-result", ticket: data.ticket, uploaded: false });
       } finally {
         data.bitmap.close();
       }

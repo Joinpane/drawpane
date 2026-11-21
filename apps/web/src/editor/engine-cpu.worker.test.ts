@@ -22,10 +22,15 @@ vi.mock("@drawpane/engine", () => ({
     Limit: 4,
     Unsupported: 5,
     Gpu: 7,
+    Trap: 100,
   },
   loadBrowserEngine: async () => ({}),
   RenderEngine: class {
     revision = 1;
+    enableViewImages() {}
+    putCpuImageLevel() {
+      return { ok: false, code: 4, message: "image budget exhausted" };
+    }
     apply(bytes: Uint8Array) {
       if (bytes[0] === 255) return { ok: false, message: "injected wrong base", code: 3 };
       this.revision = bytes[0] ?? 1;
@@ -89,7 +94,50 @@ describe("engine-cpu.worker tiled rendering, transfer credit, and error tagging"
     else delete (globalThis as Record<string, unknown>).createImageBitmap;
     if (origImageData) Object.defineProperty(globalThis, "ImageData", origImageData);
     else delete (globalThis as Record<string, unknown>).ImageData;
+    vi.unstubAllGlobals();
     vi.resetModules();
+  });
+
+  it("reports rejected image levels to the view without stopping the worker", async () => {
+    const replies: unknown[] = [];
+    const scope: {
+      onmessage: ((event: { data: unknown }) => Promise<void> | void) | null;
+      postMessage(message: unknown): void;
+    } = {
+      onmessage: null,
+      postMessage: (message) => replies.push(message),
+    };
+    vi.stubGlobal("self", scope);
+    const readPixels = vi
+      .fn()
+      .mockReturnValueOnce({ data: new Uint8ClampedArray(16) })
+      .mockImplementationOnce(() => {
+        throw new RangeError("bitmap memory exhausted");
+      });
+    vi.stubGlobal(
+      "OffscreenCanvas",
+      class {
+        getContext() {
+          return { drawImage() {}, getImageData: readPixels };
+        }
+      },
+    );
+    await import("./engine-cpu.worker");
+    await scope.onmessage?.({ data: { type: "init" } });
+    const close = vi.fn();
+    for (const ticket of [1, 2]) {
+      await scope.onmessage?.({
+        data: { type: "put-image", handle: 1, ticket, bitmap: { width: 2, height: 2, close } },
+      });
+    }
+    await scope.onmessage?.({ data: { type: "apply", bytes: Uint8Array.of(2).buffer } });
+    expect(replies).toEqual([
+      { type: "ready" },
+      { type: "image-result", ticket: 1, uploaded: false },
+      { type: "image-result", ticket: 2, uploaded: false },
+      { type: "apply-result", ok: true, revision: 2 },
+    ]);
+    expect(close).toHaveBeenCalledTimes(2);
   });
 
   it("keeps unacknowledged transfers bounded by count and bytes worker-wide across job changes and failed applies", async () => {
