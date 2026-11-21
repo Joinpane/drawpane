@@ -4,7 +4,7 @@ An audit of main at `970efc07` (2026-11-21, after phase 3) against decision 0040
 
 ## In short
 
-- **Accuracy is close.** On the frames it draws, the engine is as close to Figma as the canvas renderer, or closer: median frame error 0.47 against 0.49 on the iOS kit and 1.02 against 1.05 on shadcn. Every Figma parity suite passes on a T4 with WebGPU. It still misses "no frame worse than the canvas renderer" on many frames (171 of 280 drawn iOS frames, 171 of 500 shadcn frames so far), almost all by tiny amounts (edge alpha on small components). That's tuning work, not a redesign.
+- **Accuracy is close.** On the frames it draws, the engine is as close to Figma as the canvas renderer, or closer: median frame error 0.47 against 0.49 on the iOS kit and 1.05 against 1.10 on shadcn. Every Figma parity suite passes on a T4 with WebGPU. It still misses "no frame worse than the canvas renderer" on many frames (171 of 280 drawn iOS frames, 248 of 734 shadcn frames), almost all by tiny amounts (edge alpha on small components). That's tuning work, not a redesign.
 - **But it can't draw the files people use yet.** Text set in a font Drawpane doesn't have, with no outlines saved in the file, makes the engine refuse the whole page. The canvas renderer just draws it in a fallback font. That sends the large iOS kit's two heaviest pages, and a shadcn page, back to the canvas renderer, and it refuses 108 of the iOS kit's 400 sampled frames. Separately, the engine holds a page's images only up to 256 MiB, and one iOS page needs 821 MiB. These two are the top blockers.
 - **Speed: panning is fine, zooming and editing on heavy pages are not.** On a T4 the engine pans at 60 fps on every page measured. On the iOS kit's heaviest page, though, a zoom stalls for about 4 seconds a frame, and drag, resize and undo didn't respond within 10 minutes. On shadcn it settles after a page switch in 4.0 s (canvas: 0.3 s), and edits answer in about 57 ms (canvas: 34 ms). The cause found: tiles that nothing can stand in for get drawn at full glass and blur cost, about 270 ms each.
 - **Much of the gap to Figma isn't the renderer at all.** Dragging a shadcn component runs at about 10 fps, and small edits take about 70 ms, on both renderers. Drawing is 2 to 5 ms of that. The rest is the editor recomputing component copies, variables and layout. Typing into the iOS kit takes 8 to 9 s to settle on both renderers.
@@ -34,7 +34,7 @@ Decision 0040, "Migration, behind a switch": default-on needs "every Figma suite
 | Requirement | State on main | Evidence |
 | --- | --- | --- |
 | Every Figma parity suite within its thresholds | **Met** on SwiftShader (CI) and on the T4 with WebGPU; on the T4 with WebGL2 one gate fault (grain, G20) | `apps/web/e2e/parity/engine.spec.ts`, 24 suites, CPU, WebGPU and WebGL2 |
-| Both kits, no frame worse than the canvas renderer | **Not met**: iOS 108 frames refused, 10 drawn without images, 171 of 280 worse; shadcn 7 refused, 171 of 500 worse (most by under 0.1) | "Accuracy on the two kits" |
+| Both kits, no frame worse than the canvas renderer | **Not met**: iOS 108 frames refused, 10 drawn without images, 171 of 280 worse; shadcn 8 refused, 248 of 734 worse (most by under 0.1) | "Accuracy on the two kits" |
 | No kit page falls back | **Not met**: iOS Examples and Toolbars, shadcn Dropdown Menu | Live editor on a T4: `textWithoutOutlines` 708, 47 and 2 layers |
 | Both GPU backends | **Partly met**: WebGL2 measured on the T4; WebGPU only on SwiftShader, or with software compositing on Modal | `pnpm gpu-bench` `gpu` and `webgpu` modes |
 | Resource stress | **Partly met**: budgets, admission and loss recovery are tested; memory-pressure handling doesn't exist | `engine.spec.ts` loss and budget tests; no `memory pressure` handling in `engine-view.ts` |
@@ -61,19 +61,20 @@ Kit parity drew every sampled frame with the canvas renderer and with the engine
 
 So on the frames it draws, the engine is closer to Figma than the canvas renderer on average, and its misses against the "no frame worse" gate are mostly small: edge coverage and alpha on small components, glass at transparent edges. The blocking items are the 108 refusals (G1) and Product Bezels' images (G19).
 
-**shadcn/ui kit** (761 sampled frames, 88 pages, about 500,000 layers; conversion `172d037e7be04faf`). Two of three shards are in, 507 frames; the third shard (254 frames) is SHARD1_NOTE:
+**shadcn/ui kit** (761 sampled frames, 88 pages, about 500,000 layers; conversion `172d037e7be04faf`; run in 3 parallel shards):
 
 | | Frames |
 | --- | --- |
-| Refused by the engine | **7**: 3 `textWithoutOutlines` (Style Guide's Typography, Kbd's keyboard symbols, a chat bubble's reactions) and 4 frames longer than the engine's 8,192 px side (two Aspect Ratio frames at 10,927 px, two "Wrapper" frames at 8,761 and 8,848 px; 0040's criterion 3 refuses exports past 8,192 px on purpose) |
-| Drawn | 500 |
-| ...worse than the canvas renderer by the gate | **171**: 151 by mean, 57 by alpha, 22 by worst tile |
-| ...worse by more than 0.1 / 0.25 / 0.5 / 1 mean | 19 / 6 / 4 / 3 (largest 4.09, on a 32 × 32 dialog icon button) |
-| ...better than the canvas renderer by more than 0.01 / 0.1 | 146 / 27 |
-| Median / mean of frame means | canvas 1.049 / 1.724; engine **1.019 / 1.724** |
-| CPU against WebGL2 (T4) within 0040's tolerance | **500 of 500** (largest mean 0.115) |
+| Refused by the engine | **8**: 4 `textWithoutOutlines` (Style Guide's Typography, Kbd's keyboard symbols, two chat bubble frames) and 4 frames longer than the engine's 8,192 px side (two Aspect Ratio frames at 10,927 px, two "Wrapper" frames at 8,761 and 8,848 px; 0040's criterion 3 refuses exports past 8,192 px on purpose) |
+| Not drawn by the harness | 19 frames over 12 megapixels (component page overviews), skipped after one crashed the tab (see "Decisions") |
+| Drawn | 734 |
+| ...worse than the canvas renderer by the gate | **248**: 220 by mean, 83 by alpha, 29 by worst tile |
+| ...worse by more than 0.1 / 0.25 / 0.5 / 1 mean | 31 / 8 / 5 / 4 (largest 4.09, on a 32 × 32 dialog icon button) |
+| ...better than the canvas renderer by more than 0.01 / 0.1 | 226 / 48 |
+| Median / mean of frame means | canvas 1.103 / 1.837; engine **1.047 / 1.828** |
+| CPU against WebGL2 (T4) within 0040's tolerance | **734 of 734** (largest mean 0.115) |
 
-On shadcn the engine draws almost everything, matches the canvas renderer's accuracy on average and beats it at the median; the gate misses are overwhelmingly under 0.1.
+On shadcn the engine draws almost everything, beats the canvas renderer at the median and on average, and its gate misses are overwhelmingly under 0.1.
 
 ## Figma parity suites
 
@@ -194,7 +195,7 @@ Ranked by what blocks the default the most. P0 blocks default-on, P1 must land b
 | G2 | **Progressive layer blur with a varying radius is unsupported** (`layer.ts` sets `UNSUPPORTED.layerBlur`) | P0 | Not in either kit's pages (census: 0 pages); the renderer fallback fixture uses it on purpose | W7 |
 | G3 | **Limits and refusals end in the canvas renderer.** `ErrorCode.Limit` (content or budget), CPU view mode's limit, an unsupported page and a failed start all hand frames to `CanvasRenderer`. | P0 | Code: `engine-view.ts` `#cpuUnsupportedPage`, `ErrorCode.Limit` branches, chain step 4 | W3 |
 | G4 | **Raster export, export preview, thumbnails, component previews, prototype player and new-file template previews draw with `CanvasRenderer`** | P0 | Code: `exporting.ts`, `ExportSection.tsx`, `thumbnail.ts`, `ComponentPreview.tsx`, `prototype/Player.tsx`, `new-file/create.ts` | W2 |
-| G5 | **Kit frames the engine draws worse than the canvas renderer** | P0 | iOS: 108 frames refused (text), 10 drawn without images (Product Bezels, G19), and 171 of the other 280 worse by the gate (51 by more than 0.1 mean, 4 by more than 0.5). shadcn (507 of 761 frames so far): 7 refused (3 text, 4 longer than 8,192 px), 171 of 500 worse (19 by more than 0.1, 3 by more than 1). Most misses are edge alpha and coverage on small components over transparency | W7 |
+| G5 | **Kit frames the engine draws worse than the canvas renderer** | P0 | iOS: 108 frames refused (text), 10 drawn without images (Product Bezels, G19), and 171 of the other 280 worse by the gate (51 by more than 0.1 mean, 4 by more than 0.5). shadcn: 8 refused (4 text, 4 longer than 8,192 px), 248 of 734 drawn worse (31 by more than 0.1, 4 by more than 1). Most misses are edge alpha and coverage on small components over transparency | W7 |
 | G6 | **The engine zooms, settles and edits slower than the canvas renderer** | P0 | Zoom on reader-heavy pages stalls: iOS Examples zoom p95 4,071 ms a frame (canvas 20), Toolbars 2,350 (canvas 25), from must-draw tiles at about 270 ms each; on Examples, drag, resize and undo never answered within 10 minutes each. shadcn Combobox, T4: exact after switching pages 3,968 ms (canvas 336); fill and effect changes answered in 57 to 58 ms (34); zoom p95 44 to 62 ms (26). Opening Examples: useful image 7.3 s, exact 35 s (targets 1 s and 3 s) | W4 |
 | G7 | **Edit pipeline costs dominate interaction on real kits, on both renderers** | P0 for "close to Figma", not for the default | shadcn Dropdown Menu: drag 100 ms a frame, nudge, undo and fill answer in 70 ms with 2 ms of drawing; iOS Examples: typing exact after 8.4 to 9.4 s, open to exact 40.5 s on canvas | W4 |
 | G8 | **No interaction gates on the devices of criterion 1**, and no hardware WebGPU presentation measured | P0 | Modal can't present WebGPU canvases (`gpu-bench` README); no Mac or Windows host | W5 |
@@ -354,6 +355,7 @@ In total, about 6,600 lines of renderer source and 850 lines of its unit tests, 
 - **A second prototype made the interaction bench's cases non-fatal**, so a hanging probe doesn't end the run (also never committed; W5 lands it properly).
 - **The audit's harness changes are not in this pull request,** which is docs only. They're on the branch `t3/kit-parity-engine-mode-audit` (`84392f12`, pushed, no pull request) for W5 to review and land, and described in "How to reproduce".
 - **The engine page census is an early look, not the editor's verdict.** It builds each page right after the file opens, before the shaper's 3 s face deadline, so text in missing faces is still "loading" there, not refused. Both kits' censuses show 0 pages falling back, while the live editor on the T4 hands three pages back. The per-frame drawing waits for the deadline and is the number to trust.
+- **Huge frames were skipped in the harness.** A 2,560 × 8,004 frame crashed the tab: each frame crosses the page as base64 several times. Frames over 12 megapixels (19 shadcn component overviews) weren't drawn by the engine in kit parity (`E2E_KIT_PARITY_ENGINE_MAX_PIXELS`). That's a harness limit, not an engine result; W5's harness should pass pixels without base64.
 - **Image placeholders from the harness were rerun, not counted.** The debug renderer kit parity draws through (`engine-debug.ts`) uploads every image of a frame's page and never releases one. Over a whole run, its images pass the engine's 256 MiB and later images draw as the loading checkerboard. The live editor drops images the page no longer uses (`EngineView.#dropUnused`), so frames on pages with images were redrawn with a fresh editor per kit page (`E2E_KIT_PARITY_RELOAD_PER_PAGE`). Only iOS Product Bezels, whose own images need 821 MiB, still fails, and that one is real (G19).
 
 ## How to reproduce
