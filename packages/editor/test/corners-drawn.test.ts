@@ -1,15 +1,13 @@
 /**
  * Smoothed corners, drawn: every consumer of a box's outline uses the one
- * geometry (corners.ts), so the headless renderer's pixels (SVG through
- * resvg, as exports and agents' renders draw), hit testing, the SVG export's
- * path and the vector outline (flatten, booleans) agree. The canvas draws
+ * geometry (corners.ts), so the rasterised SVG export, hit testing and the
+ * vector outline (flatten, booleans) agree. The canvas draws
  * the same Path2D and is checked against the headless renderer in
  * `apps/web/e2e/parity/headless.spec.ts`, and against Figma in
  * `apps/web/e2e/parity` (suite "corners").
  */
 import { getProp, type NodeRecord, type Op, ROOT_ID } from "@drawpane/model";
-import type { ResvgRasteriser } from "@drawpane/raster";
-import { nodeRasteriser } from "@drawpane/raster/node";
+import { nodeRasteriser, type ResvgRasteriser } from "@drawpane/raster/node";
 import { beforeAll, describe, expect, it } from "vitest";
 import { boxPath, flattenBox, pathData } from "../src/corners";
 import { Doc } from "../src/doc";
@@ -19,7 +17,7 @@ import { exportSvg } from "../src/svg";
 import type { TextMeasurer } from "../src/text";
 import { pathBounds } from "../src/vector/bounds";
 import { nodePath } from "../src/vector/shapes";
-import { base64, createHeadlessRenderer } from "./fixtures/svg-raster";
+import { rasterSvg } from "./fixtures/svg-raster";
 
 const measurer: TextMeasurer = { width: (_font, text) => text.length * 8 };
 const solid = (color: string) => [{ type: "solid" as const, color }];
@@ -59,19 +57,9 @@ function docWith(
 }
 
 async function pixels(d: Doc) {
-  const r = createHeadlessRenderer({
-    measurer,
-    rasteriser,
-    fonts: async () => null,
-    images: async () => null,
-  });
-  const out = await r.renderPng(d, "p", { scale: 1, background: "#ffffff" });
-  const px = rasteriser.pixels(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${out.width}" height="${out.height}"><image width="${out.width}" height="${out.height}" href="data:image/png;base64,${base64(out.png)}"/></svg>`,
-    { scale: 1, fonts: [] },
-  );
+  const px = rasterSvg(d, "p", measurer, rasteriser, { background: "#ffffff" });
   return (x: number, y: number) => [
-    ...px.data.subarray((y * out.width + x) * 4, (y * out.width + x) * 4 + 3),
+    ...px.data.subarray((y * px.width + x) * 4, (y * px.width + x) * 4 + 3),
   ];
 }
 

@@ -23,18 +23,14 @@ export function headlessEngine(
   measurer: TextMeasurer,
   options: Partial<Omit<HeadlessEngineDeps, "measurer">> = {},
 ) {
-  let decoder: ReturnType<typeof nodeImageDecoder> | undefined;
-  let decodedMemory = 0;
+  let decoder: Awaited<ReturnType<typeof nodeImageDecoder>> | undefined;
   return createHeadlessRenderer({
     measurer,
     images: async () => null,
-    decodeMemoryBytes: () => decodedMemory,
+    decodeMemoryBytes: () => decoder?.memoryBytes() ?? 0,
     async decodeImage(file, target, room) {
-      decoder ??= nodeImageDecoder();
-      const codec = await decoder;
-      const result = codec.decode(file, target, room);
-      decodedMemory = codec.memoryBytes();
-      return result;
+      decoder ??= await nodeImageDecoder();
+      return decoder.decode(file, target, room);
     },
     async acquireEngine() {
       const module = await loadNodeEngine("worker", { fresh: true });
@@ -45,7 +41,13 @@ export function headlessEngine(
           code: ErrorCode.Trap,
           message: "Could not start the render engine.",
         });
-      return { engine, release: () => module.glue.__drawpaneQuiesce() };
+      return {
+        engine,
+        release() {
+          decoder?.dispose();
+          module.glue.__drawpaneQuiesce();
+        },
+      };
     },
     ...options,
   });

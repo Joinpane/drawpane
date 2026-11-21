@@ -1,11 +1,10 @@
 import { type Effect, type NodeRecord, type Op, ROOT_ID } from "@drawpane/model";
-import type { ResvgRasteriser } from "@drawpane/raster";
-import { nodeRasteriser } from "@drawpane/raster/node";
+import { nodeRasteriser, type ResvgRasteriser } from "@drawpane/raster/node";
 import { beforeAll, describe, expect, it } from "vitest";
 import { Doc } from "../src/doc";
 import { dropShadowCast } from "../src/shadows";
 import type { TextMeasurer } from "../src/text";
-import { base64, createHeadlessRenderer } from "./fixtures/svg-raster";
+import { rasterSvg } from "./fixtures/svg-raster";
 
 const ring = (props: { showBehind?: boolean } = {}): Effect => ({
   type: "drop-shadow",
@@ -91,19 +90,9 @@ describe("drop shadows, drawn", () => {
         props: { x: 20, y: 20, width: 20, height: 20, ...props },
       },
     ] as Op[]);
-    const r = createHeadlessRenderer({
-      measurer,
-      rasteriser,
-      fonts: async () => null,
-      images: async () => null,
-    });
-    const out = await r.renderPng(d, "p", { scale: 1, background: "#ffffff" });
-    const px = rasteriser.pixels(
-      `<svg xmlns="http://www.w3.org/2000/svg" width="${out.width}" height="${out.height}"><image width="${out.width}" height="${out.height}" href="data:image/png;base64,${base64(out.png)}"/></svg>`,
-      { scale: 1, fonts: [] },
-    );
+    const px = rasterSvg(d, "p", measurer, rasteriser, { background: "#ffffff" });
     return (x: number, y: number) => [
-      ...px.data.subarray((y * out.width + x) * 4, (y * out.width + x) * 4 + 3),
+      ...px.data.subarray((y * px.width + x) * 4, (y * px.width + x) * 4 + 3),
     ];
   }
 

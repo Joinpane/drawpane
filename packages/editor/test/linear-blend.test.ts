@@ -1,6 +1,5 @@
 import { type Op, ROOT_ID } from "@drawpane/model";
-import type { ResvgRasteriser } from "@drawpane/raster";
-import { nodeRasteriser } from "@drawpane/raster/node";
+import { nodeRasteriser, type ResvgRasteriser } from "@drawpane/raster/node";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { Editor } from "../src/editor";
 import { linearBlend } from "../src/linear-blend";
@@ -52,7 +51,7 @@ beforeAll(async () => {
 /** Each band's middle (red channel, straight alpha), drawn headless at 2×. */
 function probe(editor: Editor, ids: string[]): number[] {
   const bounds = { x: 0, y: 0, width: 240, height: 40 };
-  const svg = exportSvg(editor.scene, measurer, ids, bounds, { raster: 2 });
+  const svg = exportSvg(editor.scene, measurer, ids, bounds);
   const p = rasteriser.pixels(svg, { scale: 2, fonts: [] });
   return [30, 90, 150, 210].map((x) => p.data[(40 * p.width + 2 * x) * 4] as number);
 }

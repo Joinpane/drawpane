@@ -1,11 +1,7 @@
 /**
- * Linear dodge and burn in SVG (decision 0038). CSS has plus-lighter (and
- * only Safari plus-darker), and resvg, the headless renderer, has neither;
- * `feComposite operator="arithmetic"`, the filter way to add two pictures,
- * traps in resvg's WebAssembly build, and a filter that brings source and
- * backdrop together holds a buffer per step, past resvg's memory for a
- * layer of any size. So the sum is built from blends every renderer has,
- * on opaque pictures, where each is plain arithmetic:
+ * Linear dodge and burn in SVG (decision 0038). The SVG export builds the
+ * sum from widely supported blends on opaque pictures, where each step
+ * is plain arithmetic:
  *
  * - the backdrop's copy (for burn, inverted: a white difference);
  * - the source laid on black (for burn, its inverse: what's dark adds up)

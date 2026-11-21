@@ -31,14 +31,7 @@
  * - auto layout: positions are exported as they are on the canvas, not as
  *   flexbox
  */
-import {
-  cjkRegionFor,
-  getProp,
-  type NodeRecord,
-  type Paint,
-  type Props,
-  SCRIPT_FALLBACK_FAMILIES,
-} from "@drawpane/model";
+import { cjkRegionFor, getProp, type NodeRecord, type Paint, type Props } from "@drawpane/model";
 import { emojiPiecePositions, emojiPieces } from "./color-emoji";
 import {
   arcPathData,
@@ -569,41 +562,17 @@ export interface SvgImageSource {
   readonly href: string;
   readonly width: number;
   readonly height: number;
-  /**
-   * Where a tiled fill's pattern loads it from, when that isn't `href`:
-   * resvg is handed files only for images outside patterns, so a pattern
-   * needs the image inline (a data: URL).
-   */
-  readonly patternHref?: string;
 }
 
-/** An image fill drawn as a marked placeholder: a grey box with a cross, for an image that wasn't drawn. */
-export const IMAGE_PLACEHOLDER = "placeholder";
-
 export interface SvgExportOptions {
-  /**
-   * Images by content hash (`tiled`: the fill repeats it, as a pattern);
-   * image fills without one are left out, and those given
-   * `IMAGE_PLACEHOLDER` are drawn as one.
-   */
-  readonly images?: (
-    ref: string,
-    tiled: boolean,
-  ) => SvgImageSource | typeof IMAGE_PLACEHOLDER | null;
+  /** Images by content hash. Image fills without a source are omitted. */
+  readonly images?: (ref: string) => SvgImageSource | null;
   /**
    * Draw text runs with OpenType features as glyph outlines (from the
    * measurer's shaper) instead of relying on `font-feature-settings`: for
    * PDF, whose text can't take features. Other text stays text.
    */
   readonly outlineFeatures?: boolean;
-  /**
-   * Output pixels per unit, for SVG that's about to be rasterised (the
-   * headless renderer): text is drawn as the canvas draws it, each upright
-   * line on a whole output pixel and underlines and strikethroughs as the
-   * canvas's own bars rather than `text-decoration`, which a rasteriser
-   * places by the font's metrics. Left out, text is exact and semantic.
-   */
-  readonly raster?: number;
   readonly scriptLocale?: string;
 }
 
@@ -625,17 +594,10 @@ export function exportSvg(
     transform: string,
     blendStyle: string,
   ): string | null => {
-    const source = options.images?.(paint.ref, paint.scaleMode === "tile");
+    const source = options.images?.(paint.ref);
     if (!source) return null;
     const opacity =
       paint.opacity !== undefined && paint.opacity < 1 ? attr("opacity", paint.opacity) : "";
-    if (source === IMAGE_PLACEHOLDER) {
-      // The layer's box in neutral grey, crossed corner to corner, clipped to its shape.
-      const clip = out.id("clip");
-      out.defs.push(`<clipPath id="${clip}"><${shape.tag}${transform}${shape.attrs}/></clipPath>`);
-      const cross = `<path d="M0 0L${w} ${h}M${w} 0L0 ${h}" fill="none" stroke="#a3a3a3" stroke-width="1"/>`;
-      return `<g clip-path="url(#${clip})"${opacity}${blendStyle}><g${transform}><rect${attr("width", w)}${attr("height", h)} fill="#e5e5e5"/>${cross}</g></g>`;
-    }
     const p = imagePlacement(
       paint.scaleMode,
       { width: w, height: h },
@@ -648,9 +610,8 @@ export function exportSvg(
     let body: string;
     if (p.tile) {
       const tile = out.id("tile");
-      const inPattern = attr("href", source.patternHref ?? source.href);
       out.defs.push(
-        `<pattern id="${tile}" patternUnits="userSpaceOnUse"${attr("width", round2(p.width))}${attr("height", round2(p.height))}><image${attr("width", round2(p.width))}${attr("height", round2(p.height))}${inPattern} preserveAspectRatio="none"/></pattern>`,
+        `<pattern id="${tile}" patternUnits="userSpaceOnUse"${attr("width", round2(p.width))}${attr("height", round2(p.height))}><image${attr("width", round2(p.width))}${attr("height", round2(p.height))}${href} preserveAspectRatio="none"/></pattern>`,
       );
       body = `<rect${attr("width", w)}${attr("height", h)} fill="url(#${tile})"/>`;
     } else {
@@ -1314,19 +1275,11 @@ export function exportSvg(
       ...(options.scriptLocale ? { scriptLocale: options.scriptLocale } : {}),
     });
     const dy = textBlockOffset(node, layout);
-    const [ma, mb, mc, md, , mf] = scene.worldMatrix(node.id);
-    const grid = options.raster;
-    /** A baseline, on the output's pixel grid when there is one and the text is upright. */
-    const baselineY = (y: number) =>
-      grid && ma === 1 && mb === 0 && mc === 0 && md === 1
-        ? Math.round((mf + y) * grid) / grid - mf
-        : y;
     const base = node.props;
     const region =
       layout.cjkRegion ?? cjkRegionFor(getProp(base, "characters"), options.scriptLocale);
-    const regionalFont = `Noto Sans ${region}`;
     const colorOutlines = new Map<TextFragment, ShapedText>();
-    if (measurer.colorEmoji && (grid || measurer.engineText === true)) {
+    if (measurer.colorEmoji && measurer.engineText === true) {
       layout = {
         ...layout,
         lines: layout.lines.map((line) => ({
@@ -1370,13 +1323,6 @@ export function exportSvg(
       const named = getProp(props, "fontFamily").replace(/['"]/g, "");
       const drawn = drawnFamily(props, measurer).replace(/['"]/g, "");
       const stack = drawn !== named ? [drawn, named] : [named];
-      if (grid)
-        stack.push(
-          "Drawpane Missing Glyph",
-          "Instrument Sans",
-          regionalFont,
-          ...SCRIPT_FALLBACK_FAMILIES.filter((family) => family !== regionalFont),
-        );
       return `${stack.map((family) => `'${family}'`).join(", ")}, sans-serif`;
     };
     const decorationOf = (d: string) =>
@@ -1387,7 +1333,7 @@ export function exportSvg(
       style += attr("font-weight", getProp(base, "fontWeight"));
     if (getProp(base, "fontStyle") === "italic") style += attr("font-style", "italic");
     if (layout.letterSpacing !== 0) style += attr("letter-spacing", layout.letterSpacing);
-    if (!grid && getProp(base, "textDecoration") !== "none")
+    if (getProp(base, "textDecoration") !== "none")
       style += attr("text-decoration", decorationOf(getProp(base, "textDecoration")));
     if (anchor) style += attr("text-anchor", anchor);
     // OpenType features and variable axes as CSS, which SVG text honours (decisions 0005, 0009).
@@ -1433,7 +1379,7 @@ export function exportSvg(
         own += attr("font-style", getProp(p, "fontStyle"));
       if (frag.letterSpacing !== layout.letterSpacing)
         own += attr("letter-spacing", frag.letterSpacing);
-      if (!grid && frag.decoration !== getProp(base, "textDecoration"))
+      if (frag.decoration !== getProp(base, "textDecoration"))
         own += attr("text-decoration", decorationOf(frag.decoration));
       if (fontCss(p, base)) own += attr("style", fontCss(p, base));
       return own;
@@ -1452,7 +1398,7 @@ export function exportSvg(
             const fill = pass === 0 && top ? out.paint("fill", top, w, h) : null;
             return fill ?? ' fill="none"';
           };
-          const y = round2(baselineY(drawnBaseline(line, dy)));
+          const y = round2(drawnBaseline(line, dy));
           // Outlined and bidi runs already have explicit positions in the layout.
           // Each text chunk is independently anchored at its visual left edge.
           if (line.fragments.some((f) => outlined.has(f) || f.direction)) {
@@ -1546,19 +1492,6 @@ export function exportSvg(
       .map(([frag, shaped]) => glyphs(frag, shaped))
       .join("");
 
-    /** Rasterising: the canvas's underline and strikethrough bars, under fragments drawn as text. */
-    const bars = (frag: TextFragment) => {
-      const line = layout.lines.find((l) => l.fragments.includes(frag));
-      if (!grid || !line || frag.decoration === "none" || outlined.has(frag)) return "";
-      const x = lineOffset(line, w, base) + frag.x;
-      return barRect(frag.decoration, x, drawnBaseline(line, dy), frag);
-    };
-    const fragments = layout.lines.flatMap((l) => l.fragments);
-    const layerBars = fragments
-      .filter((f) => !f.fills)
-      .map(bars)
-      .join("");
-
     const fills = getProp(base, "fills");
     const paints: Paint[] = fills.length > 0 ? fills : [{ type: "solid", color: "#000000" }];
     let pass = 0;
@@ -1568,14 +1501,6 @@ export function exportSvg(
       if (!fill) continue;
       parts.push(`<text${transform}${style}${fill} xml:space="preserve">${lines(pass++)}</text>`);
       if (layerOutlines) parts.push(`<g${transform}${fill}>${layerOutlines}</g>`);
-      if (layerBars) parts.push(`<g${transform}${fill}>${layerBars}</g>`);
-    }
-    // Bars under fragments with fills of their own, in their topmost visible fill.
-    for (const frag of fragments) {
-      const bar = frag.fills ? bars(frag) : "";
-      const top = bar ? [...(frag.fills ?? [])].reverse().find((f) => f.visible !== false) : null;
-      const fill = top ? out.paint("fill", top, w, h) : null;
-      if (fill) parts.push(`<g${transform}${fill}>${bar}</g>`);
     }
     // Outlined runs with their own fills: drawn once, in their topmost visible fill.
     for (const [frag, shaped] of [

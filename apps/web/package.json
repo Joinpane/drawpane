@@ -24,7 +24,6 @@
     "@drawpane/figma": "workspace:*",
     "@drawpane/model": "workspace:*",
     "@drawpane/penpot": "workspace:*",
-    "@drawpane/raster": "workspace:*",
     "@drawpane/svg": "workspace:*",
     "@drawpane/ui": "workspace:*",
     "@simplewebauthn/browser": "14.0.0",

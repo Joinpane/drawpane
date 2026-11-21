@@ -19,7 +19,6 @@ import {
 } from "../src/harfbuzz-measurer";
 import { MISSING_GLYPH_FAMILY } from "../src/missing-glyph-font";
 import { fontString, layoutText, shapingRun, type TextMeasurer } from "../src/text";
-import { facesUsed } from "./fixtures/svg-raster";
 
 const fixture = (name: string) => {
   const b = readFileSync(new URL(`../../../apps/web/e2e/fixtures/${name}`, import.meta.url));
@@ -242,8 +241,8 @@ describe("export and render", () => {
         props: { characters: "Hi", fontFamily: "SF Pro", fontSize: 12, fontWeight: 700 },
       },
     ]);
-    expect(facesUsed(doc, ["t"], fonts)).toEqual([
-      { family: "SF Pro Text", weight: 700, italic: false },
+    expect(measuredFaces(doc.nodes(), fonts)).toEqual([
+      { family: "SF Pro Text", weight: 700, italic: false, canvas: true },
     ]);
   });
 });

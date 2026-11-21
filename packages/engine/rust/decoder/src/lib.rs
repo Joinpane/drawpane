@@ -1,4 +1,4 @@
-//! Bounded decoding for headless exports. The Worker reuses one capped instance.
+//! Bounded decoding for headless exports. The Worker keeps one capped instance per export.
 use image::{ImageDecoder, ImageFormat, ImageReader};
 use std::io::Cursor;
 use wasm_bindgen::prelude::*;
@@ -127,6 +127,76 @@ fn resample(data: &[u8], source: (u32, u32), target: (u32, u32), channels: usize
     out.output
 }
 
+fn gif_rows(natural: (u32, u32), target: (u32, u32), bytes: &[u8], room: usize) -> Result<Option<Vec<u8>>, JsError> {
+    let mut options = gif::DecodeOptions::new();
+    options.check_frame_consistency(true);
+    let mut reader = options.read_info(Cursor::new(bytes))?;
+    if (u32::from(reader.width()), u32::from(reader.height())) != natural {
+        return Err(JsError::new("the image size differs from its upload"));
+    }
+    let frame = reader
+        .next_frame_info()?
+        .ok_or_else(|| JsError::new("missing GIF frame"))?;
+    let (left, top) = (frame.left as usize, frame.top as usize);
+    let (width, height) = (frame.width as usize, frame.height as usize);
+    let transparent = frame.transparent;
+    // Interlacing needs row order before box filtering. Keep its one-byte indices.
+    // Ordinary GIFs only need the current row. Like the previous decoder, draw the first frame.
+    let indexed_bytes = if frame.interlaced { width * height } else { 0 };
+    let row_bytes = natural.0 as usize * 4;
+    let sums_bytes = target.0 as usize * size_of::<[u64; 5]>();
+    if width == 0 || height == 0 {
+        return Err(JsError::new("empty GIF frame"));
+    }
+    if indexed_bytes + width + row_bytes + sums_bytes + pixels(target.0, target.1) * 4 > room {
+        return Ok(None);
+    }
+    let palette = reader.palette()?.to_vec();
+    let mut indexed = vec![0; indexed_bytes];
+    if indexed_bytes > 0 {
+        reader.read_into_buffer(&mut indexed)?;
+    }
+    let mut indices = vec![0; width];
+    let mut row = vec![0; row_bytes];
+    let mut out = Resample::new(natural.0, target.0, target.1);
+    if natural == target {
+        out.sums.clear();
+    }
+    for y in 0..natural.1 as usize {
+        if (top..top + height).contains(&y) {
+            let indices = if indexed_bytes > 0 {
+                &indexed[(y - top) * width..][..width]
+            } else {
+                if !reader.fill_buffer(&mut indices)? {
+                    return Err(JsError::new("incomplete GIF rows"));
+                }
+                &indices
+            };
+            let (pixels, _) = row[left * 4..][..width * 4].as_chunks_mut::<4>();
+            for (pixel, &index) in pixels.iter_mut().zip(indices) {
+                let offset = index as usize * 3;
+                if Some(index) == transparent {
+                    pixel.fill(0);
+                } else {
+                    let rgb = palette
+                        .get(offset..offset + 3)
+                        .ok_or_else(|| JsError::new("invalid GIF palette index"))?;
+                    pixel[..3].copy_from_slice(rgb);
+                    pixel[3] = 255;
+                }
+            }
+        } else if y == top + height {
+            row.fill(0);
+        }
+        out.row(&row, 4);
+        let h = target.1 as usize;
+        if !out.sums.is_empty() && (y + 1) * h / natural.1 as usize != y * h / natural.1 as usize {
+            out.finish_row();
+        }
+    }
+    Ok(Some(out.output))
+}
+
 fn full_image(
     natural: (u32, u32),
     target: (u32, u32),
@@ -156,6 +226,50 @@ fn full_image(
     }
 }
 
+/// Progressive JPEG retains 64 i16 coefficients per sampled block. The maxima
+/// set the MCU size, and each component occupies its own sampled, padded grid.
+fn progressive_bytes(mut bytes: &[u8], natural: (u32, u32)) -> Option<usize> {
+    bytes = bytes.strip_prefix(&[0xff, 0xd8])?;
+    loop {
+        bytes = bytes.strip_prefix(&[0xff])?;
+        while let Some(rest) = bytes.strip_prefix(&[0xff]) {
+            bytes = rest;
+        }
+        let (&marker, segment) = bytes.split_first()?;
+        if marker == 0xda || marker == 0xd9 {
+            return None;
+        }
+        let length = u16::from_be_bytes(segment.get(..2)?.try_into().ok()?) as usize;
+        let (head, rest) = segment.split_at_checked(length)?;
+        let payload = head.get(2..)?;
+        bytes = rest;
+        if marker != 0xc2 {
+            continue;
+        }
+        let count = usize::from(*payload.get(5)?);
+        let components = payload.get(6..)?;
+        if !(1..=4).contains(&count) || components.len() != count * 3 {
+            return None;
+        }
+        let mut max_h = 0;
+        let mut max_v = 0;
+        let mut blocks_per_mcu = 0;
+        for component in components.as_chunks::<3>().0 {
+            let horizontal = usize::from(component[1] >> 4);
+            let vertical = usize::from(component[1] & 15);
+            if !(1..=4).contains(&horizontal) || !(1..=4).contains(&vertical) {
+                return None;
+            }
+            max_h = max_h.max(horizontal);
+            max_v = max_v.max(vertical);
+            blocks_per_mcu += horizontal * vertical;
+        }
+        let columns = (natural.0 as usize).div_ceil(8 * max_h);
+        let rows = (natural.1 as usize).div_ceil(8 * max_v);
+        return Some(columns * rows * blocks_per_mcu * 64 * size_of::<i16>());
+    }
+}
+
 fn jpeg_scaled(natural: (u32, u32), target: (u32, u32), bytes: &[u8], room: usize) -> Result<Option<Vec<u8>>, JsError> {
     use jpeg_decoder::{CodingProcess, Decoder, PixelFormat};
 
@@ -172,16 +286,21 @@ fn jpeg_scaled(natural: (u32, u32), target: (u32, u32), bytes: &[u8], room: usiz
         (w, h) = decoder.scale(u16::MAX, target.1 as u16)?;
     }
     let coded = pixels(w.into(), h.into());
-    let coefficients = if info.coding_process == CodingProcess::DctSequential {
-        0
-    } else {
-        pixels(natural.0, natural.1) * 8
+    let coefficients = match info.coding_process {
+        CodingProcess::DctSequential => 0,
+        CodingProcess::DctProgressive => {
+            progressive_bytes(bytes, natural).ok_or_else(|| JsError::new("invalid progressive JPEG frame"))?
+        }
+        CodingProcess::Lossless => pixels(natural.0, natural.1) * 8,
     };
-    if coded * 8 + coefficients + pixels(target.0, target.1) * 4 > room {
+    let decode_peak = coded * 8 + coefficients;
+    let resample_peak = coded * 4 + pixels(target.0, target.1) * 4 + target.0 as usize * size_of::<[u64; 5]>();
+    if decode_peak.max(resample_peak) > room {
         return Ok(None);
     }
     decoder.set_max_decoding_buffer_size(coded * 4);
     let mut data = decoder.decode()?;
+    drop(decoder);
     let channels = match info.pixel_format {
         PixelFormat::L8 => 1,
         PixelFormat::RGB24 => 3,
@@ -227,7 +346,8 @@ pub fn decode_image(
     match image::guess_format(bytes)? {
         ImageFormat::Png => png_rows(natural, target, bytes, room),
         ImageFormat::Jpeg => jpeg_scaled(natural, target, bytes, room),
-        format @ (ImageFormat::Gif | ImageFormat::WebP) => full_image(natural, target, bytes, room, format),
+        ImageFormat::Gif => gif_rows(natural, target, bytes, room),
+        ImageFormat::WebP => full_image(natural, target, bytes, room, ImageFormat::WebP),
         _ => Err(JsError::new("unsupported image format")),
     }
 }

@@ -21,10 +21,15 @@ import { teamFontKey } from "../src/api/team-fonts";
 import type { NodeRow } from "../src/rooms/node-tables";
 import { snapshotStream } from "../src/rooms/snapshots";
 import ttfUrl from "./fixtures/InstrumentSans-Regular.ttf?inline";
+import interlacedGifUrl from "./fixtures/interlaced-2400.gif?inline";
+import progressiveJpegUrl from "./fixtures/progressive-2000.jpg?inline";
 import { signedInUser } from "./helpers";
 import { call, makeToken } from "./mcp-helpers";
 
 type Result = Awaited<ReturnType<typeof call>>;
+
+const inlineBytes = (url: string) =>
+  Uint8Array.from(atob(url.slice(url.indexOf(",") + 1)), (char) => char.charCodeAt(0));
 
 /** The picture an answer carries, and its size from the PNG's header. */
 function picture(result: Result) {
@@ -76,9 +81,7 @@ describe("export_image, headless", () => {
         .bind(fileId)
         .first<{ team_id: string }>();
       if (!file) throw new Error("missing test file");
-      const fontBytes = (url: string) =>
-        Uint8Array.from(atob(url.slice(url.indexOf(",") + 1)), (c) => c.charCodeAt(0));
-      const latin = fontBytes(ttfUrl);
+      const latin = inlineBytes(ttfUrl);
       const sha = "d".repeat(64);
       await env.FILES.put(teamFontKey(sha), latin);
       await env.DB.prepare(
@@ -87,28 +90,27 @@ describe("export_image, headless", () => {
       )
         .bind(file.team_id, sha, latin.byteLength, Date.now())
         .run();
-      await env.FILES.put("fonts/fallback/v1/Noto-Sans-SC/4e00.ttf", fontBytes(notoUrl));
-      // The JP control slice lacks Han coverage. It must draw the last-resort outline.
+      await env.FILES.put("fonts/fallback/v1/Noto-Sans-SC/4e00.ttf", inlineBytes(notoUrl));
+      // The JP slice lacks Han coverage, so consulting the caller's locale would draw a box.
       await env.FILES.put("fonts/fallback/v1/Noto-Sans-JP/4e00.ttf", latin);
       const id = await render(
         '<Frame w={80} h={80} fill="#ffffff"><Text font="Instrument Sans" size={44} fill="#101010">中</Text></Frame>',
       );
       const input = { fileId, id, scale: 1 };
       const simplified = picture(await call(reader, "export_image", input));
-      const japanese = picture(
+      const withJapaneseHeader = picture(
         await call(reader, "export_image", input, { "accept-language": "ja-JP" }),
       );
       expect([simplified.width, simplified.height]).toEqual([80, 80]);
-      expect([japanese.width, japanese.height]).toEqual([80, 80]);
+      expect(withJapaneseHeader.bytes).toEqual(simplified.bytes);
       // 中 has a vertical stroke through its centre. The last-resort box is empty there.
       const middle = (bytes: Uint8Array) =>
         [16, 24, 32].map((y) => enginePngPixel(bytes, 22, y)[0] ?? 255);
       expect(middle(simplified.bytes).some((value) => value < 128)).toBe(true);
-      expect(middle(japanese.bytes)).toEqual([255, 255, 255]);
       const explicitJapanese = picture(
         await call(reader, "export_image", { ...input, locale: "ja-JP" }),
       );
-      expect(explicitJapanese.bytes).toEqual(japanese.bytes);
+      expect(middle(explicitJapanese.bytes)).toEqual([255, 255, 255]);
       expect(picture(await call(reader, "export_image", input)).bytes).toEqual(simplified.bytes);
 
       const emoji = await render(
@@ -270,9 +272,7 @@ describe("export_image, headless", () => {
         .bind(fileId)
         .first<{ team_id: string }>();
       if (!file) throw new Error("missing test file");
-      const font = Uint8Array.from(atob(ttfUrl.slice(ttfUrl.indexOf(",") + 1)), (c) =>
-        c.charCodeAt(0),
-      );
+      const font = inlineBytes(ttfUrl);
       const sha = "d".repeat(64);
       await env.DB.prepare(
         `INSERT INTO team_fonts (id, team_id, family, style, weight, weight_max, italic, format, sha, bytes, created_at)
@@ -382,6 +382,15 @@ describe("export_image, headless", () => {
     const out = picture(await call(token, "export_image", { fileId, id: photo, scale: 1 }));
     expect([out.width, out.height]).toEqual([100, 50]);
     expect(out.data.approximate).toBeUndefined();
+
+    const other = await setup();
+    const foreign = await other.render(
+      `<Rect w={100} h={50} fill={${JSON.stringify([{ type: "image", ref: sha, scaleMode: "fill" }])}} />`,
+    );
+    const blocked = picture(
+      await call(other.token, "export_image", { fileId: other.fileId, id: foreign }),
+    );
+    expect(blocked.data.approximate).toEqual([expect.stringContaining("couldn't be loaded")]);
   });
 
   it("draws an image more than a render may hold as a placeholder, and says so", async () => {
@@ -435,6 +444,60 @@ describe("export_image, headless", () => {
     }
   }, 120_000);
 
+  it.each([
+    ["progressive JPEG", "image/jpeg", progressiveJpegUrl, 200, 200],
+    ["interlaced GIF", "image/gif", interlacedGifUrl, 240, 180],
+  ] as const)(
+    "draws a large %s at its painted size",
+    async (_format, mime, source, width, height) => {
+      const { browser, fileId, token, render } = await setup();
+      const uploaded = await browser.fetch(`/api/files/${fileId}/media`, {
+        method: "POST",
+        headers: { "content-type": mime },
+        body: inlineBytes(source),
+      });
+      expect(uploaded.ok).toBe(true);
+      const { sha } = (await uploaded.json()) as { sha: string };
+      const fills = JSON.stringify([{ type: "image", ref: sha, scaleMode: "stretch" }]);
+      const id = await render(`<Rect w={${width}} h={${height}} fill={${fills}} />`);
+      const result = picture(await call(token, "export_image", { fileId, id, scale: 1 }));
+      expect(result.data).toMatchObject({ width, height, scale: 1 });
+      expect(result.data.approximate).toBeUndefined();
+      const left = enginePngPixel(result.bytes, width >> 2, height >> 1);
+      const right = enginePngPixel(result.bytes, (width * 3) >> 2, height >> 1);
+      expect(left[2]).toBeGreaterThan(180);
+      expect(left[0]).toBeLessThan(60);
+      expect(right[0]).toBeGreaterThan(210);
+      expect(right[2]).toBeLessThan(75);
+    },
+    120_000,
+  );
+
+  it("restores the full render budget after a large image in the same runner", async () => {
+    const { browser, fileId, token, render } = await setup();
+    const exportImage = async (body: Uint8Array, mime: string, width: number, height: number) => {
+      const uploaded = await browser.fetch(`/api/files/${fileId}/media`, {
+        method: "POST",
+        headers: { "content-type": mime },
+        body: new Uint8Array(body),
+      });
+      expect(uploaded.ok).toBe(true);
+      const { sha } = (await uploaded.json()) as { sha: string };
+      const fills = JSON.stringify([{ type: "image", ref: sha, scaleMode: "stretch" }]);
+      const id = await render(`<Rect w={${width}} h={${height}} fill={${fills}} />`);
+      return picture(await call(token, "export_image", { fileId, id, scale: 1 }));
+    };
+    // The progressive coefficient arrays raise the decoder's high-water mark above 13 MiB.
+    const first = await exportImage(inlineBytes(progressiveJpegUrl), "image/jpeg", 200, 200);
+    expect(first.data.approximate).toBeUndefined();
+
+    const color = [36, 108, 203, 255];
+    const next = await exportImage(solidPng(1280, 720, color), "image/png", 1280, 720);
+    expect(next.data).toMatchObject({ width: 1280, height: 720, scale: 1 });
+    expect(next.data.approximate).toBeUndefined();
+    expect(enginePngPixel(next.bytes, 640, 360)).toEqual(color);
+  }, 120_000);
+
   it("explains what it can't draw", async () => {
     const { fileId, token, render } = await setup();
     const unknown = await call(token, "export_image", { fileId, id: "nope", scale: 1 });
@@ -470,7 +533,7 @@ describe("export_image, headless", () => {
         ${scopes.repeat(4)}
           <Rect w={900} h={180} isMask maskType="alpha" fill="#ffffff" />
           <Rect w={400} h={180} fill="#bde591" />
-          <Rect x={80} w={680} h={180} fill="#ffffff22" effects={[{ "type": "background-blur", "radius": 160 }]} />
+          <Rect x={80} w={680} h={180} fill="#ffffff22" effects={[{ "type": "background-blur", "radius": 400 }]} />
         ${"</Frame>".repeat(4)}
       </Frame>`,
     );

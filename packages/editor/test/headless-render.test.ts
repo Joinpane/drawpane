@@ -44,11 +44,13 @@ describe.skipIf(!built())("the capped headless PNG renderer", () => {
     const fixture = readFileSync(new URL("./fixtures/NotoSansSC-Subset.ttf", import.meta.url));
     const bytes = Uint8Array.from(fixture).buffer;
     const requested: string[] = [];
-    const measurer = new HarfBuzzMeasurer(async (face) => {
-      if (face.subset) requested.push(`${face.family}/${face.subset}`);
-      return face.family === "Noto Sans JP" ? bytes : null;
-    });
-    measurer.setScriptLocale("ja-JP");
+    const measurer = new HarfBuzzMeasurer(
+      async (face) => {
+        if (face.subset) requested.push(`${face.family}/${face.subset}`);
+        return face.family === "Noto Sans JP" ? bytes : null;
+      },
+      { scriptLocale: "ja-JP" },
+    );
     const doc = picture([]);
     doc.apply([
       {

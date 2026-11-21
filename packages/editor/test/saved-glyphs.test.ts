@@ -12,15 +12,14 @@ import {
   ROOT_ID,
   type SavedGlyph,
 } from "@drawpane/model";
-import type { ResvgRasteriser } from "@drawpane/raster";
-import { nodeRasteriser } from "@drawpane/raster/node";
+import { nodeRasteriser, type ResvgRasteriser } from "@drawpane/raster/node";
 import { beforeAll, describe, expect, it } from "vitest";
 import { Doc } from "../src/doc";
 import { glyphTable, savedGlyphGroups, savedText } from "../src/saved-glyphs";
 import { Scene } from "../src/scene";
 import { exportSvg } from "../src/svg";
 import type { TextMeasurer } from "../src/text";
-import { createHeadlessRenderer } from "./fixtures/svg-raster";
+import { rasterSvg } from "./fixtures/svg-raster";
 
 const FAMILY = "Glyphless Test Sans";
 const SQUARE = "M0 0 L500 0 L500 500 L0 500 Z";
@@ -209,19 +208,9 @@ describe("saved glyphs, rasterised", () => {
   it("ink where the outlines are, without the font", async () => {
     const { text, sets } = imported();
     const doc = docOf(text, sets);
-    const renderer = createHeadlessRenderer({
-      measurer,
-      rasteriser,
-      fonts: async () => null,
-      images: async () => null,
-    });
-    const out = await renderer.renderPng(doc, "t", { scale: 1, background: "#ffffff" });
-    const px = rasteriser.pixels(
-      `<svg xmlns="http://www.w3.org/2000/svg" width="${out.width}" height="${out.height}"><image width="${out.width}" height="${out.height}" href="data:image/png;base64,${Buffer.from(out.png).toString("base64")}"/></svg>`,
-      { scale: 1, fonts: [] },
-    );
+    const px = rasterSvg(doc, "t", measurer, rasteriser, { background: "#ffffff" });
     const at = (x: number, y: number) => {
-      const i = (y * out.width + x) * 4;
+      const i = (y * px.width + x) * 4;
       return [...px.data.subarray(i, i + 3)];
     };
     // Inside the first square (0 to 10 across, 8 to 18 down), and the gap after it.

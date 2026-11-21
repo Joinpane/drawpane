@@ -1,5 +1,5 @@
 /**
- * Masks drawn by the headless renderer (SVG through resvg), as Figma draws
+ * Masks drawn by the SVG export, as Figma draws
  * them: what each kind of mask lets show, which layers it reaches, and
  * masks made of a group, a text, a line, turned, or alone. The canvas draws
  * the same scopes (masks.ts) and is checked against it in
@@ -7,12 +7,11 @@
  */
 import { readFileSync } from "node:fs";
 import { type Op, ROOT_ID } from "@drawpane/model";
-import type { ResvgRasteriser } from "@drawpane/raster";
-import { nodeRasteriser } from "@drawpane/raster/node";
+import { nodeRasteriser, type ResvgRasteriser } from "@drawpane/raster/node";
 import { beforeAll, describe, expect, it } from "vitest";
 import { Doc } from "../src/doc";
 import type { TextMeasurer } from "../src/text";
-import { base64, createHeadlessRenderer } from "./fixtures/svg-raster";
+import { rasterSvg } from "./fixtures/svg-raster";
 
 const measurer: TextMeasurer = {
   width: (font, text) => text.length * Number(font.match(/(\d+(?:\.\d+)?)px/)?.[1] ?? 16) * 0.6,
@@ -57,22 +56,9 @@ async function draw(layers: Layer[], size = 240) {
         }) as Op,
     ),
   ]);
-  const r = createHeadlessRenderer({
-    measurer,
-    rasteriser,
-    fonts: async (face) =>
-      face.family === "Instrument Sans"
-        ? font.buffer.slice(font.byteOffset, font.byteOffset + font.byteLength)
-        : null,
-    images: async () => null,
-  });
-  const out = await r.renderPng(d, "p", { scale: 1, background: "#ffffff" });
-  const px = rasteriser.pixels(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="${out.width}" height="${out.height}"><image width="${out.width}" height="${out.height}" href="data:image/png;base64,${base64(out.png)}"/></svg>`,
-    { scale: 1, fonts: [] },
-  );
+  const px = rasterSvg(d, "p", measurer, rasteriser, { background: "#ffffff", fonts: [font] });
   const at = (x: number, y: number) => [
-    ...px.data.subarray((y * out.width + x) * 4, (y * out.width + x) * 4 + 3),
+    ...px.data.subarray((y * px.width + x) * 4, (y * px.width + x) * 4 + 3),
   ];
   /** How many pixels in a box are near a colour. */
   const count = (box: { x: number; y: number; w: number; h: number }, color: number[]) => {
