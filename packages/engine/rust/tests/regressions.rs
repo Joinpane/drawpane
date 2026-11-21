@@ -228,6 +228,13 @@ fn gradient_stop_order_preserves_positions() {
     let red = (0.0, [1.0, 0.0, 0.0, 1.0]);
     let blue = (1.0, [0.0, 0.0, 1.0, 1.0]);
     assert!(draw(vec![blue, red]) == draw(vec![red, blue]));
+    let densely_sampled = (0..=64)
+        .map(|i| {
+            let p = i as f32 / 64.0;
+            (p, [1.0 - p, 0.0, p, 1.0])
+        })
+        .collect();
+    assert_eq!(draw(densely_sampled), draw(vec![red, blue]));
 }
 
 #[test]

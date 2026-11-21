@@ -193,8 +193,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       setCpuMode(
         engine !== null &&
           engine.backend === "cpu-worker" &&
-          (engineShowing ||
-            (!engine.recovering && engine.last.supported && !engine.limitFallbackReason)),
+          (engineShowing || (!engine.recovering && engine.last.supported)),
       );
       if (engineShowing && engine) {
         setRendererStatus(editor, {
@@ -205,6 +204,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           adapter: engine.adapter,
           compatibility: engine.compatibility,
           software: engine.software,
+          limit: engine.limitReason,
           reducedImages: engine.reducedImages,
         });
         return;
@@ -223,16 +223,9 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           switchOn: true,
           choice,
           active: "canvas",
-          reason: { kind: "unsupported", features: Object.keys(engine.unsupported(false)) },
-        });
-        return;
-      }
-      if (engine?.limitFallbackReason) {
-        setRendererStatus(editor, {
-          switchOn: true,
-          choice,
-          active: "canvas",
-          reason: { kind: "error", message: engine.limitFallbackReason },
+          reason: engine.limitReason
+            ? { kind: "limit", message: engine.limitReason }
+            : { kind: "unsupported", features: Object.keys(engine.unsupported(false)) },
         });
         return;
       }

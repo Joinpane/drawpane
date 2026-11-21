@@ -350,7 +350,8 @@ pub fn compute_regions(
         64
     };
 
-    // Only iterate over chunk indices overlapping `[vis_x0..vis_x1) x [vis_y0..vis_y1)`.
+    // Only iterate over chunks intersecting the target. Each scratch region
+    // grows from the visible part of its chunk, keeping the full-lens grid phase.
     let ix0 = (vis_x0 - paint_x0).div_euclid(step);
     let ix1 = (vis_x1 - 1 - paint_x0).div_euclid(step);
     let iy0 = (vis_y0 - paint_y0).div_euclid(step);
@@ -365,9 +366,9 @@ pub fn compute_regions(
         if oy1 <= oy0 {
             continue;
         }
-        let cy0_raw = (ty0 - support).max(full_y0);
+        let cy0_raw = (oy0 - support).max(full_y0);
         let cy0 = (cy0_raw - (cy0_raw - full_y0).rem_euclid(alignment)).max(full_y0);
-        let cy1 = (ty1 + support).min(full_y1);
+        let cy1 = (oy1 + support).min(full_y1);
         let cy1 = if align_mips { align_up(cy1, full_y0) } else { cy1 };
         let ch = cy1 - cy0;
         for ix in ix0..=ix1 {
@@ -378,9 +379,9 @@ pub fn compute_regions(
             if ox1 <= ox0 {
                 continue;
             }
-            let cx0_raw = (tx0 - support).max(full_x0);
+            let cx0_raw = (ox0 - support).max(full_x0);
             let cx0 = (cx0_raw - (cx0_raw - full_x0).rem_euclid(alignment)).max(full_x0);
-            let cx1 = (tx1 + support).min(full_x1);
+            let cx1 = (ox1 + support).min(full_x1);
             let cx1 = if align_mips { align_up(cx1, full_x0) } else { cx1 };
             let cw = cx1 - cx0;
             if cw <= 0
@@ -1730,6 +1731,25 @@ mod tests {
             assert_eq!((chunk.rw % 8, chunk.rh % 8), (0, 0));
             assert_eq!(((chunk.x0 - whole.x0) % 8, (chunk.y0 - whole.y0) % 8), (0, 0));
         }
+
+        let cropped = compute_regions(
+            &op,
+            &params,
+            view,
+            size,
+            frame,
+            (600, 200),
+            (8, 8),
+            HARD_MAX_REGION_SIDE,
+            HARD_MAX_REGION_PIXELS,
+            EXACT_SPLIT_SIDE,
+            EXACT_SPLIT_PIXELS,
+            EXACT_CHUNK_SIDE,
+        )
+        .unwrap();
+        assert_eq!(cropped.len(), 1);
+        assert_eq!((cropped[0].out_x1, cropped[0].out_y1), (8, 8));
+        assert!(cropped[0].rw < 256 && cropped[0].rh < 256);
 
         let mut backdrop = Vec::new();
         for y in 0..frame.1 {

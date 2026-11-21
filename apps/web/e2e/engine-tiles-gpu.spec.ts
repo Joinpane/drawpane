@@ -69,16 +69,29 @@ function solid(
   return [...list.finish()];
 }
 
-/** Draws `frames` in turn on a GPU engine given `list`; answers each one's stats and pixel. */
-async function sample(
-  page: Page,
-  list: number[],
-  frames: Frame[],
-  tileBytes?: number,
-  build: GpuBuild = "browser",
-) {
+function directStripes(): number[] {
+  const list = new ListWriter(0xffffffff, 1);
+  list.reset();
+  for (let i = 0; i < 12; i++) {
+    list.set(i + 1, ROOT, {
+      flags: 0,
+      transform: [1, 0, 0, 1, 20 + i * 6, 24],
+      opacity: 1,
+      width: 2,
+      height: 48,
+      coarseBelow: 0,
+      reach: 0,
+      unsupported: 0,
+      paths: [{ kind: "rect", w: 2, h: 48, radii: [0, 0, 0, 0], smoothing: 0 }],
+      ops: [{ op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [1, 0, 0, 1] } }],
+      coarse: [],
+    });
+  }
+  return [...list.finish()];
+}
+
+async function openEngine(page: Page, build: GpuBuild) {
   const root = ROOTS[build];
-  const expectedBackend = build === "webgl" ? "webgl2" : "webgpu";
   await page.route(`${origin}/**`, async (route) => {
     const filename = new URL(route.request().url()).pathname.slice(1);
     if (filename === "engine.js" || filename === "engine_bg.wasm") {
@@ -91,6 +104,18 @@ async function sample(
     }
   });
   await page.goto(origin);
+}
+
+/** Draws `frames` in turn on a GPU engine given `list`; answers each one's stats and pixel. */
+async function sample(
+  page: Page,
+  list: number[],
+  frames: Frame[],
+  tileBytes?: number,
+  build: GpuBuild = "browser",
+) {
+  await openEngine(page, build);
+  const expectedBackend = build === "webgl" ? "webgl2" : "webgpu";
   return page.evaluate(
     async ({ list, frames, tileBytes, expectedBackend }) => {
       const name = "/engine.js";
@@ -162,6 +187,83 @@ async function sample(
 
 for (const build of ["browser", "webgl"] as const) {
   test.describe(`GPU tiles (${build})`, () => {
+    test("a rejected hardware-budget resize preserves the directly presented front buffer", async ({
+      page,
+      browserName,
+    }) => {
+      test.skip(browserName !== "chromium", "Requires the Chromium GPU canvas");
+      test.skip(
+        build === "browser" && process.env.GPU_BENCH_XVFB !== "1",
+        "Headless Chromium loses its WebGPU device when a canvas presents.",
+      );
+      await openEngine(page, build);
+      const state = await page.evaluate(
+        async ({ list, expectedBackend }) => {
+          const url = "/engine.js";
+          const glue = (await import(url)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          const engine = new glue.Engine(0, 0);
+          const requireOk = (result: { ok: boolean; message: string; free(): void }) => {
+            const { ok, message } = result;
+            result.free();
+            if (!ok) throw new Error(message);
+          };
+          try {
+            requireOk(engine.setLimit("gpu_bytes", 22 << 20));
+            const canvas = document.createElement("canvas");
+            document.body.append(canvas);
+            const gpu = await glue.createGpu(canvas, 0);
+            if (
+              !gpu.ok ||
+              gpu.backend !== expectedBackend ||
+              !engine.attachGpu ||
+              !engine.renderGpu ||
+              !engine.gpuPixels
+            )
+              throw new Error(gpu.message || `expected ${expectedBackend}, got ${gpu.backend}`);
+            try {
+              requireOk(engine.attachGpu(gpu));
+            } finally {
+              gpu.free();
+            }
+            requireOk(engine.apply(new Uint8Array(list)));
+            const bg = new Float32Array([0, 0, 0, 1]);
+            const first = engine.renderGpu(160, 96, 1, 0, 0, 1, bg, false, 0, true);
+            const presented = first.presented;
+            requireOk(first);
+            // Large window with no padded readers, so this uses the actual GPU byte
+            // budget even on SwiftShader. The failed draw must leave the surface alone.
+            const rejected = engine.renderGpu(1024, 1024, 1, 0, 0, 1, bg, false, 0, true);
+            const error = { code: rejected.code, message: rejected.message };
+            rejected.free();
+            const pixels = await engine.gpuPixels();
+            if (!(pixels instanceof Uint8Array)) throw new Error(pixels.message);
+            const at = (48 * 160 + 80) * 4;
+            return {
+              presented,
+              error,
+              size: [canvas.width, canvas.height],
+              bytes: pixels.length,
+              stripe: [...pixels.subarray(at, at + 4)],
+              background: [...pixels.subarray(0, 4)],
+            };
+          } finally {
+            engine.free();
+          }
+        },
+        { list: directStripes(), expectedBackend: build === "browser" ? "webgpu" : "webgl2" },
+      );
+      expect(state.presented).toBe(true);
+      expect(state.error).toMatchObject({
+        code: 4,
+        message: expect.stringContaining("GPU memory"),
+      });
+      expect(state.size).toEqual([160, 96]);
+      expect(state.bytes).toBe(160 * 96 * 4);
+      expect(state.stripe).toEqual(red);
+      expect(state.background).toEqual([0, 0, 0, 255]);
+    });
+
     test("a zoom with one GPU page of tile slots still covers the view", async ({ page }) => {
       // 16 slots, 16 tiles in view: the coarse tiles the zoom draws must fit, or the view's own
       // tiles are drawn straight into the frame; the far corner is never left blank.
@@ -433,13 +535,13 @@ for (const build of ["browser", "webgl"] as const) {
 
 for (const build of ["browser", "webgl"] as const) {
   test(`glass scratch budget and moving reader frames (${build})`, async ({ page }) => {
-    test.setTimeout(120_000);
+    test.setTimeout(180_000);
     const root = ROOTS[build];
     const expectedBackend = build === "webgl" ? "webgl2" : "webgpu";
     const glassScene = (
       base = 0xffffffff,
       revision = 1,
-      kind: "glass" | "uniform" | "progressive" | "plain" = "glass",
+      kind: "glass" | "deep-frost" | "uniform" | "progressive" | "plain" = "glass",
     ) => {
       const w = new ListWriter(base, revision);
       w.reset();
@@ -482,7 +584,7 @@ for (const build of ["browser", "webgl"] as const) {
           unsupported: 0,
           paths: [{ kind: "rect", w: 320, h: 240, radii: [24, 24, 24, 24], smoothing: 0 }],
           ops:
-            kind === "glass"
+            kind === "glass" || kind === "deep-frost"
               ? [
                   {
                     op: "glass",
@@ -495,7 +597,7 @@ for (const build of ["browser", "webgl"] as const) {
                     refraction: 75,
                     depth: 20,
                     dispersion: 50,
-                    frost: 4,
+                    frost: kind === "deep-frost" ? 100 : 4,
                     splay: 0,
                     boxRadii: [24, 24, 24, 24],
                     boxSmoothing: [0, 0, 0, 0],
@@ -534,7 +636,7 @@ for (const build of ["browser", "webgl"] as const) {
     await page.goto(origin);
 
     const res = await page.evaluate(
-      async ({ withGlass, uniform, progressive, withoutGlass, expectedBackend }) => {
+      async ({ withGlass, deepFrost, uniform, progressive, withoutGlass, expectedBackend }) => {
         const name = "/engine.js";
         const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
         await glue.default({ module_or_path: "/engine_bg.wasm" });
@@ -543,9 +645,21 @@ for (const build of ["browser", "webgl"] as const) {
         const width = 513;
         const height = 511;
 
-        const measure = async (list: number[], mib: number) => {
-          const device = await glue.createGpu(null, 0);
-          if (!device.ok) throw new Error(device.message);
+        const attach = async () => {
+          let device = await glue.createGpu(null, 0);
+          if (!device.ok && device.code === 12) {
+            device.free();
+            device = await glue.createGpu(null, 0);
+          }
+          if (!device.ok) {
+            const message = device.message;
+            device.free();
+            throw new Error(message);
+          }
+          return device;
+        };
+        const measure = async (list: number[], mib: number, dpr = 1) => {
+          const device = await attach();
           const engine = new glue.Engine(0, 0);
           const check = (out: { ok: boolean; message: string; free(): void }) => {
             const { ok, message } = out;
@@ -557,7 +671,7 @@ for (const build of ["browser", "webgl"] as const) {
             check(engine.apply(new Uint8Array(list)));
             if (!engine.attachGpu) throw new Error("no attachGpu");
             check(engine.attachGpu(device));
-            const draw = engine.renderGpu?.(width, height, 1, 0, 0, 1, bg, false, 0);
+            const draw = engine.renderGpu?.(width, height, 1, 0, 0, dpr, bg, false, 0);
             if (!draw) throw new Error("no renderGpu");
             const result = { mib, ok: draw.ok, code: draw.code, message: draw.message };
             draw.free();
@@ -569,9 +683,13 @@ for (const build of ["browser", "webgl"] as const) {
         };
         const budgets = {
           plain: await measure(withoutGlass, 21),
-          glassLimited: await measure(withGlass, 21),
-          glassFits: await measure(withGlass, 28),
-          uniformLimited: await measure(uniform, 22),
+          // Thick frost at DPR 4 exceeds the tile halo. The whole-frame target
+          // fits at 21 MiB, leaving the glass mask itself to exercise admission.
+          glassLimited: await measure(deepFrost, 21, 4),
+          glassFits: await measure(deepFrost, 128, 4),
+          // A first draw holds one frame texture, leaving one MiB more for
+          // the Gaussian working set than the old eager two-frame setup.
+          uniformLimited: await measure(uniform, 21),
           uniformFits: await measure(uniform, 24),
           progressiveLimited: await measure(progressive, 22),
           progressiveFits: await measure(progressive, 28),
@@ -579,8 +697,7 @@ for (const build of ["browser", "webgl"] as const) {
 
         // 2. Normal budget: moving frame draws analytic coarse glass (reads > 0), settles to exact,
         // then switching to a readerless list evicts scratch and renders cleanly.
-        const dev = await glue.createGpu(null, 0);
-        if (!dev.ok) throw new Error(dev.message);
+        const dev = await attach();
         const e = new glue.Engine(0, 0);
         try {
           e.apply(new Uint8Array(withGlass)).free();
@@ -629,6 +746,7 @@ for (const build of ["browser", "webgl"] as const) {
       },
       {
         withGlass: glassScene(),
+        deepFrost: glassScene(0xffffffff, 1, "deep-frost"),
         uniform: glassScene(0xffffffff, 1, "uniform"),
         progressive: glassScene(0xffffffff, 1, "progressive"),
         withoutGlass: glassScene(0xffffffff, 2, "plain"),

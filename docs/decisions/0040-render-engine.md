@@ -1206,3 +1206,25 @@ rounding a 5K viewport's photos up to a full 4096 px level. The image budget
 scales at 48 MiB per reported GiB of device memory. When memory is unknown,
 it defaults to 128 MiB on mobile and touch devices and 192 MiB elsewhere.
 Adapter and renderer caps still apply, including 64 MiB on the CPU Worker.
+
+## Amendment: high zoom raster limits in the editor
+
+Glass chunks grow from their visible output, with the sampling grid anchored to
+the lens. Gaussian pyramids crop large source planes to the output and kernel
+support, aligned to the original pyramid grid. Layer isolation and effect
+scratch use the current render target and each effect's support.
+
+The GPU checks the proposed padded target and its working set before changing
+frame storage. It renders into a back buffer and configures the surface only
+after drawing the replacement. A raster that fits is reused through nearby
+camera changes, with a larger candidate checked when the camera settles.
+Readback timeouts use the ordinary bounded device recovery path.
+
+The lower-resolution whole view is an interim measure. The intended renderer
+keeps the viewport at device resolution and draws only the offscreen halo at
+the sampling resolution its readers need. The glass sampling path must also
+lift its 4,096 px margin clamps when it can draw that halo. Software adapters
+have a smaller padded work budget. A rejected display list or a view that still
+exceeds the raster floor uses Canvas for the affected page or view while the
+engine stays active. CPU view mode admits tiles by their working target and
+tries a direct viewport render at full resolution before reducing it.

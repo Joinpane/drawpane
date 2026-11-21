@@ -83,7 +83,7 @@ impl Default for Limits {
             record_items: 65_536,
             run_glyphs: 65_536,
             dashes: 64,
-            stops: 64,
+            stops: 4096,
             message_bytes: 512 * 1024 * 1024,
             glyph_outline_bytes: 64 * 1024 * 1024,
             // A Worker's share (decision 0040, "Text"); the browser's GPU asks for 32 MiB.

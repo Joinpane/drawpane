@@ -14,6 +14,7 @@ export type RendererFallbackReason =
   | { readonly kind: "starting" }
   | { readonly kind: "recovering" }
   | { readonly kind: "unsupported"; readonly features: readonly string[] }
+  | { readonly kind: "limit"; readonly message: string }
   | { readonly kind: "no-webgpu" }
   | { readonly kind: "software-gpu" }
   | { readonly kind: "error"; readonly message: string };
@@ -28,6 +29,7 @@ export type RendererStatus =
       readonly adapter: string | null;
       readonly compatibility: boolean;
       readonly software: boolean;
+      readonly limit?: string | null;
       readonly reducedImages?: number;
     }
   | {
@@ -83,6 +85,7 @@ export function sameRendererStatus(a: RendererStatus, b: RendererStatus): boolea
       a.adapter === b.adapter &&
       a.compatibility === b.compatibility &&
       a.software === b.software &&
+      a.limit === b.limit &&
       a.reducedImages === b.reducedImages
     );
   }
@@ -92,6 +95,9 @@ export function sameRendererStatus(a: RendererStatus, b: RendererStatus): boolea
       return sameFeatures(a.reason.features, b.reason.features);
     }
     if (a.reason.kind === "error" && b.reason.kind === "error") {
+      return a.reason.message === b.reason.message;
+    }
+    if (a.reason.kind === "limit" && b.reason.kind === "limit") {
       return a.reason.message === b.reason.message;
     }
     return true;
@@ -124,18 +130,25 @@ export function fallbackToReason(event: FallbackEvent): RendererFallbackReason {
 
 export function rendererChipLabel(status: ActiveRendererStatus): string {
   if (status.active !== "engine") return "Canvas renderer";
-  const note = status.reducedImages ? " · Images reduced" : "";
+  const note = status.limit ? " · Reduced detail" : status.reducedImages ? " · Images reduced" : "";
   return `Engine · ${status.backend}${note}`;
 }
 
 export function formatRendererReason(status: ActiveRendererStatus): string {
   if (status.active === "engine") {
-    const renderer = status.adapter ? `${status.backend} (${status.adapter})` : status.backend;
+    const adapter = status.adapter
+      ?.replace(
+        /\s*\((?:Other|IntegratedGpu|DiscreteGpu|VirtualGpu|Cpu), (?:BrowserWebGpu|Gl)\).*$/,
+        "",
+      )
+      .trim();
+    const renderer = adapter ? `${status.backend} (${adapter})` : status.backend;
     const reduced = status.reducedImages ?? 0;
     const note = reduced
       ? `. ${reduced} ${reduced === 1 ? "image" : "images"} at reduced detail`
       : "";
-    return `Drawing with ${renderer}${note}`;
+    const limit = status.limit ? ` at reduced detail. ${status.limit}` : "";
+    return `Drawing with ${renderer}${limit}${note}`;
   }
   switch (status.reason.kind) {
     case "starting":
@@ -151,6 +164,8 @@ export function formatRendererReason(status: ActiveRendererStatus): string {
       return "no WebGPU in this browser";
     case "software-gpu":
       return "only a software GPU";
+    case "limit":
+      return `This page exceeded an engine limit. ${status.reason.message}`;
     case "error":
       return `engine error: ${status.reason.message}`;
   }

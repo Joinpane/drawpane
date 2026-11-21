@@ -13,6 +13,7 @@
 import { type Camera, ErrorCode, type FrameStats, RenderEngine } from "@drawpane/engine";
 import { loadBrowserEngine } from "@drawpane/engine/browser";
 import { CPU_IMAGE_BUDGET, uploadCpuLevel } from "./engine-image";
+import { fitEngineRaster } from "./engine-raster";
 
 /** Maximum unacknowledged frame transfers in flight between the worker and the main thread. */
 const MAX_INFLIGHT_TRANSFERS = 2;
@@ -30,7 +31,7 @@ const MOVING_SLICE_TILES = 2;
 
 export type CpuWorkerRequest =
   | { readonly type: "init" }
-  | { readonly type: "apply"; readonly bytes: ArrayBuffer }
+  | { readonly type: "apply"; readonly bytes: ArrayBuffer; readonly attempt?: number }
   | {
       readonly type: "put-image";
       readonly handle: number;
@@ -62,6 +63,7 @@ export type CpuWorkerReply =
     }
   | {
       readonly type: "apply-result";
+      readonly attempt?: number;
       readonly ok: boolean;
       readonly revision: number;
       readonly code?: ErrorCode;
@@ -75,6 +77,7 @@ export type CpuWorkerReply =
       readonly y: number;
       readonly width: number;
       readonly height: number;
+      readonly reduced?: boolean;
       readonly bitmap?: ImageBitmap;
       readonly pixels?: ArrayBuffer;
     }
@@ -86,6 +89,7 @@ export type CpuWorkerReply =
       readonly height: number;
       readonly camera: Camera;
       readonly exact: boolean;
+      readonly limit?: string;
       readonly plan: FrameStats["plan"];
       readonly tiles: FrameStats["tiles"];
       readonly ms: number;
@@ -176,7 +180,10 @@ async function pump(): Promise<void> {
 
       const started = performance.now();
       const tileSize = Math.max(64, Math.min(job.tileSize, 1024));
-      const frameBytes = job.width * job.height * 4;
+      let { width, height, camera } = job;
+      let frameBytes = width * height * 4;
+      let limit: string | undefined;
+      let direct = false;
       let records = 0;
       let culled = 0;
       let glyphsMasked = 0;
@@ -198,12 +205,24 @@ async function pump(): Promise<void> {
             aborted = true;
             break;
           }
-          const r = engine.renderCpuTiled(job.width, job.height, job.camera, job.background, {
+          let r = engine.renderCpuTiled(width, height, camera, job.background, {
             moving: job.moving,
             maxJobs: job.moving ? MOVING_SLICE_TILES : REST_SLICE_TILES,
             tile: tileSize,
             slots: CPU_TILE_SLOTS,
           });
+          if (!r.ok && r.code === ErrorCode.Limit) {
+            limit = r.message;
+            direct = true;
+            const renderer = engine;
+            const retry = fitEngineRaster(width, height, camera, (raster) =>
+              renderer.renderCpu(raster.width, raster.height, raster.camera, job.background, false),
+            );
+            r = retry.result;
+            if (r.ok && retry.raster.scale === 1) limit = undefined;
+            ({ width, height, camera } = retry.raster);
+            frameBytes = width * height * 4;
+          }
           if (!r.ok) {
             aborted = true;
             if (isStale()) break;
@@ -239,7 +258,7 @@ async function pump(): Promise<void> {
             copy.set(pixels);
             let bitmap: ImageBitmap;
             try {
-              bitmap = await createImageBitmap(new ImageData(copy, job.width, job.height));
+              bitmap = await createImageBitmap(new ImageData(copy, width, height));
             } catch (err) {
               aborted = true;
               if (!isStale()) {
@@ -267,8 +286,9 @@ async function pump(): Promise<void> {
                 revision: job.revision,
                 x: 0,
                 y: 0,
-                width: job.width,
-                height: job.height,
+                width,
+                height,
+                ...(limit === undefined ? {} : { reduced: true }),
                 bitmap,
               },
               [bitmap],
@@ -289,8 +309,9 @@ async function pump(): Promise<void> {
                 revision: job.revision,
                 x: 0,
                 y: 0,
-                width: job.width,
-                height: job.height,
+                width,
+                height,
+                ...(limit === undefined ? {} : { reduced: true }),
                 pixels: copy.buffer,
               },
               [copy.buffer],
@@ -301,6 +322,7 @@ async function pump(): Promise<void> {
           // frames, pending tiles, and post-drag settling until exact (stopping immediately if a
           // slice makes no progress, e.g. while provisional text is still waiting for fonts).
           if (
+            direct ||
             job.moving ||
             stats.exact ||
             (stats.tiles.pending === 0 && stats.tiles.drawn === 0 && stats.tiles.dragged === 0)
@@ -327,10 +349,11 @@ async function pump(): Promise<void> {
           type: "done",
           jobId: job.jobId,
           revision: job.revision,
-          width: job.width,
-          height: job.height,
-          camera: job.camera,
-          exact: lastStats.exact,
+          width,
+          height,
+          camera,
+          exact: lastStats.exact && limit === undefined,
+          ...(limit === undefined ? {} : { limit }),
           plan: lastStats.plan,
           tiles: {
             drawn: totalDrawn,
@@ -402,6 +425,7 @@ scope.onmessage = async ({ data }) => {
         applyRejected = true;
         post({
           type: "apply-result",
+          ...(data.attempt === undefined ? {} : { attempt: data.attempt }),
           ok: false,
           revision: engine.revision,
           code: r.code,

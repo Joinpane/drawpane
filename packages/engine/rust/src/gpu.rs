@@ -57,8 +57,8 @@ use vello_common::kurbo::{Affine, BezPath, PathEl, Rect};
 use vello_common::paint::{Image, ImageSource, TextureRegion, Tint, TintMode};
 use vello_common::peniko::{Extend, Fill, ImageQuality, ImageSampler};
 use vello_gpu::{
-    ClearSettings, RenderOptions, RenderSize, RenderTarget, RenderTargetConfig, Renderer, Resources, Scene, TargetInit,
-    TextureBindings,
+    ClearSettings, RenderError, RenderOptions, RenderSize, RenderTarget, RenderTargetConfig, Renderer, Resources,
+    Scene, TargetInit, TextureBindings,
 };
 use wasm_bindgen::JsCast;
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -253,7 +253,7 @@ const BLIT: &str = r"
 /// What wgpu reports out of band: uncaptured errors, device loss, and wait cancellation.
 #[derive(Default)]
 pub struct Health {
-    errors: Mutex<Vec<String>>,
+    errors: Mutex<Vec<(ErrorCode, String)>>,
     lost: AtomicBool,
     lost_reason: Mutex<String>,
     cancelled: AtomicBool,
@@ -302,11 +302,11 @@ impl Health {
         rx
     }
 
-    fn record_error(&self, message: String) {
+    fn record_error(&self, code: ErrorCode, message: String) {
         if let Ok(mut list) = self.errors.lock()
             && list.len() < 16
         {
-            list.push(message);
+            list.push((code, message));
         }
     }
 
@@ -442,6 +442,18 @@ const PER_PAGE: u32 = PER_ROW * PER_ROW;
 const PAGE_BYTES: usize = (PAGE * PAGE * 4) as usize;
 /// Kept free under the budget for what a frame allocates on the way (read-backs, images).
 const HEADROOM: usize = 32 << 20;
+/// SwiftShader can exhaust its frame deadline before it exhausts the texture
+/// budget. Bound the extra viewport work on a software adapter.
+const SOFTWARE_PADDED_PIXELS: usize = 2 << 20;
+
+fn vello_error(error: RenderError) -> EngineError {
+    match error {
+        RenderError::IntermediateTexture(_) | RenderError::ResourceTextureTooLarge { .. } => {
+            EngineError::limit(error.to_string())
+        }
+        _ => EngineError::new(ErrorCode::Gpu, error.to_string()),
+    }
+}
 
 /// The compositor: textured quads (a stand-in scaled: the last frame, another level's tiles),
 /// bilinear, each sampled inside its own source rectangle so neighbours in a page never bleed
@@ -609,6 +621,8 @@ struct MotionPrefix {
 struct ActiveDraw {
     /// A whole frame writes straight to its destination; tiles use scratch color.
     frame_dst: Option<usize>,
+    /// The part of a padded viewport that is actually presented.
+    display_area: Option<IRect>,
     width: u32,
     height: u32,
     background: [f32; 4],
@@ -688,7 +702,8 @@ pub struct Gpu {
     backdrop_gen: u64,
     /// Frame textures: the one shown (`cur`) and the one being made.
     frames: Vec<Main>,
-    cur: usize,
+    cur: Option<usize>,
+    surface_bytes: usize,
     /// The board textures (decision 0040, phase 2): which tiles are held, where, and how fresh.
     pub tiles: TileCache,
     pages: Vec<Page>,
@@ -1037,7 +1052,12 @@ impl Gpu {
         {
             let h = health.clone();
             device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
-                h.record_error(e.to_string());
+                let code = if matches!(e, wgpu::Error::OutOfMemory { .. }) {
+                    ErrorCode::Limit
+                } else {
+                    ErrorCode::Gpu
+                };
+                h.record_error(code, e.to_string());
             }));
             let h = health.clone();
             device.set_device_lost_callback(move |reason, message| {
@@ -1191,7 +1211,8 @@ impl Gpu {
             active: None,
             backdrop_gen: 0,
             frames: Vec::new(),
-            cur: 0,
+            cur: None,
+            surface_bytes: 0,
             tiles: TileCache::new(TILE, 0),
             pages: Vec::new(),
             scratches: [None, None],
@@ -1720,9 +1741,17 @@ impl Gpu {
         if let Ok(mut list) = self.health.errors.lock()
             && !list.is_empty()
         {
-            let all = list.join("; ");
-            list.clear();
-            return Err(EngineError::new(ErrorCode::Gpu, all));
+            let code = if list.iter().any(|(code, _)| *code == ErrorCode::Limit) {
+                ErrorCode::Limit
+            } else {
+                ErrorCode::Gpu
+            };
+            let all = list
+                .drain(..)
+                .map(|(_, message)| message)
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(EngineError::new(code, all));
         }
         Ok(())
     }
@@ -1860,78 +1889,105 @@ impl Gpu {
         }
     }
 
-    /// Bytes frames of this size take on the GPU: `FRAMES` textures (no depth buffers: tiles are
-    /// drawn into pages, frames only composited), and the canvas's own textures (two in flight).
-    fn frame_bytes(width: u32, height: u32, presents: bool) -> usize {
-        let px = width as usize * height as usize * 4;
-        px * FRAMES + if presents { px * 2 } else { 0 }
+    fn next_frame(&self) -> usize {
+        self.cur.map_or(0, |cur| (cur + 1) % FRAMES)
     }
 
-    fn ensure_frames(&mut self, width: u32, height: u32) -> Result<()> {
+    fn frame_bytes(width: u32, height: u32) -> usize {
+        width as usize * height as usize * 4
+    }
+
+    fn check_frame(&self, dst: usize, width: u32, height: u32, work: usize, freed: usize) -> Result<()> {
         self.check_texture_size(width, height, "a frame")?;
+        let bytes = Self::frame_bytes(width, height);
+        let previous = self.frames.get(dst).map_or(0, |m| Self::frame_bytes(m.width, m.height));
+        let surface = if self.surface.is_some() {
+            (2 * bytes).saturating_sub(self.surface_bytes)
+        } else {
+            0
+        };
+        self.reserve(
+            bytes.saturating_add(surface).saturating_add(work),
+            previous.saturating_add(freed),
+            "a frame and its working textures",
+        )
+    }
+
+    /// Resize only the back buffer. The last frame and canvas are committed by finish_frame.
+    fn ensure_frame(&mut self, dst: usize, width: u32, height: u32) -> Result<()> {
         if self
             .frames
-            .first()
+            .get(dst)
             .is_some_and(|m| m.width == width && m.height == height)
         {
             return Ok(());
         }
-        let presents = self.surface.is_some();
-        let freed = self
-            .frames
-            .first()
-            .map_or(0, |m| Self::frame_bytes(m.width, m.height, presents));
-        self.reserve(Self::frame_bytes(width, height, presents), freed, "a frame")?;
-        for m in self.frames.drain(..) {
-            m.texture.destroy();
+        self.check_frame(dst, width, height, 0, 0)?;
+        if let Some(old) = self.frames.get(dst) {
+            old.texture.destroy();
         }
-        self.readers.clear_frame_targets();
-        self.forget_motion_prefix();
-        self.bytes = self.bytes - freed + Self::frame_bytes(width, height, presents);
-        for _ in 0..FRAMES {
-            let tex = texture(
-                &self.device,
-                width,
-                height,
-                wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC
-                    | wgpu::TextureUsages::COPY_DST,
-                "frame",
-            );
-            let view = tex.create_view(&Default::default());
-            let present_group = self.blit.as_ref().map(|blit| {
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("present"),
-                    layout: &blit.get_bind_group_layout(0),
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&view),
-                    }],
-                })
-            });
-            self.frames.push(Main {
-                view,
-                texture: tex,
-                present_group,
-                width,
-                height,
-            });
+        let tex = texture(
+            &self.device,
+            width,
+            height,
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
+            "frame",
+        );
+        let view = tex.create_view(&Default::default());
+        let present_group = self.blit.as_ref().map(|blit| {
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("present"),
+                layout: &blit.get_bind_group_layout(0),
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                }],
+            })
+        });
+        let frame = Main {
+            view,
+            texture: tex,
+            present_group,
+            width,
+            height,
+        };
+        self.bytes += Self::frame_bytes(width, height);
+        if dst < self.frames.len() {
+            let old = std::mem::replace(&mut self.frames[dst], frame);
+            self.bytes -= Self::frame_bytes(old.width, old.height);
+        } else {
+            self.frames.push(frame);
         }
-        self.cur = 0;
-        self.forget_last();
-        if let Some((surface, config)) = self.surface.as_mut() {
-            config.width = width;
-            config.height = height;
-            surface.configure(&self.device, config);
+        Ok(())
+    }
+
+    fn configure_surface(&mut self, frame: usize) -> Result<()> {
+        let target = &self.frames[frame];
+        let (width, height) = (target.width, target.height);
+        let Some((_, config)) = self.surface.as_ref() else {
+            return Ok(());
+        };
+        if (config.width, config.height) == (width, height) && self.surface_bytes != 0 {
+            return Ok(());
         }
+        let bytes = 2 * Self::frame_bytes(width, height);
+        self.reserve(bytes, self.surface_bytes, "the presentation surface")?;
+        let (surface, config) = self.surface.as_mut().expect("surface");
+        config.width = width;
+        config.height = height;
+        surface.configure(&self.device, config);
+        self.bytes = self.bytes - self.surface_bytes + bytes;
+        self.surface_bytes = bytes;
         Ok(())
     }
 
     /// The frame shown now (presented or read back).
     fn current(&self) -> Result<&Main> {
-        self.frames
-            .get(self.cur)
+        self.cur
+            .and_then(|cur| self.frames.get(cur))
             .ok_or_else(|| EngineError::new(ErrorCode::State, "nothing drawn on the GPU yet"))
     }
 
@@ -1991,6 +2047,10 @@ impl Gpu {
         self.readers.evict_frame_scratch();
         self.blur.clear();
         self.masks.clear();
+        for scratch in self.scratches.iter_mut().filter_map(Option::take) {
+            scratch.texture.destroy();
+            self.bytes -= scratch.width as usize * scratch.height as usize * 8;
+        }
     }
 
     /// Bytes the engine holds on the GPU outside its tile pages.
@@ -2235,14 +2295,7 @@ impl Gpu {
         samples: Option<IRect>,
     ) -> Result<DrawStats> {
         self.check()?;
-        if prefix.is_none() {
-            self.forget_motion_prefix();
-        }
-        if store.readers().is_empty() && !store.has_context() && self.readers.bytes() > 0 {
-            self.readers.evict_frame_scratch();
-        }
         let (width, height) = (u32::from(frame.width), u32::from(frame.height));
-        self.ensure_frames(width, height)?;
         let t0 = now();
         let view = frame.view;
         let scale = view.as_coeffs()[0];
@@ -2259,18 +2312,49 @@ impl Gpu {
         {
             stats.exact = true;
             stats.plan = 3;
-            return self.finish_frame(stats, t0);
+            return self.finish_frame(self.cur.expect("unchanged frame"), stats, t0);
         }
-        let dst = (self.cur + 1) % FRAMES;
-        let padded = samples.and_then(|bounds| {
+        let dst = self.next_frame();
+        let padded = if let Some(bounds) = samples {
             // Keep the same strip phase at the original viewport origin.
             let x = bounds.x0.unsigned_abs().next_multiple_of(4);
             let y = bounds.y0.unsigned_abs().next_multiple_of(4);
-            let size = (bounds.x1 as u32 + x, bounds.y1 as u32 + y);
-            self.ensure_scratch_size(size.0, size.1).ok()?;
+            let size = (
+                (bounds.x1 as u32).saturating_add(x),
+                (bounds.y1 as u32).saturating_add(y),
+            );
+            // In addition to colour/depth scratch, the padded view must have room
+            // for its backdrop plane. Do not begin a frame that cannot hold both.
+            let pixels = (size.0 as usize).saturating_mul(size.1 as usize);
+            if self.fallback_adapter && pixels > SOFTWARE_PADDED_PIXELS.max(width as usize * height as usize) {
+                return Err(EngineError::limit(
+                    "viewport readers exceed the software GPU raster budget",
+                ));
+            }
+            let scratch_bytes = self.scratches[1]
+                .as_ref()
+                .map_or(0, |s| s.width as usize * s.height as usize * 8);
+            self.check_texture_size(size.0, size.1, "a padded view")?;
+            self.check_frame(
+                dst,
+                width,
+                height,
+                pixels.saturating_mul(12),
+                scratch_bytes.saturating_add(self.readers.bytes()),
+            )?;
             Some(((x, y), size))
-        });
+        } else {
+            None
+        };
+        self.ensure_frame(dst, width, height)?;
+        if prefix.is_none() {
+            self.forget_motion_prefix();
+        }
+        if store.readers().is_empty() && !store.has_context() && self.readers.bytes() > 0 {
+            self.readers.evict_frame_scratch();
+        }
         let whole = if let Some(((x, y), (w, h))) = padded {
+            self.ensure_scratch_size(w, h)?;
             Frame {
                 width: w as u16,
                 height: h as u16,
@@ -2297,6 +2381,12 @@ impl Gpu {
         self.backdrop_gen += 1;
         self.active = Some(ActiveDraw {
             frame_dst: padded.is_none().then_some(dst),
+            display_area: padded.map(|((x, y), _)| IRect {
+                x0: x as i32,
+                y0: y as i32,
+                x1: (x + width) as i32,
+                y1: (y + height) as i32,
+            }),
             width: w,
             height: h,
             background,
@@ -2367,7 +2457,8 @@ impl Gpu {
         stats.standin = !stats.exact;
         stats.held = self.tiles.len() as u32;
         stats.evicted = self.tiles.stats.evicted;
-        self.cur = dst;
+        let stats = self.finish_frame(dst, stats, t0)?;
+        self.cur = Some(dst);
         self.last = Some(Last {
             view,
             size: (width, height),
@@ -2375,7 +2466,7 @@ impl Gpu {
         self.last_scale = Some(scale);
         self.whole_samples = (padded.is_some() == samples.is_some()).then_some(samples);
         self.shown = Some((generation, bg_bits, stats.exact));
-        self.finish_frame(stats, t0)
+        Ok(stats)
     }
 
     /// Draws a frame made of tiles (decision 0040, phase 2): draws the tiles it needs, as many as
@@ -2400,7 +2491,6 @@ impl Gpu {
             self.readers.evict_frame_scratch();
         }
         let (w, h) = (u32::from(frame.width), u32::from(frame.height));
-        self.ensure_frames(w, h)?;
         self.ensure_compositor();
         self.masks.begin_frame();
         self.blur.begin_frame();
@@ -2445,9 +2535,10 @@ impl Gpu {
         if same {
             stats.exact = true;
             stats.plan = 3;
-            return self.finish_frame(stats, t0);
+            return self.finish_frame(self.cur.expect("unchanged frame"), stats, t0);
         }
-        let dst = (self.cur + 1) % FRAMES;
+        let dst = self.next_frame();
+        self.ensure_frame(dst, w, h)?;
         let mut verbs = store.limits.frame_verbs;
         let mut drew_any = false;
         let mut direct_exact = true;
@@ -2558,12 +2649,13 @@ impl Gpu {
         stats.standin = !stats.exact;
         stats.held = self.tiles.len() as u32;
         stats.evicted = self.tiles.stats.evicted;
-        self.cur = dst;
+        let stats = self.finish_frame(dst, stats, t0)?;
+        self.cur = Some(dst);
         self.last = Some(Last { view, size: (w, h) });
         self.last_scale = Some(scale);
         self.whole_samples = None;
         self.shown = Some((generation, bg_bits, stats.exact));
-        self.finish_frame(stats, t0)
+        Ok(stats)
     }
 
     /// The frame last shown: the view it was drawn under and its size.
@@ -2595,7 +2687,7 @@ impl Gpu {
             return Ok(stats);
         };
         let mut verbs = store.limits.frame_verbs;
-        let dst = self.cur;
+        let dst = self.cur.expect("previous frame");
         for job in &plan.jobs {
             // A tile with no slot to keep it in is drawn by the frame itself.
             if plan.direct || job.direct {
@@ -2633,8 +2725,10 @@ impl Gpu {
     }
 
     /// Presents the frame shown (with a canvas) and finishes the frame's numbers.
-    fn finish_frame(&mut self, mut stats: DrawStats, t0: f64) -> Result<DrawStats> {
+    fn finish_frame(&mut self, frame: usize, mut stats: DrawStats, t0: f64) -> Result<DrawStats> {
         let t1 = now();
+        self.check()?;
+        self.configure_surface(frame)?;
         let acquired = match self.acquire() {
             Ok(t) => t,
             Err(e) => {
@@ -2645,7 +2739,7 @@ impl Gpu {
         // A frame read back (no canvas) needs no presenting.
         stats.presented = self.surface.is_none() || acquired.is_some();
         if let (Some(t), Some(blit)) = (acquired, self.blit.as_ref()) {
-            let main = self.current()?;
+            let main = &self.frames[frame];
             let mut encoder = self
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("present") });
@@ -2826,6 +2920,7 @@ impl Gpu {
         self.backdrop_gen += 1;
         self.active = Some(ActiveDraw {
             frame_dst: None,
+            display_area: None,
             width: side,
             height: side,
             background,
@@ -3092,7 +3187,7 @@ impl Gpu {
                     &self.bindings,
                     options,
                 )
-                .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+                .map_err(vello_error)?;
             if dual {
                 let (w, h) = self.active_scene_size();
                 for backdrop in [false, true] {
@@ -3285,7 +3380,7 @@ impl Gpu {
                     &self.bindings,
                     options,
                 )
-                .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+                .map_err(vello_error)?;
             self.stash_encoder(encoder);
         }
         let mut encoder = self.take_encoder(!analytic, "backdrop blur");
@@ -3323,7 +3418,7 @@ impl Gpu {
                     &self.bindings,
                     options,
                 )
-                .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+                .map_err(vello_error)?;
         }
         self.mask_scene.reset();
         Ok((encoder, clipped))
@@ -3435,7 +3530,7 @@ impl Gpu {
                     &self.bindings,
                     options,
                 )
-                .map_err(|err| EngineError::new(ErrorCode::Gpu, format!("{err:?}")))?;
+                .map_err(vello_error)?;
         }
 
         for backdrop in [false, true] {
@@ -3959,9 +4054,8 @@ impl Gpu {
             if let Some(m) = comp.base
                 && let Some(l) = self.last
                 && self
-                    .frames
-                    .get(self.cur)
-                    .is_some_and(|f| f.width == l.size.0 && f.height == l.size.1)
+                    .current()
+                    .is_ok_and(|f| f.width == l.size.0 && f.height == l.size.1)
             {
                 let (lw, lh) = (f64::from(l.size.0), f64::from(l.size.1));
                 let d = m.transform_rect_bbox(Rect::new(0.0, 0.0, lw, lh));
@@ -4069,7 +4163,7 @@ impl Gpu {
                     j += 1;
                 }
                 let view = match src {
-                    None => &self.frames[self.cur].view,
+                    None => &self.frames[self.cur.expect("stand-in frame")].view,
                     Some(p) => &self.pages[p].view,
                 };
                 runs.push((group_for(view), i as u32, j as u32));
@@ -5129,8 +5223,14 @@ impl Backend for Gpu {
             ((0, 0), (aw, ah), tex.clone(), view.clone())
         };
         let origin = self.scene_offset();
-        let (w, h) = self.active_scene_size();
-        let target_size = (i32::from(w), i32::from(h));
+        // Root glass writes only to the displayed plane. Inside an isolate,
+        // keep its effect halo because a later filter can read those pixels.
+        let output = active
+            .display_area
+            .filter(|_| self.offscreen_stack.is_empty())
+            .unwrap_or_else(|| self.target_bounds());
+        let output_origin = (output.x0, output.y0);
+        let output_size = (output.x1 - output.x0, output.y1 - output.y0);
 
         let scale = device.determinant().abs().sqrt() as f32;
         if !(scale > 0.0 && scale.is_finite()) {
@@ -5148,14 +5248,14 @@ impl Backend for Gpu {
                 glass::EXACT_CHUNK_SIDE,
             )
         };
-        let regions = glass::compute_regions(
+        let mut regions = glass::compute_regions(
             op,
             &params,
             device,
             size,
             frame_size,
-            origin,
-            target_size,
+            output_origin,
+            output_size,
             max_tex,
             glass::HARD_MAX_REGION_PIXELS,
             split_side,
@@ -5164,6 +5264,13 @@ impl Backend for Gpu {
         )?;
         if regions.is_empty() {
             return Ok(());
+        }
+        for region in &mut regions {
+            let (x, y) = (output.x0 - origin.0, output.y0 - origin.1);
+            region.out_x0 += x;
+            region.out_x1 += x;
+            region.out_y0 += y;
+            region.out_y1 += y;
         }
 
         // Compose inherited paint in scratch so it does not become part of the isolated picture.
@@ -5279,7 +5386,7 @@ impl Backend for Gpu {
                         &self.bindings,
                         options,
                     )
-                    .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+                    .map_err(vello_error)?;
                 self.stash_encoder(enc);
                 self.mask_scene.reset();
             }
@@ -5349,7 +5456,7 @@ impl Backend for Gpu {
                             &self.bindings,
                             options,
                         )
-                        .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+                        .map_err(vello_error)?;
                 }
                 self.mask_scene.reset();
             }
@@ -5702,7 +5809,7 @@ impl Backend for Gpu {
                                 &self.bindings,
                                 options,
                             )
-                            .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+                            .map_err(vello_error)?;
                         if !invert {
                             self.blur.encode(
                                 &self.device,
@@ -5918,7 +6025,7 @@ impl Backend for Gpu {
                         &self.bindings,
                         options,
                     )
-                    .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+                    .map_err(vello_error)?;
                 if !invert {
                     self.blur.encode(
                         &self.device,
@@ -6041,7 +6148,7 @@ impl Backend for Gpu {
                         &self.bindings,
                         options,
                     )
-                    .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+                    .map_err(vello_error)?;
                 self.blur.encode(
                     &self.device,
                     &self.queue,

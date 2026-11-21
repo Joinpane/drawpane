@@ -381,9 +381,7 @@ export function engineDebug(editor: Editor) {
     },
 
     /**
-     * Two read-backs of one `width` × `height` GPU frame at once, with a GPU budget that has
-     * room for the frames and one read-back's buffer: what each answers (the second must be
-     * refused by the budget, not admitted beside the first).
+     * Two concurrent read-backs, then a retry once the first buffer is released.
      */
     async readbackPair(
       width: number,
@@ -393,13 +391,12 @@ export function engineDebug(editor: Editor) {
       const mod = await moduleFor(backend);
       const px = width * height * 4;
       const row = Math.ceil((width * 4) / 256) * 256;
-      // The atlas (2,048² RGBA8) and checker, two frames, the scratch tile with its depth buffer
-      // (a budget this small keeps no tiles: frames are drawn tile by tile), and one read-back
-      // buffer and a half.
+      // The atlas and checker, the first completed frame, one scratch tile and its
+      // depth buffer, and room for one read-back plus half of another. The second
+      // frame texture is allocated lazily on a subsequent draw.
       const scratch = 512 * 512 * 4 * 2;
-      const budget =
-        2048 * 2048 * 4 + 16 * 16 * 4 + 2 * px + scratch + Math.floor(row * height * 1.5);
-      const e = new RenderEngine(mod, { gpuBytes: budget });
+      const budget = 2048 * 2048 * 4 + 16 * 16 * 4 + px + scratch + Math.floor(row * height * 1.5);
+      const e = new RenderEngine(mod, { gpuBytes: budget, tileBytes: 0 });
       try {
         const g = await e.attachGpu(null);
         if (!g.ok) return [{ ok: false, code: g.code }];
@@ -407,6 +404,7 @@ export function engineDebug(editor: Editor) {
         const r = e.renderGpu(width, height, camera, [1, 1, 1, 1], false);
         if (!r.ok) return [{ ok: false, code: r.code }];
         const both = await Promise.all([e.gpuPixels(), e.gpuPixels()]);
+        both.push(await e.gpuPixels());
         return both.map((b) => (b.ok ? { ok: true } : { ok: false, code: b.code }));
       } finally {
         e.dispose();
