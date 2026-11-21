@@ -267,6 +267,12 @@ The rules both backends follow. Without them, two implementations could agree on
   - **Figma's goldens and kit renders** are the product oracle.
   - **Both are needed:** paired passes can share a mistake.
 
+### Backdrop sampling at the viewport edge
+
+The whole-view GPU path draws the offscreen pixels its readers can reach and crops the result back to the viewport. Tiled views already read real page content beyond the viewport. Export context keeps its crop rule. When the padded scratch target exceeds the device's limits, the original clamped path remains available.
+
+On the T4 WebGL2 edge fixture, a blur over a red-to-blue step sampled [106, 36, 159, 255] at the viewport edge on the tiled path. Before padding, the whole view sampled [0, 26, 255, 255]. With padding, both paths return [106, 36, 159, 255].
+
 ## The CPU backend and exports
 
 **The same crate, built without wgpu:** 389 KB of WebAssembly in the spike (150 KB gzipped), against resvg's 2,479 KB (949 KB gzipped). It holds no font files: text arrives as glyph identities and outlines.
