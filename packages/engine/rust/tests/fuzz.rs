@@ -404,3 +404,163 @@ fn exports_larger_than_the_cap_are_refused() {
     let err = e.render_band(8192, 8192, cam, [1.0; 4], 0, 65).expect_err("too tall");
     assert_eq!(err.code, ErrorCode::Limit);
 }
+
+#[test]
+fn removing_a_shadow_keeps_unrelated_blended_pixels() {
+    let cam = Camera {
+        zoom: 1.3424164056777954,
+        x: 9.77043342590332,
+        y: 9.752151489257813,
+        dpr: 1.0,
+    };
+    let (w, h) = (72.772865, 53.64728);
+    let mut frame = Rec::new([1., 0., 0., 1., -6.497554779052734, 50.14446258544922], [w, h]);
+    frame.paths.push(Entry::Rect {
+        w,
+        h,
+        radii: [5.075545, 0., 13.92761, 4.554621],
+    });
+    frame.ops = vec![
+        Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::Solid([0.575056, 0.27041346, 0.308474, 1.]),
+        },
+        Op::Clip {
+            path: 0,
+            even_odd: false,
+        },
+        Op::Children,
+        Op::Unclip,
+        Op::Clip {
+            path: 0,
+            even_odd: false,
+        },
+        Op::Stroke {
+            path: 0,
+            width: 8.668327,
+            join: 0,
+            cap: 0,
+            dashes: vec![1.3157645, 3.659711],
+            offset: 0.0,
+            paint: Paint::Solid([0.9124175, 0.45539433, 0.84493494, 1.0]),
+        },
+        Op::Unclip,
+    ];
+
+    let (w, h) = (50.042316, 34.208965);
+    let mut child = Rec::new([1., 0., 0., 1., -11.81910514831543, 59.47084045410156], [w, h]);
+    child.flags = 2;
+    child.opacity = 0.7108273;
+    child.paths.push(Entry::Ellipse { w, h });
+    child.ops = vec![
+        Op::DropShadow {
+            paths: vec![0],
+            even_odd: false,
+            dx: 3.403202,
+            dy: -9.620993,
+            blur: 4.6614447,
+            color: [0.3033346, 0.63583434, 0.5370639, 0.43632632],
+            blend: 0,
+        },
+        Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::Solid([0.1432299, 0.001193881, 0.2930926, 1.]),
+        },
+        Op::Clip {
+            path: 0,
+            even_odd: false,
+        },
+        Op::Stroke {
+            path: 0,
+            width: 1.1940131,
+            join: 0,
+            cap: 0,
+            dashes: vec![2.3953164, 1.3487685],
+            offset: 0.0,
+            paint: Paint::Solid([0.36385566, 0.20120287, 0.40161306, 1.0]),
+        },
+        Op::Unclip,
+    ];
+
+    let mut label = Rec::new(
+        [
+            0.8941329842053497,
+            0.4478015258527329,
+            -0.4478015258527329,
+            0.8941329842053497,
+            14.287452697753906,
+            69.68342590332031,
+        ],
+        [73.91113, 5.2407093],
+    );
+    label.flags = 2;
+    label.opacity = 0.5121845;
+    label.layer_blend = 13;
+    label.paths.push(Entry::Glyphs {
+        scale: 0.021137804,
+        glyphs: vec![
+            (2, 0., 5.2407093),
+            (4, 11.887746, 5.2407093),
+            (3, 16.63705, 5.2407093),
+            (5, 19.109865, 5.2407093),
+            (5, 52.406654, 5.2407093),
+        ],
+    });
+    label.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.09701687, 0.4338537, 0.60826266, 1.]),
+    });
+
+    let mut text = Rec::new(
+        [
+            1.129729986190796,
+            0.,
+            0.,
+            1.129729986190796,
+            -9.265012741088867,
+            16.653560638427734,
+        ],
+        [71.40791, 44.69925],
+    );
+    text.paths.push(Entry::Glyphs {
+        scale: 0.016062751,
+        glyphs: vec![
+            (5, 0., 44.69925),
+            (6, 12.166812, 44.69925),
+            (2, 17.040646, 44.69925),
+            (5, 24.879559, 44.69925),
+            (4, 27.33095, 44.69925),
+        ],
+    });
+    text.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.35829508, 0.41634965, 0.32656687, 1.]),
+    });
+
+    let mut list = W::new(ANY, 1);
+    list.reset();
+    for id in 1..=GLYPHS {
+        list.glyph(id, &glyph_outline(id));
+    }
+    list.set(1, 0, &Rec::group());
+    list.set(6, 1, &frame);
+    list.set(14, 6, &child);
+    list.set(21, 0, &label);
+    list.set(23, 0, &text);
+    list.order(0, &[1, 23, 21]);
+    let mut engine = engine();
+    engine.apply(&list.finish()).expect("scene");
+    let before = render(&mut engine, cam);
+    let mut patch = W::new(1, 2);
+    patch.remove(14);
+    let applied = engine.apply(&patch.finish()).expect("remove the clipped child");
+    let after = render(&mut engine, cam);
+    let dirty = engine.store.dirty(&applied.changes, cam.view(), 1.5);
+    let pixel = (99 * W_PX as usize + 42) * 4;
+    assert!(!dirty.iter().any(|r| r.contains((42.5, 99.5))));
+    assert_eq!(&before[pixel..pixel + 4], &after[pixel..pixel + 4]);
+}

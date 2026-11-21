@@ -549,6 +549,8 @@ impl Record {
     /// scene (so an enclosing `isolate` opacity scope must use the engine's offscreen target stack
     /// instead of a Vello opacity layer).
     pub fn has_offscreen_pass(&self) -> bool {
+        // Normal shadows rasterize their masks separately and draw into the Vello scene.
+        // Their temporary buffers never trigger a flush inside a Vello opacity layer.
         !self.post_effects.is_empty()
             || self.has_own_blend()
             || self.is_picture_mask()
@@ -556,7 +558,7 @@ impl Record {
                 .ops
                 .iter()
                 .chain(&self.coarse)
-                .any(|op| matches!(op, Op::DropShadow { .. } | Op::InnerShadow { .. } | Op::Read { .. }))
+                .any(|op| matches!(op, Op::Read { .. }))
     }
 
     /// The length of an entry's outline, at most (a glyph run's isn't known here: None).
