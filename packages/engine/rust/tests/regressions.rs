@@ -665,3 +665,691 @@ fn canonical_shadow_pixels_do_not_depend_on_cache_admission() {
         "shadow pixels changed when the cache was too small"
     );
 }
+
+fn glass_rect(x: f64, y: f64, w: f32, h: f32, radii: [f32; 4], refraction: f32, frost: f32) -> Rec {
+    let mut r = Rec::new([1.0, 0.0, 0.0, 1.0, x, y], [w, h]);
+    r.paths.push(Entry::Rect { w, h, radii });
+    r.ops.push(Op::Glass {
+        paths: vec![0],
+        even_odd: false,
+        kind: 0,
+        inradius: w.min(h) * 0.5,
+        angle: -45.0,
+        intensity: 80.0,
+        refraction,
+        depth: 10.0,
+        dispersion: 20.0,
+        frost,
+        splay: 0.0,
+        box_radii: radii,
+        box_smoothing: [0.0; 4],
+    });
+    r
+}
+
+#[test]
+fn removing_glass_invalidates_earlier_paint_in_the_same_picture() {
+    let cam = camera();
+    let mut engine = Engine::new(Limits::default());
+    let mut initial = W::new(ANY, 1);
+    initial.reset();
+    initial.set(1, 0, &rect(16.0, 16.0, [0.3, 0.6, 0.1, 0.5]));
+    initial.set(2, 0, &glass_rect(96.0, 0.0, 16.0, 16.0, [2.0; 4], 30.0, 0.0));
+    initial.set(3, 0, &glass_rect(96.0, 24.0, 16.0, 16.0, [2.0; 4], 30.0, 0.0));
+    engine.apply(&initial.finish()).expect("scene");
+
+    // The glass is distant, but removing it changes when the page's earlier draws round to RGBA8.
+    let mut patch = W::new(1, 2);
+    patch.remove(2);
+    let applied = engine.apply(&patch.finish()).expect("remove glass");
+    assert!(!applied.full);
+    let dirty = engine.store.dirty(&applied.changes, cam.view(), 1.0);
+    assert!(dirty.iter().any(|r| r.contains((8.5, 8.5))));
+}
+
+fn striped_backdrop(w: &mut W) {
+    let mut bg = rect(64.0, 64.0, [0.95, 0.95, 0.95, 1.0]);
+    bg.transform = [1.0, 0.0, 0.0, 1.0, 0.0, 0.0];
+    w.set(1, 0, &bg);
+    for i in 0..4u32 {
+        let mut stripe = rect(8.0, 64.0, [0.1, 0.3, 0.85, 1.0]);
+        stripe.transform = [1.0, 0.0, 0.0, 1.0, f64::from(i * 16), 0.0];
+        w.set(2 + i, 0, &stripe);
+    }
+}
+
+#[test]
+fn stacked_glass_reads_non_glass_backdrop_and_keeps_fills_and_children() {
+    // Decision 0007 rule (b*): upper glass sees lower glass's fills and children,
+    // never lower glass's refraction/frost.
+    let build = |lower_refraction: f32, lower_frost: f32, with_lower_glass: bool| {
+        let mut e = Engine::new(Limits::default());
+        let mut w = W::new(ANY, 1);
+        w.reset();
+        striped_backdrop(&mut w);
+        let mut lower = if with_lower_glass {
+            glass_rect(8.0, 8.0, 48.0, 48.0, [10.0; 4], lower_refraction, lower_frost)
+        } else {
+            let mut r = Rec::new([1.0, 0.0, 0.0, 1.0, 8.0, 8.0], [48.0, 48.0]);
+            r.paths.push(Entry::Rect {
+                w: 48.0,
+                h: 48.0,
+                radii: [10.0; 4],
+            });
+            r
+        };
+        lower.ops.push(Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::Solid([0.9, 0.2, 0.1, 0.35]),
+        });
+        lower.ops.push(Op::Children);
+        w.set(10, 0, &lower);
+        let mut child = rect(16.0, 16.0, [0.1, 0.8, 0.2, 1.0]);
+        child.transform = [1.0, 0.0, 0.0, 1.0, 16.0, 16.0];
+        w.set(11, 10, &child);
+        // Upper glass completely inside the lower glass.
+        let upper = glass_rect(18.0, 18.0, 28.0, 28.0, [6.0; 4], 80.0, 3.0);
+        w.set(12, 0, &upper);
+        e.apply(&w.finish()).unwrap();
+        pixels(&mut e)
+    };
+
+    let with_strong_lower = build(100.0, 20.0, true);
+    let with_weak_lower = build(10.0, 0.0, true);
+    let without_lower_glass = build(0.0, 0.0, false);
+
+    // Inside the upper glass region (20..44, 20..44), the upper glass is opaque over its
+    // backdrop, so its pixels must be IDENTICAL regardless of lower glass's refraction/frost
+    // or whether lower had glass at all (only lower's fill and child enter the backdrop).
+    let mut checked = 0;
+    for y in 20..44u32 {
+        for x in 20..44u32 {
+            let i = ((y * 64 + x) * 4) as usize;
+            assert_eq!(
+                &with_strong_lower[i..i + 4],
+                &without_lower_glass[i..i + 4],
+                "upper glass leaked lower glass effect at ({x}, {y})"
+            );
+            assert_eq!(
+                &with_strong_lower[i..i + 4],
+                &with_weak_lower[i..i + 4],
+                "upper glass changed when lower glass params changed at ({x}, {y})"
+            );
+            checked += 1;
+        }
+    }
+    assert!(checked > 400);
+    // Outside upper glass (inside lower glass only, e.g. 12, 12), lower glass DID change output.
+    let outside_diff: usize = (10..16u32)
+        .flat_map(|y| (10..16u32).map(move |x| ((y * 64 + x) * 4) as usize))
+        .filter(|&i| with_strong_lower[i..i + 4] != without_lower_glass[i..i + 4])
+        .count();
+    assert!(outside_diff > 0, "lower glass must still refract outside the overlap");
+}
+
+#[test]
+fn context_records_feed_backdrop_only_and_never_paint_output() {
+    let mut e = Engine::new(Limits::default());
+    let mut w = W::new(ANY, 1);
+    w.reset();
+    // Red backdrop marked FLAG_CONTEXT (16): invisible outside the glass, refracted inside it.
+    let mut ctx = rect(64.0, 64.0, [0.9, 0.1, 0.1, 1.0]);
+    ctx.flags = 16;
+    w.set(1, 0, &ctx);
+    let g = glass_rect(16.0, 16.0, 32.0, 32.0, [8.0; 4], 60.0, 2.0);
+    w.set(2, 0, &g);
+    e.apply(&w.finish()).unwrap();
+    let px = pixels(&mut e);
+    // Corner (2, 2) outside glass must stay transparent (context never painted to main).
+    let corner = (2 * 64 + 2) * 4;
+    assert_eq!(&px[corner..corner + 4], &[0, 0, 0, 0]);
+    // Centre (32, 32) inside glass must show refracted red from the context layer.
+    let center = (32 * 64 + 32) * 4;
+    assert!(
+        px[center] > 180 && px[center + 3] > 240,
+        "center {:?}",
+        &px[center..center + 4]
+    );
+}
+
+#[test]
+fn a_faded_context_scope_preserves_exported_opacity_and_refuses_crossing_blends() {
+    let mut e = Engine::new(Limits::default());
+    let mut list = W::new(ANY, 1);
+    list.reset();
+    let mut context = Rec::group();
+    context.flags |= drawpane_engine::record::FLAG_CONTEXT | drawpane_engine::record::FLAG_ISOLATE;
+    context.opacity = 0.5;
+    list.set(1, 0, &context);
+    let mut prior = rect(64.0, 64.0, [0.0, 0.0, 1.0, 1.0]);
+    prior.flags |= drawpane_engine::record::FLAG_CONTEXT;
+    list.set(2, 1, &prior);
+    list.set(3, 1, &rect(12.0, 12.0, [1.0, 0.0, 0.0, 1.0]));
+    list.set(4, 1, &glass_rect(16.0, 16.0, 32.0, 32.0, [8.0; 4], 0.0, 0.0));
+    e.apply(&list.finish()).expect("context");
+    let px = pixels(&mut e);
+    let corner = (2 * 64 + 2) * 4;
+    assert_eq!(&px[corner..corner + 4], &[255, 0, 0, 255]);
+
+    context.layer_blend = 2;
+    let mut patch = W::new(1, 2);
+    patch.set(1, 0, &context);
+    e.apply(&patch.finish()).expect("blended context");
+    let error = e.render_cpu(64, 64, camera(), [0.0; 4], false).unwrap_err();
+    assert_eq!(error.code, ErrorCode::Unsupported);
+}
+
+#[test]
+fn isolated_opacity_group_with_glass_fades_as_one() {
+    let mut e = Engine::new(Limits::default());
+    let mut w = W::new(ANY, 1);
+    w.reset();
+    striped_backdrop(&mut w);
+    let mut group = Rec::group();
+    group.opacity = 0.5;
+    group.flags |= 2; // FLAG_ISOLATE
+    w.set(10, 0, &group);
+    let mut g = glass_rect(12.0, 12.0, 40.0, 40.0, [8.0; 4], 75.0, 4.0);
+    g.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([1.0, 1.0, 1.0, 0.3]),
+    });
+    w.set(11, 10, &g);
+    e.apply(&w.finish()).unwrap();
+    let faded = pixels(&mut e);
+
+    // Compare against an opaque group to ensure opacity took effect without failing.
+    let mut full_group = group.clone();
+    full_group.opacity = 1.0;
+    let mut w2 = W::new(1, 2);
+    w2.set(10, 0, &full_group);
+    e.apply(&w2.finish()).unwrap();
+    let opaque = pixels(&mut e);
+    assert_ne!(faded, opaque, "isolated opacity group containing glass must fade");
+}
+
+#[test]
+fn glass_bands_match_whole_frame_bit_for_bit() {
+    let mut e = Engine::new(Limits::default());
+    e.store.limits.export_tile = 24;
+    let mut w = W::new(ANY, 1);
+    w.reset();
+    striped_backdrop(&mut w);
+    w.set(10, 0, &glass_rect(10.0, 8.0, 44.0, 44.0, [10.0; 4], 80.0, 6.0));
+    w.set(11, 0, &glass_rect(22.0, 20.0, 30.0, 30.0, [8.0; 4], 60.0, 4.0));
+    e.apply(&w.finish()).unwrap();
+
+    let (whole, _) = e.render_cpu(64, 64, camera(), [1.0; 4], false).unwrap();
+    let whole = whole.to_vec();
+    let mut banded = Vec::new();
+    for y in (0..64u32).step_by(16) {
+        banded.extend_from_slice(e.render_band(64, 64, camera(), [1.0; 4], y, 16).unwrap());
+    }
+    let diffs = whole
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(banded.as_chunks::<4>().0.iter())
+        .filter(|(a, b)| a != b)
+        .count();
+    let worst = whole
+        .iter()
+        .zip(&banded)
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap_or(0);
+    assert_eq!(
+        diffs, 0,
+        "{diffs} pixels differ between banded and whole glass frame (worst {worst})"
+    );
+}
+
+fn positioned_rect(x: f64, y: f64, w: f32, h: f32, rgba: Option<[f32; 4]>) -> Rec {
+    let mut r = Rec::new([1.0, 0.0, 0.0, 1.0, x, y], [w, h]);
+    r.paths.push(Entry::Rect { w, h, radii: [0.0; 4] });
+    if let Some(c) = rgba {
+        r.ops.push(Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::Solid(c),
+        });
+    }
+    r
+}
+
+fn tuned_glass(x: f64, y: f64, w: f32, h: f32, bend: f32, frost: f32, light: f32) -> Rec {
+    let mut r = positioned_rect(x, y, w, h, None);
+    r.ops.push(Op::Glass {
+        paths: vec![0],
+        even_odd: false,
+        kind: 0,
+        inradius: w.min(h) / 2.0,
+        angle: -45.0,
+        intensity: light,
+        refraction: bend,
+        depth: 8.0,
+        dispersion: 50.0,
+        frost,
+        splay: 0.0,
+        box_radii: [0.0; 4],
+        box_smoothing: [0.0; 4],
+    });
+    r
+}
+
+#[test]
+fn neutral_glass_in_faded_group_preserves_backdrop_alpha_and_fades_siblings() {
+    let render = |grouped: bool, with_sibling: bool| {
+        let mut e = Engine::new(Limits::default());
+        let mut w = W::new(ANY, 1);
+        w.reset();
+        w.set(
+            1,
+            0,
+            &positioned_rect(0.0, 0.0, 64.0, 64.0, Some([1.0, 0.0, 0.0, 0.30])),
+        );
+        let mut group = Rec::group();
+        group.flags |= 2; // FLAG_ISOLATE
+        group.opacity = 0.5;
+        if grouped {
+            w.set(2, 0, &group);
+        }
+        let parent = if grouped { 2 } else { 0 };
+        if with_sibling {
+            w.set(
+                4,
+                parent,
+                &positioned_rect(2.0, 2.0, 8.0, 8.0, Some([0.0, 1.0, 0.0, 1.0])),
+            );
+        }
+        w.set(3, parent, &tuned_glass(12.0, 12.0, 40.0, 40.0, 0.0, 0.0, 0.0));
+        e.apply(&w.finish()).unwrap();
+        let (px, stats) = e.render_cpu(64, 64, camera(), [0.0; 4], false).unwrap();
+        assert_eq!(stats.draw.reads, 1);
+        let centre = (32 * 64 + 32) * 4;
+        let sib = (5 * 64 + 5) * 4;
+        (
+            px[..4].to_vec(),
+            px[centre..centre + 4].to_vec(),
+            px[sib..sib + 4].to_vec(),
+        )
+    };
+    let (outside, plain, _) = render(false, false);
+    let (_, grouped, _) = render(true, false);
+    assert_eq!(plain, outside);
+    assert_eq!(grouped, outside, "neutral glass must keep the 30% backdrop alpha");
+
+    // With an opaque green sibling inside the faded group alongside neutral glass:
+    // neutral glass still keeps the backdrop alpha, while the sibling fades by 0.5.
+    let (_, grouped_sib_center, grouped_sib_px) = render(true, true);
+    let (_, _, plain_sib_px) = render(false, true);
+    assert_eq!(grouped_sib_center, outside);
+    assert_eq!(plain_sib_px, vec![0, 255, 0, 255]);
+    assert!(
+        grouped_sib_px[1] > 100 && grouped_sib_px[1] < 200,
+        "sibling inside faded group must fade by 0.5, got {grouped_sib_px:?}"
+    );
+}
+
+#[test]
+fn blended_glass_reads_the_parent_without_writing_to_the_backdrop() {
+    let mut engine = Engine::new(Limits::default());
+    let mut list = W::new(ANY, 1);
+    list.reset();
+    let mut lower = tuned_glass(8.0, 8.0, 40.0, 40.0, 0.0, 0.0, 0.0);
+    lower.layer_blend = 1; // Multiply.
+    list.set(1, 0, &lower);
+    list.set(2, 0, &tuned_glass(32.0, 8.0, 24.0, 40.0, 0.0, 0.0, 0.0));
+    engine.apply(&list.finish()).unwrap();
+    let bg = [0.5, 0.625, 0.75, 1.0];
+    let (pixels, stats) = engine.render_cpu(64, 64, camera(), bg, false).unwrap();
+    assert_eq!(stats.draw.reads, 2);
+    let pixel = |x: usize, y: usize| &pixels[(y * 64 + x) * 4..][..4];
+    let backdrop = pixel(0, 0);
+    let multiplied = pixel(20, 24);
+    for channel in 0..3 {
+        let value = u32::from(backdrop[channel]);
+        assert!(multiplied[channel].abs_diff(((value * value + 127) / 255) as u8) <= 1);
+    }
+    assert_eq!(multiplied[3], 255);
+    assert_eq!(pixel(40, 24), backdrop, "the next lens samples the unblended backdrop");
+}
+
+#[test]
+fn glass_limit_does_not_silently_drop_an_effect_from_a_valid_export() {
+    let render = |width: u32, height: u32| {
+        let mut e = Engine::new(Limits::default());
+        let mut w = W::new(ANY, 1);
+        w.reset();
+        w.set(
+            1,
+            0,
+            &tuned_glass(0.0, 0.0, width as f32, height as f32, 0.0, 0.0, 100.0),
+        );
+        e.apply(&w.finish()).unwrap();
+        let bg = [0.12, 0.12, 0.12, 1.0];
+        let (px, stats) = e.render_cpu(width, height, camera(), bg, false).unwrap();
+        assert_eq!(stats.draw.reads, 1);
+        assert!(stats.draw.exact());
+        px[4..8].to_vec()
+    };
+    let small = render(128, 128);
+    let large = render(5000, 5000);
+    assert!(small[0] > 40, "small control must show the lit rim, got {small:?}");
+    assert_eq!(large, small, "valid large frame must not silently drop glass");
+}
+
+#[test]
+fn worker_admission_accounts_for_isolation_and_glass_allocations() {
+    let limits = Limits {
+        memory_bytes: 25 << 20,
+        ..Limits::default()
+    };
+    let mut e = Engine::new(limits);
+    let mut w = W::new(ANY, 1);
+    w.reset();
+    let mut group = Rec::group();
+    group.flags |= 2; // FLAG_ISOLATE
+    group.opacity = 0.5;
+    let mut parent = 0;
+    for id in 1..=24 {
+        w.set(id, parent, &group);
+        parent = id;
+    }
+    w.set(25, parent, &tuned_glass(0.0, 0.0, 2048.0, 1024.0, 80.0, 10.0, 60.0));
+    e.apply(&w.finish()).unwrap();
+    let admitted = e.admit_export(2048, 1024, camera());
+    assert!(
+        matches!(admitted, Err(err) if err.code == ErrorCode::Limit),
+        "24 nested faded groups + glass must be refused by admit_export"
+    );
+}
+
+#[test]
+fn genuinely_grown_tiles_match_whole_glass_with_image_and_clip() {
+    let mut e = Engine::new(Limits {
+        export_tile: 173,
+        ..Limits::default()
+    });
+    let mut w = W::new(ANY, 1);
+    w.reset();
+    let mut image = positioned_rect(0.0, 0.0, 540.0, 370.0, None);
+    image.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Image {
+            id: 1,
+            m: [540.0, 0.0, 0.0, 370.0, 0.0, 0.0],
+            tile: false,
+            opacity: 1.0,
+        },
+    });
+    w.set(1, 0, &image);
+    let mut clipped = positioned_rect(91.3, 60.6, 370.0, 250.0, None);
+    clipped.paths[0] = Entry::Rect {
+        w: 370.0,
+        h: 250.0,
+        radii: [22.0; 4],
+    };
+    clipped.ops.extend([
+        Op::Clip {
+            path: 0,
+            even_odd: false,
+        },
+        Op::Children,
+        Op::Unclip,
+    ]);
+    w.set(2, 0, &clipped);
+    w.set(3, 2, &tuned_glass(4.0, -13.0, 310.0, 236.0, 95.0, 5.0, 70.0));
+    w.set(4, 0, &tuned_glass(135.0, 110.0, 370.0, 205.0, 90.0, 5.0, 55.0));
+    e.apply(&w.finish()).unwrap();
+
+    let img_px: Vec<u8> = (0..64)
+        .flat_map(|y| {
+            (0..64).flat_map(move |x| {
+                if ((x / 3 + y / 3) % 2) == 0 {
+                    [250, 60, 15, 255]
+                } else {
+                    [40, 120, 220, 147]
+                }
+            })
+        })
+        .collect();
+    e.put_image(1, 64, 64, &img_px, false).unwrap();
+
+    let (width, height) = (540, 370);
+    let whole = e
+        .render_cpu(width, height, camera(), [0.0; 4], false)
+        .unwrap()
+        .0
+        .to_vec();
+    let mut banded = Vec::new();
+    for y in (0..height).step_by(47) {
+        banded.extend_from_slice(
+            e.render_band(width, height, camera(), [0.0; 4], y, 47.min(height - y))
+                .unwrap(),
+        );
+    }
+    let diff = whole
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(banded.as_chunks::<4>().0.iter())
+        .filter(|(a, b)| a != b)
+        .count();
+    let worst = whole
+        .iter()
+        .zip(&banded)
+        .map(|(a, b)| a.abs_diff(*b))
+        .max()
+        .unwrap_or(0);
+    assert_eq!(diff, 0, "split glass tiles differed in {diff} px (max {worst})");
+}
+
+#[test]
+fn off_frame_isolate_does_not_insert_a_spurious_tile_flush() {
+    let (width, height) = (320, 210);
+    let mut e = Engine::new(Limits {
+        export_tile: 80,
+        ..Limits::default()
+    });
+    let mut w = W::new(ANY, 1);
+    w.reset();
+    w.set(
+        1,
+        0,
+        &positioned_rect(0.0, 0.0, 320.0, 210.0, Some([0.6, 0.2, 0.4, 0.37])),
+    );
+    let mut group = Rec::group();
+    group.opacity = 0.5;
+    group.flags |= 2; // FLAG_ISOLATE
+    group.transform[4] = 800.0;
+    w.set(2, 0, &group);
+    w.set(3, 2, &tuned_glass(0.0, 0.0, 20.0, 20.0, 0.0, 0.0, 0.0));
+    w.set(
+        4,
+        0,
+        &positioned_rect(0.0, 0.0, 320.0, 210.0, Some([0.2, 0.9, 0.1, 0.41])),
+    );
+    w.set(5, 0, &tuned_glass(280.0, 170.0, 20.0, 20.0, 0.0, 0.0, 0.0));
+    e.apply(&w.finish()).unwrap();
+
+    let whole = e.render_cpu(width, height, camera(), [0.0; 4], false).unwrap().0[..4].to_vec();
+    let band = e.render_band(width, height, camera(), [0.0; 4], 0, 41).unwrap()[..4].to_vec();
+    assert_eq!(band, whole);
+}
+
+#[test]
+fn disjoint_readers_do_not_sum_halos_and_off_crop_readers_do_not_block_export() {
+    let mut e = Engine::new(Limits::default());
+    let mut w = W::new(ANY, 1);
+    w.reset();
+    // 12 disjoint glass cards across a row: summing halos would exceed the 512 px cap,
+    // but disjoint readers take max reach instead.
+    for i in 0..12u32 {
+        w.set(
+            i + 1,
+            0,
+            &tuned_glass(f64::from(i) * 200.0, 0.0, 120.0, 120.0, 80.0, 10.0, 60.0),
+        );
+    }
+    e.apply(&w.finish()).unwrap();
+    let halo = e
+        .halo(camera().view())
+        .expect("12 disjoint glass cards must stay under halo cap");
+    assert!(halo > 0 && halo < 200, "unexpected halo {halo}");
+
+    // Add two overlapping off-crop readers at (5000, 5000) whose combined chain exceeds 512 px:
+    // whole-page `halo` fails, yet `halo_for_rect` and `admit_export` on 128x128 succeed.
+    let mut off1 = positioned_rect(5000.0, 5000.0, 100.0, 100.0, None);
+    off1.ops.push(Op::Read { kernel: 1, halo: 300.0 });
+    let mut off2 = positioned_rect(5020.0, 5020.0, 100.0, 100.0, None);
+    off2.ops.push(Op::Read { kernel: 1, halo: 300.0 });
+    let mut w2 = W::new(1, 2);
+    w2.set(98, 0, &off1);
+    w2.set(99, 0, &off2);
+    e.apply(&w2.finish()).unwrap();
+    assert!(
+        matches!(e.halo(camera().view()), Err(err) if err.code == ErrorCode::Limit),
+        "overlapping off-crop reader chain should exceed whole-page halo cap"
+    );
+    let crop_halo = e
+        .halo_for_rect(camera().view(), vello_common::kurbo::Rect::new(0.0, 0.0, 128.0, 128.0))
+        .expect("off-crop reader must not fail halo_for_rect");
+    assert!(crop_halo < 200);
+    assert!(e.admit_export(128, 128, camera()).is_ok());
+}
+
+#[test]
+fn wire_minor_version_gates_flags_and_reader_opcodes() {
+    let set_minor = |bytes: &[u8], minor: u16| {
+        let mut out = bytes.to_vec();
+        out[6..8].copy_from_slice(&minor.to_le_bytes());
+        out
+    };
+
+    // Plain 1.0 records are valid under every supported minor.
+    let mut plain_w = W::new(ANY, 1);
+    plain_w.reset();
+    plain_w.set(1, 0, &rect(32.0, 32.0, [1.0, 0.0, 0.0, 1.0]));
+    let plain = plain_w.finish();
+    let current = drawpane_engine::wire::MINOR;
+    for minor in 0..=current {
+        let mut e = Engine::new(Limits::default());
+        assert!(e.apply(&set_minor(&plain, minor)).is_ok(), "plain failed at 1.{minor}");
+    }
+    {
+        let mut e = Engine::new(Limits::default());
+        let err = e.apply(&set_minor(&plain, current + 1)).unwrap_err();
+        assert_eq!(err.code, ErrorCode::Version);
+    }
+
+    // FLAG_PROVISIONAL (8) requires 1.1 or later.
+    let mut prov_w = W::new(ANY, 1);
+    prov_w.reset();
+    let mut prov = rect(32.0, 32.0, [1.0, 0.0, 0.0, 1.0]);
+    prov.flags = 8;
+    prov_w.set(1, 0, &prov);
+    let prov_bytes = prov_w.finish();
+    {
+        let mut e = Engine::new(Limits::default());
+        assert_eq!(
+            e.apply(&set_minor(&prov_bytes, 0)).unwrap_err().code,
+            ErrorCode::Version
+        );
+    }
+    for minor in 1..=current {
+        let mut e = Engine::new(Limits::default());
+        assert!(
+            e.apply(&set_minor(&prov_bytes, minor)).is_ok(),
+            "provisional failed at 1.{minor}"
+        );
+    }
+
+    // FLAG_CONTEXT (16) requires 1.3 or later.
+    let mut ctx_w = W::new(ANY, 1);
+    ctx_w.reset();
+    let mut ctx = rect(32.0, 32.0, [1.0, 0.0, 0.0, 1.0]);
+    ctx.flags = 16;
+    ctx_w.set(1, 0, &ctx);
+    let ctx_bytes = ctx_w.finish();
+    for minor in [0u16, 1, 2] {
+        let mut e = Engine::new(Limits::default());
+        assert_eq!(
+            e.apply(&set_minor(&ctx_bytes, minor)).unwrap_err().code,
+            ErrorCode::Version,
+            "context should fail with Version at 1.{minor}"
+        );
+    }
+    for minor in 3..=current {
+        let mut e = Engine::new(Limits::default());
+        assert!(e.apply(&set_minor(&ctx_bytes, minor)).is_ok());
+    }
+
+    // Glass (opcode 9) requires 1.3 or later.
+    let mut glass_w = W::new(ANY, 1);
+    glass_w.reset();
+    glass_w.set(1, 0, &tuned_glass(0.0, 0.0, 32.0, 32.0, 50.0, 2.0, 40.0));
+    let glass_bytes = glass_w.finish();
+    for minor in [0u16, 1, 2] {
+        let mut e = Engine::new(Limits::default());
+        assert_eq!(
+            e.apply(&set_minor(&glass_bytes, minor)).unwrap_err().code,
+            ErrorCode::Version,
+            "glass op should fail with Version at 1.{minor}"
+        );
+    }
+    for minor in 3..=current {
+        let mut e = Engine::new(Limits::default());
+        assert!(e.apply(&set_minor(&glass_bytes, minor)).is_ok());
+    }
+
+    // An unassigned flag fails with Malformed.
+    let mut bad_flag_w = W::new(ANY, 1);
+    bad_flag_w.reset();
+    let mut bad_flag = rect(32.0, 32.0, [1.0, 0.0, 0.0, 1.0]);
+    bad_flag.flags = 512;
+    bad_flag_w.set(1, 0, &bad_flag);
+    let mut e = Engine::new(Limits::default());
+    assert_eq!(e.apply(&bad_flag_w.finish()).unwrap_err().code, ErrorCode::Malformed);
+}
+#[test]
+fn backdrop_edit_invalidates_the_blurred_output_of_a_glass_reader() {
+    let mut engine = Engine::new(Limits::default());
+    let mut list = W::new(ANY, 1);
+    list.reset();
+    let mut input = positioned_rect(31.0, 12.0, 4.0, 36.0, Some([0.2, 0.3, 0.4, 1.0]));
+    list.set(1, 0, &input);
+    let mut glass = tuned_glass(24.0, 12.0, 20.0, 36.0, 0.0, 0.0, 0.0);
+    glass.layer_blend = 1; // Multiply.
+    glass.post.push(common::Post::LayerBlur(12.0));
+    list.set(2, 0, &glass);
+    engine.apply(&list.finish()).unwrap();
+    let view = camera();
+    let before = engine.render_cpu(64, 64, view, [1.0; 4], false).unwrap().0.to_vec();
+
+    input.ops[0] = Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.8, 0.7, 0.6, 1.0]),
+    };
+    let mut patch = W::new(1, 2);
+    patch.set(1, 0, &input);
+    let changes = engine.apply(&patch.finish()).unwrap().changes;
+    let after = engine.render_cpu(64, 64, view, [1.0; 4], false).unwrap().0;
+    let x = 21;
+    let y = 32;
+    let index = (y * 64 + x) * 4;
+    assert_ne!(
+        after[index..index + 4],
+        before[index..index + 4],
+        "the post blur spreads the changed lens"
+    );
+    let damage = engine.store.dirty(&changes, view.view(), 1.5);
+    assert!(
+        damage.iter().any(|r| r.contains((x as f64 + 0.5, y as f64 + 0.5))),
+        "{damage:?}"
+    );
+}

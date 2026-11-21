@@ -342,6 +342,9 @@ impl Engine {
                     cache.drag_invalidate(id, &rects);
                 }
             }
+            if store.provisional_shown().is_none() {
+                cache.invalidate_inexact_full();
+            }
         };
         if let Some(t) = self.cpu_tiles.as_mut() {
             each(&mut t.cache);
@@ -797,6 +800,11 @@ impl Engine {
                 }
             }
         }
+        // A paired picture keeps the other plane live while one plane runs a post step.
+        // This bound also covers shared per-target clip masks and the paired mask picture.
+        if !self.store.readers().is_empty() || self.store.has_context() {
+            peak_total = peak_total.saturating_mul(2);
+        }
         Ok(peak_total)
     }
 
@@ -809,39 +817,58 @@ impl Engine {
         camera.check()?;
         self.check_supported()?;
         self.check_settled()?;
-        let l = &self.store.limits;
-        let rows = self.band_rows(width) as usize;
-        let halo = self.halo(camera.view())? as usize;
-        let cols = (l.export_tile.min(width) as usize + 2 * halo).min(width as usize);
+        let limits = &self.store.limits;
+        let rows = self.band_rows(width).min(height) as usize;
+        let view = camera.view();
+        let crop = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
+        let halo = self.halo_for_rect(view, crop)? as usize;
+        let cols = (limits.export_tile.max(1).min(width) as usize + 2 * halo).min(width as usize);
         let tile_rows = (rows + 2 * halo).min(height as usize);
-        let effects = self.export_effect_working_set(cols, tile_rows, camera.view())?;
-        let budget = self.store.limits.memory_bytes;
+        let effects = self.export_effect_working_set(cols, tile_rows, view)?;
+        let budget = limits.memory_bytes;
         if budget == 0 {
             return Ok(());
         }
-        let band = rows * width as usize * 4;
-        // A tile's target and a copy of it for the PNG's straight pixels.
-        let tile = cols * tile_rows * 4 * 2;
-        // vello_cpu keeps per wide tile (256 × 4 px) command lists for the whole frame.
-        let scene = crate::cpu::scene_estimate_bytes(width, height);
-        let png = 512 * 1024;
-        let diamond = self.export_diamond_bytes(width, height, camera.view(), cols, tile_rows);
-        let need = band
-            .saturating_add(tile)
-            .saturating_add(scene)
-            .saturating_add(effects)
-            .saturating_add(png)
-            .saturating_add(diamond);
-        let held = self.held_bytes();
-        if held.saturating_add(need) > budget {
+        let band = rows as u64 * u64::from(width) * 4;
+        let tile = cols as u64 * tile_rows as u64 * 4 * 2;
+        let scene = crate::cpu::scene_work_bytes((width as usize, height as usize)) as u64;
+        let readers = self.export_reader_working_set(width, height, view, (cols, tile_rows));
+        let diamond = self.export_diamond_bytes(width, height, view, cols, tile_rows);
+        let need = band + tile + scene + effects as u64 + (512 << 10) + diamond as u64 + readers;
+        let held = self.held_bytes() as u64;
+        if held + need > budget as u64 {
             return Err(EngineError::limit(format!(
                 "an export {width} × {height} px needs {} MiB beside the {} MiB the engine holds; it may hold {} MiB",
                 need.div_ceil(1 << 20),
                 held.div_ceil(1 << 20),
-                budget >> 20
+                budget >> 20,
             )));
         }
         Ok(())
+    }
+
+    fn export_reader_working_set(&self, width: u32, height: u32, view: Affine, tile: (usize, usize)) -> u64 {
+        let frame = Frame {
+            width: width as u16,
+            height: height as u16,
+            view,
+            detail: false,
+            area: IRect {
+                x0: 0,
+                y0: 0,
+                x1: width as i32,
+                y1: height as i32,
+            },
+        };
+        let metrics = exec::export_plan_metrics(&self.store, &frame, tile);
+        if !metrics.has_readers && !metrics.needs_backdrop {
+            return 0;
+        }
+        let copy_count = 1 + usize::from(metrics.has_clipped_reader) + usize::from(metrics.needs_backdrop);
+        // Effects admission includes one plane for all 3A scopes and reader fades. Add the
+        // second plane for reader fades only if live, and include the glass/blur scratch.
+        let target_bytes = tile.0 as u64 * tile.1 as u64 * 4;
+        target_bytes * (copy_count + metrics.max_iso_surfaces) as u64 + metrics.max_reader_work_bytes as u64 + (3 << 20)
     }
 
     /// Upper bound on retained temporary diamond-gradient raster bytes for one export tile of
@@ -963,6 +990,7 @@ impl Engine {
                     x1: width as i32,
                     y1: height as i32,
                 },
+                false,
                 0,
             )?;
             out.clear();
@@ -981,7 +1009,7 @@ impl Engine {
         self.cpu.shrink_target();
 
         let view = camera.view();
-        let halo = self.halo(view)? as usize;
+        let halo = self.halo_for_rect(view, Rect::new(0.0, 0.0, f64::from(width), f64::from(height)))? as usize;
         let scene_bytes = crate::cpu::scene_estimate_bytes(width, height);
         let held = self.held_bytes();
         // Match `Cpu::check_memory`'s headroom for Wasm static data, stack, allocator overhead,
@@ -995,12 +1023,13 @@ impl Engine {
             let effects = self.export_effect_working_set(cols, tile_rows, view)?;
             let diamond = self.export_diamond_bytes(width, height, view, cols, tile_rows);
             let tile_bytes = cols.saturating_mul(tile_rows).saturating_mul(4);
-            let need = frame_bytes
-                .saturating_add(tile_bytes)
-                .saturating_add(scene_bytes)
-                .saturating_add(effects)
-                .saturating_add(diamond);
-            if held.saturating_add(need) <= cap {
+            let need = frame_bytes as u64
+                + tile_bytes as u64
+                + scene_bytes as u64
+                + effects as u64
+                + diamond as u64
+                + self.export_reader_working_set(width, height, view, (cols, tile_rows));
+            if held as u64 + need <= cap as u64 {
                 break band_h;
             }
             if band_h <= 32 {
@@ -1031,7 +1060,7 @@ impl Engine {
                         y1: (y0 + rows) as i32,
                     };
                     let (tile_stats, grown) =
-                        self.cpu_tile(width, height, camera, background, detail, area, out.capacity())?;
+                        self.cpu_tile(width, height, camera, background, detail, area, true, out.capacity())?;
                     total_stats.draw.add(&tile_stats.draw);
                     total_stats.masks = tile_stats.masks;
                     let tw = (grown.x1 - grown.x0) as usize * 4;
@@ -1090,6 +1119,7 @@ impl Engine {
                 x1: width as i32,
                 y1: height as i32,
             },
+            false,
             0,
         )?;
         Ok((self.cpu.target.data_as_u8_slice(), stats))
@@ -1119,7 +1149,12 @@ impl Engine {
         let Some(last) = gpu.last() else {
             return Ok(DrawStats::default());
         };
-        let halo = self.halo(last.view)?;
+        let rect = Rect::new(0.0, 0.0, f64::from(last.size.0), f64::from(last.size.1));
+        let halo = match self.halo_for_rect(last.view, rect) {
+            Ok(h) => h,
+            Err(e) if e.code == ErrorCode::Limit => return Ok(DrawStats::default()),
+            Err(e) => return Err(e),
+        };
         let gpu = self
             .gpu
             .as_mut()
@@ -1141,7 +1176,12 @@ impl Engine {
         camera.check()?;
         self.check_supported()?;
         let view = camera.view();
-        let halo = self.halo(view)?;
+        let frame_rect = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
+        let halo_opt = match self.halo_for_rect(view, frame_rect) {
+            Ok(h) => Some(h),
+            Err(e) if e.code == ErrorCode::Limit => None,
+            Err(e) => return Err(e),
+        };
         if self.gpu.is_none() {
             return Err(EngineError::new(ErrorCode::State, "no GPU attached"));
         }
@@ -1162,15 +1202,20 @@ impl Engine {
             .gpu
             .as_mut()
             .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
-        let mut stats = gpu.render(
-            &self.store,
-            &frame,
-            background,
-            self.generation,
-            halo,
-            options,
-            drag.as_ref(),
-        )?;
+        let mut stats = match halo_opt {
+            Some(halo) => gpu.render(
+                &self.store,
+                &frame,
+                background,
+                self.generation,
+                halo,
+                options,
+                drag.as_ref(),
+            )?,
+            // When a reader's reach exceeds the per-tile halo cap (e.g. maximum glass settings at
+            // 2x), draw the frame untiled into the frame target directly (as `render_cpu` does).
+            None => gpu.render_whole(&self.store, &frame, background, self.generation, options.moving)?,
+        };
         // No frame is exact while text is still to come: it may paint past its box.
         if stats.exact && self.store.provisional_shown().is_some() {
             stats.exact = false;
@@ -1179,21 +1224,156 @@ impl Engine {
         Ok(stats)
     }
 
-    /// Device pixels the readers on the page may read past where they paint, summed through
-    /// readers reading readers (conservatively: every reader's reach added up).
+    /// Longest geometric backdrop-dependency reach across all visible readers on the page:
+    /// disjoint readers take their maximum reach rather than summing, and glass never feeds into
+    /// later readers (decision 0007).
     pub fn halo(&self, view: Affine) -> Result<i32> {
-        let mut total = 0.0f64;
-        for id in self.store.readers() {
-            let Some(node) = self.store.nodes.get(id) else { continue };
-            if let Some(h) = node.record.reads() {
-                let m = view * self.store.world(*id);
-                // The reach on the device, as a box around a rotated or sheared one grows it,
-                // and a pixel each way for rounding to whole pixels.
-                let [a, b, c, d, _, _] = m.as_coeffs();
-                let reach = f64::from(h) * (a.abs() + c.abs()).max(b.abs() + d.abs());
-                total += reach.ceil() + 2.0;
+        self.halo_in(view, None)
+    }
+
+    /// Longest geometric backdrop-dependency reach affecting `crop` (in device pixels): unrelated
+    /// readers outside `crop` (that don't transitively feed a reader overlapping `crop`) never
+    /// inflate an export's halo.
+    pub fn halo_for_rect(&self, view: Affine, crop: Rect) -> Result<i32> {
+        self.halo_in(view, Some(crop))
+    }
+
+    fn halo_in(&self, view: Affine, crop: Option<Rect>) -> Result<i32> {
+        if self.store.readers().is_empty() {
+            return Ok(0);
+        }
+        struct ReaderNode {
+            paint: Rect,
+            read: Rect,
+            reach_px: f64,
+            writes_backdrop: bool,
+        }
+        fn collect(
+            store: &Store,
+            view: Affine,
+            id: u32,
+            parent: Affine,
+            alpha: f32,
+            parent_context: bool,
+            out: &mut Vec<ReaderNode>,
+        ) {
+            let Some(node) = store.nodes.get(&id) else {
+                return;
+            };
+            let r = &node.record;
+            if r.hidden() {
+                return;
+            }
+            let world = parent * r.transform;
+            let device = view * world;
+            if !device.as_coeffs().iter().all(|v| v.is_finite()) {
+                return;
+            }
+            let is_context = r.context();
+            let in_alpha = if parent_context && !is_context { 1.0 } else { alpha };
+            let opacity = in_alpha * r.opacity;
+            if opacity <= 0.0 {
+                return;
+            }
+            let inner = if r.isolate() && r.opacity < 1.0 { 1.0 } else { opacity };
+            let box_rect = Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1]));
+            let local = r
+                .content_bounds(&|g| store.glyphs.bounds(g))
+                .map_or(box_rect, |cb| cb.union(box_rect));
+            let [a, b, c, d, _, _] = device.as_coeffs();
+            let scale = (a.abs() + c.abs()).max(b.abs() + d.abs());
+            for op in &r.ops {
+                match op {
+                    crate::record::Op::Children => {
+                        for &kid in &node.children {
+                            collect(store, view, kid, world, inner, is_context, out);
+                        }
+                    }
+                    crate::record::Op::Glass(g) if !is_context => {
+                        let reach_px = (f64::from(crate::glass::local_halo(g)) * scale).ceil() + 2.0;
+                        let paint = device.transform_rect_bbox(local);
+                        out.push(ReaderNode {
+                            paint,
+                            read: paint.inflate(reach_px, reach_px),
+                            reach_px,
+                            writes_backdrop: false,
+                        });
+                    }
+                    crate::record::Op::Read { halo, .. } => {
+                        let reach_px = (f64::from(*halo) * scale).ceil() + 2.0;
+                        let paint = device.transform_rect_bbox(local);
+                        out.push(ReaderNode {
+                            paint,
+                            read: paint.inflate(reach_px, reach_px),
+                            reach_px,
+                            writes_backdrop: true,
+                        });
+                    }
+                    crate::record::Op::BackgroundBlur(b_op) => {
+                        let reach_px = (f64::from((b_op.radius * 1.5).ceil() + 2.0) * scale).ceil() + 2.0;
+                        let paint = device.transform_rect_bbox(local);
+                        out.push(ReaderNode {
+                            paint,
+                            read: paint.inflate(reach_px, reach_px),
+                            reach_px,
+                            writes_backdrop: true,
+                        });
+                    }
+                    crate::record::Op::ProgressiveBlur(p_op) => {
+                        let r = p_op.start_radius.max(p_op.end_radius);
+                        let reach_px = (f64::from((r * 1.5).ceil() + 2.0) * scale).ceil() + 2.0;
+                        let paint = device.transform_rect_bbox(local);
+                        out.push(ReaderNode {
+                            paint,
+                            read: paint.inflate(reach_px, reach_px),
+                            reach_px,
+                            writes_backdrop: true,
+                        });
+                    }
+                    _ => {}
+                }
             }
         }
+        let mut nodes = Vec::new();
+        if let Some(root) = self.store.nodes.get(&crate::store::ROOT) {
+            for &kid in &root.children {
+                collect(&self.store, view, kid, Affine::IDENTITY, 1.0, false, &mut nodes);
+            }
+        }
+        if nodes.is_empty() {
+            return Ok(0);
+        }
+        let overlaps = |a: Rect, b: Rect| a.x0 <= b.x1 && b.x0 <= a.x1 && a.y0 <= b.y1 && b.y0 <= a.y1;
+        let n = nodes.len();
+        let mut chain = vec![0.0f64; n];
+        for i in 0..n {
+            let mut dep = 0.0f64;
+            for k in 0..i {
+                if nodes[k].writes_backdrop && overlaps(nodes[k].paint, nodes[i].read) {
+                    dep = dep.max(chain[k]);
+                }
+            }
+            chain[i] = nodes[i].reach_px + dep;
+        }
+        let total = match crop {
+            None => chain.into_iter().fold(0.0f64, f64::max),
+            Some(crop_rect) => {
+                let mut relevant = vec![false; n];
+                for i in (0..n).rev() {
+                    if overlaps(nodes[i].paint, crop_rect) {
+                        relevant[i] = true;
+                    }
+                    if relevant[i] {
+                        for k in 0..i {
+                            if nodes[k].writes_backdrop && overlaps(nodes[k].paint, nodes[i].read) {
+                                relevant[k] = true;
+                            }
+                        }
+                    }
+                }
+                (0..n).filter(|&i| relevant[i]).map(|i| chain[i]).fold(0.0f64, f64::max)
+            }
+        };
         if total > f64::from(self.store.limits.halo) {
             return Err(EngineError::limit(format!(
                 "backdrop readers reach {total:.0} px past a band; the most is {}",
@@ -1215,10 +1395,15 @@ impl Engine {
         background: [f32; 4],
         detail: bool,
         area: IRect,
+        grow_halo: bool,
         extra_external: usize,
     ) -> Result<(FrameStats, IRect)> {
         let view = camera.view();
-        let halo = self.halo(view)?;
+        let halo = if grow_halo {
+            self.halo_for_rect(view, Rect::new(0.0, 0.0, f64::from(width), f64::from(height)))?
+        } else {
+            0
+        };
         let grown = IRect {
             x0: area.x0 - halo,
             y0: area.y0 - halo,
@@ -1308,6 +1493,7 @@ impl Engine {
             self.store.limits.image_bytes
         };
         self.cpu.set_diamond_budget(diamond_budget);
+        self.cpu.set_external_bytes(self.store.bytes());
         self.cpu.begin(side as u16, side as u16, area, premultiply(background));
         let frame = Frame {
             width: side as u16,
@@ -1706,6 +1892,9 @@ impl Engine {
         let mut band = std::mem::take(&mut self.band);
         let band_bytes = stride * rows as usize;
         band.clear();
+        if self.store.limits.memory_bytes > 0 && band.capacity() > self.store.limits.band_bytes {
+            band.shrink_to_fit();
+        }
         band.resize(band_bytes, 0);
         let mut x0 = 0u32;
         let result = (|| {
@@ -1717,7 +1906,8 @@ impl Engine {
                     x1: (x0 + cols) as i32,
                     y1: (y0 + rows) as i32,
                 };
-                let (_, grown) = self.cpu_tile(width, height, camera, background, false, area, band_bytes)?;
+                let (_, grown) =
+                    self.cpu_tile(width, height, camera, background, false, area, true, band.capacity())?;
                 let tw = (grown.x1 - grown.x0) as usize * 4;
                 let px = self.cpu.target.data_as_u8_slice();
                 for r in 0..rows as usize {

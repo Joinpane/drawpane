@@ -16,6 +16,7 @@ export class Outcome {
   readonly culled: number;
   readonly glyphs_masked: number;
   readonly glyphs_outlined: number;
+  readonly reads: number;
   readonly mask_hits: number;
   readonly mask_misses: number;
   readonly mask_bytes: number;

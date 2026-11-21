@@ -14,9 +14,12 @@ pub mod engine;
 pub mod error;
 pub mod exec;
 pub mod geometry;
+pub mod glass;
 pub mod glyphs;
 #[cfg(feature = "gpu-common")]
 pub mod gpu;
+#[cfg(feature = "gpu-common")]
+pub mod gpu_readers;
 pub mod images;
 pub mod kernels;
 pub mod limits;
@@ -51,6 +54,7 @@ pub struct Outcome {
     pub culled: u32,
     pub glyphs_masked: u32,
     pub glyphs_outlined: u32,
+    pub reads: u32,
     pub mask_hits: f64,
     pub mask_misses: f64,
     pub mask_bytes: f64,
@@ -106,6 +110,7 @@ impl Outcome {
             culled: 0,
             glyphs_masked: 0,
             glyphs_outlined: 0,
+            reads: 0,
             mask_hits: 0.0,
             mask_misses: 0.0,
             mask_bytes: 0.0,
@@ -141,6 +146,7 @@ impl Outcome {
             culled: s.draw.culled,
             glyphs_masked: s.draw.glyphs_masked,
             glyphs_outlined: s.draw.glyphs_outlined,
+            reads: s.draw.reads,
             mask_hits: s.masks.hits as f64,
             mask_misses: s.masks.misses as f64,
             mask_bytes: s.masks.bytes as f64,
@@ -276,8 +282,9 @@ impl Engine {
             "image_bytes" => l.image_bytes = v,
             "glyph_outline_bytes" => l.glyph_outline_bytes = v,
             "memory_bytes" => {
-                l.memory_bytes = v;
-                self.core.cpu.set_memory_budget(v);
+                let budget = limits::memory_budget(v);
+                l.memory_bytes = budget;
+                self.core.cpu.set_memory_budget(budget);
             }
             "gpu_bytes" => l.gpu_bytes = v,
             "tile_bytes" => l.tile_bytes = v,

@@ -350,9 +350,9 @@ fn wire_version_and_layer_scope_validation() {
         );
     }
 
-    // Both the original 1.2 and current headers accept balanced layer ops.
+    // All known headers since 1.2 accept balanced layer ops.
     let current = drawpane_engine::wire::MINOR;
-    for supported_minor in [2, current] {
+    for supported_minor in 2..=current {
         assert!(
             Engine::new(Limits::default())
                 .apply(&msg(supported_minor, &record))

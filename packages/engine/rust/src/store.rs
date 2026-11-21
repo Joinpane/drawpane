@@ -159,7 +159,7 @@ pub struct Applied {
     /// Where the changed records painted before and paint now, in page units, with their
     /// places in paint order. `Store::dirty` adds the readers they reach, for a camera.
     pub changes: Vec<Dirty>,
-    /// Everything changed (a reset): redraw it all.
+    /// A reset or page-wide rasterization change requires redrawing every tile.
     pub full: bool,
     /// The message only moved these records (transform commands and nothing else): a drag
     /// (decision 0040, "Dragging"). Sorted, without repeats.
@@ -184,6 +184,8 @@ pub struct Store {
     dirty_checks: Cell<u64>,
     /// `provisional_shown`'s answer and the revision it was found for: asked every frame.
     provisional: Cell<Option<(u32, Option<u32>)>>,
+    /// Records with `FLAG_CONTEXT` (export context, decision 0039).
+    context: HashSet<u32>,
     /// Records holding features the engine doesn't draw (their `unsupported` bits).
     unsupported: HashSet<u32>,
     /// Records that paint an image, so an image changing invalidates only what shows it.
@@ -271,6 +273,7 @@ impl Store {
             readers: Vec::new(),
             dirty_checks: Cell::new(0),
             provisional: Cell::new(None),
+            context: HashSet::new(),
             unsupported: HashSet::new(),
             image_records: HashSet::new(),
             masked_parents: HashMap::new(),
@@ -517,6 +520,7 @@ impl Store {
         self.nodes = staged.nodes;
         self.glyphs = staged.glyphs;
         self.readers = staged.readers;
+        self.context = staged.context;
         self.unsupported = staged.unsupported;
         self.image_records = staged.image_records;
         self.masked_parents = staged.masked_parents;
@@ -613,6 +617,12 @@ impl Store {
             .filter(|(_, n)| n.record.reads().is_some())
             .map(|(id, _)| *id)
             .collect();
+        self.context = self
+            .nodes
+            .iter()
+            .filter(|(_, n)| n.record.context())
+            .map(|(id, _)| *id)
+            .collect();
         self.unsupported = self
             .nodes
             .iter()
@@ -668,6 +678,7 @@ impl Store {
                 let old = std::mem::replace(&mut self.nodes, nodes);
                 let glyphs = std::mem::take(&mut self.glyphs);
                 let readers = std::mem::take(&mut self.readers);
+                self.context.clear();
                 self.unsupported.clear();
                 self.image_records.clear();
                 self.masked_parents.clear();
@@ -752,6 +763,7 @@ impl Store {
                     let may_flush = !record.hidden()
                         && (self.parent_has_mask(parent)
                             || record.has_offscreen_pass()
+                            || record.reads().is_some()
                             || (draws_children
                                 && self
                                     .nodes
@@ -768,6 +780,7 @@ impl Store {
                     }
                 }
                 let reads = record.reads().is_some();
+                let is_context = record.context();
                 let unsupported = record.unsupported != 0;
                 let images = record.images().next().is_some();
                 let cost = record.heap_bytes();
@@ -836,6 +849,11 @@ impl Store {
                 if reads {
                     self.readers.push(id);
                 }
+                if is_context {
+                    self.context.insert(id);
+                } else {
+                    self.context.remove(&id);
+                }
                 if unsupported {
                     self.unsupported.insert(id);
                 } else {
@@ -883,6 +901,7 @@ impl Store {
                         }
                         self.glyphs.release(&node.record);
                         self.bytes -= node.record.heap_bytes() + NODE_BYTES;
+                        self.context.remove(&at);
                         self.unsupported.remove(&at);
                         self.image_records.remove(&at);
                         if txn.track {
@@ -1167,7 +1186,7 @@ impl Store {
             false
         } else {
             let draws_children = id == ROOT || node.record.ops.iter().any(|op| matches!(op, Op::Children));
-            node.record.has_offscreen_pass()
+            (node.record.has_offscreen_pass() || node.record.reads().is_some())
                 || (draws_children && node.children.iter().any(|c| self.subtree_has_pass(*c)))
         };
         node.has_pass.set(Some(v));
@@ -1331,6 +1350,22 @@ impl Store {
         Some(if anc_pad > 0.0 { r.inflate(anc_pad, anc_pad) } else { r })
     }
 
+    /// Whether any visible backdrop reader may paint inside `rect` (in device pixels under `view`).
+    pub fn has_reader_in_rect(&self, view: Affine, rect: Rect) -> bool {
+        if self.readers.is_empty() {
+            return false;
+        }
+        for &id in &self.readers {
+            if let Some(wb) = self.world_extent(id) {
+                let db = view.transform_rect_bbox(wb);
+                if db.x0 <= rect.x1 && rect.x0 <= db.x1 && db.y0 <= rect.y1 && rect.y0 <= db.y1 {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     /// Where the touched records paint now, added to where they painted before.
     fn changes(&mut self, before: Vec<Dirty>, touched: &[u32]) -> Vec<Dirty> {
         let mut items = before;
@@ -1366,6 +1401,7 @@ impl Store {
                 ..*d
             })
             .collect();
+        let mut output_only: Vec<Rect> = Vec::new();
         if !self.readers.is_empty() && !items.is_empty() {
             // Each reader's paint order, subtree end, read and paint regions on the device, and
             // whether it reads after its children: worked out once.
@@ -1375,6 +1411,7 @@ impl Store {
                 reads: Rect,
                 paints: Rect,
                 after_children: bool,
+                writes_backdrop: bool,
                 /// Changes before this index are known not to reach it.
                 seen: usize,
                 joined: bool,
@@ -1388,20 +1425,30 @@ impl Store {
                 let Some(node) = self.nodes.get(&id) else { continue };
                 let r = &node.record;
                 let halo = f64::from(r.reads().unwrap_or(0.0));
-                let b = Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1]));
+                let box_rect = Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1]));
+                let b = r
+                    .content_bounds(&|g| self.glyphs.bounds(g))
+                    .map_or(box_rect, |cb| cb.union(box_rect));
                 let device = view * self.world(id);
+                let paint = device.transform_rect_bbox(b);
+                // A reader's result passes through its own and enclosing layer effects.
+                // Include that expanded output in damage and in later reader dependencies.
+                let paint = self
+                    .dirty_extent(id)
+                    .map_or(paint, |extent| paint.union(view.transform_rect_bbox(extent)));
                 readers.push(Reader {
                     order,
                     end,
                     reads: device.transform_rect_bbox(b.inflate(halo, halo)).inflate(slop, slop),
-                    paints: device.transform_rect_bbox(b).inflate(slop, slop),
+                    paints: paint.inflate(slop, slop),
                     // Its own subtree's changes are above it, unless it reads (any of its reads)
                     // after its children are drawn.
                     after_children: r
                         .ops
                         .iter()
                         .skip_while(|op| !matches!(op, Op::Children))
-                        .any(|op| matches!(op, Op::Read { .. })),
+                        .any(Op::is_reader),
+                    writes_backdrop: r.reader_writes_backdrop(),
                     seen: 0,
                     joined: false,
                 });
@@ -1428,13 +1475,20 @@ impl Store {
                     r.seen = items.len();
                     if hit {
                         r.joined = true;
-                        grew = true;
-                        items.push(Dirty {
-                            rect: r.paints,
-                            order: r.order,
-                            end: r.order,
-                            stale: false,
-                        });
+                        // Decision 0007 (2026-11-20): glass writes only to output, never to the
+                        // backdrop later readers sample, so a glass-only reader never transitively
+                        // dirties later readers' full boxes.
+                        if r.writes_backdrop {
+                            grew = true;
+                            items.push(Dirty {
+                                rect: r.paints,
+                                order: r.order,
+                                end: r.order,
+                                stale: false,
+                            });
+                        } else {
+                            output_only.push(r.paints);
+                        }
                     }
                 }
                 if !grew {
@@ -1443,7 +1497,14 @@ impl Store {
             }
             self.dirty_checks.set(checks);
         }
-        items.into_iter().map(|d| d.rect).collect()
+        let mut out: Vec<Rect> = items.into_iter().map(|d| d.rect).collect();
+        out.extend(output_only);
+        out
+    }
+
+    /// Whether any export-context record (`FLAG_CONTEXT`) is held.
+    pub fn has_context(&self) -> bool {
+        !self.context.is_empty()
     }
 
     /// How many change-against-reader checks the last `dirty` made: its cost, bounded by readers

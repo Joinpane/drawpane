@@ -6,13 +6,24 @@
 //! drawn in its parent's transform and opacity; a record that fades as one is an isolating
 //! opacity group; otherwise opacity multiplies down into its paints and children. Clips are
 //! clip paths, which don't isolate. Culling uses the engine's own subtree bounds.
+//!
+//! Stacked glass (decision 0007 amendment) and export context (decision 0039) share one dual-target
+//! model when a frame has backdrop readers or `FLAG_CONTEXT`:
+//! - A glass op writes only to the visible output (`main`), never to the backdrop (`backdrop`)
+//!   read by subsequent readers.
+//! - Non-glass fills, strokes, children, and earlier `background-blur` ops write to both `main`
+//!   and `backdrop` up to the last reader in paint order, then only to `main`.
+//! - `FLAG_CONTEXT` records write only to `backdrop` (skipping their own glass ops) and their
+//!   clips bound `clip_within` without clipping non-context output.
 
 use crate::error::{EngineError, Result};
 use crate::geometry;
+use crate::glass;
 use crate::limits::Limits;
 use crate::masks::{MaskKey, PHASES};
-use crate::record::{ComposeMode, GradientKind, Op, Paint, PathEntry, PostEffect, Record, Rgba, StrokeStyle};
+use crate::record::{ComposeMode, GlassOp, GradientKind, Op, Paint, PathEntry, PostEffect, Record, Rgba, StrokeStyle};
 use crate::store::Store;
+use std::collections::{HashMap, HashSet};
 use vello_common::color::{AlphaColor, Srgb};
 use vello_common::kurbo::{Affine, BezPath, Cap, Join, Rect, Stroke};
 use vello_common::paint::{Image, ImageSource, PaintType, Tint, TintMode};
@@ -119,6 +130,15 @@ pub struct ImageView {
     pub height: u32,
 }
 
+/// Axis-aligned device box of a clipping frame, plus its innermost opaque solid fill if any
+/// (decision 0007: glass and background blur stop at clipping frames and see their solid fill
+/// beyond the edge).
+#[derive(Clone, Copy, Debug)]
+pub struct FrameClip {
+    pub device_box: Rect,
+    pub fill: Option<[u8; 4]>,
+}
+
 /// Something open in the scene where a backdrop reader runs, so a backend that renders what's
 /// drawn so far can reopen it after.
 #[derive(Clone)]
@@ -127,6 +147,12 @@ pub enum Open {
         transform: Affine,
         path: BezPath,
         even_odd: bool,
+        frame_clip: Option<FrameClip>,
+        /// True for clips belonging to an export-context ancestor (`FLAG_CONTEXT`): clips context
+        /// drawing and bounds `clip_within`, never clips exported non-context output.
+        context_only: bool,
+        /// True while currently pushed onto `backend.scene()`.
+        active_on_scene: bool,
     },
     Layer,
 }
@@ -218,9 +244,21 @@ pub enum PostStep {
     },
 }
 
+/// How an isolated picture reads and where its result goes when the scope closes.
+#[derive(Clone, Copy, Debug)]
+pub struct Isolation {
+    pub on_main: bool,
+    pub on_backdrop: bool,
+    pub separate: bool,
+    pub copy_parent: bool,
+    /// An export selection crosses this faded context scope and keeps its own opacity.
+    pub unfaded_main: bool,
+}
+
 pub trait Backend {
     type Scene: Draw;
     fn scene(&mut self) -> &mut Self::Scene;
+    fn mark_dirty(&mut self) {}
     /// Flushes pending scene draws on tiled CPU renders when a culled subtree would have flushed
     /// on the whole frame, preserving `f32 -> u8` flush boundaries under `vello_cpu`'s
     /// `f32_pipeline`.
@@ -251,9 +289,35 @@ pub trait Backend {
         stops: &[(f32, Rgba)],
         alpha: f32,
     ) -> Result<Option<ImageSource>>;
-    /// Runs a backdrop reader over what's drawn so far (`open` is open in the scene).
+
+    /// Prepares the backend for a frame with backdrop readers or export context.
+    fn begin_readers(&mut self, _needs_backdrop: bool, _has_context: bool) -> Result<()> {
+        Ok(())
+    }
+    /// Snapshots `main` into `backdrop` right before the first glass op (when `!has_context`).
+    fn snapshot_backdrop(&mut self, _open: &[Open]) -> Result<()> {
+        Ok(())
+    }
+    /// Switches which targets subsequent scene draws write into, flushing pending scene ops first.
+    fn set_targets(&mut self, _write_main: bool, _write_backdrop: bool, _open: &[Open]) -> Result<()> {
+        Ok(())
+    }
+    /// Runs a test backdrop reader kernel over what's drawn so far (`open` is open in the scene).
     fn read(&mut self, kernel: u32, paints: IRect, reads: IRect, open: &[Open]) -> Result<()>;
-    /// Pushes a transparent offscreen target covering `area` (device pixels), flushing the active
+    /// Draws a lens from the current glass-free picture into the main picture.
+    #[allow(clippy::too_many_arguments)]
+    fn glass(
+        &mut self,
+        op: &GlassOp,
+        paths: &[(BezPath, bool)],
+        device: Affine,
+        size: [f32; 2],
+        alpha: f32,
+        coarse: bool,
+        read_parent: bool,
+        open: &[Open],
+    ) -> Result<()>;
+    /// Pushes an offscreen target covering `area` (device pixels), flushing the active
     /// scene first. When `clip_to_parent` is true, `area` is intersected with `target_bounds()`;
     /// when false (e.g. layer blur needing halo pixels outside a tile or frame edge), `area` is
     /// used as-is and `scene_origin_hint` provides a tile-independent CPU scene origin.
@@ -263,12 +327,9 @@ pub trait Backend {
         area: IRect,
         clip_to_parent: bool,
         scene_origin_hint: Option<(i32, i32)>,
+        isolation: Isolation,
         open: &[Open],
     ) -> Result<bool>;
-    /// Pushes an offscreen target covering `area` (device pixels), initialized with a copy of the
-    /// parent target's pixels over that area (for faded pass-through frames, decision 0038).
-    /// Returns `false` if the resulting target is empty.
-    fn push_isolated_backdrop(&mut self, area: IRect, open: &[Open]) -> Result<bool>;
     /// Flushes the active offscreen target (if pending), applies an ordered chain of post-effect
     /// steps (`LayerBlur`, `Noise`, `Texture`), and replaces the top of the offscreen stack with
     /// the final result.
@@ -323,7 +384,7 @@ pub struct DrawStats {
     pub glyphs_masked: u32,
     pub glyphs_outlined: u32,
     pub reads: u32,
-    /// Records drawn by their coarse ops (unreadable text as bars): a stand-in, not exact.
+    /// Records drawn by their coarse ops (unreadable text as bars, coarse glass): a stand-in, not exact.
     pub coarse: u32,
     /// Records skipped as specks (under half a device pixel): a stand-in, not exact.
     pub specks: u32,
@@ -380,6 +441,395 @@ impl DrawStats {
     pub fn exact(&self) -> bool {
         self.coarse == 0 && self.specks == 0
     }
+}
+
+/// Pre-pass plan for frames containing backdrop readers or export-context records.
+/// Always computed against the full frame viewport so tiled band exports share exact reader
+/// sequencing, `needs_backdrop`, and flush boundaries with whole-frame renders.
+struct ReaderPlan {
+    has_context: bool,
+    needs_backdrop: bool,
+    last_reader_seq: usize,
+    isolated_with_reader: HashSet<u32>,
+    /// Per full-frame-visible subtree that flushes on the whole frame (reader ops, backend-managed
+    /// isolated groups, or context switches): `(reader_ops_in_subtree, contains_first_glass)`.
+    subtree_readers: HashMap<u32, (usize, bool)>,
+}
+
+fn plan_readers(store: &Store, frame: &Frame) -> Option<ReaderPlan> {
+    if store.readers().is_empty() && !store.has_context() {
+        return None;
+    }
+    let root = store.nodes.get(&crate::store::ROOT)?;
+    let full_viewport = Rect::new(-1.0, -1.0, f64::from(frame.width) + 1.0, f64::from(frame.height) + 1.0);
+    let mut seq = 0usize;
+    let mut first_glass_seq: Option<usize> = None;
+    let mut last_reader_seq = 0usize;
+    let mut has_readers = false;
+    let mut has_context = false;
+    // Mark isolated ancestors from the full graph (independent of viewport culling), so
+    // off-screen reader motion or tiled band rendering never flips an ancestor's compositing path.
+    let mut isolated_with_reader = HashSet::new();
+    let mut subtree_readers: HashMap<u32, (usize, bool)> = HashMap::new();
+    let mut mark_isolated_ancestors = |start_id: u32| {
+        let mut chain = Vec::new();
+        let mut cur = start_id;
+        let mut child_of_cur = false;
+        while cur != crate::store::ROOT {
+            let Some(n) = store.nodes.get(&cur) else { return };
+            if n.record.hidden() {
+                return;
+            }
+            // A child under a parent whose ops contain no `Op::Children` is never drawn.
+            if child_of_cur && !n.record.ops.iter().any(|op| matches!(op, Op::Children)) {
+                return;
+            }
+            chain.push((cur, n.record.isolate() && n.record.opacity < 1.0));
+            child_of_cur = true;
+            cur = n.parent;
+        }
+        for (id, iso) in chain {
+            if iso {
+                isolated_with_reader.insert(id);
+            }
+        }
+    };
+    for &rid in store.readers() {
+        mark_isolated_ancestors(rid);
+    }
+    if store.has_context() {
+        for (&nid, node) in &store.nodes {
+            if nid != crate::store::ROOT && !node.record.context() && !node.record.hidden() {
+                let mut cur = node.parent;
+                let mut under_context = false;
+                while cur != crate::store::ROOT {
+                    let Some(p) = store.nodes.get(&cur) else { break };
+                    if p.record.context() {
+                        under_context = true;
+                        break;
+                    }
+                    cur = p.parent;
+                }
+                if under_context {
+                    mark_isolated_ancestors(nid);
+                }
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn visit(
+        store: &Store,
+        frame: &Frame,
+        viewport: Rect,
+        id: u32,
+        parent: Affine,
+        alpha: f32,
+        parent_context: bool,
+        isolated_with_reader: &HashSet<u32>,
+        seq: &mut usize,
+        first_glass_seq: &mut Option<usize>,
+        last_reader_seq: &mut usize,
+        has_readers: &mut bool,
+        has_context: &mut bool,
+        subtree_readers: &mut HashMap<u32, (usize, bool)>,
+    ) -> (usize, bool, bool) {
+        let Some(node) = store.nodes.get(&id) else {
+            return (0, false, false);
+        };
+        let r = &node.record;
+        if r.hidden() {
+            return (0, false, false);
+        }
+        let world = parent * r.transform;
+        let device = frame.view * world;
+        if !finite(device) {
+            return (0, false, false);
+        }
+        let Some(bounds) = store.bounds(id) else {
+            return (0, false, false);
+        };
+        if !overlaps(device.transform_rect_bbox(bounds), viewport) {
+            return (0, false, false);
+        }
+        if frame.detail && !r.group() {
+            let b = device.transform_rect_bbox(Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1])));
+            if b.width() < 0.5 && b.height() < 0.5 {
+                return (0, false, false);
+            }
+        }
+        let in_alpha = if parent_context && !r.context() { 1.0 } else { alpha };
+        let opacity = in_alpha * r.opacity;
+        if opacity <= 0.0 {
+            return (0, false, false);
+        }
+        if r.context() {
+            *has_context = true;
+        }
+        let isolate = r.isolate() && r.opacity < 1.0;
+        let backend_isolate = isolate && isolated_with_reader.contains(&id);
+        let inner = if isolate { 1.0 } else { opacity };
+        let coarse =
+            r.provisional() || frame.detail && r.coarse_below > 0.0 && scale_of(device) < f64::from(r.coarse_below);
+        let ops = if coarse { &r.coarse } else { &r.ops };
+        let mut count = 0usize;
+        let mut has_first_glass = false;
+        let mut flushes = backend_isolate || r.context() != parent_context;
+        for op in ops {
+            match op {
+                Op::Children => {
+                    for &c in &node.children {
+                        let (cc, cg, cf) = visit(
+                            store,
+                            frame,
+                            viewport,
+                            c,
+                            world,
+                            inner,
+                            r.context(),
+                            isolated_with_reader,
+                            seq,
+                            first_glass_seq,
+                            last_reader_seq,
+                            has_readers,
+                            has_context,
+                            subtree_readers,
+                        );
+                        count += cc;
+                        has_first_glass |= cg;
+                        flushes |= cf;
+                    }
+                }
+                Op::Glass(_) => {
+                    // A context record's own glass writes neither to output nor to backdrop.
+                    if !r.context() {
+                        *seq += 1;
+                        count += 1;
+                        flushes = true;
+                        if first_glass_seq.is_none() {
+                            *first_glass_seq = Some(*seq);
+                            has_first_glass = true;
+                        }
+                        *last_reader_seq = *seq;
+                        *has_readers = true;
+                    }
+                }
+                Op::Read { .. } | Op::BackgroundBlur(_) | Op::ProgressiveBlur(_) => {
+                    *seq += 1;
+                    count += 1;
+                    flushes = true;
+                    *last_reader_seq = *seq;
+                    *has_readers = true;
+                }
+                _ => {}
+            }
+        }
+        if flushes {
+            subtree_readers.insert(id, (count, has_first_glass));
+        }
+        (count, has_first_glass, flushes)
+    }
+
+    for &c in &root.children {
+        visit(
+            store,
+            frame,
+            full_viewport,
+            c,
+            Affine::IDENTITY,
+            1.0,
+            false,
+            &isolated_with_reader,
+            &mut seq,
+            &mut first_glass_seq,
+            &mut last_reader_seq,
+            &mut has_readers,
+            &mut has_context,
+            &mut subtree_readers,
+        );
+    }
+    if !has_readers && !has_context {
+        return None;
+    }
+    // Dual-target backdrop is needed for export context OR whenever any glass precedes a later reader.
+    let needs_backdrop = has_context || first_glass_seq.is_some_and(|g| g < last_reader_seq);
+    Some(ReaderPlan {
+        has_context,
+        needs_backdrop,
+        last_reader_seq,
+        isolated_with_reader,
+        subtree_readers,
+    })
+}
+
+/// Peak reader working-set metrics for `Engine::admit_export`.
+#[derive(Default, Clone, Copy, Debug)]
+pub struct ExportMetrics {
+    pub has_readers: bool,
+    pub needs_backdrop: bool,
+    pub max_iso_surfaces: usize,
+    pub has_clipped_reader: bool,
+    pub max_reader_work_bytes: usize,
+}
+
+/// Estimates peak reader allocations for an export of `frame` under `memory_bytes` cap.
+pub fn export_plan_metrics(store: &Store, frame: &Frame, _tile: (usize, usize)) -> ExportMetrics {
+    let Some(plan) = plan_readers(store, frame) else {
+        return ExportMetrics::default();
+    };
+    let Some(root) = store.nodes.get(&crate::store::ROOT) else {
+        return ExportMetrics::default();
+    };
+    let full_viewport = Rect::new(-1.0, -1.0, f64::from(frame.width) + 1.0, f64::from(frame.height) + 1.0);
+    let metrics = ExportMetrics {
+        has_readers: plan.last_reader_seq > 0,
+        needs_backdrop: plan.needs_backdrop,
+        ..ExportMetrics::default()
+    };
+    let (split_side, split_pixels, chunk_side) = (1024, 1_048_576, glass::WORKER_CHUNK_SIDE);
+    let frame_size = (i32::from(frame.width), i32::from(frame.height));
+
+    struct State<'a> {
+        store: &'a Store,
+        frame: &'a Frame,
+        viewport: Rect,
+        plan: &'a ReaderPlan,
+        frame_size: (i32, i32),
+        split_side: u32,
+        split_pixels: u64,
+        chunk_side: u32,
+        reader_seq: usize,
+        iso_surfaces: usize,
+        clip_depth: usize,
+        metrics: ExportMetrics,
+    }
+
+    fn visit(st: &mut State<'_>, id: u32, parent: Affine, alpha: f32, parent_context: bool) {
+        let Some(node) = st.store.nodes.get(&id) else {
+            return;
+        };
+        let r = &node.record;
+        if r.hidden() {
+            return;
+        }
+        let world = parent * r.transform;
+        let device = st.frame.view * world;
+        if !finite(device) {
+            return;
+        }
+        let Some(bounds) = st.store.bounds(id) else {
+            return;
+        };
+        if !overlaps(device.transform_rect_bbox(bounds), st.viewport) {
+            return;
+        }
+        let is_context = r.context();
+        let in_alpha = if parent_context && !is_context { 1.0 } else { alpha };
+        let opacity = in_alpha * r.opacity;
+        if opacity <= 0.0 {
+            return;
+        }
+        let isolate = r.isolate() && r.opacity < 1.0;
+        let backend_isolate = isolate && st.plan.isolated_with_reader.contains(&id);
+        let inner = if isolate { 1.0 } else { opacity };
+        let added_surfaces = if backend_isolate {
+            let on_main = !is_context;
+            let on_backdrop = st.plan.needs_backdrop && st.reader_seq < st.plan.last_reader_seq;
+            usize::from(on_main) + usize::from(on_backdrop)
+        } else {
+            0
+        };
+        st.iso_surfaces += added_surfaces;
+        st.metrics.max_iso_surfaces = st.metrics.max_iso_surfaces.max(st.iso_surfaces);
+
+        let mut local_clips = 0usize;
+        for op in &r.ops {
+            match op {
+                Op::Clip { .. } => {
+                    if !is_context {
+                        st.clip_depth += 1;
+                        local_clips += 1;
+                    }
+                }
+                Op::Unclip => {
+                    if local_clips > 0 {
+                        st.clip_depth -= 1;
+                        local_clips -= 1;
+                    }
+                }
+                Op::Children => {
+                    for &c in &node.children {
+                        visit(st, c, world, inner, is_context);
+                    }
+                }
+                Op::Glass(g) => {
+                    if !is_context {
+                        st.reader_seq += 1;
+                        if st.clip_depth > 0 {
+                            st.metrics.has_clipped_reader = true;
+                        }
+                        let scale = device.determinant().abs().sqrt() as f32;
+                        if scale > 0.0 && scale.is_finite() {
+                            let inr = if g.inradius > 0.0 {
+                                g.inradius
+                            } else {
+                                r.size[0].min(r.size[1]) * 0.5
+                            };
+                            let params = glass::glass_params(g, scale, inr);
+                            let regions = glass::compute_regions(
+                                g,
+                                &params,
+                                device,
+                                r.size,
+                                st.frame_size,
+                                (0, 0),
+                                st.frame_size,
+                                glass::HARD_MAX_REGION_SIDE.min(u32::from(u16::MAX)),
+                                glass::HARD_MAX_REGION_PIXELS,
+                                st.split_side,
+                                st.split_pixels,
+                                st.chunk_side,
+                            );
+                            if let Ok(regions) = regions {
+                                for reg in regions {
+                                    let bytes = glass::cpu_work_bytes(&reg, &params);
+                                    st.metrics.max_reader_work_bytes = st.metrics.max_reader_work_bytes.max(bytes);
+                                }
+                            }
+                        }
+                    }
+                }
+                Op::Read { .. } | Op::BackgroundBlur(_) | Op::ProgressiveBlur(_) => {
+                    st.reader_seq += 1;
+                    if st.clip_depth > 0 {
+                        st.metrics.has_clipped_reader = true;
+                    }
+                }
+                _ => {}
+            }
+        }
+        st.clip_depth -= local_clips;
+        st.iso_surfaces -= added_surfaces;
+    }
+
+    let mut st = State {
+        store,
+        frame,
+        viewport: full_viewport,
+        plan: &plan,
+        frame_size,
+        split_side,
+        split_pixels,
+        chunk_side,
+        reader_seq: 0,
+        iso_surfaces: 0,
+        clip_depth: 0,
+        metrics,
+    };
+    for &c in &root.children {
+        visit(&mut st, c, Affine::IDENTITY, 1.0, false);
+    }
+    st.metrics
 }
 
 pub fn draw<B: Backend>(store: &Store, backend: &mut B, frame: &Frame, limits: &Limits) -> Result<DrawStats> {
@@ -460,6 +910,21 @@ pub fn draw_split<B: Backend>(
     };
     let tiled = frame.area != full_frame;
     let full_viewport = Rect::new(-1.0, -1.0, f64::from(frame.width) + 1.0, f64::from(frame.height) + 1.0);
+    let plan = plan_readers(store, frame);
+    let (has_context, needs_backdrop, last_reader_seq, isolated_with_reader, subtree_readers) = match plan {
+        Some(p) => (
+            p.has_context,
+            p.needs_backdrop,
+            p.last_reader_seq,
+            p.isolated_with_reader,
+            p.subtree_readers,
+        ),
+        None => (false, false, 0, HashSet::new(), HashMap::new()),
+    };
+    let readers_active = has_context || last_reader_seq > 0;
+    if readers_active {
+        backend.begin_readers(needs_backdrop, has_context)?;
+    }
     let mut walk = Walk {
         split,
         phase: Phase::Before,
@@ -480,16 +945,31 @@ pub fn draw_split<B: Backend>(
         glyph_mask_side: f64::from(limits.glyph_mask_side),
         verbs_left: *budget,
         open_scopes: limits.open_scopes,
+        readers_active,
+        needs_backdrop,
+        backdrop_live: has_context,
+        last_reader_seq,
+        reader_seq: 0,
+        isolated_with_reader,
+        subtree_readers,
+        ancestor_clips: Vec::new(),
+        current_context: false,
+        context_clips_suspended: false,
+        isolated_backdrop_depth: 0,
     };
     if !store.nodes.contains_key(&crate::store::ROOT) {
         return Err(EngineError::malformed("no page"));
     }
-    let result = walk.draw_children(crate::store::ROOT, Affine::IDENTITY, 1.0);
+    let result = walk.draw_children(crate::store::ROOT, Affine::IDENTITY, 1.0, false);
     *budget = walk.verbs_left;
     // Whatever failed part way, close what's open so the scene stays usable.
     while let Some(o) = walk.open.pop() {
         match o {
-            Open::Clip { .. } => walk.backend.scene().pop_clip(),
+            Open::Clip { active_on_scene, .. } => {
+                if active_on_scene {
+                    walk.backend.scene().pop_clip();
+                }
+            }
             Open::Layer => walk.backend.scene().pop_layer(),
         }
     }
@@ -512,6 +992,17 @@ struct Walk<'a, B: Backend> {
     /// Path elements the frame may still generate.
     verbs_left: usize,
     open_scopes: usize,
+    readers_active: bool,
+    needs_backdrop: bool,
+    backdrop_live: bool,
+    last_reader_seq: usize,
+    reader_seq: usize,
+    isolated_with_reader: HashSet<u32>,
+    subtree_readers: HashMap<u32, (usize, bool)>,
+    ancestor_clips: Vec<Open>,
+    current_context: bool,
+    context_clips_suspended: bool,
+    isolated_backdrop_depth: usize,
 }
 
 /// The linear part of a transform (its translation dropped).
@@ -621,6 +1112,44 @@ fn color(c: Rgba, alpha: f32) -> AlphaColor<Srgb> {
 /// Snaps `raw` outward to a `step`-pixel grid whose phase matches the page origin under `view`,
 /// so tiles of any size (including non-power-of-two test tiles) share identical pyramid block
 /// boundaries with a whole-frame render.
+fn clip_wraps_children(ops: &[Op], clip_idx: usize) -> bool {
+    let mut depth = 1usize;
+    for op in &ops[clip_idx + 1..] {
+        match op {
+            Op::Clip { .. } => depth += 1,
+            Op::Unclip => {
+                depth -= 1;
+                if depth == 0 {
+                    return false;
+                }
+            }
+            Op::Children => return true,
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Innermost opaque solid fill painted before `clip_idx`, as premultiplied RGBA8 (decision 0007).
+fn frame_solid_fill(ops: &[Op], clip_idx: usize, alpha: f32) -> Option<[u8; 4]> {
+    for op in ops[..clip_idx].iter().rev() {
+        if let Op::Fill {
+            paint: Paint::Solid(c), ..
+        } = op
+            && c[3] >= 1.0 - 1e-4
+        {
+            let a = alpha.clamp(0.0, 1.0);
+            return Some([
+                ((c[0] * a).clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
+                ((c[1] * a).clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
+                ((c[2] * a).clamp(0.0, 1.0) * 255.0 + 0.5) as u8,
+                (a * 255.0 + 0.5) as u8,
+            ]);
+        }
+    }
+    None
+}
+
 fn align_area_checked(raw: IRect, step: i32, phase: (i32, i32), max_side: i32) -> Result<IRect> {
     let step = step.max(1);
     let align_down = |v: i32, p: i32| (v - p).div_euclid(step) * step + p;
@@ -1040,7 +1569,7 @@ fn subtree_flushes_in_full_frame(
     let ops = if coarse { &r.coarse } else { &r.ops };
     for op in ops {
         match op {
-            Op::Read { .. } => return true,
+            op if op.is_reader() => return true,
             Op::Fill { path, paint, blend, .. } if *blend != 0 && paint_visible(paint, inner) => {
                 if let Some(local_b) = r.entry_bounds(*path, &|g| store.glyphs.bounds(g)) {
                     let raw = IRect::around(device.transform_rect_bbox(local_b).inflate(2.0, 2.0));
@@ -1130,7 +1659,14 @@ impl<B: Backend> Walk<'_, B> {
 
     /// A parent's children in paint order, the split's selection marking where paint order
     /// passes it.
-    fn children(&mut self, parent: u32, children: &[u32], world: Affine, alpha: f32) -> Result<()> {
+    fn children(
+        &mut self,
+        parent: u32,
+        children: &[u32],
+        world: Affine,
+        alpha: f32,
+        parent_context: bool,
+    ) -> Result<()> {
         let here = self.split.pass != Pass::All && self.split.parent == parent;
         for (k, c) in children.iter().enumerate() {
             if here {
@@ -1142,12 +1678,190 @@ impl<B: Backend> Walk<'_, B> {
                     Phase::After
                 };
             }
-            self.node(*c, world, alpha)?;
+            self.node(*c, world, alpha, parent_context)?;
         }
         if here {
             self.phase = Phase::After;
         }
         Ok(())
+    }
+
+    fn sync_targets(&mut self, is_context: bool) -> Result<()> {
+        if !self.readers_active {
+            return Ok(());
+        }
+        let still_reading = self.reader_seq < self.last_reader_seq;
+        let write_main = !is_context;
+        let write_backdrop = (self.backdrop_live || self.isolated_backdrop_depth > 0) && still_reading;
+        self.backend.set_targets(write_main, write_backdrop, &self.open)
+    }
+
+    /// Suspends open `context_only` clips from `scene` when entering an exported non-context node
+    /// inside a `FLAG_CONTEXT` ancestor (keeping them in `self.open` for `clip_within`).
+    fn suspend_context_clips(&mut self) -> Result<bool> {
+        if self.context_clips_suspended {
+            return Ok(false);
+        }
+        let any_active = self.open.iter().any(|o| {
+            matches!(
+                o,
+                Open::Clip {
+                    context_only: true,
+                    active_on_scene: true,
+                    ..
+                }
+            )
+        });
+        if !any_active {
+            return Ok(false);
+        }
+        // Flush pending context ops under the active context clips first.
+        self.backend.set_targets(false, false, &self.open)?;
+        // Pop all active clips from scene, then reopen only non-context clips.
+        for o in self.open.iter().rev() {
+            if matches!(
+                o,
+                Open::Clip {
+                    active_on_scene: true,
+                    ..
+                }
+            ) {
+                self.backend.scene().pop_clip();
+            }
+        }
+        for o in &mut self.open {
+            if let Open::Clip {
+                transform,
+                path,
+                even_odd,
+                context_only,
+                active_on_scene,
+                ..
+            } = o
+            {
+                if *context_only {
+                    *active_on_scene = false;
+                } else if *active_on_scene {
+                    let scene = self.backend.scene();
+                    scene.set_transform(*transform);
+                    scene.set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
+                    scene.push_clip_path(path);
+                }
+            }
+        }
+        self.context_clips_suspended = true;
+        Ok(true)
+    }
+
+    fn resume_context_clips(&mut self) -> Result<()> {
+        if !self.context_clips_suspended {
+            return Ok(());
+        }
+        // Flush pending non-context ops before restoring context clips.
+        self.backend.set_targets(false, false, &self.open)?;
+        for o in self.open.iter().rev() {
+            if matches!(
+                o,
+                Open::Clip {
+                    active_on_scene: true,
+                    ..
+                }
+            ) {
+                self.backend.scene().pop_clip();
+            }
+        }
+        for o in &mut self.open {
+            if let Open::Clip {
+                transform,
+                path,
+                even_odd,
+                active_on_scene,
+                ..
+            } = o
+            {
+                let scene = self.backend.scene();
+                scene.set_transform(*transform);
+                scene.set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
+                scene.push_clip_path(path);
+                *active_on_scene = true;
+            }
+        }
+        self.context_clips_suspended = false;
+        Ok(())
+    }
+
+    fn isolation(&self, has_reader: bool, copy_parent: bool) -> Isolation {
+        let reading = self.needs_backdrop && self.reader_seq < self.last_reader_seq;
+        let on_backdrop = reading && (self.backdrop_live || self.isolated_backdrop_depth != 0 || has_reader);
+        Isolation {
+            on_main: !self.current_context,
+            on_backdrop,
+            separate: on_backdrop && (has_reader || copy_parent),
+            copy_parent,
+            unfaded_main: false,
+        }
+    }
+
+    fn isolate_area(
+        &mut self,
+        area: IRect,
+        clip_to_parent: bool,
+        hint: Option<(i32, i32)>,
+        has_reader: bool,
+        copy_parent: bool,
+    ) -> Result<bool> {
+        let isolation = self.isolation(has_reader, copy_parent);
+        self.backend
+            .push_isolated(area, clip_to_parent, hint, isolation, &self.open)
+    }
+
+    fn has_exported_subtree(&self, id: u32) -> bool {
+        self.store.nodes.get(&id).is_some_and(|node| {
+            !node.record.hidden()
+                && (!node.record.context()
+                    || (node.record.ops.iter().any(|op| matches!(op, Op::Children))
+                        && node.children.iter().any(|&child| self.has_exported_subtree(child))))
+        })
+    }
+
+    fn save_reader_clips(&mut self) -> usize {
+        let previous = self.ancestor_clips.len();
+        if self.readers_active {
+            for clip in &self.open {
+                if let Open::Clip {
+                    frame_clip: Some(_), ..
+                } = clip
+                {
+                    let mut clip = clip.clone();
+                    if let Open::Clip { active_on_scene, .. } = &mut clip {
+                        *active_on_scene = false;
+                    }
+                    self.ancestor_clips.push(clip);
+                }
+            }
+        }
+        previous
+    }
+
+    fn reader_open(&self) -> Vec<Open> {
+        self.ancestor_clips.iter().chain(&self.open).cloned().collect()
+    }
+
+    fn skip_reader_subtree(&mut self, id: u32, parent_context: bool) -> Result<bool> {
+        if self.tiled
+            && let Some(&(count, first_glass)) = self.subtree_readers.get(&id)
+        {
+            if first_glass && self.needs_backdrop && !self.backdrop_live {
+                self.backend.snapshot_backdrop(&self.open)?;
+                self.backdrop_live = true;
+            } else {
+                self.backend.flush_barrier(&self.open);
+            }
+            self.reader_seq += count;
+            self.sync_targets(parent_context)?;
+            return Ok(true);
+        }
+        Ok(false)
     }
 
     fn flush_if_tiled_overlap(&mut self, raw: IRect) {
@@ -1163,7 +1877,7 @@ impl<B: Backend> Walk<'_, B> {
             Affine::translate((-f64::from(sox), -f64::from(soy))) * device
         }
     }
-    fn draw_children(&mut self, parent_id: u32, world: Affine, inner: f32) -> Result<()> {
+    fn draw_children(&mut self, parent_id: u32, world: Affine, inner: f32, parent_context: bool) -> Result<()> {
         let Some(parent_node) = self.store.nodes.get(&parent_id) else {
             return Ok(());
         };
@@ -1174,7 +1888,7 @@ impl<B: Backend> Walk<'_, B> {
                 .is_some_and(|n| !n.record.hidden() && n.record.is_mask())
         });
         if !has_mask {
-            return self.children(parent_id, &parent_node.children, world, inner);
+            return self.children(parent_id, &parent_node.children, world, inner, parent_context);
         }
         let mut clipping = false;
         let mut pic_scope: Option<(u32, u32, Vec<u32>)> = None;
@@ -1188,7 +1902,7 @@ impl<B: Backend> Walk<'_, B> {
             }
             if cr.is_mask() {
                 if let Some((mid, mkind, ids)) = pic_scope.take() {
-                    self.draw_picture_mask(mid, mkind, &ids, world, inner)?;
+                    self.draw_picture_mask(mid, mkind, &ids, world, inner, parent_context)?;
                 }
                 if clipping {
                     self.open.pop();
@@ -1222,6 +1936,9 @@ impl<B: Backend> Walk<'_, B> {
                             transform: sd,
                             path: p,
                             even_odd,
+                            frame_clip: None,
+                            context_only: parent_context,
+                            active_on_scene: true,
                         });
                         clipping = true;
                     }
@@ -1233,24 +1950,24 @@ impl<B: Backend> Walk<'_, B> {
             }
             if (clipping || pic_scope.is_some()) && cr.ends_mask() {
                 if let Some((mid, mkind, ids)) = pic_scope.take() {
-                    self.draw_picture_mask(mid, mkind, &ids, world, inner)?;
+                    self.draw_picture_mask(mid, mkind, &ids, world, inner, parent_context)?;
                 }
                 if clipping {
                     self.open.pop();
                     self.backend.scene().pop_clip();
                     clipping = false;
                 }
-                self.node(cid, world, inner)?;
+                self.node(cid, world, inner, parent_context)?;
                 continue;
             }
             if let Some((_, _, ref mut ids)) = pic_scope {
                 ids.push(cid);
             } else {
-                self.node(cid, world, inner)?;
+                self.node(cid, world, inner, parent_context)?;
             }
         }
         if let Some((mid, mkind, ids)) = pic_scope.take() {
-            self.draw_picture_mask(mid, mkind, &ids, world, inner)?;
+            self.draw_picture_mask(mid, mkind, &ids, world, inner, parent_context)?;
         }
         if clipping {
             self.open.pop();
@@ -1266,9 +1983,15 @@ impl<B: Backend> Walk<'_, B> {
         ids: &[u32],
         world: Affine,
         inner: f32,
+        parent_context: bool,
     ) -> Result<()> {
         if ids.is_empty() {
             return Ok(());
+        }
+        if parent_context && ids.iter().any(|&id| self.has_exported_subtree(id)) {
+            return Err(EngineError::unsupported(
+                "an export selection crossing a backdrop picture mask",
+            ));
         }
         let Some(mask_node) = self.store.nodes.get(&mask_id) else {
             return Ok(());
@@ -1306,20 +2029,33 @@ impl<B: Backend> Walk<'_, B> {
                 .intersect(self.full_frame)
             }
         };
+        let content_has_reader = ids
+            .iter()
+            .any(|id| self.subtree_readers.get(id).is_some_and(|&(n, _)| n > 0));
+        let picture_has_reader = self.subtree_readers.get(&mask_id).is_some_and(|&(n, _)| n > 0);
+        let has_reader = content_has_reader || picture_has_reader;
         if mask_area.is_empty() {
+            if has_reader {
+                for id in ids.iter().copied().chain(std::iter::once(mask_id)) {
+                    self.skip_reader_subtree(id, parent_context)?;
+                }
+            }
             if self.tiled && !whole_mask.is_empty() {
                 self.backend.flush_barrier(&self.open);
             }
             return Ok(());
         }
         self.scope()?;
-        if !self.backend.push_isolated(mask_area, true, None, &self.open)? {
+        let paired = self.isolation(has_reader, false).separate;
+        if !self.isolate_area(mask_area, true, None, has_reader, false)? {
             if self.tiled && !whole_mask.is_empty() {
                 self.backend.flush_barrier(&self.open);
             }
             return Ok(());
         }
         let content_tb = self.backend.target_bounds();
+        let previous_reader_clips = self.save_reader_clips();
+        self.isolated_backdrop_depth += usize::from(paired);
         let prev_open = std::mem::take(&mut self.open);
         let prev_viewport = self.viewport;
         let prev_full_frame = self.full_frame;
@@ -1339,13 +2075,17 @@ impl<B: Backend> Walk<'_, B> {
         );
         let content_res = (|| -> Result<()> {
             for &cid in ids {
-                self.node(cid, world, inner)?;
+                self.node(cid, world, inner, parent_context)?;
             }
             Ok(())
         })();
         while let Some(o) = self.open.pop() {
             match o {
-                Open::Clip { .. } => self.backend.scene().pop_clip(),
+                Open::Clip { active_on_scene, .. } => {
+                    if active_on_scene {
+                        self.backend.scene().pop_clip();
+                    }
+                }
                 Open::Layer => self.backend.scene().pop_layer(),
             }
         }
@@ -1354,16 +2094,20 @@ impl<B: Backend> Walk<'_, B> {
             self.full_frame = prev_full_frame;
             self.full_viewport = prev_full_viewport;
             self.open = prev_open;
+            self.ancestor_clips.truncate(previous_reader_clips);
+            self.isolated_backdrop_depth -= usize::from(paired);
             self.backend.abort_isolated();
             return Err(e);
         }
-        let pushed_pic = match self.backend.push_isolated(content_tb, false, None, &[]) {
+        let pushed_pic = match self.isolate_area(content_tb, false, None, picture_has_reader, false) {
             Ok(p) => p,
             Err(e) => {
                 self.viewport = prev_viewport;
                 self.full_frame = prev_full_frame;
                 self.full_viewport = prev_full_viewport;
                 self.open = prev_open;
+                self.ancestor_clips.truncate(previous_reader_clips);
+                self.isolated_backdrop_depth -= usize::from(paired);
                 self.backend.abort_isolated();
                 return Err(e);
             }
@@ -1373,13 +2117,19 @@ impl<B: Backend> Walk<'_, B> {
             self.full_frame = prev_full_frame;
             self.full_viewport = prev_full_viewport;
             self.open = prev_open;
+            self.ancestor_clips.truncate(previous_reader_clips);
+            self.isolated_backdrop_depth -= usize::from(paired);
             self.backend.abort_isolated();
             return Ok(());
         }
-        let mask_res = self.node(mask_id, world, 1.0);
+        let mask_res = self.node(mask_id, world, 1.0, parent_context);
         while let Some(o) = self.open.pop() {
             match o {
-                Open::Clip { .. } => self.backend.scene().pop_clip(),
+                Open::Clip { active_on_scene, .. } => {
+                    if active_on_scene {
+                        self.backend.scene().pop_clip();
+                    }
+                }
                 Open::Layer => self.backend.scene().pop_layer(),
             }
         }
@@ -1387,6 +2137,8 @@ impl<B: Backend> Walk<'_, B> {
         self.full_frame = prev_full_frame;
         self.full_viewport = prev_full_viewport;
         self.open = prev_open;
+        self.ancestor_clips.truncate(previous_reader_clips);
+        self.isolated_backdrop_depth -= usize::from(paired);
         if let Err(e) = mask_res {
             self.backend.abort_isolated();
             self.backend.abort_isolated();
@@ -1396,14 +2148,16 @@ impl<B: Backend> Walk<'_, B> {
         Ok(())
     }
 
-    fn node(&mut self, id: u32, parent: Affine, alpha: f32) -> Result<()> {
+    fn node(&mut self, id: u32, parent: Affine, alpha: f32, parent_context: bool) -> Result<()> {
         let on_path = self.split.pass != Pass::All && self.split.path.contains(&id);
         // A subtree that isn't on the selection's path lies wholly in one part: skipped when
         // that isn't the part being drawn.
         if self.split.pass != Pass::All && !on_path && !self.paints() {
             return Ok(());
         }
-        let drawn = self.node_inner(id, parent, alpha);
+        let before = self.current_context;
+        let drawn = self.node_inner(id, parent, alpha, parent_context);
+        self.current_context = before;
         // Past a node on the selection's path, paint order has passed the selection, whether
         // the node was walked or culled (hidden, off the tile, transparent): what follows is
         // above it.
@@ -1413,7 +2167,7 @@ impl<B: Backend> Walk<'_, B> {
         drawn
     }
 
-    fn node_inner(&mut self, id: u32, parent: Affine, alpha: f32) -> Result<()> {
+    fn node_inner(&mut self, id: u32, parent: Affine, alpha: f32, parent_context: bool) -> Result<()> {
         let store = self.store;
         let Some(node) = store.nodes.get(&id) else {
             return Ok(());
@@ -1440,7 +2194,8 @@ impl<B: Backend> Walk<'_, B> {
         };
         let dev_bbox = device.transform_rect_bbox(bounds).inflate(pad_dev, pad_dev);
         if !overlaps(dev_bbox, self.viewport) {
-            if self.tiled
+            if !self.skip_reader_subtree(id, parent_context)?
+                && self.tiled
                 && overlaps(dev_bbox, self.full_viewport)
                 && store.subtree_has_pass(id)
                 && subtree_flushes_in_full_frame(
@@ -1473,16 +2228,48 @@ impl<B: Backend> Walk<'_, B> {
             )));
         }
         self.stats.records += 1;
-        let opacity = alpha * r.opacity;
+        let is_context = r.context();
+        let in_alpha = if parent_context && !is_context { 1.0 } else { alpha };
+        let opacity = in_alpha * r.opacity;
         if opacity <= 0.0 {
             return Ok(());
         }
+        let suspended = if parent_context && !is_context {
+            self.suspend_context_clips()?
+        } else {
+            false
+        };
+        self.current_context = is_context;
+        self.sync_targets(is_context)?;
         let active = active_posts(r, device, view_scale);
         let has_post = !active.is_empty();
         let layer_blend = r.blend;
         let isolate = has_post || layer_blend != 0 || (r.isolate() && r.opacity < 1.0);
-        let through = !has_post && layer_blend == 0 && r.isolate() && r.opacity < 1.0 && store.subtree_has_blend(id);
+        let has_reader = self.subtree_readers.get(&id).is_some_and(|&(n, _)| n > 0);
+        let reader_fade = self.isolated_with_reader.contains(&id);
+        let crosses_context = is_context
+            && isolate
+            && r.ops.iter().any(|op| matches!(op, Op::Children))
+            && node.children.iter().any(|&child| self.has_exported_subtree(child));
+        if crosses_context && (has_post || layer_blend != 0) {
+            return Err(EngineError::unsupported(
+                "an export selection crossing a backdrop effect or blend",
+            ));
+        }
+        let through = !has_post
+            && layer_blend == 0
+            && r.isolate()
+            && r.opacity < 1.0
+            && (store.subtree_has_blend(id) || reader_fade || crosses_context);
         let use_offscreen = has_post || layer_blend != 0 || through || (isolate && store.subtree_has_pass(id));
+        let mut isolation = self.isolation(has_reader, through);
+        if crosses_context {
+            isolation.on_main = true;
+            isolation.separate = true;
+            isolation.unfaded_main = true;
+        }
+        let paired = isolation.separate;
+        let previous_reader_clips = self.ancestor_clips.len();
         let inner = if isolate { 1.0 } else { opacity };
         let mut post_state: Option<PostIsoState> = None;
         let saved_open = if has_post {
@@ -1592,10 +2379,7 @@ impl<B: Backend> Walk<'_, B> {
                 ((content_rect.x0 - phase.0).div_euclid(step) * step + phase.0).div_euclid(4) * 4,
                 ((content_rect.y0 - phase.1).div_euclid(step) * step + phase.1).div_euclid(4) * 4,
             );
-            if !self
-                .backend
-                .push_isolated(src_area, false, Some(scene_hint), &self.open)?
-            {
+            if !self.isolate_area(src_area, false, Some(scene_hint), has_reader, false)? {
                 if self.tiled && whole_would_flush {
                     self.backend.flush_barrier(&self.open);
                 }
@@ -1622,6 +2406,8 @@ impl<B: Backend> Walk<'_, B> {
                 f64::from(whole_src.x1) + 1.0,
                 f64::from(whole_src.y1) + 1.0,
             );
+            self.save_reader_clips();
+            self.isolated_backdrop_depth += usize::from(paired);
             post_state = Some(PostIsoState {
                 prev_open: std::mem::take(&mut self.open),
                 prev_viewport,
@@ -1637,7 +2423,12 @@ impl<B: Backend> Walk<'_, B> {
             None
         } else if use_offscreen {
             self.scope()?;
-            let raw_iso = IRect::around(dev_bbox.inflate(1.0, 1.0));
+            // A pass-through reader still sees the whole parent prefix, including its halo.
+            let raw_iso = if reader_fade || crosses_context {
+                self.backend.target_bounds()
+            } else {
+                IRect::around(dev_bbox.inflate(1.0, 1.0))
+            };
             let iso_area = raw_iso.intersect(self.backend.target_bounds());
             let whole_iso = {
                 let r = raw_iso.intersect(self.full_frame);
@@ -1659,19 +2450,23 @@ impl<B: Backend> Walk<'_, B> {
                 }
                 return Ok(());
             }
-            let pushed = if through {
-                self.backend.push_isolated_backdrop(iso_area, &self.open)?
-            } else {
-                self.backend.push_isolated(iso_area, true, None, &self.open)?
-            };
+            let pushed = self
+                .backend
+                .push_isolated(iso_area, true, None, isolation, &self.open)?;
             if !pushed {
                 if self.tiled && !whole_iso.is_empty() {
                     self.backend.flush_barrier(&self.open);
                 }
                 return Ok(());
             }
+            self.save_reader_clips();
+            self.isolated_backdrop_depth += usize::from(paired);
             let prev_full_frame = self.full_frame;
-            self.full_frame = whole_iso;
+            self.full_frame = if reader_fade || crosses_context {
+                prev_full_frame
+            } else {
+                whole_iso
+            };
             Some((std::mem::take(&mut self.open), prev_full_frame))
         } else {
             if isolate {
@@ -1700,6 +2495,9 @@ impl<B: Backend> Walk<'_, B> {
                     Op::Fill { .. }
                     | Op::Stroke { .. }
                     | Op::Read { .. }
+                    | Op::Glass(_)
+                    | Op::BackgroundBlur(_)
+                    | Op::ProgressiveBlur(_)
                     | Op::DropShadow { .. }
                     | Op::InnerShadow { .. }
                         if !self.paints() => {}
@@ -1708,23 +2506,33 @@ impl<B: Backend> Walk<'_, B> {
                         even_odd,
                         paint,
                         blend,
-                    } => self.fill(
-                        r,
-                        *path,
-                        device,
-                        *even_odd,
-                        paint,
-                        *blend,
-                        active_alpha,
-                        mask_depth == 0,
-                    )?,
+                    } => {
+                        self.sync_targets(is_context)?;
+                        self.fill(
+                            r,
+                            *path,
+                            device,
+                            *even_odd,
+                            paint,
+                            *blend,
+                            active_alpha,
+                            mask_depth == 0,
+                        )?;
+                    }
                     Op::Stroke {
                         path,
                         style,
                         paint,
                         blend,
-                    } => self.stroke(r, *path, device, style, paint, *blend, active_alpha)?,
-                    Op::Clip { path, .. } if self.clip_changes_nothing(id, r, &ops[at + 1..], *path, device) => {
+                    } => {
+                        self.sync_targets(is_context)?;
+                        self.stroke(r, *path, device, style, paint, *blend, active_alpha)?;
+                    }
+                    Op::Clip { path, .. }
+                        if !is_context
+                            && !has_reader
+                            && self.clip_changes_nothing(id, r, &ops[at + 1..], *path, device) =>
+                    {
                         // Left out: the same pixels (see `clip_changes_nothing`), and what's drawn
                         // under no clip takes the renderers' fast paths.
                     }
@@ -1740,6 +2548,17 @@ impl<B: Backend> Walk<'_, B> {
                             transform: sd,
                             path: p,
                             even_odd: *even_odd,
+                            frame_clip: clip_wraps_children(ops, at).then(|| FrameClip {
+                                device_box: device.transform_rect_bbox(Rect::new(
+                                    0.0,
+                                    0.0,
+                                    f64::from(r.size[0]),
+                                    f64::from(r.size[1]),
+                                )),
+                                fill: frame_solid_fill(ops, at, active_alpha),
+                            }),
+                            context_only: is_context,
+                            active_on_scene: true,
                         });
                     }
                     Op::Unclip => {
@@ -1779,15 +2598,64 @@ impl<B: Backend> Walk<'_, B> {
                             }
                         }
                     }
-                    Op::Children => self.draw_children(id, world, active_alpha)?,
+                    Op::Children => {
+                        self.draw_children(id, world, active_alpha, is_context)?;
+                        self.sync_targets(is_context)?;
+                    }
                     Op::Read { kernel, halo } => {
                         self.stats.reads += 1;
+                        self.reader_seq += 1;
+                        self.sync_targets(is_context)?;
                         let b = Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1]));
                         let h = f64::from(*halo);
                         let paints = IRect::around(device.transform_rect_bbox(b));
                         let reads = IRect::around(device.transform_rect_bbox(b.inflate(h, h)));
-                        let open = self.open.clone();
+                        let open = self.reader_open();
                         self.backend.read(*kernel, paints, reads, &open)?;
+                        self.sync_targets(is_context)?;
+                    }
+                    Op::Glass(g) => {
+                        // A context record's glass writes neither to output nor to backdrop
+                        // (decision 0007 amendment + decision 0039).
+                        if is_context {
+                            continue;
+                        }
+                        if self.needs_backdrop && !self.backdrop_live {
+                            let open = self.reader_open();
+                            self.backend.snapshot_backdrop(&open)?;
+                            self.backdrop_live = true;
+                        }
+                        self.stats.reads += 1;
+                        self.reader_seq += 1;
+                        let mut paths = Vec::with_capacity(g.paths.len());
+                        for &pi in &g.paths {
+                            let p = self.path(r, pi, device, 0.0)?;
+                            paths.push((p, g.even_odd));
+                        }
+                        let glass_coarse = self.frame.detail;
+                        if glass_coarse {
+                            self.stats.coarse += 1;
+                        }
+                        let open = self.reader_open();
+                        self.backend.glass(
+                            g,
+                            &paths,
+                            device,
+                            r.size,
+                            active_alpha,
+                            glass_coarse,
+                            layer_blend != 0,
+                            &open,
+                        )?;
+                        self.sync_targets(is_context)?;
+                    }
+                    Op::BackgroundBlur(_) => {
+                        return Err(EngineError::unsupported("background blur (pending Gaussian blur PR)"));
+                    }
+                    Op::ProgressiveBlur(_) => {
+                        return Err(EngineError::unsupported(
+                            "progressive background blur (pending Gaussian blur PR)",
+                        ));
                     }
                     Op::DropShadow {
                         paths,
@@ -1799,6 +2667,7 @@ impl<B: Backend> Walk<'_, B> {
                         blend,
                         stroke,
                     } => {
+                        self.sync_targets(is_context)?;
                         let layered = *layered_shadows.get_or_insert_with(|| {
                             ops.iter()
                                 .filter(|op| matches!(op, Op::DropShadow { color, .. } if color[3] > 0.0))
@@ -1831,6 +2700,7 @@ impl<B: Backend> Walk<'_, B> {
                         color: shadow_color,
                         blend,
                     } => {
+                        self.sync_targets(is_context)?;
                         self.inner_shadow(
                             r,
                             *shape,
@@ -1850,12 +2720,18 @@ impl<B: Backend> Walk<'_, B> {
             Ok(())
         })();
         if let Some(post) = post_state {
+            self.ancestor_clips.truncate(previous_reader_clips);
+            self.isolated_backdrop_depth -= usize::from(paired);
             self.viewport = post.prev_viewport;
             self.full_frame = post.prev_full_frame;
             self.full_viewport = post.prev_full_viewport;
             while let Some(o) = self.open.pop() {
                 match o {
-                    Open::Clip { .. } => self.backend.scene().pop_clip(),
+                    Open::Clip { active_on_scene, .. } => {
+                        if active_on_scene {
+                            self.backend.scene().pop_clip();
+                        }
+                    }
                     Open::Layer => self.backend.scene().pop_layer(),
                 }
             }
@@ -1907,13 +2783,22 @@ impl<B: Backend> Walk<'_, B> {
             } else {
                 self.backend.abort_isolated();
             }
+            if res.is_ok() && suspended {
+                self.resume_context_clips()?;
+            }
             return res;
         }
         if let Some((prev_open, prev_full_frame)) = saved_open {
+            self.ancestor_clips.truncate(previous_reader_clips);
+            self.isolated_backdrop_depth -= usize::from(paired);
             self.full_frame = prev_full_frame;
             while let Some(o) = self.open.pop() {
                 match o {
-                    Open::Clip { .. } => self.backend.scene().pop_clip(),
+                    Open::Clip { active_on_scene, .. } => {
+                        if active_on_scene {
+                            self.backend.scene().pop_clip();
+                        }
+                    }
                     Open::Layer => self.backend.scene().pop_layer(),
                 }
             }
@@ -1930,12 +2815,18 @@ impl<B: Backend> Walk<'_, B> {
             } else {
                 self.backend.abort_isolated();
             }
+            if res.is_ok() && suspended {
+                self.resume_context_clips()?;
+            }
             return res;
         }
         res?;
         if isolate {
             self.open.pop();
             self.backend.scene().pop_layer();
+        }
+        if suspended {
+            self.resume_context_clips()?;
         }
         Ok(())
     }
@@ -2288,7 +3179,7 @@ impl<B: Backend> Walk<'_, B> {
                 return Ok(());
             }
             self.scope()?;
-            if !self.backend.push_isolated(area, true, None, &self.open)? {
+            if !self.isolate_area(area, true, None, false, false)? {
                 return Ok(());
             }
             let prev_open = std::mem::take(&mut self.open);
@@ -2319,6 +3210,7 @@ impl<B: Backend> Walk<'_, B> {
         scene.set_transform(sd);
         scene.set_fill_rule(if even_odd { Fill::EvenOdd } else { Fill::NonZero });
         scene.fill_path(&p);
+        self.backend.mark_dirty();
         Ok(())
     }
 
@@ -2355,7 +3247,7 @@ impl<B: Backend> Walk<'_, B> {
                 return Ok(());
             }
             self.scope()?;
-            if !self.backend.push_isolated(area, true, None, &self.open)? {
+            if !self.isolate_area(area, true, None, false, false)? {
                 return Ok(());
             }
             let prev_open = std::mem::take(&mut self.open);
@@ -2378,6 +3270,7 @@ impl<B: Backend> Walk<'_, B> {
             scene.set_transform(sd);
             scene.set_fill_rule(Fill::EvenOdd);
             scene.fill_path(&ring);
+            self.backend.mark_dirty();
             return Ok(());
         }
         // A glyph off the viewport by less than the stroke's reach still shows its stroke.
@@ -2448,6 +3341,7 @@ impl<B: Backend> Walk<'_, B> {
         scene.set_transform(sd);
         scene.set_stroke(s);
         scene.stroke_path(&p);
+        self.backend.mark_dirty();
         Ok(())
     }
 
@@ -2527,7 +3421,7 @@ impl<B: Backend> Walk<'_, B> {
                 return Ok(());
             }
             self.scope()?;
-            if !self.backend.push_isolated(dirty, true, None, &self.open)? {
+            if !self.isolate_area(dirty, true, None, false, false)? {
                 return Ok(());
             }
             let prev_open = std::mem::take(&mut self.open);
@@ -2547,7 +3441,11 @@ impl<B: Backend> Walk<'_, B> {
             );
             while let Some(o) = self.open.pop() {
                 match o {
-                    Open::Clip { .. } => self.backend.scene().pop_clip(),
+                    Open::Clip { active_on_scene, .. } => {
+                        if active_on_scene {
+                            self.backend.scene().pop_clip();
+                        }
+                    }
                     Open::Layer => self.backend.scene().pop_layer(),
                 }
             }
@@ -2751,14 +3649,18 @@ impl<B: Backend> Walk<'_, B> {
                 return Ok(());
             }
             self.scope()?;
-            if !self.backend.push_isolated(dirty, true, None, &self.open)? {
+            if !self.isolate_area(dirty, true, None, false, false)? {
                 return Ok(());
             }
             let prev_open = std::mem::take(&mut self.open);
             let res = self.inner_shadow(r, shape, hole, even_odd, dx, dy, blur, shadow_color, 0, device, alpha);
             while let Some(o) = self.open.pop() {
                 match o {
-                    Open::Clip { .. } => self.backend.scene().pop_clip(),
+                    Open::Clip { active_on_scene, .. } => {
+                        if active_on_scene {
+                            self.backend.scene().pop_clip();
+                        }
+                    }
                     Open::Layer => self.backend.scene().pop_layer(),
                 }
             }
@@ -2870,6 +3772,9 @@ impl<B: Backend> Walk<'_, B> {
             transform: sd,
             path: shape_local,
             even_odd,
+            frame_clip: None,
+            context_only: self.current_context,
+            active_on_scene: true,
         });
         let open = self.open.clone();
         let hole_slice = [hole_dev];
@@ -2900,6 +3805,7 @@ impl<B: Backend> Walk<'_, B> {
         }
         let tint = color(c, alpha);
         let mut outlines = BezPath::new();
+        let mut drew_any = false;
         // An outline fill is one path, so glyphs that overlap aren't laid over each other; masks
         // are. Opaque, that's the same picture. See-through, a run whose glyphs touch fills its
         // outlines.
@@ -2925,6 +3831,9 @@ impl<B: Backend> Walk<'_, B> {
         let mut placed: Vec<(std::sync::Arc<vello_cpu::Pixmap>, i32, i32)> = Vec::new();
         let mut of: Vec<usize> = Vec::new();
         let whole = self.backend.whole_runs();
+        // Keep the outline contours identical across CPU bands. Omitting an off-tile
+        // contour can change strip coverage by one level elsewhere in the same run.
+        let outline_viewport = if whole { self.full_viewport } else { self.viewport };
         for (n, g) in glyphs.iter().enumerate() {
             let Some(glyph) = self.store.glyphs.get(g.glyph) else {
                 return Err(EngineError::unknown(format!("glyph {}", g.glyph)));
@@ -2935,7 +3844,7 @@ impl<B: Backend> Walk<'_, B> {
             let small = gb.width() * a.abs() <= self.glyph_mask_side && gb.height() * d.abs() <= self.glyph_mask_side;
             let maskable = masks && axis_aligned && small && e.abs() < 1.0e7 && f.abs() < 1.0e7;
             // Out of view, a glyph matters only to a whole run's image.
-            let in_view = overlaps(m.transform_rect_bbox(gb), self.viewport);
+            let in_view = overlaps(m.transform_rect_bbox(gb), outline_viewport);
             if !in_view && !(whole && maskable) {
                 continue;
             }
@@ -2985,6 +3894,10 @@ impl<B: Backend> Walk<'_, B> {
             scene.set_transform(sd);
             scene.set_fill_rule(Fill::NonZero);
             scene.fill_path(&outlines);
+            drew_any = true;
+        }
+        if drew_any {
+            self.backend.mark_dirty();
         }
         Ok(())
     }
@@ -3062,6 +3975,7 @@ impl<B: Backend> Walk<'_, B> {
         scene.set_paint_transform(Affine::translate((rx0, ry0)));
         scene.fill_rect(&Rect::new(rx0, ry0, rx1, ry1));
         scene.set_tint(None);
+        self.backend.mark_dirty();
         self.stats.glyphs_masked += placed.len() as u32;
         true
     }
@@ -3129,6 +4043,26 @@ pub(crate) fn diamond_device_rect(local_bounds: Option<Rect>, device: Affine, cl
         x1: dev_rect.x1.min(clip_area.x1),
         y1: dev_rect.y1.min(clip_area.y1),
     }
+}
+
+/// Resolves a `GlassOp`'s inscribed radius in local units, measuring once via `vello_cpu` and
+/// caching in `op.measured_inradius` when `op.inradius == 0.0`.
+pub fn resolve_inradius(
+    resources: &mut vello_cpu::Resources,
+    op: &GlassOp,
+    paths: &[(BezPath, bool)],
+    size: [f32; 2],
+) -> f32 {
+    if op.inradius > 0.0 {
+        return op.inradius;
+    }
+    let cached = op.measured_inradius.get();
+    if cached >= 0.0 {
+        return cached;
+    }
+    let measured = glass::measure_inradius(resources, paths, size[0], size[1]);
+    op.measured_inradius.set(measured);
+    measured
 }
 
 /// Normal blending, for the record of what the engine composites by itself.

@@ -185,6 +185,21 @@ pub enum Op {
         compose: u32,
     },
     Unlayer,
+    Glass {
+        paths: Vec<u32>,
+        even_odd: bool,
+        kind: u32,
+        inradius: f32,
+        angle: f32,
+        intensity: f32,
+        refraction: f32,
+        depth: f32,
+        dispersion: f32,
+        frost: f32,
+        splay: f32,
+        box_radii: [f32; 4],
+        box_smoothing: [f32; 4],
+    },
     DropShadow {
         paths: Vec<u32>,
         even_odd: bool,
@@ -361,6 +376,43 @@ impl Rec {
                     w.u32(*compose);
                 }
                 Op::Unlayer => w.u32(8),
+                Op::Glass {
+                    paths,
+                    even_odd,
+                    kind,
+                    inradius,
+                    angle,
+                    intensity,
+                    refraction,
+                    depth,
+                    dispersion,
+                    frost,
+                    splay,
+                    box_radii,
+                    box_smoothing,
+                } => {
+                    w.u32(9);
+                    w.u32(paths.len() as u32);
+                    for p in paths {
+                        w.u32(*p);
+                    }
+                    w.u32(u32::from(*even_odd));
+                    w.u32(*kind);
+                    w.f32(*inradius);
+                    w.f32(*angle);
+                    w.f32(*intensity);
+                    w.f32(*refraction);
+                    w.f32(*depth);
+                    w.f32(*dispersion);
+                    w.f32(*frost);
+                    w.f32(*splay);
+                    for r in box_radii {
+                        w.f32(*r);
+                    }
+                    for s in box_smoothing {
+                        w.f32(*s);
+                    }
+                }
                 Op::DropShadow {
                     paths,
                     even_odd,

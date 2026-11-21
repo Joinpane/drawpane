@@ -58,6 +58,7 @@ export interface FrameStats {
   readonly culled: number;
   readonly glyphsMasked: number;
   readonly glyphsOutlined: number;
+  readonly reads: number;
   readonly maskHits: number;
   readonly maskMisses: number;
   readonly maskBytes: number;
@@ -198,6 +199,7 @@ function stats(o: Glue.Outcome, gpu = false): FrameStats {
     culled: o.culled,
     glyphsMasked: o.glyphs_masked,
     glyphsOutlined: o.glyphs_outlined,
+    reads: o.reads,
     maskHits: o.mask_hits,
     maskMisses: o.mask_misses,
     maskBytes: o.mask_bytes,

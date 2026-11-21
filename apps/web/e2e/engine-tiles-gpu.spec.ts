@@ -428,3 +428,170 @@ for (const build of ["browser", "webgl"] as const) {
     });
   });
 }
+
+for (const build of ["browser", "webgl"] as const) {
+  test(`glass scratch budget and moving reader frames (${build})`, async ({ page }) => {
+    const root = ROOTS[build];
+    const expectedBackend = build === "webgl" ? "webgl2" : "webgpu";
+    const glassScene = (base = 0xffffffff, revision = 1, withGlass = true) => {
+      const w = new ListWriter(base, revision);
+      w.reset();
+      w.set(1, ROOT, {
+        flags: 0,
+        transform: [1, 0, 0, 1, 0, 0],
+        opacity: 1,
+        width: 512,
+        height: 512,
+        coarseBelow: 0,
+        reach: 0,
+        unsupported: 0,
+        paths: [{ kind: "rect", w: 512, h: 512, radii: [0, 0, 0, 0], smoothing: 0 }],
+        ops: [
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: { kind: "solid", color: [0.1, 0.4, 0.9, 1] },
+          },
+        ],
+        coarse: [],
+      });
+      if (withGlass) {
+        w.set(2, ROOT, {
+          flags: 0,
+          transform: [1, 0, 0, 1, 64, 64],
+          opacity: 1,
+          width: 320,
+          height: 240,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [{ kind: "rect", w: 320, h: 240, radii: [24, 24, 24, 24], smoothing: 0 }],
+          ops: [
+            {
+              op: "glass",
+              paths: [0],
+              evenOdd: false,
+              kind: 0,
+              inradius: 120,
+              angle: -45,
+              intensity: 80,
+              refraction: 75,
+              depth: 20,
+              dispersion: 50,
+              frost: 4,
+              splay: 0,
+              boxRadii: [24, 24, 24, 24],
+              boxSmoothing: [0, 0, 0, 0],
+            },
+          ],
+          coarse: [],
+        });
+      }
+      return [...w.finish()];
+    };
+
+    await page.route(`${origin}/**`, async (route) => {
+      const filename = new URL(route.request().url()).pathname.slice(1);
+      if (filename === "engine.js" || filename === "engine_bg.wasm") {
+        await route.fulfill({
+          body: await readFile(root + filename),
+          contentType: filename.endsWith(".js") ? "text/javascript" : "application/wasm",
+        });
+      } else {
+        await route.fulfill({ body: "<!doctype html>", contentType: "text/html" });
+      }
+    });
+    await page.goto(origin);
+
+    const res = await page.evaluate(
+      async ({ withGlass, withoutGlass, expectedBackend }) => {
+        const name = "/engine.js";
+        const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+        await glue.default({ module_or_path: "/engine_bg.wasm" });
+        if (glue.gpuBackend() !== expectedBackend) throw new Error("wrong GPU backend");
+        const bg = new Float32Array([1, 1, 1, 1]);
+
+        // 1. Tight gpu_bytes budget must refuse oversized reader scratch with Limit (code 4).
+        const tightDev = await glue.createGpu(null, 0);
+        if (!tightDev.ok) throw new Error(tightDev.message);
+        const tight = new glue.Engine(0, 0);
+        let tightCode = 0;
+        let tightOk = true;
+        try {
+          tight.setLimit("gpu_bytes", 1 << 20).free();
+          tight.apply(new Uint8Array(withGlass)).free();
+          tight.attachGpu?.(tightDev).free();
+          const o = tight.renderGpu?.(512, 512, 1, 0, 0, 1, bg, false, 0);
+          if (!o) throw new Error("no renderGpu");
+          tightOk = o.ok;
+          tightCode = o.code;
+          o.free();
+        } finally {
+          tight.free();
+          tightDev.free();
+        }
+
+        // 2. Normal budget: moving frame draws analytic coarse glass (reads > 0), settles to exact,
+        // then switching to a readerless list evicts scratch and renders cleanly.
+        const dev = await glue.createGpu(null, 0);
+        if (!dev.ok) throw new Error(dev.message);
+        const e = new glue.Engine(0, 0);
+        try {
+          e.apply(new Uint8Array(withGlass)).free();
+          e.attachGpu?.(dev).free();
+          const moving = e.renderGpu?.(512, 512, 1, 0, 0, 1, bg, true, 0);
+          if (!moving) throw new Error("no renderGpu");
+          const movingInfo = { ok: moving.ok, exact: moving.exact, reads: moving.reads };
+          moving.free();
+          const movingPx = await e.gpuPixels?.();
+          if (!(movingPx instanceof Uint8Array)) throw new Error("moving gpuPixels failed");
+          const cAt = (180 * 512 + 200) * 4;
+          const movingCentre = [...movingPx.subarray(cAt, cAt + 4)];
+
+          const settled = e.renderGpu?.(512, 512, 1, 0, 0, 1, bg, false, 0);
+          if (!settled) throw new Error("no renderGpu");
+          const settledInfo = { ok: settled.ok, exact: settled.exact, reads: settled.reads };
+          settled.free();
+
+          e.apply(new Uint8Array(withoutGlass)).free();
+          const plain = e.renderGpu?.(512, 512, 1, 0, 0, 1, bg, false, 0);
+          if (!plain) throw new Error("no renderGpu");
+          const plainInfo = { ok: plain.ok, exact: plain.exact, reads: plain.reads };
+          plain.free();
+          const plainPx = await e.gpuPixels?.();
+          if (!(plainPx instanceof Uint8Array)) throw new Error("plain gpuPixels failed");
+          const plainCentre = [...plainPx.subarray(cAt, cAt + 4)];
+
+          return {
+            tightOk,
+            tightCode,
+            movingInfo,
+            movingCentre,
+            settledInfo,
+            plainInfo,
+            plainCentre,
+          };
+        } finally {
+          e.free();
+          dev.free();
+        }
+      },
+      {
+        withGlass: glassScene(0xffffffff, 1, true),
+        withoutGlass: glassScene(0xffffffff, 2, false),
+        expectedBackend,
+      },
+    );
+
+    expect(res.tightOk).toBe(false);
+    expect(res.tightCode).toBe(4);
+    expect(res.movingInfo.ok).toBe(true);
+    expect(res.movingInfo.reads).toBeGreaterThan(0);
+    expect(res.movingCentre[3]).toBe(255);
+    expect(res.settledInfo).toEqual({ ok: true, exact: true, reads: expect.any(Number) });
+    expect(res.settledInfo.reads).toBeGreaterThan(0);
+    expect(res.plainInfo).toEqual({ ok: true, exact: true, reads: 0 });
+    expect(res.plainCentre[2]).toBeGreaterThan(200);
+  });
+}

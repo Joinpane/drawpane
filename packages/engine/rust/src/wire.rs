@@ -8,7 +8,13 @@ use vello_common::kurbo::{Affine, BezPath, Point};
 pub const MAGIC: u32 = u32::from_le_bytes(*b"DPDL");
 /// A change to the major version breaks old readers; the engine refuses other majors.
 pub const MAJOR: u16 = 1;
-/// Minor versions add commands or kinds; the engine reads lists up to its own minor.
+/// Minor versions add commands, record flags, or ops; the engine reads lists up to its own minor
+/// and strictly rejects features gated to a newer minor than the message header declares.
+/// - 1.0: flags 1..4 (`hidden`, `isolate`, `group`), ops 1..6 (`fill`..`read`).
+/// - 1.1: flag 8 (`provisional`, phase 2).
+/// - 1.2: ops 7..8 for geometry-item `layer` / `unlayer` (blends/masks).
+/// - 1.3: flag 16 (`context`); ops 9..11 (`glass`, `backgroundBlur`, `progressiveBlur`), 12 reserved.
+/// - 1.4: flags 32/64/128/256 (`post`, `blend`, `mask`, `endsMask`); ops 13..14 (shadows).
 pub const MINOR: u16 = 4;
 
 pub struct Reader<'a> {

@@ -2027,6 +2027,96 @@ test.describe
       expect(r).toEqual([{ ok: true }, { ok: false, code: 4 }]);
     });
 
+    test("preserves translucent backdrop alpha for neutral glass inside a faded frame on CPU and GPU", async ({
+      browser,
+    }) => {
+      const context = await browser.newContext({
+        baseURL: instance.url,
+        storageState: await instance.context.storageState(),
+      });
+      try {
+        const p = await context.newPage();
+        await p.goto("/");
+        await p.evaluate(() => localStorage.setItem("drawpane:debug", "1"));
+        await p.getByRole("button", { name: "New file" }).first().click();
+        await expect(p.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
+          timeout: 15_000,
+        });
+        const m = await p.evaluate(async () => {
+          const w = window as unknown as W;
+          const editor = w.drawpane;
+          const engine = w.drawpaneEngine;
+          const pageId = editor.s.pageId;
+          editor.createLayer("rect", { x: 0, y: 0, width: 64, height: 64 }, pageId, {
+            fills: [{ type: "solid", color: "#ff0000", opacity: 0.3 }],
+          });
+          const parent = editor.createLayer(
+            "frame",
+            { x: 0, y: 0, width: 64, height: 64 },
+            pageId,
+            {
+              opacity: 0.5,
+              fills: [],
+              clipContent: false,
+            },
+          );
+          // Sibling inside the faded frame (top-left of frame, outside glass) must still fade by 0.5.
+          editor.createLayer("rect", { x: 2, y: 2, width: 8, height: 8 }, parent, {
+            fills: [{ type: "solid", color: "#00ff00", opacity: 1 }],
+          });
+          editor.createLayer("rect", { x: 12, y: 12, width: 40, height: 40 }, parent, {
+            fills: [],
+            effects: [
+              {
+                type: "glass",
+                angle: -45,
+                intensity: 0,
+                refraction: 0,
+                depth: 8,
+                dispersion: 0,
+                frost: 0,
+                splay: 0,
+              },
+            ],
+          });
+          const args = {
+            pageId,
+            rect: { x: 0, y: 0, width: 64, height: 64 },
+            scale: 1,
+            width: 64,
+            height: 64,
+            background: [0, 0, 0, 0],
+          };
+          const at = (decoded: string, x: number, y: number) => {
+            const start = (y * 64 + x) * 4;
+            return [...decoded.slice(start, start + 4)].map((byte) => byte.charCodeAt(0));
+          };
+          const capture = async (backend: "cpu" | "gpu") => {
+            const r = await engine.render({ ...args, backend });
+            if (!r.ok || !r.rgba) return { error: r.error };
+            const px = atob(r.rgba);
+            return {
+              corner: at(px, 0, 0),
+              centre: at(px, 32, 32),
+              sibling: at(px, 5, 5),
+            };
+          };
+          return { cpu: await capture("cpu"), gpu: await capture("gpu") };
+        });
+        expect(m.cpu.corner).toEqual([255, 0, 0, 77]);
+        expect(m.gpu.corner).toEqual([255, 0, 0, 77]);
+        expect(m.cpu.centre).toEqual(m.cpu.corner);
+        expect(m.gpu.centre).toEqual(m.gpu.corner);
+        // Sibling inside the 50% faded frame blends 50% green over 30% red (not 100% opaque green).
+        expect(m.cpu.sibling?.[1]).toBeGreaterThan(100);
+        expect(m.cpu.sibling?.[1]).toBeLessThan(220);
+        expect(m.gpu.sibling?.[1]).toBeGreaterThan(100);
+        expect(m.gpu.sibling?.[1]).toBeLessThan(220);
+      } finally {
+        await context.close();
+      }
+    });
+
     test("falls back from WebGPU to WebGL2 without WebGPU, and to CPU view mode without WebGL2", async ({
       browser,
     }) => {

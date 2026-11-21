@@ -58,7 +58,7 @@ fn cases(default: u32) -> u32 {
         .unwrap_or(default)
 }
 
-fn run_sequences(readers: bool, default_cases: u32) {
+fn run_sequences(readers: bool, effects: bool, default_cases: u32) {
     let base = seed() ^ if readers { 0xabcd } else { 0 };
     let mut changed_pixels = 0u64;
     for case in 0..cases(default_cases) {
@@ -70,7 +70,7 @@ fn run_sequences(readers: bool, default_cases: u32) {
         }
         let mut r = Rng(s | 1);
         let n = 4 + r.below(24);
-        let mut model = Model::new(&mut r, n, readers);
+        let mut model = Model::new_with_features(&mut r, n, readers, effects);
         let cam = Camera {
             zoom: f64::from(r.range(0.5, 1.4)),
             x: f64::from(r.range(-20.0, 20.0)),
@@ -189,12 +189,17 @@ fn run_sequences(readers: bool, default_cases: u32) {
 
 #[test]
 fn patches_equal_a_fresh_build() {
-    run_sequences(false, 60);
+    run_sequences(false, true, 60);
 }
 
 #[test]
 fn readers_are_invalidated_transitively() {
-    run_sequences(true, 60);
+    run_sequences(true, false, 60);
+}
+
+#[test]
+fn backdrop_readers_and_composites_match_fresh_after_edits() {
+    run_sequences(true, true, 30);
 }
 
 #[test]
@@ -330,6 +335,12 @@ fn bands_reproduce_the_whole_frame_where_a_run_of_glyphs_crosses_them() {
     // CI's random seed that found a run's image, cut to a band, a level off the whole frame's
     // (vello_cpu rounds an image's pixels by its size): the CPU draws a run's masks one by one.
     bands_match(1_795_184_124_632_858_455, 27);
+}
+
+#[test]
+fn bands_reproduce_the_whole_frame_for_rotated_glyph_outlines() {
+    // CI found a one-level difference in an outline fill when a band culled other glyphs in the run.
+    bands_match(1_795_215_203_959_837_193, 212);
 }
 
 /// Case `case` of seed `seed`: a random page drawn whole and in bands, bitwise the same.

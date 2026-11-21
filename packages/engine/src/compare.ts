@@ -155,7 +155,10 @@ export const CPU_GPU_TOLERANCE = {
 } as const;
 
 /** What breaks the tolerance, or nothing. */
-export function outsideTolerance(s: Score, t = CPU_GPU_TOLERANCE): string[] {
+export function outsideTolerance(
+  s: Score,
+  t: Pick<Score, keyof typeof CPU_GPU_TOLERANCE> = CPU_GPU_TOLERANCE,
+): string[] {
   const out: string[] = [];
   if (s.mean > t.mean) out.push(`mean ${s.mean.toFixed(3)} > ${t.mean}`);
   if (s.p99 > t.p99) out.push(`p99 ${s.p99} > ${t.p99}`);

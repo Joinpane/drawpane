@@ -702,12 +702,7 @@ fn drags_composite_within_rounding_and_settle_exact() {
 fn a_drag_into_a_board_is_a_removal_and_an_insertion() {
     // Two boards side by side, a layer in the first, dragged over the second and dropped in it
     // (reparented, as the editor does on drop, or as a provisional parent mid-drag).
-    let mut model = Model {
-        nodes: std::collections::BTreeMap::new(),
-        children: std::collections::HashMap::new(),
-        next: 1,
-        readers: false,
-    };
+    let mut model = Model::empty(1, false, false);
     let board = |x: f64, color: [f32; 4]| {
         let mut b = Rec::new([1.0, 0.0, 0.0, 1.0, x, 10.0], [70.0, 90.0]);
         b.paths.push(Entry::Rect {
@@ -891,12 +886,7 @@ fn a_dragged_layer_passes_under_what_is_painted_after_its_board() {
     // (The random drags found the case where a board on the selection's path is culled from a
     // tile, which once left what follows it in the part below; `exec::Walk::node` now moves
     // past the selection after any node on its path, walked or not.)
-    let mut model = Model {
-        nodes: std::collections::BTreeMap::new(),
-        children: std::collections::HashMap::new(),
-        next: 4,
-        readers: false,
-    };
+    let mut model = Model::empty(4, false, false);
     let shape = |t: [f64; 6], w: f32, h: f32, color: [f32; 4], children: bool| {
         let mut r = Rec::new(t, [w, h]);
         r.paths.push(Entry::Rect { w, h, radii: [0.0; 4] });
@@ -1024,12 +1014,7 @@ fn a_provisional_record_is_drawn_coarse_and_never_exact() {
 fn an_edit_above_a_dragged_layer_redraws_the_drags_parts() {
     // A layer dragged under a translucent shape painted after it; the shape changes colour
     // mid-drag. The part above the selection, kept for the drag, must be drawn again there.
-    let mut model = Model {
-        nodes: std::collections::BTreeMap::new(),
-        children: std::collections::HashMap::new(),
-        next: 4,
-        readers: false,
-    };
+    let mut model = Model::empty(4, false, false);
     let rect = |t: [f64; 6], w: f32, h: f32, color: [f32; 4]| {
         let mut r = Rec::new(t, [w, h]);
         r.paths.push(Entry::Rect { w, h, radii: [0.0; 4] });
