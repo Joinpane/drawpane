@@ -84,6 +84,20 @@ function glyphPath(d: string): PathData {
 
 /** Milliseconds an update spends encoding deferred text whole (see `build`'s `deferText`). */
 const DEFER_MS = 10;
+/** Leave time for applying the records and painting the opening preview. */
+const OPEN_LIST_MS = 5;
+
+interface OpeningLevel {
+  readonly ids: readonly string[];
+  readonly nearby: (readonly string[])[];
+  readonly distant: (readonly string[])[];
+  next: number;
+  nextBranch: number;
+}
+
+function openingLevel(ids: readonly string[]): OpeningLevel {
+  return { ids, nearby: [], distant: [], next: 0, nextBranch: 0 };
+}
 
 export class DisplayListBuilder {
   readonly #scene: Scene;
@@ -116,6 +130,8 @@ export class DisplayListBuilder {
   readonly #texts = new Set<string>();
   /** Text using a fallback: a face that arrives late can replace it. */
   readonly #pendingText = new Set<string>();
+  /** Parents precede their children, even when opening spans several messages. */
+  #opening: OpeningLevel[] | null = null;
   /**
    * Text to encode whole a few at a time: sent provisional when a page opened (`build`'s
    * `deferText`), or waiting for faces that have since arrived. `#queue` is the order they were
@@ -182,6 +198,10 @@ export class DisplayListBuilder {
 
   get pageId(): string | null {
     return this.#page;
+  }
+
+  get opening(): boolean {
+    return this.#opening !== null;
   }
 
   /** The revision the engine holds once it has applied every message written so far. */
@@ -704,6 +724,7 @@ export class DisplayListBuilder {
     this.#faceGeneration = this.#measurer.faceGeneration ?? 0;
     this.#glyphTable = glyphTable(doc).version;
     this.#stale = false;
+    this.#opening = null;
     this.#handles.clear();
     this.#nodes.clear();
     this.#kids.clear();
@@ -734,6 +755,111 @@ export class DisplayListBuilder {
     this.#nextGlyph = 1;
   }
 
+  #openingPageChanged(pageId: string): boolean {
+    const changes = this.#scene.doc.changesSince(this.#version);
+    if (!changes) return true;
+    const onPage = (id: string) => this.#nodes.has(id) || this.#pageOf(id) === pageId;
+    return changes.some((change) => {
+      if (change.reset) return true;
+      for (const id of change.ids) if (onPage(id)) return true;
+      for (const id of change.parents) if (onPage(id)) return true;
+      return false;
+    });
+  }
+
+  /**
+   * Opens a live page a slice at a time. Each message is valid on its own. A page switch,
+   * edit to the opening page or refusal starts a new generation rather than mixing two snapshots.
+   */
+  openSlice(pageId: string): Uint8Array {
+    const t0 = performance.now();
+    const doc = this.#scene.doc;
+    const previous = this.#opening;
+    const continuing =
+      previous !== null &&
+      this.#page === pageId &&
+      !this.#stale &&
+      !this.#openingPageChanged(pageId);
+    if (!continuing) this.#resetState(pageId);
+    else this.#version = doc.version;
+    const stack = continuing ? previous : [openingLevel(doc.childIds(pageId))];
+    const revision = this.#revision + 1;
+    const w = new ListWriter(continuing ? this.#revision : ANY_REVISION, revision, 64 << 10);
+    if (!continuing) w.reset();
+    const ctx = this.#context(true);
+    const until = t0 + OPEN_LIST_MS;
+    let records = 0;
+    let glyphs = 0;
+    while (stack.length > 0 && (records === 0 || performance.now() < until)) {
+      const level = stack[stack.length - 1] as OpeningLevel;
+      const id = level.ids[level.next];
+      if (id === undefined) {
+        const branch = level.nextBranch++;
+        const kids =
+          branch < level.nearby.length
+            ? level.nearby[branch]
+            : level.distant[branch - level.nearby.length];
+        if (kids) stack.push(openingLevel(kids));
+        else stack.pop();
+        continue;
+      }
+      level.next++;
+      const node = doc.get(id);
+      if (!node) continue;
+      glyphs += this.#writePageRecord(w, node, ctx);
+      records++;
+      const kids = doc.childIds(id);
+      if (kids.length === 0) continue;
+      // Emit each set of siblings in paint order. Their descendants can arrive in view order
+      // because they belong to separate parent records.
+      (this.#nearOpeningView(node) ? level.nearby : level.distant).push(kids);
+    }
+    this.#opening = stack.length === 0 ? null : stack;
+    this.#revision = revision;
+    const bytes = w.finish();
+    this.stats = {
+      records,
+      transforms: 0,
+      removed: 0,
+      glyphs,
+      bytes: bytes.length,
+      ms: performance.now() - t0,
+      fresh: !continuing,
+    };
+    return bytes;
+  }
+
+  #nearOpeningView(node: NodeRecord): boolean {
+    const view = this.#view;
+    if (!view || node.type === "group") return true;
+    const bounds = this.#scene.bounds(node.id);
+    return (
+      !bounds ||
+      (bounds.x <= view.x1 &&
+        bounds.x + bounds.width >= view.x0 &&
+        bounds.y <= view.y1 &&
+        bounds.y + bounds.height >= view.y0)
+    );
+  }
+
+  #writePageRecord(w: ListWriter, node: NodeRecord, ctx: LayerContext, root = false): number {
+    const parent = root ? ROOT : this.#parentHandle(node);
+    let record = this.#encode(node, ctx);
+    // An export's top layers hang from the page directly, at their page positions.
+    if (root)
+      record = {
+        ...record,
+        transform:
+          node.type === "group"
+            ? this.#scene.spaceMatrix(node.parent)
+            : this.#scene.worldMatrix(node.id),
+      };
+    const glyphs = this.#writeGlyphs(w);
+    w.set(this.#handleOf(node.id), parent, record);
+    this.#kid(node.parent, node.id);
+    return glyphs;
+  }
+
   /**
    * A fresh list of every layer on `pageId` (or of just `roots` on it, placed on the page),
    * written as it's walked: each record goes into the message as it's encoded, after the glyphs
@@ -756,29 +882,16 @@ export class DisplayListBuilder {
       Math.max(1 << 20, Math.ceil(this.#lastFresh * 1.1)),
     );
     w.reset();
+    const stack = [...(roots ?? doc.childIds(pageId))].reverse();
+    const top = roots ? new Set(roots) : null;
     let records = 0;
     let glyphs = 0;
-    const top = new Set(roots ?? []);
-    const stack = [...(roots ?? doc.childIds(pageId))].reverse();
     while (stack.length > 0) {
       const id = stack.pop() as string;
       const node = doc.get(id);
       if (!node) continue;
-      const parent = top.has(id) ? ROOT : this.#parentHandle(node);
-      let record = this.#encode(node, ctx);
-      // An export's top layers hang from the page directly: placed where they are on it.
-      if (top.has(id))
-        record = {
-          ...record,
-          transform:
-            node.type === "group"
-              ? this.#scene.spaceMatrix(node.parent)
-              : this.#scene.worldMatrix(id),
-        };
-      glyphs += this.#writeGlyphs(w);
-      w.set(this.#handleOf(id), parent, record);
+      glyphs += this.#writePageRecord(w, node, ctx, top?.has(id));
       records++;
-      this.#kid(node.parent, id);
       const kids = doc.childIds(id);
       for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i] as string);
     }
@@ -866,14 +979,14 @@ export class DisplayListBuilder {
    * A patch since the last message, or null when nothing on the page changed. Text still to be
    * encoded whole (`pending`) is, for at most `textMs` (at least one record), what's in view first.
    */
-  update(textMs = DEFER_MS): Uint8Array | null {
+  update(textMs = DEFER_MS, sliceFresh = false): Uint8Array | null {
     const page = this.#page;
     if (!page) return null;
     const t0 = performance.now();
     const doc = this.#scene.doc;
     const changes = doc.changesSince(this.#version);
     if (this.#stale || !changes || changes.some((c) => c.reset) || !doc.get(page))
-      return this.build(page);
+      return sliceFresh ? this.openSlice(page) : this.build(page);
     const touched = new Set<string>();
     const parents = new Set<string>();
     for (const c of changes) {

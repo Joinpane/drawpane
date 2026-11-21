@@ -445,7 +445,7 @@ describe("variable fonts (decision 0009)", () => {
 });
 
 describe("text dependencies in display lists", () => {
-  it("re-encodes only the layers that use the face that settled", () => {
+  it.each(["fresh", "sliced"])("re-encodes only dependent layers after a %s open", (opening) => {
     let revision = 0;
     const shapeForEngine = vi.fn((text: string) => ({
       shaped: { glyphs: [], width: 10, scale: 0.01 },
@@ -476,7 +476,14 @@ describe("text dependencies in display lists", () => {
       })),
     ]);
     const builder = new DisplayListBuilder(editor.scene, measurer);
-    builder.build("p");
+    if (opening === "sliced") {
+      builder.openSlice("p");
+      while (builder.opening) builder.openSlice("p");
+      builder.update(100);
+    } else {
+      builder.build("p");
+    }
+    expect(shapeForEngine.mock.calls.map(([text]) => text)).toEqual(["first", "second"]);
     shapeForEngine.mockClear();
     revision++;
     expect(builder.update()).not.toBeNull();
