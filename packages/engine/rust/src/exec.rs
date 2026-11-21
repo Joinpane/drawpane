@@ -947,7 +947,7 @@ pub fn draw_budgeted<B: Backend>(
     limits: &Limits,
     budget: &mut usize,
 ) -> Result<DrawStats> {
-    draw_split(store, backend, frame, limits, budget, &Split::all())
+    draw_split(store, backend, frame, limits, budget, &Split::all(), frame.detail)
 }
 
 /// `draw_budgeted`, drawing only the part of the page `split` names.
@@ -958,6 +958,7 @@ pub fn draw_split<B: Backend>(
     limits: &Limits,
     budget: &mut usize,
     split: &Split,
+    coarse_readers: bool,
 ) -> Result<DrawStats> {
     let full_frame = IRect {
         x0: 0,
@@ -988,6 +989,7 @@ pub fn draw_split<B: Backend>(
         store,
         backend,
         frame: *frame,
+        coarse_readers,
         viewport: Rect::new(
             f64::from(frame.area.x0) - 1.0,
             f64::from(frame.area.y0) - 1.0,
@@ -1039,6 +1041,7 @@ struct Walk<'a, B: Backend> {
     store: &'a Store,
     backend: &'a mut B,
     frame: Frame,
+    coarse_readers: bool,
     viewport: Rect,
     tiled: bool,
     full_frame: IRect,
@@ -2689,7 +2692,7 @@ impl<B: Backend> Walk<'_, B> {
                             let p = self.path(r, pi, device, 0.0)?;
                             paths.push((p, g.even_odd));
                         }
-                        let glass_coarse = self.frame.detail;
+                        let glass_coarse = self.coarse_readers;
                         if glass_coarse {
                             self.stats.coarse += 1;
                         }
@@ -2715,7 +2718,7 @@ impl<B: Backend> Walk<'_, B> {
                             let p = self.path(r, pi, device, 0.0)?;
                             paths.push((p, bb.even_odd));
                         }
-                        let blur_coarse = self.frame.detail && bb.radius > 0.0;
+                        let blur_coarse = self.coarse_readers && bb.radius > 0.0;
                         if blur_coarse {
                             self.stats.coarse += 1;
                         }
@@ -2733,7 +2736,7 @@ impl<B: Backend> Walk<'_, B> {
                             let p = self.path(r, pi, device, 0.0)?;
                             paths.push((p, pb.even_odd));
                         }
-                        let blur_coarse = self.frame.detail && pb.start_radius.max(pb.end_radius) > 0.0;
+                        let blur_coarse = self.coarse_readers && pb.start_radius.max(pb.end_radius) > 0.0;
                         if blur_coarse {
                             self.stats.coarse += 1;
                         }
