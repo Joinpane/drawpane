@@ -597,8 +597,18 @@ struct ScratchTile {
     height: u32,
 }
 
+struct MotionPrefix {
+    texture: wgpu::Texture,
+    view: Affine,
+    background: [u32; 4],
+    serial: u64,
+    cut: usize,
+}
+
 /// State for the active `draw_tile` or `render_whole` pass while `exec::draw_split` walks the scene.
 struct ActiveDraw {
+    /// A whole frame writes straight to its destination; tiles use scratch color.
+    frame_dst: Option<usize>,
     width: u32,
     height: u32,
     background: [f32; 4],
@@ -686,6 +696,7 @@ pub struct Gpu {
     /// non-reader and coarse tiles, slot 1 caches the haloed (`TILE + 2 * halo`) or whole-frame target.
     scratches: [Option<ScratchTile>; 2],
     active_scratch: usize,
+    motion_prefix: Option<MotionPrefix>,
     compositor: Option<Compositor>,
     diamond: Option<DiamondPipeline>,
     /// The frame shown: what it was drawn for, so the next may stand on it.
@@ -1183,6 +1194,7 @@ impl Gpu {
             pages: Vec::new(),
             scratches: [None, None],
             active_scratch: 0,
+            motion_prefix: None,
             compositor: None,
             diamond: None,
             last: None,
@@ -1776,6 +1788,7 @@ impl Gpu {
             m.texture.destroy();
         }
         self.readers.clear_frame_targets();
+        self.forget_motion_prefix();
         self.bytes = self.bytes - freed + Self::frame_bytes(width, height, presents);
         for _ in 0..FRAMES {
             let tex = texture(
@@ -2026,6 +2039,91 @@ impl Gpu {
         Ok(())
     }
 
+    /// Discards the prefix when ordinary paint can have changed, or the gesture settles.
+    pub fn forget_motion_prefix(&mut self) {
+        if let Some(prefix) = self.motion_prefix.take() {
+            self.bytes -= prefix.texture.width() as usize * prefix.texture.height() as usize * 4;
+            prefix.texture.destroy();
+        }
+    }
+
+    fn prepare_motion_prefix(
+        &mut self,
+        store: &Store,
+        frame: &Frame,
+        background: [u32; 4],
+        (serial, cut): (u64, usize),
+        verbs: &mut usize,
+        stats: &mut DrawStats,
+    ) -> Result<Option<Split>> {
+        let active = self.active.as_ref().expect("whole-frame draw");
+        let (width, height) = (active.width, active.height);
+        let dst = active.frame_dst.expect("whole-frame destination");
+        let mut split = Split {
+            pass: Pass::Below,
+            parent: crate::store::ROOT,
+            first: cut,
+            last: cut - 1,
+            path: Vec::new(),
+        };
+        let reuse = self
+            .motion_prefix
+            .as_ref()
+            .is_some_and(|p| p.serial == serial && p.cut == cut && p.view == frame.view && p.background == background);
+        if !reuse {
+            self.forget_motion_prefix();
+            let bytes = width as usize * height as usize * 4;
+            if self.reserve(bytes, 0, "motion prefix").is_err() {
+                return Ok(None);
+            }
+            let cached = texture(
+                &self.device,
+                width,
+                height,
+                wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+                "motion prefix",
+            );
+            self.bytes += bytes;
+            self.motion_prefix = Some(MotionPrefix {
+                texture: cached,
+                view: frame.view,
+                background,
+                serial,
+                cut,
+            });
+            let s = exec::draw_split(store, self, frame, &store.limits, verbs, &split, false)?;
+            stats.add(&s);
+            self.flush_scene_gpu(true)?;
+            self.scene.reset();
+            let mut encoder = self.take_encoder(false, "cache motion prefix");
+            let cached = &self.motion_prefix.as_ref().expect("cached prefix").texture;
+            copy_rect(
+                &mut encoder,
+                &self.frames[dst].texture,
+                cached,
+                (0, 0),
+                (0, 0),
+                (width, height),
+            );
+            self.stash_encoder(encoder);
+        } else {
+            let mut encoder = self.take_encoder(false, "restore motion prefix");
+            let cached = &self.motion_prefix.as_ref().expect("cached prefix").texture;
+            copy_rect(
+                &mut encoder,
+                cached,
+                &self.frames[dst].texture,
+                (0, 0),
+                (0, 0),
+                (width, height),
+            );
+            self.stash_encoder(encoder);
+            self.active.as_mut().expect("whole-frame draw").needs_clear = false;
+        }
+        split.pass = Pass::Above;
+        Ok(Some(split))
+    }
+
     /// Draws the whole frame untiled directly into `self.frames[dst]`, used when a backdrop
     /// reader's reach exceeds the per-tile halo limit (e.g. maximum glass settings at 2x).
     pub fn render_whole(
@@ -2034,20 +2132,18 @@ impl Gpu {
         frame: &Frame,
         background: [f32; 4],
         generation: u64,
-        detail: bool,
+        moving: bool,
+        prefix: Option<(u64, usize)>,
     ) -> Result<DrawStats> {
         self.check()?;
+        if prefix.is_none() {
+            self.forget_motion_prefix();
+        }
         if store.readers().is_empty() && !store.has_context() && self.readers.bytes() > 0 {
             self.readers.evict_frame_scratch();
         }
         let (width, height) = (u32::from(frame.width), u32::from(frame.height));
-        let (w, h) = if detail {
-            (width.div_ceil(2), height.div_ceil(2))
-        } else {
-            (width, height)
-        };
         self.ensure_frames(width, height)?;
-        self.ensure_scratch_size(w, h)?;
         let t0 = now();
         let view = frame.view;
         let scale = view.as_coeffs()[0];
@@ -2057,7 +2153,7 @@ impl Gpu {
             plan: 2,
             ..DrawStats::default()
         };
-        if !detail
+        if !moving
             && self.last.is_some_and(|l| l.view == view && l.size == (width, height))
             && self.shown == Some((generation, bg_bits, true))
         {
@@ -2066,18 +2162,20 @@ impl Gpu {
             return self.finish_frame(stats, t0);
         }
         let dst = (self.cur + 1) % FRAMES;
+        self.ensure_scratch_size(width, height)?;
         self.masks.begin_frame();
         self.blur.begin_frame();
         self.shadow.begin_frame();
         self.atlas.at = (0, 0, 0);
-        self.scene.reset_and_resize(w as u16, h as u16);
+        self.scene.reset_and_resize(frame.width, frame.height);
         self.readers.begin_frame();
         self.backdrop_gen += 1;
         self.active = Some(ActiveDraw {
-            width: w,
-            height: h,
+            frame_dst: Some(dst),
+            width,
+            height,
             background,
-            detail,
+            detail: moving,
             needs_clear: true,
             backdrop_live: false,
             write_main: true,
@@ -2087,23 +2185,27 @@ impl Gpu {
             encoder_has_vello: false,
             flush_ms: 0.0,
         });
-        let whole = Frame {
-            width: w as u16,
-            height: h as u16,
-            view: Affine::scale_non_uniform(f64::from(w) / f64::from(width), f64::from(h) / f64::from(height)) * view,
-            detail,
-            area: IRect {
-                x0: 0,
-                y0: 0,
-                x1: w as i32,
-                y1: h as i32,
-            },
-        };
         let limits = store.limits;
         let mut verbs = limits.frame_verbs;
-        let s = match exec::draw_split(store, self, &whole, &limits, &mut verbs, &Split::all()) {
+        let split = match prefix {
+            Some(prefix) => self.prepare_motion_prefix(store, frame, bg_bits, prefix, &mut verbs, &mut stats),
+            None => Ok(None),
+        };
+        let draw = split.and_then(|split| {
+            exec::draw_split(
+                store,
+                self,
+                frame,
+                &limits,
+                &mut verbs,
+                &split.unwrap_or_else(Split::all),
+                moving,
+            )
+        });
+        let s = match draw {
             Ok(s) => s,
             Err(e) => {
+                self.forget_motion_prefix();
                 self.discard_draw();
                 return Err(e);
             }
@@ -2114,32 +2216,13 @@ impl Gpu {
             self.discard_draw();
             return Err(e);
         }
-        let mut encoder = self.take_encoder(false, "whole copy");
-        if detail {
-            if let Err(e) = self.scale_scratch_to_frame(&mut encoder, dst) {
-                drop(encoder);
-                self.discard_draw();
-                return Err(e);
-            }
-        } else {
-            let scratch = self.scratches[self.active_scratch].as_ref().expect("scratch");
-            copy_rect(
-                &mut encoder,
-                &scratch.texture,
-                &self.frames[dst].texture,
-                (0, 0),
-                (0, 0),
-                (w, h),
-            );
-        }
-        self.stash_encoder(encoder);
         self.submit_active_encoder();
         let active = self.active.take().expect("active draw");
         self.recycle_scene_textures();
         let render_ms = active.flush_ms + now() - t1;
         stats.encode_ms += (now() - t0 - render_ms).max(0.0);
         stats.render_ms += render_ms;
-        stats.exact = !detail && s.exact();
+        stats.exact = !moving && s.exact();
         stats.standin = !stats.exact;
         stats.held = self.tiles.len() as u32;
         stats.evicted = self.tiles.stats.evicted;
@@ -2151,73 +2234,6 @@ impl Gpu {
         self.last_scale = Some(scale);
         self.shown = Some((generation, bg_bits, stats.exact));
         self.finish_frame(stats, t0)
-    }
-
-    /// Presents the half-resolution reader stand-in through the tile compositor's bilinear pass.
-    fn scale_scratch_to_frame(&mut self, encoder: &mut wgpu::CommandEncoder, dst: usize) -> Result<()> {
-        self.ensure_compositor();
-        let compositor = self.compositor.as_ref().expect("compositor");
-        let source = self.scratches[self.active_scratch]
-            .as_ref()
-            .ok_or_else(|| EngineError::new(ErrorCode::State, "no scratch tile"))?;
-        let dst = &self.frames[dst];
-        let (width, height) = (dst.width as f32, dst.height as f32);
-        let edge = (0.5 / source.width as f32, 0.5 / source.height as f32);
-        let bounds = [width, height, 0.0, 0.0];
-        let quad = [
-            0.0,
-            0.0,
-            width,
-            height,
-            0.0,
-            0.0,
-            1.0,
-            1.0,
-            edge.0,
-            edge.1,
-            1.0 - edge.0,
-            1.0 - edge.1,
-        ];
-        let bounds_bytes: Vec<_> = bounds.into_iter().flat_map(f32::to_le_bytes).collect();
-        let quad_bytes: Vec<_> = quad.into_iter().flat_map(f32::to_le_bytes).collect();
-        self.queue.write_buffer(&compositor.uniforms, 0, &bounds_bytes);
-        self.queue.write_buffer(&compositor.instances, 0, &quad_bytes);
-        let group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("coarse reader frame"),
-            layout: &compositor.pipeline.get_bind_group_layout(0),
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&source.view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&compositor.sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: compositor.uniforms.as_entire_binding(),
-                },
-            ],
-        });
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("coarse reader frame"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: &dst.view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            ..Default::default()
-        });
-        pass.set_pipeline(&compositor.pipeline);
-        pass.set_bind_group(0, &group, &[]);
-        pass.set_vertex_buffer(0, compositor.instances.slice(..));
-        pass.draw(0..4, 0..1);
-        Ok(())
     }
 
     /// Draws a frame made of tiles (decision 0040, phase 2): draws the tiles it needs, as many as
@@ -2237,6 +2253,7 @@ impl Gpu {
         drag: Option<&DragFrame>,
     ) -> Result<DrawStats> {
         self.check()?;
+        self.forget_motion_prefix();
         if store.readers().is_empty() && !store.has_context() && self.readers.bytes() > 0 {
             self.readers.evict_frame_scratch();
         }
@@ -2554,6 +2571,7 @@ impl Gpu {
         match self.draw_tile(
             store,
             job.view,
+            job.detail,
             detail,
             halo,
             background,
@@ -2623,6 +2641,7 @@ impl Gpu {
         store: &Store,
         view: Affine,
         detail: bool,
+        coarse_readers: bool,
         halo: i32,
         background: [f32; 4],
         split: &Split,
@@ -2663,10 +2682,11 @@ impl Gpu {
         self.blur.begin_frame();
         self.backdrop_gen += 1;
         self.active = Some(ActiveDraw {
+            frame_dst: None,
             width: side,
             height: side,
             background,
-            detail,
+            detail: coarse_readers,
             needs_clear: true,
             backdrop_live: false,
             write_main: true,
@@ -2689,7 +2709,7 @@ impl Gpu {
             },
         };
         let limits = store.limits;
-        let s = match exec::draw_split(store, self, &tile, &limits, verbs, split) {
+        let s = match exec::draw_split(store, self, &tile, &limits, verbs, split, coarse_readers) {
             Ok(s) => s,
             Err(e) => {
                 self.discard_draw();
@@ -2791,6 +2811,10 @@ impl Gpu {
                 .as_ref()
                 .ok_or_else(|| EngineError::new(ErrorCode::State, "no backdrop plane"))?;
             return Ok((&back.texture, &back.view, &root.depth));
+        }
+        if let Some(dst) = self.active.as_ref().and_then(|active| active.frame_dst) {
+            let frame = &self.frames[dst];
+            return Ok((&frame.texture, &frame.view, &root.depth));
         }
         Ok((&root.texture, &root.view, &root.depth))
     }
@@ -3552,6 +3576,7 @@ impl Gpu {
                                 store,
                                 view,
                                 false,
+                                false,
                                 halo,
                                 background,
                                 &Split::all(),
@@ -3571,6 +3596,7 @@ impl Gpu {
                         let drawn = self.draw_tile(
                             store,
                             view,
+                            false,
                             false,
                             halo,
                             fill,
@@ -3605,6 +3631,7 @@ impl Gpu {
                 self.draw_tile(
                     store,
                     view,
+                    false,
                     false,
                     halo,
                     [0.0; 4],
@@ -4737,9 +4764,7 @@ impl Backend for Gpu {
                     b: f64::from(b * a),
                     a: f64::from(a),
                 };
-                if let Some(s) = self.scratches[self.active_scratch].as_ref() {
-                    GpuReaders::encode_clear(&mut encoder, &s.view, bg_col);
-                }
+                GpuReaders::encode_clear(&mut encoder, self.root_plane(false)?.1, bg_col);
                 if let Some(back) = self.readers.backdrop_frame.as_ref() {
                     GpuReaders::encode_clear(&mut encoder, &back.view, wgpu::Color::TRANSPARENT);
                 }
@@ -4764,12 +4789,10 @@ impl Backend for Gpu {
         self.readers
             .ensure_frame_tex_budgeted(true, &self.device, aw, ah, "backdrop tile", max_bytes)?;
         let mut encoder = self.take_encoder(false, "backdrop snapshot");
-        let scratch = self.scratches[self.active_scratch]
-            .as_ref()
-            .ok_or_else(|| EngineError::new(ErrorCode::State, "no scratch tile"))?;
+        let (source, _, _) = self.root_plane(false)?;
         encoder.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo {
-                texture: &scratch.texture,
+                texture: source,
                 mip_level: 0,
                 origin: wgpu::Origin3d::ZERO,
                 aspect: wgpu::TextureAspect::All,
@@ -5003,7 +5026,7 @@ impl Backend for Gpu {
         // the first chunk, since later chunks' frost and refraction overlap earlier writes.
         let (dst_tex, dst_view, _) = self.plane(false)?;
         let (dst_tex, dst_view) = (dst_tex.clone(), dst_view.clone());
-        let (source_tex, source_view) = if regions.len() > 1 && source_tex == dst_tex {
+        let (_, source_view) = if regions.len() > 1 && source_tex == dst_tex {
             let budget = self.reader_budget_room();
             self.readers
                 .ensure_blur_source_budgeted(&self.device, source_size, budget)?;
@@ -5169,7 +5192,6 @@ impl Backend for Gpu {
                 &self.device,
                 &self.queue,
                 &mut encoder,
-                &source_tex,
                 &source_view,
                 &dst_tex,
                 &dst_view,
@@ -5971,7 +5993,6 @@ impl Backend for Gpu {
                 &self.device,
                 &self.queue,
                 &mut encoder,
-                &draw.source.texture,
                 &draw.source.view,
                 draw.targets.iter().flatten().map(|t| (&t.texture, &t.view)),
                 draw.size,

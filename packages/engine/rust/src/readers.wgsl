@@ -97,6 +97,17 @@ fn fs_mip_down(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     return round_unorm8((c00 + c10 + c01 + c11) * 0.25);
 }
 
+// Motion readers need only a low-resolution prefix. Sample the original directly
+// with the filter hardware, without a full-size copy into the mip texture.
+@group(0) @binding(0) var coarse_down_src: texture_2d<f32>;
+@group(0) @binding(1) var coarse_down_sampler: sampler;
+
+@fragment
+fn fs_coarse_down(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let size = max(textureDimensions(coarse_down_src) / 2u, vec2<u32>(1u));
+    return textureSampleLevel(coarse_down_src, coarse_down_sampler, pos.xy / vec2<f32>(size), 0.0);
+}
+
 // ---------------------------------------------------------------------------
 // 3. Rim height downsample: average k x k alpha texels of mask into RGBA16F.
 // ---------------------------------------------------------------------------

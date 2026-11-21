@@ -25,6 +25,7 @@ import { pan, type Summary, summaryRow } from "./frames";
 
 const WEBGL = process.env.BENCH_RENDERER === "engine-webgl";
 const ENGINE = process.env.BENCH_RENDERER === "engine" || WEBGL;
+const DENSE_TEXT = process.env.BENCH_GLASS_DENSE_TEXT === "1";
 const PRESENT = process.env.BENCH_ENGINE_PRESENT === "readback" ? "readback" : "webgpu";
 const ALLOW_SOFTWARE = process.env.BENCH_ENGINE_SOFTWARE === "allow";
 const FRAME_BUDGET_MS = 16.7;
@@ -523,7 +524,7 @@ test.describe("Glass cost", () => {
     const page = instance.page;
     await openFreshFile(page);
     const topCard = await page.evaluate(
-      (glass) => {
+      ({ glass, denseText }) => {
         const e = (window as unknown as W).drawpane;
         const pageId = e.s.pageId;
         // Busy striped backdrop with text.
@@ -556,6 +557,22 @@ test.describe("Glass cost", () => {
             fontWeight: 600,
             fills: [{ type: "solid", color: "#111111" }],
           });
+        if (denseText) {
+          for (let row = 0; row < 22; row++) {
+            for (let col = 0; col < 25; col++) {
+              e.createLayer(
+                "text",
+                { x: 40 + col * 44, y: 50 + row * 32, width: 42, height: 8 },
+                pageId,
+                {
+                  characters: `Dense label ${row}-${col}`,
+                  fontSize: 1.5,
+                  fills: [{ type: "solid", color: "#111111" }],
+                },
+              );
+            }
+          }
+        }
         // Frosted background-blur sheet behind the stacked glass cards.
         e.createLayer("rect", { x: 120, y: 110, width: 560, height: 340 }, pageId, {
           cornerRadius: 28,
@@ -579,9 +596,20 @@ test.describe("Glass cost", () => {
         e.zoomToFit();
         return top;
       },
-      [GLASS(24, 6), GLASS(40, 12), GLASS(28, 0, 95), GLASS(32, 8)] as const,
+      {
+        glass: [GLASS(24, 6), GLASS(40, 12), GLASS(28, 0, 95), GLASS(32, 8)] as const,
+        denseText: DENSE_TEXT,
+      },
     );
     const ready = await waitForReady(page);
+    if (ENGINE && DENSE_TEXT) {
+      expect(ready.records).toBeGreaterThan(512);
+      const deviceFontSize = await page.evaluate(() => {
+        const w = window as unknown as W;
+        return 1.5 * w.drawpane.s.camera.zoom * w.devicePixelRatio;
+      });
+      expect(deviceFontSize, "dense labels qualify for text stand-ins").toBeLessThan(4);
+    }
     const intact = await verifyIntactPixels(page);
     expect(intact.nonZeroAlpha).toBeGreaterThan(100);
     expect(intact.distinct).toBeGreaterThan(20);
@@ -597,7 +625,7 @@ test.describe("Glass cost", () => {
       const w = window as unknown as W;
       const view = w.drawpaneEngineView;
       const useEngine = !!view?.last.supported;
-      const frame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
+      const frame = () => new Promise<number>((resolve) => requestAnimationFrame(resolve));
       await frame();
       await frame();
       w.drawpaneFrames.reset();
@@ -621,12 +649,14 @@ test.describe("Glass cost", () => {
             { op: "set", id: cardId, prop: "x", value: x },
             { op: "set", id: cardId, prop: "y", value: y },
           ]);
-          await frame();
-          times.push(performance.now());
+          const presentedAt = await frame();
+          times.push(presentedAt);
           if (useEngine && view) {
             if (view.shown.n > lastShown) {
               lastShown = view.shown.n;
-              shownTimes.push(view.shown.at);
+              // The first animation frame that observes GPU completion. The browser's
+              // frame clock excludes variation in when main-thread callbacks execute.
+              shownTimes.push(presentedAt);
             }
             if (view.last.n > lastDrawn) {
               lastDrawn = view.last.n;
@@ -668,6 +698,12 @@ test.describe("Glass cost", () => {
     if (ENGINE) {
       expect(dragNoFence.fallback).toBeNull();
       expect(dragNoFence.maxReads).toBeGreaterThan(0);
+      if (DENSE_TEXT) {
+        expect(
+          dragNoFence.work.tiles.p95,
+          "dense reader drags redraw multiple tiles",
+        ).toBeGreaterThan(1);
+      }
     }
 
     // 3. Separate GPU-fenced drag (engine only): isolates pure GPU completion cost per drag frame.

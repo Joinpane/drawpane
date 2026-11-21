@@ -159,6 +159,7 @@ pub struct GpuReaders {
     // Pipelines
     copy_ext_pipe: wgpu::RenderPipeline,
     mip_pipe: wgpu::RenderPipeline,
+    coarse_down_pipe: wgpu::RenderPipeline,
     down_pipe: wgpu::RenderPipeline,
     blur_x_pipe: wgpu::RenderPipeline,
     blur_y_pipe: wgpu::RenderPipeline,
@@ -418,6 +419,19 @@ impl GpuReaders {
             "reader copy_ext",
         );
         let mip_pipe = make_pipeline(device, &mip_bgl, &module, "fs_mip_down", RGBA8, None, "reader mip_down");
+        let coarse_down_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("coarse backdrop downsample"),
+            entries: &[tex_binding(0, true), samp_binding(1)],
+        });
+        let coarse_down_pipe = make_pipeline(
+            device,
+            &coarse_down_bgl,
+            &module,
+            "fs_coarse_down",
+            RGBA8,
+            None,
+            "coarse backdrop downsample",
+        );
         let down_pipe = make_pipeline(
             device,
             &down_bgl,
@@ -568,6 +582,7 @@ impl GpuReaders {
             prog_blur_bgl,
             copy_ext_pipe,
             mip_pipe,
+            coarse_down_pipe,
             down_pipe,
             blur_x_pipe,
             blur_y_pipe,
@@ -1043,53 +1058,66 @@ impl GpuReaders {
         }
     }
 
-    /// Ensures `shared_coarse_mips` holds an up-to-date mipmap chain (capped at `COARSE_MAX_MIPS`
-    /// levels) of `src_tex` for `(backdrop_gen, w, h)`.
+    /// Reuses a half-resolution backdrop pyramid across unclipped readers of the same prefix.
     #[allow(clippy::too_many_arguments)]
     fn ensure_shared_coarse_mips(
         &mut self,
         device: &wgpu::Device,
         encoder: &mut wgpu::CommandEncoder,
-        src_tex: &wgpu::Texture,
-        w: u32,
-        h: u32,
+        source: &wgpu::TextureView,
+        size: (u32, u32),
         backdrop_gen: u64,
         max_bytes: usize,
     ) -> Result<()> {
-        let key = (backdrop_gen, w, h);
+        let key = (backdrop_gen, size.0, size.1);
         if self.shared_coarse_key == Some(key) && self.shared_coarse_mips.is_some() {
             return Ok(());
         }
-        let reuse = self
+        let (w, h) = ((size.0 / 2).max(1), (size.1 / 2).max(1));
+        if !self
             .shared_coarse_mips
             .as_ref()
-            .is_some_and(|t| t.width == w && t.height == h);
-        if !reuse {
+            .is_some_and(|t| t.width == w && t.height == h)
+        {
             let freed = self.shared_coarse_mips.as_ref().map_or(0, |t| t.bytes);
-            let add = MipTex::estimate_bytes(w, h, COARSE_MAX_MIPS);
+            let levels = COARSE_MAX_MIPS - 1;
+            let add = MipTex::estimate_bytes(w, h, levels);
             self.reserve_bytes(add, freed, "shared coarse backdrop", max_bytes)?;
-            self.shared_coarse_mips = Some(MipTex::new(device, w, h, COARSE_MAX_MIPS, "shared coarse backdrop", 0));
+            self.shared_coarse_mips = Some(MipTex::new(device, w, h, levels, "shared coarse backdrop", 0));
         }
         let mips = self.shared_coarse_mips.as_ref().expect("just created");
-        encoder.copy_texture_to_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: src_tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyTextureInfo {
-                texture: &mips.texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::Extent3d {
-                width: w,
-                height: h,
-                depth_or_array_layers: 1,
-            },
-        );
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.coarse_down_pipe.get_bind_group_layout(0),
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(source),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.lin_samp),
+                },
+            ],
+        });
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("coarse backdrop downsample"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &mips.mip_views[0],
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_pipeline(&self.coarse_down_pipe);
+            pass.set_bind_group(0, &group, &[]);
+            pass.draw(0..3, 0..1);
+        }
         self.encode_build_mipmaps(device, encoder, &mips.mip_views);
         self.shared_coarse_key = Some(key);
         Ok(())
@@ -1225,7 +1253,6 @@ impl GpuReaders {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        backdrop_tex: &wgpu::Texture,
         backdrop_view: &wgpu::TextureView,
         dst_tex: &wgpu::Texture,
         dst_view: &wgpu::TextureView,
@@ -1313,21 +1340,13 @@ impl GpuReaders {
             // all unclipped glass cards on the same backdrop generation (zero per-card copy_extended/mipmaps).
             let use_shared = backdrop_is_frame && within.is_none() && source_offset == (0, 0);
             let (uv_ox, uv_oy, inv_bw, inv_bh, max_mip, region_idx) = if use_shared {
-                self.ensure_shared_coarse_mips(
-                    device,
-                    encoder,
-                    backdrop_tex,
-                    tex_size.0,
-                    tex_size.1,
-                    backdrop_gen,
-                    max_bytes,
-                )?;
+                self.ensure_shared_coarse_mips(device, encoder, backdrop_view, tex_size, backdrop_gen, max_bytes)?;
                 let mips = self.shared_coarse_mips.as_ref().expect("shared");
                 (
                     (region.x0 + source_offset.0) as f32,
                     (region.y0 + source_offset.1) as f32,
-                    1.0 / (mips.width as f32),
-                    1.0 / (mips.height as f32),
+                    1.0 / (tex_size.0 as f32),
+                    1.0 / (tex_size.1 as f32),
                     (mips.mip_views.len() - 1) as f32,
                     None,
                 )
@@ -1355,7 +1374,8 @@ impl GpuReaders {
                 )
             };
             let sigma = params.frost.max(3.0 * params.unit_px);
-            let lod = (sigma * 1.5).max(1.0).log2().min(max_mip);
+            let base_lod = if use_shared { 1.0 } else { 0.0 };
+            let lod = ((sigma * 1.5).max(1.0).log2() - base_lod).clamp(0.0, max_mip);
             let (mask_mode, unit_px, to_box_x, to_box_y, radii, smoothing) = match analytic_coarse {
                 Some(ca) => (
                     f32::from(ca.mode),
@@ -2257,7 +2277,6 @@ impl GpuReaders {
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
-        backdrop_tex: &wgpu::Texture,
         backdrop_view: &wgpu::TextureView,
         targets: impl Iterator<Item = (&'a wgpu::Texture, &'a wgpu::TextureView)>,
         tex_size: (u32, u32),
@@ -2287,21 +2306,13 @@ impl GpuReaders {
             && tex_size.0 as i32 == frame_size.0
             && tex_size.1 as i32 == frame_size.1;
         let (uv_ox, uv_oy, inv_bw, inv_bh, max_mip, region_idx) = if use_shared {
-            self.ensure_shared_coarse_mips(
-                device,
-                encoder,
-                backdrop_tex,
-                tex_size.0,
-                tex_size.1,
-                backdrop_gen,
-                max_bytes,
-            )?;
+            self.ensure_shared_coarse_mips(device, encoder, backdrop_view, tex_size, backdrop_gen, max_bytes)?;
             let mips = self.shared_coarse_mips.as_ref().expect("shared");
             (
                 x0 as f32,
                 y0 as f32,
-                1.0 / (mips.width as f32),
-                1.0 / (mips.height as f32),
+                1.0 / (tex_size.0 as f32),
+                1.0 / (tex_size.1 as f32),
                 (mips.mip_views.len() - 1) as f32,
                 None,
             )
@@ -2341,7 +2352,8 @@ impl GpuReaders {
                 Some(idx),
             )
         };
-        let lod = (sigma * 1.5).max(1.0).log2().min(max_mip);
+        let base_lod = if use_shared { 1.0 } else { 0.0 };
+        let lod = ((sigma * 1.5).max(1.0).log2() - base_lod).clamp(0.0, max_mip);
         let (mask_mode, unit_px, to_box_x, to_box_y, radii, smoothing) = match analytic_coarse {
             Some(ca) => (
                 f32::from(ca.mode),
