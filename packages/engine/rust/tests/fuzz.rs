@@ -662,3 +662,103 @@ fn removing_a_post_effect_replays_its_enclosing_blend_scope() {
     let dirty = engine.store.dirty(&applied.changes, cam.view(), 1.5);
     assert!(dirty.iter().any(|r| r.contains((136.5, 20.5))));
 }
+
+#[test]
+fn replacing_a_page_blend_boundary_replays_the_page_scope() {
+    let at = |x, y| {
+        let mut record = Rec::new([1.0, 0.0, 0.0, 1.0, x, y], [20.0, 20.0]);
+        record.paths.push(Entry::Rect {
+            w: 20.0,
+            h: 20.0,
+            radii: [0.0; 4],
+        });
+        record.ops.push(Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::Solid([0.5, 0.5, 0.5, 1.0]),
+        });
+        record
+    };
+    let mut blend = at(100.0, 20.0);
+    blend.layer_blend = 5; // Lighten forces the pending page scene into the RGBA8 target.
+    let mut list = W::new(ANY, 1);
+    list.reset();
+    list.set(1, 0, &at(10.0, 85.0));
+    list.set(2, 0, &blend);
+    list.set(3, 0, &at(105.0, 25.0));
+    let mut engine = engine();
+    engine.apply(&list.finish()).expect("scene");
+    let covers_other_paint = |engine: &mut Engine, applied: &drawpane_engine::store::Applied| {
+        engine
+            .store
+            .dirty(&applied.changes, vello_common::kurbo::Affine::IDENTITY, 1.5)
+            .iter()
+            .any(|rect| rect.contains((17.5, 93.5)))
+    };
+
+    let mut ordinary = W::new(1, 2);
+    ordinary.transform(3, [1.0, 0.0, 0.0, 1.0, 108.0, 25.0]);
+    let applied = engine.apply(&ordinary.finish()).expect("move ordinary fill");
+    assert!(!covers_other_paint(&mut engine, &applied));
+
+    let mut replace_blend = W::new(2, 3);
+    replace_blend.set(2, 0, &at(135.0, 60.0));
+    let applied = engine.apply(&replace_blend.finish()).expect("replace the blend");
+    assert!(!applied.full);
+    assert!(covers_other_paint(&mut engine, &applied));
+}
+
+#[test]
+fn an_edit_can_expose_a_pass_inside_an_ordinary_clip() {
+    let at = |x, y, h| {
+        let mut record = Rec::new([1.0, 0.0, 0.0, 1.0, x, y], [15.0, h]);
+        record.paths.push(Entry::Rect {
+            w: 15.0,
+            h,
+            radii: [0.0; 4],
+        });
+        record.ops.push(Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::Solid([0.5, 0.5, 0.5, 1.0]),
+        });
+        record
+    };
+    let c = std::f64::consts::FRAC_1_SQRT_2;
+    let mut clipped = Rec::new([c, c, -c, c, 155.0, 0.0], [40.0, 40.0]);
+    clipped.paths.push(Entry::Rect {
+        w: 40.0,
+        h: 40.0,
+        radii: [0.0; 4],
+    });
+    clipped.ops = vec![
+        Op::Clip {
+            path: 0,
+            even_odd: false,
+        },
+        Op::Children,
+        Op::Unclip,
+    ];
+    let mut blend = at(50.0, 30.0, 40.0);
+    blend.layer_blend = 5;
+    let mut list = W::new(ANY, 1);
+    list.reset();
+    list.set(1, 0, &at(10.0, 85.0, 15.0));
+    list.set(2, 0, &clipped);
+    list.set(3, 2, &blend);
+    list.set(4, 2, &at(65.0, 30.0, 15.0));
+    let mut engine = engine();
+    engine.apply(&list.finish()).expect("scene");
+    // At 160 px wide, walking the unchanged blend would overlap the viewport, but its
+    // parent is culled. The ordinary child edit brings the parent into view.
+    assert!(engine.store.world_extent(2).unwrap().x0 > 161.0);
+    assert!(engine.store.world_extent(3).unwrap().x0 < 160.0);
+    let mut patch = W::new(1, 2);
+    patch.transform(4, [1.0, 0.0, 0.0, 1.0, 10.0, 10.0]);
+    let applied = engine.apply(&patch.finish()).expect("move ordinary child");
+    assert!(engine.store.world_extent(2).unwrap().x0 < 160.0);
+    let dirty = engine
+        .store
+        .dirty(&applied.changes, vello_common::kurbo::Affine::IDENTITY, 1.5);
+    assert!(dirty.iter().any(|rect| rect.contains((17.5, 93.5))));
+}

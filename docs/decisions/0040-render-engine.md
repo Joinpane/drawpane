@@ -974,6 +974,13 @@ A normal-blend shadow draws its mask into the Vello scene. It can stay inside a 
 opacity layer, which keeps adding or removing the shadow from changing when unrelated
 pixels are quantized during a scene flush.
 
+A flush writes the active Vello target as RGBA8. An edit that adds, removes or moves a
+flush can change rounding anywhere overlapping draws cross that boundary, even far from
+the edited record. Invalidation includes the enclosing picture or page scope in that
+case. A container whose bounds or compositing mode change can also start or stop a
+descendant's flush as the container becomes visible or gets culled. Ordinary paint edits keep
+their local dirty rectangles when they leave those boundaries alone.
+
 ## Amendment: layer blur (phase 3A, 2026-11-20)
 
 Layer blur (`FLAG_POST = 32`, `POST.layerBlur = 1`, `PostEffect::LayerBlur`, wire version 1.4) is drawn by both backends, clearing `UNSUPPORTED.layerBlur`. Progressive blur remains behind `UNSUPPORTED.progressiveBlur` (phase 3B).
