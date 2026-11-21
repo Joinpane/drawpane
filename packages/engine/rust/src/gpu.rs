@@ -4972,6 +4972,15 @@ impl Backend for Gpu {
         let inradius = resolve_inradius(&mut self.cpu_resources, op, paths, size);
         let params = glass::glass_params(op, scale, inradius);
         let max_tex = self.device.limits().max_texture_dimension_2d.min(u32::from(u16::MAX));
+        let (split_side, split_pixels, chunk_side) = if coarse {
+            (4096, 16_000_000, 2048)
+        } else {
+            (
+                glass::EXACT_SPLIT_SIDE,
+                glass::EXACT_SPLIT_PIXELS,
+                glass::EXACT_CHUNK_SIDE,
+            )
+        };
         let regions = glass::compute_regions(
             op,
             &params,
@@ -4982,13 +4991,38 @@ impl Backend for Gpu {
             target_size,
             max_tex,
             glass::HARD_MAX_REGION_PIXELS,
-            max_tex.min(4096),
-            16_000_000,
-            max_tex.min(2048),
+            split_side,
+            split_pixels,
+            chunk_side,
         )?;
         if regions.is_empty() {
             return Ok(());
         }
+
+        // A single lens can read and write the same plane. Freeze its prefix before
+        // the first chunk, since later chunks' frost and refraction overlap earlier writes.
+        let (dst_tex, dst_view, _) = self.plane(false)?;
+        let (dst_tex, dst_view) = (dst_tex.clone(), dst_view.clone());
+        let (source_tex, source_view) = if regions.len() > 1 && source_tex == dst_tex {
+            let budget = self.reader_budget_room();
+            self.readers
+                .ensure_blur_source_budgeted(&self.device, source_size, budget)?;
+            let mut encoder = self.take_encoder(false, "glass prefix snapshot");
+            let snapshot = self.readers.blur_source.as_ref().expect("glass prefix snapshot");
+            copy_rect(
+                &mut encoder,
+                &source_tex,
+                &snapshot.texture,
+                (0, 0),
+                (0, 0),
+                source_size,
+            );
+            let source = (snapshot.texture.clone(), snapshot.view.clone());
+            self.stash_encoder(encoder);
+            source
+        } else {
+            (source_tex, source_view)
+        };
 
         let has_clip_mask = open.iter().any(|o| {
             matches!(
@@ -5131,9 +5165,6 @@ impl Backend for Gpu {
                 self.mask_scene.reset();
             }
 
-            // A lens uses its scope's glass-free plane and writes only to its main plane.
-            let (dst_tex, dst_view, _) = self.plane(false)?;
-            let (dst_tex, dst_view) = (dst_tex.clone(), dst_view.clone());
             self.readers.encode_glass(
                 &self.device,
                 &self.queue,

@@ -429,13 +429,7 @@ test.describe("Render engine parity", () => {
           const cg = score(cpuPx, px, width, height);
           const vf = score(px, figmaPx, width, height);
           checkStackTail(label, vf);
-          // Maximum frost samples a high-contrast step through differently phased mip grids.
-          // The observed 0.289 mean comes with p99 1, max 2 and no severe pixels (decision 0040).
-          const tolerance =
-            suite.suite === "glass-probe-2" && cell.id === "frost-100"
-              ? { ...CPU_GPU_TOLERANCE, mean: 0.3 }
-              : CPU_GPU_TOLERANCE;
-          const worse = outsideTolerance(cg, tolerance);
+          const worse = outsideTolerance(cg, CPU_GPU_TOLERANCE);
           if (worse.length > 0)
             failures.push(`${cell.id}: CPU against ${label} ${worse.join(", ")}`);
           if (effectiveLimit !== undefined && f > effectiveLimit)
