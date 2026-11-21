@@ -12,6 +12,7 @@ import {
   KIND_ICONS,
 } from "@drawpane/ui";
 import { ACTIONS, type Action, type ActionContext, shortcutProp } from "./actions";
+import { copyEditorLink } from "./editor-link";
 import { kindOf, layerName } from "./layer-tree";
 import { type MenuRequest, uiFor } from "./ui-state";
 
@@ -188,6 +189,7 @@ export function selectionMenu(host: MenuHost, request: MenuRequest): ContextMenu
       a("layer.rename"),
     ],
     [a("view.zoomSelection"), a("file.export", "Export…")],
+    [a("edit.copySelectionLink")],
     [deleteItem(host)],
   );
 }
@@ -291,6 +293,16 @@ export function pageMenu(host: MenuHost, request: MenuRequest): ContextMenuEntry
           }
         : null,
       action(host, "file.addPage", "Add page"),
+    ],
+    [
+      editor.sync.revn !== null
+        ? {
+            id: "page.copyLink",
+            label: "Copy link to page",
+            icon: "link",
+            onSelect: () => void copyEditorLink(editor, { "page-id": pageId }),
+          }
+        : null,
     ],
     [
       canEdit && !last
