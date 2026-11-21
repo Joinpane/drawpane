@@ -1722,10 +1722,6 @@ impl Backend for Cpu {
         let target_size = (i32::from(target.width()), i32::from(target.height()));
         let (source_origin, source) = self.readable_backdrop(read_parent);
         let source_size = (i32::from(source.width()), i32::from(source.height()));
-        // Use the same frame-anchored chunk thresholds in both browser and Worker CPU builds so
-        // their outputs remain bit-identical across all glass sizes while keeping Worker peak RAM
-        // inside the 25 MiB cap.
-        let (split_side, split_pixels, chunk_side) = (1024, 1_048_576, glass::WORKER_CHUNK_SIDE);
         let regions = glass::compute_regions(
             op,
             &params,
@@ -1736,9 +1732,9 @@ impl Backend for Cpu {
             target_size,
             glass::HARD_MAX_REGION_SIDE.min(u32::from(u16::MAX)),
             glass::HARD_MAX_REGION_PIXELS,
-            split_side,
-            split_pixels,
-            chunk_side,
+            glass::EXACT_SPLIT_SIDE,
+            glass::EXACT_SPLIT_PIXELS,
+            glass::EXACT_CHUNK_SIDE,
         )?;
         if regions.is_empty() {
             return Ok(());

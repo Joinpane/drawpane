@@ -728,7 +728,11 @@ pub fn export_plan_metrics(store: &Store, frame: &Frame, tile: (usize, usize)) -
         needs_backdrop: plan.needs_backdrop,
         ..ExportMetrics::default()
     };
-    let (split_side, split_pixels, chunk_side) = (1024, 1_048_576, glass::WORKER_CHUNK_SIDE);
+    let (split_side, split_pixels, chunk_side) = (
+        glass::EXACT_SPLIT_SIDE,
+        glass::EXACT_SPLIT_PIXELS,
+        glass::EXACT_CHUNK_SIDE,
+    );
     let frame_size = (i32::from(frame.width), i32::from(frame.height));
 
     struct State<'a> {
