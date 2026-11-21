@@ -10,7 +10,7 @@ import { Button, Icon, IconButton } from "@drawpane/ui";
 import { useMemo, useState } from "react";
 import { shortcutFor } from "./actions";
 import { ComponentPreview } from "./ComponentPreview";
-import { useDocVersion, useEditor } from "./hooks";
+import { useDeferredDocVersion, useEditor } from "./hooks";
 import { LibrarySections } from "./libraries/LibrarySections";
 
 export const COMPONENT_DRAG_MIME = "application/x-drawpane-component";
@@ -21,7 +21,7 @@ export const COMPONENT_DRAG_MIME = "application/x-drawpane-component";
  */
 export function AssetsPanel({ onLibraries }: { onLibraries: () => void }) {
   const editor = useEditor();
-  const version = useDocVersion();
+  const version = useDeferredDocVersion();
   const [query, setQuery] = useState("");
   const usesLibraries = useMemo(() => usedLibraries(editor.doc).length > 0, [editor, version]);
   // Variants show as one tile for their set; clicking inserts the first variant.

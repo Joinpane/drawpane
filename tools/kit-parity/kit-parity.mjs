@@ -25,6 +25,9 @@
 //                                              output (coverage[-<label>].json and .md)
 //   relayout  --fig <file.fig> | --nodes <lines.json> [--name <label>]
 //                                              geometry drift after rerunning editor auto layout
+//   edits     --fig <file.fig> | --nodes <lines.json> --pages <name,name> [--only <cases>]
+//             [--name <label>]                 what the editor's edits cost on each page's busiest
+//                                              board, headless (edits[-<label>].json)
 //   text-widths [--run <dir>] [--only id,id] [--name <label>]
 //                                              Figma's text widths against Drawpane's, per font
 //                                              (text-widths[-<label>].json and .md in the run)
@@ -57,6 +60,7 @@ const { positionals, values } = parseArgs({
     "allow-missing-fonts": { type: "boolean" },
     nodes: { type: "string" },
     name: { type: "string" },
+    pages: { type: "string" },
   },
 });
 const step = positionals[0];
@@ -241,6 +245,26 @@ async function relayout() {
   });
 }
 
+async function edits() {
+  const { withMachineLock } = await import("./src/lock.mjs");
+  const pages = need("pages").split(",");
+  await withMachineLock(`edits step for ${out}`, async () => {
+    const { importTs } = await import("./src/ts.mjs");
+    const { loadEditor, runEdits, editsTable } = await importTs("edits.ts");
+    const source = values.nodes ? resolve(values.nodes) : join(await convert(), "nodes.ndjson");
+    const { editor, seconds } = loadEditor(source);
+    console.log(
+      `Loaded ${seconds.presented} layers (reading ${seconds.read.toFixed(1)} s, compacting ${(seconds.compact ?? 0).toFixed(1)} s, building every copy ${seconds.buildAll.toFixed(1)} s).`,
+    );
+    const only = values.only ? values.only.split(",") : [];
+    const results = runEdits(editor, { pages, only });
+    const file = join(out, `edits${values.name ? `-${values.name}` : ""}.json`);
+    writeFileSync(file, `${JSON.stringify({ source, seconds, results }, null, 1)}\n`);
+    console.log(editsTable(results));
+    console.log(`Saved ${file}`);
+  });
+}
+
 async function textWidthsStep() {
   const { importTs } = await import("./src/ts.mjs");
   const { textWidths, textWidthsMarkdown } = await importTs("text-widths.ts");
@@ -264,6 +288,7 @@ const steps = {
   detach,
   coverage,
   relayout,
+  edits,
   "text-widths": textWidthsStep,
 };
 if (step === "all") {

@@ -122,8 +122,10 @@ export class CompactCopies {
   readonly #rootsOf = new Map<string, Set<string>>();
   /** Instance roots that store a value a layout reads (their layout may differ from their main's). */
   readonly #layoutOwn = new Set<string>();
-  /** Override records that swap their copy to another main. */
-  readonly #swapRecords = new Set<string>();
+  /** Main id → override records that swap their copy to it. */
+  readonly #swapsOf = new Map<string, Set<string>>();
+  /** Each swapping record → the main it's indexed under in `#swapsOf`. */
+  readonly #swapMain = new Map<string, string>();
 
   /**
    * `nodes` in the stored form. With a `meter`, what the store keeps and
@@ -159,10 +161,13 @@ export class CompactCopies {
    * theirs).
    */
   instanceRoots(mainId: string): readonly string[] {
-    const roots = new Set(this.#rootsOf.get(mainId));
-    for (const id of this.#swapRecords) {
+    const direct = this.#rootsOf.get(mainId);
+    const swaps = this.#swapsOf.get(mainId);
+    if (!swaps) return direct ? [...direct] : [];
+    const roots = new Set(direct);
+    for (const id of swaps) {
       const record = this.store.get(id);
-      if (record?.props.instanceOf === mainId) roots.add(record.parent);
+      if (record) roots.add(record.parent);
     }
     return [...roots];
   }
@@ -241,6 +246,8 @@ export class CompactCopies {
   }
 
   #rollback(tx: Tx): void {
+    // Refused before anything was stored: nothing to undo, and nothing built is stale.
+    if (tx.undoStored.length === 0) return;
     for (let i = tx.undoStored.length - 1; i >= 0; i--)
       for (const op of tx.undoStored[i] as Op[]) {
         try {
@@ -257,7 +264,8 @@ export class CompactCopies {
     this.#records = 0;
     this.#rootsOf.clear();
     this.#layoutOwn.clear();
-    this.#swapRecords.clear();
+    this.#swapsOf.clear();
+    this.#swapMain.clear();
     for (const node of this.store.nodes()) {
       if (node.type === "override") {
         this.#records++;
@@ -336,7 +344,7 @@ export class CompactCopies {
         for (const gone of removed) {
           if (gone.type === "override") {
             this.#records--;
-            this.#swapRecords.delete(gone.id);
+            this.#unnoteSwap(gone.id);
             continue;
           }
           if (isFrameWithInstanceOf(gone)) {
@@ -416,8 +424,24 @@ export class CompactCopies {
   }
 
   #noteSwap(record: NodeRecord): void {
-    if (record.props.instanceOf) this.#swapRecords.add(record.id);
-    else this.#swapRecords.delete(record.id);
+    const to = record.props.instanceOf;
+    const main = typeof to === "string" && to ? to : null;
+    if (this.#swapMain.get(record.id) === main) return;
+    this.#unnoteSwap(record.id);
+    if (!main) return;
+    this.#swapMain.set(record.id, main);
+    const set = this.#swapsOf.get(main);
+    if (set) set.add(record.id);
+    else this.#swapsOf.set(main, new Set([record.id]));
+  }
+
+  #unnoteSwap(recordId: string): void {
+    const main = this.#swapMain.get(recordId);
+    if (main === undefined) return;
+    this.#swapMain.delete(recordId);
+    const set = this.#swapsOf.get(main);
+    set?.delete(recordId);
+    if (set?.size === 0) this.#swapsOf.delete(main);
   }
 
   #indexRoot(id: string, from: string | null | undefined, to: string | null | undefined): void {

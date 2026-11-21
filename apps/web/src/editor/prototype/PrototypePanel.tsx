@@ -51,7 +51,7 @@ import {
 } from "@drawpane/ui";
 import { Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { useDocVersion, useEditor, useEditorState } from "../hooks";
+import { useDeferredDocVersion, useEditor, useEditorState } from "../hooks";
 import { EasingEditor } from "./EasingEditor";
 import "./prototype.css";
 
@@ -65,7 +65,7 @@ const nameOf = (editor: Editor, id: string) =>
  */
 export function PrototypePanel({ fileId }: { fileId: string }) {
   const editor = useEditor();
-  useDocVersion();
+  useDeferredDocVersion();
   const selection = useEditorState((s) => s.selection);
   const pageId = useEditorState((s) => s.pageId);
   const canEdit = useEditorState((s) => s.role !== "viewer");

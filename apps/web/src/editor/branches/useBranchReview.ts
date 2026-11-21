@@ -60,11 +60,14 @@ export function useBranchReview(
     // Main may move while this is open: read it again on coming back to the tab.
     staleTime: 0,
   });
-  // The live branch: rows follow edits made during review.
-  const version = useSyncExternalStore(
-    (notify) => editor.doc.subscribe(notify),
-    () => editor.doc.version,
+  // The live branch: rows follow edits made during review. Only then: this is the
+  // editor page's own hook, so listening otherwise would render the whole page on every edit.
+  const reviewing = enabled && branch !== null;
+  const subscribe = useCallback(
+    (notify: () => void) => (reviewing ? editor.doc.subscribe(notify) : () => {}),
+    [editor, reviewing],
   );
+  const version = useSyncExternalStore(subscribe, () => (reviewing ? editor.doc.version : -1));
   const live = useEditorLive(editor);
   // Compared as main's room merges (decision 0029): its stored form, which a side saved
   // before main stored compact copies is converted to, ids derived alike.

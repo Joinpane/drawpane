@@ -448,6 +448,11 @@ export class LayoutEngine {
   readonly boxes = new Map<string, LayoutBox>();
   /** Which layout frames below the one run are laid out too; the rest keep their insides as they are. */
   readonly #enters: (frame: NodeRecord) => boolean;
+  /**
+   * Of those, the ones laid out already, which need laying out again only if
+   * their parent gives them another size: until then they're read as they are.
+   */
+  readonly #settled: (frame: NodeRecord) => boolean;
   /** Frames that had flow children before the edit and should shrink when emptied. */
   readonly #shrinkEmpty: ReadonlySet<string> | undefined;
   /** Frames already known to be empty before the edit (overrides main-frame fallback). */
@@ -457,12 +462,14 @@ export class LayoutEngine {
     doc: Doc,
     options: {
       enters?: (frame: NodeRecord) => boolean;
+      settled?: (frame: NodeRecord) => boolean;
       shrinkEmpty?: ReadonlySet<string>;
       keepEmpty?: ReadonlySet<string>;
     } = {},
   ) {
     this.#doc = doc;
     this.#enters = options.enters ?? (() => true);
+    this.#settled = options.settled ?? (() => false);
     this.#shrinkEmpty = options.shrinkEmpty;
     this.#keepEmpty = options.keepEmpty;
   }
@@ -487,6 +494,20 @@ export class LayoutEngine {
   /** A child that is a layout frame this run lays out inside. */
   #nested(node: NodeRecord | undefined): node is NodeRecord {
     return isLayoutFrame(node) && this.#enters(node);
+  }
+
+  /**
+   * A child that is a layout frame to lay out inside now that its parent has
+   * placed it: one that isn't settled, or a settled one given another size.
+   */
+  #placedNested(node: NodeRecord): boolean {
+    if (!this.#nested(node)) return false;
+    if (!this.#settled(node)) return true;
+    const box = this.boxes.get(node.id);
+    return (
+      box !== undefined &&
+      (box.width !== getProp(node.props, "width") || box.height !== getProp(node.props, "height"))
+    );
   }
 
   /** Where each group placed in a flow was before, to move its contents by the difference. */
@@ -650,7 +671,9 @@ export class LayoutEngine {
   /** Bottom-up: settle the size of a hugging layout frame from its content. */
   measure(frame: NodeRecord): void {
     const children = this.#children(frame);
-    for (const child of children) if (this.#nested(child)) this.measure(child);
+    // A settled child measures as it is: laid out already, it would come out the same.
+    for (const child of children)
+      if (this.#nested(child) && !this.#settled(child)) this.measure(child);
     // Layout frames out of the flow (absolute or hidden) still size themselves
     // and their contents; the flow just doesn't place them. The frames in a
     // group settle before the group's box is read.
@@ -891,7 +914,7 @@ export class LayoutEngine {
     const children = this.#children(frame);
     if (isGrid(frame)) this.#arrangeGrid(frame, children);
     else this.#arrangeFlex(frame, children);
-    for (const child of children) if (this.#nested(child)) this.arrange(child);
+    for (const child of children) if (this.#placedNested(child)) this.arrange(child);
   }
 
   #arrangeFlex(frame: NodeRecord, children: NodeRecord[]): void {
@@ -975,7 +998,7 @@ export class LayoutEngine {
 
     // Children that are layout frames settle their own content first, so a
     // hugging child has its final size before we position it.
-    for (const child of children) if (this.#nested(child)) this.measure(child);
+    for (const child of children) if (this.#placedNested(child)) this.measure(child);
 
     const justify = getProp(frame.props, "justifyContent");
     const figmaSpaceBetween = getProp(frame.props, "spaceBetweenMode") === "figma";
@@ -1204,7 +1227,7 @@ export class LayoutEngine {
         clamp(span(columns, cell.column, cell.columnSpan, columnGap), min, max),
       );
     }
-    for (const child of children) if (this.#nested(child)) this.measure(child);
+    for (const child of children) if (this.#placedNested(child)) this.measure(child);
 
     const rows = this.#gridTracks(
       frame,
@@ -1221,7 +1244,7 @@ export class LayoutEngine {
       const [min, max] = limits(child, local);
       this.#claim(child, local, clamp(span(rows, cell.row, cell.rowSpan, rowGap), min, max));
     }
-    for (const child of children) if (this.#nested(child)) this.measure(child);
+    for (const child of children) if (this.#placedNested(child)) this.measure(child);
 
     const columnTracks = trackStarts(columns, columnGap, pad.left);
     const rowTracks = trackStarts(rows, rowGap, pad.top);
@@ -1375,28 +1398,156 @@ export function gridCellAt(
  * deep inside hugging frames reaches the top.
  */
 export function layoutRoots(doc: Doc, ids: Iterable<string>): string[] {
+  return layoutClosure(doc, ids).roots;
+}
+
+/**
+ * What a change to `ids` can lay out differently: the outermost layout
+ * frames to run (`roots`), and the layout frames on the way up from each
+ * change to its root (`dirty`), the changed frames included. `changed`
+ * names more layers the change made (constraints, fix-ups), laid out the
+ * same way.
+ * A layer in `moved` changed only its position, which moves what's inside
+ * it without laying it out again: only its parent's flow can change, and
+ * not even that when the flow doesn't place it.
+ */
+function layoutClosure(
+  doc: Doc,
+  ids: Iterable<string>,
+  moved?: ReadonlySet<string>,
+  changed: Iterable<string> = [],
+  whole: Iterable<string> = [],
+): { roots: string[]; dirty: Set<string> } {
   const roots = new Set<string>();
-  for (const id of ids) {
+  const dirty = new Set<string>();
+  const walk = (id: string): string | null => {
     let top: string | null = null;
     let node = doc.get(id);
-    if (isLayoutFrame(node)) top = node.id;
+    if (node && moved?.has(id)) {
+      // A group is as big as everything in it, taking part in the flow or not: what decides
+      // is whether its outermost group does.
+      let member: NodeRecord = node;
+      for (let up = doc.get(node.parent); up?.type === "group"; up = doc.get(up.parent))
+        member = up;
+      if (!inFlow(member)) return null;
+    } else if (isLayoutFrame(node)) {
+      top = node.id;
+      dirty.add(node.id);
+    }
     while (node) {
       // Through groups: a group in a flow is as big as what's in it.
       let parent = doc.get(node.parent);
       while (parent?.type === "group") parent = doc.get(parent.parent);
       if (!isLayoutFrame(parent)) break;
       top = parent.id;
+      dirty.add(parent.id);
       node = parent;
     }
+    return top;
+  };
+  for (const id of ids) {
+    const top = walk(id);
     if (top) roots.add(top);
+  }
+  // What the edit's other operations changed (a frame its constraints resized, say) is laid
+  // out too, from its own outermost layout frame.
+  for (const id of changed) {
+    const top = walk(id);
+    if (top) roots.add(top);
+  }
+  // Everything under these is new (a swapped instance's layers): every layout frame in it.
+  for (const id of whole) {
+    walk(id);
+    const stack = [id];
+    for (let at = stack.pop(); at !== undefined; at = stack.pop()) {
+      if (isLayoutFrame(doc.get(at))) dirty.add(at);
+      for (const child of doc.childIds(at)) stack.push(child);
+    }
   }
   // Each root is as far up as layout reaches from where the change was, so a
   // root inside another (an auto layout frame in a plain frame in an auto
   // layout frame) isn't covered by it: both run.
-  return [...roots];
+  return { roots: [...roots], dirty };
 }
 
-/** Layout fix-up operations to commit alongside an edit that touched `ids`. */
+/** Whether a layer is turned at an angle that isn't a multiple of 90 degrees. */
+function oblique(node: NodeRecord | undefined): boolean {
+  return !!node && getProp(node.props, "rotation") % 90 !== 0;
+}
+
+/** Each document's layers turned obliquely, as stored (override records too), kept with its changes. */
+const turnedByDoc = new WeakMap<Doc, { version: number; ids: Set<string> }>();
+
+function turnedLayers(doc: Doc): Set<string> {
+  let known = turnedByDoc.get(doc);
+  const changes = known ? doc.changesSince(known.version) : null;
+  const stored = doc.storedReader();
+  const note = (ids: Iterable<string>, into: Set<string>) => {
+    for (const id of ids) {
+      if (oblique(stored.get(id))) into.add(id);
+      else into.delete(id);
+    }
+  };
+  if (!known || !changes || changes.some((c) => c.reset)) {
+    known = { version: doc.version, ids: new Set<string>() };
+    for (const node of doc.tokens.source().storedNodes()) if (oblique(node)) known.ids.add(node.id);
+    turnedByDoc.set(doc, known);
+  } else {
+    for (const change of changes) note(change.ids, known.ids);
+    known.version = doc.version;
+  }
+  // A commit lays out inside its batch, before its changes are logged.
+  note(doc.unflushedIds(), known.ids);
+  return known.ids;
+}
+
+/**
+ * The layout frames whose size layout works out from an obliquely turned
+ * layer's box (in its flow, and up through the flows above): stored
+ * rounded, they don't read back as layout computes them, so wherever a
+ * run reaches them they're laid out inside, as laying out the whole tree
+ * would. Turned layers are few, so this is cheap to find.
+ */
+function inexactFrames(doc: Doc): Set<string> {
+  const out = new Set<string>();
+  const turned = turnedLayers(doc);
+  if (turned.size === 0) return out;
+  for (const id of doc.tokens.source().builtFrom(turned)) {
+    let node = doc.get(id);
+    if (!node || !inFlow(node)) continue;
+    while (node) {
+      let parent = doc.get(node.parent);
+      while (parent?.type === "group") parent = doc.get(parent.parent);
+      if (!isLayoutFrame(parent) || out.has(parent.id)) break;
+      out.add(parent.id);
+      if (!inFlow(parent)) break;
+      node = parent;
+    }
+  }
+  return out;
+}
+
+/**
+ * Whether a layer's size can come from its parent's layout: it fills, or
+ * its parent stretches it, on either axis. When its parent is laid out
+ * again, a layout frame like that is laid out inside too, since its size
+ * may have changed; any other keeps its insides as they are unless a
+ * change was made in it.
+ */
+function sizeFromParent(doc: Doc, node: NodeRecord): boolean {
+  if (node.type === "group" || !inFlow(node)) return false;
+  if (sizing(node, "h") === "fill" || sizing(node, "v") === "fill") return true;
+  const parent = doc.get(node.parent);
+  if (!isLayoutFrame(parent)) return false;
+  if (isGrid(parent))
+    return (
+      stretches(node, "h", cellAlign(parent, node, "h")) ||
+      stretches(node, "v", cellAlign(parent, node, "v"))
+    );
+  const align = crossAlign(parent, node);
+  return stretches(node, "h", align) || stretches(node, "v", align);
+}
+
 /** One line of an auto layout frame's flow, across. */
 export interface FlowLine {
   readonly ids: readonly string[];
@@ -1425,14 +1576,54 @@ export function flexDistribution(doc: Doc, frame: NodeRecord): FlexDistribution 
   return new LayoutEngine(doc).flexDistribution(frame);
 }
 
+/**
+ * Layout fix-up operations to commit alongside an edit that touched `ids`:
+ * everything under the outermost layout frames they reach.
+ *
+ * With `changes`, only what the change can reach (an edit's commit, which
+ * starts from a document laid out already): the layout frames from each
+ * change up to its outermost layout frame, the layers those place, and
+ * inside them the frames their layout sizes (Fill, stretch). A frame that
+ * hugs or has a size of its own, with no change in it, keeps what's inside
+ * it as it is: laid out already, it would come out the same. `changed`
+ * names every layer the edit's operations made so far, `moved` those whose
+ * only change was their position, and `whole` layers everything under which
+ * is new, every frame of it laid out (see `layoutClosure`).
+ */
 export function layoutOps(
   doc: Doc,
   ids: Iterable<string>,
-  options: { shrinkEmpty?: ReadonlySet<string>; keepEmpty?: ReadonlySet<string> } = {},
+  options: {
+    shrinkEmpty?: ReadonlySet<string>;
+    keepEmpty?: ReadonlySet<string>;
+    changes?: {
+      readonly moved?: ReadonlySet<string>;
+      readonly changed?: Iterable<string>;
+      readonly whole?: Iterable<string>;
+    };
+  } = {},
 ): Op[] {
-  const roots = layoutRoots(doc, ids);
+  const { changes } = options;
+  const { roots, dirty } = layoutClosure(
+    doc,
+    ids,
+    changes?.moved,
+    changes?.changed,
+    changes?.whole,
+  );
   if (roots.length === 0) return [];
-  const engine = new LayoutEngine(doc, options);
+  const inexact = changes ? inexactFrames(doc) : null;
+  const exact = (frame: NodeRecord) => dirty.has(frame.id) || !!inexact?.has(frame.id);
+  const engine = new LayoutEngine(doc, {
+    ...(options.shrinkEmpty ? { shrinkEmpty: options.shrinkEmpty } : {}),
+    ...(options.keepEmpty ? { keepEmpty: options.keepEmpty } : {}),
+    ...(changes
+      ? {
+          enters: (frame: NodeRecord) => exact(frame) || sizeFromParent(doc, frame),
+          settled: (frame: NodeRecord) => !exact(frame),
+        }
+      : {}),
+  });
   for (const root of roots) engine.run(root);
   return engine.diff();
 }

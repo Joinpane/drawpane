@@ -4,10 +4,11 @@
  * it (or focus it and use ↑ and ↓) to show more pages or more layers. The
  * list is never taller than its pages, and the layers always keep some room.
  */
+import type { Doc } from "@drawpane/editor";
 import { getProp, type NodeRecord } from "@drawpane/model";
 import { IconButton } from "@drawpane/ui";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { useDocVersion, useEditor, useEditorState } from "./hooks";
+import { shallowArray, useDocSelector, useEditor, useEditorState } from "./hooks";
 import { clampPages, PAGES, pagesRange, setPanelLayout, usePanelLayout } from "./panel-layout";
 import { Splitter } from "./Splitter";
 import { openMenu, uiFor, useUi } from "./ui-state";
@@ -18,17 +19,27 @@ interface Fit {
   readonly room: number;
 }
 
+/**
+ * What the list shows of each page, flat: its record (the same object until
+ * the page itself changes), then how many layers it holds at the top.
+ */
+const pageRows = (doc: Doc): Array<NodeRecord | number> =>
+  doc.pageIds().flatMap((id) => {
+    const page = doc.get(id);
+    return page ? [page, doc.childIds(id).length] : [];
+  });
+
 export function PagesList() {
   const editor = useEditor();
-  useDocVersion();
+  // The pages and their layer counts: an edit inside a page doesn't render the list.
+  const rows = useDocSelector(pageRows, shallowArray);
+  const pages: Array<{ page: NodeRecord; count: number }> = [];
+  for (let i = 0; i < rows.length; i += 2)
+    pages.push({ page: rows[i] as NodeRecord, count: rows[i + 1] as number });
   const pageId = useEditorState((s) => s.pageId);
   const canEdit = useEditorState((s) => s.role !== "viewer");
   const renaming = useUi(editor, (ui) => ui.renaming);
   const setRenaming = (id: string | null) => uiFor(editor).set({ renaming: id });
-  const pages = editor.doc
-    .pageIds()
-    .map((id) => editor.doc.get(id))
-    .filter((p): p is NodeRecord => !!p);
 
   const chosen = usePanelLayout().pages;
   const section = useRef<HTMLDivElement>(null);
@@ -86,7 +97,7 @@ export function PagesList() {
         ) : null}
       </div>
       <ul className="pages__list" aria-label="Pages" ref={list} style={{ maxHeight: shown }}>
-        {pages.map((page) => (
+        {pages.map(({ page, count }) => (
           <li key={page.id}>
             {renaming === page.id ? (
               <input
@@ -119,7 +130,7 @@ export function PagesList() {
                 }}
               >
                 <span>{getProp(page.props, "name") || "Page"}</span>
-                <span className="pages__count">{editor.doc.childIds(page.id).length || ""}</span>
+                <span className="pages__count">{count || ""}</span>
               </button>
             )}
           </li>

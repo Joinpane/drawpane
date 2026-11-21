@@ -3,7 +3,7 @@ import { Kbd } from "@drawpane/ui";
 import { isMac } from "../app/format";
 import { capsFor } from "./actions";
 import { PASS_GESTURES } from "./canvas-gestures";
-import { useDocVersion, useEditor, useEditorState } from "./hooks";
+import { useDeferredDocVersion, useEditor, useEditorState } from "./hooks";
 import { useUi } from "./ui-state";
 
 /**
@@ -12,7 +12,7 @@ import { useUi } from "./ui-state";
  */
 export function XrayLegend() {
   const editor = useEditor();
-  useDocVersion();
+  useDeferredDocVersion();
   const xray = useEditorState((s) => s.xray);
   // Re-read the frames as the selection and hover move.
   useEditorState((s) => s.selection);

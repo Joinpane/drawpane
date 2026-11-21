@@ -40,6 +40,8 @@ export interface DocReads {
   all: boolean;
 }
 
+const EMPTY_IDS: ReadonlySet<string> = new Set();
+
 /** How many recent changes `changesSince` can replay, and how many ids they may hold in all. */
 const LOG_CHANGES = 256;
 const LOG_IDS = 2_000_000;
@@ -470,6 +472,14 @@ export class Doc {
     const out: DocChange[] = [];
     for (const entry of this.#log) if (entry.version > version) out.push(entry.change);
     return out;
+  }
+
+  /**
+   * Layers changed in the batch still open (`batch`), which `changesSince`
+   * doesn't name until it ends: for what reads the document mid-change.
+   */
+  unflushedIds(): ReadonlySet<string> {
+    return this.#pending?.ids ?? EMPTY_IDS;
   }
 
   subscribe(listener: Listener): () => void {

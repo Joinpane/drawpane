@@ -9,7 +9,7 @@ import { Button, ColorPicker, Icon, IconButton, Popover, PropertySection } from 
 import { memo, useDeferredValue, useRef, useState } from "react";
 import { ComponentSection } from "../ComponentSection";
 import { useFontReport } from "../font-report";
-import { useDocVersion, useEditor, useEditorState } from "../hooks";
+import { useDeferredDocVersion, useEditor, useEditorState } from "../hooks";
 import { layerKind } from "../layer-kinds";
 import { textViews } from "../text-views";
 import { ModesSection } from "../tokens/ModesSection";
@@ -48,7 +48,7 @@ const SelectionInspector = memo(function SelectionInspector({
   selection: readonly string[];
 }) {
   const editor = useEditor();
-  useDocVersion();
+  useDeferredDocVersion();
   const tool = useEditorState((s) => s.tool);
   const canEdit = useEditorState((s) => s.role !== "viewer");
   // While editing text, its typography and fill follow the selected characters.
@@ -140,7 +140,7 @@ const SelectionInspector = memo(function SelectionInspector({
 
 function PageInspector() {
   const editor = useEditor();
-  useDocVersion();
+  useDeferredDocVersion();
   const pageId = useEditorState((s) => s.pageId);
   const page = pageId ? editor.doc.get(pageId) : undefined;
   if (!page) return null;
