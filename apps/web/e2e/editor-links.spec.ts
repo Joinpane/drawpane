@@ -176,7 +176,7 @@ test.describe
 
     test("keeps the deep link through sign-in", async () => {
       const target = `${fileUrl}?page-id=${second}&node-id=${far}&renderer=canvas&present=readback`;
-      await page.goto("/settings");
+      await page.goto("/");
       await page.getByRole("button", { name: "Sign out" }).click();
       await expect(page).toHaveURL(/\/signin/);
       await page.goto(target);
