@@ -2,18 +2,21 @@ import { describe, expect, it } from "vitest";
 import { readViewPreferences } from "./view-preferences";
 
 describe("readViewPreferences", () => {
-  it("reads the rulers, layout grids, pixel-grid snapping, the Selection Lens and the minimap", () => {
+  it("reads the rulers, layout grids, the pixel grid, pixel-grid snapping, the Selection Lens and the minimap", () => {
     expect(
       readViewPreferences(
-        '{"rulers":true,"layoutGrids":false,"pixelSnap":false,"lens":false,"minimap":"always"}',
+        '{"rulers":true,"layoutGrids":false,"pixelGrid":false,"pixelSnap":false,"lens":false,"minimap":"always"}',
       ),
     ).toEqual({
       rulers: true,
       layoutGrids: false,
+      pixelGrid: false,
       pixelSnap: false,
       lens: false,
       minimap: "always",
     });
+    // Storage from before the pixel grid existed leaves it at its default (on).
+    expect(readViewPreferences('{"rulers":true}')).toEqual({ rulers: true });
   });
 
   it("reads the minimap's old on and off as showing while moving around, and off", () => {

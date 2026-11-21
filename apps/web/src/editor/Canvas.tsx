@@ -89,6 +89,8 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
   const editor = useEditor();
   const host = useRef<HTMLDivElement>(null);
   const content = useRef<HTMLCanvasElement>(null);
+  /** Retained pixel grid layer above the design, under labels and the transient overlay. */
+  const pixelGrid = useRef<HTMLCanvasElement>(null);
   /** Retained artboard labels layer under the transient overlay, translated on same-zoom pan. */
   const labels = useRef<HTMLCanvasElement>(null);
   const overlay = useRef<HTMLCanvasElement>(null);
@@ -111,17 +113,30 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
   // repaint the overlay on any state change. Never more than once per frame.
   useEffect(() => {
     const contentCanvas = content.current;
+    const pixelGridCanvas = pixelGrid.current;
     const labelsCanvas = labels.current;
     const overlayCanvas = overlay.current;
     const engineSlotEl = engineSlot.current;
     const hostEl = host.current;
-    if (!contentCanvas || !labelsCanvas || !overlayCanvas || !hostEl || !engineSlotEl) return;
+    if (
+      !contentCanvas ||
+      !pixelGridCanvas ||
+      !labelsCanvas ||
+      !overlayCanvas ||
+      !hostEl ||
+      !engineSlotEl
+    )
+      return;
     const cctx = contentCanvas.getContext("2d", { alpha: false });
+    const pctx = pixelGridCanvas.getContext("2d");
     const lctx = labelsCanvas.getContext("2d");
     const octx = overlayCanvas.getContext("2d");
-    if (!cctx || !lctx || !octx) return;
+    if (!cctx || !pctx || !lctx || !octx) return;
     const overlayRenderer = new OverlayRenderer();
     let labelsEnabled = true;
+    // The retained pixel grid shares the labels surface's size and overscan;
+    // too large for both, the overlay draws the grid itself instead.
+    let pixelGridEnabled = true;
 
     // Cropping starts from what a fill shows, which needs each image's own size.
     editor.imageSize = (ref) => imagesFor(editor).natural(ref);
@@ -604,6 +619,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           theme,
           dpr,
           imagesFor(editor),
+          pixelGridEnabled ? pctx : null,
         );
         overlayDirty = false;
         // Idle cursors fade: draw every frame while one is fading, else wake when the next starts.
@@ -665,6 +681,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       }
       const retainedAllowed = devW <= MAX_LABEL_CANVAS_PX && devH <= MAX_LABEL_CANVAS_PX;
       labelsEnabled = retainedAllowed;
+      pixelGridEnabled = retainedAllowed;
       if (retainedAllowed) {
         const maxCss = Math.floor(MAX_LABEL_CANVAS_PX / dpr);
         const pad = Math.max(
@@ -675,32 +692,40 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
             Math.floor((maxCss - height) / 2),
           ),
         );
-        const labelW = width + pad * 2;
-        const labelH = height + pad * 2;
-        labelsCanvas.width = Math.min(MAX_LABEL_CANVAS_PX, Math.max(1, Math.round(labelW * dpr)));
-        labelsCanvas.height = Math.min(MAX_LABEL_CANVAS_PX, Math.max(1, Math.round(labelH * dpr)));
-        labelsCanvas.style.display = "";
-        labelsCanvas.style.width = `${labelW}px`;
-        labelsCanvas.style.height = `${labelH}px`;
-        labelsCanvas.style.left = `${-pad}px`;
-        labelsCanvas.style.top = `${-pad}px`;
-        labelsCanvas.style.transform = "";
-        labelsCanvas.dataset.overscan = String(pad);
+        const retainedW = width + pad * 2;
+        const retainedH = height + pad * 2;
+        // The pixel grid and labels are the same kind of retained surface:
+        // overscanned, CSS-translated on a same-zoom pan, capped per axis.
+        for (const canvas of [pixelGridCanvas, labelsCanvas]) {
+          canvas.width = Math.min(MAX_LABEL_CANVAS_PX, Math.max(1, Math.round(retainedW * dpr)));
+          canvas.height = Math.min(MAX_LABEL_CANVAS_PX, Math.max(1, Math.round(retainedH * dpr)));
+          canvas.style.display = "";
+          canvas.style.width = `${retainedW}px`;
+          canvas.style.height = `${retainedH}px`;
+          canvas.style.left = `${-pad}px`;
+          canvas.style.top = `${-pad}px`;
+          canvas.style.transform = "";
+          canvas.dataset.overscan = String(pad);
+        }
         labelsCanvas.dataset.retainedLabels = "enabled";
+        pixelGridCanvas.dataset.retainedPixelGrid = "enabled";
         overlayRenderer.setOverscan(pad);
       } else {
         // Strictly cap the extra retained labels surface at MAX_LABEL_CANVAS_PX per axis; fall back
         // to single-canvas overlay rendering on `octx` rather than allocating an oversized surface.
-        labelsCanvas.width = 1;
-        labelsCanvas.height = 1;
-        labelsCanvas.style.display = "none";
-        labelsCanvas.style.width = "0px";
-        labelsCanvas.style.height = "0px";
-        labelsCanvas.style.left = "0px";
-        labelsCanvas.style.top = "0px";
-        labelsCanvas.style.transform = "";
-        labelsCanvas.dataset.overscan = "0";
+        for (const canvas of [pixelGridCanvas, labelsCanvas]) {
+          canvas.width = 1;
+          canvas.height = 1;
+          canvas.style.display = "none";
+          canvas.style.width = "0px";
+          canvas.style.height = "0px";
+          canvas.style.left = "0px";
+          canvas.style.top = "0px";
+          canvas.style.transform = "";
+          canvas.dataset.overscan = "0";
+        }
         labelsCanvas.dataset.retainedLabels = "disabled";
+        pixelGridCanvas.dataset.retainedPixelGrid = "disabled";
         overlayRenderer.setOverscan(0);
       }
       // The engine's canvas sizes its buffer when it draws (resizing a configured WebGPU canvas
@@ -1148,6 +1173,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         data-canvas-role="engine-slot"
         style={{ visibility: "hidden" }}
       />
+      <canvas ref={pixelGrid} className="canvas__pixel-grid" data-canvas-role="pixel-grid" />
       <canvas ref={labels} className="canvas__labels" data-canvas-role="labels" />
       <canvas ref={overlay} className="canvas__layer canvas__overlay" data-canvas-role="overlay" />
       {cpuMode ? (

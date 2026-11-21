@@ -344,8 +344,69 @@ describe("OverlayRenderer retained labels and transient dirty regions", () => {
     editor.state.set({ canUndo: !s0.canUndo, pixelSnap: !s0.pixelSnap });
     expect(overlayStateChanged(s0, editor.s)).toBe(false);
 
+    const s1 = editor.s;
+    editor.state.set({ pixelGrid: false });
+    expect(overlayStateChanged(s1, editor.s)).toBe(true);
+
     editor.state.set({ hover: "rect_0_0" });
     expect(overlayStateChanged(s0, editor.s)).toBe(true);
+  });
+
+  it("bakes the pixel grid once, translates it on same-zoom pans with no canvas writes, and clears it when toggled off", () => {
+    const { editor, interaction } = setupGrid(1, 1);
+    editor.state.set({ camera: new Camera(0, 0, 8) });
+    const renderer = new OverlayRenderer({
+      overscanCss: 144,
+      createSurface: (w, h) => makeMockSurface(w, h).surface,
+    });
+    const labels = makeMockSurface(1288, 888, true);
+    const overlay = makeMockSurface(1000, 600);
+    const grid = makeMockSurface(1288, 888, true);
+    const draw = () =>
+      renderer.draw(
+        labels.surface.ctx,
+        overlay.surface.ctx,
+        editor,
+        interaction,
+        THEME,
+        1,
+        undefined,
+        grid.surface.ctx,
+      );
+
+    // Cold bake at 800%: one clear (the lines themselves are one fill).
+    draw();
+    expect(renderer.stats.pixelGridFullDraws).toBe(1);
+    expect(grid.ops.filter((op) => op.kind === "clearRect")).toHaveLength(1);
+    expect(grid.style.transform).toBe("");
+
+    // A same-zoom pan within the overscan moves the retained canvas, writes nothing.
+    grid.ops.length = 0;
+    renderer.resetStats();
+    editor.state.set({ camera: editor.s.camera.pan(10, 5) });
+    draw();
+    expect(renderer.stats.pixelGridTranslations).toBe(1);
+    expect(renderer.stats.pixelGridFullDraws).toBe(0);
+    expect(grid.ops).toHaveLength(0);
+    expect(grid.style.transform).toBe("translate3d(10px, 5px, 0)");
+
+    // Toggling the grid off clears it once; after that it is left alone.
+    grid.ops.length = 0;
+    renderer.resetStats();
+    editor.state.set({ pixelGrid: false });
+    draw();
+    expect(grid.style.transform).toBe("");
+    expect(grid.ops.filter((op) => op.kind === "clearRect")).toHaveLength(1);
+    grid.ops.length = 0;
+    draw();
+    expect(renderer.stats.pixelGridSkipped).toBeGreaterThan(0);
+    expect(grid.ops).toHaveLength(0);
+
+    // Below 400% there is nothing to bake even with the grid on.
+    editor.state.set({ pixelGrid: true, camera: new Camera(0, 0, 2) });
+    draw();
+    expect(grid.ops).toHaveLength(0);
+    expect(renderer.stats.pixelGridFullDraws).toBe(0);
   });
 
   it("measures real wide collaborator name tag bounds so peer removal clears the full rendered tag", () => {
