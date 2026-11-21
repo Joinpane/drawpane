@@ -7,6 +7,7 @@ import {
   type FaceFileLoader,
   HarfBuzzMeasurer,
   type MeasuredFace,
+  measuredFaces,
   type TextFace,
 } from "@drawpane/editor";
 import type { HeadlessFontResolver } from "./font-aliases";
@@ -33,10 +34,15 @@ export function harfBuzzMeasurerWith(
     ...(fonts?.standIns(face.family) ?? []).map((family) => canvasFace({ ...face, family })),
   ];
   return {
+    get scriptLocale() {
+      return measurer.scriptLocale;
+    },
+    setScriptLocale: (locale) => measurer.setScriptLocale(locale),
     width: (font, text, run, direction) => measurer.width(font, text, run, direction),
     prepareScriptFallbacks: (subsets) => measurer.prepareScriptFallbacks(subsets),
-    // Runs with OpenType features or axes, as glyphs: what the headless renderer outlines.
+    // Plain and specially shaped text both arrive at the render engine as outlines.
     shape: (text, run) => measurer.shape(text, run),
+    shapeForEngine: (text, run, font) => measurer.shapeForEngine(text, run, font),
     metrics: (font) => measurer.metrics(font),
     family: (family, size) => (fonts ? fonts.family(family, size) : family),
     // No file for the face it's drawn in: text saved with glyph outlines draws from those
@@ -56,6 +62,11 @@ export function harfBuzzMeasurerWith(
     load: async (faces) => {
       await fonts?.prepare(faces.map((f) => f.family));
       await measurer.load(faces.flatMap(drawnIn));
+    },
+    prepareRenderFonts: async (nodes) => {
+      const layers = [...nodes];
+      await fonts?.prepare(measuredFaces(layers).map((face) => face.family));
+      await measurer.load(measuredFaces(layers, fonts));
     },
   };
 }

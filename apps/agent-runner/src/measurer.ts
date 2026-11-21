@@ -10,13 +10,18 @@
  * only. Its text sizes are close, never exact.
  */
 import type { FontMetrics, TextFace, TextMeasurer } from "@drawpane/editor";
+import type { NodeRecord } from "@drawpane/model";
 
 /** A measurer that fetches fonts first: everything async happens in `load`, never while measuring. */
 export interface HeadlessMeasurer extends TextMeasurer {
+  /** The export client's preferred language, when it supplies one. */
+  setScriptLocale?(locale: string): void;
   /** Whether text in `face` measures as it will in the browser now (its font is loaded, or can't be). */
   has(face: TextFace): boolean;
   /** Loads the fonts for `faces`. A face it can't find measures with a fallback from then on. */
   load(faces: readonly TextFace[]): Promise<void>;
+  /** Loads the extra faces needed by OpenType features and variable axes in an export. */
+  prepareRenderFonts?(nodes: Iterable<NodeRecord>): Promise<void>;
 }
 
 /** The px size in a canvas font string ("italic 700 16px Inter"). */

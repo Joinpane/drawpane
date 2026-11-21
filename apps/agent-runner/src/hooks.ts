@@ -16,6 +16,7 @@
  * - `slow`: the run takes `ms` longer.
  * - `run-limit`: the runner's limit on a run is `ms` (AGENT_RUN_LIMIT_MS
  *   otherwise), for as many calls as armed.
+ * - `render-trap`: the CPU engine traps when the export acquires it.
  *
  * Armed hooks are kept in the runner's SQLite, so a hook armed for several
  * calls outlives the resets it causes.
@@ -26,7 +27,8 @@ export type Hook =
   | "abort-in-committed"
   | "hang"
   | "slow"
-  | "run-limit";
+  | "run-limit"
+  | "render-trap";
 
 /** What step 0 saw Cloudflare say when a runner Durable Object ran out of memory. */
 export const OUT_OF_MEMORY_RESET =
@@ -72,6 +74,10 @@ export class Hooks {
   async inCommitted(): Promise<void> {
     if ((await this.#take("abort-in-committed")) !== null)
       this.#ctx.abort("Test hook: abort in committed.");
+  }
+
+  async renderTrap(): Promise<boolean> {
+    return (await this.#take("render-trap")) !== null;
   }
 
   /** The limit on this run, when the tests set one. */

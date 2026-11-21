@@ -45,7 +45,7 @@ import {
 } from "@drawpane/worker/src/rooms/snapshots";
 import { AgentEngine, type EngineRun } from "./engine";
 import type { Env } from "./env";
-import { agentMeasurer, fileFontLoader } from "./harfbuzz";
+import { agentMeasurer } from "./harfbuzz";
 import type { HeadlessMeasurer } from "./measurer";
 import { headlessRenderer } from "./render";
 
@@ -70,7 +70,7 @@ export class FileRunner implements Omit<AgentRunnerApi, "reset" | "strike"> {
   readonly #fileId: string;
   readonly #measurer: () => HeadlessMeasurer;
   #engine: AgentEngine | null = null;
-  #rendering: Promise<HeadlessRenderer> | null = null;
+  #rendering: HeadlessRenderer | null = null;
   /** Calls one at a time, in the order made. */
   #queue: Promise<unknown> = Promise.resolve();
   /** The run whose changes the editor holds, uncommitted, and the revision it ran on. */
@@ -87,6 +87,7 @@ export class FileRunner implements Omit<AgentRunnerApi, "reset" | "strike"> {
 
   /** Runs after a tool ran and before its answer: where the chaos tests hook in (`hooks.ts`). */
   readonly #midRun: () => Promise<void>;
+  readonly #renderTrap: (() => Promise<boolean>) | undefined;
   /** The most the editor may hold, as its meter counts it (`AgentEngine`): tests set less. */
   readonly #limit: number | undefined;
 
@@ -96,10 +97,12 @@ export class FileRunner implements Omit<AgentRunnerApi, "reset" | "strike"> {
     {
       measurer = () => agentMeasurer(env, fileId),
       midRun = async () => {},
+      renderTrap,
       limit,
     }: {
       measurer?: () => HeadlessMeasurer;
       midRun?: () => Promise<void>;
+      renderTrap?: () => Promise<boolean>;
       limit?: number;
     } = {},
   ) {
@@ -107,6 +110,7 @@ export class FileRunner implements Omit<AgentRunnerApi, "reset" | "strike"> {
     this.#fileId = fileId;
     this.#measurer = measurer;
     this.#midRun = midRun;
+    this.#renderTrap = renderTrap;
     this.#limit = limit;
   }
 
@@ -165,6 +169,7 @@ export class FileRunner implements Omit<AgentRunnerApi, "reset" | "strike"> {
     const write = tool.level === "write";
     const { source } = request;
     try {
+      engine.measurer.setScriptLocale?.(request.scriptLocale ?? "");
       const editor = await this.#editorAt(engine, source);
       // The fonts the file is set in, loaded before anything is measured (or drawn).
       if (write || request.tool === "export_image") {
@@ -174,8 +179,7 @@ export class FileRunner implements Omit<AgentRunnerApi, "reset" | "strike"> {
       const services: ToolServices = write
         ? {}
         : {
-            renderPng: async (id, options) =>
-              (await this.#renderer(engine)).renderPng(editor.doc, id, options),
+            renderPng: (id, options) => this.#renderer(engine).renderPng(editor.doc, id, options),
           };
       let run: EngineRun;
       // Where the tool and the layout it sets off read: with what it changed, the run's scope.
@@ -337,16 +341,13 @@ export class FileRunner implements Omit<AgentRunnerApi, "reset" | "strike"> {
   }
 
   /** The renderer, made the first time something is drawn. */
-  #renderer(engine: AgentEngine): Promise<HeadlessRenderer> {
+  #renderer(engine: AgentEngine): HeadlessRenderer {
     this.#rendering ??= headlessRenderer(
       this.#env,
       this.#fileId,
       engine.measurer,
-      fileFontLoader(this.#env, this.#fileId),
-    ).catch((error: unknown) => {
-      this.#rendering = null;
-      throw error;
-    });
+      this.#renderTrap,
+    );
     return this.#rendering;
   }
 }

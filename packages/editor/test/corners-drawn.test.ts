@@ -13,13 +13,13 @@ import { nodeRasteriser } from "@drawpane/raster/node";
 import { beforeAll, describe, expect, it } from "vitest";
 import { boxPath, flattenBox, pathData } from "../src/corners";
 import { Doc } from "../src/doc";
-import { base64, createHeadlessRenderer } from "../src/headless-render";
 import { hitsNode } from "../src/hit";
 import { Scene } from "../src/scene";
 import { exportSvg } from "../src/svg";
 import type { TextMeasurer } from "../src/text";
 import { pathBounds } from "../src/vector/bounds";
 import { nodePath } from "../src/vector/shapes";
+import { base64, createHeadlessRenderer } from "./fixtures/svg-raster";
 
 const measurer: TextMeasurer = { width: (_font, text) => text.length * 8 };
 const solid = (color: string) => [{ type: "solid" as const, color }];

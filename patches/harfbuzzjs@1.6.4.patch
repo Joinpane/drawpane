@@ -63,10 +63,9 @@ index e9b0c5c0070638f844f7edc932b165444e2d3d27..8badb85288b106981cb1c0c15e706c8d
 +export { AxisFlags, AxisInfo, Blob, Buffer, HarfBuzzOutOfMemory, canAllocate, BufferContentType, BufferFlag, BufferSerializeFlag, BufferSerializeFormat, ClusterLevel, Color, ColorLayer, ColorLine, ColorPalette, ColorPaletteFlags, ColorStop, Direction, DrawClosePathFunc, DrawCubicToFunc, DrawFuncs, DrawLineToFunc, DrawMoveToFunc, DrawQuadraticToFunc, Face, Feature, FeatureNameIds, Font, FontExtents, FontFuncs, GlyphClass, GlyphExtents, GlyphFlag, GlyphInfo, GlyphPosition, HarfBuzzModule, MetricsTag, NameEntry, PaintColorFunc, PaintColorGlyphFunc, PaintCompositeMode, PaintCustomPaletteColorFunc, PaintExtend, PaintFuncs, PaintImageFunc, PaintLinearGradientFunc, PaintPopClipFunc, PaintPopGroupFunc, PaintPopTransformFunc, PaintPushClipGlyphFunc, PaintPushClipRectangleFunc, PaintPushGroupFunc, PaintPushTransformFunc, PaintRadialGradientFunc, PaintSweepGradientFunc, PaletteColor, SvgPathCommand, TraceEntry, TracePhase, Variation, otTagToLanguage, otTagToScript, otTagsFromScriptAndLanguage, otTagsToScriptAndLanguage, shape, shapeWithTrace, version, versionString };
 \ No newline at end of file
 diff --git a/dist/index.mjs b/dist/index.mjs
-index ce7304d5c0655d1e1596e768635824b7041e501e..42977ba02cc8d0266854297b758954fb7183b4e7 100644
 --- a/dist/index.mjs
 +++ b/dist/index.mjs
-@@ -10,7 +10,41 @@ const registry = new FinalizationRegistry((cleanup) => {
+@@ -10,7 +10,41 @@
  });
  function track(obj, destroy) {
  	const ptr = obj.ptr;
@@ -109,7 +108,7 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..42977ba02cc8d0266854297b758954fb
  }
  /**
  * Initialize the HarfBuzz module.
-@@ -20,9 +54,16 @@ function track(obj, destroy) {
+@@ -20,9 +54,16 @@
  function init(module) {
  	Module = module;
  	exports = Module.wasmExports;
@@ -129,7 +128,7 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..42977ba02cc8d0266854297b758954fb
  }
  function hb_tag(s) {
  	return (s.charCodeAt(0) & 255) << 24 | (s.charCodeAt(1) & 255) << 16 | (s.charCodeAt(2) & 255) << 8 | (s.charCodeAt(3) & 255) << 0;
-@@ -45,7 +86,7 @@ function utf16_ptr_to_string(ptr, length) {
+@@ -45,7 +86,7 @@
  * Faster than encoding to UTF-8
  */
  function string_to_ascii_ptr(text) {
@@ -138,7 +137,7 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..42977ba02cc8d0266854297b758954fb
  	for (let i = 0; i < text.length; ++i) {
  		const char = text.charCodeAt(i);
  		if (char > 127) throw new Error("Expected ASCII text");
-@@ -61,7 +102,7 @@ function string_to_ascii_ptr(text) {
+@@ -61,7 +102,7 @@
  	};
  }
  function string_to_utf8_ptr(text) {
@@ -147,7 +146,7 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..42977ba02cc8d0266854297b758954fb
  	utf8Encoder.encodeInto(text, Module.HEAPU8.subarray(ptr, ptr + text.length));
  	return {
  		ptr,
-@@ -72,7 +113,7 @@ function string_to_utf8_ptr(text) {
+@@ -72,7 +113,7 @@
  	};
  }
  function string_to_utf16_ptr(text) {
@@ -156,7 +155,7 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..42977ba02cc8d0266854297b758954fb
  	const words = Module.HEAPU16.subarray(ptr / 2, ptr / 2 + text.length);
  	for (let i = 0; i < words.length; ++i) words[i] = text.charCodeAt(i);
  	return {
-@@ -99,10 +140,14 @@ function language_from_string(str) {
+@@ -99,10 +140,14 @@
  */
  function typed_array_from_set(setPtr) {
  	const setCount = exports.hb_set_get_population(setPtr);
@@ -173,7 +172,7 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..42977ba02cc8d0266854297b758954fb
  }
  const callbackData = [void 0];
  const freeCallbackData = [];
-@@ -210,11 +255,27 @@ var Blob = class {
+@@ -210,11 +255,27 @@
  	*/
  	constructor(data) {
  		const array = data instanceof Uint8Array ? data : new Uint8Array(data);
@@ -202,7 +201,7 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..42977ba02cc8d0266854297b758954fb
  };
  //#endregion
  //#region src/face.ts
-@@ -238,17 +299,24 @@ var Face = class {
+@@ -238,17 +299,24 @@
  		this.upem = exports.hb_face_get_upem(this.ptr);
  		track(this, exports.hb_face_destroy);
  	}
@@ -230,7 +229,7 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..42977ba02cc8d0266854297b758954fb
  	}
  	/**
  	* Return variation axis infos.
-@@ -452,7 +520,7 @@ var Face = class {
+@@ -452,7 +520,7 @@
  		const languagePtr = language_from_string(language);
  		const nameLen = exports.hb_ot_name_get_utf16(this.ptr, nameId, languagePtr, 0, 0) + 1;
  		const textSizePtr = Module.stackAlloc(4);
@@ -239,7 +238,64 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..42977ba02cc8d0266854297b758954fb
  		Module.HEAPU32[textSizePtr / 4] = nameLen;
  		exports.hb_ot_name_get_utf16(this.ptr, nameId, languagePtr, textSizePtr, textPtr);
  		const name = utf16_ptr_to_string(textPtr, nameLen - 1);
-@@ -811,10 +879,15 @@ var Font = class Font {
+@@ -608,6 +676,11 @@
+ * defined, but we translate {@link DrawFuncs.setQuadraticToFunc | quadratic-to}
+ * calls to cubic-to if the callback isn't defined.
+ */
++// Drawpane: Workers provide precompiled, table-compatible forwards for the draw callbacks.
++function addDrawFunction(callback, signature) {
++	const wrap = Module.drawpaneWrapDrawFunction;
++	return Module.addFunction(wrap ? wrap(callback, signature) : callback, signature);
++}
+ var DrawFuncs = class {
+ 	constructor() {
+ 		this.funcPtrs = [];
+@@ -630,7 +703,7 @@
+ 	setMoveToFunc(func, userData) {
+ 		const userDataPtr = register_callback_data_pointer(userData);
+ 		this.userDataPtrs.push(userDataPtr);
+-		const funcPtr = Module.addFunction((dfuncs, draw_data, draw_state, toX, toY, user_data) => {
++		const funcPtr = addDrawFunction((dfuncs, draw_data, draw_state, toX, toY, user_data) => {
+ 			func(toX, toY, get_callback_data(draw_data), get_callback_data(user_data));
+ 		}, "viiiffi");
+ 		this.funcPtrs.push(funcPtr);
+@@ -644,7 +717,7 @@
+ 	setLineToFunc(func, userData) {
+ 		const userDataPtr = register_callback_data_pointer(userData);
+ 		this.userDataPtrs.push(userDataPtr);
+-		const funcPtr = Module.addFunction((dfuncs, draw_data, draw_state, toX, toY, user_data) => {
++		const funcPtr = addDrawFunction((dfuncs, draw_data, draw_state, toX, toY, user_data) => {
+ 			func(toX, toY, get_callback_data(draw_data), get_callback_data(user_data));
+ 		}, "viiiffi");
+ 		this.funcPtrs.push(funcPtr);
+@@ -658,7 +731,7 @@
+ 	setQuadraticToFunc(func, userData) {
+ 		const userDataPtr = register_callback_data_pointer(userData);
+ 		this.userDataPtrs.push(userDataPtr);
+-		const funcPtr = Module.addFunction((dfuncs, draw_data, draw_state, cX, cY, toX, toY, user_data) => {
++		const funcPtr = addDrawFunction((dfuncs, draw_data, draw_state, cX, cY, toX, toY, user_data) => {
+ 			func(cX, cY, toX, toY, get_callback_data(draw_data), get_callback_data(user_data));
+ 		}, "viiiffffi");
+ 		this.funcPtrs.push(funcPtr);
+@@ -672,7 +745,7 @@
+ 	setCubicToFunc(func, userData) {
+ 		const userDataPtr = register_callback_data_pointer(userData);
+ 		this.userDataPtrs.push(userDataPtr);
+-		const funcPtr = Module.addFunction((dfuncs, draw_data, draw_state, c1X, c1Y, c2X, c2Y, toX, toY, user_data) => {
++		const funcPtr = addDrawFunction((dfuncs, draw_data, draw_state, c1X, c1Y, c2X, c2Y, toX, toY, user_data) => {
+ 			func(c1X, c1Y, c2X, c2Y, toX, toY, get_callback_data(draw_data), get_callback_data(user_data));
+ 		}, "viiiffffffi");
+ 		this.funcPtrs.push(funcPtr);
+@@ -686,7 +759,7 @@
+ 	setClosePathFunc(func, userData) {
+ 		const userDataPtr = register_callback_data_pointer(userData);
+ 		this.userDataPtrs.push(userDataPtr);
+-		const funcPtr = Module.addFunction((dfuncs, draw_data, draw_state, user_data) => {
++		const funcPtr = addDrawFunction((dfuncs, draw_data, draw_state, user_data) => {
+ 			func(get_callback_data(draw_data), get_callback_data(user_data));
+ 		}, "viiii");
+ 		this.funcPtrs.push(funcPtr);
+@@ -811,10 +884,15 @@
  		if (typeof arg === "number") this.ptr = exports.hb_font_reference(arg);
  		else {
  			this.ptr = exports.hb_font_create(arg.ptr);
@@ -255,7 +311,7 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..42977ba02cc8d0266854297b758954fb
  	/** The {@link Face} associated with this font. */
  	get face() {
  		if (!this._face) this._face = new Face(exports.hb_font_get_face(this.ptr));
-@@ -1799,6 +1872,10 @@ var Buffer = class Buffer {
+@@ -1799,6 +1877,10 @@
  		else this.ptr = exports.hb_buffer_create();
  		track(this, exports.hb_buffer_destroy);
  	}
@@ -266,7 +322,7 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..42977ba02cc8d0266854297b758954fb
  	/**
  	* Appends a character with the Unicode value of `codePoint` to the buffer,
  	* and gives it the initial cluster value of `cluster`. Clusters can be any
-@@ -1822,8 +1899,10 @@ var Buffer = class Buffer {
+@@ -1822,8 +1904,10 @@
  	*/
  	addText(text, itemOffset = 0, itemLength) {
  		const str = string_to_utf16_ptr(text);
@@ -277,7 +333,7 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..42977ba02cc8d0266854297b758954fb
  	}
  	/**
  	* Add code points to the buffer.
-@@ -1832,7 +1911,7 @@ var Buffer = class Buffer {
+@@ -1832,7 +1916,7 @@
  	* @param itemLength The number of code points to add to the buffer, or omit for the end of the array.
  	*/
  	addCodePoints(codePoints, itemOffset = 0, itemLength) {
@@ -286,7 +342,7 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..42977ba02cc8d0266854297b758954fb
  		Module.HEAPU32.subarray(codePointsPtr / 4, codePointsPtr / 4 + codePoints.length).set(codePoints);
  		exports.hb_buffer_add_codepoints(this.ptr, codePointsPtr, codePoints.length, itemOffset, itemLength ?? codePoints.length);
  		exports.free(codePointsPtr);
-@@ -2022,7 +2101,7 @@ var Buffer = class Buffer {
+@@ -2022,7 +2106,7 @@
  		const sp = Module.stackSave();
  		const endPos = end ?? this.getLength();
  		const bufLen = 32 * 1024;
@@ -295,7 +351,7 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..42977ba02cc8d0266854297b758954fb
  		const bufConsumedPtr = Module.stackAlloc(4);
  		let result = "";
  		while (start < endPos) {
-@@ -2228,8 +2307,10 @@ function shape(font, buffer, features) {
+@@ -2228,8 +2312,10 @@
  			feature.writeTo(featuresPtr + i * 16);
  		});
  	}
@@ -306,7 +362,7 @@ index ce7304d5c0655d1e1596e768635824b7041e501e..42977ba02cc8d0266854297b758954fb
  }
  /**
  * Shape a buffer with a given font, returning a JSON trace of the shaping process.
-@@ -2362,6 +2443,8 @@ function otTagsToScriptAndLanguage(scriptTag, languageTag) {
+@@ -2362,6 +2448,8 @@
  }
  //#endregion
  //#region src/index.ts

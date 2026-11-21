@@ -8,6 +8,9 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-11-01",
   "compatibility_flags": ["nodejs_compat"],
+  // HarfBuzz's loader makes a Node require from its module URL. The bundled Wasm
+  // goes through the instantiate hook, so the URL only supplies that loader's base.
+  "define": { "import.meta.url": "\"file:///agent-runner/index.js\"" },
   "observability": { "enabled": true },
   "workers_dev": false,
   // A minute of CPU per call: a build of 50,000 layers takes seconds and a render tens to

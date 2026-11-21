@@ -1,5 +1,7 @@
 # 0023. Headless rendering: the SVG export, rasterised by resvg in the Worker
 
+Phase 4 superseded this implementation for raster exports. [Decision 0040](0040-render-engine.md#amendment-phase-4-headless-rendering)
+
 - Status: accepted
 - Date: 2026-11-15
 - Deciders: Ziyang (lead maintainer)

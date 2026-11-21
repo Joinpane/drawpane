@@ -87,10 +87,13 @@ const EMOJI = /\p{Emoji_Presentation}|\ufe0f|\u20e3/u;
 export interface LayerContext {
   readonly scene: Scene;
   readonly measurer: TextMeasurer;
-  /** An image's engine handle and natural size once the engine holds its pixels, else null. */
+  /** An image's handle and size, `null` for a placeholder, or `undefined` to omit it. */
   image(
     ref: string,
-  ): { readonly handle: number; readonly width: number; readonly height: number } | null;
+  ):
+    | { readonly handle: number; readonly width: number; readonly height: number }
+    | null
+    | undefined;
   /** A glyph outline (SVG path data in font units, y up) as an engine glyph handle. */
   glyph(d: string): number;
   /** The same for a shaped glyph, remembered by the glyph itself (the shaper keeps its runs). */
@@ -367,7 +370,8 @@ function imageFill(
   const blend = blendCode(paint.blendMode);
   const withBlend = blend !== 0 ? { blend } : {};
   const image = ctx.image(paint.ref);
-  if (!image) {
+  if (image === undefined) return;
+  if (image === null) {
     // Loading: the checkerboard over the box, inside the shape (as the canvas renderer draws it).
     b.ops.push({
       op: "fill",

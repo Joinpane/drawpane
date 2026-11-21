@@ -17,9 +17,9 @@ import {
   measuredFaces,
   parseFont,
 } from "../src/harfbuzz-measurer";
-import { facesUsed } from "../src/headless-render";
 import { MISSING_GLYPH_FAMILY } from "../src/missing-glyph-font";
 import { fontString, layoutText, shapingRun, type TextMeasurer } from "../src/text";
+import { facesUsed } from "./fixtures/svg-raster";
 
 const fixture = (name: string) => {
   const b = readFileSync(new URL(`../../../apps/web/e2e/fixtures/${name}`, import.meta.url));

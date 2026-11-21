@@ -206,8 +206,14 @@ pub fn gpu_backend() -> String {
 pub struct Engine {
     core: Core,
     pixels: Vec<u8>,
-    png: Option<png::BandPng>,
+    png: Option<ActivePng>,
     changes: Vec<store::Dirty>,
+}
+
+struct ActivePng {
+    encoder: png::BandPng,
+    camera: Camera,
+    band_rows: u32,
 }
 
 #[wasm_bindgen]
@@ -615,39 +621,60 @@ impl Engine {
     /// memory budget. Until it ends (`pngEnd`) or is cancelled (`pngAbort`), the engine refuses
     /// changes, so every band draws the same revision.
     #[wasm_bindgen(js_name = pngBegin)]
-    pub fn png_begin(&mut self, width: u32, height: u32, zoom: f64, x: f64, y: f64, dpr: f64) -> Outcome {
+    #[allow(clippy::too_many_arguments)]
+    pub fn png_begin(&mut self, width: u32, height: u32, zoom: f64, x: f64, y: f64, dpr: f64, rows: u32) -> Outcome {
         if let Some(o) = self.exporting() {
             return o;
         }
         if self.core.limits().memory_bytes > 0 {
             self.pixels = Vec::new();
         }
-        if let Err(e) = self.core.admit_export(width, height, Camera { zoom, x, y, dpr }) {
-            return Outcome::err(e);
-        }
+        let camera = Camera { zoom, x, y, dpr };
+        let band_rows = match self.core.export_rows(width, height, camera, rows) {
+            Ok(rows) => rows,
+            Err(e) => return Outcome::err(e),
+        };
         match png::BandPng::new(width, height, self.core.limits().texture_side) {
-            Ok(p) => {
-                self.png = Some(p);
+            Ok(encoder) => {
+                self.png = Some(ActivePng {
+                    encoder,
+                    camera,
+                    band_rows,
+                });
                 Outcome::ok()
             }
             Err(e) => Outcome::err(e),
         }
     }
 
-    /// Renders the next band of the PNG begun and compresses it.
+    #[wasm_bindgen(js_name = pngRows)]
+    pub fn png_rows(&self) -> u32 {
+        self.png.as_ref().map_or(0, |p| p.band_rows)
+    }
+
+    #[wasm_bindgen(js_name = checkPng)]
     #[allow(clippy::too_many_arguments)]
+    pub fn check_png(&self, width: u32, height: u32, zoom: f64, x: f64, y: f64, dpr: f64, rows: u32) -> Outcome {
+        outcome(
+            self.core
+                .export_rows(width, height, Camera { zoom, x, y, dpr }, rows)
+                .map(|_| ()),
+        )
+    }
+
+    /// Renders the next band of the PNG begun and compresses it.
     #[wasm_bindgen(js_name = pngBand)]
-    pub fn png_band(&mut self, zoom: f64, x: f64, y: f64, dpr: f64, background: Vec<f32>, rows: u32) -> Outcome {
+    pub fn png_band(&mut self, background: Vec<f32>) -> Outcome {
         let Some(mut p) = self.png.take() else {
             return Outcome::err(EngineError::new(error::ErrorCode::State, "no PNG begun"));
         };
         let bg = rgba(&background);
-        let (w, h, y0) = (p.width, p.height, p.rows_written);
-        let rows = rows.min(h - y0);
+        let (w, h, y0) = (p.encoder.width, p.encoder.height, p.encoder.rows_written);
+        let rows = p.band_rows.min(h - y0);
         let result = self
             .core
-            .render_band_straight(w, h, Camera { zoom, x, y, dpr }, bg, y0, rows)
-            .and_then(|px| p.write_rows(px, rows));
+            .render_band_straight(w, h, p.camera, bg, y0, rows)
+            .and_then(|px| p.encoder.write_rows(px, rows));
         match result {
             Ok(()) => {
                 self.png = Some(p);
@@ -661,13 +688,13 @@ impl Engine {
     /// The compressed bytes made since the last take (all of them once the last band is in).
     #[wasm_bindgen(js_name = pngTake)]
     pub fn png_take(&mut self) -> Vec<u8> {
-        self.png.as_mut().map(|p| p.take()).unwrap_or_default()
+        self.png.as_mut().map(|p| p.encoder.take()).unwrap_or_default()
     }
 
     /// Ends the PNG: answers its last bytes.
     #[wasm_bindgen(js_name = pngEnd)]
     pub fn png_end(&mut self) -> Vec<u8> {
-        self.png.take().map(|p| p.finish()).unwrap_or_default()
+        self.png.take().map(|p| p.encoder.finish()).unwrap_or_default()
     }
 
     /// Cancels the PNG begun, letting its memory go.

@@ -11,8 +11,8 @@ import type { ResvgRasteriser } from "@drawpane/raster";
 import { nodeRasteriser } from "@drawpane/raster/node";
 import { beforeAll, describe, expect, it } from "vitest";
 import { Doc } from "../src/doc";
-import { base64, createHeadlessRenderer } from "../src/headless-render";
 import type { TextMeasurer } from "../src/text";
+import { base64, createHeadlessRenderer } from "./fixtures/svg-raster";
 
 const measurer: TextMeasurer = {
   width: (font, text) => text.length * Number(font.match(/(\d+(?:\.\d+)?)px/)?.[1] ?? 16) * 0.6,

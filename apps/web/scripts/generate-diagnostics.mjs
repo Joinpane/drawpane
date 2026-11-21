@@ -42,22 +42,16 @@ for (const cell of DIAGNOSTIC_CELLS) {
         CELL_CAMERA.x,
         CELL_CAMERA.y,
         CELL_CAMERA.dpr,
-      ),
-    );
-    const chunks = [];
-    check(
-      `${cell.id} pngBand`,
-      engine.pngBand(
-        CELL_CAMERA.zoom,
-        CELL_CAMERA.x,
-        CELL_CAMERA.y,
-        CELL_CAMERA.dpr,
-        new Float32Array(cell.background),
         CELL_HEIGHT,
       ),
     );
-    const body = engine.pngTake();
-    if (body.length > 0) chunks.push(body);
+    const chunks = [];
+    const bandRows = engine.pngRows();
+    for (let row = 0; row < CELL_HEIGHT; row += bandRows) {
+      check(`${cell.id} pngBand`, engine.pngBand(new Float32Array(cell.background)));
+      const body = engine.pngTake();
+      if (body.length > 0) chunks.push(body);
+    }
     const tail = engine.pngEnd();
     if (tail.length > 0) chunks.push(tail);
     entries[cell.id] = Buffer.concat(chunks).toString("base64");

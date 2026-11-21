@@ -43,13 +43,12 @@ import {
   type Camera,
   ErrorCode,
   type FrameStats,
-  loadBrowserEngine,
-  loadWebglEngine,
   RenderEngine,
   type Result,
   refusingBits,
   unsupportedNames,
 } from "@drawpane/engine";
+import { loadBrowserEngine, loadWebglEngine } from "@drawpane/engine/browser";
 import type { CpuWorkerReply, CpuWorkerRequest } from "./engine-cpu.worker";
 import { CPU_IMAGE_BUDGET, CPU_IMAGE_SIDE, ViewImages } from "./engine-image";
 import {

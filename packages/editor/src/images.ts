@@ -67,6 +67,18 @@ export function imagePlacement(
   return { x: (box.width - width) / 2, y: (box.height - height) / 2, width, height, tile: false };
 }
 
+/** The projected size of one image, including any part cropped out by the layer. */
+export function imageDrawnSize(
+  mode: ScaleMode,
+  box: Size,
+  natural: Size,
+  scale: Size,
+  crop?: CropRect,
+): Size {
+  const place = imagePlacement(mode, box, natural, crop);
+  return { width: place.width * scale.width, height: place.height * scale.height };
+}
+
 /**
  * Lays out images dropped or pasted together: each at its natural size,
  * scaled down (never up) to fit `max`, side by side with `gap` between them,

@@ -106,6 +106,21 @@ describe("Shaper", () => {
     expect(result.dependencies?.some((key) => key.startsWith("Arimo"))).toBe(true);
   });
 
+  it("keeps kerning in exact left-to-right outlines when canvas supplies the extent", async () => {
+    const shaper = await ready();
+    const plain = run({}, 32);
+    const exact = shaper.shape("AV", plain);
+    const prefix = shaper.shape("A", plain);
+    if (!exact || !prefix) throw new Error("Instrument Sans should shape both strings");
+    const measured = exact.width - 0.04;
+    const result = shaper.shapeForEngine("AV", plain, (text) =>
+      text === "AV" ? measured : prefix.width,
+    );
+    if ("waiting" in result) throw new Error("Instrument Sans is ready");
+    expect(result.shaped.width).toBe(measured);
+    expect(result.shaped.glyphs).toEqual(exact.glyphs);
+  });
+
   it("preloads bundled fallbacks and waits past the ordinary face deadline", async () => {
     await import("harfbuzzjs");
     vi.useFakeTimers();

@@ -1,55 +1,20 @@
-/**
- * A layer rendered both ways an agent's `export_image` can be: by the
- * canvas, as the open editor exports it, and by the headless renderer
- * (decision 0023), as the Worker does with no editor open. For the render
- * parity suite (e2e/parity/headless.spec.ts) and for debugging; attached to
- * the debug handle only (`drawpaneHeadless`).
- *
- * The headless side runs here with this tab's text layout, font files and
- * images, and hands its SVG to `window.drawpaneRasterise`, which the test
- * provides: resvg in Node, the same build the Worker imports. Text layout is
- * compared separately (canvas against HarfBuzz), so what this measures is
- * the SVG export and the rasteriser.
- */
+/** Scene-to-PNG parity through the CPU engine and the canvas export. */
 import {
+  base64,
   CanvasRenderer,
   createHeadlessRenderer,
   type Editor,
   exportRaster,
   type ImageBytesLoader,
+  measuredFaces,
   mediaUrl,
 } from "@drawpane/editor";
-import { cachedFontLoader, type Rasteriser } from "@drawpane/raster";
+import { RenderEngine } from "@drawpane/engine";
+import { loadBrowserEngine } from "@drawpane/engine/browser";
 import { imagesFor } from "./media";
-import { fontBytes } from "./shaping";
+import { shaper } from "./shaping";
 
-/** A font file as the test's rasteriser takes it: sent once, named by `id` after that. */
-interface FontRef {
-  readonly id: number;
-  readonly data?: string;
-}
-
-type RemoteRasterise = (
-  svg: string,
-  options: {
-    scale: number;
-    fonts: FontRef[];
-    fallbackFamily: string | null;
-    background: string | null;
-    /** Image files by the URL the SVG names them by, base64. */
-    images: { href: string; data: string }[];
-  },
-) => Promise<{ png: string; width: number; height: number }>;
-
-const toBase64 = (bytes: Uint8Array) => {
-  let s = "";
-  for (let i = 0; i < bytes.length; i += 0x8000)
-    s += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
-  return btoa(s);
-};
-const fromBase64 = (b64: string) => Uint8Array.from(atob(b64), (c) => c.charCodeAt(0));
-
-/** Images by hash, as the Worker reads them from R2: their bytes, type and size. */
+/** Images by hash, as the Worker reads them from R2. */
 const imageBytes: ImageBytesLoader = async (ref) => {
   const response = await fetch(mediaUrl(ref), { credentials: "same-origin" });
   if (!response.ok) return null;
@@ -61,54 +26,39 @@ const imageBytes: ImageBytesLoader = async (ref) => {
 };
 
 export function headlessDebug(editor: Editor) {
-  // Each font file crosses to the test once; after that, by number.
-  const sent = new WeakMap<ArrayBufferLike, number>();
-  let count = 0;
-  const remote: Rasteriser = {
-    async rasterise(svg, options) {
-      const rasterise = (window as unknown as { drawpaneRasterise?: RemoteRasterise })
-        .drawpaneRasterise;
-      if (!rasterise) throw new Error("No rasteriser: the test provides drawpaneRasterise.");
-      const fonts = options.fonts.map((f): FontRef => {
-        const known = sent.get(f.buffer);
-        if (known !== undefined) return { id: known };
-        const id = ++count;
-        sent.set(f.buffer, id);
-        return { id, data: toBase64(f) };
-      });
-      const out = await rasterise(svg, {
-        scale: options.scale,
-        fonts,
-        fallbackFamily: options.fallbackFamily ?? null,
-        background: options.background ?? null,
-        images: [...(options.images ?? [])].map(([href, bytes]) => ({
-          href,
-          data: toBase64(bytes),
-        })),
-      });
-      return { ...out, png: fromBase64(out.png) };
-    },
-  };
   const headless = createHeadlessRenderer({
     measurer: editor.measurer,
-    fonts: cachedFontLoader(fontBytes),
     images: imageBytes,
-    rasteriser: remote,
+    async prepareFonts(nodes) {
+      await Promise.all(measuredFaces(nodes, editor.measurer).map((face) => shaper.load(face)));
+    },
+    waitForFaces: (keys) => Promise.all(keys.map((key) => shaper.waitForFace(key))),
+    async decodeImage(file, target) {
+      const bitmap = await createImageBitmap(
+        new Blob([new Uint8Array(file.bytes)], { type: file.type }),
+      );
+      try {
+        const surface = new OffscreenCanvas(target.width, target.height);
+        const ctx = surface.getContext("2d", { willReadFrequently: true });
+        if (!ctx) return null;
+        ctx.imageSmoothingQuality = "high";
+        ctx.drawImage(bitmap, 0, 0, target.width, target.height);
+        return new Uint8Array(ctx.getImageData(0, 0, target.width, target.height).data.buffer);
+      } finally {
+        bitmap.close();
+      }
+    },
+    async acquireEngine() {
+      return { engine: new RenderEngine(await loadBrowserEngine()), release() {} };
+    },
   });
   return {
-    /** The layer drawn headlessly: a PNG (base64), and what it couldn't draw exactly. */
+    /** The layer drawn headlessly: a PNG (base64), and its asset notes. */
     async headless(id: string, scale: number, background: string | null) {
-      const out = await headless.renderPng(editor.doc, id, { scale, background });
-      return {
-        png: toBase64(out.png),
-        width: out.width,
-        height: out.height,
-        approximate: out.approximate,
-        missingFonts: out.missingFonts,
-        missingImages: out.missingImages,
-      };
+      const { png, ...metadata } = await headless.renderPng(editor.doc, id, { scale, background });
+      return { ...metadata, png: base64(png) };
     },
-    /** The layer as the open editor exports it, with the canvas renderer: a PNG (base64). */
+    /** The layer as the open editor exports it with the canvas renderer. */
     async canvas(id: string, scale: number, background: string | null) {
       const renderer = new CanvasRenderer(editor.scene, editor.measurer, {
         images: imagesFor(editor),
@@ -118,7 +68,7 @@ export function headlessDebug(editor: Editor) {
         scale,
         background,
       });
-      return toBase64(new Uint8Array(await blob.arrayBuffer()));
+      return base64(new Uint8Array(await blob.arrayBuffer()));
     },
   };
 }

@@ -1,43 +1,13 @@
-/**
- * WebAssembly bounds (decision 0033, item 4.2), on #173's second review's
- * cases. resvg and HarfBuzz grow their own linear memory, which no meter in
- * JavaScript sees and which never shrinks, so each runs with a `maximum`
- * written into its module (`@drawpane/raster/wasm-limits`). Past it, a call
- * must fail cleanly, as the tool's failure, and the next call must work and
- * give the right answer:
- *
- * - resvg draws each picture in an instance of its own, since a trap leaves
- *   an instance unusable and what it held unfreed. A picture estimated not
- *   to fit is drawn smaller, and says so; one that traps all the same is
- *   drawn once more at half the scale;
- * - harfbuzzjs (patched) throws when `malloc` answers 0, instead of copying
- *   a font file to address 0, after which text already loaded measured 0
- *   wide with no error. A load that fails so frees what it made, leaving
- *   the room text loaded before measures in.
- *
- * Run with the memory check (`pnpm --filter @drawpane/worker memory`).
- */
 import { mkdirSync, readFileSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-  createHeadlessRenderer,
-  type FaceFileLoader,
-  MIN_HEADLESS_SIDE,
-  PICTURE_OUT_OF_MEMORY,
-  ToolFailure,
-} from "@drawpane/editor";
+import { type FaceFileLoader, ToolFailure } from "@drawpane/editor";
 import { checkNode, type NodeRecord, ROOT_ID } from "@drawpane/model";
-import type { Rasteriser } from "@drawpane/raster";
-import { nodeRasteriser } from "@drawpane/raster/node";
-import {
-  HARFBUZZ_MAX_BYTES,
-  memoryLimits,
-  RESVG_MAX_BYTES,
-  withMemoryMaximum,
-} from "@drawpane/raster/wasm-limits";
+import { HARFBUZZ_MAX_BYTES, memoryLimits, withMemoryMaximum } from "@drawpane/raster/wasm-limits";
 import { afterAll, describe, expect, it } from "vitest";
+import { headlessEngine } from "../../../packages/editor/test/fixtures/engine-raster";
+import { enginePngPixel } from "../../../packages/editor/test/fixtures/png";
 import { AgentEngine, TEXT_OUT_OF_MEMORY } from "../../agent-runner/src/engine";
 import { harfBuzzMeasurerWith } from "../../agent-runner/src/harfbuzz-measurer";
 import { STANDIN } from "../../agent-runner/src/measurer";
@@ -63,20 +33,7 @@ function room(name: string, nodes: NodeRecord[]) {
   return r;
 }
 
-/** export_image's renderer over `rasteriser`, for the editor's document. */
-async function renderServices(editor: ReturnType<typeof editorOf>, rasteriser: Rasteriser) {
-  const renderer = createHeadlessRenderer({
-    measurer: STANDIN,
-    fonts: async () => null,
-    images: async () => null,
-    rasteriser,
-  });
-  return {
-    renderPng: (id: string, options: object) => renderer.renderPng(editor.doc, id, options),
-  };
-}
-
-/** Frame F, 2048 px, and 20 frames nested in it as large, each at 90% opacity. */
+/** Frame F and 20 nested translucent frames. */
 function nestedFrames(): NodeRecord[] {
   const nodes: NodeRecord[] = [
     {
@@ -112,148 +69,49 @@ function editorOf(engine: AgentEngine, r: ReturnType<typeof room>) {
   return engine.editorAt(1, store.count(), () => store.records(), "materialized");
 }
 
-describe("the WebAssembly modules", () => {
-  it("are capped as the Worker bundles them, and the caps fit in a Worker with the editor", () => {
-    const resvg = new Uint8Array(readFileSync(require.resolve("@resvg/resvg-wasm/index_bg.wasm")));
-    const hb = new Uint8Array(readFileSync(require.resolve("harfbuzzjs/dist/harfbuzz.wasm")));
-    // As shipped: resvg may grow to 4 GiB, HarfBuzz to 2 GiB.
-    expect(memoryLimits(resvg)?.max).toBeUndefined();
-    expect(memoryLimits(hb)?.max).toBe(32_768);
-    expect(memoryLimits(withMemoryMaximum(resvg, RESVG_MAX_BYTES))).toEqual({
-      min: memoryLimits(resvg)?.min,
-      max: RESVG_MAX_BYTES / 65_536,
-    });
+describe("the bundled Wasm budgets", () => {
+  it("caps the engine, decoder and HarfBuzz alongside the editor", () => {
+    const engine = readFileSync(
+      new URL("../../../packages/engine/dist/worker/engine_bg.wasm", import.meta.url),
+    );
+    const decoder = readFileSync(
+      new URL("../../../packages/engine/dist/decoder/image_decoder_bg.wasm", import.meta.url),
+    );
+    const hb = readFileSync(require.resolve("harfbuzzjs/dist/harfbuzz.wasm"));
+    expect(memoryLimits(engine)?.max).toBe((25 << 20) / 65_536);
+    expect(memoryLimits(decoder)?.max).toBe((16 << 20) / 65_536);
     expect(memoryLimits(withMemoryMaximum(hb, HARFBUZZ_MAX_BYTES))?.max).toBe(
       HARFBUZZ_MAX_BYTES / 65_536,
     );
-    // Decision 0033, answer 2: a 17 MB baseline, the editor's 48 MiB, and both caps, under 128 MB.
-    expect(17e6 + (48 << 20) + RESVG_MAX_BYTES + HARFBUZZ_MAX_BYTES).toBeLessThan(128e6);
+    // Decoder high-water pages are part of the renderer's combined 25 MiB.
+    expect(17e6 + (48 << 20) + (25 << 20) + HARFBUZZ_MAX_BYTES).toBeLessThan(128e6);
   });
 });
 
-describe("resvg-nested: 20 nested 2048 px frames at 90% opacity", () => {
-  it("draws export_image smaller to fit, and says so", async () => {
-    // Uncapped, resvg grew to 666.6 MiB at scale 1 and 375.4 MiB at the default (review 2).
-    const r = room("resvg-nested-fit", nestedFrames());
-    const engine = new AgentEngine(STANDIN);
-    const editor = editorOf(engine, r);
-    const services = await renderServices(editor, await nodeRasteriser());
-    for (const [input, asked] of [
-      [{ id: "F", scale: 1 }, "2048 × 2048 (scale 1)"],
-      [{ id: "F" }, "1536 × 1536 (scale 0.75)"],
-    ] as const) {
-      const { result } = await engine.run(editor, "export_image", input, services);
-      const data = result.data as { width: number; height: number; reduced: string };
-      expect(data.width).toBe(data.height);
-      expect(data.width).toBeGreaterThanOrEqual(MIN_HEADLESS_SIDE);
-      expect(data.width).toBeLessThan(1024);
-      expect(data.reduced).toContain(`at ${data.width} × ${data.height}`);
-      expect(data.reduced).toContain(`instead of ${asked}`);
+describe("headless engine exports under the Worker cap", () => {
+  it("draws a 20-level opacity stack and refuses an oversized request without poisoning the next export", async () => {
+    const r = room("engine-nested", nestedFrames());
+    try {
+      const engine = new AgentEngine(STANDIN);
+      const editor = editorOf(engine, r);
+      const renderer = headlessEngine(STANDIN);
+      const services = {
+        renderPng: (id: string, options: object) => renderer.renderPng(editor.doc, id, options),
+      };
+      await expect(renderer.renderPng(editor.doc, "F", { scale: 5 })).rejects.toThrow("8,192");
+      const { result } = await engine.run(
+        editor,
+        "export_image",
+        { id: "F", scale: 0.125 },
+        services,
+      );
+      expect(result.data).toMatchObject({ width: 256, height: 256 });
+      const png = Uint8Array.from(atob(result.image?.base64 ?? ""), (ch) => ch.charCodeAt(0));
+      expect(enginePngPixel(png, 128, 128)).toMatchObject([255, 0, 0, expect.any(Number)]);
+      expect(enginePngPixel(png, 128, 128)[3]).toBeGreaterThan(0);
+    } finally {
+      r.close();
     }
-    r.close();
-  });
-
-  it("without the estimate, fails export_image cleanly, and draws a small layer right after", async () => {
-    const nodes: NodeRecord[] = [
-      {
-        id: "F",
-        parent: "P",
-        key: "a0",
-        type: "frame",
-        props: { width: 2048, height: 2048, clipContent: true },
-      },
-      // Smaller, but not tiny: about 10 MiB to draw, which a reused instance no longer has.
-      {
-        id: "S",
-        parent: "P",
-        key: "a1",
-        type: "frame",
-        props: { x: 3000, width: 1024, height: 512, fills: [{ type: "solid", color: "#0000ff" }] },
-      },
-      {
-        id: "S1",
-        parent: "S",
-        key: "a0",
-        type: "rect",
-        props: {
-          width: 512,
-          height: 512,
-          opacity: 0.5,
-          fills: [{ type: "solid", color: "#ff0000" }],
-        },
-      },
-    ];
-    nodes.push(...nestedFrames().slice(1));
-    const r = room("resvg-nested", nodes);
-    const engine = new AgentEngine(STANDIN);
-    const editor = editorOf(engine, r);
-    const rasteriser = await nodeRasteriser();
-    // The rasteriser without its `memory`: nothing is drawn smaller first, so each picture runs
-    // out (at its scale, and at half that), as a rasteriser that can't say how much it has does.
-    const services = await renderServices(editor, {
-      rasterise: (svg, options) => rasteriser.rasterise(svg, options),
-    });
-    for (const input of [{ id: "F", scale: 1 }, { id: "F" }]) {
-      const failed = engine.run(editor, "export_image", input, services);
-      await expect(failed).rejects.toBeInstanceOf(ToolFailure);
-      await expect(failed).rejects.toThrow(PICTURE_OUT_OF_MEMORY);
-    }
-    // The next picture is drawn in a fresh instance: right, and at its size.
-    const small = await engine.run(
-      editorOf(engine, r),
-      "export_image",
-      { id: "S", scale: 1 },
-      services,
-    );
-    expect(small.result.data).toMatchObject({ width: 1024, height: 512 });
-    const px = rasteriser.pixels(
-      `<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4" fill="#00ff00"/></svg>`,
-      { scale: 1, fonts: [] },
-    );
-    expect([...px.data.subarray(0, 4)]).toEqual([0, 255, 0, 255]);
-    r.close();
-  });
-});
-
-describe("a shadow on a 2048 px frame: 107 MiB to draw at full size", () => {
-  it("draws export_image smaller, inside the cap, and says from what to what", async () => {
-    const r = room("shadow", [
-      { id: "F", parent: "P", key: "a0", type: "frame", props: { width: 2048, height: 2048 } },
-      {
-        id: "S",
-        parent: "F",
-        key: "a0",
-        type: "frame",
-        props: {
-          width: 2048,
-          height: 2048,
-          fills: [{ type: "solid", color: "#ff0000" }],
-          effects: [{ type: "drop-shadow", x: 0, y: 4, blur: 16, spread: 0, color: "#00000040" }],
-        },
-      },
-    ] as NodeRecord[]);
-    const engine = new AgentEngine(STANDIN);
-    const editor = editorOf(engine, r);
-    const rasteriser = await nodeRasteriser();
-    // Counts what it's asked to draw: drawn once, at the scale chosen, without running out.
-    const scales: number[] = [];
-    const services = await renderServices(editor, {
-      memory: RESVG_MAX_BYTES,
-      rasterise: (svg, options) => {
-        scales.push(options.scale);
-        return rasteriser.rasterise(svg, options);
-      },
-    });
-    const { result } = await engine.run(editor, "export_image", { id: "F", scale: 1 }, services);
-    const data = result.data as { width: number; height: number; scale: number; reduced: string };
-    expect(scales).toEqual([data.scale]);
-    expect(data.width).toBe(data.height);
-    expect(data.width).toBeGreaterThan(512);
-    expect(data.width).toBeLessThan(2048);
-    expect(data.reduced).toBe(
-      `Drawn smaller than asked, at ${data.width} × ${data.height} (scale ${data.scale}) instead of 2048 × 2048 (scale 1): the full size needs more memory than rendering here has. Export a smaller layer to see it in more detail.`,
-    );
-    r.close();
   });
 });
 

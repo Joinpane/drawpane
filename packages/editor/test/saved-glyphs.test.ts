@@ -16,11 +16,11 @@ import type { ResvgRasteriser } from "@drawpane/raster";
 import { nodeRasteriser } from "@drawpane/raster/node";
 import { beforeAll, describe, expect, it } from "vitest";
 import { Doc } from "../src/doc";
-import { createHeadlessRenderer } from "../src/headless-render";
 import { glyphTable, savedGlyphGroups, savedText } from "../src/saved-glyphs";
 import { Scene } from "../src/scene";
 import { exportSvg } from "../src/svg";
 import type { TextMeasurer } from "../src/text";
+import { createHeadlessRenderer } from "./fixtures/svg-raster";
 
 const FAMILY = "Glyphless Test Sans";
 const SQUARE = "M0 0 L500 0 L500 500 L0 500 Z";

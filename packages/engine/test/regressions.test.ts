@@ -180,6 +180,32 @@ describe.skipIf(!built())("Recovery and stream lifetimes", () => {
     engine.dispose();
   });
 
+  it("releases an unread PNG stream when its deadline aborts it", async () => {
+    const engine = new RenderEngine(await loadNodeEngine());
+    expect(engine.apply(square()).ok).toBe(true);
+    const controller = new AbortController();
+    let ended = 0;
+    const stream = engine.renderPngStream(
+      16,
+      64,
+      camera,
+      clear,
+      4,
+      () => ended++,
+      undefined,
+      controller.signal,
+    );
+    if (!stream.ok) throw new Error(stream.message);
+    const timeout = new Error("The export took too long.");
+    controller.abort(timeout);
+    expect(ended).toBe(1);
+    const patch = new ListWriter(1, 2);
+    patch.remove(1);
+    expect(engine.apply(patch.finish()).ok).toBe(true);
+    await expect(stream.value.getReader().read()).rejects.toBe(timeout);
+    engine.dispose();
+  });
+
   it("refuses an export too large for the Worker's memory before any byte", async () => {
     const engine = new RenderEngine(await loadNodeEngine(), { memoryBytes: 4 << 20 });
     expect(engine.apply(square()).ok).toBe(true);
@@ -416,6 +442,7 @@ describe.skipIf(!built())("Recovery and stream lifetimes", () => {
       h: number;
       memoryBytes?: number;
       mustRefuse?: boolean;
+      mustStream?: boolean;
       rejectWire?: boolean;
       postEffects: NonNullable<Parameters<ListWriter["set"]>[2]["postEffects"]>;
     }> = [
@@ -442,7 +469,7 @@ describe.skipIf(!built())("Recovery and stream lifetimes", () => {
         w: 512,
         h: 512,
         memoryBytes: 2 << 20,
-        mustRefuse: true,
+        mustStream: true,
         postEffects: [{ kind: "texture", size: 4, radius: 18, clipToShape: false }],
       },
       {
@@ -517,6 +544,10 @@ describe.skipIf(!built())("Recovery and stream lifetimes", () => {
       const started = e.renderPngStream(c.w, c.h, cam, clear);
       if (c.mustRefuse) {
         expect(started, c.name).toMatchObject({ ok: false, code: ErrorCode.Limit });
+      } else if (c.mustStream) {
+        if (!started.ok) throw new Error(started.message);
+        const bytes = new Uint8Array(await new Response(started.value).arrayBuffer());
+        expect([...bytes.subarray(-8, -4)], c.name).toEqual([73, 69, 78, 68]); // IEND
       } else if (started.ok) {
         const reader = started.value.getReader();
         let chunks = 0;

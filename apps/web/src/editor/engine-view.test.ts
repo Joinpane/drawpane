@@ -115,6 +115,11 @@ vi.mock("@drawpane/editor", () => ({
   },
 }));
 
+vi.mock("@drawpane/engine/browser", () => ({
+  loadBrowserEngine: async () => ({}),
+  loadWebglEngine: async () => ({}),
+}));
+
 vi.mock("@drawpane/engine", () => ({
   ErrorCode: {
     Malformed: 1,
@@ -130,8 +135,6 @@ vi.mock("@drawpane/engine", () => ({
     State: 11,
     Timeout: 12,
   },
-  loadBrowserEngine: async () => ({}),
-  loadWebglEngine: async () => ({}),
   unsupportedNames: () => [],
   RenderEngine: class {
     failure = null;

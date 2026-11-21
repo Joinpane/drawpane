@@ -85,6 +85,14 @@ jobs:
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
+      - name: PNG exports in the real agent runner with live fonts
+        run: pnpm --filter @drawpane/worker test test/agent-export-image.test.ts --maxWorkers=1
+        env:
+          AGENT_TEST_LIVE_FONTS: "1"
+      - name: Han fallback outlines in the real agent runner
+        run: pnpm --filter @drawpane/worker test test/agent-export-image.test.ts --maxWorkers=1 -t 'Han fallback outlines'
+        env:
+          AGENT_TEST_FALLBACK_FONTS: "1"
       - run: pnpm build
       - name: The installer's release deploys (Wrangler dry run)
         run: pnpm --filter create-drawpane smoke
