@@ -272,7 +272,8 @@ export function BrowseLibrariesDialog({
   onPublish: () => void;
 }) {
   const editor = useEditor();
-  const version = useDocVersion();
+  // Closed, it shows nothing that edits change.
+  const version = useDocVersion(open);
   const own = useLibraryHistory(fileId);
   const ownCount = useMemo(
     () => (open ? libraryAssets(editor.doc).length : 0),
