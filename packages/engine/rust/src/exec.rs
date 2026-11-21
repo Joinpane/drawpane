@@ -192,6 +192,32 @@ pub enum ShadowCast<'a> {
     },
 }
 
+/// One resolved post-effect pass in device pixels, applied in order to an isolated target.
+#[derive(Clone, Copy, Debug)]
+pub enum PostStep {
+    LayerBlur {
+        out_area: IRect,
+        sigma: f32,
+    },
+    Noise {
+        out_area: IRect,
+        noise_type: u32,
+        size: f32,
+        density: f32,
+        color: Rgba,
+        secondary_color: Rgba,
+        opacity: f32,
+        dev_to_layer: Affine,
+    },
+    Texture {
+        out_area: IRect,
+        size: f32,
+        radius_dev: f32,
+        clip_to_shape: bool,
+        dev_to_layer: Affine,
+    },
+}
+
 pub trait Backend {
     type Scene: Draw;
     fn scene(&mut self) -> &mut Self::Scene;
@@ -243,10 +269,10 @@ pub trait Backend {
     /// parent target's pixels over that area (for faded pass-through frames, decision 0038).
     /// Returns `false` if the resulting target is empty.
     fn push_isolated_backdrop(&mut self, area: IRect, open: &[Open]) -> Result<bool>;
-    /// Flushes the active offscreen target (if pending), applies a chain of reference Gaussian
-    /// blurs (`EdgeMode::Zero`) for `(out_area, sigma)` in sequence, and replaces the top of the
-    /// offscreen stack with the final blurred result.
-    fn blur_isolated(&mut self, steps: &[(IRect, f32)]) -> Result<()>;
+    /// Flushes the active offscreen target (if pending), applies an ordered chain of post-effect
+    /// steps (`LayerBlur`, `Noise`, `Texture`), and replaces the top of the offscreen stack with
+    /// the final result.
+    fn apply_post_isolated(&mut self, steps: &[PostStep]) -> Result<()>;
     /// Flushes (if pending) and pops the active offscreen target, reopens parent `open` clips,
     /// and draws it onto the parent scene with `SrcOver` at `opacity`.
     fn pop_isolated(&mut self, opacity: f32, open: &[Open]) -> Result<()>;
@@ -621,6 +647,178 @@ fn view_grid_phase(view: Affine, step: i32) -> (i32, i32) {
     (e.floor().rem_euclid(s) as i32, f.floor().rem_euclid(s) as i32)
 }
 
+#[derive(Clone, Debug)]
+enum ActivePost {
+    LayerBlur {
+        sigma: f32,
+    },
+    Noise {
+        noise_type: u32,
+        size: f32,
+        density: f32,
+        color: Rgba,
+        secondary_color: Rgba,
+        opacity: f32,
+        dev_to_layer: Affine,
+    },
+    Texture {
+        size: f32,
+        radius_dev: f32,
+        clip_to_shape: bool,
+        dev_to_layer: Affine,
+    },
+}
+
+impl ActivePost {
+    fn src_pad(&self) -> i32 {
+        match *self {
+            Self::LayerBlur { sigma } => crate::shadow::blur_support_pad(sigma),
+            Self::Noise { .. } => 0,
+            Self::Texture { radius_dev, .. } => (radius_dev.ceil() as i32).saturating_add(2),
+        }
+    }
+
+    fn grow_pad(&self) -> i32 {
+        match *self {
+            Self::LayerBlur { sigma } => crate::shadow::blur_support_pad(sigma),
+            Self::Noise { .. } => 0,
+            Self::Texture {
+                radius_dev,
+                clip_to_shape,
+                ..
+            } => {
+                if clip_to_shape {
+                    0
+                } else {
+                    (radius_dev.ceil() as i32).saturating_add(2)
+                }
+            }
+        }
+    }
+
+    fn into_step(self, out_area: IRect) -> PostStep {
+        match self {
+            Self::LayerBlur { sigma } => PostStep::LayerBlur { out_area, sigma },
+            Self::Noise {
+                noise_type,
+                size,
+                density,
+                color,
+                secondary_color,
+                opacity,
+                dev_to_layer,
+            } => PostStep::Noise {
+                out_area,
+                noise_type,
+                size,
+                density,
+                color,
+                secondary_color,
+                opacity,
+                dev_to_layer,
+            },
+            Self::Texture {
+                size,
+                radius_dev,
+                clip_to_shape,
+                dev_to_layer,
+            } => PostStep::Texture {
+                out_area,
+                size,
+                radius_dev,
+                clip_to_shape,
+                dev_to_layer,
+            },
+        }
+    }
+}
+
+/// Verifies that the texture Perlin lattice coordinates `dev_to_layer(corner) / size` stay
+/// finite and within safe `f32`/`i32` lattice precision (`|q| <= 1e6`) across `area`.
+pub(crate) fn validate_texture_lattice(area: IRect, dev_to_layer: Affine, size: f32) -> Result<()> {
+    const MAX_LATTICE: f64 = 1.0e6;
+    if !size.is_finite() || size <= 0.0 {
+        return Err(EngineError::limit("texture cell size is not finite"));
+    }
+    let coeffs = dev_to_layer.as_coeffs();
+    if coeffs.iter().any(|c| !(*c as f32).is_finite()) {
+        return Err(EngineError::limit("texture transform exceeds finite f32 bounds"));
+    }
+    let inv_cell = 1.0 / f64::from(size);
+    if !inv_cell.is_finite() {
+        return Err(EngineError::limit("texture cell size is too small for finite lattice"));
+    }
+    for (x, y) in [
+        (f64::from(area.x0) + 0.5, f64::from(area.y0) + 0.5),
+        (f64::from(area.x1) - 0.5, f64::from(area.y0) + 0.5),
+        (f64::from(area.x0) + 0.5, f64::from(area.y1) - 0.5),
+        (f64::from(area.x1) - 0.5, f64::from(area.y1) - 0.5),
+    ] {
+        let p = dev_to_layer * vello_common::kurbo::Point::new(x, y);
+        let qx = p.x * inv_cell;
+        let qy = p.y * inv_cell;
+        if !qx.is_finite()
+            || !qy.is_finite()
+            || !(qx as f32).is_finite()
+            || !(qy as f32).is_finite()
+            || qx.abs() > MAX_LATTICE
+            || qy.abs() > MAX_LATTICE
+        {
+            return Err(EngineError::limit("texture coordinates exceed finite lattice bounds"));
+        }
+    }
+    Ok(())
+}
+
+fn active_posts(r: &Record, device: Affine, view_scale: f64) -> Vec<ActivePost> {
+    if r.post_effects.is_empty() {
+        return Vec::new();
+    }
+    let inv = bounded(device, 1e12).then(|| device.inverse());
+    r.post_effects
+        .iter()
+        .filter_map(|pe| match *pe {
+            PostEffect::LayerBlur { radius } => {
+                let sigma = (f64::from(crate::blur::sigma_from_radius(radius)) * view_scale) as f32;
+                (sigma >= 1e-4).then_some(ActivePost::LayerBlur { sigma })
+            }
+            PostEffect::Noise {
+                noise_type,
+                size,
+                density,
+                color,
+                secondary_color,
+                opacity,
+            } => {
+                let dev_to_layer = inv?;
+                (size > 0.0 && density > 0.0).then_some(ActivePost::Noise {
+                    noise_type,
+                    size,
+                    density,
+                    color,
+                    secondary_color,
+                    opacity,
+                    dev_to_layer,
+                })
+            }
+            PostEffect::Texture {
+                size,
+                radius,
+                clip_to_shape,
+            } => {
+                let dev_to_layer = inv?;
+                let radius_dev = (f64::from(radius) * view_scale) as f32;
+                (size > 0.0 && radius_dev >= 1e-4).then_some(ActivePost::Texture {
+                    size,
+                    radius_dev,
+                    clip_to_shape,
+                    dev_to_layer,
+                })
+            }
+        })
+        .collect()
+}
+
 struct PostIsoState {
     prev_open: Vec<Open>,
     prev_viewport: Rect,
@@ -628,7 +826,7 @@ struct PostIsoState {
     prev_full_viewport: Rect,
     out_area: IRect,
     content_rect: IRect,
-    blurs: Vec<f32>,
+    posts: Vec<ActivePost>,
     max_step: i32,
     phase: (i32, i32),
     blend: u32,
@@ -791,17 +989,8 @@ fn subtree_flushes_in_full_frame(
     if opacity <= 0.0 {
         return false;
     }
-    let active_blurs: Vec<f32> = r
-        .post_effects
-        .iter()
-        .filter_map(|pe| match *pe {
-            PostEffect::LayerBlur { radius } => {
-                let sigma = (f64::from(crate::blur::sigma_from_radius(radius)) * view_scale) as f32;
-                (sigma >= 1e-4).then_some(sigma)
-            }
-        })
-        .collect();
-    let has_post = !active_blurs.is_empty();
+    let active = active_posts(r, device, view_scale);
+    let has_post = !active.is_empty();
     let through = !has_post && r.blend == 0 && r.isolate() && r.opacity < 1.0 && store.subtree_has_blend(id);
     let isolate = has_post || r.blend != 0 || (r.isolate() && r.opacity < 1.0);
     if has_post {
@@ -831,12 +1020,9 @@ fn subtree_flushes_in_full_frame(
             };
             let content_bbox = device.transform_rect_bbox(bounds).inflate(inner_pad_dev, inner_pad_dev);
             let content_rect = IRect::around(content_bbox).inflate(2, 2);
-            let total_blur_pad: i32 = active_blurs
-                .iter()
-                .map(|&sigma| crate::shadow::blur_support_pad(sigma))
-                .sum();
+            let total_post_pad: i32 = active.iter().fold(0i32, |acc, p| acc.saturating_add(p.src_pad()));
             if !content_rect
-                .intersect(full_out.inflate(total_blur_pad, total_blur_pad))
+                .intersect(full_out.inflate(total_post_pad, total_post_pad))
                 .is_empty()
             {
                 return true;
@@ -1291,17 +1477,8 @@ impl<B: Backend> Walk<'_, B> {
         if opacity <= 0.0 {
             return Ok(());
         }
-        let active_blurs: Vec<f32> = r
-            .post_effects
-            .iter()
-            .filter_map(|pe| match *pe {
-                PostEffect::LayerBlur { radius } => {
-                    let sigma = (f64::from(crate::blur::sigma_from_radius(radius)) * view_scale) as f32;
-                    (sigma >= 1e-4).then_some(sigma)
-                }
-            })
-            .collect();
-        let has_post = !active_blurs.is_empty();
+        let active = active_posts(r, device, view_scale);
+        let has_post = !active.is_empty();
         let layer_blend = r.blend;
         let isolate = has_post || layer_blend != 0 || (r.isolate() && r.opacity < 1.0);
         let through = !has_post && layer_blend == 0 && r.isolate() && r.opacity < 1.0 && store.subtree_has_blend(id);
@@ -1336,26 +1513,52 @@ impl<B: Backend> Walk<'_, B> {
             };
             let content_bbox = device.transform_rect_bbox(bounds).inflate(inner_pad_dev, inner_pad_dev);
             let content_rect = IRect::around(content_bbox).inflate(2, 2);
-            let mut total_blur_pad = 0i32;
+            let max_side = self.store.limits.texture_side as i32;
+            let mut total_post_pad = 0i32;
             let mut max_step = 4i32;
-            for &sigma in &active_blurs {
-                if !out_area.is_empty() {
-                    crate::blur::validate_sigma(
-                        sigma,
-                        IRect {
-                            x0: 0,
-                            y0: 0,
-                            x1: (out_area.x1 - out_area.x0).max(1),
-                            y1: (out_area.y1 - out_area.y0).max(1),
-                        },
-                        crate::blur::EdgeMode::Zero,
-                    )?;
+            for pe in &active {
+                match *pe {
+                    ActivePost::LayerBlur { sigma } => {
+                        if !out_area.is_empty() {
+                            crate::blur::validate_sigma(
+                                sigma,
+                                IRect {
+                                    x0: 0,
+                                    y0: 0,
+                                    x1: (out_area.x1 - out_area.x0).max(1),
+                                    y1: (out_area.y1 - out_area.y0).max(1),
+                                },
+                                crate::blur::EdgeMode::Zero,
+                            )?;
+                        }
+                        if sigma > crate::blur::DIRECT_SIGMA_MAX {
+                            let (lvl, _) = crate::blur::choose_level(sigma, crate::blur::MAX_PYRAMID_LEVELS);
+                            max_step = max_step.max(1i32 << lvl.min(8));
+                        }
+                    }
+                    ActivePost::Texture {
+                        size,
+                        radius_dev,
+                        dev_to_layer,
+                        ..
+                    } => {
+                        if !radius_dev.is_finite() || radius_dev > max_side as f32 {
+                            return Err(EngineError::limit("texture radius exceeds finite target bounds"));
+                        }
+                        if !out_area.is_empty() {
+                            validate_texture_lattice(out_area, dev_to_layer, size)?;
+                        }
+                    }
+                    ActivePost::Noise { size, dev_to_layer, .. } => {
+                        let uv_scale =
+                            crate::noise::PIXELS_PER_UNIT / (f64::from(size) * crate::noise::NOISE_TILE as f64);
+                        let coeffs = (Affine::scale(uv_scale) * dev_to_layer).as_coeffs();
+                        if !uv_scale.is_finite() || coeffs.iter().any(|c| !(*c as f32).is_finite()) {
+                            return Err(EngineError::limit("noise scale exceeds finite coordinate bounds"));
+                        }
+                    }
                 }
-                total_blur_pad = total_blur_pad.saturating_add(crate::shadow::blur_support_pad(sigma));
-                if sigma > crate::blur::DIRECT_SIGMA_MAX {
-                    let (lvl, _) = crate::blur::choose_level(sigma, crate::blur::MAX_PYRAMID_LEVELS);
-                    max_step = max_step.max(1i32 << lvl.min(8));
-                }
+                total_post_pad = total_post_pad.saturating_add(pe.src_pad());
             }
             let whole_out = padded_out.intersect(self.full_frame);
             let whole_raw_src = if whole_out.is_empty() {
@@ -1366,7 +1569,7 @@ impl<B: Backend> Walk<'_, B> {
                     y1: 0,
                 }
             } else {
-                content_rect.intersect(whole_out.inflate(total_blur_pad, total_blur_pad))
+                content_rect.intersect(whole_out.inflate(total_post_pad, total_post_pad))
             };
             let whole_would_flush = !whole_raw_src.is_empty();
             if out_area.is_empty() {
@@ -1375,14 +1578,13 @@ impl<B: Backend> Walk<'_, B> {
                 }
                 return Ok(());
             }
-            let raw_src = content_rect.intersect(out_area.inflate(total_blur_pad, total_blur_pad));
+            let raw_src = content_rect.intersect(out_area.inflate(total_post_pad, total_post_pad));
             if raw_src.is_empty() {
                 if self.tiled && whole_would_flush {
                     self.backend.flush_barrier(&self.open);
                 }
                 return Ok(());
             }
-            let max_side = self.store.limits.texture_side as i32;
             let phase = view_grid_phase(self.frame.view, max_step);
             let src_area = align_area_checked(raw_src, max_step, phase, max_side)?;
             let step = max_step.max(1);
@@ -1427,7 +1629,7 @@ impl<B: Backend> Walk<'_, B> {
                 prev_full_viewport,
                 out_area,
                 content_rect,
-                blurs: active_blurs,
+                posts: active,
                 max_step,
                 phase,
                 blend: layer_blend,
@@ -1660,18 +1862,22 @@ impl<B: Backend> Walk<'_, B> {
             self.open = post.prev_open;
             if res.is_ok() {
                 let max_side = self.store.limits.texture_side as i32;
-                let mut steps = Vec::with_capacity(post.blurs.len());
-                let mut blur_res = Ok(());
+                let mut steps = Vec::with_capacity(post.posts.len());
+                let mut post_res = Ok(());
                 let mut grown = 0i32;
-                for (idx, &sigma) in post.blurs.iter().enumerate() {
-                    grown = grown.saturating_add(crate::shadow::blur_support_pad(sigma));
-                    let step_out = if idx + 1 == post.blurs.len() {
+                let total = post.posts.len();
+                let mut rem_pads = vec![0i32; total];
+                let mut suffix = 0i32;
+                for i in (0..total).rev() {
+                    rem_pads[i] = suffix;
+                    suffix = suffix.saturating_add(post.posts[i].src_pad());
+                }
+                for (idx, pe) in post.posts.into_iter().enumerate() {
+                    grown = grown.saturating_add(pe.grow_pad());
+                    let step_out = if idx + 1 == total {
                         Ok(post.out_area)
                     } else {
-                        let rem: i32 = post.blurs[idx + 1..]
-                            .iter()
-                            .map(|&s| crate::shadow::blur_support_pad(s))
-                            .sum();
+                        let rem = rem_pads[idx];
                         let raw = post
                             .content_rect
                             .inflate(grown, grown)
@@ -1679,17 +1885,17 @@ impl<B: Backend> Walk<'_, B> {
                         align_area_checked(raw, post.max_step, post.phase, max_side)
                     };
                     match step_out {
-                        Ok(area) => steps.push((area, sigma)),
+                        Ok(area) => steps.push(pe.into_step(area)),
                         Err(e) => {
-                            blur_res = Err(e);
+                            post_res = Err(e);
                             break;
                         }
                     }
                 }
-                if blur_res.is_ok() {
-                    blur_res = self.backend.blur_isolated(&steps);
+                if post_res.is_ok() {
+                    post_res = self.backend.apply_post_isolated(&steps);
                 }
-                if let Err(e) = blur_res {
+                if let Err(e) = post_res {
                     self.backend.abort_isolated();
                     return Err(e);
                 }
@@ -1843,7 +2049,7 @@ impl<B: Backend> Walk<'_, B> {
                     self.path(r, *of, device, 0.0)?
                 } else {
                     let p = r
-                        .entry_path(*of)
+                        .entry_path(*of, device)
                         .ok_or_else(|| EngineError::malformed(format!("no path {of}")))?;
                     self.spend(p.elements().len())?;
                     p
@@ -1864,7 +2070,7 @@ impl<B: Backend> Walk<'_, B> {
             }
             _ => {
                 let p = r
-                    .entry_path(i)
+                    .entry_path(i, device)
                     .ok_or_else(|| EngineError::malformed(format!("no path {i}")))?;
                 self.spend(p.elements().len())?;
                 Ok(p)

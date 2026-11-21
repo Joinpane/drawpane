@@ -190,6 +190,23 @@ pub fn gen_rec(r: &mut Rng, readers: bool) -> Rec {
         rec.post
             .push(Post::LayerBlur(if r.chance(0.2) { 0.0 } else { r.range(2.0, 14.0) }));
     }
+    if !readers && r.chance(0.07) {
+        rec.post.push(Post::Noise {
+            noise_type: r.below(3),
+            size: r.range(0.5, 4.0),
+            density: r.range(15.0, 85.0),
+            color: r.color(),
+            secondary_color: r.color(),
+            opacity: r.range(0.25, 1.0),
+        });
+    }
+    if !readers && r.chance(0.07) {
+        rec.post.push(Post::Texture {
+            size: r.range(2.0, 12.0),
+            radius: r.range(1.0, 8.0),
+            clip_to_shape: r.chance(0.5),
+        });
+    }
     if !readers && r.chance(0.08) {
         rec.layer_blend = 1 + r.below(17);
     }

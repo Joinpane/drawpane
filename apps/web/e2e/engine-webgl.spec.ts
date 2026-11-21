@@ -570,4 +570,285 @@ test.describe("WebGL2 backend waits, disposal, limits, and presentation", () => 
     expect(out.cap4096.okRender).toBe(true);
     expect(out.cap1024).toMatchObject({ ok: false, code: 9 });
   });
+
+  test("renders phase 3A passes (shadows, blur, blends, masks, noise, texture) on forced WebGL2 matching CPU", async ({
+    page,
+  }) => {
+    const errors: string[] = [];
+    page.on("pageerror", (e) => errors.push(e.message));
+    await page.goto(baseUrl);
+    const out = await page.evaluate(
+      async ({ modUrl, wasmUrl, facadeUrl }) => {
+        const m = await import(modUrl);
+        const facade = await import(facadeUrl);
+        const bytes = await (await fetch(wasmUrl)).arrayBuffer();
+        const mod = facade.loadEngineSync(m, bytes, "webgl");
+        const engine = new facade.RenderEngine(mod);
+        const canvas = document.createElement("canvas");
+        document.body.append(canvas);
+        const attached = await engine.attachGpu(canvas);
+        if (!attached.ok) return { error: `attachGpu: ${attached.message}` };
+        const w = 220;
+        const h = 160;
+        const cam = { zoom: 1.25, x: 3.5, y: -2.25, dpr: 1 };
+        const bg = [1, 1, 1, 1] as const;
+        const { ListWriter, FLAG, ROOT } = facade;
+        const list = new ListWriter(0xffffffff, 1);
+        list.reset();
+        // Backdrop with analytic drop + inner shadow.
+        list.set(1, ROOT, {
+          flags: 0,
+          opacity: 1,
+          transform: [1, 0, 0, 1, 8, 8],
+          width: 150,
+          height: 100,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [{ kind: "rect", w: 150, h: 100, radii: [10, 10, 10, 10], smoothing: 0 }],
+          ops: [
+            {
+              op: "dropShadow",
+              paths: [0],
+              evenOdd: false,
+              dx: 4,
+              dy: 6,
+              blur: 14,
+              color: [0.05, 0.08, 0.15, 0.55],
+              blend: 0,
+            },
+            {
+              op: "fill",
+              path: 0,
+              evenOdd: false,
+              paint: { kind: "solid", color: [0.92, 0.89, 0.84, 1] },
+            },
+            {
+              op: "innerShadow",
+              shape: 0,
+              hole: 0,
+              evenOdd: false,
+              dx: 2,
+              dy: 3,
+              blur: 8,
+              color: [0.15, 0.25, 0.55, 0.35],
+              blend: 0,
+            },
+          ],
+          coarse: [],
+        });
+        // Alpha picture mask with layer blur gating a multiply-blended textured + mono/duo noise layer.
+        list.set(2, ROOT, {
+          flags: FLAG.mask | FLAG.post,
+          opacity: 1,
+          transform: [1, 0, 0, 1, 14, 14],
+          width: 84,
+          height: 84,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [{ kind: "ellipse", w: 84, h: 84 }],
+          ops: [
+            {
+              op: "fill",
+              path: 0,
+              evenOdd: false,
+              paint: { kind: "solid", color: [1, 1, 1, 0.9] },
+            },
+          ],
+          coarse: [],
+          postEffects: [{ kind: "layerBlur", radius: 8 }],
+          mask: 4,
+        });
+        list.set(3, ROOT, {
+          flags: FLAG.blend | FLAG.post,
+          opacity: 1,
+          transform: [1, 0, 0, 1, 20, 20],
+          width: 72,
+          height: 72,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [{ kind: "rect", w: 72, h: 72, radii: [8, 8, 8, 8], smoothing: 0 }],
+          ops: [
+            {
+              op: "fill",
+              path: 0,
+              evenOdd: false,
+              paint: { kind: "solid", color: [0.88, 0.3, 0.22, 1] },
+            },
+          ],
+          coarse: [],
+          blend: 1, // multiply
+          postEffects: [
+            {
+              kind: "noise",
+              noiseType: 0,
+              size: 1.6,
+              density: 55,
+              color: [0.05, 0.05, 0.05, 0.65],
+              secondaryColor: [1, 1, 1, 1],
+              opacity: 1,
+            },
+            {
+              kind: "noise",
+              noiseType: 1,
+              size: 1.8,
+              density: 60,
+              color: [0.1, 0.1, 0.1, 0.6],
+              secondaryColor: [1, 1, 1, 0.7],
+              opacity: 1,
+            },
+            { kind: "texture", size: 4, radius: 5, clipToShape: false },
+          ],
+        });
+        // Luminance gradient mask gating a linear-dodge + HSL color + multi-noise + clipped texture badge.
+        list.set(4, ROOT, {
+          flags: FLAG.mask,
+          opacity: 1,
+          transform: [1, 0, 0, 1, 86, 18],
+          width: 74,
+          height: 74,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [{ kind: "rect", w: 74, h: 74, radii: [10, 10, 10, 10], smoothing: 0 }],
+          ops: [
+            {
+              op: "fill",
+              path: 0,
+              evenOdd: false,
+              paint: {
+                kind: "linear",
+                matrix: [74, 0, 0, 74, 0, 0],
+                stops: [
+                  { position: 0, color: [1, 1, 1, 1] },
+                  { position: 1, color: [0.2, 0.2, 0.2, 1] },
+                ],
+              },
+            },
+          ],
+          coarse: [],
+          mask: 5,
+        });
+        list.set(5, ROOT, {
+          flags: FLAG.blend | FLAG.post,
+          opacity: 1,
+          transform: [1, 0, 0, 1, 90, 22],
+          width: 66,
+          height: 66,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [{ kind: "rect", w: 66, h: 66, radii: [10, 10, 10, 10], smoothing: 0 }],
+          ops: [
+            {
+              op: "fill",
+              path: 0,
+              evenOdd: false,
+              paint: { kind: "solid", color: [0.28, 0.56, 0.92, 0.88] },
+            },
+            {
+              op: "fill",
+              path: 0,
+              evenOdd: false,
+              paint: { kind: "solid", color: [0.95, 0.52, 0.18, 0.5], blend: 14 },
+            },
+          ],
+          coarse: [],
+          blend: 16, // linear-dodge
+          postEffects: [
+            { kind: "layerBlur", radius: 26 },
+            {
+              kind: "noise",
+              noiseType: 2,
+              size: 1.4,
+              density: 70,
+              color: [0, 0, 0, 1],
+              secondaryColor: [1, 1, 1, 1],
+              opacity: 0.65,
+            },
+            { kind: "texture", size: 3.5, radius: 4, clipToShape: true },
+          ],
+        });
+        // Clipping frame closes mask scope and exercises 9 distinct mono-noise looks + linear-burn.
+        list.set(6, ROOT, {
+          flags: FLAG.endsMask | FLAG.blend | FLAG.post,
+          opacity: 1,
+          transform: [1, 0, 0, 1, 12, 92],
+          width: 64,
+          height: 30,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [{ kind: "rect", w: 64, h: 30, radii: [4, 4, 4, 4], smoothing: 0 }],
+          ops: [
+            {
+              op: "fill",
+              path: 0,
+              evenOdd: false,
+              paint: { kind: "solid", color: [0.7, 0.72, 0.78, 1] },
+            },
+          ],
+          coarse: [],
+          blend: 17, // linear-burn
+          postEffects: Array.from({ length: 9 }, (_, i) => ({
+            kind: "noise" as const,
+            noiseType: 0,
+            size: 1.5,
+            density: 20 + i * 8,
+            color: [(i * 0.09) % 1, (0.2 + i * 0.07) % 1, (0.4 + i * 0.06) % 1, 0.45] as const,
+            secondaryColor: [1, 1, 1, 1] as const,
+            opacity: 1,
+          })),
+        });
+        list.order(ROOT, [1, 2, 3, 4, 5, 6]);
+        const applied = engine.apply(list.finish());
+        if (!applied.ok) return { error: `apply: ${applied.message}` };
+        const cpu = engine.renderCpu(w, h, cam, bg, false);
+        if (!cpu.ok) return { error: `renderCpu: ${cpu.message}` };
+        const gpu = engine.renderGpu(w, h, cam, bg, false);
+        if (!gpu.ok) return { error: `renderGpu: ${gpu.message}` };
+        const gpuPx = await engine.gpuPixels();
+        if (!gpuPx.ok) return { error: `gpuPixels: ${gpuPx.message}` };
+        const health = engine.gpuCheck();
+        const a = cpu.value.pixels;
+        const b = gpuPx.value;
+        let sum = 0;
+        let maxDiff = 0;
+        let severe = 0;
+        for (let i = 0; i < a.length; i += 4) {
+          const d = Math.max(
+            Math.abs((a[i] ?? 0) - (b[i] ?? 0)),
+            Math.abs((a[i + 1] ?? 0) - (b[i + 1] ?? 0)),
+            Math.abs((a[i + 2] ?? 0) - (b[i + 2] ?? 0)),
+            Math.abs((a[i + 3] ?? 0) - (b[i + 3] ?? 0)),
+          );
+          sum += d;
+          if (d > maxDiff) maxDiff = d;
+          if (d > 8) severe++;
+        }
+        const mean = sum / (w * h);
+        engine.dispose();
+        return {
+          backend: attached.value.backend,
+          healthOk: health.ok,
+          mean,
+          maxDiff,
+          severe,
+        };
+      },
+      {
+        modUrl: "/webgl/engine.js",
+        wasmUrl: "/webgl/engine_bg.wasm",
+        facadeUrl: "/facade.js",
+      },
+    );
+    expect(errors).toEqual([]);
+    expect(out.error).toBeUndefined();
+    expect(out.backend).toBe("webgl2");
+    expect(out.healthOk).toBe(true);
+    expect(out.mean).toBeLessThan(0.25);
+    expect(out.severe).toBe(0);
+  });
 });

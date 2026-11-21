@@ -47,7 +47,8 @@ export const MASK = {
   alpha: 4,
   luminance: 5,
 } as const;
-export const POST = { layerBlur: 1 } as const;
+export const POST = { layerBlur: 1, noise: 2, texture: 3 } as const;
+export const NOISE_TYPE = { mono: 0, duo: 1, multi: 2 } as const;
 
 export const PATH = {
   path: 1,
@@ -285,7 +286,23 @@ export type WireOp =
       readonly blend: number;
     };
 
-export type WirePostEffect = { readonly kind: "layerBlur"; readonly radius: number };
+export type WirePostEffect =
+  | { readonly kind: "layerBlur"; readonly radius: number }
+  | {
+      readonly kind: "noise";
+      readonly noiseType: number;
+      readonly size: number;
+      readonly density: number;
+      readonly color: Rgba;
+      readonly secondaryColor: Rgba;
+      readonly opacity: number;
+    }
+  | {
+      readonly kind: "texture";
+      readonly size: number;
+      readonly radius: number;
+      readonly clipToShape: boolean;
+    };
 
 export interface WireRecord {
   readonly flags: number;
@@ -448,6 +465,21 @@ export class ListWriter {
             case "layerBlur":
               this.u32(POST.layerBlur);
               this.f32(Math.max(0, pe.radius));
+              break;
+            case "noise":
+              this.u32(POST.noise);
+              this.u32(pe.noiseType);
+              this.f32(Math.max(0, pe.size));
+              this.f32(Math.min(100, Math.max(0, pe.density)));
+              this.rgba(pe.color);
+              this.rgba(pe.secondaryColor);
+              this.f32(Math.min(1, Math.max(0, pe.opacity)));
+              break;
+            case "texture":
+              this.u32(POST.texture);
+              this.f32(Math.max(0, pe.size));
+              this.f32(Math.max(0, pe.radius));
+              this.u32(pe.clipToShape ? 1 : 0);
               break;
           }
         }

@@ -135,6 +135,22 @@ const LOOKS: Array<[PropName, unknown]> = [
     ],
   ],
   ["effects", [{ type: "layer-blur", radius: 8 }]],
+  [
+    "effects",
+    [
+      {
+        type: "noise",
+        noiseType: "duo",
+        size: 1.5,
+        density: 60,
+        color: "#00000080",
+        secondaryColor: "#ffffff80",
+        opacity: 80,
+      },
+    ],
+  ],
+  ["effects", [{ type: "texture", size: 4, radius: 6, clipToShape: false }]],
+  ["effects", [{ type: "texture", size: 3, radius: 5, clipToShape: true }]],
   ["effects", []],
   ["blendMode", "multiply"],
   ["blendMode", "linear-dodge"],
@@ -561,5 +577,66 @@ describe.skipIf(!built("worker") && !process.env.CI)("the display-list builder",
     ]);
     const withZero = new DisplayListBuilder(new Scene(doc), measurer).build("p1");
     expect(withZero.length).toBe(plain.length);
+  });
+
+  it("encodes and renders noise (mono, duo, multi) and texture (clipped and unclipped) cleanly", () => {
+    const doc = new Doc();
+    seed(doc);
+    const frame = doc.childIds("p1")[0] as string;
+    doc.apply([
+      create("rect", frame, "a0", {
+        x: 10,
+        y: 10,
+        width: 70,
+        height: 50,
+        fills: [{ type: "solid", color: "#3366cc" }],
+        effects: [
+          {
+            type: "noise",
+            noiseType: "mono",
+            size: 1.5,
+            density: 70,
+            color: "#00000088",
+            secondaryColor: "#ffffff",
+            opacity: 100,
+          },
+          {
+            type: "noise",
+            noiseType: "duo",
+            size: 2,
+            density: 50,
+            color: "#11111180",
+            secondaryColor: "#eeeeee80",
+            opacity: 100,
+          },
+          {
+            type: "noise",
+            noiseType: "multi",
+            size: 1.2,
+            density: 65,
+            color: "#000000",
+            secondaryColor: "#ffffff",
+            opacity: 75,
+          },
+        ],
+      }),
+      create("ellipse", frame, "a1", {
+        x: 90,
+        y: 20,
+        width: 60,
+        height: 60,
+        fills: [{ type: "solid", color: "#dd4433" }],
+        effects: [
+          { type: "texture", size: 4, radius: 6, clipToShape: false },
+          { type: "texture", size: 3, radius: 4, clipToShape: true },
+        ],
+      }),
+    ]);
+    const builder = new DisplayListBuilder(new Scene(doc), measurer);
+    const engine = new RenderEngine(mod);
+    expect(engine.apply(builder.build("p1")).ok).toBe(true);
+    expect(builder.supported).toBe(true);
+    const r = engine.renderCpu(W, H, camera, BG);
+    expect(r.ok).toBe(true);
   });
 });

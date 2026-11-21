@@ -386,7 +386,7 @@ pub enum Op {
         stroke: Option<Box<StrokeStyle>>,
     },
     /// Inner shadow clipped to `shape`: the complement of `hole` (`None` when spread shrinks the
-    /// hole to empty), offset in page units by `(dx, dy)` and blurred with `sigma = blur / 2`.
+    /// hole to empty), offset in page units by `(dx, dy)` and blurred using decision 0013's sigma.
     InnerShadow {
         shape: u32,
         hole: Option<u32>,
@@ -403,8 +403,25 @@ pub enum Op {
 /// children together), matching `packages/editor/src/post-effects.ts`.
 #[derive(Clone, Debug)]
 pub enum PostEffect {
-    /// Gaussian layer blur with Figma `radius` (page units; `sigma = radius / 2 * view_scale`).
+    /// Gaussian layer blur with Figma `radius` in page units, using decision 0013's sigma.
     LayerBlur { radius: f32 },
+    /// Grain noise composited with `source-atop` in layer coordinates (`noise.ts`).
+    Noise {
+        /// `0` mono, `1` duo, `2` multi.
+        noise_type: u32,
+        size: f32,
+        density: f32,
+        color: Rgba,
+        secondary_color: Rgba,
+        /// Multi-mode opacity in `0..=1`.
+        opacity: f32,
+    },
+    /// Perlin displacement roughening edges and detail in layer coordinates (`texture.ts`).
+    Texture {
+        size: f32,
+        radius: f32,
+        clip_to_shape: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -521,13 +538,40 @@ impl Record {
         pad
     }
 
-    /// Page-unit reach added by post-effects (`layer-blur`) outside the finished layer picture.
+    /// Page-unit reach added by post-effects (`layer-blur`, unclipped `texture`) outside the
+    /// finished layer picture.
     pub fn post_pad(&self) -> f64 {
         let mut pad = 0.0f64;
         for pe in &self.post_effects {
             match *pe {
                 PostEffect::LayerBlur { radius } if radius > 0.0 => {
                     pad += f64::from(radius) * 2.25 + 6.0;
+                }
+                PostEffect::Texture {
+                    size,
+                    radius,
+                    clip_to_shape: false,
+                } if size > 0.0 && radius > 0.0 => {
+                    pad += f64::from(radius) + 2.0;
+                }
+                _ => {}
+            }
+        }
+        pad
+    }
+
+    /// Page-unit displacement/blur reach for dirty invalidation of descendants: includes BOTH
+    /// clipped and unclipped `texture` displacement radius (changing a child pixel inside a
+    /// clipped texture can shift into neighboring pixels up to `radius` away).
+    pub fn post_dirty_pad(&self) -> f64 {
+        let mut pad = 0.0f64;
+        for pe in &self.post_effects {
+            match *pe {
+                PostEffect::LayerBlur { radius } if radius > 0.0 => {
+                    pad += f64::from(radius) * 2.25 + 6.0;
+                }
+                PostEffect::Texture { size, radius, .. } if size > 0.0 && radius > 0.0 => {
+                    pad += f64::from(radius) + 2.0;
                 }
                 _ => {}
             }
@@ -740,11 +784,11 @@ impl Record {
     }
 
     /// An entry as a path in the record's units (glyph runs are built by the glyph store).
-    pub fn entry_path(&self, i: u32) -> Option<BezPath> {
+    pub fn entry_path(&self, i: u32, device: Affine) -> Option<BezPath> {
         match self.paths.get(i as usize)? {
             PathEntry::Path(p) => Some(p.to_bez()),
             PathEntry::Rect { w, h, radii, smoothing } => Some(geometry::rounded_rect(*w, *h, *radii, *smoothing)),
-            PathEntry::Ellipse { w, h } => Some(geometry::ellipse(*w, *h)),
+            PathEntry::Ellipse { w, h } => Some(geometry::ellipse(*w, *h, device)),
             PathEntry::Box {
                 x,
                 y,
@@ -760,7 +804,7 @@ impl Record {
                 Some(p)
             }
             PathEntry::Oval { x, y, w, h } => {
-                let mut p = geometry::ellipse(*w, *h);
+                let mut p = geometry::ellipse(*w, *h, device);
                 if *x != 0.0 || *y != 0.0 {
                     p.apply_affine(Affine::translate((f64::from(*x), f64::from(*y))));
                 }
@@ -1155,6 +1199,42 @@ pub fn decode(r: &mut Reader, limits: &Limits, minor: u16) -> Result<Record> {
                 1 => {
                     let radius = r.f32_nonneg()?;
                     post_effects.push(PostEffect::LayerBlur { radius });
+                }
+                2 => {
+                    let noise_type = r.u32()?;
+                    if noise_type > 2 {
+                        return Err(EngineError::malformed(format!("unknown noise type {noise_type}")));
+                    }
+                    let size = r.f32_nonneg()?;
+                    let density = r.f32_nonneg()?.min(100.0);
+                    let color = r.rgba()?;
+                    let secondary_color = r.rgba()?;
+                    let opacity = r.f32()?.clamp(0.0, 1.0);
+                    post_effects.push(PostEffect::Noise {
+                        noise_type,
+                        size,
+                        density,
+                        color,
+                        secondary_color,
+                        opacity,
+                    });
+                }
+                3 => {
+                    let size = r.f32_nonneg()?;
+                    let radius = r.f32_nonneg()?;
+                    // Match the editor's effect schema before coordinates reach the shaders.
+                    if !(0.5..=50.0).contains(&size) || radius > 100.0 {
+                        return Err(EngineError::limit("texture size or radius exceeds the wire range"));
+                    }
+                    let clip_u32 = r.u32()?;
+                    if clip_u32 > 1 {
+                        return Err(EngineError::malformed(format!("invalid texture clip flag {clip_u32}")));
+                    }
+                    post_effects.push(PostEffect::Texture {
+                        size,
+                        radius,
+                        clip_to_shape: clip_u32 != 0,
+                    });
                 }
                 k => return Err(EngineError::malformed(format!("unknown post effect kind {k}"))),
             }

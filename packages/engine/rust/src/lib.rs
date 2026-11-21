@@ -22,10 +22,12 @@ pub mod kernels;
 pub mod limits;
 pub mod mask;
 pub mod masks;
+pub mod noise;
 pub mod png;
 pub mod record;
 pub mod shadow;
 pub mod store;
+pub mod texture;
 pub mod tiles;
 pub mod wire;
 

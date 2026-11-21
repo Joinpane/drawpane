@@ -1,7 +1,7 @@
 //! Reference separable Gaussian blur and shareable blur pyramids (decisions 0013 and 0040).
 //!
 //! - **Contract:** `BlurSpec.sigma` is the Gaussian standard deviation in device pixels; effects
-//!   convert Figma blur radius via the shared `figma_blur_sigma` helper (`0.45 * radius`, decision
+//!   convert Figma blur radius via the shared `sigma_from_radius` helper (`0.45 * radius`, decision
 //!   0013 revision). The kernel is a normalised discrete Gaussian over `±ceil(3.5 * sigma)`,
 //!   separable, premultiplied RGBA8 between passes with f32 accumulation.
 //!   Extending support from `3 * sigma` to `3.5 * sigma` removes the ~0.7 LSB `3 * sigma`

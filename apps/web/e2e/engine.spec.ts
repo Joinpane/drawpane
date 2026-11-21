@@ -17,6 +17,7 @@
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { outsideTolerance, score } from "@drawpane/engine/compare";
+import { OP } from "@drawpane/engine/wire";
 import { expect, type Page, test } from "@playwright/test";
 import { dropImage, freshInstance, type Instance } from "./fresh-instance";
 
@@ -1343,6 +1344,367 @@ test.describe
           (ids) =>
             (window as unknown as W).drawpane.commit(ids.map((id) => ({ op: "delete", id }))),
           scenes.map((s) => s.frame),
+        );
+      }
+    });
+
+    test("renders the phase 3A effect substack across CPU, GPU, and canvas", async () => {
+      // Composes layer blur, separable blend (multiply), linear blend (linear-dodge),
+      // alpha and luminance masks, noise (mono, duo, and multi), and texture (unclipped + clipped)
+      // together inside a translucent faded frame over visible backdrops at fractional DPR.
+      // Backdrop readers (background blur and glass) arrive in phase 3B (#237 / #240).
+      const scene = await page.evaluate(() => {
+        const w = window as unknown as W;
+        const e = w.drawpane;
+        const ox = 8200;
+        const root = e.createLayer("frame", { x: ox, y: 0, width: 260, height: 180 }, e.s.pageId, {
+          fills: [{ type: "solid", color: "#223b66" }],
+          clipContent: true,
+        });
+        const faded = e.createLayer("frame", { x: ox + 12, y: 12, width: 236, height: 156 }, root, {
+          // White premultiplies to the alpha byte exactly on both Vello backends. The
+          // frame still leaves the parent backdrop visible through its fill.
+          fills: [{ type: "solid", color: "#ffffff80" }],
+          cornerRadius: 12,
+          opacity: 0.85,
+          clipContent: true,
+        });
+        // Alpha mask with layer blur gating a backdrop card plus a multiply-blended noisy textured card.
+        e.createLayer("ellipse", { x: ox + 22, y: 24, width: 126, height: 126 }, faded, {
+          fills: [{ type: "solid", color: "#ffffffdd" }],
+          isMask: true,
+          maskType: "alpha",
+          effects: [{ type: "layer-blur", radius: 10 }],
+        });
+        e.createLayer("rect", { x: ox + 26, y: 28, width: 118, height: 112 }, faded, {
+          fills: [{ type: "solid", color: "#44a08d" }],
+          cornerRadius: 10,
+          effects: [
+            {
+              type: "noise",
+              noiseType: "mono",
+              size: 1.8,
+              density: 55,
+              color: "#1a1a1a70",
+              secondaryColor: "#ffffff",
+              opacity: 100,
+            },
+          ],
+        });
+        const mulCard = e.createLayer(
+          "rect",
+          { x: ox + 36, y: 36, width: 118, height: 96 },
+          faded,
+          {
+            fills: [{ type: "solid", color: "#e54d38" }],
+            cornerRadius: 10,
+            blendMode: "multiply",
+            effects: [
+              {
+                type: "noise",
+                noiseType: "duo",
+                size: 1.6,
+                density: 65,
+                color: "#00000080",
+                secondaryColor: "#ffffff88",
+                opacity: 100,
+              },
+              { type: "texture", size: 4, radius: 6, clipToShape: false },
+            ],
+          },
+        );
+        // Luminance gradient mask gating a backdrop plus a linear-dodge blurred clipped-texture badge.
+        e.createLayer("rect", { x: ox + 116, y: 26, width: 118, height: 122 }, faded, {
+          fills: [
+            {
+              type: "linear",
+              from: { x: 0, y: 0 },
+              to: { x: 1, y: 1 },
+              stops: [
+                { position: 0, color: "#ffffff" },
+                { position: 1, color: "#242424" },
+              ],
+            },
+          ],
+          cornerRadius: 12,
+          isMask: true,
+          maskType: "luminance",
+        });
+        e.createLayer("rect", { x: ox + 118, y: 30, width: 110, height: 112 }, faded, {
+          fills: [{ type: "solid", color: "#3d2c6d" }],
+          cornerRadius: 12,
+        });
+        const dodgeCard = e.createLayer(
+          "rect",
+          { x: ox + 126, y: 40, width: 96, height: 92 },
+          faded,
+          {
+            fills: [{ type: "solid", color: "#4e96f0dd" }],
+            cornerRadius: 14,
+            blendMode: "linear-dodge",
+            effects: [
+              { type: "layer-blur", radius: 6 },
+              {
+                type: "noise",
+                noiseType: "multi",
+                size: 1.4,
+                density: 70,
+                color: "#000000",
+                secondaryColor: "#ffffff",
+                opacity: 65,
+              },
+              { type: "texture", size: 3.5, radius: 5, clipToShape: true },
+            ],
+          },
+        );
+        return { root, mulCard, dodgeCard, ox };
+      });
+      await frames(page, 4);
+      try {
+        const res = await page.evaluate(async ({ root, mulCard, dodgeCard, ox }) => {
+          const w = window as unknown as W;
+          const opts = {
+            pageId: w.drawpane.s.pageId,
+            rect: { x: ox, y: 0, width: 260, height: 180 },
+            scale: 1.25,
+            width: 325,
+            height: 225,
+          };
+          const cpu = await w.drawpaneEngine.render({
+            ...opts,
+            backend: "cpu",
+            background: [1, 1, 1, 1],
+            ids: [root],
+          });
+          const gpu = await w.drawpaneEngine.render({
+            ...opts,
+            backend: "gpu",
+            background: [1, 1, 1, 1],
+            ids: [root],
+          });
+          const canvas = await w.drawpaneEngine.canvasRender({ ...opts, background: "#ffffff" });
+          // Temporarily switch both blends to normal to confirm blends materially alter pixels.
+          w.drawpane.commit([
+            { op: "set", id: mulCard, prop: "blendMode", value: "normal" },
+            { op: "set", id: dodgeCard, prop: "blendMode", value: "normal" },
+          ]);
+          const unblended = await w.drawpaneEngine.render({
+            ...opts,
+            backend: "gpu",
+            background: [1, 1, 1, 1],
+            ids: [root],
+          });
+          return { cpu, gpu, canvas, unblended };
+        }, scene);
+        expect(res.cpu.ok, `phase-3a-substack cpu: ${res.cpu.error}`).toBe(true);
+        expect(res.gpu.ok, `phase-3a-substack gpu: ${res.gpu.error}`).toBe(true);
+        expect(res.unblended.ok, `phase-3a-substack unblended: ${res.unblended.error}`).toBe(true);
+        const cpuPx = Buffer.from(res.cpu.rgba ?? "", "base64");
+        const gpuPx = Buffer.from(res.gpu.rgba ?? "", "base64");
+        const canPx = Buffer.from(res.canvas, "base64");
+        const unblendedPx = Buffer.from(res.unblended.rgba ?? "", "base64");
+        const cg = score(cpuPx, gpuPx, 325, 225);
+        expect(
+          outsideTolerance(cg),
+          `phase-3a-substack CPU vs GPU: mean=${cg.mean.toFixed(4)} p99=${cg.p99} tile=${cg.worstTile.toFixed(3)}`,
+        ).toEqual([]);
+        const vsCan = score(gpuPx, canPx, 325, 225);
+        expect(
+          vsCan.mean,
+          `phase-3a-substack GPU vs canvas: mean=${vsCan.mean.toFixed(3)} tile=${vsCan.worstTile.toFixed(2)}`,
+        ).toBeLessThan(2.5);
+        const blendDelta = score(gpuPx, unblendedPx, 325, 225);
+        expect(
+          blendDelta.mean,
+          `phase-3a-substack blends must visibly change pixels (mean=${blendDelta.mean.toFixed(3)})`,
+        ).toBeGreaterThan(2.0);
+      } finally {
+        await page.evaluate(
+          (id) => (window as unknown as W).drawpane.commit([{ op: "delete", id }]),
+          scene.root,
+        );
+      }
+    });
+
+    test("blends masked content over glass without feeding glass into the next lens", async () => {
+      test.skip(!Object.hasOwn(OP, "glass"), "The glass display-list reader lands in PR #237.");
+      const result = await page.evaluate(async () => {
+        const { drawpane: e, drawpaneEngine: engine } = window as unknown as W;
+        const x = 10_400;
+        const width = 96;
+        const height = 64;
+        const root = e.createLayer("frame", { x, y: 0, width, height }, e.s.pageId, {
+          fills: [{ type: "solid", color: "#d0d0d0" }],
+          clipContent: true,
+        });
+        try {
+          const faded = e.createLayer("frame", { x, y: 0, width, height }, root, {
+            opacity: 0.75,
+            fills: [],
+          });
+          const rect = (left: number, top: number, w: number, h: number, props: object) =>
+            e.createLayer("rect", { x: x + left, y: top, width: w, height: h }, faded, props);
+          const glass = (frost: number) => ({
+            type: "glass",
+            angle: 0,
+            intensity: 0,
+            refraction: 80,
+            depth: 8,
+            dispersion: 0,
+            frost,
+            splay: 0,
+          });
+          const mask = rect(4, 4, 88, 56, {
+            isMask: true,
+            maskType: "alpha",
+            fills: [{ type: "solid", color: "#ffffff" }],
+          });
+          rect(0, 8, 4, 48, { fills: [{ type: "solid", color: "#203040" }] });
+          for (let left = 4; left < 92; left += 8) {
+            rect(left, 4, 8, 56, {
+              fills: [{ type: "solid", color: left % 16 === 4 ? "#203040" : "#b4b8be" }],
+            });
+          }
+          const lower = rect(8, 8, 68, 48, { fills: [], cornerRadius: 8, effects: [glass(18)] });
+          const multiply = rect(12, 10, 64, 42, {
+            fills: [{ type: "solid", color: "#70a6d0a0" }],
+            blendMode: "multiply",
+          });
+          const dodge = rect(38, 13, 40, 28, {
+            fills: [{ type: "solid", color: "#24102660" }],
+            blendMode: "linear-dodge",
+            effects: [{ type: "layer-blur", radius: 4 }],
+          });
+          e.createLayer("frame", { x, y: 0, width, height }, faded, {
+            clipContent: true,
+            fills: [],
+          });
+          const upper = rect(24, 16, 36, 32, { fills: [], cornerRadius: 6, effects: [glass(4)] });
+          const render = (backend: "cpu" | "gpu" | "webgl") =>
+            engine.render({
+              pageId: e.s.pageId,
+              ids: [root],
+              rect: { x, y: 0, width, height },
+              scale: 1,
+              width,
+              height,
+              background: [1, 1, 1, 1],
+              backend,
+            });
+          const full = await render("cpu");
+          if (!full.ok) return { full, width, height };
+          const gpu = await render("gpu");
+          const webgl = await render("webgl");
+          e.setProp([lower], "effects", [], "Disable lower glass");
+          const withoutLower = await render("cpu");
+          e.setProp([lower], "effects", [glass(18)], "Restore lower glass");
+          e.setProp([upper], "effects", [], "Disable upper glass");
+          const withoutUpper = await render("cpu");
+          e.setProp([upper], "effects", [glass(4)], "Restore upper glass");
+          e.setProp([multiply, dodge], "blendMode", "normal", "Disable layer blends");
+          const withoutBlends = await render("cpu");
+          e.setProp([multiply], "blendMode", "multiply", "Restore multiply");
+          e.setProp([dodge], "blendMode", "linear-dodge", "Restore linear dodge");
+          e.setProp([mask], "isMask", false, "Disable the alpha mask");
+          const withoutMask = await render("cpu");
+          return {
+            full,
+            gpu,
+            webgl,
+            withoutLower,
+            withoutUpper,
+            withoutBlends,
+            withoutMask,
+            width,
+            height,
+          };
+        } finally {
+          e.commit([{ op: "delete", id: root }]);
+        }
+      });
+      const pixels = (render: typeof result.full | undefined) => {
+        expect(render?.ok, render?.error).toBe(true);
+        return Buffer.from(render?.rgba ?? "", "base64");
+      };
+      const { width, height } = result;
+      const full = pixels(result.full);
+      const lower = pixels(result.withoutLower);
+      const upper = pixels(result.withoutUpper);
+      const normal = pixels(result.withoutBlends);
+      const unmasked = pixels(result.withoutMask);
+      for (const render of [result.gpu, result.webgl]) {
+        expect(outsideTolerance(score(full, pixels(render), width, height))).toEqual([]);
+      }
+      for (let y = 22; y < 42; y++) {
+        const start = (y * width + 30) * 4;
+        expect(full.subarray(start, start + 24 * 4)).toEqual(lower.subarray(start, start + 24 * 4));
+      }
+      expect(score(full, lower, width, height).mean).toBeGreaterThan(1);
+      expect(score(full, upper, width, height).mean).toBeGreaterThan(0.25);
+      expect(score(full, normal, width, height).mean).toBeGreaterThan(1);
+      const outsideMask = (12 * width + 1) * 4;
+      expect([...full.subarray(outsideMask, outsideMask + 4)]).toEqual([208, 208, 208, 255]);
+      expect(unmasked[outsideMask]).toBeLessThan(100);
+    });
+
+    test("retires evicted GPU noise tiles cleanly across 9 distinct mono noise effects on one layer", async () => {
+      const scene = await page.evaluate(() => {
+        const w = window as unknown as W;
+        const e = w.drawpane;
+        const ox = 8600;
+        const root = e.createLayer("frame", { x: ox, y: 0, width: 64, height: 64 }, e.s.pageId, {
+          fills: [{ type: "solid", color: "#808080" }],
+          clipContent: true,
+          effects: Array.from({ length: 9 }, (_, i) => ({
+            type: "noise" as const,
+            noiseType: "mono" as const,
+            size: 1.5,
+            density: 20 + i * 8,
+            color: `#${((i * 23) & 255).toString(16).padStart(2, "0")}${(((i + 3) * 29) & 255).toString(16).padStart(2, "0")}${(((i + 6) * 31) & 255).toString(16).padStart(2, "0")}80`,
+            secondaryColor: "#ffffff",
+            opacity: 100,
+          })),
+        });
+        return { root, ox };
+      });
+      await frames(page, 4);
+      try {
+        const res = await page.evaluate(async ({ root, ox }) => {
+          const w = window as unknown as W;
+          const opts = {
+            pageId: w.drawpane.s.pageId,
+            rect: { x: ox, y: 0, width: 64, height: 64 },
+            scale: 1,
+            width: 64,
+            height: 64,
+          };
+          const cpu = await w.drawpaneEngine.render({
+            ...opts,
+            backend: "cpu",
+            background: [1, 1, 1, 1],
+            ids: [root],
+          });
+          const gpu = await w.drawpaneEngine.render({
+            ...opts,
+            backend: "gpu",
+            background: [1, 1, 1, 1],
+            ids: [root],
+          });
+          return { cpu, gpu };
+        }, scene);
+        expect(res.cpu.ok, `9-noise cpu: ${res.cpu.error}`).toBe(true);
+        expect(res.gpu.ok, `9-noise gpu: ${res.gpu.error}`).toBe(true);
+        const cpuPx = Buffer.from(res.cpu.rgba ?? "", "base64");
+        const gpuPx = Buffer.from(res.gpu.rgba ?? "", "base64");
+        const cg = score(cpuPx, gpuPx, 64, 64);
+        expect(
+          outsideTolerance(cg),
+          `9-noise CPU vs GPU: mean=${cg.mean.toFixed(4)} p99=${cg.p99} tile=${cg.worstTile.toFixed(3)}`,
+        ).toEqual([]);
+      } finally {
+        await page.evaluate(
+          (id) => (window as unknown as W).drawpane.commit([{ op: "delete", id }]),
+          scene.root,
         );
       }
     });

@@ -199,13 +199,19 @@ pub struct Store {
     structure: u64,
 }
 
-struct IsoAncestor {
+struct PassAncestor {
     id: u32,
+    isolated: bool,
     had_pass: bool,
     had_pad: f64,
     had_blend: bool,
     before_rect: Option<Rect>,
     order: (u32, u32),
+}
+
+struct PageScope {
+    before_rect: Option<Rect>,
+    replay: bool,
 }
 
 /// What one message's commands do as they're applied: the undo log and where pixels change. A
@@ -217,11 +223,13 @@ struct Txn {
     before_seen: HashSet<u32>,
     mask_siblings_seen: HashSet<u32>,
     touched: Vec<u32>,
-    /// Isolated faded ancestors of touched nodes, recorded before edits so if a descendant's
-    /// edit flips `subtree_has_pass` (switching between Vello opacity and offscreen isolation),
-    /// the ancestor's whole extent joins the dirty set.
-    iso_ancestors: Vec<IsoAncestor>,
-    iso_seen: HashSet<u32>,
+    /// Ancestors with isolation or offscreen work. A patch can change their compositing mode
+    /// or culling bounds, which can move a flush in their enclosing picture.
+    pass_ancestors: Vec<PassAncestor>,
+    pass_ancestor_seen: HashSet<u32>,
+    // A descendant edit can change where an offscreen pass quantizes this scope.
+    iso_replay: HashSet<u32>,
+    page_scope: Option<PageScope>,
     full: bool,
 }
 
@@ -234,8 +242,10 @@ impl Txn {
             before_seen: HashSet::new(),
             mask_siblings_seen: HashSet::new(),
             touched: Vec::new(),
-            iso_ancestors: Vec::new(),
-            iso_seen: HashSet::new(),
+            pass_ancestors: Vec::new(),
+            pass_ancestor_seen: HashSet::new(),
+            iso_replay: HashSet::new(),
+            page_scope: None,
             full: false,
         }
     }
@@ -391,19 +401,31 @@ impl Store {
                 touched: Vec::new(),
             });
         }
-        for IsoAncestor {
+        for PassAncestor {
             id: a,
+            isolated,
             had_pass,
             had_pad,
             had_blend,
             before_rect,
             order: (order, end),
-        } in txn.iso_ancestors
+        } in txn.pass_ancestors
         {
-            if self.nodes.contains_key(&a)
-                && (self.subtree_has_pass(a) != had_pass
-                    || self.subtree_has_blend(a) != had_blend
-                    || (self.bounds_and_pad(a).1 - had_pad).abs() > 1e-6)
+            if !self.nodes.contains_key(&a) {
+                continue;
+            }
+            let has_pass = self.subtree_has_pass(a);
+            let mode_changed = has_pass != had_pass || self.subtree_has_blend(a) != had_blend;
+            // A scope that changes mode or bounds can start or stop flushing its parent when
+            // culled at a viewport edge. Its footprint alone cannot bound that rounding change.
+            if let Some(page) = &mut txn.page_scope
+                && (had_pass || has_pass)
+                && (mode_changed || self.dirty_extent(a) != before_rect)
+            {
+                page.replay = true;
+            }
+            if isolated
+                && (txn.iso_replay.contains(&a) || mode_changed || (self.bounds_and_pad(a).1 - had_pad).abs() > 1e-6)
             {
                 if let Some(rect) = before_rect {
                     txn.before.push(Dirty {
@@ -422,7 +444,30 @@ impl Store {
             }
         }
         let touched = txn.touched.clone();
-        let changes = self.changes(std::mem::take(&mut txn.before), &txn.touched);
+        let mut changes = self.changes(std::mem::take(&mut txn.before), &txn.touched);
+        if let Some(PageScope {
+            before_rect,
+            replay: true,
+        }) = txn.page_scope
+        {
+            // A root flush quantizes the current Vello scene across the target. Any overlapping
+            // draws on either side of that boundary can round differently after it moves.
+            let page_rect = before_rect
+                .into_iter()
+                .chain(self.world_extent(ROOT))
+                .reduce(|before, after| before.union(after));
+            if let Some(rect) = page_rect {
+                // This entry also reaches every reader over it. Covered record changes would
+                // only add redundant rectangles to the same invalidation sweep.
+                changes.retain(|d| rect.union(d.rect) != rect);
+                changes.push(Dirty {
+                    rect,
+                    order: 0,
+                    end: u32::MAX,
+                    stale: true,
+                });
+            }
+        }
         if let Some(m) = moved.as_mut() {
             m.sort_unstable();
             m.dedup();
@@ -638,6 +683,7 @@ impl Store {
                 txn.before_seen.clear();
                 txn.mask_siblings_seen.clear();
                 txn.touched.clear();
+                txn.page_scope = None;
                 txn.full = true;
             }
             Command::Glyph { glyph, path } => {
@@ -702,7 +748,16 @@ impl Store {
                 let new_ends = record.ends_mask();
                 if txn.track {
                     self.note_before(id, txn);
-                    self.note_iso_ancestors(parent, txn);
+                    let draws_children = record.ops.iter().any(|op| matches!(op, Op::Children));
+                    let may_flush = !record.hidden()
+                        && (self.parent_has_mask(parent)
+                            || record.has_offscreen_pass()
+                            || (draws_children
+                                && self
+                                    .nodes
+                                    .get(&id)
+                                    .is_some_and(|n| n.children.iter().any(|&child| self.subtree_has_pass(child)))));
+                    self.note_pass_ancestors(parent, txn, may_flush.then_some(id));
                     if let Some((old_parent, old_mask, old_ends)) = old_info
                         && (old_mask || (old_ends && self.parent_has_mask(old_parent)))
                     {
@@ -812,7 +867,6 @@ impl Store {
                     .map_or((false, false), |n| (n.record.is_mask(), n.record.ends_mask()));
                 if txn.track {
                     self.note_before(id, txn);
-                    self.note_iso_ancestors(parent, txn);
                     if old_mask || (old_ends && self.parent_has_mask(parent)) {
                         self.note_mask_siblings(parent, txn);
                     }
@@ -964,31 +1018,53 @@ impl Store {
         }
     }
 
-    /// Notes isolated faded ancestors of `start` (inclusive) before an edit.
-    fn note_iso_ancestors(&mut self, mut at: u32, txn: &mut Txn) {
+    /// Notes ancestors of an edit where flushes can change. A clipped, non-isolating container
+    /// can also stop or start a descendant's flush when the container is culled.
+    fn note_pass_ancestors(&mut self, mut at: u32, txn: &mut Txn, flush_origin: Option<u32>) {
         if !txn.track {
             return;
         }
+        let mut reaches_page = flush_origin.is_some();
+        let mut may_change_scope = false;
         while at != ROOT {
             let Some(n) = self.nodes.get(&at) else { break };
             let parent = n.parent;
-            let iso = n.record.blend != 0 || (n.record.isolate() && n.record.opacity < 1.0);
-            if iso && txn.iso_seen.insert(at) {
+            let isolates = n.record.blend != 0 || (n.record.isolate() && n.record.opacity < 1.0);
+            let iso = isolates || !n.record.post_effects.is_empty();
+            if iso && flush_origin.is_some_and(|id| id != at) {
+                may_change_scope = true;
+                txn.iso_replay.insert(at);
+                // A post effect can turn off at some scales. A blend or faded picture owns
+                // its children's offscreen work whenever that work is present.
+                reaches_page &= !isolates;
+            }
+            if txn.pass_ancestor_seen.insert(at) {
                 let had_pass = self.subtree_has_pass(at);
-                let had_pad = self.bounds_and_pad(at).1;
-                let had_blend = self.subtree_has_blend(at);
-                let rect = self.dirty_extent(at);
-                let ord = self.order_of(at);
-                txn.iso_ancestors.push(IsoAncestor {
-                    id: at,
-                    had_pass,
-                    had_pad,
-                    had_blend,
-                    before_rect: rect,
-                    order: ord,
-                });
+                may_change_scope |= had_pass;
+                if iso || had_pass {
+                    let had_pad = self.bounds_and_pad(at).1;
+                    let had_blend = self.subtree_has_blend(at);
+                    let rect = self.dirty_extent(at);
+                    let ord = self.order_of(at);
+                    txn.pass_ancestors.push(PassAncestor {
+                        id: at,
+                        isolated: iso,
+                        had_pass,
+                        had_pad,
+                        had_blend,
+                        before_rect: rect,
+                        order: ord,
+                    });
+                }
             }
             at = parent;
+        }
+        if reaches_page || may_change_scope {
+            let page = txn.page_scope.get_or_insert_with(|| PageScope {
+                before_rect: self.world_extent(ROOT),
+                replay: false,
+            });
+            page.replay |= reaches_page;
         }
     }
 
@@ -1013,10 +1089,13 @@ impl Store {
             return;
         }
         txn.touched.push(id);
-        if !self.nodes.contains_key(&id) {
+        let Some(node) = self.nodes.get(&id) else {
             return;
-        }
-        self.note_iso_ancestors(id, txn);
+        };
+        // In a masked sibling list, even ordinary content can create or remove a picture
+        // mask pass by becoming the first or last record in its scope.
+        let may_flush = self.parent_has_mask(node.parent) || self.subtree_has_pass(id);
+        self.note_pass_ancestors(id, txn, may_flush.then_some(id));
         let (order, end) = self.order_of(id);
         if let Some(rect) = self.dirty_extent(id) {
             txn.before.push(Dirty {
@@ -1209,10 +1288,7 @@ impl Store {
             let b = match r.paths.get(p as usize)? {
                 PathEntry::Outside(_) => continue,
                 PathEntry::Glyphs { .. } => continue,
-                _ => {
-                    use vello_common::kurbo::Shape;
-                    r.entry_path(p)?.bounding_box()
-                }
+                _ => r.entry_bounds(p, &|g| self.glyphs.bounds(g))?,
             };
             out = Some(out.map_or(b, |o| o.intersect(b)));
         }
@@ -1245,7 +1321,7 @@ impl Store {
                 break;
             }
             if let Some(pn) = self.nodes.get(&p) {
-                anc_pad += pn.record.post_pad();
+                anc_pad += pn.record.post_dirty_pad();
                 if pn.record.blend != 0 || (pn.record.isolate() && pn.record.opacity < 1.0) {
                     anc_pad = anc_pad.max(self.bounds_and_pad(p).1);
                 }
@@ -1407,8 +1483,9 @@ impl Store {
         true
     }
 
-    /// Where the records painting image `id` paint, as changes (an image put or dropped under a
-    /// handle they use changes their pixels). Readers they reach join through `dirty`.
+    /// Where the records painting image `id` may change pixels, including outward spread from
+    /// any blurred/textured ancestors and any siblings gated by an image-bearing mask. Readers
+    /// they reach join through `dirty`.
     pub fn image_users(&mut self, id: u32) -> Vec<Dirty> {
         let mut users: Vec<u32> = self
             .image_records
@@ -1416,11 +1493,23 @@ impl Store {
             .copied()
             .filter(|r| self.nodes.get(r).is_some_and(|n| n.record.images().any(|i| i == id)))
             .collect();
+        // If an image belongs to a mask layer, replacing it can alter all siblings in that container.
+        let mut extra: Vec<u32> = Vec::new();
+        for &r in &users {
+            if let Some(n) = self.nodes.get(&r)
+                && n.record.is_mask()
+                && let Some(p) = self.nodes.get(&n.parent)
+            {
+                extra.extend(p.children.iter().copied());
+            }
+        }
+        users.extend(extra);
         users.sort_unstable();
+        users.dedup();
         let mut out = Vec::new();
         for r in users {
             let (order, end) = self.order_of(r);
-            if let Some(rect) = self.world_extent(r) {
+            if let Some(rect) = self.dirty_extent(r) {
                 out.push(Dirty {
                     rect,
                     order,

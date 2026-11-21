@@ -209,6 +209,19 @@ pub enum Op {
 #[derive(Clone, Debug)]
 pub enum Post {
     LayerBlur(f32),
+    Noise {
+        noise_type: u32,
+        size: f32,
+        density: f32,
+        color: [f32; 4],
+        secondary_color: [f32; 4],
+        opacity: f32,
+    },
+    Texture {
+        size: f32,
+        radius: f32,
+        clip_to_shape: bool,
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -473,6 +486,36 @@ impl Rec {
                     Post::LayerBlur(radius) => {
                         w.u32(1);
                         w.f32(*radius);
+                    }
+                    Post::Noise {
+                        noise_type,
+                        size,
+                        density,
+                        color,
+                        secondary_color,
+                        opacity,
+                    } => {
+                        w.u32(2);
+                        w.u32(*noise_type);
+                        w.f32(*size);
+                        w.f32(*density);
+                        for v in color {
+                            w.f32(*v);
+                        }
+                        for v in secondary_color {
+                            w.f32(*v);
+                        }
+                        w.f32(*opacity);
+                    }
+                    Post::Texture {
+                        size,
+                        radius,
+                        clip_to_shape,
+                    } => {
+                        w.u32(3);
+                        w.f32(*size);
+                        w.f32(*radius);
+                        w.u32(u32::from(*clip_to_shape));
                     }
                 }
             }

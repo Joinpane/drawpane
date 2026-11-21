@@ -962,6 +962,25 @@ Drop and inner shadows (`Op::DropShadow` opcode 13, `Op::InnerShadow` opcode 14,
   - `Switch` (820 layers, 311 shadows): first frame 131 ms, exact 167 ms (down from 601 ms; canvas 147 / 147 ms); `pan, whole` interval 29.7 / 33.5 ms (canvas 33.8 / 38.7); `zoom, whole` 33.3 / 36.1 ms (canvas 38.2 / 48.5); `pan, 50%` content 1.8 / 2.9 ms, interval 30.3 / 32.6 ms (canvas 2.1 / 9.6, 36.2 / 51.4); `pan, 100%` content 1.4 / 2.0 ms, interval 30.5 / 32.0 ms (canvas 3.5 / 9.3, 36.9 / 46.0).
   - `Checkbox` (955 layers, 115 shadows): `pan, 100%` interval 30.6 / 33.5 ms (canvas 32.7 / 35.6); `Slider` (189 layers, 53 shadows): `pan, 100%` 30.3 / 32.1 ms (canvas 31.8 / 35.7); `Input OTP` (410 layers, 170 shadows): `pan, 100%` 30.5 / 35.8 ms (canvas 34.4 / 44.3).
 
+**Stacked shadows.** When a record has multiple visible drop shadows, each uses a
+rasterized mask and the reference Gaussian. A single eligible drop shadow can use Vello's
+analytic rounded-box path. Its approximation error can accumulate where shadows overlap.
+In the two-shadow `drop-layered` parity cell, the stacked mask path scored 0.21 on CPU and
+0.23 on both T4 GPU backends against Figma (the live canvas scored 0.24). The fixed 0.23
+ceiling was the rounded GPU score itself. This cell uses the same Figma and live-canvas
+gates as the rest of the shadow suite, including the 0.01 mean allowance against live canvas.
+
+A normal-blend shadow draws its mask into the Vello scene. It can stay inside a Vello
+opacity layer, which keeps adding or removing the shadow from changing when unrelated
+pixels are quantized during a scene flush.
+
+A flush writes the active Vello target as RGBA8. An edit that adds, removes or moves a
+flush can change rounding anywhere overlapping draws cross that boundary, even far from
+the edited record. Invalidation includes the enclosing picture or page scope in that
+case. A container whose bounds or compositing mode change can also start or stop a
+descendant's flush as the container becomes visible or gets culled. Ordinary paint edits keep
+their local dirty rectangles when they leave those boundaries alone.
+
 ## Amendment: layer blur (phase 3A, 2026-11-20)
 
 Layer blur (`FLAG_POST = 32`, `POST.layerBlur = 1`, `PostEffect::LayerBlur`, wire version 1.4) is drawn by both backends, clearing `UNSUPPORTED.layerBlur`. Progressive blur remains behind `UNSUPPORTED.progressiveBlur` (phase 3B).
@@ -1014,3 +1033,11 @@ All three Figma mask types (outline, alpha, and luminance, plus sibling scope te
   - Banded CPU seam regression (`regressions.test.ts`): 10/10 cases (including alpha, luminance, and blurred alpha picture masks across 73-row DPR 1.35 bands) match whole-frame CPU bit-for-bit.
   - Module sizes: worker 640 KB raw / 253 KB gzipped (budget 400 KB); browser 1139 KB raw / 428 KB gzipped (budget 1000 KB).
   - Workerd 8,192 x 8,192 export: engine 17.4 / 25 MiB.
+
+## Amendment: noise and texture (phase 3A, 2026-11-20)
+
+Procedural noise (`POST.noise = 2`: mono, duo, and multi) and Perlin-displacement texture (`POST.texture = 3`: clipped and unclipped) are drawn in declared effect order alongside layer blur (`FLAG_POST = 32`, wire version 1.4), clearing `UNSUPPORTED.noise` and `UNSUPPORTED.texture`.
+
+- **Noise tiles and GPU retirement (`noise.rs`, `noise.wgsl`, `cpu.rs`, `gpu.rs`):** Synthesizes the same 320 x 320 periodic Perlin fields and `noise.ts` transfer curves (`mono`, `duo`, and `multi` with straight-channel rounding before premultiplication so CPU and GPU match `u8` quantization). Both CPU and GPU caches cap at 8 tiles (`NOISE_TILE_LIMIT`), evict before allocating, and `GpuNoise` holds evicted tiles in `retired` until after `queue.submit` so chains exceeding 8 distinct noise looks in one submission never destroy in-flight textures. UVs are evaluated from origin-invariant device coordinates (`dev_pos = dst_origin + pixel + 0.5`).
+- **Origin-invariant texture displacement (`texture.rs`, `texture.wgsl`, `exec.rs`):** Evaluates the 2D gradient Perlin displacement field from origin-invariant device coordinates (`dev_to_layer` plus `dst_origin`), keeping tiled and banded exports bit-identical across fractional camera zooms and offsets. Extreme texture radii or lattice coordinates overflow cleanly into `ErrorCode::Limit` before rendering.
+- **Invalidation and Worker admission (`store.rs`, `record.rs`, `engine.rs`):** `Record::post_dirty_pad()` includes both clipped and unclipped texture displacement radius so descendant edits and image replacements (`image_users`) dirty all displaced halo pixels. `export_effect_working_set` walks the full ordered `post_effects` chain, charging coexisting halo-expanded intermediates and noise working-set memory before any PNG byte streams.

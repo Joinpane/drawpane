@@ -16,6 +16,7 @@ import {
   JOIN,
   MASK,
   type Matrix,
+  NOISE_TYPE,
   PathData,
   type PathEntry,
   type Rgba,
@@ -924,8 +925,6 @@ function unsupportedOf(node: NodeRecord): number {
     if (e.visible === false) continue;
     if (e.type === "background-blur") bits |= UNSUPPORTED.backgroundBlur;
     else if (e.type === "glass") bits |= UNSUPPORTED.glass;
-    else if (e.type === "noise") bits |= UNSUPPORTED.noise;
-    else if (e.type === "texture") bits |= UNSUPPORTED.texture;
   }
   return bits;
 }
@@ -963,6 +962,23 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
   for (const pe of postEffects(getProp(node.props, "effects"))) {
     if (pe.type === "layer-blur" && pe.radius > 0) {
       wirePost.push({ kind: "layerBlur", radius: pe.radius });
+    } else if (pe.type === "noise" && pe.size > 0 && pe.density > 0) {
+      wirePost.push({
+        kind: "noise",
+        noiseType: NOISE_TYPE[pe.noiseType],
+        size: pe.size,
+        density: pe.density,
+        color: rgba(pe.color),
+        secondaryColor: rgba(pe.secondaryColor),
+        opacity: Math.min(1, Math.max(0, pe.opacity / 100)),
+      });
+    } else if (pe.type === "texture" && pe.size > 0 && pe.radius > 0) {
+      wirePost.push({
+        kind: "texture",
+        size: pe.size,
+        radius: pe.radius,
+        clipToShape: pe.clipToShape,
+      });
     }
   }
   const flags =

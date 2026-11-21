@@ -8,7 +8,7 @@
 
 use crate::blur::{BlurSpec, EdgeMode, try_blur_cpu, validate_sigma};
 use crate::error::{EngineError, Result};
-use crate::exec::{Backend, GlyphMask, IRect, ImageView, Open, ShadowCast, impl_draw};
+use crate::exec::{Backend, GlyphMask, IRect, ImageView, Open, PostStep, ShadowCast, impl_draw};
 use crate::images::{self, Level};
 use crate::kernels;
 use crate::masks::{self, MaskCache, MaskKey};
@@ -58,10 +58,6 @@ fn tile_padded_rect(r: IRect, tb: IRect, scene_offset: (i32, i32)) -> Rect {
     let y1 = f64::from(r.y1 - scene_offset.1) + if r.y1 == tb.y1 { 4.0 } else { 0.0 };
     Rect::new(x0, y0, x1, y1)
 }
-
-/// Byte cap on transient offscreen pixmaps held by the active CPU scene before an automatic flush
-/// releases them in bounded Worker exports.
-const WORKER_TEMP_FLUSH_BYTES: usize = 1 << 20;
 
 fn pixmap(width: u32, height: u32, pixels: Vec<u8>) -> Pixmap {
     Pixmap::from_parts(
@@ -116,6 +112,8 @@ pub struct Cpu {
     checker: Arc<Pixmap>,
     /// Shareable CPU blur pyramids, reused across equal inputs within a frame.
     pub blur: crate::blur::CpuBlurCache,
+    /// Bounded LRU cache of periodic 320 x 320 premultiplied noise grain tiles.
+    pub noise: crate::noise::CpuNoiseCache,
     /// Strictly budgeted LRU cache for canonical blurred shadow masks.
     pub shadow_cache: ShadowMaskCache<Arc<Pixmap>>,
     /// How far the target extends past the band each way, for readers' reach: kernels may read
@@ -158,6 +156,7 @@ impl Cpu {
             mask_side,
             checker: Arc::new(pixmap(16, 16, checker_pixels())),
             blur: crate::blur::CpuBlurCache::new(blur_budget),
+            noise: crate::noise::CpuNoiseCache::default(),
             shadow_cache: ShadowMaskCache::new(shadow_budget),
             halo: 0,
             offscreen_stack: Vec::new(),
@@ -178,7 +177,8 @@ impl Cpu {
         } else {
             4 << 20
         };
-        let _ = self.shadow_cache.set_budget(shadow_budget);
+        let evicted = self.shadow_cache.set_budget(shadow_budget);
+        self.account_for_evicted_shadows(evicted);
         let blur_budget = if budget > 0 {
             (budget / 12).min(2 << 20)
         } else {
@@ -202,6 +202,15 @@ impl Cpu {
         self.scene.reset_and_resize(1, 1);
     }
 
+    /// An evicted mask can still be referenced by a pending scene draw.
+    fn account_for_evicted_shadows(&mut self, evicted: Vec<Arc<Pixmap>>) {
+        for mask in evicted {
+            if Arc::strong_count(&mask) > 1 {
+                self.temp_bytes = self.temp_bytes.saturating_add(mask.data_as_u8_slice().len());
+            }
+        }
+    }
+
     /// Bytes currently allocated inside `Cpu` (target, offscreen stack, images, caches, temp).
     fn runtime_bytes(&self) -> usize {
         let target_b = self.target.data_as_u8_slice().len();
@@ -217,6 +226,7 @@ impl Cpu {
             .saturating_add(self.image_bytes)
             .saturating_add(self.masks.stats.bytes)
             .saturating_add(self.blur.bytes())
+            .saturating_add(self.noise.bytes())
             .saturating_add(self.shadow_cache.bytes())
             .saturating_add(self.temp_bytes)
             .saturating_add(self.diamond_bytes)
@@ -235,8 +245,10 @@ impl Cpu {
             .saturating_add(self.runtime_bytes())
             .saturating_add(need);
         if total > cap {
-            let _ = self.shadow_cache.clear();
+            let evicted = self.shadow_cache.clear();
+            self.account_for_evicted_shadows(evicted);
             self.blur.clear();
+            self.noise.clear();
         }
         let total = self
             .external_bytes
@@ -366,7 +378,6 @@ impl Cpu {
         dirty: IRect,
         color: AlphaColor<Srgb>,
         transient_bytes: usize,
-        open: &[Open],
     ) {
         let tb = self.target_bounds();
         let so = self.scene_offset();
@@ -391,20 +402,7 @@ impl Cpu {
         self.scene.set_fill_rule(Fill::NonZero);
         self.scene.fill_rect(&tile_padded_rect(dirty, tb, so));
         self.scene.set_tint(None);
-        if transient_bytes > 0 {
-            self.temp_bytes += transient_bytes;
-            if self.memory_budget > 0
-                && self.temp_bytes >= WORKER_TEMP_FLUSH_BYTES
-                && !open.iter().any(|o| matches!(o, Open::Layer))
-            {
-                for _ in open {
-                    self.scene.pop_clip();
-                }
-                self.flush_current();
-                self.scene.reset();
-                self.reopen_clips(open);
-            }
-        }
+        self.temp_bytes = self.temp_bytes.saturating_add(transient_bytes);
     }
 }
 
@@ -675,7 +673,7 @@ impl Backend for Cpu {
         Ok(true)
     }
 
-    fn blur_isolated(&mut self, steps: &[(IRect, f32)]) -> Result<()> {
+    fn apply_post_isolated(&mut self, steps: &[PostStep]) -> Result<()> {
         if steps.is_empty() {
             return Ok(());
         }
@@ -686,57 +684,178 @@ impl Backend for Cpu {
         let Some(mut src) = self.offscreen_stack.pop() else {
             return Ok(());
         };
-        for &(out_area, sigma) in steps {
-            if out_area.is_empty() {
-                return Ok(());
-            }
+        for step in steps {
             let src_w = u32::from(src.pixmap.width());
             let src_h = u32::from(src.pixmap.height());
-            let dst_w = (out_area.x1 - out_area.x0).max(1) as u32;
-            let dst_h = (out_area.y1 - out_area.y0).max(1) as u32;
-            let dst_origin = (out_area.x0 - src.origin.0, out_area.y0 - src.origin.1);
-            let spec = BlurSpec {
-                sigma,
-                edge: EdgeMode::Zero,
-                clamp_bounds: IRect {
-                    x0: 0,
-                    y0: 0,
-                    x1: src_w as i32,
-                    y1: src_h as i32,
-                },
-                dirty: IRect {
-                    x0: dst_origin.0,
-                    y0: dst_origin.1,
-                    x1: dst_origin.0 + dst_w as i32,
-                    y1: dst_origin.1 + dst_h as i32,
-                },
-            };
-            crate::blur::validate_sigma(sigma, spec.clamp_bounds, spec.edge)?;
+            // `src` was popped from `offscreen_stack`, so `runtime_bytes()` does not count it;
+            // charge it alongside `dst` in every step so Worker limits see both live buffers.
             let src_bytes = (src_w as usize).saturating_mul(src_h as usize).saturating_mul(4);
-            let dst_bytes = (dst_w as usize)
-                .checked_mul(dst_h as usize)
-                .and_then(|n| n.checked_mul(4))
-                .ok_or_else(|| EngineError::limit("layer blur output size overflow"))?;
-            // Charge blurred output plus intermediate pyramid/scratch bytes beside current src.
-            let scratch = crate::blur::cpu_work_bytes((src_w, src_h), (dst_w, dst_h), sigma);
-            let need = src_bytes.saturating_add(dst_bytes).saturating_add(scratch);
-            self.check_memory(need, "a layer blur pass")?;
-            let mut out = vec![0u8; dst_bytes];
-            try_blur_cpu(
-                src.pixmap.data_as_u8_slice(),
-                (src_w, src_h),
-                &mut out,
-                (dst_w, dst_h),
-                dst_origin,
-                &spec,
-            )?;
-            src = CpuTarget {
-                pixmap: pixmap(dst_w, dst_h, out),
-                origin: (out_area.x0, out_area.y0),
-                scene_origin: (0, 0),
-                scene_size: self.frame_size,
-                scene_pending: false,
-            };
+            match *step {
+                PostStep::LayerBlur { out_area, sigma } => {
+                    if out_area.is_empty() {
+                        return Ok(());
+                    }
+                    let dst_w = (out_area.x1 - out_area.x0).max(1) as u32;
+                    let dst_h = (out_area.y1 - out_area.y0).max(1) as u32;
+                    let dst_origin = (out_area.x0 - src.origin.0, out_area.y0 - src.origin.1);
+                    let spec = BlurSpec {
+                        sigma,
+                        edge: EdgeMode::Zero,
+                        clamp_bounds: IRect {
+                            x0: 0,
+                            y0: 0,
+                            x1: src_w as i32,
+                            y1: src_h as i32,
+                        },
+                        dirty: IRect {
+                            x0: dst_origin.0,
+                            y0: dst_origin.1,
+                            x1: dst_origin.0 + dst_w as i32,
+                            y1: dst_origin.1 + dst_h as i32,
+                        },
+                    };
+                    crate::blur::validate_sigma(sigma, spec.clamp_bounds, spec.edge)?;
+                    let dst_bytes = (dst_w as usize)
+                        .checked_mul(dst_h as usize)
+                        .and_then(|n| n.checked_mul(4))
+                        .ok_or_else(|| EngineError::limit("layer blur output size overflow"))?;
+                    // Charge blurred output plus live src and scratch beside runtime bytes.
+                    let scratch = crate::blur::cpu_work_bytes((src_w, src_h), (dst_w, dst_h), sigma);
+                    let need = src_bytes.saturating_add(dst_bytes).saturating_add(scratch);
+                    self.check_memory(need, "a layer blur pass")?;
+                    let mut out = vec![0u8; dst_bytes];
+                    try_blur_cpu(
+                        src.pixmap.data_as_u8_slice(),
+                        (src_w, src_h),
+                        &mut out,
+                        (dst_w, dst_h),
+                        dst_origin,
+                        &spec,
+                    )?;
+                    src = CpuTarget {
+                        pixmap: pixmap(dst_w, dst_h, out),
+                        origin: (out_area.x0, out_area.y0),
+                        scene_origin: (0, 0),
+                        scene_size: self.frame_size,
+                        scene_pending: false,
+                    };
+                }
+                PostStep::Noise {
+                    out_area,
+                    noise_type,
+                    size,
+                    density,
+                    color,
+                    secondary_color,
+                    opacity,
+                    dev_to_layer,
+                } => {
+                    if out_area.is_empty() {
+                        return Ok(());
+                    }
+                    let dst_w = (out_area.x1 - out_area.x0).max(1) as u32;
+                    let dst_h = (out_area.y1 - out_area.y0).max(1) as u32;
+                    let dst_bytes = (dst_w as usize)
+                        .checked_mul(dst_h as usize)
+                        .and_then(|n| n.checked_mul(4))
+                        .ok_or_else(|| EngineError::limit("noise output size overflow"))?;
+                    let active = size > 0.0 && density > 0.0;
+                    let noise_need = if !active {
+                        0
+                    } else if !self.noise.has_fields() {
+                        crate::noise::NOISE_WORKING_SET_BYTES
+                    } else {
+                        let key = crate::noise::NoiseLookKey::from_params(
+                            noise_type,
+                            density,
+                            color,
+                            secondary_color,
+                            opacity,
+                        );
+                        if self.noise.contains(key) {
+                            0
+                        } else {
+                            crate::noise::CpuNoiseCache::TILE_BYTES
+                        }
+                    };
+                    self.check_memory(
+                        src_bytes.saturating_add(dst_bytes).saturating_add(noise_need),
+                        "a noise post-effect pass",
+                    )?;
+                    // If `check_memory` evicted warm caches (including `self.noise`), re-check
+                    // with the full noise working set so we never regenerate it past the cap.
+                    if active && !self.noise.has_fields() {
+                        self.check_memory(
+                            src_bytes
+                                .saturating_add(dst_bytes)
+                                .saturating_add(crate::noise::NOISE_WORKING_SET_BYTES),
+                            "a noise post-effect pass",
+                        )?;
+                    }
+                    let mut out = vec![0u8; dst_bytes];
+                    crate::noise::noise_cpu(
+                        &mut self.noise,
+                        src.pixmap.data_as_u8_slice(),
+                        (src_w, src_h),
+                        src.origin,
+                        &mut out,
+                        (dst_w, dst_h),
+                        (out_area.x0, out_area.y0),
+                        noise_type,
+                        size,
+                        density,
+                        color,
+                        secondary_color,
+                        opacity,
+                        dev_to_layer,
+                    );
+                    src = CpuTarget {
+                        pixmap: pixmap(dst_w, dst_h, out),
+                        origin: (out_area.x0, out_area.y0),
+                        scene_origin: (0, 0),
+                        scene_size: self.frame_size,
+                        scene_pending: false,
+                    };
+                }
+                PostStep::Texture {
+                    out_area,
+                    size,
+                    radius_dev,
+                    clip_to_shape,
+                    dev_to_layer,
+                } => {
+                    if out_area.is_empty() {
+                        return Ok(());
+                    }
+                    let dst_w = (out_area.x1 - out_area.x0).max(1) as u32;
+                    let dst_h = (out_area.y1 - out_area.y0).max(1) as u32;
+                    let dst_bytes = (dst_w as usize)
+                        .checked_mul(dst_h as usize)
+                        .and_then(|n| n.checked_mul(4))
+                        .ok_or_else(|| EngineError::limit("texture output size overflow"))?;
+                    self.check_memory(src_bytes.saturating_add(dst_bytes), "a texture post-effect pass")?;
+                    let mut out = vec![0u8; dst_bytes];
+                    crate::texture::texture_cpu(
+                        src.pixmap.data_as_u8_slice(),
+                        (src_w, src_h),
+                        src.origin,
+                        &mut out,
+                        (dst_w, dst_h),
+                        (out_area.x0, out_area.y0),
+                        size,
+                        radius_dev,
+                        clip_to_shape,
+                        dev_to_layer,
+                    );
+                    src = CpuTarget {
+                        pixmap: pixmap(dst_w, dst_h, out),
+                        origin: (out_area.x0, out_area.y0),
+                        scene_origin: (0, 0),
+                        scene_size: self.frame_size,
+                        scene_pending: false,
+                    };
+                }
+            }
         }
         self.offscreen_stack.push(src);
         Ok(())
@@ -796,18 +915,9 @@ impl Backend for Cpu {
         self.scene.set_fill_rule(Fill::NonZero);
         let tb = self.target_bounds();
         self.scene.fill_rect(&tile_padded_rect(rect, tb, so));
-        self.temp_bytes += bytes;
-        if self.memory_budget > 0
-            && self.temp_bytes >= WORKER_TEMP_FLUSH_BYTES
-            && !open.iter().any(|o| matches!(o, Open::Layer))
-        {
-            for _ in open {
-                self.scene.pop_clip();
-            }
-            self.flush_current();
-            self.scene.reset();
-            self.reopen_clips(open);
-        }
+        // Keep the same Vello flush boundaries in the browser and in budgeted bands.
+        // The pending pixmap stays charged until the next render-graph flush.
+        self.temp_bytes = self.temp_bytes.saturating_add(bytes);
         Ok(())
     }
 
@@ -924,7 +1034,7 @@ impl Backend for Cpu {
         dirty: IRect,
         sigma: f32,
         color: AlphaColor<Srgb>,
-        open: &[Open],
+        _open: &[Open],
     ) -> Result<()> {
         let dirty = align4_padded(dirty).intersect(self.target_bounds());
         if dirty.is_empty() {
@@ -941,80 +1051,82 @@ impl Backend for Cpu {
             EdgeMode::Zero,
         )?;
 
-        // Fast path: canonical rounded-box / ellipse mask cache (bit-identical across tiles because
-        // the cached mask depends only on the canonical shape, never on tile bounds).
+        // Canonical coordinates and sigma determine the pixels. Cache admission controls
+        // reuse only. If the mask cannot fit, return Limit instead of switching rasterizers.
         if let Some(canon) = canonical {
+            if let Some(entry) = self.shadow_cache.get(&canon.key) {
+                let pm = entry.value.clone();
+                let origin = (canon.anchor.0 + entry.origin.0, canon.anchor.1 + entry.origin.1);
+                self.stamp_shadow_pixmap(pm, origin, dirty, color, 0);
+                return Ok(());
+            }
             let cw = (canon.mask_rect.x1 - canon.mask_rect.x0) as u32;
             let ch = (canon.mask_rect.y1 - canon.mask_rect.y0) as u32;
             let cache_bytes = (cw as usize) * (ch as usize) * 4;
-            if self.shadow_cache.fits_budget(cache_bytes) {
-                if let Some(entry) = self.shadow_cache.get(&canon.key) {
-                    let pm = entry.value.clone();
-                    let origin = (canon.anchor.0 + entry.origin.0, canon.anchor.1 + entry.origin.1);
-                    self.stamp_shadow_pixmap(pm, origin, dirty, color, 0, open);
-                    return Ok(());
-                }
-                let need = cache_bytes
-                    .saturating_mul(3)
-                    .saturating_add(scene_estimate_bytes(cw, ch));
-                if self.check_memory(need, "a cached shadow mask").is_ok() {
-                    let mut mask_scene = RenderContext::new(cw as u16, ch as u16);
-                    mask_scene.set_transform(Affine::translate((
-                        -f64::from(canon.mask_rect.x0),
-                        -f64::from(canon.mask_rect.y0),
-                    )));
-                    mask_scene.set_paint(AlphaColor::<Srgb>::new([1.0, 1.0, 1.0, 1.0]));
-                    mask_scene.set_fill_rule(Fill::NonZero);
-                    mask_scene.fill_path(&canon.path);
-                    mask_scene.flush();
-                    let mut mask_pm = Pixmap::new(cw as u16, ch as u16);
-                    let settings = RasterizerSettings {
-                        render_mode: RenderMode::OptimizeQuality,
-                        ..Default::default()
-                    };
-                    mask_scene.render_with(&mut mask_pm, &mut self.resources, settings);
-                    let mut out = vec![0u8; cache_bytes];
-                    let full = IRect {
-                        x0: 0,
-                        y0: 0,
-                        x1: cw as i32,
-                        y1: ch as i32,
-                    };
-                    try_blur_cpu(
-                        mask_pm.data_as_u8_slice(),
-                        (cw, ch),
-                        &mut out,
-                        (cw, ch),
-                        (0, 0),
-                        &BlurSpec {
-                            sigma: canon.sigma,
-                            edge: EdgeMode::Zero,
-                            clamp_bounds: full,
-                            dirty: full,
-                        },
-                    )?;
-                    if invert {
-                        for px in out.as_chunks_mut::<4>().0.iter_mut() {
-                            px[0] = 0;
-                            px[1] = 0;
-                            px[2] = 0;
-                            px[3] = 255 - px[3];
-                        }
-                    }
-                    let pm = Arc::new(pixmap(cw, ch, out));
-                    let mask_origin = (canon.mask_rect.x0, canon.mask_rect.y0);
-                    let _ = self.shadow_cache.insert(
-                        canon.key,
-                        pm.clone(),
-                        mask_origin,
-                        (cw as u16, ch as u16),
-                        cache_bytes,
-                    );
-                    let origin = (canon.anchor.0 + mask_origin.0, canon.anchor.1 + mask_origin.1);
-                    self.stamp_shadow_pixmap(pm, origin, dirty, color, 0, open);
-                    return Ok(());
+            let blur_bytes = crate::blur::cpu_work_bytes((cw, ch), (cw, ch), canon.sigma);
+            let need = cache_bytes
+                .saturating_mul(2)
+                .saturating_add(blur_bytes)
+                .saturating_add(scene_estimate_bytes(cw, ch));
+            self.check_memory(need, "a canonical shadow mask")?;
+
+            let mut mask_scene = RenderContext::new(cw as u16, ch as u16);
+            mask_scene.set_transform(Affine::translate((
+                -f64::from(canon.mask_rect.x0),
+                -f64::from(canon.mask_rect.y0),
+            )));
+            mask_scene.set_paint(AlphaColor::<Srgb>::new([1.0, 1.0, 1.0, 1.0]));
+            mask_scene.set_fill_rule(Fill::NonZero);
+            mask_scene.fill_path(&canon.path);
+            mask_scene.flush();
+            let mut mask_pm = Pixmap::new(cw as u16, ch as u16);
+            let settings = RasterizerSettings {
+                render_mode: RenderMode::OptimizeQuality,
+                ..Default::default()
+            };
+            mask_scene.render_with(&mut mask_pm, &mut self.resources, settings);
+            let mut out = vec![0u8; cache_bytes];
+            let full = IRect {
+                x0: 0,
+                y0: 0,
+                x1: cw as i32,
+                y1: ch as i32,
+            };
+            try_blur_cpu(
+                mask_pm.data_as_u8_slice(),
+                (cw, ch),
+                &mut out,
+                (cw, ch),
+                (0, 0),
+                &BlurSpec {
+                    sigma: canon.sigma,
+                    edge: EdgeMode::Zero,
+                    clamp_bounds: full,
+                    dirty: full,
+                },
+            )?;
+            if invert {
+                for px in out.as_chunks_mut::<4>().0.iter_mut() {
+                    px[0] = 0;
+                    px[1] = 0;
+                    px[2] = 0;
+                    px[3] = 255 - px[3];
                 }
             }
+            let pm = Arc::new(pixmap(cw, ch, out));
+            let mask_origin = (canon.mask_rect.x0, canon.mask_rect.y0);
+            let transient_bytes = if self.shadow_cache.fits_budget(cache_bytes) {
+                let evicted =
+                    self.shadow_cache
+                        .insert(canon.key, pm.clone(), mask_origin, (cw as u16, ch as u16), cache_bytes);
+                self.account_for_evicted_shadows(evicted);
+                0
+            } else {
+                cache_bytes
+            };
+            let origin = (canon.anchor.0 + mask_origin.0, canon.anchor.1 + mask_origin.1);
+            self.stamp_shadow_pixmap(pm, origin, dirty, color, transient_bytes);
+            return Ok(());
         }
 
         let mask_rect_opt = match cast {
@@ -1246,7 +1358,7 @@ impl Backend for Cpu {
         // Ensure RGB doesn't matter under AlphaMask; keep alpha intact.
         let _ = &mut out;
         let shadow_pm = Arc::new(pixmap(dirty_w, dirty_h, out));
-        self.stamp_shadow_pixmap(shadow_pm, (dirty.x0, dirty.y0), dirty, color, bytes, open);
+        self.stamp_shadow_pixmap(shadow_pm, (dirty.x0, dirty.y0), dirty, color, bytes);
         Ok(())
     }
 

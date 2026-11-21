@@ -96,7 +96,7 @@ const EXPECTED_CELL_FALLBACKS: Record<string, Record<string, readonly string[]>>
     "blur-burn-material": ["backgroundBlur"],
   },
 };
-/** Suites whose every cell needs a phase 3 feature (glass, grain). */
+/** Suites whose every cell needs a phase 3B backdrop reader feature (glass). */
 const PHASE_3 = new Set([
   "glass",
   "glass-dark",
@@ -104,13 +104,12 @@ const PHASE_3 = new Set([
   "glass-probe",
   "glass-probe-2",
   "glass-stack",
-  "grain",
 ]);
 /**
  * Suites gated against the live current canvas renderer baseline (decision 0040 replacement gate:
  * mean not worse by more than 0.01, worst 32 x 32 tile not worse by more than 1, alpha not worse).
  */
-const REPLACEMENT_SUITES = new Set(["shadows", "blurs", "linear-blends"]);
+const REPLACEMENT_SUITES = new Set(["shadows", "blurs", "linear-blends", "masks", "grain"]);
 
 /**
  * Minimum drawn-cell count per supported suite so a regression or accidental fallback cannot turn
@@ -131,6 +130,25 @@ const MIN_DRAWN: Record<string, number> = {
   blurs: 4,
   "linear-blends": 19,
   masks: 7,
+  grain: 12,
+};
+
+// Engine scores on SwiftShader and T4 after the suite's statistical blur, with
+// 0.05 points or 5% of headroom, whichever is greater. Canvas has its own limits
+// because its texture sampler varies by raster backend.
+const GRAIN_LIMITS: Record<string, number> = {
+  "noise-mono": 0.44,
+  "noise-mono-large": 1.81,
+  "noise-mono-sparse": 0.25,
+  "noise-mono-dense": 0.93,
+  "noise-mono-colour": 0.61,
+  "noise-duo": 1.03,
+  "noise-duo-strong": 3.84,
+  "noise-multi": 1.41,
+  "noise-on-dark": 0.77,
+  "texture-fine": 0.33,
+  "texture-coarse": 1.95,
+  "texture-clipped": 0.97,
 };
 
 const WANT_BACKENDS = (process.env.ENGINE_PARITY_BACKENDS ?? "gpu,webgl")
@@ -416,11 +434,8 @@ test.describe("Render engine parity", () => {
               ).then(([a, b]) => Math.round((((a?.mean ?? 0) + (b?.mean ?? 0)) / 2) * 100) / 100)
             : (await compare(page, ours, theirs.data, width, height, suite.blur)).mean;
         const figmaCpu = await figma(cpu.rgba);
-        // The two-shadow card exercises accumulated error from analytic shadow masks.
         const limit =
-          suite.suite === "shadows" && cell.id === "drop-layered"
-            ? 0.23
-            : recorded[suite.suite]?.[cell.id];
+          suite.suite === "grain" ? GRAIN_LIMITS[cell.id] : recorded[suite.suite]?.[cell.id];
         const figmaPx = Buffer.from(theirs.data, "base64");
         const cpuPx = Buffer.from(cpu.rgba, "base64");
         const vsFigma = score(cpuPx, figmaPx, width, height);
@@ -504,19 +519,23 @@ test.describe("Render engine parity", () => {
           );
           figmaCanvas = await figma(canvasRgba);
           vsFigmaCanvas = score(Buffer.from(canvasRgba, "base64"), figmaPx, width, height);
-          if (figmaCpu > figmaCanvas + 0.01)
-            failures.push(
-              `${cell.id}: CPU ${figmaCpu} regresses past live canvas ${figmaCanvas} (+0.01 gate)`,
-            );
-          if (figmaGpu !== undefined && figmaGpu > figmaCanvas + 0.01)
-            failures.push(
-              `${cell.id}: WebGPU ${figmaGpu} regresses past live canvas ${figmaCanvas} (+0.01 gate)`,
-            );
-          if (figmaWebgl !== undefined && figmaWebgl > figmaCanvas + 0.01)
-            failures.push(
-              `${cell.id}: WebGL2 ${figmaWebgl} regresses past live canvas ${figmaCanvas} (+0.01 gate)`,
-            );
+          // Grain uses the recorded engine limits above. Live canvas texture sampling
+          // changes with the browser's raster backend.
+          if (suite.suite === "grain" && limit === undefined)
+            failures.push(`${cell.id}: missing recorded grain threshold`);
           if (suite.blur === undefined) {
+            if (figmaCpu > figmaCanvas + 0.01)
+              failures.push(
+                `${cell.id}: CPU ${figmaCpu} regresses past live canvas ${figmaCanvas} (+0.01 gate)`,
+              );
+            if (figmaGpu !== undefined && figmaGpu > figmaCanvas + 0.01)
+              failures.push(
+                `${cell.id}: WebGPU ${figmaGpu} regresses past live canvas ${figmaCanvas} (+0.01 gate)`,
+              );
+            if (figmaWebgl !== undefined && figmaWebgl > figmaCanvas + 0.01)
+              failures.push(
+                `${cell.id}: WebGL2 ${figmaWebgl} regresses past live canvas ${figmaCanvas} (+0.01 gate)`,
+              );
             if (vsFigma.worstTile > vsFigmaCanvas.worstTile + 1.0)
               failures.push(
                 `${cell.id}: CPU worst tile ${vsFigma.worstTile.toFixed(2)} regresses past canvas ${vsFigmaCanvas.worstTile.toFixed(2)} (+1.0 gate)`,
