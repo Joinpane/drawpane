@@ -713,11 +713,12 @@ function perform(editor: Editor, e: Edit): void {
 function makeEditor(nodes: readonly NodeRecord[] | null, copies: "compact" | "materialized") {
   const editor = new Editor({ measurer, clientId: "oracle" });
   editor.state.set({ role: "editor", viewport: { width: 1200, height: 800 } });
-  if (nodes) editor.doc.resetStored(nodes, copies);
-  else
-    editor.doc.apply([
-      { op: "create", id: "p", type: "page", parent: ROOT_ID, key: "a0", props: { name: "Page" } },
-    ]);
+  const start: NodeRecord[] = nodes
+    ? [...nodes]
+    : [{ id: "p", type: "page", parent: ROOT_ID, key: "a0", props: { name: "Page" } }];
+  // In the format asked for, whatever documents default to (`pnpm test` runs the suite again
+  // with compact copies on for every document).
+  editor.doc.resetStored(start, copies);
   editor.setPage("p");
   return editor;
 }
@@ -748,8 +749,6 @@ describe("an edit leaves the document as a full layout would", () => {
       fc.assert(
         fc.property(tree, fc.array(edit, { minLength: 1, maxLength: 16 }), (spec, edits) => {
           const editor = makeEditor(null, copies);
-          if (copies === "compact" && !editor.doc.compactCopies)
-            editor.doc.resetStored(editor.doc.stored(), "compact");
           build(editor, spec);
           const start = editor.doc.stored();
           const mirror = new Doc();
