@@ -756,33 +756,50 @@ export function relayoutTargets(
     if (isRoot || node.type === "text" || isLayout(node) || inLayout(node))
       for (const id of around) inner.add(id);
   }
-  // A main holding instances of a resized main changed inside, however deep.
+  /** What changed in the mains: the layers their copies are laid out again around. */
+  const seeds = new Set(ids);
+  // A main holding instances of a resized main changed inside, however deep: around them.
   const queue = [...sized];
   for (let i = 0; i < queue.length; i++)
-    for (const root of doc.instanceRoots(queue[i] as string))
+    for (const root of doc.instanceRoots(queue[i] as string)) {
+      seeds.add(root);
       for (const outer of affectedComponents(doc, [root]))
         if (!inner.has(outer)) {
           inner.add(outer);
           queue.push(outer);
         }
+    }
   const seen = new Set<string>();
+  /** Instances laid out differently from their mains, whose layout inside may have changed. */
+  const differing: string[] = [];
   for (const componentId of new Set([...inner, ...sized])) {
     for (const root of doc.instanceRoots(componentId)) {
       if (seen.has(root) || !doc.has(root)) continue;
       if (doc.ancestors(root).some((a) => a.id === componentId)) continue;
       if (doc.layoutDiffers(root) && inner.has(componentId)) {
         seen.add(root);
-        const all = [root];
-        for (let i = 0; i < all.length; i++) {
-          const id = all[i] as string;
-          all.push(...doc.childIds(id));
-        }
-        const toMeasure = changedCharacters ? all.filter(inheritsTextChange) : all;
-        if (toMeasure.length === 0) continue;
-        for (const id of all) layout.push(id);
-        for (const id of toMeasure) text.push(id);
+        differing.push(root);
       } else if (sized.has(componentId)) layout.push(root);
     }
+  }
+  if (differing.length === 0) return { layout, text };
+  // In each, the copies of what changed (and the instance itself): laid out as it is
+  // otherwise, the rest of it comes out the same. Built first, so every copy is found.
+  for (const root of differing) doc.childIds(root);
+  const copies = new Map<string, string[]>();
+  for (const id of doc.tokens.source().builtFrom(seeds)) {
+    const root = doc.copySlot(id)?.root;
+    if (!root) continue;
+    const list = copies.get(root);
+    if (list) list.push(id);
+    else copies.set(root, [id]);
+  }
+  for (const root of differing) {
+    const changed = [root, ...(copies.get(root) ?? [])];
+    const toMeasure = changedCharacters ? changed.filter(inheritsTextChange) : changed;
+    if (toMeasure.length === 0) continue;
+    for (const id of changed) layout.push(id);
+    for (const id of toMeasure) text.push(id);
   }
   return { layout, text };
 }
