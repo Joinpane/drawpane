@@ -426,7 +426,7 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
     state.imageDemands = [{ ref: "photo", visible: true, span: { width: 100, height: 100 } }];
     const view = await EngineView.create(
       new FakeCanvas(true) as unknown as HTMLCanvasElement,
-      { scene: {} } as never,
+      { scene: {}, doc: { version: 1 } } as never,
       {} as never,
       {
         subscribe: () => () => {},
@@ -463,7 +463,7 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
       configurable: true,
       value: { gpu: { requestAdapter: async () => ({ info: { description: "NVIDIA T4" } }) } },
     });
-    const editor = { scene: {} } as never;
+    const editor = { scene: {}, doc: { version: 1 } } as never;
     const images = { subscribe: () => () => {}, natural: () => null, get: () => null } as never;
     const view = await EngineView.create(
       new FakeCanvas(true) as unknown as HTMLCanvasElement,
@@ -501,7 +501,7 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
       configurable: true,
       value: {},
     });
-    const editor = { scene: {} } as never;
+    const editor = { scene: {}, doc: { version: 1 } } as never;
     const images = { subscribe: () => () => {}, natural: () => null, get: () => null } as never;
     const initial = new FakeCanvas(true) as unknown as HTMLCanvasElement;
     const abandoned = EngineView.create(initial, editor, {} as never, images, "engine");
@@ -519,7 +519,7 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
       configurable: true,
       value: {},
     });
-    const editor = { scene: {} } as never;
+    const editor = { scene: {}, doc: { version: 1 } } as never;
     const images = { subscribe: () => () => {}, natural: () => null, get: () => null } as never;
     const initial = new FakeCanvas(true);
     const ac = new AbortController();
@@ -546,7 +546,7 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
       configurable: true,
       value: {},
     });
-    const editor = { scene: {} } as never;
+    const editor = { scene: {}, doc: { version: 1 } } as never;
     const images = { subscribe: () => () => {}, natural: () => null, get: () => null } as never;
     const view = await EngineView.create(
       new FakeCanvas(true) as unknown as HTMLCanvasElement,
@@ -626,7 +626,7 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
       resolveClaimed();
       return pending;
     };
-    const editor = { scene: {} } as never;
+    const editor = { scene: {}, doc: { version: 1 } } as never;
     const images = { subscribe: () => () => {}, natural: () => null, get: () => null } as never;
     const canvas = initial as unknown as HTMLCanvasElement;
     const abandoned = EngineView.create(canvas, editor, {} as never, images, "engine");
@@ -658,7 +658,7 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
       (surface as FakeCanvas).context = "webgpu";
       return { ok: false, code: 9, message: "fixture device request rejected" };
     };
-    const editor = { scene: {} } as never;
+    const editor = { scene: {}, doc: { version: 1 } } as never;
     const images = { subscribe: () => () => {}, natural: () => null, get: () => null } as never;
     const view = await EngineView.create(
       initial as unknown as HTMLCanvasElement,
@@ -709,7 +709,7 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
         value: { adapter: "NVIDIA T4", backend: "webgpu", details: "{}", fallback: false },
       };
     };
-    const editor = { scene: {} } as never;
+    const editor = { scene: {}, doc: { version: 1 } } as never;
     const images = { subscribe: () => () => {}, natural: () => null, get: () => null } as never;
     const view = await EngineView.create(
       new FakeCanvas(true) as unknown as HTMLCanvasElement,
@@ -747,8 +747,8 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
     view?.dispose();
   });
 
-  it("ignores obsolete CPU job errors and lets active Limit errors fall back per-frame without killing the Worker", async () => {
-    const editor = { scene: {} } as never;
+  it("ignores obsolete CPU job errors and keeps a limited view on the Worker", async () => {
+    const editor = { scene: {}, doc: { version: 1 } } as never;
     const images = { subscribe: () => () => {}, natural: () => null, get: () => null } as never;
     const view = await EngineView.create(
       new FakeCanvas(true) as unknown as HTMLCanvasElement,
@@ -779,8 +779,7 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
     expect(state.lastWorker?.terminated).toBe(false);
     expect(fallbacks).toEqual([]);
 
-    // Active job Limit error must let Canvas draw that view without terminating the healthy Worker,
-    // and expose limitFallbackReason for the status chip until another view draws cleanly.
+    // A failed reduced render leaves the Worker active and exposes the reason on the chip.
     state.lastWorker?.emit({
       type: "error",
       jobId: jobs[1]?.jobId,
@@ -790,13 +789,13 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
     });
     expect(state.lastWorker?.terminated).toBe(false);
     expect(fallbacks).toEqual([]);
-    expect(view?.limitFallbackReason).toBe("active view limit");
+    expect(view?.limitReason).toBe("active view limit");
     expect(view?.software).toBe(false);
-    expect(frame(32)).toMatchObject({ drawn: false });
-    expect(view?.limitFallbackReason).toBe("active view limit");
+    expect(frame(32)).toMatchObject({ drawn: true, exact: false, settled: true });
+    expect(view?.limitReason).toBe("active view limit");
     // Moving to a different camera view resumes CPU rendering cleanly and clears the limit reason.
     expect(frame(64)).toMatchObject({ drawn: true });
-    expect(view?.limitFallbackReason).toBeNull();
+    expect(view?.limitReason).toBeNull();
     view?.dispose();
   });
 
@@ -805,7 +804,7 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
       configurable: true,
       value: { gpu: { requestAdapter: async () => ({ info: { description: "NVIDIA T4" } }) } },
     });
-    const editor = { scene: {} } as never;
+    const editor = { scene: {}, doc: { version: 1 } } as never;
     const images = { subscribe: () => () => {}, natural: () => null, get: () => null } as never;
     const slot = new FakeSlot();
     const view = await EngineView.create(
@@ -841,7 +840,7 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
     state.builderPendingVisible = 2;
     state.builderPendingOffscreen = 3;
     try {
-      const editor = { scene: {} } as never;
+      const editor = { scene: {}, doc: { version: 1 } } as never;
       const images = { subscribe: () => () => {}, natural: () => null, get: () => null } as never;
       const view = await EngineView.create(
         new FakeCanvas(true) as unknown as HTMLCanvasElement,
@@ -932,7 +931,7 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
       return rafQueue.length;
     };
     try {
-      const editor = { scene: {} } as never;
+      const editor = { scene: {}, doc: { version: 1 } } as never;
       const images = { subscribe: () => () => {}, natural: () => null, get: () => null } as never;
       const view = await EngineView.create(
         new FakeCanvas(true) as unknown as HTMLCanvasElement,

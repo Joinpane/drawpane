@@ -1759,7 +1759,7 @@ impl Engine {
             self.use_cpu_tiles(crate::tiles::TILE, 256);
         }
         let view = camera.view();
-        let halo = self.halo(view)?;
+        let halo = self.halo_for_rect(view, Rect::new(0.0, 0.0, f64::from(width), f64::from(height)))?;
         let mut tiles = self.cpu_tiles.take().expect("made above");
         let result = self.cpu_tiled_frame(&mut tiles, width, height, view, halo, background, options);
         self.cpu_tiles = Some(tiles);
@@ -1781,7 +1781,8 @@ impl Engine {
         let result = (|| {
             let mut stats = TiledStats::default();
             let Some(last) = tiles.last else { return Ok(stats) };
-            let halo = self.halo(last.view)?;
+            let crop = Rect::new(0.0, 0.0, f64::from(last.size.0), f64::from(last.size.1));
+            let halo = self.halo_for_rect(last.view, crop)?;
             let tile = tiles.cache.tile;
             tiles.cache.begin(background, halo);
             let Some(plan) = tiles.cache.plan(last.view, last.size, false, Some(last), true) else {

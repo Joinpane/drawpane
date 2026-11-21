@@ -253,7 +253,7 @@ const BLIT: &str = r"
 /// What wgpu reports out of band: uncaptured errors, device loss, and wait cancellation.
 #[derive(Default)]
 pub struct Health {
-    errors: Mutex<Vec<String>>,
+    errors: Mutex<Vec<(ErrorCode, String)>>,
     lost: AtomicBool,
     lost_reason: Mutex<String>,
     cancelled: AtomicBool,
@@ -302,11 +302,11 @@ impl Health {
         rx
     }
 
-    fn record_error(&self, message: String) {
+    fn record_error(&self, code: ErrorCode, message: String) {
         if let Ok(mut list) = self.errors.lock()
             && list.len() < 16
         {
-            list.push(message);
+            list.push((code, message));
         }
     }
 
@@ -609,6 +609,8 @@ struct MotionPrefix {
 struct ActiveDraw {
     /// A whole frame writes straight to its destination; tiles use scratch color.
     frame_dst: Option<usize>,
+    /// The part of a padded viewport that is actually presented.
+    display_area: Option<IRect>,
     width: u32,
     height: u32,
     background: [f32; 4],
@@ -1037,7 +1039,12 @@ impl Gpu {
         {
             let h = health.clone();
             device.on_uncaptured_error(Arc::new(move |e: wgpu::Error| {
-                h.record_error(e.to_string());
+                let code = if matches!(e, wgpu::Error::OutOfMemory { .. }) {
+                    ErrorCode::Limit
+                } else {
+                    ErrorCode::Gpu
+                };
+                h.record_error(code, e.to_string());
             }));
             let h = health.clone();
             device.set_device_lost_callback(move |reason, message| {
@@ -1720,9 +1727,17 @@ impl Gpu {
         if let Ok(mut list) = self.health.errors.lock()
             && !list.is_empty()
         {
-            let all = list.join("; ");
-            list.clear();
-            return Err(EngineError::new(ErrorCode::Gpu, all));
+            let code = if list.iter().any(|(code, _)| *code == ErrorCode::Limit) {
+                ErrorCode::Limit
+            } else {
+                ErrorCode::Gpu
+            };
+            let all = list
+                .drain(..)
+                .map(|(_, message)| message)
+                .collect::<Vec<_>>()
+                .join("; ");
+            return Err(EngineError::new(code, all));
         }
         Ok(())
     }
@@ -1991,6 +2006,10 @@ impl Gpu {
         self.readers.evict_frame_scratch();
         self.blur.clear();
         self.masks.clear();
+        for scratch in self.scratches.iter_mut().filter_map(Option::take) {
+            scratch.texture.destroy();
+            self.bytes -= scratch.width as usize * scratch.height as usize * 8;
+        }
     }
 
     /// Bytes the engine holds on the GPU outside its tile pages.
@@ -2262,14 +2281,30 @@ impl Gpu {
             return self.finish_frame(stats, t0);
         }
         let dst = (self.cur + 1) % FRAMES;
-        let padded = samples.and_then(|bounds| {
+        let padded = if let Some(bounds) = samples {
             // Keep the same strip phase at the original viewport origin.
             let x = bounds.x0.unsigned_abs().next_multiple_of(4);
             let y = bounds.y0.unsigned_abs().next_multiple_of(4);
-            let size = (bounds.x1 as u32 + x, bounds.y1 as u32 + y);
-            self.ensure_scratch_size(size.0, size.1).ok()?;
+            let size = (
+                (bounds.x1 as u32).saturating_add(x),
+                (bounds.y1 as u32).saturating_add(y),
+            );
+            // In addition to colour/depth scratch, the padded view must have room
+            // for its backdrop plane. Do not begin a frame that cannot hold both.
+            let pixels = (size.0 as usize).saturating_mul(size.1 as usize);
+            let scratch_bytes = self.scratches[1]
+                .as_ref()
+                .map_or(0, |s| s.width as usize * s.height as usize * 8);
+            self.reserve_or_trim(
+                pixels.saturating_mul(12),
+                scratch_bytes.saturating_add(self.readers.bytes()),
+                "a padded view and its backdrop",
+            )?;
+            self.ensure_scratch_size(size.0, size.1)?;
             Some(((x, y), size))
-        });
+        } else {
+            None
+        };
         let whole = if let Some(((x, y), (w, h))) = padded {
             Frame {
                 width: w as u16,
@@ -2297,6 +2332,12 @@ impl Gpu {
         self.backdrop_gen += 1;
         self.active = Some(ActiveDraw {
             frame_dst: padded.is_none().then_some(dst),
+            display_area: padded.map(|((x, y), _)| IRect {
+                x0: x as i32,
+                y0: y as i32,
+                x1: (x + width) as i32,
+                y1: (y + height) as i32,
+            }),
             width: w,
             height: h,
             background,
@@ -2826,6 +2867,7 @@ impl Gpu {
         self.backdrop_gen += 1;
         self.active = Some(ActiveDraw {
             frame_dst: None,
+            display_area: None,
             width: side,
             height: side,
             background,
@@ -5128,8 +5170,14 @@ impl Backend for Gpu {
             ((0, 0), (aw, ah), tex.clone(), view.clone())
         };
         let origin = self.scene_offset();
-        let (w, h) = self.active_scene_size();
-        let target_size = (i32::from(w), i32::from(h));
+        // Root glass writes only to the displayed plane. Inside an isolate,
+        // keep its effect halo because a later filter can read those pixels.
+        let output = active
+            .display_area
+            .filter(|_| self.offscreen_stack.is_empty())
+            .unwrap_or_else(|| self.target_bounds());
+        let output_origin = (output.x0, output.y0);
+        let output_size = (output.x1 - output.x0, output.y1 - output.y0);
 
         let scale = device.determinant().abs().sqrt() as f32;
         if !(scale > 0.0 && scale.is_finite()) {
@@ -5147,14 +5195,14 @@ impl Backend for Gpu {
                 glass::EXACT_CHUNK_SIDE,
             )
         };
-        let regions = glass::compute_regions(
+        let mut regions = glass::compute_regions(
             op,
             &params,
             device,
             size,
             frame_size,
-            origin,
-            target_size,
+            output_origin,
+            output_size,
             max_tex,
             glass::HARD_MAX_REGION_PIXELS,
             split_side,
@@ -5163,6 +5211,13 @@ impl Backend for Gpu {
         )?;
         if regions.is_empty() {
             return Ok(());
+        }
+        for region in &mut regions {
+            let (x, y) = (output.x0 - origin.0, output.y0 - origin.1);
+            region.out_x0 += x;
+            region.out_x1 += x;
+            region.out_y0 += y;
+            region.out_y1 += y;
         }
 
         // A single lens can read and write the same plane. Freeze its prefix before

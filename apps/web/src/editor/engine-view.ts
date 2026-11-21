@@ -52,6 +52,7 @@ import {
 } from "@drawpane/engine";
 import type { CpuWorkerReply, CpuWorkerRequest } from "./engine-cpu.worker";
 import { CPU_IMAGE_BUDGET, CPU_IMAGE_SIDE, ViewImages } from "./engine-image";
+import { fitEngineRaster } from "./engine-raster";
 import {
   type PresentationMode,
   presentation,
@@ -967,7 +968,19 @@ export class EngineView {
   #readbackFailTimer = 0;
   #timeoutBackoffTimer = 0;
   #consecutiveTimeouts = 0;
-  #want: { n: number; width: number; height: number; exact: boolean; epoch: number } | null = null;
+  #want: {
+    n: number;
+    width: number;
+    height: number;
+    exact: boolean;
+    epoch: number;
+    rasterKey: string;
+    rasterScale: number;
+  } | null = null;
+  #gpuRaster: { key: string; scale: number; reason: string } | null = null;
+  #pendingRasterLimit: string | null = null;
+  #gpuAppliedPage: string | null = null;
+  #listLimit: { pageId: string; version: number; reason: string } | null = null;
   /** CPU view mode state: monotonic job ids, last complete frame for pan/zoom stand-ins. */
   #cpuJobId = 0;
   #cpuRevision = 0;
@@ -977,10 +990,10 @@ export class EngineView {
   #cpuBacking: CpuBackedFrame | null = null;
   #cpuHasPage: string | null = null;
   #cpuUnsupportedPage: string | null = null;
-  /** Scene key that hit a content/budget Limit in CPU view mode (Canvas draws that frame). */
+  /** CPU view that hit a limit and cannot settle further at this camera. */
   #cpuLimitKey: string | null = null;
   #cpuLimitMessage: string | null = null;
-  /** Per-frame content/budget Limit fallback reason (Canvas covers the current frame). */
+  /** Why the engine is drawing at reduced detail or retaining its last usable picture. */
   #limitReason: string | null = null;
   /** Aborted on dispose so any in-flight step-down probe stops immediately. */
   readonly #lifecycle = new AbortController();
@@ -1273,7 +1286,7 @@ export class EngineView {
     return this.#recovering !== null;
   }
 
-  get limitFallbackReason(): string | null {
+  get limitReason(): string | null {
     return this.#limitReason;
   }
 
@@ -1309,6 +1322,16 @@ export class EngineView {
     return { ok: false, code: ErrorCode.State, message: "no active backend" };
   }
 
+  #holdLimit(pageId: string, background: string, reason: string): EngineDraw {
+    if (this.last.pageId !== pageId) {
+      this.#canvas.width = this.#canvas.width;
+      this.#canvas.style.backgroundColor = background;
+    }
+    this.#limitReason = reason;
+    this.last = { ...this.last, exact: false, supported: true };
+    return { drawn: true, ready: true, exact: false, ahead: false, settled: true };
+  }
+
   #wireCpuWorker(worker: Worker): void {
     worker.onmessage = (e: MessageEvent<CpuWorkerReply>) => {
       if (this.#dead || this.#cpuWorker !== worker) return;
@@ -1325,7 +1348,17 @@ export class EngineView {
           this.#cpuCompletedExact = false;
           this.#cpuRevision = msg.revision;
           this.#builder.acknowledge(false, msg.revision);
-          if (msg.code === ErrorCode.Revision) {
+          if (msg.code === ErrorCode.Limit) {
+            const pageId = this.#builder.pageId;
+            if (pageId) {
+              this.#listLimit = {
+                pageId,
+                version: this.#editor.doc.version,
+                reason: msg.message ?? "display list exceeded the engine limit",
+              };
+            }
+            this.onChange();
+          } else if (msg.code === ErrorCode.Revision) {
             this.onChange();
           } else {
             this.#stepDown({
@@ -1362,8 +1395,7 @@ export class EngineView {
             return;
           }
           if (msg.code === ErrorCode.Limit) {
-            // Content/budget limit on this specific view, not a Worker crash:
-            // let Canvas draw this view while keeping the healthy CPU Worker alive.
+            // Even the smallest raster could not draw this view. Retain its last usable picture.
             this.#cpuJob = null;
             this.#cpuCompletedKey = null;
             this.#cpuCompletedExact = false;
@@ -1374,7 +1406,7 @@ export class EngineView {
             return;
           }
         }
-        this.#stepDown({ message: msg.message, code: msg.code });
+        if (msg.code !== ErrorCode.Limit) this.#stepDown({ message: msg.message, code: msg.code });
         return;
       }
       if (msg.type === "tile") {
@@ -1392,6 +1424,14 @@ export class EngineView {
           msg.bitmap?.close();
           return;
         }
+        if (
+          msg.reduced &&
+          (msg.width !== this.#canvas.width || msg.height !== this.#canvas.height)
+        ) {
+          this.#canvas.width = msg.width;
+          this.#canvas.height = msg.height;
+        }
+        this.#canvas.style.backgroundColor = "";
         if (job.firstTile) {
           job.firstTile = false;
           const backed =
@@ -1447,6 +1487,11 @@ export class EngineView {
             camera: msg.camera,
           };
         }
+        if (msg.limit) {
+          this.#cpuLimitKey = job.sceneKey;
+          this.#cpuLimitMessage = msg.limit;
+          this.#limitReason = msg.limit;
+        }
         const frameExact =
           msg.exact && job.exact && job.imagesExact && this.#builder.pendingVisible === 0;
         const at = performance.now();
@@ -1492,6 +1537,10 @@ export class EngineView {
     this.#shownWaiting = false;
     this.#want = null;
     this.#consecutiveTimeouts = 0;
+    this.#gpuRaster = null;
+    this.#pendingRasterLimit = null;
+    this.#gpuAppliedPage = null;
+    this.#listLimit = null;
     if (this.#readbackFailTimer) {
       window.clearTimeout(this.#readbackFailTimer);
       this.#readbackFailTimer = 0;
@@ -1512,6 +1561,17 @@ export class EngineView {
     recoverable: boolean,
   ): EngineDraw {
     if (this.#dead || this.#recovering) return NOT_DRAWN;
+    if (r.code === ErrorCode.Limit) {
+      this.#limitReason = r.message;
+      if (this.#engine && this.#presenting) {
+        const scale = this.#gpuRaster?.scale ?? 1;
+        if (Math.max(this.#presenting.width, this.#presenting.height) * scale >= 2) {
+          this.#pendingRasterLimit = r.message;
+          this.onChange();
+        }
+      }
+      return { drawn: true, ready: true, exact: false, ahead: false, settled: true };
+    }
     this.#supersede();
     this.#bumpDeviceGeneration();
     this.#unpresented = 0;
@@ -1846,6 +1906,9 @@ export class EngineView {
   #patchGpu(pageId: string, textMs?: number): boolean {
     const engine = this.#engine;
     if (!engine) return false;
+    const version = this.#editor.doc.version;
+    if (this.#listLimit?.pageId === pageId && this.#listLimit.version === version) return true;
+    this.#listLimit = null;
     const t0 = performance.now();
     // A page shown afresh sends geometry in slices and leaves its text provisional until
     // the whole structure is in view. The first frame need not wait for the full list.
@@ -1870,9 +1933,14 @@ export class EngineView {
       this.#builder.acknowledge(r.ok, engine.revision);
     }
     if (!r.ok) {
+      if (r.code === ErrorCode.Limit) {
+        this.#listLimit = { pageId, version, reason: r.message };
+        return true;
+      }
       this.#handleGpuFailure(r, false);
       return false;
     }
+    this.#gpuAppliedPage = pageId;
     if (this.#builder.stats.fresh || !this.#builder.opening) {
       this.#images.retain(this.#builder.imagesInUse());
     }
@@ -1883,6 +1951,9 @@ export class EngineView {
   #patchCpu(pageId: string, textMs?: number): boolean {
     const worker = this.#cpuWorker;
     if (!worker) return false;
+    const version = this.#editor.doc.version;
+    if (this.#listLimit?.pageId === pageId && this.#listLimit.version === version) return true;
+    this.#listLimit = null;
     const t0 = performance.now();
     const message =
       this.#builder.pageId === pageId
@@ -1988,7 +2059,7 @@ export class EngineView {
     const b = this.#builder;
     // Initial geometry advances with a new frame so each slice can be shown before the
     // next one starts. Do not run an unbroken sequence of idle slices during open.
-    if (b.opening) return null;
+    if (b.opening || this.#listLimit) return null;
     try {
       const text = (): EngineAhead | null => {
         const t = performance.now();
@@ -2026,10 +2097,12 @@ export class EngineView {
       }
       const engine = this.#engine;
       if (!engine) return null;
+      if (this.#gpuRaster) return b.pageId === pageId && b.pending > 0 ? text() : null;
       const r = engine.renderGpuAhead(colour(background), budgetMs);
       if (!r.ok) {
         // A layer the engine refuses: the next frame draws this page on the canvas.
-        if (r.code !== ErrorCode.Unsupported) this.#handleGpuFailure(r, true);
+        if (r.code !== ErrorCode.Unsupported && r.code !== ErrorCode.Limit)
+          this.#handleGpuFailure(r, true);
         return null;
       }
       this.idle = {
@@ -2122,48 +2195,72 @@ export class EngineView {
     });
     if (!this.#patchGpu(pageId)) return NOT_DRAWN;
     const t1 = performance.now();
-    this.#limitReason = null;
-    if (!this.#builder.supported) {
+    const listLimit = this.#listLimit;
+    if (listLimit && this.#gpuAppliedPage !== pageId)
+      return this.#holdLimit(pageId, background, listLimit.reason);
+    if (!this.#builder.supported && !listLimit) {
+      this.#limitReason = null;
       this.last = { ...this.last, supported: false, patchMs: t1 - t0 };
       this.#pageSupported(pageId, false);
       return NOT_DRAWN;
     }
     const cam: Camera = { zoom: camera.zoom, x: camera.x, y: camera.y, dpr };
     const imagesExact = this.#updateImages(cam, width, height);
-    if (this.#canvas.width !== width || this.#canvas.height !== height) {
-      this.#canvas.width = width;
-      this.#canvas.height = height;
-    }
     // While text in view is still to be sent whole, a frame draws only what nothing stands in
     // for (as while moving): a tile drawn now would be stale again when the text arrives, and the
     // time between frames sends the text first.
-    const opening = this.#builder.opening;
-    const textFirst = opening || this.#builder.pendingVisible > 0;
-    const drawFrame = () =>
-      engine.renderGpu(
-        width,
-        height,
-        cam,
-        colour(background),
-        !exact || textFirst,
-        textFirst ? NO_OPTIONAL_MS : budgetMs,
-        true,
-      );
-    let frame = drawFrame();
-    if (!frame.ok && frame.code === ErrorCode.Limit && this.#images.releasePressure()) {
-      frame = drawFrame();
-    }
+    const opening = this.#builder.opening && !listLimit;
+    const textFirst = opening || (!listLimit && this.#builder.pendingVisible > 0);
+    const key = `${pageId}|${engine.revision}|${this.#imageVersion}|${width}x${height}|${cam.zoom}|${cam.x}|${cam.y}|${dpr}`;
+    const previous = this.#gpuRaster?.key === key ? this.#gpuRaster : null;
+    const pendingLimit = this.#pendingRasterLimit;
+    this.#pendingRasterLimit = null;
+    if (pendingLimit) engine.clearViewCaches();
+    const initialScale = pendingLimit ? (previous?.scale ?? 1) / 2 : previous?.scale;
+    const bg = colour(background);
+    const {
+      raster,
+      result: frame,
+      limit,
+    } = fitEngineRaster(
+      width,
+      height,
+      cam,
+      (r) => {
+        const full = r.scale === 1;
+        const draw = () =>
+          engine.renderGpu(
+            r.width,
+            r.height,
+            r.camera,
+            bg,
+            full && (!exact || textFirst),
+            full ? (textFirst ? NO_OPTIONAL_MS : budgetMs) : 0,
+            true,
+          );
+        const result = draw();
+        if (result.ok || result.code !== ErrorCode.Limit) return result;
+        engine.clearViewCaches();
+        if (full) {
+          this.#images.releasePressure();
+          return draw();
+        }
+        return result;
+      },
+      initialScale,
+    );
+    const rasterLimit = limit ?? pendingLimit ?? previous?.reason ?? null;
+    this.#gpuRaster = rasterLimit ? { key, scale: raster.scale, reason: rasterLimit } : null;
+    this.#limitReason = rasterLimit ?? listLimit?.reason ?? null;
     if (!frame.ok) {
       if (frame.code === ErrorCode.Unsupported) {
+        if (listLimit) return this.#holdLimit(pageId, background, listLimit.reason);
         this.last = { ...this.last, supported: false };
         this.#pageSupported(pageId, false);
         return NOT_DRAWN;
       }
-      // Repeatable dimension/budget limits are not device loss: let the canvas renderer draw this frame.
-      if (frame.code === ErrorCode.Limit) {
-        this.#limitReason = frame.message;
-        return NOT_DRAWN;
-      }
+      if (frame.code === ErrorCode.Limit)
+        return this.#holdLimit(pageId, background, rasterLimit ?? frame.message);
       if (frame.code === ErrorCode.Timeout) {
         const health = engine.gpuCheck();
         if (!health.ok) return this.#handleGpuFailure(health, true);
@@ -2198,7 +2295,13 @@ export class EngineView {
     this.#unpresented = 0;
     // Exact only when the list holds what the page shows: text in view still to be sent again
     // (fonts arrived) leaves the frame a stand-in, whatever the engine drew.
-    const shownExact = f.exact && !opening && imagesExact && this.#builder.pendingVisible === 0;
+    const shownExact =
+      f.exact &&
+      !opening &&
+      imagesExact &&
+      this.#builder.pendingVisible === 0 &&
+      !this.#limitReason;
+    this.#canvas.style.backgroundColor = "";
     const n = ++this.#frame;
     if (opening) {
       this.#openingFrame = n;
@@ -2277,7 +2380,15 @@ export class EngineView {
       trackShown(n, false);
     }
     if (this.#readback) {
-      this.#want = { n, width, height, exact: shownExact, epoch: this.#epoch };
+      this.#want = {
+        n,
+        width: raster.width,
+        height: raster.height,
+        exact: shownExact,
+        epoch: this.#epoch,
+        rasterKey: key,
+        rasterScale: raster.scale,
+      };
       this.#readNext();
     }
     this.last = {
@@ -2322,9 +2433,11 @@ export class EngineView {
       drawn: true,
       ready: this.#readback === null,
       exact: shownExact,
-      ahead: f.tiles.queued > 0 || this.#builder.pending > 0,
+      ahead: !listLimit && (this.#builder.pending > 0 || (!rasterLimit && f.tiles.queued > 0)),
       settled:
-        !opening && f.tiles.pending === 0 && f.tiles.queued === 0 && this.#builder.pending === 0,
+        !opening &&
+        (!!this.#limitReason ||
+          (f.tiles.pending === 0 && f.tiles.queued === 0 && this.#builder.pending === 0)),
     };
   }
 
@@ -2351,6 +2464,7 @@ export class EngineView {
       y1: (height / dpr - camera.y) / z,
     });
     if (!this.#patchCpu(pageId)) return NOT_DRAWN;
+    if (this.#listLimit) return this.#holdLimit(pageId, background, this.#listLimit.reason);
     const t1 = performance.now();
     if (!this.#builder.supported || this.#cpuUnsupportedPage === pageId) {
       this.last = { ...this.last, supported: false, patchMs: t1 - t0 };
@@ -2368,11 +2482,12 @@ export class EngineView {
     const hasPendingText = this.#builder.pending > 0;
     const textFirst = this.#builder.pendingVisible > 0;
 
-    // If this exact view hit a content/budget Limit, let Canvas draw it without terminating the Worker.
-    if (this.#cpuLimitKey === sceneKey) {
-      this.#limitReason = this.#cpuLimitMessage ?? "frame exceeded CPU render limit";
-      return NOT_DRAWN;
-    }
+    if (this.#cpuLimitKey === sceneKey)
+      return this.#holdLimit(
+        pageId,
+        background,
+        this.#cpuLimitMessage ?? "frame exceeded CPU render limit",
+      );
     this.#limitReason = null;
 
     // Deduplicate against an already completed frame for identical inputs.
@@ -2497,6 +2612,21 @@ export class EngineView {
       if (!px.ok) {
         // Keep the existing timeout backoff in charge of waking the next opening slice.
         if (this.#openingFrame === want.n) this.#clearOpeningFrame();
+        if (px.code === ErrorCode.Limit) {
+          if (want.epoch === this.#epoch && want.n === this.#frame) {
+            const smaller = want.width > 1 || want.height > 1;
+            this.#gpuRaster = {
+              key: want.rasterKey,
+              scale: smaller ? want.rasterScale / 2 : want.rasterScale,
+              reason: px.message,
+            };
+            this.#limitReason = px.message;
+            if (smaller) this.onChange();
+          } else {
+            this.#readNext();
+          }
+          return;
+        }
         if (px.code === ErrorCode.Timeout) {
           const health = engine.gpuCheck();
           if (!health.ok) {
@@ -2554,6 +2684,10 @@ export class EngineView {
         this.#completeOpeningFrame(want.n);
         this.#readNext();
         return;
+      }
+      if (this.#canvas.width !== want.width || this.#canvas.height !== want.height) {
+        this.#canvas.width = want.width;
+        this.#canvas.height = want.height;
       }
       const p0 = performance.now();
       ctx.putImageData(

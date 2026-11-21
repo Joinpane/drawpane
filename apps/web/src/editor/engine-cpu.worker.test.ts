@@ -14,6 +14,7 @@ const workerState = vi.hoisted(() => ({
   failRenderCode: null as number | null,
   remainingTiles: 0,
   lastTiledOptions: null as Record<string, unknown> | null,
+  allowReducedRender: false,
 }));
 
 vi.mock("@drawpane/engine", () => ({
@@ -75,6 +76,24 @@ vi.mock("@drawpane/engine", () => ({
         },
       };
     }
+    renderCpu(w: number, h: number) {
+      if (!workerState.allowReducedRender) return { ok: false, code: 4, message: "injected limit" };
+      return {
+        ok: true,
+        value: {
+          pixels: new Uint8Array(w * h * 4),
+          stats: {
+            exact: true,
+            plan: "direct",
+            tiles: { drawn: 0, pending: 0, queued: 0, held: 0, evicted: 0, dragged: 0 },
+            records: 1,
+            culled: 0,
+            glyphsMasked: 0,
+            glyphsOutlined: 0,
+          },
+        },
+      };
+    }
     dispose() {}
   },
 }));
@@ -88,6 +107,7 @@ describe("engine-cpu.worker tiled rendering, transfer credit, and error tagging"
     workerState.failRenderCode = null;
     workerState.remainingTiles = 0;
     workerState.lastTiledOptions = null;
+    workerState.allowReducedRender = false;
     if (origSelf) Object.defineProperty(globalThis, "self", origSelf);
     else delete (globalThis as Record<string, unknown>).self;
     if (origCreateBitmap) Object.defineProperty(globalThis, "createImageBitmap", origCreateBitmap);
@@ -255,6 +275,16 @@ describe("engine-cpu.worker tiled rendering, transfer credit, and error tagging"
     await waitTick();
     expect(replies).toContainEqual(
       expect.objectContaining({ type: "error", jobId: 6, revision: 5, code: 4 }),
+    );
+
+    workerState.allowReducedRender = true;
+    await render(7, 5, 64);
+    await waitTick();
+    expect(replies).toContainEqual(
+      expect.objectContaining({ type: "tile", jobId: 7, width: 32, height: 32, reduced: true }),
+    );
+    expect(replies).toContainEqual(
+      expect.objectContaining({ type: "done", jobId: 7, exact: false, limit: "injected limit" }),
     );
 
     await send({ type: "dispose" });

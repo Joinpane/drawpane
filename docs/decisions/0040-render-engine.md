@@ -1146,3 +1146,18 @@ different pixels. The view releases its caches after 30 seconds continuously
 hidden. Allocation refusals reclaim optional levels. Missing sources back off
 and corrupt bytes are retried only when the source changes or the view reloads.
 The strict raw-pixel export API retains its admission checks.
+
+## Amendment: high zoom raster limits in the editor
+
+Glass chunks grow from their visible output, with the sampling grid anchored to
+the lens. Gaussian pyramids crop large source planes to the output and kernel
+support, aligned to the original pyramid grid. Layer isolation and effect
+scratch use the current render target and each effect's support.
+
+A GPU render that reaches a memory or texture limit releases view caches and
+retries. If the view still exceeds a limit, the same backend draws at a lower
+device raster scale. The camera's page-space crop stays the same, and the chip
+reports reduced detail. CPU view mode likewise retries a limited tiled render
+as a smaller direct frame. An irreducible content limit retains the last usable
+picture for that page. The engine can draw again after the camera or document
+changes.

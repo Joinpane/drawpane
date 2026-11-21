@@ -1895,8 +1895,9 @@ pub mod gpu {
             spec: &BlurSpec,
             pyramid_key: Option<PyramidKey>,
         ) -> usize {
-            let cb = spec.clamp_bounds.clamp(src_size.0 as i32, src_size.1 as i32);
             let dirty = effective_dirty(spec.dirty, dst_size, dst_origin);
+            let cb = Self::source_bounds(spec, src_size, dirty);
+            let pyramid_key = pyramid_key.map(|key| PyramidKey::new(key.source_id, cb, spec.edge));
             let r = kernel_radius(spec.sigma);
             if dirty.is_empty() || cb.is_empty() || r == 0 || is_constant_clamp_pixel(cb, spec.edge) {
                 return 0;
@@ -1952,6 +1953,31 @@ pub mod gpu {
             let scratch_v_add = Self::scratch_growth(&self.scratch_v, bw, bh, self.inter_bpp);
             let scratch_h_add = Self::scratch_growth(&self.scratch_h, bw, ih, self.inter_bpp);
             pyr_add.saturating_add(scratch_v_add).saturating_add(scratch_h_add)
+        }
+
+        /// The pyramid needs the output and its Gaussian support. Keep new
+        /// edges on the original sampling grid so a window into a large
+        /// backdrop has the same phase as the complete backdrop.
+        fn source_bounds(spec: &BlurSpec, src_size: (u32, u32), dirty: IRect) -> IRect {
+            let cb = spec.clamp_bounds.clamp(src_size.0 as i32, src_size.1 as i32);
+            if cb.is_empty() || dirty.is_empty() || spec.sigma <= DIRECT_SIGMA_MAX {
+                return cb;
+            }
+            let (level, _) = choose_level(spec.sigma.min(MAX_BLUR_SIGMA), MAX_PYRAMID_LEVELS);
+            let step = 1 << level;
+            let halo = blur_reach(spec.sigma) as i32;
+            let axis = |from: i32, to: i32, lo: i32, hi: i32| {
+                let a = (from.clamp(lo, hi - 1) - halo - lo).max(0);
+                let b = (to.clamp(lo + 1, hi) + halo - lo).max(1);
+                (lo + (a / step) * step, hi.min(lo + ((b + step - 1) / step) * step))
+            };
+            let (x0, x1) = axis(dirty.x0, dirty.x1, cb.x0, cb.x1);
+            let (y0, y1) = axis(dirty.y0, dirty.y1, cb.y0, cb.y1);
+            let cropped = IRect { x0, y0, x1, y1 };
+            let pixels = |r: IRect| i64::from(r.x1 - r.x0) * i64::from(r.y1 - r.y0);
+            // Reuse the full-frame pyramid for neighbouring readers when cropping
+            // would save little memory.
+            if pixels(cb) > 2 * pixels(cropped) { cropped } else { cb }
         }
 
         pub fn pyramid_bytes(&self) -> usize {
@@ -2438,11 +2464,10 @@ pub mod gpu {
             pyramid_key: Option<PyramidKey>,
         ) -> Result<()> {
             let max_tex = device.limits().max_texture_dimension_2d;
-            let src_w = src_size.0 as i32;
-            let src_h = src_size.1 as i32;
-            let cb = spec.clamp_bounds.clamp(src_w, src_h);
-            validate_sigma(spec.sigma, cb, spec.edge)?;
             let dirty = effective_dirty(spec.dirty, dst_size, dst_origin);
+            let cb = Self::source_bounds(spec, src_size, dirty);
+            let pyramid_key = pyramid_key.map(|key| PyramidKey::new(key.source_id, cb, spec.edge));
+            validate_sigma(spec.sigma, cb, spec.edge)?;
             if dirty.is_empty() {
                 return Ok(());
             }

@@ -28,6 +28,7 @@ export type RendererStatus =
       readonly adapter: string | null;
       readonly compatibility: boolean;
       readonly software: boolean;
+      readonly limit?: string | null;
       readonly reducedImages?: number;
     }
   | {
@@ -83,6 +84,7 @@ export function sameRendererStatus(a: RendererStatus, b: RendererStatus): boolea
       a.adapter === b.adapter &&
       a.compatibility === b.compatibility &&
       a.software === b.software &&
+      a.limit === b.limit &&
       a.reducedImages === b.reducedImages
     );
   }
@@ -124,18 +126,25 @@ export function fallbackToReason(event: FallbackEvent): RendererFallbackReason {
 
 export function rendererChipLabel(status: ActiveRendererStatus): string {
   if (status.active !== "engine") return "Canvas renderer";
-  const note = status.reducedImages ? " · Images reduced" : "";
+  const note = status.limit ? " · Reduced detail" : status.reducedImages ? " · Images reduced" : "";
   return `Engine · ${status.backend}${note}`;
 }
 
 export function formatRendererReason(status: ActiveRendererStatus): string {
   if (status.active === "engine") {
-    const renderer = status.adapter ? `${status.backend} (${status.adapter})` : status.backend;
+    const adapter = status.adapter
+      ?.replace(
+        /\s*\((?:Other|IntegratedGpu|DiscreteGpu|VirtualGpu|Cpu), (?:BrowserWebGpu|Gl)\).*$/,
+        "",
+      )
+      .trim();
+    const renderer = adapter ? `${status.backend} (${adapter})` : status.backend;
     const reduced = status.reducedImages ?? 0;
     const note = reduced
       ? `. ${reduced} ${reduced === 1 ? "image" : "images"} at reduced detail`
       : "";
-    return `Drawing with ${renderer}${note}`;
+    const limit = status.limit ? ` at reduced detail. ${status.limit}` : "";
+    return `Drawing with ${renderer}${limit}${note}`;
   }
   switch (status.reason.kind) {
     case "starting":
