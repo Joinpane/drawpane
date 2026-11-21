@@ -3824,16 +3824,7 @@ impl<B: Backend> Walk<'_, B> {
         let whole = self.backend.whole_runs();
         // Keep the outline contours identical across CPU bands. Omitting an off-tile
         // contour can change strip coverage by one level elsewhere in the same run.
-        let outline_viewport = if whole {
-            Rect::new(
-                -1.0,
-                -1.0,
-                f64::from(self.frame.width) + 1.0,
-                f64::from(self.frame.height) + 1.0,
-            )
-        } else {
-            self.viewport
-        };
+        let outline_viewport = if whole { self.full_viewport } else { self.viewport };
         for (n, g) in glyphs.iter().enumerate() {
             let Some(glyph) = self.store.glyphs.get(g.glyph) else {
                 return Err(EngineError::unknown(format!("glyph {}", g.glyph)));

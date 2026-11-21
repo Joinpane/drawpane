@@ -159,7 +159,7 @@ pub struct Applied {
     /// Where the changed records painted before and paint now, in page units, with their
     /// places in paint order. `Store::dirty` adds the readers they reach, for a camera.
     pub changes: Vec<Dirty>,
-    /// Everything changed (a reset): redraw it all.
+    /// A reset or page-wide rasterization change requires redrawing every tile.
     pub full: bool,
     /// The message only moved these records (transform commands and nothing else): a drag
     /// (decision 0040, "Dragging"). Sorted, without repeats.

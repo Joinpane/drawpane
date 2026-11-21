@@ -761,7 +761,11 @@ pub fn measure_inradius(
     }
     ctx.flush();
     let mut pix = vello_cpu::Pixmap::new(pw, ph);
-    ctx.render_with(&mut pix, resources, vello_cpu::RasterizerSettings::default());
+    let settings = vello_cpu::RasterizerSettings {
+        render_mode: vello_cpu::RenderMode::OptimizeQuality,
+        ..Default::default()
+    };
+    ctx.render_with(&mut pix, resources, settings);
     let data = pix.data_as_u8_slice();
     let inside: Vec<u8> = data
         .as_chunks::<4>()
