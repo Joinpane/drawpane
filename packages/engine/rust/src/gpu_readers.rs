@@ -164,6 +164,16 @@ impl MipTex {
     }
 }
 
+pub struct GlassResolve<'a> {
+    pub divisor: f32,
+    pub optical_origin: (f32, f32),
+    pub native: Option<&'a wgpu::TextureView>,
+    pub native_origin: (f32, f32),
+    pub native_size: (u32, u32),
+    pub native_clip: Option<ClipWithin>,
+    pub source_origin: (i32, i32),
+}
+
 pub struct GpuReaders {
     // Bind group layouts
     copy_ext_bgl: wgpu::BindGroupLayout,
@@ -385,7 +395,8 @@ impl GpuReaders {
                 tex_binding(4, false),
                 tex_binding(5, false),
                 samp_binding(6),
-                uni_binding(7, 224),
+                uni_binding(7, 256),
+                tex_binding(8, true),
             ],
         });
         let coarse_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1314,6 +1325,7 @@ impl GpuReaders {
         coarse: bool,
         analytic_coarse: Option<CoarseAnalytic>,
         has_clip_mask: bool,
+        resolve: Option<GlassResolve<'_>>,
         max_bytes: usize,
     ) -> Result<()> {
         // GlassRegion's write rectangle is already local to the destination. Only
@@ -1888,6 +1900,26 @@ impl GpuReaders {
             None => (0.0, [0.0; 4], [0.0; 4], [0.0; 4], [0.0; 4], params.unit_px),
         };
         let hairline_px = (tune.hairline * params.unit_px).max(1e-3);
+        let (divisor, optical_origin) = resolve
+            .as_ref()
+            .map_or((1.0, (mask_x0, mask_y0)), |r| (r.divisor, r.optical_origin));
+        let mut native_map = [0.0; 4];
+        let mut native_bounds = [0.0; 4];
+        if let Some(r) = resolve.as_ref().filter(|r| r.native.is_some()) {
+            native_map = [r.native_origin.0, r.native_origin.1, 1.0, 0.0];
+            let w = r.native_size.0 as f32;
+            let h = r.native_size.1 as f32;
+            let ox = r.source_origin.0 as f32;
+            let oy = r.source_origin.1 as f32;
+            native_bounds = r.native_clip.map_or([0.0, 0.0, w, h], |clip| {
+                [
+                    (clip.x0.floor() - ox).clamp(0.0, w),
+                    (clip.y0.floor() - oy).clamp(0.0, h),
+                    (clip.x1.ceil() - ox).clamp(0.0, w),
+                    (clip.y1.ceil() - oy).clamp(0.0, h),
+                ]
+            });
+        }
         let u_glass = &[
             // sizes
             region.rw as f32,
@@ -1895,8 +1927,8 @@ impl GpuReaders {
             low_tw,
             low_th,
             // origin
-            mask_x0,
-            mask_y0,
+            optical_origin.0,
+            optical_origin.1,
             out_x0 as f32,
             out_y0 as f32,
             // rim
@@ -1958,7 +1990,15 @@ impl GpuReaders {
             packed_flag,
             (dst_offset.0 & 1) as f32,
             (dst_offset.1 & 1) as f32,
-            0.0,
+            divisor,
+            native_map[0],
+            native_map[1],
+            native_map[2],
+            native_map[3],
+            native_bounds[0],
+            native_bounds[1],
+            native_bounds[2],
+            native_bounds[3],
         ];
         let (sg_idx, sg_off) = self.push_uniform(device, queue, u_glass);
         let clip_view = if has_clip_mask {
@@ -2003,8 +2043,14 @@ impl GpuReaders {
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                         buffer: &self.slabs[sg_idx],
                         offset: 0,
-                        size: wgpu::BufferSize::new(224),
+                        size: wgpu::BufferSize::new(256),
                     }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: wgpu::BindingResource::TextureView(
+                        resolve.as_ref().and_then(|r| r.native).unwrap_or(&self.white_1x1.view),
+                    ),
                 },
             ],
         });

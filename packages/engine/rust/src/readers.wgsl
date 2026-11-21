@@ -304,8 +304,11 @@ struct GlassU {
     tune_b: vec4<f32>,
     // (shade, shade_reach, valid_lw, valid_lh)
     tune_c: vec4<f32>,
-    // (height_packed, 0, 0, 0)
-    tune_d: vec4<f32>, // (packed height, quad phase x, quad phase y, unused)
+    // (height_packed, quad phase x, quad phase y, device px per optical px)
+    tune_d: vec4<f32>,
+    // (native coordinate at the optical origin, native sampling enabled, unused)
+    native_map: vec4<f32>,
+    native_bounds: vec4<f32>,
 };
 
 @group(0) @binding(0) var g_backdrop: texture_2d<f32>;
@@ -316,6 +319,7 @@ struct GlassU {
 @group(0) @binding(5) var g_clip: texture_2d<f32>;
 @group(0) @binding(6) var g_lin_samp: sampler;
 @group(0) @binding(7) var<uniform> gu: GlassU;
+@group(0) @binding(8) var g_native: texture_2d<f32>;
 
 fn safe_pow(base: f32, exponent: f32) -> f32 {
     // Metal/ANGLE pow(0.0, y) can be undefined or NaN; keep base strictly positive even on untaken lanes.
@@ -458,7 +462,7 @@ fn lens_sample(p: vec2<f32>) -> LensSample {
     let rim = safe_pow(slope, gu.tune_a.x);
     let fall = select(
         rim,
-        safe_pow(clamp(1.0 - d / max(depth, 1.0), 0.0, 1.0), gu.tune_a.y),
+        safe_pow(clamp(1.0 - d / max(depth, 1.0 / gu.tune_d.w), 0.0, 1.0), gu.tune_a.y),
         is_box
     );
     let along = vec2<f32>(-inward.y, inward.x);
@@ -469,9 +473,26 @@ fn lens_sample(p: vec2<f32>) -> LensSample {
     return LensSample(bend, inward, d);
 }
 
+// Clear glass can sample unreduced backdrop pixels when the displaced ray
+// stays in the viewport. Fade over the last device pixel at the halo boundary.
+fn glass_color(uv: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>) -> vec4<f32> {
+    let halo_color = textureSampleGrad(g_backdrop, g_mip_samp, uv, dx, dy);
+    if (gu.native_map.z < 0.5) {
+        return halo_color;
+    }
+    let scale = gu.sizes.xy * gu.tune_d.w;
+    let native_px = uv * scale + gu.native_map.xy;
+    let edge = min(native_px - gu.native_bounds.xy, gu.native_bounds.zw - native_px);
+    let footprint = max(length(dx * scale), length(dy * scale));
+    let blend = clamp(min(edge.x, edge.y) + 0.5, 0.0, 1.0)
+        * (1.0 - clamp((footprint - 1.0) / (gu.tune_d.w - 1.0), 0.0, 1.0));
+    let uv_native = native_px / vec2<f32>(textureDimensions(g_native));
+    return mix(halo_color, textureSampleLevel(g_native, g_lin_samp, uv_native, 0.0), blend);
+}
+
 @fragment
 fn fs_glass(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let p = pos.xy - gu.origin.xy;
+    let p = (pos.xy - gu.origin.xy) / gu.tune_d.w;
     let rw = max(gu.sizes.x, 1.0);
     let rh = max(gu.sizes.y, 1.0);
     let depth = gu.rim.z;
@@ -494,7 +515,7 @@ fn fs_glass(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     // of the frame-aligned quad on any axis where hardware quads are out of phase.
     if (gu.tune_d.y > 0.5) {
         let step = select(-1.0, 1.0, (i32(pos.x) & 1) != 0);
-        let q = p + vec2<f32>(step, 0.0);
+        let q = p + vec2<f32>(step / gu.tune_d.w, 0.0);
         let bend = lens_sample(q).bend;
         dx_r = ((q + bend * (1.0 + dispersion)) * inv_size - uv_r) * step;
         dx_g = ((q + bend) * inv_size - uv_g) * step;
@@ -502,24 +523,24 @@ fn fs_glass(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     }
     if (gu.tune_d.z > 0.5) {
         let step = select(-1.0, 1.0, (i32(pos.y) & 1) != 0);
-        let q = p + vec2<f32>(0.0, step);
+        let q = p + vec2<f32>(0.0, step / gu.tune_d.w);
         let bend = lens_sample(q).bend;
         dy_r = ((q + bend * (1.0 + dispersion)) * inv_size - uv_r) * step;
         dy_g = ((q + bend) * inv_size - uv_g) * step;
         dy_b = ((q + bend * (1.0 - dispersion)) * inv_size - uv_b) * step;
     }
 
-    let red = textureSampleGrad(g_backdrop, g_mip_samp, uv_r, dx_r, dy_r);
-    let green = textureSampleGrad(g_backdrop, g_mip_samp, uv_g, dx_g, dy_g);
-    let blue = textureSampleGrad(g_backdrop, g_mip_samp, uv_b, dx_b, dy_b);
+    let red = glass_color(uv_r, dx_r, dy_r);
+    let green = glass_color(uv_g, dx_g, dy_g);
+    let blue = glass_color(uv_b, dx_b, dy_b);
 
     let dst_coord = vec2<i32>(floor(pos.xy - gu.origin.zw));
     let dst = textureLoad(g_dst, dst_coord, 0);
 
     let mask_coord = vec2<i32>(floor(p));
     let in_mask = mask_coord.x >= 0 && mask_coord.y >= 0 && mask_coord.x < i32(rw) && mask_coord.y < i32(rh);
-    var a = 0.0;
-    if (in_mask) {
+    var a = select(0.0, 1.0, gu.tune_d.w > 1.0);
+    if (gu.tune_d.w == 1.0 && in_mask) {
         a = textureLoad(g_mask, mask_coord, 0).a;
     }
     var clip_cov = 1.0;
@@ -534,9 +555,9 @@ fn fs_glass(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let seen_alpha = max(red.a, max(green.a, blue.a));
     var seen = vec3<f32>(red.r, green.g, blue.b);
     let facing = dot(-inward, gu.light_box.xy);
-    let hair = exp(-max(0.0, d - 0.5) / max(gu.tune_a.z, 1e-3));
+    let hair = exp(-max(0.0, d - 0.5 / gu.tune_d.w) / max(gu.tune_a.z, 1e-3));
     let edge = max(gu.tune_b.x * (facing - gu.tune_b.y), 0.0) + max(gu.tune_b.z * (-facing - gu.tune_b.w), 0.0);
-    let shading = intensity * gu.tune_c.x * facing * max(0.0, 1.0 - d / max(gu.tune_c.y * depth, 1.0));
+    let shading = intensity * gu.tune_c.x * facing * max(0.0, 1.0 - d / max(gu.tune_c.y * depth, 1.0 / gu.tune_d.w));
     seen = select(
         mix(seen, vec3<f32>(seen_alpha), -shading),
         mix(seen, vec3<f32>(0.0), shading),

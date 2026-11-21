@@ -343,6 +343,7 @@ pub trait Backend {
     #[allow(clippy::too_many_arguments)]
     fn glass(
         &mut self,
+        key: (u32, usize),
         op: &GlassOp,
         paths: &[(BezPath, bool)],
         device: Affine,
@@ -2744,6 +2745,7 @@ impl<B: Backend> Walk<'_, B> {
                         }
                         let open = self.reader_open();
                         self.backend.glass(
+                            (id, at),
                             g,
                             &paths,
                             device,

@@ -112,9 +112,9 @@ pub fn glass_params(op: &GlassOp, scale: f32, inradius: f32) -> GlassParams {
     let sigma = (depth.max(4.0 * scale) * tune.rim_sigma).max(0.5);
     let margin_f = refraction * (1.0 + dispersion) * (1.0 + splay) + frost * 3.0 + 2.0;
     let margin = if margin_f.is_finite() {
-        margin_f.ceil().clamp(2.0, 4096.0) as i32
+        margin_f.ceil().clamp(2.0, (i32::MAX / 4) as f32) as i32
     } else {
-        4096
+        i32::MAX / 4
     };
     GlassParams {
         refraction,
@@ -235,7 +235,9 @@ pub fn compute_regions(
         return Ok(Vec::new());
     }
     let m = i64::from(params.margin);
-    let rim_pad = (3.0 * f64::from(params.sigma)).ceil().clamp(0.0, 4096.0) as i64;
+    let rim_pad = (3.0 * f64::from(params.sigma))
+        .ceil()
+        .clamp(0.0, f64::from(i32::MAX / 4)) as i64;
     let pad = m + rim_pad;
     let (fw, fh) = (i64::from(frame_size.0), i64::from(frame_size.1));
     let full_x0 = (-pad).max(min_x.floor().clamp(-1e12, 1e12) as i64 - m);
@@ -1685,6 +1687,29 @@ mod tests {
         }
         let r = largest_inscribed_radius(&inside, side, side);
         assert!((r - 20.5).abs() < 1.0, "got {r}");
+    }
+
+    #[test]
+    fn large_path_lens_keeps_its_full_optical_reach() {
+        let op = GlassOp {
+            paths: vec![0],
+            even_odd: false,
+            kind: KIND_ELLIPSE,
+            inradius: 36.0,
+            angle: 0.0,
+            intensity: 80.0,
+            refraction: 95.0,
+            depth: 18.0,
+            dispersion: 65.0,
+            frost: 18.0,
+            splay: 50.0,
+            box_radii: [0.0; 4],
+            box_smoothing: [0.0; 4],
+            measured_inradius: std::cell::Cell::new(-1.0),
+        };
+        let params = glass_params(&op, 512.0, op.inradius);
+        assert!(params.margin > 4_096);
+        assert!(3.0 * params.sigma > 4_096.0);
     }
 
     #[test]

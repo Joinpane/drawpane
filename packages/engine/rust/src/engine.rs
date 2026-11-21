@@ -1354,11 +1354,13 @@ impl Engine {
         self.check_supported()?;
         let view = camera.view();
         let frame_rect = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
-        let (reach, samples) = self.reader_reach(view, Some(frame_rect));
+        let (reach, samples, native_samples) = self.reader_reach(view, Some(frame_rect));
         let halo_opt = self.limit_halo(reach).ok();
         let samples = (editor_viewport && !self.store.has_context())
             .then(|| IRect::around(samples))
             .filter(|sample| *sample != IRect::around(frame_rect));
+        let native_samples = samples
+            .and_then(|samples| (samples != IRect::around(native_samples)).then_some(IRect::around(native_samples)));
         if self.gpu.is_none() {
             return Err(EngineError::new(ErrorCode::State, "no GPU attached"));
         }
@@ -1402,7 +1404,8 @@ impl Engine {
             .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
         // One pass avoids rasterizing the same reader and prefix in each touched tile. For
         // interactive drags bound the scene walk. Dense pages use their retained tiles.
-        let whole = halo_opt != Some(0) && (options.budget_ms <= 0.0 || simple_reader_drag);
+        let whole = halo_opt != Some(0)
+            && (options.budget_ms <= 0.0 || simple_reader_drag || (native_samples.is_some() && halo_opt.is_none()));
         let whole_stats = if whole {
             let mut result = gpu.render_whole(
                 &self.store,
@@ -1412,6 +1415,7 @@ impl Engine {
                 options.moving,
                 prefix,
                 samples,
+                native_samples,
             );
             if prefix.is_some() && result.as_ref().is_err_and(|e| e.code == ErrorCode::Limit) {
                 result = gpu.render_whole(
@@ -1422,6 +1426,7 @@ impl Engine {
                     options.moving,
                     None,
                     samples,
+                    native_samples,
                 );
             }
             match result {
@@ -1464,6 +1469,7 @@ impl Engine {
                 options.moving,
                 None,
                 samples,
+                native_samples,
             )?
         };
         // No frame is exact while text is still to come: it may paint past its box.
@@ -1499,10 +1505,11 @@ impl Engine {
     }
 
     /// The dependency reach and the page pixels a reader may sample outside a view.
-    fn reader_reach(&self, view: Affine, crop: Option<Rect>) -> (f64, Rect) {
+    fn reader_reach(&self, view: Affine, crop: Option<Rect>) -> (f64, Rect, Rect) {
         let mut samples = crop.unwrap_or(Rect::ZERO);
+        let mut native_samples = samples;
         if self.store.readers().is_empty() {
-            return (0.0, samples);
+            return (0.0, samples, native_samples);
         }
         struct ReaderNode {
             paint: Rect,
@@ -1613,9 +1620,11 @@ impl Engine {
             .filter_map(|(i, node)| node.writes_backdrop.then_some(i))
             .collect();
         let mut needed_by_later = vec![0.0f64; nodes.len()];
+        let mut native_needed = vec![0.0f64; nodes.len()];
         let mut total = 0.0f64;
         for (i, node) in nodes.iter().enumerate().rev() {
             let downstream = needed_by_later[i];
+            let native_downstream = native_needed[i];
             if downstream == 0.0 && crop.is_some_and(|rect| !overlaps(node.paint, rect)) {
                 continue;
             }
@@ -1627,14 +1636,30 @@ impl Engine {
                     samples = samples.union(visible.inflate(node.reach_px, node.reach_px));
                 }
             }
+            let native_reach = if node.writes_backdrop {
+                if let Some(crop) = crop {
+                    let visible = node.paint.intersect(crop.inflate(native_downstream, native_downstream));
+                    if visible.width() > 0.0 && visible.height() > 0.0 {
+                        native_samples = native_samples.union(visible.inflate(node.reach_px, node.reach_px));
+                        node.reach_px + native_downstream
+                    } else {
+                        0.0
+                    }
+                } else {
+                    0.0
+                }
+            } else {
+                0.0
+            };
             let earlier = writers.partition_point(|&writer| writer < i);
             for &writer in &writers[..earlier] {
                 if overlaps(nodes[writer].paint, node.read) {
                     needed_by_later[writer] = needed_by_later[writer].max(reach);
+                    native_needed[writer] = native_needed[writer].max(native_reach);
                 }
             }
         }
-        (total, samples)
+        (total, samples, native_samples)
     }
 
     /// Draws `area` of a `width` × `height` frame into the CPU target, extended by the readers'

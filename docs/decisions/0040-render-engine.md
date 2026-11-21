@@ -1229,6 +1229,16 @@ exceeds the raster floor uses Canvas for the affected page or view while the
 engine stays active. CPU view mode admits tiles by their working target and
 tries a direct viewport render at full resolution before reducing it.
 
+An editor viewport that cannot admit its full-resolution glass padding draws
+the glass-free prefixes in a second, lower-density pass. Each lens takes its
+samples at its own paint position, so later fills and earlier lenses do not
+enter the sampled backdrop. The device-resolution pass still draws coverage,
+clipping, ordinary paint, and clear lens samples whose rays land in the
+viewport. Frost and offscreen refraction use the reduced backdrop. Other
+readers retain their own native padding. The frame reports a glass sampling
+reduction, and the 4,096 px optical padding cap is replaced by normal texture
+and working-set admission.
+
 ## Amendment: exact camera motion (W4, 2026-11-21)
 
 Pan and zoom on Examples and Toolbars from a large iOS UI kit and on shadcn Combobox must present zero degraded frames, with frame intervals at most 16.7 ms at p95 and 20 ms at p99. This tightens the quality requirement during camera motion. Coarse readers, half-resolution pictures, incomplete coverage, and stand-ins outside a measured scale and sampling phase fail the fidelity gate. Count unpresented camera requests too, since keeping the last exact picture on screen can still leave the camera stalled.

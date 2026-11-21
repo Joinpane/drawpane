@@ -79,6 +79,12 @@ for (const backend of ["webgpu", "webgl2"] as const) {
     expect(outcome.backend).toBe(backend);
     const green = [36, 140, 80, 255];
     expect(outcome.plain.pixel).toEqual(green);
+    expect(outcome.detailReference.size).toEqual([640, 384]);
+    expect(outcome.detailGlass.size).toEqual([640, 384]);
+    const whiteStripes = outcome.detailReference.detail.filter((v, i) => i % 4 === 0 && v > 240);
+    expect(whiteStripes).toHaveLength(8);
+    for (const [i, reference] of outcome.detailReference.detail.entries())
+      expect(Math.abs((outcome.detailGlass.detail[i] ?? 0) - reference)).toBeLessThanOrEqual(4);
     expect(outcome.refracted.pixel[2]).toBeGreaterThan(200);
     expect(outcome.refracted.pixel[1]).toBeLessThan(100);
     expect(outcome.refracted.pixel[3]).toBe(255);
@@ -90,6 +96,7 @@ for (const backend of ["webgpu", "webgl2"] as const) {
         ).toBeLessThanOrEqual(12);
     }
     for (const frame of outcome.rim) {
+      expect(frame.size).toEqual([640, 384]);
       const d = 0.65;
       const shade = 0.8 * 0.09 * (1 - d / (0.55 * 18));
       const light = 0.8 * 3.7 * (1 - 0.45) * Math.exp(-d / 0.35);

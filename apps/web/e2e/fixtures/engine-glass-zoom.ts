@@ -83,7 +83,9 @@ export async function drawExtremeZoom(choice: RendererChoice) {
         displayed = true;
         break;
       }
-      for (let j = 0; j < 180 && view.shown.n < view.last.n; j++) await wait();
+      const deadline = performance.now() + 15_000;
+      while (performance.now() < deadline && view.shown.n < view.last.n && !view.recovering)
+        await wait();
       if (draw.settled && !draw.awaitingPreview && view.shown.n >= view.last.n) {
         displayed = true;
         break;
@@ -102,7 +104,9 @@ export async function drawExtremeZoom(choice: RendererChoice) {
       zoom,
       exact: view.last.exact,
       limit: view.limitReason,
+      size: [w, h],
       pixel: Array.from(center.data),
+      detail: Array.from(ctx.getImageData(Math.floor(w / 2) - 8, Math.floor(h / 2), 16, 1).data),
     };
   }
 
@@ -153,8 +157,49 @@ export async function drawExtremeZoom(choice: RendererChoice) {
       cornerRadius: 18,
       effects: [{ ...glass, intensity: 0, dispersion: 0, frost: 0, splay: 0 }],
     });
+    // A later fill occupies the same offscreen pixels. It must be absent
+    // from the lens's snapshot even when the same strip is replayed.
+    editor.createLayer("rect", { x: striped.x, y: 10, width: striped.width, height: 12 }, pageId, {
+      fills: [{ type: "solid", color: "#d01912" }],
+    });
     const refracted = await frame(26, 365, 0.65);
-    return { backend, fallbacks, rim, interior, fuzz, plain, refracted };
+    // At the centre of clear glass each ray arrives in the device-resolution
+    // viewport. A one-device-pixel stripe would disappear at even half scale.
+    const detailZoom = 256;
+    const devicePixel = 1 / (detailZoom * dpr);
+    const detailX = 650;
+    for (let i = -8; i < 8; i += 2) {
+      editor.createLayer(
+        "rect",
+        { x: detailX + i * devicePixel, y: 17, width: devicePixel, height: 2 },
+        pageId,
+        {
+          // The editor rounds interactive geometry to hundredths. The fixture
+          // gives the stored layer exact coordinates for this device pixel.
+          x: detailX + i * devicePixel,
+          width: devicePixel,
+          fills: [{ type: "solid", color: "#ffffff" }],
+        },
+      );
+    }
+    const detailReference = await frame(detailZoom, detailX, 18);
+    editor.createLayer("rect", { ...pill, x: detailX - 65 }, pageId, {
+      fills: [],
+      cornerRadius: 18,
+      effects: [{ ...glass, intensity: 0, dispersion: 0, frost: 0, splay: 0 }],
+    });
+    const detailGlass = await frame(detailZoom, detailX, 18);
+    return {
+      backend,
+      fallbacks,
+      rim,
+      interior,
+      fuzz,
+      plain,
+      refracted,
+      detailReference,
+      detailGlass,
+    };
   } finally {
     window.removeEventListener("drawpane:renderer-fallback", fallback);
     view.dispose();

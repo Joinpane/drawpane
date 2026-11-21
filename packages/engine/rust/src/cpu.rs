@@ -1751,6 +1751,7 @@ impl Backend for Cpu {
 
     fn glass(
         &mut self,
+        _key: (u32, usize),
         op: &GlassOp,
         paths: &[(BezPath, bool)],
         device: Affine,
