@@ -975,6 +975,30 @@ describe.skipIf(!built())("Engines sharing a module (re-check of PR 216)", () =>
     b.dispose();
   });
 
+  it("keeps a photo-heavy view alive when full image levels exceed its budget", async () => {
+    const module = await loadNodeEngine("worker", { fresh: true });
+    const engine = new RenderEngine(module, { imageBytes: 12_000 });
+    expect(engine.apply(fresh(1)).ok).toBe(true);
+    const sizes: number[] = [];
+    const read = (width: number, height: number) => {
+      sizes.push(width);
+      return new Uint8Array(width * height * 4);
+    };
+    expect(engine.putViewImage(1, 1_792, 2_400, read)).toEqual({ ok: true, value: true });
+    expect(engine.putViewImage(2, 1_792, 2_400, read)).toEqual({ ok: true, value: true });
+    expect(sizes).toEqual([28, 28]);
+
+    const full = new RenderEngine(module, { imageBytes: 4 });
+    expect(full.putViewImage(1, 1, 1, read)).toEqual({ ok: true, value: true });
+    expect(full.putViewImage(2, 1_792, 2_400, read)).toEqual({ ok: true, value: false });
+    expect(sizes).toEqual([28, 28, 1]);
+    expect(full.dropImage(1).ok).toBe(true);
+    expect(full.putViewImage(2, 1_792, 2_400, read)).toEqual({ ok: true, value: true });
+    expect(engine.renderCpu(16, 16, { zoom: 1, x: 0, y: 0, dpr: 1 }, [0, 0, 0, 0]).ok).toBe(true);
+    full.dispose();
+    engine.dispose();
+  });
+
   it("kills every engine on a module that trapped, so none sees the renewed instance", async () => {
     const module = await loadNodeEngine("worker", { fresh: true });
     const a = new RenderEngine(module);

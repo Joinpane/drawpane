@@ -1114,3 +1114,12 @@ Saved outlines still draw as before. For live text, the engine shapes the run's 
 Characters reachable only through browser system fonts draw with bundled last-resort outlines and retain the advances the browser measured. The headless measurer shares the coverage partitioner and uses em estimates for characters beyond its font files. Supporting the system scripts in full and sharing one layout measurer across browsers are part of W6.
 
 Loading faces still mark their records provisional. When a face reaches its deadline the record resolves through the fallback chain, and a later arrival queues the record again. The existing `textWithoutOutlines` bit counts layers that used fallback outlines. The builder and Rust engine exclude it when deciding whether a page can draw.
+
+## Amendment: interactive image admission (2026-11-21)
+
+An interactive image upload chooses a smaller image when its full levels
+would exceed the available budget. The view only publishes a handle once
+its backend holds the pixels. If no level fits, that image remains pending
+until a later upload attempt can fit it. Image admission never changes the
+view's renderer. The strict raw-pixel upload used by exports retains its
+existing validation and admission semantics.

@@ -603,6 +603,43 @@ export class RenderEngine {
     return { ok: true, value: v } as Result<T>;
   }
 
+  /**
+   * Uploads an interactive image within the available budget. Reads only the
+   * pixels that can fit. A false value leaves the image pending in the view.
+   */
+  putViewImage(
+    id: number,
+    width: number,
+    height: number,
+    read: (width: number, height: number) => Uint8Array,
+  ): Result<boolean> {
+    if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1) {
+      return fail(ErrorCode.Image, "invalid image dimensions");
+    }
+    const limits = this.#value(() =>
+      this.#call((e) => ({
+        room: e.imageBudget - e.imageBytes + e.imageHeld(id),
+        side: e.textureSide,
+      })),
+    );
+    if (!limits.ok) return limits;
+    const { room, side } = limits.value;
+    const fit = Math.min(1, side / Math.max(width, height));
+    let w = Math.max(1, Math.floor(width * fit));
+    let h = Math.max(1, Math.floor(height * fit));
+    while (room >= 4) {
+      if (imageLevelsBytes(w, h) <= room) {
+        const r = this.putImage(id, w, h, read(w, h));
+        if (r.ok) return { ok: true, value: true };
+        if (r.code !== ErrorCode.Limit) return r;
+      }
+      if (w === 1 && h === 1) break;
+      w = Math.max(1, Math.floor(w / 2));
+      h = Math.max(1, Math.floor(h / 2));
+    }
+    return { ok: true, value: false };
+  }
+
   putImage(
     id: number,
     width: number,

@@ -417,18 +417,18 @@ impl Engine {
         if let Some(gpu) = self.gpu.as_ref() {
             gpu.check_texture_size(width, height, "an image")?;
         }
-        self.generation += 1;
-        self.invalidate_image(id);
         let levels = images::levels(width, height, rgba, premultiplied, limits.texture_side)?;
+        // GPU admission can fail independently of the CPU image cap. Commit neither
+        // backend's new copy until the GPU has accepted the upload.
+        #[cfg(feature = "gpu-common")]
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.put_image(id, &levels, limits.image_bytes)?;
+        }
         self.cpu.put_image(id, &levels, limits.image_bytes)?;
         #[cfg(feature = "gpu-common")]
-        {
-            let levels = std::rc::Rc::new(levels);
-            if let Some(gpu) = self.gpu.as_mut() {
-                gpu.put_image(id, &levels, limits.image_bytes)?;
-            }
-            self.image_levels.insert(id, levels);
-        }
+        self.image_levels.insert(id, std::rc::Rc::new(levels));
+        self.generation += 1;
+        self.invalidate_image(id);
         Ok(())
     }
 

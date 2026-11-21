@@ -17,6 +17,7 @@ import {
   loadBrowserEngine,
   RenderEngine,
 } from "@drawpane/engine";
+import { uploadViewImage } from "./engine-image";
 
 /** Maximum unacknowledged frame transfers in flight between the worker and the main thread. */
 const MAX_INFLIGHT_TRANSFERS = 2;
@@ -38,10 +39,8 @@ export type CpuWorkerRequest =
   | {
       readonly type: "put-image";
       readonly handle: number;
-      readonly width: number;
-      readonly height: number;
-      readonly bytes: ArrayBuffer;
-      readonly premultiplied: boolean;
+      readonly ref: string;
+      readonly bitmap: ImageBitmap;
     }
   | { readonly type: "drop-image"; readonly handle: number }
   | {
@@ -60,6 +59,12 @@ export type CpuWorkerRequest =
 
 export type CpuWorkerReply =
   | { readonly type: "ready" }
+  | {
+      readonly type: "image-result";
+      readonly ref: string;
+      readonly handle: number;
+      readonly uploaded: boolean;
+    }
   | {
       readonly type: "apply-result";
       readonly ok: boolean;
@@ -407,14 +412,16 @@ scope.onmessage = async ({ data }) => {
       return;
     }
     if (data.type === "put-image") {
-      const r = engine.putImage(
-        data.handle,
-        data.width,
-        data.height,
-        new Uint8Array(data.bytes),
-        data.premultiplied,
-      );
-      if (!r.ok) post({ type: "error", code: r.code, message: r.message });
+      try {
+        const r = uploadViewImage(engine, data.handle, data.bitmap);
+        if (r.ok) {
+          post({ type: "image-result", ref: data.ref, handle: data.handle, uploaded: r.value });
+        } else {
+          post({ type: "error", code: r.code, message: r.message });
+        }
+      } finally {
+        data.bitmap.close();
+      }
       return;
     }
     if (data.type === "drop-image") {

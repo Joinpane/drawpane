@@ -51,6 +51,7 @@ import {
   unsupportedNames,
 } from "@drawpane/engine";
 import type { CpuWorkerReply, CpuWorkerRequest } from "./engine-cpu.worker";
+import { uploadViewImage } from "./engine-image";
 import {
   type PresentationMode,
   presentation,
@@ -949,6 +950,7 @@ export class EngineView {
   #builder: DisplayListBuilder;
   /** Image refs whose pixels the active backend holds, by handle. */
   readonly #uploaded = new Map<string, { handle: number; width: number; height: number }>();
+  readonly #sending = new Map<string, { handle: number; width: number; height: number }>();
   readonly #pending = new Set<string>();
   #uploadFailure: { readonly message: string; readonly code: ErrorCode | null } | null = null;
   /** Monotonic device generation incremented on every GPU detach/reattach/replacement. */
@@ -1295,6 +1297,18 @@ export class EngineView {
     worker.onmessage = (e: MessageEvent<CpuWorkerReply>) => {
       if (this.#dead || this.#cpuWorker !== worker) return;
       const msg = e.data;
+      if (msg.type === "image-result") {
+        const image = this.#sending.get(msg.ref);
+        if (!image || image.handle !== msg.handle) return;
+        this.#sending.delete(msg.ref);
+        if (msg.uploaded) {
+          this.#uploaded.set(msg.ref, image);
+          this.#pending.delete(msg.ref);
+          this.#builder.imageReady(msg.ref);
+          this.onChange();
+        }
+        return;
+      }
       if (msg.type === "apply-result") {
         if (!msg.ok) {
           this.#supersede();
@@ -1674,6 +1688,7 @@ export class EngineView {
         // AFTER clearing `#recovering` so ready images are never left as checkers.
         const prevRefs = new Set([...this.#uploaded.keys(), ...this.#pending]);
         this.#uploaded.clear();
+        this.#sending.clear();
         for (const ref of prevRefs) this.#pending.add(ref);
         this.#builder = new DisplayListBuilder(this.#editor.scene, this.#measurer, {
           image: (ref) => this.#image(ref),
@@ -1724,55 +1739,35 @@ export class EngineView {
 
   /** Uploads one ready image ref to the active backend if decoded in `ImageCache`. */
   #uploadRef(ref: string): "uploaded" | "pending" | "failed" {
+    if (this.#sending.has(ref)) return "pending";
     const natural = this.#images.natural(ref);
     const view = natural ? this.#images.get(ref) : null;
     if (!natural || !view) return "pending";
     const { bitmap } = view;
-    const surface =
-      typeof OffscreenCanvas !== "undefined"
-        ? new OffscreenCanvas(bitmap.width, bitmap.height)
-        : Object.assign(document.createElement("canvas"), {
-            width: bitmap.width,
-            height: bitmap.height,
-          });
-    const ctx = surface.getContext("2d") as
-      | OffscreenCanvasRenderingContext2D
-      | CanvasRenderingContext2D
-      | null;
-    if (!ctx) return "pending";
-    ctx.drawImage(bitmap, 0, 0);
-    const data = ctx.getImageData(0, 0, bitmap.width, bitmap.height).data;
     const handle = this.#nextImage++;
+    const image = { handle, width: natural.width, height: natural.height };
     if (this.#engine) {
-      const r = this.#engine.putImage(
-        handle,
-        bitmap.width,
-        bitmap.height,
-        new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
-        false,
-      );
+      const r = uploadViewImage(this.#engine, handle, bitmap);
       if (!r.ok) {
         this.#uploadFailure = { message: r.message, code: r.code };
         return "failed";
       }
+      if (!r.value) return "pending";
     } else if (this.#cpuWorker) {
-      const copy = new Uint8Array(data.length);
-      copy.set(data);
-      this.#cpuWorker.postMessage(
-        {
-          type: "put-image",
-          handle,
-          width: bitmap.width,
-          height: bitmap.height,
-          bytes: copy.buffer,
-          premultiplied: false,
-        } satisfies CpuWorkerRequest,
-        [copy.buffer],
-      );
+      // A clone lets the Worker resize/read pixels within its own budget. Keep
+      // the display list on the loading paint until the Worker has the handle.
+      this.#cpuWorker.postMessage({
+        type: "put-image",
+        handle,
+        ref,
+        bitmap,
+      } satisfies CpuWorkerRequest);
+      this.#sending.set(ref, image);
+      return "pending";
     } else {
       return "pending";
     }
-    this.#uploaded.set(ref, { handle, width: natural.width, height: natural.height });
+    this.#uploaded.set(ref, image);
     this.#pending.delete(ref);
     return "uploaded";
   }
@@ -1830,6 +1825,7 @@ export class EngineView {
   /** Lets go of the images (and waits for images) no record on the page paints any more. */
   #dropUnused(): void {
     const used = this.#builder.imagesInUse();
+    let freed = false;
     for (const [ref, held] of this.#uploaded) {
       if (used.has(ref)) continue;
       if (this.#engine) {
@@ -1842,8 +1838,19 @@ export class EngineView {
         } satisfies CpuWorkerRequest);
       }
       this.#uploaded.delete(ref);
+      freed = true;
+    }
+    for (const [ref, image] of this.#sending) {
+      if (used.has(ref)) continue;
+      this.#cpuWorker?.postMessage({
+        type: "drop-image",
+        handle: image.handle,
+      } satisfies CpuWorkerRequest);
+      this.#sending.delete(ref);
+      freed = true;
     }
     for (const ref of this.#pending) if (!used.has(ref)) this.#pending.delete(ref);
+    if (freed && this.#pending.size > 0) this.#upload();
   }
 
   /** The last fresh list (a page shown): building it and applying it, in ms (benches). */
@@ -1870,10 +1877,6 @@ export class EngineView {
         : this.#builder.build(pageId, undefined, { deferText: true });
     const uploadErr = this.#takeUploadFailure();
     if (uploadErr) {
-      if (uploadErr.code === ErrorCode.Limit) {
-        this.#limitReason = uploadErr.message;
-        return false;
-      }
       this.#handleGpuFailure(uploadErr, false);
       return false;
     }
