@@ -119,6 +119,8 @@ When two glass layers overlap, Figma does not render nested glass. To pin down t
 
 Downsampling Figma's 2x `exportAsync` renders to 1x and aligning them against Figma's 100%-zoom canvas screenshots gives a mean RGB channel difference of **0.53** across all 15 cells (range 0.37 to 0.68, p99 2 to 6). Both paths obey the same stacked-glass rule.
 
+The committed [100% live canvas recaptures](../../tools/figma-parity/live/glass-stack) cover the same 15 scenes. Comparing these new captures with the original 2× goldens downsampled by a 2 × 2 box filter gives a mean RGB difference of 0.79 (range 0.45 to 1.41, p99 3 to 22). The live images were cropped to the exact 240 × 160 frame bounds.
+
 ### Best-supported tested rule (`b*`)
 
 Among the seven candidate stacking models tested below, the best-supported model (`b*`) is:

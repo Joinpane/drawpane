@@ -1591,3 +1591,119 @@ fn backdrop_edit_invalidates_the_blurred_output_of_a_glass_reader() {
         "{damage:?}"
     );
 }
+
+#[test]
+fn isolated_nested_glass_reads_its_own_interior_paint() {
+    let make = |intensity: f32, paint: [f32; 4]| {
+        let mut list = W::new(ANY, 1);
+        list.reset();
+        let mut scope = positioned_rect(32.0, 24.0, 112.0, 96.0, None);
+        scope.layer_blend = 1; // Isolate the two lenses with their own interior paint.
+        scope.ops.push(Op::Children);
+        list.set(1, 0, &scope);
+        list.set(2, 1, &positioned_rect(0.0, 0.0, 112.0, 96.0, Some(paint)));
+        let mut outer = tuned_glass(4.0, 4.0, 96.0, 80.0, 14.0, 0.0, intensity);
+        outer.ops.push(Op::Children);
+        list.set(3, 1, &outer);
+        list.set(4, 3, &tuned_glass(-4.0, -4.0, 60.0, 48.0, 0.0, 0.0, 0.0));
+        let mut engine = Engine::new(Limits::default());
+        engine.apply(&list.finish()).unwrap();
+        engine
+            .render_cpu(176, 144, camera(), [1.0; 4], false)
+            .unwrap()
+            .0
+            .to_vec()
+    };
+    let red = [0.9, 0.1, 0.2, 1.0];
+    let blue = [0.1, 0.2, 0.9, 1.0];
+    let neutral = make(0.0, red);
+    let lit = make(100.0, red);
+    let recolored = make(100.0, blue);
+    let pixel = |rgba: &[u8], x: usize, y: usize| {
+        let index = (y * 176 + x) * 4;
+        <[u8; 4]>::try_from(&rgba[index..index + 4]).unwrap()
+    };
+    assert_eq!(pixel(&lit, 37, 49), pixel(&neutral, 37, 49));
+    assert_ne!(pixel(&lit, 37, 49), pixel(&recolored, 37, 49));
+    assert_ne!(pixel(&lit, 37, 94), pixel(&neutral, 37, 94));
+}
+
+#[test]
+fn glass_respects_a_rotated_cross_frame_clip() {
+    let make = |glass: bool| {
+        let mut list = W::new(ANY, 1);
+        list.reset();
+        list.set(
+            1,
+            0,
+            &positioned_rect(0.0, 0.0, 64.0, 192.0, Some([0.8, 0.1, 0.1, 1.0])),
+        );
+        list.set(
+            2,
+            0,
+            &positioned_rect(64.0, 0.0, 128.0, 192.0, Some([0.1, 0.1, 0.8, 1.0])),
+        );
+        let (sin, cos) = 0.45f64.sin_cos();
+        let mut frame = positioned_rect(50.0, 28.0, 100.0, 92.0, None);
+        frame.transform = [cos, sin, -sin, cos, 50.0, 28.0];
+        frame.ops.extend([
+            Op::Clip {
+                path: 0,
+                even_odd: false,
+            },
+            Op::Children,
+            Op::Unclip,
+        ]);
+        list.set(3, 0, &frame);
+        if glass {
+            list.set(4, 3, &tuned_glass(-20.0, 8.0, 144.0, 72.0, 20.0, 30.0, 75.0));
+        }
+        let mut engine = Engine::new(Limits::default());
+        engine.apply(&list.finish()).unwrap();
+        engine
+            .render_cpu(192, 192, camera(), [1.0; 4], false)
+            .unwrap()
+            .0
+            .to_vec()
+    };
+    let plain = make(false);
+    let glass = make(true);
+    let outside = (34 * 192 + 32) * 4;
+    let inside = (80 * 192 + 64) * 4;
+    assert_eq!(glass[outside..outside + 4], plain[outside..outside + 4]);
+    assert_ne!(glass[inside..inside + 4], plain[inside..inside + 4]);
+}
+
+#[test]
+fn glass_samples_the_alpha_of_an_image() {
+    let mut list = W::new(ANY, 1);
+    list.reset();
+    let mut image = positioned_rect(0.0, 0.0, 96.0, 64.0, None);
+    image.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Image {
+            id: 7,
+            m: [96.0, 0.0, 0.0, 64.0, 0.0, 0.0],
+            tile: false,
+            opacity: 1.0,
+        },
+    });
+    list.set(1, 0, &image);
+    list.set(2, 0, &tuned_glass(12.0, 8.0, 72.0, 48.0, 20.0, 8.0, 0.0));
+
+    let mut engine = Engine::new(Limits::default());
+    let pixels: Vec<u8> = (0..64)
+        .flat_map(|i| if i % 8 < 4 { [255, 0, 0, 128] } else { [0, 255, 0, 0] })
+        .collect();
+    engine.put_image(7, 8, 8, &pixels, false).unwrap();
+    engine.apply(&list.finish()).unwrap();
+    let rgba = engine.render_cpu(96, 64, camera(), [0.0; 4], false).unwrap().0;
+    let inside = (32 * 96 + 27) * 4;
+    let transition = (32 * 96 + 47) * 4;
+    let clear = (32 * 96 + 72) * 4;
+    assert_eq!(&rgba[inside..inside + 4], &[128, 0, 0, 128]);
+    assert_eq!(rgba[transition], rgba[transition + 3]);
+    assert!((1..128).contains(&rgba[transition + 3]));
+    assert_eq!(&rgba[clear..clear + 4], &[0; 4]);
+}
