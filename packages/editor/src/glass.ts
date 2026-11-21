@@ -404,13 +404,6 @@ float erfinv(float x) {
 }
 vec2 flipped(vec2 p) { return vec2(p.x, size.y - p.y) / size; }
 vec4 canvasAt(sampler2D t, vec2 p) { return texture(t, flipped(p)); }
-// The backdrop where a bent ray lands (premultiplied), filtered over the footprint of this
-// pixel's ray: where the lens compresses what's behind, mipmaps average it.
-vec4 seenAt(vec2 p) {
-  vec2 uv = flipped(p);
-  return textureGrad(backdrop, uv, dFdx(uv), dFdy(uv));
-}
-
 // How far in from a corner's outline a point is, in box units (negative outside), for a corner of
 // radius R and smoothing s as corners.ts draws it, folded about the corner's diagonal: "along" is
 // the larger of the point's distances in from the corner's two edges, "off" the smaller. At s = 0
@@ -468,7 +461,6 @@ void main() {
   // The destination clips reduced boxes using the original path. Keep a texel
   // past its edge for interpolation so upsampling retains the bright rim.
   if (box == 1 && tuneA.w < 1.0) a = boxEdge >= -1.5 ? 1.0 : 0.0;
-  if (a <= 0.0) { color = vec4(0.0); return; }
   // The rim: its slope, in full pixels, from the smooth height field.
   vec3 hs = texture(height, (p / k) / heightTexSize).rgb;
   vec2 grad = hs.gb / k;
@@ -495,9 +487,18 @@ void main() {
   float off = extent > 0.0 ? dot(p - center, along) / extent : 0.0;
   // A convex rim looks in: each pixel there sees the backdrop from further inside.
   vec2 bend = (inward - along * off * splay) * fall * refraction;
-  vec4 red = seenAt(p + bend * (1.0 + dispersion));
-  vec4 green = seenAt(p + bend);
-  vec4 blue = seenAt(p + bend * (1.0 - dispersion));
+  // Compute gradients before testing coverage. A visible rim pixel can share a
+  // derivative quad with transparent pixels, whose rays still define its mip.
+  vec2 redUv = flipped(p + bend * (1.0 + dispersion));
+  vec2 greenUv = flipped(p + bend);
+  vec2 blueUv = flipped(p + bend * (1.0 - dispersion));
+  vec2 redDx = dFdx(redUv), redDy = dFdy(redUv);
+  vec2 greenDx = dFdx(greenUv), greenDy = dFdy(greenUv);
+  vec2 blueDx = dFdx(blueUv), blueDy = dFdy(blueUv);
+  if (a <= 0.0) { color = vec4(0.0); return; }
+  vec4 red = textureGrad(backdrop, redUv, redDx, redDy);
+  vec4 green = textureGrad(backdrop, greenUv, greenDx, greenDy);
+  vec4 blue = textureGrad(backdrop, blueUv, blueDx, blueDy);
   // Premultiplied, so what's behind keeps its alpha: over nothing, glass shows nothing (as
   // Figma's does), and its light and shade are only as opaque as what they fall on.
   float seenAlpha = max(red.a, max(green.a, blue.a));
