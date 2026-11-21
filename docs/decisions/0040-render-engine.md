@@ -1122,3 +1122,27 @@ A live GPU page opens over several revisions. Each frame admits a time-budgeted 
 In a local SwiftShader reproduction using the Examples records without media, the page switch itself returned in 1.4 ms. The fresh list of 17,922 records took 3,159 ms to build and 506 ms to apply. The longest browser task took 42,954 ms, with WebGPU buffer and texture uploads dominating the sampled CPU profile. The run used the main revision before the missing-face fallback. It previously refused unoutlined text. The fallback amendment above removed that refusal.
 
 With sliced opening, the first message took 15.5 ms to build and 1.1 ms to apply. The longest task in the candidate run was 324 ms. The first GPU preview reached the readback canvas after 5.44 s on this loaded software renderer. This run verifies that opening yields to browser tasks and reduces the blocking work. It leaves the 1 s first-image target open on the real page.
+
+## Amendment: on-demand image levels in the editor (2026-11-21)
+
+The editor retains compressed sources and assigns image handles independently
+of resident pixels. It requests levels for both projected axes of each paint,
+including crop and repeat, on screen and in the neighbouring tile ring. Two
+finer levels can be prefetched. Visible work has priority, uploads are paced
+across frames, and an oversized individual texture gets its own upload slice.
+
+The device budget combines adapter limits and reported device memory. The
+browser CPU Worker has a separate cap. Under pressure, the cache evicts
+off-screen and speculative levels, protecting a visible image's last level
+until a replacement is resident. If the visible set exceeds the cap, the
+largest levels are reduced first. The view follows every camera and edit with
+the best resident pixels, and a permanent reduction can settle at that detail.
+The renderer chip reports reductions including unavailable media.
+
+WebGPU copies resized ImageBitmaps directly. WebGL2 uses the bitmap overload
+of texSubImage2D. Only the CPU view Worker reads RGBA into WebAssembly.
+A level change dirties raster scales whose image sampler would choose
+different pixels. The view releases its caches after 30 seconds continuously
+hidden. Allocation refusals reclaim optional levels. Missing sources back off
+and corrupt bytes are retried only when the source changes or the view reloads.
+The strict raw-pixel export API retains its admission checks.

@@ -649,3 +649,48 @@ describe.skipIf(!built("worker") && !process.env.CI)("the display-list builder",
     expect(r.ok).toBe(true);
   });
 });
+
+describe("image demand from painted geometry", () => {
+  it.each([
+    { mode: "fill", w: 150, h: 70, rotation: 0, zoom: 1, dpr: 1, expected: [150, 75] },
+    { mode: "fit", w: 150, h: 70, rotation: Math.PI / 3, zoom: 2, dpr: 2, expected: [560, 280] },
+    {
+      mode: "stretch",
+      w: 25,
+      h: 600,
+      rotation: Math.PI / 4,
+      zoom: 0.5,
+      dpr: 2,
+      expected: [25, 600],
+    },
+    { mode: "crop", w: 150, h: 70, rotation: Math.PI / 2, zoom: 1, dpr: 2, expected: [1200, 280] },
+    { mode: "tile", w: 150, h: 70, rotation: Math.PI, zoom: 1, dpr: 1, expected: [400, 200] },
+  ])("projects both painted axes for $mode", ({ mode, w, h, rotation, zoom, dpr, expected }) => {
+    const doc = new Doc();
+    doc.apply([
+      { op: "create", id: "p1", type: "page", parent: ROOT_ID, key: "a0", props: {} },
+      create("rect", "p1", "a0", {
+        width: w,
+        height: h,
+        rotation,
+        flipX: true,
+        fills: [
+          {
+            type: "image",
+            ref: "a".repeat(64),
+            scaleMode: mode,
+            crop: { x: 0, y: 0, width: 0.25, height: 0.5 },
+          },
+        ],
+      }),
+    ]);
+    const builder = new DisplayListBuilder(new Scene(doc), measurer, {
+      image: () => ({ handle: 1, width: 400, height: 200 }),
+    });
+    builder.build("p1");
+    const [demand] = builder.imageDemands({ x: -1000, y: -1000, width: 2000, height: 2000 }, 0);
+    expect(demand?.visible).toBe(true);
+    expect((demand?.span?.width ?? 0) * zoom * dpr).toBeCloseTo(expected[0] ?? 0);
+    expect((demand?.span?.height ?? 0) * zoom * dpr).toBeCloseTo(expected[1] ?? 0);
+  });
+});
