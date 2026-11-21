@@ -1,7 +1,8 @@
 import { getProp, type NodeRecord, ROOT_ID, type TextRun } from "@drawpane/model";
+import fc from "fast-check";
 import { describe, expect, it } from "vitest";
 import { Editor } from "../src/editor";
-import { fontFaceKey, fontUsage, replaceFontOps } from "../src/replace-fonts";
+import { FontUsageIndex, fontFaceKey, fontUsage, replaceFontOps } from "../src/replace-fonts";
 import type { TextFace } from "../src/rich-text";
 
 function setup() {
@@ -54,6 +55,136 @@ describe("fontUsage", () => {
     expect(by(face("SF Pro", 700))?.layers).toEqual([b]);
     expect(by(face("Inter"))?.layers).toHaveLength(1);
   });
+});
+
+describe("FontUsageIndex", () => {
+  /** Usage as sets, so a kept index and a fresh read compare whatever order layers came in. */
+  const normal = (uses: ReturnType<typeof fontUsage>) =>
+    uses
+      .map((u) => ({
+        key: fontFaceKey(u),
+        layers: [...u.layers].sort(),
+        styles: [...u.styles].sort(),
+        sizes: u.sizes,
+      }))
+      .sort((a, b) => a.key.localeCompare(b.key));
+
+  type Step =
+    | { kind: "text"; family: number; weight: number; size: number; inMain: boolean }
+    | { kind: "family" | "weight" | "size"; at: number; value: number }
+    | { kind: "bold"; at: number }
+    | { kind: "instance" }
+    | { kind: "style"; at: number }
+    | { kind: "delete"; at: number }
+    | { kind: "undo" | "redo" };
+  const families = ["SF Pro", "Inter", "Geist"] as const;
+  const step: fc.Arbitrary<Step> = fc.oneof(
+    fc.record({
+      kind: fc.constant("text" as const),
+      family: fc.nat(2),
+      weight: fc.constantFrom(400, 600, 700),
+      size: fc.constantFrom(12, 17, 34),
+      inMain: fc.boolean(),
+    }),
+    fc.record({
+      kind: fc.constantFrom("family" as const, "weight" as const, "size" as const),
+      at: fc.nat(30),
+      value: fc.nat(2),
+    }),
+    fc.record({ kind: fc.constant("bold" as const), at: fc.nat(30) }),
+    fc.constant({ kind: "instance" as const }),
+    fc.record({ kind: fc.constant("style" as const), at: fc.nat(30) }),
+    fc.record({ kind: fc.constant("delete" as const), at: fc.nat(30) }),
+    fc.constantFrom({ kind: "undo" as const }, { kind: "redo" as const }),
+  );
+
+  it("keeps the same usage as reading the file afresh, through any edits", () => {
+    fc.assert(
+      fc.property(fc.array(step, { minLength: 1, maxLength: 25 }), (steps) => {
+        const { editor, text } = setup();
+        const main = editor.createLayer("frame", { x: 400, y: 0, width: 200, height: 100 }, "p", {
+          name: "Card",
+        }) as string;
+        editor.select([main]);
+        editor.createComponent();
+        const index = new FontUsageIndex(editor.doc);
+        expect(normal(index.usage())).toEqual(normal(fontUsage(editor.doc)));
+        const texts = () =>
+          [...editor.doc.nodes()].filter((n) => n.type === "text").map((n) => n.id);
+        for (const s of steps) {
+          const all = texts();
+          const pick = (at: number) => all[at % Math.max(1, all.length)];
+          switch (s.kind) {
+            case "text": {
+              const props = {
+                fontFamily: families[s.family] ?? "Inter",
+                fontWeight: s.weight,
+                fontSize: s.size,
+              };
+              if (s.inMain)
+                editor.createLayer("text", { x: 4, y: 4, width: 40, height: 20 }, main, {
+                  characters: "In the card",
+                  ...props,
+                });
+              else text("On the page", props);
+              break;
+            }
+            case "family":
+            case "weight":
+            case "size": {
+              const id = pick(s.at);
+              if (!id) break;
+              const prop =
+                s.kind === "family"
+                  ? "fontFamily"
+                  : s.kind === "weight"
+                    ? "fontWeight"
+                    : "fontSize";
+              const value =
+                s.kind === "family"
+                  ? families[s.value]
+                  : s.kind === "weight"
+                    ? [400, 600, 700][s.value]
+                    : [12, 17, 34][s.value];
+              editor.setProp([id], prop, value);
+              break;
+            }
+            case "bold": {
+              const id = pick(s.at);
+              if (!id) break;
+              editor.setProp([id], "textRuns", [{ start: 0, end: 2, fontWeight: 700 }]);
+              break;
+            }
+            case "instance":
+              editor.insertInstance(main, { x: 0, y: 300 });
+              break;
+            case "style": {
+              const id = pick(s.at);
+              if (!id) break;
+              editor.select([id]);
+              editor.createTextStyle(`Style ${s.at}`, id);
+              break;
+            }
+            case "delete": {
+              const id = pick(s.at);
+              if (!id) break;
+              editor.select([id]);
+              editor.deleteSelection();
+              break;
+            }
+            case "undo":
+              editor.undo();
+              break;
+            case "redo":
+              editor.redo();
+              break;
+          }
+          expect(normal(index.usage()), JSON.stringify(s)).toEqual(normal(fontUsage(editor.doc)));
+        }
+      }),
+      { numRuns: Number(process.env.FUZZ_RUNS) || 60 },
+    );
+  }, 120_000);
 });
 
 describe("replaceFontOps", () => {

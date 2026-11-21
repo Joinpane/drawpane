@@ -44,56 +44,137 @@ const runFace = (base: TextFace, run: TextRun): TextFace => ({
 const setsFace = (run: TextRun) =>
   run.fontFamily !== undefined || run.fontWeight !== undefined || run.fontStyle !== undefined;
 
+/** The faces one text layer or text style is set in, each with the sizes it's set at there. */
+function facesOf(node: NodeRecord): Map<string, { face: TextFace; sizes: number[] }> | null {
+  const out = new Map<string, { face: TextFace; sizes: number[] }>();
+  const note = (face: TextFace, size: number) => {
+    const key = fontFaceKey(face);
+    const use = out.get(key);
+    if (use) use.sizes.push(size);
+    else out.set(key, { face, sizes: [size] });
+  };
+  if (node.type === "textStyle") {
+    note(faceOf(node.props), getProp(node.props, "fontSize"));
+    return out;
+  }
+  if (node.type !== "text") return null;
+  const base = faceOf(node.props);
+  const size = getProp(node.props, "fontSize");
+  const runs = layerRuns(node);
+  // The layer's own face shows wherever no run sets another (all of it, without runs).
+  let covered = 0;
+  for (const run of runs)
+    if (setsFace(run) || run.fontSize !== undefined) covered += run.end - run.start;
+  if (runs.length === 0 || covered < getProp(node.props, "characters").length) note(base, size);
+  for (const run of runs) note(runFace(base, run), run.fontSize ?? size);
+  return out;
+}
+
+interface Use {
+  readonly face: TextFace;
+  readonly layers: Set<string>;
+  readonly styles: Set<string>;
+  /** Each size, with how many layers and styles set it there. */
+  readonly sizes: Map<number, number>;
+}
+
+/**
+ * The faces a file uses, kept up with its changes: each change reads only
+ * the layers it names (`Doc.changesSince`), not the whole file, so a
+ * 500k-layer kit's font report stays cheap to keep. A reset, or more
+ * changes than the document keeps, reads the file again.
+ */
+export class FontUsageIndex {
+  readonly #doc: Doc;
+  #version = -1;
+  /** Each text layer's and text style's faces, by face key, with their sizes. */
+  readonly #faces = new Map<string, Map<string, { face: TextFace; sizes: number[] }>>();
+  readonly #uses = new Map<string, Use>();
+
+  constructor(doc: Doc) {
+    this.#doc = doc;
+  }
+
+  /** Every face the file's text and text styles are set in, most used first (see `fontUsage`). */
+  usage(): FontUse[] {
+    this.#sync();
+    return [...this.#uses.values()]
+      .filter((u) => u.layers.size > 0 || u.styles.size > 0)
+      .map(
+        (u): FontUse => ({
+          ...u.face,
+          layers: [...u.layers],
+          styles: [...u.styles],
+          sizes: [...u.sizes.keys()].sort((a, b) => a - b),
+        }),
+      )
+      .sort(
+        (a, b) =>
+          b.layers.length - a.layers.length ||
+          a.family.localeCompare(b.family) ||
+          a.weight - b.weight ||
+          Number(a.italic) - Number(b.italic),
+      );
+  }
+
+  #sync(): void {
+    const version = this.#doc.version;
+    if (version === this.#version) return;
+    const changes = this.#version < 0 ? null : this.#doc.changesSince(this.#version);
+    if (!changes || changes.some((c) => c.reset)) {
+      this.#faces.clear();
+      this.#uses.clear();
+      for (const node of this.#doc.nodes()) this.#add(node);
+    } else {
+      const ids = new Set<string>();
+      for (const change of changes) for (const id of change.ids) ids.add(id);
+      for (const id of ids) {
+        this.#remove(id);
+        const node = this.#doc.get(id);
+        if (node) this.#add(node);
+      }
+    }
+    this.#version = version;
+  }
+
+  #add(node: NodeRecord): void {
+    const faces = facesOf(node);
+    if (!faces) return;
+    this.#faces.set(node.id, faces);
+    const style = node.type === "textStyle";
+    for (const [key, { face, sizes }] of faces) {
+      let use = this.#uses.get(key);
+      if (!use) {
+        use = { face, layers: new Set(), styles: new Set(), sizes: new Map() };
+        this.#uses.set(key, use);
+      }
+      (style ? use.styles : use.layers).add(node.id);
+      for (const size of sizes) use.sizes.set(size, (use.sizes.get(size) ?? 0) + 1);
+    }
+  }
+
+  #remove(id: string): void {
+    const faces = this.#faces.get(id);
+    if (!faces) return;
+    this.#faces.delete(id);
+    for (const [key, { sizes }] of faces) {
+      const use = this.#uses.get(key);
+      if (!use) continue;
+      use.layers.delete(id);
+      use.styles.delete(id);
+      for (const size of sizes) {
+        const left = (use.sizes.get(size) ?? 0) - 1;
+        if (left > 0) use.sizes.set(size, left);
+        else use.sizes.delete(size);
+      }
+      if (use.layers.size === 0 && use.styles.size === 0) this.#uses.delete(key);
+    }
+  }
+}
+
 /** Every face the file's text and text styles are set in, most used first. */
 export function fontUsage(doc: Doc): FontUse[] {
-  const uses = new Map<
-    string,
-    { face: TextFace; layers: Set<string>; styles: Set<string>; sizes: Set<number> }
-  >();
-  const note = (face: TextFace, size: number, layer: string | null, style: string | null) => {
-    const key = fontFaceKey(face);
-    let use = uses.get(key);
-    if (!use) {
-      use = { face, layers: new Set(), styles: new Set(), sizes: new Set() };
-      uses.set(key, use);
-    }
-    if (layer) use.layers.add(layer);
-    if (style) use.styles.add(style);
-    use.sizes.add(size);
-  };
-  for (const node of doc.nodes()) {
-    if (node.type === "textStyle") {
-      note(faceOf(node.props), getProp(node.props, "fontSize"), null, node.id);
-      continue;
-    }
-    if (node.type !== "text") continue;
-    const base = faceOf(node.props);
-    const size = getProp(node.props, "fontSize");
-    const runs = layerRuns(node);
-    // The layer's own face shows wherever no run sets another (all of it, without runs).
-    let covered = 0;
-    for (const run of runs)
-      if (setsFace(run) || run.fontSize !== undefined) covered += run.end - run.start;
-    if (runs.length === 0 || covered < getProp(node.props, "characters").length)
-      note(base, size, node.id, null);
-    for (const run of runs) note(runFace(base, run), run.fontSize ?? size, node.id, null);
-  }
-  return [...uses.values()]
-    .map(
-      (u): FontUse => ({
-        ...u.face,
-        layers: [...u.layers],
-        styles: [...u.styles],
-        sizes: [...u.sizes].sort((a, b) => a - b),
-      }),
-    )
-    .sort(
-      (a, b) =>
-        b.layers.length - a.layers.length ||
-        a.family.localeCompare(b.family) ||
-        a.weight - b.weight ||
-        Number(a.italic) - Number(b.italic),
-    );
+  return new FontUsageIndex(doc).usage();
 }
 
 /** Replacements by the face they replace (`fontFaceKey`). */

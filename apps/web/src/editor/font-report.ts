@@ -4,13 +4,15 @@
  * button, the notice a file opens with, the page inspector's Fonts section
  * and the missing fonts panel.
  *
- * Reading every text layer is the expensive part, so it happens a beat after
- * the edits that could change the answer, and only those: a change that
+ * The faces in use are kept as the document changes (`FontUsageIndex`): a
+ * change reads only the layers it names, and the whole file is read only
+ * when it's opened or replaced. The report is worked out a beat after the
+ * edits that could change the answer, and only those: a change that
  * touches no text layer or text style (moving a frame, recoloring a shape)
  * costs a look at the ids it changed and nothing more. A 500k-layer kit
- * stays quick to edit with the button on screen.
+ * stays quick to edit, and to type in, with the button on screen.
  */
-import { type Doc, type DocChange, type Editor, fontUsage } from "@drawpane/editor";
+import { type Doc, type DocChange, type Editor, FontUsageIndex } from "@drawpane/editor";
 import { useEffect, useSyncExternalStore } from "react";
 import { fonts } from "../fonts/fonts";
 import { type FamilyReport, type FontLookup, fontReport } from "../fonts/missing-fonts";
@@ -53,6 +55,7 @@ export function touchesFonts(
 
 export class FontReportStore {
   readonly #doc: Doc;
+  readonly #usage: FontUsageIndex;
   readonly #fonts: ReportFonts;
   #state: FontReportState = { report: null, docVersion: -1, pending: true };
   readonly #listeners = new Set<() => void>();
@@ -61,6 +64,7 @@ export class FontReportStore {
 
   constructor(doc: Doc, registry: ReportFonts) {
     this.#doc = doc;
+    this.#usage = new FontUsageIndex(doc);
     this.#fonts = registry;
   }
 
@@ -111,7 +115,7 @@ export class FontReportStore {
       () => {
         this.#timer = null;
         this.#set({
-          report: fontReport(fontUsage(this.#doc), this.#fonts),
+          report: fontReport(this.#usage.usage(), this.#fonts),
           docVersion: this.#doc.version,
           pending: false,
         });
