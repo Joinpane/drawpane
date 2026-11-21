@@ -300,22 +300,42 @@ describe("image residency", () => {
     }
   });
 
-  it("retains only tiny levels of visible photos after hidden eviction", async () => {
+  it("retains the currently drawn level of each visible photo after hidden eviction", async () => {
     const r = photoRig();
     const photos = [...demand(["a", "b"], 400), ...demand(["off"], 400, 400, false)];
     try {
       await eventually(() => {
         expect(r.images.update(photos, 1, limit(16))).toBe(true);
         expect(r.held("off")?.has(448)).toBe(true);
+        expect(r.held("a")?.has(896)).toBe(true);
       });
       r.images.evict(true);
       expect(r.held("off")?.size).toBe(0);
-      for (const ref of ["a", "b"]) expect([...(r.held(ref)?.keys() ?? [])]).toEqual([28]);
+      for (const ref of ["a", "b"]) expect([...(r.held(ref)?.keys() ?? [])]).toEqual([28, 448]);
+      r.pause();
+      expect(r.images.update(photos, 1, limit(16))).toBe(true);
+      for (const ref of ["a", "b"]) expect(r.held(ref)?.has(448)).toBe(true);
+    } finally {
+      r.resume();
+      r.images.setBackend(null);
+    }
+  });
+
+  it("drops the sharp level to its thumbnail on an allocation refusal while hidden", async () => {
+    const r = photoRig();
+    const photos = demand(["a"], 400);
+    try {
+      await eventually(() => expect(r.images.update(photos, 1, limit(16))).toBe(true));
+      r.images.evict(true);
+      expect(r.held("a")?.has(448)).toBe(true);
+      expect(r.images.releasePressure()).toBe(true);
+      expect([...(r.held("a")?.keys() ?? [])]).toEqual([28]);
       r.pause();
       expect(r.images.update(photos, 1, limit(16))).toBe(false);
-      for (const ref of ["a", "b"]) expect(r.held(ref)?.has(28)).toBe(true);
+      expect(r.held("a")?.has(28)).toBe(true);
       r.resume();
       await eventually(() => expect(r.images.update(photos, 1, limit(16))).toBe(true));
+      expect(r.held("a")?.has(448)).toBe(true);
     } finally {
       r.resume();
       r.images.setBackend(null);
@@ -347,24 +367,69 @@ describe("image residency", () => {
     }
   });
 
-  it.each([undefined, 4])(
-    "fits a 2x2 photo grid on a 5K display with deviceMemory=%s",
-    async (memory) => {
-      vi.stubGlobal("navigator", { deviceMemory: memory });
-      expect(deviceImageBudget(256 << 20)).toBe(192 << 20);
-      expect(deviceImageBudget(128 << 20)).toBe(128 << 20);
+  it("covers a large photo through a 2x step and a slow 3x zoom without new decodes", async () => {
+    const r = photoRig({ size: { width: 6000, height: 4000 } });
+    const photo = demand(["large"], 1300, 866);
+    const cap = limit(128);
+    try {
+      await eventually(() => {
+        expect(r.images.update(photo, 1, cap, 0)).toBe(true);
+        expect(r.held("large")?.size).toBeGreaterThanOrEqual(3);
+      });
+      expect(r.held("large")?.has(1536)).toBe(true);
+      const requests = r.requests.length;
+      r.pause();
+      expect(r.images.update(photo, 2, cap, 200)).toBe(true);
+      for (let frame = 0; frame <= 120; frame++) {
+        const scale = 1 + (2 * frame) / 120;
+        expect(r.images.update(photo, scale, cap, 216 + frame * 16)).toBe(true);
+      }
+      expect(r.requests).toHaveLength(requests);
+    } finally {
+      r.resume();
+      r.images.setBackend(null);
+    }
+  });
+
+  it.each([
+    { deviceMemory: 2, adapter: 256, expected: 96, prefetch: false },
+    { deviceMemory: 4, adapter: 256, expected: 192, prefetch: true },
+    { deviceMemory: 4, adapter: 128, expected: 128, prefetch: true },
+  ])(
+    "keeps a 5K photo grid sharp with $expected MiB from $deviceMemory GiB and a $adapter MiB adapter cap",
+    async ({ deviceMemory, adapter, expected, prefetch }) => {
+      vi.stubGlobal("navigator", { deviceMemory });
       const r = photoRig({ size: { width: 6000, height: 4000 } });
       const photos = demand(["a", "b", "c", "d"], 1280, 853);
       try {
         await eventually(() => {
-          expect(r.images.update(photos, 2, limit(128))).toBe(true);
+          expect(r.images.update(photos, 2, limit(adapter))).toBe(true);
           for (const { ref } of photos) expect(r.held(ref)?.has(2560)).toBe(true);
+          expect(photos.some(({ ref }) => r.held(ref)?.has(4096))).toBe(prefetch);
         });
+        expect(r.images.budget).toBe(limit(expected).bytes);
         expect(r.images.reduced).toBe(0);
-        expect(r.peak).toBeLessThanOrEqual(limit(128).bytes);
+        expect(r.peak).toBeLessThanOrEqual(limit(expected).bytes);
       } finally {
         r.images.setBackend(null);
       }
+    },
+  );
+
+  it.each([
+    { userAgent: "Macintosh", maxTouchPoints: 0, expected: 192 },
+    { userAgent: "Macintosh", maxTouchPoints: 5, expected: 128 },
+    {
+      userAgent: "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X)",
+      maxTouchPoints: 0,
+      expected: 128,
+    },
+  ])(
+    "uses $expected MiB when memory is unreported ($userAgent, $maxTouchPoints touch points)",
+    (device) => {
+      vi.stubGlobal("navigator", device);
+      expect(deviceImageBudget(limit(256).bytes)).toBe(limit(device.expected).bytes);
+      expect(deviceImageBudget(limit(64).bytes)).toBe(limit(64).bytes);
     },
   );
 });

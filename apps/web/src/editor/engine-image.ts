@@ -5,7 +5,7 @@ import { colorBitmap } from "./color-glyphs";
 
 const MIB = 1024 * 1024;
 const MAX_DECODES = 4;
-const PREFETCH_LEVELS = 2;
+const PREFETCH_RATIOS = [2, 4];
 const DECODE_BYTES = 64 * MIB;
 const ZOOM_SAMPLE_MS = 100;
 const ZOOM_LOOKAHEAD_MS = 180;
@@ -18,10 +18,14 @@ export const CPU_IMAGE_BUDGET = 64 * MIB;
 export const CPU_IMAGE_SIDE = MAX_BITMAP_SIDE;
 
 export function deviceImageBudget(max: number): number {
-  const memory = (globalThis.navigator as (Navigator & { deviceMemory?: number }) | undefined)
-    ?.deviceMemory;
-  const bytes = memory && memory > 0 ? Math.max(16, memory * 48) * MIB : 192 * MIB;
-  return Math.min(max, bytes);
+  const navigator = globalThis.navigator as (Navigator & { deviceMemory?: number }) | undefined;
+  const memory = navigator?.deviceMemory;
+  // iPadOS can advertise a desktop user agent while still having touch input.
+  const mobile =
+    (navigator?.maxTouchPoints ?? 0) > 0 ||
+    /\b(Android|iPhone|iPad|iPod|Mobile)\b/i.test(navigator?.userAgent ?? "");
+  const mib = memory && memory > 0 ? Math.max(16, memory * 48) : mobile ? 128 : 192;
+  return Math.min(max, mib * MIB);
 }
 
 export function uploadCpuLevel(engine: RenderEngine, handle: number, bitmap: ImageBitmap) {
@@ -76,24 +80,23 @@ function fits(level: Size, needed: Size): boolean {
   return level.width >= needed.width && level.height >= needed.height;
 }
 
-function levels(size: Size, maxSide: number): Size[] {
+function levels(size: Size, maxSide: number): { zoom: Size[]; rest: Size[] } {
   const fit = Math.min(1, maxSide / Math.max(size.width, size.height));
   let width = Math.max(1, Math.floor(size.width * fit));
   let height = Math.max(1, Math.floor(size.height * fit));
-  const out = [{ width, height }];
+  const largest = { width, height };
+  const zoom = [largest];
   while (width >= 2 && Math.max(width, height) >= 64) {
     width = Math.floor(width / 2);
     height = Math.max(1, Math.floor(height / 2));
-    out.push({ width, height });
+    zoom.push({ width, height });
   }
   // Large photos on high-DPR displays could round up to nearly four times the
   // visible pixel count. Stable 256 px steps keep headroom without decoding a
   // different size on every camera tick.
-  if (Math.max(size.width, size.height) < 3072) return out;
-  const largest = out[0];
-  if (!largest) return out;
+  if (Math.max(size.width, size.height) < 3072) return { zoom, rest: zoom };
   const side = Math.max(largest.width, largest.height);
-  const byWidth = new Map(out.map((level) => [level.width, level]));
+  const byWidth = new Map(zoom.map((level) => [level.width, level]));
   for (let step = 1280; step < side; step += 256) {
     const smaller = {
       width: Math.ceil((largest.width * step) / side),
@@ -101,7 +104,7 @@ function levels(size: Size, maxSide: number): Size[] {
     };
     if (!byWidth.has(smaller.width)) byWidth.set(smaller.width, smaller);
   }
-  return [...byWidth.values()].sort((a, b) => b.width - a.width);
+  return { zoom, rest: [...byWidth.values()].sort((a, b) => b.width - a.width) };
 }
 
 function levelFor(pyramid: readonly Size[], span: Size, scale: number): number {
@@ -174,6 +177,7 @@ export class ViewImages {
   #metadata = new Map<string, boolean>();
   #backend: ImageBackend | null = null;
   #budget = 0;
+  #hidden = false;
   #reduced = 0;
   #uploadedThisFrame = 0;
   #uploadFrame: Promise<void> | undefined;
@@ -238,22 +242,20 @@ export class ViewImages {
   /** Releases pixel memory and cancels work which could bring it back while hidden. */
   evict(keepVisible = false): void {
     for (const { abort } of this.#jobs.values()) abort.abort();
-    const keep = new Map<string, Resident>();
-    if (keepVisible) {
-      for (const level of this.#residents.values()) {
-        if (!this.#visible.has(level.ref)) continue;
-        const previous = keep.get(level.ref);
-        if (!previous || level.width < previous.width) keep.set(level.ref, level);
-      }
-    }
+    this.#hidden = keepVisible;
+    const keep = keepVisible ? this.#closestVisible() : new Map<string, Resident>();
     for (const [key, level] of this.#residents) {
-      if (keep.get(level.ref) !== level) this.#drop(key);
+      const thumbnail = this.#fallbacks.get(level.ref);
+      if (keep.get(level.ref) !== level && (!keepVisible || !thumbnail || keyOf(thumbnail) !== key))
+        this.#drop(key);
     }
     this.#targets.clear();
     this.#metadata.clear();
-    if (!keepVisible) this.#visible.clear();
+    if (!keepVisible) {
+      this.#visible.clear();
+      this.#fallbacks.clear();
+    }
     this.#primary.clear();
-    this.#fallbacks.clear();
     this.#protected.clear();
     this.#zoomSample = undefined;
     this.#forecastScale = 0;
@@ -291,6 +293,7 @@ export class ViewImages {
     now = performance.now(),
   ): boolean {
     if (!this.#backend) return true;
+    this.#hidden = false;
     const budget = deviceImageBudget(limits.bytes);
     if (budget !== this.#budget) this.#denied.clear();
     const maxSide = Math.min(MAX_BITMAP_SIDE, limits.side);
@@ -299,7 +302,7 @@ export class ViewImages {
     const ideal = new Map<string, Target>();
     const forecasts = new Map<string, Target>();
     const fallbacks = new Map<string, Target>();
-    const pyramids = new Map<string, Size[]>();
+    const pyramids = new Map<string, ReturnType<typeof levels>>();
     const heldByHandle = new Map<number, Resident[]>();
     for (const level of this.#residents.values()) {
       const held = heldByHandle.get(level.handle) ?? [];
@@ -309,7 +312,9 @@ export class ViewImages {
     const visible = new Set<string>();
     const reduced = new Set<string>();
     const clock = ++this.#clock;
+    const scaleChanged = this.#zoomSample !== undefined && this.#zoomSample.scale !== scale;
     const forecastScale = this.#predictScale(scale, now);
+    const zooming = scaleChanged || forecastScale > scale;
 
     for (const { ref, visible: onScreen, span } of demands) {
       if (onScreen) visible.add(ref);
@@ -337,24 +342,39 @@ export class ViewImages {
         pyramid = levels(source.info, maxSide);
         pyramids.set(ref, pyramid);
       }
-      const current = levelFor(pyramid, span, scale);
-      const ahead = levelFor(pyramid, span, forecastScale);
+      const sizing = zooming ? pyramid.zoom : pyramid.rest;
       const handle = source.info.handle;
-      const size = pyramid[current];
+      const size = pyramid.rest[levelFor(pyramid.rest, span, scale)];
       if (!size) continue;
       const wanted = { ...size, ref, handle, priority: onScreen ? 0 : 3 };
       if (onScreen) ideal.set(keyOf(wanted), wanted);
-      let available = pyramid
-        .slice(current)
+      let available = sizing
+        .slice(levelFor(sizing, span, scale))
         .find((level) => !this.#denied.has(keyOf({ ...wanted, ...level })));
       if (onScreen && available) {
         // A prefetched level can satisfy the current view. Charge its real
         // size to the plan so it still gives way under budget pressure.
         let held: Resident | undefined;
         for (const level of heldByHandle.get(handle) ?? []) {
-          if (fits(level, available) && (!held || level.width < held.width)) held = level;
+          if (fits(level, size) && (!held || level.width < held.width)) held = level;
         }
-        if (held) available = held;
+        if (held) {
+          available = held;
+        } else {
+          // A zoom level can still finish after the camera stops moving.
+          for (const job of this.#jobs.values()) {
+            const pending = job.target;
+            if (
+              pending?.handle === handle &&
+              pending.priority === 0 &&
+              !job.abort.signal.aborted &&
+              fits(pending, size)
+            ) {
+              available = pending;
+              break;
+            }
+          }
+        }
       }
       if (available) {
         const target = { ...wanted, ...available };
@@ -363,19 +383,23 @@ export class ViewImages {
         if (!previous || target.priority < previous.priority) candidates.set(key, target);
       }
       if (onScreen) {
-        const coarse = pyramid.at(-1);
+        const coarse = pyramid.zoom.at(-1);
         if (coarse) fallbacks.set(ref, { ...coarse, ref, handle, priority: 0 });
-        const projected = pyramid[ahead];
-        if (ahead < current && projected) {
+        const projected = pyramid.zoom[levelFor(pyramid.zoom, span, forecastScale)];
+        if (
+          forecastScale > scale &&
+          projected &&
+          projected.width > (available?.width ?? size.width)
+        ) {
           const forecast = { ...projected, ref, handle, priority: 1, forecast: true };
           const previous = forecasts.get(ref);
           if ((!previous || forecast.width > previous.width) && !this.#denied.has(keyOf(forecast)))
             forecasts.set(ref, forecast);
         }
-        for (let ahead = 1; ahead <= PREFETCH_LEVELS; ahead++) {
-          const finer = pyramid[current - ahead];
-          if (!finer) break;
-          const target = { ...finer, ref, handle, priority: 3 + ahead };
+        for (const [index, ratio] of PREFETCH_RATIOS.entries()) {
+          const finer = pyramid.zoom[levelFor(pyramid.zoom, span, scale * ratio)];
+          if (!finer || finer.width <= (available?.width ?? size.width)) continue;
+          const target = { ...finer, ref, handle, priority: 4 + index };
           const key = keyOf(target);
           if (!candidates.has(key) && !this.#denied.has(key)) candidates.set(key, target);
         }
@@ -412,7 +436,7 @@ export class ViewImages {
         if (bytes(target) <= largestBytes) continue;
         const smaller = pyramids
           .get(target.ref)
-          ?.find(
+          ?.rest.find(
             (level) =>
               level.width < target.width && !this.#denied.has(keyOf({ ...target, ...level })),
           );
@@ -447,7 +471,7 @@ export class ViewImages {
       const credit = target.forecast && current ? plannedBytes(current) : 0;
       if (planned + plannedBytes(target) - credit > budget) {
         if (!target.forecast || !current) continue;
-        const affordable = pyramids.get(target.ref)?.find((level) => {
+        const affordable = pyramids.get(target.ref)?.zoom.find((level) => {
           const choice = { ...target, ...level };
           return (
             level.width <= target.width &&
@@ -515,10 +539,9 @@ export class ViewImages {
     return pending.size === 0;
   }
 
-  #refreshProtection(): void {
-    this.#protected.clear();
+  #closestVisible(): Map<string, Resident> {
     const nearest = new Map<string, Resident>();
-    for (const [key, resident] of this.#residents) {
+    for (const resident of this.#residents.values()) {
       if (!this.#visible.has(resident.ref)) continue;
       const wanted = this.#primary.get(resident.ref);
       const previous = nearest.get(resident.ref);
@@ -529,13 +552,21 @@ export class ViewImages {
           : resident.width > previous.width)
       )
         nearest.set(resident.ref, resident);
+    }
+    return nearest;
+  }
+
+  #refreshProtection(): void {
+    this.#protected.clear();
+    for (const [key, resident] of this.#residents) {
+      if (!this.#visible.has(resident.ref)) continue;
       if (
         this.#targets.get(key)?.priority === 0 ||
         this.#fallbacks.get(resident.ref)?.width === resident.width
       )
         this.#protected.add(key);
     }
-    for (const resident of nearest.values()) this.#protected.add(keyOf(resident));
+    for (const resident of this.#closestVisible().values()) this.#protected.add(keyOf(resident));
   }
 
   #missingFallback(target: Target): Target | undefined {
@@ -603,8 +634,14 @@ export class ViewImages {
   releasePressure(): boolean {
     this.#refreshProtection();
     let freed = false;
-    for (const [key] of this.#residents) {
-      if (this.#protected.has(key)) continue;
+    for (const [key, resident] of this.#residents) {
+      const thumbnail = this.#fallbacks.get(resident.ref);
+      const canKeepThumbnail =
+        this.#hidden &&
+        thumbnail &&
+        keyOf(thumbnail) !== key &&
+        this.#residents.has(keyOf(thumbnail));
+      if (this.#protected.has(key) && !canKeepThumbnail) continue;
       this.#drop(key);
       freed = true;
     }

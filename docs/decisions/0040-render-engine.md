@@ -1170,16 +1170,19 @@ While zooming in, the editor projects the recent logarithmic zoom velocity
 still draw and carries an in-flight prediction forward when it can serve
 the current view. Up to four decode jobs can run, with a separate 64 MiB
 limit on their requested bitmap sizes. Uploads use the existing frame budget.
+Speculative levels use the power-of-two pyramid to cover roughly 2× and
+4× the current zoom. Active zoom and velocity predictions use the same
+pyramid to avoid a new decode at every small step.
 
 The closest useful resident level stays available through decode. A sharper
 decoded bitmap can replace that level under the same residency cap, using a
 tiny resident copy as the fallback during the swap. After 30 seconds hidden
-the view drops nonvisible levels and keeps one coarse copy per visible
-photo. The first frame on return can paint those photos while sharp detail
-is rebuilt.
+the view drops nearby and speculative levels and keeps the drawn level of
+each visible photo. A backend allocation refusal while hidden can reclaim
+those levels down to their thumbnails.
 
-Large sources use 256-device-pixel size steps above 1024 px to avoid
+At rest, large sources use 256-device-pixel size steps above 1024 px to avoid
 rounding a 5K viewport's photos up to a full 4096 px level. The image budget
-defaults to 192 MiB and scales at 48 MiB per reported GiB of device memory,
-subject to the existing adapter and renderer caps. The CPU Worker keeps
-its 64 MiB cap.
+scales at 48 MiB per reported GiB of device memory. When memory is unknown,
+it defaults to 128 MiB on mobile and touch devices and 192 MiB elsewhere.
+Adapter and renderer caps still apply, including 64 MiB on the CPU Worker.
