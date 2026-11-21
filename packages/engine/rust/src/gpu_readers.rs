@@ -1928,8 +1928,8 @@ impl GpuReaders {
         Ok(())
     }
 
-    /// A progressive draw can write the same plane that it reads. Keep a bounded
-    /// copy of that scope while all its output tiles are encoded.
+    /// Preserve the original scope when several blur tiles or glass chunks write
+    /// to the same plane that they sample.
     pub fn ensure_blur_source_budgeted(
         &mut self,
         device: &wgpu::Device,
@@ -1941,7 +1941,7 @@ impl GpuReaders {
             return Ok(());
         }
         let freed = self.blur_source.as_ref().map_or(0, PlainTex::bytes);
-        self.reserve_bytes(w as usize * h as usize * 4, freed, "progressive blur prefix", max_bytes)?;
+        self.reserve_bytes(w as usize * h as usize * 4, freed, "reader prefix snapshot", max_bytes)?;
         self.blur_source = Some(make_plain(
             device,
             w,
@@ -1949,7 +1949,7 @@ impl GpuReaders {
             RGBA8,
             4,
             wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::TEXTURE_BINDING,
-            "progressive blur prefix",
+            "reader prefix snapshot",
         ));
         Ok(())
     }

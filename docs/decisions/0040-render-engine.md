@@ -1070,3 +1070,9 @@ Phase 3B executes backdrop readers on CPU and GPU in the tiled renderer and band
   - The restacked T4 WebGPU readback benchmark passed both cases. The six-layer exact and coarse fence p95 values were 31.9 and 4.2 ms. Stacked drag content p95 was 6.0 ms, with 3.1 ms encoding and 1.8 ms rendering. Latest exact settlement took at most 122.2 ms.
   - Onscreen T4 WebGL2 measured 50.2 and 17.2 ms for the six-layer exact and coarse fence p95. Stacked drag content p95 was 11.1 ms, including 5.0 ms encoding and 4.0 ms rendering. Confirmed presentation intervals were 16.6 ms median, 19.5 ms p95 and 25.4 ms p99. The coarse six-layer fence and the drag work and presentation tails missed their gates.
 - **Open conformance coverage** includes desktop WebGPU presentation with hardware compositing and native Safari Metal and ANGLE-Metal.
+
+### Frost mip phase
+
+Exact glass uses the same region split on CPU, WebGPU and WebGL2. Each chunk samples the original prefix. If the lens reads the same plane it writes, the GPU copies that plane once before drawing the first chunk. Otherwise it reads the existing glass-free plane directly.
+
+On the T4, all 31 `glass-probe-2` cells and all 15 `glass-stack` cells passed on both backends. The `frost-100` CPU/GPU mean fell from 0.295 to 0.021, with p99 and maximum of 1. Its CPU, WebGPU and WebGL2 means against Figma were all 2.53. The cell uses the standard 0.25 mean cap.

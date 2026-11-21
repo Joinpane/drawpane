@@ -11,8 +11,11 @@ use vello_common::kurbo::{Affine, Rect};
 
 /// Preferred interior chunk side (in device pixels) when a glass layer exceeds single-pass bounds.
 pub const DEFAULT_CHUNK_SIDE: u32 = 1024;
-/// Smaller chunk side used under a Worker `memory_bytes` cap so each chunk fits comfortably.
-pub const WORKER_CHUNK_SIDE: u32 = 512;
+/// Exact CPU and GPU draws use identical region sizes so their mip texels have the same phase.
+pub const EXACT_SPLIT_SIDE: u32 = 1024;
+pub const EXACT_SPLIT_PIXELS: u64 = 1_048_576;
+/// Sized for the Worker's memory cap.
+pub const EXACT_CHUNK_SIDE: u32 = 512;
 /// Hard per-chunk region side cap on CPU (`u16::MAX` / 16k).
 pub const HARD_MAX_REGION_SIDE: u32 = 16_384;
 /// Hard per-chunk pixel cap (24M px).
