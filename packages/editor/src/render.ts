@@ -749,7 +749,8 @@ export class CanvasRenderer {
           frame.zoom,
           dirty.reduce((sum, r) => sum + r.width * r.height, 0),
           budget,
-        )
+        ) &&
+        !this.#damagesReader(dirty, frame, camera, dpr)
       ) {
         // A change that takes longer to draw than a frame has: the old picture stays until each
         // place is drawn again.
@@ -776,6 +777,9 @@ export class CanvasRenderer {
       const area = frame.width * frame.height;
       if (!tiles || !this.#costly(frame.pageId, frame.zoom, area, budget)) {
         this.#workWhole = false;
+        // Keep the reader positions even after a full draw. The next edit may move one
+        // offscreen, so only its old footprint will intersect the damage.
+        this.#areas(frame, camera, dpr);
         const t = performance.now();
         ctx.fillStyle = frame.background;
         ctx.fillRect(0, 0, frame.width, frame.height);
@@ -918,6 +922,32 @@ export class CanvasRenderer {
       rects.push({ x: x0, y: y0, width: x1 - x0, height: y1 - y0 });
     }
     return coverRects(rects, { x: 0, y: 0, width: frame.width, height: frame.height });
+  }
+
+  /**
+   * Repaint this batch together if it touches a reader's old or new footprint.
+   * Tiling it could draw the reader at its new position before erasing its old one.
+   * The repaint can still draw readers coarse and settle their optics later.
+   */
+  #damagesReader(dirty: readonly Rect[], frame: LastFrame, camera: Camera, dpr: number): boolean {
+    const previous = this.#readerAreas;
+    const current = this.#areas(frame, camera, dpr);
+    const touches = (areas: ReadonlyMap<string, ReaderArea>) => {
+      for (const area of areas.values()) {
+        const paints = onCanvas(area.paints, frame);
+        if (paints && dirty.some((rect) => rectsIntersect(rect, paints))) return true;
+      }
+      return false;
+    };
+    return (
+      touches(current) ||
+      (previous !== null &&
+        previous.areas !== current &&
+        previous.pageId === frame.pageId &&
+        previous.zoom === frame.zoom &&
+        previous.dpr === frame.dpr &&
+        touches(previous.areas))
+    );
   }
 
   /**
