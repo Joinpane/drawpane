@@ -28,7 +28,10 @@
  *   their ancestors), so a mode set on a frame of unbound layers walks none.
  * - layout is queued only for layers whose layout reads what changed (a
  *   bound padding through the changed variable or collection), never for a
- *   colour or a style.
+ *   colour or a style;
+ * - a layer's own layout bindings changed (bound to another variable, or
+ *   unbound): layout is queued for every built copy of it, which may show
+ *   another mode than the layer and read another value there.
  *
  * What it keeps (its indexes, and resolved nodes it caches) is counted in the
  * document's meter when it has one (the room's headless editor): indexes as
@@ -36,10 +39,14 @@
  * node is cached only while the meter has room for it.
  */
 import {
+  type BindingKey,
   type BuildBudget,
   BuildTooLarge,
+  bindingVariable,
+  bindsLayout,
   getProp,
   heapBytes,
+  LAYOUT_BINDINGS,
   layoutVariables,
   type NodeRecord,
   type Op,
@@ -129,6 +136,48 @@ function modeKeys(value: unknown): string[] {
 function unsetsModes(props: unknown): boolean {
   const unset = (props as { unset?: unknown } | undefined)?.unset;
   return Array.isArray(unset) && unset.includes("variableModes");
+}
+
+/** What a `bindings` value binds that a layout reads: each key with its variable, in key order. */
+function layoutBindings(bindings: unknown): string {
+  if (!bindings || typeof bindings !== "object") return "";
+  const out: string[] = [];
+  for (const [key, ref] of Object.entries(bindings as Record<string, unknown>))
+    if (LAYOUT_BINDINGS.has(key as BindingKey)) out.push(`${key}=${bindingVariable(ref) ?? ""}`);
+  return out.sort().join("\n");
+}
+
+/**
+ * The stored nodes whose layout bindings (a padding's, a visibility's)
+ * differ after the stored operations `inverse` undoes, read from it in undo
+ * order: a binding set to name another variable or none, an override
+ * record made or removed with layout bindings of its own, or one that
+ * starts or stops unsetting them. `now` reads a node as stored after them.
+ */
+function reboundLayout(
+  inverse: readonly Op[],
+  now: (id: string) => NodeRecord | undefined,
+): Set<string> {
+  const out = new Set<string>();
+  for (const op of inverse) {
+    if (op.op === "set" && op.prop === "bindings") {
+      const node = now(op.id);
+      if (node && layoutBindings(op.value) !== layoutBindings(getProp(node.props, "bindings")))
+        out.add(op.id);
+    } else if (op.op === "set" && op.prop === "unset") {
+      const was = Array.isArray(op.value) && op.value.includes("bindings");
+      const node = now(op.id);
+      if (node && was !== getProp(node.props, "unset").includes("bindings")) out.add(op.id);
+    } else if (op.op === "delete") {
+      // Made by the change: a layer's copies are new and laid out anyway, a record's aren't.
+      const node = now(op.id);
+      if (node?.type === "override" && bindsLayout(node.props)) out.add(op.id);
+    } else if (op.op === "create" && op.type === "override" && bindsLayout(op.props)) {
+      // A record removed: its copy reads its main's bindings again.
+      out.add(op.id);
+    }
+  }
+  return out;
 }
 
 export class TokenView {
@@ -343,6 +392,18 @@ export class TokenView {
           this.#layout.add(id);
       }
     }
+
+    // Layers bound anew: where a copy shows another mode than its main's layer, the
+    // layer's new variable can resolve differently there though the main reads the same
+    // value as before (a padding bound to a variable that's 8 in Light and 24 in Dark
+    // writes nothing in a Light main, but its instance in Dark grows). Every built copy
+    // is laid out again; the layer itself too, which lays out nothing it didn't already.
+    for (const id of reboundLayout(inverse, (id) => this.#source.stored(id)))
+      for (const copy of this.#source.builtFrom([id])) {
+        affected.add(copy);
+        this.#forget(copy);
+        this.#layout.add(copy);
+      }
 
     // Where modes apply changed.
     const roots = this.#modeRoots(stored, inverse);

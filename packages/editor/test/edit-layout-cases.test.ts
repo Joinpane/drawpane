@@ -237,4 +237,174 @@ describe("edits that leave layout as a full layout would", () => {
     expect(dot()).toEqual([16, 16]);
     expect(unsettled(editor)).toEqual([]);
   });
+
+  // The swapped-in layers' auto layout frame sits under a plain frame: the instance's root
+  // itself, or a frame between it and an auto layout root (PR 266's re-check).
+  it.each([
+    ["is the instance's root", false],
+    ["sits between auto layout frames", true],
+  ])("lays out a swapped instance's auto layout under a plain frame that %s", (_shape, between) => {
+    const flow = between ? ({ layoutMode: "row" } as const) : {};
+    const editor = make(
+      [
+        page,
+        modes,
+        node("v", "variable", "c", { variableType: "number", values: { light: 8, dark: 16 } }),
+        node("old-main", "frame", "p", { isComponent: true, width: 100, height: 30, ...flow }),
+        node(
+          "new-main",
+          "frame",
+          "p",
+          { isComponent: true, width: 100, height: 30, ...flow },
+          "a1",
+        ),
+        ...(between ? [node("plain", "frame", "new-main", { width: 100, height: 30 })] : []),
+        node("inner", "frame", between ? "plain" : "new-main", {
+          layoutMode: "row",
+          width: 100,
+          height: 30,
+          paddingLeft: 8,
+          bindings: { paddingLeft: "v" },
+        }),
+        node("dot", "rect", "inner", { x: 8, width: 10, height: 10 }),
+        node(
+          "dark",
+          "frame",
+          "p",
+          { variableModes: { c: "dark" }, x: 200, width: 200, height: 200 },
+          "a2",
+        ),
+        node("instance", "frame", "dark", { instanceOf: "old-main" }),
+      ],
+      "compact",
+    );
+    const dot = () => {
+      let inner = editor.doc.childIds("instance")[0] as string;
+      if (between) inner = editor.doc.childIds(inner)[0] as string;
+      return [
+        prop(editor, inner, "paddingLeft"),
+        prop(editor, editor.doc.childIds(inner)[0] as string, "x"),
+      ];
+    };
+    expect(unsettled(editor)).toEqual([]);
+    editor.swapInstance("instance", "new-main");
+    expect(dot()).toEqual([16, 16]);
+    expect(unsettled(editor)).toEqual([]);
+    editor.undo();
+    editor.redo();
+    expect(dot()).toEqual([16, 16]);
+    expect(unsettled(editor)).toEqual([]);
+  });
+
+  // Binding a main's layer to another variable that resolves as before in the main's mode
+  // writes nothing but the binding, yet its copies in another mode read a new value.
+  it.each([
+    ["binding", "an unbound padding", false],
+    ["rebinding", "a bound padding", true],
+  ])("lays out a copy in another mode after %s %s in its main", (_verb, _what, bound) => {
+    const editor = make(
+      [
+        page,
+        modes,
+        node("pad", "variable", "c", { variableType: "number", values: { light: 8, dark: 16 } }),
+        node(
+          "wide",
+          "variable",
+          "c",
+          { variableType: "number", values: { light: 8, dark: 24 } },
+          "a1",
+        ),
+        node("main", "frame", "p", {
+          isComponent: true,
+          layoutMode: "row",
+          width: 100,
+          height: 30,
+        }),
+        node("inner", "frame", "main", {
+          layoutMode: "row",
+          width: 100,
+          height: 30,
+          paddingLeft: 8,
+          ...(bound ? { bindings: { paddingLeft: "pad" } } : {}),
+        }),
+        node("dot", "rect", "inner", { x: 8, width: 10, height: 10 }),
+        node(
+          "dark",
+          "frame",
+          "p",
+          { variableModes: { c: "dark" }, x: 200, width: 200, height: 200 },
+          "a2",
+        ),
+      ],
+      "compact",
+    );
+    // Placed through the editor, so the copy is laid out in Dark as it's shown.
+    const instance = editor.insertInstance("main", { x: 0, y: 300 }) as string;
+    expect(editor.commit([{ op: "move", id: instance, parent: "dark", key: "a0" }])).toBe(true);
+    const inner = editor.doc.childIds(instance)[0] as string;
+    const dot = editor.doc.childIds(inner)[0] as string;
+    const shown = () => [prop(editor, inner, "paddingLeft"), prop(editor, dot, "x")];
+    expect(shown()).toEqual(bound ? [16, 16] : [8, 8]);
+    expect(unsettled(editor)).toEqual([]);
+    editor.bindVariable(["inner"], "paddingLeft", "wide");
+    expect([prop(editor, "inner", "paddingLeft"), prop(editor, "dot", "x")]).toEqual([8, 8]);
+    expect(shown()).toEqual([24, 24]);
+    expect(unsettled(editor)).toEqual([]);
+    const reopened = make(editor.doc.stored(), "compact");
+    expect([prop(reopened, inner, "paddingLeft"), prop(reopened, dot, "x")]).toEqual([24, 24]);
+    editor.undo();
+    expect(shown()).toEqual(bound ? [16, 16] : [8, 8]);
+    editor.redo();
+    expect(shown()).toEqual([24, 24]);
+  });
+
+  // A main set to a mode passes it to its instances; materialized ones are written it in a
+  // later round of the commit, and what then reads other values is laid out too.
+  it.each(["materialized", "compact"] as const)(
+    "lays out an instance in another mode when its main is set to one (copies %s)",
+    (copies) => {
+      const editor = make(
+        [
+          page,
+          modes,
+          node("pad", "variable", "c", { variableType: "number", values: { light: 4, dark: 12 } }),
+          node("main", "frame", "p", {
+            isComponent: true,
+            layoutMode: "row",
+            width: 100,
+            height: 30,
+          }),
+          node("inner", "frame", "main", {
+            layoutMode: "row",
+            width: 100,
+            height: 30,
+            paddingLeft: 4,
+            bindings: { paddingLeft: "pad" },
+          }),
+          node("dot", "rect", "inner", { x: 4, width: 10, height: 10 }),
+          node(
+            "dark",
+            "frame",
+            "p",
+            { variableModes: { c: "dark" }, x: 200, width: 200, height: 200 },
+            "a2",
+          ),
+        ],
+        copies,
+      );
+      const instance = editor.insertInstance("main", { x: 0, y: 300 }) as string;
+      expect(editor.commit([{ op: "move", id: instance, parent: "dark", key: "a0" }])).toBe(true);
+      const inner = editor.doc.childIds(instance)[0] as string;
+      const dot = editor.doc.childIds(inner)[0] as string;
+      const shown = () => [prop(editor, inner, "paddingLeft"), prop(editor, dot, "x")];
+      expect(shown()).toEqual([12, 12]);
+      editor.setVariableModes(["main"], "c", "light");
+      expect(shown()).toEqual([4, 4]);
+      expect(unsettled(editor)).toEqual([]);
+      editor.undo();
+      expect(shown()).toEqual([12, 12]);
+      editor.redo();
+      expect(shown()).toEqual([4, 4]);
+    },
+  );
 });

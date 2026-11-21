@@ -1455,12 +1455,19 @@ function layoutClosure(
     const top = walk(id);
     if (top) roots.add(top);
   }
-  // Everything under these is new (a swapped instance's layers): every layout frame in it.
+  // Everything under these is new (a swapped instance's layers): every layout frame in it,
+  // each from its own outermost layout frame, since a plain frame (the instance's root, or
+  // one between two auto layout frames) stops a run from reaching what's inside it.
   for (const id of whole) {
-    walk(id);
-    const stack = [id];
+    const top = walk(id);
+    if (top) roots.add(top);
+    const stack = [...doc.childIds(id)];
     for (let at = stack.pop(); at !== undefined; at = stack.pop()) {
-      if (isLayoutFrame(doc.get(at))) dirty.add(at);
+      const node = doc.get(at);
+      if (isLayoutFrame(node) && !dirty.has(at)) {
+        const top = walk(at);
+        if (top) roots.add(top);
+      }
       for (const child of doc.childIds(at)) stack.push(child);
     }
   }

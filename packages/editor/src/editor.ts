@@ -751,13 +751,21 @@ export class Editor {
         const derived = [...derivedSoFar, ...text];
         const afterSync =
           derived.length > 0 ? this.#touchedBy(derived, roundInverse) : new Set<string>();
-        const layoutTargets = new Set([...live, ...afterSync, ...relayout.layout]);
+        // Layers this round's own writes made resolve otherwise (a main's mode or binding
+        // written to its materialized copies): laid out with the rest, as the edit's are.
+        const resolvedAgain = [...this.doc.takeTokenLayout()].filter((id) => this.doc.has(id));
+        const layoutTargets = new Set([
+          ...live,
+          ...afterSync,
+          ...relayout.layout,
+          ...resolvedAgain,
+        ]);
         // Laid out inside: whatever this round's operations changed (constraints and fix-ups
         // included), except layers they only moved, whose insides stay laid out as they are,
         // and layers they changed only in ways no layout reads (a fill), laid out not at all.
         const roundOps = [...lastOps, ...derived];
         const { moved, neutral } = layoutChanges(roundOps, [...inverse, ...roundInverse]);
-        for (const id of relayout.layout) {
+        for (const id of [...relayout.layout, ...resolvedAgain]) {
           moved.delete(id);
           neutral.delete(id);
         }
