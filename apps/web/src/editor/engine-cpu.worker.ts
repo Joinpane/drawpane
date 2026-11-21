@@ -36,7 +36,7 @@ const MOVING_SLICE_TILES = 2;
 
 export type CpuWorkerRequest =
   | { readonly type: "init" }
-  | { readonly type: "apply"; readonly bytes: ArrayBuffer }
+  | { readonly type: "apply"; readonly bytes: ArrayBuffer; readonly attempt?: number }
   | {
       readonly type: "put-image";
       readonly handle: number;
@@ -68,6 +68,7 @@ export type CpuWorkerReply =
     }
   | {
       readonly type: "apply-result";
+      readonly attempt?: number;
       readonly ok: boolean;
       readonly revision: number;
       readonly code?: ErrorCode;
@@ -187,6 +188,7 @@ async function pump(): Promise<void> {
       let { width, height, camera } = job;
       let frameBytes = width * height * 4;
       let limit: string | undefined;
+      let direct = false;
       let records = 0;
       let culled = 0;
       let glyphsMasked = 0;
@@ -216,22 +218,13 @@ async function pump(): Promise<void> {
           });
           if (!r.ok && r.code === ErrorCode.Limit) {
             limit = r.message;
+            direct = true;
             const renderer = engine;
-            const retry = fitEngineRaster(
-              width,
-              height,
-              camera,
-              (raster) =>
-                renderer.renderCpu(
-                  raster.width,
-                  raster.height,
-                  raster.camera,
-                  job.background,
-                  false,
-                ),
-              0.5,
+            const retry = fitEngineRaster(width, height, camera, (raster) =>
+              renderer.renderCpu(raster.width, raster.height, raster.camera, job.background, false),
             );
             r = retry.result;
+            if (r.ok && retry.raster.scale === 1) limit = undefined;
             ({ width, height, camera } = retry.raster);
             frameBytes = width * height * 4;
           }
@@ -334,7 +327,7 @@ async function pump(): Promise<void> {
           // frames, pending tiles, and post-drag settling until exact (stopping immediately if a
           // slice makes no progress, e.g. while provisional text is still waiting for fonts).
           if (
-            limit !== undefined ||
+            direct ||
             job.moving ||
             stats.exact ||
             (stats.tiles.pending === 0 && stats.tiles.drawn === 0 && stats.tiles.dragged === 0)
@@ -437,6 +430,7 @@ scope.onmessage = async ({ data }) => {
         applyRejected = true;
         post({
           type: "apply-result",
+          ...(data.attempt === undefined ? {} : { attempt: data.attempt }),
           ok: false,
           revision: engine.revision,
           code: r.code,

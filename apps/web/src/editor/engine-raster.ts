@@ -1,5 +1,7 @@
 import { type Camera, ErrorCode, type Result } from "@drawpane/engine";
 
+export const MIN_RASTER_SCALE = 1 / 64;
+
 interface Raster {
   readonly width: number;
   readonly height: number;
@@ -27,7 +29,8 @@ export function fitEngineRaster<T>(
     const result = draw(raster);
     if (result.ok || result.code !== ErrorCode.Limit) return { raster, result, limit };
     limit ??= result.message;
-    if (raster.width === 1 && raster.height === 1) return { raster, result, limit };
+    if (scale <= MIN_RASTER_SCALE || (raster.width === 1 && raster.height === 1))
+      return { raster, result, limit };
     scale /= 2;
   }
 }

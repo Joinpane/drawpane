@@ -1742,6 +1742,28 @@ impl Engine {
         Ok(self.cpu.target.data_as_u8_slice().to_vec())
     }
 
+    /// Viewport tiles can grow past the export-band halo if their working target fits.
+    fn cpu_view_halo(&self, view: Affine, crop: Rect, tile: u32) -> Result<i32> {
+        let halo = self.reader_reach(view, Some(crop)).0.ceil();
+        let side = f64::from(tile) + 2.0 * halo;
+        let tile_bytes = side * side * 4.0;
+        let budget = self.store.limits.memory_bytes;
+        if !side.is_finite()
+            || side > f64::from(self.store.limits.texture_side)
+            || tile_bytes
+                > if budget > 0 {
+                    budget.saturating_sub(self.held_bytes()) as f64
+                } else {
+                    (64 << 20) as f64
+                }
+        {
+            return Err(EngineError::limit(
+                "a CPU viewport tile and its halo exceed the working frame",
+            ));
+        }
+        Ok(halo as i32)
+    }
+
     /// A frame made of tiles on the CPU (decision 0040, phase 2): premultiplied RGBA8. What the
     /// GPU's tiles are held to; exact frames are bitwise what a fresh engine makes.
     pub fn render_cpu_tiled(
@@ -1759,9 +1781,11 @@ impl Engine {
             self.use_cpu_tiles(crate::tiles::TILE, 256);
         }
         let view = camera.view();
-        let halo = self.halo_for_rect(view, Rect::new(0.0, 0.0, f64::from(width), f64::from(height)))?;
         let mut tiles = self.cpu_tiles.take().expect("made above");
-        let result = self.cpu_tiled_frame(&mut tiles, width, height, view, halo, background, options);
+        let crop = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
+        let result = self
+            .cpu_view_halo(view, crop, tiles.cache.tile)
+            .and_then(|halo| self.cpu_tiled_frame(&mut tiles, width, height, view, halo, background, options));
         self.cpu_tiles = Some(tiles);
         let mut stats = result?;
         // No frame is exact while text is still to come: it may paint past its box.
@@ -1782,8 +1806,8 @@ impl Engine {
             let mut stats = TiledStats::default();
             let Some(last) = tiles.last else { return Ok(stats) };
             let crop = Rect::new(0.0, 0.0, f64::from(last.size.0), f64::from(last.size.1));
-            let halo = self.halo_for_rect(last.view, crop)?;
             let tile = tiles.cache.tile;
+            let halo = self.cpu_view_halo(last.view, crop, tile)?;
             tiles.cache.begin(background, halo);
             let Some(plan) = tiles.cache.plan(last.view, last.size, false, Some(last), true) else {
                 return Ok(stats);

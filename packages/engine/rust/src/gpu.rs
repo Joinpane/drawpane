@@ -703,6 +703,7 @@ pub struct Gpu {
     /// Frame textures: the one shown (`cur`) and the one being made.
     frames: Vec<Main>,
     cur: usize,
+    surface_bytes: usize,
     /// The board textures (decision 0040, phase 2): which tiles are held, where, and how fresh.
     pub tiles: TileCache,
     pages: Vec<Page>,
@@ -1211,6 +1212,7 @@ impl Gpu {
             backdrop_gen: 0,
             frames: Vec::new(),
             cur: 0,
+            surface_bytes: 0,
             tiles: TileCache::new(TILE, 0),
             pages: Vec::new(),
             scratches: [None, None],
@@ -1887,71 +1889,102 @@ impl Gpu {
         }
     }
 
-    /// Bytes frames of this size take on the GPU: `FRAMES` textures (no depth buffers: tiles are
-    /// drawn into pages, frames only composited), and the canvas's own textures (two in flight).
-    fn frame_bytes(width: u32, height: u32, presents: bool) -> usize {
-        let px = width as usize * height as usize * 4;
-        px * FRAMES + if presents { px * 2 } else { 0 }
+    fn next_frame(&self) -> usize {
+        if self.frames.is_empty() {
+            0
+        } else {
+            (self.cur + 1) % FRAMES
+        }
     }
 
-    fn ensure_frames(&mut self, width: u32, height: u32) -> Result<()> {
+    fn frame_bytes(width: u32, height: u32) -> usize {
+        width as usize * height as usize * 4
+    }
+
+    fn check_frame(&self, dst: usize, width: u32, height: u32, work: usize, freed: usize) -> Result<()> {
         self.check_texture_size(width, height, "a frame")?;
+        let bytes = Self::frame_bytes(width, height);
+        let previous = self.frames.get(dst).map_or(0, |m| Self::frame_bytes(m.width, m.height));
+        let surface = if self.surface.is_some() {
+            (2 * bytes).saturating_sub(self.surface_bytes)
+        } else {
+            0
+        };
+        self.reserve(
+            bytes.saturating_add(surface).saturating_add(work),
+            previous.saturating_add(freed),
+            "a frame and its working textures",
+        )
+    }
+
+    /// Resize only the back buffer. The last frame and canvas are committed by finish_frame.
+    fn ensure_frame(&mut self, dst: usize, width: u32, height: u32) -> Result<()> {
         if self
             .frames
-            .first()
+            .get(dst)
             .is_some_and(|m| m.width == width && m.height == height)
         {
             return Ok(());
         }
-        let presents = self.surface.is_some();
-        let freed = self
-            .frames
-            .first()
-            .map_or(0, |m| Self::frame_bytes(m.width, m.height, presents));
-        self.reserve(Self::frame_bytes(width, height, presents), freed, "a frame")?;
-        for m in self.frames.drain(..) {
-            m.texture.destroy();
+        self.check_frame(dst, width, height, 0, 0)?;
+        if let Some(old) = self.frames.get(dst) {
+            old.texture.destroy();
         }
-        self.readers.clear_frame_targets();
-        self.forget_motion_prefix();
-        self.bytes = self.bytes - freed + Self::frame_bytes(width, height, presents);
-        for _ in 0..FRAMES {
-            let tex = texture(
-                &self.device,
-                width,
-                height,
-                wgpu::TextureUsages::RENDER_ATTACHMENT
-                    | wgpu::TextureUsages::TEXTURE_BINDING
-                    | wgpu::TextureUsages::COPY_SRC
-                    | wgpu::TextureUsages::COPY_DST,
-                "frame",
-            );
-            let view = tex.create_view(&Default::default());
-            let present_group = self.blit.as_ref().map(|blit| {
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("present"),
-                    layout: &blit.get_bind_group_layout(0),
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&view),
-                    }],
-                })
-            });
-            self.frames.push(Main {
-                view,
-                texture: tex,
-                present_group,
-                width,
-                height,
-            });
+        let tex = texture(
+            &self.device,
+            width,
+            height,
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_SRC
+                | wgpu::TextureUsages::COPY_DST,
+            "frame",
+        );
+        let view = tex.create_view(&Default::default());
+        let present_group = self.blit.as_ref().map(|blit| {
+            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("present"),
+                layout: &blit.get_bind_group_layout(0),
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                }],
+            })
+        });
+        let frame = Main {
+            view,
+            texture: tex,
+            present_group,
+            width,
+            height,
+        };
+        self.bytes += Self::frame_bytes(width, height);
+        if dst < self.frames.len() {
+            let old = std::mem::replace(&mut self.frames[dst], frame);
+            self.bytes -= Self::frame_bytes(old.width, old.height);
+        } else {
+            self.frames.push(frame);
         }
-        self.cur = 0;
-        self.forget_last();
-        if let Some((surface, config)) = self.surface.as_mut() {
-            config.width = width;
-            config.height = height;
-            surface.configure(&self.device, config);
+        Ok(())
+    }
+
+    fn configure_surface(&mut self, frame: usize) -> Result<()> {
+        let target = &self.frames[frame];
+        let (width, height) = (target.width, target.height);
+        let Some((_, config)) = self.surface.as_ref() else {
+            return Ok(());
+        };
+        if (config.width, config.height) == (width, height) && self.surface_bytes != 0 {
+            return Ok(());
         }
+        let bytes = 2 * Self::frame_bytes(width, height);
+        self.reserve(bytes, self.surface_bytes, "the presentation surface")?;
+        let (surface, config) = self.surface.as_mut().expect("surface");
+        config.width = width;
+        config.height = height;
+        surface.configure(&self.device, config);
+        self.bytes = self.bytes - self.surface_bytes + bytes;
+        self.surface_bytes = bytes;
         Ok(())
     }
 
@@ -2266,14 +2299,7 @@ impl Gpu {
         samples: Option<IRect>,
     ) -> Result<DrawStats> {
         self.check()?;
-        if prefix.is_none() {
-            self.forget_motion_prefix();
-        }
-        if store.readers().is_empty() && !store.has_context() && self.readers.bytes() > 0 {
-            self.readers.evict_frame_scratch();
-        }
         let (width, height) = (u32::from(frame.width), u32::from(frame.height));
-        self.ensure_frames(width, height)?;
         let t0 = now();
         let view = frame.view;
         let scale = view.as_coeffs()[0];
@@ -2290,9 +2316,9 @@ impl Gpu {
         {
             stats.exact = true;
             stats.plan = 3;
-            return self.finish_frame(stats, t0);
+            return self.finish_frame(self.cur, stats, t0);
         }
-        let dst = (self.cur + 1) % FRAMES;
+        let dst = self.next_frame();
         let padded = if let Some(bounds) = samples {
             // Keep the same strip phase at the original viewport origin.
             let x = bounds.x0.unsigned_abs().next_multiple_of(4);
@@ -2312,17 +2338,27 @@ impl Gpu {
             let scratch_bytes = self.scratches[1]
                 .as_ref()
                 .map_or(0, |s| s.width as usize * s.height as usize * 8);
-            self.reserve_or_trim(
+            self.check_texture_size(size.0, size.1, "a padded view")?;
+            self.check_frame(
+                dst,
+                width,
+                height,
                 pixels.saturating_mul(12),
                 scratch_bytes.saturating_add(self.readers.bytes()),
-                "a padded view and its backdrop",
             )?;
-            self.ensure_scratch_size(size.0, size.1)?;
             Some(((x, y), size))
         } else {
             None
         };
+        self.ensure_frame(dst, width, height)?;
+        if prefix.is_none() {
+            self.forget_motion_prefix();
+        }
+        if store.readers().is_empty() && !store.has_context() && self.readers.bytes() > 0 {
+            self.readers.evict_frame_scratch();
+        }
         let whole = if let Some(((x, y), (w, h))) = padded {
+            self.ensure_scratch_size(w, h)?;
             Frame {
                 width: w as u16,
                 height: h as u16,
@@ -2425,6 +2461,7 @@ impl Gpu {
         stats.standin = !stats.exact;
         stats.held = self.tiles.len() as u32;
         stats.evicted = self.tiles.stats.evicted;
+        let stats = self.finish_frame(dst, stats, t0)?;
         self.cur = dst;
         self.last = Some(Last {
             view,
@@ -2433,7 +2470,7 @@ impl Gpu {
         self.last_scale = Some(scale);
         self.whole_samples = (padded.is_some() == samples.is_some()).then_some(samples);
         self.shown = Some((generation, bg_bits, stats.exact));
-        self.finish_frame(stats, t0)
+        Ok(stats)
     }
 
     /// Draws a frame made of tiles (decision 0040, phase 2): draws the tiles it needs, as many as
@@ -2458,7 +2495,6 @@ impl Gpu {
             self.readers.evict_frame_scratch();
         }
         let (w, h) = (u32::from(frame.width), u32::from(frame.height));
-        self.ensure_frames(w, h)?;
         self.ensure_compositor();
         self.masks.begin_frame();
         self.blur.begin_frame();
@@ -2503,9 +2539,10 @@ impl Gpu {
         if same {
             stats.exact = true;
             stats.plan = 3;
-            return self.finish_frame(stats, t0);
+            return self.finish_frame(self.cur, stats, t0);
         }
-        let dst = (self.cur + 1) % FRAMES;
+        let dst = self.next_frame();
+        self.ensure_frame(dst, w, h)?;
         let mut verbs = store.limits.frame_verbs;
         let mut drew_any = false;
         let mut direct_exact = true;
@@ -2616,12 +2653,13 @@ impl Gpu {
         stats.standin = !stats.exact;
         stats.held = self.tiles.len() as u32;
         stats.evicted = self.tiles.stats.evicted;
+        let stats = self.finish_frame(dst, stats, t0)?;
         self.cur = dst;
         self.last = Some(Last { view, size: (w, h) });
         self.last_scale = Some(scale);
         self.whole_samples = None;
         self.shown = Some((generation, bg_bits, stats.exact));
-        self.finish_frame(stats, t0)
+        Ok(stats)
     }
 
     /// The frame last shown: the view it was drawn under and its size.
@@ -2691,8 +2729,10 @@ impl Gpu {
     }
 
     /// Presents the frame shown (with a canvas) and finishes the frame's numbers.
-    fn finish_frame(&mut self, mut stats: DrawStats, t0: f64) -> Result<DrawStats> {
+    fn finish_frame(&mut self, frame: usize, mut stats: DrawStats, t0: f64) -> Result<DrawStats> {
         let t1 = now();
+        self.check()?;
+        self.configure_surface(frame)?;
         let acquired = match self.acquire() {
             Ok(t) => t,
             Err(e) => {
@@ -2703,7 +2743,7 @@ impl Gpu {
         // A frame read back (no canvas) needs no presenting.
         stats.presented = self.surface.is_none() || acquired.is_some();
         if let (Some(t), Some(blit)) = (acquired, self.blit.as_ref()) {
-            let main = self.current()?;
+            let main = &self.frames[frame];
             let mut encoder = self
                 .device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("present") });

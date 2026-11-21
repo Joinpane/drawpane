@@ -30,6 +30,9 @@ const state = vi.hoisted(() => ({
     span: { width: number; height: number };
   }>,
   cameraX: 0,
+  rasterWidths: [] as number[],
+  maxRasterWidth: Infinity,
+  applyLimit: false,
   paintedX: -1,
   uploadedWidths: [] as number[],
   gpuFinishedFixture: null as null | (() => Promise<{ ok: boolean }>),
@@ -146,6 +149,7 @@ vi.mock("@drawpane/engine", () => ({
       return { ok: true, value: { side: 4096, bytes: 128 << 20 } };
     }
     apply() {
+      if (state.applyLimit) return { ok: false, code: 4, message: "too many nested records" };
       return { ok: true, value: { changes: new Float64Array(), full: true } };
     }
     async attachGpu(surface?: unknown) {
@@ -163,7 +167,10 @@ vi.mock("@drawpane/engine", () => ({
       return { ok: true };
     }
     dropImageLevel() {}
-    renderGpu(_width: number, _height: number, camera: { x: number }) {
+    renderGpu(width: number, _height: number, camera: { x: number }) {
+      state.rasterWidths.push(width);
+      if (width > state.maxRasterWidth)
+        return { ok: false, code: 4, message: "padded viewport budget" };
       state.cameraX = camera.x;
       return {
         ok: true,
@@ -342,6 +349,9 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
     state.lastWorker = null;
     state.imageDemands = [];
     state.cameraX = 0;
+    state.rasterWidths = [];
+    state.maxRasterWidth = Infinity;
+    state.applyLimit = false;
     state.paintedX = -1;
     state.uploadedWidths = [];
     healthTick = null;
@@ -587,7 +597,7 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
     // and acknowledged cleanly without being presented.
     let presented = 0;
     if (view) view.onPresented = () => presented++;
-    state.lastWorker?.emit({ type: "apply-result", ok: false, revision: 0, code: 3 });
+    state.lastWorker?.emit({ type: "apply-result", ok: false, attempt: 1, revision: 0, code: 3 });
     state.lastWorker?.emit({
       type: "tile",
       jobId: renders[0]?.jobId,
@@ -735,19 +745,100 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
     expect(engine.gpuCheck()).toEqual({ ok: true });
     let retried = 0;
     if (view) view.onChange = () => retried++;
-    view?.draw("page", { zoom: 1, x: 0, y: 0 }, 65, 17, 1, "#abcdef", {
-      hidden: new Set(),
-      whole: null,
-    });
+    const frame = (x: number, exact: boolean) =>
+      view?.draw(
+        "page",
+        { zoom: 1, x, y: 0 },
+        65,
+        17,
+        1,
+        "#abcdef",
+        { hidden: new Set(), whole: null },
+        exact,
+      );
+    state.maxRasterWidth = 50;
+    expect(frame(0, false)?.drawn).toBe(true);
     await new Promise((ready) => setTimeout(ready, 360));
     expect(readCount).toBe(1);
     expect(recoveries).toEqual([]);
     expect(fallbacks).toEqual([]);
     expect(retried).toBeGreaterThanOrEqual(1);
+    expect(frame(1, false)?.drawn).toBe(true);
+    expect(state.rasterWidths.at(-1)).toBe(state.rasterWidths[1]);
+    state.maxRasterWidth = 65;
+    expect(frame(1, true)?.exact).toBe(true);
+    expect(state.rasterWidths.at(-1)).toBe(65);
     view?.dispose();
   });
 
-  it("ignores obsolete CPU job errors and keeps a limited view on the Worker", async () => {
+  it("reuses a raster across pans and admits full resolution again when the camera settles", async () => {
+    vi.stubGlobal("navigator", {
+      gpu: { requestAdapter: async () => ({ info: { description: "NVIDIA T4" } }) },
+    });
+    const editor = { scene: {}, doc: { version: 1 } } as never;
+    const images = { subscribe: () => () => {}, natural: () => null, get: () => null } as never;
+    const view = await EngineView.create(
+      new FakeCanvas(true) as unknown as HTMLCanvasElement,
+      editor,
+      {} as never,
+      images,
+      "engine",
+    );
+    const frame = (x: number, exact: boolean) =>
+      view?.draw(
+        "page",
+        { zoom: 26, x, y: 0 },
+        128,
+        96,
+        1,
+        "#ffffff",
+        { hidden: new Set(), whole: null },
+        exact,
+      );
+    state.maxRasterWidth = 64;
+    expect(frame(0, false)?.drawn).toBe(true);
+    expect(state.rasterWidths).toEqual([128, 64]);
+    expect(frame(1, false)?.drawn).toBe(true);
+    expect(frame(2, false)?.drawn).toBe(true);
+    expect(state.rasterWidths).toEqual([128, 64, 64, 64]);
+    state.maxRasterWidth = 128;
+    expect(frame(2, true)?.exact).toBe(true);
+    expect(state.rasterWidths.at(-1)).toBe(128);
+    expect(view?.limitReason).toBeNull();
+    view?.dispose();
+  });
+
+  it("uses Canvas for a rejected display list and resumes the same engine on another page", async () => {
+    vi.stubGlobal("navigator", {
+      gpu: { requestAdapter: async () => ({ info: { description: "NVIDIA T4" } }) },
+    });
+    const editor = { scene: {}, doc: { version: 1 } } as never;
+    const images = { subscribe: () => () => {}, natural: () => null, get: () => null } as never;
+    const view = await EngineView.create(
+      new FakeCanvas(true) as unknown as HTMLCanvasElement,
+      editor,
+      {} as never,
+      images,
+      "engine",
+    );
+    const frame = (page: string) =>
+      view?.draw(page, { zoom: 1, x: 0, y: 0 }, 128, 96, 1, "#ffffff", {
+        hidden: new Set(),
+        whole: null,
+      });
+    state.applyLimit = true;
+    expect(frame("nested")?.drawn).toBe(false);
+    expect(view?.limitReason).toBe("too many nested records");
+    expect(state.rasterWidths).toEqual([]);
+    expect(fallbacks).toEqual([]);
+    state.applyLimit = false;
+    expect(frame("other")?.drawn).toBe(true);
+    expect(view?.backend).toBe("webgpu");
+    expect(view?.limitReason).toBeNull();
+    view?.dispose();
+  });
+
+  it("ignores obsolete CPU job errors and falls back only for the refused view", async () => {
     const editor = { scene: {}, doc: { version: 1 } } as never;
     const images = { subscribe: () => () => {}, natural: () => null, get: () => null } as never;
     const view = await EngineView.create(
@@ -791,7 +882,7 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
     expect(fallbacks).toEqual([]);
     expect(view?.limitReason).toBe("active view limit");
     expect(view?.software).toBe(false);
-    expect(frame(32)).toMatchObject({ drawn: true, exact: false, settled: true });
+    expect(frame(32)).toMatchObject({ drawn: false });
     expect(view?.limitReason).toBe("active view limit");
     // Moving to a different camera view resumes CPU rendering cleanly and clears the limit reason.
     expect(frame(64)).toMatchObject({ drawn: true });

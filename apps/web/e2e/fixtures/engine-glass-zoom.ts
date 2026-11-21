@@ -136,7 +136,25 @@ export async function drawExtremeZoom(choice: RendererChoice) {
       seed = (Math.imul(1664525, seed) + 1013904223) >>> 0;
       fuzz.push(await frame(26 + (seed % 231), 56 + (seed % 16), 18));
     }
-    return { backend, fallbacks, rim, interior, fuzz };
+    // The top rim bends toward the blue band, which lies outside the viewport.
+    // Alternating stripes make a missing or mispositioned refraction visible.
+    const striped = { ...pill, x: 300 };
+    for (let i = 0; i < 12; i++) {
+      editor.createLayer(
+        "rect",
+        { x: striped.x, y: 10 + i, width: striped.width, height: 1 },
+        pageId,
+        { fills: [{ type: "solid", color: i % 2 ? "#365aec" : "#2044e0" }] },
+      );
+    }
+    const plain = await frame(26, 365, 0.65);
+    editor.createLayer("rect", striped, pageId, {
+      fills: [],
+      cornerRadius: 18,
+      effects: [{ ...glass, intensity: 0, dispersion: 0, frost: 0, splay: 0 }],
+    });
+    const refracted = await frame(26, 365, 0.65);
+    return { backend, fallbacks, rim, interior, fuzz, plain, refracted };
   } finally {
     window.removeEventListener("drawpane:renderer-fallback", fallback);
     view.dispose();

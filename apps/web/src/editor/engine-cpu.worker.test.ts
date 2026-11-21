@@ -77,7 +77,8 @@ vi.mock("@drawpane/engine", () => ({
       };
     }
     renderCpu(w: number, h: number) {
-      if (!workerState.allowReducedRender) return { ok: false, code: 4, message: "injected limit" };
+      if (!workerState.allowReducedRender || w > 32)
+        return { ok: false, code: 4, message: "injected limit" };
       return {
         ok: true,
         value: {

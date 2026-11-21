@@ -14,6 +14,7 @@ export type RendererFallbackReason =
   | { readonly kind: "starting" }
   | { readonly kind: "recovering" }
   | { readonly kind: "unsupported"; readonly features: readonly string[] }
+  | { readonly kind: "limit"; readonly message: string }
   | { readonly kind: "no-webgpu" }
   | { readonly kind: "software-gpu" }
   | { readonly kind: "error"; readonly message: string };
@@ -96,6 +97,9 @@ export function sameRendererStatus(a: RendererStatus, b: RendererStatus): boolea
     if (a.reason.kind === "error" && b.reason.kind === "error") {
       return a.reason.message === b.reason.message;
     }
+    if (a.reason.kind === "limit" && b.reason.kind === "limit") {
+      return a.reason.message === b.reason.message;
+    }
     return true;
   }
   return false;
@@ -160,6 +164,8 @@ export function formatRendererReason(status: ActiveRendererStatus): string {
       return "no WebGPU in this browser";
     case "software-gpu":
       return "only a software GPU";
+    case "limit":
+      return `This page exceeded an engine limit. ${status.reason.message}`;
     case "error":
       return `engine error: ${status.reason.message}`;
   }

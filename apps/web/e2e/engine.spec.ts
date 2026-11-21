@@ -3271,6 +3271,7 @@ test.describe("GPU blur memory budget (PR #234)", () => {
   test("admits Gaussian pyramid peak work against the GPU memory budget before allocating", async ({
     page,
   }) => {
+    test.setTimeout(120_000);
     const root = fileURLToPath(new URL("../../../packages/engine/dist/browser/", import.meta.url));
     const origin = "http://localhost:51389";
     await page.route(`${origin}/**`, async (route) => {
@@ -3293,7 +3294,12 @@ test.describe("GPU blur memory budget (PR #234)", () => {
         const set = engine.setLimit("gpu_bytes", budget);
         if (!set.ok) throw new Error(set.message);
         set.free();
-        const device = await glue.createGpu(null, 0);
+        let device = await glue.createGpu(null, 0);
+        // As in the editor, let a cold shader probe retry once on a slow software adapter.
+        if (!device.ok && device.code === 12) {
+          device.free();
+          device = await glue.createGpu(null, 0);
+        }
         if (!device.ok || !engine.attachGpu || !engine.blurGpu || !engine.blurGpuStats) {
           throw new Error(device.message);
         }
@@ -3302,45 +3308,101 @@ test.describe("GPU blur memory budget (PR #234)", () => {
         if (!attach.ok) throw new Error(attach.message);
         attach.free();
         const side = budget === limits[0] ? 1024 : 2048;
-        const source = new Uint8Array(side * side * 4).fill(255);
-        const rounds = budget === limits[0] ? 2 : 8;
-        const samples = [];
-        for (let i = 1; i <= rounds; i++) {
-          const rendered = await engine.blurGpu(
+        const source = new Uint8Array(side * side * 4);
+        for (let i = 0, seed = 179; i < source.length; i += 4) {
+          seed = (Math.imul(1664525, seed) + 1013904223) >>> 0;
+          source[i] = seed >>> 24;
+          source[i + 1] = seed >>> 16;
+          source[i + 2] = seed >>> 8;
+          source[i + 3] = 255;
+        }
+        const border = new Float32Array(4);
+        const blur = engine.blurGpu.bind(engine);
+        const window = (x: number, y: number, id: number, sigma = 16) =>
+          blur(
             source,
             side,
             side,
             8,
             8,
-            32,
-            32,
+            x,
+            y,
+            sigma,
+            1,
+            border,
+            0,
+            0,
+            side,
+            side,
+            x,
+            y,
+            x + 8,
+            y + 8,
+            id,
+          );
+        const full = (id: number) =>
+          blur(
+            source,
+            side,
+            side,
+            1280,
+            1840,
+            0,
+            0,
             16,
             1,
-            new Float32Array(4),
+            border,
             0,
             0,
             side,
             side,
-            32,
-            32,
-            40,
-            40,
-            i,
+            0,
+            0,
+            1280,
+            1840,
+            id,
           );
+        const stats = engine.blurGpuStats.bind(engine);
+        const samples = [];
+        for (let i = 1; i <= (budget === limits[0] ? 2 : 8); i++) {
+          // A wide kernel needs the whole source even when the output is tiny.
+          const rendered = await window(side / 2, side / 2, i, 400);
           const outcome =
             rendered instanceof Uint8Array
               ? "OK"
               : { code: rendered.code, message: rendered.message };
           if (!(rendered instanceof Uint8Array)) rendered.free();
-          samples.push({ outcome, cache: [...engine.blurGpuStats()] });
+          samples.push({ outcome, cache: [...stats()] });
+        }
+        const cropped = [];
+        if (budget === limits[1]) {
+          const reference = await full(9);
+          if (!(reference instanceof Uint8Array)) throw new Error(reference.message);
+          for (const [x, y] of [
+            [57, 79],
+            [411, 603],
+            [819, 1133],
+          ] as const) {
+            const bytesBefore = stats()[3] ?? 0;
+            const rendered = await window(x, y, 10);
+            if (!(rendered instanceof Uint8Array)) throw new Error(rendered.message);
+            let maxDifference = 0;
+            for (let j = 0; j < rendered.length; j++) {
+              const at = ((y + (j >>> 5)) * 1280 + x) * 4 + (j % 32);
+              maxDifference = Math.max(
+                maxDifference,
+                Math.abs((rendered[j] ?? 0) - (reference[at] ?? 0)),
+              );
+            }
+            cropped.push({ maxDifference, bytesAdded: (stats()[3] ?? 0) - bytesBefore });
+          }
         }
         engine.free();
-        out.push({ budget, side, samples });
+        out.push({ budget, side, samples, cropped });
       }
       return out;
     });
-    // Under a 20.125 MiB budget (16 MiB atlas + 4 MiB src + 2.13 MiB pyramid > 20.125 MiB),
-    // call 1 must refuse cleanly with Limit (4) BEFORE allocating any pyramid.
+    // The atlas and source leave too little space for the wide kernel's pyramid and readback.
     expect(reports[0]?.samples[0]?.outcome).toMatchObject({ code: 4 });
     expect(reports[0]?.samples[0]?.cache[3]).toBe(0);
     expect(reports[0]?.samples[1]?.outcome).toMatchObject({ code: 4 });
@@ -3350,5 +3412,10 @@ test.describe("GPU blur memory budget (PR #234)", () => {
       reports[1]?.samples.every((s) => s.outcome === "OK" && (s.cache[3] ?? 0) <= 32 * 1048576),
     ).toBe(true);
     expect(reports[1]?.samples.at(-1)?.cache[2]).toBeGreaterThan(0);
+    expect(reports[1]?.cropped).toHaveLength(3);
+    for (const sample of reports[1]?.cropped ?? []) {
+      expect(sample.maxDifference).toBeLessThanOrEqual(1);
+      expect(sample.bytesAdded).toBeLessThan(1 << 20);
+    }
   });
 });

@@ -77,8 +77,11 @@ for (const backend of ["webgpu", "webgl2"] as const) {
       });
     expect(outcome.fallbacks).toEqual([]);
     expect(outcome.backend).toBe(backend);
-    expect(outcome.rim.some((frame) => frame.limit && !frame.exact)).toBe(true);
     const green = [36, 140, 80, 255];
+    expect(outcome.plain.pixel).toEqual(green);
+    expect(outcome.refracted.pixel[2]).toBeGreaterThan(200);
+    expect(outcome.refracted.pixel[1]).toBeLessThan(100);
+    expect(outcome.refracted.pixel[3]).toBe(255);
     for (const frame of [outcome.interior, ...outcome.fuzz]) {
       for (const [channel, expected] of green.entries())
         expect(

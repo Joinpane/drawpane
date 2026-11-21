@@ -1154,13 +1154,17 @@ the lens. Gaussian pyramids crop large source planes to the output and kernel
 support, aligned to the original pyramid grid. Layer isolation and effect
 scratch use the current render target and each effect's support.
 
-A GPU render that reaches a memory or texture limit releases view caches and
-retries. If the view still exceeds a limit, the same backend draws at a lower
-device raster scale. The camera's page-space crop stays the same, and the chip
-reports reduced detail. CPU view mode likewise retries a limited tiled render
-as a smaller direct frame. An irreducible content limit retains the last usable
-picture for that page. The engine can draw again after the camera or document
-changes.
+The GPU checks the proposed padded target and its working set before changing
+frame storage. It renders into a back buffer and configures the surface only
+after drawing the replacement. A raster that fits is reused through nearby
+camera changes, with a larger candidate checked when the camera settles.
+Readback timeouts use the ordinary bounded device recovery path.
 
-Software GPU adapters have a tighter budget for padded views. A healthy device
-whose reduced frame times out in readback retries at a smaller raster.
+The lower-resolution whole view is an interim measure. The intended renderer
+keeps the viewport at device resolution and draws only the offscreen halo at
+the sampling resolution its readers need. The glass sampling path must also
+lift its 4,096 px margin clamps when it can draw that halo. Software adapters
+have a smaller padded work budget. A rejected display list or a view that still
+exceeds the raster floor uses Canvas for the affected page or view while the
+engine stays active. CPU view mode admits tiles by their working target and
+tries a direct viewport render at full resolution before reducing it.

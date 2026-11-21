@@ -110,7 +110,7 @@ The records are a tree in paint order: a record's ops, with its children drawn w
 
 ## Limits
 
-A message past a limit is refused whole, with the limit named (`ErrorCode.Limit`): records 4,000,000; path verbs 1,000,000; paths and ops per record 65,536; glyphs per run 65,536; dashes 64; gradient stops 64; message 512 MiB; glyph outlines 64 MiB; the graph 1 GiB (its records and outlines, roughly); nesting 512 records and 512 clips; a frame's or image's longest side 8,192 px; images 256 MiB; a reader's reach 512 px (along the longest geometric dependency chain intersecting the crop, for bands); bands of at most 256 rows and 2 MiB of output, in export tiles of 1,024 columns.
+A message past a limit is refused whole, with the limit named (`ErrorCode.Limit`): records 4,000,000; path verbs 1,000,000; paths and ops per record 65,536; glyphs per run 65,536; dashes 64; gradient stops 4,096; message 512 MiB; glyph outlines 64 MiB; the graph 1 GiB (its records and outlines, roughly); nesting 512 records and 512 clips; a frame's or image's longest side 8,192 px; images 256 MiB; a reader's reach 512 px (along the longest geometric dependency chain intersecting the crop, for bands); bands of at most 256 rows and 2 MiB of output, in export tiles of 1,024 columns.
 
 What the engine generates while drawing is held to limits too, so a legal document can't make a frame take unbounded time or memory before anything can fall back: a frame (or export tile) may generate 4,000,000 path elements (dashes, glyph runs expanded to outlines, shapes; glyphs off the viewport aren't expanded), and open 512 clips and layers at once. A transform that overflows on the device is refused. A refused frame is `Limit`; the editor draws that page with the canvas renderer.
 
