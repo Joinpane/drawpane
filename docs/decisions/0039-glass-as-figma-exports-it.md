@@ -50,3 +50,10 @@ The inspector's export preview drew the selection with what's under it (point 3)
 - **The preview is drawn only while it's on screen** (the inspector often has it scrolled out of view), and when it comes into view.
 
 A large selection full of glass still costs its export's drawing once it's in view (a couple of seconds on a machine without a GPU). Numbers in the pull request.
+
+### Glass at high zoom in the editor
+
+The canvas renderer sizes glass scratch to the visible lens and its optical reach.
+When that crop exceeds its raster budget, it samples the same region at a lower
+resolution. The lens center, edge distance and refraction stay tied to the
+original geometry. The full-resolution outline clips the enlarged result.

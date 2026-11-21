@@ -50,6 +50,7 @@ export function copyExtended(
   h: number,
   /** What of `src` may be read (a clipping frame's box); the rest of the canvas is as if past its edge. */
   within: Bounds = { x0: 0, y0: 0, x1: src.width, y1: src.height },
+  scale = 1,
 ) {
   const lo = (v: number, a: number, b: number) => Math.min(Math.max(v, a), b);
   const bx0 = Math.max(0, Math.floor(within.x0));
@@ -65,6 +66,41 @@ export function copyExtended(
   out.globalCompositeOperation = "copy";
   out.filter = "none";
   out.imageSmoothingEnabled = false;
+  if (scale < 1 && ix1 > ix0 && iy1 > iy0) {
+    const rasterWidth = Math.ceil(w * scale);
+    const rasterHeight = Math.ceil(h * scale);
+    const dx0 = Math.round((ix0 - x) * scale);
+    const dy0 = Math.round((iy0 - y) * scale);
+    const dx1 = Math.round((ix1 - x) * scale);
+    const dy1 = Math.round((iy1 - y) * scale);
+    out.clearRect(0, 0, rasterWidth, rasterHeight);
+    out.globalCompositeOperation = "source-over";
+    // Sample edge strips directly in the source. A strip can survive even when the
+    // intersection is less than a texel across in the smaller raster.
+    out.imageSmoothingEnabled = true;
+    for (const [sx, sw, dx, dw] of [
+      [ix0, 1, 0, dx0],
+      [ix0, ix1 - ix0, dx0, dx1 - dx0],
+      [ix1 - 1, 1, dx1, rasterWidth - dx1],
+    ] as const) {
+      for (const [sy, sh, dy, dh] of [
+        [iy0, 1, 0, dy0],
+        [iy0, iy1 - iy0, dy0, dy1 - dy0],
+        [iy1 - 1, 1, dy1, rasterHeight - dy1],
+      ] as const) {
+        if (dw > 0 && dh > 0) out.drawImage(src, sx, sy, sw, sh, dx, dy, dw, dh);
+      }
+    }
+    if (within.fill) {
+      out.fillStyle = within.fill;
+      if (x < within.x0) out.fillRect(0, 0, dx0, rasterHeight);
+      if (x + w > within.x1) out.fillRect(dx1, 0, rasterWidth - dx1, rasterHeight);
+      if (y < within.y0) out.fillRect(dx0, 0, dx1 - dx0, dy0);
+      if (y + h > within.y1) out.fillRect(dx0, dy1, dx1 - dx0, rasterHeight - dy1);
+    }
+    out.restore();
+    return;
+  }
   if (ix1 <= ix0 || iy1 <= iy0) {
     out.clearRect(0, 0, w, h);
     out.restore();
@@ -254,7 +290,7 @@ export function fits(p: GlCanvas, w: number, h: number): boolean {
  */
 export function begin(p: GlCanvas, w: number, h: number): boolean {
   const { canvas, gl } = p;
-  const oversized = canvas.width * canvas.height > 4 * w * h;
+  const oversized = Math.max(canvas.width, w) * Math.max(canvas.height, h) > 4 * w * h;
   if (canvas.width < w || oversized) canvas.width = w;
   if (canvas.height < h || oversized) canvas.height = h;
   if (gl.drawingBufferWidth < w || gl.drawingBufferHeight < h) return false;
