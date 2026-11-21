@@ -4,9 +4,12 @@
  * what drawing them took (`drawpaneFrames`). Shared by the benchmarks.
  */
 import type { Page } from "@playwright/test";
+import type { MotionStats } from "../../src/editor/frame-stats";
 
 export interface Summary {
   frames: number;
+  motion?: MotionStats;
+  presentedInterval?: Summary["interval"];
   /** Time between animation frames: what you'd see, painting included (16.7 ms at 60 Hz). */
   interval?: { p50: number; p95: number; p99: number; max: number };
   content: { p50: number; p95: number; p99?: number; max: number };
@@ -42,23 +45,43 @@ export interface Settle {
 }
 
 /** Pans for `frames` animation frames and returns what drawing them took. */
-export async function pan(page: Page, zoom: number | "fit", frames: number): Promise<Summary> {
+export function pan(page: Page, zoom: number | "fit", frames: number): Promise<Summary> {
+  return move(page, "pan", zoom, frames);
+}
+
+/** Zooms in and out about the centre for `frames` frames, from the whole file. */
+export function zoom(page: Page, frames: number): Promise<Summary> {
+  return move(page, "zoom", "fit", frames);
+}
+
+async function move(
+  page: Page,
+  kind: "pan" | "zoom",
+  zoom: number | "fit",
+  frames: number,
+): Promise<Summary> {
   return page.evaluate(
-    async ({ zoom, frames }) => {
-      type Camera = { pan(dx: number, dy: number): Camera };
-      const e = (
-        window as unknown as {
-          drawpane: {
-            s: { camera: Camera };
-            state: { set(patch: { camera: Camera }): void };
-            zoomTo(z: number): void;
-            zoomToFit(): void;
-          };
-          drawpaneFrames: { reset(): void; summary(): Summary };
-        }
-      ).drawpane;
-      const stats = (window as unknown as { drawpaneFrames: { reset(): void; summary(): Summary } })
-        .drawpaneFrames;
+    async ({ kind, zoom, frames, instrument, native }) => {
+      type Camera = {
+        zoom: number;
+        pan(dx: number, dy: number): Camera;
+        zoomAt(screen: { x: number; y: number }, zoom: number): Camera;
+      };
+      const w = window as unknown as {
+        drawpane: {
+          s: { camera: Camera; viewport: { width: number; height: number } };
+          state: { set(patch: { camera: Camera }): void };
+          zoomToFit(): void;
+          zoomTo(z: number): void;
+        };
+        drawpaneFrames: {
+          reset(): void;
+          summary(): Summary;
+          beginMotion?(native: boolean): MotionStats;
+          endMotion?(): void;
+        };
+      };
+      const e = w.drawpane;
       if (zoom === "fit") e.zoomToFit();
       else e.zoomTo(zoom);
       const intervals = (times: number[]) => {
@@ -70,6 +93,7 @@ export async function pan(page: Page, zoom: number | "fit", frames: number): Pro
           Math.round((gaps[Math.floor(q * (gaps.length - 1))] ?? 0) * 10) / 10;
         return { p50: at(0.5), p95: at(0.95), p99: at(0.99), max: at(1) };
       };
+      const nextFrame = () => new Promise<number>((r) => requestAnimationFrame(r));
       type View = {
         last: { exact: boolean; ms: number; plan: string; tiles: { drawn: number } };
         idle: { slices: number; tiles: number; ms: number };
@@ -94,8 +118,6 @@ export async function pan(page: Page, zoom: number | "fit", frames: number): Pro
         if (l && l.ms > worst.ms)
           worst = { ms: Math.round(l.ms * 10) / 10, plan: l.plan, tiles: l.tiles.drawn };
       };
-      // Until an exact frame is on screen after the movement's last frame (at most 10 s), and
-      // until the engine drew one.
       const exactAfter = async () => {
         const t = performance.now();
         const f = (window as unknown as { drawpaneFrames: { exact: boolean } }).drawpaneFrames;
@@ -151,157 +173,52 @@ export async function pan(page: Page, zoom: number | "fit", frames: number): Pro
           settle: { ...settle, trace },
         };
       };
-      const nextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
       await nextFrame();
       await nextFrame();
-      stats.reset();
+      w.drawpaneFrames.reset();
+      const motion = instrument && view() ? w.drawpaneFrames.beginMotion?.(native) : undefined;
+      const centre = { x: e.s.viewport.width / 2, y: e.s.viewport.height / 2 };
       const times: number[] = [];
       for (let i = 0; i < frames; i++) {
-        // A steady diagonal drag, back and forth.
-        const d = i % 120 < 60 ? 6 : -6;
-        e.state.set({ camera: e.s.camera.pan(d, d / 2) });
-        await nextFrame();
-        times.push(performance.now());
+        const forward = i % 120 < 60;
+        const submitted = motion?.submitted;
+        const camera = e.s.camera;
+        const next =
+          kind === "zoom"
+            ? camera.zoomAt(centre, camera.zoom * (forward ? 1.03 : 1 / 1.03))
+            : camera.pan(forward ? 6 : -6, forward ? 3 : -3);
+        e.state.set({ camera: next });
+        times.push(await nextFrame());
+        if (motion && motion.submitted === submitted) motion.missed++;
         watch();
       }
-      const summary = stats.summary();
+      const summary = w.drawpaneFrames.summary();
+      // Give the final submitted camera frame the same completion-probe window as earlier frames.
+      if (motion) {
+        await nextFrame();
+        await nextFrame();
+        w.drawpaneFrames.endMotion?.();
+      }
       const exact = await exactAfter();
       return {
         ...summary,
         interval: intervals(times),
+        ...(motion ? { motion } : {}),
+        ...(motion && motion.presentations.length > 1
+          ? { presentedInterval: intervals(motion.presentations) }
+          : {}),
         exactMs: exact.shown,
         ...(view() ? { engine: { exactMs: exact.drawn, worst, settle: exact.settle } } : {}),
       };
     },
-    { zoom, frames },
+    {
+      kind,
+      zoom,
+      frames,
+      instrument: process.env.BENCH_W4_CAMERA_GATE === "1",
+      native: process.env.BENCH_W4_NATIVE === "1",
+    },
   );
-}
-
-/** Zooms in and out about the centre for `frames` frames, from the whole file. */
-export async function zoom(page: Page, frames: number): Promise<Summary> {
-  return page.evaluate(async (frames) => {
-    type Camera = { zoomAt(screen: { x: number; y: number }, zoom: number): Camera; zoom: number };
-    const w = window as unknown as {
-      drawpane: {
-        s: { camera: Camera; viewport: { width: number; height: number } };
-        state: { set(patch: { camera: Camera }): void };
-        zoomToFit(): void;
-      };
-      drawpaneFrames: { reset(): void; summary(): Summary };
-    };
-    const e = w.drawpane;
-    e.zoomToFit();
-    const intervals = (times: number[]) => {
-      const gaps = times
-        .slice(1)
-        .map((t, i) => t - (times[i] as number))
-        .sort((a, b) => a - b);
-      const at = (q: number) =>
-        Math.round((gaps[Math.floor(q * (gaps.length - 1))] ?? 0) * 10) / 10;
-      return { p50: at(0.5), p95: at(0.95), p99: at(0.99), max: at(1) };
-    };
-    const nextFrame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
-    type View = {
-      last: { exact: boolean; ms: number; plan: string; tiles: { drawn: number } };
-      idle: { slices: number; tiles: number; ms: number };
-      trace: Array<{
-        t: number;
-        k: string;
-        ms: number;
-        tiles: number;
-        pending: number;
-        encode: number;
-        render: number;
-        misses: number;
-        records: number;
-        masked: number;
-        outlined: number;
-      }> | null;
-    };
-    const view = () => (window as unknown as { drawpaneEngineView?: View }).drawpaneEngineView;
-    let worst = { ms: 0, plan: "", tiles: 0 };
-    const watch = () => {
-      const l = view()?.last;
-      if (l && l.ms > worst.ms)
-        worst = { ms: Math.round(l.ms * 10) / 10, plan: l.plan, tiles: l.tiles.drawn };
-    };
-    const exactAfter = async () => {
-      const t = performance.now();
-      const f = (window as unknown as { drawpaneFrames: { exact: boolean } }).drawpaneFrames;
-      let drawn = -1;
-      const idle0 = view()?.idle;
-      const traced = view();
-      if (traced) traced.trace = [];
-      let seen = view()?.last;
-      const settle = {
-        frames: 0,
-        frameTiles: 0,
-        frameMs: 0,
-        idleSlices: 0,
-        idleTiles: 0,
-        idleMs: 0,
-      };
-      const tally = () => {
-        const v = view();
-        if (!v || drawn >= 0) return;
-        if (v.last !== seen) {
-          seen = v.last;
-          settle.frames++;
-          settle.frameTiles += v.last.tiles.drawn;
-          settle.frameMs += v.last.ms;
-        }
-        if (idle0) {
-          settle.idleSlices = v.idle.slices - idle0.slices;
-          settle.idleTiles = v.idle.tiles - idle0.tiles;
-          settle.idleMs = Math.round((v.idle.ms - idle0.ms) * 10) / 10;
-        }
-        if (v.last.exact) drawn = performance.now() - t;
-      };
-      await nextFrame();
-      while (!f.exact && performance.now() - t < 10_000) {
-        tally();
-        await nextFrame();
-      }
-      tally();
-      settle.frameMs = Math.round(settle.frameMs * 10) / 10;
-      const shown = Math.round(performance.now() - t);
-      const trace = (traced?.trace ?? [])
-        .map(
-          (e) =>
-            `${e.k === "frame" ? "f" : e.k === "present" ? "p" : e.k === "text" ? "t" : "i"}${Math.round(e.t - t)}:${Math.round(e.ms)}(${Math.round(e.encode)}+${Math.round(e.render)})/${e.tiles}/${e.pending}/m${e.misses}/r${e.records}/g${e.masked}+${e.outlined}`,
-        )
-        .join(" ");
-      if (traced) traced.trace = null;
-      // A wait that ran out is reported as such, never as the time it waited.
-      const timedOut = !f.exact;
-      return {
-        shown: timedOut ? null : shown,
-        drawn: drawn < 0 ? null : Math.round(drawn),
-        settle: { ...settle, trace },
-      };
-    };
-    await nextFrame();
-    await nextFrame();
-    w.drawpaneFrames.reset();
-    const centre = { x: e.s.viewport.width / 2, y: e.s.viewport.height / 2 };
-    const times: number[] = [];
-    for (let i = 0; i < frames; i++) {
-      // A pinch: 3% a frame, in for a second and out again.
-      const factor = i % 120 < 60 ? 1.03 : 1 / 1.03;
-      e.state.set({ camera: e.s.camera.zoomAt(centre, e.s.camera.zoom * factor) });
-      await nextFrame();
-      times.push(performance.now());
-      watch();
-    }
-    const summary = w.drawpaneFrames.summary();
-    const exact = await exactAfter();
-    return {
-      ...summary,
-      interval: intervals(times),
-      exactMs: exact.shown,
-      ...(view() ? { engine: { exactMs: exact.drawn, worst, settle: exact.settle } } : {}),
-    };
-  }, frames);
 }
 
 function settleText(s: Settle | undefined): string {

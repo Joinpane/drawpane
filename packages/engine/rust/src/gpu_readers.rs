@@ -72,10 +72,10 @@ impl VelloTex {
 }
 
 /// A full mipmapped Rgba8 texture with per-level views for 2x2 box downsampling.
-pub struct MipTex {
-    pub texture: wgpu::Texture,
+struct MipTex {
     pub full_view: wgpu::TextureView,
     pub mip_views: Vec<wgpu::TextureView>,
+    downsample_groups: Vec<wgpu::BindGroup>,
     pub width: u32,
     pub height: u32,
     pub bytes: usize,
@@ -97,7 +97,15 @@ impl MipTex {
         bytes
     }
 
-    fn new(device: &wgpu::Device, width: u32, height: u32, max_mips: u32, label: &str, used: u64) -> Self {
+    fn new(
+        device: &wgpu::Device,
+        mip_layout: &wgpu::BindGroupLayout,
+        width: u32,
+        height: u32,
+        max_mips: u32,
+        label: &str,
+        used: u64,
+    ) -> Self {
         let w = width.max(1);
         let h = height.max(1);
         let mips = glass::mip_count(w, h).min(max_mips.max(1));
@@ -131,10 +139,23 @@ impl MipTex {
             mw = (mw / 2).max(1);
             mh = (mh / 2).max(1);
         }
+        let downsample_groups = mip_views[..(mips - 1) as usize]
+            .iter()
+            .map(|view| {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("reader mip source"),
+                    layout: mip_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(view),
+                    }],
+                })
+            })
+            .collect();
         Self {
-            texture,
             full_view,
             mip_views,
+            downsample_groups,
             width: w,
             height: h,
             bytes,
@@ -186,6 +207,8 @@ pub struct GpuReaders {
     slabs: Vec<wgpu::Buffer>,
     slab_idx: usize,
     slab_slot: u32,
+    uniform_start: u32,
+    uniform_bytes: Vec<u8>,
 
     // Tile/frame-sized reader textures
     pub backdrop_frame: Option<PlainTex>,
@@ -317,14 +340,6 @@ fn make_plain(
         height,
         bpp,
     }
-}
-
-fn floats_to_bytes(vals: &[f32]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(vals.len() * 4);
-    for &v in vals {
-        out.extend_from_slice(&v.to_le_bytes());
-    }
-    out
 }
 
 impl GpuReaders {
@@ -603,6 +618,8 @@ impl GpuReaders {
             slabs: Vec::new(),
             slab_idx: 0,
             slab_slot: 0,
+            uniform_start: 0,
+            uniform_bytes: Vec::new(),
             backdrop_frame: None,
             delta_frame: None,
             shared_coarse_mips: None,
@@ -672,8 +689,25 @@ impl GpuReaders {
     }
 
     pub fn begin_frame(&mut self) {
+        self.uniform_bytes.clear();
         self.slab_idx = 0;
         self.slab_slot = 0;
+    }
+
+    /// Upload all reader uniforms recorded since the preceding submission in one write.
+    pub fn flush_uniforms(&mut self, queue: &wgpu::Queue) {
+        if !self.uniform_bytes.is_empty() {
+            queue.write_buffer(
+                &self.slabs[self.slab_idx],
+                u64::from(self.uniform_start),
+                &self.uniform_bytes,
+            );
+            self.uniform_bytes.clear();
+        }
+    }
+
+    pub fn discard_uniforms(&mut self) {
+        self.uniform_bytes.clear();
     }
 
     pub fn clear_frame_targets(&mut self) {
@@ -866,24 +900,25 @@ impl GpuReaders {
     fn acquire_mip_tex(
         &mut self,
         device: &wgpu::Device,
-        w: u32,
-        h: u32,
+        size: (u32, u32),
+        max_mips: u32,
         avoid: Option<usize>,
         label: &str,
         max_bytes: usize,
     ) -> Result<usize> {
+        let (w, h) = size;
         self.pool_tick += 1;
         let tick = self.pool_tick;
-        if let Some(idx) = self
-            .mip_pool
-            .iter()
-            .enumerate()
-            .position(|(i, t)| Some(i) != avoid && t.width == w && t.height == h)
+        let levels = glass::mip_count(w, h).min(max_mips);
+        if let Some(idx) =
+            self.mip_pool.iter().enumerate().position(|(i, t)| {
+                Some(i) != avoid && t.width == w && t.height == h && t.mip_views.len() as u32 == levels
+            })
         {
             self.mip_pool[idx].used = tick;
             return Ok(idx);
         }
-        let add = MipTex::estimate_bytes(w, h, u32::MAX);
+        let add = MipTex::estimate_bytes(w, h, levels);
         // Evict stale pool entries if needed to stay under `max_bytes`.
         let mut victim = if self.mip_pool.len() >= MIP_POOL_CAP {
             self.mip_pool
@@ -913,7 +948,7 @@ impl GpuReaders {
             freed = 0;
         }
         self.reserve_bytes(add, freed, label, max_bytes)?;
-        let tex = MipTex::new(device, w, h, u32::MAX, label, tick);
+        let tex = MipTex::new(device, &self.mip_bgl, w, h, levels, label, tick);
         if let Some(v) = victim {
             self.mip_pool[v] = tex;
             Ok(v)
@@ -923,11 +958,12 @@ impl GpuReaders {
         }
     }
 
-    fn push_uniform(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, bytes: &[u8]) -> (usize, u32) {
+    fn push_uniform(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, values: &[f32]) -> (usize, u32) {
         if self.slabs.is_empty() {
             self.slabs.push(Self::make_slab(device, self.uniform_align));
         }
         if self.slab_slot >= SLAB_SLOTS {
+            self.flush_uniforms(queue);
             self.slab_idx += 1;
             self.slab_slot = 0;
             if self.slab_idx >= self.slabs.len() {
@@ -936,7 +972,13 @@ impl GpuReaders {
         }
         let offset = self.slab_slot * self.uniform_align;
         self.slab_slot += 1;
-        queue.write_buffer(&self.slabs[self.slab_idx], u64::from(offset), bytes);
+        if self.uniform_bytes.is_empty() {
+            self.uniform_start = offset;
+        }
+        self.uniform_bytes.resize((offset - self.uniform_start) as usize, 0);
+        for value in values {
+            self.uniform_bytes.extend_from_slice(&value.to_le_bytes());
+        }
         (self.slab_idx, offset)
     }
 
@@ -957,8 +999,8 @@ impl GpuReaders {
     ) {
         let opacity = opacity.clamp(0.0, 1.0);
         let source_scale = if lerp { 1.0 } else { opacity };
-        let data = floats_to_bytes(&[source_scale, dst_origin.0 as f32, dst_origin.1 as f32, 0.0]);
-        let (slab_idx, offset) = self.push_uniform(device, queue, &data);
+        let data = &[source_scale, dst_origin.0 as f32, dst_origin.1 as f32, 0.0];
+        let (slab_idx, offset) = self.push_uniform(device, queue, data);
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &self.comp_bgl,
@@ -1024,25 +1066,12 @@ impl GpuReaders {
         });
     }
 
-    fn encode_build_mipmaps(
-        &self,
-        device: &wgpu::Device,
-        encoder: &mut wgpu::CommandEncoder,
-        mip_views: &[wgpu::TextureView],
-    ) {
-        for level in 1..mip_views.len() {
-            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &self.mip_bgl,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&mip_views[level - 1]),
-                }],
-            });
+    fn encode_build_mipmaps(&self, encoder: &mut wgpu::CommandEncoder, mips: &MipTex) {
+        for (view, group) in mips.mip_views[1..].iter().zip(&mips.downsample_groups) {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("reader mip_down"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &mip_views[level],
+                    view,
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
@@ -1053,7 +1082,7 @@ impl GpuReaders {
                 ..Default::default()
             });
             pass.set_pipeline(&self.mip_pipe);
-            pass.set_bind_group(0, &group, &[]);
+            pass.set_bind_group(0, group, &[]);
             pass.draw(0..3, 0..1);
         }
     }
@@ -1083,7 +1112,15 @@ impl GpuReaders {
             let levels = COARSE_MAX_MIPS - 1;
             let add = MipTex::estimate_bytes(w, h, levels);
             self.reserve_bytes(add, freed, "shared coarse backdrop", max_bytes)?;
-            self.shared_coarse_mips = Some(MipTex::new(device, w, h, levels, "shared coarse backdrop", 0));
+            self.shared_coarse_mips = Some(MipTex::new(
+                device,
+                &self.mip_bgl,
+                w,
+                h,
+                levels,
+                "shared coarse backdrop",
+                0,
+            ));
         }
         let mips = self.shared_coarse_mips.as_ref().expect("just created");
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1118,7 +1155,7 @@ impl GpuReaders {
             pass.set_bind_group(0, &group, &[]);
             pass.draw(0..3, 0..1);
         }
-        self.encode_build_mipmaps(device, encoder, &mips.mip_views);
+        self.encode_build_mipmaps(encoder, mips);
         self.shared_coarse_key = Some(key);
         Ok(())
     }
@@ -1136,9 +1173,17 @@ impl GpuReaders {
         offset: (i32, i32),
         region: &GlassRegion,
         within: Option<ClipWithin>,
+        max_mips: u32,
         max_bytes: usize,
     ) -> Result<usize> {
-        let idx = self.acquire_mip_tex(device, region.rw, region.rh, None, "reader region backdrop", max_bytes)?;
+        let idx = self.acquire_mip_tex(
+            device,
+            (region.rw, region.rh),
+            max_mips,
+            None,
+            "reader region backdrop",
+            max_bytes,
+        )?;
         let (bx0, by0, bx1, by1, fill_info) = match within {
             Some(w) => (
                 w.x0.floor().max(0.0) as i32 + offset.0,
@@ -1184,7 +1229,7 @@ impl GpuReaders {
             ),
             None => (0.0, 0.0, 0.0, 0.0, 0.0, [0.0; 4]),
         };
-        let u_bytes = floats_to_bytes(&[
+        let u_bytes = &[
             (region.x0 + offset.0) as f32,
             (region.y0 + offset.1) as f32,
             sx0 as f32,
@@ -1201,8 +1246,8 @@ impl GpuReaders {
             fill_rgba[1],
             fill_rgba[2],
             fill_rgba[3],
-        ]);
-        let (slab_idx, u_off) = self.push_uniform(device, queue, &u_bytes);
+        ];
+        let (slab_idx, u_off) = self.push_uniform(device, queue, u_bytes);
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &self.copy_ext_bgl,
@@ -1240,7 +1285,7 @@ impl GpuReaders {
             pass.set_bind_group(0, &group, &[u_off]);
             pass.draw(0..3, 0..1);
         }
-        self.encode_build_mipmaps(device, encoder, &self.mip_pool[idx].mip_views);
+        self.encode_build_mipmaps(encoder, &self.mip_pool[idx]);
         Ok(idx)
     }
 
@@ -1361,6 +1406,7 @@ impl GpuReaders {
                     source_offset,
                     region,
                     within,
+                    u32::MAX,
                     max_bytes,
                 )?;
                 let m = &self.mip_pool[idx];
@@ -1387,7 +1433,7 @@ impl GpuReaders {
                 ),
                 None => (0.0, params.unit_px, [0.0; 4], [0.0; 4], [0.0; 4], [0.0; 4]),
             };
-            let u_bytes = floats_to_bytes(&[
+            let u_bytes = &[
                 region.rw as f32,
                 region.rh as f32,
                 lod,
@@ -1420,8 +1466,8 @@ impl GpuReaders {
                 smoothing[1],
                 smoothing[2],
                 smoothing[3],
-            ]);
-            let (slab_idx, u_off) = self.push_uniform(device, queue, &u_bytes);
+            ];
+            let (slab_idx, u_off) = self.push_uniform(device, queue, u_bytes);
             let b_view = match region_idx {
                 Some(i) => &self.mip_pool[i].full_view,
                 None => &self.shared_coarse_mips.as_ref().expect("shared").full_view,
@@ -1491,8 +1537,17 @@ impl GpuReaders {
             return Ok(());
         }
 
-        // Exact glass pipeline:
-        // 1. Copy extended backdrop + build mipmap chain.
+        // Frost reads one integer LOD of the backdrop. Refraction samples the separate
+        // frosted texture, so only that texture needs to retain its complete chain.
+        let frost = (params.frost > 0.4).then(|| {
+            glass::frost_params(
+                params.frost,
+                region.rw,
+                region.rh,
+                glass::mip_count(region.rw, region.rh) - 1,
+            )
+        });
+        // 1. Copy extended backdrop and build the sampled mip levels.
         let base_mip_idx = self.encode_copy_extended_and_mips(
             device,
             queue,
@@ -1503,13 +1558,12 @@ impl GpuReaders {
             source_offset,
             region,
             within,
+            frost.map_or(u32::MAX, |f| f.level + 1),
             max_bytes,
         )?;
 
         // 2. Optional mip-assisted frost pass (exact port of glass.ts / frost_cpu).
-        let sampled_mip_idx = if params.frost > 0.4 {
-            let max_lvl = (self.mip_pool[base_mip_idx].mip_views.len() - 1) as u32;
-            let fp = glass::frost_params(params.frost, region.rw, region.rh, max_lvl);
+        let sampled_mip_idx = if let Some(fp) = frost {
             let need_ft = !self
                 .frosted_tmp
                 .as_ref()
@@ -1524,11 +1578,18 @@ impl GpuReaders {
                 )?;
                 Self::ensure_frame_tex(&mut self.frosted_tmp, device, fp.fw, fp.fh, "reader frosted_tmp");
             }
-            let frosted_idx =
-                self.acquire_mip_tex(device, fp.fw, fp.fh, Some(base_mip_idx), "reader frosted", max_bytes)?;
+            let base_view = self.mip_pool[base_mip_idx].full_view.clone();
+            let frosted_idx = self.acquire_mip_tex(
+                device,
+                (fp.fw, fp.fh),
+                u32::MAX,
+                Some(base_mip_idx),
+                "reader frosted",
+                max_bytes,
+            )?;
 
             // Horizontal pass: base_mip -> frosted_tmp
-            let u_h = floats_to_bytes(&[
+            let u_h = &[
                 fp.fw as f32,
                 fp.fh as f32,
                 1.0,
@@ -1537,15 +1598,15 @@ impl GpuReaders {
                 fp.left,
                 fp.radius as f32,
                 0.0,
-            ]);
-            let (sh_idx, sh_off) = self.push_uniform(device, queue, &u_h);
+            ];
+            let (sh_idx, sh_off) = self.push_uniform(device, queue, u_h);
             let group_h = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
                 layout: &self.frost_bgl,
                 entries: &[
                     wgpu::BindGroupEntry {
                         binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&self.mip_pool[base_mip_idx].full_view),
+                        resource: wgpu::BindingResource::TextureView(&base_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
@@ -1577,7 +1638,7 @@ impl GpuReaders {
             }
 
             // Vertical pass: frosted_tmp -> frosted[0]
-            let u_v = floats_to_bytes(&[
+            let u_v = &[
                 fp.fw as f32,
                 fp.fh as f32,
                 0.0,
@@ -1586,8 +1647,8 @@ impl GpuReaders {
                 fp.left,
                 fp.radius as f32,
                 0.0,
-            ]);
-            let (sv_idx, sv_off) = self.push_uniform(device, queue, &u_v);
+            ];
+            let (sv_idx, sv_off) = self.push_uniform(device, queue, u_v);
             let group_v = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
                 layout: &self.frost_bgl,
@@ -1624,7 +1685,7 @@ impl GpuReaders {
                 pass.set_bind_group(0, &group_v, &[sv_off]);
                 pass.draw(0..3, 0..1);
             }
-            self.encode_build_mipmaps(device, encoder, &self.mip_pool[frosted_idx].mip_views);
+            self.encode_build_mipmaps(encoder, &self.mip_pool[frosted_idx]);
             frosted_idx
         } else {
             base_mip_idx
@@ -1666,52 +1727,71 @@ impl GpuReaders {
             }
         }
 
-        // Downsample mask -> low_0
-        let u_down = floats_to_bytes(&[region.rw as f32, region.rh as f32, k as f32, 0.0]);
-        let (sd_idx, sd_off) = self.push_uniform(device, queue, &u_down);
-        let group_down = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &self.down_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.mask_tex.as_ref().expect("mask").view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &self.slabs[sd_idx],
-                        offset: 0,
-                        size: wgpu::BufferSize::new(16),
-                    }),
-                },
-            ],
-        });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("reader down"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.low_0.as_ref().expect("low_0").view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
+        let mask_view = self.mask_tex.as_ref().expect("mask").view.clone();
+        // A 1 × 1 reduction only copies the alpha channel to the red channel of
+        // the height texture. Apply that conversion at the horizontal filter's
+        // input and skip the draw and bandwidth of writing a full-size texture.
+        let blur_x_view = if k == 1 {
+            mask_view
+        } else {
+            // Downsample mask -> low_0
+            let u_down = &[region.rw as f32, region.rh as f32, k as f32, 0.0];
+            let (sd_idx, sd_off) = self.push_uniform(device, queue, u_down);
+            let group_down = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: None,
+                layout: &self.down_bgl,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(&mask_view),
                     },
-                })],
-                ..Default::default()
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: &self.slabs[sd_idx],
+                            offset: 0,
+                            size: wgpu::BufferSize::new(16),
+                        }),
+                    },
+                ],
             });
-            pass.set_scissor_rect(0, 0, lw, lh);
-            pass.set_pipeline(&self.down_pipe);
-            pass.set_bind_group(0, &group_down, &[sd_off]);
-            pass.draw(0..3, 0..1);
-        }
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("reader down"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &self.low_0.as_ref().expect("low_0").view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+                pass.set_scissor_rect(0, 0, lw, lh);
+                pass.set_pipeline(&self.down_pipe);
+                pass.set_bind_group(0, &group_down, &[sd_off]);
+                pass.draw(0..3, 0..1);
+            }
+
+            self.low_0.as_ref().expect("low_0").view.clone()
+        };
 
         let sigma_low = params.sigma / (k as f32);
         let blur_radius = (sigma_low * 3.0).ceil().min(64.0);
         let packed_flag = if self.height_packed { 1.0 } else { 0.0 };
-        let u_blur = floats_to_bytes(&[lw as f32, lh as f32, sigma_low, blur_radius, packed_flag, 0.0, 0.0, 0.0]);
-        let (sb_idx, sb_off) = self.push_uniform(device, queue, &u_blur);
+        let u_blur = &[
+            lw as f32,
+            lh as f32,
+            sigma_low,
+            blur_radius,
+            packed_flag,
+            if k == 1 { 1.0 } else { 0.0 },
+            0.0,
+            0.0,
+        ];
+        let (sb_idx, sb_off) = self.push_uniform(device, queue, u_blur);
 
         // blur_x: low_0 -> low_1
         let group_bx = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1720,7 +1800,7 @@ impl GpuReaders {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.low_0.as_ref().expect("low_0").view),
+                    resource: wgpu::BindingResource::TextureView(&blur_x_view),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -1808,7 +1888,7 @@ impl GpuReaders {
             None => (0.0, [0.0; 4], [0.0; 4], [0.0; 4], [0.0; 4], params.unit_px),
         };
         let hairline_px = (tune.hairline * params.unit_px).max(1e-3);
-        let u_glass = floats_to_bytes(&[
+        let u_glass = &[
             // sizes
             region.rw as f32,
             region.rh as f32,
@@ -1879,8 +1959,8 @@ impl GpuReaders {
             (dst_offset.0 & 1) as f32,
             (dst_offset.1 & 1) as f32,
             0.0,
-        ]);
-        let (sg_idx, sg_off) = self.push_uniform(device, queue, &u_glass);
+        ];
+        let (sg_idx, sg_off) = self.push_uniform(device, queue, u_glass);
         let clip_view = if has_clip_mask {
             &self.clip_tex.as_ref().expect("clip").view
         } else {
@@ -2073,8 +2153,8 @@ impl GpuReaders {
                 depth_or_array_layers: 1,
             },
         );
-        let u_bytes = floats_to_bytes(&[x0 as f32, y0 as f32, alpha, if has_clip_mask { 1.0 } else { 0.0 }]);
-        let (slab_idx, u_off) = self.push_uniform(device, queue, &u_bytes);
+        let u_bytes = &[x0 as f32, y0 as f32, alpha, if has_clip_mask { 1.0 } else { 0.0 }];
+        let (slab_idx, u_off) = self.push_uniform(device, queue, u_bytes);
         let clip_view = if has_clip_mask {
             &self.clip_tex.as_ref().expect("clip").view
         } else {
@@ -2177,7 +2257,7 @@ impl GpuReaders {
             },
         );
         let stops = plan.padded_stops();
-        let u_bytes = floats_to_bytes(&[
+        let u_bytes = &[
             // tile
             x0 as f32,
             y0 as f32,
@@ -2215,8 +2295,8 @@ impl GpuReaders {
             frame_origin.1 as f32,
             0.0,
             0.0,
-        ]);
-        let (slab_idx, u_off) = self.push_uniform(device, queue, &u_bytes);
+        ];
+        let (slab_idx, u_off) = self.push_uniform(device, queue, u_bytes);
         let clip_view = if has_clip_mask {
             &self.clip_tex.as_ref().expect("clip").view
         } else {
@@ -2343,6 +2423,7 @@ impl GpuReaders {
                 offset,
                 &region,
                 within,
+                u32::MAX,
                 max_bytes,
             )?;
             let m = &self.mip_pool[idx];
@@ -2369,7 +2450,7 @@ impl GpuReaders {
             None => (0.0, 0.0, [0.0; 4], [0.0; 4], [0.0; 4], [0.0; 4]),
         };
         // Matches 128-byte CoarseU in readers.wgsl.
-        let u_bytes = floats_to_bytes(&[
+        let u_bytes = &[
             bw as f32,
             bh as f32,
             lod,
@@ -2402,8 +2483,8 @@ impl GpuReaders {
             smoothing[1],
             smoothing[2],
             smoothing[3],
-        ]);
-        let (slab_idx, u_off) = self.push_uniform(device, queue, &u_bytes);
+        ];
+        let (slab_idx, u_off) = self.push_uniform(device, queue, u_bytes);
         let b_view = match region_idx {
             Some(i) => &self.mip_pool[i].full_view,
             None => &self.shared_coarse_mips.as_ref().expect("shared").full_view,

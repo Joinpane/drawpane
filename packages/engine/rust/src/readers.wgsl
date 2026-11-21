@@ -144,7 +144,7 @@ fn fs_down(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 struct BlurU {
     // (valid_w, valid_h, sigma, radius)
     info: vec4<f32>,
-    // (packed_rgba8, 0, 0, 0)
+    // (packed_rgba8, horizontal_reads_mask_alpha, 0, 0)
     pack: vec4<f32>,
 };
 
@@ -162,14 +162,20 @@ fn fs_blur_x(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     var h = 0.0;
     var dx = 0.0;
     var total = 0.0;
-    for (var i = -64; i <= 64; i = i + 1) {
-        if (i < -radius || i > radius) { continue; }
+    for (var i = -radius; i <= radius; i = i + 1) {
         let x = f32(i);
         let w = exp(-x * x * inv2);
         let qx = p.x + i;
         var m = 0.0;
         if (qx >= 0 && qx < valid_w) {
-            m = textureLoad(blur_src, vec2<i32>(qx, p.y), 0).r;
+            let src = textureLoad(blur_src, vec2<i32>(qx, p.y), 0);
+            m = src.r;
+            if (blur_u.pack.y > 0.5) {
+                m = src.a;
+                if (blur_u.pack.x < 0.5) {
+                    m = quantizeToF16(m);
+                }
+            }
         }
         h = h + w * m;
         dx = dx + w * m * x * inv_s2;
@@ -196,8 +202,7 @@ fn fs_blur_y(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     var dx = 0.0;
     var dy = 0.0;
     var total = 0.0;
-    for (var i = -64; i <= 64; i = i + 1) {
-        if (i < -radius || i > radius) { continue; }
+    for (var i = -radius; i <= radius; i = i + 1) {
         let y = f32(i);
         let w = exp(-y * y * inv2);
         let qy = p.y + i;
@@ -252,8 +257,7 @@ fn fs_frost(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let inv2 = 0.5 / (sigma * sigma);
     var sum = vec4<f32>(0.0);
     var total = 0.0;
-    for (var i = -64; i <= 64; i = i + 1) {
-        if (i < -radius || i > radius) { continue; }
+    for (var i = -radius; i <= radius; i = i + 1) {
         let fi = f32(i);
         let w = exp(-fi * fi * inv2);
         let tap = pos.xy + dir * fi;
@@ -438,11 +442,12 @@ fn lens_sample(p: vec2<f32>) -> LensSample {
     let grad_raw = select(hs.gb, (hs.gb - vec2<f32>(0.5)) * 2.0, gu.tune_d.x > 0.5);
     let grad = grad_raw / k;
     let g = length(grad);
-    let d_raw = select(
-        1.4142136 * sigma * erfinv(clamp(2.0 * hs.r - 1.0, -0.99999, 0.99999)),
-        box_distance(p),
-        is_box
-    );
+    var d_raw: f32;
+    if (is_box) {
+        d_raw = box_distance(p);
+    } else {
+        d_raw = 1.4142136 * sigma * erfinv(clamp(2.0 * hs.r - 1.0, -0.99999, 0.99999));
+    }
     let d = max(0.0, d_raw);
     let slope = select(
         clamp(g * sigma * 2.5066283, 0.0, 1.0),

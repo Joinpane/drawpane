@@ -365,6 +365,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           const seq = frameN !== undefined ? submittedFrameSeq.get(frameN) : engineSubmittedFrames;
           if (frameN !== undefined && seq === undefined) return;
           enginePresentedFrames++;
+          if (seq !== undefined) timing.confirmMotionFrame(seq);
           if (seq !== undefined && seq > engineConfirmedFrame) engineConfirmedFrame = seq;
           showEngine(true);
           syncRendererAttr();
@@ -391,6 +392,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           const seq = submittedFrameSeq.get(frameN);
           if (seq === undefined) return;
           enginePresentedFrames++;
+          timing.confirmMotionFrame(seq);
           if (seq > engineConfirmedFrame) engineConfirmedFrame = seq;
           syncRendererAttr();
         };
@@ -515,7 +517,9 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       if (!drewEngine && contentDirty && s.pageId !== null && engine) {
         // Camera motion and pointer gestures have the same moving-frame budget. Once they stop,
         // idle slices fill the remaining exact tiles (decision 0040).
-        const moving = !whole && !exact && (gestureMoving || engineCamera !== s.camera);
+        const nativeMotion = timing.motion?.native === true;
+        const moving =
+          !nativeMotion && !whole && !exact && (gestureMoving || engineCamera !== s.camera);
         const background = (page && getProp(page.props, "backgroundColor")) ?? renderer.canvasColor;
         changed = false;
         const r = engine.draw(
@@ -527,7 +531,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           background,
           { hidden: renderer.hidden, whole: s.editingText },
           !moving,
-          whole ? 0 : moving ? MOVING_BUDGET_MS : REST_BUDGET_MS,
+          whole || nativeMotion ? 0 : moving ? MOVING_BUDGET_MS : REST_BUDGET_MS,
         );
         engineCamera = s.camera;
         engineMoved = r.drawn && moving && !r.exact && engine.backend !== "cpu-worker";
@@ -541,6 +545,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           whole = false;
           clearTimeout(settle);
           const seq = ++engineSubmittedFrames;
+          timing.submitMotionFrame(seq, r.exact);
           if (engine.last.n > 0) {
             submittedFrameSeq.set(engine.last.n, seq);
             if (submittedFrameSeq.size > 128) {
@@ -574,7 +579,10 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         }
       }
       if (!drewEngine && contentDirty && s.pageId) {
-        if (choice !== "canvas") fallbackFrames++;
+        if (choice !== "canvas") {
+          fallbackFrames++;
+          if (timing.motion) timing.motion.fallback++;
+        }
         if (engine) showEngine(false);
         else {
           syncRendererAttr();

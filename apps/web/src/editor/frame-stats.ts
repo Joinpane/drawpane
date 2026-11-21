@@ -26,6 +26,18 @@ export interface FrameSummary {
   readonly culled: number;
 }
 
+/** Counts the GPU frames produced during the bench's camera inputs. */
+export interface MotionStats {
+  readonly native: boolean;
+  readonly presentations: number[];
+  submitted: number;
+  degradedSubmitted: number;
+  confirmed: number;
+  degradedConfirmed: number;
+  fallback: number;
+  missed: number;
+}
+
 export class FrameStats {
   readonly #content = new Float64Array(SIZE);
   readonly #overlay = new Float64Array(SIZE);
@@ -35,6 +47,45 @@ export class FrameStats {
   culled = 0;
   /** Whether the last content frame was exact (not a stand-in, nor drawn in part). */
   exact = true;
+  motion: MotionStats | null = null;
+  #motionFrames = new Map<number, boolean>();
+
+  beginMotion(native: boolean): MotionStats {
+    this.#motionFrames.clear();
+    this.motion = {
+      native,
+      presentations: [],
+      submitted: 0,
+      degradedSubmitted: 0,
+      confirmed: 0,
+      degradedConfirmed: 0,
+      fallback: 0,
+      missed: 0,
+    };
+    return this.motion;
+  }
+
+  endMotion(): void {
+    this.motion = null;
+    this.#motionFrames.clear();
+  }
+
+  submitMotionFrame(sequence: number, exact: boolean): void {
+    if (!this.motion) return;
+    this.motion.submitted++;
+    // Until resampled pixels pass calibration, only a native exact frame qualifies.
+    if (!exact) this.motion.degradedSubmitted++;
+    this.#motionFrames.set(sequence, exact);
+  }
+
+  confirmMotionFrame(sequence: number): void {
+    const exact = this.#motionFrames.get(sequence);
+    if (!this.motion || exact === undefined) return;
+    this.motion.confirmed++;
+    this.motion.presentations.push(performance.now());
+    if (!exact) this.motion.degradedConfirmed++;
+    this.#motionFrames.delete(sequence);
+  }
   /**
    * The canvas's drawing budget per frame in ms, when set (for checks: a tiny budget makes
    * every frame one that costs more than it, as a heavy file does on a slow machine).
