@@ -51,6 +51,16 @@ Runs the editor's layout and constraint fixups in a fresh `Doc` with the kit's v
 
 `relayout[-<label>].json` includes kit totals, counts for each frame subtree, and examples grouped by observable causes. Totals and causes count layers visible after relayout. A separate count shows which visible boxes already differed when the editor resolved bindings, before running layout. Hidden box changes are reported separately and include descendants of hidden layers. Nested frame counts overlap, so use the kit totals to compare whole files.
 
+## What edits cost
+
+```sh
+node --max-old-space-size=14000 tools/kit-parity/kit-parity.mjs edits --nodes <nodes.ndjson> --pages "Dropdown Menu,Combobox" --out $OUT [--only drag,nudge,fill,type] [--name <label>]
+```
+
+Opens the kit in a headless `Editor` with copies stored compact, as a room stores them, and builds every copy as the browser does when a file opens. Then, on each named page's busiest board (picked as `bench/interactions.spec.ts` picks it), it makes the interaction bench's edits through `Editor` and `Interaction`: a 60-step drag and its drop, nudges and their undos, a fill changed in one gesture, and typing. It times each step. No renderer and no React run, so this is the editor's own share: copies, variables, layout, history and sync's bookkeeping. Compare a change with main on the same machine, one after the other, twice: timings swing with the machine's load. Text is measured by a fixed-width stand-in, so typing costs what layout and the model cost, not what a browser's text measuring costs.
+
+`edits[-<label>].json` has every step's time. The table it prints has the median, p95 and worst step of each edit.
+
 ## Copies that stay copies
 
 ```sh
