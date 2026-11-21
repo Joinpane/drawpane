@@ -702,7 +702,7 @@ pub struct Gpu {
     backdrop_gen: u64,
     /// Frame textures: the one shown (`cur`) and the one being made.
     frames: Vec<Main>,
-    cur: usize,
+    cur: Option<usize>,
     surface_bytes: usize,
     /// The board textures (decision 0040, phase 2): which tiles are held, where, and how fresh.
     pub tiles: TileCache,
@@ -1211,7 +1211,7 @@ impl Gpu {
             active: None,
             backdrop_gen: 0,
             frames: Vec::new(),
-            cur: 0,
+            cur: None,
             surface_bytes: 0,
             tiles: TileCache::new(TILE, 0),
             pages: Vec::new(),
@@ -1890,11 +1890,7 @@ impl Gpu {
     }
 
     fn next_frame(&self) -> usize {
-        if self.frames.is_empty() {
-            0
-        } else {
-            (self.cur + 1) % FRAMES
-        }
+        self.cur.map_or(0, |cur| (cur + 1) % FRAMES)
     }
 
     fn frame_bytes(width: u32, height: u32) -> usize {
@@ -1990,8 +1986,8 @@ impl Gpu {
 
     /// The frame shown now (presented or read back).
     fn current(&self) -> Result<&Main> {
-        self.frames
-            .get(self.cur)
+        self.cur
+            .and_then(|cur| self.frames.get(cur))
             .ok_or_else(|| EngineError::new(ErrorCode::State, "nothing drawn on the GPU yet"))
     }
 
@@ -2316,7 +2312,7 @@ impl Gpu {
         {
             stats.exact = true;
             stats.plan = 3;
-            return self.finish_frame(self.cur, stats, t0);
+            return self.finish_frame(self.cur.expect("unchanged frame"), stats, t0);
         }
         let dst = self.next_frame();
         let padded = if let Some(bounds) = samples {
@@ -2462,7 +2458,7 @@ impl Gpu {
         stats.held = self.tiles.len() as u32;
         stats.evicted = self.tiles.stats.evicted;
         let stats = self.finish_frame(dst, stats, t0)?;
-        self.cur = dst;
+        self.cur = Some(dst);
         self.last = Some(Last {
             view,
             size: (width, height),
@@ -2539,7 +2535,7 @@ impl Gpu {
         if same {
             stats.exact = true;
             stats.plan = 3;
-            return self.finish_frame(self.cur, stats, t0);
+            return self.finish_frame(self.cur.expect("unchanged frame"), stats, t0);
         }
         let dst = self.next_frame();
         self.ensure_frame(dst, w, h)?;
@@ -2654,7 +2650,7 @@ impl Gpu {
         stats.held = self.tiles.len() as u32;
         stats.evicted = self.tiles.stats.evicted;
         let stats = self.finish_frame(dst, stats, t0)?;
-        self.cur = dst;
+        self.cur = Some(dst);
         self.last = Some(Last { view, size: (w, h) });
         self.last_scale = Some(scale);
         self.whole_samples = None;
@@ -2691,7 +2687,7 @@ impl Gpu {
             return Ok(stats);
         };
         let mut verbs = store.limits.frame_verbs;
-        let dst = self.cur;
+        let dst = self.cur.expect("previous frame");
         for job in &plan.jobs {
             // A tile with no slot to keep it in is drawn by the frame itself.
             if plan.direct || job.direct {
@@ -4058,9 +4054,8 @@ impl Gpu {
             if let Some(m) = comp.base
                 && let Some(l) = self.last
                 && self
-                    .frames
-                    .get(self.cur)
-                    .is_some_and(|f| f.width == l.size.0 && f.height == l.size.1)
+                    .current()
+                    .is_ok_and(|f| f.width == l.size.0 && f.height == l.size.1)
             {
                 let (lw, lh) = (f64::from(l.size.0), f64::from(l.size.1));
                 let d = m.transform_rect_bbox(Rect::new(0.0, 0.0, lw, lh));
@@ -4168,7 +4163,7 @@ impl Gpu {
                     j += 1;
                 }
                 let view = match src {
-                    None => &self.frames[self.cur].view,
+                    None => &self.frames[self.cur.expect("stand-in frame")].view,
                     Some(p) => &self.pages[p].view,
                 };
                 runs.push((group_for(view), i as u32, j as u32));

@@ -2461,8 +2461,8 @@ test.describe
       const r = await page.evaluate(() =>
         (window as unknown as W).drawpaneEngine.readbackPair(640, 480),
       );
-      // The first is admitted; the second, beside it, is past the budget (Limit, 4).
-      expect(r).toEqual([{ ok: true }, { ok: false, code: 4 }]);
+      // The second exceeds the budget only while the first buffer is in flight.
+      expect(r).toEqual([{ ok: true }, { ok: false, code: 4 }, { ok: true }]);
     });
 
     test("preserves translucent backdrop alpha for neutral glass inside a faded frame on CPU and GPU", async ({

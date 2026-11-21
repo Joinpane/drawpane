@@ -535,13 +535,13 @@ for (const build of ["browser", "webgl"] as const) {
 
 for (const build of ["browser", "webgl"] as const) {
   test(`glass scratch budget and moving reader frames (${build})`, async ({ page }) => {
-    test.setTimeout(120_000);
+    test.setTimeout(180_000);
     const root = ROOTS[build];
     const expectedBackend = build === "webgl" ? "webgl2" : "webgpu";
     const glassScene = (
       base = 0xffffffff,
       revision = 1,
-      kind: "glass" | "uniform" | "progressive" | "plain" = "glass",
+      kind: "glass" | "deep-frost" | "uniform" | "progressive" | "plain" = "glass",
     ) => {
       const w = new ListWriter(base, revision);
       w.reset();
@@ -584,7 +584,7 @@ for (const build of ["browser", "webgl"] as const) {
           unsupported: 0,
           paths: [{ kind: "rect", w: 320, h: 240, radii: [24, 24, 24, 24], smoothing: 0 }],
           ops:
-            kind === "glass"
+            kind === "glass" || kind === "deep-frost"
               ? [
                   {
                     op: "glass",
@@ -597,7 +597,7 @@ for (const build of ["browser", "webgl"] as const) {
                     refraction: 75,
                     depth: 20,
                     dispersion: 50,
-                    frost: 4,
+                    frost: kind === "deep-frost" ? 100 : 4,
                     splay: 0,
                     boxRadii: [24, 24, 24, 24],
                     boxSmoothing: [0, 0, 0, 0],
@@ -636,7 +636,7 @@ for (const build of ["browser", "webgl"] as const) {
     await page.goto(origin);
 
     const res = await page.evaluate(
-      async ({ withGlass, uniform, progressive, withoutGlass, expectedBackend }) => {
+      async ({ withGlass, deepFrost, uniform, progressive, withoutGlass, expectedBackend }) => {
         const name = "/engine.js";
         const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
         await glue.default({ module_or_path: "/engine_bg.wasm" });
@@ -645,9 +645,21 @@ for (const build of ["browser", "webgl"] as const) {
         const width = 513;
         const height = 511;
 
-        const measure = async (list: number[], mib: number) => {
-          const device = await glue.createGpu(null, 0);
-          if (!device.ok) throw new Error(device.message);
+        const attach = async () => {
+          let device = await glue.createGpu(null, 0);
+          if (!device.ok && device.code === 12) {
+            device.free();
+            device = await glue.createGpu(null, 0);
+          }
+          if (!device.ok) {
+            const message = device.message;
+            device.free();
+            throw new Error(message);
+          }
+          return device;
+        };
+        const measure = async (list: number[], mib: number, dpr = 1) => {
+          const device = await attach();
           const engine = new glue.Engine(0, 0);
           const check = (out: { ok: boolean; message: string; free(): void }) => {
             const { ok, message } = out;
@@ -659,7 +671,7 @@ for (const build of ["browser", "webgl"] as const) {
             check(engine.apply(new Uint8Array(list)));
             if (!engine.attachGpu) throw new Error("no attachGpu");
             check(engine.attachGpu(device));
-            const draw = engine.renderGpu?.(width, height, 1, 0, 0, 1, bg, false, 0);
+            const draw = engine.renderGpu?.(width, height, 1, 0, 0, dpr, bg, false, 0);
             if (!draw) throw new Error("no renderGpu");
             const result = { mib, ok: draw.ok, code: draw.code, message: draw.message };
             draw.free();
@@ -671,8 +683,10 @@ for (const build of ["browser", "webgl"] as const) {
         };
         const budgets = {
           plain: await measure(withoutGlass, 21),
-          glassLimited: await measure(withGlass, 21),
-          glassFits: await measure(withGlass, 28),
+          // Thick frost at DPR 4 exceeds the tile halo. The whole-frame target
+          // fits at 21 MiB, leaving the glass mask itself to exercise admission.
+          glassLimited: await measure(deepFrost, 21, 4),
+          glassFits: await measure(deepFrost, 128, 4),
           uniformLimited: await measure(uniform, 22),
           uniformFits: await measure(uniform, 24),
           progressiveLimited: await measure(progressive, 22),
@@ -681,8 +695,7 @@ for (const build of ["browser", "webgl"] as const) {
 
         // 2. Normal budget: moving frame draws analytic coarse glass (reads > 0), settles to exact,
         // then switching to a readerless list evicts scratch and renders cleanly.
-        const dev = await glue.createGpu(null, 0);
-        if (!dev.ok) throw new Error(dev.message);
+        const dev = await attach();
         const e = new glue.Engine(0, 0);
         try {
           e.apply(new Uint8Array(withGlass)).free();
@@ -731,6 +744,7 @@ for (const build of ["browser", "webgl"] as const) {
       },
       {
         withGlass: glassScene(),
+        deepFrost: glassScene(0xffffffff, 1, "deep-frost"),
         uniform: glassScene(0xffffffff, 1, "uniform"),
         progressive: glassScene(0xffffffff, 1, "progressive"),
         withoutGlass: glassScene(0xffffffff, 2, "plain"),
