@@ -39,6 +39,7 @@ import {
   type Props,
   SCRIPT_FALLBACK_FAMILIES,
 } from "@drawpane/model";
+import { emojiPiecePositions, emojiPieces } from "./color-emoji";
 import {
   arcPathData,
   fitCorners,
@@ -603,6 +604,7 @@ export interface SvgExportOptions {
    * places by the font's metrics. Left out, text is exact and semantic.
    */
   readonly raster?: number;
+  readonly scriptLocale?: string;
 }
 
 export function exportSvg(
@@ -1308,7 +1310,9 @@ export function exportSvg(
       return;
     }
     const mode = getProp(node.props, "textAutoResize");
-    const layout = layoutText(node, measurer, mode === "width" ? null : w);
+    let layout = layoutText(node, measurer, mode === "width" ? null : w, {
+      ...(options.scriptLocale ? { scriptLocale: options.scriptLocale } : {}),
+    });
     const dy = textBlockOffset(node, layout);
     const [ma, mb, mc, md, , mf] = scene.worldMatrix(node.id);
     const grid = options.raster;
@@ -1318,7 +1322,46 @@ export function exportSvg(
         ? Math.round((mf + y) * grid) / grid - mf
         : y;
     const base = node.props;
-    const regionalFont = `Noto Sans ${cjkRegionFor(getProp(base, "characters"))}`;
+    const region =
+      layout.cjkRegion ?? cjkRegionFor(getProp(base, "characters"), options.scriptLocale);
+    const regionalFont = `Noto Sans ${region}`;
+    const colorOutlines = new Map<TextFragment, ShapedText>();
+    if (measurer.colorEmoji && (grid || measurer.engineText === true)) {
+      layout = {
+        ...layout,
+        lines: layout.lines.map((line) => ({
+          ...line,
+          fragments: line.fragments.flatMap((frag) => {
+            const pieces = emojiPieces(
+              frag.text,
+              (text) => measurer.colorEmoji?.(text, frag.fontSize) ?? null,
+            );
+            if (pieces.length === 0) return [frag];
+            const positioned = emojiPiecePositions(
+              pieces,
+              frag.text,
+              frag.font,
+              frag.letterSpacing,
+              frag.direction,
+              measurer,
+              region,
+            );
+            return positioned.map((piece) => {
+              const next: TextFragment = {
+                ...frag,
+                start: frag.start + piece.start,
+                end: frag.start + piece.end,
+                text: frag.text.slice(piece.start, piece.end),
+                width: piece.width,
+                x: frag.x + piece.x,
+              };
+              if (piece.shaped) colorOutlines.set(next, piece.shaped);
+              return next;
+            });
+          }),
+        })),
+      };
+    }
     const align = getProp(base, "textAlign");
     const anchor = align === "center" ? "middle" : align === "right" ? "end" : null;
     const lineX = align === "center" ? w / 2 : align === "right" ? w : 0;
@@ -1365,10 +1408,11 @@ export function exportSvg(
     if (fontCss(base, null)) style += attr("style", fontCss(base, null));
 
     // Runs drawn as glyph outlines (PDF): what the shaper has for them.
-    const outlined = new Map<TextFragment, ShapedText>();
+    const outlined = new Map(colorOutlines);
     if (options.outlineFeatures && measurer.shape)
       for (const line of layout.lines)
         for (const frag of line.fragments) {
+          if (outlined.has(frag)) continue;
           const shaped = frag.run ? measurer.shape(frag.text, frag.run) : null;
           // Without outlines (a Worker's HarfBuzz can't draw them) it stays text.
           if (shaped && shaped.outlines !== false) outlined.set(frag, shaped);
@@ -1421,7 +1465,8 @@ export function exportSvg(
               .filter((frag) => !outlined.has(frag) && frag.text)
               .map((frag) => {
                 const anchor = frag.direction === "rtl" ? "end" : "start";
-                return `<tspan${attr("x", round2(x0 + frag.x))}${attr("y", y)}${attr("text-anchor", anchor)}${typeOf(frag)}${fillOf(frag)}>${escapeXml(frag.text)}</tspan>`;
+                const x = x0 + frag.x + (anchor === "end" ? frag.width : 0);
+                return `<tspan${attr("x", round2(x))}${attr("y", y)}${attr("text-anchor", anchor)}${typeOf(frag)}${fillOf(frag)}>${escapeXml(frag.text)}</tspan>`;
               })
               .join("");
             return marker + text;
@@ -1454,7 +1499,15 @@ export function exportSvg(
     const glyphs = (
       frag: TextFragment,
       shaped: ShapedText,
-      { prefix = "", strokeWidth }: { prefix?: string; strokeWidth?: number } = {},
+      {
+        prefix = "",
+        strokeWidth,
+        palette = true,
+      }: {
+        prefix?: string;
+        strokeWidth?: number;
+        palette?: boolean;
+      } = {},
     ) => {
       const line = layout.lines.find((l) => l.fragments.includes(frag));
       if (!line) return "";
@@ -1470,14 +1523,18 @@ export function exportSvg(
       const s = round2(shaped.scale * 10000) / 10000;
       let svg = "";
       for (const g of shaped.glyphs) {
-        if (!g.d) continue;
         const x = round2(x0 + g.x + frag.letterSpacing * (before[g.cluster] ?? 0));
         const y = round2(y0 - g.y);
         const width =
           strokeWidth === undefined
             ? ""
             : attr("stroke-width", round2((strokeWidth / s) * 100) / 100);
-        svg += `<path transform="${prefix}matrix(${s} 0 0 ${-s} ${x} ${y})"${width}${attr("d", g.d)}/>`;
+        for (const layer of g.colorLayers ?? [{ d: g.d, color: null }]) {
+          if (!layer.d) continue;
+          const fill =
+            palette && strokeWidth === undefined && layer.color ? attr("fill", layer.color) : "";
+          svg += `<path transform="${prefix}matrix(${s} 0 0 ${-s} ${x} ${y})"${width}${fill}${attr("d", layer.d)}/>`;
+        }
       }
       if (frag.decoration !== "none" && strokeWidth === undefined)
         svg += barRect(frag.decoration, x0, y0, frag);
@@ -1485,7 +1542,7 @@ export function exportSvg(
     };
     const ownOutlines = [...outlined].filter(([frag]) => frag.fills);
     const layerOutlines = [...outlined]
-      .filter(([frag]) => !frag.fills)
+      .filter(([frag]) => !frag.fills && !colorOutlines.has(frag))
       .map(([frag, shaped]) => glyphs(frag, shaped))
       .join("");
 
@@ -1521,8 +1578,11 @@ export function exportSvg(
       if (fill) parts.push(`<g${transform}${fill}>${bar}</g>`);
     }
     // Outlined runs with their own fills: drawn once, in their topmost visible fill.
-    for (const [frag, shaped] of ownOutlines) {
-      const top = [...(frag.fills ?? [])].reverse().find((f) => f.visible !== false);
+    for (const [frag, shaped] of [
+      ...ownOutlines,
+      ...[...colorOutlines].filter(([frag]) => !frag.fills),
+    ]) {
+      const top = [...(frag.fills ?? paints)].reverse().find((f) => f.visible !== false);
       const fill = top ? out.paint("fill", top, w, h) : null;
       if (fill) parts.push(`<g${transform}${fill}>${glyphs(frag, shaped)}</g>`);
     }
@@ -1551,8 +1611,8 @@ export function exportSvg(
       `<text${transform}${style}${fill} xml:space="preserve">${lines(1)}</text>${[...outlined]
         .map(([frag, shaped]) =>
           inClip
-            ? glyphs(frag, shaped, { prefix: inner ? `${inner} ` : "" })
-            : `<g${transform}${fill}>${glyphs(frag, shaped)}</g>`,
+            ? glyphs(frag, shaped, { prefix: inner ? `${inner} ` : "", palette: false })
+            : `<g${transform}${fill}>${glyphs(frag, shaped, { palette: false })}</g>`,
         )
         .join("")}`;
     let wrap = (svg: string) => svg;

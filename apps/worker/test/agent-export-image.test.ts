@@ -9,7 +9,11 @@ import { inflateSync } from "node:zlib";
 import { DEFAULT_GLASS, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import notoUrl from "../../../packages/editor/test/fixtures/NotoSansSC-Subset.ttf?inline";
-import { enginePngPixel, solidPng } from "../../../packages/editor/test/fixtures/png";
+import {
+  enginePngColors,
+  enginePngPixel,
+  solidPng,
+} from "../../../packages/editor/test/fixtures/png";
 import { agentDeps } from "../src/agent/call";
 import { AGENT_RUNNER_V } from "../src/agent/runner-api";
 import { mediaKey } from "../src/api/media";
@@ -65,7 +69,7 @@ async function setup() {
 
 describe("export_image, headless", () => {
   it.skipIf(!env.TEST_FALLBACK_FONTS)(
-    "exports Han fallback outlines from the requested R2 slice",
+    "exports Han fallback outlines and bundled colour emoji",
     async () => {
       const { fileId, reader, render } = await setup();
       const file = await env.DB.prepare("SELECT team_id FROM files WHERE id = ?")
@@ -101,7 +105,18 @@ describe("export_image, headless", () => {
         [16, 24, 32].map((y) => enginePngPixel(bytes, 22, y)[0] ?? 255);
       expect(middle(simplified.bytes).some((value) => value < 128)).toBe(true);
       expect(middle(japanese.bytes)).toEqual([255, 255, 255]);
+      const explicitJapanese = picture(
+        await call(reader, "export_image", { ...input, locale: "ja-JP" }),
+      );
+      expect(explicitJapanese.bytes).toEqual(japanese.bytes);
       expect(picture(await call(reader, "export_image", input)).bytes).toEqual(simplified.bytes);
+
+      const emoji = await render(
+        '<Frame w={80} h={80} fill="#ffffff"><Text font="Instrument Sans" size={44} fill="#101010">👩🏽‍🔬</Text></Frame>',
+      );
+      const color = picture(await call(reader, "export_image", { fileId, id: emoji, scale: 2 }));
+      expect([color.width, color.height]).toEqual([160, 160]);
+      expect(enginePngColors(color.bytes, 7)).toBe(7);
     },
     30_000,
   );

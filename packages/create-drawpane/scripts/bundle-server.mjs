@@ -26,6 +26,10 @@ async function need(path, hint) {
 
 await need(join(worker, "dist/index.js"), "build the Worker first (pnpm build).");
 await need(join(runner, "dist/index.js"), "build the agent runner first (pnpm build).");
+await need(
+  join(runner, "dist/Twemoji-CC-BY-4.0.txt"),
+  "build the agent runner with its Twemoji attribution.",
+);
 await need(join(web, "index.html"), "build the web app first (pnpm build).");
 
 /**
@@ -46,13 +50,14 @@ async function template(app) {
   return `${JSON.stringify(config, null, 2)}\n`;
 }
 
-/** A built Worker: its module, source map, and the WebAssembly it imports as modules of their own. */
+/** A built Worker and its WebAssembly, font and attribution modules. */
 async function copyWorker(app, into) {
   await mkdir(into, { recursive: true });
   await cp(join(app, "dist/index.js"), join(into, "index.js"));
   await cp(join(app, "dist/index.js.map"), join(into, "index.js.map")).catch(() => {});
   for (const name of await readdir(join(app, "dist")))
-    if (name.endsWith(".wasm")) await cp(join(app, "dist", name), join(into, name));
+    if (name.endsWith(".wasm") || name.endsWith(".ttf") || name === "Twemoji-CC-BY-4.0.txt")
+      await cp(join(app, "dist", name), join(into, name));
 }
 
 await rm(out, { recursive: true, force: true });

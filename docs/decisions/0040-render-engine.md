@@ -1137,19 +1137,19 @@ Loading faces still mark their records provisional. When a face reaches its dead
 
 ### System faces, fallback files and bidirectional text
 
-The browser's measured advances determine glyph cluster positions when a requested face is inaccessible. Local Font Access supplies the matching font file when the browser grants access. Without access, the engine uses open substitutes for common system faces, fitted to the browser's advances. System UI glyph shapes still depend on the bytes available to the browser.
+The browser's measured advances determine the reading edge and layout width of each visible run when a requested face is inaccessible. Local Font Access supplies the matching font file when the browser grants access. Without access, the engine places open substitutes at the measured reading edge and preserves their own glyph spacing. Arabic joins and Latin, Greek and Cyrillic kerning stay intact.
 
 The browser preloads Instrument Sans and the private-use box when the engine starts. Bundled face loads stay provisional until they finish, and failed downloads retry with bounded backoff. The display list indexes the faces each text layer uses so a settled face only requeues its dependants.
 
-Layout resolves Unicode bidi levels per paragraph and places each wrapped line in visual order. The canvas and HarfBuzz draw the resulting directional runs, and the caret and selection use the same fragment positions.
+Engine layout resolves Unicode bidi levels per paragraph and places each wrapped line in visual order. The caret and selection use the same fragment positions. Wrapping oversized words searches a local prefix and bidi range lookup starts at the intersecting paragraph, so wrapping work does not repeatedly measure the remaining paragraph.
 
-After Instrument Sans, the engine uses open Noto outlines for Greek, Cyrillic, CJK, Arabic, Hebrew and symbols. The canvas stack keeps its platform fallbacks, and the engine uses the browser's measured cluster origins while keeping the outlines' native proportions. The first engine use of a slice starts its load, with the same per-face settlement tracking as other outlines.
+After Instrument Sans, the engine uses open Noto outlines for Greek, Cyrillic, CJK, Arabic, Hebrew and symbols. The canvas stack keeps its platform fallbacks. The first engine use of a slice starts its load, with the same per-face settlement tracking as other outlines.
 
-The browser engine and Worker use one fixed catalogue. CJK and emoji use 256-code-point Unicode blocks. Smaller script faces load whole so joining alphabets share a font file. Browser requests carry only family and slice identifiers. Google receives stock family requests or the catalogue's fixed Unicode ranges. The proxy requires a session, allows 240 requests per account per minute, and caches one TrueType object per catalogue entry in R2.
+The browser engine and Worker use one fixed catalogue. CJK and monochrome emoji use 256-code-point Unicode blocks. Smaller script faces load whole so joining alphabets share a font file. Browser requests batch up to twelve family and slice identifiers and retry rate-limited batches using Retry-After and exponential backoff. Google receives stock family requests or the catalogue's fixed Unicode ranges. The proxy requires a session, allows 240 slices per account per minute, and reserves one R2 object per entry. Confirmed upstream misses are cached for one day.
 
-Drawpane has no language field on a text layer. Kana anywhere in a layer selects Japanese Han forms, and Hangul selects Korean in a layer without kana. Otherwise the viewer locale selects Noto Sans JP, KR, SC or TC. Traditional Chinese locales include Hant, Taiwan, Hong Kong and Macao. Workers use the same text heuristic and default to SC without a viewer locale. The prolonged sound mark and Japanese middle dot always use the Japanese face.
+Drawpane has no language field on a text layer. Hiragana or katakana anywhere in a layer selects Japanese Han forms, and Hangul selects Korean in a layer without kana. Shared punctuation does not vote. Otherwise the viewer locale selects Noto Sans JP, KR, SC or TC. Traditional Chinese locales include Hant, Taiwan, Hong Kong and Macao. Worker exports receive the viewer locale from the request and default to SC without it. Width measurement and outlines both use the node's region. Japanese sound marks and the middle dot use the Japanese face for their own glyphs.
 
-The browser uses its colour emoji renderer for supported graphemes and the engine holds those bitmaps as image resources at the current zoom bucket. Worker exports use monochrome emoji outlines when available.
+The engine and Worker exports shape the same bundled Twemoji COLRv0 font. HarfBuzz resolves each colour grapheme to glyph IDs and the renderer draws the corresponding ordered palette outlines. The paths scale with the camera or export at any output scale. Emoji outside the bundled font use the outline fallback chain.
 
 ## Amendment: opening a large page without blocking input
 

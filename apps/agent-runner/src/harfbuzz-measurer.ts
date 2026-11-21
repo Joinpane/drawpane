@@ -38,7 +38,11 @@ export function harfBuzzMeasurerWith(
       return measurer.scriptLocale;
     },
     setScriptLocale: (locale) => measurer.setScriptLocale(locale),
-    width: (font, text, run, direction) => measurer.width(font, text, run, direction),
+    engineText: true,
+    colorEmoji: (text, size) => measurer.colorEmoji(text, size),
+    prepareColorEmoji: () => measurer.prepareColorEmoji(),
+    width: (font, text, run, direction, region) =>
+      measurer.width(font, text, run, direction, region),
     prepareScriptFallbacks: (subsets) => measurer.prepareScriptFallbacks(subsets),
     // Plain and specially shaped text both arrive at the render engine as outlines.
     shape: (text, run) => measurer.shape(text, run),

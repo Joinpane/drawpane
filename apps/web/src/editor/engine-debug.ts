@@ -107,12 +107,10 @@ export function engineDebug(editor: Editor) {
 
   let canvas: CanvasRenderer | null = null;
 
-  function builder(images?: ViewImages, scale = 1): DisplayListBuilder {
+  function builder(images?: ViewImages): DisplayListBuilder {
     const b = new DisplayListBuilder(editor.scene, editor.measurer, {
       image: (ref) => images?.info(ref) ?? null,
-      colorGlyph: (text, font, bucket) => images?.colorGlyph(text, font, bucket) ?? null,
     });
-    b.setColorScale(scale);
     return b;
   }
 
@@ -153,7 +151,7 @@ export function engineDebug(editor: Editor) {
       // the first try, and the list sends it provisional (bars) meanwhile. Wait for it (as the
       // canvas's parity spec waits for fonts), up to 20 s: what's drawn is the text itself.
       const make = () => {
-        const b = builder(images, options.scale);
+        const b = builder(images);
         return {
           b,
           list: options.ids
@@ -177,7 +175,7 @@ export function engineDebug(editor: Editor) {
       const t0 = performance.now();
       // A fresh list replaces whatever the engine held: made for a revision past the engine's
       // (fresh lists only move the revision forward).
-      const b = builder(images, options.scale);
+      const b = builder(images);
       b.acknowledge(false, e.revision);
       const list = options.ids
         ? b.buildLayers(options.ids, { context: options.context })

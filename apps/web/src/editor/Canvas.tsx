@@ -22,7 +22,6 @@ import { loadedFamilies, watchDocumentFonts } from "../fonts/document-fonts";
 import { fonts } from "../fonts/fonts";
 import { COMPONENT_DRAG_MIME } from "./AssetsPanel";
 import { passesToCanvas } from "./canvas-gestures";
-import { invalidateColorBitmaps } from "./color-glyphs";
 import {
   EngineView,
   engineFallback,
@@ -805,7 +804,6 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         for (const family of [...families])
           for (const from of fonts.aliasedTo(family)) families.add(from);
         if (families.size === 0) return;
-        invalidateColorBitmaps();
         measurer.invalidate(families);
         editor.refitText(families);
       } else {

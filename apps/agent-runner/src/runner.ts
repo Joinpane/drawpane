@@ -179,7 +179,14 @@ export class FileRunner implements Omit<AgentRunnerApi, "reset" | "strike"> {
       const services: ToolServices = write
         ? {}
         : {
-            renderPng: (id, options) => this.#renderer(engine).renderPng(editor.doc, id, options),
+            renderPng: async (id, options, locale) => {
+              if (locale) engine.measurer.setScriptLocale?.(locale);
+              try {
+                return await this.#renderer(engine).renderPng(editor.doc, id, options);
+              } finally {
+                if (locale) engine.measurer.setScriptLocale?.(request.scriptLocale ?? "");
+              }
+            },
           };
       let run: EngineRun;
       // Where the tool and the layout it sets off read: with what it changed, the run's scope.

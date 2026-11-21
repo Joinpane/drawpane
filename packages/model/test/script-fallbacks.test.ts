@@ -13,6 +13,9 @@ describe("engine script fallback catalogue", () => {
     ).toEqual([{ family: "Noto Sans JP", subset: "9a00" }]);
     expect(cjkRegionFor("骨\n한글", "ja-JP")).toBe("KR");
     expect(cjkRegionFor("骨", "zh-TW")).toBe("TC");
+    expect(cjkRegionFor("哈利・波特", "zh-TW")).toBe("TC");
+    expect(cjkRegionFor("骨･한글", "ja-JP")).toBe("KR");
+    expect(cjkRegionFor("骨゛゜ー", "zh-CN")).toBe("SC");
     expect(cjkRegionFor("骨", "zh-Hant-HK")).toBe("TC");
     expect(cjkRegionFor("骨", "zh-CN")).toBe("SC");
     expect(cjkRegionFor("骨", "ja-JP")).toBe("JP");
@@ -20,11 +23,9 @@ describe("engine script fallback catalogue", () => {
   });
 
   it("maps kana punctuation and combining marks to the Japanese slice", () => {
-    expect([..."ー・゙"].map((char) => scriptFallbackFamily(char))).toEqual([
-      "Noto Sans JP",
-      "Noto Sans JP",
-      "Noto Sans JP",
-    ]);
+    expect([..."ー・゙゛゜"].map((char) => scriptFallbackFamily(char))).toEqual(
+      Array(5).fill("Noto Sans JP"),
+    );
     expect(scriptSubsets(["コーヒー・"])).toEqual([{ family: "Noto Sans JP", subset: "3000" }]);
   });
 

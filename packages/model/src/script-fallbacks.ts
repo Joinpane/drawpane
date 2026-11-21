@@ -1,3 +1,5 @@
+export const SCRIPT_SLICE_BATCH_SIZE = 12;
+
 /** Open outline families used after Instrument Sans. */
 export const SCRIPT_FALLBACK_FAMILIES = [
   "Noto Sans",
@@ -21,7 +23,8 @@ export interface ScriptSubset {
   readonly subset: string;
 }
 
-const KANA = /[\p{Script=Hiragana}\p{Script=Katakana}\u3099\u309a\u30fb\u30fc\uff65\uff70]/u;
+const KANA = /[\p{Script=Hiragana}\p{Script=Katakana}]/u;
+const KANA_MARK = /[\u3099-\u309c\u30fb\u30fc\uff65\uff70]/u;
 const HANGUL = /\p{Script=Hangul}/u;
 
 export function cjkRegionFor(text: string, locale = ""): CjkRegion {
@@ -38,7 +41,7 @@ export function scriptFallbackFamily(
   region: CjkRegion = "SC",
 ): ScriptFallbackFamily | null {
   if (/\p{Emoji_Presentation}/u.test(char)) return "Noto Emoji";
-  if (KANA.test(char)) return "Noto Sans JP";
+  if (KANA.test(char) || KANA_MARK.test(char)) return "Noto Sans JP";
   if (HANGUL.test(char)) return "Noto Sans KR";
   if (/[\p{Script=Han}\u3000-\u303f\uff01-\uff60\uffe0-\uffe6]/u.test(char))
     return `Noto Sans ${region}`;

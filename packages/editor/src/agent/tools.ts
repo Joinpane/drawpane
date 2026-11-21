@@ -50,7 +50,11 @@ export interface ToolResult {
  */
 export interface ToolServices {
   /** Draws a layer, or every layer on a page, as a PNG. */
-  readonly renderPng?: (nodeId: string, options: PngOptions) => Promise<HeadlessPng>;
+  readonly renderPng?: (
+    nodeId: string,
+    options: PngOptions,
+    locale?: string,
+  ) => Promise<HeadlessPng>;
 }
 
 export interface AgentTool<I extends z.ZodType = z.ZodType> {
@@ -226,16 +230,26 @@ const exportImage = defineTool({
       .string()
       .regex(/^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/, "a hex colour, like #ffffff")
       .optional(),
+    locale: z
+      .string()
+      .max(64)
+      .regex(/^[a-z]{2,8}(?:-[a-z0-9]{1,8})*$/i)
+      .describe("The viewer's BCP 47 locale for regional Han glyphs, for example zh-TW.")
+      .optional(),
   }),
-  async run(editor, { id: nodeId, scale, background }, services) {
+  async run(editor, { id: nodeId, scale, background, locale }, services) {
     need(editor, nodeId);
     if (!services.renderPng) throw new ToolFailure("Images can't be rendered here.");
     let png: HeadlessPng;
     try {
-      png = await services.renderPng(nodeId, {
-        ...(scale === undefined ? { fit: EXPORT_IMAGE_FIT } : { scale }),
-        background: background ?? null,
-      });
+      png = await services.renderPng(
+        nodeId,
+        {
+          ...(scale === undefined ? { fit: EXPORT_IMAGE_FIT } : { scale }),
+          background: background ?? null,
+        },
+        locale,
+      );
     } catch (error) {
       if (error instanceof ExportError) throw new ToolFailure(error.message);
       throw error;

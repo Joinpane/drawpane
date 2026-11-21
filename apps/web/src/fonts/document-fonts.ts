@@ -92,7 +92,7 @@ export function loadedFamilies(faces: Iterable<FontFace>): Set<string> {
   const out = new Set<string>();
   for (const face of faces) {
     const name = face.family.replace(/^["']|["']$/g, "");
-    if (name.endsWith(" Preview") || name.startsWith("Drawpane Noto ")) continue;
+    if (name.endsWith(" Preview")) continue;
     out.add(name.replace(/ Variable$/, ""));
   }
   return out;

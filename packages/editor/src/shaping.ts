@@ -27,6 +27,7 @@
  */
 import { type FontFeatures, GLYPH_UNITS, scriptSlice } from "@drawpane/model";
 import { type Face, type FontBytesLoader, faceKey } from "@drawpane/raster";
+import { type ColorEmojiFont, colorEmojiFont, ENGINE_EMOJI_FACE } from "./color-emoji";
 import { acquireFace, isHarfBuzzOutOfMemory, releaseFace } from "./harfbuzz-faces";
 import { isPrivateUse, MISSING_GLYPH_FAMILY, missingGlyphFont } from "./missing-glyph-font";
 import type {
@@ -90,6 +91,7 @@ interface ReadyFace extends FontCoverage {
   readonly axes: Readonly<Record<string, { min: number; default: number; max: number }>>;
   /** The instances shaped from, by their point on the axes; the least recently used go first. */
   readonly instances: Map<string, Instance>;
+  readonly emoji: ColorEmojiFont | null;
 }
 
 type FaceEntry =
@@ -201,6 +203,22 @@ export class Shaper {
     this.#entry({ family: MISSING_GLYPH_FAMILY, weight: 400, italic: false });
     for (const italic of [false, true])
       this.#entry({ family: this.#fallbackFamily, weight: 400, italic, variable: true });
+  }
+
+  async prepareColorEmoji(): Promise<void> {
+    await this.load(ENGINE_EMOJI_FACE);
+  }
+
+  colorEmoji(text: string, size: number): ShapedText | null {
+    const entry = this.#entry(ENGINE_EMOJI_FACE);
+    if (entry.status !== "ready" || !entry.emoji) return null;
+    const run = { size, weight: 400, variations: {} };
+    try {
+      return entry.emoji.shape(entry.hb, this.#instance(entry, run).font, text, size);
+    } catch (error) {
+      if (isHarfBuzzOutOfMemory(error)) return null;
+      throw error;
+    }
   }
 
   /** Hears the family of each face that became ready or unavailable. */
@@ -355,13 +373,7 @@ export class Shaper {
     if (exact && exact.outlines !== false) {
       const styled = Object.keys(run.features).length > 0 || wanted.variable;
       const width = styled ? exact.width : (measure?.(text) ?? exact.width);
-      // A measured prefix leaves out kerning into the next cluster. Keep the
-      // exact face's left-to-right glyph origins and use the measured extent.
-      const fitted =
-        run.direction === "rtl" && !styled && measure && Math.abs(width - exact.width) > 0.01
-          ? this.#fitClusters(exact, text, run.direction, measure)
-          : exact;
-      return { shaped: this.#fit(fitted, width), fallback: false };
+      return { shaped: this.#fit(exact, width, run.direction), fallback: false };
     }
 
     // When the feature shaper cannot draw a whole run, the canvas draws it
@@ -419,21 +431,11 @@ export class Shaper {
         ? (prefix: string) => Math.max(0, measure(text.slice(0, piece.start) + prefix) - before)
         : undefined;
       const advance = measurePiece?.(piece.text);
-      // Same-file fallback already carries the browser's kerning. Fit cluster
-      // positions only where the platform resolved different advances or an
-      // explicit system substitute supplied the outlines.
-      const fitClusters =
-        measurePiece &&
-        shaped &&
-        advance !== undefined &&
-        (face === substitute || Math.abs(advance - shaped.width) > 0.05);
       const drawn =
         shaped && shaped.outlines !== false
-          ? fitClusters
-            ? this.#fitClusters(shaped, piece.text, piece.direction, measurePiece)
-            : shaped
+          ? shaped
           : lastResortText(piece.text, run.size, measurePiece, piece.direction);
-      const fitted = this.#fit(drawn, advance ?? drawn.width, scale);
+      const fitted = this.#fit(drawn, advance ?? drawn.width, piece.direction, scale);
       for (const glyph of fitted.glyphs) {
         glyphs.push({
           ...glyph,
@@ -446,51 +448,24 @@ export class Shaper {
     return { shaped: { glyphs, width, scale }, fallback: true };
   }
 
-  /** Preserve ligatures and marks while aligning their cluster origins to the caret. */
-  #fitClusters(
+  /** Anchor the visual run at its measured reading edge and keep its internal spacing. */
+  #fit(
     shaped: ShapedText,
-    text: string,
-    direction: TextDirection | undefined,
-    measure: (prefix: string) => number,
+    width: number,
+    direction?: TextDirection,
+    scale = shaped.scale,
   ): ShapedText {
-    const width = measure(text);
-    const starts = [...new Set(shaped.glyphs.map((glyph) => glyph.cluster))].sort((a, b) => a - b);
-    const target = new Map<number, number>();
-    let startPx = 0;
-    for (const [index, start] of starts.entries()) {
-      const end = starts[index + 1] ?? text.length;
-      const endPx = end === text.length ? width : measure(text.slice(0, end));
-      target.set(start, direction === "rtl" ? width - endPx : startPx);
-      startPx = endPx;
-    }
-    const pens = new Map<number, number>();
-    for (const glyph of shaped.glyphs) {
-      if (glyph.penX !== undefined && !pens.has(glyph.cluster)) pens.set(glyph.cluster, glyph.penX);
-    }
-    return {
-      ...shaped,
-      width,
-      glyphs: shaped.glyphs.map((glyph) => {
-        const at = target.get(glyph.cluster);
-        const pen = pens.get(glyph.cluster);
-        return at === undefined || pen === undefined ? glyph : { ...glyph, x: at + glyph.x - pen };
-      }),
-    };
-  }
-
-  /** Put outlines in common units without changing their proportions or advance positions. */
-  #fit(shaped: ShapedText, width: number, scale = shaped.scale): ShapedText {
+    const offset = direction === "rtl" ? width - shaped.width : 0;
     const units = shaped.scale / scale;
-    if (Math.abs(units - 1) < 1e-9) {
-      return width === shaped.width ? shaped : { ...shaped, width };
-    }
+    const normalize = Math.abs(units - 1) >= 1e-9;
+    if (!normalize && offset === 0) return width === shaped.width ? shaped : { ...shaped, width };
     return {
       width,
       scale,
-      glyphs: shaped.glyphs.map((g) => ({
-        ...g,
-        path: null,
-        d: this.#normalize(g.d, units),
+      glyphs: shaped.glyphs.map((glyph) => ({
+        ...glyph,
+        x: glyph.x + offset,
+        ...(normalize ? { path: null, d: this.#normalize(glyph.d, units) } : {}),
       })),
     };
   }
@@ -555,7 +530,7 @@ export class Shaper {
   }
 
   /** The face at the run's point on its axes, made on first use. */
-  #instance(entry: ReadyFace, run: ShapingRun): Instance {
+  #instance(entry: ReadyFace, run: Pick<ShapingRun, "weight" | "size" | "variations">): Instance {
     const settings = axisSettings(entry.axes, run);
     const key = Object.keys(settings)
       .sort()
@@ -654,6 +629,8 @@ export class Shaper {
         upem: hbFace.upem || GLYPH_UNITS,
         axes,
         instances: new Map(),
+        emoji:
+          face.family === ENGINE_EMOJI_FACE.family ? await colorEmojiFont(bytes, hbFace) : null,
         get unicodes() {
           if (box) return { has: isPrivateUse };
           return subset && subset !== "all"
@@ -744,7 +721,6 @@ export class Shaper {
         x: (pen + p.xOffset) * scale,
         y: (rise + p.yOffset) * scale,
         cluster: info.cluster,
-        penX: pen * scale,
       });
       pen += p.xAdvance;
       rise += p.yAdvance;
@@ -764,7 +740,7 @@ export class Shaper {
  * canvas has it.
  */
 export class ShapingMeasurer implements TextMeasurer {
-  #engineText = true;
+  #engineText = false;
 
   constructor(
     readonly base: TextMeasurer & { invalidate(bumpGeneration?: boolean): void },
@@ -799,6 +775,14 @@ export class ShapingMeasurer implements TextMeasurer {
 
   shape(text: string, run: ShapingRun): ShapedText | null {
     return this.shaper.shape(text, run);
+  }
+
+  colorEmoji(text: string, size: number): ShapedText | null {
+    return this.shaper.colorEmoji(text, size);
+  }
+
+  prepareColorEmoji(): Promise<void> {
+    return this.shaper.prepareColorEmoji();
   }
 
   shapeForEngine(text: string, run: ShapingRun, font: string): EngineText {

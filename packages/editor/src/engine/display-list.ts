@@ -36,13 +36,7 @@ import { blurSigma } from "../post-effects";
 import { glyphTable } from "../saved-glyphs";
 import type { Scene } from "../scene";
 import type { TextMeasurer } from "../text";
-import {
-  type ColorGlyph,
-  type EncodedLayer,
-  encodeLayer,
-  type LayerContext,
-  localTransform,
-} from "./layer";
+import { encodeLayer, type LayerContext, localTransform } from "./layer";
 import { svgPathData } from "./svg-path";
 
 export interface EngineImage {
@@ -61,7 +55,6 @@ export interface ImageDemand {
 export interface DisplayListOptions {
   /** `null` draws a placeholder. `undefined` omits an unavailable image from an export. */
   readonly image?: (ref: string) => EngineImage | null | undefined;
-  readonly colorGlyph?: (text: string, font: string, scale: number) => ColorGlyph | null;
 }
 
 export interface BuildStats {
@@ -117,9 +110,6 @@ export class DisplayListBuilder {
   readonly #scene: Scene;
   readonly #measurer: TextMeasurer;
   readonly #image: (ref: string) => EngineImage | null | undefined;
-  readonly #colorGlyph: DisplayListOptions["colorGlyph"];
-  readonly #colorText = new Map<string, EncodedLayer["colorGlyphs"]>();
-  #colorScale = 1;
   #page: string | null = null;
   #revision = 0;
   /** The engine refused a message: the next one is a fresh list. */
@@ -208,7 +198,6 @@ export class DisplayListBuilder {
     this.#scene = scene;
     this.#measurer = measurer;
     this.#image = options.image ?? (() => null);
-    this.#colorGlyph = options.colorGlyph;
   }
 
   get pageId(): string | null {
@@ -275,15 +264,11 @@ export class DisplayListBuilder {
       }
       return g;
     };
-    const raster = this.#colorGlyph;
     return {
       scene: this.#scene,
       measurer: this.#measurer,
       image: (ref) => this.#image(ref),
       glyph,
-      ...(raster
-        ? { colorGlyph: (text: string, font: string) => raster(text, font, this.#colorScale) }
-        : {}),
       shapedGlyph: (g) => {
         let h = this.#shaped.get(g);
         // A handle freed since is gone: intern the outline again.
@@ -315,8 +300,6 @@ export class DisplayListBuilder {
     else this.#waits.delete(node.id);
     this.#watchFaces(node.id, [...new Set([...e.waiting, ...e.faceDependencies])]);
     this.#useImages(node.id, e.images);
-    if (e.colorGlyphs.length) this.#colorText.set(node.id, e.colorGlyphs);
-    else this.#colorText.delete(node.id);
     if (e.images.length) this.#imageReach.set(node.id, e.record.reach);
     if (e.record.unsupported) this.unsupported.set(node.id, e.record.unsupported);
     else this.unsupported.delete(node.id);
@@ -412,14 +395,6 @@ export class DisplayListBuilder {
     if (this.#deferred.size > 0) this.#rescan();
   }
 
-  /** Keep bitmap emoji sharp at a new zoom without reshaping other text. */
-  setColorScale(deviceScale: number): void {
-    const bucket = Math.max(1, Math.min(16, 2 ** Math.ceil(Math.log2(deviceScale))));
-    if (bucket === this.#colorScale) return;
-    this.#colorScale = bucket;
-    for (const id of this.#colorText.keys()) this.#extra.add(id);
-  }
-
   /** Notes the images a layer's record paints now, forgetting those it painted before. */
   #useImages(id: string, refs: readonly string[]): void {
     for (const ref of this.#imagesBy.get(id) ?? []) {
@@ -471,12 +446,6 @@ export class DisplayListBuilder {
         width: Math.hypot(matrix[0], matrix[1]),
         height: Math.hypot(matrix[2], matrix[3]),
       };
-      for (const glyph of this.#colorText.get(id) ?? [])
-        yield {
-          ref: glyph.ref,
-          visible,
-          span: { width: glyph.width * scale.width, height: glyph.height * scale.height },
-        };
       for (const paint of getProp(layer.props, "fills")) {
         if (
           paint.type !== "image" ||
@@ -828,7 +797,6 @@ export class DisplayListBuilder {
     this.#imagesBy.clear();
     this.#imageReach.clear();
     this.#texts.clear();
-    this.#colorText.clear();
     this.#pendingText.clear();
     this.#deferred.clear();
     this.#queue = [];
@@ -1038,7 +1006,6 @@ export class DisplayListBuilder {
       if (node) this.#kids.get(node.parent)?.delete(at);
       this.#nodes.delete(at);
       this.#texts.delete(at);
-      this.#colorText.delete(at);
       this.#pendingText.delete(at);
       this.#deferred.delete(at);
       this.#visible.delete(at);

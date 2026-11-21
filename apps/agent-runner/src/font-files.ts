@@ -29,6 +29,8 @@
  * the browser's shaper): the measurer reports it. Files are kept for the
  * isolate's life, up to a budget.
  */
+import { ENGINE_EMOJI_FACE } from "@drawpane/editor";
+import emojiBytes from "@drawpane/editor/emoji-font.ttf";
 import { type FontFormat, sniffFont } from "@drawpane/model";
 import {
   copyFromGoogle,
@@ -366,6 +368,7 @@ export function headlessFontLoader(
   };
 
   return async (face) => {
+    if (face.family === ENGINE_EMOJI_FACE.family) return emojiBytes;
     if (face.subset !== undefined) {
       const subset = face.subset;
       return keep(`script\0${face.family}\0${subset}`, async () => {

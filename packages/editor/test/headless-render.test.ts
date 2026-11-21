@@ -3,10 +3,11 @@ import { ErrorCode } from "@drawpane/engine";
 import { built } from "@drawpane/engine/node";
 import { type Paint, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
+import { ENGINE_EMOJI_FACE } from "../src/color-emoji";
 import { Doc } from "../src/doc";
 import { HarfBuzzMeasurer, measuredFaces } from "../src/harfbuzz-measurer";
 import { headlessEngine } from "./fixtures/engine-raster";
-import { enginePngPixel, solidPng } from "./fixtures/png";
+import { enginePngColors, enginePngPixel, solidPng } from "./fixtures/png";
 
 function picture(fills: Paint[]) {
   const doc = new Doc();
@@ -85,6 +86,38 @@ describe.skipIf(!built())("the capped headless PNG renderer", () => {
     expect(result.fallbackText).toBe(true);
     expect(result.png.length).toBeGreaterThan(200);
   });
+
+  it("rasterises the bundled colour outlines at export scale", async () => {
+    const fixture = readFileSync(new URL("../assets/Twemoji_GlyfColr0.ttf", import.meta.url));
+    const bytes = Uint8Array.from(fixture).buffer;
+    const renderer = headlessEngine(
+      new HarfBuzzMeasurer(async (face) =>
+        face.family === ENGINE_EMOJI_FACE.family ? bytes : null,
+      ),
+    );
+    const doc = picture([]);
+    doc.apply([
+      {
+        op: "create",
+        id: "emoji",
+        parent: "p",
+        type: "text",
+        key: "a1",
+        props: {
+          characters: "👩🏽‍🔬",
+          fontFamily: "Missing",
+          fontSize: 42,
+          textAutoResize: "none",
+          width: 60,
+          height: 60,
+        },
+      },
+    ]);
+
+    const out = await renderer.renderPng(doc, "emoji", { scale: 24 });
+    expect(out).toMatchObject({ scale: 24, width: 1440, height: 1440 });
+    expect(enginePngColors(out.png, 7)).toBe(7);
+  }, 20_000);
 
   it("decodes a large image at its drawn size and reports when tiling needs a smaller level", async () => {
     const doc = picture([{ type: "image", ref: large, scaleMode: "fill" }]);

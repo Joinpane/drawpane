@@ -13,6 +13,12 @@
   "define": { "import.meta.url": "\"file:///agent-runner/index.js\"" },
   "observability": { "enabled": true },
   "workers_dev": false,
+  // Bundle the attribution next to the imported emoji font, including during development.
+  "find_additional_modules": true,
+  "rules": [
+    { "type": "Data", "globs": ["**/*.ttf"], "fallthrough": true },
+    { "type": "Text", "globs": ["Twemoji-CC-BY-4.0.txt"], "fallthrough": false }
+  ],
   // A minute of CPU per call: a build of 50,000 layers takes seconds and a render tens to
   // hundreds of milliseconds, so a runaway fails within a minute (decision 0033, item 4.6).
   "limits": { "cpu_ms": 60000 },
