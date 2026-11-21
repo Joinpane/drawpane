@@ -629,8 +629,12 @@ export class Editor {
   /** Keeps UI state valid after the document changes (remote deletes, page removal). */
   #reconcile(): void {
     const { pageId, selection, hover, editingText } = this.s;
+    // Read after every change, though it's needed only when the page went: an agent run's
+    // commit counts what the run read (decision 0033), and this read of the root's list is
+    // what makes a run that relied on a shared style see the style change under it.
+    const pages = this.doc.pageIds();
     const patch: { -readonly [K in keyof EditorState]?: EditorState[K] } = {};
-    if (!pageId || !this.doc.has(pageId)) patch.pageId = this.doc.pageIds()[0] ?? null;
+    if (!pageId || !this.doc.has(pageId)) patch.pageId = pages[0] ?? null;
     const alive = selection.filter((id) => this.doc.has(id));
     if (alive.length !== selection.length) patch.selection = alive;
     if (hover && !this.doc.has(hover)) patch.hover = null;
