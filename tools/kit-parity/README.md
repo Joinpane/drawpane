@@ -140,7 +140,7 @@ Run the same check on a Modal T4 with a converted kit directory that also contai
 
 ```sh
 t3-vault run modal-token-id -- t3-vault run modal-token-secret -- \
-  pnpm gpu-bench --file "$KIT_FOLDER" --modes gpu --timeout 70 \
+  pnpm gpu-bench --ref HEAD --file "$KIT_FOLDER" --modes gpu --timeout 70 \
   --env E2E_KIT_PARITY_FROM_BENCH=1 --env E2E_KIT_PARITY_STAGE=render \
   --env E2E_KIT_PARITY_INLINE=1 --env E2E_KIT_PARITY_ENGINE=cpu,webgl \
   --env E2E_KIT_PARITY_ALLOW_MISSING_FONTS=1 --env E2E_KIT_PARITY_RUN=/out/kitrun \

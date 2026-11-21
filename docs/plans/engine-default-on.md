@@ -278,6 +278,22 @@ Owners are open. Each workstream lists its scope, what it depends on, and the te
 
 The four engine-on Chromium shards run with SwiftShader and the editor's engine switch enabled. Each shard reports failed specs in its job summary. Each exception in `apps/web/e2e/engine-ci-allowed.json` needs an observed failure and a follow-up below. An unexpected spec failure fails the engine-on check.
 
+| Spec | Observed failure | Follow-up |
+| --- | --- | --- |
+| `canvas-scale.spec.ts` | The 45,000-layer page timed out locally. In hosted CI its legacy fresh-redraw check found 149,801 differing pixels. | Measure engine settle on the fitted page and compare the actual engine surface with a fresh engine render. |
+| `corner-smoothing.spec.ts` | The iOS preset case failed a corner pixel probe. | Sample the presented engine frame before and after the preset and undo. |
+| `glass-drag.spec.ts` | A pan and zoom changed the glass or blur sample by 255, with a limit of 120. The layer drag failed once and passed its retry. | Read frames from the presenting renderer and check for missing readers during movement. |
+| `glass.spec.ts` | Glass over grain showed zero measured bending in the first canvas, with a minimum greater than four. | Sample the engine surface and check refraction over grain. |
+| `images.spec.ts` | The image fill sample stayed blue after changing scale mode. | Sample the active engine frame after the scale-mode patch and check for stale image pixels. |
+| `inspector.spec.ts` | The per-side stroke probe read white where the left stroke should appear. | Sample the active engine frame and verify the changed stroke edges. |
+| `masks.spec.ts` | The alpha-mask inspector case measured blueness of 171 at the faded edge, with a limit of 30. | Sample the active engine surface, then check the alpha mask after the inspector change. |
+| `noise-texture.spec.ts` | The pan case counted zero coloured grain pixels in the first canvas, with a minimum of 46. | Read the active presentation surface and keep the grain-in-place assertion. |
+| `parity/parity.spec.ts` | The blur cells exceeded the Figma thresholds while sampling the first canvas. | Capture the active renderer for viewport cases and keep the legacy baseline on the canvas shard. |
+| `parity/svg.spec.ts` | `icon-stroke.svg` scored 0.79 against the browser's SVG, with a limit of 0.50. | Compare the active engine surface and investigate any remaining stroke drift. |
+| `parity/import.spec.ts` | The Figma fills comparison read far from the reference on its first attempt and passed its retry. | Wait for the active renderer to present the imported frame before sampling it. |
+
+The first engine-on run also failed `renderer-switch.spec.ts` because the test expecting the switch to be off inherited the engine preference. That test now explicitly selects Canvas, and the next test clears the saved preference before exercising the engine URL.
+
 ### W6. Text layout through HarfBuzz (P1)
 
 - **Scope:** "Cross-browser text" above: `HarfBuzzMeasurer` as the browser's layout measurer, byte-loaded faces, fallback faces for scripts the app can't read, no relayout on open.

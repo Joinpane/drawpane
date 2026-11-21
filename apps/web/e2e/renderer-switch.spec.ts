@@ -68,6 +68,7 @@ test.describe
     });
 
     test("hides the status chip when the switch is off", async () => {
+      await page.goto("/?renderer=canvas");
       await page.getByRole("button", { name: "New file" }).first().click();
       await live(page);
       fileUrl = new URL(page.url()).pathname;
@@ -75,7 +76,8 @@ test.describe
     });
 
     test("keeps ?renderer=engine from the dashboard into the editor and updates the chip per page", async () => {
-      // Turn the switch on via the dashboard URL (no localStorage["drawpane:renderer"]).
+      // Turn the switch on via the dashboard URL with no saved renderer preference.
+      await page.evaluate(() => localStorage.removeItem("drawpane:renderer"));
       await page.goto("/?renderer=engine&present=readback");
       await expect(page.getByRole("button", { name: "New file" }).first()).toBeVisible({
         timeout: 15_000,

@@ -1,1 +1,12 @@
-{}
+{
+  "canvas-scale.spec.ts": "The large fitted page timed out locally and differed from the legacy fresh redraw in hosted CI.",
+  "corner-smoothing.spec.ts": "The iOS smoothing preset case failed its corner pixel probe.",
+  "glass-drag.spec.ts": "The movement probe exceeded the colour-distance limit while panning and zooming.",
+  "glass.spec.ts": "The glass-over-grain probe read no bending signal from the first canvas.",
+  "images.spec.ts": "The fill scale-mode probe retained its original blue sample.",
+  "inspector.spec.ts": "The per-side stroke probe sampled white where the left stroke should appear.",
+  "masks.spec.ts": "The alpha-mask inspector case reads the first content canvas and sees too much blue at the faded edge.",
+  "noise-texture.spec.ts": "The grain case samples the first canvas and reads no coloured grain with the engine on.",
+  "parity/parity.spec.ts": "The blur suite captures the first canvas and exceeds its Figma thresholds with the engine on.",
+  "parity/svg.spec.ts": "The icon-stroke viewport comparison exceeded its browser SVG mean limit."
+}
