@@ -10,6 +10,8 @@ import {
   mediaUrl,
   tailwindFor,
   trackLabel,
+  vectorApproximationNotes,
+  vectorApproximations,
 } from "@drawpane/editor";
 import { getProp, type NodeRecord } from "@drawpane/model";
 import { Badge, IconButton, PropertySection, SegmentedControl } from "@drawpane/ui";
@@ -178,19 +180,8 @@ function svgFor(editor: Editor, node: NodeRecord): { code: string; notes: string
   const notes: string[] = [];
   if (imageRefs(editor, [node.id]).size > 0)
     notes.push("Images link to this file. Export as SVG to embed them.");
-  if (hasBackgroundBlur(editor, node.id))
-    notes.push("Background blur isn't part of SVG, so it's left out.");
+  notes.push(...vectorApproximationNotes("svg", vectorApproximations(editor.doc, [node.id])));
   return { code, notes };
-}
-
-function hasBackgroundBlur(editor: Editor, id: string): boolean {
-  const node = editor.doc.get(id);
-  if (!node || getProp(node.props, "visible") === false) return false;
-  if (
-    getProp(node.props, "effects").some((e) => e.type === "background-blur" && e.visible !== false)
-  )
-    return true;
-  return editor.doc.childIds(id).some((child) => hasBackgroundBlur(editor, child));
 }
 
 function Summary({ node }: { node: NodeRecord }) {

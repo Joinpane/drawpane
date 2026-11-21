@@ -10,15 +10,22 @@ import {
   unsupportedNames,
   WORKER_LIMITS,
 } from "@drawpane/engine";
-import { getProp, type NodeRecord, type Paint, scriptSubsets } from "@drawpane/model";
+import { getProp, type NodeRecord, scriptSubsets } from "@drawpane/model";
 import { hasColorEmoji } from "./color-emoji";
 import type { Doc } from "./doc";
 import { DisplayListBuilder, type EngineImage } from "./engine/display-list";
 import { rgba } from "./engine/layer";
-import { ExportError, exportBounds, fitScale, snapToPixels } from "./export";
+import {
+  chooseImageLevel,
+  collectExportImageUses,
+  ExportError,
+  exportBounds,
+  fitScale,
+  snapToPixels,
+} from "./export";
 import type { Rect } from "./geometry";
 import { isHarfBuzzOutOfMemory } from "./harfbuzz-faces";
-import { imageDrawnSize, type Size } from "./images";
+import type { Size } from "./images";
 import { textSpans } from "./rich-text";
 import { Scene } from "./scene";
 import { drawnFamily, type TextMeasurer } from "./text";
@@ -117,28 +124,6 @@ function backgroundColor(value: string | null | undefined) {
   return rgba(hex);
 }
 
-interface ImageUse {
-  readonly paint: Extract<Paint, { type: "image" }>;
-  readonly box: Size;
-  readonly scale: Size;
-}
-
-function imageLevel(file: Size, uses: readonly ImageUse[]): Size {
-  let width = 1;
-  let height = 1;
-  for (const { paint, box, scale } of uses) {
-    const drawn = imageDrawnSize(paint.scaleMode, box, file, scale, paint.crop);
-    width = Math.max(width, drawn.width);
-    height = Math.max(height, drawn.height);
-  }
-  let level = { width: file.width, height: file.height };
-  for (;;) {
-    const next = smallerImageLevel(level.width, level.height);
-    if (!next || next.width < width || next.height < height) return level;
-    level = next;
-  }
-}
-
 export function createHeadlessRenderer(deps: HeadlessEngineDeps) {
   async function renderPngStream(
     doc: Doc,
@@ -195,33 +180,9 @@ export function createHeadlessRenderer(deps: HeadlessEngineDeps) {
       image: (ref) => images.get(ref),
     });
     const plan = builder.planLayers(ids, { context: true });
-    const refs = new Map<string, ImageUse[]>();
-    const text: NodeRecord[] = [];
-    for (const layer of plan.visibleNodes()) {
-      if (layer.type === "text") text.push(layer);
-      else if (layer.type !== "group" && layer.type !== "page") {
-        const box = {
-          width: getProp(layer.props, "width"),
-          height: getProp(layer.props, "height"),
-        };
-        if (box.width <= 0 || box.height <= 0) continue;
-        const [a, b, c, d] = scene.worldMatrix(layer.id);
-        for (const paint of [
-          ...getProp(layer.props, "fills"),
-          ...getProp(layer.props, "strokes"),
-        ]) {
-          if (paint.type !== "image" || paint.visible === false) continue;
-          const use = {
-            paint,
-            box,
-            scale: { width: Math.hypot(a, b) * scale, height: Math.hypot(c, d) * scale },
-          };
-          const existing = refs.get(paint.ref);
-          if (existing) existing.push(use);
-          else refs.set(paint.ref, [use]);
-        }
-      }
-    }
+    const visibleNodes = [...plan.visibleNodes()];
+    const refs = collectExportImageUses(scene, visibleNodes, scale);
+    const text = visibleNodes.filter((layer) => layer.type === "text");
     try {
       checkDeadline();
       await deps.prepareFonts?.(text);
@@ -280,7 +241,7 @@ export function createHeadlessRenderer(deps: HeadlessEngineDeps) {
           images.set(ref, null);
           continue;
         }
-        const wanted = imageLevel(file, uses);
+        const wanted = chooseImageLevel(file, uses);
         let level: Size | null = wanted;
         while (level) {
           const { width, height } = level;

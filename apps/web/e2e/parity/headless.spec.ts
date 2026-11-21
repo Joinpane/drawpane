@@ -74,8 +74,11 @@ type W = {
   drawpaneHeadless: {
     headless(id: string, scale: number, background: string | null): Promise<Headless>;
     canvas(id: string, scale: number, background: string | null): Promise<string>;
+    browser(id: string, scale: number, background: string | null): Promise<string>;
   };
 };
+
+const useBrowserEngine = process.env.HEADLESS_PARITY_BROWSER === "1";
 
 const read = (dir: string, names?: readonly string[]): Suite[] =>
   readdirSync(dir)
@@ -258,7 +261,8 @@ test.describe("Render parity: canvas and headless", () => {
   test.beforeAll(async ({ browser }) => {
     test.setTimeout(180_000);
     const port = Number(process.env.HEADLESS_PARITY_PORT ?? 9005);
-    instance = await freshInstance(browser, { port, inspectorPort: port + 540 });
+    const inspectorPort = Number(process.env.HEADLESS_PARITY_INSPECTOR_PORT ?? port + 540);
+    instance = await freshInstance(browser, { port, inspectorPort });
     // The canvas loads its web fonts. The outline pass reads deterministic TrueType fixtures.
     const fontFixtures = {
       Inter: ["Inter-Variable.ttf", "Inter-Italic-Variable.ttf"],
@@ -336,12 +340,21 @@ test.describe("Render parity: canvas and headless", () => {
       results[suite.suite] = scores;
       for (const [i, cell] of suite.cells.entries()) {
         const frame = frames[i] as string;
-        const [canvasPng, headless] = await page.evaluate(
-          async ({ frame, scale }) => {
+        const [canvasPng, actual] = await page.evaluate(
+          async ({ frame, scale, browserEngine }) => {
             const h = (window as unknown as W).drawpaneHeadless;
-            return Promise.all([h.canvas(frame, scale, null), h.headless(frame, scale, null)]);
+            const canvas = h.canvas(frame, scale, null);
+            if (browserEngine) {
+              const png = await h.browser(frame, scale, null);
+              return [
+                await canvas,
+                { png, approximate: [] as string[], missingFonts: null, missingImages: null },
+              ] as const;
+            }
+            const headless = await h.headless(frame, scale, null);
+            return [await canvas, headless] as const;
           },
-          { frame, scale: SCALE },
+          { frame, scale: SCALE, browserEngine: useBrowserEngine },
         );
         // The circle exposes platform-dependent CSS blur. The translucent mask
         // tests Figma's coverage rule directly.
@@ -354,12 +367,14 @@ test.describe("Render parity: canvas and headless", () => {
             )
           : canvasPng;
         const theirs = await rgba(page, referencePng);
-        const ours = await rgba(page, headless.png);
+        const ours = await rgba(page, actual.png);
         expect([ours.width, ours.height], `${cell.id} size`).toEqual([theirs.width, theirs.height]);
-        // Instrument Sans tops out at 700. This cell also checks the missing-weight note.
-        const missingFonts = cell.id === "instrument-40-800" ? ["Instrument Sans 800"] : [];
-        expect(headless.missingFonts, `${cell.id} fonts`).toEqual(missingFonts);
-        expect(headless.missingImages, `${cell.id} images`).toEqual([]);
+        if (actual.missingFonts !== null && actual.missingImages !== null) {
+          // Instrument Sans tops out at 700. This cell also checks the missing-weight note.
+          const missingFonts = cell.id === "instrument-40-800" ? ["Instrument Sans 800"] : [];
+          expect(actual.missingFonts, `${cell.id} fonts`).toEqual(missingFonts);
+          expect(actual.missingImages, `${cell.id} images`).toEqual([]);
+        }
         const diff = await compare(
           page,
           ours.data,
@@ -378,11 +393,11 @@ test.describe("Render parity: canvas and headless", () => {
           failures.push(`${cell.id}: ${diff.mean} (allowed ${limit})`);
         if (!updating && limit === undefined) failures.push(`${cell.id}: no threshold recorded`);
         const img = (b64: string) => encodePng(page, b64, ours.width, ours.height);
-        const note = headless.approximate.length
-          ? `<br><small>approximate: ${headless.approximate.join(", ")}</small>`
+        const note = actual.approximate.length
+          ? `<br><small>approximate: ${actual.approximate.join(", ")}</small>`
           : "";
         rows.push(
-          `<tr><th>${cell.id}<br><small>${fromFigma ? "Figma · " : ""}${diff.mean} · p99 ${diff.p99} · worst tile ${diff.worstTile}${limit !== undefined ? ` · max ${limit}` : ""}</small>${note}</th><td><img src="data:image/png;base64,${referencePng}"></td><td><img src="data:image/png;base64,${headless.png}"></td><td><img src="${await img(diff.heat)}"></td></tr>`,
+          `<tr><th>${cell.id}<br><small>${fromFigma ? "Figma · " : ""}${diff.mean} · p99 ${diff.p99} · worst tile ${diff.worstTile}${limit !== undefined ? ` · max ${limit}` : ""}</small>${note}</th><td><img src="data:image/png;base64,${referencePng}"></td><td><img src="data:image/png;base64,${actual.png}"></td><td><img src="${await img(diff.heat)}"></td></tr>`,
         );
       }
       const values = Object.values(scores);

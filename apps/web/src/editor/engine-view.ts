@@ -58,6 +58,7 @@ import {
   type RendererChoice,
   rendererChoice,
   softwareAllowed,
+  useEngineRenderer,
 } from "./renderer-switch";
 
 export {
@@ -66,6 +67,7 @@ export {
   type RendererChoice,
   rendererChoice,
   softwareAllowed,
+  useEngineRenderer,
 };
 
 export type EngineBackend = "webgpu" | "webgl2" | "cpu-worker";
@@ -1102,6 +1104,8 @@ export class EngineView {
     breakdown: { patch: 0, encode: 0, render: 0, submit: 0, readback: 0 },
   };
   readonly #health: number;
+  #lastGpuWidth = 0;
+  #lastGpuHeight = 0;
 
   private constructor(
     slot: HTMLElement | null,
@@ -1313,6 +1317,42 @@ export class EngineView {
   /** Whether the latest engine draw presented a frame cleanly (not recovering or stalled). */
   get lastPresented(): boolean {
     return !this.#dead && !this.#recovering && this.#unpresented === 0 && this.last.supported;
+  }
+
+  /**
+   * Captures the currently displayed frame for prototype transitions before the next screen draws.
+   * - On readback and CPU-worker modes, returns the 2D canvas synchronously.
+   * - On direct-present WebGPU and WebGL2, synchronously queues `gpuPixels()` from the engine's
+   *   internal GPU render target before returning, so a subsequent `draw()` will not overwrite it.
+   */
+  captureFrame():
+    | { readonly sync: HTMLCanvasElement }
+    | {
+        readonly async: Promise<{
+          readonly width: number;
+          readonly height: number;
+          readonly pixels: Uint8Array;
+        } | null>;
+      }
+    | null {
+    if (this.#dead || this.#recovering) return null;
+    if (this.#readback !== null || this.#backend === "cpu-worker") {
+      return { sync: this.#canvas };
+    }
+    const engine = this.#engine;
+    const width = this.#lastGpuWidth;
+    const height = this.#lastGpuHeight;
+    if (!engine || width <= 0 || height <= 0) return null;
+    const pending = engine.gpuPixels();
+    return {
+      async: pending
+        .then((res) =>
+          res.ok && res.value.length === width * height * 4
+            ? { width, height, pixels: res.value }
+            : null,
+        )
+        .catch(() => null),
+    };
   }
 
   /** Reads back the currently shown frame pixels (straight RGBA8), on any engine backend. */
@@ -1579,6 +1619,8 @@ export class EngineView {
     this.#supersede();
     this.#bumpDeviceGeneration();
     this.#unpresented = 0;
+    this.#lastGpuWidth = 0;
+    this.#lastGpuHeight = 0;
     const isLoss =
       recoverable &&
       (r.code === ErrorCode.DeviceLost || r.code === ErrorCode.Gpu || /lost/i.test(r.message));
@@ -2305,6 +2347,8 @@ export class EngineView {
       return NOT_DRAWN;
     }
     this.#unpresented = 0;
+    this.#lastGpuWidth = width;
+    this.#lastGpuHeight = height;
     // Exact only when the list holds what the page shows: text in view still to be sent again
     // (fonts arrived) leaves the frame a stand-in, whatever the engine drew.
     const shownExact =

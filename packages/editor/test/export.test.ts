@@ -1,13 +1,25 @@
+import { imageLevelsBytes, MAX_SIDE, WORKER_LIMITS } from "@drawpane/engine";
 import { DEFAULT_GLASS, type Op, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { Editor } from "../src/editor";
 import {
+  budgetExportImages,
+  chooseDrawnImageSize,
+  chooseImageLevel,
+  collectExportImageUses,
+  ExportError,
+  exportBackgroundRgba,
   exportBounds,
   exportFileName,
+  exportSizeError,
   fitScale,
   imageRefs,
+  MAX_EXPORT_SIDE,
   outputSize,
   snapToPixels,
+  thumbnailLayout,
+  vectorApproximationNotes,
+  vectorApproximations,
 } from "../src/export";
 import { exportSvg, formatSvg } from "../src/svg";
 import type { TextMeasurer } from "../src/text";
@@ -863,5 +875,154 @@ describe("exportSvg", () => {
     expect(svg).toBe(
       '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10" viewBox="0 0 10 10"></svg>\n',
     );
+  });
+});
+
+describe("engine export helpers", () => {
+  it("keeps the 16,384 px export limit and formats clear size errors for product and engine caps", () => {
+    expect(MAX_EXPORT_SIDE).toBe(16_384);
+    expect(outputSize({ x: 0, y: 0, width: 8192, height: 8192 }, 1)).toEqual({
+      width: 8192,
+      height: 8192,
+    });
+    expect(outputSize({ x: 0, y: 0, width: 1440, height: 5000 }, 2)).toEqual({
+      width: 2880,
+      height: 10_000,
+    });
+    expect(outputSize({ x: 0, y: 0, width: 16_385, height: 100 }, 1)).toBeNull();
+    expect(outputSize({ x: 0, y: 0, width: 100, height: 16_385 }, 1)).toBeNull();
+    const productErr = exportSizeError(16_385, 64);
+    expect(productErr).toBeInstanceOf(ExportError);
+    expect(productErr.reason).toBe("size");
+    expect(productErr.message).toContain("16385 × 64 px");
+    expect(productErr.message).toContain("16,384 px");
+    const engineErr = exportSizeError(8193, 64, MAX_SIDE);
+    expect(engineErr).toBeInstanceOf(ExportError);
+    expect(engineErr.reason).toBe("size");
+    expect(engineErr.message).toContain("8193 × 64 px");
+    expect(engineErr.message).toContain("8,192 px");
+  });
+
+  it("sizes browser export photos to exact drawn resolution without softening inside the browser budget", () => {
+    const editor = makeEditor([
+      rect("hero", {
+        width: 1440,
+        height: 1080,
+        fills: [{ type: "image", ref: SHA, scaleMode: "fill" }],
+      }),
+    ]);
+    const uses1x = collectExportImageUses(editor.scene, editor.doc.nodes(), 1);
+    const uses2x = collectExportImageUses(editor.scene, editor.doc.nodes(), 2);
+    const uses3x = collectExportImageUses(editor.scene, editor.doc.nodes(), 3);
+    expect(chooseDrawnImageSize({ width: 4000, height: 3000 }, uses1x.get(SHA) ?? [])).toEqual({
+      width: 1440,
+      height: 1080,
+    });
+    expect(chooseDrawnImageSize({ width: 4000, height: 3000 }, uses2x.get(SHA) ?? [])).toEqual({
+      width: 2880,
+      height: 2160,
+    });
+    // Never upscales past natural dimensions.
+    expect(chooseDrawnImageSize({ width: 4000, height: 3000 }, uses3x.get(SHA) ?? [])).toEqual({
+      width: 4000,
+      height: 3000,
+    });
+    const browserBudget = 192 << 20;
+    const plan2x = budgetExportImages(
+      [{ ref: SHA, natural: { width: 4000, height: 3000 }, uses: uses2x.get(SHA) ?? [] }],
+      browserBudget,
+      { exactDrawn: true },
+    );
+    expect(plan2x.get(SHA)).toEqual({ target: { width: 2880, height: 2160 }, reduced: false });
+  });
+
+  it("parses hex, keyword, and CSS rgb/rgba export backgrounds", () => {
+    expect(exportBackgroundRgba(null)).toEqual([0, 0, 0, 0]);
+    expect(exportBackgroundRgba("transparent")).toEqual([0, 0, 0, 0]);
+    expect(exportBackgroundRgba("white")).toEqual([1, 1, 1, 1]);
+    expect(exportBackgroundRgba("black")).toEqual([0, 0, 0, 1]);
+    expect(exportBackgroundRgba("#f08")).toEqual([1, 0, 0x88 / 255, 1]);
+    expect(exportBackgroundRgba("#2b4fd680")).toEqual([
+      0x2b / 255,
+      0x4f / 255,
+      0xd6 / 255,
+      0x80 / 255,
+    ]);
+    expect(exportBackgroundRgba("rgb(255, 0, 128)")).toEqual([1, 0, 128 / 255, 1]);
+    expect(exportBackgroundRgba("rgba(0, 255, 0, 0.5)")).toEqual([0, 1, 0, 0.5]);
+    expect(() => exportBackgroundRgba("not-a-color")).toThrow(ExportError);
+  });
+
+  it("collects image uses and budgets mip levels inside the Worker 6 MiB image cap", () => {
+    const editor = makeEditor([
+      rect("a", {
+        width: 200,
+        height: 100,
+        fills: [{ type: "image", ref: SHA, scaleMode: "fill" }],
+      }),
+      rect(
+        "b",
+        {
+          x: 0,
+          y: 200,
+          width: 2400,
+          height: 1800,
+          fills: [{ type: "image", ref: SHA2, scaleMode: "fill" }],
+        },
+        "p",
+        "a1",
+      ),
+    ]);
+    const uses = collectExportImageUses(editor.scene, editor.doc.nodes(), 2);
+    expect([...uses.keys()].sort()).toEqual([SHA, SHA2]);
+    // 200 × 100 at 2× = 400 × 200; a 1600 × 800 photo steps down to 400 × 200.
+    expect(chooseImageLevel({ width: 1600, height: 800 }, uses.get(SHA) ?? [])).toEqual({
+      width: 400,
+      height: 200,
+    });
+    const plan = budgetExportImages(
+      [
+        { ref: SHA, natural: { width: 1600, height: 800 }, uses: uses.get(SHA) ?? [] },
+        { ref: SHA2, natural: { width: 4000, height: 3000 }, uses: uses.get(SHA2) ?? [] },
+      ],
+      WORKER_LIMITS.imageBytes,
+    );
+    const a = plan.get(SHA);
+    const b = plan.get(SHA2);
+    if (!a || !b) throw new Error("expected budgeted images");
+    expect(a.reduced).toBe(false);
+    expect(b.reduced).toBe(true);
+    const totalBytes =
+      imageLevelsBytes(a.target.width, a.target.height) +
+      imageLevelsBytes(b.target.width, b.target.height);
+    expect(totalBytes).toBeLessThanOrEqual(WORKER_LIMITS.imageBytes);
+  });
+
+  it("computes deterministic page thumbnail framing and vector approximation notes", () => {
+    const editor = makeEditor([
+      rect("card", {
+        x: 50,
+        y: 100,
+        width: 400,
+        height: 200,
+        effects: [DEFAULT_GLASS, { type: "background-blur", radius: 12 }],
+      }),
+    ]);
+    const layout = thumbnailLayout(editor.scene, "p");
+    expect(layout).not.toBeNull();
+    expect(layout?.width).toBeLessThanOrEqual(640);
+    expect(layout?.height).toBeLessThanOrEqual(480);
+    expect(layout?.ids).toEqual(["card"]);
+
+    const effects = vectorApproximations(editor.doc, ["card"]);
+    expect(effects).toEqual({ glass: true, backgroundBlur: true });
+    expect(vectorApproximationNotes("svg", effects)).toEqual([
+      "Background blur isn't part of SVG, so it's left out.",
+      "Glass exports in SVG as a lit rim without refraction, frost or what's behind the layer.",
+    ]);
+    expect(vectorApproximationNotes("pdf", effects)).toEqual([
+      "Background blur isn't part of PDF, so it's left out.",
+      "Glass exports in PDF as a lit rim without refraction, frost or what's behind the layer.",
+    ]);
   });
 });

@@ -104,10 +104,15 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
   const present = useMemo(() => presentation(searchStr), [searchStr]);
   // The editor's measurer re-measures after web fonts load (EditorPage gives it one that does).
   const measurer = editor.measurer as ShapingMeasurer;
-  const renderer = useMemo(
-    () => new CanvasRenderer(editor.scene, measurer, { images: imagesFor(editor) }),
-    [editor, measurer],
-  );
+  // Lazy: CanvasRenderer is only constructed if canvas rendering or a fallback actually runs.
+  const rendererRef = useRef<{
+    editor: typeof editor;
+    measurer: ShapingMeasurer;
+    instance: CanvasRenderer | null;
+  }>({ editor, measurer, instance: null });
+  if (rendererRef.current.editor !== editor || rendererRef.current.measurer !== measurer) {
+    rendererRef.current = { editor, measurer, instance: null };
+  }
 
   // Render loop: repaint content when the document, page or camera changes;
   // repaint the overlay on any state change. Never more than once per frame.
@@ -144,7 +149,19 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     const canvasToken = () =>
       getComputedStyle(document.documentElement).getPropertyValue("--canvas").trim() || "#ebeae6";
     let theme = readTheme();
-    renderer.canvasColor = canvasToken();
+    let canvasColor = canvasToken();
+    const emptyHidden: ReadonlySet<string> = new Set();
+    const getRenderer = (): CanvasRenderer => {
+      if (!rendererRef.current.instance) {
+        const instance = new CanvasRenderer(editor.scene, measurer, {
+          images: imagesFor(editor),
+        });
+        instance.canvasColor = canvasColor;
+        rendererRef.current.instance = instance;
+      }
+      return rendererRef.current.instance;
+    };
+    if (rendererRef.current.instance) rendererRef.current.instance.canvasColor = canvasColor;
     // The render engine, behind its switch (decision 0040): it draws the page when it can, and
     // the canvas renderer draws whatever it can't, never a blank canvas.
     let activeEngineCanvas: HTMLCanvasElement | null = null;
@@ -253,9 +270,10 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     const paintCoverSync = () => {
       const s = editor.s;
       if (!s.pageId) return;
-      renderer.invalidate();
-      renderer.whole = s.editingText;
-      renderer.render(cctx, s.pageId, s.camera, s.viewport, dpr, {
+      const r = getRenderer();
+      r.invalidate();
+      r.whole = s.editingText;
+      r.render(cctx, s.pageId, s.camera, s.viewport, dpr, {
         exact: false,
         budget: timing.budget ?? CONTENT_BUDGET,
       });
@@ -279,7 +297,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       syncRendererAttr();
       syncRendererStatus();
       // The canvas renderer drew nothing meanwhile: its last frame can't be reused.
-      if (!on) renderer.invalidate();
+      if (!on) rendererRef.current.instance?.invalidate();
     };
 
     syncRendererAttr();
@@ -304,6 +322,8 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         if (!view) {
           syncRendererAttr();
           syncRendererStatus();
+          contentDirty = true;
+          schedule();
           return;
         }
         activeEngineCanvas = view.canvas;
@@ -415,7 +435,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
 
     const timing = frameStatsFor(editor);
     timing.redraw = () => {
-      renderer.invalidate();
+      rendererRef.current.instance?.invalidate();
       exact = true;
       // Asked for by tests that read the canvas next: drawn whole in one frame, never a part.
       whole = true;
@@ -426,10 +446,11 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       const s = editor.s;
       if (!s.pageId) return null;
       const { width, height } = contentCanvas;
+      const r = getRenderer();
       // Drawn again on the same canvas (another canvas may rasterise differently), whole, at once.
       const shown = cctx.getImageData(0, 0, width, height).data;
-      renderer.invalidate();
-      renderer.render(cctx, s.pageId, s.camera, s.viewport, dpr, { exact: true });
+      r.invalidate();
+      r.render(cctx, s.pageId, s.camera, s.viewport, dpr, { exact: true });
       const whole = cctx.getImageData(0, 0, width, height).data;
       let differing = 0;
       let max = 0;
@@ -509,7 +530,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           // now would only show the same stand-ins again).
           drewEngine = true;
           idleOn = true;
-          idleBackground = (page && getProp(page.props, "backgroundColor")) ?? renderer.canvasColor;
+          idleBackground = (page && getProp(page.props, "backgroundColor")) ?? canvasColor;
           postIdle();
         }
         engineMoved = false;
@@ -520,7 +541,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         const nativeMotion = timing.motion?.native === true;
         const moving =
           !nativeMotion && !whole && !exact && (gestureMoving || engineCamera !== s.camera);
-        const background = (page && getProp(page.props, "backgroundColor")) ?? renderer.canvasColor;
+        const background = (page && getProp(page.props, "backgroundColor")) ?? canvasColor;
         changed = false;
         const r = engine.draw(
           s.pageId,
@@ -529,7 +550,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           contentCanvas.height,
           dpr,
           background,
-          { hidden: renderer.hidden, whole: s.editingText },
+          { hidden: rendererRef.current.instance?.hidden ?? emptyHidden, whole: s.editingText },
           !moving,
           whole || nativeMotion ? 0 : moving ? MOVING_BUDGET_MS : REST_BUDGET_MS,
         );
@@ -579,42 +600,52 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         }
       }
       if (!drewEngine && contentDirty && s.pageId) {
-        if (choice !== "canvas") {
-          fallbackFrames++;
-          if (timing.motion) timing.motion.fallback++;
-        }
-        if (engine) showEngine(false);
-        else {
-          syncRendererAttr();
-          syncRendererStatus();
-        }
-        // Truncated text shows all its lines while it's being edited.
-        renderer.whole = s.editingText;
-        const done = renderer.render(
-          cctx,
-          s.pageId,
-          s.camera,
-          s.viewport,
-          dpr,
-          whole ? { exact: true } : { exact, budget: timing.budget ?? CONTENT_BUDGET },
-        );
-        exact = false;
-        whole = false;
-        clearTimeout(settle);
-        contentDirty = false;
-        if (renderer.pending) {
-          // Drawn in part: the next frame draws more.
-          contentDirty = true;
-          schedule();
-        } else if (!done)
-          settle = window.setTimeout(() => {
-            exact = true;
+        if (choice !== "canvas" && !engineStarted) {
+          // EngineView.create is still starting: paint the page/canvas backdrop without
+          // constructing CanvasRenderer so engine-only sessions never instantiate it.
+          cctx.setTransform(1, 0, 0, 1, 0, 0);
+          cctx.fillStyle = (page && getProp(page.props, "backgroundColor")) ?? canvasColor;
+          cctx.fillRect(0, 0, contentCanvas.width, contentCanvas.height);
+          contentDirty = false;
+        } else {
+          if (choice !== "canvas") {
+            fallbackFrames++;
+            if (timing.motion) timing.motion.fallback++;
+          }
+          if (engine) showEngine(false);
+          else {
+            syncRendererAttr();
+            syncRendererStatus();
+          }
+          // Truncated text shows all its lines while it's being edited.
+          const r = getRenderer();
+          r.whole = s.editingText;
+          const done = r.render(
+            cctx,
+            s.pageId,
+            s.camera,
+            s.viewport,
+            dpr,
+            whole ? { exact: true } : { exact, budget: timing.budget ?? CONTENT_BUDGET },
+          );
+          exact = false;
+          whole = false;
+          clearTimeout(settle);
+          contentDirty = false;
+          if (r.pending) {
+            // Drawn in part: the next frame draws more.
             contentDirty = true;
             schedule();
-          }, SETTLE_MS);
-        timing.drawn = renderer.stats.drawn;
-        timing.culled = renderer.stats.culled;
-        timing.exact = done;
+          } else if (!done)
+            settle = window.setTimeout(() => {
+              exact = true;
+              contentDirty = true;
+              schedule();
+            }, SETTLE_MS);
+          timing.drawn = r.stats.drawn;
+          timing.culled = r.stats.culled;
+          timing.exact = done;
+        }
       }
       const t1 = performance.now();
       if (overlayDirty) {
@@ -745,7 +776,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       }
       // Sizing a canvas clears it, even to the same size: the last frame is
       // gone, so the renderer mustn't reuse it (a pan would move black).
-      renderer.invalidate();
+      rendererRef.current.instance?.invalidate();
       overlayRenderer.invalidate();
       editor.setViewport(width, height);
       contentDirty = overlayDirty = changed = true;
@@ -763,7 +794,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       schedule();
     });
     // An image finished decoding (or a sharper copy is ready): repaint the content.
-    const offImages = renderer.images.subscribe(() => {
+    const offImages = imagesFor(editor).subscribe(() => {
       contentDirty = changed = true;
       schedule();
     });
@@ -830,7 +861,8 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
 
     const themeObserver = new MutationObserver(() => {
       theme = readTheme();
-      renderer.canvasColor = canvasToken();
+      canvasColor = canvasToken();
+      if (rendererRef.current.instance) rendererRef.current.instance.canvasColor = canvasColor;
       overlayRenderer.invalidate(true);
       contentDirty = overlayDirty = changed = true;
       schedule();
@@ -882,7 +914,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       clearTimeout(settle);
       clearTimeout(fadeTimer);
     };
-  }, [editor, interaction, renderer, measurer, choice, present]);
+  }, [editor, interaction, measurer, choice, present]);
 
   // Pointer and wheel input.
   useEffect(() => {

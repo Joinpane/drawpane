@@ -1,6 +1,8 @@
 /**
- * Exporting the selection: rendered in this tab with the canvas's own
- * renderer, then downloaded. Settings are remembered per browser.
+ * Exporting the selection: raster exports follow the renderer switch (engine snapshot service
+ * when the engine is on, with canvas fallback for > 8,192 px up to 16,384 px or unsupported
+ * effects; CanvasRenderer when canvas mode is active). Vector exports keep their SVG and PDF
+ * paths, then the result downloads. Settings are remembered per browser.
  */
 import {
   CanvasRenderer,
@@ -12,15 +14,27 @@ import {
   exportBounds,
   exportFileName,
   exportRaster,
+  exportSizeError,
   exportSvg,
+  MAX_EXPORT_PIXELS,
+  MAX_EXPORT_SIDE,
+  snapToPixels,
 } from "@drawpane/editor";
+import { formatReducedImagesNote, renderEngineRasterExportWithMeta } from "./engine-snapshot";
 import { embeddedImages } from "./export-assets";
 import { imagesFor } from "./media";
 import { type PdfPage, pdfPageOf, pdfPages, renderPdf } from "./pdf";
+import { useEngineRenderer } from "./renderer-switch";
 
 export interface ExportSettings {
   readonly scale: 1 | 2 | 3;
   readonly format: ExportFormat;
+}
+
+export interface RenderedExport {
+  readonly blob: Blob;
+  readonly reducedImages: number;
+  readonly omittedImages: number;
 }
 
 const KEY = "drawpane.export";
@@ -72,28 +86,146 @@ export function exportName(editor: Editor, ids: readonly string[]): string {
   return ids.length > 1 ? `${name} and ${ids.length - 1} more` : name;
 }
 
-/** Renders layers in the given format, transparent where nothing is drawn (white for JPEG). */
-export async function renderExport(
+function tryCanvasRasterExport(
   editor: Editor,
   ids: readonly string[],
-  { format, scale }: ExportSettings,
-): Promise<Blob> {
+  options: {
+    readonly format: "png" | "jpeg" | "webp";
+    readonly scale: number;
+    readonly background?: string | null;
+  },
+): Promise<Blob> | null {
+  let renderer: CanvasRenderer;
+  try {
+    renderer = new CanvasRenderer(editor.scene, editor.measurer, { images: imagesFor(editor) });
+  } catch {
+    return null;
+  }
+  return exportRaster(renderer, editor.scene, ids, {
+    format: options.format,
+    scale: options.scale,
+    ...(options.background !== undefined ? { background: options.background } : {}),
+  });
+}
+
+function canFallbackEngineError(
+  editor: Editor,
+  ids: readonly string[],
+  scale: number,
+  error: unknown,
+): boolean {
+  if (!(error instanceof ExportError)) return false;
+  if (error.reason === "unsupported" || error.reason === "limit") return true;
+  if (error.reason === "size") {
+    const bounds = exportBounds(editor.scene, ids);
+    if (!bounds) return false;
+    const rect = snapToPixels(bounds, scale);
+    const width = Math.max(1, Math.round(rect.width * scale));
+    const height = Math.max(1, Math.round(rect.height * scale));
+    return (
+      width <= MAX_EXPORT_SIDE && height <= MAX_EXPORT_SIDE && width * height <= MAX_EXPORT_PIXELS
+    );
+  }
+  return false;
+}
+
+/**
+ * Renders layers in the given format, returning the file blob plus image-reduction metadata
+ * when rendered through the engine snapshot service.
+ */
+export async function renderExportWithMeta(
+  editor: Editor,
+  ids: readonly string[],
+  {
+    format,
+    scale,
+    background,
+    signal,
+    imageBudget,
+  }: ExportSettings & {
+    readonly background?: string | null;
+    readonly signal?: AbortSignal;
+    readonly imageBudget?: number;
+  },
+): Promise<RenderedExport> {
   if (format === "pdf") {
-    return (await renderPdf(editor, pdfPages(editor, ids), exportName(editor, ids))).blob;
+    return {
+      blob: (await renderPdf(editor, pdfPages(editor, ids), exportName(editor, ids))).blob,
+      reducedImages: 0,
+      omittedImages: 0,
+    };
   }
   if (format === "svg") {
     const bounds = exportBounds(editor.scene, ids);
     if (!bounds) throw new ExportError("Nothing visible to export. Show the layer and try again.");
     // Images go inside as data: URLs, so the file stands on its own.
     const images = await embeddedImages(editor, ids);
-    return new Blob([exportSvg(editor.scene, editor.measurer, ids, bounds, { images })], {
-      type: EXPORT_MIME.svg,
-    });
+    return {
+      blob: new Blob([exportSvg(editor.scene, editor.measurer, ids, bounds, { images })], {
+        type: EXPORT_MIME.svg,
+      }),
+      reducedImages: 0,
+      omittedImages: 0,
+    };
   }
-  const renderer = new CanvasRenderer(editor.scene, editor.measurer, {
-    images: imagesFor(editor),
-  });
-  return exportRaster(renderer, editor.scene, ids, { format, scale });
+  if (!useEngineRenderer()) {
+    const renderer = new CanvasRenderer(editor.scene, editor.measurer, {
+      images: imagesFor(editor),
+    });
+    const blob = await exportRaster(renderer, editor.scene, ids, {
+      format,
+      scale,
+      ...(background !== undefined ? { background } : {}),
+    });
+    return { blob, reducedImages: 0, omittedImages: 0 };
+  }
+
+  // Validate product-level maximum (16,384 px) up front so oversized exports fail clearly.
+  const bounds = exportBounds(editor.scene, ids);
+  if (!bounds) throw new ExportError("Nothing visible to export. Show the layer and try again.");
+  const rect = snapToPixels(bounds, scale);
+  const width = Math.max(1, Math.round(rect.width * scale));
+  const height = Math.max(1, Math.round(rect.height * scale));
+  if (width > MAX_EXPORT_SIDE || height > MAX_EXPORT_SIDE || width * height > MAX_EXPORT_PIXELS) {
+    throw exportSizeError(width, height, MAX_EXPORT_SIDE);
+  }
+
+  try {
+    return await renderEngineRasterExportWithMeta(editor, ids, {
+      format,
+      scale,
+      ...(background !== undefined ? { background } : {}),
+      ...(imageBudget !== undefined ? { imageBudget } : {}),
+      images: imagesFor(editor),
+      priority: "high",
+      ...(signal ? { signal } : {}),
+    });
+  } catch (error) {
+    if (canFallbackEngineError(editor, ids, scale, error)) {
+      const fallback = tryCanvasRasterExport(editor, ids, {
+        format,
+        scale,
+        ...(background !== undefined ? { background } : {}),
+      });
+      if (fallback) {
+        return { blob: await fallback, reducedImages: 0, omittedImages: 0 };
+      }
+    }
+    throw error;
+  }
+}
+
+/** Renders layers in the given format, transparent where nothing is drawn (white for JPEG). */
+export async function renderExport(
+  editor: Editor,
+  ids: readonly string[],
+  options: ExportSettings & {
+    readonly background?: string | null;
+    readonly signal?: AbortSignal;
+    readonly imageBudget?: number;
+  },
+): Promise<Blob> {
+  return (await renderExportWithMeta(editor, ids, options)).blob;
 }
 
 /** Saves a blob through the browser's download, then lets the object URL go. */
@@ -126,8 +258,10 @@ export async function exportSelection(
       await savePdf(editor, pdfPages(editor, ids), exportName(editor, ids));
       return;
     }
-    download(await renderExport(editor, ids, options), name);
-    editor.notify(`Exported ${name}.`);
+    const { blob, reducedImages, omittedImages } = await renderExportWithMeta(editor, ids, options);
+    download(blob, name);
+    const reductionNote = formatReducedImagesNote(reducedImages, omittedImages);
+    editor.notify(reductionNote ? `Exported ${name}. ${reductionNote}` : `Exported ${name}.`);
   } catch (error) {
     editor.notify(
       error instanceof ExportError

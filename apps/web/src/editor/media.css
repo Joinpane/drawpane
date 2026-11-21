@@ -205,6 +205,12 @@
   color: var(--ink-muted);
   font: var(--type-ui-label);
 }
+.export-section__note {
+  margin: 0;
+  color: var(--ink-muted);
+  font: var(--type-ui-label);
+  line-height: 1.4;
+}
 
 /* The Export section sits just after the Inspector's fieldset (so viewers can use it). */
 .inspector:has(+ .inspector-export) {

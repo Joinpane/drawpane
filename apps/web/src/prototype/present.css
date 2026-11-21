@@ -197,7 +197,8 @@
   background: var(--surface-sunken);
   box-shadow: inset 0 0 0 1px var(--line);
 }
-.present__thumb canvas {
+.present__thumb canvas,
+.present__thumb img {
   display: block;
   border-radius: 2px;
 }
@@ -277,6 +278,21 @@
   position: absolute;
   inset: 0;
   z-index: 3;
+}
+.stage__engine-slot {
+  position: relative;
+  display: block;
+}
+.stage__unavailable {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: var(--space-400);
+  background: var(--surface-sunken);
+  color: var(--ink-muted);
+  font: var(--type-ui-body);
+  text-align: center;
 }
 .stage__canvas {
   display: block;

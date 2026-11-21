@@ -4,8 +4,9 @@
  * text sizes, auto layout and text styles come out exactly as the editor
  * makes them. The result is a list of nodes for the import endpoint.
  */
-import { CanvasTextMeasurer, Editor } from "@drawpane/editor";
+import { Editor } from "@drawpane/editor";
 import { keyBetween, type NodeRecord, newId, ROOT_ID } from "@drawpane/model";
+import { textMeasurer } from "../editor/shaping";
 
 export interface Scratch {
   readonly editor: Editor;
@@ -21,7 +22,7 @@ export async function scratchEditor(pageName = "Page 1"): Promise<Scratch> {
       document.fonts.load(`${w} 16px "${TEMPLATE_FONT}"`).catch(() => []),
     ),
   );
-  const editor = new Editor({ measurer: new CanvasTextMeasurer(), clientId: newId(8) });
+  const editor = new Editor({ measurer: textMeasurer(), clientId: newId(8) });
   editor.state.set({ role: "editor" });
   const pageId = newId();
   editor.doc.apply([

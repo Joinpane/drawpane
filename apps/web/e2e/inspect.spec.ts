@@ -220,6 +220,17 @@ test.describe
         return (await response.json()).url as string;
       });
       const context = await browser.newContext({ baseURL: instance.url });
+      if (process.env.E2E_ENGINE === "1") {
+        await context.addInitScript(() => {
+          try {
+            localStorage.setItem("drawpane:renderer", "engine");
+            localStorage.setItem("drawpane:engine-software", "allow");
+            localStorage.setItem("drawpane:engine-present", "readback");
+          } catch {
+            // Ignore opaque origins such as about:blank before first navigation.
+          }
+        });
+      }
       const viewer = await context.newPage();
       await addPasskey(context, viewer);
       await viewer.goto(new URL(invite).pathname);

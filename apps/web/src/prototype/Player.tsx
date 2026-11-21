@@ -2,6 +2,7 @@ import {
   CanvasRenderer,
   defaultStart,
   type Editor,
+  ExportError,
   flowScreens,
   hotspotIds,
   type ImageCache,
@@ -13,6 +14,8 @@ import { DEVICE_IDS, DEVICES, type DeviceId, type Flow, getProp } from "@drawpan
 import { Icon, IconButton } from "@drawpane/ui";
 import { type ReactNode, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { isMac } from "../app/format";
+import { renderEngineSnapshot } from "../editor/engine-snapshot";
+import { useEngineRenderer } from "../editor/renderer-switch";
 import { PlayerStage } from "./stage";
 import "./present.css";
 
@@ -83,10 +86,6 @@ export function Player({
   useDoc(editor);
   const { pageId, start } = target;
   const flowId = target.flow?.id ?? null;
-  const renderer = useMemo(
-    () => new CanvasRenderer(editor.scene, editor.measurer, { images }),
-    [editor, images],
-  );
   const [player] = useState(() => new PrototypePlayer(editor.doc, start));
   const state = useSyncExternalStore(
     (cb) => player.subscribe(cb),
@@ -122,7 +121,7 @@ export function Player({
     if (!el) return;
     const s = new PlayerStage({
       editor,
-      renderer,
+      images,
       player,
       host: el,
       device,
@@ -142,7 +141,7 @@ export function Player({
       stage.current = null;
     };
     // The stage lives as long as the player; device changes go through setDevice below.
-  }, [editor, renderer, player]);
+  }, [editor, images, player]);
   useEffect(() => stage.current?.setDevice(device), [device]);
 
   // A screen deleted while playing: start over.
@@ -292,7 +291,7 @@ export function Player({
                       if (window.matchMedia(NARROW).matches) setPanelOpen(false);
                     }}
                   >
-                    <ScreenThumb editor={editor} renderer={renderer} id={id} />
+                    <ScreenThumb editor={editor} images={images} id={id} />
                     <span className="present__screen-text">
                       <span className="present__screen-name">{nameOf(id)}</span>
                       <span className="present__screen-meta">{screenMeta(editor, id, start)}</span>
@@ -327,18 +326,36 @@ function screenMeta(editor: Editor, id: string, start: string): string {
 const THUMB_W = 44;
 const THUMB_H = 72;
 
-/** A small picture of a screen, redrawn when the document settles. */
-function ScreenThumb({
+const thumbFallbackRenderers = new WeakMap<Editor, CanvasRenderer>();
+
+function getThumbFallbackRenderer(editor: Editor, images: ImageCache): CanvasRenderer | null {
+  let renderer = thumbFallbackRenderers.get(editor);
+  if (!renderer) {
+    try {
+      renderer = new CanvasRenderer(editor.scene, editor.measurer, { images });
+      thumbFallbackRenderers.set(editor, renderer);
+    } catch {
+      return null;
+    }
+  }
+  return renderer;
+}
+
+function CanvasScreenThumb({
   editor,
-  renderer,
+  images,
   id,
 }: {
   editor: Editor;
-  renderer: CanvasRenderer;
+  images: ImageCache;
   id: string;
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const version = useDoc(editor);
+  const renderer = useMemo(
+    () => new CanvasRenderer(editor.scene, editor.measurer, { images }),
+    [editor, images],
+  );
   useEffect(() => {
     const draw = () => {
       const el = canvas.current;
@@ -366,5 +383,100 @@ function ScreenThumb({
     <span className="present__thumb" aria-hidden="true">
       <canvas ref={canvas} />
     </span>
+  );
+}
+
+/** A small picture of a screen, rendered through the engine snapshot service when it settles. */
+function EngineScreenThumb({
+  editor,
+  images,
+  id,
+}: {
+  editor: Editor;
+  images: ImageCache;
+  id: string;
+}) {
+  const version = useDoc(editor);
+  const [thumb, setThumb] = useState<{ url: string; width: number; height: number } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    let made: string | null = null;
+    const abort = new AbortController();
+    const draw = () => {
+      const bounds = editor.scene.bounds(id);
+      if (!bounds) return;
+      const dpr = window.devicePixelRatio || 1;
+      const scale = Math.min(THUMB_W / bounds.width, THUMB_H / bounds.height);
+      const w = Math.max(1, Math.round(bounds.width * scale));
+      const h = Math.max(1, Math.round(bounds.height * scale));
+      const pw = Math.max(1, Math.round(w * dpr));
+      const ph = Math.max(1, Math.round(h * dpr));
+      void renderEngineSnapshot(editor, {
+        ids: [id],
+        rect: bounds,
+        width: pw,
+        height: ph,
+        scale: scale * dpr,
+        format: "webp",
+        quality: 0.85,
+        background: "#ffffff",
+        context: false,
+        images,
+        priority: "low",
+        signal: abort.signal,
+      })
+        .catch(async (error) => {
+          if (
+            abort.signal.aborted ||
+            !(error instanceof ExportError) ||
+            (error.reason !== "unsupported" && error.reason !== "limit") ||
+            typeof OffscreenCanvas === "undefined"
+          ) {
+            throw error;
+          }
+          const renderer = getThumbFallbackRenderer(editor, images);
+          if (!renderer) throw error;
+          const surface = new OffscreenCanvas(pw, ph);
+          const ctx = surface.getContext("2d");
+          if (!ctx) throw error;
+          renderer.renderNodes(ctx, [id], bounds, scale * dpr, "#ffffff");
+          return surface.convertToBlob({ type: "image/webp", quality: 0.85 });
+        })
+        .then((blob) => {
+          if (cancelled) return;
+          if (made) URL.revokeObjectURL(made);
+          made = URL.createObjectURL(blob);
+          setThumb({ url: made, width: w, height: h });
+        })
+        .catch(() => {
+          // Cancelled or superseded thumbnail.
+        });
+    };
+    const t = setTimeout(draw, version === 0 ? 0 : 250);
+    return () => {
+      cancelled = true;
+      abort.abort();
+      clearTimeout(t);
+      if (made) URL.revokeObjectURL(made);
+    };
+  }, [editor, images, id, version]);
+  return (
+    <span className="present__thumb" aria-hidden="true">
+      {thumb ? (
+        <img
+          src={thumb.url}
+          alt=""
+          style={{ width: `${thumb.width}px`, height: `${thumb.height}px` }}
+        />
+      ) : null}
+    </span>
+  );
+}
+
+function ScreenThumb({ editor, images, id }: { editor: Editor; images: ImageCache; id: string }) {
+  return useEngineRenderer() ? (
+    <EngineScreenThumb editor={editor} images={images} id={id} />
+  ) : (
+    <CanvasScreenThumb editor={editor} images={images} id={id} />
   );
 }
