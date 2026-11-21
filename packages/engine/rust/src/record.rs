@@ -21,13 +21,14 @@ pub const FLAG_PROVISIONAL: u32 = 8;
 // Bit 16 (1 << 4) is reserved for phase 3B's `context` flag.
 /// Has an ordered list of post-effects (`post_effects`) encoded after `coarse`.
 pub const FLAG_POST: u32 = 32;
-const KNOWN_FLAGS: u32 = FLAG_HIDDEN | FLAG_ISOLATE | FLAG_GROUP | FLAG_PROVISIONAL | FLAG_POST;
+/// Has a non-normal layer blend mode (`1..=17`, minor 1.4) encoded after `post_effects` (or `coarse`).
+pub const FLAG_BLEND: u32 = 64;
+const KNOWN_FLAGS: u32 = FLAG_HIDDEN | FLAG_ISOLATE | FLAG_GROUP | FLAG_PROVISIONAL | FLAG_POST | FLAG_BLEND;
 
 /// Bits of `Record::unsupported` (`UNSUPPORTED` in wire.ts) the engine sets itself, from what it
 /// decodes, so anything it would refuse while drawing refuses its page before any drawing, on
 /// screen or not, in an export's crop or not, whatever the builder flagged.
 pub mod derived {
-    pub const BLEND: u32 = 1 << 7;
     pub const BACKDROP_READER: u32 = 1 << 13;
 }
 
@@ -332,11 +333,13 @@ pub enum Op {
         path: u32,
         even_odd: bool,
         paint: Paint,
+        blend: u8,
     },
     Stroke {
         path: u32,
         style: Box<StrokeStyle>,
         paint: Paint,
+        blend: u8,
     },
     Clip {
         path: u32,
@@ -412,6 +415,8 @@ pub struct Record {
     pub coarse: Vec<Op>,
     /// Ordered post-effects applied to the record's finished picture.
     pub post_effects: Vec<PostEffect>,
+    /// Layer blend mode (`0` normal, `1..=17` per `BLEND` in `wire.ts`).
+    pub blend: u32,
     /// Features TypeScript found it needs that the engine doesn't draw (a bit set, see
     /// `UNSUPPORTED` in wire.ts). Held to report, never drawn around.
     pub unsupported: u32,
@@ -507,11 +512,22 @@ impl Record {
         pad
     }
 
-    /// True if this record contains ops or post-effects that may flush the active Vello scene
-    /// (so an enclosing `isolate` opacity scope must use the engine's offscreen target stack
+    /// True if this record itself uses a non-normal blend mode on the layer, a paint, or a shadow.
+    pub fn has_own_blend(&self) -> bool {
+        self.blend != 0
+            || self.ops.iter().chain(&self.coarse).any(|op| match op {
+                Op::Fill { blend, .. } | Op::Stroke { blend, .. } => *blend != 0,
+                Op::DropShadow { blend, .. } | Op::InnerShadow { blend, .. } => *blend != 0,
+                _ => false,
+            })
+    }
+
+    /// True if this record contains ops, post-effects, or blends that may flush the active Vello
+    /// scene (so an enclosing `isolate` opacity scope must use the engine's offscreen target stack
     /// instead of a Vello opacity layer).
     pub fn has_offscreen_pass(&self) -> bool {
         !self.post_effects.is_empty()
+            || self.has_own_blend()
             || self
                 .ops
                 .iter()
@@ -545,6 +561,7 @@ impl Record {
             ops: vec![Op::Children],
             coarse: Vec::new(),
             post_effects: Vec::new(),
+            blend: 0,
             unsupported: 0,
         }
     }
@@ -728,13 +745,16 @@ impl Record {
     }
 }
 
-fn paint(r: &mut Reader, limits: &Limits, derived: &mut u32) -> Result<Paint> {
+fn paint(r: &mut Reader, limits: &Limits, minor: u16) -> Result<(Paint, u8)> {
     let kind = r.u32()?;
     let blend = r.u32()?;
-    if blend != 0 {
-        *derived |= derived::BLEND;
+    if blend > 17 {
+        return Err(EngineError::malformed(format!("unknown paint blend mode {blend}")));
     }
-    Ok(match kind {
+    if blend != 0 && minor < 4 {
+        return Err(EngineError::malformed("paint blend mode requires display list 1.4"));
+    }
+    let paint = match kind {
         1 => Paint::Solid(r.rgba()?),
         2..=5 => {
             let kind = match kind {
@@ -772,7 +792,8 @@ fn paint(r: &mut Reader, limits: &Limits, derived: &mut u32) -> Result<Paint> {
         }
         7 => Paint::Placeholder(r.f32()?.clamp(0.0, 1.0)),
         k => return Err(EngineError::malformed(format!("unknown paint kind {k}"))),
-    })
+    };
+    Ok((paint, blend as u8))
 }
 
 fn stroke_style(r: &mut Reader, limits: &Limits) -> Result<StrokeStyle> {
@@ -830,19 +851,23 @@ fn ops(
             1 => {
                 let path = path_index(r)?;
                 let even_odd = r.u32()? == 1;
+                let (paint, blend) = paint(r, limits, minor)?;
                 Op::Fill {
                     path,
                     even_odd,
-                    paint: paint(r, limits, derived)?,
+                    paint,
+                    blend,
                 }
             }
             2 => {
                 let path = path_index(r)?;
                 let style = Box::new(stroke_style(r, limits)?);
+                let (paint, blend) = paint(r, limits, minor)?;
                 Op::Stroke {
                     path,
                     style,
-                    paint: paint(r, limits, derived)?,
+                    paint,
+                    blend,
                 }
             }
             3 => {
@@ -877,7 +902,7 @@ fn ops(
                 }
                 // Phase 1 draws no backdrop reader outside the tests (glass and background blur
                 // are phase 3's): a reader refuses its page.
-                if !cfg!(feature = "test-kernels") {
+                if !cfg!(feature = "test-kernels") || kernel != crate::kernels::KERNEL_BOX_MEAN {
                     *derived |= derived::BACKDROP_READER;
                 }
                 Op::Read { kernel, halo }
@@ -941,9 +966,6 @@ fn ops(
                 if blend > 17 {
                     return Err(EngineError::malformed(format!("unknown shadow blend mode {blend}")));
                 }
-                if blend != 0 {
-                    *derived |= derived::BLEND;
-                }
                 let stroke = if has_stroke {
                     Some(Box::new(stroke_style(r, limits)?))
                 } else {
@@ -988,9 +1010,6 @@ fn ops(
                 if blend > 17 {
                     return Err(EngineError::malformed(format!("unknown shadow blend mode {blend}")));
                 }
-                if blend != 0 {
-                    *derived |= derived::BLEND;
-                }
                 Op::InnerShadow {
                     shape,
                     hole,
@@ -1019,7 +1038,7 @@ pub fn decode(r: &mut Reader, limits: &Limits, minor: u16) -> Result<Record> {
         allowed_flags &= !FLAG_PROVISIONAL;
     }
     if minor < 4 {
-        allowed_flags &= !FLAG_POST;
+        allowed_flags &= !(FLAG_POST | FLAG_BLEND);
     }
     if flags & !allowed_flags != 0 {
         return Err(EngineError::malformed(format!(
@@ -1114,6 +1133,15 @@ pub fn decode(r: &mut Reader, limits: &Limits, minor: u16) -> Result<Record> {
             }
         }
     }
+    let blend = if flags & FLAG_BLEND != 0 {
+        let mode = r.u32()?;
+        if mode > 17 {
+            return Err(EngineError::malformed(format!("unknown layer blend mode {mode}")));
+        }
+        mode
+    } else {
+        0
+    };
     let record = Record {
         flags,
         opacity,
@@ -1125,6 +1153,7 @@ pub fn decode(r: &mut Reader, limits: &Limits, minor: u16) -> Result<Record> {
         ops: ops_list,
         coarse,
         post_effects,
+        blend,
         unsupported: unsupported | derived,
     };
     if !record.coarse.is_empty() && record.ops.iter().any(|op| matches!(op, Op::Children)) {

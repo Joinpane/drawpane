@@ -45,6 +45,9 @@ pub struct Node {
     /// Whether this record or any visible descendant has an offscreen pass that may flush the
     /// active Vello scene (shadows, readers, filters, blends, masks).
     has_pass: Cell<Option<bool>>,
+    /// Whether this record or any visible descendant uses a non-normal blend mode (for faded
+    /// pass-through frames, decision 0038).
+    has_blend: Cell<Option<bool>>,
 }
 
 impl Node {
@@ -57,6 +60,7 @@ impl Node {
             kids: Cell::new(None),
             hash,
             has_pass: Cell::new(None),
+            has_blend: Cell::new(None),
         }
     }
 }
@@ -196,6 +200,7 @@ struct IsoAncestor {
     id: u32,
     had_pass: bool,
     had_pad: f64,
+    had_blend: bool,
     before_rect: Option<Rect>,
     order: (u32, u32),
 }
@@ -368,12 +373,15 @@ impl Store {
             id: a,
             had_pass,
             had_pad,
+            had_blend,
             before_rect,
             order: (order, end),
         } in txn.iso_ancestors
         {
             if self.nodes.contains_key(&a)
-                && (self.subtree_has_pass(a) != had_pass || (self.bounds_and_pad(a).1 - had_pad).abs() > 1e-6)
+                && (self.subtree_has_pass(a) != had_pass
+                    || self.subtree_has_blend(a) != had_blend
+                    || (self.bounds_and_pad(a).1 - had_pad).abs() > 1e-6)
             {
                 if let Some(rect) = before_rect {
                     txn.before.push(Dirty {
@@ -561,6 +569,7 @@ impl Store {
             n.bounds.set(None);
             n.kids.set(None);
             n.has_pass.set(None);
+            n.has_blend.set(None);
         }
     }
 
@@ -672,6 +681,7 @@ impl Store {
                     node.bounds.set(None);
                     node.kids.set(None);
                     node.has_pass.set(None);
+                    node.has_blend.set(None);
                     self.bytes = self.bytes + cost - old.heap_bytes();
                     self.glyphs.release(&old);
                     if structural {
@@ -876,6 +886,7 @@ impl Store {
             n.bounds.set(None);
             n.kids.set(None);
             n.has_pass.set(None);
+            n.has_blend.set(None);
             if id == ROOT {
                 return;
             }
@@ -891,16 +902,18 @@ impl Store {
         while at != ROOT {
             let Some(n) = self.nodes.get(&at) else { break };
             let parent = n.parent;
-            let iso = n.record.isolate() && n.record.opacity < 1.0;
+            let iso = n.record.blend != 0 || (n.record.isolate() && n.record.opacity < 1.0);
             if iso && txn.iso_seen.insert(at) {
                 let had_pass = self.subtree_has_pass(at);
                 let had_pad = self.bounds_and_pad(at).1;
+                let had_blend = self.subtree_has_blend(at);
                 let rect = self.dirty_extent(at);
                 let ord = self.order_of(at);
                 txn.iso_ancestors.push(IsoAncestor {
                     id: at,
                     had_pass,
                     had_pad,
+                    had_blend,
                     before_rect: rect,
                     order: ord,
                 });
@@ -986,11 +999,30 @@ impl Store {
         let v = if node.record.hidden() {
             false
         } else {
-            let draws_children = node.record.ops.iter().any(|op| matches!(op, Op::Children));
+            let draws_children = id == ROOT || node.record.ops.iter().any(|op| matches!(op, Op::Children));
             node.record.has_offscreen_pass()
                 || (draws_children && node.children.iter().any(|c| self.subtree_has_pass(*c)))
         };
         node.has_pass.set(Some(v));
+        v
+    }
+
+    /// Whether `id` or any visible descendant uses a non-normal blend mode (for faded
+    /// pass-through frames, decision 0038).
+    pub fn subtree_has_blend(&self, id: u32) -> bool {
+        let Some(node) = self.nodes.get(&id) else {
+            return false;
+        };
+        if let Some(v) = node.has_blend.get() {
+            return v;
+        }
+        let v = if node.record.hidden() {
+            false
+        } else {
+            let draws_children = id == ROOT || node.record.ops.iter().any(|op| matches!(op, Op::Children));
+            node.record.has_own_blend() || (draws_children && node.children.iter().any(|c| self.subtree_has_blend(*c)))
+        };
+        node.has_blend.set(Some(v));
         v
     }
 
@@ -1126,7 +1158,7 @@ impl Store {
             }
             if let Some(pn) = self.nodes.get(&p) {
                 anc_pad += pn.record.post_pad();
-                if pn.record.isolate() && pn.record.opacity < 1.0 {
+                if pn.record.blend != 0 || (pn.record.isolate() && pn.record.opacity < 1.0) {
                     anc_pad = anc_pad.max(self.bounds_and_pad(p).1);
                 }
             }
@@ -1319,7 +1351,7 @@ impl Store {
     /// the selection with what's beneath it inside the group). Answers the parent, the first and
     /// last child index, and the parent's ancestor path (parent first).
     pub fn selection(&self, ids: &[u32]) -> Option<(u32, usize, usize, Vec<u32>)> {
-        if ids.is_empty() || !self.readers.is_empty() {
+        if ids.is_empty() || !self.readers.is_empty() || self.subtree_has_blend(ROOT) {
             return None;
         }
         let parent = self.nodes.get(ids.first()?)?.parent;

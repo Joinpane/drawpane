@@ -110,7 +110,10 @@ export function rgba(hex: string, opacity = 1): Rgba {
 /** A paint as the engine paints it in a box `w` × `h`, or null when it paints nothing here. */
 function wirePaint(paint: Paint, w: number, h: number, alpha = 1): WirePaint | null {
   const opacity = (paint.opacity ?? 1) * alpha;
-  if (paint.type === "solid") return { kind: "solid", color: rgba(paint.color, opacity) };
+  const blend = blendCode(paint.blendMode);
+  const withBlend = blend !== 0 ? { blend } : {};
+  if (paint.type === "solid")
+    return { kind: "solid", color: rgba(paint.color, opacity), ...withBlend };
   if (paint.type === "image") return null; // Placed by the caller, which needs the shape.
   const m = gradientMatrix(paint, w, h);
   if (!m) return null;
@@ -118,11 +121,7 @@ function wirePaint(paint: Paint, w: number, h: number, alpha = 1): WirePaint | n
     position: s.position,
     color: rgba(s.color, opacity),
   }));
-  return { kind: paint.type, matrix: m, stops };
-}
-
-function blendOf(paint: Paint): boolean {
-  return paint.blendMode !== undefined && paint.blendMode !== "normal";
+  return { kind: paint.type, matrix: m, stops, ...withBlend };
 }
 
 function blendCode(mode: BlendMode | undefined): number {
@@ -334,6 +333,8 @@ function imageFill(
 ): void {
   if (w <= 0 || h <= 0) return;
   b.images.push(paint.ref);
+  const blend = blendCode(paint.blendMode);
+  const withBlend = blend !== 0 ? { blend } : {};
   const image = ctx.image(paint.ref);
   if (!image) {
     // Loading: the checkerboard over the box, inside the shape (as the canvas renderer draws it).
@@ -341,7 +342,7 @@ function imageFill(
       op: "fill",
       path: shape,
       evenOdd,
-      paint: { kind: "placeholder", opacity: paint.opacity ?? 1 },
+      paint: { kind: "placeholder", opacity: paint.opacity ?? 1, ...withBlend },
     });
     return;
   }
@@ -358,6 +359,7 @@ function imageFill(
         matrix: [place.width, 0, 0, place.height, 0, 0],
         tile: true,
         opacity,
+        ...withBlend,
       },
     });
     return;
@@ -382,6 +384,7 @@ function imageFill(
       matrix: [place.width, 0, 0, place.height, place.x, place.y],
       tile: false,
       opacity,
+      ...withBlend,
     },
   });
   b.ops.push({ op: "unclip" });
@@ -470,7 +473,6 @@ function dashedPieces(
 function shapeStrokes(b: Builder, node: NodeRecord, shape: number, w: number, h: number): void {
   const strokes = getProp(node.props, "strokes").filter(shows);
   if (strokes.length === 0) return;
-  if (strokes.some(blendOf)) b.unsupported |= UNSUPPORTED.blend;
   const sides = strokeWidths(node);
   // Image strokes paint nothing, as on the canvas.
   const paints = () =>
@@ -810,7 +812,6 @@ function text(
   const fill = (entry: number, paints: readonly Paint[]) => {
     for (const paint of paints) {
       if (!shows(paint)) continue;
-      if (blendOf(paint)) b.unsupported |= UNSUPPORTED.blend;
       const p = wirePaint(paint, width, height);
       if (p) b.ops.push({ op: "fill", path: entry, evenOdd: false, paint: p });
     }
@@ -840,7 +841,6 @@ function text(
   const strokes = getProp(node.props, "strokes").filter(shows);
   const weight = getProp(node.props, "strokeWeight");
   if (strokes.length > 0 && weight > 0 && runs.runs.length > 0) {
-    if (strokes.some(blendOf)) b.unsupported |= UNSUPPORTED.blend;
     const align = getProp(node.props, "strokeAlign");
     const style = strokeStyle(
       align === "center" ? weight : weight * 2,
@@ -889,7 +889,7 @@ function text(
     const fills = getProp(node.props, "fills");
     const paint = [...fills].reverse().find(shows);
     const greek = paint
-      ? wirePaint(paint, width, height, 0.55)
+      ? wirePaint({ ...paint, blendMode: "normal" }, width, height, 0.55)
       : { kind: "solid" as const, color: [0, 0, 0, 0.55] as const };
     if (greek) {
       const align = getProp(node.props, "textAlign");
@@ -916,24 +916,19 @@ function text(
   }
 }
 
-/** Effects, masks and blends the engine doesn't draw yet: their bits. */
+/** Effects and masks the engine doesn't draw yet: their bits. */
 function unsupportedOf(node: NodeRecord, scene: Scene): number {
   let bits = 0;
   for (const e of getProp(node.props, "effects")) {
     if (e.visible === false) continue;
-    if (e.type === "drop-shadow" || e.type === "inner-shadow") {
-      if (e.blendMode !== undefined && e.blendMode !== "normal") bits |= UNSUPPORTED.blend;
-    } else if (e.type === "background-blur") bits |= UNSUPPORTED.backgroundBlur;
+    if (e.type === "background-blur") bits |= UNSUPPORTED.backgroundBlur;
     else if (e.type === "glass") bits |= UNSUPPORTED.glass;
     else if (e.type === "noise") bits |= UNSUPPORTED.noise;
     else if (e.type === "texture") bits |= UNSUPPORTED.texture;
   }
-  const mode = getProp(node.props, "blendMode");
-  if (mode !== "normal") bits |= UNSUPPORTED.blend;
   const id = node.id;
   const masks = isActiveMask(node);
   if (masks || scene.hasMask(id)) bits |= UNSUPPORTED.mask;
-  if (getProp(node.props, "fills").some((p) => shows(p) && blendOf(p))) bits |= UNSUPPORTED.blend;
   return bits;
 }
 
@@ -945,6 +940,7 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
   const hidden = node.props.visible === false || ctx.hidden.has(node.id);
   const opacity = getProp(node.props, "opacity");
   const isolate = opacity < 1 && fadesAsOne(node, children);
+  const blend = blendCode(getProp(node.props, "blendMode"));
   b.unsupported |= unsupportedOf(node, scene);
   const w = node.type === "group" ? 0 : getProp(node.props, "width");
   const h = node.type === "group" ? 0 : getProp(node.props, "height");
@@ -958,7 +954,8 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
     (hidden ? FLAG.hidden : 0) |
     (isolate ? FLAG.isolate : 0) |
     (node.type === "group" ? FLAG.group : 0) |
-    (wirePost.length > 0 ? FLAG.post : 0);
+    (wirePost.length > 0 ? FLAG.post : 0) |
+    (blend !== 0 ? FLAG.blend : 0);
   if (node.type === "group") {
     b.ops.push({ op: "children" });
   } else if (node.type === "text") {
@@ -1001,6 +998,7 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
       ops: b.ops,
       coarse: b.coarse,
       ...(wirePost.length > 0 ? { postEffects: wirePost } : {}),
+      ...(blend !== 0 ? { blend } : {}),
     },
     images: b.images,
     textPending: b.textPending,

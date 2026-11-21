@@ -6,6 +6,7 @@
 //! code and message. Nothing panics across it: inputs are validated (`wire.rs`, `record.rs`),
 //! sizes are limited (`limits.rs`), and the fuzz tests (`tests/fuzz.rs`) hold that.
 
+pub mod blend;
 pub mod blur;
 pub mod cpu;
 pub mod diamond;

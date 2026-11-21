@@ -90,9 +90,9 @@ fn readers(revision: u32, red: f32) -> Vec<u8> {
     let mut msg = W::new(ANY, revision);
     msg.reset();
     let mut outer = Rec::new([1.0, 0.0, 0.0, 1.0, 128.0, 0.0], [18.0, 32.0]);
-    outer.ops = vec![Op::Children, Op::Read { halo: 8.0 }];
+    outer.ops = vec![Op::Children, Op::Read { kernel: 1, halo: 8.0 }];
     let mut inner = Rec::new([1.0, 0.0, 0.0, 1.0, -8.0, 0.0], [6.0, 32.0]);
-    inner.ops = vec![Op::Read { halo: 8.0 }];
+    inner.ops = vec![Op::Read { kernel: 1, halo: 8.0 }];
     msg.set(1, 0, &outer);
     msg.set(2, 1, &solid(-19.0, 7.0, 32.0, red));
     msg.set(3, 1, &inner);
@@ -145,17 +145,17 @@ fn nested(revision: u32, red: f32) -> Vec<u8> {
             even_odd: false,
             paint: Paint::Solid([0.0, 0.0, 1.0, 1.0]),
         },
-        Op::Read { halo: 8.0 },
+        Op::Read { kernel: 1, halo: 8.0 },
         Op::Children,
-        Op::Read { halo: 8.0 },
+        Op::Read { kernel: 1, halo: 8.0 },
     ];
     // On the page: the middle at 150..160, the inner at 140..150, the fill at 126..136; each
     // reader reads 8 round itself, so the inner reads the fill, the middle the inner, the outer
     // the middle, and none reads further.
     let mut middle = Rec::new([1.0, 0.0, 0.0, 1.0, -10.0, 0.0], [10.0, 32.0]);
-    middle.ops = vec![Op::Children, Op::Read { halo: 8.0 }];
+    middle.ops = vec![Op::Children, Op::Read { kernel: 1, halo: 8.0 }];
     let mut inner = Rec::new([1.0, 0.0, 0.0, 1.0, -10.0, 0.0], [10.0, 32.0]);
-    inner.ops = vec![Op::Read { halo: 8.0 }];
+    inner.ops = vec![Op::Read { kernel: 1, halo: 8.0 }];
     msg.set(1, 0, &outer);
     msg.set(2, 1, &middle);
     msg.set(3, 2, &solid(-24.0, 10.0, 32.0, red));
@@ -289,7 +289,7 @@ fn a_reader_chain_against_preorder_checks_each_change_once() {
     list.reset();
     for id in 1..=NESTED {
         let mut r = Rec::new([1.0, 0.0, 0.0, 1.0, -4.0, 0.0], [1.0, 8.0]);
-        r.ops = vec![Op::Children, Op::Read { halo: 2.0 }];
+        r.ops = vec![Op::Children, Op::Read { kernel: 1, halo: 2.0 }];
         list.set(id, id - 1, &r);
     }
     let mut engine = Engine::new(Limits::default());
@@ -1210,4 +1210,231 @@ fn layer_blur_matches_across_48px_tile_seams_at_pyramid_sigma_and_invalidates_ch
         .render_cpu_tiled(96, 64, cam, [1.0; 4], TiledOptions::default())
         .unwrap();
     assert_eq!(tiled_after, whole_after, "stale blurred halo survived in neighbor tile");
+}
+
+#[test]
+fn blended_layer_and_pass_through_group_match_across_tile_seams_and_refuse_split_drag() {
+    // A backdrop spanning two 48 px tiles, covered by a faded pass-through container holding a
+    // linear-dodge blended child straddling the tile seam. Tiled rendering must match whole-frame
+    // rendering bit-for-bit, split-drag must be refused when blends are present, and moving the
+    // child must invalidate both tiles cleanly.
+    let mut bg = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [96.0, 64.0]);
+    bg.paths.push(Entry::Rect {
+        w: 96.0,
+        h: 64.0,
+        radii: [0.0; 4],
+    });
+    bg.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.25, 0.45, 0.7, 1.0]),
+    });
+
+    let mut frame = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [96.0, 64.0]);
+    frame.flags = 2; // isolate (fades as one, pass-through because child uses blend)
+    frame.opacity = 0.7;
+    frame.ops.push(Op::Children);
+
+    let mut blended = Rec::new([1.0, 0.0, 0.0, 1.0, 28.0, 12.0], [40.0, 36.0]);
+    blended.layer_blend = 16; // linear-dodge
+    blended.paths.push(Entry::Rect {
+        w: 40.0,
+        h: 36.0,
+        radii: [6.0; 4],
+    });
+    blended.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.6, 0.4, 0.2, 0.9]),
+    });
+
+    let mut msg = W::new(ANY, 1);
+    msg.reset();
+    msg.set(1, 0, &bg);
+    msg.set(2, 0, &frame);
+    msg.set(3, 2, &blended);
+    msg.order(0, &[1, 2]);
+    let mut e = Engine::new(Limits::default());
+    e.use_cpu_tiles(48, 64);
+    e.apply(&msg.finish()).unwrap();
+    // Pages with non-normal blends must not use SrcOver split-drag compositing.
+    assert!(e.store.selection(&[1]).is_none());
+    assert!(e.store.selection(&[2]).is_none());
+    assert!(e.store.selection(&[3]).is_none());
+
+    let cam = camera(1.0, 0.0, 0.0);
+    let whole = e.render_cpu(96, 64, cam, [1.0; 4], false).unwrap().0.to_vec();
+    let (tiled, stats) = e
+        .render_cpu_tiled(96, 64, cam, [1.0; 4], TiledOptions::default())
+        .unwrap();
+    assert!(stats.exact);
+    assert_eq!(tiled, whole, "blended pass-through tile seam mismatch");
+
+    let mut move_blend = W::new(1, 2);
+    move_blend.transform(3, [1.0, 0.0, 0.0, 1.0, 56.0, 12.0]);
+    e.apply(&move_blend.finish()).unwrap();
+    let whole_after = e.render_cpu(96, 64, cam, [1.0; 4], false).unwrap().0.to_vec();
+    let (tiled_after, _) = e
+        .render_cpu_tiled(96, 64, cam, [1.0; 4], TiledOptions::default())
+        .unwrap();
+    assert_eq!(tiled_after, whole_after, "stale blended pixels survived after move");
+}
+
+#[test]
+fn blended_group_isolates_children_like_figma_and_svg() {
+    // Regression for PR #242 review: a group/frame with a non-normal blend mode (such as multiply)
+    // isolates its children and blends the flattened group once against the backdrop (matching
+    // Figma's dodge-layer-frame golden and SVG mix-blend-mode), rather than inheriting the blend
+    // mode onto each overlapping child.
+    let mut bg = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [64.0, 64.0]);
+    bg.paths.push(Entry::Rect {
+        w: 64.0,
+        h: 64.0,
+        radii: [0.0; 4],
+    });
+    bg.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0]),
+    });
+
+    let mut group = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [64.0, 64.0]);
+    group.flags = 4; // FLAG_GROUP
+    group.layer_blend = 1; // multiply
+    group.ops.push(Op::Children);
+
+    let mut child1 = Rec::new([1.0, 0.0, 0.0, 1.0, 4.0, 4.0], [40.0, 40.0]);
+    child1.paths.push(Entry::Rect {
+        w: 40.0,
+        h: 40.0,
+        radii: [0.0; 4],
+    });
+    child1.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0]),
+    });
+
+    let mut child2 = Rec::new([1.0, 0.0, 0.0, 1.0, 16.0, 16.0], [40.0, 40.0]);
+    child2.paths.push(Entry::Rect {
+        w: 40.0,
+        h: 40.0,
+        radii: [0.0; 4],
+    });
+    child2.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([128.0 / 255.0, 128.0 / 255.0, 128.0 / 255.0, 1.0]),
+    });
+
+    let mut msg = W::new(ANY, 1);
+    msg.reset();
+    msg.set(1, 0, &bg);
+    msg.set(2, 0, &group);
+    msg.set(3, 2, &child1);
+    msg.set(4, 2, &child2);
+    msg.order(0, &[1, 2]);
+    let mut e = Engine::new(Limits::default());
+    e.apply(&msg.finish()).unwrap();
+    let (px, _) = e.render_cpu(64, 64, camera(1.0, 0.0, 0.0), [1.0; 4], false).unwrap();
+    // Overlap region (24, 24): isolated multiply of 0.5 over 0.5 -> ~64, NOT double-multiplied 32.
+    let i = (24 * 64 + 24) * 4;
+    assert!(
+        (i32::from(px[i]) - 64).abs() <= 1,
+        "expected isolated multiply gray ~64 at overlap, got {:?}",
+        &px[i..i + 4]
+    );
+}
+
+#[test]
+fn wire_minor_version_gates_newer_features() {
+    // Regression for PR #242 review: messages declaring a lower minor version must be refused
+    // when they carry flags, ops, path entries, or paint blends introduced in a higher minor.
+    let mut blended = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [20.0, 20.0]);
+    blended.layer_blend = 1;
+    blended.paths.push(Entry::Rect {
+        w: 20.0,
+        h: 20.0,
+        radii: [0.0; 4],
+    });
+    blended.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([1.0, 0.0, 0.0, 1.0]),
+    });
+    let mut w = W::new(ANY, 1);
+    w.reset();
+    w.set(1, 0, &blended);
+    let mut bytes = w.finish();
+    // Patch wire header minor (u16 LE at offset 6..8) from 4 down to 3.
+    bytes[6] = 3;
+    bytes[7] = 0;
+    let mut e = Engine::new(Limits::default());
+    let err = e.apply(&bytes).unwrap_err();
+    assert_eq!(err.code, drawpane_engine::error::ErrorCode::Malformed);
+
+    // Normal 1.0 record is accepted under minor 3, while FLAG_PROVISIONAL (1.1) is refused under 1.0.
+    let mut plain = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [20.0, 20.0]);
+    plain.paths.push(Entry::Rect {
+        w: 20.0,
+        h: 20.0,
+        radii: [0.0; 4],
+    });
+    plain.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([1.0, 0.0, 0.0, 1.0]),
+    });
+    let mut w2 = W::new(ANY, 1);
+    w2.reset();
+    w2.set(1, 0, &plain);
+    let mut b2 = w2.finish();
+    b2[6] = 3;
+    b2[7] = 0;
+    assert!(e.apply(&b2).is_ok());
+
+    let mut prov = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [20.0, 20.0]);
+    prov.flags = 8; // FLAG_PROVISIONAL (wire 1.1)
+    let mut w3 = W::new(ANY, 2);
+    w3.reset();
+    w3.set(1, 0, &prov);
+    let mut b3 = w3.finish();
+    b3[6] = 0;
+    b3[7] = 0;
+    let err3 = e.apply(&b3).unwrap_err();
+    assert_eq!(err3.code, drawpane_engine::error::ErrorCode::Malformed);
+
+    // Layer blur post-effect (FLAG_POST, wire 1.4) refused under minor 3.
+    let mut blurred = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [20.0, 20.0]);
+    blurred.post.push(Post::LayerBlur(8.0));
+    let mut w4 = W::new(ANY, 3);
+    w4.reset();
+    w4.set(1, 0, &blurred);
+    let mut b4 = w4.finish();
+    b4[6] = 3;
+    b4[7] = 0;
+    let err4 = e.apply(&b4).unwrap_err();
+    assert_eq!(err4.code, drawpane_engine::error::ErrorCode::Malformed);
+
+    // Paint-level non-normal blend (wire 1.4) also refused under minor 3.
+    let mut paint_blend = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [20.0, 20.0]);
+    paint_blend.blend = 16; // linear-dodge
+    paint_blend.paths.push(Entry::Rect {
+        w: 20.0,
+        h: 20.0,
+        radii: [0.0; 4],
+    });
+    paint_blend.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([1.0, 0.0, 0.0, 1.0]),
+    });
+    let mut w5 = W::new(ANY, 4);
+    w5.reset();
+    w5.set(1, 0, &paint_blend);
+    let mut b5 = w5.finish();
+    b5[6] = 3;
+    b5[7] = 0;
+    let err5 = e.apply(&b5).unwrap_err();
+    assert_eq!(err5.code, drawpane_engine::error::ErrorCode::Malformed);
 }

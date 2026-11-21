@@ -39,17 +39,18 @@ Each glyph definition gets a serial no other definition has, in any engine, acro
 
 | Field | Type | |
 | --- | --- | --- |
-| flags | u32 | 1 hidden, 2 isolate (fades as one: an opacity group), 4 group (no paint of its own; its ops are only `children`), 8 provisional (sent ahead of its real drawing, as text not yet shaped while a page opens or while its face loads: drawn as its coarse ops at every scale, never exact, and sent again whole soon after; it counts its box, grown by its reach, wherever its coarse ops paint or don't, and an export is refused while any shown record is provisional), 16 reserved for 3B context, 32 post (minor 1.4: ordered `postEffects` list follows `coarse`) |
+| flags | u32 | 1 hidden, 2 isolate (fades as one: an opacity group), 4 group (no paint of its own; its ops are only `children`), 8 provisional (sent ahead of its real drawing, as text not yet shaped while a page opens or while its face loads: drawn as its coarse ops at every scale, never exact, and sent again whole soon after; it counts its box, grown by its reach, wherever its coarse ops paint or don't, and an export is refused while any shown record is provisional), 16 reserved for 3B context, 32 post (minor 1.4: ordered `postEffects` list follows `coarse`), 64 blend (minor 1.4: layer blend mode `u32` `1..=17` follows `postEffects` or `coarse`) |
 | opacity | f32 | Its own; inherited opacity multiplies down unless it isolates. |
 | transform | f64 × 6 | Its units to its parent record's (`a b c d e f`), not to the page: moving a board is one command. |
 | width, height | f32 × 2 | Its box, for the speck rule (layers under half a device pixel both ways are skipped on screen). |
 | coarse below | f32 | Below this many device pixels per unit, its coarse ops are drawn instead (text too small to read, as bars). 0: never. Screen only; exports always draw the ops. |
 | reach | f32 | How far it may paint past its box, in its units (strokes, effects, overhanging type). A record the engine refuses counts its box grown by this, so it's refused wherever it could show, never culled away. |
-| unsupported | u32 | Features the builder found it needs that the engine doesn't draw yet (`UNSUPPORTED` in wire.ts). The engine adds the ones it finds itself while decoding (a blend mode, a backdrop reader outside the tests), so anything it would refuse while drawing is known before it draws. A page holding a shown record with any is refused whole, wherever the record is. |
+| unsupported | u32 | Features the builder found it needs that the engine doesn't draw yet (`UNSUPPORTED` in wire.ts). The engine derives additional flags while decoding, such as for backdrop readers outside the tests. A page holding a shown record with any unsupported features is refused whole, wherever the record is. |
 | paths | u32 count, entries | Its shapes, referred to by index |
 | ops | u32 count, ops | What it draws, in order |
 | coarse | u32 count, ops | Drawn instead of `ops` below `coarse below` (no `children`) |
 | post effects | u32 count, entries | Present only when `flags & 32` is set (minor 1.4). Applied in order to the record's finished picture: kind `1` = layer blur (`radius` `f32`, `sigma = 0.45 * radius * view_scale`, decision 0013 revision). |
+| blend | u32 | Present only when `flags & 64` is set (minor 1.4). Non-normal layer blend mode (`1..=17`, matching `BLEND` in `wire.ts`). |
 
 **Path entries:**
 
@@ -75,10 +76,10 @@ Each glyph definition gets a serial no other definition has, in any engine, acro
 | 6 | read | kernel `u32`, halo `f32` (its units): a backdrop reader over its box, reading its box grown by the halo. Refused outside the tests in phase 1 (glass and background blur arrive in phase 3); the render graph already orders and invalidates by it. |
 | 7 | layer | compose `u32` (0 SrcOver isolated, 1 DestOut, 2 DestIn). Opens a compositing layer (balanced LIFO with `unlayer` and `clip`/`unclip`). Requires wire version 1.2 (`minor >= 2`); rejected with `ErrorCode.Version` in 1.0 and 1.1 messages. |
 | 8 | unlayer | Closes the matching `layer`. Requires wire version 1.2 (`minor >= 2`). |
-| 13 | drop shadow | path count `u32`, path indices `u32[]`, `u32` flags (bit 0: even-odd, bit 1: stroke cast), `dx` `f32`, `dy` `f32`, `blur` `f32` (Figma radius), RGBA `f32` × 4, blend `u32` (0..17; minor 1.4; opcodes 7..=8 reserved for 3C, 9..=12 reserved for 3B), plus stroke style (same fields as op 2) when bit 1 is set. Casts from all listed entries combined (stroked when bit 1 is set, for open stroke-only layers), offset in page space by `(dx, dy)` and blurred with Figma's calibrated Gaussian (`0.45 * blur`). Cut-out shadows (decision 0031) wrap the op in `clip(outside(shape), evenOdd: true)`. Non-normal blends mark the record unsupported (`UNSUPPORTED.blend`) until blend kernels land. |
+| 13 | drop shadow | path count `u32`, path indices `u32[]`, `u32` flags (bit 0: even-odd, bit 1: stroke cast), `dx` `f32`, `dy` `f32`, `blur` `f32` (Figma radius), RGBA `f32` × 4, blend `u32` (0..17; minor 1.4; 9..=12 reserved for 3B), plus stroke style (same fields as op 2) when bit 1 is set. Casts from all listed entries combined (stroked when bit 1 is set, for open stroke-only layers), offset in page space by `(dx, dy)` and blurred with Figma's calibrated Gaussian (`0.45 * blur`). Cut-out shadows (decision 0031) wrap the op in `clip(outside(shape), evenOdd: true)`. |
 | 14 | inner shadow | `shape` `u32`, `hole` `u32` (`0xFFFFFFFF` when spread shrinks the hole to empty), `u32` even-odd, `dx` `f32`, `dy` `f32`, `blur` `f32`, RGBA `f32` × 4, blend `u32` (0..17; minor 1.4). Clips to `shape`, blurs the shifted `hole` with Figma's calibrated Gaussian (`0.45 * blur`), and tints the complement (`1 - alpha`). |
 
-**Paints:** a kind `u32` and a blend mode `u32` (only 0, normal, is drawn; anything else marks its record unsupported, and the builder flags it first).
+**Paints:** a kind `u32` and a blend mode `u32` (`0` normal, `1..=17` per `BLEND` in `wire.ts`: 11 W3C separable modes, 4 W3C non-separable HSL modes, `16` Figma linear-dodge, `17` Figma linear-burn).
 
 | Kind | | Body |
 | --- | --- | --- |

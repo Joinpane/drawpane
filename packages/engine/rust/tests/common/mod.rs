@@ -178,6 +178,7 @@ pub enum Op {
     Unclip,
     Children,
     Read {
+        kernel: u32,
         halo: f32,
     },
     Layer {
@@ -222,6 +223,8 @@ pub struct Rec {
     pub ops: Vec<Op>,
     pub coarse: Vec<Op>,
     pub post: Vec<Post>,
+    /// Layer blend mode (0 normal, 1..=17 per wire.ts `BLEND`).
+    pub layer_blend: u32,
     /// The blend mode written on every paint (0 normal), and every rect entry's smoothing.
     pub blend: u32,
     pub smoothing: f32,
@@ -240,6 +243,7 @@ impl Rec {
             ops: vec![],
             coarse: vec![],
             post: vec![],
+            layer_blend: 0,
             blend: 0,
             smoothing: 0.0,
         }
@@ -274,7 +278,7 @@ impl Rec {
             }
             Paint::Image { id, m, tile, opacity } => {
                 w.u32(6);
-                w.u32(0);
+                w.u32(blend);
                 w.u32(*id);
                 w.m(*m);
                 w.u32(u32::from(*tile));
@@ -282,12 +286,12 @@ impl Rec {
             }
             Paint::Placeholder => {
                 w.u32(7);
-                w.u32(0);
+                w.u32(blend);
                 w.f32(1.0);
             }
             Paint::PlaceholderAt(opacity) => {
                 w.u32(7);
-                w.u32(0);
+                w.u32(blend);
                 w.f32(*opacity);
             }
         }
@@ -331,9 +335,9 @@ impl Rec {
                 }
                 Op::Unclip => w.u32(4),
                 Op::Children => w.u32(5),
-                Op::Read { halo } => {
+                Op::Read { kernel, halo } => {
                     w.u32(6);
-                    w.u32(1);
+                    w.u32(*kernel);
                     w.f32(*halo);
                 }
                 Op::Layer { compose } => {
@@ -390,7 +394,7 @@ impl Rec {
         }
     }
     pub fn write(&self, w: &mut W) {
-        let flags = self.flags | if self.post.is_empty() { 0 } else { 32 };
+        let flags = self.flags | if self.post.is_empty() { 0 } else { 32 } | if self.layer_blend != 0 { 64 } else { 0 };
         w.u32(flags);
         w.f32(self.opacity);
         w.m(self.transform);
@@ -466,6 +470,9 @@ impl Rec {
                     }
                 }
             }
+        }
+        if self.layer_blend != 0 {
+            w.u32(self.layer_blend);
         }
     }
 }

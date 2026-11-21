@@ -504,6 +504,12 @@ impl Engine {
             };
             let cur_tile_bytes = cur_cols.saturating_mul(cur_rows).saturating_mul(4);
             let has_post = id != crate::store::ROOT && !r.post_effects.is_empty();
+            let through = id != crate::store::ROOT
+                && !has_post
+                && r.blend == 0
+                && r.isolate()
+                && r.opacity < 1.0
+                && self.store.subtree_has_blend(id);
             let mut next_cols = cur_cols;
             let mut next_rows = cur_rows;
             let mut next_iso = live_iso;
@@ -564,25 +570,54 @@ impl Engine {
                     }
                     let src_bytes = src_w.saturating_mul(src_h).saturating_mul(4);
                     let src_scene = crate::cpu::scene_estimate_bytes(src_w as u32, src_h as u32);
-                    // Offscreen input pixmap + blur scratch/pyramid + scene strips + blurred output.
+                    // Offscreen input pixmap + blur scratch/pyramid + scene strips + blurred output
+                    // (+ backdrop copy when blended).
+                    let blend_extra = if r.blend != 0 { cur_tile_bytes } else { 0 };
                     let blur_need = live_iso
                         .saturating_add(src_bytes.saturating_mul(3))
                         .saturating_add(src_scene)
-                        .saturating_add(cur_tile_bytes);
+                        .saturating_add(cur_tile_bytes)
+                        .saturating_add(blend_extra);
                     peak_total = peak_total.max(blur_need);
                     next_cols = src_w;
                     next_rows = src_h;
                     next_iso = live_iso.saturating_add(src_bytes).saturating_add(src_scene);
+                } else if r.blend != 0 {
+                    next_iso = live_iso
+                        .saturating_add(cur_tile_bytes)
+                        .saturating_add(crate::cpu::scene_estimate_bytes(cur_cols as u32, cur_rows as u32));
+                    peak_total = peak_total.max(next_iso.saturating_add(cur_tile_bytes));
                 }
-            } else if id != crate::store::ROOT && r.isolate() && r.opacity < 1.0 && self.store.subtree_has_pass(id) {
+            } else if id != crate::store::ROOT
+                && (r.blend != 0 || through || (r.isolate() && r.opacity < 1.0 && self.store.subtree_has_pass(id)))
+            {
                 next_iso = live_iso
                     .saturating_add(cur_tile_bytes)
                     .saturating_add(crate::cpu::scene_estimate_bytes(cur_cols as u32, cur_rows as u32));
-                peak_total = peak_total.max(next_iso);
+                let blend_extra = if r.blend != 0 || through { cur_tile_bytes } else { 0 };
+                peak_total = peak_total.max(next_iso.saturating_add(blend_extra));
             }
+            let next_tile_bytes = next_cols.saturating_mul(next_rows).saturating_mul(4);
+            let next_scene_bytes = crate::cpu::scene_estimate_bytes(next_cols as u32, next_rows as u32);
             for op in &r.ops {
                 match op {
-                    crate::record::Op::DropShadow { blur, .. } | crate::record::Op::InnerShadow { blur, .. } => {
+                    crate::record::Op::Fill { blend, .. } | crate::record::Op::Stroke { blend, .. } if *blend != 0 => {
+                        let blend_need = next_iso
+                            .saturating_add(next_tile_bytes.saturating_mul(2))
+                            .saturating_add(next_scene_bytes);
+                        peak_total = peak_total.max(blend_need);
+                    }
+                    crate::record::Op::DropShadow { blur, blend, .. }
+                    | crate::record::Op::InnerShadow { blur, blend, .. } => {
+                        let shadow_iso = if *blend != 0 {
+                            let b_iso = next_iso
+                                .saturating_add(next_tile_bytes)
+                                .saturating_add(next_scene_bytes);
+                            peak_total = peak_total.max(b_iso.saturating_add(next_tile_bytes));
+                            b_iso
+                        } else {
+                            next_iso
+                        };
                         let sigma = crate::blur::sigma_from_radius(*blur) * view_scale as f32;
                         crate::blur::validate_sigma(
                             sigma,
@@ -606,11 +641,10 @@ impl Engine {
                                 )));
                             }
                             let mask_b = mw.saturating_mul(mh).saturating_mul(4);
-                            let cur_out = next_cols.saturating_mul(next_rows).saturating_mul(4);
-                            let shadow_need = next_iso
+                            let shadow_need = shadow_iso
                                 .saturating_add(mask_b.saturating_mul(3))
                                 .saturating_add(crate::cpu::scene_estimate_bytes(mw as u32, mh as u32))
-                                .saturating_add(cur_out);
+                                .saturating_add(next_tile_bytes);
                             peak_total = peak_total.max(shadow_need);
                         }
                     }
@@ -701,7 +735,7 @@ impl Engine {
                     for op in &node.record.ops {
                         let (path, pad, paint) = match op {
                             Op::Fill { path, paint, .. } => (*path, 0.0, paint),
-                            Op::Stroke { path, style, paint } => {
+                            Op::Stroke { path, style, paint, .. } => {
                                 if style.width <= 0.0 {
                                     continue;
                                 }
