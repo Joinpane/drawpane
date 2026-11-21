@@ -63,8 +63,12 @@ vi.mock("@drawpane/editor", () => ({
     waiting = 0;
     revision = 1;
     stats = { fresh: true, records: 1 };
+    opening = false;
     setEditorState() {}
     setView() {}
+    openSlice(id: string) {
+      return this.build(id);
+    }
     build(id: string) {
       this.pageId = id;
       this.supported = state.builderSupported;

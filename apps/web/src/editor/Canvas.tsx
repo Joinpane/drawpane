@@ -535,7 +535,10 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         );
         engineCamera = s.camera;
         engineMoved = r.drawn && moving && !r.exact && engine.backend !== "cpu-worker";
-        if (r.drawn) {
+        if (r.awaitingPreview) {
+          drewEngine = true;
+          contentDirty = false;
+        } else if (r.drawn) {
           drewEngine = true;
           contentDirty = false;
           exact = false;

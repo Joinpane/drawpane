@@ -102,6 +102,7 @@ const LOSS_WINDOW_MS = 60_000;
 const MAX_RECOVERIES_IN_WINDOW = 2;
 /** Consecutive healthy GPU wait timeouts before stepping down without blaming device loss. */
 const MAX_CONSECUTIVE_TIMEOUTS = 3;
+const OPENING_PREVIEW_TIMEOUT_MS = 8_000;
 /** Frames in a row a GPU canvas cannot take before stepping down. */
 const UNPRESENTED = 3;
 /** Device-pixel tile edge for CPU view mode. */
@@ -545,6 +546,8 @@ export interface EngineDraw {
    * provisional while its faces load, or an async CPU worker frame in flight).
    */
   readonly settled: boolean;
+  /** An opening preview is already submitted. Its completion schedules the next slice. */
+  readonly awaitingPreview?: boolean;
 }
 
 const NOT_DRAWN: EngineDraw = {
@@ -1006,6 +1009,8 @@ export class EngineView {
   onGpuPresented: (frame: number) => void = () => {};
   /** Coalesces direct-present `gpuFinished` stamps so WebGL2 never exceeds MAX_FINISHED_WAITERS. */
   #shownWaiting = false;
+  #openingFrame: number | null = null;
+  #openingPreviewTimer = 0;
   /** What drawing between frames did, summed (`ahead`), for the bench and the debug handle. */
   idle = { slices: 0, tiles: 0, ms: 0 };
   /**
@@ -1846,7 +1851,7 @@ export class EngineView {
     for (const ref of this.#pending) if (!used.has(ref)) this.#pending.delete(ref);
   }
 
-  /** The last fresh list (a page shown): building it and applying it, in ms (benches). */
+  /** The first message of the last fresh list: building and applying it, in ms (benches). */
   opened: { pageId: string; buildMs: number; applyMs: number; records: number } | null = null;
 
   #takeUploadFailure(): { readonly message: string; readonly code: ErrorCode | null } | null {
@@ -1861,13 +1866,12 @@ export class EngineView {
     if (!engine) return false;
     this.#uploadFailure = null;
     const t0 = performance.now();
-    // A page shown afresh: its text sent provisional (coarse bars), encoded whole over the next
-    // frames and the time between them, so the first frame doesn't wait for every line to be
-    // shaped.
+    // A page shown afresh sends geometry in slices and leaves its text provisional until
+    // the whole structure is in view. The first frame need not wait for the full list.
     let message =
-      this.#builder.pageId === pageId
-        ? this.#builder.update(textMs)
-        : this.#builder.build(pageId, undefined, { deferText: true });
+      this.#builder.pageId !== pageId || this.#builder.opening
+        ? this.#builder.openSlice(pageId)
+        : this.#builder.update(textMs, true);
     const uploadErr = this.#takeUploadFailure();
     if (uploadErr) {
       if (uploadErr.code === ErrorCode.Limit) {
@@ -1889,7 +1893,7 @@ export class EngineView {
       };
     this.#builder.acknowledge(r.ok, engine.revision);
     if (!r.ok && r.code === ErrorCode.Revision) {
-      message = this.#builder.build(pageId);
+      message = this.#builder.openSlice(pageId);
       r = engine.apply(message);
       this.#builder.acknowledge(r.ok, engine.revision);
     }
@@ -1897,7 +1901,7 @@ export class EngineView {
       this.#handleGpuFailure(r, false);
       return false;
     }
-    this.#dropUnused();
+    if (this.#builder.stats.fresh || !this.#builder.opening) this.#dropUnused();
     return true;
   }
 
@@ -2014,6 +2018,9 @@ export class EngineView {
       return null;
     }
     const b = this.#builder;
+    // Initial geometry advances with a new frame so each slice can be shown before the
+    // next one starts. Do not run an unbroken sequence of idle slices during open.
+    if (b.opening) return null;
     try {
       const text = (): EngineAhead | null => {
         const t = performance.now();
@@ -2093,10 +2100,24 @@ export class EngineView {
   #supersede(): void {
     this.#epoch++;
     this.#shownWaiting = false;
+    this.#clearOpeningFrame();
     this.#want = null;
     this.#cpuJob = null;
     this.#cpuCompletedKey = null;
     this.#cpuCompletedExact = false;
+  }
+
+  #clearOpeningFrame(): void {
+    this.#openingFrame = null;
+    if (!this.#openingPreviewTimer) return;
+    window.clearTimeout(this.#openingPreviewTimer);
+    this.#openingPreviewTimer = 0;
+  }
+
+  #completeOpeningFrame(n: number): void {
+    if (this.#openingFrame !== n) return;
+    this.#clearOpeningFrame();
+    this.onChange();
   }
 
   #drawGpu(
@@ -2112,6 +2133,15 @@ export class EngineView {
   ): EngineDraw {
     const engine = this.#engine;
     if (!engine) return NOT_DRAWN;
+    if (this.#openingFrame !== null)
+      return {
+        drawn: true,
+        ready: false,
+        exact: false,
+        ahead: false,
+        settled: true,
+        awaitingPreview: true,
+      };
     const t0 = performance.now();
     this.#builder.setEditorState(state);
     // What's in view, in page units: text still to send whole goes there first.
@@ -2138,7 +2168,8 @@ export class EngineView {
     // While text in view is still to be sent whole, a frame draws only what nothing stands in
     // for (as while moving): a tile drawn now would be stale again when the text arrives, and the
     // time between frames sends the text first.
-    const textFirst = this.#builder.pendingVisible > 0;
+    const opening = this.#builder.opening;
+    const textFirst = opening || this.#builder.pendingVisible > 0;
     const frame = engine.renderGpu(
       width,
       height,
@@ -2193,8 +2224,21 @@ export class EngineView {
     this.#unpresented = 0;
     // Exact only when the list holds what the page shows: text in view still to be sent again
     // (fonts arrived) leaves the frame a stand-in, whatever the engine drew.
-    const shownExact = f.exact && this.#builder.pendingVisible === 0;
+    const shownExact = f.exact && !opening && this.#builder.pendingVisible === 0;
     const n = ++this.#frame;
+    if (opening) {
+      this.#openingFrame = n;
+      this.#openingPreviewTimer = window.setTimeout(() => {
+        if (this.#openingFrame !== n) return;
+        this.#handleGpuFailure(
+          {
+            message: "opening preview did not present before the deadline",
+            code: ErrorCode.Timeout,
+          },
+          false,
+        );
+      }, OPENING_PREVIEW_TIMEOUT_MS);
+    }
     const stamps = this.stamps;
     const gen = this.#deviceGeneration;
     const epoch = this.#epoch;
@@ -2212,9 +2256,15 @@ export class EngineView {
           this.#dead ||
           this.#recovering ||
           gen !== this.#deviceGeneration ||
-          epoch !== this.#epoch ||
-          !res.ok
+          epoch !== this.#epoch
         ) {
+          return;
+        }
+        if (!res.ok) {
+          // An older probe can already be in flight when the opening preview is submitted.
+          const openingFrame = this.#openingFrame;
+          if (!isWatch && !this.#readback && openingFrame !== null && openingFrame > targetN)
+            trackShown(openingFrame, false);
           return;
         }
         const gpu = performance.now();
@@ -2236,6 +2286,7 @@ export class EngineView {
             this.shown = { n: targetN, at };
             this.onGpuPresented(targetN);
           }
+          this.#completeOpeningFrame(targetN);
           if (isWatch && stamps && this.stamps === stamps && !stamps.shown) {
             stamps.shown = { n: targetN, at };
           }
@@ -2298,7 +2349,8 @@ export class EngineView {
       ready: this.#readback === null,
       exact: shownExact,
       ahead: f.tiles.queued > 0 || this.#builder.pending > 0,
-      settled: f.tiles.pending === 0 && f.tiles.queued === 0 && this.#builder.pending === 0,
+      settled:
+        !opening && f.tiles.pending === 0 && f.tiles.queued === 0 && this.#builder.pending === 0,
     };
   }
 
@@ -2467,6 +2519,8 @@ export class EngineView {
       this.#reading = false;
       if (this.#dead || this.#recovering || this.#engine !== engine) return;
       if (!px.ok) {
+        // Keep the existing timeout backoff in charge of waking the next opening slice.
+        if (this.#openingFrame === want.n) this.#clearOpeningFrame();
         if (px.code === ErrorCode.Timeout) {
           const health = engine.gpuCheck();
           if (!health.ok) {
@@ -2521,6 +2575,7 @@ export class EngineView {
       }
       this.#consecutiveTimeouts = 0;
       if (want.epoch !== this.#epoch || px.value.length !== want.width * want.height * 4) {
+        this.#completeOpeningFrame(want.n);
         this.#readNext();
         return;
       }
@@ -2560,6 +2615,7 @@ export class EngineView {
       if (this.stamps && !this.stamps.shown && want.exact && want.n === this.#frame)
         this.stamps.shown = { n: want.n, at: performance.now() };
       this.onPresented(want.exact && want.n === this.#frame, want.n);
+      this.#completeOpeningFrame(want.n);
       this.#readNext();
     });
   }
