@@ -1404,8 +1404,7 @@ impl Engine {
             .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
         // One pass avoids rasterizing the same reader and prefix in each touched tile. For
         // interactive drags bound the scene walk. Dense pages use their retained tiles.
-        let whole = halo_opt != Some(0)
-            && (options.budget_ms <= 0.0 || simple_reader_drag || (native_samples.is_some() && halo_opt.is_none()));
+        let whole = halo_opt != Some(0) && (options.budget_ms <= 0.0 || simple_reader_drag);
         let whole_stats = if whole {
             let mut result = gpu.render_whole(
                 &self.store,
@@ -1516,7 +1515,9 @@ impl Engine {
             read: Rect,
             reach_px: f64,
             writes_backdrop: bool,
+            native_reads: bool,
         }
+        #[allow(clippy::too_many_arguments)]
         fn collect(
             store: &Store,
             view: Affine,
@@ -1524,6 +1525,7 @@ impl Engine {
             parent: Affine,
             alpha: f32,
             parent_context: bool,
+            inside_isolation: bool,
             out: &mut Vec<ReaderNode>,
         ) {
             let Some(node) = store.nodes.get(&id) else {
@@ -1545,6 +1547,8 @@ impl Engine {
                 return;
             }
             let inner = if r.isolate() && r.opacity < 1.0 { 1.0 } else { opacity };
+            let inside_isolation =
+                inside_isolation || (r.isolate() && r.opacity < 1.0) || !r.post_effects.is_empty() || r.blend != 0;
             let box_rect = Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1]));
             let local = r
                 .content_bounds(&|g| store.glyphs.bounds(g))
@@ -1555,7 +1559,7 @@ impl Engine {
                 match op {
                     crate::record::Op::Children => {
                         for &kid in &node.children {
-                            collect(store, view, kid, world, inner, is_context, out);
+                            collect(store, view, kid, world, inner, is_context, inside_isolation, out);
                         }
                     }
                     crate::record::Op::Glass(g) if !is_context => {
@@ -1566,6 +1570,7 @@ impl Engine {
                             read: paint.inflate(reach_px, reach_px),
                             reach_px,
                             writes_backdrop: false,
+                            native_reads: false,
                         });
                     }
                     crate::record::Op::Read { halo, .. } => {
@@ -1576,6 +1581,7 @@ impl Engine {
                             read: paint.inflate(reach_px, reach_px),
                             reach_px,
                             writes_backdrop: true,
+                            native_reads: true,
                         });
                     }
                     crate::record::Op::BackgroundBlur(b_op) => {
@@ -1587,6 +1593,10 @@ impl Engine {
                             read: paint.inflate(reach_px, reach_px),
                             reach_px,
                             writes_backdrop: true,
+                            native_reads: inside_isolation
+                                || crate::blur::sigma_from_radius(b_op.radius)
+                                    * (device.determinant().abs().sqrt() as f32)
+                                    < crate::blur::VIEWPORT_HALO_MIN_SIGMA,
                         });
                     }
                     crate::record::Op::ProgressiveBlur(p_op) => {
@@ -1599,6 +1609,7 @@ impl Engine {
                             read: paint.inflate(reach_px, reach_px),
                             reach_px,
                             writes_backdrop: true,
+                            native_reads: true,
                         });
                     }
                     _ => {}
@@ -1608,7 +1619,7 @@ impl Engine {
         let mut nodes = Vec::new();
         if let Some(root) = self.store.nodes.get(&crate::store::ROOT) {
             for &kid in &root.children {
-                collect(&self.store, view, kid, Affine::IDENTITY, 1.0, false, &mut nodes);
+                collect(&self.store, view, kid, Affine::IDENTITY, 1.0, false, false, &mut nodes);
             }
         }
         let overlaps = |a: Rect, b: Rect| a.x0 <= b.x1 && b.x0 <= a.x1 && a.y0 <= b.y1 && b.y0 <= a.y1;
@@ -1636,7 +1647,7 @@ impl Engine {
                     samples = samples.union(visible.inflate(node.reach_px, node.reach_px));
                 }
             }
-            let native_reach = if node.writes_backdrop {
+            let native_reach = if node.native_reads {
                 if let Some(crop) = crop {
                     let visible = node.paint.intersect(crop.inflate(native_downstream, native_downstream));
                     if visible.width() > 0.0 && visible.height() > 0.0 {
@@ -1868,12 +1879,14 @@ impl Engine {
         };
         let result = (|| {
             let mut stats = TiledStats::default();
-            let Some(last) = tiles.last else { return Ok(stats) };
+            let Some(last) = tiles.last else {
+                return Ok(stats);
+            };
             let crop = Rect::new(0.0, 0.0, f64::from(last.size.0), f64::from(last.size.1));
             let tile = tiles.cache.tile;
             let halo = self.cpu_view_halo(last.view, crop, tile)?;
             tiles.cache.begin(background, halo);
-            let Some(plan) = tiles.cache.plan(last.view, last.size, false, Some(last), true) else {
+            let Some(plan) = tiles.cache.plan(last.view, last.size, false, Some(last), true, false) else {
                 return Ok(stats);
             };
             let t = tile as usize;
@@ -1935,7 +1948,7 @@ impl Engine {
         tiles.cache.opening = opening;
         let mut plan = tiles
             .cache
-            .plan(view, (width, height), zooming || opening, last, options.prefetch)
+            .plan(view, (width, height), zooming || opening, last, options.prefetch, false)
             .ok_or_else(|| EngineError::limit("a camera the tiles can't follow (too far out)"))?;
         let mut stats = TiledStats {
             direct: plan.direct,

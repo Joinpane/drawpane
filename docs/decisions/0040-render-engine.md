@@ -1239,6 +1239,19 @@ readers retain their own native padding. The frame reports a glass sampling
 reduction, and the 4,096 px optical padding cap is replaced by normal texture
 and working-set admission.
 
+For clear glass the height mask and bend keep device pixel coordinates. The mask
+covers only the visible lens and the support of the height kernel. Rays into the
+offscreen prefix still sample on the lower-density grid. A wide uniform
+background blur in the page plane can use the same replay. The replay saves
+the blurred prefix at that reader's paint position, and the device pass
+applies the blur with native shape and clip coverage.
+
+The coarse replay keeps its own render target and backdrop planes, and the GPU
+pools the captured textures. Moving frames use the normal retained tiles and
+settle with the reader halo when needed. The CPU Worker retries up to half of
+device resolution. If it cannot fit that view it reports a viewport limit so
+Canvas can draw the view while the Worker stays available.
+
 ## Amendment: exact camera motion (W4, 2026-11-21)
 
 Pan and zoom on Examples and Toolbars from a large iOS UI kit and on shadcn Combobox must present zero degraded frames, with frame intervals at most 16.7 ms at p95 and 20 ms at p99. This tightens the quality requirement during camera motion. Coarse readers, half-resolution pictures, incomplete coverage, and stand-ins outside a measured scale and sampling phase fail the fidelity gate. Count unpresented camera requests too, since keeping the last exact picture on screen can still leave the camera stalled.

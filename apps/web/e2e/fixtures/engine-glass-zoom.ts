@@ -54,20 +54,21 @@ export async function drawExtremeZoom(choice: RendererChoice) {
   const view = engine;
   const backend = view.backend;
   const wait = () => new Promise<void>((resolve) => requestAnimationFrame(() => resolve()));
-  async function frame(zoom: number, x: number, y: number) {
+  async function frame(zoom: number, x: number, y: number, w = width, h = height) {
     const previous = view.last.n;
-    const camera = { x: width / 2 - x * zoom, y: height / 2 - y * zoom, zoom };
+    const camera = { x: w / 2 - x * zoom, y: h / 2 - y * zoom, zoom };
     let displayed = false;
     for (let i = 0; i < 20; i++) {
       const draw = view.draw(
         pageId,
         camera,
-        width * dpr,
-        height * dpr,
+        w * dpr,
+        h * dpr,
         dpr,
         green,
         { hidden: new Set(), whole: null },
         true,
+        0,
       );
       if (!draw.drawn) {
         throw new Error(
@@ -95,18 +96,20 @@ export async function drawExtremeZoom(choice: RendererChoice) {
       throw new Error(`no new settled engine picture at ${zoom * 100}%`);
     if (view.backend !== backend)
       throw new Error(`backend changed at ${zoom * 100}%: ${JSON.stringify(fallbacks)}`);
-    const w = view.canvas.width;
-    const h = view.canvas.height;
+    const rasterWidth = view.canvas.width;
+    const rasterHeight = view.canvas.height;
     const ctx = view.canvas.getContext("2d");
     if (!ctx) throw new Error("no readback canvas");
-    const center = ctx.getImageData(Math.floor(w / 2), Math.floor(h / 2), 1, 1);
+    const cx = Math.floor(rasterWidth / 2);
+    const cy = Math.floor(rasterHeight / 2);
+    const center = ctx.getImageData(cx, cy, 1, 1);
     return {
       zoom,
       exact: view.last.exact,
       limit: view.limitReason,
-      size: [w, h],
+      size: [rasterWidth, rasterHeight],
       pixel: Array.from(center.data),
-      detail: Array.from(ctx.getImageData(Math.floor(w / 2) - 8, Math.floor(h / 2), 16, 1).data),
+      detail: Array.from(ctx.getImageData(cx - 8, cy, 16, 1).data),
     };
   }
 
@@ -138,7 +141,9 @@ export async function drawExtremeZoom(choice: RendererChoice) {
     const fuzz = [];
     for (let i = 0; i < 4; i++) {
       seed = (Math.imul(1664525, seed) + 1013904223) >>> 0;
-      fuzz.push(await frame(26 + (seed % 231), 56 + (seed % 16), 18));
+      // Keep the overlapping readers affordable on a software GPU. The
+      // named zoom cases still render the full test viewport.
+      fuzz.push(await frame(26 + (seed % 231), 56 + (seed % 16), 18, 160, 96));
     }
     // The top rim bends toward the blue band, which lies outside the viewport.
     // Alternating stripes make a missing or mispositioned refraction visible.
@@ -189,6 +194,23 @@ export async function drawExtremeZoom(choice: RendererChoice) {
       effects: [{ ...glass, intensity: 0, dispersion: 0, frost: 0, splay: 0 }],
     });
     const detailGlass = await frame(detailZoom, detailX, 18);
+    // A large Gaussian reads far past this viewport. A black-white
+    // half-plane has a midpoint near half intensity after symmetric blur.
+    const wideBlur = [];
+    for (const [i, radius] of [20, 40].entries()) {
+      const x = 1200 + i * 500;
+      editor.createLayer("rect", { x: x - 180, y: -180, width: 360, height: 360 }, pageId, {
+        fills: [{ type: "solid", color: "#ffffff" }],
+      });
+      editor.createLayer("rect", { x: x - 180, y: -180, width: 180, height: 360 }, pageId, {
+        fills: [{ type: "solid", color: "#000000" }],
+      });
+      editor.createLayer("rect", { x: x - 60, y: -60, width: 120, height: 120 }, pageId, {
+        fills: [{ type: "solid", color: "#00000001" }],
+        effects: [{ type: "background-blur", radius }],
+      });
+      wideBlur.push(await frame(radius === 20 ? 100 : 50, x, 0));
+    }
     return {
       backend,
       fallbacks,
@@ -199,6 +221,7 @@ export async function drawExtremeZoom(choice: RendererChoice) {
       refracted,
       detailReference,
       detailGlass,
+      wideBlur,
     };
   } finally {
     window.removeEventListener("drawpane:renderer-fallback", fallback);

@@ -79,7 +79,7 @@ export interface FrameStats {
    * stand-ins under tiles not drawn yet; drawn tile by tile straight into the frame (its tiles
    * don't fit the budget); or unchanged.
    */
-  readonly plan: "tiles" | "standin" | "direct" | "unchanged" | "glass-halo";
+  readonly plan: "tiles" | "standin" | "direct" | "unchanged" | "reader-halo";
   /**
    * GPU tiles: drawn this frame, still stale or missing on screen, still to draw round the view
    * (ahead of a pan: idle frames may draw them), held, evicted for room.
@@ -108,7 +108,7 @@ export interface FrameStats {
   };
 }
 
-const PLANS = ["tiles", "standin", "direct", "unchanged", "glass-halo"] as const;
+const PLANS = ["tiles", "standin", "direct", "unchanged", "reader-halo"] as const;
 
 export interface Camera {
   readonly zoom: number;

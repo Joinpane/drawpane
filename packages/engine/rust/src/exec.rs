@@ -357,6 +357,7 @@ pub trait Backend {
     #[allow(clippy::too_many_arguments)]
     fn background_blur(
         &mut self,
+        key: Option<(u32, usize)>,
         op: &BackgroundBlurOp,
         paths: &[(BezPath, bool)],
         device: Affine,
@@ -536,7 +537,9 @@ fn plan_readers(store: &Store, frame: &Frame) -> Option<ReaderPlan> {
         let mut cur = start_id;
         let mut child_of_cur = false;
         while cur != crate::store::ROOT {
-            let Some(n) = store.nodes.get(&cur) else { return };
+            let Some(n) = store.nodes.get(&cur) else {
+                return;
+            };
             if n.record.hidden() {
                 return;
             }
@@ -563,7 +566,9 @@ fn plan_readers(store: &Store, frame: &Frame) -> Option<ReaderPlan> {
                 let mut cur = node.parent;
                 let mut under_context = false;
                 while cur != crate::store::ROOT {
-                    let Some(p) = store.nodes.get(&cur) else { break };
+                    let Some(p) = store.nodes.get(&cur) else {
+                        break;
+                    };
                     if p.record.context() {
                         under_context = true;
                         break;
@@ -2771,8 +2776,16 @@ impl<B: Backend> Walk<'_, B> {
                             self.stats.coarse += 1;
                         }
                         let open = self.reader_open();
-                        self.backend
-                            .background_blur(bb, &paths, device, r.size, inner, blur_coarse, &open)?;
+                        self.backend.background_blur(
+                            Some((id, at)),
+                            bb,
+                            &paths,
+                            device,
+                            r.size,
+                            inner,
+                            blur_coarse,
+                            &open,
+                        )?;
                         self.sync_targets(is_context)?;
                     }
                     Op::ProgressiveBlur(pb) => {

@@ -16,6 +16,7 @@ export function fitEngineRaster<T>(
   camera: Camera,
   draw: (raster: Raster) => Result<T>,
   initialScale = 1,
+  minimumScale = MIN_RASTER_SCALE,
 ) {
   let scale = initialScale;
   let limit: string | null = null;
@@ -29,8 +30,8 @@ export function fitEngineRaster<T>(
     const result = draw(raster);
     if (result.ok || result.code !== ErrorCode.Limit) return { raster, result, limit };
     limit ??= result.message;
-    if (scale <= MIN_RASTER_SCALE || (raster.width === 1 && raster.height === 1))
+    if (scale <= minimumScale || (raster.width === 1 && raster.height === 1))
       return { raster, result, limit };
-    scale /= 2;
+    scale = Math.max(minimumScale, scale / 2);
   }
 }

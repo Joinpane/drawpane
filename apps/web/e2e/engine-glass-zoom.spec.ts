@@ -95,6 +95,15 @@ for (const backend of ["webgpu", "webgl2"] as const) {
           `interior at ${frame.zoom * 100}%`,
         ).toBeLessThanOrEqual(12);
     }
+    for (const frame of outcome.wideBlur) {
+      expect(frame.size).toEqual([640, 384]);
+      expect(frame.pixel[3]).toBe(255);
+      for (const channel of frame.pixel.slice(0, 3))
+        expect(
+          Math.abs(channel - 128),
+          `blur at ${frame.zoom * 100}%: ${frame.pixel}`,
+        ).toBeLessThanOrEqual(3);
+    }
     for (const frame of outcome.rim) {
       expect(frame.size).toEqual([640, 384]);
       const d = 0.65;

@@ -32,7 +32,7 @@ use crate::exec::{
     impl_draw, resolve_inradius,
 };
 use crate::glass;
-use crate::gpu_readers::{CoarseAnalytic, GlassResolve, GpuReaders};
+use crate::gpu_readers::{BlurHaloSample, CoarseAnalytic, GlassResolve, GpuReaders, NativeRim, PlainTex};
 use crate::images::{self, Level};
 use crate::masks::{self, MaskCache, MaskKey};
 use crate::progressive_blur;
@@ -640,7 +640,7 @@ struct ActiveDraw {
 }
 
 /// The glass-free prefix at a lens's paint position in the coarse viewport pass.
-struct GlassPrefix {
+struct HaloPatch {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
     origin: (i32, i32),
@@ -649,18 +649,20 @@ struct GlassPrefix {
 }
 
 const GLASS_HALO_REPLAY_SIDE: u32 = 1024;
+const HALO_SCRATCH_SLOT: usize = 2;
 const SOFTWARE_FILTER_PIXELS: usize = 512 * 1024;
 
-struct GlassHalo {
+struct ReaderHalo {
     divisor: i32,
     offset: (i32, i32),
     frame_size: (i32, i32),
     visible: IRect,
     capturing: bool,
-    prefixes: HashMap<(u32, usize), GlassPrefix>,
+    prefixes: HashMap<(u32, usize), HaloPatch>,
+    blurred: HashMap<(u32, usize), HaloPatch>,
 }
 
-impl GlassHalo {
+impl ReaderHalo {
     fn to_coarse(&self, rect: IRect, origin: (i32, i32)) -> IRect {
         let floor = |p: i32| p.div_euclid(self.divisor);
         let ceil = |p: i32| -floor(-p);
@@ -731,7 +733,7 @@ pub struct Gpu {
     scene: Scene,
     mask_scene: Scene,
     readers: GpuReaders,
-    glass_halo: Option<GlassHalo>,
+    reader_halo: Option<ReaderHalo>,
     active: Option<ActiveDraw>,
     backdrop_gen: u64,
     /// Frame textures: the one shown (`cur`) and the one being made.
@@ -743,7 +745,9 @@ pub struct Gpu {
     pages: Vec<Page>,
     /// Scratch targets and their depth buffers: slot 0 caches the plain `TILE x TILE` target for
     /// non-reader and coarse tiles, slot 1 caches the haloed (`TILE + 2 * halo`) or whole-frame target.
-    scratches: [Option<ScratchTile>; 2],
+    scratches: [Option<ScratchTile>; 3],
+    halo_reader_planes: [Option<PlainTex>; 3],
+    halo_prefix_pool: Vec<HaloPatch>,
     active_scratch: usize,
     motion_prefix: Option<MotionPrefix>,
     compositor: Option<Compositor>,
@@ -755,7 +759,7 @@ pub struct Gpu {
     shown: Option<(u64, [u32; 4], bool)>,
     /// The requested reader bounds of the last whole draw, if it fit.
     whole_samples: Option<Option<IRect>>,
-    whole_glass_halo: bool,
+    whole_reader_halo: bool,
     /// Milliseconds a tile has lately taken to draw (a running average).
     tile_ms: f64,
     blit: Option<wgpu::RenderPipeline>,
@@ -1243,7 +1247,7 @@ impl Gpu {
             scene: Scene::new(1, 1),
             mask_scene: Scene::new(1, 1),
             readers,
-            glass_halo: None,
+            reader_halo: None,
             active: None,
             backdrop_gen: 0,
             frames: Vec::new(),
@@ -1251,7 +1255,9 @@ impl Gpu {
             surface_bytes: 0,
             tiles: TileCache::new(TILE, 0),
             pages: Vec::new(),
-            scratches: [None, None],
+            scratches: [None, None, None],
+            halo_reader_planes: [None, None, None],
+            halo_prefix_pool: Vec::new(),
             active_scratch: 0,
             motion_prefix: None,
             compositor: None,
@@ -1260,7 +1266,7 @@ impl Gpu {
             last_scale: None,
             shown: None,
             whole_samples: None,
-            whole_glass_halo: false,
+            whole_reader_halo: false,
             tile_ms: 0.0,
             blit,
             images: HashMap::new(),
@@ -1464,6 +1470,12 @@ impl Gpu {
     pub fn bytes(&self) -> usize {
         self.bytes
             + self.readers.bytes()
+            + self
+                .halo_reader_planes
+                .iter()
+                .flatten()
+                .map(PlainTex::bytes)
+                .sum::<usize>()
             + self.blur.bytes()
             + self.pool_bytes
             + self.shadow_cache.bytes()
@@ -1508,6 +1520,7 @@ impl Gpu {
             }
             self.blur.clear();
             self.noise.clear();
+            self.halo_reader_planes = [None, None, None];
         }
         while self.pool_bytes > keep_bytes {
             if let Some(t) = self.temp_pool.pop() {
@@ -1517,6 +1530,9 @@ impl Gpu {
             } else if let Some(t) = self.offscreen_pool.pop() {
                 self.pool_bytes = self.pool_bytes.saturating_sub(t.bytes);
                 t.tex.destroy();
+            } else if let Some(prefix) = self.halo_prefix_pool.pop() {
+                self.pool_bytes -= Self::frame_bytes(prefix.texture.width(), prefix.texture.height());
+                prefix.texture.destroy();
             } else if self.active.is_some() {
                 // Keep scratch reservations valid while allocating the rest of a pass.
                 break;
@@ -2189,7 +2205,11 @@ impl Gpu {
 
     /// The scratch render target (`width` × `height`) and its depth buffer.
     fn ensure_scratch_size(&mut self, width: u32, height: u32) -> Result<()> {
-        let slot = usize::from(!(width == TILE && height == TILE));
+        let slot = if self.reader_halo.as_ref().is_some_and(|halo| halo.capturing) {
+            HALO_SCRATCH_SLOT
+        } else {
+            usize::from(!(width == TILE && height == TILE))
+        };
         if self.scratches[slot]
             .as_ref()
             .is_some_and(|s| s.width == width && s.height == height)
@@ -2207,12 +2227,16 @@ impl Gpu {
             .as_ref()
             .map_or(0, |s| (s.width as usize) * (s.height as usize) * 4 * 2);
         let bytes = (width as usize) * (height as usize) * 4 * 2;
-        if self.reserve(bytes, freed, "the scratch tile").is_err()
-            && let Some(old) = self.scratches[1 - slot].take()
-        {
-            let ob = (old.width as usize) * (old.height as usize) * 4 * 2;
-            old.texture.destroy();
-            self.bytes = self.bytes.saturating_sub(ob);
+        for other in 0..self.scratches.len() {
+            if self.reserve(bytes, freed, "the scratch tile").is_ok() {
+                break;
+            }
+            if other != slot
+                && let Some(old) = self.scratches[other].take()
+            {
+                self.bytes -= Self::frame_bytes(old.width, old.height) * 2;
+                old.texture.destroy();
+            }
         }
         self.reserve(bytes, freed, "the scratch tile")?;
         if let Some(old) = self.scratches[slot].take() {
@@ -2336,7 +2360,7 @@ impl Gpu {
     ) -> Result<DrawStats> {
         let size = (u32::from(frame.width), u32::from(frame.height));
         if !moving
-            && self.whole_glass_halo
+            && self.whole_reader_halo
             && self.last.is_some_and(|l| l.view == frame.view && l.size == size)
             && self.shown == Some((generation, background.map(f32::to_bits), false))
             && self.whole_samples == Some(samples)
@@ -2354,7 +2378,7 @@ impl Gpu {
             return result;
         };
         if result.as_ref().is_err_and(|e| e.code == ErrorCode::Limit) {
-            return self.render_glass_halo(store, frame, background, generation, moving, samples, native);
+            return self.render_reader_halo(store, frame, background, generation, moving, samples, native);
         }
         result
     }
@@ -2362,7 +2386,7 @@ impl Gpu {
     /// Draw the surrounding page at a lower density and snapshot each reader's prefix.
     /// The second pass uses these samples for optics and renders the visible page at device scale.
     #[allow(clippy::too_many_arguments)]
-    fn render_glass_halo(
+    fn render_reader_halo(
         &mut self,
         store: &Store,
         frame: &Frame,
@@ -2386,12 +2410,18 @@ impl Gpu {
         let span = (samples.x1 - samples.x0).max(samples.y1 - samples.y0) as u32;
         // Budget the replay, its copies, and the reader's mip/mask work separately
         // from the displayed frame; the replay runs once even with multiple lenses.
-        let divisor = span.div_ceil(GLASS_HALO_REPLAY_SIDE).max(2).next_power_of_two() as i32;
+        let replay_limit = if self.fallback_adapter && native != frame.area {
+            GLASS_HALO_REPLAY_SIDE / 2
+        } else {
+            GLASS_HALO_REPLAY_SIDE
+        };
+        let divisor = span.div_ceil(replay_limit).max(2).next_power_of_two() as i32;
         let offset = (-samples.x0.div_euclid(divisor), -samples.y0.div_euclid(divisor));
-        let frame_size = (
-            offset.0 - (-samples.x1).div_euclid(divisor),
-            offset.1 - (-samples.y1).div_euclid(divisor),
-        );
+        // Small pans can move the rounded crop by a pixel. Reuse the backing
+        // planes by keeping the replay extent aligned to the texture pool.
+        let replay_side =
+            |end: i32, start: i32| ((start - (-end).div_euclid(divisor)) as u32).next_multiple_of(64) as i32;
+        let frame_size = (replay_side(samples.x1, offset.0), replay_side(samples.y1, offset.1));
         let transform =
             Affine::translate((f64::from(offset.0), f64::from(offset.1))) * Affine::scale(1.0 / f64::from(divisor));
         let coarse = Frame {
@@ -2406,19 +2436,22 @@ impl Gpu {
                 y1: frame_size.1,
             },
         };
-        let mut halo = GlassHalo {
+        let mut halo = ReaderHalo {
             divisor,
             offset,
             frame_size,
             visible: frame.area,
             capturing: true,
             prefixes: HashMap::new(),
+            blurred: HashMap::new(),
         };
         halo.visible = halo.to_coarse(native, (0, 0));
-        self.glass_halo = Some(halo);
+        self.reader_halo = Some(halo);
+        self.swap_halo_reader_planes();
         let result = self.draw_whole_pass(store, &coarse, background, generation, false, None, None);
+        self.swap_halo_reader_planes();
         let result = result.and_then(|replay| {
-            self.glass_halo.as_mut().expect("glass halo").capturing = false;
+            self.reader_halo.as_mut().expect("glass halo").capturing = false;
             let native = (native != frame.area).then_some(native);
             let mut stats = self.draw_whole_pass(store, frame, background, generation, moving, None, native)?;
             stats.encode_ms += replay.encode_ms;
@@ -2426,15 +2459,69 @@ impl Gpu {
             stats.cpu_ms = now() - t0;
             Ok(stats)
         });
-        let halo = self.glass_halo.take().expect("glass halo");
-        for prefix in halo.prefixes.into_values() {
-            self.bytes -= Self::frame_bytes(prefix.size.0, prefix.size.1);
-            prefix.texture.destroy();
+        let halo = self.reader_halo.take().expect("glass halo");
+        for prefix in halo.prefixes.into_values().chain(halo.blurred.into_values()) {
+            self.recycle_halo_prefix(prefix);
         }
+        self.trim_pools(GPU_POOL_KEEP_BYTES);
         if result.is_ok() {
             self.whole_samples = Some(Some(samples));
         }
         result
+    }
+
+    fn swap_halo_reader_planes(&mut self) {
+        let [backdrop, delta, blur_source] = &mut self.halo_reader_planes;
+        std::mem::swap(&mut self.readers.backdrop_frame, backdrop);
+        std::mem::swap(&mut self.readers.delta_frame, delta);
+        std::mem::swap(&mut self.readers.blur_source, blur_source);
+    }
+
+    fn acquire_halo_patch(
+        &mut self,
+        origin: (i32, i32),
+        size: (u32, u32),
+        within: Option<glass::ClipWithin>,
+    ) -> Result<HaloPatch> {
+        // Round the storage so a one-pixel change in the clipped view on pan reuses it.
+        let width = size.0.next_multiple_of(64).min(self.max_texture_2d);
+        let height = size.1.next_multiple_of(64).min(self.max_texture_2d);
+        let bytes = Self::frame_bytes(width, height);
+        let reusable = self
+            .halo_prefix_pool
+            .iter()
+            .position(|prefix| prefix.texture.width() == width && prefix.texture.height() == height);
+        let (texture, view) = if let Some(at) = reusable {
+            let prefix = self.halo_prefix_pool.swap_remove(at);
+            self.pool_bytes -= bytes;
+            (prefix.texture, prefix.view)
+        } else {
+            self.reserve_or_trim(bytes, 0, "a coarse reader backdrop")?;
+            let texture = texture(
+                &self.device,
+                width,
+                height,
+                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                "coarse reader backdrop",
+            );
+            let view = texture.create_view(&Default::default());
+            (texture, view)
+        };
+        self.bytes += bytes;
+        Ok(HaloPatch {
+            texture,
+            view,
+            origin,
+            size,
+            within,
+        })
+    }
+
+    fn recycle_halo_prefix(&mut self, prefix: HaloPatch) {
+        let bytes = Self::frame_bytes(prefix.texture.width(), prefix.texture.height());
+        self.bytes -= bytes;
+        self.pool_bytes += bytes;
+        self.halo_prefix_pool.push(prefix);
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -2450,7 +2537,7 @@ impl Gpu {
     ) -> Result<DrawStats> {
         self.check()?;
         let (width, height) = (u32::from(frame.width), u32::from(frame.height));
-        let capturing = self.glass_halo.as_ref().is_some_and(|halo| halo.capturing);
+        let capturing = self.reader_halo.as_ref().is_some_and(|halo| halo.capturing);
         let t0 = now();
         let view = frame.view;
         let scale = view.as_coeffs()[0];
@@ -2460,7 +2547,7 @@ impl Gpu {
             plan: 2,
             ..DrawStats::default()
         };
-        if self.glass_halo.is_none()
+        if self.reader_halo.is_none()
             && !moving
             && self.last.is_some_and(|l| l.view == view && l.size == (width, height))
             && self.shown == Some((generation, bg_bits, true))
@@ -2572,7 +2659,7 @@ impl Gpu {
                 &limits,
                 &mut verbs,
                 &split.unwrap_or_else(Split::all),
-                moving && self.glass_halo.is_none(),
+                moving && self.reader_halo.is_none(),
             )
         });
         let s = match draw {
@@ -2615,9 +2702,9 @@ impl Gpu {
             self.scene.reset();
             return Ok(stats);
         }
-        stats.exact = self.glass_halo.is_none() && !moving && s.exact();
+        stats.exact = self.reader_halo.is_none() && !moving && s.exact();
         stats.standin = !stats.exact;
-        if self.glass_halo.is_some() {
+        if self.reader_halo.is_some() {
             stats.plan = 4;
         }
         stats.held = self.tiles.len() as u32;
@@ -2630,7 +2717,7 @@ impl Gpu {
         });
         self.last_scale = Some(scale);
         self.whole_samples = (padded.is_some() == samples.is_some()).then_some(samples);
-        self.whole_glass_halo = self.glass_halo.is_some() && !moving;
+        self.whole_reader_halo = self.reader_halo.is_some() && !moving;
         self.shown = Some((generation, bg_bits, stats.exact));
         Ok(stats)
     }
@@ -2686,6 +2773,7 @@ impl Gpu {
                 zooming || opening,
                 last,
                 options.prefetch && !coarse_moving,
+                coarse_moving,
             )
             .ok_or_else(|| EngineError::limit("a camera the tiles can't follow (too far out)"))?;
         let selection = self.tiles.drag_prepare(&mut plan, drag.map(DragFrame::input).as_ref());
@@ -2843,13 +2931,15 @@ impl Gpu {
     pub fn ahead(&mut self, store: &Store, background: [f32; 4], halo: i32, budget_ms: f64) -> Result<DrawStats> {
         self.check()?;
         let mut stats = DrawStats::default();
-        let Some(last) = self.last else { return Ok(stats) };
+        let Some(last) = self.last else {
+            return Ok(stats);
+        };
         let t0 = now();
         self.masks.begin_frame();
         self.blur.begin_frame();
         self.tiles.begin(background, halo);
         self.fit_tiles(store.limits.tile_bytes);
-        let Some(plan) = self.tiles.plan(last.view, last.size, false, Some(last), true) else {
+        let Some(plan) = self.tiles.plan(last.view, last.size, false, Some(last), true, false) else {
             return Ok(stats);
         };
         let mut verbs = store.limits.frame_verbs;
@@ -4364,7 +4454,9 @@ impl Gpu {
         }
         for cp in &comp.copies {
             let page = (cp.slot / PER_PAGE) as usize;
-            let Some(pg) = self.pages.get(page) else { continue };
+            let Some(pg) = self.pages.get(page) else {
+                continue;
+            };
             let within = cp.slot % PER_PAGE;
             let (x, y) = ((within % PER_ROW) * TILE, (within / PER_ROW) * TILE);
             encoder.copy_texture_to_texture(
@@ -5391,40 +5483,25 @@ impl Backend for Gpu {
             ((0, 0), (aw, ah), tex.clone(), view.clone())
         };
         let within = glass::clip_within_from_open(open);
-        if self.glass_halo.as_ref().is_some_and(|halo| halo.capturing) {
-            let visible = self.glass_halo.as_ref().expect("glass halo").visible;
+        if self.reader_halo.as_ref().is_some_and(|halo| halo.capturing) {
+            let visible = self.reader_halo.as_ref().expect("glass halo").visible;
             let lens = device.transform_rect_bbox(Rect::new(0.0, 0.0, f64::from(size[0]), f64::from(size[1])));
             if IRect::around(lens.inflate(2.0, 2.0)).intersect(visible).is_empty() {
                 return Ok(());
             }
-            let bytes = Self::frame_bytes(source_size.0, source_size.1);
-            self.reserve(bytes, 0, "a coarse glass prefix")?;
-            let texture = texture(
-                &self.device,
-                source_size.0,
-                source_size.1,
-                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                "coarse glass prefix",
-            );
-            let view = texture.create_view(&Default::default());
-            let mut encoder = self.take_encoder(false, "snapshot coarse glass prefix");
-            copy_rect(&mut encoder, &source_tex, &texture, (0, 0), (0, 0), source_size);
+            let prefix = self.acquire_halo_patch(source_origin, source_size, within)?;
+            let mut encoder = self.take_encoder(false, "snapshot coarse reader backdrop");
+            copy_rect(&mut encoder, &source_tex, &prefix.texture, (0, 0), (0, 0), source_size);
             self.stash_encoder(encoder);
-            self.bytes += bytes;
-            let old = self.glass_halo.as_mut().expect("glass halo").prefixes.insert(
-                key,
-                GlassPrefix {
-                    texture,
-                    view,
-                    origin: source_origin,
-                    size: source_size,
-                    within,
-                },
-            );
+            let old = self
+                .reader_halo
+                .as_mut()
+                .expect("glass halo")
+                .prefixes
+                .insert(key, prefix);
             if let Some(old) = old {
                 self.submit_active_encoder();
-                self.bytes -= Self::frame_bytes(old.size.0, old.size.1);
-                old.texture.destroy();
+                self.recycle_halo_prefix(old);
             }
             return Ok(());
         }
@@ -5438,7 +5515,7 @@ impl Backend for Gpu {
         let high_origin = active.display_area.map_or((0, 0), |area| (area.x0, area.y0));
         let high_scale = device.determinant().abs().sqrt() as f32;
         let (optical_device, optical_frame, optical_area, divisor, halo_offset, low_prefix) =
-            if let Some(halo) = &self.glass_halo {
+            if let Some(halo) = &self.reader_halo {
                 let offset = (
                     halo.offset.0 * halo.divisor - high_origin.0,
                     halo.offset.1 * halo.divisor - high_origin.1,
@@ -5508,7 +5585,9 @@ impl Backend for Gpu {
             region.out_y0 = map_y(region.out_y0);
             region.out_y1 = map_y(region.out_y1);
         }
-        let native_sampling = divisor > 1 && glass::glass_params(op, high_scale, inradius).frost <= 0.4;
+        let native_params = glass::glass_params(op, high_scale, inradius);
+        let native_sampling = divisor > 1 && native_params.frost <= 0.4;
+        let native_lens = device.transform_rect_bbox(Rect::new(0.0, 0.0, f64::from(size[0]), f64::from(size[1])));
 
         // Compose inherited paint in scratch so it does not become part of the isolated picture.
         // The same scratch freezes an aliased prefix before any glass chunks write into it.
@@ -5591,6 +5670,27 @@ impl Backend for Gpu {
             if out_w == 0 || out_h == 0 {
                 continue;
             }
+            let (rx, ry) = (region.x0 * divisor - halo_offset.0, region.y0 * divisor - halo_offset.1);
+            let rim = native_sampling.then(|| {
+                let k = glass::height_scale(native_params.sigma) as i32;
+                // The height shader uses at most 64 Gaussian taps on either side and
+                // bilinear interpolation inside that grid. Refraction/frost never read this mask.
+                let pad = ((3.0 * native_params.sigma / k as f32).ceil().min(64.0) as i32 + 2) * k + 2;
+                let anchor_x = native_lens.x0.floor().clamp(-1e12, 1e12) as i64 - i64::from(native_params.margin);
+                let anchor_y = native_lens.y0.floor().clamp(-1e12, 1e12) as i64 - i64::from(native_params.margin);
+                let snap = |x: i32, anchor: i64| x - ((i64::from(x) - anchor).rem_euclid(i64::from(k))) as i32;
+                let area = IRect {
+                    x0: snap(region.out_x0 + origin.0 - pad, anchor_x),
+                    y0: snap(region.out_y0 + origin.1 - pad, anchor_y),
+                    x1: region.out_x1 + origin.0 + pad,
+                    y1: region.out_y1 + origin.1 + pad,
+                };
+                NativeRim {
+                    area,
+                    offset: ((area.x0 - rx) as f32, (area.y0 - ry) as f32),
+                    params: native_params,
+                }
+            });
             let max_bytes = self.reader_budget_room();
 
             // 1. Optional open non-context clip mask (rasterized with vello_gpu into `clip_tex`).
@@ -5694,17 +5794,28 @@ impl Backend for Gpu {
             let mut encoder = self.take_encoder(analytic_coarse.is_none(), "reader glass");
 
             if analytic_coarse.is_none() {
+                let (mask_x, mask_y, mask_w, mask_h, mask_device) =
+                    rim.map_or((region.x0, region.y0, region.rw, region.rh, optical_device), |r| {
+                        (
+                            r.area.x0,
+                            r.area.y0,
+                            (r.area.x1 - r.area.x0) as u32,
+                            (r.area.y1 - r.area.y0) as u32,
+                            device,
+                        )
+                    });
+                self.check_texture_size(mask_w, mask_h, "a glass rim mask")?;
                 self.readers.ensure_vello_tex_budgeted(
                     false,
                     &self.device,
                     &self.renderer,
-                    region.rw,
-                    region.rh,
+                    mask_w,
+                    mask_h,
                     "reader mask",
                     max_bytes,
                 )?;
-                self.mask_scene.reset_and_resize(region.rw as u16, region.rh as u16);
-                let shifted = Affine::translate((-f64::from(region.x0), -f64::from(region.y0))) * optical_device;
+                self.mask_scene.reset_and_resize(mask_w as u16, mask_h as u16);
+                let shifted = Affine::translate((-f64::from(mask_x), -f64::from(mask_y))) * mask_device;
                 self.mask_scene.set_transform(shifted);
                 self.mask_scene.set_paint(vello_common::color::palette::css::WHITE);
                 for (p, even_odd) in paths {
@@ -5737,6 +5848,7 @@ impl Backend for Gpu {
 
             let resolve = low_prefix.as_ref().map(|_| GlassResolve {
                 divisor: divisor as f32,
+                rim,
                 optical_origin: (
                     (region.x0 * divisor - halo_offset.0 - origin.0) as f32,
                     (region.y0 * divisor - halo_offset.1 - origin.1) as f32,
@@ -6527,6 +6639,7 @@ impl Backend for Gpu {
 
     fn background_blur(
         &mut self,
+        reader: Option<(u32, usize)>,
         op: &BackgroundBlurOp,
         paths: &[(BezPath, bool)],
         device: Affine,
@@ -6577,28 +6690,86 @@ impl Backend for Gpu {
                 budget,
             )?;
         } else {
-            let (width, height) = draw.dirty_size();
-            let budget = self.reader_budget_room();
-            self.readers
-                .ensure_blur_out_budgeted(&self.device, width, height, budget)?;
-            let (clamp_bounds, edge) = draw.bounds_and_edge(within, sigma);
-            let key = draw
-                .source_is_frame
-                .then(|| blur::PyramidKey::new(self.backdrop_gen, clamp_bounds, edge));
-            let spec = BlurSpec {
-                sigma,
-                edge,
-                clamp_bounds,
-                dirty: draw.dirty,
-            };
-            self.encode_blur_reader_slice(
-                &mut encoder,
-                &draw.source.view,
-                draw.size,
-                (draw.dirty.x0, draw.dirty.y0),
-                &spec,
-                key,
-            )?;
+            let halo_sample = reader.and_then(|reader| {
+                let halo = self.reader_halo.as_ref().filter(|halo| !halo.capturing)?;
+                let patch = halo.blurred.get(&reader)?;
+                let area = self.active.as_ref()?.display_area.map_or((0, 0), |r| (r.x0, r.y0));
+                let inv = 1.0 / halo.divisor as f32;
+                Some(BlurHaloSample {
+                    view: patch.view.clone(),
+                    size: patch.size,
+                    inv,
+                    offset: (
+                        (draw.origin.0 - area.0) as f32 * inv + (halo.offset.0 - patch.origin.0) as f32,
+                        (draw.origin.1 - area.1) as f32 * inv + (halo.offset.1 - patch.origin.1) as f32,
+                    ),
+                })
+            });
+            if halo_sample.is_none() {
+                if draw.source_is_frame
+                    && reader.is_some()
+                    && sigma >= blur::VIEWPORT_HALO_MIN_SIGMA
+                    && self.reader_halo.as_ref().is_some_and(|halo| !halo.capturing)
+                {
+                    return Err(EngineError::limit("a visible background blur has no coarse backdrop"));
+                }
+                let (width, height) = draw.dirty_size();
+                let budget = self.reader_budget_room();
+                self.readers
+                    .ensure_blur_out_budgeted(&self.device, width, height, budget)?;
+                let (clamp_bounds, edge) = draw.bounds_and_edge(within, sigma);
+                let key = draw
+                    .source_is_frame
+                    .then(|| blur::PyramidKey::new(self.backdrop_gen, clamp_bounds, edge));
+                let spec = BlurSpec {
+                    sigma,
+                    edge,
+                    clamp_bounds,
+                    dirty: draw.dirty,
+                };
+                self.encode_blur_reader_slice(
+                    &mut encoder,
+                    &draw.source.view,
+                    draw.size,
+                    (draw.dirty.x0, draw.dirty.y0),
+                    &spec,
+                    key,
+                )?;
+                let origin = draw.frame_dirty_origin();
+                let capture = reader.filter(|_| {
+                    self.reader_halo.as_ref().is_some_and(|halo| {
+                        halo.capturing
+                            && draw.source_is_frame
+                            && sigma * halo.divisor as f32 >= blur::VIEWPORT_HALO_MIN_SIGMA
+                            && !IRect {
+                                x0: origin.0,
+                                y0: origin.1,
+                                x1: origin.0 + width as i32,
+                                y1: origin.1 + height as i32,
+                            }
+                            .intersect(halo.visible)
+                            .is_empty()
+                    })
+                });
+                if let Some(reader) = capture {
+                    let patch = self.acquire_halo_patch(origin, (width, height), None)?;
+                    let source = &self.readers.blur_out.as_ref().expect("blur halo output").texture;
+                    copy_rect(&mut encoder, source, &patch.texture, (0, 0), (0, 0), (width, height));
+                    let old = self
+                        .reader_halo
+                        .as_mut()
+                        .expect("reader halo")
+                        .blurred
+                        .insert(reader, patch);
+                    if let Some(old) = old {
+                        // This encoder can still refer to the previous patch.
+                        self.stash_encoder(encoder);
+                        self.submit_active_encoder();
+                        self.recycle_halo_prefix(old);
+                        encoder = self.take_encoder(false, "reader blur composite");
+                    }
+                }
+            }
             let budget = self.reader_budget_room();
             for target in draw.targets.iter().flatten() {
                 self.readers.encode_bg_blur_composite(
@@ -6610,6 +6781,7 @@ impl Backend for Gpu {
                     draw.dirty,
                     alpha,
                     clipped,
+                    halo_sample.as_ref(),
                     budget,
                 )?;
             }
@@ -6654,7 +6826,7 @@ impl Backend for Gpu {
                     even_odd: op.even_odd,
                     radius,
                 };
-                return self.background_blur(&uniform, paths, device, size, alpha, coarse, open);
+                return self.background_blur(None, &uniform, paths, device, size, alpha, coarse, open);
             }
         };
         let Some(draw) = self.prepare_blur_reader(paths, device, false, open)? else {
