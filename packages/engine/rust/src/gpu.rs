@@ -2477,6 +2477,45 @@ impl Gpu {
         std::mem::swap(&mut self.readers.blur_source, blur_source);
     }
 
+    fn overlay_glass_interiors(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        source_origin: (i32, i32),
+        source_size: (u32, u32),
+        interiors: &[usize],
+    ) {
+        for &layer in interiors {
+            let paint = self.offscreen_stack[layer].plane(true);
+            let offset = (paint.origin.0 - source_origin.0, paint.origin.1 - source_origin.1);
+            let visible = IRect {
+                x0: offset.0,
+                y0: offset.1,
+                x1: offset.0 + i32::from(paint.active_size.0),
+                y1: offset.1 + i32::from(paint.active_size.1),
+            }
+            .clamp(source_size.0 as i32, source_size.1 as i32);
+            if !visible.is_empty() {
+                self.readers.encode_composite(
+                    &self.device,
+                    &self.queue,
+                    encoder,
+                    &paint.view,
+                    view,
+                    offset,
+                    (
+                        visible.x0 as u32,
+                        visible.y0 as u32,
+                        (visible.x1 - visible.x0) as u32,
+                        (visible.y1 - visible.y0) as u32,
+                    ),
+                    1.0,
+                    false,
+                );
+            }
+        }
+    }
+
     fn acquire_halo_patch(
         &mut self,
         origin: (i32, i32),
@@ -2501,7 +2540,9 @@ impl Gpu {
                 &self.device,
                 width,
                 height,
-                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
                 "coarse reader backdrop",
             );
             let view = texture.create_view(&Default::default());
@@ -5492,6 +5533,7 @@ impl Backend for Gpu {
             let prefix = self.acquire_halo_patch(source_origin, source_size, within)?;
             let mut encoder = self.take_encoder(false, "snapshot coarse reader backdrop");
             copy_rect(&mut encoder, &source_tex, &prefix.texture, (0, 0), (0, 0), source_size);
+            self.overlay_glass_interiors(&mut encoder, &prefix.view, source_origin, source_size, &interiors);
             self.stash_encoder(encoder);
             let old = self
                 .reader_halo
@@ -5604,35 +5646,7 @@ impl Backend for Gpu {
             let snapshot = self.readers.blur_source.as_ref().expect("glass prefix snapshot");
             let (tex, view) = (snapshot.texture.clone(), snapshot.view.clone());
             copy_rect(&mut encoder, &source_tex, &tex, (0, 0), (0, 0), source_size);
-            for layer in interiors {
-                let paint = self.offscreen_stack[layer].plane(true);
-                let offset = (paint.origin.0 - source_origin.0, paint.origin.1 - source_origin.1);
-                let visible = IRect {
-                    x0: offset.0,
-                    y0: offset.1,
-                    x1: offset.0 + i32::from(paint.active_size.0),
-                    y1: offset.1 + i32::from(paint.active_size.1),
-                }
-                .clamp(source_size.0 as i32, source_size.1 as i32);
-                if !visible.is_empty() {
-                    self.readers.encode_composite(
-                        &self.device,
-                        &self.queue,
-                        &mut encoder,
-                        &paint.view,
-                        &view,
-                        offset,
-                        (
-                            visible.x0 as u32,
-                            visible.y0 as u32,
-                            (visible.x1 - visible.x0) as u32,
-                            (visible.y1 - visible.y0) as u32,
-                        ),
-                        1.0,
-                        false,
-                    );
-                }
-            }
+            self.overlay_glass_interiors(&mut encoder, &view, source_origin, source_size, &interiors);
             self.stash_encoder(encoder);
             view
         } else {

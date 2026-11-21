@@ -237,7 +237,7 @@ fn prefetch_cannot_pin_the_slots_promised_to_a_missing_visible_tile() {
     let mut cache = TileCache::new(512, 16);
     let view = Affine::IDENTITY;
     cache.begin([0.0; 4], 0);
-    let level = cache.plan(view, (2048, 1024), false, None, false).unwrap().level;
+    let level = cache.plan(view, (2048, 1024), false, None, false, false).unwrap().level;
     let warm = (0..2)
         .flat_map(|j| (0..4).map(move |i| (i, j)))
         .filter(|&cell| cell != (0, 0))
@@ -257,7 +257,7 @@ fn prefetch_cannot_pin_the_slots_promised_to_a_missing_visible_tile() {
     });
     for _ in 0..3 {
         cache.begin([0.0; 4], 0);
-        let plan = cache.plan(view, (2048, 1024), false, last, true).unwrap();
+        let plan = cache.plan(view, (2048, 1024), false, last, true, false).unwrap();
         let job = plan
             .jobs
             .iter()
@@ -672,14 +672,16 @@ fn large_drag_never_suppresses_all_visible_work() {
 fn offscreen_drag_history_is_not_retained_without_a_slot() {
     let mut cache = TileCache::new(512, 16);
     cache.begin([0.0; 4], 0);
-    let mut plan = cache.plan(Affine::IDENTITY, (64, 64), false, None, false).unwrap();
-    for step in 1..=2048 {
+    let mut plan = cache
+        .plan(Affine::IDENTITY, (64, 64), false, None, false, false)
+        .unwrap();
+    for step in 1u32..=2048 {
         let x = f64::from(step - 1) * 1024.0 + 32.0;
         cache.drag_prepare(
             &mut plan,
             Some(&DragInput {
                 serial: 1,
-                moves: step as u64,
+                moves: u64::from(step),
                 start: None,
                 now: Rect::new(x, 32.0, x + 4.0, 36.0),
                 eligible: true,
