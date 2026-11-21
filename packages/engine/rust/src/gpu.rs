@@ -2655,6 +2655,10 @@ impl Gpu {
             let target = scope.plane(backdrop);
             return Ok((&target.tex, &target.view, &target.depth));
         }
+        self.root_plane(backdrop)
+    }
+
+    fn root_plane(&self, backdrop: bool) -> Result<(&wgpu::Texture, &wgpu::TextureView, &wgpu::TextureView)> {
         let root = self.scratches[self.active_scratch]
             .as_ref()
             .ok_or_else(|| EngineError::new(ErrorCode::State, "no scratch tile"))?;
@@ -4611,6 +4615,7 @@ impl Backend for Gpu {
         size: [f32; 2],
         alpha: f32,
         coarse: bool,
+        read_parent: bool,
         open: &[Open],
     ) -> Result<()> {
         if open.iter().any(|o| matches!(o, Open::Layer)) {
@@ -4624,9 +4629,22 @@ impl Backend for Gpu {
         };
         let (aw, ah) = (active.width, active.height);
         let frame_size = (aw as i32, ah as i32);
-        let scope = self.offscreen_stack.last();
+        // An explicitly blended layer contributes one transparent picture, but its own
+        // glass sees the parent's glass-free prefix. Readers in its children see their scope.
+        let scope = self.offscreen_stack.iter().rev().nth(usize::from(read_parent));
         let backdrop_is_frame = scope.is_none();
-        let backdrop_plane = scope.map_or(active.backdrop_live, |scope| scope.backdrop.is_some());
+        let (source_origin, source_size, source_tex, source_view) = if let Some(scope) = scope {
+            let target = scope.plane(true);
+            (
+                target.origin,
+                (u32::from(target.active_size.0), u32::from(target.active_size.1)),
+                target.tex.clone(),
+                target.view.clone(),
+            )
+        } else {
+            let (tex, view, _) = self.root_plane(active.backdrop_live)?;
+            ((0, 0), (aw, ah), tex.clone(), view.clone())
+        };
         let origin = self.scene_offset();
         let (w, h) = self.active_scene_size();
         let target_size = (i32::from(w), i32::from(h));
@@ -4798,20 +4816,19 @@ impl Backend for Gpu {
             }
 
             // A lens uses its scope's glass-free plane and writes only to its main plane.
-            let (backdrop_tex, backdrop_view, _) = self.plane(backdrop_plane)?;
-            let (backdrop_tex, backdrop_view) = (backdrop_tex.clone(), backdrop_view.clone());
             let (dst_tex, dst_view, _) = self.plane(false)?;
             let (dst_tex, dst_view) = (dst_tex.clone(), dst_view.clone());
             self.readers.encode_glass(
                 &self.device,
                 &self.queue,
                 &mut encoder,
-                &backdrop_tex,
-                &backdrop_view,
+                &source_tex,
+                &source_view,
                 &dst_tex,
                 &dst_view,
-                (u32::from(w), u32::from(h)),
+                source_size,
                 frame_size,
+                (-source_origin.0, -source_origin.1),
                 (-origin.0, -origin.1),
                 self.backdrop_gen,
                 backdrop_is_frame,

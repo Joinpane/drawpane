@@ -48,24 +48,53 @@ fn fs_copy_extended(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32>
     return textureLoad(ce_src, vec2<i32>(cx, cy), 0);
 }
 
+// Render-target UNORM conversion and texture filter precision can vary by GPU.
+// Keep the glass prefilter's RGBA8 rounding and bilinear interpolation in the shader.
+fn round_unorm8(value: vec4<f32>) -> vec4<f32> {
+    return floor(clamp(value, vec4<f32>(0.0), vec4<f32>(1.0)) * 255.0 + 0.5) / 255.0;
+}
+
+fn bilinear_load(
+    tex: texture_2d<f32>, uv: vec2<f32>, level: i32, dims: vec2<i32>,
+) -> vec4<f32> {
+    let p = clamp(uv, vec2<f32>(0.0), vec2<f32>(1.0)) * vec2<f32>(dims) - 0.5;
+    let xy = vec2<i32>(floor(p));
+    let f = fract(p);
+    let lo = vec2<i32>(0);
+    let hi = dims - 1;
+    let a = textureLoad(tex, clamp(xy, lo, hi), level);
+    let b = textureLoad(tex, clamp(xy + vec2<i32>(1, 0), lo, hi), level);
+    let c = textureLoad(tex, clamp(xy + vec2<i32>(0, 1), lo, hi), level);
+    let d = textureLoad(tex, clamp(xy + 1, lo, hi), level);
+    return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+
 // ---------------------------------------------------------------------------
 // 2. Centered 4-tap bilinear mipmap downsample (matches CPU build_mipmaps_cpu:
 //    exact 2x2 box on even sizes, zero spatial shift on odd sizes).
 // ---------------------------------------------------------------------------
 @group(0) @binding(0) var mip_src: texture_2d<f32>;
-@group(0) @binding(1) var mip_samp: sampler;
 
 @fragment
 fn fs_mip_down(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-    let dims = vec2<f32>(textureDimensions(mip_src, 0));
-    let dst_dims = max(floor(dims * 0.5), vec2<f32>(1.0));
+    let dims = vec2<i32>(textureDimensions(mip_src, 0));
+    if (all((dims & vec2<i32>(1)) == vec2<i32>(0))) {
+        // Match CPU's integer 2x2 box filter, including exact half-byte ties.
+        let xy = vec2<i32>(pos.xy) * 2;
+        let a = vec4<u32>(round(textureLoad(mip_src, xy, 0) * 255.0));
+        let b = vec4<u32>(round(textureLoad(mip_src, xy + vec2<i32>(1, 0), 0) * 255.0));
+        let c = vec4<u32>(round(textureLoad(mip_src, xy + vec2<i32>(0, 1), 0) * 255.0));
+        let d = vec4<u32>(round(textureLoad(mip_src, xy + 1, 0) * 255.0));
+        return vec4<f32>((a + b + c + d + 2u) / 4u) / 255.0;
+    }
+    let dst_dims = vec2<f32>(max(dims / 2, vec2<i32>(1)));
     let base = floor(pos.xy);
     let inv = vec2<f32>(1.0) / dst_dims;
-    let c00 = textureSampleLevel(mip_src, mip_samp, (base + vec2<f32>(0.25, 0.25)) * inv, 0.0);
-    let c10 = textureSampleLevel(mip_src, mip_samp, (base + vec2<f32>(0.75, 0.25)) * inv, 0.0);
-    let c01 = textureSampleLevel(mip_src, mip_samp, (base + vec2<f32>(0.25, 0.75)) * inv, 0.0);
-    let c11 = textureSampleLevel(mip_src, mip_samp, (base + vec2<f32>(0.75, 0.75)) * inv, 0.0);
-    return (c00 + c10 + c01 + c11) * 0.25;
+    let c00 = bilinear_load(mip_src, (base + vec2<f32>(0.25, 0.25)) * inv, 0, dims);
+    let c10 = bilinear_load(mip_src, (base + vec2<f32>(0.75, 0.25)) * inv, 0, dims);
+    let c01 = bilinear_load(mip_src, (base + vec2<f32>(0.25, 0.75)) * inv, 0, dims);
+    let c11 = bilinear_load(mip_src, (base + vec2<f32>(0.75, 0.75)) * inv, 0, dims);
+    return round_unorm8((c00 + c10 + c01 + c11) * 0.25);
 }
 
 // ---------------------------------------------------------------------------
@@ -198,14 +227,15 @@ struct FrostU {
 };
 
 @group(0) @binding(0) var frost_src: texture_2d<f32>;
-@group(0) @binding(1) var frost_samp: sampler;
-@group(0) @binding(2) var<uniform> frost_u: FrostU;
+@group(0) @binding(1) var<uniform> frost_u: FrostU;
 
 @fragment
 fn fs_frost(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let size = max(frost_u.a.xy, vec2<f32>(1.0));
     let dir = frost_u.a.zw;
-    let lod = frost_u.b.x;
+    let lod = i32(frost_u.b.x);
+    let source_size = vec2<i32>(textureDimensions(frost_src, lod));
+    let aligned = all(source_size == vec2<i32>(size));
     let sigma = clamp(frost_u.b.y, 1e-3, 1e12);
     let radius = i32(frost_u.b.z);
     let inv2 = 0.5 / (sigma * sigma);
@@ -215,11 +245,18 @@ fn fs_frost(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         if (i < -radius || i > radius) { continue; }
         let fi = f32(i);
         let w = exp(-fi * fi * inv2);
-        let uv = clamp((pos.xy + dir * fi) / size, vec2<f32>(0.0), vec2<f32>(1.0));
-        sum = sum + textureSampleLevel(frost_src, frost_samp, uv, lod) * w;
+        let tap = pos.xy + dir * fi;
+        var rgba: vec4<f32>;
+        if (aligned) {
+            let xy = clamp(vec2<i32>(floor(tap)), vec2<i32>(0), source_size - 1);
+            rgba = textureLoad(frost_src, xy, lod);
+        } else {
+            rgba = bilinear_load(frost_src, tap / size, lod, source_size);
+        }
+        sum = sum + rgba * w;
         total = total + w;
     }
-    return sum / max(total, 1e-6);
+    return round_unorm8(sum / max(total, 1e-6));
 }
 
 // ---------------------------------------------------------------------------

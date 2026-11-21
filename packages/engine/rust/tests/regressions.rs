@@ -994,6 +994,30 @@ fn neutral_glass_in_faded_group_preserves_backdrop_alpha_and_fades_siblings() {
 }
 
 #[test]
+fn blended_glass_reads_the_parent_without_writing_to_the_backdrop() {
+    let mut engine = Engine::new(Limits::default());
+    let mut list = W::new(ANY, 1);
+    list.reset();
+    let mut lower = tuned_glass(8.0, 8.0, 40.0, 40.0, 0.0, 0.0, 0.0);
+    lower.layer_blend = 1; // Multiply.
+    list.set(1, 0, &lower);
+    list.set(2, 0, &tuned_glass(32.0, 8.0, 24.0, 40.0, 0.0, 0.0, 0.0));
+    engine.apply(&list.finish()).unwrap();
+    let bg = [0.5, 0.625, 0.75, 1.0];
+    let (pixels, stats) = engine.render_cpu(64, 64, camera(), bg, false).unwrap();
+    assert_eq!(stats.draw.reads, 2);
+    let pixel = |x: usize, y: usize| &pixels[(y * 64 + x) * 4..][..4];
+    let backdrop = pixel(0, 0);
+    let multiplied = pixel(20, 24);
+    for channel in 0..3 {
+        let value = u32::from(backdrop[channel]);
+        assert!(multiplied[channel].abs_diff(((value * value + 127) / 255) as u8) <= 1);
+    }
+    assert_eq!(multiplied[3], 255);
+    assert_eq!(pixel(40, 24), backdrop, "the next lens samples the unblended backdrop");
+}
+
+#[test]
 fn glass_limit_does_not_silently_drop_an_effect_from_a_valid_export() {
     let render = |width: u32, height: u32| {
         let mut e = Engine::new(Limits::default());

@@ -468,8 +468,8 @@ impl Cpu {
             })
     }
 
-    fn readable_backdrop(&self) -> ((i32, i32), &Pixmap) {
-        if let Some(scope) = self.offscreen_stack.last() {
+    fn readable_backdrop(&self, read_parent: bool) -> ((i32, i32), &Pixmap) {
+        if let Some(scope) = self.offscreen_stack.iter().rev().nth(usize::from(read_parent)) {
             let target = scope.backdrop.as_ref().unwrap_or(&scope.main);
             (target.origin, &target.pixmap)
         } else if self.backdrop_live
@@ -477,7 +477,7 @@ impl Cpu {
         {
             (self.origin, backdrop)
         } else {
-            self.main()
+            (self.origin, &self.target)
         }
     }
 
@@ -1010,7 +1010,7 @@ impl Backend for Cpu {
             }
         };
         let main = make(self.main());
-        let backdrop = isolation.separate.then(|| make(self.readable_backdrop()));
+        let backdrop = isolation.separate.then(|| make(self.readable_backdrop(false)));
         let parent_writes = (self.write_main, self.write_backdrop);
         self.offscreen_stack.push(CpuScope {
             main,
@@ -1604,14 +1604,14 @@ impl Backend for Cpu {
             ));
         }
         self.flush_barrier(open);
-        let (origin, backdrop) = self.readable_backdrop();
+        let (origin, backdrop) = self.readable_backdrop(false);
         let (w, h) = (i32::from(backdrop.width()), i32::from(backdrop.height()));
         let buffers = if open.iter().any(reader_clip) { 3 } else { 2 };
         self.check_memory(w as usize * h as usize * 4 * buffers, "a backdrop reader kernel")?;
         let halo = (i64::from(reads.x1) - i64::from(paints.x1))
             .max(i64::from(paints.x0) - i64::from(reads.x0))
             .clamp(0, 512) as i32;
-        let src = self.readable_backdrop().1.data_as_u8_slice().to_vec();
+        let src = self.readable_backdrop(false).1.data_as_u8_slice().to_vec();
         let mut out = src.clone();
         kernels::run(kernel, &src, &mut out, w, h, origin, paints, reads, halo)?;
         let clip_mask = self.rasterize_open_clips(paints, open);
@@ -1656,6 +1656,7 @@ impl Backend for Cpu {
         size: [f32; 2],
         alpha: f32,
         coarse: bool,
+        read_parent: bool,
         open: &[Open],
     ) -> Result<()> {
         if open.iter().any(|o| matches!(o, Open::Layer)) {
@@ -1671,8 +1672,10 @@ impl Backend for Cpu {
         let inradius = resolve_inradius(&mut self.resources, op, paths, size);
         let params = glass::glass_params(op, scale, inradius);
         let frame_size = (i32::from(self.frame_size.0), i32::from(self.frame_size.1));
-        let (origin, backdrop) = self.readable_backdrop();
-        let target_size = (i32::from(backdrop.width()), i32::from(backdrop.height()));
+        let (origin, target) = self.main();
+        let target_size = (i32::from(target.width()), i32::from(target.height()));
+        let (source_origin, source) = self.readable_backdrop(read_parent);
+        let source_size = (i32::from(source.width()), i32::from(source.height()));
         // Use the same frame-anchored chunk thresholds in both browser and Worker CPU builds so
         // their outputs remain bit-identical across all glass sizes while keeping Worker peak RAM
         // inside the 25 MiB cap.
@@ -1696,21 +1699,24 @@ impl Backend for Cpu {
         }
         if self.memory_budget > 0 {
             self.blur.clear();
-            let size = (target_size.0 as usize, target_size.1 as usize);
+            let clip_scene = open
+                .iter()
+                .any(reader_clip)
+                .then(|| (self.scene.width() as usize, self.scene.height() as usize));
+            let copies = source_size.0 as usize * source_size.1 as usize * 4
+                + clip_scene.map_or(0, |size| {
+                    target_size.0 as usize * target_size.1 as usize * 4 + scene_work_bytes(size)
+                });
             let scratch = regions
                 .iter()
                 .map(|r| glass::cpu_work_bytes(r, &params))
                 .max()
                 .unwrap_or(0);
-            self.check_memory(
-                size.0 * size.1 * 4 * (1 + usize::from(open.iter().any(reader_clip))) + scratch,
-                "glass working set",
-            )?;
+            self.check_memory(copies.saturating_add(scratch), "glass working set")?;
         }
         let within = glass::clip_within_from_open(open);
-        let backdrop_src = self.readable_backdrop().1.data_as_u8_slice().to_vec();
+        let backdrop_src = self.readable_backdrop(read_parent).1.data_as_u8_slice().to_vec();
         let target_w = target_size.0;
-        let target_h = target_size.1;
         // Rasterize open non-context clip mask once over the union of all chunk outputs.
         let mut union_paints = IRect {
             x0: i32::MAX,
@@ -1734,9 +1740,9 @@ impl Backend for Cpu {
                     target_w,
                     origin,
                     &backdrop_src,
-                    target_w,
-                    target_h,
-                    origin,
+                    source_size.0,
+                    source_size.1,
+                    source_origin,
                     frame_size,
                     clip_pix.as_ref().map(Pixmap::data_as_u8_slice),
                     region,
@@ -1784,9 +1790,9 @@ impl Backend for Cpu {
                     target_w,
                     origin,
                     &backdrop_src,
-                    target_w,
-                    target_h,
-                    origin,
+                    source_size.0,
+                    source_size.1,
+                    source_origin,
                     frame_size,
                     &out_alpha,
                     lw,
@@ -1805,9 +1811,9 @@ impl Backend for Cpu {
                     target_w,
                     origin,
                     &backdrop_src,
-                    target_w,
-                    target_h,
-                    origin,
+                    source_size.0,
+                    source_size.1,
+                    source_origin,
                     frame_size,
                     &out_alpha,
                     clip_pix.as_ref().map(Pixmap::data_as_u8_slice),

@@ -314,6 +314,7 @@ pub trait Backend {
         size: [f32; 2],
         alpha: f32,
         coarse: bool,
+        read_parent: bool,
         open: &[Open],
     ) -> Result<()>;
     /// Pushes an offscreen target covering `area` (device pixels), flushing the active
@@ -2636,8 +2637,16 @@ impl<B: Backend> Walk<'_, B> {
                             self.stats.coarse += 1;
                         }
                         let open = self.reader_open();
-                        self.backend
-                            .glass(g, &paths, device, r.size, active_alpha, glass_coarse, &open)?;
+                        self.backend.glass(
+                            g,
+                            &paths,
+                            device,
+                            r.size,
+                            active_alpha,
+                            glass_coarse,
+                            layer_blend != 0,
+                            &open,
+                        )?;
                         self.sync_targets(is_context)?;
                     }
                     Op::BackgroundBlur(_) => {

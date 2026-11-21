@@ -172,7 +172,6 @@ pub struct GpuReaders {
     // Samplers & fallback textures
     lin_samp: wgpu::Sampler,
     mip_lin_samp: wgpu::Sampler,
-    mip_near_samp: wgpu::Sampler,
     white_1x1: PlainTex,
 
     // Dynamic uniform slabs
@@ -338,7 +337,7 @@ impl GpuReaders {
         });
         let mip_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mip_down bgl"),
-            entries: &[tex_binding(0, true), samp_binding(1)],
+            entries: &[tex_binding(0, false)],
         });
         let down_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("down bgl"),
@@ -350,7 +349,7 @@ impl GpuReaders {
         });
         let frost_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("frost bgl"),
-            entries: &[tex_binding(0, true), samp_binding(1), uni_binding(2, 32)],
+            entries: &[tex_binding(0, false), uni_binding(1, 32)],
         });
         let glass_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("glass bgl"),
@@ -478,15 +477,6 @@ impl GpuReaders {
             mipmap_filter: wgpu::MipmapFilterMode::Linear,
             ..Default::default()
         });
-        let mip_near_samp = device.create_sampler(&wgpu::SamplerDescriptor {
-            label: Some("reader mip nearest"),
-            address_mode_u: wgpu::AddressMode::ClampToEdge,
-            address_mode_v: wgpu::AddressMode::ClampToEdge,
-            mag_filter: wgpu::FilterMode::Linear,
-            min_filter: wgpu::FilterMode::Linear,
-            mipmap_filter: wgpu::MipmapFilterMode::Nearest,
-            ..Default::default()
-        });
 
         let white_1x1 = make_plain(
             device,
@@ -543,7 +533,6 @@ impl GpuReaders {
             height_packed,
             lin_samp,
             mip_lin_samp,
-            mip_near_samp,
             white_1x1,
             uniform_align,
             slabs: Vec::new(),
@@ -970,16 +959,10 @@ impl GpuReaders {
             let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
                 layout: &self.mip_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&mip_views[level - 1]),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.lin_samp),
-                    },
-                ],
+                entries: &[wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&mip_views[level - 1]),
+                }],
             });
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("reader mip_down"),
@@ -1188,7 +1171,8 @@ impl GpuReaders {
         dst_view: &wgpu::TextureView,
         tex_size: (u32, u32),
         frame_size: (i32, i32),
-        offset: (i32, i32),
+        source_offset: (i32, i32),
+        dst_offset: (i32, i32),
         backdrop_gen: u64,
         backdrop_is_frame: bool,
         params: &GlassParams,
@@ -1261,13 +1245,13 @@ impl GpuReaders {
             },
         );
 
-        let reg_in_tex_x0 = (region.x0 + offset.0) as f32;
-        let reg_in_tex_y0 = (region.y0 + offset.1) as f32;
+        let mask_x0 = (region.x0 + dst_offset.0) as f32;
+        let mask_y0 = (region.y0 + dst_offset.1) as f32;
 
         if coarse {
             // Fast interactive coarse stand-in: share one tile/frame mipmap (<= 5 levels) across
             // all unclipped glass cards on the same backdrop generation (zero per-card copy_extended/mipmaps).
-            let use_shared = backdrop_is_frame && within.is_none() && offset == (0, 0);
+            let use_shared = backdrop_is_frame && within.is_none() && source_offset == (0, 0);
             let (uv_ox, uv_oy, inv_bw, inv_bh, max_mip, region_idx) = if use_shared {
                 self.ensure_shared_coarse_mips(
                     device,
@@ -1280,8 +1264,8 @@ impl GpuReaders {
                 )?;
                 let mips = self.shared_coarse_mips.as_ref().expect("shared");
                 (
-                    reg_in_tex_x0,
-                    reg_in_tex_y0,
+                    (region.x0 + source_offset.0) as f32,
+                    (region.y0 + source_offset.1) as f32,
                     1.0 / (mips.width as f32),
                     1.0 / (mips.height as f32),
                     (mips.mip_views.len() - 1) as f32,
@@ -1295,7 +1279,7 @@ impl GpuReaders {
                     backdrop_view,
                     (tex_size.0 as i32, tex_size.1 as i32),
                     frame_size,
-                    offset,
+                    source_offset,
                     region,
                     within,
                     max_bytes,
@@ -1328,8 +1312,8 @@ impl GpuReaders {
                 region.rh as f32,
                 lod,
                 alpha,
-                reg_in_tex_x0,
-                reg_in_tex_y0,
+                mask_x0,
+                mask_y0,
                 out_x0 as f32,
                 out_y0 as f32,
                 if has_clip_mask { 1.0 } else { 0.0 },
@@ -1436,7 +1420,7 @@ impl GpuReaders {
             backdrop_view,
             (tex_size.0 as i32, tex_size.1 as i32),
             frame_size,
-            offset,
+            source_offset,
             region,
             within,
             max_bytes,
@@ -1485,10 +1469,6 @@ impl GpuReaders {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.mip_near_samp),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
                         resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                             buffer: &self.slabs[sh_idx],
                             offset: 0,
@@ -1538,10 +1518,6 @@ impl GpuReaders {
                     },
                     wgpu::BindGroupEntry {
                         binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.mip_near_samp),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
                         resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                             buffer: &self.slabs[sv_idx],
                             offset: 0,
@@ -1759,8 +1735,8 @@ impl GpuReaders {
             low_tw,
             low_th,
             // origin
-            reg_in_tex_x0,
-            reg_in_tex_y0,
+            mask_x0,
+            mask_y0,
             out_x0 as f32,
             out_y0 as f32,
             // rim
@@ -1820,8 +1796,8 @@ impl GpuReaders {
             lh as f32,
             // Height packing and frame-relative fragment quad phase.
             packed_flag,
-            (offset.0 & 1) as f32,
-            (offset.1 & 1) as f32,
+            (dst_offset.0 & 1) as f32,
+            (dst_offset.1 & 1) as f32,
             0.0,
         ]);
         let (sg_idx, sg_off) = self.push_uniform(device, queue, &u_glass);
