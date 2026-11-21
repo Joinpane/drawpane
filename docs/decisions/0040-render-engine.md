@@ -1178,3 +1178,27 @@ different pixels. The view releases its caches after 30 seconds continuously
 hidden. Allocation refusals reclaim optional levels. Missing sources back off
 and corrupt bytes are retried only when the source changes or the view reloads.
 The strict raw-pixel export API retains its admission checks.
+
+## Amendment for photo detail during zoom and tab restore
+
+While zooming in, the editor projects the recent logarithmic zoom velocity
+180 ms ahead. It starts the predicted level while the current level can
+still draw and carries an in-flight prediction forward when it can serve
+the current view. Up to four decode jobs can run, with a separate 64 MiB
+limit on their requested bitmap sizes. Uploads use the existing frame budget.
+Speculative levels use the power-of-two pyramid to cover roughly 2× and
+4× the current zoom. Active zoom and velocity predictions use the same
+pyramid to avoid a new decode at every small step.
+
+The closest useful resident level stays available through decode. A sharper
+decoded bitmap can replace that level under the same residency cap, using a
+tiny resident copy as the fallback during the swap. After 30 seconds hidden
+the view drops nearby and speculative levels and keeps the drawn level of
+each visible photo. A backend allocation refusal while hidden can reclaim
+those levels down to their thumbnails.
+
+At rest, large sources use 256-device-pixel size steps above 1024 px to avoid
+rounding a 5K viewport's photos up to a full 4096 px level. The image budget
+scales at 48 MiB per reported GiB of device memory. When memory is unknown,
+it defaults to 128 MiB on mobile and touch devices and 192 MiB elsewhere.
+Adapter and renderer caps still apply, including 64 MiB on the CPU Worker.

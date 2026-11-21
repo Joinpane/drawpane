@@ -944,7 +944,6 @@ export class EngineView {
   #imageLimits = { side: CPU_IMAGE_SIDE, bytes: CPU_IMAGE_BUDGET };
   readonly #imageUploads = new Map<number, { done(uploaded: boolean): void; cancel(): void }>();
   #imageTicket = 0;
-  #imageScale = 0;
   #imageVersion = 0;
   #hiddenImageTimer: ReturnType<typeof setTimeout> | undefined;
   readonly #offImageSource: () => void;
@@ -1751,7 +1750,6 @@ export class EngineView {
   #attachImages(): void {
     const engine = this.#engine;
     const worker = this.#cpuWorker;
-    this.#imageScale = 0;
     if (engine) {
       engine.enableViewImages();
       const limits = engine.viewImageLimits();
@@ -1802,7 +1800,7 @@ export class EngineView {
   }
 
   #evictImages = (): void => {
-    this.#images.evict();
+    this.#images.evict(true);
     this.#engine?.clearViewCaches();
     this.#cpuWorker?.postMessage({ type: "clear-view-caches" } satisfies CpuWorkerRequest);
     this.#imageVersion++;
@@ -1829,11 +1827,9 @@ export class EngineView {
       width: width / scale,
       height: height / scale,
     };
-    const zoomingIn = this.#imageScale > 0 && scale > this.#imageScale;
-    this.#imageScale = scale;
     // The image cache covers the visible tiles plus the neighbouring tile ring.
     const demands = this.#builder.imageDemands(region, 1024 / scale);
-    return this.#images.update(demands, scale, zoomingIn, this.#imageLimits);
+    return this.#images.update(demands, scale, this.#imageLimits);
   }
 
   get reducedImages(): number {

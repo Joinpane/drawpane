@@ -166,7 +166,10 @@ vi.mock("@drawpane/engine", () => ({
       state.uploadedWidths.push(bitmap.width);
       return { ok: true };
     }
-    dropImageLevel() {}
+    dropImageLevel(_handle: number, width: number) {
+      state.uploadedWidths = state.uploadedWidths.filter((held) => held !== width);
+    }
+    clearViewCaches() {}
     renderGpu(_width: number, _height: number, camera: { x: number }) {
       state.cameraX = camera.x;
       return {
@@ -459,6 +462,63 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
     } finally {
       fine.resolve();
       view?.dispose();
+    }
+  });
+
+  it("draws the first restored frame at the retained photo detail after 30 seconds hidden", async () => {
+    const page = Object.assign(new EventTarget(), {
+      visibilityState: "visible",
+      createElement: () => new FakeCanvas(false),
+    });
+    vi.stubGlobal("document", page);
+    vi.stubGlobal("navigator", {
+      gpu: { requestAdapter: async () => ({ info: { description: "NVIDIA T4" } }) },
+    });
+    vi.stubGlobal(
+      "ImageData",
+      class {
+        constructor(readonly data: Uint8ClampedArray) {}
+      },
+    );
+    vi.stubGlobal("createImageBitmap", async (_source: Blob, options: ImageBitmapOptions) => ({
+      width: options.resizeWidth,
+      height: options.resizeHeight,
+      close() {},
+    }));
+    state.readbackError = false;
+    state.imageDemands = [{ ref: "photo", visible: true, span: { width: 400, height: 400 } }];
+    const view = await EngineView.create(
+      new FakeCanvas(true) as unknown as HTMLCanvasElement,
+      { scene: {} } as never,
+      {} as never,
+      {
+        subscribe: () => () => {},
+        encodedVersion: () => 0,
+        encoded: async () => ({ blob: new Blob(), size: { width: 1792, height: 2400 } }),
+      } as never,
+      "engine",
+    );
+    const draw = () =>
+      view?.draw("page-1", { zoom: 1, x: 0, y: 0 }, 65, 17, 1, "#ffffff", {
+        hidden: new Set(),
+        whole: null,
+      });
+    try {
+      await vi.waitFor(() => {
+        expect(draw()?.exact).toBe(true);
+        expect(state.uploadedWidths).toContain(896);
+      });
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      page.visibilityState = "hidden";
+      page.dispatchEvent(new Event("visibilitychange"));
+      await vi.advanceTimersByTimeAsync(30_000);
+      expect(state.uploadedWidths).toEqual([28, 448]);
+      page.visibilityState = "visible";
+      page.dispatchEvent(new Event("visibilitychange"));
+      expect(draw()).toMatchObject({ drawn: true, exact: true });
+    } finally {
+      view?.dispose();
+      vi.useRealTimers();
     }
   });
 
