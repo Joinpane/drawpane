@@ -127,8 +127,9 @@ export function measuresOn(node: NodeRecord, axis: "h" | "v"): boolean {
 /**
  * Where a span pinned by `c` starts when it keeps its size (its own auto
  * layout hugs it) and its frame goes from `from` to `to`, as Figma places it:
- * stretched, it's centred in the span stretching would give it (in its frame
- * once that span is gone); scaled, its centre scales.
+ * stretched, it's centred in the span stretching would give it (past its
+ * margins, moved by half the change plus its size); scaled, its centre
+ * scales.
  */
 export function constrainHugged(
   c: Constraint,
@@ -146,7 +147,9 @@ export function constrainHugged(
     case "center":
       return pos + delta / 2;
     case "stretch":
-      return size + delta > 0 ? pos + delta / 2 : (to - size) / 2;
+      // Past its margins (no span left), Figma keeps it where it was at exactly zero room and
+      // moves it by half the change plus its size beyond that.
+      return size + delta > 0 ? pos + delta / 2 : size + delta === 0 ? pos : pos + delta / 2 + size;
     case "scale":
       return from <= 0 ? pos : (pos + size / 2) * (to / from) - size / 2;
   }
@@ -229,6 +232,103 @@ export function constrainedValues(
       out[axis.size] = round2(span.size);
   }
   return out;
+}
+
+type Box = "x" | "y" | "width" | "height";
+
+/**
+ * Why a copy keeps a value of its own instead of the one derived from its
+ * main layer: its own layout decides it ("layout": it hugs, its text
+ * measures itself, it's bound to a variable), or it's the copy's own
+ * ("own": overridden, a swapped instance's size, a layer whose frame took
+ * its auto layout away). An own value still follows its constraints from
+ * where it is when its frame resizes; a laid-out one isn't touched.
+ */
+export type Kept = "layout" | "own";
+
+/** A copy layer's placed geometry: what's derived from its main layer, and what it keeps. */
+export interface Placed {
+  readonly derived: Partial<Record<Box, number>>;
+  readonly kept: Partial<Record<Box, Kept>>;
+}
+
+/**
+ * Everything `placedGeometry` reads, on a copy, its main layer and their
+ * frames. A change to any of these can move or resize a copy, so this is
+ * what decides when copies are placed again (not a list kept by hand).
+ */
+export const PLACED_INPUTS: ReadonlySet<string> = new Set([
+  "x",
+  "y",
+  "width",
+  "height",
+  "constraintH",
+  "constraintV",
+  "sizingH",
+  "sizingV",
+  "layoutMode",
+  "positioning",
+  "textAutoResize",
+  "instanceOf",
+  "overrides",
+  "bindings",
+]);
+
+/**
+ * Where a copy layer sits and how big it is, from the main layer it copies
+ * (decisions 0035, item 7, and 0043): the one derivation both copy formats
+ * use. Materialized sync writes it, compact copies store it where their
+ * frame differs from its main's, the constraint pass places copies by it,
+ * and the edit-layout oracle checks both formats against it.
+ *
+ * Placed freely in a frame, each of its place and size is either derived
+ * (its constraints' value where its frame differs in size from its main's,
+ * its main layer's otherwise) or kept (`Kept`). Undefined where nothing
+ * here places it: an instance root, a layer in a group or outside a frame,
+ * or one its frame's auto layout places.
+ */
+export function placedGeometry(
+  copy: NodeRecord,
+  source: NodeRecord,
+  parent: NodeRecord | undefined,
+  parentSource: NodeRecord | undefined,
+): Placed | undefined {
+  if (!parent || !parentSource || parent.type !== "frame" || copy.type === "group")
+    return undefined;
+  if (getProp(copy.props, "instanceOf") && !getProp(copy.props, "mirrors")) return undefined;
+  const absolute = getProp(copy.props, "positioning") === "absolute";
+  if (getProp(parent.props, "layoutMode") !== "none" && !absolute) return undefined;
+  const constrained = constrainedValues(copy, source, parent, parentSource);
+  const overrides = getProp(copy.props, "overrides");
+  const bound = getProp(copy.props, "bindings") as Record<string, unknown>;
+  // Placed by its own choice: made absolute (or not) unlike its main layer, or in a frame that took
+  // its auto layout away, which leaves its layers where the layout put them (Figma).
+  const ownPlace =
+    getProp(copy.props, "positioning") !== getProp(source.props, "positioning") ||
+    (!absolute &&
+      (getProp(parentSource.props, "layoutMode") !== "none" ||
+        getProp(parent.props, "overrides").includes("layoutMode")));
+  // A nested instance swapped for another component is that component's size.
+  const shown = getProp(copy.props, "instanceOf");
+  const swapped = !!shown && shown !== getProp(source.props, "instanceOf");
+  const derived: Partial<Record<Box, number>> = {};
+  const kept: Partial<Record<Box, Kept>> = {};
+  for (const axis of AXES) {
+    const a = axis.size === "width" ? "h" : "v";
+    if (bound[axis.pos]) kept[axis.pos] = "layout";
+    else if (overrides.includes(axis.pos) || ownPlace) kept[axis.pos] = "own";
+    else derived[axis.pos] = constrained[axis.pos] ?? getProp(source.props, axis.pos);
+    if (bound[axis.size] || hugsOn(copy, a) || measuresOn(copy, a)) kept[axis.size] = "layout";
+    else if (
+      overrides.includes(axis.size) ||
+      overrides.includes(axis.sizing) ||
+      swapped ||
+      ownPlace
+    )
+      kept[axis.size] = "own";
+    else derived[axis.size] = constrained[axis.size] ?? getProp(source.props, axis.size);
+  }
+  return { derived, kept };
 }
 
 /**

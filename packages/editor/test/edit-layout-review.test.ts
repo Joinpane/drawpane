@@ -5,6 +5,7 @@
  */
 import { getProp, type NodeRecord, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
+import { canMoveInto } from "../src/components";
 import { Doc } from "../src/doc";
 import { Editor } from "../src/editor";
 import { layoutOps } from "../src/layout";
@@ -1407,5 +1408,193 @@ describe.each(["materialized", "compact"] as const)("re-check 3 with copies %s",
     const bar = editor.doc.childIds(instance)[0] as string;
     // 4 × 18 / 20.5 = 3.512; scaling 3.77 (19.3 tall) again gives 3.52.
     expect(y(editor, bar)).toBe(3.51);
+  });
+});
+
+// The fourth re-check (at 90db25ca): one derivation (`placedGeometry`) places copies in both
+// formats, and these are the cases it found.
+describe.each(["materialized", "compact"] as const)("re-check 4 with copies %s", (copies) => {
+  const box = (editor: Editor, id: string) => {
+    const props = editor.doc.get(id)?.props ?? {};
+    return [
+      getProp(props, "x"),
+      getProp(props, "y"),
+      getProp(props, "width"),
+      getProp(props, "height"),
+    ];
+  };
+  const hugRow = (sizingV: "hug" | "fixed") => [
+    page,
+    node("main", "frame", "p", { isComponent: true, width: 160, height: 80 }),
+    node("box", "frame", "main", {
+      x: 10,
+      y: 10,
+      width: 40,
+      height: 20,
+      layoutMode: "row",
+      sizingV,
+      constraintV: "stretch",
+    }),
+    node("bar", "rect", "box", { width: 20, height: 20 }),
+  ];
+
+  it("keeps a swapped nested instance its component's size (finding 1)", () => {
+    const editor = make(
+      [
+        page,
+        node("small", "frame", "p", { isComponent: true, width: 40, height: 20 }),
+        node("big", "frame", "p", { isComponent: true, y: 100, width: 80, height: 40 }, "a1"),
+        node("outer", "frame", "p", { isComponent: true, y: 200, width: 160, height: 80 }, "a2"),
+        node("nested", "frame", "outer", {
+          instanceOf: "small",
+          x: 10,
+          y: 10,
+          width: 40,
+          height: 20,
+          constraintH: "end",
+        }),
+      ],
+      copies,
+    );
+    const instance = editor.insertInstance("outer", { x: 300, y: 0 }) as string;
+    const nested = editor.doc.childIds(instance)[0] as string;
+    editor.swapInstance(nested, "big");
+    editor.resize([instance], "width", 200);
+    expect(box(editor, nested)).toEqual([50, 10, 80, 40]);
+    editor.setProp(["nested"], "x", 20);
+    expect(box(editor, nested)).toEqual([60, 10, 80, 40]);
+  });
+
+  it.each([
+    ["hug", "fixed", [10, 60]],
+    ["fixed", "hug", [30, 20]],
+  ] as const)(
+    "places copies again when their main row goes from %s to %s (finding 2)",
+    (from, to, want) => {
+      const editor = make(hugRow(from), copies);
+      const instance = editor.insertInstance("main", { x: 0, y: 200 }) as string;
+      editor.resize([instance], "height", 120);
+      editor.setProp(["box"], "sizingV", to);
+      const copy = editor.doc.childIds(instance)[0] as string;
+      expect(
+        box(editor, copy)
+          .slice(1, 4)
+          .filter((_, i) => i !== 1),
+      ).toEqual(want);
+      expect(unsettled(editor)).toEqual([]);
+    },
+  );
+
+  it.each([
+    ["sizingV", "fixed", "hug", [10, 20]],
+    ["sizingV", "hug", "fixed", [30, 20]],
+    ["layoutMode", "none", "hug", [10, 60]],
+  ] as const)(
+    "places a copy again when it overrides its %s to %s (finding 2)",
+    (prop, value, sizing, want) => {
+      const editor = make(hugRow(sizing), copies);
+      const instance = editor.insertInstance("main", { x: 0, y: 200 }) as string;
+      editor.resize([instance], "height", 120);
+      const copy = editor.doc.childIds(instance)[0] as string;
+      editor.setProp([copy], prop, value);
+      const shown = () => [getProp(editor.doc.get(copy)?.props ?? {}, "y"), box(editor, copy)[3]];
+      expect(shown()).toEqual(want);
+      editor.setProp(["main"], "fills", [{ type: "solid", color: "#ff0000" }]);
+      expect(shown()).toEqual(want);
+      expect(unsettled(editor)).toEqual([]);
+    },
+  );
+
+  it("stretches a copy text once it overrides its mode to auto height (finding 2)", () => {
+    const editor = make(
+      [
+        page,
+        node("main", "frame", "p", { isComponent: true, width: 160, height: 60 }),
+        node("lbl", "text", "main", {
+          x: 10,
+          y: 10,
+          width: 120,
+          height: 20,
+          characters: "Words wrap here",
+          fontSize: 16,
+          textAutoResize: "width",
+          constraintH: "stretch",
+        }),
+      ],
+      copies,
+    );
+    const instance = editor.insertInstance("main", { x: 0, y: 200 }) as string;
+    editor.resize([instance], "width", 100);
+    const lbl = editor.doc.childIds(instance)[0] as string;
+    editor.setProp([lbl], "textAutoResize", "height");
+    expect(box(editor, lbl).slice(2)).toEqual([60, 60]);
+    editor.setProp(["main"], "fills", [{ type: "solid", color: "#ff0000" }]);
+    expect(box(editor, lbl).slice(2)).toEqual([60, 60]);
+    expect(unsettled(editor)).toEqual([]);
+  });
+
+  // Figma, probed live from an uneven start: past its margins, a stretched Hug frame sits at
+  // pos + delta / 2 + size (at exactly no room, where it was).
+  it.each([
+    [130, 17],
+    [120, 27],
+    [100, 17],
+    [80, 7],
+    [20, -23],
+  ] as const)(
+    "places a stretched Hug frame as Figma does when its frame narrows to %s (finding 3)",
+    (to, x) => {
+      const nodes = (parent: string) => [
+        node("row", "frame", parent, {
+          x: 17,
+          y: 10,
+          width: 30,
+          height: 20,
+          layoutMode: "row",
+          sizingH: "hug",
+          constraintH: "stretch",
+        }),
+        node("bar", "rect", "row", { width: 30, height: 20 }),
+      ];
+      const editor = make(
+        [
+          page,
+          node("plain", "frame", "p", { width: 160, height: 80 }),
+          ...nodes("plain"),
+          node("main", "frame", "p", { isComponent: true, y: 200, width: 160, height: 80 }, "a1"),
+          ...nodes("main").map((n) => ({
+            ...n,
+            id: `m-${n.id}`,
+            parent: n.parent === "row" ? "m-row" : "main",
+          })),
+        ],
+        copies,
+      );
+      editor.resize(["plain"], "width", to);
+      expect(box(editor, "row")[0]).toBe(x);
+      const instance = editor.insertInstance("main", { x: 0, y: 400 }) as string;
+      editor.resize([instance], "width", to);
+      expect(box(editor, editor.doc.childIds(instance)[0] as string)[0]).toBe(x);
+    },
+  );
+
+  it("refuses moving a component into one its instances show through a swap (issue 311)", () => {
+    const editor = make(
+      [
+        page,
+        node("main0", "frame", "p", { isComponent: true, width: 40, height: 20 }),
+        node("main1", "frame", "p", { isComponent: true, y: 100, width: 100, height: 60 }, "a1"),
+        node("main2", "frame", "p", { isComponent: true, y: 200, width: 80, height: 40 }, "a2"),
+        node("nested", "frame", "main2", { instanceOf: "main0", width: 40, height: 20 }),
+      ],
+      copies,
+    );
+    const instance = editor.insertInstance("main2", { x: 200, y: 0 }) as string;
+    editor.swapInstance(editor.doc.childIds(instance)[0] as string, "main1");
+    expect(canMoveInto(editor.doc, ["main2"], "main1")).toBe(false);
+    // Made anyway (a raw edit), sync stops at the cycle rather than overflowing its stack.
+    expect(() =>
+      editor.commit([{ op: "move", id: "main2", parent: "main1", key: "a0" }]),
+    ).not.toThrow();
   });
 });

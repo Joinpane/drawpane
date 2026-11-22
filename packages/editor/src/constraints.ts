@@ -16,7 +16,6 @@
  * Figma places it (`constrainHugged`).
  */
 import {
-  constrainedValues,
   constrainHugged,
   constrainSpan,
   getProp,
@@ -24,6 +23,8 @@ import {
   measuresOn,
   type NodeRecord,
   type Op,
+  type Placed,
+  placedGeometry,
   textResizeWhenSized,
 } from "@drawpane/model";
 import type { Doc } from "./doc";
@@ -115,37 +116,23 @@ export function constraintOps(doc: Doc, ops: readonly Op[]): Op[] {
     props.set(prop, round2(value));
   };
   /**
-   * A copy layer's place and size on an axis in its frame at size `to`, from its main layer
-   * (`constrainedValues`): undefined for a layer that isn't a copy, or that overrides its place.
+   * A copy layer's placed geometry in its frame at size `to`, from its main layer
+   * (`placedGeometry`, the derivation both formats use): undefined for a layer that isn't a copy,
+   * or whose main layer's frame resizes in this same pass (the main layer moves by its
+   * constraints too, and the copy follows it the same way, from where it is).
    */
   const fromMain = (
     child: NodeRecord,
-    axis: Axis,
     to: { readonly width: number; readonly height: number },
-  ): { pos: number; size?: number } | undefined => {
+  ): Placed | undefined => {
     const sourceId = getProp(child.props, "mirrors");
     const source = sourceId ? doc.get(sourceId) : undefined;
     const frame = doc.get(child.parent);
     const frameSource = source ? doc.get(source.parent) : undefined;
     if (!source || !frame || !frameSource) return undefined;
-    // Its main layer's frame resized in this same pass: the main layer moves by its constraints
-    // too, and the copy follows it the same way, from where it is.
     if (sizes.has(frameSource.id) || explicit.has(source.id)) return undefined;
-    const { pos, size } = AXIS[axis];
-    const overrides = getProp(child.props, "overrides");
-    if (overrides.includes(pos) || overrides.includes(size)) return undefined;
     const sized = { ...frame, props: { ...frame.props, width: to.width, height: to.height } };
-    const derived = constrainedValues(child, source, sized as NodeRecord, frameSource);
-    // What isn't derived is its main layer's, but a size its own layout decides.
-    const own =
-      hugsOn(child, axis) ||
-      measuresOn(child, axis) ||
-      overrides.includes(axis === "h" ? "sizingH" : "sizingV");
-    const want = derived[size] ?? (own ? undefined : getProp(source.props, size));
-    return {
-      pos: derived[pos] ?? getProp(source.props, pos),
-      ...(want !== undefined ? { size: want } : {}),
-    };
+    return placedGeometry(child, source, sized as NodeRecord, frameSource);
   };
   const keeps = (id: string, axis: Axis) => {
     const props = explicit.get(id);
@@ -167,21 +154,25 @@ export function constraintOps(doc: Doc, ops: readonly Op[]): Op[] {
         if (from === to || keeps(childId, axis)) continue;
         const c = getProp(child.props, constraint);
         if (c === "start") continue;
-        const exact = child.type === "group" ? undefined : fromMain(child, axis, resize.to);
-        if (exact) {
-          // A copy follows its main layer: derived from it, exactly, not from where it was.
-          write(child, pos, exact.pos);
-          if (exact.size !== undefined) write(child, size, exact.size);
-        } else if (child.type === "group")
+        if (child.type === "group") {
           constrainGroup(doc, child, axis, c, from, to, read, write);
-        else if (hugsOn(child, axis))
-          // Its auto layout keeps its size; Figma places it (it never passes a resize on).
-          write(child, pos, constrainHugged(c, read(child, pos), read(child, size), from, to));
-        else {
-          const span = constrainSpan(c, read(child, pos), read(child, size), from, to);
-          write(child, pos, span.pos);
-          if (!copyMeasures(child, axis)) write(child, size, span.size);
+          continue;
         }
+        // A copy takes what the derivation gives it, exactly; what it keeps as its own follows
+        // its constraints from where it is, and what its own layout decides isn't touched.
+        const placed = fromMain(child, resize.to);
+        if (hugsOn(child, axis)) {
+          // Its auto layout keeps its size; Figma places it (it never passes a resize on).
+          const at = constrainHugged(c, read(child, pos), read(child, size), from, to);
+          write(child, pos, placed?.derived[pos] ?? at);
+          continue;
+        }
+        const span = constrainSpan(c, read(child, pos), read(child, size), from, to);
+        write(child, pos, placed?.derived[pos] ?? span.pos);
+        const derivedSize = placed?.derived[size];
+        if (derivedSize !== undefined) write(child, size, derivedSize);
+        else if (placed?.kept[size] !== "layout" && !copyMeasures(child, axis))
+          write(child, size, span.size);
       }
       // A nested frame that changed size passes the change on to its own children.
       if (child.type === "frame") {

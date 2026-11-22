@@ -42,7 +42,8 @@ The stored mode is the source of truth, as before. A file saved with constrained
   - Fixed size text follows its constraints, as any layer does.
   - So a copy's mode is always its main layer's (another mode is a person's override), and `laidOutProps` counts only that one as laid out. The width a constraint used to give auto width text in an instance (on main) is gone: it measures itself, as its main does.
 - **A frame whose auto layout hugs on an axis keeps its size** when a constraint would stretch or scale it there, plain or a copy, and what's inside it stays where it is. Figma places it: stretched, it's centred in the span stretching would give it (centred in its frame once that span is gone); scaled, its centre scales.
-- `packages/editor/test/constraints.test.ts` ("text a constraint resizes") checks the table's rows.
+- `packages/editor/test/constraints.test.ts` ("text a constraint resizes") checks the table's rows. The edit-layout oracle now generates constrained auto-sized text, which it used to leave out because of the old disagreement.
+- **One derivation for both copy formats.** Where a copy sits, how big it is, and what it keeps of its own (`placedGeometry` in `packages/model/src/laid-out.ts`) is decided once. Materialized sync writes it, compact copies store it where their frame differs from their main's, and the constraint pass places copies by it. What it reads (`PLACED_INPUTS`) is what makes copies be placed again.
 
 ### Figma's instances and Hug frames (2026-11-22)
 
@@ -66,5 +67,6 @@ A 40 × 20 row with Hug height at y 10 in a 160 × 80 frame, Top and bottom or S
 | Top and bottom, in an instance | 5 | 10 | 15 | 10 | 5 | 20 | 30 | 50 (plain) |
 | Scale, either | 7.5 | 5 | 2.5 | 0 | −2.5 | 15 | 20 | 30 |
 
-The frame stayed 20 tall throughout, and an absolutely placed 8 × 8 layer inside it, Scale, stayed at y 4. Scale fits its centre scaling exactly. Top and bottom fits centring in the stretched span wherever that span has room (70, 100, 120, 160). Below that, Figma centres it in its frame (50, 40, 30), except at exactly zero room (60), where it stays at 10. We take the centring in the frame there too.
- The edit-layout oracle now generates constrained auto-sized text, which it used to leave out because of the old disagreement.
+The frame stayed 20 tall throughout, and an absolutely placed 8 × 8 layer inside it, Scale, stayed at y 4. Scale fits its centre scaling exactly: `(pos + size / 2) × to / from − size / 2`. Top and bottom fits centring in the stretched span wherever that span has room (70, 100, 120, 160): `pos + delta / 2`, where `delta = to − from`.
+
+Below that, the frame's own position happened to make these numbers look like centring in the frame. A second probe (PR 286's fourth re-check) used an uneven start, x 17 in a 160 wide frame and y 17 in an 80 tall one, on both axes, in plain frames, instances and layers moved into a main. It settled the rule: at exactly no room (`size + delta = 0`) the frame stays at `pos`. Past that, it's at `pos + delta / 2 + size`. With x 17 and width 30, a 130 wide frame leaves it at 17, 120 at 27, 100 at 17, 80 at 7, 50 at −8 and 20 at −23. `constrainHugged` follows it, and the Figma importer reads it through `laidOutProps`, so an import doesn't mark these places as overrides.
