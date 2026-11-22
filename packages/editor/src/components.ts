@@ -786,16 +786,22 @@ export function copyConstraintOps(doc: Doc, ops: readonly Op[]): Op[] {
       starts.push(...doc.childIds(root));
     }
   if (starts.length === 0) return [];
-  const all = new Set<string>();
-  const stack = [...starts];
-  while (stack.length > 0) {
-    const id = stack.pop() as string;
-    if (all.has(id) || !doc.has(id)) continue;
-    all.add(id);
-    stack.push(...doc.childIds(id));
+  // Starts shallowest first (a start inside another comes with it), each walked parents first.
+  const unique = [...new Set(starts)].filter((id) => doc.has(id));
+  const depth = new Map(unique.map((id) => [id, doc.ancestors(id).length]));
+  unique.sort((a, b) => (depth.get(a) ?? 0) - (depth.get(b) ?? 0));
+  const order: string[] = [];
+  const seen = new Set<string>();
+  for (const start of unique) {
+    const stack = [start];
+    while (stack.length > 0) {
+      const id = stack.pop() as string;
+      if (seen.has(id)) continue;
+      seen.add(id);
+      order.push(id);
+      stack.push(...doc.childIds(id));
+    }
   }
-  const depth = new Map([...all].map((id) => [id, doc.ancestors(id).length]));
-  const order = [...all].sort((a, b) => (depth.get(a) ?? 0) - (depth.get(b) ?? 0));
   const out: Op[] = [];
   const pending = new Map<string, Record<string, unknown>>();
   const view = (id: string): NodeRecord | undefined => {
@@ -819,7 +825,9 @@ function copyPlaceOps(doc: Doc, id: string, view: (id: string) => NodeRecord | u
   const sourceId = getProp(copy.props, "mirrors");
   const source = sourceId ? doc.get(sourceId) : undefined;
   if (!source) return out;
-  const derived = constrainedValues(copy, source, view(copy.parent), doc.get(source.parent));
+  const parent = view(copy.parent);
+  const parentSource = doc.get(source.parent);
+  const derived = constrainedValues(copy, source, parent, parentSource);
   const overridden = getProp(copy.props, "overrides");
   for (const [prop, want] of Object.entries(derived)) {
     if (overridden.includes(prop as PropName)) continue;
@@ -830,15 +838,13 @@ function copyPlaceOps(doc: Doc, id: string, view: (id: string) => NodeRecord | u
   // Placed freely (no flow places it) on an axis its constraints don't move: where its main
   // layer is, as materialized sync has it. A value layout gave it before (in a flow, or one
   // laid out in another mode) isn't kept once nothing lays it out.
-  const parent = view(copy.parent);
   const free =
     parent?.type === "frame" &&
     copy.type !== "group" &&
     (getProp(parent.props, "layoutMode") === "none" ||
       getProp(copy.props, "positioning") === "absolute") &&
     getProp(copy.props, "positioning") === getProp(source.props, "positioning") &&
-    getProp(parent.props, "layoutMode") ===
-      getProp(doc.get(source.parent)?.props ?? {}, "layoutMode");
+    getProp(parent.props, "layoutMode") === getProp(parentSource?.props ?? {}, "layoutMode");
   // Placed freely, what its constraints don't derive is its main layer's: its place, and its size
   // where nothing else decides it (its auto layout hugs, or its text measures itself).
   if (free)
