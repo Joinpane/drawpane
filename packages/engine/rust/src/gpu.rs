@@ -844,6 +844,35 @@ impl BlurReaderDraw {
     }
 }
 
+#[cfg(feature = "compute")]
+pub type ComputeCheck = std::pin::Pin<Box<dyn std::future::Future<Output = ()>>>;
+
+#[cfg(feature = "compute")]
+type ComputeResult = Rc<std::cell::RefCell<Option<Result<Option<crate::vello_compute::FrameDiagnostic>>>>>;
+
+#[cfg(feature = "compute")]
+struct PendingCompute {
+    result: ComputeResult,
+    generation: u64,
+    dst: usize,
+    last: Last,
+    background: [u32; 4],
+    stats: crate::vello_compute::ComputeFrameStats,
+}
+
+#[cfg(feature = "compute")]
+pub enum ComputeFinish {
+    /// Checked and presented.
+    Frame(DrawStats),
+    /// A buffer overflowed and grew: stage the same frame again.
+    Retry,
+    /// Compute is off for this session (`compute_reason` says why): draw with vello_gpu.
+    Fallback,
+    /// Nothing checked to show for this generation (an edit landed, or it was cancelled):
+    /// stage again.
+    Stale,
+}
+
 pub struct Gpu {
     /// Held for the device's lifetime: on the web, dropping the instance loses the device.
     _instance: wgpu::Instance,
@@ -968,6 +997,14 @@ pub struct Gpu {
     pub compute_ordinary: bool,
     #[cfg(feature = "compute")]
     pub last_compute_used: bool,
+    #[cfg(feature = "compute")]
+    pending_compute: Option<PendingCompute>,
+    #[cfg(feature = "compute")]
+    pub compute_reason: Option<String>,
+    #[cfg(feature = "compute")]
+    pub ordinary_revision: Option<(u32, bool)>,
+    #[cfg(feature = "compute")]
+    compute_tight: bool,
 }
 
 impl Drop for Gpu {
@@ -1545,6 +1582,14 @@ impl Gpu {
             compute_ordinary: false,
             #[cfg(feature = "compute")]
             last_compute_used: false,
+            #[cfg(feature = "compute")]
+            pending_compute: None,
+            #[cfg(feature = "compute")]
+            compute_reason: None,
+            #[cfg(feature = "compute")]
+            ordinary_revision: None,
+            #[cfg(feature = "compute")]
+            compute_tight: false,
         };
         gpu.ensure_compositor();
         gpu.ensure_diamond();
@@ -2374,8 +2419,11 @@ impl Gpu {
             self.bytes -= scratch.width as usize * scratch.height as usize * 8;
         }
         #[cfg(feature = "compute")]
-        if let Some(c) = self.compute.as_mut() {
-            c.reset();
+        {
+            self.pending_compute = None;
+            if let Some(c) = self.compute.as_mut() {
+                c.reset();
+            }
         }
     }
 
@@ -2389,6 +2437,7 @@ impl Gpu {
     pub fn set_compute_ordinary(&mut self, enabled: bool) {
         self.compute_ordinary = enabled;
         if !enabled {
+            self.pending_compute = None;
             self.last_compute_used = false;
             if let Some(c) = self.compute.as_mut() {
                 c.reset();
@@ -2403,68 +2452,67 @@ impl Gpu {
         }
     }
 
+    /// A fresh list (a page switch or a reset): what the last page's frames needed says nothing
+    /// about this one, so its buffers and grown capacities go.
     #[cfg(feature = "compute")]
-    pub fn compute_stats_start(&mut self) -> Result<crate::vello_compute::StatsReadback> {
-        let c = self
-            .compute
-            .as_mut()
-            .ok_or_else(|| EngineError::new(ErrorCode::State, "GPU compute pipeline has not run yet"))?;
-        c.start_stats_readback()
+    pub fn compute_page_reset(&mut self) {
+        self.pending_compute = None;
+        self.ordinary_revision = None;
+        if let Some(c) = self.compute.as_mut() {
+            c.reset();
+        }
     }
 
-    /// Renders an ordinary-paint frame on Vello 0.12's GPU compute pipeline directly into
-    /// `self.frames[dst]`, presenting onto the canvas surface in the same command buffer when one
-    /// is attached.
+    /// Starts compute frames from minimal buffers (or the usual ones), for the diagnostics'
+    /// capacity matrix.
     #[cfg(feature = "compute")]
-    pub fn render_compute(
+    pub fn compute_tight(&mut self, tight: bool) {
+        self.compute_tight = tight;
+        self.pending_compute = None;
+        if let Some(c) = self.compute.as_mut() {
+            c.set_tight(tight);
+        }
+    }
+
+    #[cfg(feature = "compute")]
+    pub fn compute_stats_json(&self) -> Result<String> {
+        self.compute
+            .as_ref()
+            .map(crate::vello_compute::VelloCompute::stats_json)
+            .ok_or_else(|| EngineError::new(ErrorCode::State, "the compute pipeline has not run yet"))
+    }
+
+    #[cfg(feature = "compute")]
+    pub fn stage_compute(
         &mut self,
         store: &Store,
         frame: &Frame,
         background: [f32; 4],
         generation: u64,
-    ) -> Result<DrawStats> {
+    ) -> Result<ComputeCheck> {
         self.check()?;
+        self.pending_compute = None;
         self.last_compute_used = false;
         let (width, height) = (u32::from(frame.width), u32::from(frame.height));
         let dst = self.next_frame();
+        let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let memory = self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let internal = self.device.push_error_scope(wgpu::ErrorFilter::Internal);
         self.ensure_frame(dst, width, height)?;
-        self.configure_surface(dst)?;
-        let acquired = self.acquire()?;
-        let presented = self.surface.is_none() || acquired.is_some();
-
-        if self.compute.is_none() {
-            self.compute = Some(crate::vello_compute::VelloCompute::new(
-                &self.device,
-                &self.queue,
-                self.timestamp_query,
-            ));
-        }
-        let surface_view = acquired.as_ref().map(|t| t.texture.create_view(&Default::default()));
+        let existing = self.compute.as_ref().map_or(0, |c| c.gpu_bytes());
+        let working_budget = self.budget.saturating_sub(
+            self.bytes()
+                .saturating_sub(existing)
+                .saturating_add(self.readbacks.bytes.get()),
+        );
+        let tight = self.compute_tight;
+        let pipeline = self.compute.get_or_insert_with(|| {
+            let mut pipeline = crate::vello_compute::VelloCompute::new(&self.device, &self.queue, self.timestamp_query);
+            pipeline.set_tight(tight);
+            pipeline
+        });
         let main = &self.frames[dst];
-        let fallback_group;
-        let present = match (surface_view.as_ref(), self.blit.as_ref()) {
-            (Some(sv), Some(blit)) => {
-                let group = match main.present_group.as_ref() {
-                    Some(g) => g,
-                    None => {
-                        fallback_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                            label: None,
-                            layout: &blit.get_bind_group_layout(0),
-                            entries: &[wgpu::BindGroupEntry {
-                                binding: 0,
-                                resource: wgpu::BindingResource::TextureView(&main.view),
-                            }],
-                        });
-                        &fallback_group
-                    }
-                };
-                Some((blit, group, sv))
-            }
-            _ => None,
-        };
-
-        let compute = self.compute.as_mut().expect("compute initialized");
-        let cstats = compute.render_into(
+        let (stats, diagnostic) = pipeline.render_into(
             &self.device,
             &self.queue,
             store,
@@ -2476,35 +2524,125 @@ impl Gpu {
             dst,
             main.view_id,
             &main.view,
-            present,
+            working_budget as u64,
         )?;
-        drop(surface_view);
-        if let Some(t) = acquired {
-            self.queue.present(t);
-        }
-        self.submits += 1;
-        self.cur = Some(dst);
-        self.last = Some(Last {
-            view: frame.view,
-            size: (width, height),
+        let internal = internal.pop();
+        let memory = memory.pop();
+        let validation = validation.pop();
+        let result = Rc::new(std::cell::RefCell::new(None));
+        self.pending_compute = Some(PendingCompute {
+            result: result.clone(),
+            generation,
+            dst,
+            last: Last {
+                view: frame.view,
+                size: (width, height),
+            },
+            background: background.map(f32::to_bits),
+            stats,
         });
-        self.last_scale = Some(frame.view.as_coeffs()[0]);
-        self.shown = Some((generation, background.map(f32::to_bits), true));
-        self.last_compute_used = true;
-        self.check()?;
-        Ok(DrawStats {
-            direct: true,
-            plan: 2,
-            exact: true,
-            standin: false,
-            presented,
-            glyphs_outlined: cstats.glyphs,
-            encode_ms: cstats.encode_ms,
-            render_ms: cstats.render_ms,
-            submit_ms: cstats.submit_ms,
-            cpu_ms: cstats.cpu_ms,
-            ..DrawStats::default()
-        })
+        let device = self.device.clone();
+        let health = self.health.clone();
+        Ok(Box::pin(async move {
+            let diagnostic = match diagnostic {
+                Some(item) => crate::vello_compute::verify_compute_frame(&device, &health, item)
+                    .await
+                    .map(Some),
+                None => Ok(None),
+            };
+            let error = internal.await.or(memory.await).or(validation.await);
+            let result_value = match (health.stop_error(), error) {
+                (Some(error), _) => Err(error),
+                (None, Some(error)) => Err(EngineError::new(ErrorCode::Gpu, error.to_string())),
+                (None, None) => diagnostic,
+            };
+            *result.borrow_mut() = Some(result_value);
+        }))
+    }
+
+    /// Shows a staged compute frame once its check has come back, or says why not. A frame
+    /// whose check found an overflow, an error or a lost device is never presented.
+    #[cfg(feature = "compute")]
+    pub fn finish_compute(&mut self, generation: u64, final_attempt: bool) -> Result<ComputeFinish> {
+        let Some(staged) = self.pending_compute.take() else {
+            return Ok(ComputeFinish::Stale);
+        };
+        // A frame of an earlier generation (an edit landed while it was checked) is still a
+        // correct picture of that page, so it may be shown while the current one is drawn, but
+        // it isn't exact for the page as it is now.
+        let current = staged.generation == generation;
+        let verified = staged.result.borrow_mut().take();
+        let Some(verified) = verified else {
+            // Not checked yet: the caller asked too early. Keep it.
+            self.pending_compute = Some(staged);
+            return Ok(ComputeFinish::Stale);
+        };
+        let diagnostic = match verified {
+            Ok(diagnostic) => diagnostic,
+            Err(error) => {
+                self.disable_compute(format!("a compute frame failed its GPU check: {}", error.message));
+                if error.code == ErrorCode::DeviceLost {
+                    return Err(error);
+                }
+                return Ok(ComputeFinish::Fallback);
+            }
+        };
+        if let Some(diagnostic) = diagnostic {
+            let compute = self.compute.as_mut().expect("staged compute pipeline");
+            if let crate::vello_compute::FrameCheck::Overflow(stages) = compute.check_frame(diagnostic) {
+                if final_attempt {
+                    self.disable_compute(format!(
+                        "compute buffers still overflowed (stages {stages:#x}) after growing"
+                    ));
+                    return Ok(ComputeFinish::Fallback);
+                }
+                return Ok(ComputeFinish::Retry);
+            }
+        }
+
+        let c = staged.stats;
+        let t0 = now();
+        // The staged draw was one submit; presenting may add another.
+        let submits0 = self.submits;
+        self.submits += 1;
+        let mut stats = self.finish_frame(
+            staged.dst,
+            DrawStats {
+                direct: true,
+                plan: 2,
+                exact: current,
+                standin: !current,
+                glyphs_outlined: c.glyphs,
+                encode_ms: c.encode_ms,
+                render_ms: c.render_ms,
+                ..DrawStats::default()
+            },
+            t0,
+            submits0,
+        )?;
+        stats.submit_ms += c.submit_ms;
+        stats.cpu_ms += c.cpu_ms;
+        if stats.presented {
+            self.cur = Some(staged.dst);
+            self.last_scale = Some(staged.last.view.as_coeffs()[0]);
+            self.last = Some(staged.last);
+            self.shown = Some((staged.generation, staged.background, true));
+            self.last_compute_used = true;
+        }
+        Ok(ComputeFinish::Frame(stats))
+    }
+
+    #[cfg(feature = "compute")]
+    pub fn cancel_compute_frame(&mut self) {
+        self.pending_compute = None;
+    }
+
+    #[cfg(feature = "compute")]
+    pub fn disable_compute(&mut self, reason: String) {
+        self.compute_reason = Some(reason);
+        self.pending_compute = None;
+        self.compute = None;
+        self.last_compute_used = false;
     }
 
     /// Bytes the engine holds on the GPU outside its tile pages.
@@ -3232,6 +3370,7 @@ impl Gpu {
         self.check()?;
         #[cfg(feature = "compute")]
         {
+            self.pending_compute = None;
             self.last_compute_used = false;
         }
         let (width, height) = (u32::from(frame.width), u32::from(frame.height));
@@ -3439,6 +3578,7 @@ impl Gpu {
         self.check()?;
         #[cfg(feature = "compute")]
         {
+            self.pending_compute = None;
             self.last_compute_used = false;
         }
         self.forget_motion_prefix();

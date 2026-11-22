@@ -15,7 +15,7 @@ import { type GpuInfo, RenderEngine } from "@drawpane/engine";
 import { loadBrowserEngine, loadComputeEngine, loadWebglEngine } from "@drawpane/engine/browser";
 import { CPU_GPU_TOLERANCE, outsideTolerance, type Score, score } from "@drawpane/engine/compare";
 import { Badge, Button, Logo, SegmentedControl } from "@drawpane/ui";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useCopy } from "../app/CopyField";
 import { EXPECTED_PNGS } from "./expected-pixels";
 import {
@@ -29,6 +29,13 @@ import "./diagnostics.css";
 
 type RequestedMode = "auto" | "webgpu" | "webgl2" | "cpu";
 type ActiveBackend = "webgpu" | "webgl2" | "cpu";
+
+import { SectionBoundary } from "./SectionBoundary";
+
+/** The opt-in compute checks (`?compute=1`), loaded only with that flag. */
+const ComputeDiagnostics = lazy(() =>
+  import("./ComputeDiagnostics").then((m) => ({ default: m.ComputeDiagnostics })),
+);
 
 const SOFTWARE_RE =
   /swiftshader|llvmpipe|lavapipe|softpipe|software|basic render|mesa offscreen|subzero/i;
@@ -621,6 +628,10 @@ export function RendererDiagnosticsPage() {
     };
   }, [requested, allowSoftware, runDiagnostics]);
 
+  const computeRequested = useMemo(
+    () => new URLSearchParams(window.location.search).get("compute") === "1",
+    [],
+  );
   const passedCount = state.cells.filter((c) => c.ok).length;
   const totalCount = state.cells.length;
   const allPassed = !state.running && !state.error && totalCount > 0 && passedCount === totalCount;
@@ -943,6 +954,17 @@ export function RendererDiagnosticsPage() {
             ))}
           </div>
         </section>
+
+        {computeRequested ? (
+          <SectionBoundary title="Compute capacity matrix">
+            <Suspense fallback={null}>
+              <ComputeDiagnostics
+                start={!state.running && totalCount > 0}
+                allowSoftware={allowSoftware}
+              />
+            </Suspense>
+          </SectionBoundary>
+        ) : null}
 
         <details className="diag__details">
           <summary>Raw report (Markdown + JSON)</summary>

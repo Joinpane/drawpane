@@ -1,0 +1,137 @@
+/**
+ * The editor's checked compute frames (decision 0040, P1-0) on a real GPU, through the editor
+ * itself (`?renderer=engine&compute=1`, read-back presentation): a frame staged under one
+ * background must never be shown, let alone reported exact, after the background changed while
+ * it was being checked (the stack review's live T4 repro showed the old background as exact).
+ * Runs only with `BENCH_COMPUTE_MATRIX=1`, on `pnpm gpu-bench --modes webgpu`.
+ */
+import { expect, test } from "@playwright/test";
+import { freshInstance, type Instance } from "../fresh-instance";
+
+test.use({ trace: "off" });
+
+test.describe("Checked compute frames in the editor", () => {
+  test.skip(process.env.BENCH_COMPUTE_MATRIX !== "1", "set BENCH_COMPUTE_MATRIX=1 on a real GPU");
+  let instance: Instance;
+
+  test.beforeAll(async ({ browser }) => {
+    test.setTimeout(240_000);
+    const port = Number(process.env.BENCH_PORT ?? 8927);
+    instance = await freshInstance(browser, { port, inspectorPort: port + 540 });
+  });
+
+  test.afterAll(async () => {
+    await instance?.stop();
+  });
+
+  test("a background change while a frame is checked shows the new background", async () => {
+    test.setTimeout(6 * 60_000);
+    const p = await instance.context.newPage();
+    await p.setViewportSize({ width: 1440, height: 900 });
+    await p.goto(`${instance.url}/`);
+    await p.evaluate(() => {
+      localStorage.setItem("drawpane:debug", "1");
+      localStorage.setItem("drawpane:renderer", "engine");
+      localStorage.setItem("drawpane:engine-present", "readback");
+    });
+    await p.getByRole("button", { name: "New file" }).first().click({ timeout: 20_000 });
+    await p.waitForURL(/\/f\//, { timeout: 30_000 });
+    await p.goto(`${p.url().split("?")[0]}?renderer=engine&compute=1`);
+    await p.waitForFunction(
+      () =>
+        Boolean(
+          (window as unknown as { drawpaneEngineView?: { engine?: { gpu?: unknown } } })
+            .drawpaneEngineView?.engine?.gpu,
+        ),
+      undefined,
+      { timeout: 45_000 },
+    );
+    const result = await p.evaluate(async () => {
+      // biome-ignore lint/suspicious/noExplicitAny: the editor's debug handles
+      const w = window as any;
+      const pageId = w.drawpane.s.pageId;
+      const page = [...w.drawpane.doc.stored()].find((n: { id: string }) => n.id === pageId);
+      w.drawpane.doc.resetStored(
+        [
+          page,
+          {
+            id: "board",
+            type: "frame",
+            parent: pageId,
+            key: "a0",
+            props: {
+              name: "Board",
+              x: 400,
+              y: 300,
+              width: 300,
+              height: 200,
+              fills: [{ type: "solid", color: "#ffffff" }],
+            },
+          },
+        ],
+        "materialized",
+      );
+      const raf = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
+      for (
+        let i = 0;
+        i < 240 && !(w.drawpaneFrames?.exact && w.drawpaneEngineView?.last?.exact);
+        i++
+      )
+        await raf();
+      const view = w.drawpaneEngineView;
+      // Quiet the editor's own loop, then drive the view by hand.
+      const editorChange = view.onChange;
+      let landed = false;
+      view.onChange = () => {
+        landed = true;
+      };
+      const canvas = view.canvas as HTMLCanvasElement;
+      const cam = w.drawpane.s.camera;
+      const dpr = window.devicePixelRatio || 1;
+      const state = { hidden: new Set(), whole: null };
+      const draw = (bg: string) =>
+        view.draw(pageId, cam, canvas.width, canvas.height, dpr, bg, state, true, 0);
+      // Stage a compute candidate under #112233 (the first draw of a new background is
+      // vello_gpu's; the next one stages), and let its check land.
+      let staged = false;
+      for (let i = 0; i < 30 && !staged; i++) {
+        staged = Boolean(draw("#112233").awaitingPreview);
+        if (!staged) await new Promise((r) => setTimeout(r, 16));
+      }
+      landed = false;
+      for (let t = 0; t < 300 && !landed; t++) await new Promise((r) => setTimeout(r, 10));
+      // The page now asks for #ff00ff at the same camera. Draw until compute shows an exact
+      // frame; nothing exact may show the old background on the way.
+      const frames = [];
+      let computeUsed = false;
+      for (let i = 0; i < 120; i++) {
+        const frame = draw("#ff00ff");
+        frames.push(frame);
+        computeUsed = view.engine.computeUsed();
+        if (frame.exact && computeUsed) break;
+        await new Promise((r) => setTimeout(r, 16));
+      }
+      // Let the read-back of that frame land on the canvas.
+      await new Promise((r) => setTimeout(r, 400));
+      view.onChange = editorChange;
+      const pixel = Array.from(canvas.getContext("2d")?.getImageData(5, 5, 1, 1).data ?? []);
+      return {
+        staged,
+        frames,
+        exact: view.last.exact,
+        computeUsed,
+        fallback: view.computeFallbackReason,
+        pixel,
+      };
+    });
+    test.info().annotations.push({ type: "bench", description: JSON.stringify(result) });
+    console.log(JSON.stringify(result));
+    expect(result.fallback).toBeNull();
+    expect(result.staged).toBe(true);
+    expect(result.computeUsed).toBe(true);
+    // Whatever was reported exact shows the background asked for.
+    expect(result.exact).toBe(true);
+    expect(result.pixel.slice(0, 3)).toEqual([255, 0, 255]);
+    await p.close();
+  });
+});

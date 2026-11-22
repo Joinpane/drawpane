@@ -222,6 +222,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           compatibility: engine.compatibility,
           software: engine.software,
           limit: engine.limitReason,
+          computeFallback: engine.computeFallbackReason,
           reducedImages: engine.reducedImages,
         });
         return;

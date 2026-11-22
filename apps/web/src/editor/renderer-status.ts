@@ -30,6 +30,7 @@ export type RendererStatus =
       readonly compatibility: boolean;
       readonly software: boolean;
       readonly limit?: string | null;
+      readonly computeFallback?: string | null;
       readonly reducedImages?: number;
     }
   | {
@@ -86,6 +87,7 @@ export function sameRendererStatus(a: RendererStatus, b: RendererStatus): boolea
       a.compatibility === b.compatibility &&
       a.software === b.software &&
       a.limit === b.limit &&
+      a.computeFallback === b.computeFallback &&
       a.reducedImages === b.reducedImages
     );
   }
@@ -131,7 +133,8 @@ export function fallbackToReason(event: FallbackEvent): RendererFallbackReason {
 export function rendererChipLabel(status: ActiveRendererStatus): string {
   if (status.active !== "engine") return "Canvas renderer";
   const note = status.limit ? " · Reduced detail" : status.reducedImages ? " · Images reduced" : "";
-  return `Engine · ${status.backend}${note}`;
+  const compute = status.computeFallback ? " · Compute off" : "";
+  return `Engine · ${status.backend}${compute}${note}`;
 }
 
 export function formatRendererReason(status: ActiveRendererStatus): string {
@@ -148,7 +151,10 @@ export function formatRendererReason(status: ActiveRendererStatus): string {
       ? `. ${reduced} ${reduced === 1 ? "image" : "images"} at reduced detail`
       : "";
     const limit = status.limit ? ` at reduced detail. ${status.limit}` : "";
-    return `Drawing with ${renderer}${limit}${note}`;
+    const compute = status.computeFallback
+      ? `. Compute is off for this session, so Vello GPU draws instead: ${status.computeFallback}`
+      : "";
+    return `Drawing with ${renderer}${limit}${note}${compute}`;
   }
   switch (status.reason.kind) {
     case "starting":

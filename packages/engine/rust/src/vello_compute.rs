@@ -1,8 +1,6 @@
-//! Vello 0.12 GPU compute path for ordinary paint (decision 0040, Phase P0).
+//! Vello 0.12 GPU compute path for ordinary paint (decision 0040, P0 and P1-0).
 //!
-//! Gated strictly on `#[cfg(feature = "gpu")]` (WebGPU Core browser build only; zero impact on
-//! `worker` or `webgl` builds) and kept behind an opt-in runtime flag (`compute_ordinary = false`
-//! by default).
+//! Compiled only in the opt-in WebGPU Core module.
 //!
 //! Architecture:
 //! 1. On document revision change (cold encode), `ordinary::walk_ordinary` walks `Store` once in
@@ -13,12 +11,10 @@
 //! 2. On every zoom/pan frame (hot frame), uploads only 160 bytes of uniforms (`ViewParams` +
 //!    `ConfigUniform`), runs `APPLY_VIEW_WGSL` (multiplying `view * base_transforms[i]` and
 //!    applying the exact 1/8 px glyph snap when eligible), runs Vello's compute stages through
-//!    `fine_area` (writing premultiplied RGBA8 directly into `gpu.frames[dst]`), optionally
-//!    records the present blit into the same `CommandEncoder`, resolves hardware GPU timestamp
-//!    queries when supported, and copies the 32-byte `BumpAllocators` + 256-byte timestamps into
-//!    a pooled 288-byte `MAP_READ` buffer checked asynchronously on every single frame with zero
-//!    main-thread stalls.
+//!    `fine_area`, writing to a private back buffer. The engine reads every bump result and
+//!    checks the device before making that texture current or presenting it.
 
+use crate::compute_caps::{self, Caps as BumpCaps, Needs, SceneShape};
 use crate::error::{EngineError, ErrorCode, Result};
 use crate::exec::expand_gradient_stops;
 use crate::gpu::{self, Health};
@@ -26,7 +22,7 @@ use crate::ordinary::{OrdinarySink, walk_ordinary};
 use crate::record::{CompactPath, ComposeMode, GlyphInstance, GradientKind, Paint};
 use crate::store::Store;
 use bytemuck::{Pod, Zeroable};
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::mem::size_of;
 use std::sync::Arc;
 use vello_common::kurbo::{Affine, BezPath, Rect};
@@ -45,7 +41,7 @@ const BUMP_BYTES: u64 = size_of::<BumpAllocators>() as u64;
 const TS_BYTES: u64 = (TS_QUERY_COUNT as u64) * 8;
 const DIAG_BUF_BYTES: u64 = BUMP_BYTES + TS_BYTES; // 32 + 256 = 288 bytes
 const MAX_DIAG_SAMPLES: usize = 4096;
-const MAX_DIAG_IN_FLIGHT: usize = 512;
+const MAX_DIAG_POOL: usize = 8;
 
 const PASS_NAMES: [&str; NUM_TS_PASSES] = [
     "apply_view",
@@ -186,16 +182,12 @@ pub struct ComputeFrameStats {
     pub glyphs: u32,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
-struct BumpCaps {
-    binning: u32,
-    ptcl: u32,
-    tile: u32,
-    seg_counts: u32,
-    segments: u32,
-    blend: u32,
-    lines: u32,
-}
+const _: () = {
+    assert!(size_of::<LineSoup>() as u64 == compute_caps::LINE_BYTES);
+    assert!(size_of::<Tile>() as u64 == compute_caps::TILE_BYTES);
+    assert!(size_of::<SegmentCount>() as u64 == compute_caps::SEG_COUNT_BYTES);
+    assert!(size_of::<PathSegment>() as u64 == compute_caps::SEGMENT_BYTES);
+};
 
 #[derive(Clone, Debug, Default)]
 struct DiagSummary {
@@ -274,12 +266,10 @@ pub struct PendingDiag {
     period_ns: f32,
 }
 
-pub struct StatsReadback {
-    pending: Vec<PendingDiag>,
-    summary: DiagSummary,
-    timestamps_supported: bool,
-    timestamp_period_ns: f32,
-    scene_meta_json: String,
+pub struct FrameDiagnostic {
+    staging: wgpu::Buffer,
+    bump: BumpAllocators,
+    timestamps: Option<([u64; TS_QUERY_COUNT as usize], u16, f32)>,
 }
 
 struct PipelineEntry {
@@ -544,7 +534,13 @@ impl ComputePipelines {
     }
 }
 
+/// What a page's encoding needs on the GPU, whatever the camera or canvas size: the packed scene,
+/// its transforms, the scene-sized scratch, and the camera-invariant prefix sums. Rebuilt only
+/// when the page's revision or generation changes.
 struct RetainedScene {
+    /// The view scale strokes were expanded for (`stroke_bucket`): zooming in past it encodes
+    /// again with finer outlines.
+    stroke_scale: f64,
     revision: u32,
     generation: u64,
     layout: Layout,
@@ -576,28 +572,12 @@ struct RetainedScene {
     clip_bbox_buf: wgpu::Buffer,
     draw_bbox_buf: wgpu::Buffer,
     path_buf: wgpu::Buffer,
-    caps: BumpCaps,
-    info_bin_data_buf: wgpu::Buffer,
-    tile_buf: wgpu::Buffer,
-    lines_buf: wgpu::Buffer,
-    seg_counts_buf: wgpu::Buffer,
-    segments_buf: wgpu::Buffer,
-    ptcl_buf: wgpu::Buffer,
-    blend_spill_buf: wgpu::Buffer,
-    total_gpu_bytes: u64,
-    max_bind_bytes: u64,
+    bytes: u64,
     bg_apply_view: wgpu::BindGroup,
     bg_bbox_clear: wgpu::BindGroup,
-    bg_flatten: wgpu::BindGroup,
-    bg_draw_leaf: wgpu::BindGroup,
     bg_clip_reduce: Option<wgpu::BindGroup>,
     bg_clip_leaf: Option<wgpu::BindGroup>,
-    bg_tile_alloc: wgpu::BindGroup,
     bg_path_count_setup: wgpu::BindGroup,
-    bg_path_count: wgpu::BindGroup,
-    bg_backdrop: wgpu::BindGroup,
-    bg_path_tiling_setup: wgpu::BindGroup,
-    bg_path_tiling: wgpu::BindGroup,
 }
 
 impl RetainedScene {
@@ -621,6 +601,42 @@ impl RetainedScene {
         self.clip_bbox_buf.destroy();
         self.draw_bbox_buf.destroy();
         self.path_buf.destroy();
+    }
+}
+
+/// The buffers Vello's bump allocators fill, sized from the canvas (tiles) as well as the scene,
+/// and every bind group that names them. Rebuilt when the canvas size changes or a checked frame
+/// reports that a stage needed more room; the page's encoding stays.
+struct Working {
+    raster: (u32, u32),
+    revision: u32,
+    generation: u64,
+    caps: BumpCaps,
+    info_bin_data_buf: wgpu::Buffer,
+    tile_buf: wgpu::Buffer,
+    lines_buf: wgpu::Buffer,
+    seg_counts_buf: wgpu::Buffer,
+    segments_buf: wgpu::Buffer,
+    ptcl_buf: wgpu::Buffer,
+    blend_spill_buf: wgpu::Buffer,
+    bin_header_buf: wgpu::Buffer,
+    bytes: u64,
+    wg_counts: WorkgroupCounts,
+    bg_flatten: wgpu::BindGroup,
+    bg_draw_leaf: wgpu::BindGroup,
+    bg_binning: wgpu::BindGroup,
+    bg_tile_alloc: wgpu::BindGroup,
+    bg_path_count: wgpu::BindGroup,
+    bg_backdrop: wgpu::BindGroup,
+    bg_coarse: wgpu::BindGroup,
+    bg_path_tiling_setup: wgpu::BindGroup,
+    bg_path_tiling: wgpu::BindGroup,
+    /// `fine_area` bind groups per frame slot (`FRAMES = 2`), keyed by the target view's id.
+    bg_fine_slots: [Option<(u64, wgpu::BindGroup)>; 2],
+}
+
+impl Working {
+    fn destroy(&self) {
         self.info_bin_data_buf.destroy();
         self.tile_buf.destroy();
         self.lines_buf.destroy();
@@ -628,26 +644,6 @@ impl RetainedScene {
         self.segments_buf.destroy();
         self.ptcl_buf.destroy();
         self.blend_spill_buf.destroy();
-    }
-}
-
-struct ViewportResources {
-    width: u32,
-    height: u32,
-    scene_revision: u32,
-    scene_generation: u64,
-    bin_header_buf: wgpu::Buffer,
-    bin_header_bytes: u64,
-    wg_counts: WorkgroupCounts,
-    bg_binning: wgpu::BindGroup,
-    bg_coarse: wgpu::BindGroup,
-    /// Cached `fine_area` bind group per `gpu.frames[dst]` slot (`FRAMES = 2`), keyed by target view
-    /// pointer/generation (rebuilt when frame texture resizes or scene rebuilds).
-    bg_fine_slots: [Option<(u64, wgpu::BindGroup)>; 2],
-}
-
-impl ViewportResources {
-    fn destroy(&self) {
         self.bin_header_buf.destroy();
     }
 }
@@ -655,13 +651,17 @@ impl ViewportResources {
 pub struct VelloCompute {
     pipelines: ComputePipelines,
     retained: Option<RetainedScene>,
-    viewport: Option<ViewportResources>,
+    working: Option<Working>,
+    /// The most each stage has needed so far (with spare), so a page that once overflowed keeps
+    /// the room it needed across revisions instead of overflowing on every edit.
+    floor: Needs,
+    /// Start from minimal capacities (the diagnostics' capacity matrix).
+    tight: bool,
     resolver: Resolver,
     ts_query_set: Option<wgpu::QuerySet>,
     ts_resolve_buf: Option<wgpu::Buffer>,
     timestamp_period_ns: f32,
     diag_pool: Vec<wgpu::Buffer>,
-    pending_diag: VecDeque<PendingDiag>,
     diag_summary: DiagSummary,
 }
 
@@ -674,10 +674,17 @@ impl Drop for VelloCompute {
         for b in self.diag_pool.drain(..) {
             b.destroy();
         }
-        for p in self.pending_diag.drain(..) {
-            p.staging.destroy();
-        }
     }
+}
+
+/// The checks a staged compute frame passes before it may be shown, in the order they run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FrameCheck {
+    /// Every stage fit: the frame is exact.
+    Fits,
+    /// A stage ran out of room (`failed` holds Vello's stage bits, or bit 31 when only a count
+    /// past its capacity showed it). The buffers grew; draw the same frame again.
+    Overflow(u32),
 }
 
 impl VelloCompute {
@@ -701,81 +708,46 @@ impl VelloCompute {
         Self {
             pipelines: ComputePipelines::new(device),
             retained: None,
-            viewport: None,
+            working: None,
+            floor: Needs::default(),
+            tight: false,
             resolver: Resolver::new(),
             ts_query_set,
             ts_resolve_buf,
             timestamp_period_ns,
             diag_pool: Vec::new(),
-            pending_diag: VecDeque::new(),
             diag_summary: DiagSummary::default(),
         }
     }
 
     pub fn gpu_bytes(&self) -> usize {
-        let ret = self.retained.as_ref().map_or(0, |r| r.total_gpu_bytes as usize);
-        let vp = self.viewport.as_ref().map_or(0, |v| v.bin_header_bytes as usize);
-        ret + vp
+        let ret = self.retained.as_ref().map_or(0, |r| r.bytes);
+        let work = self.working.as_ref().map_or(0, |w| w.bytes);
+        (ret + work) as usize
     }
 
     pub fn reset(&mut self) {
-        if let Some(vp) = self.viewport.take() {
-            vp.destroy();
+        self.floor = Needs::default();
+        if let Some(work) = self.working.take() {
+            work.destroy();
         }
         if let Some(ret) = self.retained.take() {
             ret.destroy();
         }
     }
 
-    pub fn reset_stats(&mut self) {
-        self.drain_ready_diag();
-        for p in self.pending_diag.drain(..) {
-            p.staging.destroy();
+    /// Starts from minimal capacities (or the usual ones) and forgets what earlier frames needed,
+    /// so the next frames exercise the grow-and-redraw path.
+    pub fn set_tight(&mut self, tight: bool) {
+        self.tight = tight;
+        self.floor = Needs::default();
+        if let Some(work) = self.working.take() {
+            work.destroy();
         }
-        self.diag_summary = DiagSummary::default();
     }
 
-    fn drain_ready_diag(&mut self) {
-        while let Some(front) = self.pending_diag.front_mut() {
-            match front.rx.try_recv() {
-                Ok(Some(Ok(()))) => {
-                    let item = self.pending_diag.pop_front().expect("front");
-                    if let Ok(mapped) = item.staging.slice(..).get_mapped_range() {
-                        let bump: BumpAllocators = *bytemuck::from_bytes(&mapped[..BUMP_BYTES as usize]);
-                        let ts_parsed = if item.has_ts {
-                            let mut ts = [0u64; TS_QUERY_COUNT as usize];
-                            for (i, chunk) in mapped[BUMP_BYTES as usize..DIAG_BUF_BYTES as usize]
-                                .as_chunks::<8>()
-                                .0
-                                .iter()
-                                .enumerate()
-                            {
-                                ts[i] = u64::from_le_bytes(*chunk);
-                            }
-                            Some((ts, item.pass_mask, item.period_ns))
-                        } else {
-                            None
-                        };
-                        drop(mapped);
-                        item.staging.unmap();
-                        self.diag_summary
-                            .record_frame(bump, ts_parsed.as_ref().map(|(t, m, p)| (t, *m, *p)));
-                        if self.diag_pool.len() < MAX_DIAG_IN_FLIGHT {
-                            self.diag_pool.push(item.staging);
-                        } else {
-                            item.staging.destroy();
-                        }
-                    } else {
-                        item.staging.destroy();
-                    }
-                }
-                Ok(Some(Err(_))) | Err(_) => {
-                    let item = self.pending_diag.pop_front().expect("front");
-                    item.staging.destroy();
-                }
-                Ok(None) => break,
-            }
-        }
+    pub fn reset_stats(&mut self) {
+        self.diag_summary = DiagSummary::default();
     }
 
     fn acquire_diag_buffer(pool: &mut Vec<wgpu::Buffer>, device: &wgpu::Device) -> wgpu::Buffer {
@@ -790,8 +762,13 @@ impl VelloCompute {
         })
     }
 
-    /// Renders the retained ordinary-paint scene directly into `dst_view` (`gpu.frames[dst]`) and
-    /// optionally encodes the canvas present blit in the same command buffer (single submit).
+    /// Draws the page into `dst_view` (a back buffer nobody shows yet) and copies the bump
+    /// counters (and timestamps) out for the check. Nothing is presented here: the caller makes
+    /// the texture current only after `check_frame` says every stage fit.
+    ///
+    /// `budget` is the GPU memory the compute buffers may hold in all (decision 0040's budget,
+    /// less what the rest of the engine holds). Past it, or past a binding limit, this refuses
+    /// with `ErrorCode::Limit` before allocating.
     #[allow(clippy::too_many_arguments)]
     pub fn render_into(
         &mut self,
@@ -806,70 +783,92 @@ impl VelloCompute {
         dst_slot: usize,
         dst_view_id: u64,
         dst_view: &wgpu::TextureView,
-        present: Option<(&wgpu::RenderPipeline, &wgpu::BindGroup, &wgpu::TextureView)>,
-    ) -> Result<ComputeFrameStats> {
+        budget: u64,
+    ) -> Result<(ComputeFrameStats, Option<PendingDiag>)> {
         let t_total = gpu::now();
-        self.drain_ready_diag();
         let mut encode_ms = 0.0;
 
-        let need_rebuild = self
-            .retained
-            .as_ref()
-            .is_none_or(|r| r.revision != store.revision || r.generation != generation);
-
-        if need_rebuild {
-            if let Some(vp) = self.viewport.take() {
-                vp.destroy();
+        let stroke_scale = stroke_bucket(view);
+        let stale = self.retained.as_ref().is_none_or(|r| {
+            r.revision != store.revision || r.generation != generation || r.stroke_scale < stroke_scale
+        });
+        if stale {
+            if let Some(work) = self.working.take() {
+                work.destroy();
             }
             if let Some(ret) = self.retained.take() {
                 ret.destroy();
             }
             let t_enc = gpu::now();
-            let retained = self.build_retained(device, queue, store, generation)?;
+            let retained = self.build_retained(device, queue, store, generation, stroke_scale, budget)?;
             encode_ms = gpu::now() - t_enc;
             self.retained = Some(retained);
         }
 
         let t_setup = gpu::now();
         let ret = self.retained.as_ref().expect("retained scene");
-        let need_vp = self.viewport.as_ref().is_none_or(|vp| {
-            vp.width != width
-                || vp.height != height
-                || vp.scene_revision != ret.revision
-                || vp.scene_generation != ret.generation
+        let limits = device.limits();
+        let max_bind = limits.max_storage_buffer_binding_size.min(limits.max_buffer_size);
+        let tiles = (width.div_ceil(16), height.div_ceil(16));
+        let shape = SceneShape {
+            n_paths: ret.layout.n_paths,
+            n_draw_objects: ret.layout.n_draw_objects,
+            n_clips: ret.layout.n_clips,
+            bin_data_start: ret.layout.bin_data_start,
+            path_segments: ret.n_path_segments,
+        };
+        let caps = if self.tight {
+            compute_caps::tight_caps(&shape, tiles, max_bind, &self.floor)?
+        } else {
+            compute_caps::caps(&shape, tiles, max_bind, &self.floor)?
+        };
+        let rebuild_working = self.working.as_ref().is_none_or(|w| {
+            w.raster != (width, height)
+                || w.revision != ret.revision
+                || w.generation != ret.generation
+                || !w.caps.covers(&caps)
         });
-        if need_vp {
-            if let Some(vp) = self.viewport.take() {
-                vp.destroy();
+        if rebuild_working {
+            if let Some(work) = self.working.take() {
+                work.destroy();
             }
-            let vp = build_viewport(device, &self.pipelines, ret, width, height)?;
-            self.viewport = Some(vp);
+            let left = budget.saturating_sub(ret.bytes);
+            self.working = Some(build_working(
+                device,
+                &self.pipelines,
+                ret,
+                (width, height),
+                caps,
+                left,
+            )?);
         }
-        let vp = self.viewport.as_mut().expect("viewport resources");
+        let work = self.working.as_mut().expect("working buffers");
         let slot = dst_slot % 2;
-        if vp.bg_fine_slots[slot].as_ref().is_none_or(|(id, _)| *id != dst_view_id) {
+        if work.bg_fine_slots[slot]
+            .as_ref()
+            .is_none_or(|(id, _)| *id != dst_view_id)
+        {
             let bg = self.pipelines.fine_area.bind_group(
                 device,
                 "compute.bg_fine_area",
                 &[
                     ret.config_buf.as_entire_binding(),
-                    ret.segments_buf.as_entire_binding(),
-                    ret.ptcl_buf.as_entire_binding(),
-                    ret.info_bin_data_buf.as_entire_binding(),
-                    ret.blend_spill_buf.as_entire_binding(),
+                    work.segments_buf.as_entire_binding(),
+                    work.ptcl_buf.as_entire_binding(),
+                    work.info_bin_data_buf.as_entire_binding(),
+                    work.blend_spill_buf.as_entire_binding(),
                     wgpu::BindingResource::TextureView(dst_view),
                     wgpu::BindingResource::TextureView(&ret.gradient_view),
                     wgpu::BindingResource::TextureView(&ret.image_atlas_view),
                 ],
             );
-            vp.bg_fine_slots[slot] = Some((dst_view_id, bg));
+            work.bg_fine_slots[slot] = Some((dst_view_id, bg));
         }
         let render_ms = gpu::now() - t_setup;
 
         let t_sub = gpu::now();
-        let ret = self.retained.as_ref().expect("retained scene");
-        let vp = self.viewport.as_ref().expect("viewport resources");
-        let bg_fine = &vp.bg_fine_slots[slot].as_ref().expect("fine bind group").1;
+        let work = self.working.as_ref().expect("working buffers");
+        let bg_fine = &work.bg_fine_slots[slot].as_ref().expect("fine bind group").1;
 
         if ret.layout.n_paths == 0 {
             let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -901,42 +900,24 @@ impl VelloCompute {
                     ..Default::default()
                 });
             }
-            if let Some((blit_pipe, blit_bg, surface_view)) = present {
-                let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("compute.present"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: surface_view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    ..Default::default()
-                });
-                rpass.set_pipeline(blit_pipe);
-                rpass.set_bind_group(0, blit_bg, &[]);
-                rpass.draw(0..3, 0..1);
-            }
             queue.submit([encoder.finish()]);
             let submit_ms = gpu::now() - t_sub;
             self.diag_summary.frames_submitted += 1;
-            self.diag_summary.frames_checked += 1;
-            return Ok(ComputeFrameStats {
-                encode_ms,
-                render_ms,
-                submit_ms,
-                cpu_ms: gpu::now() - t_total,
-                n_paths: 0,
-                glyphs: 0,
-            });
+            return Ok((
+                ComputeFrameStats {
+                    encode_ms,
+                    render_ms,
+                    submit_ms,
+                    cpu_ms: gpu::now() - t_total,
+                    n_paths: 0,
+                    glyphs: 0,
+                },
+                None,
+            ));
         }
 
         let bg_color = Color::new([background[0], background[1], background[2], background[3]]);
-        let mut cfg = make_config_uniform(&ret.layout, width, height, &bg_color, ret.caps);
-        cfg.target_width = width;
-        cfg.target_height = height;
+        let cfg = make_config_uniform(&ret.layout, width, height, &bg_color, work.caps);
 
         let c = view.as_coeffs();
         let view_params = ViewParams {
@@ -958,8 +939,7 @@ impl VelloCompute {
 
         let ts_qs = self.ts_query_set.as_ref();
         let mut pass_mask = 0u16;
-
-        let wg = &vp.wg_counts;
+        let wg = &work.wg_counts;
 
         if ret.n_transforms > 0 {
             pass_mask |= 1u16 << 0;
@@ -1024,14 +1004,14 @@ impl VelloCompute {
             2,
             "compute.flatten",
             self.pipelines.flatten,
-            &ret.bg_flatten,
+            &work.bg_flatten,
             wg.flatten
         );
         dispatch!(
             3,
             "compute.draw_leaf",
             self.pipelines.draw_leaf,
-            &ret.bg_draw_leaf,
+            &work.bg_draw_leaf,
             wg.draw_leaf
         );
         if wg.clip_reduce.0 > 0
@@ -1044,12 +1024,18 @@ impl VelloCompute {
         {
             dispatch!(5, "compute.clip_leaf", pipe, bg, wg.clip_leaf);
         }
-        dispatch!(6, "compute.binning", self.pipelines.binning, &vp.bg_binning, wg.binning);
+        dispatch!(
+            6,
+            "compute.binning",
+            self.pipelines.binning,
+            &work.bg_binning,
+            wg.binning
+        );
         dispatch!(
             7,
             "compute.tile_alloc",
             self.pipelines.tile_alloc,
-            &ret.bg_tile_alloc,
+            &work.bg_tile_alloc,
             wg.tile_alloc
         );
         dispatch!(
@@ -1059,54 +1045,29 @@ impl VelloCompute {
             &ret.bg_path_count_setup,
             wg.path_count_setup
         );
-        dispatch_indirect!(9, "compute.path_count", self.pipelines.path_count, &ret.bg_path_count);
+        dispatch_indirect!(9, "compute.path_count", self.pipelines.path_count, &work.bg_path_count);
         dispatch!(
             10,
             "compute.backdrop",
             self.pipelines.backdrop,
-            &ret.bg_backdrop,
+            &work.bg_backdrop,
             wg.backdrop
         );
-        dispatch!(11, "compute.coarse", self.pipelines.coarse, &vp.bg_coarse, wg.coarse);
+        dispatch!(11, "compute.coarse", self.pipelines.coarse, &work.bg_coarse, wg.coarse);
         dispatch!(
             12,
             "compute.path_tiling_setup",
             self.pipelines.path_tiling_setup,
-            &ret.bg_path_tiling_setup,
+            &work.bg_path_tiling_setup,
             wg.path_tiling_setup
         );
         dispatch_indirect!(
             13,
             "compute.path_tiling",
             self.pipelines.path_tiling,
-            &ret.bg_path_tiling
+            &work.bg_path_tiling
         );
         dispatch!(14, "compute.fine_area", self.pipelines.fine_area, bg_fine, wg.fine);
-
-        if let Some((blit_pipe, blit_bg, surface_view)) = present {
-            pass_mask |= 1u16 << 15;
-            let mut rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("compute.present"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: surface_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                timestamp_writes: ts_qs.map(|qs| wgpu::RenderPassTimestampWrites {
-                    query_set: qs,
-                    beginning_of_pass_write_index: Some(30),
-                    end_of_pass_write_index: Some(31),
-                }),
-                ..Default::default()
-            });
-            rpass.set_pipeline(blit_pipe);
-            rpass.set_bind_group(0, blit_bg, &[]);
-            rpass.draw(0..3, 0..1);
-        }
 
         let has_ts = if let (Some(qs), Some(ts_buf)) = (ts_qs, self.ts_resolve_buf.as_ref()) {
             encoder.resolve_query_set(qs, 0..TS_QUERY_COUNT, ts_buf, 0);
@@ -1115,94 +1076,151 @@ impl VelloCompute {
             false
         };
 
-        // Copy bump counters + resolved timestamps into a tiny 288-byte staging buffer on EVERY
-        // frame so bump.failed and GPU timestamps are verified on every frame without stalling.
         let n_paths = ret.layout.n_paths;
-        let n_glyphs = ret.n_glyphs;
-        let bump_buf_ref = &ret.bump_buf;
-        let record_diag = self.pending_diag.len() < MAX_DIAG_IN_FLIGHT;
-        let diag_staging = if record_diag {
-            let staging = Self::acquire_diag_buffer(&mut self.diag_pool, device);
-            encoder.copy_buffer_to_buffer(bump_buf_ref, 0, &staging, 0, BUMP_BYTES);
-            if has_ts && let Some(ts_buf) = self.ts_resolve_buf.as_ref() {
-                encoder.copy_buffer_to_buffer(ts_buf, 0, &staging, BUMP_BYTES, TS_BYTES);
-            }
-            Some(staging)
-        } else {
-            None
-        };
-
+        let glyphs = ret.n_glyphs;
+        let staging = Self::acquire_diag_buffer(&mut self.diag_pool, device);
+        encoder.copy_buffer_to_buffer(&ret.bump_buf, 0, &staging, 0, BUMP_BYTES);
+        if has_ts && let Some(ts_buf) = self.ts_resolve_buf.as_ref() {
+            encoder.copy_buffer_to_buffer(ts_buf, 0, &staging, BUMP_BYTES, TS_BYTES);
+        }
         queue.submit([encoder.finish()]);
         self.diag_summary.frames_submitted += 1;
 
-        if let Some(staging) = diag_staging {
-            let (tx, rx) = futures_channel::oneshot::channel();
-            staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
-                let _ = tx.send(r);
-            });
-            self.pending_diag.push_back(PendingDiag {
-                staging,
-                rx,
-                pass_mask,
-                has_ts,
-                period_ns: self.timestamp_period_ns,
-            });
-        }
+        let (tx, rx) = futures_channel::oneshot::channel();
+        staging.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+            let _ = tx.send(r);
+        });
+        let readback = PendingDiag {
+            staging,
+            rx,
+            pass_mask,
+            has_ts,
+            period_ns: self.timestamp_period_ns,
+        };
 
         let submit_ms = gpu::now() - t_sub;
-        Ok(ComputeFrameStats {
-            encode_ms,
-            render_ms,
-            submit_ms,
-            cpu_ms: gpu::now() - t_total,
-            n_paths,
-            glyphs: n_glyphs,
-        })
+        Ok((
+            ComputeFrameStats {
+                encode_ms,
+                render_ms,
+                submit_ms,
+                cpu_ms: gpu::now() - t_total,
+                n_paths,
+                glyphs,
+            },
+            Some(readback),
+        ))
     }
 
-    /// Drains ready per-frame diagnostics and hands any still-in-flight frames to an async finish
-    /// call (`finish_stats_readback`) so every submitted frame is checked before reporting stats.
-    pub fn start_stats_readback(&mut self) -> Result<StatsReadback> {
-        self.drain_ready_diag();
-        let pending: Vec<PendingDiag> = self.pending_diag.drain(..).collect();
-        let summary = self.diag_summary.clone();
-        let scene_meta_json = if let Some(ret) = self.retained.as_ref() {
-            format!(
-                concat!(
-                    "\"capacities\":{{\"binning\":{},\"ptcl\":{},\"tile\":{},\"seg_counts\":{},\"segments\":{},\"blend\":{},\"lines\":{},\"maxBindBytes\":{}}},",
-                    "\"scene\":{{\"nPaths\":{},\"nDrawObjects\":{},\"nClips\":{},\"nPathSegments\":{},\"nTransforms\":{},\"nGlyphs\":{},",
-                    "\"packedBytes\":{},\"totalGpuBytes\":{},\"coldEncodeMs\":{:.3},\"coldResolveMs\":{:.3},\"coldUploadMs\":{:.3}}}"
-                ),
-                ret.caps.binning,
-                ret.caps.ptcl,
-                ret.caps.tile,
-                ret.caps.seg_counts,
-                ret.caps.segments,
-                ret.caps.blend,
-                ret.caps.lines,
-                ret.max_bind_bytes,
-                ret.layout.n_paths,
-                ret.layout.n_draw_objects,
-                ret.layout.n_clips,
-                ret.n_path_segments,
-                ret.n_transforms,
-                ret.n_glyphs,
-                ret.packed_bytes,
-                ret.total_gpu_bytes,
-                ret.cold_encode_ms,
-                ret.cold_resolve_ms,
-                ret.cold_upload_ms,
-            )
-        } else {
-            "\"capacities\":null,\"scene\":null".to_string()
+    /// Judges a staged frame from its read-back counters. Vello flags most overflows in
+    /// `bump.failed`; `segments` it never checks (upstream relies on it never exceeding
+    /// `seg_counts`), and a stage that failed skips the stages after it, so a count past its
+    /// capacity counts as a failure too. On overflow the floor grows to what was asked for plus
+    /// half again, so the next draw of the same frame gets room.
+    pub fn check_frame(&mut self, diagnostic: FrameDiagnostic) -> FrameCheck {
+        let FrameDiagnostic {
+            staging,
+            mut bump,
+            timestamps,
+        } = diagnostic;
+        let seen = Needs {
+            binning: bump.binning,
+            ptcl: bump.ptcl,
+            tile: bump.tile,
+            seg_counts: bump.seg_counts,
+            segments: bump.segments,
+            blend: bump.blend,
+            lines: bump.lines,
         };
-        Ok(StatsReadback {
-            pending,
-            summary,
-            timestamps_supported: self.ts_query_set.is_some(),
-            timestamp_period_ns: self.timestamp_period_ns,
+        if bump.failed == 0 && self.working.as_ref().is_some_and(|w| w.caps.exceeded_by(&seen)) {
+            bump.failed = 1 << 31;
+        }
+        self.diag_summary.record_frame(
+            bump,
+            timestamps.as_ref().map(|(raw, mask, period)| (raw, *mask, *period)),
+        );
+        if self.diag_pool.len() < MAX_DIAG_POOL {
+            self.diag_pool.push(staging);
+        } else {
+            staging.destroy();
+        }
+        if bump.failed == 0 {
+            return FrameCheck::Fits;
+        }
+        self.floor = self.floor.grow(seen);
+        FrameCheck::Overflow(bump.failed)
+    }
+
+    /// The diagnostics so far: every checked frame's counters and timestamps, and the scene's
+    /// shape and capacities.
+    pub fn stats_json(&self) -> String {
+        let s = &self.diag_summary;
+        let fmt_bump = |b: &BumpAllocators| {
+            format!(
+                "{{\"failed\":{},\"binning\":{},\"ptcl\":{},\"tile\":{},\"seg_counts\":{},\"segments\":{},\"blend\":{},\"lines\":{}}}",
+                b.failed, b.binning, b.ptcl, b.tile, b.seg_counts, b.segments, b.blend, b.lines
+            )
+        };
+        let list = |v: &[f64]| v.iter().map(|v| format!("{v:.4}")).collect::<Vec<_>>().join(",");
+        let pass_avg_json: String = PASS_NAMES
+            .iter()
+            .enumerate()
+            .map(|(i, name)| {
+                let avg = if s.pass_counts[i] > 0 {
+                    s.pass_ms_sum[i] / f64::from(s.pass_counts[i])
+                } else {
+                    0.0
+                };
+                format!("\"{name}\":{avg:.4}")
+            })
+            .collect::<Vec<_>>()
+            .join(",");
+        let scene_meta_json = match (self.retained.as_ref(), self.working.as_ref()) {
+            (Some(ret), work) => {
+                let caps = work.map(|w| w.caps).unwrap_or_default();
+                format!(
+                    concat!(
+                        "\"capacities\":{{\"binning\":{},\"ptcl\":{},\"tile\":{},\"seg_counts\":{},\"segments\":{},\"blend\":{},\"lines\":{}}},",
+                        "\"scene\":{{\"nPaths\":{},\"nDrawObjects\":{},\"nClips\":{},\"nPathSegments\":{},\"nTransforms\":{},\"nGlyphs\":{},",
+                        "\"packedBytes\":{},\"totalGpuBytes\":{},\"coldEncodeMs\":{:.3},\"coldResolveMs\":{:.3},\"coldUploadMs\":{:.3}}}"
+                    ),
+                    caps.binning,
+                    caps.ptcl,
+                    caps.tile,
+                    caps.seg_counts,
+                    caps.segments,
+                    caps.blend,
+                    caps.lines,
+                    ret.layout.n_paths,
+                    ret.layout.n_draw_objects,
+                    ret.layout.n_clips,
+                    ret.n_path_segments,
+                    ret.n_transforms,
+                    ret.n_glyphs,
+                    ret.packed_bytes,
+                    self.gpu_bytes(),
+                    ret.cold_encode_ms,
+                    ret.cold_resolve_ms,
+                    ret.cold_upload_ms,
+                )
+            }
+            (None, _) => "\"capacities\":null,\"scene\":null".to_string(),
+        };
+        format!(
+            "{{\"framesSubmitted\":{},\"framesChecked\":{},\"failedFrames\":{},\"anyFailedMask\":{},\"bump\":{},\"maxBump\":{},\"timestampsSupported\":{},\"timestampPeriodNs\":{:.3},\"gpuMs\":[{}],\"gpuSpanMs\":[{}],\"passAvgMs\":{{{}}},{}}}",
+            s.frames_submitted,
+            s.frames_checked,
+            s.failed_frames,
+            s.any_failed_mask,
+            fmt_bump(&s.last_bump),
+            fmt_bump(&s.max_bump),
+            self.ts_query_set.is_some(),
+            self.timestamp_period_ns,
+            list(&s.gpu_ms),
+            list(&s.gpu_span_ms),
+            pass_avg_json,
             scene_meta_json,
-        })
+        )
     }
 
     fn build_retained(
@@ -1211,9 +1229,11 @@ impl VelloCompute {
         queue: &wgpu::Queue,
         store: &Store,
         generation: u64,
+        stroke_scale: f64,
+        budget: u64,
     ) -> Result<RetainedScene> {
         let t0 = gpu::now();
-        let mut sink = VelloComputeSink::new(store);
+        let mut sink = VelloComputeSink::new(store, stroke_scale);
         walk_ordinary(store, &mut sink)?;
         let cold_encode_ms = gpu::now() - t0;
 
@@ -1245,52 +1265,121 @@ impl VelloCompute {
         }
 
         let limits = device.limits();
-        let max_bind = limits.max_storage_buffer_binding_size.min(limits.max_buffer_size);
-        let caps = compute_bump_caps(&layout, n_path_segments, max_bind);
-
-        let mut total_gpu_bytes = 0u64;
-        let mut make_buf = |label: &str, size: u64, usage: wgpu::BufferUsages| -> wgpu::Buffer {
-            let sz = size.max(4).next_multiple_of(4);
-            total_gpu_bytes += sz;
-            device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some(label),
-                size: sz,
-                usage,
-                mapped_at_creation: false,
-            })
-        };
-
-        let scene_buf = make_buf(
-            "compute.scene",
-            packed.len() as u64,
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        );
-        queue.write_buffer(&scene_buf, 0, &packed);
-
-        let base_transforms_buf = make_buf(
-            "compute.base_transforms",
-            (transform_bytes.len() as u64).max(24),
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        );
-        if !transform_bytes.is_empty() {
-            queue.write_buffer(&base_transforms_buf, 0, transform_bytes);
-        }
-
-        let meta_bytes: &[u8] = bytemuck::cast_slice(&sink.transform_meta);
-        let transform_meta_buf = make_buf(
-            "compute.transform_meta",
-            (meta_bytes.len() as u64).max(size_of::<TransformMeta>() as u64),
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
-        );
-        if !meta_bytes.is_empty() {
-            queue.write_buffer(&transform_meta_buf, 0, meta_bytes);
-        }
-
         let (gw, gh) = if ramps.height == 0 {
             (1, 1)
         } else {
             (ramps.width, ramps.height)
         };
+        let (aw, ah) = (images.width.max(1), images.height.max(1));
+        if gw.max(gh).max(aw).max(ah) > limits.max_texture_dimension_2d {
+            return Err(EngineError::limit(
+                "compute gradient or image atlas exceeds the GPU texture limit",
+            ));
+        }
+        // Scene-sized only: the tile counts here don't matter (bin headers live in `Working`).
+        let wgc = WorkgroupCounts::new(&layout, 1, 1, layout.path_tags_size());
+        let bs = BufferSizes::new(&layout, &wgc);
+        let mut alloc = Allocator::new(&limits, budget);
+        alloc.reserve(
+            "compute gradient and image atlases",
+            (u64::from(gw) * u64::from(gh) + u64::from(aw) * u64::from(ah)) * 4,
+        )?;
+
+        let storage = wgpu::BufferUsages::STORAGE;
+        let upload = wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST;
+        let uniform = wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST;
+        let scene_buf = alloc.buffer(device, "compute.scene", packed.len() as u64, upload)?;
+        let base_transforms_buf = alloc.buffer(
+            device,
+            "compute.base_transforms",
+            (transform_bytes.len() as u64).max(24),
+            upload,
+        )?;
+        let meta_bytes: &[u8] = bytemuck::cast_slice(&sink.transform_meta);
+        let transform_meta_buf = alloc.buffer(
+            device,
+            "compute.transform_meta",
+            (meta_bytes.len() as u64).max(size_of::<TransformMeta>() as u64),
+            upload,
+        )?;
+        let view_buf = alloc.buffer(device, "compute.view", size_of::<ViewParams>() as u64, uniform)?;
+        let config_buf = alloc.buffer(device, "compute.config", size_of::<ConfigUniform>() as u64, uniform)?;
+        let tagmonoid_buf = alloc.buffer(
+            device,
+            "compute.tagmonoid",
+            u64::from(bs.path_monoids.size_in_bytes()),
+            storage,
+        )?;
+        let draw_reduced_buf = alloc.buffer(
+            device,
+            "compute.draw_reduced",
+            u64::from(bs.draw_reduced.size_in_bytes()),
+            storage,
+        )?;
+        let bump_buf = alloc.buffer(
+            device,
+            "compute.bump",
+            u64::from(bs.bump_alloc.size_in_bytes()),
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
+        )?;
+        let indirect_count_buf = alloc.buffer(
+            device,
+            "compute.indirect",
+            u64::from(bs.indirect_count.size_in_bytes()),
+            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
+        )?;
+        let path_bbox_buf = alloc.buffer(
+            device,
+            "compute.path_bbox",
+            u64::from(bs.path_bboxes.size_in_bytes()),
+            storage,
+        )?;
+        let draw_monoid_buf = alloc.buffer(
+            device,
+            "compute.draw_monoid",
+            u64::from(bs.draw_monoids.size_in_bytes()),
+            storage,
+        )?;
+        let clip_inp_buf = alloc.buffer(
+            device,
+            "compute.clip_inp",
+            u64::from(bs.clip_inps.size_in_bytes()),
+            storage,
+        )?;
+        let clip_el_buf = alloc.buffer(
+            device,
+            "compute.clip_el",
+            u64::from(bs.clip_els.size_in_bytes()),
+            storage,
+        )?;
+        let clip_bic_buf = alloc.buffer(
+            device,
+            "compute.clip_bic",
+            u64::from(bs.clip_bics.size_in_bytes()),
+            storage,
+        )?;
+        let clip_bbox_buf = alloc.buffer(
+            device,
+            "compute.clip_bbox",
+            u64::from(bs.clip_bboxes.size_in_bytes()),
+            storage,
+        )?;
+        let draw_bbox_buf = alloc.buffer(
+            device,
+            "compute.draw_bbox",
+            u64::from(bs.draw_bboxes.size_in_bytes()),
+            storage,
+        )?;
+        let path_buf = alloc.buffer(device, "compute.paths", u64::from(bs.paths.size_in_bytes()), storage)?;
+
+        queue.write_buffer(&scene_buf, 0, &packed);
+        if !transform_bytes.is_empty() {
+            queue.write_buffer(&base_transforms_buf, 0, transform_bytes);
+        }
+        if !meta_bytes.is_empty() {
+            queue.write_buffer(&transform_meta_buf, 0, meta_bytes);
+        }
+
         let gradient_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("compute.gradients"),
             size: wgpu::Extent3d {
@@ -1329,7 +1418,6 @@ impl VelloCompute {
         }
         let gradient_view = gradient_tex.create_view(&Default::default());
 
-        let (aw, ah) = (images.width.max(1), images.height.max(1));
         let image_atlas_tex = device.create_texture(&wgpu::TextureDescriptor {
             label: Some("compute.image_atlas"),
             size: wgpu::Extent3d {
@@ -1346,122 +1434,20 @@ impl VelloCompute {
         });
         let image_atlas_view = image_atlas_tex.create_view(&Default::default());
 
-        let wgc = WorkgroupCounts::new(&layout, 1, 1, layout.path_tags_size());
-        let bs = BufferSizes::new(&layout, &wgc);
-
-        let view_buf = make_buf(
-            "compute.view",
-            size_of::<ViewParams>() as u64,
-            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        );
-        let config_buf = make_buf(
-            "compute.config",
-            size_of::<ConfigUniform>() as u64,
-            wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        );
-        let tagmonoid_buf = make_buf(
-            "compute.tagmonoid",
-            u64::from(bs.path_monoids.size_in_bytes()),
-            wgpu::BufferUsages::STORAGE,
-        );
-        let draw_reduced_buf = make_buf(
-            "compute.draw_reduced",
-            u64::from(bs.draw_reduced.size_in_bytes()),
-            wgpu::BufferUsages::STORAGE,
-        );
-        let bump_buf = make_buf(
-            "compute.bump",
-            u64::from(bs.bump_alloc.size_in_bytes()),
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::COPY_SRC,
-        );
-        let indirect_count_buf = make_buf(
-            "compute.indirect",
-            u64::from(bs.indirect_count.size_in_bytes()),
-            wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::INDIRECT,
-        );
-        let path_bbox_buf = make_buf(
-            "compute.path_bbox",
-            u64::from(bs.path_bboxes.size_in_bytes()),
-            wgpu::BufferUsages::STORAGE,
-        );
-        let draw_monoid_buf = make_buf(
-            "compute.draw_monoid",
-            u64::from(bs.draw_monoids.size_in_bytes()),
-            wgpu::BufferUsages::STORAGE,
-        );
-        let clip_inp_buf = make_buf(
-            "compute.clip_inp",
-            u64::from(bs.clip_inps.size_in_bytes()),
-            wgpu::BufferUsages::STORAGE,
-        );
-        let clip_el_buf = make_buf(
-            "compute.clip_el",
-            u64::from(bs.clip_els.size_in_bytes()),
-            wgpu::BufferUsages::STORAGE,
-        );
-        let clip_bic_buf = make_buf(
-            "compute.clip_bic",
-            u64::from(bs.clip_bics.size_in_bytes()),
-            wgpu::BufferUsages::STORAGE,
-        );
-        let clip_bbox_buf = make_buf(
-            "compute.clip_bbox",
-            u64::from(bs.clip_bboxes.size_in_bytes()),
-            wgpu::BufferUsages::STORAGE,
-        );
-        let draw_bbox_buf = make_buf(
-            "compute.draw_bbox",
-            u64::from(bs.draw_bboxes.size_in_bytes()),
-            wgpu::BufferUsages::STORAGE,
-        );
-        let path_buf = make_buf(
-            "compute.paths",
-            u64::from(bs.paths.size_in_bytes()),
-            wgpu::BufferUsages::STORAGE,
-        );
-
-        let info_bin_words = u64::from(layout.bin_data_start) + u64::from(caps.binning);
-        let info_bin_data_buf = make_buf("compute.info_bin_data", info_bin_words * 4, wgpu::BufferUsages::STORAGE);
-        let tile_buf = make_buf(
-            "compute.tiles",
-            u64::from(caps.tile) * size_of::<Tile>() as u64,
-            wgpu::BufferUsages::STORAGE,
-        );
-        let lines_buf = make_buf(
-            "compute.lines",
-            u64::from(caps.lines) * size_of::<LineSoup>() as u64,
-            wgpu::BufferUsages::STORAGE,
-        );
-        let seg_counts_buf = make_buf(
-            "compute.seg_counts",
-            u64::from(caps.seg_counts) * size_of::<SegmentCount>() as u64,
-            wgpu::BufferUsages::STORAGE,
-        );
-        let segments_buf = make_buf(
-            "compute.segments",
-            u64::from(caps.segments) * size_of::<PathSegment>() as u64,
-            wgpu::BufferUsages::STORAGE,
-        );
-        let ptcl_buf = make_buf("compute.ptcl", u64::from(caps.ptcl) * 4, wgpu::BufferUsages::STORAGE);
-        let blend_spill_buf = make_buf(
-            "compute.blend_spill",
-            u64::from(caps.blend) * 4,
-            wgpu::BufferUsages::STORAGE,
-        );
-        drop(make_buf);
-        total_gpu_bytes += u64::from(gw) * u64::from(gh) * 4 + u64::from(aw) * u64::from(ah) * 4;
-
-        // Precompute camera-invariant prefix sums once per revision.
+        // Camera-invariant prefix sums, once per revision. The config's capacities don't matter
+        // to these passes, so a 16x16 placeholder is enough until the first frame writes its own.
         if layout.n_paths > 0 {
-            let init_cfg = make_config_uniform(&layout, 16, 16, &Color::TRANSPARENT, caps);
+            let init_cfg = make_config_uniform(&layout, 16, 16, &Color::TRANSPARENT, BumpCaps::default());
             queue.write_buffer(&config_buf, 0, bytemuck::bytes_of(&init_cfg));
 
-            let reduced_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("compute.reduced_tmp"),
-                size: u64::from(bs.path_reduced.size_in_bytes()).max(4),
-                usage: wgpu::BufferUsages::STORAGE,
-                mapped_at_creation: false,
-            });
+            // Prefix-sum scratch, alive only while this runs: checked against the binding limit
+            // and the budget beside every retained buffer, then released.
+            let reduced_buf = alloc.buffer(
+                device,
+                "compute.reduced_tmp",
+                u64::from(bs.path_reduced.size_in_bytes()),
+                wgpu::BufferUsages::STORAGE,
+            )?;
             let mut cmd = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("compute.precompute_monoids"),
             });
@@ -1487,18 +1473,18 @@ impl VelloCompute {
                 let p_pr2 = self.pipelines.pathtag_reduce2.as_ref().expect("pathtag_reduce2");
                 let p_ps1 = self.pipelines.pathtag_scan1.as_ref().expect("pathtag_scan1");
                 let p_psl = self.pipelines.pathtag_scan_large.as_ref().expect("pathtag_scan_large");
-                let reduced2_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("compute.reduced2_tmp"),
-                    size: u64::from(bs.path_reduced2.size_in_bytes()).max(4),
-                    usage: wgpu::BufferUsages::STORAGE,
-                    mapped_at_creation: false,
-                });
-                let reduced_scan_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                    label: Some("compute.reduced_scan_tmp"),
-                    size: u64::from(bs.path_reduced_scan.size_in_bytes()).max(4),
-                    usage: wgpu::BufferUsages::STORAGE,
-                    mapped_at_creation: false,
-                });
+                let reduced2_buf = alloc.buffer(
+                    device,
+                    "compute.reduced2_tmp",
+                    u64::from(bs.path_reduced2.size_in_bytes()),
+                    wgpu::BufferUsages::STORAGE,
+                )?;
+                let reduced_scan_buf = alloc.buffer(
+                    device,
+                    "compute.reduced_scan_tmp",
+                    u64::from(bs.path_reduced_scan.size_in_bytes()),
+                    wgpu::BufferUsages::STORAGE,
+                )?;
                 let bg_pr2 = p_pr2.bind_group(
                     device,
                     "compute.bg_pathtag_reduce2",
@@ -1578,8 +1564,13 @@ impl VelloCompute {
             }
 
             queue.submit([cmd.finish()]);
-            drop(large_tmps);
-            drop(reduced_buf);
+            if let Some((a, b)) = large_tmps {
+                alloc.release(a.size() + b.size());
+                a.destroy();
+                b.destroy();
+            }
+            alloc.release(reduced_buf.size());
+            reduced_buf.destroy();
         }
 
         if wgc.clip_reduce.0 > 0 {
@@ -1616,33 +1607,8 @@ impl VelloCompute {
             "compute.bg_bbox_clear",
             &[config_buf.as_entire_binding(), path_bbox_buf.as_entire_binding()],
         );
-        let bg_flatten = p.flatten.bind_group(
-            device,
-            "compute.bg_flatten",
-            &[
-                config_buf.as_entire_binding(),
-                scene_buf.as_entire_binding(),
-                tagmonoid_buf.as_entire_binding(),
-                path_bbox_buf.as_entire_binding(),
-                bump_buf.as_entire_binding(),
-                lines_buf.as_entire_binding(),
-            ],
-        );
-        let bg_draw_leaf = p.draw_leaf.bind_group(
-            device,
-            "compute.bg_draw_leaf",
-            &[
-                config_buf.as_entire_binding(),
-                scene_buf.as_entire_binding(),
-                draw_reduced_buf.as_entire_binding(),
-                path_bbox_buf.as_entire_binding(),
-                draw_monoid_buf.as_entire_binding(),
-                info_bin_data_buf.as_entire_binding(),
-                clip_inp_buf.as_entire_binding(),
-            ],
-        );
-        let bg_clip_reduce = if wgc.clip_reduce.0 > 0 {
-            Some(p.clip_reduce.as_ref().expect("clip_reduce").bind_group(
+        let bg_clip_reduce = (wgc.clip_reduce.0 > 0).then(|| {
+            p.clip_reduce.as_ref().expect("clip_reduce").bind_group(
                 device,
                 "compute.bg_clip_reduce",
                 &[
@@ -1651,12 +1617,10 @@ impl VelloCompute {
                     clip_bic_buf.as_entire_binding(),
                     clip_el_buf.as_entire_binding(),
                 ],
-            ))
-        } else {
-            None
-        };
-        let bg_clip_leaf = if wgc.clip_leaf.0 > 0 {
-            Some(p.clip_leaf.as_ref().expect("clip_leaf").bind_group(
+            )
+        });
+        let bg_clip_leaf = (wgc.clip_leaf.0 > 0).then(|| {
+            p.clip_leaf.as_ref().expect("clip_leaf").bind_group(
                 device,
                 "compute.bg_clip_leaf",
                 &[
@@ -1668,74 +1632,18 @@ impl VelloCompute {
                     draw_monoid_buf.as_entire_binding(),
                     clip_bbox_buf.as_entire_binding(),
                 ],
-            ))
-        } else {
-            None
-        };
-        let bg_tile_alloc = p.tile_alloc.bind_group(
-            device,
-            "compute.bg_tile_alloc",
-            &[
-                config_buf.as_entire_binding(),
-                scene_buf.as_entire_binding(),
-                draw_bbox_buf.as_entire_binding(),
-                bump_buf.as_entire_binding(),
-                path_buf.as_entire_binding(),
-                tile_buf.as_entire_binding(),
-            ],
-        );
+            )
+        });
         let bg_path_count_setup = p.path_count_setup.bind_group(
             device,
             "compute.bg_path_count_setup",
             &[bump_buf.as_entire_binding(), indirect_count_buf.as_entire_binding()],
         );
-        let bg_path_count = p.path_count.bind_group(
-            device,
-            "compute.bg_path_count",
-            &[
-                config_buf.as_entire_binding(),
-                bump_buf.as_entire_binding(),
-                lines_buf.as_entire_binding(),
-                path_buf.as_entire_binding(),
-                tile_buf.as_entire_binding(),
-                seg_counts_buf.as_entire_binding(),
-            ],
-        );
-        let bg_backdrop = p.backdrop.bind_group(
-            device,
-            "compute.bg_backdrop",
-            &[
-                config_buf.as_entire_binding(),
-                bump_buf.as_entire_binding(),
-                path_buf.as_entire_binding(),
-                tile_buf.as_entire_binding(),
-            ],
-        );
-        let bg_path_tiling_setup = p.path_tiling_setup.bind_group(
-            device,
-            "compute.bg_path_tiling_setup",
-            &[
-                bump_buf.as_entire_binding(),
-                indirect_count_buf.as_entire_binding(),
-                ptcl_buf.as_entire_binding(),
-            ],
-        );
-        let bg_path_tiling = p.path_tiling.bind_group(
-            device,
-            "compute.bg_path_tiling",
-            &[
-                bump_buf.as_entire_binding(),
-                seg_counts_buf.as_entire_binding(),
-                lines_buf.as_entire_binding(),
-                path_buf.as_entire_binding(),
-                tile_buf.as_entire_binding(),
-                segments_buf.as_entire_binding(),
-            ],
-        );
 
         let cold_upload_ms = gpu::now() - t2;
 
         Ok(RetainedScene {
+            stroke_scale,
             revision: store.revision,
             generation,
             layout,
@@ -1767,169 +1675,143 @@ impl VelloCompute {
             clip_bbox_buf,
             draw_bbox_buf,
             path_buf,
-            caps,
-            info_bin_data_buf,
-            tile_buf,
-            lines_buf,
-            seg_counts_buf,
-            segments_buf,
-            ptcl_buf,
-            blend_spill_buf,
-            total_gpu_bytes,
-            max_bind_bytes: max_bind,
+            bytes: alloc.total,
             bg_apply_view,
             bg_bbox_clear,
-            bg_flatten,
-            bg_draw_leaf,
             bg_clip_reduce,
             bg_clip_leaf,
-            bg_tile_alloc,
             bg_path_count_setup,
-            bg_path_count,
-            bg_backdrop,
-            bg_path_tiling_setup,
-            bg_path_tiling,
         })
     }
 }
 
-pub async fn finish_stats_readback(
-    device: wgpu::Device,
-    health: Arc<Health>,
-    mut readback: StatsReadback,
-) -> Result<String> {
-    if let Some(err) = health.stop_error() {
-        for p in readback.pending {
-            p.staging.destroy();
+/// Creates buffers within the device's limits and a byte budget, refusing (with
+/// `ErrorCode::Limit`) before it allocates anything that would not fit.
+struct Allocator {
+    max_buffer: u64,
+    max_storage_binding: u64,
+    max_uniform_binding: u64,
+    budget: u64,
+    total: u64,
+}
+
+impl Allocator {
+    fn new(limits: &wgpu::Limits, budget: u64) -> Self {
+        Self {
+            max_buffer: limits.max_buffer_size,
+            max_storage_binding: limits.max_storage_buffer_binding_size,
+            max_uniform_binding: limits.max_uniform_buffer_binding_size,
+            budget,
+            total: 0,
         }
-        return Err(err);
     }
-    for item in readback.pending {
-        match gpu::pump(&device, &health, item.rx, 12_000).await {
-            Ok(Ok(())) => {
-                if let Ok(mapped) = item.staging.slice(..).get_mapped_range() {
-                    let bump: BumpAllocators = *bytemuck::from_bytes(&mapped[..BUMP_BYTES as usize]);
-                    let ts_parsed = if item.has_ts {
-                        let mut ts = [0u64; TS_QUERY_COUNT as usize];
-                        for (i, chunk) in mapped[BUMP_BYTES as usize..DIAG_BUF_BYTES as usize]
-                            .as_chunks::<8>()
-                            .0
-                            .iter()
-                            .enumerate()
-                        {
-                            ts[i] = u64::from_le_bytes(*chunk);
-                        }
-                        Some((ts, item.pass_mask, item.period_ns))
-                    } else {
-                        None
-                    };
-                    drop(mapped);
-                    item.staging.unmap();
-                    readback
-                        .summary
-                        .record_frame(bump, ts_parsed.as_ref().map(|(t, m, p)| (t, *m, *p)));
-                }
-                item.staging.destroy();
-            }
-            Ok(Err(e)) => {
-                item.staging.destroy();
-                return Err(EngineError::new(ErrorCode::Gpu, e.to_string()));
-            }
+
+    fn reserve(&mut self, what: &str, bytes: u64) -> Result<()> {
+        let total = self.total.saturating_add(bytes);
+        if total > self.budget {
+            return Err(EngineError::limit(format!(
+                "{what} would take compute's GPU memory to {} MiB, past its {} MiB budget",
+                total >> 20,
+                self.budget >> 20
+            )));
+        }
+        self.total = total;
+        Ok(())
+    }
+
+    /// Gives back a transient buffer's bytes once it is destroyed.
+    fn release(&mut self, bytes: u64) {
+        self.total = self.total.saturating_sub(bytes);
+    }
+
+    fn buffer(
+        &mut self,
+        device: &wgpu::Device,
+        label: &str,
+        size: u64,
+        usage: wgpu::BufferUsages,
+    ) -> Result<wgpu::Buffer> {
+        let size = size.max(4).next_multiple_of(4);
+        if size > self.max_buffer
+            || (usage.contains(wgpu::BufferUsages::STORAGE) && size > self.max_storage_binding)
+            || (usage.contains(wgpu::BufferUsages::UNIFORM) && size > self.max_uniform_binding)
+        {
+            return Err(EngineError::limit(format!(
+                "{label} needs {} MiB, past the GPU's binding limit",
+                size >> 20
+            )));
+        }
+        self.reserve(label, size)?;
+        Ok(device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some(label),
+            size,
+            usage,
+            mapped_at_creation: false,
+        }))
+    }
+}
+
+/// Waits for a staged frame's counters. A failed map (device lost, or the wait timed out) is an
+/// error; the frame is then never shown.
+pub async fn verify_compute_frame(
+    device: &wgpu::Device,
+    health: &Arc<Health>,
+    item: PendingDiag,
+) -> Result<FrameDiagnostic> {
+    let PendingDiag {
+        staging,
+        rx,
+        pass_mask,
+        has_ts,
+        period_ns,
+    } = item;
+    let mapped = gpu::pump(device, health, rx, 12_000)
+        .await
+        .and_then(|r| r.map_err(|e| EngineError::new(ErrorCode::Gpu, format!("compute check read-back: {e}"))));
+    if let Err(error) = mapped {
+        staging.destroy();
+        return Err(error);
+    }
+    let (bump, timestamps) = {
+        let view = match staging.slice(..).get_mapped_range() {
+            Ok(view) => view,
             Err(e) => {
-                item.staging.destroy();
-                return Err(e);
+                staging.destroy();
+                return Err(EngineError::new(
+                    ErrorCode::Gpu,
+                    format!("compute check read-back: {e}"),
+                ));
             }
-        }
-    }
-
-    let s = &readback.summary;
-    let fmt_bump = |b: &BumpAllocators| {
-        format!(
-            "{{\"failed\":{},\"binning\":{},\"ptcl\":{},\"tile\":{},\"seg_counts\":{},\"segments\":{},\"blend\":{},\"lines\":{}}}",
-            b.failed, b.binning, b.ptcl, b.tile, b.seg_counts, b.segments, b.blend, b.lines
-        )
+        };
+        let bump: BumpAllocators = bytemuck::pod_read_unaligned(&view[..BUMP_BYTES as usize]);
+        let timestamps = has_ts.then(|| {
+            let mut ts = [0u64; TS_QUERY_COUNT as usize];
+            for (value, chunk) in ts
+                .iter_mut()
+                .zip(view[BUMP_BYTES as usize..DIAG_BUF_BYTES as usize].as_chunks::<8>().0)
+            {
+                *value = u64::from_le_bytes(*chunk);
+            }
+            (ts, pass_mask, period_ns)
+        });
+        (bump, timestamps)
     };
-    let gpu_ms_json: String = s.gpu_ms.iter().map(|v| format!("{v:.4}")).collect::<Vec<_>>().join(",");
-    let gpu_span_json: String = s
-        .gpu_span_ms
-        .iter()
-        .map(|v| format!("{v:.4}"))
-        .collect::<Vec<_>>()
-        .join(",");
-    let pass_avg_json: String = PASS_NAMES
-        .iter()
-        .enumerate()
-        .map(|(i, name)| {
-            let avg = if s.pass_counts[i] > 0 {
-                s.pass_ms_sum[i] / f64::from(s.pass_counts[i])
-            } else {
-                0.0
-            };
-            format!("\"{name}\":{avg:.4}")
-        })
-        .collect::<Vec<_>>()
-        .join(",");
-
-    Ok(format!(
-        "{{\"framesSubmitted\":{},\"framesChecked\":{},\"failedFrames\":{},\"anyFailedMask\":{},\"bump\":{},\"maxBump\":{},\"timestampsSupported\":{},\"timestampPeriodNs\":{:.3},\"gpuMs\":[{}],\"gpuSpanMs\":[{}],\"passAvgMs\":{{{}}},{}}}",
-        s.frames_submitted,
-        s.frames_checked,
-        s.failed_frames,
-        s.any_failed_mask,
-        fmt_bump(&s.last_bump),
-        fmt_bump(&s.max_bump),
-        readback.timestamps_supported,
-        readback.timestamp_period_ns,
-        gpu_ms_json,
-        gpu_span_json,
-        pass_avg_json,
-        readback.scene_meta_json,
-    ))
+    staging.unmap();
+    Ok(FrameDiagnostic {
+        staging,
+        bump,
+        timestamps,
+    })
 }
 
-fn compute_bump_caps(layout: &Layout, n_path_segments: u32, max_bind: u64) -> BumpCaps {
-    // Respect WebGPU Core's 128 MiB default storage-binding floor and keep the dynamic working set
-    // well inside the engine's desktop GPU budget while preserving generous headroom for 10k-40k
-    // pages (verified on every frame via per-frame bump.failed readback).
-    let cap_bytes = max_bind.min(128 << 20);
-    let max_lines = (cap_bytes / size_of::<LineSoup>() as u64) as u32;
-    let max_segments = (cap_bytes / size_of::<PathSegment>() as u64) as u32;
-    let max_tiles = (cap_bytes / size_of::<Tile>() as u64) as u32;
-    let max_seg_counts = (cap_bytes / size_of::<SegmentCount>() as u64) as u32;
-    let max_u32s = (cap_bytes / 4) as u32;
-
-    let binning_max = max_u32s.saturating_sub(layout.bin_data_start).max(1 << 16);
-    let binning = (layout.n_draw_objects.saturating_mul(32))
-        .clamp(1 << 15, 2 << 20)
-        .min(binning_max);
-    let lines = (n_path_segments.saturating_mul(4))
-        .clamp(1 << 16, 3 << 20)
-        .min(max_lines);
-    let tile = (layout.n_paths.saturating_mul(128))
-        .clamp(1 << 16, 3 << 20)
-        .min(max_tiles);
-    let seg_counts = (n_path_segments.saturating_mul(3))
-        .clamp(1 << 16, 2_500_000)
-        .min(max_seg_counts);
-    let segments = (n_path_segments.saturating_mul(3))
-        .clamp(1 << 16, 2_500_000)
-        .min(max_segments);
-    let ptcl = (layout.n_paths.saturating_mul(256))
-        .clamp(1 << 18, 6 << 20)
-        .min(max_u32s);
-    let blend = (layout.n_clips.saturating_mul(1024))
-        .clamp(1 << 16, 2 << 20)
-        .min(max_u32s);
-
-    BumpCaps {
-        binning,
-        ptcl,
-        tile,
-        seg_counts,
-        segments,
-        blend,
-        lines,
+/// The view's scale rounded up to a power of two (at least 1): strokes are expanded for it, so a
+/// zoom re-encodes only when it doubles past the last one (`stroke::stroke_level`).
+fn stroke_bucket(view: Affine) -> f64 {
+    let scale = crate::stroke::max_scale(view);
+    if !scale.is_finite() || scale <= 1.0 {
+        return 1.0;
     }
+    scale.log2().ceil().exp2()
 }
 
 fn make_config_uniform(layout: &Layout, width: u32, height: u32, base_color: &Color, caps: BumpCaps) -> ConfigUniform {
@@ -1952,13 +1834,14 @@ fn make_config_uniform(layout: &Layout, width: u32, height: u32, base_color: &Co
     }
 }
 
-fn build_viewport(
+fn build_working(
     device: &wgpu::Device,
     p: &ComputePipelines,
     ret: &RetainedScene,
-    width: u32,
-    height: u32,
-) -> Result<ViewportResources> {
+    (width, height): (u32, u32),
+    caps: BumpCaps,
+    budget: u64,
+) -> Result<Working> {
     let width_in_tiles = width.div_ceil(16);
     let height_in_tiles = height.div_ceil(16);
     let wg = WorkgroupCounts::new(
@@ -1974,15 +1857,69 @@ fn build_viewport(
             "Vello compute supports at most 256 bins (4096x4096); {width}x{height} needs {n_bins}"
         )));
     }
-    let bin_header_size =
-        u64::from(BufferSize::<vello_encoding::BinHeader>::new(bs.bin_headers.len()).size_in_bytes()).max(8);
-    let bin_header_buf = device.create_buffer(&wgpu::BufferDescriptor {
-        label: Some("compute.bin_headers"),
-        size: bin_header_size,
-        usage: wgpu::BufferUsages::STORAGE,
-        mapped_at_creation: false,
-    });
+    let limits = device.limits();
+    let mut alloc = Allocator::new(&limits, budget);
+    let storage = wgpu::BufferUsages::STORAGE;
+    let info_bin_words = u64::from(ret.layout.bin_data_start) + u64::from(caps.binning);
+    let info_bin_data_buf = alloc.buffer(device, "compute.info_bin_data", info_bin_words * 4, storage)?;
+    let tile_buf = alloc.buffer(
+        device,
+        "compute.tiles",
+        u64::from(caps.tile) * size_of::<Tile>() as u64,
+        storage,
+    )?;
+    let lines_buf = alloc.buffer(
+        device,
+        "compute.lines",
+        u64::from(caps.lines) * size_of::<LineSoup>() as u64,
+        storage,
+    )?;
+    let seg_counts_buf = alloc.buffer(
+        device,
+        "compute.seg_counts",
+        u64::from(caps.seg_counts) * size_of::<SegmentCount>() as u64,
+        storage,
+    )?;
+    let segments_buf = alloc.buffer(
+        device,
+        "compute.segments",
+        u64::from(caps.segments) * size_of::<PathSegment>() as u64,
+        storage,
+    )?;
+    let ptcl_buf = alloc.buffer(device, "compute.ptcl", u64::from(caps.ptcl) * 4, storage)?;
+    let blend_spill_buf = alloc.buffer(device, "compute.blend_spill", u64::from(caps.blend) * 4, storage)?;
+    let bin_header_buf = alloc.buffer(
+        device,
+        "compute.bin_headers",
+        u64::from(BufferSize::<vello_encoding::BinHeader>::new(bs.bin_headers.len()).size_in_bytes()).max(8),
+        storage,
+    )?;
 
+    let bg_flatten = p.flatten.bind_group(
+        device,
+        "compute.bg_flatten",
+        &[
+            ret.config_buf.as_entire_binding(),
+            ret.scene_buf.as_entire_binding(),
+            ret.tagmonoid_buf.as_entire_binding(),
+            ret.path_bbox_buf.as_entire_binding(),
+            ret.bump_buf.as_entire_binding(),
+            lines_buf.as_entire_binding(),
+        ],
+    );
+    let bg_draw_leaf = p.draw_leaf.bind_group(
+        device,
+        "compute.bg_draw_leaf",
+        &[
+            ret.config_buf.as_entire_binding(),
+            ret.scene_buf.as_entire_binding(),
+            ret.draw_reduced_buf.as_entire_binding(),
+            ret.path_bbox_buf.as_entire_binding(),
+            ret.draw_monoid_buf.as_entire_binding(),
+            info_bin_data_buf.as_entire_binding(),
+            ret.clip_inp_buf.as_entire_binding(),
+        ],
+    );
     let bg_binning = p.binning.bind_group(
         device,
         "compute.bg_binning",
@@ -1993,8 +1930,42 @@ fn build_viewport(
             ret.clip_bbox_buf.as_entire_binding(),
             ret.draw_bbox_buf.as_entire_binding(),
             ret.bump_buf.as_entire_binding(),
-            ret.info_bin_data_buf.as_entire_binding(),
+            info_bin_data_buf.as_entire_binding(),
             bin_header_buf.as_entire_binding(),
+        ],
+    );
+    let bg_tile_alloc = p.tile_alloc.bind_group(
+        device,
+        "compute.bg_tile_alloc",
+        &[
+            ret.config_buf.as_entire_binding(),
+            ret.scene_buf.as_entire_binding(),
+            ret.draw_bbox_buf.as_entire_binding(),
+            ret.bump_buf.as_entire_binding(),
+            ret.path_buf.as_entire_binding(),
+            tile_buf.as_entire_binding(),
+        ],
+    );
+    let bg_path_count = p.path_count.bind_group(
+        device,
+        "compute.bg_path_count",
+        &[
+            ret.config_buf.as_entire_binding(),
+            ret.bump_buf.as_entire_binding(),
+            lines_buf.as_entire_binding(),
+            ret.path_buf.as_entire_binding(),
+            tile_buf.as_entire_binding(),
+            seg_counts_buf.as_entire_binding(),
+        ],
+    );
+    let bg_backdrop = p.backdrop.bind_group(
+        device,
+        "compute.bg_backdrop",
+        &[
+            ret.config_buf.as_entire_binding(),
+            ret.bump_buf.as_entire_binding(),
+            ret.path_buf.as_entire_binding(),
+            tile_buf.as_entire_binding(),
         ],
     );
     let bg_coarse = p.coarse.bind_group(
@@ -2005,24 +1976,59 @@ fn build_viewport(
             ret.scene_buf.as_entire_binding(),
             ret.draw_monoid_buf.as_entire_binding(),
             bin_header_buf.as_entire_binding(),
-            ret.info_bin_data_buf.as_entire_binding(),
+            info_bin_data_buf.as_entire_binding(),
             ret.path_buf.as_entire_binding(),
-            ret.tile_buf.as_entire_binding(),
+            tile_buf.as_entire_binding(),
             ret.bump_buf.as_entire_binding(),
-            ret.ptcl_buf.as_entire_binding(),
+            ptcl_buf.as_entire_binding(),
+        ],
+    );
+    let bg_path_tiling_setup = p.path_tiling_setup.bind_group(
+        device,
+        "compute.bg_path_tiling_setup",
+        &[
+            ret.bump_buf.as_entire_binding(),
+            ret.indirect_count_buf.as_entire_binding(),
+            ptcl_buf.as_entire_binding(),
+        ],
+    );
+    let bg_path_tiling = p.path_tiling.bind_group(
+        device,
+        "compute.bg_path_tiling",
+        &[
+            ret.bump_buf.as_entire_binding(),
+            seg_counts_buf.as_entire_binding(),
+            lines_buf.as_entire_binding(),
+            ret.path_buf.as_entire_binding(),
+            tile_buf.as_entire_binding(),
+            segments_buf.as_entire_binding(),
         ],
     );
 
-    Ok(ViewportResources {
-        width,
-        height,
-        scene_revision: ret.revision,
-        scene_generation: ret.generation,
+    Ok(Working {
+        raster: (width, height),
+        revision: ret.revision,
+        generation: ret.generation,
+        caps,
+        info_bin_data_buf,
+        tile_buf,
+        lines_buf,
+        seg_counts_buf,
+        segments_buf,
+        ptcl_buf,
+        blend_spill_buf,
         bin_header_buf,
-        bin_header_bytes: bin_header_size,
+        bytes: alloc.total,
         wg_counts: wg,
+        bg_flatten,
+        bg_draw_leaf,
         bg_binning,
+        bg_tile_alloc,
+        bg_path_count,
+        bg_backdrop,
         bg_coarse,
+        bg_path_tiling_setup,
+        bg_path_tiling,
         bg_fine_slots: [None, None],
     })
 }
@@ -2037,6 +2043,8 @@ struct EncodedGlyph {
 /// Vello 0.12 encoder driven by `ordinary::walk_ordinary`.
 struct VelloComputeSink<'a> {
     store: &'a Store,
+    /// Device pixels per page unit the encoding is drawn at, at most (`stroke_bucket`).
+    view_scale: f64,
     encoding: Encoding,
     transform_meta: Vec<TransformMeta>,
     last_meta: Option<TransformMeta>,
@@ -2045,9 +2053,10 @@ struct VelloComputeSink<'a> {
 }
 
 impl<'a> VelloComputeSink<'a> {
-    fn new(store: &'a Store) -> Self {
+    fn new(store: &'a Store, view_scale: f64) -> Self {
         Self {
             store,
+            view_scale,
             encoding: Encoding::new(),
             transform_meta: Vec::new(),
             last_meta: None,
@@ -2112,6 +2121,10 @@ impl<'a> VelloComputeSink<'a> {
 }
 
 impl OrdinarySink for VelloComputeSink<'_> {
+    fn view_scale(&self) -> f64 {
+        self.view_scale
+    }
+
     fn push_layer(&mut self, world: Affine, bounds: Rect, blend: u32, compose: ComposeMode, opacity: f32) {
         let vello_compose = match compose {
             ComposeMode::SrcOver => Compose::SrcOver,

@@ -1,0 +1,289 @@
+/**
+ * The opt-in compute path's correctness checks for `/diagnostics/renderer?compute=1` (decision
+ * 0040, P1-0): the capacity matrix the PR #291 review asked for. Small, bench-sized and large
+ * ordinary pages at 1x and 2x, each at 100%, 200% and fit, drawn by the compute pipeline and by
+ * vello_gpu on separate devices and compared pixel for pixel. Every cell must be exact or fall
+ * back to vello_gpu; none may show a wrong frame. A "tight" pass starts each cell with minimal
+ * buffers so the grow-and-redraw path runs on every page.
+ */
+import { type Camera, type FrameStats, RenderEngine } from "@drawpane/engine";
+import { loadBrowserEngine, loadComputeEngine } from "@drawpane/engine/browser";
+import { CPU_GPU_TOLERANCE, outsideTolerance, score } from "@drawpane/engine/compare";
+import { buildOrdinaryScene } from "./compute-scene";
+
+export const COMPUTE_BG = [0.95, 0.95, 0.93, 1] as const;
+
+/** Draws of one frame the matrix allows before it counts the cell as falling back. */
+const MATRIX_ATTEMPTS = 8;
+
+export interface CheckedFrame {
+  readonly stats: FrameStats;
+  readonly backend: "compute" | "vello_gpu";
+  /** Compute draws staged for this frame (more than one: a buffer grew and it drew again). */
+  readonly attempts: number;
+  /** Main-thread time of every engine call the frame took (staging, showing, any fallback). */
+  readonly cpuMs: number;
+  /** Time waiting for the GPU check, off the main thread. */
+  readonly checkMs: number;
+  /** Why compute is off for the session, when it fell back. */
+  readonly fallback: string | null;
+}
+
+/**
+ * One frame the way the editor draws it with `?compute=1`: staged, checked, redrawn while a
+ * buffer grows, shown only once clean; otherwise drawn by vello_gpu.
+ */
+export async function drawChecked(
+  engine: RenderEngine,
+  width: number,
+  height: number,
+  camera: Camera,
+  maxAttempts = 4,
+): Promise<CheckedFrame> {
+  let cpuMs = 0;
+  let checkMs = 0;
+  let attempts = 0;
+  while (attempts < maxAttempts) {
+    let t = performance.now();
+    const staged = engine.stageComputeFrame(width, height, camera, COMPUTE_BG);
+    cpuMs += performance.now() - t;
+    if (!staged.ok) throw new Error(staged.message);
+    if (!staged.value) break;
+    attempts++;
+    t = performance.now();
+    const checked = await staged.value;
+    checkMs += performance.now() - t;
+    if (!checked) throw new Error("the compute check was interrupted");
+    t = performance.now();
+    const finished = engine.finishComputeFrame(attempts >= maxAttempts);
+    cpuMs += performance.now() - t;
+    if (!finished.ok) throw new Error(finished.message);
+    const value = finished.value;
+    if (value === "fallback") break;
+    if (value === "retry" || value === "stale") continue;
+    return { stats: value, backend: "compute", attempts, cpuMs, checkMs, fallback: null };
+  }
+  const t = performance.now();
+  const drawn = engine.renderGpu(width, height, camera, COMPUTE_BG, false);
+  cpuMs += performance.now() - t;
+  if (!drawn.ok) throw new Error(drawn.message);
+  return {
+    stats: drawn.value,
+    backend: "vello_gpu",
+    attempts,
+    cpuMs,
+    checkMs,
+    fallback: engine.computeFallbackReason(),
+  };
+}
+
+export interface MatrixCell {
+  readonly page: string;
+  readonly layers: number;
+  readonly tight: boolean;
+  readonly dpr: number;
+  readonly zoom: string;
+  readonly backend: "compute" | "vello_gpu";
+  readonly attempts: number;
+  readonly fallback: string | null;
+  /** Exact against vello_gpu (or fell back to it), and shown. */
+  readonly ok: boolean;
+  readonly mean: number;
+  readonly p99: number;
+  readonly max: number;
+  readonly worstTile: number;
+  readonly severeInTile: number;
+  readonly violations: readonly string[];
+}
+
+export interface MatrixReport {
+  readonly adapter: string;
+  readonly software: boolean;
+  readonly cells: readonly MatrixCell[];
+  /** Checks that found an overflow (each one redrew; none was shown). */
+  readonly overflowChecks: number;
+  readonly ms: number;
+}
+
+const PAGES = [
+  { page: "small", columns: 6, rows: 6 },
+  { page: "bench", columns: 20, rows: 20 },
+  { page: "large", columns: 40, rows: 40 },
+] as const;
+
+const CSS_WIDTH = 1440;
+const CSS_HEIGHT = 900;
+
+export async function runComputeMatrix(options: {
+  readonly allowSoftware: boolean;
+  readonly signal: AbortSignal;
+  readonly onCell?: (cell: MatrixCell, done: number, total: number) => void;
+}): Promise<MatrixReport> {
+  const started = performance.now();
+  const [computeModule, legacyModule] = await Promise.all([
+    loadComputeEngine(),
+    loadBrowserEngine(),
+  ]);
+  const cells: MatrixCell[] = [];
+  const total = PAGES.length * 2 * (3 + 2);
+  let adapter = "";
+  let software = false;
+  let overflowChecks = 0;
+  for (const spec of PAGES) {
+    options.signal.throwIfAborted();
+    const scene = buildOrdinaryScene(spec.columns, spec.rows);
+    // Separate devices, fresh per page: one page's grown buffers or fallback can't hide another's.
+    const reference = new RenderEngine(legacyModule);
+    const candidate = new RenderEngine(computeModule);
+    try {
+      const [refGpu, gpu] = await Promise.all([
+        reference.attachGpu(null, { compatibility: false }),
+        candidate.attachGpu(null, { compatibility: false }),
+      ]);
+      if (!refGpu.ok) throw new Error(`vello_gpu device: ${refGpu.message}`);
+      if (!gpu.ok) throw new Error(`compute device: ${gpu.message}`);
+      adapter = gpu.value.adapter;
+      software = gpu.value.fallback;
+      if (software && !options.allowSoftware) throw new Error("only a software GPU is available");
+      for (const engine of [reference, candidate]) {
+        const applied = engine.apply(scene.list);
+        if (!applied.ok) throw new Error(applied.message);
+      }
+      const on = candidate.setComputeOrdinary(true);
+      if (!on.ok) throw new Error(on.message);
+      const fit = Math.min(CSS_WIDTH / scene.pageWidth, CSS_HEIGHT / scene.pageHeight);
+      const views = [
+        { zoom: "100%", scale: 1, tight: false },
+        { zoom: "200%", scale: 2, tight: false },
+        { zoom: "fit", scale: fit, tight: false },
+        { zoom: "100%", scale: 1, tight: true },
+        { zoom: "fit", scale: fit, tight: true },
+      ];
+      for (const dpr of [1, 2]) {
+        for (const view of views) {
+          options.signal.throwIfAborted();
+          const width = CSS_WIDTH * dpr;
+          const height = CSS_HEIGHT * dpr;
+          const camera: Camera = {
+            zoom: view.scale,
+            x: (CSS_WIDTH - scene.pageWidth * view.scale) / 2,
+            y: view.zoom === "fit" ? (CSS_HEIGHT - scene.pageHeight * view.scale) / 2 : 0,
+            dpr,
+          };
+          const expected = reference.renderGpu(width, height, camera, COMPUTE_BG, false);
+          if (!expected.ok) throw new Error(`vello_gpu frame: ${expected.message}`);
+          const ours = view.tight ? candidate.computeTight(true) : candidate.computeTight(false);
+          if (!ours.ok) throw new Error(ours.message);
+          const frame = await drawChecked(candidate, width, height, camera, MATRIX_ATTEMPTS);
+          const [want, got] = await Promise.all([reference.gpuPixels(), candidate.gpuPixels()]);
+          if (!want.ok) throw new Error(`vello_gpu pixels: ${want.message}`);
+          if (!got.ok) throw new Error(`compute pixels: ${got.message}`);
+          const s = score(got.value, want.value, width, height);
+          const violations = outsideTolerance(s, CPU_GPU_TOLERANCE);
+          if (!frame.stats.exact) violations.push("the frame shown was not exact");
+          if (!frame.stats.presented) violations.push("the frame was not shown");
+          const cell: MatrixCell = {
+            page: spec.page,
+            layers: scene.layers,
+            tight: view.tight,
+            dpr,
+            zoom: view.zoom,
+            backend: frame.backend,
+            attempts: frame.attempts,
+            fallback: frame.fallback,
+            ok: violations.length === 0,
+            mean: Number(s.mean.toFixed(4)),
+            p99: s.p99,
+            max: s.max,
+            worstTile: Number(s.worstTile.toFixed(3)),
+            severeInTile: s.severeInTile,
+            violations,
+          };
+          cells.push(cell);
+          options.onCell?.(cell, cells.length, total);
+        }
+      }
+      const stats = candidate.computeStats();
+      if (stats.ok) overflowChecks += stats.value.failedFrames;
+    } finally {
+      candidate.dispose();
+      reference.dispose();
+    }
+  }
+  options.signal.throwIfAborted();
+  const floor = await checkFloorReset(computeModule, options.allowSoftware);
+  cells.push(floor);
+  options.onCell?.(floor, cells.length, total + 1);
+  return {
+    adapter,
+    software,
+    cells,
+    overflowChecks,
+    ms: Math.round(performance.now() - started),
+  };
+}
+
+/**
+ * What one page's frames needed must not carry over to the next (the stack review: after a 40k
+ * page overflowed, a small page kept ~193 MiB of buffers). One engine grows on the large page
+ * from minimal buffers, then loads a small page as a fresh list; its capacities there must be a
+ * fresh engine's.
+ */
+async function checkFloorReset(
+  computeModule: Awaited<ReturnType<typeof loadComputeEngine>>,
+  allowSoftware: boolean,
+): Promise<MatrixCell> {
+  const small = buildOrdinaryScene(6, 6);
+  const camera: Camera = { zoom: 1, x: 0, y: 0, dpr: 1 };
+  const capacitiesAfter = async (pages: readonly Uint8Array[]) => {
+    const engine = new RenderEngine(computeModule);
+    try {
+      const gpu = await engine.attachGpu(null, { compatibility: false });
+      if (!gpu.ok) throw new Error(`compute device: ${gpu.message}`);
+      if (gpu.value.fallback && !allowSoftware) throw new Error("only a software GPU is available");
+      const on = engine.setComputeOrdinary(true);
+      if (!on.ok) throw new Error(on.message);
+      const tight = engine.computeTight(true);
+      if (!tight.ok) throw new Error(tight.message);
+      let frame: CheckedFrame | null = null;
+      for (const [k, list] of pages.entries()) {
+        const copy = new Uint8Array(list);
+        // A fresh list moves the revision on.
+        new DataView(copy.buffer).setUint32(12, engine.revision + 1 + k, true);
+        const applied = engine.apply(copy);
+        if (!applied.ok) throw new Error(applied.message);
+        frame = await drawChecked(engine, CSS_WIDTH, CSS_HEIGHT, camera, MATRIX_ATTEMPTS);
+      }
+      const stats = engine.computeStats();
+      if (!stats.ok) throw new Error(stats.message);
+      return { frame, capacities: stats.value.capacities };
+    } finally {
+      engine.dispose();
+    }
+  };
+  const fresh = await capacitiesAfter([small.list]);
+  const after = await capacitiesAfter([buildOrdinaryScene(40, 40).list, small.list]);
+  const violations: string[] = [];
+  if (JSON.stringify(after.capacities) !== JSON.stringify(fresh.capacities))
+    violations.push(
+      `capacities after the 40k page ${JSON.stringify(after.capacities)}, fresh ${JSON.stringify(fresh.capacities)}`,
+    );
+  if (after.frame?.backend !== "compute") violations.push("the small page fell back");
+  return {
+    page: "small page after a 40k one",
+    layers: small.layers,
+    tight: true,
+    dpr: 1,
+    zoom: "100%",
+    backend: after.frame?.backend ?? "vello_gpu",
+    attempts: after.frame?.attempts ?? 0,
+    fallback: after.frame?.fallback ?? null,
+    ok: violations.length === 0,
+    mean: 0,
+    p99: 0,
+    max: 0,
+    worstTile: 0,
+    severeInTile: 0,
+    violations,
+  };
+}
