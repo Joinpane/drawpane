@@ -1250,11 +1250,14 @@ function connect(editor: Editor, nodes: readonly NodeRecord[], copies: "compact"
       // The same edit, made serially on the editor's document as it is now.
       const staleBefore = new Set(unsettled(editor.doc).map(entryKey));
       const serial = makeEditor(editor.doc.stored(), copies);
-      const serialSettled =
-        act(serial) &&
-        unsettled(serial.doc)
-          .map(entryKey)
-          .every((key) => staleBefore.has(key));
+      // The collaborator's target, where the editor deleted it unsent: no serial order exists
+      // (a deleted layer can't be edited), and the two edits collide on that layer.
+      const target = [copy, copy, own, instance][step % 4];
+      const serialSettled = act(serial)
+        ? unsettled(serial.doc)
+            .map(entryKey)
+            .every((key) => staleBefore.has(key))
+        : !!target && ours.has(target.id) && !editor.doc.has(target.id);
       for (const op of ops) {
         theirs.add(op.id);
         if (op.op === "create" || op.op === "move") theirs.add(op.parent);
