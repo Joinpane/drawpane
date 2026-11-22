@@ -10,6 +10,9 @@ pub mod blend;
 pub mod blur;
 #[cfg(any(feature = "compute", test))]
 pub mod compute_caps;
+// Pure Rust, built everywhere so the integration tests can check a patched encoding against a
+// fresh one. Only the compute module calls these, and the other builds drop them.
+pub mod compute_moves;
 pub mod cpu;
 pub mod diamond;
 pub mod engine;
@@ -28,7 +31,6 @@ pub mod limits;
 pub mod mask;
 pub mod masks;
 pub mod noise;
-#[cfg(any(feature = "compute", test))]
 pub mod ordinary;
 pub mod png;
 pub mod progressive_blur;

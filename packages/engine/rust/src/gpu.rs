@@ -2463,6 +2463,35 @@ impl Gpu {
         }
     }
 
+    /// After a message: a fresh list drops everything (`compute_page_reset`), a no-op keeps the
+    /// retained compute encoding, and one that only moved records patches its transforms in place
+    /// (`compute_moves`); either way the cached ordinary-page answer carries over, since neither
+    /// changes what a page holds.
+    #[cfg(feature = "compute")]
+    pub fn compute_applied(&mut self, from: u32, store: &Store, applied: &crate::store::Applied, generation: u64) {
+        if applied.full {
+            self.compute_page_reset();
+            return;
+        }
+        let Some(compute) = self.compute.as_mut() else {
+            return;
+        };
+        let kept = if applied.noop {
+            compute.adopt_revision(from, store.revision);
+            true
+        } else if let Some(moved) = applied.moved.as_deref() {
+            compute.apply_moves(&self.queue, store, from, generation, moved)
+        } else {
+            false
+        };
+        if kept
+            && let Some((revision, ordinary)) = self.ordinary_revision
+            && revision == from
+        {
+            self.ordinary_revision = Some((store.revision, ordinary));
+        }
+    }
+
     /// Starts compute frames from minimal buffers (or the usual ones), for the diagnostics'
     /// capacity matrix.
     #[cfg(feature = "compute")]

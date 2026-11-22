@@ -15,6 +15,7 @@
 //!    checks the device before making that texture current or presenting it.
 
 use crate::compute_caps::{self, Caps as BumpCaps, Needs, SceneShape};
+use crate::compute_moves::{Span, SpanRecorder};
 use crate::error::{EngineError, ErrorCode, Result};
 use crate::exec::expand_gradient_stops;
 use crate::gpu::{self, Health};
@@ -543,6 +544,10 @@ struct RetainedScene {
     stroke_scale: f64,
     revision: u32,
     generation: u64,
+    /// The transform stream in f64 (as `base_transforms_buf` holds it in f32), and each drawn
+    /// record's span of it: what a drag patches (`compute_moves`). Empty when they don't line up.
+    worlds: Vec<Affine>,
+    spans: HashMap<u32, Span>,
     layout: Layout,
     n_path_segments: u32,
     n_transforms: u32,
@@ -663,6 +668,9 @@ pub struct VelloCompute {
     timestamp_period_ns: f32,
     diag_pool: Vec<wgpu::Buffer>,
     diag_summary: DiagSummary,
+    /// Encodes of the whole page, and patches that only moved transforms, since the last reset.
+    full_encodes: u32,
+    patched_moves: u32,
 }
 
 impl Drop for VelloCompute {
@@ -717,6 +725,8 @@ impl VelloCompute {
             timestamp_period_ns,
             diag_pool: Vec::new(),
             diag_summary: DiagSummary::default(),
+            full_encodes: 0,
+            patched_moves: 0,
         }
     }
 
@@ -748,6 +758,58 @@ impl VelloCompute {
 
     pub fn reset_stats(&mut self) {
         self.diag_summary = DiagSummary::default();
+        self.full_encodes = 0;
+        self.patched_moves = 0;
+    }
+
+    /// A message that changed nothing: the retained encoding is still the page.
+    pub fn adopt_revision(&mut self, from: u32, to: u32) {
+        if let Some(ret) = self.retained.as_mut()
+            && ret.revision == from
+        {
+            ret.revision = to;
+            if let Some(work) = self.working.as_mut() {
+                work.revision = to;
+            }
+        }
+    }
+
+    /// A message that only moved `moved`: patches the retained encoding's transforms in place
+    /// (`compute_moves`) and uploads just those, instead of encoding the page again. Returns
+    /// false (and changes nothing) when it can't, and the next frame encodes afresh.
+    pub fn apply_moves(
+        &mut self,
+        queue: &wgpu::Queue,
+        store: &Store,
+        from: u32,
+        generation: u64,
+        moved: &[u32],
+    ) -> bool {
+        let Some(ret) = self.retained.as_mut() else {
+            return false;
+        };
+        if ret.revision != from || ret.spans.is_empty() {
+            return false;
+        }
+        let Some(dirty) = crate::compute_moves::apply_moves(&mut ret.worlds, &mut ret.spans, store, moved) else {
+            return false;
+        };
+        for range in dirty {
+            let bytes: Vec<Transform> = ret.worlds[range.clone()].iter().map(Transform::from_kurbo).collect();
+            queue.write_buffer(
+                &ret.base_transforms_buf,
+                (range.start * size_of::<Transform>()) as u64,
+                bytemuck::cast_slice(&bytes),
+            );
+        }
+        ret.revision = store.revision;
+        ret.generation = generation;
+        if let Some(work) = self.working.as_mut() {
+            work.revision = store.revision;
+            work.generation = generation;
+        }
+        self.patched_moves += 1;
+        true
     }
 
     fn acquire_diag_buffer(pool: &mut Vec<wgpu::Buffer>, device: &wgpu::Device) -> wgpu::Buffer {
@@ -800,6 +862,7 @@ impl VelloCompute {
                 ret.destroy();
             }
             let t_enc = gpu::now();
+            self.full_encodes += 1;
             let retained = self.build_retained(device, queue, store, generation, stroke_scale, budget)?;
             encode_ms = gpu::now() - t_enc;
             self.retained = Some(retained);
@@ -1207,7 +1270,9 @@ impl VelloCompute {
             (None, _) => "\"capacities\":null,\"scene\":null".to_string(),
         };
         format!(
-            "{{\"framesSubmitted\":{},\"framesChecked\":{},\"failedFrames\":{},\"anyFailedMask\":{},\"bump\":{},\"maxBump\":{},\"timestampsSupported\":{},\"timestampPeriodNs\":{:.3},\"gpuMs\":[{}],\"gpuSpanMs\":[{}],\"passAvgMs\":{{{}}},{}}}",
+            "{{\"encodes\":{{\"full\":{},\"patched\":{}}},\"framesSubmitted\":{},\"framesChecked\":{},\"failedFrames\":{},\"anyFailedMask\":{},\"bump\":{},\"maxBump\":{},\"timestampsSupported\":{},\"timestampPeriodNs\":{:.3},\"gpuMs\":[{}],\"gpuSpanMs\":[{}],\"passAvgMs\":{{{}}},{}}}",
+            self.full_encodes,
+            self.patched_moves,
             s.frames_submitted,
             s.frames_checked,
             s.failed_frames,
@@ -1642,10 +1707,18 @@ impl VelloCompute {
 
         let cold_upload_ms = gpu::now() - t2;
 
+        // Patching drags needs the f64 transforms to line up with what was uploaded.
+        let (worlds, spans) = if sink.worlds.len() == n_transforms as usize {
+            (std::mem::take(&mut sink.worlds), std::mem::take(&mut sink.spans.spans))
+        } else {
+            (Vec::new(), HashMap::new())
+        };
         Ok(RetainedScene {
             stroke_scale,
             revision: store.revision,
             generation,
+            worlds,
+            spans,
             layout,
             n_path_segments,
             n_transforms,
@@ -2046,6 +2119,9 @@ struct VelloComputeSink<'a> {
     /// Device pixels per page unit the encoding is drawn at, at most (`stroke_bucket`).
     view_scale: f64,
     encoding: Encoding,
+    /// `encoding.transforms` in f64, as encoded, so drags can patch them exactly.
+    worlds: Vec<Affine>,
+    spans: SpanRecorder,
     transform_meta: Vec<TransformMeta>,
     last_meta: Option<TransformMeta>,
     glyph_cache: HashMap<u32, EncodedGlyph>,
@@ -2058,6 +2134,8 @@ impl<'a> VelloComputeSink<'a> {
             store,
             view_scale,
             encoding: Encoding::new(),
+            worlds: Vec::new(),
+            spans: SpanRecorder::default(),
             transform_meta: Vec::new(),
             last_meta: None,
             glyph_cache: HashMap::new(),
@@ -2067,13 +2145,14 @@ impl<'a> VelloComputeSink<'a> {
 
     /// Encodes a transform with matching `TransformMeta`, forcing a new transform entry whenever
     /// `meta` differs so `encoding.transforms` and `self.transform_meta` stay strictly 1:1.
-    fn encode_transform_with_meta(&mut self, t: Transform, meta: TransformMeta) -> bool {
+    fn encode_transform_with_meta(&mut self, t: Affine, meta: TransformMeta) -> bool {
         if self.last_meta != Some(meta) {
             self.encoding.flags |= Encoding::FORCE_NEXT_TRANSFORM;
         }
-        let pushed = self.encoding.encode_transform(t);
+        let pushed = self.encoding.encode_transform(Transform::from_kurbo(&t));
         if pushed {
             self.transform_meta.push(meta);
+            self.worlds.push(t);
             self.last_meta = Some(meta);
         }
         pushed
@@ -2112,7 +2191,7 @@ impl<'a> VelloComputeSink<'a> {
 
     fn finish_fill_brush(&mut self, world: Affine, brush: &ResolvedBrush, brush_transform: Option<Affine>) {
         if let Some(bt) = brush_transform
-            && self.encode_transform_with_meta(Transform::from_kurbo(&(world * bt)), TransformMeta::NONE)
+            && self.encode_transform_with_meta(world * bt, TransformMeta::NONE)
         {
             self.encoding.swap_last_path_tags();
         }
@@ -2125,6 +2204,18 @@ impl OrdinarySink for VelloComputeSink<'_> {
         self.view_scale
     }
 
+    // No transform entry is shared across a record's start or end, so a drag can move exactly
+    // the record's span (`compute_moves`).
+    fn begin_record(&mut self, id: u32, world: Affine) {
+        self.encoding.flags |= Encoding::FORCE_NEXT_TRANSFORM;
+        self.spans.begin(id, world, self.encoding.transforms.len());
+    }
+
+    fn end_record(&mut self, id: u32) {
+        self.encoding.flags |= Encoding::FORCE_NEXT_TRANSFORM;
+        self.spans.end(id, self.encoding.transforms.len());
+    }
+
     fn push_layer(&mut self, world: Affine, bounds: Rect, blend: u32, compose: ComposeMode, opacity: f32) {
         let vello_compose = match compose {
             ComposeMode::SrcOver => Compose::SrcOver,
@@ -2132,7 +2223,7 @@ impl OrdinarySink for VelloComputeSink<'_> {
             ComposeMode::DestIn => Compose::DestIn,
         };
         let blend_mode = BlendMode::new(map_mix(blend), vello_compose);
-        self.encode_transform_with_meta(Transform::from_kurbo(&world), TransformMeta::NONE);
+        self.encode_transform_with_meta(world, TransformMeta::NONE);
         self.encoding.encode_fill_style(Fill::NonZero);
         if !self.encoding.encode_shape(&bounds, true) {
             self.encoding.encode_empty_shape();
@@ -2146,7 +2237,7 @@ impl OrdinarySink for VelloComputeSink<'_> {
     }
 
     fn push_clip(&mut self, world: Affine, path: &BezPath, even_odd: bool) {
-        self.encode_transform_with_meta(Transform::from_kurbo(&world), TransformMeta::NONE);
+        self.encode_transform_with_meta(world, TransformMeta::NONE);
         self.encoding
             .encode_fill_style(if even_odd { Fill::EvenOdd } else { Fill::NonZero });
         if path.is_empty() || !self.encoding.encode_shape(path, true) {
@@ -2163,7 +2254,7 @@ impl OrdinarySink for VelloComputeSink<'_> {
         let Some((brush, brush_transform)) = build_brush(paint, alpha) else {
             return;
         };
-        self.encode_transform_with_meta(Transform::from_kurbo(&world), TransformMeta::NONE);
+        self.encode_transform_with_meta(world, TransformMeta::NONE);
         self.encoding
             .encode_fill_style(if even_odd { Fill::EvenOdd } else { Fill::NonZero });
         if self.encoding.encode_shape(path, true) {
@@ -2175,7 +2266,7 @@ impl OrdinarySink for VelloComputeSink<'_> {
         let Some((brush, brush_transform)) = build_brush(paint, alpha) else {
             return;
         };
-        self.encode_transform_with_meta(Transform::from_kurbo(&world), TransformMeta::NONE);
+        self.encode_transform_with_meta(world, TransformMeta::NONE);
         self.encoding
             .encode_fill_style(if even_odd { Fill::EvenOdd } else { Fill::NonZero });
         if self.encode_compact_path(path) {
@@ -2246,7 +2337,7 @@ impl OrdinarySink for VelloComputeSink<'_> {
             } else {
                 TransformMeta::NONE
             };
-            self.encode_transform_with_meta(Transform::from_kurbo(&gm), meta);
+            self.encode_transform_with_meta(gm, meta);
             let eg = &self.glyph_cache[&g.glyph];
             self.encoding.path_tags.extend_from_slice(&eg.tags);
             self.encoding.path_data.extend_from_slice(&eg.data);
@@ -2259,7 +2350,7 @@ impl OrdinarySink for VelloComputeSink<'_> {
         }
         // Paint transform sits right before PathTag::PATH so flatten.wgsl stores it on PathBbox.
         if let Some(bt) = brush_transform {
-            self.encode_transform_with_meta(Transform::from_kurbo(&(world * bt)), TransformMeta::NONE);
+            self.encode_transform_with_meta(world * bt, TransformMeta::NONE);
         }
         self.encoding.path_tags.push(PathTag::PATH);
         self.encoding.n_paths += 1;
