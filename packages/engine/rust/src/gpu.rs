@@ -31,7 +31,7 @@ use crate::exec::{
     self, Backend, DrawStats, Frame, GlyphMask, IRect, ImageView, Isolation, Open, Pass, PostStep, ShadowCast, Split,
     impl_draw, resolve_inradius,
 };
-use crate::glass;
+use crate::glass::{self, GlassMaskSlot};
 use crate::gpu_readers::{
     BlurHaloSample, CoarseAnalytic, CompositeTarget, GlassResolve, GpuReaders, NativeRim, PlainTex,
     ProgressiveHaloSample,
@@ -39,7 +39,7 @@ use crate::gpu_readers::{
 use crate::images::{self, Level};
 use crate::masks::{self, MaskCache, MaskKey};
 use crate::progressive_blur;
-use crate::record::{BackgroundBlurOp, GlassOp, Op, PathEntry, ProgressiveBlurOp};
+use crate::record::{BackgroundBlurOp, GlassOp, ProgressiveBlurOp};
 use crate::shadow::{
     CanonicalShadow, ShadowMaskCache, compute_mask_rect, compute_mask_rect_bounds, reduced_dirty_rect,
     scaled_shadow_sigma, shadow_raster_shift,
@@ -620,9 +620,15 @@ struct MotionPrefix {
     cut: usize,
 }
 
-struct GlassMaskSlot {
-    region: (i32, i32, u32, u32),
-    offset: (u32, u32),
+/// Optional WebGPU GPU-side frame timing via `TIMESTAMP_QUERY`.
+struct GpuTimestampQuery {
+    query_set: wgpu::QuerySet,
+    resolve_buf: wgpu::Buffer,
+    dummy_tex: wgpu::Texture,
+    dummy_view: wgpu::TextureView,
+    period_ns: f64,
+    enabled: bool,
+    has_sample: bool,
 }
 
 /// State for the active `draw_tile` or `render_whole` pass while `exec::draw_split` walks the scene.
@@ -646,6 +652,74 @@ struct ActiveDraw {
     /// must submit `before` first so `vello_hybrid`'s shared GPU staging buffers are not overwritten.
     encoder_has_vello: bool,
     flush_ms: f64,
+    prepare_masks_ms: f64,
+    vello_render_ms: f64,
+    reader_ms: f64,
+    shadow_ms: f64,
+    submit_ms: f64,
+    vello_renders: u32,
+    glass_ops: u32,
+    glass_batched: u32,
+    bg_blur_ops: u32,
+    shadow_ops: u32,
+    shadow_hits: u32,
+}
+
+impl ActiveDraw {
+    fn new(
+        frame_dst: Option<usize>,
+        display_area: Option<IRect>,
+        width: u32,
+        height: u32,
+        background: [f32; 4],
+        detail: bool,
+    ) -> Self {
+        Self {
+            frame_dst,
+            display_area,
+            width,
+            height,
+            background,
+            detail,
+            needs_clear: true,
+            backdrop_live: false,
+            write_main: true,
+            write_backdrop: false,
+            scene_dirty: false,
+            glass_masks: HashMap::new(),
+            before: None,
+            encoder_has_vello: false,
+            flush_ms: 0.0,
+            prepare_masks_ms: 0.0,
+            vello_render_ms: 0.0,
+            reader_ms: 0.0,
+            shadow_ms: 0.0,
+            submit_ms: 0.0,
+            vello_renders: 0,
+            glass_ops: 0,
+            glass_batched: 0,
+            bg_blur_ops: 0,
+            shadow_ops: 0,
+            shadow_hits: 0,
+        }
+    }
+
+    fn record_into(&self, stats: &mut DrawStats, total_ms: f64) {
+        stats.prepare_masks_ms += self.prepare_masks_ms;
+        stats.vello_render_ms += self.vello_render_ms;
+        stats.reader_ms += self.reader_ms;
+        stats.shadow_ms += self.shadow_ms;
+        stats.submit_ms += self.submit_ms;
+        stats.vello_renders += self.vello_renders;
+        stats.glass_ops += self.glass_ops;
+        stats.glass_batched += self.glass_batched;
+        stats.bg_blur_ops += self.bg_blur_ops;
+        stats.shadow_ops += self.shadow_ops;
+        stats.shadow_hits += self.shadow_hits;
+        let render_ms = self.prepare_masks_ms + self.vello_render_ms + self.reader_ms + self.shadow_ms + self.flush_ms;
+        stats.render_ms += render_ms;
+        stats.encode_ms += (total_ms - render_ms - self.submit_ms).max(0.0);
+    }
 }
 
 /// The glass-free prefix at a lens's paint position in the coarse viewport pass.
@@ -876,11 +950,17 @@ pub struct Gpu {
     max_buffer_size: u64,
     /// Read-backs in flight.
     readbacks: Rc<Flights>,
+    /// Optional WebGPU GPU timestamp query state for frame-level GPU timing.
+    timestamps: Option<GpuTimestampQuery>,
 }
 
 impl Drop for Gpu {
     fn drop(&mut self) {
         self.health.cancel();
+        if let Some(ts) = self.timestamps.take() {
+            ts.resolve_buf.destroy();
+            ts.dummy_tex.destroy();
+        }
         for m in self.frames.drain(..) {
             m.texture.destroy();
         }
@@ -908,26 +988,32 @@ impl Drop for Gpu {
     }
 }
 
-fn raster_clips(scene: &mut Scene, open: &[Open], shift: Affine, size: (u32, u32), skip_context: bool) {
-    let mut pushed = 0;
-    for o in open {
-        if let Open::Clip {
+fn active_clips(open: &[Open], skip_context: bool) -> impl Iterator<Item = (&BezPath, Affine, bool)> {
+    open.iter().filter_map(move |o| match o {
+        Open::Clip {
             transform,
             path,
             even_odd,
             active_on_scene: true,
             context_only,
             ..
-        } = o
-        {
-            if skip_context && *context_only {
-                continue;
-            }
-            scene.set_transform(shift * *transform);
-            scene.set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
-            scene.push_clip_path(path);
-            pushed += 1;
-        }
+        } if !skip_context || !*context_only => Some((path, *transform, *even_odd)),
+        _ => None,
+    })
+}
+
+fn open_clips_need_mask(open: &[Open], rect: IRect, skip_context: bool) -> bool {
+    active_clips(open, skip_context)
+        .any(|(path, transform, even_odd)| !crate::geometry::path_covers_rect(path, transform, even_odd, rect))
+}
+
+fn raster_clips(scene: &mut Scene, open: &[Open], shift: Affine, size: (u32, u32), skip_context: bool) {
+    let mut pushed = 0;
+    for (path, transform, even_odd) in active_clips(open, skip_context) {
+        scene.set_transform(shift * transform);
+        scene.set_fill_rule(if even_odd { Fill::EvenOdd } else { Fill::NonZero });
+        scene.push_clip_path(path);
+        pushed += 1;
     }
     scene.set_transform(Affine::IDENTITY);
     scene.set_fill_rule(Fill::NonZero);
@@ -1121,15 +1207,76 @@ impl Gpu {
         } else {
             adapter_limits.clone()
         };
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                label: Some("drawpane engine"),
-                required_features: wgpu::Features::empty(),
-                required_limits,
-                ..Default::default()
+        let want_timestamps = !IS_WEBGL && adapter_features.contains(wgpu::Features::TIMESTAMP_QUERY);
+        let (device, queue) = if want_timestamps {
+            match adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("drawpane engine"),
+                    required_features: wgpu::Features::TIMESTAMP_QUERY,
+                    required_limits: required_limits.clone(),
+                    ..Default::default()
+                })
+                .await
+            {
+                Ok(pair) => pair,
+                Err(_) => adapter
+                    .request_device(&wgpu::DeviceDescriptor {
+                        label: Some("drawpane engine"),
+                        required_features: wgpu::Features::empty(),
+                        required_limits,
+                        ..Default::default()
+                    })
+                    .await
+                    .map_err(|e| EngineError::new(ErrorCode::NoAdapter, format!("no {backend_name} device: {e}")))?,
+            }
+        } else {
+            adapter
+                .request_device(&wgpu::DeviceDescriptor {
+                    label: Some("drawpane engine"),
+                    required_features: wgpu::Features::empty(),
+                    required_limits,
+                    ..Default::default()
+                })
+                .await
+                .map_err(|e| EngineError::new(ErrorCode::NoAdapter, format!("no {backend_name} device: {e}")))?
+        };
+        let timestamps = if !IS_WEBGL && device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            let query_set = device.create_query_set(&wgpu::QuerySetDescriptor {
+                label: Some("frame timestamps"),
+                ty: wgpu::QueryType::Timestamp,
+                count: 2,
+            });
+            let resolve_buf = device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("frame timestamps resolve"),
+                size: 16,
+                usage: wgpu::BufferUsages::QUERY_RESOLVE | wgpu::BufferUsages::COPY_SRC,
+                mapped_at_creation: false,
+            });
+            let dummy_tex = texture(
+                &device,
+                1,
+                1,
+                wgpu::TextureUsages::RENDER_ATTACHMENT,
+                "frame timestamps target",
+            );
+            let dummy_view = dummy_tex.create_view(&Default::default());
+            let period_ns = f64::from(queue.get_timestamp_period());
+            Some(GpuTimestampQuery {
+                query_set,
+                resolve_buf,
+                dummy_tex,
+                dummy_view,
+                period_ns: if period_ns.is_finite() && period_ns > 0.0 {
+                    period_ns
+                } else {
+                    1.0
+                },
+                enabled: false,
+                has_sample: false,
             })
-            .await
-            .map_err(|e| EngineError::new(ErrorCode::NoAdapter, format!("no {backend_name} device: {e}")))?;
+        } else {
+            None
+        };
         let device_limits = device.limits();
         if device_limits.max_texture_dimension_2d < ATLAS_SIDE {
             return Err(EngineError::new(
@@ -1359,6 +1506,7 @@ impl Gpu {
             max_texture_2d: device_limits.max_texture_dimension_2d,
             max_buffer_size: device_limits.max_buffer_size,
             readbacks: Rc::new(Flights::default()),
+            timestamps,
         };
         gpu.ensure_compositor();
         gpu.ensure_diamond();
@@ -1523,6 +1671,7 @@ impl Gpu {
     pub fn bytes(&self) -> usize {
         self.bytes
             + self.readers.bytes()
+            + self.blend.bytes()
             + self
                 .halo_reader_planes
                 .iter()
@@ -1574,6 +1723,7 @@ impl Gpu {
             self.blur.clear();
             self.noise.clear();
             self.halo_reader_planes = [None, None, None];
+            self.readers.drop_glass_mask_atlas();
         }
         while self.pool_bytes > keep_bytes {
             if let Some(t) = self.temp_pool.pop() {
@@ -1703,16 +1853,21 @@ impl Gpu {
         let need_w = w.max(1).next_multiple_of(64).min(max_tex);
         let need_h = h.max(1).next_multiple_of(64).min(max_tex);
         let max_area = (need_w as usize * need_h as usize * 4).max(65_536);
-        let reuse = self
-            .scratch_mask
-            .as_ref()
-            .is_some_and(|s| s.width >= w && s.height >= h && (s.width as usize * s.height as usize) <= max_area);
+        let reuse = self.scratch_mask.as_ref().is_some_and(|s| {
+            s.width >= w
+                && s.height >= h
+                && ((s.width as usize * s.height as usize) <= max_area
+                    || (self.active.is_some() && s.bytes <= (4 << 20)))
+        });
         if reuse {
             return Ok(());
         }
         let freed = self.scratch_mask.as_ref().map_or(0, |s| s.bytes);
         let bytes = need_w as usize * need_h as usize * 8;
         self.reserve_or_trim(bytes, freed, "a shadow mask")?;
+        if self.scratch_mask.is_some() {
+            self.submit_active_encoder();
+        }
         if let Some(old) = self.scratch_mask.take() {
             self.pool_bytes = self.pool_bytes.saturating_sub(old.bytes);
             old.tex.destroy();
@@ -1759,6 +1914,9 @@ impl Gpu {
         let freed = self.scratch_blur.as_ref().map_or(0, |s| s.bytes);
         let bytes = need_w as usize * need_h as usize * 4;
         self.reserve_or_trim(bytes, freed, "a shadow blur buffer")?;
+        if self.scratch_blur.is_some() {
+            self.submit_active_encoder();
+        }
         if let Some(old) = self.scratch_blur.take() {
             self.pool_bytes = self.pool_bytes.saturating_sub(old.bytes);
             old.tex.destroy();
@@ -1790,16 +1948,21 @@ impl Gpu {
         let need_w = w.max(1).next_multiple_of(64).min(max_tex);
         let need_h = h.max(1).next_multiple_of(64).min(max_tex);
         let max_area = (need_w as usize * need_h as usize * 4).max(65_536);
-        let reuse = self
-            .scratch_backdrop
-            .as_ref()
-            .is_some_and(|s| s.width >= w && s.height >= h && (s.width as usize * s.height as usize) <= max_area);
+        let reuse = self.scratch_backdrop.as_ref().is_some_and(|s| {
+            s.width >= w
+                && s.height >= h
+                && ((s.width as usize * s.height as usize) <= max_area
+                    || (self.active.is_some() && s.bytes <= (4 << 20)))
+        });
         if reuse {
             return Ok(());
         }
         let freed = self.scratch_backdrop.as_ref().map_or(0, |s| s.bytes);
         let bytes = need_w as usize * need_h as usize * 4;
         self.reserve_or_trim(bytes, freed, "a blend backdrop buffer")?;
+        if self.scratch_backdrop.is_some() {
+            self.submit_active_encoder();
+        }
         if let Some(old) = self.scratch_backdrop.take() {
             self.pool_bytes = self.pool_bytes.saturating_sub(old.bytes);
             old.tex.destroy();
@@ -2228,14 +2391,113 @@ impl Gpu {
     fn submit_active_encoder(&mut self) {
         if let Some(active) = self.active.as_mut() {
             if let Some(encoder) = active.before.take() {
+                let t0 = now();
                 self.readers.flush_uniforms(&self.queue);
+                self.blend.flush_uniforms(&self.queue);
                 self.queue.submit([encoder.finish()]);
                 self.blur.flush_retired();
                 self.submits += 1;
+                active.submit_ms += now() - t0;
             }
             active.encoder_has_vello = false;
         }
         self.offscreen_pool.append(&mut self.offscreen_in_use);
+    }
+
+    /// Enables or disables per-frame WebGPU timestamp queries (returns whether active).
+    pub fn set_gpu_timestamps(&mut self, enabled: bool) -> bool {
+        if let Some(ts) = self.timestamps.as_mut() {
+            ts.enabled = enabled;
+            if !enabled {
+                ts.has_sample = false;
+            }
+            ts.enabled
+        } else {
+            false
+        }
+    }
+
+    fn begin_frame_timestamp(&mut self) {
+        let Some(ts) = self.timestamps.as_mut().filter(|t| t.enabled) else {
+            return;
+        };
+        ts.has_sample = false;
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("frame timestamp start"),
+        });
+        {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("frame timestamp start"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &ts.dummy_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Discard,
+                    },
+                })],
+                timestamp_writes: Some(wgpu::RenderPassTimestampWrites {
+                    query_set: &ts.query_set,
+                    beginning_of_pass_write_index: Some(0),
+                    end_of_pass_write_index: None,
+                }),
+                ..Default::default()
+            });
+        }
+        self.queue.submit([encoder.finish()]);
+    }
+
+    fn end_frame_timestamp(&mut self) {
+        let Some(ts) = self.timestamps.as_mut().filter(|t| t.enabled) else {
+            return;
+        };
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("frame timestamp end"),
+        });
+        {
+            let _pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("frame timestamp end"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &ts.dummy_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Discard,
+                    },
+                })],
+                timestamp_writes: Some(wgpu::RenderPassTimestampWrites {
+                    query_set: &ts.query_set,
+                    beginning_of_pass_write_index: None,
+                    end_of_pass_write_index: Some(1),
+                }),
+                ..Default::default()
+            });
+        }
+        encoder.resolve_query_set(&ts.query_set, 0..2, &ts.resolve_buf, 0);
+        self.queue.submit([encoder.finish()]);
+        ts.has_sample = true;
+    }
+
+    pub fn gpu_timestamp_start(&self) -> Result<Option<(wgpu::Buffer, f64)>> {
+        self.check()?;
+        let Some(ts) = self.timestamps.as_ref().filter(|t| t.enabled && t.has_sample) else {
+            return Ok(None);
+        };
+        let buffer = self.device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("frame timestamps read"),
+            size: 16,
+            usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+            mapped_at_creation: false,
+        });
+        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("frame timestamps copy"),
+        });
+        encoder.copy_buffer_to_buffer(&ts.resolve_buf, 0, &buffer, 0, 16);
+        self.queue.submit([encoder.finish()]);
+        self.check()?;
+        Ok(Some((buffer, ts.period_ns)))
     }
 
     /// Stashes `encoder` onto the active tile so subsequent non-Vello reader/copy passes can join
@@ -2245,6 +2507,7 @@ impl Gpu {
             a.before = Some(encoder);
         } else {
             self.readers.flush_uniforms(&self.queue);
+            self.blend.flush_uniforms(&self.queue);
             self.queue.submit([encoder.finish()]);
             self.blur.flush_retired();
             self.submits += 1;
@@ -2398,125 +2661,49 @@ impl Gpu {
         Ok(Some(split))
     }
 
-    /// Rasterizes independent shape coverage together before scrolling the paint stack.
-    /// The masks have no dependency on the lens's backdrop prefix.
+    /// Rasterizes independent shape coverage together before walking the paint stack.
+    /// Slots are packed in canonical paint order and rasterized in lens-local coordinates
+    /// (`fill_path_in_slot`), so batched masks match the serial path bit-for-bit.
     fn prepare_glass_masks(&mut self, store: &Store, frame: &Frame) -> Result<()> {
-        use vello_common::kurbo::Shape;
-
-        if store.readers().len() < 2 {
-            return Ok(());
-        }
-        let side = self.max_texture_2d.min(crate::gpu_readers::GLASS_MASK_ATLAS_SIDE);
-        let frame_size = (i32::from(frame.width), i32::from(frame.height));
-        let texture_limit = self.max_texture_2d.min(u32::from(u16::MAX));
-        let mut masks = HashMap::new();
-        let (mut left, mut top, mut row_height, mut used_width) = (0, 0, 0, 0);
-        let mut placements = Vec::new();
-        for id in store.readers() {
-            let Some(node) = store.nodes.get(id) else { continue };
-            let record = &node.record;
-            if record.hidden() || record.context() || record.provisional() {
-                continue;
-            }
-            let device = frame.view * store.world(*id);
-            let scale = device.determinant().abs().sqrt() as f32;
-            if !(scale > 0.0 && scale.is_finite()) {
-                continue;
-            }
-            for (op_index, op) in record.ops.iter().enumerate() {
-                let Op::Glass(lens) = op else { continue };
-                let [path_id] = lens.paths.as_slice() else {
-                    continue;
-                };
-                if lens.inradius <= 0.0
-                    || !matches!(
-                        record.paths.get(*path_id as usize),
-                        Some(PathEntry::Rect { .. } | PathEntry::Ellipse { .. })
-                    )
-                {
-                    continue;
-                }
-                let params = glass::glass_params(lens, scale, lens.inradius);
-                let Ok(regions) = glass::compute_regions(
-                    lens,
-                    &params,
-                    device,
-                    record.size,
-                    frame_size,
-                    (0, 0),
-                    frame_size,
-                    texture_limit,
-                    glass::HARD_MAX_REGION_PIXELS,
-                    glass::EXACT_SPLIT_SIDE,
-                    glass::EXACT_SPLIT_PIXELS,
-                    glass::EXACT_CHUNK_SIDE,
-                ) else {
-                    continue;
-                };
-                let [region] = regions.as_slice() else {
-                    continue;
-                };
-                let w = region.rw.next_multiple_of(4);
-                let h = region.rh.next_multiple_of(4);
-                if w > side || h > side {
-                    continue;
-                }
-                let Some(path) = record.entry_path(*path_id, device) else {
-                    continue;
-                };
-                let bounds = device.transform_rect_bbox(path.bounding_box()).inflate(1.0, 1.0);
-                if bounds.x0 < f64::from(region.x0)
-                    || bounds.y0 < f64::from(region.y0)
-                    || bounds.x1 > f64::from(region.x0) + f64::from(region.rw)
-                    || bounds.y1 > f64::from(region.y0) + f64::from(region.rh)
-                {
-                    continue;
-                }
-                if left + w > side {
-                    left = 0;
-                    top += row_height;
-                    row_height = 0;
-                }
-                if top + h > side {
-                    continue;
-                }
-                let shift = Affine::translate((
-                    f64::from(left) - f64::from(region.x0),
-                    f64::from(top) - f64::from(region.y0),
-                ));
-                placements.push((path, shift * device, lens.even_odd));
-                masks.insert(
-                    (*id, op_index),
-                    GlassMaskSlot {
-                        region: (region.x0, region.y0, region.rw, region.rh),
-                        offset: (left, top),
-                    },
-                );
-                left += w;
-                row_height = row_height.max(h);
-                used_width = used_width.max(left);
-            }
-        }
-
-        let max_bytes = self.reader_budget_room();
-        if masks.len() < 2
-            || !self.readers.ensure_glass_mask_atlas(
-                &self.device,
-                &self.renderer,
-                (used_width, top + row_height),
-                max_bytes,
-            )
+        let t0 = now();
+        let sub0 = self.active.as_ref().map_or(0.0, |a| a.submit_ms);
+        let frame_backdrop = (u32::from(frame.width) as usize)
+            .saturating_mul(u32::from(frame.height) as usize)
+            .saturating_mul(4);
+        let existing_backdrop = self.readers.backdrop_frame.as_ref().map_or(0, PlainTex::bytes);
+        // Reserve room for the mandatory backdrop plane so the optional mask atlas
+        // never starves a frame under a tight GPU budget.
+        let needed_backdrop = frame_backdrop.saturating_sub(existing_backdrop);
+        let reader_room = self.reader_budget_room().saturating_sub(needed_backdrop);
+        let other_reader_bytes = self
+            .readers
+            .bytes()
+            .saturating_sub(self.readers.glass_mask_atlas_bytes());
+        let atlas_room = reader_room.saturating_sub(other_reader_bytes);
+        let plan = glass::plan_glass_masks(store, frame, self.max_texture_2d, atlas_room);
+        if plan.placements.len() < 2
+            || !self
+                .readers
+                .ensure_glass_mask_atlas(&self.device, &self.renderer, plan.size, reader_room)
         {
+            self.readers.drop_glass_mask_atlas();
+            if let Some(active) = self.active.as_mut() {
+                let sub = active.submit_ms - sub0;
+                active.prepare_masks_ms += (now() - t0 - sub).max(0.0);
+            }
             return Ok(());
         }
-        self.mask_scene
-            .reset_and_resize(used_width as u16, (top + row_height) as u16);
+        self.mask_scene.reset_and_resize(plan.size.0 as u16, plan.size.1 as u16);
         self.mask_scene.set_paint(vello_common::color::palette::css::WHITE);
-        for (path, transform, even_odd) in placements {
-            self.mask_scene.set_transform(transform);
+        for p in &plan.placements {
+            self.mask_scene.set_transform(p.local_transform);
             self.mask_scene
-                .set_fill_rule(if even_odd { Fill::EvenOdd } else { Fill::NonZero });
-            self.mask_scene.fill_path(&path);
+                .set_fill_rule(if p.even_odd { Fill::EvenOdd } else { Fill::NonZero });
+            self.mask_scene.fill_path_in_slot(
+                &p.path,
+                (p.slot.offset.0 as u16, p.slot.offset.1 as u16),
+                (p.slot.region.2 as u16, p.slot.region.3 as u16),
+            );
         }
         let mut encoder = self.take_encoder(true, "glass mask batch");
         let mut options = RenderOptions::default();
@@ -2539,7 +2726,11 @@ impl Gpu {
             .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
         self.stash_encoder(encoder);
         self.mask_scene.reset();
-        self.active.as_mut().expect("active draw").glass_masks = masks;
+        let active = self.active.as_mut().expect("active draw");
+        active.vello_renders += 1;
+        active.glass_masks = plan.slots;
+        let sub = active.submit_ms - sub0;
+        active.prepare_masks_ms += (now() - t0 - sub).max(0.0);
         Ok(())
     }
 
@@ -2563,13 +2754,14 @@ impl Gpu {
             && self.shown == Some((generation, background.map(f32::to_bits), false))
             && self.whole_samples == Some(samples)
         {
+            let submits0 = self.submits;
             let stats = DrawStats {
                 direct: true,
                 plan: 4,
                 standin: true,
                 ..DrawStats::default()
             };
-            return self.finish_frame(self.cur.expect("unchanged frame"), stats, now());
+            return self.finish_frame(self.cur.expect("unchanged frame"), stats, now(), submits0);
         }
         let result = self.draw_whole_pass(store, frame, background, generation, moving, prefix, samples);
         let (Some(samples), Some(native)) = (samples, native_samples) else {
@@ -2655,6 +2847,18 @@ impl Gpu {
             let mut stats = self.draw_whole_pass(store, frame, background, generation, moving, None, native)?;
             stats.encode_ms += replay.encode_ms;
             stats.render_ms += replay.render_ms;
+            stats.prepare_masks_ms += replay.prepare_masks_ms;
+            stats.vello_render_ms += replay.vello_render_ms;
+            stats.reader_ms += replay.reader_ms;
+            stats.shadow_ms += replay.shadow_ms;
+            stats.submit_ms += replay.submit_ms;
+            stats.submits += replay.submits;
+            stats.vello_renders += replay.vello_renders;
+            stats.glass_ops += replay.glass_ops;
+            stats.glass_batched += replay.glass_batched;
+            stats.bg_blur_ops += replay.bg_blur_ops;
+            stats.shadow_ops += replay.shadow_ops;
+            stats.shadow_hits += replay.shadow_hits;
             stats.cpu_ms = now() - t0;
             Ok(stats)
         });
@@ -2844,6 +3048,7 @@ impl Gpu {
         let (width, height) = (u32::from(frame.width), u32::from(frame.height));
         let capturing = self.reader_halo.as_ref().is_some_and(|halo| halo.capturing);
         let t0 = now();
+        let submits0 = self.submits;
         let view = frame.view;
         let scale = view.as_coeffs()[0];
         let bg_bits = background.map(f32::to_bits);
@@ -2860,7 +3065,7 @@ impl Gpu {
         {
             stats.exact = true;
             stats.plan = 3;
-            return self.finish_frame(self.cur.expect("unchanged frame"), stats, t0);
+            return self.finish_frame(self.cur.expect("unchanged frame"), stats, t0, submits0);
         }
         let dst = self.next_frame();
         let padded = if let Some(bounds) = samples {
@@ -2929,28 +3134,22 @@ impl Gpu {
         self.scene.reset_and_resize(whole.width, whole.height);
         self.readers.begin_frame();
         self.backdrop_gen += 1;
-        self.active = Some(ActiveDraw {
-            frame_dst: (padded.is_none() && !capturing).then_some(dst),
-            display_area: padded.map(|((x, y), _)| IRect {
+        if !capturing {
+            self.begin_frame_timestamp();
+        }
+        self.active = Some(ActiveDraw::new(
+            (padded.is_none() && !capturing).then_some(dst),
+            padded.map(|((x, y), _)| IRect {
                 x0: x as i32,
                 y0: y as i32,
                 x1: (x + width) as i32,
                 y1: (y + height) as i32,
             }),
-            width: w,
-            height: h,
+            w,
+            h,
             background,
-            detail: moving,
-            needs_clear: true,
-            backdrop_live: false,
-            write_main: true,
-            write_backdrop: false,
-            scene_dirty: false,
-            glass_masks: HashMap::new(),
-            before: None,
-            encoder_has_vello: false,
-            flush_ms: 0.0,
-        });
+            moving,
+        ));
         let limits = store.limits;
         let mut verbs = limits.frame_verbs;
         let split = match prefix {
@@ -2983,7 +3182,6 @@ impl Gpu {
             }
         };
         stats.add(&s);
-        let t1 = now();
         if let Err(e) = self.flush_scene_gpu(true) {
             self.discard_draw();
             return Err(e);
@@ -3007,10 +3205,9 @@ impl Gpu {
         self.submit_active_encoder();
         let active = self.active.take().expect("active draw");
         self.recycle_scene_textures();
-        let render_ms = active.flush_ms + now() - t1;
-        stats.encode_ms += (now() - t0 - render_ms).max(0.0);
-        stats.render_ms += render_ms;
+        active.record_into(&mut stats, now() - t0);
         if capturing {
+            stats.submits = self.submits.saturating_sub(submits0);
             self.scene.reset();
             return Ok(stats);
         }
@@ -3021,7 +3218,7 @@ impl Gpu {
         }
         stats.held = self.tiles.len() as u32;
         stats.evicted = self.tiles.stats.evicted;
-        let stats = self.finish_frame(dst, stats, t0)?;
+        let stats = self.finish_frame(dst, stats, t0, submits0)?;
         self.cur = Some(dst);
         self.last = Some(Last {
             view,
@@ -3052,6 +3249,7 @@ impl Gpu {
     ) -> Result<DrawStats> {
         self.check()?;
         self.forget_motion_prefix();
+        self.readers.drop_glass_mask_atlas();
         if store.readers().is_empty() && !store.has_context() && self.readers.bytes() > 0 {
             self.readers.evict_frame_scratch();
         }
@@ -3062,6 +3260,7 @@ impl Gpu {
         self.shadow.begin_frame();
         self.trim_pools(GPU_POOL_KEEP_BYTES);
         let t0 = now();
+        let submits0 = self.submits;
         self.tiles.begin(background, halo);
         self.fit_tiles(store.limits.tile_bytes);
         let view = frame.view;
@@ -3101,8 +3300,9 @@ impl Gpu {
         if same {
             stats.exact = true;
             stats.plan = 3;
-            return self.finish_frame(self.cur.expect("unchanged frame"), stats, t0);
+            return self.finish_frame(self.cur.expect("unchanged frame"), stats, t0, submits0);
         }
+        self.begin_frame_timestamp();
         let dst = self.next_frame();
         self.ensure_frame(dst, w, h)?;
         let mut verbs = store.limits.frame_verbs;
@@ -3215,7 +3415,7 @@ impl Gpu {
         stats.standin = !stats.exact;
         stats.held = self.tiles.len() as u32;
         stats.evicted = self.tiles.stats.evicted;
-        let stats = self.finish_frame(dst, stats, t0)?;
+        let stats = self.finish_frame(dst, stats, t0, submits0)?;
         self.cur = Some(dst);
         self.last = Some(Last { view, size: (w, h) });
         self.last_scale = Some(scale);
@@ -3246,6 +3446,7 @@ impl Gpu {
         let Some(last) = self.last else {
             return Ok(stats);
         };
+        self.readers.drop_glass_mask_atlas();
         let t0 = now();
         self.masks.begin_frame();
         self.blur.begin_frame();
@@ -3293,7 +3494,7 @@ impl Gpu {
     }
 
     /// Presents the frame shown (with a canvas) and finishes the frame's numbers.
-    fn finish_frame(&mut self, frame: usize, mut stats: DrawStats, t0: f64) -> Result<DrawStats> {
+    fn finish_frame(&mut self, frame: usize, mut stats: DrawStats, t0: f64, submits0: u32) -> Result<DrawStats> {
         let t1 = now();
         self.check()?;
         self.configure_surface(frame)?;
@@ -3349,7 +3550,9 @@ impl Gpu {
             self.submits += 1;
             self.queue.present(t);
         }
-        stats.submit_ms = now() - t1;
+        stats.submit_ms += now() - t1;
+        stats.submits = self.submits.saturating_sub(submits0);
+        self.end_frame_timestamp();
         stats.cpu_ms = now() - t0;
         self.scene.reset();
         self.check()?;
@@ -3486,23 +3689,7 @@ impl Gpu {
         self.readers.begin_frame();
         self.blur.begin_frame();
         self.backdrop_gen += 1;
-        self.active = Some(ActiveDraw {
-            frame_dst: None,
-            display_area: None,
-            width: side,
-            height: side,
-            background,
-            detail: coarse_readers,
-            needs_clear: true,
-            backdrop_live: false,
-            write_main: true,
-            write_backdrop: false,
-            scene_dirty: false,
-            glass_masks: HashMap::new(),
-            before: None,
-            encoder_has_vello: false,
-            flush_ms: 0.0,
-        });
+        self.active = Some(ActiveDraw::new(None, None, side, side, background, coarse_readers));
         let tile = Frame {
             width: side as u16,
             height: side as u16,
@@ -3526,7 +3713,6 @@ impl Gpu {
         stats.add(&s);
         // Exact only if nothing stood in: no level of detail, no provisional record.
         let exact = s.exact();
-        let t1 = now();
         let place = match target {
             TileTarget::Slot(slot) => match self.slot_place(slot) {
                 Ok(p) => Some(p),
@@ -3591,9 +3777,7 @@ impl Gpu {
         let active = self.active.take().expect("active draw");
         self.recycle_scene_textures();
         self.trim_pools(GPU_POOL_KEEP_BYTES);
-        let render_ms = active.flush_ms + now() - t1;
-        stats.encode_ms += (now() - t0 - render_ms).max(0.0);
-        stats.render_ms += render_ms;
+        active.record_into(stats, now() - t0);
         Ok(exact)
     }
 
@@ -3639,6 +3823,7 @@ impl Gpu {
     fn discard_draw(&mut self) {
         self.active = None;
         self.readers.discard_uniforms();
+        self.blend.discard_uniforms();
         self.blur.flush_retired();
         while let Some(scope) = self.offscreen_stack.pop() {
             self.offscreen_pool.push(scope.main);
@@ -3692,6 +3877,7 @@ impl Gpu {
             return Ok(());
         }
         let t0 = now();
+        let sub0 = active.submit_ms;
         let [r, g, b, a] = active.background;
         let write_main = active.write_main;
         let write_backdrop = active.write_backdrop;
@@ -3797,7 +3983,11 @@ impl Gpu {
         let active = self.active.as_mut().expect("active draw");
         active.needs_clear &= !needs_clear;
         active.scene_dirty = false;
-        active.flush_ms += now() - t0;
+        if draw {
+            active.vello_renders += 1;
+        }
+        let sub = active.submit_ms - sub0;
+        active.vello_render_ms += (now() - t0 - sub).max(0.0);
         if needs_clear || (draw && (write_backdrop || (!active.backdrop_live && root))) {
             self.backdrop_gen += 1;
         }
@@ -3930,16 +4120,7 @@ impl Gpu {
         options.target_init = TargetInit::Clear(ClearSettings::Viewport {
             color: AlphaColor::TRANSPARENT,
         });
-        let clipped = open.iter().any(|o| {
-            matches!(
-                o,
-                Open::Clip {
-                    active_on_scene: true,
-                    context_only: false,
-                    ..
-                }
-            )
-        });
+        let clipped = open_clips_need_mask(open, draw.dirty, true);
         if clipped {
             let budget = self.reader_budget_room();
             self.readers.ensure_vello_tex_budgeted(
@@ -3956,6 +4137,7 @@ impl Gpu {
             raster_clips(&mut self.mask_scene, open, shift, (w, h), true);
             let mut encoder = self.take_encoder(true, "blur reader clip");
             let clip = self.readers.clip_tex.as_ref().expect("blur reader clip");
+            let t_vr = now();
             self.renderer
                 .render(
                     &self.mask_scene,
@@ -3969,6 +4151,10 @@ impl Gpu {
                     options,
                 )
                 .map_err(vello_error)?;
+            if let Some(a) = self.active.as_mut() {
+                a.vello_render_ms += now() - t_vr;
+                a.vello_renders += 1;
+            }
             self.stash_encoder(encoder);
         }
         let mut encoder = self.take_encoder(!analytic, "backdrop blur");
@@ -3994,6 +4180,7 @@ impl Gpu {
                 self.mask_scene.fill_path(path);
             }
             let mask = self.readers.mask_tex.as_ref().expect("blur reader shape");
+            let t_vr = now();
             self.renderer
                 .render(
                     &self.mask_scene,
@@ -4007,6 +4194,10 @@ impl Gpu {
                     options,
                 )
                 .map_err(vello_error)?;
+            if let Some(a) = self.active.as_mut() {
+                a.vello_render_ms += now() - t_vr;
+                a.vello_renders += 1;
+            }
         }
         self.mask_scene.reset();
         Ok((encoder, clipped))
@@ -4073,27 +4264,42 @@ impl Gpu {
             return Ok(());
         }
         let t0 = now();
+        let (sub0, vr0) = self
+            .active
+            .as_ref()
+            .map_or((0.0, 0.0), |a| (a.submit_ms, a.vello_render_ms));
         let dst_origin = (sx - parent.x0, sy - parent.y0);
         let src_offset = ((visible.x0 - sx) as u32, (visible.y0 - sy) as u32);
         let dst_offset = ((visible.x0 - parent.x0) as u32, (visible.y0 - parent.y0) as u32);
         let size = ((visible.x1 - visible.x0) as u32, (visible.y1 - visible.y0) as u32);
         let scissor = (dst_offset.0, dst_offset.1, size.0, size.1);
-        let clipped = open.iter().any(|o| {
-            matches!(
-                o,
-                Open::Clip {
-                    active_on_scene: true,
-                    ..
-                }
-            )
-        });
+        let mut clips = active_clips(open, false).peekable();
         let lerp = blend == crate::blend::BLEND_LERP;
-        let shader = clipped || picture.is_some() || (blend != 0 && !lerp);
+        // Keep the same compositing arithmetic when a clip is present, including
+        // UNORM rounding for normal and lerp modes. Only skip rasterizing its mask.
+        let shader = clips.peek().is_some() || picture.is_some() || (blend != 0 && !lerp);
+        let visible_in_parent = IRect {
+            x0: dst_offset.0 as i32,
+            y0: dst_offset.1 as i32,
+            x1: (dst_offset.0 + size.0) as i32,
+            y1: (dst_offset.1 + size.1) as i32,
+        };
+        let clipped = clips.any(|(path, transform, even_odd)| {
+            !crate::geometry::path_covers_rect(path, transform, even_odd, visible_in_parent)
+        });
         let (aw, ah) = (u32::from(src.active_size.0), u32::from(src.active_size.1));
         if shader {
             self.ensure_scratch_backdrop(aw, ah)?;
             if clipped {
                 self.ensure_scratch_mask(aw, ah)?;
+            }
+            let bytes = self.blend.pending_allocation();
+            if bytes > 0 {
+                self.reserve_or_trim(bytes, 0, "blend uniforms")?;
+                self.blend.ensure_slab(&self.device);
+            }
+            if !self.blend.has_slots(u32::from(write_main) + u32::from(write_backdrop)) {
+                self.submit_active_encoder();
             }
         }
         let mut encoder = self.take_encoder(clipped, "scope composite");
@@ -4106,6 +4312,7 @@ impl Gpu {
             options.target_init = TargetInit::Clear(ClearSettings::Viewport {
                 color: AlphaColor::TRANSPARENT,
             });
+            let t_vr = now();
             self.renderer
                 .render(
                     &self.mask_scene,
@@ -4119,17 +4326,15 @@ impl Gpu {
                     options,
                 )
                 .map_err(vello_error)?;
+            if let Some(a) = self.active.as_mut() {
+                a.vello_render_ms += now() - t_vr;
+                a.vello_renders += 1;
+            }
         }
 
         for backdrop in [false, true] {
             if (backdrop && !write_backdrop) || (!backdrop && !write_main) {
                 continue;
-            }
-            if shader && backdrop && write_main && content.isolation.unfaded_main {
-                // The second plane uses a different opacity in the blend uniform.
-                self.stash_encoder(encoder);
-                self.submit_active_encoder();
-                encoder = self.take_encoder(false, "scope backdrop composite");
             }
             let opacity = if !backdrop && content.isolation.unfaded_main {
                 1.0
@@ -4146,7 +4351,6 @@ impl Gpu {
                 copy_rect(&mut encoder, dst_tex, &prefix.tex, dst_offset, src_offset, size);
                 self.blend.encode(
                     &self.device,
-                    &self.queue,
                     &mut encoder,
                     &src.view,
                     &prefix.view,
@@ -4176,19 +4380,20 @@ impl Gpu {
             }
         }
         self.stash_encoder(encoder);
-        if shader {
-            // Submit before another composite changes the blend uniform or trims the prefix scratch.
-            self.submit_active_encoder();
-        }
         if write_backdrop || (write_main && root && !self.active.as_ref().expect("active draw").backdrop_live) {
             self.backdrop_gen += 1;
         }
-        self.active.as_mut().expect("active draw").flush_ms += now() - t0;
+        if let Some(a) = self.active.as_mut() {
+            let sub = a.submit_ms - sub0;
+            let vr = a.vello_render_ms - vr0;
+            a.flush_ms += (now() - t0 - sub - vr).max(0.0);
+        }
         Ok(())
     }
 
     fn post_plane(&mut self, source: &GpuTarget, steps: &[PostStep]) -> Result<Option<GpuTarget>> {
         let t0 = now();
+        let sub0 = self.active.as_ref().map_or(0.0, |a| a.submit_ms);
         let mut encoder = self.take_encoder(false, "post effects");
         let mut outputs = Vec::with_capacity(steps.len());
         let result = (|| -> Result<bool> {
@@ -4337,7 +4542,10 @@ impl Gpu {
         self.stash_encoder(encoder);
         self.submit_active_encoder();
         self.noise.flush_retired();
-        self.active.as_mut().expect("active draw").flush_ms += now() - t0;
+        if let Some(a) = self.active.as_mut() {
+            let sub = a.submit_ms - sub0;
+            a.flush_ms += (now() - t0 - sub).max(0.0);
+        }
         let output = if matches!(result, Ok(true)) {
             outputs.pop()
         } else {
@@ -5545,6 +5753,49 @@ pub async fn finished(device: wgpu::Device, health: Arc<Health>, queue: wgpu::Qu
     pump(&device, &health, rx, WAIT_TIMEOUT_MS).await
 }
 
+/// Reads back a 16-byte resolved timestamp query buffer (`[t0, t1]` in GPU ticks) as milliseconds.
+pub async fn read_timestamp_ms(
+    device: wgpu::Device,
+    health: Arc<Health>,
+    buffer: wgpu::Buffer,
+    period_ns: f64,
+) -> Result<f64> {
+    if let Some(err) = health.stop_error() {
+        buffer.destroy();
+        return Err(err);
+    }
+    let (tx, rx) = futures_channel::oneshot::channel();
+    buffer.slice(..).map_async(wgpu::MapMode::Read, move |r| {
+        let _ = tx.send(r);
+    });
+    match pump(&device, &health, rx, WAIT_TIMEOUT_MS).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => {
+            buffer.destroy();
+            return Err(EngineError::new(ErrorCode::Gpu, e.to_string()));
+        }
+        Err(e) => {
+            buffer.destroy();
+            return Err(e);
+        }
+    }
+    let mapped = buffer
+        .slice(..)
+        .get_mapped_range()
+        .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+    let ms = if mapped.len() >= 16 {
+        let t0 = u64::from_le_bytes(mapped[0..8].try_into().unwrap_or([0; 8]));
+        let t1 = u64::from_le_bytes(mapped[8..16].try_into().unwrap_or([0; 8]));
+        (t1.saturating_sub(t0) as f64) * period_ns / 1_000_000.0
+    } else {
+        0.0
+    };
+    drop(mapped);
+    buffer.unmap();
+    buffer.destroy();
+    Ok(ms)
+}
+
 impl Backend for Gpu {
     type Scene = Scene;
 
@@ -5797,6 +6048,9 @@ impl Backend for Gpu {
         let Some(active) = self.active.as_ref() else {
             return Ok(());
         };
+        let t_reader = now();
+        let sub0 = active.submit_ms;
+        let vr0 = active.vello_render_ms;
         let (aw, ah) = (active.width, active.height);
         let frame_size = (aw as i32, ah as i32);
         // A lens on an explicitly blended layer reads from its parent. A child lens
@@ -5946,7 +6200,7 @@ impl Backend for Gpu {
             source_view
         };
 
-        let has_clip_mask = divisor > 1
+        let any_clip = divisor > 1
             || open.iter().any(|o| {
                 matches!(
                     o,
@@ -5977,6 +6231,18 @@ impl Backend for Gpu {
             if out_w == 0 || out_h == 0 {
                 continue;
             }
+            let has_clip_mask = divisor > 1
+                || (any_clip
+                    && open_clips_need_mask(
+                        open,
+                        IRect {
+                            x0: region.out_x0,
+                            y0: region.out_y0,
+                            x1: region.out_x1,
+                            y1: region.out_y1,
+                        },
+                        true,
+                    ));
             let (rx, ry) = (region.x0 * divisor - halo_offset.0, region.y0 * divisor - halo_offset.1);
             let rim = native_sampling.then(|| {
                 let k = glass::height_scale(native_params.sigma) as i32;
@@ -6054,6 +6320,7 @@ impl Backend for Gpu {
                     color: vello_common::color::AlphaColor::TRANSPARENT,
                 });
                 let clip_t = self.readers.clip_tex.as_ref().expect("clip");
+                let t_vr = now();
                 self.renderer
                     .render(
                         &self.mask_scene,
@@ -6067,6 +6334,10 @@ impl Backend for Gpu {
                         options,
                     )
                     .map_err(vello_error)?;
+                if let Some(a) = self.active.as_mut() {
+                    a.vello_render_ms += now() - t_vr;
+                    a.vello_renders += 1;
+                }
                 self.stash_encoder(enc);
                 self.mask_scene.reset();
             }
@@ -6105,6 +6376,12 @@ impl Backend for Gpu {
                 .and_then(|draw| draw.glass_masks.get(&key))
                 .filter(|slot| slot.region == (region.x0, region.y0, region.rw, region.rh))
                 .map(|slot| slot.offset);
+            if let Some(a) = self.active.as_mut() {
+                a.glass_ops += 1;
+                if mask_slot.is_some() {
+                    a.glass_batched += 1;
+                }
+            }
             let render_mask = analytic_coarse.is_none() && mask_slot.is_none();
             let mut encoder = self.take_encoder(render_mask, "reader glass");
 
@@ -6144,6 +6421,7 @@ impl Backend for Gpu {
                         color: vello_common::color::AlphaColor::TRANSPARENT,
                     });
                     let mask_t = self.readers.mask_tex.as_ref().expect("mask");
+                    let t_vr = now();
                     self.renderer
                         .render(
                             &self.mask_scene,
@@ -6157,6 +6435,10 @@ impl Backend for Gpu {
                             options,
                         )
                         .map_err(vello_error)?;
+                    if let Some(a) = self.active.as_mut() {
+                        a.vello_render_ms += now() - t_vr;
+                        a.vello_renders += 1;
+                    }
                 }
                 self.mask_scene.reset();
             }
@@ -6208,6 +6490,11 @@ impl Backend for Gpu {
             )?;
 
             self.stash_encoder(encoder);
+        }
+        if let Some(a) = self.active.as_mut() {
+            let sub = a.submit_ms - sub0;
+            let vr = a.vello_render_ms - vr0;
+            a.reader_ms += (now() - t_reader - sub - vr).max(0.0);
         }
         Ok(())
     }
@@ -6401,6 +6688,9 @@ impl Backend for Gpu {
         if dirty.is_empty() {
             return Ok(());
         }
+        if let Some(a) = self.active.as_mut() {
+            a.shadow_ops += 1;
+        }
         validate_sigma(
             sigma,
             IRect {
@@ -6422,6 +6712,9 @@ impl Backend for Gpu {
                     let tid = entry.value.tid;
                     let (ew, eh) = entry.size;
                     let origin = (canon.anchor.0 + entry.origin.0, canon.anchor.1 + entry.origin.1);
+                    if let Some(a) = self.active.as_mut() {
+                        a.shadow_hits += 1;
+                    }
                     let (sox, soy) = self.scene_offset();
                     let px = f64::from(origin.0 - sox);
                     let py = f64::from(origin.1 - soy);
@@ -6459,6 +6752,7 @@ impl Backend for Gpu {
 
                 // Cache miss: rasterise + blur canonical mask once and cache it.
                 let t0 = now();
+                let sub0 = self.active.as_ref().map_or(0.0, |a| a.submit_ms);
                 let max_tex = self.device.limits().max_texture_dimension_2d;
                 if cw <= max_tex && ch <= max_tex {
                     self.ensure_scratch_mask(cw, ch)?;
@@ -6571,11 +6865,16 @@ impl Backend for Gpu {
                         tex.destroy();
                         return Err(e);
                     }
+                    let t_sub = now();
                     self.queue.submit([encoder.finish()]);
                     self.submits += 1;
                     self.blur.flush_retired();
+                    let sub_dt = now() - t_sub;
                     if let Some(root) = self.active.as_mut() {
-                        root.flush_ms += now() - t0;
+                        root.submit_ms += sub_dt;
+                        root.vello_renders += 1;
+                        let total_sub = root.submit_ms - sub0;
+                        root.shadow_ms += (now() - t0 - total_sub).max(0.0);
                     }
                     self.bindings.insert(tid, bind_view);
                     let mask_origin = (canon.mask_rect.x0, canon.mask_rect.y0);
@@ -6664,6 +6963,7 @@ impl Backend for Gpu {
         let dst_origin = (dirty.x0 - mask_rect.x0, dirty.y0 - mask_rect.y0);
 
         let t0 = now();
+        let sub0 = self.active.as_ref().map_or(0.0, |a| a.submit_ms);
         self.submit_active_encoder();
         let temp = self.acquire_temp(dirty_w, dirty_h)?;
         let res = (|| -> Result<wgpu::CommandEncoder> {
@@ -6909,11 +7209,16 @@ impl Backend for Gpu {
                 return Err(e);
             }
         };
+        let t_sub = now();
         self.queue.submit([encoder.finish()]);
         self.submits += 1;
         self.blur.flush_retired();
+        let sub_dt = now() - t_sub;
         if let Some(root) = self.active.as_mut() {
-            root.flush_ms += now() - t0;
+            root.submit_ms += sub_dt;
+            root.vello_renders += 1;
+            let total_sub = root.submit_ms - sub0;
+            root.shadow_ms += (now() - t0 - total_sub).max(0.0);
         }
 
         let tid = temp.tid;
@@ -6976,6 +7281,14 @@ impl Backend for Gpu {
         let Some(draw) = self.prepare_blur_reader(paths, device, coarse, open)? else {
             return Ok(());
         };
+        let t_blur = now();
+        let (sub0, vr0) = self
+            .active
+            .as_ref()
+            .map_or((0.0, 0.0), |a| (a.submit_ms, a.vello_render_ms));
+        if let Some(a) = self.active.as_mut() {
+            a.bg_blur_ops += 1;
+        }
         let analytic = if coarse {
             analytic_box_from_paths(paths, device, size, draw.frame_dirty_origin())
         } else {
@@ -7095,6 +7408,11 @@ impl Backend for Gpu {
             self.backdrop_gen += 1;
         }
         self.stash_encoder(encoder);
+        if let Some(a) = self.active.as_mut() {
+            let sub = a.submit_ms - sub0;
+            let vr = a.vello_render_ms - vr0;
+            a.reader_ms += (now() - t_blur - sub - vr).max(0.0);
+        }
         Ok(())
     }
 
@@ -7138,6 +7456,14 @@ impl Backend for Gpu {
         let Some(draw) = self.prepare_blur_reader(paths, device, false, open)? else {
             return Ok(());
         };
+        let t_blur = now();
+        let (sub0, vr0) = self
+            .active
+            .as_ref()
+            .map_or((0.0, 0.0), |a| (a.submit_ms, a.vello_render_ms));
+        if let Some(a) = self.active.as_mut() {
+            a.bg_blur_ops += 1;
+        }
         let max_sigma = plan.start_sigma.max(plan.end_sigma);
         let replay = self.reader_halo.is_some()
             && !self
@@ -7287,6 +7613,11 @@ impl Backend for Gpu {
             self.backdrop_gen += 1;
         }
         self.stash_encoder(encoder);
+        if let Some(a) = self.active.as_mut() {
+            let sub = a.submit_ms - sub0;
+            let vr = a.vello_render_ms - vr0;
+            a.reader_ms += (now() - t_blur - sub - vr).max(0.0);
+        }
         Ok(())
     }
 }

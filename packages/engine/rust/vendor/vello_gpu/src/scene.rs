@@ -264,6 +264,8 @@ pub struct Scene {
     pub(crate) recorder: CommandRecorder<RecordedDraw>,
     /// SIMD level used for strip generation.
     level: Level,
+    /// Drawpane: reusable strip generator for isolated tile-aligned atlas slots.
+    slot_generator: Option<StripGenerator>,
 }
 
 impl Scene {
@@ -290,6 +292,7 @@ impl Scene {
             filter: None,
             recorder: CommandRecorder::new(width, height),
             level,
+            slot_generator: None,
         }
     }
 
@@ -375,6 +378,82 @@ impl Scene {
                 ctx.aliasing_threshold,
             );
         });
+    }
+
+    /// Drawpane: Fill a path with solid paint inside a tile-aligned atlas slot.
+    ///
+    /// Flattening and strip rasterization run in slot-local coordinates `[0..slot_size)` so f32
+    /// coordinates and coverage match a standalone `(slot_size)` scene at `(0, 0)` bit-for-bit.
+    /// The resulting strips are then translated by `slot_origin` (multiples of tile size 4).
+    /// Requires solid paint and no active clip, blend, or filter layers.
+    pub fn fill_path_in_slot(
+        &mut self,
+        path: &BezPath,
+        slot_origin: (u16, u16),
+        slot_size: (u16, u16),
+    ) {
+        use vello_common::tile::Tile;
+
+        debug_assert_eq!(slot_origin.0 % Tile::WIDTH, 0);
+        debug_assert_eq!(slot_origin.1 % Tile::HEIGHT, 0);
+        debug_assert!(matches!(self.render_state.paint, PaintType::Solid(_)));
+        debug_assert!(self.viewport_state.clip().is_none());
+        debug_assert!(self.filter.is_none());
+        debug_assert_eq!(self.render_state.blend_mode, BlendMode::default());
+
+        if slot_size.0 == 0 || slot_size.1 == 0 {
+            return;
+        }
+        let Some(paint) = self.encode_current_paint() else {
+            return;
+        };
+        let transform = self.effective_path_transform();
+        let fill_rule = self.render_state.fill_rule;
+        let aliasing_threshold = self.aliasing_threshold;
+        let level = self.level;
+        let generator = match &mut self.slot_generator {
+            Some(generator) => {
+                generator.reset(slot_size.0, slot_size.1);
+                generator
+            }
+            None => self
+                .slot_generator
+                .insert(StripGenerator::new(slot_size.0, slot_size.1, level)),
+        };
+
+        let strips = {
+            let mut strip_storage = self.strip_storage.borrow_mut();
+            let strip_start = strip_storage.strips.len();
+            generator.generate_filled_path(
+                path,
+                fill_rule,
+                transform,
+                aliasing_threshold,
+                &mut strip_storage,
+                None,
+            );
+            for strip in &mut strip_storage.strips[strip_start..] {
+                if !strip.is_sentinel() {
+                    strip.x = strip
+                        .x
+                        .checked_add(slot_origin.0)
+                        .expect("slot strip x overflow");
+                }
+                strip.y = strip
+                    .y
+                    .checked_add(slot_origin.1)
+                    .expect("slot strip y overflow");
+            }
+            strip_start..strip_storage.strips.len()
+        };
+
+        if strips.is_empty() {
+            return;
+        }
+
+        let draw = RecordedDraw::new_path(strips.clone(), paint);
+        let strip_storage = self.strip_storage.borrow();
+        self.recorder.push_draw(draw, &strip_storage.strips[strips]);
     }
 
     /// Build strips for a filled path with the given properties and record the draw.
@@ -1215,5 +1294,99 @@ mod tests {
             .unwrap();
 
         assert!(resources.glyph_resources.is_some());
+    }
+
+    #[test]
+    fn fill_path_in_slot_matches_standalone_strips_and_alphas_bit_for_bit() {
+        use vello_common::kurbo::{Affine, Ellipse, RoundedRect, Shape};
+        use vello_common::peniko::Fill;
+        use vello_common::peniko::color::palette::css::WHITE;
+
+        let mut seed = 0x5EED_CAFE_1234_5678u64;
+        let mut next_f64 = || {
+            seed = seed
+                .wrapping_mul(6_364_136_223_846_793_005)
+                .wrapping_add(1_442_695_040_888_963_407);
+            ((seed >> 11) as f64) / ((1u64 << 53) as f64)
+        };
+
+        let mut atlas = Scene::new(1024, 1024);
+        atlas.set_paint(WHITE);
+
+        for i in 0..200 {
+            let rw = (24 + (next_f64() * 140.0) as u16).max(8);
+            let rh = (24 + (next_f64() * 140.0) as u16).max(8);
+            let slot_x = (((next_f64() * 760.0) as u16) / 4) * 4;
+            let slot_y = (((next_f64() * 760.0) as u16) / 4) * 4;
+            let scale = 0.7 + next_f64() * 1.8;
+            let angle = if i % 3 == 0 {
+                (next_f64() - 0.5) * 1.4
+            } else {
+                0.0
+            };
+            let cx = f64::from(rw) * 0.5 + (next_f64() - 0.5) * 2.0;
+            let cy = f64::from(rh) * 0.5 + (next_f64() - 0.5) * 2.0;
+            let local_w = (f64::from(rw) * 0.55) / scale;
+            let local_h = (f64::from(rh) * 0.55) / scale;
+            let path = if i % 2 == 0 {
+                RoundedRect::new(
+                    0.0,
+                    0.0,
+                    local_w,
+                    local_h,
+                    local_w.min(local_h) * 0.25,
+                )
+                .to_path(0.1)
+            } else {
+                Ellipse::new(
+                    (local_w * 0.5, local_h * 0.5),
+                    (local_w * 0.5, local_h * 0.5),
+                    0.0,
+                )
+                .to_path(0.1)
+            };
+            let transform = Affine::translate((cx, cy))
+                * Affine::rotate(angle)
+                * Affine::scale(scale)
+                * Affine::translate((-local_w * 0.5, -local_h * 0.5));
+            let rule = if i % 5 == 0 {
+                Fill::EvenOdd
+            } else {
+                Fill::NonZero
+            };
+
+            let mut serial = Scene::new(rw, rh);
+            serial.set_paint(WHITE);
+            serial.set_fill_rule(rule);
+            serial.set_transform(transform);
+            serial.fill_path(&path);
+
+            let prev_strips = atlas.strip_storage.borrow().strips.len();
+            let prev_alphas = atlas.strip_storage.borrow().alphas.len();
+            atlas.set_fill_rule(rule);
+            atlas.set_transform(transform);
+            atlas.fill_path_in_slot(&path, (slot_x, slot_y), (rw, rh));
+
+            let s_store = serial.strip_storage.borrow();
+            let a_store = atlas.strip_storage.borrow();
+            let a_strips = &a_store.strips[prev_strips..];
+            let a_alphas = &a_store.alphas[prev_alphas..];
+
+            assert_eq!(a_alphas, &s_store.alphas[..], "case {i}: alpha bytes differ");
+            assert_eq!(a_strips.len(), s_store.strips.len(), "case {i}: strip count differs");
+            for (s, a) in s_store.strips.iter().zip(a_strips.iter()) {
+                assert_eq!(s.is_sentinel(), a.is_sentinel(), "case {i}: sentinel mismatch");
+                if !s.is_sentinel() {
+                    assert_eq!(a.x, s.x + slot_x, "case {i}: strip x mismatch");
+                }
+                assert_eq!(a.y, s.y + slot_y, "case {i}: strip y mismatch");
+                assert_eq!(a.fill_gap(), s.fill_gap(), "case {i}: fill_gap mismatch");
+                assert_eq!(
+                    a.alpha_idx() - prev_alphas as u32,
+                    s.alpha_idx(),
+                    "case {i}: alpha_idx mismatch"
+                );
+            }
+        }
     }
 }

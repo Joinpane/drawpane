@@ -346,16 +346,30 @@ pub(crate) fn composite_cpu(
 #[cfg(feature = "gpu-common")]
 pub mod gpu {
     const BLEND_WGSL: &str = include_str!("blend.wgsl");
+    const SLAB_SLOTS: u32 = 256;
+    const UNIFORM_SIZE: usize = 32;
 
     /// GPU blend pass (`blend.wgsl`): composites a premultiplied source over a backdrop copy
     /// directly into the active target, optionally modulated by an anti-aliased clip mask.
+    /// Uses a dynamic-offset uniform slab so consecutive blend passes batch into one encoder.
     pub struct GpuBlend {
         bgl: wgpu::BindGroupLayout,
         pipe_plain: wgpu::RenderPipeline,
         pipe_clipped: wgpu::RenderPipeline,
-        uniform_buf: wgpu::Buffer,
+        slab: Option<wgpu::Buffer>,
+        slab_slot: u32,
+        uniform_align: u32,
+        uniform_bytes: Vec<u8>,
         dummy_view: wgpu::TextureView,
         _dummy_tex: wgpu::Texture,
+    }
+
+    impl Drop for GpuBlend {
+        fn drop(&mut self) {
+            if let Some(slab) = self.slab.take() {
+                slab.destroy();
+            }
+        }
     }
 
     impl GpuBlend {
@@ -385,8 +399,8 @@ pub mod gpu {
                         visibility: wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: wgpu::BufferSize::new(32),
+                            has_dynamic_offset: true,
+                            min_binding_size: wgpu::BufferSize::new(UNIFORM_SIZE as u64),
                         },
                         count: None,
                     },
@@ -427,12 +441,7 @@ pub mod gpu {
             };
             let pipe_plain = make_pipe("blend plain", "fs_blend");
             let pipe_clipped = make_pipe("blend clipped", "fs_blend_clipped");
-            let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("blend params"),
-                size: 32,
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
+            let uniform_align = device.limits().min_uniform_buffer_offset_alignment.max(256);
             let dummy_tex = device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("blend dummy clip"),
                 size: wgpu::Extent3d {
@@ -452,19 +461,72 @@ pub mod gpu {
                 bgl,
                 pipe_plain,
                 pipe_clipped,
-                uniform_buf,
+                slab: None,
+                slab_slot: 0,
+                uniform_align,
+                uniform_bytes: Vec::new(),
                 dummy_view,
                 _dummy_tex: dummy_tex,
             }
+        }
+
+        fn slab_size(&self) -> usize {
+            self.uniform_align as usize * SLAB_SLOTS as usize
+        }
+
+        pub fn bytes(&self) -> usize {
+            self.slab.as_ref().map_or(0, |_| self.slab_size())
+        }
+
+        pub fn pending_allocation(&self) -> usize {
+            self.slab.as_ref().map_or(self.slab_size(), |_| 0)
+        }
+
+        pub fn ensure_slab(&mut self, device: &wgpu::Device) {
+            let size = self.slab_size() as u64;
+            self.slab.get_or_insert_with(|| {
+                device.create_buffer(&wgpu::BufferDescriptor {
+                    label: Some("blend params slab"),
+                    size,
+                    usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                    mapped_at_creation: false,
+                })
+            });
+        }
+
+        pub fn has_slots(&self, count: u32) -> bool {
+            count <= SLAB_SLOTS - self.slab_slot
+        }
+
+        /// Upload the slots before submitting the encoder that refers to them. The next upload
+        /// runs after that submit, so the next encoder can reuse the same offsets.
+        pub fn flush_uniforms(&mut self, queue: &wgpu::Queue) {
+            if !self.uniform_bytes.is_empty() {
+                queue.write_buffer(self.slab.as_ref().expect("blend slab"), 0, &self.uniform_bytes);
+            }
+            self.discard_uniforms();
+        }
+
+        pub fn discard_uniforms(&mut self) {
+            self.uniform_bytes.clear();
+            self.slab_slot = 0;
+        }
+
+        fn push_uniform(&mut self, bytes: &[u8; UNIFORM_SIZE]) -> u32 {
+            assert!(self.has_slots(1), "submit before reusing blend uniform slots");
+            let offset = self.slab_slot * self.uniform_align;
+            self.slab_slot += 1;
+            self.uniform_bytes.resize(offset as usize, 0);
+            self.uniform_bytes.extend_from_slice(bytes);
+            offset
         }
 
         /// Encodes a single scissored fragment pass writing `blend(src * opacity * clip, backdrop)`
         /// into `dst_view` over the portion of the source within the parent target.
         #[allow(clippy::too_many_arguments)]
         pub fn encode(
-            &self,
+            &mut self,
             device: &wgpu::Device,
-            queue: &wgpu::Queue,
             encoder: &mut wgpu::CommandEncoder,
             src_view: &wgpu::TextureView,
             backdrop_view: &wgpu::TextureView,
@@ -479,14 +541,15 @@ pub mod gpu {
             if scissor.2 == 0 || scissor.3 == 0 {
                 return;
             }
-            let mut bytes = [0u8; 32];
+            let mut bytes = [0u8; UNIFORM_SIZE];
             bytes[0..4].copy_from_slice(&dst_origin.0.to_le_bytes());
             bytes[4..8].copy_from_slice(&dst_origin.1.to_le_bytes());
             bytes[8..12].copy_from_slice(&mode.to_le_bytes());
             bytes[12..16].copy_from_slice(&opacity.clamp(0.0, 1.0).to_le_bytes());
-            let (picture_view, mask_kind) = picture.unwrap_or((&self.dummy_view, 0));
+            let mask_kind = picture.map_or(0, |(_, kind)| kind);
             bytes[16..20].copy_from_slice(&mask_kind.to_le_bytes());
-            queue.write_buffer(&self.uniform_buf, 0, &bytes);
+            let offset = self.push_uniform(&bytes);
+            let picture_view = picture.map_or(&self.dummy_view, |(view, _)| view);
             let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("blend bg"),
                 layout: &self.bgl,
@@ -505,7 +568,11 @@ pub mod gpu {
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: self.uniform_buf.as_entire_binding(),
+                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                            buffer: self.slab.as_ref().expect("blend slab"),
+                            offset: 0,
+                            size: wgpu::BufferSize::new(UNIFORM_SIZE as u64),
+                        }),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
@@ -534,7 +601,7 @@ pub mod gpu {
             } else {
                 &self.pipe_plain
             });
-            pass.set_bind_group(0, &bg, &[]);
+            pass.set_bind_group(0, &bg, &[offset]);
             pass.set_scissor_rect(scissor.0, scissor.1, scissor.2, scissor.3);
             pass.draw(0..3, 0..1);
         }

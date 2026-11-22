@@ -204,7 +204,7 @@ pub enum CompositeTarget<'a> {
     Lerp(&'a wgpu::TextureView),
 }
 
-pub const GLASS_MASK_ATLAS_SIDE: u32 = 1024;
+pub use crate::glass::{GLASS_MASK_ATLAS_MAX_BYTES, GLASS_MASK_ATLAS_SIDE};
 
 pub struct GpuReaders {
     // Bind group layouts
@@ -927,6 +927,14 @@ impl GpuReaders {
         Ok(())
     }
 
+    pub fn glass_mask_atlas_bytes(&self) -> usize {
+        self.glass_mask_atlas.as_ref().map_or(0, VelloTex::bytes)
+    }
+
+    pub fn drop_glass_mask_atlas(&mut self) {
+        self.glass_mask_atlas = None;
+    }
+
     pub fn ensure_glass_mask_atlas(
         &mut self,
         device: &wgpu::Device,
@@ -934,19 +942,36 @@ impl GpuReaders {
         size: (u32, u32),
         max_bytes: usize,
     ) -> bool {
-        let freed = self.glass_mask_atlas.as_ref().map_or(0, VelloTex::bytes);
-        let bytes = size.0.next_multiple_of(64) as usize * size.1.next_multiple_of(64) as usize * 8;
-        if self.reserve_bytes(bytes, freed, "glass mask atlas", max_bytes).is_err() {
+        let nw = size.0.max(1).next_multiple_of(64).min(u32::from(u16::MAX));
+        let nh = size.1.max(1).next_multiple_of(64).min(u32::from(u16::MAX));
+        let reuse = self.glass_mask_atlas.as_ref().is_some_and(|t| {
+            t.width >= size.0
+                && t.height >= size.1
+                && (t.width as usize * t.height as usize) <= (nw as usize * nh as usize * 4).max(1_048_576)
+        });
+        let freed = self.glass_mask_atlas_bytes();
+        let needed = if reuse {
+            freed
+        } else {
+            crate::glass::glass_mask_atlas_bytes(size.0, size.1)
+        };
+        if needed > GLASS_MASK_ATLAS_MAX_BYTES
+            || self
+                .reserve_bytes(needed, freed, "glass mask atlas", max_bytes)
+                .is_err()
+        {
             return false;
         }
-        Self::ensure_vello_tex(
-            &mut self.glass_mask_atlas,
-            device,
-            renderer,
-            size.0,
-            size.1,
-            "glass mask atlas",
-        );
+        if !reuse {
+            Self::ensure_vello_tex(
+                &mut self.glass_mask_atlas,
+                device,
+                renderer,
+                size.0,
+                size.1,
+                "glass mask atlas",
+            );
+        }
         true
     }
 
@@ -2111,9 +2136,8 @@ impl GpuReaders {
             lw as f32,
             lh as f32,
             // Packed height/quad-phase flags, atlas mask origin, and device-per-optical scale.
-            (u32::from(self.height_packed)
-                | (((dst_offset.0 & 1) as u32) << 1)
-                | (((dst_offset.1 & 1) as u32) << 2)) as f32,
+            (u32::from(self.height_packed) | (((dst_offset.0 & 1) as u32) << 1) | (((dst_offset.1 & 1) as u32) << 2))
+                as f32,
             mask_x as f32,
             mask_y as f32,
             divisor / rim_scale,

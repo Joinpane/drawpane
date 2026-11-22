@@ -343,6 +343,177 @@ pub fn rect_path(r: Rect) -> BezPath {
     p
 }
 
+/// Returns true only when `path` transformed by `transform` provably has coverage 1.0 across
+/// every pixel of `rect` under `even_odd` / non-zero fill rules.
+///
+/// Every segment must stay disjoint from `rect` (exact axis-aligned lines may lie on `rect`'s
+/// integer edges; diagonal lines and curves must keep a 1 px margin outside `rect`). Disjointness
+/// guarantees `rect` lies in a single connected component of the complement of the path, so a
+/// single `+x` ray winding test at the center of `rect` is exact.
+pub fn path_covers_rect(path: &BezPath, transform: Affine, even_odd: bool, rect: crate::exec::IRect) -> bool {
+    use vello_common::kurbo::PathEl;
+
+    // Keep within Vello's i16 winding range even when a clip has many coincident contours.
+    if rect.is_empty()
+        || path.elements().len() > i16::MAX as usize
+        || transform.as_coeffs().iter().any(|c| !c.is_finite())
+    {
+        return false;
+    }
+    let rx0 = f64::from(rect.x0);
+    let ry0 = f64::from(rect.y0);
+    let rx1 = f64::from(rect.x1);
+    let ry1 = f64::from(rect.y1);
+    let cx = 0.5 * (rx0 + rx1);
+    let cy = 0.5 * (ry0 + ry1);
+    let mut winding = 0i32;
+
+    // Vello flattens to f32. Keep coordinates small enough for the margin around
+    // diagonal and curved segments to cover rounding and flattening error.
+    let in_range = |p: Point| (p.x - cx).abs() <= 1_048_576.0 && (p.y - cy).abs() <= 1_048_576.0;
+    let check_line = |a: Point, b: Point, winding: &mut i32| -> bool {
+        if !in_range(a) || !in_range(b) {
+            return false;
+        }
+        let min_x = a.x.min(b.x);
+        let max_x = a.x.max(b.x);
+        let min_y = a.y.min(b.y);
+        let max_y = a.y.max(b.y);
+        let axis_x = a.x == b.x;
+        let axis_y = a.y == b.y;
+        if axis_x && axis_y {
+            return true;
+        }
+        let clear = if axis_x || axis_y {
+            max_x <= rx0 || min_x >= rx1 || max_y <= ry0 || min_y >= ry1
+        } else {
+            // Exact slab test against the 1 px expanded rect so diagonal edges (e.g. rotated
+            // frames) only reject when they actually come within 1 px of `rect`.
+            let ex0 = rx0 - 1.0;
+            let ey0 = ry0 - 1.0;
+            let ex1 = rx1 + 1.0;
+            let ey1 = ry1 + 1.0;
+            if max_x <= ex0 || min_x >= ex1 || max_y <= ey0 || min_y >= ey1 {
+                true
+            } else {
+                let dx = b.x - a.x;
+                let dy = b.y - a.y;
+                let (tx0, tx1) = {
+                    let t1 = (ex0 - a.x) / dx;
+                    let t2 = (ex1 - a.x) / dx;
+                    (t1.min(t2), t1.max(t2))
+                };
+                let (ty0, ty1) = {
+                    let t1 = (ey0 - a.y) / dy;
+                    let t2 = (ey1 - a.y) / dy;
+                    (t1.min(t2), t1.max(t2))
+                };
+                let t_enter = tx0.max(ty0).max(0.0);
+                let t_exit = tx1.min(ty1).min(1.0);
+                t_enter > t_exit
+            }
+        };
+        if !clear {
+            return false;
+        }
+        if a.y <= cy && b.y > cy {
+            let x_cross = a.x + (cy - a.y) * (b.x - a.x) / (b.y - a.y);
+            if x_cross > cx {
+                *winding += 1;
+            }
+        } else if b.y <= cy && a.y > cy {
+            let x_cross = a.x + (cy - a.y) * (b.x - a.x) / (b.y - a.y);
+            if x_cross > cx {
+                *winding -= 1;
+            }
+        }
+        true
+    };
+
+    let check_curve = |pts: &[Point], winding: &mut i32| -> bool {
+        let (mut min_x, mut max_x) = (f64::INFINITY, f64::NEG_INFINITY);
+        let (mut min_y, mut max_y) = (f64::INFINITY, f64::NEG_INFINITY);
+        for p in pts {
+            if !in_range(*p) {
+                return false;
+            }
+            min_x = min_x.min(p.x);
+            max_x = max_x.max(p.x);
+            min_y = min_y.min(p.y);
+            max_y = max_y.max(p.y);
+        }
+        let clear = max_x <= rx0 - 1.0 || min_x >= rx1 + 1.0 || max_y <= ry0 - 1.0 || min_y >= ry1 + 1.0;
+        if !clear {
+            return false;
+        }
+        if min_x >= cx {
+            let a = pts[0];
+            let b = pts[pts.len() - 1];
+            if a.y <= cy && b.y > cy {
+                *winding += 1;
+            } else if b.y <= cy && a.y > cy {
+                *winding -= 1;
+            }
+        }
+        true
+    };
+
+    let mut start: Option<Point> = None;
+    let mut cur = Point::ORIGIN;
+    for el in path.elements() {
+        match *el {
+            PathEl::MoveTo(p) => {
+                if let Some(s) = start
+                    && !check_line(cur, s, &mut winding)
+                {
+                    return false;
+                }
+                let tp = transform * p;
+                start = Some(tp);
+                cur = tp;
+            }
+            PathEl::LineTo(p) => {
+                let tp = transform * p;
+                if !check_line(cur, tp, &mut winding) {
+                    return false;
+                }
+                cur = tp;
+            }
+            PathEl::QuadTo(p1, p2) => {
+                let t1 = transform * p1;
+                let t2 = transform * p2;
+                if !check_curve(&[cur, t1, t2], &mut winding) {
+                    return false;
+                }
+                cur = t2;
+            }
+            PathEl::CurveTo(p1, p2, p3) => {
+                let t1 = transform * p1;
+                let t2 = transform * p2;
+                let t3 = transform * p3;
+                if !check_curve(&[cur, t1, t2, t3], &mut winding) {
+                    return false;
+                }
+                cur = t3;
+            }
+            PathEl::ClosePath => {
+                if let Some(s) = start.take() {
+                    if !check_line(cur, s, &mut winding) {
+                        return false;
+                    }
+                    cur = s;
+                }
+            }
+        }
+    }
+    if let Some(s) = start
+        && !check_line(cur, s, &mut winding)
+    {
+        return false;
+    }
+    if even_odd { (winding & 1) != 0 } else { winding != 0 }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -430,5 +601,78 @@ mod tests {
             }
             other => panic!("expected cubic, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn path_covers_rect_handles_rects_rounded_frames_rotations_and_cutouts() {
+        use crate::exec::IRect;
+        let r = |x0, y0, x1, y1| IRect { x0, y0, x1, y1 };
+
+        // Plain rectangle (strictly inside, exact boundary, partial overlap, outside).
+        let box_path = rect_path(Rect::new(10.0, 20.0, 210.0, 120.0));
+        assert!(path_covers_rect(&box_path, Affine::IDENTITY, false, r(20, 30, 100, 90)));
+        assert!(path_covers_rect(
+            &box_path,
+            Affine::IDENTITY,
+            false,
+            r(10, 20, 210, 120)
+        ));
+        assert!(path_covers_rect(&box_path, Affine::IDENTITY, true, r(10, 20, 210, 120)));
+        assert!(!path_covers_rect(&box_path, Affine::IDENTITY, false, r(9, 20, 100, 90)));
+        assert!(!path_covers_rect(
+            &box_path,
+            Affine::IDENTITY,
+            false,
+            r(250, 30, 300, 90)
+        ));
+        assert!(!path_covers_rect(&box_path, Affine::IDENTITY, false, r(20, 30, 20, 90)));
+
+        // A fractional edge still intersects the first column of pixels. A nearly
+        // axis-aligned edge needs the general safety margin even if it misses the box.
+        let target = r(10, 20, 210, 120);
+        assert!(!path_covers_rect(
+            &box_path,
+            Affine::translate((0.25, 0.0)),
+            false,
+            target
+        ));
+        let shear = Affine::new([1.0, 0.0, -1e-9, 1.0, 0.0, 0.0]);
+        assert!(!path_covers_rect(&box_path, shear, false, r(10, 20, 209, 120)));
+
+        // Negative-scale flipped rectangle keeps non-zero and even-odd coverage.
+        let flip = Affine::translate((220.0, 0.0)) * Affine::scale_non_uniform(-1.0, 1.0);
+        assert!(path_covers_rect(&box_path, flip, false, r(20, 30, 100, 90)));
+        assert!(path_covers_rect(&box_path, flip, true, r(20, 30, 100, 90)));
+
+        // Rounded phone-screen frame: interior rect is covered, corner rects outside the arc are not.
+        // At radius 55, the top-left arc midpoint is near (16.1, 16.1).
+        let phone = rounded_rect(390.0, 844.0, [55.0; 4], 0.6);
+        assert!(path_covers_rect(&phone, Affine::IDENTITY, false, r(60, 100, 330, 740)));
+        assert!(path_covers_rect(&phone, Affine::IDENTITY, false, r(50, 50, 120, 120)));
+        assert!(!path_covers_rect(&phone, Affine::IDENTITY, false, r(0, 0, 80, 80)));
+        assert!(!path_covers_rect(&phone, Affine::IDENTITY, false, r(10, 10, 120, 120)));
+        assert!(!path_covers_rect(&phone, Affine::IDENTITY, false, r(16, 16, 120, 120)));
+
+        // Rotated square: center interior is covered, near-edge rect falls back.
+        let sq = rect_path(Rect::new(-100.0, -100.0, 100.0, 100.0));
+        let rot = Affine::translate((200.0, 200.0)) * Affine::rotate(core::f64::consts::FRAC_PI_4);
+        assert!(path_covers_rect(&sq, rot, false, r(180, 180, 220, 220)));
+        assert!(!path_covers_rect(&sq, rot, false, r(120, 120, 280, 280)));
+
+        // Even-odd cutout ring: hole center is not covered.
+        let mut ring = rect_path(Rect::new(0.0, 0.0, 200.0, 200.0));
+        for el in rect_path(Rect::new(40.0, 40.0, 160.0, 160.0)).elements() {
+            ring.push(*el);
+        }
+        assert!(!path_covers_rect(&ring, Affine::IDENTITY, true, r(60, 60, 140, 140)));
+        assert!(path_covers_rect(&ring, Affine::IDENTITY, false, r(60, 60, 140, 140)));
+
+        // Empty path never covers anything.
+        assert!(!path_covers_rect(
+            &BezPath::new(),
+            Affine::IDENTITY,
+            false,
+            r(0, 0, 10, 10)
+        ));
     }
 }

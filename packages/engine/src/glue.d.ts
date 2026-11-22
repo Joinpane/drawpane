@@ -36,6 +36,17 @@ export class Outcome {
   readonly render_ms: number;
   readonly submit_ms: number;
   readonly cpu_ms: number;
+  readonly prepare_masks_ms: number;
+  readonly vello_render_ms: number;
+  readonly reader_ms: number;
+  readonly shadow_ms: number;
+  readonly submits: number;
+  readonly vello_renders: number;
+  readonly glass_ops: number;
+  readonly glass_batched: number;
+  readonly bg_blur_ops: number;
+  readonly shadow_ops: number;
+  readonly shadow_hits: number;
 }
 
 export class GpuInit {
@@ -183,6 +194,8 @@ export class Engine {
   clearTiles?(): void;
   gpuCheck?(): Outcome;
   gpuDestroy?(): void;
+  setGpuTimestamps?(enabled: boolean): boolean;
+  gpuTimestampMs?(): Promise<number | Outcome | undefined>;
   gpuFinished?(): Promise<Outcome | undefined>;
   /** Resolves to the pixels, or to an `Outcome` saying why not; never rejects. */
   gpuPixels?(): Promise<Uint8Array | Outcome>;

@@ -4,10 +4,270 @@
 //! Coordinates throughout are y-down device pixels (matching Vello and WebGPU).
 //! `DEFAULT_GLASS_TUNING` and `glass_params` match `packages/editor/src/glass.ts` number for number.
 
+use std::collections::{HashMap, HashSet};
+
 use crate::error::{EngineError, Result};
-use crate::exec::IRect;
-use crate::record::GlassOp;
-use vello_common::kurbo::{Affine, Rect};
+use crate::exec::{Frame, IRect};
+use crate::record::{GlassOp, Op, PathEntry};
+use crate::store::{ROOT, Store};
+use vello_common::kurbo::{Affine, BezPath, Rect, Shape};
+
+/// Maximum side (in device pixels) of the whole-frame glass mask atlas.
+pub const GLASS_MASK_ATLAS_SIDE: u32 = 1024;
+/// Maximum GPU bytes (RGBA8 colour + Depth32Float = 8 B/px) allowed for the glass mask atlas.
+pub const GLASS_MASK_ATLAS_MAX_BYTES: usize = 8 * 1024 * 1024;
+
+/// A packed slot inside the whole-frame glass mask atlas.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GlassMaskSlot {
+    pub region: (i32, i32, u32, u32),
+    pub offset: (u32, u32),
+}
+
+/// One eligible lens mask scheduled for rasterization into the glass mask atlas.
+#[derive(Debug)]
+pub struct GlassMaskPlacement {
+    pub key: (u32, usize),
+    pub path: BezPath,
+    pub local_transform: Affine,
+    pub slot: GlassMaskSlot,
+    pub even_odd: bool,
+}
+
+/// Deterministic whole-frame glass mask atlas plan, packed in canonical paint order.
+#[derive(Default, Debug)]
+pub struct GlassMaskPlan {
+    pub placements: Vec<GlassMaskPlacement>,
+    pub slots: HashMap<(u32, usize), GlassMaskSlot>,
+    pub size: (u32, u32),
+}
+
+/// GPU bytes required for a glass mask atlas texture (rounded to 64 px, RGBA8 + depth = 8 B/px).
+pub fn glass_mask_atlas_bytes(width: u32, height: u32) -> usize {
+    let nw = width.max(1).next_multiple_of(64) as usize;
+    let nh = height.max(1).next_multiple_of(64) as usize;
+    nw.saturating_mul(nh).saturating_mul(8)
+}
+
+/// Plans deterministic, paint-order-canonical atlas slots for eligible exact glass lenses.
+///
+/// Packing follows the scene's op order from `ROOT`, entering child records at `Op::Children`.
+/// The reader index supplies candidates only. Lenses that exceed `side`, fail to fit
+/// the remaining shelf space, or are clipped/split fall back to serial drawing; if fewer than two
+/// lenses pack or the atlas exceeds `max_bytes` / `GLASS_MASK_ATLAS_MAX_BYTES`, the whole frame
+/// stays serial (empty plan).
+pub fn plan_glass_masks(store: &Store, frame: &Frame, max_texture_2d: u32, max_bytes: usize) -> GlassMaskPlan {
+    if store.readers().len() < 2 {
+        return GlassMaskPlan::default();
+    }
+    let side = max_texture_2d.min(GLASS_MASK_ATLAS_SIDE);
+    let frame_size = (i32::from(frame.width), i32::from(frame.height));
+    let texture_limit = max_texture_2d.min(u32::from(u16::MAX));
+    let cap_bytes = max_bytes.min(GLASS_MASK_ATLAS_MAX_BYTES);
+
+    struct Candidate {
+        op_index: usize,
+        path: BezPath,
+        local_transform: Affine,
+        region: (i32, i32, u32, u32),
+        slot_w: u32,
+        slot_h: u32,
+        even_odd: bool,
+    }
+
+    let mut eligible: HashMap<u32, Vec<Candidate>> = HashMap::new();
+    let mut relevant: HashSet<u32> = HashSet::new();
+    let mut chain: Vec<Affine> = Vec::new();
+    let mut ancestors: Vec<u32> = Vec::new();
+    let mut candidate_count = 0usize;
+    let max_depth = store.nodes.len().saturating_add(1);
+
+    for &id in store.readers() {
+        let Some(node) = store.nodes.get(&id) else {
+            continue;
+        };
+        let record = &node.record;
+        if !record.ops.iter().any(|op| matches!(op, Op::Glass(_))) {
+            continue;
+        }
+        chain.clear();
+        ancestors.clear();
+        let mut at = id;
+        let mut visible = true;
+        let mut steps = 0usize;
+        while at != ROOT {
+            steps += 1;
+            if steps > max_depth {
+                visible = false;
+                break;
+            }
+            let Some(n) = store.nodes.get(&at) else {
+                visible = false;
+                break;
+            };
+            let r = &n.record;
+            if r.hidden() || r.context() || r.provisional() || r.opacity <= 0.0 {
+                visible = false;
+                break;
+            }
+            chain.push(r.transform);
+            ancestors.push(at);
+            at = n.parent;
+        }
+        if !visible {
+            continue;
+        }
+        let device = chain.iter().rev().fold(frame.view, |m, t| m * *t);
+        let scale = device.determinant().abs().sqrt() as f32;
+        if !(scale > 0.0 && scale.is_finite()) {
+            continue;
+        }
+        let mut ops = Vec::new();
+        for (op_index, op) in record.ops.iter().enumerate() {
+            let Op::Glass(lens) = op else { continue };
+            let [path_id] = lens.paths.as_slice() else {
+                continue;
+            };
+            if lens.inradius <= 0.0
+                || !matches!(
+                    record.paths.get(*path_id as usize),
+                    Some(PathEntry::Rect { .. } | PathEntry::Ellipse { .. })
+                )
+            {
+                continue;
+            }
+            let params = glass_params(lens, scale, lens.inradius);
+            let Ok(regions) = compute_regions(
+                lens,
+                &params,
+                device,
+                record.size,
+                frame_size,
+                (0, 0),
+                frame_size,
+                texture_limit,
+                HARD_MAX_REGION_PIXELS,
+                EXACT_SPLIT_SIDE,
+                EXACT_SPLIT_PIXELS,
+                EXACT_CHUNK_SIDE,
+            ) else {
+                continue;
+            };
+            let [region] = regions.as_slice() else {
+                continue;
+            };
+            let w = region.rw.next_multiple_of(4);
+            let h = region.rh.next_multiple_of(4);
+            if w == 0 || h == 0 || w > side || h > side {
+                continue;
+            }
+            let Some(path) = record.entry_path(*path_id, device) else {
+                continue;
+            };
+            let bounds = device.transform_rect_bbox(path.bounding_box()).inflate(1.0, 1.0);
+            if bounds.x0 < f64::from(region.x0)
+                || bounds.y0 < f64::from(region.y0)
+                || bounds.x1 > f64::from(region.x0) + f64::from(region.rw)
+                || bounds.y1 > f64::from(region.y0) + f64::from(region.rh)
+            {
+                continue;
+            }
+            let local_transform = Affine::translate((-f64::from(region.x0), -f64::from(region.y0))) * device;
+            ops.push(Candidate {
+                op_index,
+                path,
+                local_transform,
+                region: (region.x0, region.y0, region.rw, region.rh),
+                slot_w: w,
+                slot_h: h,
+                even_odd: lens.even_odd,
+            });
+        }
+        if !ops.is_empty() {
+            candidate_count += ops.len();
+            eligible.insert(id, ops);
+            relevant.extend(ancestors.iter().copied());
+        }
+    }
+
+    if candidate_count < 2 {
+        return GlassMaskPlan::default();
+    }
+
+    enum Visit {
+        Record(u32),
+        Lens(u32, Candidate),
+    }
+
+    let mut placements = Vec::with_capacity(candidate_count);
+    let mut slots = HashMap::with_capacity(candidate_count);
+    let (mut left, mut top, mut row_height, mut used_width) = (0u32, 0u32, 0u32, 0u32);
+    let mut stack = vec![Visit::Record(ROOT)];
+    while let Some(visit) = stack.pop() {
+        let (id, cand) = match visit {
+            Visit::Record(id) => {
+                let Some(node) = store.nodes.get(&id) else {
+                    continue;
+                };
+                let mut candidates = eligible.remove(&id).unwrap_or_default();
+                for (index, op) in node.record.ops.iter().enumerate().rev() {
+                    if matches!(op, Op::Children) {
+                        stack.extend(
+                            node.children
+                                .iter()
+                                .rev()
+                                .filter(|child| relevant.contains(child))
+                                .map(|&child| Visit::Record(child)),
+                        );
+                    } else if let Some(cand) = candidates.pop_if(|cand| cand.op_index == index) {
+                        stack.push(Visit::Lens(id, cand));
+                    }
+                }
+                continue;
+            }
+            Visit::Lens(id, cand) => (id, cand),
+        };
+        if left + cand.slot_w > side {
+            left = 0;
+            top += row_height;
+            row_height = 0;
+        }
+        if top + cand.slot_h > side {
+            continue;
+        }
+        let slot = GlassMaskSlot {
+            region: cand.region,
+            offset: (left, top),
+        };
+        let key = (id, cand.op_index);
+        placements.push(GlassMaskPlacement {
+            key,
+            path: cand.path,
+            local_transform: cand.local_transform,
+            slot,
+            even_odd: cand.even_odd,
+        });
+        slots.insert(key, slot);
+        left += cand.slot_w;
+        row_height = row_height.max(cand.slot_h);
+        used_width = used_width.max(left);
+    }
+
+    let used_height = top + row_height;
+    if placements.len() < 2
+        || used_width == 0
+        || used_height == 0
+        || glass_mask_atlas_bytes(used_width, used_height) > cap_bytes
+    {
+        return GlassMaskPlan::default();
+    }
+
+    GlassMaskPlan {
+        placements,
+        slots,
+        size: (used_width, used_height),
+    }
+}
 
 /// Preferred interior chunk side (in device pixels) when a glass layer exceeds single-pass bounds.
 pub const DEFAULT_CHUNK_SIDE: u32 = 1024;
