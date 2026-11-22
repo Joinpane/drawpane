@@ -953,10 +953,47 @@ impl Engine {
         Ok(peak_total.saturating_add(expanded_reader_work))
     }
 
-    /// Refuses an export of a `width` × `height` frame before it starts when its working set
-    /// wouldn't fit beside what the engine holds, under `Limits::memory_bytes` (a Worker's cap;
-    /// zero: no check). The working set is a band of output, a tile of target (with the readers'
-    /// reach round it), the scene's rows, peak shadow/isolated offscreen passes, and the compressor.
+    /// Maximum aggregate per-pass pixels (`tiles × pass_pixels`) allowed for a single banded
+    /// export, enforced even when `Limits::memory_bytes == 0` (browser builds) so huge enclosing
+    /// blurs or halos return a typed `ErrorCode::Limit` immediately instead of running into a
+    /// watchdog timeout.
+    const MAX_EXPORT_WORK_PIXELS: u64 = 1_000_000_000;
+
+    #[allow(clippy::too_many_arguments)]
+    fn check_export_work(
+        &self,
+        width: u32,
+        height: u32,
+        rows: u32,
+        tile: u64,
+        effects: usize,
+        diamond: usize,
+        readers: u64,
+    ) -> Result<()> {
+        // Tiling repeats halo and effect work. Bound that work separately from the peak
+        // allocation, which only accounts for one tile at a time (and is disabled when
+        // `Limits::memory_bytes == 0` in browser builds).
+        let tiles =
+            u64::from(width.div_ceil(self.store.limits.export_tile.max(1))) * u64::from(height.div_ceil(rows.max(1)));
+        let pass_pixels = (tile
+            .saturating_add(effects as u64)
+            .saturating_add(diamond as u64)
+            .saturating_add(readers))
+            / 4;
+        if tiles.saturating_mul(pass_pixels) > Self::MAX_EXPORT_WORK_PIXELS {
+            return Err(EngineError::limit(
+                "this export needs too much rendering work at this scale",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Refuses an export of a `width` × `height` frame before it starts when its total banded
+    /// rendering work exceeds `MAX_EXPORT_WORK_PIXELS` (for all builds, including browser builds
+    /// with `Limits::memory_bytes == 0`), or when its working set wouldn't fit beside what the
+    /// engine holds under `Limits::memory_bytes` (when non-zero, as in Worker builds). The working
+    /// set is a band of output, a tile of target (with the readers' reach round it), the scene's
+    /// rows, peak shadow/isolated offscreen passes, and the compressor.
     pub fn admit_export(&self, width: u32, height: u32, camera: Camera) -> Result<()> {
         self.plan_export_rows(width, height, camera, self.band_rows(width), false)
             .map(|_| ())
@@ -990,13 +1027,14 @@ impl Engine {
         loop {
             let tile_rows = (rows as usize + 2 * halo).min(height as usize);
             let effects = self.export_effect_working_set(cols, tile_rows, view)?;
-            if budget == 0 {
-                return Ok(rows);
-            }
-            let band = u64::from(rows) * u64::from(width) * 4;
             let tile = cols as u64 * tile_rows as u64 * 4;
             let readers = self.export_reader_working_set(width, height, view, (cols, tile_rows));
             let diamond = self.export_diamond_bytes(width, height, view, cols, tile_rows);
+            if budget == 0 {
+                self.check_export_work(width, height, rows, tile, effects, diamond, readers)?;
+                return Ok(rows);
+            }
+            let band = u64::from(rows) * u64::from(width) * 4;
             let draw = band + tile + scene + effects as u64 + diamond as u64 + readers;
             // PNG encoding follows drawing. A high-entropy band can grow the outgoing buffer
             // while its old allocation and the uncompressed band are still live.
@@ -1005,17 +1043,7 @@ impl Engine {
             // budget covers target replacement, outside the guarded effect passes.
             let need = (draw + tile.max(runtime_headroom)).max(encode) + (512 << 10);
             if held + need <= budget as u64 {
-                if adaptive {
-                    // Tiling repeats halo and effect work. Bound that work separately from
-                    // the peak allocation, which only accounts for one tile at a time.
-                    let tiles = u64::from(width.div_ceil(limits.export_tile.max(1))) * u64::from(height.div_ceil(rows));
-                    let pass_pixels = (tile + effects as u64 + diamond as u64 + readers) / 4;
-                    if tiles.saturating_mul(pass_pixels) > 1_000_000_000 {
-                        return Err(EngineError::limit(
-                            "this export needs too much rendering work at this scale",
-                        ));
-                    }
-                }
+                self.check_export_work(width, height, rows, tile, effects, diamond, readers)?;
                 return Ok(rows);
             }
             if rows <= minimum {
@@ -1622,8 +1650,9 @@ impl Engine {
     /// Band halo for exports into a `width` × `height` frame. Enclosing post-effects
     /// (layer blur, texture) can extend the required tile halo past `Limits::halo` while
     /// clamping to the frame bounds and keeping `Limits::halo` enforced on the reader-only
-    /// reach so exports that only exceed the cap via post-effects stay admitted under the
-    /// export memory and work budgets.
+    /// reach. Total banded work is still bounded by `MAX_EXPORT_WORK_PIXELS` across all builds
+    /// (including browser exports with `Limits::memory_bytes == 0`), while `Limits::memory_bytes`
+    /// additionally bounds peak memory in Worker builds (`memory_bytes > 0`).
     fn export_halo(&self, view: Affine, width: u32, height: u32) -> Result<i32> {
         let crop = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
         let (total, reader_only, _, _) = self.reader_reach(view, Some(crop));
@@ -2437,6 +2466,20 @@ impl Engine {
         y0: u32,
         rows: u32,
     ) -> Result<&[u8]> {
+        self.render_band_inner(width, height, camera, background, y0, rows, true)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn render_band_inner(
+        &mut self,
+        width: u32,
+        height: u32,
+        camera: Camera,
+        background: [f32; 4],
+        y0: u32,
+        rows: u32,
+        check_work: bool,
+    ) -> Result<&[u8]> {
         self.store.begin_stroke_frame();
         self.check_size(width, height)?;
         camera.check()?;
@@ -2450,6 +2493,25 @@ impl Engine {
                     "a band of {rows} rows at {y0} in a frame {height} tall; bands {width} px wide are at most {most} rows"
                 ),
             ));
+        }
+        if check_work {
+            // A trailing partial band can be shorter than the nominal band height; estimate the
+            // full export's tile count with the nominal height so the final short band is not
+            // overcounted.
+            let nominal_rows = if y0 + rows == height && y0 > 0 {
+                rows.max(most.min(height))
+            } else {
+                rows
+            };
+            let view = camera.view();
+            let halo = self.export_halo(view, width, height)? as usize;
+            let cols = (self.store.limits.export_tile.max(1).min(width) as usize + 2 * halo).min(width as usize);
+            let tile_rows = (nominal_rows as usize + 2 * halo).min(height as usize);
+            let effects = self.export_effect_working_set(cols, tile_rows, view)?;
+            let tile = cols as u64 * tile_rows as u64 * 4;
+            let readers = self.export_reader_working_set(width, height, view, (cols, tile_rows));
+            let diamond = self.export_diamond_bytes(width, height, view, cols, tile_rows);
+            self.check_export_work(width, height, nominal_rows, tile, effects, diamond, readers)?;
         }
         let stride = width as usize * 4;
         let mut band = std::mem::take(&mut self.band);
@@ -2498,8 +2560,23 @@ impl Engine {
         y0: u32,
         rows: u32,
     ) -> Result<&[u8]> {
-        self.store.begin_stroke_frame();
-        self.render_band(width, height, camera, background, y0, rows)?;
+        self.render_band_inner(width, height, camera, background, y0, rows, true)?;
+        unpremultiply(&mut self.band);
+        Ok(self.band.as_slice())
+    }
+
+    /// Used by `png_band` after `png_begin` has already validated export admission and pinned
+    /// the revision, avoiding redundant per-band work-bound walks.
+    pub(crate) fn render_band_straight_admitted(
+        &mut self,
+        width: u32,
+        height: u32,
+        camera: Camera,
+        background: [f32; 4],
+        y0: u32,
+        rows: u32,
+    ) -> Result<&[u8]> {
+        self.render_band_inner(width, height, camera, background, y0, rows, false)?;
         unpremultiply(&mut self.band);
         Ok(self.band.as_slice())
     }

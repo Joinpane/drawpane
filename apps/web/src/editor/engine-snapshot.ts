@@ -232,7 +232,11 @@ function mapEngineError(
         "limit",
       );
     }
-    return new ExportError(`${message}. Try a smaller scale.`, "limit");
+    const detail = message
+      ? `${message[0]?.toUpperCase() ?? ""}${message.slice(1)}`
+      : "This export exceeds the engine's limits";
+    const sentence = detail.endsWith(".") ? detail : `${detail}.`;
+    return new ExportError(`${sentence} Try a smaller scale.`, "limit");
   }
   if (code === ErrorCode.Unsupported) {
     return new ExportError(

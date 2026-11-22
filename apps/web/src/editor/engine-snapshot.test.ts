@@ -286,6 +286,21 @@ describe("EngineSnapshotService", () => {
     });
     await expect(job).rejects.toThrow(/too many different glyph outlines/);
 
+    const workJob = service.enqueue(payload(8192, 8192), "high");
+    await flush();
+    const workRender = must(rendersOf(worker)[1], "work limit render");
+    worker.emit({
+      type: "error",
+      jobId: workRender.jobId,
+      code: ErrorCode.Limit,
+      message: "this export needs too much rendering work at this scale",
+    });
+    await expect(workJob).rejects.toMatchObject({
+      name: "ExportError",
+      reason: "limit",
+      message: "This export needs too much rendering work at this scale. Try a smaller scale.",
+    });
+
     service.dispose();
   });
 
