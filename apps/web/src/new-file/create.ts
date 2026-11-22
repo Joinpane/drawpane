@@ -3,8 +3,10 @@
  * built-in template, or as a copy of a team template. Content built here is
  * filled in through the import endpoint; a copy is made by the server.
  */
-import { CanvasRenderer, type Editor, renderThumbnail } from "@drawpane/editor";
+import type { Editor } from "@drawpane/editor";
 import { api, type FileMeta } from "../api/client";
+import { useEngineRenderer } from "../editor/renderer-switch";
+import { renderPageThumbnail } from "../editor/thumbnail";
 import { nodesOf, scratchEditor } from "./scratch";
 import { type BuiltInTemplate, buildTemplate } from "./templates";
 
@@ -59,24 +61,26 @@ export async function createFromFile(projectId: string, file: FileMeta): Promise
 const previews = new Map<string, Promise<string | null>>();
 
 /**
- * A picture of a built-in template, drawn with the canvas's renderer from
- * the same build the file gets, so the preview is what you'll open. Cached
- * for the session as an object URL.
+ * A picture of a built-in template, drawn from the same build the file gets (following the
+ * renderer switch: engine snapshot service when engine is on, CanvasRenderer in canvas mode).
+ * Cached for the session as an object URL.
  */
 export function templatePreview(template: BuiltInTemplate): Promise<string | null> {
-  let preview = previews.get(template.id);
+  const key = `${template.id}:${useEngineRenderer() ? "engine" : "canvas"}`;
+  let preview = previews.get(key);
   if (!preview) {
     preview = (async () => {
       const { editor, pageId } = await scratchEditor();
       buildTemplate(template, editor, pageId);
-      const renderer = new CanvasRenderer(editor.scene, editor.measurer);
-      const blob = await renderThumbnail(renderer, editor.scene, pageId, {
+      const blob = await renderPageThumbnail(editor, {
+        pageId,
         maxWidth: 640,
         maxHeight: 400,
+        priority: "low",
       });
       return blob ? URL.createObjectURL(blob) : null;
     })().catch(() => null);
-    previews.set(template.id, preview);
+    previews.set(key, preview);
   }
   return preview;
 }

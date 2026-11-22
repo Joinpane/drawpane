@@ -95,6 +95,12 @@ export interface LayerContext {
    * later (a page opening shows its first frame sooner; decision 0040, phase 2).
    */
   readonly deferText?: boolean;
+  /**
+   * When set (for page thumbnails and small previews, never exports), enables level-of-detail
+   * culling at this pixels-per-unit scale: unreadable text is emitted directly as greeked bars
+   * without shaping, and sub-pixel shadows, post effects, and tiny backdrop readers are omitted.
+   */
+  readonly detailScale?: number | undefined;
 }
 
 export interface EncodedLayer {
@@ -191,6 +197,7 @@ function emitDropShadows(
   evenOdd: boolean,
   w: number,
   h: number,
+  detailScale?: number,
 ): void {
   const open =
     node.type === "line" ||
@@ -212,6 +219,12 @@ function emitDropShadows(
   let outside: number | null = null;
   for (const e of getProp(node.props, "effects")) {
     if (e.visible === false || e.type !== "drop-shadow") continue;
+    if (
+      detailScale !== undefined &&
+      Math.max(e.blur, Math.hypot(e.x, e.y), Math.abs(e.spread ?? 0)) * detailScale < 0.75
+    ) {
+      continue;
+    }
     const col = rgba(e.color);
     if (col[3] <= 0) continue;
     if (openStrokeOnly) {
@@ -259,9 +272,16 @@ function emitInnerShadows(
   evenOdd: boolean,
   w: number,
   h: number,
+  detailScale?: number,
 ): void {
   for (const e of getProp(node.props, "effects")) {
     if (e.visible === false || e.type !== "inner-shadow") continue;
+    if (
+      detailScale !== undefined &&
+      Math.max(e.blur, Math.hypot(e.x, e.y), Math.abs(e.spread ?? 0)) * detailScale < 0.75
+    ) {
+      continue;
+    }
     const col = rgba(e.color);
     if (col[3] <= 0) continue;
     const hole = spreadEntry(b, node, shape, w, h, -e.spread);
@@ -1023,9 +1043,12 @@ function text(
   height: number,
   ctx: LayerContext,
 ): void {
-  // Deferred: its coarse bars only, for now (below), never its glyphs.
-  const runs = ctx.deferText ? { runs: [], bars: [] } : textRuns(b, node, width, ctx);
-  if (ctx.deferText) {
+  const size = largestFontSize(node);
+  const greekOnly =
+    ctx.detailScale !== undefined && ctx.detailScale > 0 && size * ctx.detailScale < GREEK_BELOW;
+  // Deferred or thumbnail-greeked: its coarse bars only, never shaping glyphs.
+  const runs = ctx.deferText || greekOnly ? { runs: [], bars: [] } : textRuns(b, node, width, ctx);
+  if (ctx.deferText && !greekOnly) {
     b.provisional = true;
     b.deferred = true;
   }
@@ -1042,6 +1065,12 @@ function text(
   if (shadowPaths.length > 0) {
     for (const e of getProp(node.props, "effects")) {
       if (e.visible === false || e.type !== "drop-shadow") continue;
+      if (
+        ctx.detailScale !== undefined &&
+        Math.max(e.blur, Math.hypot(e.x, e.y), Math.abs(e.spread ?? 0)) * ctx.detailScale < 0.75
+      ) {
+        continue;
+      }
       const col = rgba(e.color);
       if (col[3] <= 0) continue;
       b.ops.push({
@@ -1056,10 +1085,14 @@ function text(
       });
     }
   }
-  const bg = backgroundBlurOp(node, shadowPaths, false);
-  if (bg) b.ops.push(bg);
-  const g = glassOp(node, shadowPaths, false, width, height);
-  if (g) b.ops.push(g);
+  const allowReader =
+    ctx.detailScale === undefined || Math.min(width, height) * ctx.detailScale >= 24;
+  if (allowReader) {
+    const bg = backgroundBlurOp(node, shadowPaths, false);
+    if (bg) b.ops.push(bg);
+    const g = glassOp(node, shadowPaths, false, width, height);
+    if (g) b.ops.push(g);
+  }
   // The canvas fills each run in its paints, then its decorations in the same.
   for (const r of runs.runs) {
     if ("color" in r) b.ops.push({ op: "fill", path: r.entry, evenOdd: false, paint: r.color });
@@ -1111,7 +1144,6 @@ function text(
     }
   }
   // Too small to read on screen: bars where the lines are (`#greek`), in the last visible fill.
-  const size = largestFontSize(node);
   if (size > 0) {
     const { lines, lh } = greekLines(node, ctx.measurer);
     const fills = getProp(node.props, "fills");
@@ -1134,12 +1166,14 @@ function text(
           .lineTo(x, y + fontSize * 0.5)
           .close();
       }
-      b.coarse.push({
+      const barOp: WireOp = {
         op: "fill",
         path: b.path({ kind: "path", path }),
         evenOdd: false,
         paint: greek,
-      });
+      };
+      b.coarse.push(barOp);
+      if (greekOnly) b.ops.push(barOp);
     }
   }
 }
@@ -1150,9 +1184,14 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
   const scene = ctx.scene;
   const children = scene.doc.childIds(node.id).length;
   const hidden = node.props.visible === false || ctx.hidden.has(node.id);
+  const w = node.type === "group" ? 0 : getProp(node.props, "width");
+  const h = node.type === "group" ? 0 : getProp(node.props, "height");
+  const detailScale = ctx.detailScale;
+  const tinyDetail =
+    detailScale !== undefined && node.type !== "group" && Math.max(w, h) * detailScale < 24;
   const opacity = getProp(node.props, "opacity");
-  const isolate = opacity < 1 && fadesAsOne(node, children);
-  const blend = blendCode(getProp(node.props, "blendMode"));
+  const isolate = !tinyDetail && opacity < 1 && fadesAsOne(node, children);
+  const blend = tinyDetail ? BLEND.normal : blendCode(getProp(node.props, "blendMode"));
   const activeMask = !hidden && isActiveMask(node);
   const stopMask = !hidden && !activeMask && endsMask(node);
   let mask = 0;
@@ -1170,11 +1209,15 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
             : MASK.outlinePicture;
     }
   }
-  const w = node.type === "group" ? 0 : getProp(node.props, "width");
-  const h = node.type === "group" ? 0 : getProp(node.props, "height");
   const wirePost: WirePostEffect[] = [];
   for (const pe of postEffects(getProp(node.props, "effects"))) {
     if (pe.type === "layer-blur") {
+      if (
+        detailScale !== undefined &&
+        Math.max(pe.radius, pe.startRadius ?? 0) * detailScale < 0.75
+      ) {
+        continue;
+      }
       if (
         pe.blurType === "progressive" &&
         pe.startOffset &&
@@ -1186,6 +1229,7 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
         wirePost.push({ kind: "layerBlur", radius: pe.radius });
       }
     } else if (pe.type === "noise" && pe.size > 0 && pe.density > 0) {
+      if (detailScale !== undefined && pe.size * detailScale < 0.5) continue;
       wirePost.push({
         kind: "noise",
         noiseType: NOISE_TYPE[pe.noiseType],
@@ -1196,6 +1240,7 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
         opacity: Math.min(1, Math.max(0, pe.opacity / 100)),
       });
     } else if (pe.type === "texture" && pe.size > 0 && pe.radius > 0) {
+      if (detailScale !== undefined && pe.size * detailScale < 0.5) continue;
       wirePost.push({
         kind: "texture",
         size: pe.size,
@@ -1220,22 +1265,49 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
   } else {
     const shape = b.path(shapeEntry(node, w, h));
     const evenOdd = node.type === "path" && getProp(node.props, "windingRule") === "evenodd";
-    emitDropShadows(b, node, shape, evenOdd, w, h);
+    emitDropShadows(b, node, shape, evenOdd, w, h, detailScale);
     if (node.type !== "line") {
-      const bg = backgroundBlurOp(node, [shape], evenOdd);
-      if (bg) b.ops.push(bg);
+      const readerBoxPx = detailScale !== undefined ? Math.min(w, h) * detailScale : Infinity;
+      const bg = readerBoxPx >= 24 ? backgroundBlurOp(node, [shape], evenOdd) : null;
+      if (
+        bg &&
+        (detailScale === undefined ||
+          (bg.op === "backgroundBlur"
+            ? bg.radius * detailScale >= 1
+            : bg.op === "progressiveBlur"
+              ? Math.max(bg.startRadius, bg.endRadius) * detailScale >= 1
+              : true))
+      ) {
+        b.ops.push(bg);
+      }
       const g = glassOp(node, [shape], evenOdd, w, h);
-      if (g) b.ops.push(g);
+      if (g) {
+        if (readerBoxPx >= 24) {
+          b.ops.push(g);
+        } else if (!getProp(node.props, "fills").some(shows)) {
+          // Tiny glass element on a zoomed-out thumbnail: subtle frost tint without full refraction.
+          b.ops.push({
+            op: "fill",
+            path: shape,
+            evenOdd,
+            paint: { kind: "solid", color: [1, 1, 1, 0.18] },
+          });
+        }
+      }
       for (const paint of getProp(node.props, "fills")) {
         if (!shows(paint)) continue;
-        if (paint.type === "image") imageFill(b, shape, evenOdd, paint, w, h, ctx);
+        const effective =
+          tinyDetail && paint.blendMode && paint.blendMode !== "normal"
+            ? { ...paint, blendMode: "normal" as const }
+            : paint;
+        if (effective.type === "image") imageFill(b, shape, evenOdd, effective, w, h, ctx);
         else {
-          const p = wirePaint(paint, w, h);
+          const p = wirePaint(effective, w, h);
           if (p) b.ops.push({ op: "fill", path: shape, evenOdd, paint: p });
         }
       }
     }
-    emitInnerShadows(b, node, shape, evenOdd, w, h);
+    emitInnerShadows(b, node, shape, evenOdd, w, h, detailScale);
     if (node.type === "frame") {
       const clip = getProp(node.props, "clipContent");
       if (clip) b.ops.push({ op: "clip", path: shape, evenOdd: false });

@@ -761,6 +761,33 @@ export class RenderEngine {
     return typeof r === "number" ? r : bandRows(width);
   }
 
+  /** Draws one whole-frame band (`y0 .. y0 + rows`) on the CPU: straight RGBA8. */
+  renderBand(
+    width: number,
+    height: number,
+    camera: Camera,
+    background: readonly [number, number, number, number],
+    y0: number,
+    rows: number,
+  ): Result<Uint8Array> {
+    return this.#call((e) => {
+      const res = outcome(
+        e.renderBand(
+          width,
+          height,
+          camera.zoom,
+          camera.x,
+          camera.y,
+          camera.dpr,
+          bg(background),
+          y0,
+          rows,
+        ),
+      );
+      return res.ok ? { ok: true as const, value: e.pixels() } : res;
+    }) as Result<Uint8Array>;
+  }
+
   /**
    * Draws a large frame band by band on the CPU, in bounded memory (the band, never the frame):
    * `onBand` gets each band's rows, straight RGBA8. Frames over `MAX_SIDE` are refused.
@@ -776,22 +803,7 @@ export class RenderEngine {
     rows = Math.max(1, Math.min(rows, this.bandRows(width)));
     for (let y0 = 0; y0 < height; y0 += rows) {
       const n = Math.min(rows, height - y0);
-      const r = this.#call((e) => {
-        const res = outcome(
-          e.renderBand(
-            width,
-            height,
-            camera.zoom,
-            camera.x,
-            camera.y,
-            camera.dpr,
-            bg(background),
-            y0,
-            n,
-          ),
-        );
-        return res.ok ? { ok: true as const, value: e.pixels() } : res;
-      }) as Result<Uint8Array>;
+      const r = this.renderBand(width, height, camera, background, y0, n);
       if (!r.ok) return r;
       onBand(y0, n, r.value);
     }

@@ -477,12 +477,19 @@ export async function freshInstance(
   browser: Browser,
   ports: { port: number; inspectorPort: number; env?: Record<string, string> },
 ): Promise<Instance> {
+  const offset = Number(process.env.E2E_PORT_OFFSET || 0);
+  const resolvedPorts =
+    offset > 0
+      ? { ...ports, port: ports.port + offset, inspectorPort: ports.inspectorPort + offset }
+      : ports;
   const isWebkit = browser.browserType().name() === "webkit";
-  const proxy = isWebkit ? await startHttpsProxy(ports.port) : null;
-  const workerEnv = proxy ? { ...ports.env, E2E_PUBLIC_ORIGIN: proxy.url } : (ports.env ?? {});
+  const proxy = isWebkit ? await startHttpsProxy(resolvedPorts.port) : null;
+  const workerEnv = proxy
+    ? { ...resolvedPorts.env, E2E_PUBLIC_ORIGIN: proxy.url }
+    : (resolvedPorts.env ?? {});
   let worker: TestWorker;
   try {
-    worker = await startWorker({ ...ports, env: workerEnv });
+    worker = await startWorker({ ...resolvedPorts, env: workerEnv });
   } catch (error) {
     await proxy?.stop();
     throw error;
@@ -494,6 +501,19 @@ export async function freshInstance(
       acceptDownloads: true,
       ...(isWebkit ? { ignoreHTTPSErrors: true } : {}),
     });
+    const engineMode = process.env.E2E_ENGINE;
+    if (engineMode) {
+      const renderer = engineMode === "1" ? "engine" : engineMode;
+      await context.addInitScript((choice) => {
+        try {
+          localStorage.setItem("drawpane:renderer", choice);
+          localStorage.setItem("drawpane:engine-software", "allow");
+          localStorage.setItem("drawpane:engine-present", "readback");
+        } catch {
+          // Ignore opaque origins such as about:blank before first navigation.
+        }
+      }, renderer);
+    }
     const page = await context.newPage();
     await addPasskey(context, page);
     await page.goto("/setup");
@@ -560,9 +580,11 @@ export async function dropImage(
 /** The design canvas's colour at a screen point, as #rrggbb. */
 export async function canvasColor(page: Page, at: { x: number; y: number }): Promise<string> {
   return page.evaluate((at) => {
-    const canvas = document.querySelector<HTMLCanvasElement>(
-      ".canvas__layer:not(.canvas__overlay)",
-    );
+    const engine = document.querySelector<HTMLCanvasElement>('[data-canvas-role="engine"]');
+    const canvas =
+      engine && engine.style.visibility !== "hidden"
+        ? engine
+        : document.querySelector<HTMLCanvasElement>(".canvas__layer:not(.canvas__overlay)");
     const ctx = canvas?.getContext("2d");
     if (!canvas || !ctx) throw new Error("no canvas");
     const rect = canvas.getBoundingClientRect();

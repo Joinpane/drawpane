@@ -8,11 +8,15 @@ import {
   type ImageBytesLoader,
   measuredFaces,
   mediaUrl,
+  thumbnailLayout,
 } from "@drawpane/editor";
 import { RenderEngine } from "@drawpane/engine";
 import { loadBrowserEngine } from "@drawpane/engine/browser";
+import { renderEngineRasterExportWithMeta } from "./engine-snapshot";
+import { renderExportWithMeta } from "./exporting";
 import { imagesFor } from "./media";
 import { shaper } from "./shaping";
+import { renderPageThumbnail } from "./thumbnail";
 
 /** Images by hash, as the Worker reads them from R2. */
 const imageBytes: ImageBytesLoader = async (ref) => {
@@ -69,6 +73,70 @@ export function headlessDebug(editor: Editor) {
         background,
       });
       return base64(new Uint8Array(await blob.arrayBuffer()));
+    },
+    /** The layer as the browser exports it on the engine snapshot service: a PNG (base64). */
+    async browser(
+      id: string,
+      scale: number,
+      background: string | null,
+      options?: { readonly imageBudget?: number },
+    ) {
+      const { blob } = await renderEngineRasterExportWithMeta(editor, [id], {
+        format: "png",
+        scale,
+        background,
+        ...(options?.imageBudget !== undefined ? { imageBudget: options.imageBudget } : {}),
+        images: imagesFor(editor),
+        priority: "high",
+      });
+      return base64(new Uint8Array(await blob.arrayBuffer()));
+    },
+    /** The layer via the product export entry point (following the renderer switch + fallbacks). */
+    async exportLayer(
+      ids: readonly string[],
+      options: {
+        readonly format: "png" | "jpeg" | "webp";
+        readonly scale: 1 | 2 | 3;
+        readonly background?: string | null;
+        readonly imageBudget?: number;
+      },
+    ) {
+      const { blob, reducedImages, omittedImages } = await renderExportWithMeta(
+        editor,
+        ids,
+        options,
+      );
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      return {
+        data: base64(bytes),
+        bytes: bytes.byteLength,
+        type: blob.type,
+        reducedImages,
+        omittedImages,
+      };
+    },
+    /** The page's dashboard thumbnail (following the switch unless `forceEngine` is set). */
+    async thumbnail(options?: {
+      pageId?: string;
+      maxWidth?: number;
+      maxHeight?: number;
+      format?: "webp" | "png";
+      quality?: number;
+      forceEngine?: boolean;
+    }) {
+      const pageId = options?.pageId ?? editor.doc.pageIds()[0];
+      if (!pageId) return null;
+      const layout = thumbnailLayout(editor.scene, pageId, options);
+      const blob = await renderPageThumbnail(editor, { ...options, pageId, priority: "high" });
+      if (!blob || !layout) return null;
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      return {
+        data: base64(bytes),
+        png: base64(bytes),
+        bytes: bytes.byteLength,
+        type: blob.type,
+        layout,
+      };
     },
   };
 }

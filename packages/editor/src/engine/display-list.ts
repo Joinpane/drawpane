@@ -229,9 +229,25 @@ export class DisplayListBuilder {
     return this.#handles.get(id);
   }
 
-  /** Whether everything on the page is something the engine draws. */
+  /** Whether every shown layer on the page (not hidden) is something the engine draws. */
   get supported(): boolean {
-    return this.#refused.size === 0;
+    if (this.#refused.size === 0) return true;
+    const doc = this.#scene.doc;
+    for (const id of this.#refused) {
+      let cur: string | undefined = id;
+      let isHidden = false;
+      while (cur && cur !== this.#page) {
+        const node = doc.get(cur);
+        if (!node) break;
+        if (node.props.visible === false || this.#hidden.has(cur)) {
+          isHidden = true;
+          break;
+        }
+        cur = node.parent;
+      }
+      if (!isHidden) return false;
+    }
+    return true;
   }
 
   /** Layers hidden while dragged, and the text being edited: their records change with these. */
@@ -253,7 +269,7 @@ export class DisplayListBuilder {
     for (const id of this.#imagesOf.get(ref) ?? []) this.#extra.add(id);
   }
 
-  #context(deferText = false): LayerContext {
+  #context(deferText = false, detailScale?: number): LayerContext {
     const glyph = (d: string) => {
       let g = this.#glyphs.get(d);
       if (g === undefined) {
@@ -281,7 +297,24 @@ export class DisplayListBuilder {
       whole: this.#whole,
       hidden: this.#hidden,
       deferText,
+      ...(detailScale !== undefined && detailScale > 0 ? { detailScale } : {}),
     };
+  }
+
+  /** Sub-pixel specks skipped during thumbnail level-of-detail builds (never during exports). */
+  #isThumbnailSpeck(node: NodeRecord, detailScale: number): boolean {
+    if (node.type === "page" || node.type === "group") return false;
+    if (getProp(node.props, "isMask")) return false;
+    // Unclipped frames with children may have larger descendants: keep the container and cull leaves.
+    if (
+      node.type === "frame" &&
+      !getProp(node.props, "clipContent") &&
+      this.#scene.doc.childIds(node.id).length > 0
+    ) {
+      return false;
+    }
+    const bounds = this.#scene.bounds(node.id);
+    return !!bounds && bounds.width * detailScale < 0.75 && bounds.height * detailScale < 0.75;
   }
 
   #encode(node: NodeRecord, ctx: LayerContext): WireRecord {
@@ -531,16 +564,33 @@ export class DisplayListBuilder {
    */
   buildLayers(
     ids: readonly string[],
-    options?: { readonly context?: boolean | undefined },
+    options?: {
+      readonly context?: boolean | undefined;
+      readonly detailScale?: number | undefined;
+    },
   ): Uint8Array {
     return this.planLayers(ids, options).build();
   }
 
   /** Plans the selected layers and their reader context before a headless host loads their assets. */
-  planLayers(ids: readonly string[], options?: { readonly context?: boolean | undefined }) {
+  planLayers(
+    ids: readonly string[],
+    options?: {
+      readonly context?: boolean | undefined;
+      readonly detailScale?: number | undefined;
+    },
+  ) {
     const doc = this.#scene.doc;
     const first = ids.map((id) => doc.get(id)).find((n) => n !== undefined);
     const pageId = first ? this.#pageOf(first.id) : null;
+    const detailScale =
+      options?.detailScale !== undefined && options.detailScale > 0
+        ? options.detailScale
+        : undefined;
+    const isSpeck =
+      detailScale !== undefined
+        ? (node: NodeRecord) => this.#isThumbnailSpeck(node, detailScale)
+        : null;
     const parts = options?.context && pageId ? this.#readerContextParts(ids) : [];
     const context = pageId && parts.length > 0 ? this.#contextPrefix(pageId, ids, parts) : null;
     return {
@@ -551,6 +601,7 @@ export class DisplayListBuilder {
           const id = stack.pop() as string;
           const node = doc.get(id);
           if (!node || node.props.visible === false || seen.has(id)) continue;
+          if (isSpeck?.(node)) continue;
           seen.add(id);
           yield node;
           for (const child of doc.childIds(id)) stack.push(child);
@@ -564,7 +615,7 @@ export class DisplayListBuilder {
         const list =
           context && pageId
             ? this.#buildWithContext(pageId, ids, context)
-            : this.build(pageId ?? "", ids);
+            : this.build(pageId ?? "", ids, detailScale !== undefined ? { detailScale } : {});
         this.#page = null;
         return list;
       },
@@ -933,12 +984,16 @@ export class DisplayListBuilder {
   build(
     pageId: string,
     roots?: readonly string[],
-    options: { readonly deferText?: boolean } = {},
+    options: { readonly deferText?: boolean; readonly detailScale?: number | undefined } = {},
   ): Uint8Array {
     const t0 = performance.now();
     const doc = this.#scene.doc;
     this.#resetState(pageId);
-    const ctx = this.#context(options.deferText ?? false);
+    const detailScale =
+      options.detailScale !== undefined && options.detailScale > 0
+        ? options.detailScale
+        : undefined;
+    const ctx = this.#context(options.deferText ?? false, detailScale);
     const revision = this.#revision + 1;
     // Sized for the last fresh list (a page reopened, a reset), so the buffer rarely grows.
     const w = new ListWriter(
@@ -955,6 +1010,9 @@ export class DisplayListBuilder {
       const id = stack.pop() as string;
       const node = doc.get(id);
       if (!node) continue;
+      if (detailScale !== undefined) {
+        if (node.props.visible === false || this.#isThumbnailSpeck(node, detailScale)) continue;
+      }
       glyphs += this.#writePageRecord(w, node, ctx, top?.has(id));
       records++;
       const kids = doc.childIds(id);

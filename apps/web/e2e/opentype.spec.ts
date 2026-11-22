@@ -46,8 +46,12 @@ function inked(page: Page, id: string): Promise<number> {
     const p = e.doc.get(id)?.props as { x: number; y: number; width: number; height: number };
     const a = e.s.camera.toScreen({ x: p.x, y: p.y });
     const b = e.s.camera.toScreen({ x: p.x + p.width, y: p.y + p.height });
-    // The content layer (the first canvas), in device pixels.
-    const canvas = document.querySelector(".canvas canvas") as HTMLCanvasElement;
+    // The active design canvas (engine canvas when showing, else the 2D content layer).
+    const engine = document.querySelector<HTMLCanvasElement>('[data-canvas-role="engine"]');
+    const canvas =
+      engine && engine.style.visibility !== "hidden"
+        ? engine
+        : (document.querySelector(".canvas canvas") as HTMLCanvasElement);
     const ratio = canvas.width / canvas.getBoundingClientRect().width;
     const ctx = canvas.getContext("2d") as CanvasRenderingContext2D;
     const px = ctx.getImageData(

@@ -143,6 +143,11 @@ export function rendererChoice(search?: string): RendererChoice {
   return stored ?? "canvas";
 }
 
+/** Whether product flows should run on the render engine instead of CanvasRenderer. */
+export function useEngineRenderer(search?: string): boolean {
+  return rendererChoice(search) !== "canvas";
+}
+
 /**
  * How frames reach the screen: through the GPU canvas (the product), or read back through
  * a buffer into a 2D canvas (`?present=readback` or `drawpane:engine-present` = "readback").

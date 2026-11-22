@@ -1,11 +1,19 @@
 /**
- * Exports and thumbnails, rendered in the browser with the same
- * `CanvasRenderer` the canvas uses: what you export is what you see, and the
- * server never runs a headless browser.
+ * Exports, previews and thumbnails: bounds, sizing, image budgeting, background parsing,
+ * vector approximation notes, and the legacy `CanvasRenderer` helpers kept until W8 retires it.
  */
-import { getProp, type NodeRecord } from "@drawpane/model";
+import {
+  imageLevelsBytes,
+  MAX_SIDE,
+  type Rgba,
+  smallerImageLevel,
+  WORKER_LIMITS,
+} from "@drawpane/engine";
+import { getProp, type NodeRecord, type Paint } from "@drawpane/model";
 import type { Doc } from "./doc";
+import { rgba } from "./engine/layer";
 import { type Rect, unionRects } from "./geometry";
+import { imageDrawnSize, type Size } from "./images";
 import { markerLength } from "./markers";
 import { postEffects, postReach } from "./post-effects";
 import type { CanvasRenderer } from "./render";
@@ -36,7 +44,7 @@ export const EXPORT_EXTENSION: Record<ExportFormat, string> = {
   pdf: "pdf",
 };
 
-/** Browsers refuse canvases past about 16k on a side or 268M pixels; stay well inside. */
+/** Maximum side and total pixels a product raster export allows (up to 16,384 px per side). */
 export const MAX_EXPORT_SIDE = 16_384;
 export const MAX_EXPORT_PIXELS = 8192 * 8192;
 
@@ -157,8 +165,287 @@ export function imageRefs(doc: Doc, ids: readonly string[]): string[] {
   return [...refs];
 }
 
+export type ExportErrorReason = "size" | "unsupported" | "limit" | "other";
+
 export class ExportError extends Error {
   override name = "ExportError";
+  readonly reason: ExportErrorReason;
+  constructor(message: string, reason: ExportErrorReason = "other") {
+    super(message);
+    this.reason = reason;
+  }
+}
+
+/** Clear error message when a requested raster output exceeds the maximum side or pixel limit. */
+export function exportSizeError(
+  width: number,
+  height: number,
+  maxSide = MAX_EXPORT_SIDE,
+): ExportError {
+  if (width > maxSide || height > maxSide) {
+    return new ExportError(
+      `That export is too large (${width} × ${height} px). The maximum is ${maxSide.toLocaleString("en")} px on either side. Try a smaller scale.`,
+      "size",
+    );
+  }
+  return new ExportError(
+    `That export is too large (${width} × ${height} px). The maximum is ${Math.round(MAX_EXPORT_PIXELS / 1_000_000)} megapixels. Try a smaller scale.`,
+    "size",
+  );
+}
+
+/**
+ * Parses an export or preview background colour into straight RGBA floats. Accepts null or
+ * `"transparent"` for transparent, `"white"` / `"black"`, `#rgb` / `#rgba` / `#rrggbb` /
+ * `#rrggbbaa`, and CSS `rgb(...)` / `rgba(...)` strings.
+ */
+export function exportBackgroundRgba(value: string | null | undefined): Rgba {
+  if (!value || value === "transparent") return [0, 0, 0, 0];
+  const trimmed = value.trim();
+  if (!trimmed || trimmed === "transparent") return [0, 0, 0, 0];
+  if (trimmed === "white") return [1, 1, 1, 1];
+  if (trimmed === "black") return [0, 0, 0, 1];
+  if (/^#[\da-f]{3,4}$/i.test(trimmed)) {
+    const expanded = `#${[...trimmed.slice(1)].map((c) => c + c).join("")}`;
+    return rgba(expanded);
+  }
+  if (/^#(?:[\da-f]{6}|[\da-f]{8})$/i.test(trimmed)) return rgba(trimmed);
+  const rgbMatch =
+    /^rgba?\(\s*([\d.]+)\s*[,\s]\s*([\d.]+)\s*[,\s]\s*([\d.]+)(?:\s*[,/]\s*([\d.]+%?))?\s*\)$/i.exec(
+      trimmed,
+    );
+  if (rgbMatch) {
+    const r = Math.max(0, Math.min(255, Number(rgbMatch[1]))) / 255;
+    const g = Math.max(0, Math.min(255, Number(rgbMatch[2]))) / 255;
+    const b = Math.max(0, Math.min(255, Number(rgbMatch[3]))) / 255;
+    const rawAlpha = rgbMatch[4];
+    const a =
+      rawAlpha === undefined
+        ? 1
+        : rawAlpha.endsWith("%")
+          ? Math.max(0, Math.min(100, Number(rawAlpha.slice(0, -1)))) / 100
+          : Math.max(0, Math.min(1, Number(rawAlpha)));
+    return [r, g, b, a];
+  }
+  throw new ExportError("Use a hex colour for the export background.");
+}
+
+export interface ExportImageUse {
+  readonly paint: Extract<Paint, { type: "image" }>;
+  readonly box: Size;
+  readonly scale: Size;
+}
+
+/** Collects every visible image paint in `nodes` with its layer box and output pixel scale. */
+export function collectExportImageUses(
+  scene: Scene,
+  nodes: Iterable<NodeRecord>,
+  scale: number,
+): Map<string, ExportImageUse[]> {
+  const refs = new Map<string, ExportImageUse[]>();
+  for (const layer of nodes) {
+    if (layer.type === "group" || layer.type === "page" || layer.type === "text") continue;
+    const box = {
+      width: getProp(layer.props, "width"),
+      height: getProp(layer.props, "height"),
+    };
+    if (box.width <= 0 || box.height <= 0) continue;
+    const [a, b, c, d] = scene.worldMatrix(layer.id);
+    for (const paint of [...getProp(layer.props, "fills"), ...getProp(layer.props, "strokes")]) {
+      if (paint.type !== "image" || paint.visible === false || paint.opacity === 0) continue;
+      const use: ExportImageUse = {
+        paint,
+        box,
+        scale: { width: Math.hypot(a, b) * scale, height: Math.hypot(c, d) * scale },
+      };
+      const list = refs.get(paint.ref);
+      if (list) list.push(use);
+      else refs.set(paint.ref, [use]);
+    }
+  }
+  return refs;
+}
+
+/** Smallest mip level of `natural` that still covers the largest drawn use. */
+export function chooseImageLevel(natural: Size, uses: readonly ExportImageUse[]): Size {
+  let width = 1;
+  let height = 1;
+  for (const { paint, box, scale } of uses) {
+    const drawn = imageDrawnSize(paint.scaleMode, box, natural, scale, paint.crop);
+    width = Math.max(width, drawn.width);
+    height = Math.max(height, drawn.height);
+  }
+  let level: Size = { width: Math.max(1, natural.width), height: Math.max(1, natural.height) };
+  for (;;) {
+    const next = smallerImageLevel(level.width, level.height);
+    if (!next || next.width < width || next.height < height) return level;
+    level = next;
+  }
+}
+
+/**
+ * Exact target pixel size covering the largest drawn use of `natural`, clamped to `natural`
+ * (never upscaling) and `maxSide` while preserving aspect ratio. Avoids the power-of-2
+ * over-allocation of `chooseImageLevel` for browser exports.
+ */
+export function chooseDrawnImageSize(
+  natural: Size,
+  uses: readonly ExportImageUse[],
+  maxSide = MAX_SIDE,
+): Size {
+  const natW = Math.max(1, natural.width);
+  const natH = Math.max(1, natural.height);
+  let width = 1;
+  let height = 1;
+  for (const { paint, box, scale } of uses) {
+    const drawn = imageDrawnSize(
+      paint.scaleMode,
+      box,
+      { width: natW, height: natH },
+      scale,
+      paint.crop,
+    );
+    width = Math.max(width, drawn.width);
+    height = Math.max(height, drawn.height);
+  }
+  const ratio = Math.min(1, Math.max(width / natW, height / natH));
+  let targetW = Math.max(1, Math.min(natW, Math.ceil(natW * ratio)));
+  let targetH = Math.max(1, Math.min(natH, Math.ceil(natH * ratio)));
+  const longest = Math.max(targetW, targetH);
+  if (longest > maxSide) {
+    const fit = maxSide / longest;
+    targetW = Math.max(1, Math.floor(targetW * fit));
+    targetH = Math.max(1, Math.floor(targetH * fit));
+  }
+  return { width: targetW, height: targetH };
+}
+
+export interface ExportImageCandidate {
+  readonly ref: string;
+  readonly natural: Size;
+  readonly uses: readonly ExportImageUse[];
+}
+
+export interface ExportImagePlan {
+  readonly target: Size;
+  readonly reduced: boolean;
+}
+
+export interface BudgetExportImagesOptions {
+  /** Size each image to its exact drawn dimensions instead of power-of-2 mip steps. */
+  readonly exactDrawn?: boolean;
+  /** Maximum side for any uploaded image level (defaults to `MAX_SIDE`, 8,192 px). */
+  readonly maxSide?: number;
+}
+
+/**
+ * Budgets every image in an export within `budgetBytes` (default `WORKER_LIMITS.imageBytes`,
+ * 6 MiB). Each image starts at the level covering its largest drawn size; when the total
+ * exceeds the budget, the largest reducible image steps down one mip level at a time so no
+ * single photo starves the rest. Any image that still cannot fit at its smallest level maps to
+ * null.
+ */
+export function budgetExportImages(
+  candidates: readonly ExportImageCandidate[],
+  budgetBytes = WORKER_LIMITS.imageBytes,
+  options: BudgetExportImagesOptions = {},
+): Map<string, ExportImagePlan | null> {
+  const maxSide = options.maxSide ?? MAX_SIDE;
+  const items = candidates.map((c) => {
+    let level = options.exactDrawn
+      ? chooseDrawnImageSize(c.natural, c.uses, maxSide)
+      : chooseImageLevel(c.natural, c.uses);
+    while (Math.max(level.width, level.height) > maxSide) {
+      const next = smallerImageLevel(level.width, level.height);
+      if (!next) break;
+      level = next;
+    }
+    return {
+      ref: c.ref,
+      wanted: level,
+      target: level,
+      bytes: imageLevelsBytes(level.width, level.height),
+    };
+  });
+
+  let total = items.reduce((sum, item) => sum + item.bytes, 0);
+  while (total > budgetBytes) {
+    let pick = -1;
+    let pickBytes = 0;
+    let pickNext: Size | null = null;
+    for (let i = 0; i < items.length; i++) {
+      const item = items[i] as (typeof items)[number];
+      if (item.bytes <= pickBytes) continue;
+      const next = smallerImageLevel(item.target.width, item.target.height);
+      if (!next) continue;
+      pick = i;
+      pickBytes = item.bytes;
+      pickNext = next;
+    }
+    if (pick < 0 || !pickNext) break;
+    const chosen = items[pick] as (typeof items)[number];
+    const nextBytes = imageLevelsBytes(pickNext.width, pickNext.height);
+    total = total - chosen.bytes + nextBytes;
+    chosen.target = pickNext;
+    chosen.bytes = nextBytes;
+  }
+
+  const plan = new Map<string, ExportImagePlan | null>();
+  let used = 0;
+  for (const item of items) {
+    if (used + item.bytes <= budgetBytes) {
+      used += item.bytes;
+      plan.set(item.ref, {
+        target: item.target,
+        reduced: item.target.width < item.wanted.width || item.target.height < item.wanted.height,
+      });
+    } else {
+      plan.set(item.ref, null);
+    }
+  }
+  return plan;
+}
+
+export interface VectorApproximations {
+  readonly glass: boolean;
+  readonly backgroundBlur: boolean;
+}
+
+/** Reports whether visible layers in `ids` hold effects that SVG and PDF approximate. */
+export function vectorApproximations(doc: Doc, ids: readonly string[]): VectorApproximations {
+  let glass = false;
+  let backgroundBlur = false;
+  const visit = (id: string) => {
+    if (glass && backgroundBlur) return;
+    const node = doc.get(id);
+    if (!node || getProp(node.props, "visible") === false) return;
+    for (const effect of getProp(node.props, "effects")) {
+      if (effect.visible === false) continue;
+      if (effect.type === "glass") glass = true;
+      else if (effect.type === "background-blur") backgroundBlur = true;
+    }
+    for (const child of doc.childIds(id)) visit(child);
+  };
+  for (const id of ids) visit(id);
+  return { glass, backgroundBlur };
+}
+
+/** Human-readable notes describing how SVG and PDF approximate glass and background blur. */
+export function vectorApproximationNotes(
+  format: "svg" | "pdf",
+  effects: VectorApproximations,
+): string[] {
+  const label = format.toUpperCase();
+  const notes: string[] = [];
+  if (effects.backgroundBlur) {
+    notes.push(`Background blur isn't part of ${label}, so it's left out.`);
+  }
+  if (effects.glass) {
+    notes.push(
+      `Glass exports in ${label} as a lit rim without refraction, frost or what's behind the layer.`,
+    );
+  }
+  return notes;
 }
 
 export interface RasterOptions {
@@ -172,8 +459,8 @@ export interface RasterOptions {
 }
 
 /**
- * Renders layers to an image file in an OffscreenCanvas. Waits for their
- * images to decode first, so nothing exports as a placeholder.
+ * Legacy CanvasRenderer raster export helper (kept until W8 retires CanvasRenderer).
+ * Product exports run through the browser engine snapshot service instead.
  */
 export async function exportRaster(
   renderer: CanvasRenderer,
@@ -185,7 +472,12 @@ export async function exportRaster(
   if (!bounds) throw new ExportError("Nothing visible to export. Show the layer and try again.");
   const rect = snapToPixels(bounds, options.scale);
   const size = outputSize(rect, options.scale);
-  if (!size) throw new ExportError("That export is too large. Try a smaller scale.");
+  if (!size) {
+    throw exportSizeError(
+      Math.max(1, Math.round(rect.width * options.scale)),
+      Math.max(1, Math.round(rect.height * options.scale)),
+    );
+  }
   await renderer.images.ready(imageRefs(scene.doc, ids));
   const canvas = new OffscreenCanvas(size.width, size.height);
   const ctx = canvas.getContext("2d");
@@ -213,6 +505,16 @@ export interface ThumbnailOptions {
   readonly quality?: number;
 }
 
+export interface ThumbnailLayout {
+  readonly pageId: string;
+  readonly ids: readonly string[];
+  readonly rect: Rect;
+  readonly scale: number;
+  readonly width: number;
+  readonly height: number;
+  readonly background: string | null;
+}
+
 /** The scale that fits `size` inside `max`, never enlarging past 2×. */
 export function fitScale(
   size: { width: number; height: number },
@@ -222,9 +524,44 @@ export function fitScale(
 }
 
 /**
- * A picture of a page for the dashboard: everything on it, fitted inside
- * 640 × 480 with a little margin, on the page's own background so it looks
- * the same in both themes. Null when the page is empty.
+ * Computes a page thumbnail's framing: every top-level layer on the page, padded by 4%, fitted
+ * inside `maxWidth × maxHeight` (default 640 × 480) on the page's own background. Null when empty.
+ */
+export function thumbnailLayout(
+  scene: Scene,
+  pageId: string,
+  options: Pick<ThumbnailOptions, "maxWidth" | "maxHeight"> = {},
+): ThumbnailLayout | null {
+  const page = scene.doc.get(pageId);
+  if (!page) return null;
+  const ids = scene.doc.childIds(pageId);
+  const bounds = exportBounds(scene, ids);
+  if (!bounds || bounds.width <= 0 || bounds.height <= 0) return null;
+  const margin = Math.max(bounds.width, bounds.height) * 0.04;
+  const rect = {
+    x: bounds.x - margin,
+    y: bounds.y - margin,
+    width: bounds.width + margin * 2,
+    height: bounds.height + margin * 2,
+  };
+  const max = { width: options.maxWidth ?? 640, height: options.maxHeight ?? 480 };
+  const scale = fitScale(rect, max);
+  const width = Math.max(1, Math.min(max.width, Math.round(rect.width * scale)));
+  const height = Math.max(1, Math.min(max.height, Math.round(rect.height * scale)));
+  return {
+    pageId,
+    ids,
+    rect,
+    scale,
+    width,
+    height,
+    background: getProp(page.props, "backgroundColor"),
+  };
+}
+
+/**
+ * Legacy CanvasRenderer thumbnail helper (kept until W8 retires CanvasRenderer).
+ * Product thumbnails run through the browser engine snapshot service instead.
  */
 export async function renderThumbnail(
   renderer: CanvasRenderer,
@@ -232,28 +569,14 @@ export async function renderThumbnail(
   pageId: string,
   options: ThumbnailOptions = {},
 ): Promise<Blob | null> {
-  const page = scene.doc.get(pageId);
-  if (!page) return null;
-  const ids = scene.doc.childIds(pageId);
-  const bounds = exportBounds(scene, ids);
-  if (!bounds || bounds.width <= 0 || bounds.height <= 0) return null;
-  const margin = Math.max(bounds.width, bounds.height) * 0.04;
-  const padded = {
-    x: bounds.x - margin,
-    y: bounds.y - margin,
-    width: bounds.width + margin * 2,
-    height: bounds.height + margin * 2,
-  };
-  const max = { width: options.maxWidth ?? 640, height: options.maxHeight ?? 480 };
-  const scale = fitScale(padded, max);
-  const width = Math.max(1, Math.min(max.width, Math.round(padded.width * scale)));
-  const height = Math.max(1, Math.min(max.height, Math.round(padded.height * scale)));
-  await renderer.images.ready(imageRefs(scene.doc, ids), 5000);
-  const canvas = new OffscreenCanvas(width, height);
+  const layout = thumbnailLayout(scene, pageId, options);
+  if (!layout) return null;
+  await renderer.images.ready(imageRefs(scene.doc, layout.ids), 5000);
+  const canvas = new OffscreenCanvas(layout.width, layout.height);
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
   // A thumbnail is small: unreadable text draws as bars, as on the canvas.
-  renderer.renderNodes(ctx, ids, padded, scale, getProp(page.props, "backgroundColor"), true);
+  renderer.renderNodes(ctx, layout.ids, layout.rect, layout.scale, layout.background, true);
   return canvas.convertToBlob({
     type: options.type ?? "image/webp",
     quality: options.quality ?? 0.85,

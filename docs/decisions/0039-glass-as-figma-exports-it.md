@@ -61,3 +61,14 @@ original geometry. The full-resolution outline clips the enlarged result.
 The WebGL glass pass computes ray gradients before discarding transparent
 pixels. A pixel at the lens edge can share a derivative quad with pixels
 outside the outline. Their rays keep mip selection defined at the edge.
+
+## Revision: engine snapshot service and vector approximations (2026-11-21)
+
+When the render engine switch is active (`rendererChoice() !== "canvas"`), raster exports (PNG, JPEG, WebP) and the export panel preview run off the main thread in the browser engine snapshot service (`apps/web/src/editor/engine-snapshot.ts`), which uses the Rust/WebAssembly browser CPU build (`@drawpane/engine/browser-glue`) fed by `DisplayListBuilder.planLayers(ids, { context: true })`. Because the snapshot Worker runs off the main thread, previews and exports with glass or background blur no longer stall editor input, and contextual backdrops follow the same transitive prefix rule as headless exports. Canvas-mode sessions keep `CanvasRenderer` until W8 flips the default.
+
+SVG and PDF keep their vector export path:
+
+- **Background blur** cannot be expressed portably in SVG or PDF vector graphics, so it is left out of both formats.
+- **Glass** exports in SVG and PDF as a lit rim masked by the alpha of what sits behind the layer inside the exported subtree, without refraction, frost, dispersion, or context from layers outside the export selection.
+
+The Export panel (`ExportSection.tsx`) and Inspect's SVG view (`InspectPanel.tsx`) show explicit notes naming these approximations whenever a selected layer or its visible children use glass or background blur in SVG or PDF. For exact glass and background blur with page context, export a raster format (PNG, JPEG, or WebP).
