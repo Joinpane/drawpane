@@ -1143,6 +1143,35 @@ function check(
   expect(snapshot(mirror), `replayed ${step}`).toEqual(now);
 }
 
+/**
+ * What issue 294's fix will do, done here: lays the editor's document out where a rebase left it
+ * stale (what a full layout changes, text measured, copies placed by `placedGeometry`), as the
+ * editor's own unsent fix-up, outside its undo history.
+ */
+function layOutRebase(editor: Editor): void {
+  for (let round = 0; round < 4; round++) {
+    const ops: Op[] = [];
+    for (const entry of unsettled(editor.doc)) {
+      const e = entry as Record<string, unknown>;
+      if (e.op === "set") ops.push(entry as Op);
+      else if (e.constrained)
+        ops.push({
+          op: "set",
+          id: String(e.constrained),
+          prop: e.prop as "x",
+          value: e.want as number,
+        });
+      else if (e.text) {
+        const prop = e.width ? "width" : "height";
+        const value = (e[prop] as number[])[1] as number;
+        ops.push({ op: "set", id: String(e.text), prop, value });
+      }
+    }
+    if (ops.length === 0) return;
+    editor.sync.commit(ops);
+  }
+}
+
 /** A stale entry's layer and what about it is stale, to tell two checks' entries apart. */
 function entryKey(o: unknown): string {
   const e = o as Record<string, unknown>;
@@ -1331,28 +1360,20 @@ describe("an edit leaves the document as a full layout would", () => {
             // Issue 294: a collaborator's edits are worked out against their own document, and a
             // rebase lays out nothing, so where they meet edits of the editor's that were unsent
             // when they arrived, layout can be stale. Right after a collaborator's edit lands with
-            // unsent edits rebased on it, its staleness is noted as issue 294's only when the same
-            // edit, made serially on the editor's document instead, leaves nothing newly stale. A
-            // later check sets aside only stale layout all of which was noted then. Anything an
-            // edit of the editor's makes stale is checked, and so are runs with no collaborator.
-            // Noted by layer and what about it was stale, and dropped once that's laid out right, so
-            // a later bug on the same layer is still caught.
-            const fromRebase = new Set<string>();
-            const ofRebase = (stale: readonly unknown[]) =>
-              !!room && stale.length > 0 && stale.every((o) => fromRebase.has(entryKey(o)));
+            // unsent edits rebased on it, its staleness is issue 294's when the same edit, made
+            // serially on the editor's document instead, leaves nothing newly stale. Then the
+            // editor lays it out there (as the fix will), and every check after stays strict: what
+            // the collaborator's edit itself, or an edit of the editor's, leaves stale fails.
             check(editor, mirror, copies, "after making it", undefined, !room);
             const history: string[] = [];
             for (const [step, e] of edits.entries()) {
               // What an undo restores is the document as it was, empty frames' boxes included.
               const undoing = e.kind === "undo" || e.kind === "undo-redo";
               const before = undoing ? undefined : frameStates(editor.doc);
-              // A redo lays out what it touches, so a document a collision left stale (issue 294,
-              // as above) needn't come back as it was; the round trip is compared everywhere else.
-              const roundTrip = e.kind !== "undo-redo" || !ofRebase(unsettled(editor.doc));
               const was = room ? snapshot(editor.doc) : undefined;
               const version = editor.doc.version;
               const concurrent = room ? room.concurrent() : new Set<string>();
-              if (perform(editor, e, roundTrip, concurrent) === "lost") return;
+              if (perform(editor, e, true, concurrent) === "lost") return;
               if (editor.doc.version !== version) ran.set(e.kind, (ran.get(e.kind) ?? 0) + 1);
               history.push(JSON.stringify(e));
               if (room && was) {
@@ -1369,17 +1390,10 @@ describe("an edit leaves the document as a full layout would", () => {
                     .filter((id): id is string => !!id),
                 );
               }
-              const layout = !ofRebase(unsettled(editor.doc, before));
-              check(editor, mirror, copies, `after ${history.join(", ")}`, before, !room, layout);
-              if (fromRebase.size > 0) {
-                const still = new Set(unsettled(editor.doc).map(entryKey));
-                for (const key of fromRebase) if (!still.has(key)) fromRebase.delete(key);
-              }
+              check(editor, mirror, copies, `after ${history.join(", ")}`, before, !room);
               if (room && step % 2 === 1) {
                 const serialSettled = room.remote(step);
-                const stale = unsettled(editor.doc);
-                if (stale.length > 0 && room.rebased.size > 0 && serialSettled)
-                  for (const o of stale) fromRebase.add(entryKey(o));
+                if (room.rebased.size > 0 && serialSettled) layOutRebase(editor);
               }
             }
             if (room) room.settle(mirror, `after ${history.join(", ")}`);
