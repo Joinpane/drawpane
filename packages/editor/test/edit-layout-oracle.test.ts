@@ -911,6 +911,19 @@ function orphaned(before: Snapshot, id: string, doc: Doc): boolean {
   return false;
 }
 
+/** Every layer as presented, and every record as stored (variables and styles included). */
+function everything(doc: Doc): Snapshot {
+  const out: Snapshot = { ...snapshot(doc) };
+  for (const node of doc.stored())
+    out[`stored:${node.id}`] = {
+      parent: node.parent,
+      key: node.key,
+      type: node.type,
+      props: node.props,
+    };
+  return out;
+}
+
 /** A value as JSON with its keys in order, so two orders of the same fields compare equal. */
 function stable(value: unknown): string {
   return JSON.stringify(value, (_key, v) =>
@@ -1362,9 +1375,9 @@ describe("an edit leaves the document as a full layout would", () => {
             // between flushes, while a collaborator's edits arrive and rebase them.
             const room = batched ? connect(editor, start, copies) : null;
             // Issue 294: a collaborator's edits are worked out against their own document, and a
-            // rebase lays out nothing, so where they meet edits of the editor's that were unsent
+            // rebase lays out nothing, so where they meet operations of the editor's still pending
             // when they arrived, layout can be stale. Right after a collaborator's edit lands with
-            // unsent edits rebased on it, its staleness is issue 294's when the same edit, made
+            // pending operations rebased on it, its staleness is issue 294's when the same edit, made
             // serially on the editor's document instead, leaves nothing newly stale. Then the
             // editor lays it out there (as the fix will), and every check after stays strict: what
             // the collaborator's edit itself, or an edit of the editor's, leaves stale fails.
@@ -1374,16 +1387,17 @@ describe("an edit leaves the document as a full layout would", () => {
               // What an undo restores is the document as it was, empty frames' boxes included.
               const undoing = e.kind === "undo" || e.kind === "undo-redo";
               const before = undoing ? undefined : frameStates(editor.doc);
-              const was = room ? snapshot(editor.doc) : undefined;
+              const was = room ? everything(editor.doc) : undefined;
               const version = editor.doc.version;
               const concurrent = room ? room.concurrent() : new Set<string>();
               if (perform(editor, e, true, concurrent) === "lost") return;
               if (editor.doc.version !== version) ran.set(e.kind, (ran.get(e.kind) ?? 0) + 1);
               history.push(JSON.stringify(e));
               if (room && was) {
-                // What it changed, with the frames those were and are in (a layer it deleted, or
-                // moved, changed them too).
-                const now = snapshot(editor.doc);
+                // What it changed (layers, and records that aren't layers: a variable, a style),
+                // with the frames those were and are in (a layer it deleted, or moved, changed them
+                // too).
+                const now = everything(editor.doc);
                 const changed = [...new Set([...Object.keys(was), ...Object.keys(now)])].filter(
                   (id) => stable(was[id]) !== stable(now[id]),
                 );
@@ -1396,8 +1410,11 @@ describe("an edit leaves the document as a full layout would", () => {
               }
               check(editor, mirror, copies, `after ${history.join(", ")}`, before, !room);
               if (room && step % 2 === 1) {
+                // A rebase replays the editor's pending operations (even ones that net to no change,
+                // as an undo and redo do) over the collaborator's edit.
+                const rebasing = editor.sync.pendingCount > 0;
                 const serialSettled = room.remote(step);
-                if (room.rebased.size > 0 && serialSettled) layOutRebase(editor);
+                if (rebasing && serialSettled) layOutRebase(editor);
               }
             }
             if (room) room.settle(mirror, `after ${history.join(", ")}`);
