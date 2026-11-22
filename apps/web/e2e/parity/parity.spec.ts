@@ -161,9 +161,12 @@ test.describe
         test.setTimeout(240_000);
         const page = instance.page;
         const grid = gridSize(suite);
+        // Each glass probe is clipped to its own frame. A viewport sized to one cell
+        // avoids redrawing most of the grid's lenses each time capture centers a cell.
+        const view = suite.suite === "glass-probe-2" ? suite.cell : grid;
         await page.setViewportSize({
-          width: Math.min(4000, grid.width * SCALE + 200),
-          height: Math.min(4000, grid.height * SCALE + 200),
+          width: Math.min(4000, view.width * SCALE + 200),
+          height: Math.min(4000, view.height * SCALE + 200),
         });
         await page.goto("/");
         await page.getByRole("button", { name: "New file" }).first().click();
