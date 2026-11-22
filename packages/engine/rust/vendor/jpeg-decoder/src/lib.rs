@@ -1,3 +1,4 @@
+// Modified by Drawpane: register the progressive module for reduced-scale decoding.
 //! This crate contains a JPEG decoder.
 //!
 //! # Examples
