@@ -33,7 +33,9 @@ import {
   branchChanges,
   constrainedValues,
   getProp,
+  hugsOn,
   keyBetween,
+  measuresOn,
   mergeOps,
   type NodeRecord,
   nodeReader,
@@ -43,7 +45,7 @@ import {
 } from "@drawpane/model";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { canMoveInto, wouldCycle } from "../src/components";
+import { affectedComponents, canMoveInto, instancesOf, wouldCycle } from "../src/components";
 import { Doc } from "../src/doc";
 import { Editor } from "../src/editor";
 import { layoutOps } from "../src/layout";
@@ -164,9 +166,18 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
     const again = new Doc();
     again.resetStored(doc.stored(), doc.compactCopies ? "compact" : "materialized");
     again.applyStored(ops, { held: true });
-    if (layoutOps(again, frames, { shrinkEmpty, keepEmpty }).length > 0)
+    if (layoutOps(again, frames, { shrinkEmpty, keepEmpty }).some(swings))
       ops = ops.filter((op) => !swings(op));
   }
+  // Issue 306: layers kept by an instance whose main is gone aren't laid out in another mode;
+  // what a full layout changes inside one is set aside.
+  ops = ops.filter(
+    (op) =>
+      !doc.ancestors(op.id).some((a) => {
+        const main = getProp(a.props, "instanceOf");
+        return !!main && !doc.has(main);
+      }),
+  );
   // Issue 302: layout stretches a size bound to a variable, which the binding sets otherwise. A
   // full layout's width or height for a layer that binds it, in a flow stretching that axis, is
   // set aside.
@@ -195,8 +206,6 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
     const source = sourceId ? doc.get(sourceId) : undefined;
     const parent = doc.get(node.parent);
     if (!source || parent?.type !== "frame" || node.type === "group") continue;
-    // An instance's place is its own, nested in another or not.
-    if (getProp(node.props, "instanceOf")) continue;
     if (isLayoutFrame(parent) && getProp(node.props, "positioning") !== "absolute") continue;
     // Placed otherwise by the copy's own choice: made absolute, or in a frame it gave (or took)
     // auto layout. Its place then is where that left it.
@@ -206,13 +215,50 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
       getProp(parent.props, "layoutMode") !== getProp(parentSource?.props ?? {}, "layoutMode")
     )
       continue;
+    // Issue 305: an instance sized by a binding, or a hidden nested instance left at a size its
+    // main layer no longer has (swapped), doesn't place its layers again; their places and sizes
+    // are set aside, nothing else.
+    const instances = doc.ancestors(node.id).filter((a) => getProp(a.props, "instanceOf"));
+    if (
+      instances.some((a) => {
+        const bound = getProp(a.props, "bindings") as Record<string, unknown>;
+        const layer = doc.get(getProp(a.props, "mirrors") ?? "");
+        const stale =
+          !!layer &&
+          !getProp(a.props, "visible") &&
+          (getProp(a.props, "width") !== getProp(layer.props, "width") ||
+            getProp(a.props, "height") !== getProp(layer.props, "height"));
+        return !!bound.width || !!bound.height || stale;
+      })
+    )
+      continue;
     const derived = constrainedValues(node, source, parent, parentSource);
     const own = getProp(node.props, "overrides");
-    for (const prop of ["x", "y"] as const) {
-      if (own.includes(prop)) continue;
+    for (const [prop, axis] of [
+      ["x", "h"],
+      ["y", "v"],
+      ["width", "h"],
+      ["height", "v"],
+    ] as const) {
+      // A bound value is its variable's, in the copy's mode (decision 0034).
+      const bound = getProp(node.props, "bindings") as Record<string, unknown>;
+      if (own.includes(prop) || bound[prop]) continue;
+      // A size its own layout decides (it hugs, its text measures itself, or it's an instance,
+      // sized as its own main is in its mode) is checked above; one whose sizing it overrides is
+      // its own (made fixed, it keeps the size it had).
+      if (
+        (prop === "width" || prop === "height") &&
+        (hugsOn(node, axis) ||
+          measuresOn(node, axis) ||
+          getProp(node.props, "instanceOf") ||
+          own.includes(axis === "h" ? "sizingH" : "sizingV"))
+      )
+        continue;
       const want = derived[prop] ?? getProp(source.props, prop);
       const have = getProp(node.props, prop);
-      if (Math.abs(want - have) > 0.01) out.push({ constrained: node.id, prop, have, want });
+      // Both are kept to two places: compare them there.
+      if (Math.round(Math.abs(want - have) * 100) > 1)
+        out.push({ constrained: node.id, prop, have, want });
     }
   }
   for (const node of all) {
@@ -1092,6 +1138,56 @@ function check(
 }
 
 /**
+ * Issue 294's signature: whether stale layout comes of a rebase collision.
+ * The editor's rebased edits and the collaborator's must touch overlapping
+ * scopes (the layers, the frames above them, the components they're in and
+ * those components' instances), and every stale layer must be one their
+ * edits influence: a layer in those scopes, one in a frame in them (a
+ * sibling in a flow), or one inside a layer they touched or inside an
+ * instance of a component they touched.
+ */
+function rebasedStale(
+  doc: Doc,
+  rebased: ReadonlySet<string>,
+  theirs: ReadonlySet<string>,
+  stale: readonly unknown[],
+): boolean {
+  if (rebased.size === 0 || theirs.size === 0) return false;
+  const copiesOf = (ids: Iterable<string>) => {
+    const out = new Set<string>();
+    for (const main of affectedComponents(
+      doc,
+      [...ids].filter((id) => doc.has(id)),
+    ))
+      for (const root of instancesOf(doc, main)) out.add(root);
+    return out;
+  };
+  const scopes = (ids: ReadonlySet<string>) => {
+    const out = new Set<string>();
+    for (const id of [...ids, ...copiesOf(ids)]) {
+      out.add(id);
+      for (const a of doc.has(id) ? doc.ancestors(id) : [])
+        if (a.type !== "page" && a.id !== ROOT_ID) out.add(a.id);
+    }
+    return out;
+  };
+  const ours = scopes(rebased);
+  const all = scopes(theirs);
+  if (![...ours].some((id) => all.has(id))) return false;
+  for (const id of ours) all.add(id);
+  const touched = new Set([...rebased, ...theirs, ...copiesOf(rebased), ...copiesOf(theirs)]);
+  return stale.every((entry) => {
+    const o = entry as Record<string, unknown>;
+    const id = String(o.id ?? o.constrained ?? o.text);
+    if (all.has(id)) return true;
+    const node = doc.get(id);
+    if (!node) return false;
+    if (all.has(node.parent)) return true;
+    return doc.ancestors(id).some((a) => touched.has(a.id));
+  });
+}
+
+/**
  * Connects the editor to a room that holds `nodes`, with a collaborator
  * editing the same file there: `remote` has them change a shared layer
  * (a copy's or an instance's fill or opacity, a reset, an instance moved
@@ -1123,8 +1219,19 @@ function connect(editor: Editor, nodes: readonly NodeRecord[], copies: "compact"
   editor.setPage("p");
   const other = makeEditor(nodes, copies);
   const remote: Op[][] = [];
-  const refused: string[] = [];
+  /** Layers the editor's edits changed, all unsent until `settle`. */
+  const ours = new Set<string>();
+  /** Of those, the ones a collaborator's edit arrived after (so they were rebased on it). */
+  const rebased = new Set<string>();
+  /** Layers the collaborator's edits changed, with where they moved them from and to. */
+  const theirs = new Set<string>();
   return {
+    rebased,
+    theirs,
+    /** Records layers an edit of the editor's changed. */
+    note(ids: Iterable<string>) {
+      for (const id of ids) ours.add(id);
+    },
     remote(step: number) {
       const all = layers(other.doc);
       const pick = (fits: (n: NodeRecord) => boolean) => {
@@ -1154,6 +1261,13 @@ function connect(editor: Editor, nodes: readonly NodeRecord[], copies: "compact"
       }
       const ops = other.sync.takeUnsent();
       if (ops.length === 0) return;
+      for (const op of ops) {
+        theirs.add(op.id);
+        if (op.op === "create" || op.op === "move") theirs.add(op.parent);
+        const was = editor.doc.get(op.id)?.parent;
+        if (op.op === "move" && was) theirs.add(was);
+      }
+      for (const id of ours) rebased.add(id);
       remote.push(ops);
       revn += 1;
       receive({ t: "txn", revn, ops });
@@ -1169,7 +1283,6 @@ function connect(editor: Editor, nodes: readonly NodeRecord[], copies: "compact"
           receive({ t: "ack", seq: m.seq, revn });
         } catch (error) {
           if (!(error instanceof Error) || error.name !== "ModelError") throw error;
-          refused.push((error as { code?: string }).code ?? error.message);
           receive({
             t: "reject",
             seq: m.seq,
@@ -1208,50 +1321,50 @@ describe("an edit leaves the document as a full layout would", () => {
             // Half the runs keep their edits unsent through the whole sequence, as a client does
             // between flushes, while a collaborator's edits arrive and rebase them.
             const room = batched ? connect(editor, start, copies) : null;
-            // Issue 294: concurrent edits leave layout computed against the other client's
-            // document, and a rebase lays out nothing, so layout that depends on what the
-            // collaborator changed can be stale. A control editor makes the same edits with no
-            // collaborator: where it's settled after an edit and this one isn't, the
-            // collaborator is the cause, and that edit's full-layout check is set aside (its
-            // other checks, and the room's at the end, still run). Runs with no collaborator,
-            // half of them, check layout throughout.
-            let control: Editor | null = null;
-            if (room) {
-              control = makeEditor(null, copies);
-              build(control, spec);
-              control.sync.takeUnsent();
-            }
+            // Issue 294: a collaborator's edits are worked out against their own document, and a
+            // rebase lays out nothing, so where they collide with edits of the editor's that were
+            // unsent when they arrived, layout depending on both can be stale. Right after a
+            // collaborator's edit lands, layers stale from such a collision (`rebasedStale`) are
+            // noted; a later check sets aside only stale layout all of which was noted then.
+            // Anything an edit of the editor's makes stale is checked, and so are runs with no
+            // collaborator (half of them) and collaborator runs with no collision.
+            const fromRebase = new Set<string>();
+            const entryId = (o: unknown) => {
+              const e = o as Record<string, unknown>;
+              return String(e.id ?? e.constrained ?? e.text);
+            };
+            const ofRebase = (stale: readonly unknown[]) =>
+              !!room && stale.length > 0 && stale.every((o) => fromRebase.has(entryId(o)));
             check(editor, mirror, copies, "after making it", undefined, !room);
             const history: string[] = [];
             for (const [step, e] of edits.entries()) {
               // What an undo restores is the document as it was, empty frames' boxes included.
               const undoing = e.kind === "undo" || e.kind === "undo-redo";
               const before = undoing ? undefined : frameStates(editor.doc);
-              const controlBefore = control && !undoing ? frameStates(control.doc) : undefined;
-              // A redo lays out what it touches, so a document a collaborator's edit left stale
-              // (issue 294, as above: stale here, settled in the control) needn't come back as it
-              // was; the round trip is compared everywhere else.
-              const roundTrip =
-                !control ||
-                e.kind !== "undo-redo" ||
-                unsettled(editor.doc).length === 0 ||
-                unsettled(control.doc).length > 0;
+              // A redo lays out what it touches, so a document a collision left stale (issue 294,
+              // as above) needn't come back as it was; the round trip is compared everywhere else.
+              const roundTrip = e.kind !== "undo-redo" || !ofRebase(unsettled(editor.doc));
+              const was = room ? snapshot(editor.doc) : undefined;
               const version = editor.doc.version;
               if (perform(editor, e, roundTrip) === "lost") return;
               if (editor.doc.version !== version) ran.set(e.kind, (ran.get(e.kind) ?? 0) + 1);
               history.push(JSON.stringify(e));
-              let ours = true;
-              if (control) {
-                try {
-                  if (perform(control, e) === "lost") control = null;
-                  else if (unsettled(editor.doc, before).length > 0)
-                    ours = unsettled(control.doc, controlBefore).length > 0;
-                } catch {
-                  control = null;
-                }
+              if (room && was) {
+                const now = snapshot(editor.doc);
+                room.note(
+                  [...new Set([...Object.keys(was), ...Object.keys(now)])].filter(
+                    (id) => stable(was[id]) !== stable(now[id]),
+                  ),
+                );
               }
-              check(editor, mirror, copies, `after ${history.join(", ")}`, before, !room, ours);
-              if (room && step % 2 === 1) room.remote(step);
+              const layout = !ofRebase(unsettled(editor.doc, before));
+              check(editor, mirror, copies, `after ${history.join(", ")}`, before, !room, layout);
+              if (room && step % 2 === 1) {
+                room.remote(step);
+                const stale = unsettled(editor.doc);
+                if (stale.length > 0 && rebasedStale(editor.doc, room.rebased, room.theirs, stale))
+                  for (const o of stale) fromRebase.add(entryId(o));
+              }
             }
             if (room) room.settle(mirror, `after ${history.join(", ")}`);
             // Merged back into where it started, as a branch is.
