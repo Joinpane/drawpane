@@ -2808,8 +2808,14 @@ export class Editor {
     const PLACED = new Set(["x", "y", "width", "height", "textAutoResize"]);
     const placing = (id: string | undefined) =>
       !!id && PLACING.some((prop) => reset.get(id)?.has(prop));
+    // The frame that places a layer: its parent, or the one above the groups it's in.
+    const placedBy = (id: string) => {
+      let at = this.doc.get(this.doc.get(id)?.parent ?? "");
+      while (at?.type === "group") at = this.doc.get(at.parent);
+      return at?.id;
+    };
     const replaced = (id: string, prop: string) =>
-      PLACED.has(prop) && (placing(id) || placing(this.doc.get(id)?.parent));
+      PLACED.has(prop) && (placing(id) || placing(placedBy(id)));
     const sync = [...outer]
       .flatMap((id) => syncInstanceOps(this.doc, id))
       .filter((op) => {

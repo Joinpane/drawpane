@@ -10,11 +10,18 @@
  *
  * A text layer a constraint resizes stops sizing itself on that axis, as in
  * Figma (decision 0043): auto width becomes auto height, wrapping at the
- * width it's given, and a height it's given makes it fixed.
+ * width it's given, and a height it's given makes it fixed. A copy text in
+ * an instance doesn't: it keeps sizing itself where it does, and its mode.
+ * A frame whose auto layout hugs on an axis keeps its size there, placed as
+ * Figma places it (`constrainHugged`).
  */
 import {
+  constrainedValues,
+  constrainHugged,
   constrainSpan,
   getProp,
+  hugsOn,
+  measuresOn,
   type NodeRecord,
   type Op,
   textResizeWhenSized,
@@ -35,6 +42,14 @@ const AXIS = {
   h: { pos: "x", size: "width", constraint: "constraintH" },
   v: { pos: "y", size: "height", constraint: "constraintV" },
 } as const;
+
+/**
+ * Whether a copy text sizes itself on an axis: in an instance, constraints place such text but
+ * never size it there, and never switch its mode, as in Figma (decision 0043).
+ */
+function copyMeasures(node: NodeRecord, axis: Axis): boolean {
+  return !!getProp(node.props, "mirrors") && measuresOn(node, axis);
+}
 
 /** Whether the frame places this child itself (auto layout) rather than leaving it where it is. */
 function placedByLayout(frame: NodeRecord, child: NodeRecord): boolean {
@@ -100,35 +115,28 @@ export function constraintOps(doc: Doc, ops: readonly Op[]): Op[] {
     props.set(prop, round2(value));
   };
   /**
-   * A copy text layer's mode, from its main layer's (decision 0043): given up on each axis
-   * where its frame, as resized, differs in size from its main's and its constraints size it,
-   * its main layer's own where none does (an instance made its main's size again). Undefined
-   * for a layer that isn't a copy.
+   * A copy layer's place and size on an axis in its frame at size `to`, from its main layer
+   * (`constrainedValues`): undefined for a layer that isn't a copy, or that overrides its place.
    */
-  const copyResize = (node: NodeRecord): "none" | "width" | "height" | undefined => {
-    const sourceId = getProp(node.props, "mirrors");
+  const fromMain = (
+    child: NodeRecord,
+    axis: Axis,
+    to: { readonly width: number; readonly height: number },
+  ): { pos: number; size?: number } | undefined => {
+    const sourceId = getProp(child.props, "mirrors");
     const source = sourceId ? doc.get(sourceId) : undefined;
-    if (!source) return undefined;
-    // In a group, the outermost group's constraints decide, against the frame it's in.
-    let pinned: NodeRecord = node;
-    let frame = doc.get(node.parent);
-    let frameSource = doc.get(source.parent);
-    while (frame?.type === "group" && frameSource) {
-      pinned = frame;
-      frame = doc.get(frame.parent);
-      frameSource = doc.get(frameSource.parent);
-    }
-    if (!frame || !frameSource) return undefined;
-    const differ = new Set<Axis>();
-    for (const axis of ["h", "v"] as const) {
-      const c = getProp(pinned.props, AXIS[axis].constraint);
-      if (c !== "stretch" && c !== "scale") continue;
-      const size = AXIS[axis].size;
-      // As this edit leaves it: the size it sets, or what its constraints give.
-      const now = sizes.get(frame.id)?.[size] ?? read(frame, size);
-      if (Math.abs(now - getProp(frameSource.props, size)) > 0.01) differ.add(axis);
-    }
-    return textResizeWhenSized(getProp(source.props, "textAutoResize"), differ);
+    const frame = doc.get(child.parent);
+    const frameSource = source ? doc.get(source.parent) : undefined;
+    if (!source || !frame || !frameSource) return undefined;
+    const { pos, size } = AXIS[axis];
+    const own = getProp(child.props, "overrides");
+    if (own.includes(pos) || own.includes(size)) return undefined;
+    const sized = { ...frame, props: { ...frame.props, width: to.width, height: to.height } };
+    const derived = constrainedValues(child, source, sized as NodeRecord, frameSource);
+    return {
+      pos: derived[pos] ?? getProp(source.props, pos),
+      ...(derived[size] !== undefined ? { size: derived[size] } : {}),
+    };
   };
   const keeps = (id: string, axis: Axis) => {
     const props = explicit.get(id);
@@ -150,11 +158,20 @@ export function constraintOps(doc: Doc, ops: readonly Op[]): Op[] {
         if (from === to || keeps(childId, axis)) continue;
         const c = getProp(child.props, constraint);
         if (c === "start") continue;
-        if (child.type === "group") constrainGroup(doc, child, axis, c, from, to, read, write);
+        const exact = child.type === "group" ? undefined : fromMain(child, axis, resize.to);
+        if (exact) {
+          // A copy follows its main layer: derived from it, exactly, not from where it was.
+          write(child, pos, exact.pos);
+          if (exact.size !== undefined) write(child, size, exact.size);
+        } else if (child.type === "group")
+          constrainGroup(doc, child, axis, c, from, to, read, write);
+        else if (hugsOn(child, axis))
+          // Its auto layout keeps its size; Figma places it (it never passes a resize on).
+          write(child, pos, constrainHugged(c, read(child, pos), read(child, size), from, to));
         else {
           const span = constrainSpan(c, read(child, pos), read(child, size), from, to);
           write(child, pos, span.pos);
-          write(child, size, span.size);
+          if (!copyMeasures(child, axis)) write(child, size, span.size);
         }
       }
       // A nested frame that changed size passes the change on to its own children.
@@ -178,7 +195,7 @@ export function constraintOps(doc: Doc, ops: readonly Op[]): Op[] {
     const node = doc.get(id);
     if (!node || explicit.get(id)?.has("textAutoResize")) continue;
     const mode = getProp(node.props, "textAutoResize");
-    const now = copyResize(node) ?? textResizeWhenSized(mode, axes);
+    const now = textResizeWhenSized(mode, axes);
     if (now !== mode) out.push({ op: "set", id, prop: "textAutoResize", value: now });
   }
   return out;
@@ -226,6 +243,6 @@ function constrainGroup(
   const k = end - start > 0 ? span.size / (end - start) : 1;
   for (const m of members) {
     write(m, pos, span.pos + (read(m, pos) - start) * k);
-    if (k !== 1) write(m, size, read(m, size) * k);
+    if (k !== 1 && !hugsOn(m, axis) && !copyMeasures(m, axis)) write(m, size, read(m, size) * k);
   }
 }

@@ -1,7 +1,7 @@
 # 0043. Text a constraint resizes stops sizing itself on that axis
 
 - Status: accepted
-- Date: 2026-11-21
+- Date: 2026-11-21, copies and Hug frames 2026-11-22
 - Deciders: Ziyang (lead maintainer)
 
 ## Context
@@ -36,9 +36,35 @@ The stored mode is the source of truth, as before. A file saved with constrained
 ## Consequences
 
 - Narrowing a frame wraps its stretched text and grows it downward, as in Figma. Widening it again unwraps the lines, but the text stays auto height, as in Figma.
-- **Copies:** an instance resized in an editor gives its stretched text the same switch, as a laid-out value on the copy (never an override). Its main keeps auto width.
-  - The copy's mode is derived like the place and size its constraints give: from its main layer's mode, on the axes where the copy's frame differs in size from the main's (`constrainedTextResize`). Materialized sync and compact copy constraints both write it, so the two formats agree, and a main edit that doesn't touch it leaves it alone.
-  - `laidOutProps` counts either mode as laid out (the main layer's, or the one its stretch or scale constraints give), so pinning an imported file doesn't mark it overridden.
-  - The copy's mode is derived from its main layer's, so it's the main layer's own again wherever the copy's frame is its main's size: an instance resized back, or reset (which resets the instance's size with everything else, as Figma's "Reset all changes" does). Text in a group follows the outermost group's constraints against the frame the group is in.
-  - The copy's width still follows its main layer's box by the constraint's margins. If the main's own auto width text grows past its frame, the copy's text overflows its frame by the same amount, wrapping at that width.
-- `packages/editor/test/constraints.test.ts` ("text a constraint resizes") checks the table's rows. The edit-layout oracle now generates constrained auto-sized text, which it used to leave out because of the old disagreement.
+- **Copies follow Figma's instances, which don't switch** (probed 2026-11-22, below). In an instance, a copy text that sizes itself on an axis keeps doing so, and keeps its mode. Its constraints still place it, but don't size it on that axis.
+  - Auto width text keeps its own width and height in a narrowed or widened instance, under Left and right or Scale. Scale moves it (its left edge scales); Left and right leaves it where it is.
+  - Auto height text takes the width Left and right or Scale gives it and measures its height there, but Top and bottom doesn't size it.
+  - Fixed size text follows its constraints, as any layer does.
+  - So a copy's mode is always its main layer's (another mode is a person's override), and `laidOutProps` counts only that one as laid out. The width a constraint used to give auto width text in an instance (on main) is gone: it measures itself, as its main does.
+- **A frame whose auto layout hugs on an axis keeps its size** when a constraint would stretch or scale it there, plain or a copy, and what's inside it stays where it is. Figma places it: stretched, it's centred in the span stretching would give it (centred in its frame once that span is gone); scaled, its centre scales.
+- `packages/editor/test/constraints.test.ts` ("text a constraint resizes") checks the table's rows.
+
+### Figma's instances and Hug frames (2026-11-22)
+
+Probed the same way, on a scratch page of the parity draft file, removed afterwards. Each text was "Words wrap here" in Inter 16 at x 10 in a 160 × 60 component, read back from an instance resized to 100 wide (or 120 tall for Top and bottom) and from a plain frame resized the same way:
+
+| Text, constraints | In the instance | In the plain frame |
+| --- | --- | --- |
+| Auto width, Left and right | Auto width, 129 × 19, unmoved (220 wide: the same) | Auto height, 69 × 57 |
+| Auto width, Scale | Auto width, 129 × 19, x 6.25 (13.75 at 220) | Auto height, 80.62 × 38, x 6.25 |
+| Auto width, Center or Right | Auto width, moved only (x −20, −50) | the same |
+| Auto height, Left and right | Auto height, 69 × 57 (189 × 19 at 220) | Auto height, 69 × 57 |
+| Fixed size, Left and right | Fixed, 69 × 19 | Fixed, 69 × 19 |
+| Auto width or auto height, Top and bottom | unchanged | Fixed size, 129 × 79 |
+
+A rectangle with Left and right in the same instance went from 100 to 40 wide, so constraints do apply to instance layers; it's only self-sizing text that keeps its size. (Groups have no constraints in Figma's plugin API, so the group rows of this decision weren't comparable.)
+
+A 40 × 20 row with Hug height at y 10 in a 160 × 80 frame, Top and bottom or Scale, in a plain frame and in an instance:
+
+| Frame height | 70 | 60 | 50 | 40 | 30 | 100 | 120 | 160 |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| Top and bottom, in an instance | 5 | 10 | 15 | 10 | 5 | 20 | 30 | 50 (plain) |
+| Scale, either | 7.5 | 5 | 2.5 | 0 | −2.5 | 15 | 20 | 30 |
+
+The frame stayed 20 tall throughout, and an absolutely placed 8 × 8 layer inside it, Scale, stayed at y 4. Scale fits its centre scaling exactly. Top and bottom fits centring in the stretched span wherever that span has room (70, 100, 120, 160). Below that, Figma centres it in its frame (50, 40, 30), except at exactly zero room (60), where it stays at 10. We take the centring in the frame there too.
+ The edit-layout oracle now generates constrained auto-sized text, which it used to leave out because of the old disagreement.

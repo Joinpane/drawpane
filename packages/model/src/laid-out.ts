@@ -76,25 +76,6 @@ export function laidOutProps(
       if (resize !== "none") out.add("height");
     }
   }
-  if (
-    copy.type === "text" &&
-    !context.root &&
-    !inFlow &&
-    (parent?.type === "frame" || parent?.type === "group")
-  ) {
-    // Constraints that stretch or scale a text layer take that axis's size from it (decision
-    // 0043): its main layer's auto-resize is laid out, and so is the one they give where its
-    // frame differs in size from its main's (in a group, the group's constraints decide).
-    const mode = getProp(copy.props, "textAutoResize");
-    const own = getProp(source.props, "textAutoResize");
-    const given =
-      parent?.type === "group"
-        ? sizedAxes(parent).size > 0
-          ? textResizeWhenSized(own, sizedAxes(parent))
-          : own
-        : constrainedTextResize(copy, source, parent, parentSource);
-    if (mode === own || mode === given) out.add("textAutoResize");
-  }
   if (!context.root && !inFlow && parent && parentSource) {
     // A frame the copy resized moved and stretched its children by their constraints: a place or
     // size is laid out where it's what they derive from the main layer's. Anything else is a
@@ -104,19 +85,6 @@ export function laidOutProps(
       const have = (copy.props as Record<string, unknown>)[prop];
       if (typeof have === "number" && Math.abs(have - want) <= EPSILON) out.add(prop);
     }
-  }
-  return out;
-}
-
-/** The axes a layer's constraints stretch or scale it on, so its frame's size sets its size. */
-function sizedAxes(node: NodeRecord): Set<"h" | "v"> {
-  const out = new Set<"h" | "v">();
-  for (const [axis, prop] of [
-    ["h", "constraintH"],
-    ["v", "constraintV"],
-  ] as const) {
-    const c = getProp(node.props, prop);
-    if (c === "stretch" || c === "scale") out.add(axis);
   }
   return out;
 }
@@ -136,24 +104,52 @@ export function textResizeWhenSized(
   return mode;
 }
 
+/** Whether a frame's own auto layout sizes it on an axis (it hugs there), so constraints only place it. */
+export function hugsOn(node: NodeRecord, axis: "h" | "v"): boolean {
+  return (
+    node.type === "frame" &&
+    getProp(node.props, "layoutMode") !== "none" &&
+    getProp(node.props, axis === "h" ? "sizingH" : "sizingV") === "hug"
+  );
+}
+
 /**
- * The auto-resize a copy text layer's constraints give it, from the main
- * layer it copies, where they size it (its frame differs in size from its
- * main's on an axis it stretches or scales on): undefined where they don't.
+ * Whether a text layer sizes itself on an axis: auto width on both, auto
+ * height on its height. In an instance, Figma's constraints place such a
+ * copy but never size it there, and never switch its mode (decision 0043).
  */
-export function constrainedTextResize(
-  copy: NodeRecord,
-  source: NodeRecord,
-  parent: NodeRecord | undefined,
-  parentSource: NodeRecord | undefined,
-): "none" | "width" | "height" | undefined {
-  if (copy.type !== "text") return undefined;
-  const derived = constrainedValues(copy, source, parent, parentSource);
-  const axes = new Set<"h" | "v">();
-  if (derived.width !== undefined) axes.add("h");
-  if (derived.height !== undefined) axes.add("v");
-  if (axes.size === 0) return undefined;
-  return textResizeWhenSized(getProp(source.props, "textAutoResize"), axes);
+export function measuresOn(node: NodeRecord, axis: "h" | "v"): boolean {
+  if (node.type !== "text") return false;
+  const mode = getProp(node.props, "textAutoResize");
+  return mode === "width" || (mode === "height" && axis === "v");
+}
+
+/**
+ * Where a span pinned by `c` starts when it keeps its size (its own auto
+ * layout hugs it) and its frame goes from `from` to `to`, as Figma places it:
+ * stretched, it's centred in the span stretching would give it (in its frame
+ * once that span is gone); scaled, its centre scales.
+ */
+export function constrainHugged(
+  c: Constraint,
+  pos: number,
+  size: number,
+  from: number,
+  to: number,
+): number {
+  const delta = to - from;
+  switch (c) {
+    case "start":
+      return pos;
+    case "end":
+      return pos + delta;
+    case "center":
+      return pos + delta / 2;
+    case "stretch":
+      return size + delta > 0 ? pos + delta / 2 : (to - size) / 2;
+    case "scale":
+      return from <= 0 ? pos : (pos + size / 2) * (to / from) - size / 2;
+  }
 }
 
 /** How a layer follows its frame on one axis (Figma's and Penpot's constraints). */
@@ -195,7 +191,8 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
  * centre, stretched or scaled sits where its main layer does, moved by the
  * difference. Only the values that differ from the main layer's are given;
  * an axis pinned to the start (or a frame of the same size) gives none, and
- * an axis the layer's own auto layout hugs on gives no size.
+ * an axis the layer sizes itself on (its auto layout hugs, or its text
+ * measures itself) gives a place but no size.
  */
 export function constrainedValues(
   copy: NodeRecord,
@@ -217,20 +214,19 @@ export function constrainedValues(
     if (Math.abs(to - from) <= EPSILON) continue;
     const c = getProp(copy.props, axis.constraint) as Constraint;
     if (c === "start") continue;
-    const span = constrainSpan(
-      c,
-      getProp(source.props, axis.pos),
-      getProp(source.props, axis.size),
-      from,
-      to,
-    );
+    const pos = getProp(source.props, axis.pos);
+    const size = getProp(source.props, axis.size);
+    const a = axis.size === "width" ? "h" : "v";
+    // A frame whose auto layout hugs on this axis keeps its size, placed as Figma places it.
+    if (hugsOn(copy, a)) {
+      out[axis.pos] = round2(constrainHugged(c, pos, size, from, to));
+      continue;
+    }
+    const span = constrainSpan(c, pos, size, from, to);
     out[axis.pos] = round2(span.pos);
-    // A frame whose auto layout hugs on this axis is sized by that layout, not its constraints.
-    const hugs =
-      copy.type === "frame" &&
-      getProp(copy.props, "layoutMode") !== "none" &&
-      getProp(copy.props, axis.sizing) === "hug";
-    if ((c === "stretch" || c === "scale") && !hugs) out[axis.size] = round2(span.size);
+    // Text that sizes itself on this axis keeps doing so.
+    if ((c === "stretch" || c === "scale") && !measuresOn(copy, a))
+      out[axis.size] = round2(span.size);
   }
   return out;
 }

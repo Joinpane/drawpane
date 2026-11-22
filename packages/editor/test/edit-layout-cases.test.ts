@@ -40,8 +40,11 @@ const modes = node(
   },
   "a1",
 );
-const prop = (editor: Editor, id: string, name: "x" | "width" | "visible" | "paddingLeft") =>
-  getProp(editor.doc.get(id)?.props ?? {}, name);
+const prop = (
+  editor: Editor,
+  id: string,
+  name: "x" | "width" | "height" | "visible" | "paddingLeft",
+) => getProp(editor.doc.get(id)?.props ?? {}, name);
 /** What laying out the whole document afresh would still change. */
 const unsettled = (editor: Editor) => {
   const frames: string[] = [];
@@ -361,8 +364,10 @@ describe("edits that leave layout as a full layout would", () => {
 
   // Decision 0043: an instance resized gives its constrained text the width, which it wraps at.
   it.each(["materialized", "compact"] as const)(
-    "wraps an instance's stretched auto width text when the instance narrows (copies %s)",
+    "keeps an instance's stretched auto width text sizing itself when the instance narrows (copies %s)",
     (copies) => {
+      // Figma (decision 0043, copies): in an instance, text that sizes itself keeps doing so on
+      // that axis and keeps its mode; constraints only place it. A plain frame switches it.
       const editor = make(
         [
           page,
@@ -377,27 +382,42 @@ describe("edits that leave layout as a full layout would", () => {
             textAutoResize: "width",
             constraintH: "stretch",
           }),
+          node(
+            "tall",
+            "text",
+            "main",
+            {
+              x: 10,
+              y: 30,
+              width: 105,
+              height: 20,
+              characters: "Words wrap here",
+              fontSize: 16,
+              textAutoResize: "height",
+              constraintH: "stretch",
+            },
+            "a1",
+          ),
         ],
         copies,
       );
       const instance = editor.insertInstance("main", { x: 0, y: 200 }) as string;
-      const label = editor.doc.childIds(instance)[0] as string;
-      const shown = () => {
-        const n = editor.doc.get(label);
-        return [getProp(n?.props ?? {}, "textAutoResize"), prop(editor, label, "width")];
+      const [label, tall] = editor.doc.childIds(instance) as [string, string];
+      const shown = (id: string) => {
+        const n = editor.doc.get(id);
+        return [getProp(n?.props ?? {}, "textAutoResize"), prop(editor, id, "width")];
       };
-      expect(shown()).toEqual(["width", 105]);
+      expect(shown(label)).toEqual(["width", 105]);
       editor.resize([instance], "width", 100);
-      expect(shown()).toEqual(["height", 45]);
-      const text = editor.doc.get(label);
+      expect(shown(label)).toEqual(["width", 105]);
+      // Auto height takes the width stretching gives it, and measures its height there.
+      expect(shown(tall)).toEqual(["height", 45]);
+      const text = editor.doc.get(tall);
       expect(text && autoSize(text, measurer)).toEqual({ width: 45, height: 60 });
-      expect(getProp(editor.doc.get("label")?.props ?? {}, "textAutoResize")).toBe("width");
+      expect(prop(editor, tall, "height")).toBe(60);
       const reopened = make(editor.doc.stored(), copies);
-      const again = reopened.doc.get(label);
-      expect(again && [getProp(again.props, "textAutoResize"), autoSize(again, measurer)]).toEqual([
-        "height",
-        { width: 45, height: 60 },
-      ]);
+      expect(getProp(reopened.doc.get(label)?.props ?? {}, "textAutoResize")).toBe("width");
+      expect(prop(reopened, tall, "width")).toBe(45);
     },
   );
 

@@ -79,7 +79,7 @@ function unsettled(editor: Editor): unknown[] {
 
 describe.each(["materialized", "compact"] as const)("with copies %s", (copies) => {
   // F2: decision 0043's switch is a laid-out value on the copy, kept by both formats.
-  it("keeps an instance's constrained text wrapped through its main's other edits", () => {
+  it("keeps an instance's constrained text sizing itself through its main's other edits", () => {
     const editor = make(
       [
         page,
@@ -105,7 +105,8 @@ describe.each(["materialized", "compact"] as const)("with copies %s", (copies) =
       num(editor, label, "width"),
       num(editor, label, "height"),
     ];
-    expect(wrapped).toEqual(["height", 60, 60]);
+    // Figma (decision 0043, copies): the copy keeps sizing itself, at its main's measured size.
+    expect(wrapped).toEqual(["width", 120, 20]);
     editor.setProp(["main"], "fills", [{ type: "solid", color: "#ff0000" }]);
     expect([
       mode(editor, label),
@@ -116,10 +117,10 @@ describe.each(["materialized", "compact"] as const)("with copies %s", (copies) =
       "textAutoResize",
     );
     expect(unsettled(editor)).toEqual([]);
-    // Its main's text, stretched like it, gives it the switch too when the constraint comes later.
+    // A constraint its main's text gains later doesn't switch it either.
     editor.setProp(["label"], "constraintH", "start");
     editor.setProp(["label"], "constraintH", "stretch");
-    expect(mode(editor, label)).toBe("height");
+    expect(mode(editor, label)).toBe("width");
     expect(unsettled(editor)).toEqual([]);
   });
 
@@ -842,7 +843,7 @@ describe.each(["materialized", "compact"] as const)("deriving copies with copies
     expect(unsettled(editor)).toEqual([]);
   });
 
-  it("keeps a stretched group's text wrapped through its main's other edits (F2h)", () => {
+  it("keeps a stretched group's text sizing itself through its main's other edits (F2h)", () => {
     const { editor, instance } = setup(
       node("grp", "group", "main", { constraintH: "stretch" }),
       node("label", "text", "grp", {
@@ -857,9 +858,36 @@ describe.each(["materialized", "compact"] as const)("deriving copies with copies
     );
     const copy = editor.doc.childIds(editor.doc.childIds(instance)[0] as string)[0] as string;
     editor.resize([instance], "width", 100);
-    expect(shown(editor, copy)).toEqual(["height", 60, 60]);
+    expect(shown(editor, copy)).toEqual(["width", 120, 20]);
     editor.setProp(["main"], "fills", [{ type: "solid", color: "#ff0000" }]);
-    expect(shown(editor, copy)).toEqual(["height", 60, 60]);
+    expect(shown(editor, copy)).toEqual(["width", 120, 20]);
+    expect(unsettled(editor)).toEqual([]);
+  });
+
+  it("follows its main's mode in a stretched group, nested or not (re-check 3, S3)", () => {
+    const { editor, instance } = setup(
+      node("outer", "group", "main", { constraintH: "stretch" }),
+      node("inner", "group", "outer", { constraintH: "start" }),
+      node("label", "text", "inner", {
+        x: 10,
+        y: 10,
+        width: 120,
+        height: 20,
+        characters: "Words wrap here",
+        fontSize: 16,
+        textAutoResize: "width",
+      }),
+    );
+    const outer = editor.doc.childIds(instance)[0] as string;
+    const copy = editor.doc.childIds(editor.doc.childIds(outer)[0] as string)[0] as string;
+    // Unresized: the main's mode, there and back.
+    editor.setProp(["label"], "textAutoResize", "height");
+    editor.setProp(["label"], "textAutoResize", "width");
+    expect(mode(editor, copy)).toBe("width");
+    // Narrowed, then an unrelated edit on the main: still the main's mode and size.
+    editor.resize([instance], "width", 100);
+    editor.setProp(["main"], "fills", [{ type: "solid", color: "#ff0000" }]);
+    expect(shown(editor, copy)).toEqual(["width", 120, 20]);
     expect(unsettled(editor)).toEqual([]);
   });
 
@@ -1107,3 +1135,251 @@ describe.each(["materialized", "compact"] as const)(
     });
   },
 );
+
+// The third re-check (at f1b099bd), and Figma's answers probed for it.
+describe.each(["materialized", "compact"] as const)("re-check 3 with copies %s", (copies) => {
+  const y = (editor: Editor, id: string) => getProp(editor.doc.get(id)?.props ?? {}, "y");
+  const hugBox = (parent: string, constraintV: "stretch" | "scale") => [
+    node("box", "frame", parent, {
+      x: 10,
+      y: 10,
+      width: 40,
+      height: 20,
+      layoutMode: "row",
+      sizingV: "hug",
+      constraintV,
+    }),
+    node("bar", "rect", "box", { width: 20, height: 20 }),
+    node(
+      "dot",
+      "rect",
+      "box",
+      { x: 4, y: 4, width: 8, height: 8, positioning: "absolute", constraintV: "scale" },
+      "a1",
+    ),
+  ];
+
+  // Figma: a Hug frame keeps its size; stretched, it's centred in the span stretching would give
+  // it; scaled, its centre scales; what's inside it is untouched.
+  it.each([
+    ["stretch", 120, 30],
+    ["stretch", 40, 10],
+    ["scale", 120, 20],
+    ["scale", 40, 0],
+  ] as const)(
+    "places a Hug frame pinned by %s in an instance %s tall at y %s",
+    (c, height, want) => {
+      const editor = make(
+        [
+          page,
+          node("main", "frame", "p", { isComponent: true, width: 160, height: 80 }),
+          ...hugBox("main", c),
+        ],
+        copies,
+      );
+      const instance = editor.insertInstance("main", { x: 0, y: 300 }) as string;
+      editor.resize([instance], "height", height);
+      const box = editor.doc.childIds(instance)[0] as string;
+      const dot = editor.doc.childIds(box)[1] as string;
+      expect([y(editor, box), num(editor, box, "height")]).toEqual([want, 20]);
+      expect([y(editor, dot), num(editor, dot, "height")]).toEqual([4, 8]);
+      expect(unsettled(editor)).toEqual([]);
+    },
+  );
+
+  it.each([
+    ["stretch", 120, 30],
+    ["scale", 120, 20],
+    ["scale", 40, 0],
+  ] as const)(
+    "places a Hug frame pinned by %s in a plain frame %s tall at y %s",
+    (c, height, want) => {
+      const editor = make(
+        [page, node("outer", "frame", "p", { width: 160, height: 80 }), ...hugBox("outer", c)],
+        copies,
+      );
+      editor.resize(["outer"], "height", height);
+      expect([y(editor, "box"), num(editor, "box", "height")]).toEqual([want, 20]);
+      expect([y(editor, "dot"), num(editor, "dot", "height")]).toEqual([4, 8]);
+      expect(unsettled(editor)).toEqual([]);
+    },
+  );
+
+  it("keeps a stretched text in a Hug frame sizing itself when the frame's frame grows (S1b)", () => {
+    const editor = make(
+      [
+        page,
+        node("outer", "frame", "p", { width: 160, height: 80 }),
+        ...hugBox("outer", "stretch").slice(0, 2),
+        node(
+          "lbl",
+          "text",
+          "box",
+          {
+            x: 2,
+            y: 2,
+            width: 40,
+            height: 15,
+            characters: "Hi",
+            fontSize: 10,
+            textAutoResize: "width",
+            positioning: "absolute",
+            constraintV: "stretch",
+          },
+          "a1",
+        ),
+      ],
+      copies,
+    );
+    editor.resize(["outer"], "height", 120);
+    expect(getProp(editor.doc.get("lbl")?.props ?? {}, "textAutoResize")).toBe("width");
+    expect(num(editor, "box", "height")).toBe(20);
+  });
+
+  it("places layers given constraints together, frames before what's in them (S5d)", () => {
+    const editor = make(
+      [
+        page,
+        node("main", "frame", "p", { isComponent: true, width: 160, height: 80 }),
+        node("inner", "frame", "main", { x: 0, width: 100, height: 40 }),
+        node("leaf", "rect", "inner", { x: 10, width: 80, height: 10 }),
+      ],
+      copies,
+    );
+    const instance = editor.insertInstance("main", { x: 0, y: 300 }) as string;
+    editor.resize([instance], "width", 120);
+    const inner = editor.doc.childIds(instance)[0] as string;
+    const leaf = editor.doc.childIds(inner)[0] as string;
+    editor.setProp([inner, leaf], "constraintH", "stretch");
+    expect([num(editor, inner, "width"), num(editor, leaf, "width")]).toEqual([60, 40]);
+    expect(unsettled(editor)).toEqual([]);
+  });
+
+  it("places what's in a swapped frame for its new size (S5c)", () => {
+    const editor = make(
+      [
+        page,
+        node("small", "frame", "p", { isComponent: true, width: 87, height: 25 }),
+        node("big", "frame", "p", { isComponent: true, y: 100, width: 160, height: 80 }, "a1"),
+        node("inner", "frame", "big", { x: 10, width: 100, height: 40, constraintH: "stretch" }),
+        node("leaf", "rect", "inner", { x: 30, width: 20, height: 10, constraintH: "end" }),
+      ],
+      copies,
+    );
+    const instance = editor.insertInstance("small", { x: 0, y: 300 }) as string;
+    editor.swapInstance(instance, "big");
+    const inner = editor.doc.childIds(instance)[0] as string;
+    const leaf = editor.doc.childIds(inner)[0] as string;
+    expect([num(editor, inner, "width"), num(editor, leaf, "x")]).toEqual([100, 30]);
+    expect(unsettled(editor)).toEqual([]);
+  });
+
+  it("puts a scaled layer where its main layer is after a nested swap to a bigger component (S5e)", () => {
+    const editor = make(
+      [
+        page,
+        node("small", "frame", "p", { isComponent: true, width: 87, height: 25 }),
+        node("big", "frame", "p", { isComponent: true, y: 100, width: 160, height: 80 }, "a1"),
+        node("bar", "rect", "big", { x: 16, width: 8, height: 8, constraintH: "scale" }),
+        node("outer", "frame", "p", { isComponent: true, y: 300, width: 300, height: 200 }, "a2"),
+        node("nested", "frame", "outer", { instanceOf: "small", width: 87, height: 25 }),
+      ],
+      copies,
+    );
+    const instance = editor.insertInstance("outer", { x: 0, y: 600 }) as string;
+    const nested = editor.doc.childIds(instance)[0] as string;
+    editor.swapInstance(nested, "big");
+    const bar = editor.doc.childIds(nested)[0] as string;
+    expect([num(editor, bar, "x"), num(editor, bar, "width")]).toEqual([16, 8]);
+  });
+
+  it("gives a copy its main layer's size again once its main stops stretching it (S2)", () => {
+    const editor = make(
+      [
+        page,
+        node("main", "frame", "p", { isComponent: true, width: 160, height: 80 }),
+        node("bar", "rect", "main", { x: 10, width: 100, height: 10, constraintH: "stretch" }),
+      ],
+      copies,
+    );
+    const instance = editor.insertInstance("main", { x: 0, y: 300 }) as string;
+    editor.resize([instance], "width", 100);
+    const bar = editor.doc.childIds(instance)[0] as string;
+    expect(num(editor, bar, "width")).toBe(40);
+    editor.setProp(["bar"], "constraintH", "start");
+    expect(num(editor, bar, "width")).toBe(100);
+    expect(unsettled(editor)).toEqual([]);
+  });
+
+  it("puts a nested instance where its main layer is once it's pinned to the start, unless moved (E1)", () => {
+    const editor = make(
+      [
+        page,
+        node("leaf", "frame", "p", { isComponent: true, width: 20, height: 20 }),
+        node("outer", "frame", "p", { isComponent: true, y: 100, width: 160, height: 80 }, "a1"),
+        node("nested", "frame", "outer", {
+          instanceOf: "leaf",
+          x: 10,
+          width: 20,
+          height: 20,
+          constraintH: "end",
+        }),
+      ],
+      copies,
+    );
+    const instance = editor.insertInstance("outer", { x: 0, y: 300 }) as string;
+    editor.resize([instance], "width", 100);
+    const nested = editor.doc.childIds(instance)[0] as string;
+    expect(num(editor, nested, "x")).toBe(-50);
+    editor.setProp(["nested"], "constraintH", "start");
+    expect(num(editor, nested, "x")).toBe(10);
+    // A person's move of a nested instance is an override, which sync and constraints keep.
+    editor.setProp([nested], "x", 33);
+    expect(getProp(editor.doc.get(nested)?.props ?? {}, "overrides")).toContain("x");
+    editor.setProp(["nested"], "constraintH", "end");
+    editor.setProp(["outer"], "fills", [{ type: "solid", color: "#ff0000" }]);
+    expect(num(editor, nested, "x")).toBe(33);
+    // From where it was put, it still follows its pin when the instance widens.
+    editor.resize([instance], "width", 120);
+    expect(num(editor, nested, "x")).toBe(53);
+  });
+
+  it("puts a group's layers back once a reset takes its instance's auto layout away (S4b)", () => {
+    const editor = make(
+      [
+        page,
+        node("main", "frame", "p", { isComponent: true, width: 160, height: 80 }),
+        node("grp", "group", "main", {}),
+        node("a", "rect", "grp", { x: 80, y: 40, width: 10, height: 10 }),
+        node("b", "rect", "grp", { x: 100, y: 40, width: 10, height: 10 }, "a1"),
+      ],
+      copies,
+    );
+    const instance = editor.insertInstance("main", { x: 0, y: 300 }) as string;
+    editor.setProp([instance], "layoutMode", "row");
+    const grp = editor.doc.childIds(instance)[0] as string;
+    const [a, b] = editor.doc.childIds(grp) as [string, string];
+    expect(num(editor, a, "x")).not.toBe(80);
+    editor.resetOverrides([{ id: instance, props: ["layoutMode"] }]);
+    expect([num(editor, a, "x"), y(editor, a), num(editor, b, "x"), y(editor, b)]).toEqual([
+      80, 40, 100, 40,
+    ]);
+  });
+
+  it("scales a copy from its main layer, not from where an earlier resize left it (seed -41827364)", () => {
+    const editor = make(
+      [
+        page,
+        node("main", "frame", "p", { isComponent: true, width: 160, height: 20.5 }),
+        node("bar", "rect", "main", { x: 10, y: 4, width: 20, height: 10, constraintV: "scale" }),
+      ],
+      copies,
+    );
+    const instance = editor.insertInstance("main", { x: 0, y: 300 }) as string;
+    editor.resize([instance], "height", 19.3);
+    editor.resize([instance], "height", 18);
+    const bar = editor.doc.childIds(instance)[0] as string;
+    // 4 × 18 / 20.5 = 3.512; scaling 3.77 (19.3 tall) again gives 3.52.
+    expect(y(editor, bar)).toBe(3.51);
+  });
+});

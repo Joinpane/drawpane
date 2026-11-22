@@ -22,13 +22,14 @@
  */
 import {
   boundaryDrivenProps,
-  constrainedTextResize,
   constrainedValues,
   copyChildId,
   getProp,
+  hugsOn,
   isMainNode,
   isPropName,
   laidOutProps,
+  measuresOn,
   type NodeRecord,
   newId,
   type Op,
@@ -488,6 +489,8 @@ export function syncInstanceOps(
         "positioning",
         "sizingH",
         "sizingV",
+        // Whether its text sizes itself, so whether its constraints size it.
+        "textAutoResize",
       ] as const)
         if (!overridden.has(prop)) placed[prop] = from.props[prop];
     const nextProps: Record<string, unknown> = { ...to.props };
@@ -510,14 +513,6 @@ export function syncInstanceOps(
     const derived: Record<string, number> =
       derive && !isRoot ? constrainedValues(next, from, parent, parentSource) : {};
     for (const prop of laidOut) if (!(prop in derived)) overridden.add(prop);
-    // Text whose size they derive gives that axis up, as its main layer would (decision 0043).
-    const resize =
-      derive && !isRoot ? constrainedTextResize(next, from, parent, parentSource) : undefined;
-    if (resize !== undefined && !getProp(to.props, "overrides").includes("textAutoResize")) {
-      overridden.add("textAutoResize");
-      if (getProp(to.props, "textAutoResize") !== resize && (!only || only("textAutoResize")))
-        push({ op: "set", id: to.id, prop: "textAutoResize", value: resize });
-    }
     // Glyphs saved with a file were laid out for each copy (decision 0037); a stale set is
     // never drawn, so the copy's own is kept rather than replaced by its main's.
     if (from.type === "text") overridden.add("glyphLayout");
@@ -667,8 +662,6 @@ function createMirror(
   if (placeIn) {
     const parentMain = doc.getUnresolved(mainNode.parent);
     Object.assign(props, constrainedValues(record, mainNode, placeIn, parentMain));
-    const resize = constrainedTextResize(record, mainNode, placeIn, parentMain);
-    if (resize !== undefined) props.textAutoResize = resize;
   }
   ops.push({ op: "create", ...record });
   for (const childId of doc.childIds(mainNode.id)) {
@@ -759,43 +752,24 @@ export function copyConstraintOps(doc: Doc, ops: readonly Op[]): Op[] {
     )
     .map((op) => op.id)
     .filter((id) => !!getProp(doc.get(id)?.props ?? {}, "mirrors"));
-  const out: Op[] = [];
-  const seen = new Set<string>();
-  // What this pass writes so far: a layer is placed in its frame as the pass leaves it.
-  const pending = new Map<string, Record<string, unknown>>();
-  const view = (id: string): NodeRecord | undefined => {
-    const node = doc.get(id);
-    const props = node && pending.get(id);
-    return props ? { ...node, props: { ...node.props, ...props } as Props } : node;
-  };
-  const walk = (start: readonly string[]) => {
-    const stack = [...start];
-    while (stack.length > 0) {
-      const id = stack.pop() as string;
-      if (seen.has(id)) continue;
-      seen.add(id);
-      stack.push(...doc.childIds(id));
-      for (const op of copyPlaceOps(doc, id, view)) {
-        out.push(op);
-        if (op.op === "set") pending.set(op.id, { ...pending.get(op.id), [op.prop]: op.value });
-      }
-    }
-  };
-  walk(repinned);
-  if (!doc.compactCopies) return out;
-  // A swapped instance shows another main's layers: placed for the size the instance has.
-  for (const op of ops)
-    if (op.op === "set" && op.prop === "instanceOf" && doc.layoutDiffers(op.id))
-      walk(doc.childIds(op.id));
+  // Where to start, from every reason below; then each of them and what's in them is placed,
+  // parents first, so a layer is placed in its frame as this pass leaves it.
+  const starts = [...repinned];
+  // A swapped instance shows another main's layers: placed for the size the instance has (nested
+  // ones too, whose layout difference their outer instance holds).
+  if (doc.compactCopies)
+    for (const op of ops)
+      if (op.op === "set" && op.prop === "instanceOf") starts.push(...doc.childIds(op.id));
   // What moved or resized, re-pinned, or came into a main (made there, or moved in).
-  const touched = ops
-    .filter(
-      (op) => (op.op === "set" && GEOMETRY.has(op.prop)) || op.op === "create" || op.op === "move",
-    )
-    .map((op) => op.id);
-  if (touched.length === 0) return out;
-  const mains = affectedComponents(doc, touched);
-  if (mains.size === 0) return out;
+  const touched = doc.compactCopies
+    ? ops
+        .filter(
+          (op) =>
+            (op.op === "set" && GEOMETRY.has(op.prop)) || op.op === "create" || op.op === "move",
+        )
+        .map((op) => op.id)
+    : [];
+  const mains = touched.length > 0 ? affectedComponents(doc, touched) : new Set<string>();
   const queue = [...mains];
   for (let i = 0; i < queue.length; i++)
     for (const root of doc.instanceRoots(queue[i] as string))
@@ -809,7 +783,30 @@ export function copyConstraintOps(doc: Doc, ops: readonly Op[]): Op[] {
     for (const root of doc.instanceRoots(main)) {
       if (roots.has(root) || !doc.layoutDiffers(root)) continue;
       roots.add(root);
-      walk(doc.childIds(root));
+      starts.push(...doc.childIds(root));
+    }
+  if (starts.length === 0) return [];
+  const all = new Set<string>();
+  const stack = [...starts];
+  while (stack.length > 0) {
+    const id = stack.pop() as string;
+    if (all.has(id) || !doc.has(id)) continue;
+    all.add(id);
+    stack.push(...doc.childIds(id));
+  }
+  const depth = new Map([...all].map((id) => [id, doc.ancestors(id).length]));
+  const order = [...all].sort((a, b) => (depth.get(a) ?? 0) - (depth.get(b) ?? 0));
+  const out: Op[] = [];
+  const pending = new Map<string, Record<string, unknown>>();
+  const view = (id: string): NodeRecord | undefined => {
+    const node = doc.get(id);
+    const props = node && pending.get(id);
+    return props ? { ...node, props: { ...node.props, ...props } as Props } : node;
+  };
+  for (const id of order)
+    for (const op of copyPlaceOps(doc, id, view)) {
+      out.push(op);
+      if (op.op === "set") pending.set(op.id, { ...pending.get(op.id), [op.prop]: op.value });
     }
   return out;
 }
@@ -837,34 +834,38 @@ function copyPlaceOps(doc: Doc, id: string, view: (id: string) => NodeRecord | u
   const free =
     parent?.type === "frame" &&
     copy.type !== "group" &&
-    !getProp(copy.props, "instanceOf") &&
     (getProp(parent.props, "layoutMode") === "none" ||
       getProp(copy.props, "positioning") === "absolute") &&
     getProp(copy.props, "positioning") === getProp(source.props, "positioning") &&
     getProp(parent.props, "layoutMode") ===
       getProp(doc.get(source.parent)?.props ?? {}, "layoutMode");
+  // Placed freely, what its constraints don't derive is its main layer's: its place, and its size
+  // where nothing else decides it (its auto layout hugs, or its text measures itself).
   if (free)
-    for (const prop of ["x", "y"] as const) {
+    for (const [prop, axis] of [
+      ["x", "h"],
+      ["y", "v"],
+      ["width", "h"],
+      ["height", "v"],
+    ] as const) {
       if (prop in derived || overridden.includes(prop)) continue;
+      // A size its own layout decides isn't its main layer's, nor one whose sizing it overrides
+      // (made fixed, it keeps the size it had).
+      if (
+        (prop === "width" || prop === "height") &&
+        (hugsOn(copy, axis) ||
+          measuresOn(copy, axis) ||
+          overridden.includes(axis === "h" ? "sizingH" : "sizingV"))
+      )
+        continue;
       const want = getProp(source.props, prop);
       if (Math.abs(getProp(copy.props, prop) - want) > PLACE_EPSILON)
         out.push({ op: "set", id, prop, value: want });
     }
-  // Text whose size they derive gives that axis up, as materialized sync has it (0043).
-  const resize = constrainedTextResize(copy, source, view(copy.parent), doc.get(source.parent));
-  if (
-    resize !== undefined &&
-    !overridden.includes("textAutoResize") &&
-    getProp(copy.props, "textAutoResize") !== resize
-  )
-    out.push({ op: "set", id, prop: "textAutoResize", value: resize });
-  // Its constraints no longer size it (its frame is its main's size again, or they pin
-  // it now): its main layer's auto-resize, as materialized sync gives it.
+  // A copy text keeps its main layer's auto-resize (decision 0043): constraints never switch it.
   const own = getProp(source.props, "textAutoResize");
   if (
-    free &&
     copy.type === "text" &&
-    resize === undefined &&
     !overridden.includes("textAutoResize") &&
     getProp(copy.props, "textAutoResize") !== own
   )
@@ -1170,7 +1171,9 @@ export function overrideOps(doc: Doc, ops: readonly Op[]): Op[] {
     const inInstance =
       isRoot || (getProp(node.props, "mirrors") !== null && isInsideInstance(doc, op.id));
     if (!inInstance) continue;
-    if (isRoot && ROOT_LOCAL_PROPS.has(op.prop)) continue;
+    // An instance's place and pinning are its own, unless it's nested in another instance: then
+    // it's a copy layer like any other, and a person's move of it is an override.
+    if (isRoot && ROOT_LOCAL_PROPS.has(op.prop) && !isInsideInstance(doc, op.id)) continue;
     let set = marks.get(op.id);
     if (!set) {
       set = new Set(getProp(node.props, "overrides"));
