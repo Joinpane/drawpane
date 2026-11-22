@@ -9,6 +9,7 @@
 import { type Camera, type FrameStats, RenderEngine } from "@drawpane/engine";
 import { loadBrowserEngine, loadComputeEngine } from "@drawpane/engine/browser";
 import { CPU_GPU_TOLERANCE, outsideTolerance, score } from "@drawpane/engine/compare";
+import { FLAG, ListWriter, ROOT } from "@drawpane/engine/wire";
 import { buildOrdinaryScene } from "./compute-scene";
 
 export const COMPUTE_BG = [0.95, 0.95, 0.93, 1] as const;
@@ -232,6 +233,16 @@ export async function runComputeMatrix(options: {
   const floor = await checkFloorReset(computeModule, options.allowSoftware);
   cells.push(floor);
   options.onCell?.(floor, cells.length, total + 1);
+  options.signal.throwIfAborted();
+  for (const cell of await runDragChecks(
+    computeModule,
+    legacyModule,
+    options.allowSoftware,
+    options.signal,
+  )) {
+    cells.push(cell);
+    options.onCell?.(cell, cells.length, total + DRAG_CELLS);
+  }
   return {
     adapter,
     software,
@@ -239,6 +250,194 @@ export async function runComputeMatrix(options: {
     overflowChecks,
     ms: Math.round(performance.now() - started),
   };
+}
+
+type Module = Awaited<ReturnType<typeof loadBrowserEngine>>;
+type Patch = (w: ListWriter) => void;
+
+/** Cells `runDragChecks` adds to the matrix: one per drag step of each scene. */
+const DRAG_CELLS = 4 + 2 + 3;
+
+function rect(
+  id: number,
+  parent: number,
+  x: number,
+  y: number,
+  side: number,
+  color: readonly [number, number, number, number],
+) {
+  return {
+    id,
+    parent,
+    record: {
+      flags: 0,
+      opacity: 1,
+      transform: [1, 0, 0, 1, x, y] as [number, number, number, number, number, number],
+      width: side,
+      height: side,
+      coarseBelow: 0,
+      reach: 0,
+      unsupported: 0,
+      paths: [
+        {
+          kind: "rect" as const,
+          w: side,
+          h: side,
+          radii: [0, 0, 0, 0] as [number, number, number, number],
+          smoothing: 0,
+        },
+      ],
+      ops: [
+        { op: "fill" as const, path: 0, evenOdd: false, paint: { kind: "solid" as const, color } },
+      ],
+      coarse: [],
+    },
+  };
+}
+
+function group(id: number, x: number, y: number, opacity: number, isolate: boolean) {
+  return {
+    flags: FLAG.group | (isolate ? FLAG.isolate : 0),
+    opacity,
+    transform: [1, 0, 0, 1, x, y] as [number, number, number, number, number, number],
+    width: 0,
+    height: 0,
+    coarseBelow: 0,
+    reach: 0,
+    unsupported: 0,
+    paths: [],
+    ops: [{ op: "children" as const }],
+    coarse: [],
+    id,
+  };
+}
+
+/**
+ * Drags on compute, step by step, each step's patch sent to both engines and compute's frame
+ * compared with a fresh vello_gpu one (PR #300 review: a one-child group's shared span and an
+ * isolated group's fixed layer rect both showed wrong pixels as exact). Moves compute can't
+ * patch in place must re-encode and still match.
+ */
+async function runDragChecks(
+  computeModule: Module,
+  legacyModule: Module,
+  allowSoftware: boolean,
+  signal: AbortSignal,
+): Promise<MatrixCell[]> {
+  const W = 800;
+  const H = 600;
+  const camera: Camera = { zoom: 1, x: 0, y: 0, dpr: 1 };
+  const translate = (dx: number, dy: number, x: number, y: number) =>
+    [1, 0, 0, 1, x + dx, y + dy] as [number, number, number, number, number, number];
+  const scenes: Array<{ name: string; build: (w: ListWriter) => void; steps: Patch[] }> = [
+    {
+      name: "drag in a one-child group",
+      build: (w) => {
+        const g = group(10, 100, 50, 1, false);
+        w.set(10, ROOT, g);
+        const r = rect(11, 10, 10, 20, 60, [0.9, 0.1, 0.1, 1]);
+        w.set(r.id, r.parent, r.record);
+        w.order(10, [11]);
+        w.order(ROOT, [10]);
+      },
+      steps: [1, 2, 3, 4].map(
+        (k) => (w: ListWriter) => w.transform(11, translate(25 * k, 0, 10, 20)),
+      ),
+    },
+    {
+      name: "drag out of an isolated group",
+      build: (w) => {
+        w.set(10, ROOT, group(10, 0, 0, 0.6, true));
+        for (const r of [
+          rect(11, 10, 40, 40, 40, [0.1, 0.4, 0.9, 1]),
+          rect(12, 10, 50, 40, 40, [0.1, 0.6, 0.3, 1]),
+        ]) {
+          w.set(r.id, r.parent, r.record);
+        }
+        w.order(10, [11, 12]);
+        w.order(ROOT, [10]);
+      },
+      steps: [220, 260].map((dx) => (w: ListWriter) => w.transform(11, translate(dx, 0, 40, 40))),
+    },
+    {
+      name: "drag three cards",
+      build: () => {},
+      steps: [1, 2, 3].map((k) => (w: ListWriter) => {
+        for (const id of [1, 26, 51])
+          w.transform(id, translate(9 * k, 5 * k, 32 + ((id - 1) / 25) * 344, 32));
+      }),
+    },
+  ];
+  const cells: MatrixCell[] = [];
+  for (const scene of scenes) {
+    signal.throwIfAborted();
+    const reference = new RenderEngine(legacyModule);
+    const candidate = new RenderEngine(computeModule);
+    try {
+      const [refGpu, gpu] = await Promise.all([
+        reference.attachGpu(null, { compatibility: false }),
+        candidate.attachGpu(null, { compatibility: false }),
+      ]);
+      if (!refGpu.ok) throw new Error(`vello_gpu device: ${refGpu.message}`);
+      if (!gpu.ok) throw new Error(`compute device: ${gpu.message}`);
+      if (gpu.value.fallback && !allowSoftware) throw new Error("only a software GPU is available");
+      let list: Uint8Array;
+      if (scene.name === "drag three cards") {
+        list = buildOrdinaryScene(6, 6).list;
+      } else {
+        const w = new ListWriter(0xffffffff, 1);
+        w.reset();
+        scene.build(w);
+        list = w.finish();
+      }
+      for (const engine of [reference, candidate]) {
+        const applied = engine.apply(list);
+        if (!applied.ok) throw new Error(applied.message);
+      }
+      const on = candidate.setComputeOrdinary(true);
+      if (!on.ok) throw new Error(on.message);
+      // The first frame encodes the page; every later one is a patch.
+      await drawChecked(candidate, W, H, camera, MATRIX_ATTEMPTS);
+      for (const [k, step] of scene.steps.entries()) {
+        for (const engine of [reference, candidate]) {
+          const w = new ListWriter(engine.revision, engine.revision + 1);
+          step(w);
+          const applied = engine.apply(w.finish());
+          if (!applied.ok) throw new Error(applied.message);
+        }
+        const expected = reference.renderGpu(W, H, camera, COMPUTE_BG, false);
+        if (!expected.ok) throw new Error(`vello_gpu frame: ${expected.message}`);
+        const frame = await drawChecked(candidate, W, H, camera, MATRIX_ATTEMPTS);
+        const [want, got] = await Promise.all([reference.gpuPixels(), candidate.gpuPixels()]);
+        if (!want.ok) throw new Error(`vello_gpu pixels: ${want.message}`);
+        if (!got.ok) throw new Error(`compute pixels: ${got.message}`);
+        const s = score(got.value, want.value, W, H);
+        const violations = outsideTolerance(s, CPU_GPU_TOLERANCE);
+        if (!frame.stats.exact) violations.push("the frame shown was not exact");
+        cells.push({
+          page: scene.name,
+          layers: 0,
+          tight: false,
+          dpr: 1,
+          zoom: `step ${k + 1}`,
+          backend: frame.backend,
+          attempts: frame.attempts,
+          fallback: frame.fallback,
+          ok: violations.length === 0,
+          mean: Number(s.mean.toFixed(4)),
+          p99: s.p99,
+          max: s.max,
+          worstTile: Number(s.worstTile.toFixed(3)),
+          severeInTile: s.severeInTile,
+          violations,
+        });
+      }
+    } finally {
+      candidate.dispose();
+      reference.dispose();
+    }
+  }
+  return cells;
 }
 
 /**

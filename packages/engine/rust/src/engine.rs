@@ -417,19 +417,23 @@ impl Engine {
     }
 
     pub fn apply(&mut self, bytes: &[u8]) -> Result<Applied> {
+        #[cfg(feature = "compute")]
+        let before = self.store.revision;
         let applied = self.store.apply(bytes)?;
         if applied.noop {
             // Nothing changed: no frame needs drawing again, and a drag goes on.
+            #[cfg(feature = "compute")]
+            if let Some(gpu) = self.gpu.as_mut() {
+                gpu.compute_applied(before, &self.store, &applied, self.generation);
+            }
             return Ok(applied);
         }
         self.generation += 1;
         self.invalidate_tiles(&applied.changes, applied.full, applied.moved.is_none());
         self.follow_drag(&applied);
         #[cfg(feature = "compute")]
-        if applied.full
-            && let Some(gpu) = self.gpu.as_mut()
-        {
-            gpu.compute_page_reset();
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.compute_applied(before, &self.store, &applied, self.generation);
         }
         Ok(applied)
     }

@@ -20,6 +20,12 @@ pub trait OrdinarySink {
     fn view_scale(&self) -> f64 {
         1.0
     }
+    /// A record starts (after its visibility checks, before anything it draws), under `world`.
+    /// Its children follow before the matching `end_record`.
+    fn begin_record(&mut self, _id: u32, _world: Affine) {}
+    /// The record (and everything under it) is done.
+    fn end_record(&mut self, _id: u32) {}
+
     /// Opens an isolated compositing/blending layer clipped to `bounds` in `world` space.
     /// `blend` uses Drawpane's wire enum (`0` = Normal, `1..=15` = W3C separable/non-separable).
     fn push_layer(&mut self, world: Affine, bounds: Rect, blend: u32, compose: ComposeMode, opacity: f32);
@@ -300,6 +306,18 @@ fn walk_children<S: OrdinarySink>(
     Ok(())
 }
 
+/// Whether `walk_node` composites the record as one layer (bounded by `node_clip_rect`).
+fn isolates(r: &Record) -> bool {
+    (r.isolate() && r.opacity < 1.0) || r.blend != 0
+}
+
+/// Whether drawing `r` bounds its children by a layer rect sized from where they are now (the
+/// isolated layer, or an `Op::Layer`): moving a child can then take it outside, so a move under
+/// it can't be patched in place (`compute_moves::apply_moves`).
+pub fn bounds_children(r: &Record) -> bool {
+    isolates(r) || r.ops.iter().chain(&r.coarse).any(|op| matches!(op, Op::Layer { .. }))
+}
+
 fn walk_node<S: OrdinarySink>(
     store: &Store,
     id: u32,
@@ -324,7 +342,8 @@ fn walk_node<S: OrdinarySink>(
         return Ok(());
     }
 
-    let isolate_layer = (r.isolate() && r.opacity < 1.0) || r.blend != 0;
+    sink.begin_record(id, world);
+    let isolate_layer = isolates(r);
     let inner_alpha = if isolate_layer { 1.0 } else { opacity };
     if isolate_layer {
         let bounds = node_clip_rect(store, id, r);
@@ -492,6 +511,7 @@ fn walk_node<S: OrdinarySink>(
     if isolate_layer {
         sink.pop_layer();
     }
+    sink.end_record(id);
     res
 }
 
