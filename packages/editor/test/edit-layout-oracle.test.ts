@@ -31,6 +31,7 @@
 import {
   type BindingKey,
   branchChanges,
+  constrainedValues,
   getProp,
   keyBetween,
   mergeOps,
@@ -144,6 +145,34 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
   const out: unknown[] = layoutOps(doc, frames, { shrinkEmpty, keepEmpty }).filter(
     (op) => !twoAnswers(op.id),
   );
+  // A copy layer its frame places freely sits where its constraints put it, from its main layer
+  // (moved by the difference in size where its frame differs from its main's), unless it
+  // overrides its own place.
+  for (const node of all) {
+    const sourceId = getProp(node.props, "mirrors");
+    const source = sourceId ? doc.get(sourceId) : undefined;
+    const parent = doc.get(node.parent);
+    if (!source || parent?.type !== "frame" || node.type === "group") continue;
+    // An instance's place is its own, nested in another or not.
+    if (getProp(node.props, "instanceOf")) continue;
+    if (isLayoutFrame(parent) && getProp(node.props, "positioning") !== "absolute") continue;
+    // Placed otherwise by the copy's own choice: made absolute, or in a frame it gave (or took)
+    // auto layout. Its place then is where that left it.
+    const parentSource = doc.get(source.parent);
+    if (
+      getProp(node.props, "positioning") !== getProp(source.props, "positioning") ||
+      getProp(parent.props, "layoutMode") !== getProp(parentSource?.props ?? {}, "layoutMode")
+    )
+      continue;
+    const derived = constrainedValues(node, source, parent, parentSource);
+    const own = getProp(node.props, "overrides");
+    for (const prop of ["x", "y"] as const) {
+      if (own.includes(prop)) continue;
+      const want = derived[prop] ?? getProp(source.props, prop);
+      const have = getProp(node.props, prop);
+      if (Math.abs(want - have) > 0.01) out.push({ constrained: node.id, prop, have, want });
+    }
+  }
   for (const node of all) {
     if (node.type !== "text") continue;
     const size = autoSize(node, measurer);
@@ -588,7 +617,7 @@ type Edit =
   | { kind: "unbind"; at: number; binding: number }
   | { kind: "variable"; variable: number; mode: number; value: number }
   | { kind: "mode"; at: number; mode: number }
-  | { kind: "swap" | "detach" | "reset"; at: number }
+  | { kind: "swap" | "detach" | "reset" | "reset-all"; at: number }
   | { kind: "undo" }
   | { kind: "undo-redo" };
 
@@ -630,12 +659,20 @@ const edit: fc.Arbitrary<Edit> = fc.oneof(
   fc.record({ kind: fc.constantFrom("bind" as const, "unbind" as const), at, binding: fc.nat(6) }),
   fc.record({
     kind: fc.constant("variable" as const),
-    variable: fc.nat(3),
+    variable: fc.nat(5),
     mode: fc.nat(1),
     value: fc.nat(1),
   }),
   fc.record({ kind: fc.constant("mode" as const), at, mode: fc.nat(2) }),
-  fc.record({ kind: fc.constantFrom("swap" as const, "detach" as const, "reset" as const), at }),
+  fc.record({
+    kind: fc.constantFrom(
+      "swap" as const,
+      "detach" as const,
+      "reset" as const,
+      "reset-all" as const,
+    ),
+    at,
+  }),
   fc.constantFrom({ kind: "undo" as const }, { kind: "undo-redo" as const }),
 );
 const KINDS: readonly Edit["kind"][] = [
@@ -662,6 +699,7 @@ const KINDS: readonly Edit["kind"][] = [
   "swap",
   "detach",
   "reset",
+  "reset-all",
   "undo",
   "undo-redo",
 ];
@@ -689,6 +727,7 @@ const TARGETS: Partial<Record<Edit["kind"], (node: NodeRecord) => boolean>> = {
   swap: isInstance,
   detach: isInstance,
   reset: (node) => getProp(node.props, "overrides").length > 0,
+  "reset-all": isInstance,
   unbind: (node) => Object.keys(getProp(node.props, "bindings")).length > 0,
 };
 
@@ -710,7 +749,8 @@ function unexplained(before: Snapshot, after: Snapshot, doc: Doc): string[] {
     const source = was && getProp(was.props, "mirrors");
     if (was && !now && orphaned(before, id, doc)) continue;
     if (was && now && placedOnly(was, now) && inGroupedFlow(before, id)) continue;
-    if (was && now && !doc.compactCopies && getProp(now.props, "mirrors") === (source ?? null)) {
+    const linked = source !== null || getProp(was?.props ?? {}, "instanceOf") !== null;
+    if (was && now && linked && !doc.compactCopies && getProp(now.props, "mirrors") === source) {
       const same = (n: typeof was) => stable({ ...n, props: placeless(n.props) });
       if (same(was) === same(now)) continue;
     }
@@ -810,11 +850,26 @@ function perform(editor: Editor, e: Edit): "lost" | undefined {
     return;
   }
   if (e.kind === "variable") {
-    const variable = [VARIABLES.show, VARIABLES.shown, VARIABLES.pad, VARIABLES.gap][
-      e.variable
-    ] as string;
+    const variable = [
+      VARIABLES.show,
+      VARIABLES.shown,
+      VARIABLES.pad,
+      VARIABLES.gap,
+      VARIABLES.words,
+      VARIABLES.size,
+    ][e.variable] as string;
     const mode = e.mode ? "dark" : "light";
-    editor.setVariableValue(variable, mode, e.variable < 2 ? e.value === 1 : e.value ? 14 : 3);
+    const value =
+      e.variable < 2
+        ? e.value === 1
+        : e.variable === 4
+          ? e.value
+            ? "A much longer label in this mode"
+            : "Short"
+          : e.value
+            ? 14
+            : 3;
+    editor.setVariableValue(variable, mode, value);
     return;
   }
   const all = layers(doc);
@@ -943,6 +998,11 @@ function perform(editor: Editor, e: Edit): "lost" | undefined {
     case "reset":
       editor.resetOverrides([{ id, props: getProp(node.props, "overrides") }]);
       break;
+    case "reset-all":
+      // Everything in the instance a layer is in, its size included.
+      editor.select([id]);
+      editor.resetInstances();
+      break;
   }
 }
 
@@ -979,14 +1039,16 @@ function check(
 }
 
 /**
- * Connects the editor to a room that holds `nodes`, and gives what a
- * collaborator does there: `remote` makes a layer, arriving while the
- * editor's own edits are still unsent (so they're rebased on it), and
- * `settle` sends them at last and checks the room ends as the editor did,
- * with no desync.
+ * Connects the editor to a room that holds `nodes`, with a collaborator
+ * editing the same file there: `remote` has them change a shared layer
+ * (a copy's or an instance's fill or opacity, a reset, an instance moved
+ * into Dark), arriving while the editor's own edits are still unsent (so
+ * they're rebased on it). `settle` sends the editor's edits at last, as the
+ * room takes them (acked, or refused when they no longer apply), and checks
+ * the room ends as the editor did, with no desync.
  */
 function connect(editor: Editor, nodes: readonly NodeRecord[], copies: "compact" | "materialized") {
-  const sent: { t: string; ops?: Op[] }[] = [];
+  const sent: { t: string; seq?: number; ops?: Op[] }[] = [];
   let desync: string | null = null;
   let revn = 1;
   editor.sync.on("desync", (reason: string) => {
@@ -1006,29 +1068,70 @@ function connect(editor: Editor, nodes: readonly NodeRecord[], copies: "compact"
   });
   receive({ t: "snapshot", nodes, done: true });
   editor.setPage("p");
+  const other = makeEditor(nodes, copies);
   const remote: Op[][] = [];
+  const refused: string[] = [];
   return {
     remote(step: number) {
-      const last = editor.doc.childIds("p").at(-1);
-      const ops: Op[] = [
-        {
-          op: "create",
-          id: `remote${step}`,
-          type: "rect",
-          parent: "p",
-          key: keyBetween(last ? (editor.doc.get(last)?.key ?? null) : null, null),
-          props: { x: 40 * step, y: 1000, width: 10, height: 10 },
-        },
-      ];
+      const all = layers(other.doc);
+      const pick = (fits: (n: NodeRecord) => boolean) => {
+        const list = all.filter(fits);
+        return list[(step * 7) % Math.max(1, list.length)];
+      };
+      const copy = pick((n) => !!getProp(n.props, "mirrors"));
+      const instance = pick(isInstance);
+      switch (step % 4) {
+        case 0:
+          if (copy) other.setProp([copy.id], "opacity", 0.5);
+          break;
+        case 1:
+          if (copy) other.setProp([copy.id], "fills", [{ type: "solid", color: "#336699" }]);
+          break;
+        case 2: {
+          const own = pick((n) => getProp(n.props, "overrides").length > 0);
+          if (own) other.resetOverrides([{ id: own.id, props: getProp(own.props, "overrides") }]);
+          break;
+        }
+        case 3:
+          if (instance && canMoveInto(other.doc, [instance.id], "dark"))
+            other.commit([
+              { op: "move", id: instance.id, parent: "dark", key: other.topKey("dark") },
+            ]);
+          break;
+      }
+      const ops = other.sync.takeUnsent();
+      if (ops.length === 0) return;
       remote.push(ops);
       revn += 1;
       receive({ t: "txn", revn, ops });
     },
     settle(mirror: Doc, step: string) {
-      editor.sync.flush();
       for (const ops of remote) mirror.applyStored(ops, { held: true });
-      for (const m of sent) if (m.t === "txn" && m.ops) mirror.applyStored(m.ops, { held: true });
+      editor.sync.flush();
+      for (const m of sent.splice(0)) {
+        if (m.t !== "txn" || !m.ops) continue;
+        try {
+          mirror.applyStored(m.ops, { held: true });
+          revn += 1;
+          receive({ t: "ack", seq: m.seq, revn });
+        } catch (error) {
+          if (!(error instanceof Error) || error.name !== "ModelError") throw error;
+          refused.push((error as { code?: string }).code ?? error.message);
+          receive({
+            t: "reject",
+            seq: m.seq,
+            code: (error as { code?: string }).code,
+            message: error.message,
+            fix: {},
+          });
+        }
+      }
       expect(desync, `no desync ${step}`).toBeNull();
+      // The collaborator's edits (a fill, an opacity, a reset, an instance moved) never truly
+      // conflict with the editor's in compact copies, as rooms keep them: one the room refuses
+      // is one lost in the rebase. Materialized copies are rewritten whole by sync, so two
+      // clients editing one instance can conflict there (on main too).
+      if (copies === "compact") expect(refused, `nothing refused ${step}`).toEqual([]);
       expect(snapshot(mirror), `the room, rebased ${step}`).toEqual(snapshot(editor.doc));
     },
   };
