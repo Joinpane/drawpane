@@ -1,9 +1,11 @@
 import { type EngineModule, ErrorCode, RenderEngine, unsupportedNames } from "@drawpane/engine";
 import { built, loadNodeEngine } from "@drawpane/engine/node";
+import { FLAG } from "@drawpane/engine/wire";
 import { glyphKey, ROOT_ID } from "@drawpane/model";
 import { beforeAll, describe, expect, it } from "vitest";
 import { Doc } from "../src/doc";
 import { DisplayListBuilder } from "../src/engine/display-list";
+import { encodeLayer } from "../src/engine/layer";
 import { greekLines } from "../src/render";
 import { Scene } from "../src/scene";
 import type { TextMeasurer } from "../src/text";
@@ -85,6 +87,71 @@ describe("Document regressions (review of PR 216)", () => {
     };
     new DisplayListBuilder(new Scene(doc), counting).build("p");
     expect(shaped).toBe(0);
+  });
+
+  it("isolates a faded layer combining a backdrop reader with a visible fill or stroke", () => {
+    const doc = page();
+    doc.apply([
+      {
+        op: "create",
+        id: "fadedBlurWithFill",
+        type: "rect",
+        parent: "p",
+        key: "a0",
+        props: {
+          width: 40,
+          height: 40,
+          opacity: 0.9,
+          fills: [{ type: "solid", color: "#000000", blendMode: "screen" }],
+          effects: [{ type: "background-blur", radius: 20 }],
+        },
+      },
+      {
+        op: "create",
+        id: "fadedBlurOnly",
+        type: "rect",
+        parent: "p",
+        key: "a1",
+        props: {
+          width: 40,
+          height: 40,
+          opacity: 0.9,
+          fills: [],
+          effects: [{ type: "background-blur", radius: 20 }],
+        },
+      },
+      {
+        op: "create",
+        id: "opaqueBlurWithFill",
+        type: "rect",
+        parent: "p",
+        key: "a2",
+        props: {
+          width: 40,
+          height: 40,
+          opacity: 1,
+          fills: [{ type: "solid", color: "#ffffff33" }],
+          effects: [{ type: "background-blur", radius: 20 }],
+        },
+      },
+    ]);
+    const scene = new Scene(doc);
+    const ctx = {
+      scene,
+      measurer,
+      hidden: new Set<string>(),
+      whole: null,
+      glyph: () => 1,
+      image: () => undefined,
+    };
+    const flags = (id: string) => {
+      const node = doc.get(id);
+      if (!node) throw new Error(`missing ${id}`);
+      return encodeLayer(node, ctx).record.flags;
+    };
+    expect((flags("fadedBlurWithFill") & FLAG.isolate) !== 0).toBe(true);
+    expect((flags("fadedBlurOnly") & FLAG.isolate) !== 0).toBe(false);
+    expect((flags("opaqueBlurWithFill") & FLAG.isolate) !== 0).toBe(false);
   });
 });
 
@@ -636,5 +703,81 @@ describe.skipIf(!built())("Saved glyphs, images and revisions (review of PR 216)
     } finally {
       engine.dispose();
     }
+  });
+
+  it("renders a faded backdrop-blur + fill layer inside an alpha mask at Figma's alpha end-to-end", () => {
+    const renderCenterAlpha = (maskColor: string) => {
+      const doc = page();
+      doc.apply([
+        {
+          op: "create",
+          id: "bg",
+          type: "rect",
+          parent: "p",
+          key: "a0",
+          props: {
+            x: 0,
+            y: 0,
+            width: 120,
+            height: 120,
+            fills: [{ type: "solid", color: "#00000080" }],
+          },
+        },
+        {
+          op: "create",
+          id: "scope",
+          type: "frame",
+          parent: "p",
+          key: "a1",
+          props: { x: 10, y: 10, width: 100, height: 100, clipContent: false, fills: [] },
+        },
+        {
+          op: "create",
+          id: "mask",
+          type: "frame",
+          parent: "scope",
+          key: "a0",
+          props: {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+            isMask: true,
+            maskType: "alpha",
+            fills: [{ type: "solid", color: maskColor }],
+          },
+        },
+        {
+          op: "create",
+          id: "blur",
+          type: "rect",
+          parent: "scope",
+          key: "a1",
+          props: {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+            opacity: 0.9,
+            fills: [{ type: "solid", color: "#000000", blendMode: "screen" }],
+            effects: [{ type: "background-blur", radius: 10 }],
+          },
+        },
+      ]);
+      const engine = new RenderEngine(module);
+      try {
+        const list = new DisplayListBuilder(new Scene(doc), measurer).build("p");
+        expect(engine.apply(list).ok).toBe(true);
+        const res = engine.renderCpu(120, 120, camera, [0, 0, 0, 0], false);
+        if (!res.ok) throw new Error(res.message);
+        return res.value.pixels[(60 * 120 + 60) * 4 + 3];
+      } finally {
+        engine.dispose();
+      }
+    };
+    // Mask 0.502 * 0.9 over 0.502 backdrop -> 185; mask 0.667 * 0.9 over 0.502 -> 204 (Figma
+    // scroll-edge-mask golden, vs 209 from the non-isolated canvas path).
+    expect(renderCenterAlpha("#ffffff80")).toBe(185);
+    expect(renderCenterAlpha("#ffffffaa")).toBe(204);
   });
 });

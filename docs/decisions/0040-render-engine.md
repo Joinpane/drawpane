@@ -113,7 +113,7 @@ A list of **layer records**, each keyed by a handle (a 32-bit index plus a gener
 
 ## The render graph
 
-A board picture is reusable only while everything its pixels depend on is unchanged. Pass-through blends and backdrop readers make a layer's pixels depend on drawing outside its own subtree (decisions 0038 and 0039). Isolation controls how the finished picture composites. Glass inside an isolated picture can still depend on paint outside it. So caching follows a graph of what reads what, not the layer tree.
+A board picture is reusable only while everything its pixels depend on is unchanged. Pass-through blends and backdrop readers make a layer's pixels depend on drawing outside its own subtree (decisions 0038 and 0039). Isolation controls how the finished picture composites. Glass and background blur inside an isolated picture can still depend on paint outside it. So caching follows a graph of what reads what, not the layer tree.
 
 ### Nodes
 
@@ -122,7 +122,7 @@ A board picture is reusable only while everything its pixels depend on is unchan
   - The page is a scope.
   - So is every layer that isolates: fading as one, a mask group (masked layers are drawn apart, 0016), a layer blur, a layer that blends as one.
   - A frame that doesn't isolate is not a scope: blending passes through it.
-- **Backdrop prefix:** for a reader at paint position *p* in scope *S*, the paint available before *p*, restricted to the reader's read region (its extent grown by its reach). Ordinary blends use the current scope's prefix. Glass inherits the parent prefix beneath an isolated picture and composites the picture's preceding glass-free paint over it.
+- **Backdrop prefix:** for a reader at paint position *p* in scope *S*, the paint available before *p*, restricted to the reader's read region (its extent grown by its reach). Ordinary blends use the current scope's prefix. Glass, background blur and progressive background blur inherit the parent prefix beneath an isolated picture and composite the picture's preceding glass-free paint over it.
   - For an export with context (decision 0039), the page beneath the exported layers, without the page's background, is the prefix of the export's top scope.
 - **Reader:** a pass whose output depends on its prefix: glass, background blur, every non-normal blend, and the copy a faded pass-through frame holding a blend draws over (0038). Its output region is its extent.
 - **Filter:** a pass over a scope's own result (layer blur, noise, texture, mask application).
@@ -1126,6 +1126,18 @@ The `glass-scopes` fixtures put the lens across the edge of translucent interior
 The added cells measure glass in a mask under multiply, in a layer-blurred multiply frame, in a multiply frame under layer blur, and in a texture picture. Their measured Worker mean differences from Figma are 1.99, 2.50, 0.61 and 1.08. The largest remaining differences in the two outer multiply cells occur where translucent interior paint overlaps the lens.
 
 A translucent luminance mask uses the Rec. 709 luminance of its premultiplied picture multiplied by the picture's alpha. The Figma masks fixture varies the luminance at constant 80% opacity, making the white end cover about 64% of the content.
+
+### Background blur inside isolated pictures
+
+Background and progressive blur sample the same inherited prefix as glass. Their source coordinates follow the saved prefix, while the mask and output stay in the destination picture's coordinates. The original mask, post effect or blend applies to that picture, and the picture then composites over the parent.
+
+An inherited GPU prefix snapshot is cropped to the reader's input rectangle inside a growable, budgeted scratch texture rounded to 64-pixel multiples. For glass this is the union of its chunks' read extents (mapped back to native frame pixels when high-zoom replay splits optics onto a reduced grid; per-lens coarse halo snapshots use the same crop). For blur it includes the Gaussian reach and keeps the downsample phase anchored to the unclipped frame. Readers treat the cropped input as immutable; only the reader's own shaded output is written to the scope's picture.
+
+Band and tile halos include the reach of enclosing spatial post-effects (such as layer blur and texture) when a reader inherits through them, and CPU reader masks rasterize in the active scene's coordinates rather than per-band origin offsets, so row- and column-banded Worker exports stay bit-identical to whole frames at fractional cameras when the page varies along either axis. Exports enforce `Limits::halo` on the reader-only reach while allowing enclosing post-effect reach (clamped to the frame bounds) under the export memory and work budgets so exports that previously succeeded are not newly refused.
+
+Measured in Figma on transparent pages (`scoped-alpha` suite): when a picture mask (gradient, ellipse, blurred, or clipping a child), layer blur, noise, texture or explicit blend isolates a picture over a see-through background (such as 50% black), Figma composites the finished picture over the parent, so the see-through backdrop beneath the reader enters the composite again (for example, 50% black becomes 75% alpha in a layer-blurred frame, and 70% to 74% under an 80% clipping alpha mask). Only when Figma can elide the mask offscreen (such as an unclipped uniform-alpha rectangle enclosing the child) does it apply directly to the parent. Separately, the engine deliberately departs from `render.ts` for faded layers (`opacity < 1`) that combine a backdrop reader with a visible fill or stroke, isolating them as one picture (`FLAG_ISOLATE`) rather than fading the blur and fill independently; this matches the `scoped-alpha` `scroll-edge-mask` Figma golden (alpha 204 and 185 vs 209 from the canvas renderer).
+
+On the Figma goldens (verified on a Tesla T4 across CPU, WebGPU, WebGL2 and Worker builds, all Worker outputs bit-identical to browser CPU): `blur-scopes` mean error fell from 2.82 to 0.44 CPU (0.46 WebGPU/WebGL2) for blur in a picture mask and from 4.10 to 0.56 CPU (0.58 WebGPU/WebGL2) for blur in a layer-blurred frame (suite mean 0.50 CPU, 0.52 WebGPU/WebGL2). The `scoped-alpha` suite scores 0.14 CPU and 0.12 WebGPU/WebGL2 across its five cells (`bgblur-in-mask` 0.16, `bgblur-in-blur` 0.13/0.14, `glass-in-mask` 0.05, `glass-in-blur` 0.14, `scroll-edge-mask` 0.20 CPU / 0.13 GPU). On 12 comparable frames of a large iOS UI kit, engine CPU total error dropped from 24.30 to 13.28 (`Examples/List` 13.89 to 2.98, `Lock Screen Widget - Modular Table` 0.17 to 0.04, `Scroll Edge Effect - Soft` unchanged at 0.39). Regressions cover inherited samples, patch/fresh equality, row- and column-banded exports at fractional cameras across layer-blur chains, large enclosing layer-blur export halos, extreme-zoom whole-frame scoped glass and background blur equivalence, and end-to-end faded blur+fill layers inside masks.
 
 ## Amendment for text with missing faces
 

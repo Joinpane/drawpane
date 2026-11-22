@@ -485,7 +485,7 @@ fn lens_sample(p: vec2<f32>) -> LensSample {
 // stays in the viewport. Fade over the last device pixel at the halo boundary.
 fn glass_color(uv: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>) -> vec4<f32> {
     let halo_color = textureSampleGrad(g_backdrop, g_mip_samp, uv, dx, dy);
-    if (gu.native_map.z < 0.5) {
+    if (gu.native_map.z < 0.5 || gu.native_bounds.z <= gu.native_bounds.x || gu.native_bounds.w <= gu.native_bounds.y) {
         return halo_color;
     }
     let scale = gu.sizes.xy * gu.native_map.w;
@@ -494,7 +494,10 @@ fn glass_color(uv: vec2<f32>, dx: vec2<f32>, dy: vec2<f32>) -> vec4<f32> {
     let footprint = max(length(dx * scale), length(dy * scale));
     let blend = clamp(min(edge.x, edge.y) + 0.5, 0.0, 1.0)
         * (1.0 - clamp((footprint - 1.0) / (gu.native_map.w - 1.0), 0.0, 1.0));
-    let uv_native = native_px / vec2<f32>(textureDimensions(g_native));
+    // Clamp inside the logical native bounds so a growable scratch texture never leaks padding texels.
+    let lo = gu.native_bounds.xy + vec2<f32>(0.5);
+    let hi = max(lo, gu.native_bounds.zw - vec2<f32>(0.5));
+    let uv_native = clamp(native_px, lo, hi) / vec2<f32>(textureDimensions(g_native));
     return mix(halo_color, textureSampleLevel(g_native, g_lin_samp, uv_native, 0.0), blend);
 }
 

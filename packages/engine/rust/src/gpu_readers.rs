@@ -2225,7 +2225,8 @@ impl GpuReaders {
     }
 
     /// Preserve the original scope when several blur tiles or glass chunks write
-    /// to the same plane that they sample.
+    /// to the same plane that they sample, or compose an inherited reader prefix.
+    /// Growable in 64-pixel multiples so varying crop sizes reuse one scratch texture.
     pub fn ensure_blur_source_budgeted(
         &mut self,
         device: &wgpu::Device,
@@ -2233,15 +2234,29 @@ impl GpuReaders {
         max_bytes: usize,
     ) -> Result<()> {
         let (w, h) = size;
-        if self.blur_source.as_ref().is_some_and(|t| (t.width, t.height) == size) {
+        let max_dim = device.limits().max_texture_dimension_2d;
+        if w > max_dim || h > max_dim {
+            return Err(EngineError::limit(format!(
+                "reader prefix snapshot ({w} x {h} px) exceeds device texture limit ({max_dim} px)"
+            )));
+        }
+        let nw = w.max(1).next_multiple_of(64).min(max_dim);
+        let nh = h.max(1).next_multiple_of(64).min(max_dim);
+        let reuse = self.blur_source.as_ref().is_some_and(|t| {
+            t.width >= w
+                && t.height >= h
+                && (t.width as usize * t.height as usize) <= (nw as usize * nh as usize * 4).max(1_048_576)
+        });
+        if reuse {
             return Ok(());
         }
         let freed = self.blur_source.as_ref().map_or(0, PlainTex::bytes);
-        self.reserve_bytes(w as usize * h as usize * 4, freed, "reader prefix snapshot", max_bytes)?;
+        let add = nw as usize * nh as usize * 4;
+        self.reserve_bytes(add, freed, "reader prefix snapshot", max_bytes)?;
         self.blur_source = Some(make_plain(
             device,
-            w,
-            h,
+            nw,
+            nh,
             RGBA8,
             4,
             wgpu::TextureUsages::COPY_DST
@@ -2612,6 +2627,7 @@ impl GpuReaders {
         tex_size: (u32, u32),
         frame_size: (i32, i32),
         offset: (i32, i32),
+        frame_dirty_origin: (i32, i32),
         backdrop_gen: u64,
         backdrop_is_frame: bool,
         dirty: IRect,
@@ -2639,8 +2655,8 @@ impl GpuReaders {
             self.ensure_shared_coarse_mips(device, encoder, backdrop_view, tex_size, backdrop_gen, max_bytes)?;
             let mips = self.shared_coarse_mips.as_ref().expect("shared");
             (
-                x0 as f32,
-                y0 as f32,
+                frame_dirty_origin.0 as f32,
+                frame_dirty_origin.1 as f32,
                 1.0 / (tex_size.0 as f32),
                 1.0 / (tex_size.1 as f32),
                 (mips.mip_views.len() - 1) as f32,
@@ -2648,8 +2664,8 @@ impl GpuReaders {
             )
         } else {
             let region = GlassRegion {
-                x0: dirty.x0 - offset.0,
-                y0: dirty.y0 - offset.1,
+                x0: frame_dirty_origin.0,
+                y0: frame_dirty_origin.1,
                 rw: bw,
                 rh: bh,
                 out_x0: dirty.x0,
