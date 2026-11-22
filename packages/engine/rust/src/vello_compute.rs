@@ -1027,6 +1027,9 @@ impl VelloCompute {
         budget: u64,
     ) -> Result<(ComputeFrameStats, Option<PendingDiag>)> {
         let t_total = gpu::now();
+        // A gated frame's back texture stays allocated between frames, staged ones included: the
+        // rest of compute's buffers get what it leaves of the budget.
+        let budget = budget.saturating_sub(self.back.as_ref().map_or(0, |b| b.bytes));
         if let Some((_, format)) = gate
             && self.gate.is_none()
         {
@@ -1484,7 +1487,7 @@ impl VelloCompute {
             }
         };
         let (id, back_view) = (back.id, back.view.clone());
-        // The rest of compute's buffers get what the back texture leaves of the budget.
+        // `render_into` takes the back texture out of the budget for the rest of the buffers.
         self.back = Some(back);
         self.render_into(
             device,
@@ -1499,7 +1502,7 @@ impl VelloCompute {
             id,
             &back_view,
             Some((shown, format)),
-            budget.saturating_sub(bytes),
+            budget,
         )
     }
 

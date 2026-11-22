@@ -2718,6 +2718,9 @@ export class EngineView {
       // This view is on screen; its check redraws when it lands.
       return { kind: "wait" };
     }
+    // Whatever was on screen before is superseded by this present (or by vello_gpu, if the
+    // engine is busy or stages instead): a check still in flight for it must not hold this view.
+    this.#pendingGate = null;
     const presented = engine.presentComputeFrame(width, height, cam, bg);
     if (!presented.ok) return { kind: "frame", result: presented, key };
     const reason = engine.computeFallbackReason();

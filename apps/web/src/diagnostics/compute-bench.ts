@@ -71,11 +71,15 @@ export interface FrameSample {
   /** Main-thread wall of every engine call the frame took. */
   readonly cpuMs: number;
   readonly split: CpuSplit;
-  /** Waiting for the compute check (off the main thread), or for vello_gpu's fence. */
-  readonly waitMs: number;
-  /** GPU time of the frame's passes (timestamp queries), when the device has them. */
+  /** From the request until the frame's read-back check landed (compute only). */
+  readonly checkMs: number | null;
+  /** `gpuFinished` after the frame's last engine call: the GPU finished everything submitted. */
+  readonly fenceMs: number | null;
+  /** The sum of the frame's compute passes (timestamp queries), when the device has them. */
   readonly gpuMs: number | null;
-  /** From the frame's request to the next animation frame after it was shown. */
+  /** First pass's start to last pass's end: `gpuSpanMs - gpuMs` is gaps between passes. */
+  readonly gpuSpanMs: number | null;
+  /** From the frame's request to the next animation frame after the GPU finished it. */
   readonly shownMs: number;
 }
 
@@ -85,12 +89,17 @@ export interface SweepReport {
   readonly cpuMs: Quantiles;
   /** p50 of each part of the CPU split. */
   readonly splitP50: CpuSplit;
-  readonly waitMs: Quantiles;
+  readonly checkMs: Quantiles | null;
+  readonly fenceMs: Quantiles | null;
   readonly gpuMs: Quantiles | null;
+  readonly gpuSpanMs: Quantiles | null;
   readonly shownMs: Quantiles;
   /** Mean GPU ms per compute pass over this sweep (compute sweeps with timestamps). */
   readonly passAvgMs: Readonly<Record<string, number>> | null;
-  /** The frames at or past the GPU (else CPU) p99, with what they were drawing. */
+  /**
+   * The slowest frames to show and to finish on the GPU, slowest shown first. A frame whose GPU
+   * time is ordinary but whose fence or check is late is a scheduling or read-back delay.
+   */
   readonly slowest: readonly FrameSample[];
   readonly computeFrames: number;
 }
@@ -117,12 +126,30 @@ export interface BenchReport {
   readonly layers: number;
   readonly sweeps: readonly SweepReport[];
   readonly edits: readonly EditReport[];
+  /** What the display and a trivial WebGPU submission cost here, beside the engine's frames. */
+  readonly baseline: Baseline;
   /** Checks that found an overflow and redrew, over the whole bench. */
   readonly overflowChecks: number;
   /** Whole-page encodes and in-place patched moves on compute, over the whole bench. */
   readonly encodes: { readonly full: number; readonly patched: number } | null;
   readonly fallback: string | null;
   readonly ms: number;
+}
+
+/**
+ * The floor under every sweep: the display's animation-frame interval (16.7 ms at 60 Hz, 8.3 ms
+ * at 120 Hz ProMotion), and the fence of a trivial WebGPU submission (16 one-workgroup compute
+ * passes and a 288-byte read-back, like a compute frame's shape with none of its work), paced by
+ * animation frames and back to back. Against these, a slow compute frame is either the display,
+ * the browser's submission and callback path, or the engine.
+ */
+export interface Baseline {
+  readonly rafMs: Quantiles;
+  readonly refreshHz: number;
+  readonly trivialFence: {
+    readonly paced: Quantiles;
+    readonly backToBack: Quantiles;
+  } | null;
 }
 
 const nextFrame = () => new Promise<number>((resolve) => requestAnimationFrame(resolve));
@@ -154,12 +181,19 @@ function sweepReport(
   frames: FrameSample[],
   passAvgMs: Readonly<Record<string, number>> | null,
 ): SweepReport {
-  const gpu = frames.map((f) => f.gpuMs).filter((x): x is number => x !== null);
-  const gpuQ = gpu.length === frames.length && gpu.length > 0 ? quantiles(gpu) : null;
+  const all = (pick: (f: FrameSample) => number | null) => {
+    const xs = frames.map(pick).filter((x): x is number => x !== null);
+    return xs.length === frames.length && xs.length > 0 ? quantiles(xs) : null;
+  };
+  const gpuQ = all((f) => f.gpuMs);
   const cpuQ = quantiles(frames.map((f) => f.cpuMs));
-  const slowest = gpuQ
-    ? frames.filter((f) => (f.gpuMs ?? 0) >= gpuQ.p99)
-    : frames.filter((f) => f.cpuMs >= cpuQ.p99);
+  // The four slowest to show, and the four slowest to finish (fence or check), once each.
+  const by = (pick: (f: FrameSample) => number) =>
+    [...frames].sort((a, b) => pick(b) - pick(a)).slice(0, 4);
+  const late = (f: FrameSample) => Math.max(f.fenceMs ?? 0, f.checkMs ?? 0);
+  const slowest = [...new Set([...by((f) => f.shownMs), ...by(late)])].sort(
+    (a, b) => b.shownMs - a.shownMs,
+  );
   const p50 = (pick: (s: CpuSplit) => number) => quantiles(frames.map((f) => pick(f.split))).p50;
   return {
     label,
@@ -173,8 +207,10 @@ function sweepReport(
       render: p50((s) => s.render),
       submit: p50((s) => s.submit),
     },
-    waitMs: quantiles(frames.map((f) => f.waitMs)),
+    checkMs: all((f) => f.checkMs),
+    fenceMs: all((f) => f.fenceMs),
     gpuMs: gpuQ,
+    gpuSpanMs: all((f) => f.gpuSpanMs),
     shownMs: quantiles(frames.map((f) => f.shownMs)),
     passAvgMs,
     slowest,
@@ -194,6 +230,37 @@ function takeStats(
   totals.patched += stats.value.encodes?.patched ?? 0;
   engine.computeResetStats();
   return stats.value;
+}
+
+/**
+ * Puts the engine's per-frame GPU times (pass sum and span) on the frames that drew them, in
+ * order: `draws` frames' checks each (a frame that redrew after an overflow was checked more
+ * than once, and its last check is the one shown).
+ */
+function withGpuTimes(
+  frames: FrameSample[],
+  stats: { readonly gpuMs: readonly number[]; readonly gpuSpanMs: readonly number[] },
+): void {
+  let at = 0;
+  for (const [k, f] of frames.entries()) {
+    if (f.backend !== "compute") continue;
+    at += f.draws;
+    const ms = stats.gpuMs[at - 1];
+    const span = stats.gpuSpanMs[at - 1];
+    frames[k] = {
+      ...f,
+      gpuMs: ms === undefined ? null : round(ms),
+      gpuSpanMs: span === undefined ? null : round(span),
+    };
+  }
+}
+
+function passesOf(stats: { readonly passAvgMs: Readonly<Record<string, number>> }) {
+  return Object.fromEntries(
+    Object.entries(stats.passAvgMs)
+      .filter(([, ms]) => ms > 0)
+      .map(([k, ms]) => [k, round(ms)]),
+  );
 }
 
 /** A zoom sweep on compute: each frame staged, checked and shown, as the editor does. */
@@ -221,6 +288,7 @@ async function computeSweep(
     // finished presenting it.
     const fence = await engine.gpuFinished();
     if (!fence.ok) throw new Error(`compute fence ${i}: ${fence.message}`);
+    const fenceMs = performance.now() - t0;
     await nextFrame();
     frames.push({
       i,
@@ -229,40 +297,25 @@ async function computeSweep(
       draws: frame.attempts,
       cpuMs: round(frame.cpuMs),
       split: splitOf(frame),
-      waitMs: round(frame.checkMs),
+      checkMs: frame.backend === "compute" ? round(frame.stageMs + frame.checkMs) : null,
+      fenceMs: round(fenceMs),
       gpuMs: null,
+      gpuSpanMs: null,
       shownMs: round(performance.now() - t0),
     });
   }
-  // The engine keeps every checked frame's GPU time in order; a frame that redrew after an
-  // overflow checked more than once, so line them up by draws.
   const stats = takeStats(engine, totals);
-  if (stats?.timestampsSupported) {
-    const gpu = stats.gpuMs;
-    let at = 0;
-    for (const [k, f] of frames.entries()) {
-      if (f.backend !== "compute") continue;
-      at += f.draws;
-      const ms = gpu[at - 1];
-      if (ms !== undefined) frames[k] = { ...f, gpuMs: round(ms) };
-    }
-  }
-  const passes = stats?.timestampsSupported
-    ? Object.fromEntries(
-        Object.entries(stats.passAvgMs)
-          .filter(([, ms]) => ms > 0)
-          .map(([k, ms]) => [k, round(ms)]),
-      )
-    : null;
-  return sweepReport(label, frames, passes);
+  if (stats?.timestampsSupported) withGpuTimes(frames, stats);
+  return sweepReport(label, frames, stats?.timestampsSupported ? passesOf(stats) : null);
 }
 
 /**
  * A zoom sweep through the bump gate: each frame presented at once (the GPU keeps the last good
  * frame wherever a stage overflowed), its check landing later. Fenced exactly as the vello_gpu
- * sweep is: wait is how long the GPU took to finish after the request, and shown is the
- * animation frame after that. Every frame's check is kept and settled; when the engine has as
- * many in flight as it allows, the sweep waits for the oldest before presenting again.
+ * sweep is, and shown is the animation frame after the fence. Every frame's check is kept and
+ * settled; when the engine has as many in flight as it allows, the sweep waits for the oldest
+ * before presenting again. `paced` false draws back to back, with no animation frame between:
+ * shown is then the fence, and the sweep says what submitting costs without the display.
  */
 async function gatedSweep(
   engine: RenderEngine,
@@ -271,6 +324,7 @@ async function gatedSweep(
   page: { readonly pageWidth: number; readonly pageHeight: number },
   totals: { overflow: number; full: number; patched: number },
   signal: AbortSignal,
+  paced = true,
 ): Promise<SweepReport> {
   // The gate keeps the frame on screen, so there has to be one: draw the first one checked.
   await drawChecked(
@@ -282,6 +336,7 @@ async function gatedSweep(
   takeStats(engine, totals);
   const frames: FrameSample[] = [];
   const checks: Array<Promise<boolean>> = [];
+  const landed: number[] = [];
   let settled = 0;
   let redraws = 0;
   let busy = 0;
@@ -301,12 +356,17 @@ async function gatedSweep(
     if (!presented.ok) throw new Error(`gated frame ${i}: ${presented.message}`);
     if (!presented.value || presented.value === "busy")
       throw new Error(`gated frame ${i}: compute didn't draw it`);
-    checks.push(presented.value.check);
-    const t1 = performance.now();
+    const requested = t0;
+    checks.push(
+      presented.value.check.then((ok) => {
+        landed[i] = performance.now() - requested;
+        return ok;
+      }),
+    );
     const fence = await engine.gpuFinished();
     if (!fence.ok) throw new Error(`gated fence ${i}: ${fence.message}`);
-    const waitMs = performance.now() - t1;
-    await nextFrame();
+    const fenceMs = performance.now() - t0;
+    if (paced) await nextFrame();
     const verdict = engine.finishComputeGate();
     if (verdict === "redraw") redraws++;
     if (verdict === "fallback" || verdict === "lost")
@@ -325,28 +385,23 @@ async function gatedSweep(
         render: round(stats.ms.render),
         submit: round(stats.ms.submit),
       },
-      waitMs: round(waitMs),
+      checkMs: null,
+      fenceMs: round(fenceMs),
       gpuMs: null,
+      gpuSpanMs: null,
       shownMs: round(performance.now() - t0),
     });
   }
   await Promise.all(checks);
-
+  for (const [k, f] of frames.entries()) {
+    const ms = landed[k];
+    if (ms !== undefined) frames[k] = { ...f, checkMs: round(ms) };
+  }
   engine.finishComputeGate();
   const stats = takeStats(engine, totals);
-  if (stats?.timestampsSupported && stats.gpuMs.length === frames.length) {
-    for (const [k, ms] of stats.gpuMs.entries()) {
-      const f = frames[k];
-      if (f) frames[k] = { ...f, gpuMs: round(ms) };
-    }
-  }
-  const passes = stats?.timestampsSupported
-    ? Object.fromEntries(
-        Object.entries(stats.passAvgMs)
-          .filter(([, ms]) => ms > 0)
-          .map(([k, ms]) => [k, round(ms)]),
-      )
-    : null;
+  if (stats?.timestampsSupported && stats.gpuMs.length === frames.length)
+    withGpuTimes(frames, stats);
+  const passes = stats?.timestampsSupported ? passesOf(stats) : null;
   const notes = [
     redraws ? `${redraws} redrew after an overflow` : "",
     busy ? `${busy} waited for a check` : "",
@@ -379,10 +434,9 @@ async function velloSweep(
     );
     const cpuMs = performance.now() - t0;
     if (!drawn.ok) throw new Error(`vello_gpu frame ${i}: ${drawn.message}`);
-    const t1 = performance.now();
     const fence = await engine.gpuFinished();
     if (!fence.ok) throw new Error(`vello_gpu fence ${i}: ${fence.message}`);
-    const waitMs = performance.now() - t1;
+    const fenceMs = performance.now() - t0;
     await nextFrame();
     frames.push({
       i,
@@ -397,8 +451,10 @@ async function velloSweep(
         render: round(drawn.value.ms.render),
         submit: round(drawn.value.ms.submit),
       },
-      waitMs: round(waitMs),
+      checkMs: null,
+      fenceMs: round(fenceMs),
       gpuMs: null,
+      gpuSpanMs: null,
       shownMs: round(performance.now() - t0),
     });
   }
@@ -519,6 +575,120 @@ async function editLoop(
   };
 }
 
+/** The display's animation-frame interval: 16.7 ms at 60 Hz, 8.3 ms at 120 Hz. */
+async function rafBaseline(frames = 60): Promise<Pick<Baseline, "rafMs" | "refreshHz">> {
+  let last = await nextFrame();
+  const intervals: number[] = [];
+  for (let i = 0; i < frames; i++) {
+    const t = await nextFrame();
+    intervals.push(t - last);
+    last = t;
+  }
+  const rafMs = quantiles(intervals);
+  return { rafMs, refreshHz: rafMs.p50 > 0 ? Math.round(1000 / rafMs.p50) : 0 };
+}
+
+/** Just what `trivialFence` calls, so the page needs no WebGPU type package. */
+interface TrivialBuffer {
+  mapAsync(mode: number): Promise<void>;
+  unmap(): void;
+  destroy(): void;
+}
+interface TrivialDevice {
+  createShaderModule(d: { code: string }): unknown;
+  createComputePipeline(d: { layout: "auto"; compute: { module: unknown; entryPoint: string } }): {
+    getBindGroupLayout(i: number): unknown;
+  };
+  createBuffer(d: { size: number; usage: number }): TrivialBuffer;
+  createBindGroup(d: {
+    layout: unknown;
+    entries: Array<{ binding: number; resource: { buffer: TrivialBuffer } }>;
+  }): unknown;
+  createCommandEncoder(): {
+    beginComputePass(): {
+      setPipeline(p: unknown): void;
+      setBindGroup(i: number, g: unknown): void;
+      dispatchWorkgroups(x: number): void;
+      end(): void;
+    };
+    copyBufferToBuffer(a: TrivialBuffer, ao: number, b: TrivialBuffer, bo: number, n: number): void;
+    finish(): unknown;
+  };
+  readonly queue: { submit(buffers: unknown[]): void; onSubmittedWorkDone(): Promise<void> };
+  destroy(): void;
+}
+
+/**
+ * A compute frame's shape with none of its work, on a device of its own: 16 one-workgroup
+ * passes and a 288-byte read-back, timed from submit to `onSubmittedWorkDone`. Paced by
+ * animation frames, then back to back. `null` without WebGPU.
+ */
+async function trivialFence(frames = 30): Promise<Baseline["trivialFence"]> {
+  const gpu = (
+    navigator as Navigator & {
+      gpu?: { requestAdapter(): Promise<{ requestDevice(): Promise<TrivialDevice> } | null> };
+    }
+  ).gpu;
+  const adapter = await gpu?.requestAdapter();
+  if (!adapter) return null;
+  const device = await adapter.requestDevice();
+  const g = globalThis as unknown as {
+    GPUBufferUsage: { STORAGE: number; COPY_SRC: number; COPY_DST: number; MAP_READ: number };
+    GPUMapMode: { READ: number };
+  };
+  try {
+    const module = device.createShaderModule({
+      code: `@group(0) @binding(0) var<storage, read_write> out: array<u32>;
+@compute @workgroup_size(64) fn main(@builtin(global_invocation_id) id: vec3<u32>) {
+  if (id.x < 64u) { out[id.x] = out[id.x] + 1u; }
+}`,
+    });
+    const pipeline = device.createComputePipeline({
+      layout: "auto",
+      compute: { module, entryPoint: "main" },
+    });
+    const data = device.createBuffer({
+      size: 288,
+      usage: g.GPUBufferUsage.STORAGE | g.GPUBufferUsage.COPY_SRC,
+    });
+    const back = device.createBuffer({
+      size: 288,
+      usage: g.GPUBufferUsage.COPY_DST | g.GPUBufferUsage.MAP_READ,
+    });
+    const group = device.createBindGroup({
+      layout: pipeline.getBindGroupLayout(0),
+      entries: [{ binding: 0, resource: { buffer: data } }],
+    });
+    const run = async (paced: boolean) => {
+      const fences: number[] = [];
+      if (paced) await nextFrame();
+      for (let i = 0; i < frames; i++) {
+        const encoder = device.createCommandEncoder();
+        for (let k = 0; k < 16; k++) {
+          const pass = encoder.beginComputePass();
+          pass.setPipeline(pipeline);
+          pass.setBindGroup(0, group);
+          pass.dispatchWorkgroups(1);
+          pass.end();
+        }
+        encoder.copyBufferToBuffer(data, 0, back, 0, 288);
+        const t = performance.now();
+        device.queue.submit([encoder.finish()]);
+        const mapped = back.mapAsync(g.GPUMapMode.READ);
+        await device.queue.onSubmittedWorkDone();
+        fences.push(performance.now() - t);
+        await mapped;
+        back.unmap();
+        if (paced) await nextFrame();
+      }
+      return quantiles(fences);
+    };
+    return { paced: await run(true), backToBack: await run(false) };
+  } finally {
+    device.destroy();
+  }
+}
+
 /** Whether a person drives this browser (automation reads back: headless loses presenting devices). */
 function presentsToCanvas(): boolean {
   if (typeof navigator !== "undefined" && navigator.webdriver) return false;
@@ -609,6 +779,9 @@ export async function runComputeBench(options: {
       await vello.gpuFinished();
     }
 
+    options.onProgress?.("the display's frame interval and a trivial WebGPU fence");
+    const baseline: Baseline = { ...(await rafBaseline()), trivialFence: await trivialFence() };
+
     const sweeps: SweepReport[] = [];
     options.onProgress?.("compute zoom at 100%");
     sweeps.push(
@@ -638,6 +811,18 @@ export async function runComputeBench(options: {
         scene,
         totals,
         signal,
+      ),
+    );
+    options.onProgress?.("compute through the bump gate, back to back");
+    sweeps.push(
+      await gatedSweep(
+        compute,
+        "compute gated · back to back, around 100%",
+        around(1).slice(0, 30),
+        scene,
+        totals,
+        signal,
+        false,
       ),
     );
     const short = Math.min(frames, 60);
@@ -796,6 +981,7 @@ export async function runComputeBench(options: {
       layers: scene.layers,
       sweeps,
       edits,
+      baseline,
       overflowChecks: totals.overflow,
       encodes: last?.encodes !== undefined ? { full: totals.full, patched: totals.patched } : null,
       fallback: compute.computeFallbackReason(),
