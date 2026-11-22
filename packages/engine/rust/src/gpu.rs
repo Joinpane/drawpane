@@ -33,12 +33,13 @@ use crate::exec::{
 };
 use crate::glass;
 use crate::gpu_readers::{
-    BlurHaloSample, CoarseAnalytic, GlassResolve, GpuReaders, NativeRim, PlainTex, ProgressiveHaloSample,
+    BlurHaloSample, CoarseAnalytic, CompositeTarget, GlassResolve, GpuReaders, NativeRim, PlainTex,
+    ProgressiveHaloSample,
 };
 use crate::images::{self, Level};
 use crate::masks::{self, MaskCache, MaskKey};
 use crate::progressive_blur;
-use crate::record::{BackgroundBlurOp, GlassOp, ProgressiveBlurOp};
+use crate::record::{BackgroundBlurOp, GlassOp, Op, PathEntry, ProgressiveBlurOp};
 use crate::shadow::{
     CanonicalShadow, ShadowMaskCache, compute_mask_rect, compute_mask_rect_bounds, reduced_dirty_rect,
     scaled_shadow_sigma, shadow_raster_shift,
@@ -619,6 +620,11 @@ struct MotionPrefix {
     cut: usize,
 }
 
+struct GlassMaskSlot {
+    region: (i32, i32, u32, u32),
+    offset: (u32, u32),
+}
+
 /// State for the active `draw_tile` or `render_whole` pass while `exec::draw_split` walks the scene.
 struct ActiveDraw {
     /// A whole frame writes straight to its destination; tiles use scratch color.
@@ -634,6 +640,7 @@ struct ActiveDraw {
     write_main: bool,
     write_backdrop: bool,
     scene_dirty: bool,
+    glass_masks: HashMap<(u32, usize), GlassMaskSlot>,
     before: Option<wgpu::CommandEncoder>,
     /// True once `before` contains a `vello_hybrid::Renderer::render` call; a second `render`
     /// must submit `before` first so `vello_hybrid`'s shared GPU staging buffers are not overwritten.
@@ -2391,6 +2398,151 @@ impl Gpu {
         Ok(Some(split))
     }
 
+    /// Rasterizes independent shape coverage together before scrolling the paint stack.
+    /// The masks have no dependency on the lens's backdrop prefix.
+    fn prepare_glass_masks(&mut self, store: &Store, frame: &Frame) -> Result<()> {
+        use vello_common::kurbo::Shape;
+
+        if store.readers().len() < 2 {
+            return Ok(());
+        }
+        let side = self.max_texture_2d.min(crate::gpu_readers::GLASS_MASK_ATLAS_SIDE);
+        let frame_size = (i32::from(frame.width), i32::from(frame.height));
+        let texture_limit = self.max_texture_2d.min(u32::from(u16::MAX));
+        let mut masks = HashMap::new();
+        let (mut left, mut top, mut row_height, mut used_width) = (0, 0, 0, 0);
+        let mut placements = Vec::new();
+        for id in store.readers() {
+            let Some(node) = store.nodes.get(id) else { continue };
+            let record = &node.record;
+            if record.hidden() || record.context() || record.provisional() {
+                continue;
+            }
+            let device = frame.view * store.world(*id);
+            let scale = device.determinant().abs().sqrt() as f32;
+            if !(scale > 0.0 && scale.is_finite()) {
+                continue;
+            }
+            for (op_index, op) in record.ops.iter().enumerate() {
+                let Op::Glass(lens) = op else { continue };
+                let [path_id] = lens.paths.as_slice() else {
+                    continue;
+                };
+                if lens.inradius <= 0.0
+                    || !matches!(
+                        record.paths.get(*path_id as usize),
+                        Some(PathEntry::Rect { .. } | PathEntry::Ellipse { .. })
+                    )
+                {
+                    continue;
+                }
+                let params = glass::glass_params(lens, scale, lens.inradius);
+                let Ok(regions) = glass::compute_regions(
+                    lens,
+                    &params,
+                    device,
+                    record.size,
+                    frame_size,
+                    (0, 0),
+                    frame_size,
+                    texture_limit,
+                    glass::HARD_MAX_REGION_PIXELS,
+                    glass::EXACT_SPLIT_SIDE,
+                    glass::EXACT_SPLIT_PIXELS,
+                    glass::EXACT_CHUNK_SIDE,
+                ) else {
+                    continue;
+                };
+                let [region] = regions.as_slice() else {
+                    continue;
+                };
+                let w = region.rw.next_multiple_of(4);
+                let h = region.rh.next_multiple_of(4);
+                if w > side || h > side {
+                    continue;
+                }
+                let Some(path) = record.entry_path(*path_id, device) else {
+                    continue;
+                };
+                let bounds = device.transform_rect_bbox(path.bounding_box()).inflate(1.0, 1.0);
+                if bounds.x0 < f64::from(region.x0)
+                    || bounds.y0 < f64::from(region.y0)
+                    || bounds.x1 > f64::from(region.x0) + f64::from(region.rw)
+                    || bounds.y1 > f64::from(region.y0) + f64::from(region.rh)
+                {
+                    continue;
+                }
+                if left + w > side {
+                    left = 0;
+                    top += row_height;
+                    row_height = 0;
+                }
+                if top + h > side {
+                    continue;
+                }
+                let shift = Affine::translate((
+                    f64::from(left) - f64::from(region.x0),
+                    f64::from(top) - f64::from(region.y0),
+                ));
+                placements.push((path, shift * device, lens.even_odd));
+                masks.insert(
+                    (*id, op_index),
+                    GlassMaskSlot {
+                        region: (region.x0, region.y0, region.rw, region.rh),
+                        offset: (left, top),
+                    },
+                );
+                left += w;
+                row_height = row_height.max(h);
+                used_width = used_width.max(left);
+            }
+        }
+
+        let max_bytes = self.reader_budget_room();
+        if masks.len() < 2
+            || !self.readers.ensure_glass_mask_atlas(
+                &self.device,
+                &self.renderer,
+                (used_width, top + row_height),
+                max_bytes,
+            )
+        {
+            return Ok(());
+        }
+        self.mask_scene
+            .reset_and_resize(used_width as u16, (top + row_height) as u16);
+        self.mask_scene.set_paint(vello_common::color::palette::css::WHITE);
+        for (path, transform, even_odd) in placements {
+            self.mask_scene.set_transform(transform);
+            self.mask_scene
+                .set_fill_rule(if even_odd { Fill::EvenOdd } else { Fill::NonZero });
+            self.mask_scene.fill_path(&path);
+        }
+        let mut encoder = self.take_encoder(true, "glass mask batch");
+        let mut options = RenderOptions::default();
+        options.target_init = TargetInit::Clear(ClearSettings::Viewport {
+            color: vello_common::color::AlphaColor::TRANSPARENT,
+        });
+        let atlas = self.readers.glass_mask_atlas.as_ref().expect("glass mask atlas");
+        self.renderer
+            .render(
+                &self.mask_scene,
+                &mut self.resources,
+                &mut encoder,
+                RenderTarget {
+                    view: &atlas.view,
+                    depth_view: Some(&atlas.depth),
+                },
+                &self.bindings,
+                options,
+            )
+            .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
+        self.stash_encoder(encoder);
+        self.mask_scene.reset();
+        self.active.as_mut().expect("active draw").glass_masks = masks;
+        Ok(())
+    }
+
     /// Draws an untiled frame when a reader exceeds the tile halo or a whole draw is cheaper.
     #[allow(clippy::too_many_arguments)]
     pub fn render_whole(
@@ -2554,7 +2706,7 @@ impl Gpu {
                     &self.queue,
                     encoder,
                     &paint.view,
-                    view,
+                    CompositeTarget::Over(view),
                     offset,
                     (
                         visible.x0 as u32,
@@ -2563,7 +2715,6 @@ impl Gpu {
                         (visible.y1 - visible.y0) as u32,
                     ),
                     1.0,
-                    false,
                 );
             }
         }
@@ -2795,6 +2946,7 @@ impl Gpu {
             write_main: true,
             write_backdrop: false,
             scene_dirty: false,
+            glass_masks: HashMap::new(),
             before: None,
             encoder_has_vello: false,
             flush_ms: 0.0,
@@ -2803,7 +2955,13 @@ impl Gpu {
         let mut verbs = limits.frame_verbs;
         let split = match prefix {
             Some(prefix) => self.prepare_motion_prefix(store, &whole, bg_bits, prefix, &mut verbs, &mut stats),
-            None => Ok(None),
+            None => {
+                if moving || self.reader_halo.is_some() {
+                    Ok(None)
+                } else {
+                    self.prepare_glass_masks(store, &whole).map(|()| None)
+                }
+            }
         };
         let draw = split.and_then(|split| {
             exec::draw_split(
@@ -3340,6 +3498,7 @@ impl Gpu {
             write_main: true,
             write_backdrop: false,
             scene_dirty: false,
+            glass_masks: HashMap::new(),
             before: None,
             encoder_has_vello: false,
             flush_ms: 0.0,
@@ -3601,19 +3760,37 @@ impl Gpu {
                 .map_err(vello_error)?;
             if dual {
                 let (w, h) = self.active_scene_size();
-                for backdrop in [false, true] {
-                    let dst = self.plane(backdrop)?.1.clone();
+                let (main_tex, main, _) = self.plane(false)?;
+                let (back_tex, backdrop, _) = self.plane(true)?;
+                let same_size = (main_tex.width(), main_tex.height()) == (back_tex.width(), back_tex.height());
+                let (main, backdrop) = (main.clone(), backdrop.clone());
+                let scissor = (0, 0, u32::from(w), u32::from(h));
+                if same_size {
                     self.readers.encode_composite(
                         &self.device,
                         &self.queue,
                         &mut encoder,
                         &color,
-                        &dst,
+                        CompositeTarget::OverBoth(&main, &backdrop),
                         (0, 0),
-                        (0, 0, u32::from(w), u32::from(h)),
+                        scissor,
                         1.0,
-                        false,
                     );
+                } else {
+                    // Reused offscreen planes can have different allocation sizes even
+                    // though they share an active viewport. A pass requires matching extents.
+                    for view in [&main, &backdrop] {
+                        self.readers.encode_composite(
+                            &self.device,
+                            &self.queue,
+                            &mut encoder,
+                            &color,
+                            CompositeTarget::Over(view),
+                            (0, 0),
+                            scissor,
+                            1.0,
+                        );
+                    }
                 }
             }
         }
@@ -3987,11 +4164,14 @@ impl Gpu {
                     &self.queue,
                     &mut encoder,
                     &src.view,
-                    &dst_view,
+                    if lerp {
+                        CompositeTarget::Lerp(&dst_view)
+                    } else {
+                        CompositeTarget::Over(&dst_view)
+                    },
                     dst_origin,
                     scissor,
                     opacity,
-                    lerp,
                 );
             }
         }
@@ -5918,9 +6098,17 @@ impl Backend for Gpu {
                     None
                 };
 
-            let mut encoder = self.take_encoder(analytic_coarse.is_none(), "reader glass");
+            let mask_slot = self
+                .active
+                .as_ref()
+                .filter(|_| !coarse && divisor == 1 && rim.is_none())
+                .and_then(|draw| draw.glass_masks.get(&key))
+                .filter(|slot| slot.region == (region.x0, region.y0, region.rw, region.rh))
+                .map(|slot| slot.offset);
+            let render_mask = analytic_coarse.is_none() && mask_slot.is_none();
+            let mut encoder = self.take_encoder(render_mask, "reader glass");
 
-            if analytic_coarse.is_none() {
+            if render_mask {
                 let (mask_x, mask_y, mask_w, mask_h, mask_device) =
                     rim.map_or((region.x0, region.y0, region.rw, region.rh, optical_device), |r| {
                         (
@@ -6013,6 +6201,7 @@ impl Backend for Gpu {
                 alpha,
                 coarse && divisor == 1,
                 analytic_coarse,
+                mask_slot,
                 has_clip_mask,
                 resolve,
                 max_bytes,

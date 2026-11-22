@@ -1300,11 +1300,11 @@ Device-space rasterization computes coverage of glyphs and edges on the destinat
 
 Examples has 630 glass layers and 291 background blurs. If all 630 lenses draw, a 16.7 ms frame leaves an average of 26.5 µs per lens before ordinary paint, blur, or presentation. Toolbars has 164 glass layers and four background blurs. Combobox's four readers are all background blurs. A glass-only improvement therefore needs separate validation of background blur and native paint costs.
 
-Rasterize sharp paint at the requested device scale and phase, and accelerate native glass separately. Share an exact backdrop only between readers with the same scope, source paint prefix, extension and clamp rules, region grid, and filter parameters. Non-glass paint and other backdrop-writing effects advance the source prefix. A single unconditional blur pyramid for the frame would read through intervening paint and change the filtering around reader boundaries. Keep independently reusable source work, such as geometry and mask inputs, separate from reader output that depends on the prefix.
+Rasterize sharp paint at the requested device scale and phase, and accelerate native glass separately. Share exact backdrop inputs when the source paint inside each extended read region agrees. Preserve scope, extension, clamp rules, and the region-local filter grid. Non-glass paint and other backdrop-writing effects invalidate intersecting read regions. A single unconditional blur pyramid would cross intervening paint and change filtering around region boundaries. Keep independently reusable source work, such as geometry and mask inputs, separate from reader output that depends on the prefix.
 
 Start by reducing redundant work inside the exact reader path. Preserve the CPU reference, including its intermediate rounding, and keep fragment passes as the common backend. Compare fused compute on WebGPU if it can preserve these rules and reduce measured cost. Recomputing the existing exact path at every camera change costs seconds on the largest cold views, including on T4 WebGPU, so it cannot meet the frame budget as built.
 
-Retain completed tiles where the revision, camera scale and device phase match. A finite scale ladder is useful for revisits and integral-device-pixel pans, but it cannot cover continuous zoom and fractional phase with the measured fidelity. Predict the device-space viewport from pan velocity and the rate of change of log zoom, and prioritize work that will cover it soon. Use an explicit encoding and in-flight GPU budget for background preparation. Charge prediction and reader scratch to the engine's 768 MiB default GPU budget and charge retained frames to its 256 MiB tile cap within that budget. Evict speculative work before visible coverage. If a cold camera jump outruns preparation, a held frame counts as a missed presentation. This keeps the gate honest while the exact path is too slow.
+Retain completed tiles where the revision, camera scale and device phase match. These cover revisits and integral-device-pixel pans. Continually changing scales and fractional phases need fresh sharp rasterization. Predict the device-space viewport from pan velocity and the rate of change of log zoom, and prioritize work that will cover it soon. Use an explicit encoding and in-flight GPU budget for background preparation. Charge prediction and reader scratch to the engine's 768 MiB default GPU budget and charge retained frames to its 256 MiB tile cap within that budget. Evict speculative work before visible coverage. If a cold camera jump outruns preparation, a held frame counts as a missed presentation. This keeps the gate honest while the exact path is too slow.
 
 Figma publicly describes retained GPU rendering through WebGPU and WebGL. Its visible motion is consistent with keeping geometry and working textures resident, rerasterizing sharp edges, and batching effect work across compatible sources. That is a hypothesis about the internal renderer. The acceptance evidence here is paired T4 runs with hardware presentation in WebGL2 and GPU execution measured separately through WebGPU readback.
 
@@ -1328,3 +1328,105 @@ Every browser picture outside the live editor canvas now has an engine implement
 - **Prototype player (`apps/web/src/prototype/stage.ts`, `Player.tsx`):** Keeps the synchronous `CanvasRenderer` stage in canvas mode, and runs live on its own `EngineView` (`webgpu -> webgl2 -> cpu-worker`) when the engine switch is on. Animated transitions capture the outgoing frame directly from the live GPU view (`EngineView.captureFrame()` via `gpuPixels()`) before drawing the incoming screen. When the engine cannot draw a screen (`NOT_DRAWN` or backend unavailability), the stage hides stale pixels and falls back per page to `CanvasRenderer` or displays an unavailable status with hotspots disabled.
 - **SVG and PDF vector paths:** Kept on their vector exporters. Both formats omit background blur and approximate glass as a lit rim without refraction, frost, or external backdrop context; this is documented in decision 0039 and surfaced inline in `ExportSection.tsx` and `InspectPanel.tsx`.
 - **Lazy `CanvasRenderer` in `Canvas.tsx`:** `CanvasRenderer` is only instantiated when canvas mode is active or a fallback occurs, so engine-only sessions never construct it.
+
+### Batching exact readers
+
+Keep sharp paint at the current camera scale and device-pixel phase. The
+follow-up calibration puts the high-frequency energy ratio of a bilinear
+1% zoom stand-in near 0.52 on retina text and hairlines. Fractional pan
+reaches 0.34, and even a 2× cache with area filtering reaches only 0.82.
+Frosted interiors without a rim have smaller errors, with p99 of 1 to 2
+levels for the examples tested. This rules out a page-wide scale ladder.
+It also rules out freely resampling sharp paint and rerendering only glass.
+Keep exact tile reuse for matching scales and integer-device-pixel pans.
+Use prediction to queue visible work, with the existing memory budget and
+speculative eviction policy.
+
+The six-lens WebGPU trace on main recorded 143 render passes, 114 reader
+passes, 124 bind groups, and 13 queue submissions. Packing uniform writes
+and trimming unused mip levels still leaves submission boundaries between
+Vello paint and lens masks. At Examples' 630 lenses, the entire 16.7 ms
+frame would allow only 26.5 µs per lens before sharp paint, backdrop blur,
+and presentation. Reduce the number of passes and submissions by grouping
+lens work.
+
+Decision 0007's glass-free backdrop permits sharing when each lens sees the
+same paint inside its own extended read region. A group may cross intervening
+paint whose conservative bounds miss those regions. Preserve the order of
+writes to the visible plane. A pending visible write must finish before
+intersecting paint or readers that sample the visible plane. Isolation,
+masks, clips, blend operations and unknown paint bounds split a group
+unless their effects are accounted for. Batch frost and height work over
+region-sized atlas allocations. Keep each lens's extension and clamp rules,
+region-local mip phase, and intermediate precision. Cap atlas scratch
+against the reader budget and split before exceeding the cap. Fall back to
+the existing serial reader for unsupported cases or allocation pressure.
+
+Rounded rectangles, capsules and ellipses can evaluate the rim from their
+geometry. The reference filters sampled mask coverage, including corner
+curvature and device-pixel phase. Compare analytic height and final pixels
+against the reference across small lenses, phase shifts and rotated shapes
+before enabling any analytic case. Arbitrary outlines keep raster masks.
+A dual-attachment composite writes the same premultiplied paint delta to
+the visible and glass-free planes in one pass, with source-over blending
+on each. Glass itself still writes only the visible plane.
+
+Capture the exact camera and pixels of confirmed motion presentations in
+an untimed replay pass. After the gesture, render native exact references at
+those cameras and the same DPR. Evaluate missing or wrong content with the
+per-tile share of pixels exceeding ΔE2000 of 10, sharpness with the
+high-frequency energy ratio (0.85 to 1.2), and NVIDIA LDR FLIP at declared
+pixels per degree. Compare the last moving frame with the settled frame at
+the same camera and track changes in sharpness across consecutive samples.
+Keep the frame-interval and missed-presentation measurements independent of
+readback. Thresholds for perceived quality remain provisional until
+calibrated on a laptop.
+
+The first direct-distance spike plugs a rounded-box or ellipse distance and
+its local normal into the existing lighting and refraction equations. It
+removes the Vello shape mask and the two height-filter passes for eligible
+lenses. In a six-lens SwiftShader WebGL2 trace, framebuffer attachments
+dropped from 1,017 to 777, uniform writes from 42 to 13, and submissions
+from 13 to seven. The larger candidate fixture timed out during readback.
+In an independent sampled-field check at 0.25× to 1×, direct coverage
+differed from the supersampled edge by up to 22 levels. The p99 inward
+direction error reached 36.6° for the rounded box and 11.3° for the ellipse.
+Curved and adjacent boundaries contribute jointly to the Gaussian field.
+A nearest-edge normal and a half-plane height omit that combined influence.
+Keep the raster reference while batching coverage first. Admit a parameter
+range for analytic height only after it passes the same-camera pixel gate.
+
+The first batch groups raster mask coverage for simple lenses into one
+bounded atlas in exact whole-view draws. Coverage is independent of the
+backdrop, so this step can cross any number of backdrop changes without
+reordering paints. Atlas slots preserve the integral strip phase, carry
+their original lens-local dimensions, and use the serial path if the lens
+is clipped to a different region, split, or too large to fit. The atlas
+uses the existing reader memory budget and caps coverage plus depth at
+8 MiB. Source extraction, frost, height filtering, and visible writes
+remain in paint order. Dual-plane paint uses one attachment pass when
+both targets have matching allocated extents. Mismatched pooled targets
+use the serial composite passes.
+
+A paired six-lens 230 × 145 SwiftShader fixture matched the reference byte
+for byte on WebGL2 and WebGPU. WebGL2's framebuffer attachment calls fell
+from 1,017 with serial composites to 972 with the dual-plane pass, then to
+872 after batching masks. Submissions on both backends fell from 13 to
+eight after batching. WebGPU's Vello render passes fell from 19 to nine,
+and its paint composites fell from ten to five. Each arm still encoded
+six backdrop extracts, six pairs of frost passes and 36 mip passes.
+These counts cover one native camera sample after warming the renderer.
+They measure the work removed from preparation and composition.
+
+The two T4 comparisons of the first reader setup change used 120 native
+Examples zoom requests per arm. Confirmed WebGL2 frame intervals were
+12.40/13.12 s at p95/p99 on the baseline and 11.94/13.67 s on the candidate
+in the first pair. Reversing the order gave 11.67/13.88 s and 12.00/13.44 s.
+This does not establish a motion improvement on the full page. The core
+WebGPU adapters passed GPU verification. All four core WebGPU cases timed
+out waiting for the opening view to settle before zoom.
+
+A second fixture with 24 overlapping lenses reduced submissions from 49 to
+26 on both backends and WebGPU's Vello render passes from 73 to 27. Each
+backend differed from the serial path by one level in three color bytes
+out of 133,400. Its p99 difference was zero.

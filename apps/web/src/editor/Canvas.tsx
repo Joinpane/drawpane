@@ -567,6 +567,23 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           clearTimeout(settle);
           const seq = ++engineSubmittedFrames;
           timing.submitMotionFrame(seq, r.exact);
+          if (timing.motionCapture) {
+            const view = engine;
+            timing.motionCapture.submitted(
+              seq,
+              s.camera,
+              contentCanvas.width,
+              contentCanvas.height,
+              r.exact,
+              async () => {
+                // gpuPixels schedules the copy before yielding. Confirm the same sequence
+                // separately, since another frame can supersede it before presentation.
+                const pixels = await view.pixels();
+                if (!pixels.ok) throw new Error(pixels.message);
+                return pixels.value;
+              },
+            );
+          }
           if (engine.last.n > 0) {
             submittedFrameSeq.set(engine.last.n, seq);
             if (submittedFrameSeq.size > 128) {

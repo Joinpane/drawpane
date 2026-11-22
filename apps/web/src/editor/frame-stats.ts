@@ -4,7 +4,7 @@
  * a frame, nothing else). The benchmarks read it through the debug handle,
  * and it answers "is this file slow to pan?" from the console.
  */
-import type { Editor } from "@drawpane/editor";
+import type { Camera, Editor } from "@drawpane/editor";
 
 const SIZE = 600;
 
@@ -38,6 +38,19 @@ export interface MotionStats {
   missed: number;
 }
 
+/** Opt-in pixel capture for a separate, untimed replay of the camera inputs. */
+export interface MotionCapture {
+  submitted(
+    sequence: number,
+    camera: Camera,
+    width: number,
+    height: number,
+    exact: boolean,
+    pixels: () => Promise<Uint8Array>,
+  ): void;
+  confirmed(sequence: number): void;
+}
+
 export class FrameStats {
   readonly #content = new Float64Array(SIZE);
   readonly #overlay = new Float64Array(SIZE);
@@ -48,6 +61,7 @@ export class FrameStats {
   /** Whether the last content frame was exact (not a stand-in, nor drawn in part). */
   exact = true;
   motion: MotionStats | null = null;
+  motionCapture: MotionCapture | null = null;
   #motionFrames = new Map<number, boolean>();
 
   beginMotion(native: boolean): MotionStats {
@@ -85,6 +99,7 @@ export class FrameStats {
     this.motion.presentations.push(performance.now());
     if (!exact) this.motion.degradedConfirmed++;
     this.#motionFrames.delete(sequence);
+    this.motionCapture?.confirmed(sequence);
   }
   /**
    * The canvas's drawing budget per frame in ms, when set (for checks: a tiny budget makes

@@ -112,12 +112,18 @@ fn fs_coarse_down(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 // 3. Rim height downsample: average k x k alpha texels of mask into RGBA16F.
 // ---------------------------------------------------------------------------
 struct DownU {
-    // (rw, rh, k, 0)
+    // (rw, rh, k, packed mask origin)
     info: vec4<f32>,
 };
 
 @group(0) @binding(0) var down_mask: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> down_u: DownU;
+
+// A mask slot has a 10-bit coordinate on each axis.
+fn mask_atlas_origin(packed: f32) -> vec2<i32> {
+    let bits = i32(packed);
+    return vec2<i32>(bits & 1023, bits >> 10);
+}
 
 @fragment
 fn fs_down(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
@@ -131,7 +137,7 @@ fn fs_down(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         for (var i = 0; i < 8; i = i + 1) {
             if (i >= k) { break; }
             let sx = min(base.x + i, max_c.x);
-            sum = sum + textureLoad(down_mask, vec2<i32>(sx, sy), 0).a;
+            sum = sum + textureLoad(down_mask, vec2<i32>(sx, sy) + mask_atlas_origin(down_u.info.w), 0).a;
         }
     }
     let n = f32(k * k);
@@ -144,7 +150,7 @@ fn fs_down(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
 struct BlurU {
     // (valid_w, valid_h, sigma, radius)
     info: vec4<f32>,
-    // (packed_rgba8, horizontal_reads_mask_alpha, 0, 0)
+    // (packed_rgba8, horizontal_reads_mask_alpha, mask_x, mask_y)
     pack: vec4<f32>,
 };
 
@@ -168,7 +174,9 @@ fn fs_blur_x(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         let qx = p.x + i;
         var m = 0.0;
         if (qx >= 0 && qx < valid_w) {
-            let src = textureLoad(blur_src, vec2<i32>(qx, p.y), 0);
+            let mask_offset = vec2<i32>(blur_u.pack.zw);
+            let local = vec2<i32>(qx, p.y);
+            let src = textureLoad(blur_src, select(local, local + mask_offset, blur_u.pack.y > 0.5), 0);
             m = src.r;
             if (blur_u.pack.y > 0.5) {
                 m = src.a;
@@ -304,7 +312,7 @@ struct GlassU {
     tune_b: vec4<f32>,
     // (shade, shade_reach, valid_lw, valid_lh)
     tune_c: vec4<f32>,
-    // (height_packed, quad phase x, quad phase y, device px per optical px)
+    // (flags: bit0=height_packed bit1=quad_phase_x bit2=quad_phase_y, mask_x, mask_y, device px per optical px)
     tune_d: vec4<f32>,
     // (native coordinate at the optical origin, native sampling enabled, backdrop divisor)
     native_map: vec4<f32>,
@@ -443,7 +451,7 @@ fn lens_sample(p: vec2<f32>) -> LensSample {
     let h_px = clamp((p - gu.sizes.zw) / k, vec2<f32>(0.5), max(valid_h - vec2<f32>(0.5), vec2<f32>(0.5)));
     let h_uv = clamp(h_px / vec2<f32>(textureDimensions(g_height)), vec2<f32>(0.0), vec2<f32>(1.0));
     let hs = textureSampleLevel(g_height, g_lin_samp, h_uv, 0.0).rgb;
-    let grad_raw = select(hs.gb, (hs.gb - vec2<f32>(0.5)) * 2.0, gu.tune_d.x > 0.5);
+    let grad_raw = select(hs.gb, (hs.gb - vec2<f32>(0.5)) * 2.0, (i32(gu.tune_d.x) & 1) != 0);
     let grad = grad_raw / k;
     let g = length(grad);
     var d_raw: f32;
@@ -513,7 +521,8 @@ fn fs_glass(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     var dy_b = dpdy(uv_b);
     // Post-effect scopes can start on an odd frame pixel. Sample the other lane
     // of the frame-aligned quad on any axis where hardware quads are out of phase.
-    if (gu.tune_d.y > 0.5) {
+    let tune_flags = i32(gu.tune_d.x);
+    if ((tune_flags & 2) != 0) {
         let step = select(-1.0, 1.0, (i32(pos.x) & 1) != 0);
         let q = p + vec2<f32>(step / gu.tune_d.w, 0.0);
         let bend = lens_sample(q).bend;
@@ -521,7 +530,7 @@ fn fs_glass(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
         dx_g = ((q + bend) * inv_size - uv_g) * step;
         dx_b = ((q + bend * (1.0 - dispersion)) * inv_size - uv_b) * step;
     }
-    if (gu.tune_d.z > 0.5) {
+    if ((tune_flags & 4) != 0) {
         let step = select(-1.0, 1.0, (i32(pos.y) & 1) != 0);
         let q = p + vec2<f32>(0.0, step / gu.tune_d.w);
         let bend = lens_sample(q).bend;
@@ -541,7 +550,7 @@ fn fs_glass(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let in_mask = mask_coord.x >= 0 && mask_coord.y >= 0 && mask_coord.x < i32(rw) && mask_coord.y < i32(rh);
     var a = select(0.0, 1.0, gu.native_map.w > 1.0);
     if (gu.native_map.w == 1.0 && in_mask) {
-        a = textureLoad(g_mask, mask_coord, 0).a;
+        a = textureLoad(g_mask, mask_coord + vec2<i32>(gu.tune_d.yz), 0).a;
     }
     var clip_cov = 1.0;
     if (gu.tune_a.w > 0.5) {
@@ -654,10 +663,25 @@ struct CompU {
 @group(0) @binding(0) var comp_src: texture_2d<f32>;
 @group(0) @binding(1) var<uniform> comp_u: CompU;
 
-@fragment
-fn fs_composite(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+fn composite_color(pos: vec4<f32>) -> vec4<f32> {
     let p = vec2<i32>(floor(pos.xy)) - vec2<i32>(comp_u.info.yz);
     return textureLoad(comp_src, p, 0) * comp_u.info.x;
+}
+
+@fragment
+fn fs_composite(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    return composite_color(pos);
+}
+
+struct DualComposite {
+    @location(0) main: vec4<f32>,
+    @location(1) backdrop: vec4<f32>,
+};
+
+@fragment
+fn fs_composite_dual(@builtin(position) pos: vec4<f32>) -> DualComposite {
+    let color = composite_color(pos);
+    return DualComposite(color, color);
 }
 
 // ---------------------------------------------------------------------------

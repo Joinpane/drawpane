@@ -196,6 +196,16 @@ pub struct GlassResolve<'a> {
     pub source_origin: (i32, i32),
 }
 
+#[derive(Clone, Copy)]
+pub enum CompositeTarget<'a> {
+    Over(&'a wgpu::TextureView),
+    /// Both planes receive the same premultiplied source over their own alpha.
+    OverBoth(&'a wgpu::TextureView, &'a wgpu::TextureView),
+    Lerp(&'a wgpu::TextureView),
+}
+
+pub const GLASS_MASK_ATLAS_SIDE: u32 = 1024;
+
 pub struct GpuReaders {
     // Bind group layouts
     copy_ext_bgl: wgpu::BindGroupLayout,
@@ -220,6 +230,7 @@ pub struct GpuReaders {
     glass_pipe: wgpu::RenderPipeline,
     coarse_pipe: wgpu::RenderPipeline,
     comp_pipe: wgpu::RenderPipeline,
+    comp_dual_pipe: wgpu::RenderPipeline,
     lerp_pipe: wgpu::RenderPipeline,
     bg_blur_pipe: wgpu::RenderPipeline,
     prog_blur_pipe: wgpu::RenderPipeline,
@@ -257,6 +268,7 @@ pub struct GpuReaders {
     low_0: Option<PlainTex>,
     low_1: Option<PlainTex>,
     pub mask_tex: Option<VelloTex>,
+    pub glass_mask_atlas: Option<VelloTex>,
     pub clip_tex: Option<VelloTex>,
     pub blur_out: Option<PlainTex>,
     pub blur_source: Option<PlainTex>,
@@ -307,6 +319,25 @@ fn make_pipeline(
     blend: Option<wgpu::BlendState>,
     label: &str,
 ) -> wgpu::RenderPipeline {
+    make_pipeline_targets(device, bgl, module, entry, &[color_target(format, blend)], label)
+}
+
+fn color_target(format: wgpu::TextureFormat, blend: Option<wgpu::BlendState>) -> Option<wgpu::ColorTargetState> {
+    Some(wgpu::ColorTargetState {
+        format,
+        blend,
+        write_mask: wgpu::ColorWrites::ALL,
+    })
+}
+
+fn make_pipeline_targets(
+    device: &wgpu::Device,
+    bgl: &wgpu::BindGroupLayout,
+    module: &wgpu::ShaderModule,
+    entry: &str,
+    targets: &[Option<wgpu::ColorTargetState>],
+    label: &str,
+) -> wgpu::RenderPipeline {
     let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some(label),
         bind_group_layouts: &[Some(bgl)],
@@ -328,11 +359,7 @@ fn make_pipeline(
             module,
             entry_point: Some(entry),
             compilation_options: Default::default(),
-            targets: &[Some(wgpu::ColorTargetState {
-                format,
-                blend,
-                write_mask: wgpu::ColorWrites::ALL,
-            })],
+            targets,
         }),
         multiview_mask: None,
         cache: None,
@@ -528,6 +555,16 @@ impl GpuReaders {
             Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
             "reader composite",
         );
+        let comp_dual_pipe = make_pipeline_targets(
+            device,
+            &comp_bgl,
+            &module,
+            "fs_composite_dual",
+            &std::array::from_fn::<_, 2, _>(|_| {
+                color_target(RGBA8, Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING))
+            }),
+            "reader dual composite",
+        );
         let lerp_blend = wgpu::BlendState {
             color: wgpu::BlendComponent {
                 src_factor: wgpu::BlendFactor::Constant,
@@ -639,6 +676,7 @@ impl GpuReaders {
             glass_pipe,
             coarse_pipe,
             comp_pipe,
+            comp_dual_pipe,
             lerp_pipe,
             bg_blur_pipe,
             prog_blur_pipe,
@@ -664,6 +702,7 @@ impl GpuReaders {
             low_0: None,
             low_1: None,
             mask_tex: None,
+            glass_mask_atlas: None,
             clip_tex: None,
             blur_out: None,
             blur_source: None,
@@ -705,6 +744,9 @@ impl GpuReaders {
             total += t.bytes();
         }
         if let Some(t) = &self.mask_tex {
+            total += t.bytes();
+        }
+        if let Some(t) = &self.glass_mask_atlas {
             total += t.bytes();
         }
         if let Some(t) = &self.clip_tex {
@@ -760,6 +802,7 @@ impl GpuReaders {
         self.low_0 = None;
         self.low_1 = None;
         self.mask_tex = None;
+        self.glass_mask_atlas = None;
         self.clip_tex = None;
         self.blur_out = None;
         self.dst_copy = None;
@@ -882,6 +925,37 @@ impl GpuReaders {
             Self::ensure_vello_tex(slot, device, renderer, w, h, label);
         }
         Ok(())
+    }
+
+    pub fn ensure_glass_mask_atlas(
+        &mut self,
+        device: &wgpu::Device,
+        renderer: &Renderer,
+        size: (u32, u32),
+        max_bytes: usize,
+    ) -> bool {
+        let freed = self.glass_mask_atlas.as_ref().map_or(0, VelloTex::bytes);
+        let bytes = size.0.next_multiple_of(64) as usize * size.1.next_multiple_of(64) as usize * 8;
+        if self.reserve_bytes(bytes, freed, "glass mask atlas", max_bytes).is_err() {
+            return false;
+        }
+        Self::ensure_vello_tex(
+            &mut self.glass_mask_atlas,
+            device,
+            renderer,
+            size.0,
+            size.1,
+            "glass mask atlas",
+        );
+        true
+    }
+
+    fn glass_mask_view(&self, batched: bool) -> &wgpu::TextureView {
+        if batched {
+            &self.glass_mask_atlas.as_ref().expect("glass mask atlas").view
+        } else {
+            &self.mask_tex.as_ref().expect("glass mask").view
+        }
     }
 
     pub fn ensure_vello_tex(
@@ -1025,14 +1099,17 @@ impl GpuReaders {
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         src_view: &wgpu::TextureView,
-        dst_view: &wgpu::TextureView,
+        destination: CompositeTarget<'_>,
         dst_origin: (i32, i32),
         scissor: (u32, u32, u32, u32),
         opacity: f32,
-        lerp: bool,
     ) {
         let opacity = opacity.clamp(0.0, 1.0);
-        let source_scale = if lerp { 1.0 } else { opacity };
+        let source_scale = if matches!(destination, CompositeTarget::Lerp(_)) {
+            1.0
+        } else {
+            opacity
+        };
         let data = &[source_scale, dst_origin.0 as f32, dst_origin.1 as f32, 0.0];
         let (slab_idx, offset) = self.push_uniform(device, queue, data);
         let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -1053,30 +1130,37 @@ impl GpuReaders {
                 },
             ],
         });
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("scope composite"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: dst_view,
+        let (pipeline, first, second) = match destination {
+            CompositeTarget::Over(view) => (&self.comp_pipe, view, None),
+            CompositeTarget::OverBoth(main, backdrop) => (&self.comp_dual_pipe, main, Some(backdrop)),
+            CompositeTarget::Lerp(view) => (&self.lerp_pipe, view, None),
+        };
+        fn attachment(view: &wgpu::TextureView) -> wgpu::RenderPassColorAttachment<'_> {
+            wgpu::RenderPassColorAttachment {
+                view,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
                     load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
-            })],
+            }
+        }
+        let attachments = [Some(attachment(first)), second.map(attachment)];
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("scope composite"),
+            color_attachments: &attachments[..1 + usize::from(second.is_some())],
             ..Default::default()
         });
-        if lerp {
+        pass.set_pipeline(pipeline);
+        if matches!(destination, CompositeTarget::Lerp(_)) {
             let opacity = f64::from(opacity);
-            pass.set_pipeline(&self.lerp_pipe);
             pass.set_blend_constant(wgpu::Color {
                 r: opacity,
                 g: opacity,
                 b: opacity,
                 a: opacity,
             });
-        } else {
-            pass.set_pipeline(&self.comp_pipe);
         }
         pass.set_bind_group(0, &group, &[offset]);
         pass.set_scissor_rect(scissor.0, scissor.1, scissor.2, scissor.3);
@@ -1347,6 +1431,7 @@ impl GpuReaders {
         alpha: f32,
         coarse: bool,
         analytic_coarse: Option<CoarseAnalytic>,
+        mask_slot: Option<(u32, u32)>,
         has_clip_mask: bool,
         resolve: Option<GlassResolve<'_>>,
         max_bytes: usize,
@@ -1767,7 +1852,9 @@ impl GpuReaders {
             }
         }
 
-        let mask_view = self.mask_tex.as_ref().expect("mask").view.clone();
+        let mask_view = self.glass_mask_view(mask_slot.is_some()).clone();
+        let (mask_x, mask_y) = mask_slot.unwrap_or_default();
+        let mask_offset = (mask_x + mask_y * GLASS_MASK_ATLAS_SIDE) as f32;
         // A 1 × 1 reduction only copies the alpha channel to the red channel of
         // the height texture. Apply that conversion at the horizontal filter's
         // input and skip the draw and bandwidth of writing a full-size texture.
@@ -1775,7 +1862,7 @@ impl GpuReaders {
             mask_view
         } else {
             // Downsample mask -> low_0
-            let u_down = &[rim_w as f32, rim_h as f32, k as f32, 0.0];
+            let u_down = &[rim_w as f32, rim_h as f32, k as f32, mask_offset];
             let (sd_idx, sd_off) = self.push_uniform(device, queue, u_down);
             let group_down = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
@@ -1828,8 +1915,8 @@ impl GpuReaders {
             blur_radius,
             packed_flag,
             if k == 1 { 1.0 } else { 0.0 },
-            0.0,
-            0.0,
+            mask_x as f32,
+            mask_y as f32,
         ];
         let (sb_idx, sb_off) = self.push_uniform(device, queue, u_blur);
 
@@ -2023,10 +2110,12 @@ impl GpuReaders {
             tune.shade_reach,
             lw as f32,
             lh as f32,
-            // Height packing and frame-relative fragment quad phase.
-            packed_flag,
-            (dst_offset.0 & 1) as f32,
-            (dst_offset.1 & 1) as f32,
+            // Packed height/quad-phase flags, atlas mask origin, and device-per-optical scale.
+            (u32::from(self.height_packed)
+                | (((dst_offset.0 & 1) as u32) << 1)
+                | (((dst_offset.1 & 1) as u32) << 2)) as f32,
+            mask_x as f32,
+            mask_y as f32,
             divisor / rim_scale,
             native_map[0],
             native_map[1],
@@ -2057,7 +2146,7 @@ impl GpuReaders {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::TextureView(&self.mask_tex.as_ref().expect("mask").view),
+                    resource: wgpu::BindingResource::TextureView(self.glass_mask_view(mask_slot.is_some())),
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,

@@ -39,6 +39,7 @@ import { writeFileSync } from "node:fs";
 import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "../fresh-instance";
 import { importConverted } from "../import-converted";
+import { cameraReplay, type ReplayScore } from "./camera-replay";
 import { type Opening, opening, openingRow, pan, type Summary, summaryRow, zoom } from "./frames";
 import { type PageInfo, pagesOf } from "./kit-pages";
 import { profiled } from "./profile";
@@ -56,6 +57,7 @@ const PRESENT = process.env.BENCH_ENGINE_PRESENT;
 const VERIFIED = process.env.BENCH_VERIFIED_BACKENDS;
 const READBACK = PRESENT === "readback" || (PRESENT === "auto" && VERIFIED === "webgpu");
 const RENDERER = process.env.BENCH_RENDERER === "engine" ? "engine" : "canvas";
+const REPLAY = RENDERER === "engine" && process.env.BENCH_W4_REPLAY === "1";
 /** Decision 0040's confirmed targets on the heaviest page, on real GPU hardware. */
 const USEFUL_IMAGE_MS = 1000;
 const EXACT_MS = 3000;
@@ -78,6 +80,7 @@ interface PageResult {
   open: Opening;
   canvas: Record<string, Summary>;
   engine?: EngineFacts;
+  replay?: Record<string, ReplayScore>;
 }
 
 /** What the engine did on the page shown, and its GPU's time per frame over a pan. */
@@ -276,6 +279,17 @@ test.describe("A real file", () => {
         canvas,
         ...(RENDERER === "engine" ? { engine: await engineFacts(page, Math.min(FRAMES, 60)) } : {}),
       };
+      if (REPLAY) {
+        const replay: Record<string, ReplayScore> = {};
+        for (const gesture of Object.keys(canvas)) {
+          const kind = gesture.startsWith("zoom") ? "zoom" : "pan";
+          const level = gesture.endsWith("100%") ? 1 : gesture.endsWith("50%") ? 0.5 : "fit";
+          if (typeof level === "number" && info.busiest) await focus(page, info.busiest);
+          await settle(page);
+          replay[gesture] = await cameraReplay(page, kind, level, FRAMES);
+        }
+        result.replay = replay;
+      }
       results.push(result);
       console.log(
         [
@@ -295,6 +309,16 @@ test.describe("A real file", () => {
     if (process.env.BENCH_OUT)
       writeFileSync(process.env.BENCH_OUT, `${JSON.stringify(report, null, 1)}\n`);
     expect(results.length).toBeGreaterThan(0);
+    if (REPLAY) {
+      for (const result of results) {
+        for (const [gesture, score] of Object.entries(result.replay ?? {})) {
+          const detail = "error" in score ? `: ${score.error}` : "";
+          expect
+            .soft(score.pass, `${result.page.name}, ${gesture} pixel fidelity${detail}`)
+            .toBe(true);
+        }
+      }
+    }
     if (RENDERER === "engine" && process.env.BENCH_W4_CAMERA_GATE === "1") {
       for (const result of results) {
         expect.soft(result.engine?.renderer, result.page.name).toBe("engine");
@@ -307,8 +331,10 @@ test.describe("A real file", () => {
           const motion = summary.motion;
           expect.soft(motion, `${label} motion samples`).toBeDefined();
           if (!motion) continue;
-          expect.soft(motion.degradedConfirmed, `${label} degraded presentations`).toBe(0);
-          expect.soft(motion.degradedSubmitted, `${label} degraded submissions`).toBe(0);
+          if (!REPLAY) {
+            expect.soft(motion.degradedConfirmed, `${label} degraded presentations`).toBe(0);
+            expect.soft(motion.degradedSubmitted, `${label} degraded submissions`).toBe(0);
+          }
           expect.soft(motion.fallback, `${label} renderer fallbacks`).toBe(0);
           expect.soft(motion.missed, `${label} camera requests without a frame`).toBe(0);
           expect.soft(motion.confirmed, `${label} confirmed presentations`).toBeGreaterThan(1);
