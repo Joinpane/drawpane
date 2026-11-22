@@ -386,6 +386,114 @@ fn bands_match_for_a_blurred_glyph_run_shadow() {
     assert_bands_match(&w.finish(), "blurred glyph run shadow");
 }
 
+#[test]
+fn bands_match_when_an_offscreen_post_effect_skips_its_blended_child() {
+    let translated = |x, y| [1.0, 0.0, 0.0, 1.0, x, y];
+    let mut gradient = Rec::new(translated(75.30220794677734, 9.793569564819336), [71.80306, 10.874212]);
+    gradient.paths.push(Entry::Rect {
+        w: 71.80306,
+        h: 10.874212,
+        radii: [0.0; 4],
+    });
+    gradient.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Gradient {
+            kind: 2,
+            m: [
+                39.63776397705078,
+                -0.8386936783790588,
+                1.9533928632736206,
+                4.722131729125977,
+                35.90153121948242,
+                5.437106132507324,
+            ],
+            stops: vec![
+                (0.0, [0.07410997, 0.11352062, 0.48155314, 0.69872814]),
+                (0.5085106, [0.17542702, 0.0023872852, 0.48346436, 1.0]),
+                (1.0, [0.46761525, 0.32026982, 0.52161056, 1.0]),
+            ],
+        },
+    });
+
+    let mut group = Rec::group();
+    group.transform = [
+        0.817051351070404,
+        0.0,
+        0.0,
+        0.817051351070404,
+        -11.831083297729492,
+        0.12973594665527344,
+    ];
+    let mut clipped = Rec::new(
+        translated(-15.035476684570313, 22.489540100097656),
+        [8.139553, 45.91338],
+    );
+    clipped.paths.push(Entry::Rect {
+        w: 8.139553,
+        h: 45.91338,
+        radii: [0.0; 4],
+    });
+    clipped.ops = vec![
+        Op::Clip {
+            path: 0,
+            even_odd: false,
+        },
+        Op::Children,
+        Op::Unclip,
+    ];
+    clipped.post.push(Post::LayerBlur(3.9131439));
+
+    let mut blended = Rec::new(translated(12.834033966064453, 22.67571258544922), [34.68774, 22.826876]);
+    blended.paths.push(Entry::Rect {
+        w: 34.68774,
+        h: 22.826876,
+        radii: [0.0; 4],
+    });
+    blended.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.5, 0.2, 0.4, 1.0]),
+    });
+    blended.layer_blend = 10;
+
+    // The shadow makes the group visible on the full frame, below the gradient.
+    let mut shadow = Rec::new(
+        [
+            1.2353966236114502,
+            0.0,
+            0.0,
+            1.2353966236114502,
+            123.19078063964844,
+            60.113868713378906,
+        ],
+        [0.0; 2],
+    );
+    shadow.paths.push(Entry::Glyphs {
+        scale: 0.03580617,
+        glyphs: vec![(4, 0.0, 20.280376)],
+    });
+    shadow.ops.push(Op::DropShadow {
+        paths: vec![0],
+        even_odd: false,
+        dx: 5.842882,
+        dy: -9.344065,
+        blur: 18.390978,
+        color: [0.75357896, 0.008114517, 0.8719568, 0.23725611],
+        blend: 0,
+    });
+
+    let mut w = W::new(ANY, 1);
+    w.reset();
+    w.glyph(4, &glyph_outline(4));
+    w.set(1, 0, &gradient);
+    w.set(2, 0, &group);
+    w.set(3, 2, &clipped);
+    w.set(4, 3, &blended);
+    w.set(5, 2, &shadow);
+    assert_bands_match(&w.finish(), "skipped offscreen post effect");
+}
+
 /// Draws the given case whole and in bands. Historical regressions pass their original RNG state.
 fn bands_match(mut r: Rng, case: u32) {
     let model = Model::new(&mut r, 24, case.is_multiple_of(2));

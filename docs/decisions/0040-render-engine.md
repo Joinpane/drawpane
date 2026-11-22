@@ -1017,6 +1017,11 @@ case. A container whose bounds or compositing mode change can also start or stop
 descendant's flush as the container becomes visible or gets culled. Ordinary paint edits keep
 their local dirty rectangles when they leave those boundaries alone.
 
+A CPU tile mirrors a culled subtree's flush only if that subtree would flush the
+full frame. A post effect with an empty output or source region skips the subtree,
+as does an isolated record outside the active target. The flush check stops at
+either boundary, even if a descendant's own bounds reach the frame.
+
 ## Amendment: layer blur (phase 3A, 2026-11-20)
 
 Layer blur (`FLAG_POST = 32`, `POST.layerBlur = 1`, `PostEffect::LayerBlur`, wire version 1.4) is drawn by both backends, clearing `UNSUPPORTED.layerBlur`. Progressive blur remains behind `UNSUPPORTED.progressiveBlur` (phase 3B).

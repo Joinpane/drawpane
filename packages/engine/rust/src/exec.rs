@@ -1667,10 +1667,7 @@ fn subtree_flushes_in_full_frame(
         return false;
     }
     let active = active_posts(r, device, view_scale);
-    let has_post = !active.is_empty();
-    let through = !has_post && r.blend == 0 && r.isolate() && r.opacity < 1.0 && store.subtree_has_blend(id);
-    let isolate = has_post || r.blend != 0 || (r.isolate() && r.opacity < 1.0);
-    if has_post {
+    if !active.is_empty() {
         let raw_out = IRect::around(dev_bbox.inflate(1.0, 1.0));
         let full_out = if raw_out.intersect(full_frame).is_empty() {
             IRect {
@@ -1688,37 +1685,35 @@ fn subtree_flushes_in_full_frame(
             }
             .intersect(full_frame)
         };
-        if !full_out.is_empty() {
-            let inner_pad = (page_pad - r.post_pad()).max(0.0);
-            let inner_pad_dev = if inner_pad > 0.0 {
-                inner_pad * view_scale + 2.0
-            } else {
-                0.0
-            };
-            let content_bbox = device.transform_rect_bbox(bounds).inflate(inner_pad_dev, inner_pad_dev);
-            let content_rect = IRect::around(content_bbox).inflate(2, 2);
-            let total_post_pad: i32 = active.iter().fold(0i32, |acc, p| acc.saturating_add(p.src_pad()));
-            if !content_rect
-                .intersect(full_out.inflate(total_post_pad, total_post_pad))
-                .is_empty()
-            {
-                return true;
-            }
+        // A post-effect record whose output misses the frame skips its entire
+        // subtree. Its descendants cannot flush the parent scene.
+        if full_out.is_empty() {
+            return false;
         }
-    } else if r.blend != 0 || through || isolate {
-        let raw = IRect::around(dev_bbox.inflate(1.0, 1.0));
-        if !raw.intersect(full_frame).is_empty() {
-            return true;
-        }
+        let inner_pad = (page_pad - r.post_pad()).max(0.0);
+        let inner_pad_dev = if inner_pad > 0.0 {
+            inner_pad * view_scale + 2.0
+        } else {
+            0.0
+        };
+        let content_bbox = device.transform_rect_bbox(bounds).inflate(inner_pad_dev, inner_pad_dev);
+        let content_rect = IRect::around(content_bbox).inflate(2, 2);
+        let total_post_pad: i32 = active.iter().fold(0i32, |acc, p| acc.saturating_add(p.src_pad()));
+        return !content_rect
+            .intersect(full_out.inflate(total_post_pad, total_post_pad))
+            .is_empty();
     }
-    let inner = if isolate { 1.0 } else { opacity };
+    if r.blend != 0 || (r.isolate() && r.opacity < 1.0) {
+        let raw = IRect::around(dev_bbox.inflate(1.0, 1.0));
+        return !raw.intersect(full_frame).is_empty();
+    }
     let coarse =
         r.provisional() || frame.detail && r.coarse_below > 0.0 && scale_of(device) < f64::from(r.coarse_below);
     let ops = if coarse { &r.coarse } else { &r.ops };
     for op in ops {
         match op {
             op if op.is_reader() => return true,
-            Op::Fill { path, paint, blend, .. } if *blend != 0 && paint_visible(paint, inner) => {
+            Op::Fill { path, paint, blend, .. } if *blend != 0 && paint_visible(paint, opacity) => {
                 if let Some(local_b) = r.entry_bounds(*path, &|g| store.glyphs.bounds(g)) {
                     let raw = IRect::around(device.transform_rect_bbox(local_b).inflate(2.0, 2.0));
                     if !raw.intersect(full_frame).is_empty() {
@@ -1732,7 +1727,7 @@ fn subtree_flushes_in_full_frame(
                 paint,
                 blend,
                 ..
-            } if *blend != 0 && style.width > 0.0 && paint_visible(paint, inner) => {
+            } if *blend != 0 && style.width > 0.0 && paint_visible(paint, opacity) => {
                 if let Some(local_b) = r.entry_bounds(*path, &|g| store.glyphs.bounds(g)) {
                     let grow =
                         f64::from(style.width) * f64::from(style.miter.max(1.0)) * 0.5 + f64::from(style.width) + 1.0;
@@ -1755,7 +1750,7 @@ fn subtree_flushes_in_full_frame(
                 blend,
                 stroke,
                 ..
-            } if *blend != 0 && c[3] * inner > 0.0 && stroke.as_ref().is_none_or(|st| st.width > 0.0) => {
+            } if *blend != 0 && c[3] * opacity > 0.0 && stroke.as_ref().is_none_or(|st| st.width > 0.0) => {
                 let shifted = Affine::translate((f64::from(*dx) * view_scale, f64::from(*dy) * view_scale)) * device;
                 let sigma_dev = crate::blur::sigma_from_radius(*blur) * view_scale as f32;
                 let stroke_grow = stroke.as_deref().map_or(0.0, |st| {
@@ -1778,7 +1773,7 @@ fn subtree_flushes_in_full_frame(
             }
             Op::InnerShadow {
                 shape, color: c, blend, ..
-            } if *blend != 0 && c[3] * inner > 0.0 => {
+            } if *blend != 0 && c[3] * opacity > 0.0 => {
                 if let Some(b) = r.entry_bounds(*shape, &|g| store.glyphs.bounds(g)) {
                     let raw = IRect::around(device.transform_rect_bbox(b).inflate(2.0, 2.0));
                     if !raw.intersect(full_frame).is_empty() {
@@ -1786,7 +1781,9 @@ fn subtree_flushes_in_full_frame(
                     }
                 }
             }
-            Op::Children if children_flush_in_full_frame(store, frame, full_frame, full_viewport, id, world, inner) => {
+            Op::Children
+                if children_flush_in_full_frame(store, frame, full_frame, full_viewport, id, world, opacity) =>
+            {
                 return true;
             }
             _ => {}
