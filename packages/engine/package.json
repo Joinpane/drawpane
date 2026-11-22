@@ -17,6 +17,10 @@
       "types": "./src/glue.d.ts",
       "default": "./dist/browser/engine.js"
     },
+    "./compute-glue": {
+      "types": "./src/glue.d.ts",
+      "default": "./dist/compute/engine.js"
+    },
     "./webgl-glue": {
       "types": "./src/glue.d.ts",
       "default": "./dist/webgl/engine.js"

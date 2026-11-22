@@ -280,6 +280,47 @@ export interface StrokeCacheStats {
   readonly cachedBytes: number;
 }
 
+export interface ComputeBumpCounters {
+  readonly failed: number;
+  readonly binning: number;
+  readonly ptcl: number;
+  readonly tile: number;
+  readonly seg_counts: number;
+  readonly segments: number;
+  readonly blend: number;
+  readonly lines: number;
+}
+
+export interface ComputeStats {
+  readonly framesSubmitted: number;
+  readonly framesChecked: number;
+  readonly failedFrames: number;
+  readonly anyFailedMask: number;
+  readonly bump: ComputeBumpCounters;
+  readonly maxBump: ComputeBumpCounters;
+  readonly timestampsSupported: boolean;
+  readonly timestampPeriodNs: number;
+  readonly gpuMs: readonly number[];
+  readonly gpuSpanMs: readonly number[];
+  readonly passAvgMs: Readonly<Record<string, number>>;
+  readonly capacities:
+    | (Omit<ComputeBumpCounters, "failed"> & { readonly maxBindBytes: number })
+    | null;
+  readonly scene: {
+    readonly nPaths: number;
+    readonly nDrawObjects: number;
+    readonly nClips: number;
+    readonly nPathSegments: number;
+    readonly nTransforms: number;
+    readonly nGlyphs: number;
+    readonly packedBytes: number;
+    readonly totalGpuBytes: number;
+    readonly coldEncodeMs: number;
+    readonly coldResolveMs: number;
+    readonly coldUploadMs: number;
+  } | null;
+}
+
 export interface EngineOptions {
   /** Bytes of rasterised glyph masks to keep per backend (default 4 MiB). */
   readonly glyphMaskBytes?: number;
@@ -1471,6 +1512,84 @@ export class RenderEngine {
         };
       }),
     );
+  }
+
+  /** Enables or disables the P0 Vello 0.12 GPU compute path for ordinary paint (WebGPU only). */
+  setComputeOrdinary(enabled: boolean): Result {
+    return this.#call((e) =>
+      e.setComputeOrdinary
+        ? outcome(e.setComputeOrdinary(enabled))
+        : fail(ErrorCode.NotAvailable, "no GPU compute backend"),
+    ) as Result;
+  }
+
+  /** Whether the most recent GPU render frame executed on the Vello 0.12 GPU compute path. */
+  computeUsed(): boolean {
+    const r = this.#call((e) => e.computeUsed?.() ?? false);
+    return r === true;
+  }
+
+  /** Resets accumulated GPU compute per-frame bump and timestamp diagnostics. */
+  computeResetStats(): void {
+    this.#call((e) => e.computeResetStats?.());
+  }
+
+  /**
+   * Drains all in-flight GPU compute frame diagnostics (per-frame bump allocator counters and
+   * hardware GPU timestamps) and returns the structured report.
+   */
+  async computeStats(): Promise<Result<ComputeStats>> {
+    const startEpoch = this.#epoch;
+    const state = glueState(this.#module.glue);
+    const genTrap = this.#genTrapNotice;
+    const p = this.#call((e) => e.computeStats?.());
+    if (isFailure(p)) return p;
+    if (!(p instanceof Promise)) return fail(ErrorCode.NotAvailable, "no GPU compute backend");
+    p.then(
+      (stale) => {
+        if (state.epoch !== startEpoch && typeof stale !== "string") unfinalized(stale);
+      },
+      () => {},
+    );
+    let v: string | Glue.Outcome;
+    try {
+      const settled = await Promise.race([
+        p.then((value) => ({ kind: "value" as const, value })),
+        genTrap.then(() => ({ kind: "trapped" as const })),
+      ]);
+      if (settled.kind === "trapped") {
+        this.#live();
+        return (
+          this.#dead ?? fail(ErrorCode.Trap, "the engine instance changed during computeStats")
+        );
+      }
+      v = settled.value;
+    } catch (err) {
+      return this.#trapped(err);
+    }
+    if (state.epoch !== startEpoch) {
+      if (typeof v !== "string") unfinalized(v);
+      this.#live();
+      return this.#dead ?? fail(ErrorCode.Trap, "the engine instance changed during computeStats");
+    }
+    if (!this.#live()) {
+      if (typeof v !== "string") {
+        try {
+          v.free();
+        } catch (err) {
+          return this.#trapped(err);
+        }
+      }
+      return this.#dead ?? fail(ErrorCode.State, "the engine was disposed");
+    }
+    if (typeof v === "string") {
+      try {
+        return { ok: true, value: JSON.parse(v) as ComputeStats };
+      } catch (err) {
+        return fail(ErrorCode.Gpu, `invalid computeStats JSON: ${String(err)}`);
+      }
+    }
+    return outcome(v) as Result<ComputeStats>;
   }
 
   /** Frees the engine's memory (nothing, if its instance is gone). */

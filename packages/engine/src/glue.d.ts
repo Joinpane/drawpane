@@ -155,6 +155,10 @@ export class Engine {
   pngEnd(): Uint8Array;
   pngAbort(): void;
   strokeCacheStats(): Float64Array;
+  setComputeOrdinary?(enabled: boolean): Outcome;
+  computeUsed?(): boolean;
+  computeResetStats?(): void;
+  computeStats?(): Promise<string | Outcome>;
   blurCpu(
     src: Uint8Array,
     srcW: number,
