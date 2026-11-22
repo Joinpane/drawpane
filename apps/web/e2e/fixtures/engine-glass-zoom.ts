@@ -103,6 +103,7 @@ export async function drawExtremeZoom(choice: RendererChoice) {
     const cx = Math.floor(rasterWidth / 2);
     const cy = Math.floor(rasterHeight / 2);
     const center = ctx.getImageData(cx, cy, 1, 1);
+    const full = ctx.getImageData(0, 0, rasterWidth, rasterHeight).data;
     return {
       zoom,
       exact: view.last.exact,
@@ -110,8 +111,28 @@ export async function drawExtremeZoom(choice: RendererChoice) {
       size: [rasterWidth, rasterHeight],
       pixel: Array.from(center.data),
       detail: Array.from(ctx.getImageData(cx - 8, cy, 16, 1).data),
+      rgba: full,
     };
   }
+  type FrameCapture = Awaited<ReturnType<typeof frame>>;
+  const strip = ({ rgba: _rgba, ...summary }: FrameCapture) => summary;
+  const diffFrames = (a: Uint8ClampedArray, b: Uint8ClampedArray) => {
+    if (a.length !== b.length) return { count: -1, maxDiff: 255 };
+    let count = 0;
+    let maxDiff = 0;
+    for (let i = 0; i < a.length; i += 4) {
+      let d = 0;
+      for (let c = 0; c < 4; c++) {
+        const cd = Math.abs((a[i + c] ?? 0) - (b[i + c] ?? 0));
+        if (cd > d) d = cd;
+      }
+      if (d > 0) {
+        count++;
+        if (d > maxDiff) maxDiff = d;
+      }
+    }
+    return { count, maxDiff };
+  };
 
   try {
     await frame(1, 65, 18);
@@ -194,11 +215,77 @@ export async function drawExtremeZoom(choice: RendererChoice) {
       effects: [{ ...glass, intensity: 0, dispersion: 0, frost: 0, splay: 0 }],
     });
     const detailGlass = await frame(detailZoom, detailX, 18);
+    // Extreme-zoom glass inside isolated scopes must inherit the page prefix:
+    // 1. Inside a layer-blurred frame, the cropped coarse halo still refracts the offscreen blue stripes.
+    const scoped = { ...pill, x: 900 };
+    for (let i = 0; i < 12; i++) {
+      editor.createLayer(
+        "rect",
+        { x: scoped.x, y: 10 + i, width: scoped.width, height: 1 },
+        pageId,
+        { fills: [{ type: "solid", color: i % 2 ? "#365aec" : "#2044e0" }] },
+      );
+    }
+    const blurScope = editor.createLayer("frame", scoped, pageId, {
+      fills: [],
+      effects: [{ type: "layer-blur", radius: 0.1 }],
+    });
+    if (!blurScope) throw new Error("no blur scope");
+    editor.createLayer("rect", scoped, blurScope, {
+      fills: [],
+      cornerRadius: 18,
+      effects: [{ ...glass, intensity: 0, dispersion: 0, frost: 0, splay: 0 }],
+    });
+    editor.createLayer("rect", { x: scoped.x, y: 10, width: scoped.width, height: 12 }, pageId, {
+      fills: [{ type: "solid", color: "#d01912" }],
+    });
+    const scopedRefracted = await frame(26, scoped.x + 65, 0.65);
+    // 2. Inside a picture mask at 25600%, native-pixel prefix cropping keeps 1-device-pixel stripes crisp.
+    const scopedDetailX = 1150;
+    for (let i = -8; i < 8; i += 2) {
+      editor.createLayer(
+        "rect",
+        { x: scopedDetailX + i * devicePixel, y: 17, width: devicePixel, height: 2 },
+        pageId,
+        {
+          x: scopedDetailX + i * devicePixel,
+          width: devicePixel,
+          fills: [{ type: "solid", color: "#ffffff" }],
+        },
+      );
+    }
+    const scopedDetailReference = await frame(detailZoom, scopedDetailX, 18);
+    const maskRect = { ...pill, x: scopedDetailX - 65 };
+    const maskGroup = editor.createLayer("frame", maskRect, pageId, {
+      fills: [],
+    });
+    if (!maskGroup) throw new Error("no mask scope");
+    editor.createLayer("rect", maskRect, maskGroup, {
+      isMask: true,
+      maskType: "alpha",
+      fills: [
+        {
+          type: "linear",
+          from: { x: 0, y: 0 },
+          to: { x: 1, y: 0 },
+          stops: [
+            { position: 0, color: "#ffffff" },
+            { position: 1, color: "#ffffff" },
+          ],
+        },
+      ],
+    });
+    editor.createLayer("rect", maskRect, maskGroup, {
+      fills: [],
+      cornerRadius: 18,
+      effects: [{ ...glass, intensity: 0, dispersion: 0, frost: 0, splay: 0 }],
+    });
+    const scopedDetailGlass = await frame(detailZoom, scopedDetailX, 18);
     // A large Gaussian reads far past this viewport. A black-white
     // half-plane has a midpoint near half intensity after symmetric blur.
     const wideBlur = [];
     for (const [i, radius] of [20, 40].entries()) {
-      const x = 1200 + i * 500;
+      const x = 1600 + i * 500;
       editor.createLayer("rect", { x: x - 180, y: -180, width: 360, height: 360 }, pageId, {
         fills: [{ type: "solid", color: "#ffffff" }],
       });
@@ -211,17 +298,59 @@ export async function drawExtremeZoom(choice: RendererChoice) {
       });
       wideBlur.push(await frame(radius === 20 ? 100 : 50, x, 0));
     }
+    // Same extreme-zoom wide blur inside a full-cover opaque alpha mask must match the root blur
+    // across the entire viewport.
+    const scopedBlurX = 2600;
+    editor.createLayer("rect", { x: scopedBlurX - 180, y: -180, width: 360, height: 360 }, pageId, {
+      fills: [{ type: "solid", color: "#ffffff" }],
+    });
+    editor.createLayer("rect", { x: scopedBlurX - 180, y: -180, width: 180, height: 360 }, pageId, {
+      fills: [{ type: "solid", color: "#000000" }],
+    });
+    const scopedBlurRect = { x: scopedBlurX - 60, y: -60, width: 120, height: 120 };
+    const scopedBlurGroup = editor.createLayer("frame", scopedBlurRect, pageId, { fills: [] });
+    if (!scopedBlurGroup) throw new Error("no scoped blur group");
+    editor.createLayer("rect", scopedBlurRect, scopedBlurGroup, {
+      isMask: true,
+      maskType: "alpha",
+      fills: [
+        {
+          type: "linear",
+          from: { x: 0, y: 0 },
+          to: { x: 1, y: 0 },
+          stops: [
+            { position: 0, color: "#ffffff" },
+            { position: 1, color: "#ffffff" },
+          ],
+        },
+      ],
+    });
+    editor.createLayer("rect", scopedBlurRect, scopedBlurGroup, {
+      fills: [{ type: "solid", color: "#00000001" }],
+      effects: [{ type: "background-blur", radius: 20 }],
+    });
+    const scopedWideBlur = await frame(100, scopedBlurX, 0);
+    const scopedDetailGlassDiff = diffFrames(detailGlass.rgba, scopedDetailGlass.rgba);
+    const wideBlur0 = wideBlur[0];
+    if (!wideBlur0) throw new Error("missing wideBlur[0]");
+    const scopedWideBlurDiff = diffFrames(wideBlur0.rgba, scopedWideBlur.rgba);
     return {
       backend,
       fallbacks,
-      rim,
-      interior,
-      fuzz,
-      plain,
-      refracted,
-      detailReference,
-      detailGlass,
-      wideBlur,
+      rim: rim.map(strip),
+      interior: strip(interior),
+      fuzz: fuzz.map(strip),
+      plain: strip(plain),
+      refracted: strip(refracted),
+      detailReference: strip(detailReference),
+      detailGlass: strip(detailGlass),
+      scopedRefracted: strip(scopedRefracted),
+      scopedDetailReference: strip(scopedDetailReference),
+      scopedDetailGlass: strip(scopedDetailGlass),
+      scopedDetailGlassDiff,
+      wideBlur: wideBlur.map(strip),
+      scopedWideBlur: strip(scopedWideBlur),
+      scopedWideBlurDiff,
     };
   } finally {
     window.removeEventListener("drawpane:renderer-fallback", fallback);

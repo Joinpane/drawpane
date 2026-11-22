@@ -88,6 +88,20 @@ for (const backend of ["webgpu", "webgl2"] as const) {
     expect(outcome.refracted.pixel[2]).toBeGreaterThan(200);
     expect(outcome.refracted.pixel[1]).toBeLessThan(100);
     expect(outcome.refracted.pixel[3]).toBe(255);
+    expect(outcome.scopedRefracted.pixel[2]).toBeGreaterThan(200);
+    expect(outcome.scopedRefracted.pixel[1]).toBeLessThan(100);
+    expect(outcome.scopedRefracted.pixel[3]).toBe(255);
+    expect(outcome.scopedDetailGlass.limit).toContain("reduced detail");
+    expect(outcome.scopedDetailGlass.size).toEqual([640, 384]);
+    expect(outcome.scopedDetailGlassDiff.maxDiff).toBeLessThanOrEqual(1);
+    const scopedStripes = outcome.scopedDetailReference.detail.filter(
+      (v, i) => i % 4 === 0 && v > 240,
+    );
+    expect(scopedStripes).toHaveLength(8);
+    for (const [i, reference] of outcome.scopedDetailReference.detail.entries())
+      expect(Math.abs((outcome.scopedDetailGlass.detail[i] ?? 0) - reference)).toBeLessThanOrEqual(
+        4,
+      );
     for (const frame of [outcome.interior, ...outcome.fuzz]) {
       for (const [channel, expected] of green.entries())
         expect(
@@ -95,7 +109,7 @@ for (const backend of ["webgpu", "webgl2"] as const) {
           `interior at ${frame.zoom * 100}%`,
         ).toBeLessThanOrEqual(12);
     }
-    for (const frame of outcome.wideBlur) {
+    for (const frame of [...outcome.wideBlur, outcome.scopedWideBlur]) {
       expect(frame.size).toEqual([640, 384]);
       expect(frame.pixel[3]).toBe(255);
       for (const channel of frame.pixel.slice(0, 3))
@@ -104,6 +118,7 @@ for (const backend of ["webgpu", "webgl2"] as const) {
           `blur at ${frame.zoom * 100}%: ${frame.pixel}`,
         ).toBeLessThanOrEqual(3);
     }
+    expect(outcome.scopedWideBlurDiff.maxDiff).toBeLessThanOrEqual(1);
     for (const frame of outcome.rim) {
       expect(frame.size).toEqual([640, 384]);
       const d = 0.65;

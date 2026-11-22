@@ -810,12 +810,17 @@ struct BlurReaderPlane {
     view: wgpu::TextureView,
 }
 
+struct ReaderSource {
+    plane: BlurReaderPlane,
+    bounds: IRect,
+}
+
 struct BlurReaderDraw {
     frame_size: (i32, i32),
     origin: (i32, i32),
-    size: (u32, u32),
     dirty: IRect,
-    source: BlurReaderPlane,
+    source: ReaderSource,
+    interiors: Vec<usize>,
     source_is_frame: bool,
     source_written: bool,
     targets: [Option<BlurReaderPlane>; 2],
@@ -837,9 +842,16 @@ impl BlurReaderDraw {
         progressive_blur::blur_bounds_and_edge(
             within,
             self.frame_size,
-            (-self.origin.0, -self.origin.1),
-            (self.size.0 as i32, self.size.1 as i32),
+            (-self.source.bounds.x0, -self.source.bounds.y0),
+            (self.source.bounds.size().0 as i32, self.source.bounds.size().1 as i32),
             sigma,
+        )
+    }
+
+    fn source_rect(&self, target_rect: IRect) -> IRect {
+        target_rect.translate(
+            self.origin.0 - self.source.bounds.x0,
+            self.origin.1 - self.source.bounds.y0,
         )
     }
 }
@@ -3238,38 +3250,33 @@ impl Gpu {
         std::mem::swap(&mut self.readers.blur_source, blur_source);
     }
 
-    fn overlay_glass_interiors(
+    fn overlay_reader_interiors(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
-        source_origin: (i32, i32),
-        source_size: (u32, u32),
+        bounds: IRect,
         interiors: &[usize],
     ) {
         for &layer in interiors {
             let paint = self.offscreen_stack[layer].plane(true);
-            let offset = (paint.origin.0 - source_origin.0, paint.origin.1 - source_origin.1);
             let visible = IRect {
-                x0: offset.0,
-                y0: offset.1,
-                x1: offset.0 + i32::from(paint.active_size.0),
-                y1: offset.1 + i32::from(paint.active_size.1),
+                x0: paint.origin.0,
+                y0: paint.origin.1,
+                x1: paint.origin.0 + i32::from(paint.active_size.0),
+                y1: paint.origin.1 + i32::from(paint.active_size.1),
             }
-            .clamp(source_size.0 as i32, source_size.1 as i32);
+            .intersect(bounds);
             if !visible.is_empty() {
+                let local = visible.translate(-bounds.x0, -bounds.y0);
+                let (width, height) = local.size();
                 self.readers.encode_composite(
                     &self.device,
                     &self.queue,
                     encoder,
                     &paint.view,
                     CompositeTarget::Over(view),
-                    offset,
-                    (
-                        visible.x0 as u32,
-                        visible.y0 as u32,
-                        (visible.x1 - visible.x0) as u32,
-                        (visible.y1 - visible.y0) as u32,
-                    ),
+                    (paint.origin.0 - bounds.x0, paint.origin.1 - bounds.y0),
+                    (local.x0 as u32, local.y0 as u32, width, height),
                     1.0,
                 );
             }
@@ -4401,10 +4408,76 @@ impl Gpu {
         retired.extend(scope.backdrop);
     }
 
-    fn readable_backdrop_plane(&self, active: &ActiveDraw) -> bool {
-        self.offscreen_stack
-            .last()
-            .map_or(active.backdrop_live, |scope| scope.backdrop.is_some())
+    fn reader_source(&self, base: Option<usize>, active: &ActiveDraw) -> Result<ReaderSource> {
+        let ((x, y), (width, height), texture, view) = if let Some(base) = base {
+            let plane = self.offscreen_stack[base].plane(true);
+            (
+                plane.origin,
+                (i32::from(plane.active_size.0), i32::from(plane.active_size.1)),
+                &plane.tex,
+                &plane.view,
+            )
+        } else {
+            let (texture, view, _) = self.root_plane(active.backdrop_live)?;
+            ((0, 0), (active.width as i32, active.height as i32), texture, view)
+        };
+        Ok(ReaderSource {
+            plane: BlurReaderPlane {
+                texture: texture.clone(),
+                view: view.clone(),
+            },
+            bounds: IRect {
+                x0: x,
+                y0: y,
+                x1: x + width,
+                y1: y + height,
+            },
+        })
+    }
+
+    /// Freezes earlier paint without incorporating it into the scope's own picture.
+    fn snapshot_reader_prefix(
+        &mut self,
+        source: &ReaderSource,
+        interiors: &[usize],
+        reads: IRect,
+    ) -> Result<ReaderSource> {
+        let bounds = source.bounds.reader_crop(reads);
+        let size = bounds.size();
+        let budget = self.reader_budget_room();
+        self.readers.ensure_blur_source_budgeted(&self.device, size, budget)?;
+        let mut encoder = self.take_encoder(false, "reader prefix snapshot");
+        let snapshot = self.readers.blur_source.as_ref().expect("reader prefix snapshot");
+        let texture = snapshot.texture.clone();
+        let view = snapshot.view.clone();
+        let offset = (
+            (bounds.x0 - source.bounds.x0) as u32,
+            (bounds.y0 - source.bounds.y0) as u32,
+        );
+        copy_rect(&mut encoder, &source.plane.texture, &texture, offset, (0, 0), size);
+        self.overlay_reader_interiors(&mut encoder, &view, bounds, interiors);
+        self.stash_encoder(encoder);
+        Ok(ReaderSource {
+            plane: BlurReaderPlane { texture, view },
+            bounds,
+        })
+    }
+
+    fn resolve_blur_source(&mut self, draw: &mut BlurReaderDraw, sigma: f32) -> Result<()> {
+        if draw.interiors.is_empty() {
+            return Ok(());
+        }
+        let interiors = std::mem::take(&mut draw.interiors);
+        let reach = blur::blur_reach(sigma) as i32;
+        let reads = draw.dirty.translate(draw.origin.0, draw.origin.1).inflate(reach, reach);
+        draw.source = self.snapshot_reader_prefix(&draw.source, &interiors, reads)?;
+        draw.source_is_frame = false;
+        draw.source_written = draw
+            .targets
+            .iter()
+            .flatten()
+            .any(|target| target.texture == draw.source.plane.texture);
+        Ok(())
     }
 
     /// The draw region and both destination prefixes live in the current scope's coordinates.
@@ -4436,7 +4509,6 @@ impl Gpu {
         let frame_size = (active.width as i32, active.height as i32);
         let origin = self.scene_offset();
         let (width, height) = self.active_scene_size();
-        let size = (u32::from(width), u32::from(height));
         let Some(dirty) = progressive_blur::blur_dirty_rect(
             paths,
             device,
@@ -4446,7 +4518,6 @@ impl Gpu {
         ) else {
             return Ok(None);
         };
-        let read_backdrop = self.readable_backdrop_plane(active);
         let clone_plane = |backdrop| -> Result<BlurReaderPlane> {
             let (texture, view, _) = self.plane(backdrop)?;
             Ok(BlurReaderPlane {
@@ -4454,18 +4525,25 @@ impl Gpu {
                 view: view.clone(),
             })
         };
+        let targets = [
+            write_main.then(|| clone_plane(false)).transpose()?,
+            write_backdrop.then(|| clone_plane(true)).transpose()?,
+        ];
+        let (base, interiors) = exec::reader_backdrop_layers(&self.offscreen_stack, false, |scope| scope.isolation);
+        let source = self.reader_source(base, active)?;
+        let source_written = targets
+            .iter()
+            .flatten()
+            .any(|target| target.texture == source.plane.texture);
         Ok(Some(BlurReaderDraw {
             frame_size,
             origin,
-            size,
             dirty,
-            source: clone_plane(read_backdrop)?,
+            source,
+            interiors,
             source_is_frame,
-            source_written: if read_backdrop { write_backdrop } else { write_main },
-            targets: [
-                write_main.then(|| clone_plane(false)).transpose()?,
-                write_backdrop.then(|| clone_plane(true)).transpose()?,
-            ],
+            source_written,
+            targets,
         }))
     }
 
@@ -6418,20 +6496,9 @@ impl Backend for Gpu {
         // A lens on an explicitly blended layer reads from its parent. A child lens
         // inherits that prefix with any preceding glass-free paint from the blend scope.
         let (base, interiors) =
-            exec::glass_backdrop_layers(&self.offscreen_stack, read_parent, |scope| scope.isolation);
-        let backdrop_is_frame = base.is_none() && interiors.is_empty();
-        let (source_origin, source_size, source_tex, source_view) = if let Some(base) = base {
-            let target = self.offscreen_stack[base].plane(true);
-            (
-                target.origin,
-                (u32::from(target.active_size.0), u32::from(target.active_size.1)),
-                target.tex.clone(),
-                target.view.clone(),
-            )
-        } else {
-            let (tex, view, _) = self.root_plane(active.backdrop_live)?;
-            ((0, 0), (aw, ah), tex.clone(), view.clone())
-        };
+            exec::reader_backdrop_layers(&self.offscreen_stack, read_parent, |scope| scope.isolation);
+        let mut backdrop_is_frame = base.is_none() && interiors.is_empty();
+        let mut source = self.reader_source(base, active)?;
         let within = glass::clip_within_from_open(open);
         if self.reader_halo.as_ref().is_some_and(|halo| halo.capturing) {
             let visible = self.reader_halo.as_ref().expect("glass halo").visible;
@@ -6439,10 +6506,31 @@ impl Backend for Gpu {
             if IRect::around(lens.inflate(2.0, 2.0)).intersect(visible).is_empty() {
                 return Ok(());
             }
-            let prefix = self.acquire_halo_patch(source_origin, source_size, within)?;
+            let scale = device.determinant().abs().sqrt() as f32;
+            let bounds = if scale > 0.0 && scale.is_finite() {
+                let inradius = resolve_inradius(&mut self.cpu_resources, op, paths, size);
+                let params = glass::glass_params(op, scale, inradius);
+                let pad = f64::from(params.margin) + 26.0;
+                source.bounds.reader_crop(IRect::around(lens.inflate(pad, pad)))
+            } else {
+                source.bounds
+            };
+            let patch_size = bounds.size();
+            let prefix = self.acquire_halo_patch((bounds.x0, bounds.y0), patch_size, within)?;
             let mut encoder = self.take_encoder(false, "snapshot coarse reader backdrop");
-            copy_rect(&mut encoder, &source_tex, &prefix.texture, (0, 0), (0, 0), source_size);
-            self.overlay_glass_interiors(&mut encoder, &prefix.view, source_origin, source_size, &interiors);
+            let offset = (
+                (bounds.x0 - source.bounds.x0) as u32,
+                (bounds.y0 - source.bounds.y0) as u32,
+            );
+            copy_rect(
+                &mut encoder,
+                &source.plane.texture,
+                &prefix.texture,
+                offset,
+                (0, 0),
+                patch_size,
+            );
+            self.overlay_reader_interiors(&mut encoder, &prefix.view, bounds, &interiors);
             self.stash_encoder(encoder);
             let old = self
                 .reader_halo
@@ -6545,22 +6633,47 @@ impl Backend for Gpu {
         let (dst_tex, dst_view, _) = self.plane(false)?;
         let (dst_tex, dst_view) = (dst_tex.clone(), dst_view.clone());
         let needs_native_prefix = divisor == 1 || native_sampling;
-        let source_view = if needs_native_prefix
-            && (!interiors.is_empty() || ((regions.len() > 1 || native_sampling) && source_tex == dst_tex))
+        if needs_native_prefix
+            && (!interiors.is_empty() || ((regions.len() > 1 || native_sampling) && source.plane.texture == dst_tex))
         {
-            let budget = self.reader_budget_room();
-            self.readers
-                .ensure_blur_source_budgeted(&self.device, source_size, budget)?;
-            let mut encoder = self.take_encoder(false, "glass prefix snapshot");
-            let snapshot = self.readers.blur_source.as_ref().expect("glass prefix snapshot");
-            let (tex, view) = (snapshot.texture.clone(), snapshot.view.clone());
-            copy_rect(&mut encoder, &source_tex, &tex, (0, 0), (0, 0), source_size);
-            self.overlay_glass_interiors(&mut encoder, &view, source_origin, source_size, &interiors);
-            self.stash_encoder(encoder);
-            view
-        } else {
-            source_view
-        };
+            let reads = if divisor == 1 {
+                IRect {
+                    x0: regions.iter().map(|r| r.x0).min().unwrap(),
+                    y0: regions.iter().map(|r| r.y0).min().unwrap(),
+                    x1: regions.iter().map(|r| r.x0 + r.rw as i32).max().unwrap(),
+                    y1: regions.iter().map(|r| r.y0 + r.rh as i32).max().unwrap(),
+                }
+            } else {
+                let pad = native_params.margin + 2;
+                IRect {
+                    x0: regions
+                        .iter()
+                        .map(|r| (r.x0 * divisor - halo_offset.0 - 2).min(r.out_x0 + origin.0 - pad))
+                        .min()
+                        .unwrap(),
+                    y0: regions
+                        .iter()
+                        .map(|r| (r.y0 * divisor - halo_offset.1 - 2).min(r.out_y0 + origin.1 - pad))
+                        .min()
+                        .unwrap(),
+                    x1: regions
+                        .iter()
+                        .map(|r| ((r.x0 + r.rw as i32) * divisor - halo_offset.0 + 2).max(r.out_x1 + origin.0 + pad))
+                        .max()
+                        .unwrap(),
+                    y1: regions
+                        .iter()
+                        .map(|r| ((r.y0 + r.rh as i32) * divisor - halo_offset.1 + 2).max(r.out_y1 + origin.1 + pad))
+                        .max()
+                        .unwrap(),
+                }
+            };
+            source = self.snapshot_reader_prefix(&source, &interiors, reads)?;
+            backdrop_is_frame = false;
+        }
+        let source_origin = (source.bounds.x0, source.bounds.y0);
+        let source_size = source.bounds.size();
+        let source_view = source.plane.view;
 
         let any_clip = divisor > 1
             || open.iter().any(|o| {
@@ -6838,7 +6951,7 @@ impl Backend for Gpu {
                 (-sample_origin.0, -sample_origin.1),
                 (-origin.0, -origin.1),
                 self.backdrop_gen,
-                backdrop_is_frame,
+                low_prefix.is_none() && backdrop_is_frame,
                 &params,
                 region,
                 sample_clip,
@@ -7640,7 +7753,7 @@ impl Backend for Gpu {
         if !(scale > 0.0 && scale.is_finite()) {
             return Ok(());
         }
-        let Some(draw) = self.prepare_blur_reader(paths, device, coarse, open)? else {
+        let Some(mut draw) = self.prepare_blur_reader(paths, device, coarse, open)? else {
             return Ok(());
         };
         let t_blur = now();
@@ -7651,12 +7764,6 @@ impl Backend for Gpu {
         if let Some(a) = self.active.as_mut() {
             a.bg_blur_ops += 1;
         }
-        let analytic = if coarse {
-            analytic_box_from_paths(paths, device, size, draw.frame_dirty_origin())
-        } else {
-            None
-        };
-        let (mut encoder, clipped) = self.encode_blur_reader_masks(&draw, paths, device, analytic.is_some(), open)?;
         let sigma = blur::sigma_from_radius(op.radius) * scale;
         let within = glass::clip_within_from_open(open);
         let replay = self.reader_halo.is_some()
@@ -7664,17 +7771,42 @@ impl Backend for Gpu {
                 .offscreen_stack
                 .iter()
                 .any(|scope| scope.isolation.source_for_post_effect);
+        let halo_sample = if coarse {
+            None
+        } else {
+            reader
+                .and_then(|reader| self.reader_halo.as_ref()?.blurred.get(&reader))
+                .and_then(|patch| self.sample_blur_halo(&draw, patch))
+        };
+        if coarse || halo_sample.is_none() {
+            if !coarse
+                && replay
+                && reader.is_some()
+                && sigma >= blur::VIEWPORT_HALO_MIN_SIGMA
+                && self.reader_halo.as_ref().is_some_and(|halo| !halo.capturing)
+            {
+                return Err(EngineError::limit("a visible background blur has no coarse backdrop"));
+            }
+            self.resolve_blur_source(&mut draw, sigma)?;
+        }
+        let analytic = if coarse {
+            analytic_box_from_paths(paths, device, size, draw.frame_dirty_origin())
+        } else {
+            None
+        };
+        let (mut encoder, clipped) = self.encode_blur_reader_masks(&draw, paths, device, analytic.is_some(), open)?;
         if coarse {
             let budget = self.reader_budget_room();
             self.readers.encode_coarse_blur(
                 &self.device,
                 &self.queue,
                 &mut encoder,
-                &draw.source.view,
+                &draw.source.plane.view,
                 draw.targets.iter().flatten().map(|t| (&t.texture, &t.view)),
-                draw.size,
+                draw.source.bounds.size(),
                 draw.frame_size,
-                (-draw.origin.0, -draw.origin.1),
+                (-draw.source.bounds.x0, -draw.source.bounds.y0),
+                draw.frame_dirty_origin(),
                 self.backdrop_gen,
                 draw.source_is_frame,
                 draw.dirty,
@@ -7686,17 +7818,7 @@ impl Backend for Gpu {
                 budget,
             )?;
         } else {
-            let halo_sample = reader
-                .and_then(|reader| self.reader_halo.as_ref()?.blurred.get(&reader))
-                .and_then(|patch| self.sample_blur_halo(&draw, patch));
             if halo_sample.is_none() {
-                if replay
-                    && reader.is_some()
-                    && sigma >= blur::VIEWPORT_HALO_MIN_SIGMA
-                    && self.reader_halo.as_ref().is_some_and(|halo| !halo.capturing)
-                {
-                    return Err(EngineError::limit("a visible background blur has no coarse backdrop"));
-                }
                 let (width, height) = draw.dirty_size();
                 let budget = self.reader_budget_room();
                 self.readers
@@ -7705,17 +7827,18 @@ impl Backend for Gpu {
                 let key = draw
                     .source_is_frame
                     .then(|| blur::PyramidKey::new(self.backdrop_gen, clamp_bounds, edge));
+                let sample = draw.source_rect(draw.dirty);
                 let spec = BlurSpec {
                     sigma,
                     edge,
                     clamp_bounds,
-                    dirty: draw.dirty,
+                    dirty: sample,
                 };
                 self.encode_blur_reader_slice(
                     &mut encoder,
-                    &draw.source.view,
-                    draw.size,
-                    (draw.dirty.x0, draw.dirty.y0),
+                    &draw.source.plane.view,
+                    draw.source.bounds.size(),
+                    (sample.x0, sample.y0),
                     &spec,
                     key,
                 )?;
@@ -7815,7 +7938,7 @@ impl Backend for Gpu {
                 return self.background_blur(Some(key), &uniform, paths, device, size, alpha, coarse, open);
             }
         };
-        let Some(draw) = self.prepare_blur_reader(paths, device, false, open)? else {
+        let Some(mut draw) = self.prepare_blur_reader(paths, device, false, open)? else {
             return Ok(());
         };
         let t_blur = now();
@@ -7870,11 +7993,12 @@ impl Backend for Gpu {
             return Err(EngineError::limit("a visible progressive blur has no coarse backdrop"));
         }
         let resident = halo_sample.as_ref().map_or(plan.stops.len(), |halo| halo.first);
+        let resident_sigma = plan.stops.get(resident.saturating_sub(1)).copied().unwrap_or(0.0);
+        if resident > 0 {
+            self.resolve_blur_source(&mut draw, resident_sigma)?;
+        }
         let (mut encoder, clipped) = self.encode_blur_reader_masks(&draw, paths, device, false, open)?;
-        let (clamp_bounds, edge) = draw.bounds_and_edge(
-            glass::clip_within_from_open(open),
-            plan.stops.get(resident.saturating_sub(1)).copied().unwrap_or(0.0),
-        );
+        let (clamp_bounds, edge) = draw.bounds_and_edge(glass::clip_within_from_open(open), resident_sigma);
         let pyramid_key = draw
             .source_is_frame
             .then(|| blur::PyramidKey::new(self.backdrop_gen, clamp_bounds, edge));
@@ -7896,19 +8020,19 @@ impl Backend for Gpu {
         let source = if resident > 0 && draw.source_written && (width > tile_side || height > tile_side) {
             let budget = self.reader_budget_room();
             self.readers
-                .ensure_blur_source_budgeted(&self.device, draw.size, budget)?;
+                .ensure_blur_source_budgeted(&self.device, draw.source.bounds.size(), budget)?;
             let snapshot = self.readers.blur_source.as_ref().expect("blur reader source");
             copy_rect(
                 &mut encoder,
-                &draw.source.texture,
+                &draw.source.plane.texture,
                 &snapshot.texture,
                 (0, 0),
                 (0, 0),
-                draw.size,
+                draw.source.bounds.size(),
             );
             &snapshot.view
         } else {
-            &draw.source.view
+            &draw.source.plane.view
         }
         .clone();
 
@@ -7923,6 +8047,7 @@ impl Backend for Gpu {
                     y1: (y0 + side).min(dirty.y1),
                 };
                 let (tw, th) = (tile.x1 - x0, tile.y1 - y0);
+                let sample = draw.source_rect(tile);
                 for (stop, &sigma) in plan.stops.iter().take(resident).enumerate() {
                     let col = (stop as u32 % cols) as i32;
                     let row = (stop as u32 / cols) as i32;
@@ -7930,13 +8055,13 @@ impl Backend for Gpu {
                         sigma,
                         edge,
                         clamp_bounds,
-                        dirty: tile,
+                        dirty: sample,
                     };
                     self.encode_blur_reader_slice(
                         &mut encoder,
                         &source,
-                        draw.size,
-                        (x0 - col * tw, y0 - row * th),
+                        draw.source.bounds.size(),
+                        (sample.x0 - col * tw, sample.y0 - row * th),
                         &spec,
                         pyramid_key,
                     )?;

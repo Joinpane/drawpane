@@ -1794,3 +1794,503 @@ fn nested_mask_and_layer_blur_let_glass_see_the_page_prefix() {
         "multiply over refracted stripes: {lens:?}"
     );
 }
+
+#[test]
+fn background_and_progressive_blur_in_pictures_read_the_page_prefix() {
+    for progressive in [false, true] {
+        let render = |engine: &mut Engine| {
+            let (pixels, stats) = engine
+                .render_cpu_tiled(
+                    128,
+                    96,
+                    camera(),
+                    [0.0; 4],
+                    drawpane_engine::engine::TiledOptions::default(),
+                )
+                .unwrap();
+            assert!(stats.exact);
+            pixels.to_vec()
+        };
+        let make = |page_color| {
+            let mut list = W::new(ANY, 1);
+            list.reset();
+            list.set(1, 0, &positioned_rect(0.0, 0.0, 64.0, 96.0, Some(page_color)));
+            list.set(
+                2,
+                0,
+                &positioned_rect(64.0, 0.0, 64.0, 96.0, Some([0.0, 0.0, 1.0, 1.0])),
+            );
+            let mut scope = positioned_rect(8.0, 8.0, 112.0, 80.0, None);
+            scope.post.push(common::Post::LayerBlur(4.0));
+            scope.ops.push(Op::Children);
+            list.set(3, 0, &scope);
+            let mut mask = positioned_rect(8.0, 8.0, 96.0, 64.0, Some([1.0; 4]));
+            mask.mask = drawpane_engine::record::MASK_ALPHA;
+            list.set(4, 3, &mask);
+            let mut lens = positioned_rect(16.0, 12.0, 80.0, 56.0, None);
+            lens.ops.push(if progressive {
+                Op::ProgressiveBlur {
+                    paths: vec![0],
+                    even_odd: false,
+                    start_radius: 4.0,
+                    end_radius: 48.0,
+                    start: [0.0, 0.0],
+                    end: [0.0, 1.0],
+                }
+            } else {
+                Op::BackgroundBlur {
+                    paths: vec![0],
+                    even_odd: false,
+                    radius: 42.0,
+                }
+            });
+            list.set(5, 3, &lens);
+            list.finish()
+        };
+        let pixel = |image: &[u8], x: usize, y: usize| {
+            let start = (y * 128 + x) * 4;
+            <[u8; 4]>::try_from(&image[start..start + 4]).unwrap()
+        };
+        let mut engine = Engine::new(Limits::default());
+        engine.use_cpu_tiles(32, 128);
+        engine.apply(&make([1.0, 0.0, 0.0, 1.0])).unwrap();
+        let before = render(&mut engine);
+        let edge = pixel(&before, 65, 48);
+        assert!(edge[0] > 40 && edge[2] > 40, "scoped stripe transition: {edge:?}");
+        assert_eq!(pixel(&before, 65, 0), [0, 0, 255, 255]);
+
+        let white = [1.0; 4];
+        let mut patch = W::new(1, 2);
+        patch.set(1, 0, &positioned_rect(0.0, 0.0, 64.0, 96.0, Some(white)));
+        engine.apply(&patch.finish()).unwrap();
+        let patched = render(&mut engine);
+        assert!(pixel(&patched, 65, 48)[1] > 40);
+        let mut fresh = Engine::new(Limits::default());
+        fresh.use_cpu_tiles(32, 128);
+        fresh.apply(&make(white)).unwrap();
+        assert!(patched == render(&mut fresh), "patched tiles differ from fresh tiles");
+
+        let whole = fresh.render_cpu(128, 96, camera(), [0.0; 4], false).unwrap().0.to_vec();
+        fresh.store.limits.export_tile = 31;
+        let mut banded = Vec::new();
+        for y in (0..96).step_by(19) {
+            banded.extend_from_slice(
+                fresh
+                    .render_band(128, 96, camera(), [0.0; 4], y, 19.min(96 - y))
+                    .unwrap(),
+            );
+        }
+        assert!(whole == banded, "whole and banded exports differ");
+    }
+}
+
+/// Banded exports must match whole frames bit-for-bit when page content varies top to bottom
+/// and a backdrop reader sits inside a layer-blurred scope (enclosing post-effect reach).
+#[test]
+fn scoped_readers_in_layer_blur_match_whole_frame_across_vertical_bands() {
+    #[derive(Clone, Copy, Debug)]
+    enum Kind {
+        Bg(f32),
+        Progressive(f32, f32),
+        Glass,
+    }
+    let build = |mask: bool, layer_blur: f32, kind: Kind| {
+        let mut list = W::new(ANY, 1);
+        list.reset();
+        list.set(
+            1,
+            0,
+            &positioned_rect(0.0, 0.0, 240.0, 160.0, Some([0.957, 0.953, 0.937, 1.0])),
+        );
+        for i in 0..14u32 {
+            list.set(
+                2 + i,
+                0,
+                &positioned_rect(0.0, f64::from(i * 12), 240.0, 6.0, Some([0.1, 0.1, 0.1, 1.0])),
+            );
+        }
+        let mut frame = positioned_rect(32.0, 23.0, 176.0, 116.0, None);
+        frame.ops.push(Op::Children);
+        if layer_blur > 0.0 {
+            frame.post.push(common::Post::LayerBlur(layer_blur));
+        }
+        list.set(30, 0, &frame);
+        if mask {
+            let mut m = positioned_rect(8.0, 8.0, 152.0, 97.0, Some([1.0, 1.0, 1.0, 0.8]));
+            m.mask = drawpane_engine::record::MASK_ALPHA;
+            list.set(31, 30, &m);
+        }
+        list.set(
+            32,
+            30,
+            &positioned_rect(0.0, 26.0, 96.0, 64.0, Some([0.27, 0.65, 0.87, 0.74])),
+        );
+        let lens = match kind {
+            Kind::Bg(radius) => {
+                let mut r = positioned_rect(44.0, 16.0, 128.0, 82.0, Some([1.0, 1.0, 1.0, 0.2]));
+                r.ops.insert(
+                    0,
+                    Op::BackgroundBlur {
+                        paths: vec![0],
+                        even_odd: false,
+                        radius,
+                    },
+                );
+                r
+            }
+            Kind::Progressive(a, b) => {
+                let mut r = positioned_rect(44.0, 16.0, 128.0, 82.0, Some([1.0, 1.0, 1.0, 0.2]));
+                r.ops.insert(
+                    0,
+                    Op::ProgressiveBlur {
+                        paths: vec![0],
+                        even_odd: false,
+                        start_radius: a,
+                        end_radius: b,
+                        start: [0.0, 0.0],
+                        end: [0.0, 1.0],
+                    },
+                );
+                r
+            }
+            Kind::Glass => tuned_glass(44.0, 16.0, 128.0, 82.0, 45.0, 6.0, 16.0),
+        };
+        list.set(34, 30, &lens);
+        list.finish()
+    };
+
+    for (mask, lb, kind, bands_at_2x) in [
+        (false, 5.0, Kind::Bg(10.0), true),
+        (false, 12.0, Kind::Bg(10.0), true),
+        (true, 5.0, Kind::Bg(10.0), true),
+        (false, 5.0, Kind::Bg(40.0), false),
+        (false, 8.0, Kind::Progressive(4.0, 28.0), false),
+        (false, 6.0, Kind::Glass, false),
+    ] {
+        for zoom in [1.0, 2.0] {
+            let (w, h) = ((240.0 * zoom) as u32, (160.0 * zoom) as u32);
+            let cam = Camera {
+                zoom,
+                x: 0.0,
+                y: 0.0,
+                dpr: 1.0,
+            };
+            let bytes = build(mask, lb, kind);
+            let mut browser = Engine::new(Limits::default());
+            browser.apply(&bytes).unwrap();
+            let whole = browser.render_cpu(w, h, cam, [0.0; 4], false).unwrap().0.to_vec();
+
+            let limits = Limits {
+                memory_bytes: 25 << 20,
+                ..Limits::default()
+            };
+            let mut worker = Engine::new(limits);
+            worker.apply(&bytes).unwrap();
+            let worker_px = worker.render_cpu(w, h, cam, [0.0; 4], false).unwrap().0.to_vec();
+            assert_eq!(
+                whole, worker_px,
+                "worker banded export differs from whole frame (mask={mask}, lb={lb}, kind={kind:?}, zoom={zoom})"
+            );
+
+            if zoom == 1.0 || bands_at_2x {
+                browser.store.limits.export_tile = 64;
+                let mut bands = Vec::new();
+                for y in (0..h).step_by(40) {
+                    bands.extend_from_slice(browser.render_band(w, h, cam, [0.0; 4], y, 40.min(h - y)).unwrap());
+                }
+                assert_eq!(
+                    whole, bands,
+                    "64x40 render_band differs from whole frame (mask={mask}, lb={lb}, kind={kind:?}, zoom={zoom})"
+                );
+            }
+        }
+    }
+}
+
+/// Column-cutting bands at fractional cameras (and production 1024 px columns at zoom 5) must
+/// match whole frames bit-for-bit when scoped backdrop blurs sit inside layer-blur chains.
+#[test]
+fn scoped_readers_in_layer_blur_match_whole_frame_across_column_bands() {
+    #[derive(Clone, Copy, Debug)]
+    enum Kind {
+        Bg(f32),
+        Progressive(f32, f32),
+    }
+    let build = |blurs: &[f32], kind: Kind| {
+        let mut list = W::new(ANY, 1);
+        list.reset();
+        list.set(
+            1,
+            0,
+            &positioned_rect(0.0, 0.0, 260.0, 180.0, Some([0.957, 0.953, 0.937, 1.0])),
+        );
+        for i in 0..15u32 {
+            list.set(
+                2 + i,
+                0,
+                &positioned_rect(0.0, f64::from(i * 12), 260.0, 5.0, Some([0.1, 0.1, 0.1, 1.0])),
+            );
+        }
+        for i in 0..11u32 {
+            list.set(
+                20 + i,
+                0,
+                &positioned_rect(f64::from(i * 24 + 3), 0.0, 7.0, 180.0, Some([0.15, 0.35, 0.85, 0.7])),
+            );
+        }
+        let mut parent = 0u32;
+        let mut id = 40u32;
+        let (mut x, mut y, mut sw, mut sh) = (30.0f64, 24.0f64, 200.0f32, 130.0f32);
+        for &radius in blurs {
+            let mut f = positioned_rect(x, y, sw, sh, None);
+            f.ops.push(Op::Children);
+            f.post.push(common::Post::LayerBlur(radius));
+            list.set(id, parent, &f);
+            parent = id;
+            id += 1;
+            x = 4.0;
+            y = 4.0;
+            sw -= 8.0;
+            sh -= 8.0;
+        }
+        list.set(
+            id,
+            parent,
+            &positioned_rect(0.0, 30.0, 90.0, 60.0, Some([0.27, 0.65, 0.87, 0.74])),
+        );
+        id += 1;
+        let mut lens = positioned_rect(40.0, 14.0, 130.0, 86.0, Some([1.0, 1.0, 1.0, 0.2]));
+        lens.ops.insert(
+            0,
+            match kind {
+                Kind::Bg(radius) => Op::BackgroundBlur {
+                    paths: vec![0],
+                    even_odd: false,
+                    radius,
+                },
+                Kind::Progressive(a, b) => Op::ProgressiveBlur {
+                    paths: vec![0],
+                    even_odd: false,
+                    start_radius: a,
+                    end_radius: b,
+                    start: [0.0, 0.0],
+                    end: [0.0, 1.0],
+                },
+            },
+        );
+        list.set(id, parent, &lens);
+        list.finish()
+    };
+
+    // Pure column cuts (rows = band_rows) and combined cuts at fractional camera (-7.3, -11.6).
+    for (blurs, kind) in [
+        (&[5.0][..], Kind::Bg(10.0)),
+        (&[4.0, 6.0][..], Kind::Bg(10.0)),
+        (&[5.0][..], Kind::Progressive(4.0, 28.0)),
+    ] {
+        let bytes = build(blurs, kind);
+        let cam = Camera {
+            zoom: 2.0,
+            x: -7.3,
+            y: -11.6,
+            dpr: 1.0,
+        };
+        let (w, h) = (520u32, 360u32);
+        let mut e = Engine::new(Limits::default());
+        e.apply(&bytes).unwrap();
+        let whole = e.render_cpu(w, h, cam, [0.0; 4], false).unwrap().0.to_vec();
+        e.store.limits.export_tile = 64;
+        let rows = e.band_rows(w).min(h);
+        let mut banded = Vec::new();
+        for y in (0..h).step_by(rows as usize) {
+            banded.extend_from_slice(e.render_band(w, h, cam, [0.0; 4], y, rows.min(h - y)).unwrap());
+        }
+        assert_eq!(
+            whole, banded,
+            "64px column bands differ from whole frame (blurs={blurs:?}, kind={kind:?})"
+        );
+    }
+
+    // Production 1024 px columns at zoom 5 with a column edge cutting the lens at x = 250.9.
+    for kind in [Kind::Bg(10.0), Kind::Progressive(4.0, 28.0)] {
+        let bytes = build(&[5.0], kind);
+        let cam = Camera {
+            zoom: 5.0,
+            x: 250.9,
+            y: -11.6,
+            dpr: 1.0,
+        };
+        let (w, h) = (1600u32, 360u32);
+        let mut e = Engine::new(Limits::default());
+        e.apply(&bytes).unwrap();
+        let whole = e.render_cpu(w, h, cam, [0.0; 4], false).unwrap().0.to_vec();
+        let rows = e.band_rows(w).min(h);
+        let mut banded = Vec::new();
+        for y in (0..h).step_by(rows as usize) {
+            banded.extend_from_slice(e.render_band(w, h, cam, [0.0; 4], y, rows.min(h - y)).unwrap());
+        }
+        assert_eq!(
+            whole, banded,
+            "default 1024px render_band differs from whole frame ({kind:?})"
+        );
+        let mut worker = Engine::new(Limits {
+            memory_bytes: 64 << 20,
+            ..Limits::default()
+        });
+        worker.apply(&bytes).unwrap();
+        let worker_px = worker.render_cpu(w, h, cam, [0.0; 4], false).unwrap().0.to_vec();
+        assert_eq!(
+            whole, worker_px,
+            "default 1024px worker render_cpu differs from whole frame ({kind:?})"
+        );
+    }
+}
+
+/// Enclosing post-effects (such as a large layer blur around a background blur) can extend the
+/// combined export halo past `Limits::halo` without newly refusing exports, while reader-only
+/// reach stays capped by `Limits::halo`.
+#[test]
+fn export_allows_large_enclosing_layer_blur_halo_while_capping_reader_reach() {
+    let build = |layer_blur: Option<f32>, bg_radius: f32| {
+        let mut list = W::new(ANY, 1);
+        list.reset();
+        list.set(
+            1,
+            0,
+            &positioned_rect(0.0, 0.0, 260.0, 180.0, Some([0.95, 0.94, 0.92, 1.0])),
+        );
+        for i in 0..9u32 {
+            list.set(
+                2 + i,
+                0,
+                &positioned_rect(0.0, f64::from(i * 20), 260.0, 8.0, Some([0.1, 0.2, 0.4, 1.0])),
+            );
+        }
+        let parent = if let Some(lb) = layer_blur {
+            let mut f = positioned_rect(20.0, 20.0, 220.0, 140.0, None);
+            f.ops.push(Op::Children);
+            f.post.push(common::Post::LayerBlur(lb));
+            list.set(20, 0, &f);
+            20
+        } else {
+            0
+        };
+        let mut lens = positioned_rect(30.0, 20.0, 140.0, 90.0, Some([1.0, 1.0, 1.0, 0.2]));
+        lens.ops.insert(
+            0,
+            Op::BackgroundBlur {
+                paths: vec![0],
+                even_odd: false,
+                radius: bg_radius,
+            },
+        );
+        list.set(21, parent, &lens);
+        list.finish()
+    };
+
+    // Layer blur 60 + background blur 100 at 2x: reader-only reach (386) <= 512, total (610) > 512.
+    let bytes = build(Some(60.0), 100.0);
+    let cam = Camera {
+        zoom: 2.0,
+        x: 0.0,
+        y: 0.0,
+        dpr: 1.0,
+    };
+    let (w, h) = (520u32, 360u32);
+    let mut browser = Engine::new(Limits::default());
+    browser.apply(&bytes).unwrap();
+    assert!(
+        matches!(
+            browser.halo_for_rect(cam.view(), vello_common::kurbo::Rect::new(0.0, 0.0, f64::from(w), f64::from(h))),
+            Err(err) if err.code == ErrorCode::Limit
+        ),
+        "halo_for_rect keeps reporting total reach > Limits::halo"
+    );
+    let whole = browser.render_cpu(w, h, cam, [0.0; 4], false).unwrap().0.to_vec();
+    let mut worker = Engine::new(Limits {
+        memory_bytes: 25 << 20,
+        ..Limits::default()
+    });
+    worker.apply(&bytes).unwrap();
+    worker
+        .admit_export(w, h, cam)
+        .expect("export admitted despite post reach > 512");
+    let worker_px = worker.render_cpu(w, h, cam, [0.0; 4], false).unwrap().0.to_vec();
+    assert_eq!(whole, worker_px, "worker export matches whole frame");
+    let mut banded = Vec::new();
+    for y in (0..h).step_by(90) {
+        banded.extend_from_slice(browser.render_band(w, h, cam, [0.0; 4], y, 90.min(h - y)).unwrap());
+    }
+    assert_eq!(whole, banded, "banded export matches whole frame");
+
+    // Reader-only reach > 512 (bg blur 120 at 3.5x) is still refused on exports.
+    let too_wide = build(None, 120.0);
+    let zoom_cam = Camera {
+        zoom: 3.5,
+        x: 0.0,
+        y: 0.0,
+        dpr: 1.0,
+    };
+    let mut limited = Engine::new(Limits {
+        memory_bytes: 25 << 20,
+        ..Limits::default()
+    });
+    limited.apply(&too_wide).unwrap();
+    assert!(
+        matches!(limited.admit_export(520, 360, zoom_cam), Err(err) if err.code == ErrorCode::Limit),
+        "excessive reader-only reach must stay refused"
+    );
+    assert!(
+        matches!(
+            limited.render_cpu(520, 360, zoom_cam, [0.0; 4], false),
+            Err(err) if err.code == ErrorCode::Limit
+        ),
+        "worker render_cpu must refuse excessive reader-only reach"
+    );
+}
+
+/// Rust-side execution check for `FLAG_ISOLATE` on a faded layer combining a background blur and
+/// a fill inside a picture mask over a see-through backdrop (the Scroll Edge Effect case). The
+/// `layer.ts` emission rule is verified end-to-end in `packages/editor/test/engine-regressions.test.ts`.
+#[test]
+fn isolated_faded_reader_with_fill_inside_mask_matches_figma_alpha() {
+    let mut list = W::new(ANY, 1);
+    list.reset();
+    list.set(
+        1,
+        0,
+        &positioned_rect(0.0, 0.0, 120.0, 120.0, Some([0.0, 0.0, 0.0, 0.5])),
+    );
+    let mut scope = positioned_rect(10.0, 10.0, 100.0, 100.0, None);
+    scope.ops.push(Op::Children);
+    list.set(2, 0, &scope);
+    let mut mask = positioned_rect(0.0, 0.0, 100.0, 100.0, Some([1.0, 1.0, 1.0, 0.5]));
+    mask.mask = drawpane_engine::record::MASK_ALPHA;
+    list.set(3, 2, &mask);
+
+    let mut blur_layer = positioned_rect(0.0, 0.0, 100.0, 100.0, None);
+    blur_layer.opacity = 0.9;
+    blur_layer.flags |= drawpane_engine::record::FLAG_ISOLATE;
+    blur_layer.ops.push(Op::BackgroundBlur {
+        paths: vec![0],
+        even_odd: false,
+        radius: 10.0,
+    });
+    blur_layer.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.0, 0.0, 0.0, 1.0]),
+    });
+    list.set(4, 2, &blur_layer);
+
+    let mut engine = Engine::new(Limits::default());
+    engine.apply(&list.finish()).unwrap();
+    let img = engine
+        .render_cpu(120, 120, camera(), [0.0; 4], false)
+        .unwrap()
+        .0
+        .to_vec();
+    let mid = (60 * 120 + 60) * 4;
+    // Mask (0.5) * faded layer (0.9) = 0.45 over 0.502 backdrop -> 0.45 + 0.55 * 0.502 = 0.726 -> 185.
+    assert_eq!(img[mid + 3], 185, "mid pixel {:?}", &img[mid..mid + 4]);
+}

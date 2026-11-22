@@ -198,13 +198,27 @@ impl IRect {
             y1: self.y1.min(o.y1),
         }
     }
-    #[cfg(feature = "gpu-common")]
     pub(crate) fn translate(self, x: i32, y: i32) -> Self {
         Self {
             x0: self.x0 + x,
             y0: self.y0 + y,
             x1: self.x1 + x,
             y1: self.y1 + y,
+        }
+    }
+    pub(crate) fn size(self) -> (u32, u32) {
+        ((self.x1 - self.x0) as u32, (self.y1 - self.y0) as u32)
+    }
+    /// Restrict a reader's scratch to its input region in this plane. Retain the
+    /// nearest edge texel if the requested extent is wholly beyond the plane.
+    pub(crate) fn reader_crop(self, reads: Self) -> Self {
+        let x0 = reads.x0.clamp(self.x0, self.x1 - 1);
+        let y0 = reads.y0.clamp(self.y0, self.y1 - 1);
+        Self {
+            x0,
+            y0,
+            x1: reads.x1.clamp(x0 + 1, self.x1),
+            y1: reads.y1.clamp(y0 + 1, self.y1),
         }
     }
     pub fn inflate(self, dx: i32, dy: i32) -> Self {
@@ -266,15 +280,15 @@ pub struct Isolation {
     pub on_backdrop: bool,
     pub separate: bool,
     pub copy_parent: bool,
-    /// This picture's nested glass can see the prefix behind the picture.
-    pub inherit_glass: bool,
+    /// This picture's nested readers can see the prefix behind the picture.
+    pub inherit_prefix: bool,
     /// An export selection crosses this faded context scope and keeps its own opacity.
     pub unfaded_main: bool,
 }
 
-/// Glass samples the base prefix (the root for None) with the listed glass-free interiors
+/// Readers sample the base prefix (the root for None) with the listed glass-free interiors
 /// composited over it in paint order.
-pub fn glass_backdrop_layers<T>(
+pub fn reader_backdrop_layers<T>(
     scopes: &[T],
     read_parent: bool,
     isolation: impl Fn(&T) -> Isolation,
@@ -290,7 +304,7 @@ pub fn glass_backdrop_layers<T>(
         // A fading pass-through picture starts with the immediate parent's pixels. Keep
         // following that parent's scope rule, without blending those pixels into it again.
         copied = scope.copy_parent;
-        if !scope.inherit_glass && !copied {
+        if !scope.inherit_prefix && !copied {
             interiors.reverse();
             return (base, interiors);
         }
@@ -1927,7 +1941,7 @@ impl<B: Backend> Walk<'_, B> {
             on_backdrop,
             separate: on_backdrop && (has_reader || copy_parent),
             copy_parent,
-            inherit_glass: false,
+            inherit_prefix: false,
             unfaded_main: false,
         }
     }
@@ -2177,7 +2191,7 @@ impl<B: Backend> Walk<'_, B> {
         }
         self.scope()?;
         let mut isolation = self.isolation(has_reader, false);
-        isolation.inherit_glass = content_has_reader;
+        isolation.inherit_prefix = content_has_reader;
         let paired = isolation.separate;
         if !self
             .backend
@@ -2399,7 +2413,7 @@ impl<B: Backend> Walk<'_, B> {
         let use_offscreen = has_post || layer_blend != 0 || through || (isolate && store.subtree_has_pass(id));
         let mut isolation = self.isolation(has_reader, through);
         isolation.source_for_post_effect = has_post;
-        isolation.inherit_glass = has_reader;
+        isolation.inherit_prefix = has_reader;
         if crosses_context {
             isolation.on_main = true;
             isolation.separate = true;

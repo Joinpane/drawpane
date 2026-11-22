@@ -1,0 +1,346 @@
+{
+  "suite": "scoped-alpha",
+  "about": "Scoped background blur and glass over a see-through background on a transparent page",
+  "cell": {
+    "width": 240,
+    "height": 160,
+    "columns": 3,
+    "gap": 40
+  },
+  "background": "none",
+  "cells": [
+    {
+      "id": "bgblur-in-mask",
+      "layers": [
+        {
+          "type": "rect",
+          "name": "See-through page fill",
+          "x": 0,
+          "y": 0,
+          "width": 240,
+          "height": 160,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#00000080"
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "name": "Mask over bg blur",
+          "x": 32,
+          "y": 23,
+          "width": 176,
+          "height": 116,
+          "clipContent": false,
+          "fills": [],
+          "effects": [],
+          "children": [
+            {
+              "type": "rect",
+              "name": "Mask",
+              "x": 8,
+              "y": 8,
+              "width": 152,
+              "height": 97,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#ffffffcc"
+                }
+              ],
+              "cornerRadius": 22,
+              "isMask": true,
+              "maskType": "alpha"
+            },
+            {
+              "type": "rect",
+              "name": "Blur",
+              "x": 44,
+              "y": 16,
+              "width": 128,
+              "height": 82,
+              "cornerRadius": 16,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#ffffff33"
+                }
+              ],
+              "effects": [
+                {
+                  "type": "background-blur",
+                  "radius": 10
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "bgblur-in-blur",
+      "layers": [
+        {
+          "type": "rect",
+          "name": "See-through page fill",
+          "x": 0,
+          "y": 0,
+          "width": 240,
+          "height": 160,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#00000080"
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "name": "Blur over bg blur",
+          "x": 32,
+          "y": 23,
+          "width": 176,
+          "height": 116,
+          "clipContent": false,
+          "fills": [],
+          "effects": [
+            {
+              "type": "layer-blur",
+              "radius": 5
+            }
+          ],
+          "children": [
+            {
+              "type": "rect",
+              "name": "Blur",
+              "x": 44,
+              "y": 16,
+              "width": 128,
+              "height": 82,
+              "cornerRadius": 16,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#ffffff33"
+                }
+              ],
+              "effects": [
+                {
+                  "type": "background-blur",
+                  "radius": 10
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "glass-in-mask",
+      "layers": [
+        {
+          "type": "rect",
+          "name": "See-through page fill",
+          "x": 0,
+          "y": 0,
+          "width": 240,
+          "height": 160,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#00000080"
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "name": "Mask over glass",
+          "x": 32,
+          "y": 23,
+          "width": 176,
+          "height": 116,
+          "clipContent": false,
+          "fills": [],
+          "effects": [],
+          "children": [
+            {
+              "type": "rect",
+              "name": "Mask",
+              "x": 8,
+              "y": 8,
+              "width": 152,
+              "height": 97,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#ffffffcc"
+                }
+              ],
+              "cornerRadius": 22,
+              "isMask": true,
+              "maskType": "alpha"
+            },
+            {
+              "type": "rect",
+              "name": "Lens",
+              "x": 44,
+              "y": 16,
+              "width": 128,
+              "height": 82,
+              "cornerRadius": 16,
+              "fills": [],
+              "effects": [
+                {
+                  "type": "glass",
+                  "angle": -45,
+                  "intensity": 45,
+                  "refraction": 60,
+                  "depth": 18,
+                  "dispersion": 16,
+                  "frost": 6,
+                  "splay": 0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "glass-in-blur",
+      "layers": [
+        {
+          "type": "rect",
+          "name": "See-through page fill",
+          "x": 0,
+          "y": 0,
+          "width": 240,
+          "height": 160,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#00000080"
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "name": "Blur over glass",
+          "x": 32,
+          "y": 23,
+          "width": 176,
+          "height": 116,
+          "clipContent": false,
+          "fills": [],
+          "effects": [
+            {
+              "type": "layer-blur",
+              "radius": 5
+            }
+          ],
+          "children": [
+            {
+              "type": "rect",
+              "name": "Lens",
+              "x": 44,
+              "y": 16,
+              "width": 128,
+              "height": 82,
+              "cornerRadius": 16,
+              "fills": [],
+              "effects": [
+                {
+                  "type": "glass",
+                  "angle": -45,
+                  "intensity": 45,
+                  "refraction": 60,
+                  "depth": 18,
+                  "dispersion": 16,
+                  "frost": 6,
+                  "splay": 0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "scroll-edge-mask",
+      "layers": [
+        {
+          "type": "rect",
+          "name": "See-through page fill",
+          "x": 0,
+          "y": 0,
+          "width": 240,
+          "height": 160,
+          "fills": [
+            {
+              "type": "solid",
+              "color": "#00000080"
+            }
+          ]
+        },
+        {
+          "type": "frame",
+          "name": "Scroll edge",
+          "x": 20,
+          "y": 20,
+          "width": 200,
+          "height": 120,
+          "clipContent": false,
+          "fills": [],
+          "children": [
+            {
+              "type": "frame",
+              "name": "Gradient Mask",
+              "x": 0,
+              "y": 0,
+              "width": 200,
+              "height": 120,
+              "clipContent": true,
+              "isMask": true,
+              "maskType": "alpha",
+              "fills": [
+                {
+                  "type": "linear",
+                  "from": { "x": 0.5, "y": 0 },
+                  "to": { "x": 0.5, "y": 1 },
+                  "stops": [
+                    { "position": 0, "color": "#000000ff" },
+                    { "position": 1, "color": "#00000000" }
+                  ]
+                }
+              ]
+            },
+            {
+              "type": "rect",
+              "name": "Blur",
+              "x": 0,
+              "y": 0,
+              "width": 200,
+              "height": 120,
+              "opacity": 0.9,
+              "fills": [
+                {
+                  "type": "solid",
+                  "color": "#000000",
+                  "blendMode": "screen"
+                }
+              ],
+              "effects": [
+                {
+                  "type": "background-blur",
+                  "radius": 20
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

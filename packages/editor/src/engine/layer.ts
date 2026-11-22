@@ -1190,7 +1190,6 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
   const tinyDetail =
     detailScale !== undefined && node.type !== "group" && Math.max(w, h) * detailScale < 24;
   const opacity = getProp(node.props, "opacity");
-  const isolate = !tinyDetail && opacity < 1 && fadesAsOne(node, children);
   const blend = tinyDetail ? BLEND.normal : blendCode(getProp(node.props, "blendMode"));
   const activeMask = !hidden && isActiveMask(node);
   const stopMask = !hidden && !activeMask && endsMask(node);
@@ -1249,14 +1248,6 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
       });
     }
   }
-  const flags =
-    (hidden ? FLAG.hidden : 0) |
-    (isolate ? FLAG.isolate : 0) |
-    (node.type === "group" ? FLAG.group : 0) |
-    (wirePost.length > 0 ? FLAG.post : 0) |
-    (blend !== 0 ? FLAG.blend : 0) |
-    (mask !== 0 ? FLAG.mask : 0) |
-    (stopMask ? FLAG.endsMask : 0);
   if (node.type === "group") {
     b.ops.push({ op: "children" });
   } else if (node.type === "text") {
@@ -1316,6 +1307,22 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
     }
     shapeStrokes(b, node, shape, w, h);
   }
+  const readerOps = b.ops.filter(
+    (op) => op.op === "backgroundBlur" || op.op === "progressiveBlur" || op.op === "glass",
+  ).length;
+  const hasPaint = b.ops.some((op) => op.op === "fill" || op.op === "stroke");
+  const isolate =
+    !tinyDetail &&
+    opacity < 1 &&
+    (fadesAsOne(node, children) || (readerOps > 0 && (hasPaint || readerOps > 1)));
+  const flags =
+    (hidden ? FLAG.hidden : 0) |
+    (isolate ? FLAG.isolate : 0) |
+    (node.type === "group" ? FLAG.group : 0) |
+    (wirePost.length > 0 ? FLAG.post : 0) |
+    (blend !== 0 ? FLAG.blend : 0) |
+    (mask !== 0 ? FLAG.mask : 0) |
+    (stopMask ? FLAG.endsMask : 0);
   const size = node.type === "text" ? largestFontSize(node) : 0;
   return {
     record: {

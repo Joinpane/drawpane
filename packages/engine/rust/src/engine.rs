@@ -937,7 +937,7 @@ impl Engine {
                         let source = (next_cols as u32, next_rows as u32);
                         let device = view * world;
                         let scale = device.determinant().abs().sqrt() as f32;
-                        let copies = crate::cpu::reader_copy_bytes(source, Some((next_cols, next_rows)));
+                        let copies = crate::cpu::reader_copy_bytes(source, source, Some((next_cols, next_rows)));
                         expanded_reader_work = expanded_reader_work
                             .max(copies.saturating_add(exec::background_reader_work_bytes(op, source, source, scale)));
                     }
@@ -976,8 +976,7 @@ impl Engine {
         let limits = &self.store.limits;
         let mut rows = requested.clamp(1, self.band_rows(width)).min(height);
         let view = camera.view();
-        let crop = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
-        let halo = self.halo_for_rect(view, crop)? as usize;
+        let halo = self.export_halo(view, width, height)? as usize;
         let cols = (limits.export_tile.max(1).min(width) as usize + 2 * halo).min(width as usize);
         let budget = limits.memory_bytes;
         let scene = crate::cpu::scene_work_bytes((width as usize, height as usize)) as u64;
@@ -1049,7 +1048,8 @@ impl Engine {
             return 0;
         }
         let clip_scene = metrics.has_clipped_reader.then_some((width as usize, height as usize));
-        let copies = crate::cpu::reader_copy_bytes((tile.0 as u32, tile.1 as u32), clip_scene);
+        let tile_size = (tile.0 as u32, tile.1 as u32);
+        let copies = crate::cpu::reader_copy_bytes(tile_size, tile_size, clip_scene);
         let target_bytes = tile.0 as u64 * tile.1 as u64 * 4;
         target_bytes * (usize::from(metrics.needs_backdrop) + metrics.max_iso_surfaces) as u64
             + copies as u64
@@ -1196,7 +1196,7 @@ impl Engine {
         self.cpu.shrink_target();
 
         let view = camera.view();
-        let halo = self.halo_for_rect(view, Rect::new(0.0, 0.0, f64::from(width), f64::from(height)))? as usize;
+        let halo = self.export_halo(view, width, height)? as usize;
         let scene_bytes = crate::cpu::scene_estimate_bytes(width, height);
         let held = self.held_bytes();
         // Match `Cpu::check_memory`'s headroom for Wasm static data, stack, allocator overhead,
@@ -1368,7 +1368,7 @@ impl Engine {
         self.check_supported()?;
         let view = camera.view();
         let frame_rect = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
-        let (reach, samples, native_samples) = self.reader_reach(view, Some(frame_rect));
+        let (reach, _, samples, native_samples) = self.reader_reach(view, Some(frame_rect));
         let halo_opt = self.limit_halo(reach).ok();
         let samples = (editor_viewport && !self.store.has_context())
             .then(|| IRect::around(samples))
@@ -1581,29 +1581,70 @@ impl Engine {
         Ok(total.ceil() as i32)
     }
 
-    /// The dependency reach and the page pixels a reader may sample outside a view.
-    fn reader_reach(&self, view: Affine, crop: Option<Rect>) -> (f64, Rect, Rect) {
+    /// Band halo for exports into a `width` × `height` frame. Enclosing post-effects
+    /// (layer blur, texture) can extend the required tile halo past `Limits::halo` while
+    /// clamping to the frame bounds and keeping `Limits::halo` enforced on the reader-only
+    /// reach so exports that only exceed the cap via post-effects stay admitted under the
+    /// export memory and work budgets.
+    fn export_halo(&self, view: Affine, width: u32, height: u32) -> Result<i32> {
+        let crop = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
+        let (total, reader_only, _, _) = self.reader_reach(view, Some(crop));
+        self.limit_halo(reader_only)?;
+        if !total.is_finite() {
+            return self.limit_halo(total);
+        }
+        Ok(total.min(f64::from(width.max(height))).ceil() as i32)
+    }
+
+    /// Dependency reach `(total, reader_only, samples, native_samples)` outside a view.
+    fn reader_reach(&self, view: Affine, crop: Option<Rect>) -> (f64, f64, Rect, Rect) {
         let mut samples = crop.unwrap_or(Rect::ZERO);
         let mut native_samples = samples;
         if self.store.readers().is_empty() {
-            return (0.0, samples, native_samples);
+            return (0.0, 0.0, samples, native_samples);
         }
         struct ReaderNode {
             paint: Rect,
             read: Rect,
             reach_px: f64,
+            post_reach_px: f64,
             writes_backdrop: bool,
             native_reach_px: f64,
         }
+        fn post_effect_reach(r: &crate::record::Record, view_scale: f64) -> f64 {
+            let mut reach = 0.0f64;
+            for pe in &r.post_effects {
+                match *pe {
+                    crate::record::PostEffect::LayerBlur { radius } => {
+                        let sigma = (f64::from(crate::blur::sigma_from_radius(radius)) * view_scale) as f32;
+                        if sigma >= 1e-4 {
+                            reach += f64::from(crate::shadow::blur_support_pad(sigma))
+                                .max(f64::from(crate::blur::blur_reach(sigma)));
+                        }
+                    }
+                    crate::record::PostEffect::Texture { size, radius, .. } => {
+                        let radius_dev = (f64::from(radius) * view_scale) as f32;
+                        if size > 0.0 && radius_dev >= 1e-4 {
+                            reach += f64::from((radius_dev.ceil() as i32).saturating_add(2));
+                        }
+                    }
+                    crate::record::PostEffect::Noise { .. } => {}
+                }
+            }
+            reach
+        }
+        let view_scale = view.determinant().abs().sqrt();
         #[allow(clippy::too_many_arguments)]
         fn collect(
             store: &Store,
             view: Affine,
+            view_scale: f64,
             id: u32,
             parent: Affine,
             alpha: f32,
             parent_context: bool,
             inside_post_scope: bool,
+            post_reach_px: f64,
             out: &mut Vec<ReaderNode>,
         ) {
             let Some(node) = store.nodes.get(&id) else {
@@ -1627,6 +1668,7 @@ impl Engine {
             let inner = if r.isolate() && r.opacity < 1.0 { 1.0 } else { opacity };
             // Post-effects can sample outside the nominal target of a reader in the picture.
             let inside_post_scope = inside_post_scope || !r.post_effects.is_empty();
+            let post_reach_px = post_reach_px + post_effect_reach(r, view_scale);
             let box_rect = Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1]));
             let local = r
                 .content_bounds(&|g| store.glyphs.bounds(g))
@@ -1637,7 +1679,18 @@ impl Engine {
                 match op {
                     crate::record::Op::Children => {
                         for &kid in &node.children {
-                            collect(store, view, kid, world, inner, is_context, inside_post_scope, out);
+                            collect(
+                                store,
+                                view,
+                                view_scale,
+                                kid,
+                                world,
+                                inner,
+                                is_context,
+                                inside_post_scope,
+                                post_reach_px,
+                                out,
+                            );
                         }
                     }
                     crate::record::Op::Glass(g) if !is_context => {
@@ -1647,6 +1700,7 @@ impl Engine {
                             paint,
                             read: paint.inflate(reach_px, reach_px),
                             reach_px,
+                            post_reach_px,
                             writes_backdrop: false,
                             native_reach_px: 0.0,
                         });
@@ -1658,6 +1712,7 @@ impl Engine {
                             paint,
                             read: paint.inflate(reach_px, reach_px),
                             reach_px,
+                            post_reach_px,
                             writes_backdrop: true,
                             native_reach_px: reach_px,
                         });
@@ -1670,6 +1725,7 @@ impl Engine {
                             paint,
                             read: paint.inflate(reach_px, reach_px),
                             reach_px,
+                            post_reach_px,
                             writes_backdrop: true,
                             native_reach_px: if inside_post_scope
                                 || crate::blur::sigma_from_radius(b_op.radius)
@@ -1710,6 +1766,7 @@ impl Engine {
                             paint,
                             read: paint.inflate(reach_px, reach_px),
                             reach_px,
+                            post_reach_px,
                             writes_backdrop: true,
                             native_reach_px,
                         });
@@ -1721,7 +1778,18 @@ impl Engine {
         let mut nodes = Vec::new();
         if let Some(root) = self.store.nodes.get(&crate::store::ROOT) {
             for &kid in &root.children {
-                collect(&self.store, view, kid, Affine::IDENTITY, 1.0, false, false, &mut nodes);
+                collect(
+                    &self.store,
+                    view,
+                    view_scale,
+                    kid,
+                    Affine::IDENTITY,
+                    1.0,
+                    false,
+                    false,
+                    0.0,
+                    &mut nodes,
+                );
             }
         }
         let overlaps = |a: Rect, b: Rect| a.x0 <= b.x1 && b.x0 <= a.x1 && a.y0 <= b.y1 && b.y0 <= a.y1;
@@ -1733,47 +1801,73 @@ impl Engine {
             .filter_map(|(i, node)| node.writes_backdrop.then_some(i))
             .collect();
         let mut needed_by_later = vec![0.0f64; nodes.len()];
+        let mut reader_only_needed = vec![0.0f64; nodes.len()];
         let mut native_needed = vec![0.0f64; nodes.len()];
         let mut total = 0.0f64;
+        let mut reader_only = 0.0f64;
         for (i, node) in nodes.iter().enumerate().rev() {
             let downstream = needed_by_later[i];
+            let reader_downstream = reader_only_needed[i];
             let native_downstream = native_needed[i];
-            if downstream == 0.0 && crop.is_some_and(|rect| !overlaps(node.paint, rect)) {
+            let affected = node.paint.inflate(node.post_reach_px, node.post_reach_px);
+            if downstream == 0.0 && crop.is_some_and(|rect| !overlaps(affected, rect)) {
                 continue;
             }
-            let reach = node.reach_px + downstream;
+            let reach = node.reach_px + node.post_reach_px + downstream;
             total = total.max(reach);
+            let reader_reach_only = node.reach_px + reader_downstream;
+            reader_only = reader_only.max(reader_reach_only);
             if let Some(crop) = crop {
-                let visible = node.paint.intersect(crop.inflate(downstream, downstream));
+                let visible = node
+                    .paint
+                    .intersect(crop.inflate(downstream + node.post_reach_px, downstream + node.post_reach_px));
                 if visible.width() > 0.0 && visible.height() > 0.0 {
                     samples = samples.union(visible.inflate(node.reach_px, node.reach_px));
                 }
             }
             let native_reach = if node.native_reach_px > 0.0 {
                 if let Some(crop) = crop {
-                    let visible = node.paint.intersect(crop.inflate(native_downstream, native_downstream));
+                    let visible = node.paint.intersect(crop.inflate(
+                        native_downstream + node.post_reach_px,
+                        native_downstream + node.post_reach_px,
+                    ));
                     if visible.width() > 0.0 && visible.height() > 0.0 {
                         let reach = node.native_reach_px;
                         native_samples = native_samples.union(visible.inflate(reach, reach));
-                        reach + native_downstream
+                        reach + node.post_reach_px + native_downstream
                     } else {
                         0.0
                     }
                 } else {
                     0.0
                 }
+            } else if node.post_reach_px > 0.0 {
+                if let Some(crop) = crop {
+                    let visible = node.paint.intersect(crop.inflate(
+                        native_downstream + node.post_reach_px,
+                        native_downstream + node.post_reach_px,
+                    ));
+                    if visible.width() > 0.0 && visible.height() > 0.0 {
+                        native_samples = native_samples.union(visible);
+                    }
+                }
+                0.0
             } else {
                 0.0
             };
             let earlier = writers.partition_point(|&writer| writer < i);
             for &writer in &writers[..earlier] {
-                if overlaps(nodes[writer].paint, node.read) {
+                let writer_paint = nodes[writer]
+                    .paint
+                    .inflate(nodes[writer].post_reach_px, nodes[writer].post_reach_px);
+                if overlaps(writer_paint, node.read) {
                     needed_by_later[writer] = needed_by_later[writer].max(reach);
+                    reader_only_needed[writer] = reader_only_needed[writer].max(reader_reach_only);
                     native_needed[writer] = native_needed[writer].max(native_reach);
                 }
             }
         }
-        (total, samples, native_samples)
+        (total, reader_only, samples, native_samples)
     }
 
     /// Draws `area` of a `width` × `height` frame into the CPU target, extended by the readers'
@@ -1793,7 +1887,7 @@ impl Engine {
     ) -> Result<(FrameStats, IRect)> {
         let view = camera.view();
         let halo = if grow_halo {
-            self.halo_for_rect(view, Rect::new(0.0, 0.0, f64::from(width), f64::from(height)))?
+            self.export_halo(view, width, height)?
         } else {
             0
         };

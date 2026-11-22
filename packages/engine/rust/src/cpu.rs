@@ -10,7 +10,7 @@ use crate::blur;
 use crate::blur::{BlurSpec, EdgeMode, try_blur_cpu, validate_sigma};
 use crate::error::{EngineError, Result};
 use crate::exec::{Backend, GlyphMask, IRect, ImageView, Isolation, Open, PostStep, ShadowCast, impl_draw};
-use crate::exec::{glass_backdrop_layers, resolve_inradius};
+use crate::exec::{reader_backdrop_layers, resolve_inradius};
 use crate::glass;
 use crate::images::{self, Level};
 use crate::kernels;
@@ -125,9 +125,15 @@ pub(crate) fn blur_buffer_bytes((width, height): (u32, u32)) -> usize {
     rgba + rgba.max(scene_work_bytes(size))
 }
 
-pub(crate) fn reader_copy_bytes((width, height): (u32, u32), clip_scene: Option<(usize, usize)>) -> usize {
+pub(crate) fn reader_copy_bytes(
+    (width, height): (u32, u32),
+    target: (u32, u32),
+    clip_scene: Option<(usize, usize)>,
+) -> usize {
     let rgba = width as usize * height as usize * 4;
-    rgba + clip_scene.map_or(0, |size| rgba + scene_work_bytes(size))
+    rgba + clip_scene.map_or(0, |size| {
+        target.0 as usize * target.1 as usize * 4 + scene_work_bytes(size)
+    })
 }
 
 fn active_clip(open: &Open) -> bool {
@@ -549,6 +555,43 @@ impl Cpu {
         }
     }
 
+    fn prefix_bounds(&self, base: Option<usize>) -> IRect {
+        let ((x, y), source) = self.backdrop_layer(base);
+        IRect {
+            x0: x,
+            y0: y,
+            x1: x + i32::from(source.width()),
+            y1: y + i32::from(source.height()),
+        }
+    }
+
+    fn compose_reader_prefix(&self, base: Option<usize>, interiors: Vec<usize>, crop: IRect) -> Vec<u8> {
+        let ((x, y), backdrop) = self.backdrop_layer(base);
+        let stride = usize::from(backdrop.width()) * 4;
+        let size = crop.size();
+        let read = crop.translate(-x, -y);
+        let source = backdrop.data_as_u8_slice();
+        let mut pixels = Vec::with_capacity(size.0 as usize * size.1 as usize * 4);
+        for row in read.y0..read.y1 {
+            let start = row as usize * stride + read.x0 as usize * 4;
+            pixels.extend_from_slice(&source[start..start + size.0 as usize * 4]);
+        }
+        for layer in interiors {
+            let ((x, y), paint) = self.backdrop_layer(Some(layer));
+            crate::blend::blend_cpu(
+                paint.data_as_u8_slice(),
+                &mut pixels,
+                size,
+                (u32::from(paint.width()), u32::from(paint.height())),
+                (x - crop.x0, y - crop.y0),
+                0,
+                1.0,
+                None,
+            );
+        }
+        pixels
+    }
+
     fn main_mut(&mut self) -> ((i32, i32), &mut Pixmap) {
         self.offscreen_stack
             .last_mut()
@@ -642,22 +685,31 @@ impl Cpu {
         device: Affine,
         origin: (i32, i32),
         (width, height): (u32, u32),
+        open: &[Open],
     ) -> Pixmap {
-        let mut mask_ctx = RenderContext::new(width as u16, height as u16);
-        let shifted = Affine::translate((-f64::from(origin.0), -f64::from(origin.1))) * device;
-        mask_ctx.set_transform(shifted);
-        mask_ctx.set_paint(vello_common::color::palette::css::WHITE);
+        // Rasterize in the active scene's coordinates so path vertices land on identical
+        // floating-point positions across whole frames and column/row export bands.
+        let so = self.scene_offset();
+        self.close_clips(open);
+        self.scene.reset();
+        let shifted = Affine::translate((-f64::from(so.0), -f64::from(so.1))) * device;
+        self.scene.set_transform(shifted);
+        self.scene.set_paint(vello_common::color::palette::css::WHITE);
         for (path, even_odd) in paths {
-            mask_ctx.set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
-            mask_ctx.fill_path(path);
+            self.scene
+                .set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
+            self.scene.fill_path(path);
         }
-        mask_ctx.flush();
+        self.scene.flush();
         let mut mask = Pixmap::new(width as u16, height as u16);
         let settings = RasterizerSettings {
             render_mode: RenderMode::OptimizeQuality,
+            offset: (so.0 - origin.0, so.1 - origin.1),
             ..Default::default()
         };
-        mask_ctx.render_with(&mut mask, &mut self.resources, settings);
+        self.scene.render_with(&mut mask, &mut self.resources, settings);
+        self.scene.reset();
+        self.reopen_clips(open);
         mask
     }
 
@@ -1776,7 +1828,7 @@ impl Backend for Cpu {
         let frame_size = (i32::from(self.frame_size.0), i32::from(self.frame_size.1));
         let (origin, target) = self.main();
         let target_size = (i32::from(target.width()), i32::from(target.height()));
-        let (base, interiors) = glass_backdrop_layers(&self.offscreen_stack, read_parent, |scope| scope.isolation);
+        let (base, interiors) = reader_backdrop_layers(&self.offscreen_stack, read_parent, |scope| scope.isolation);
         let (source_origin, source) = self.backdrop_layer(base);
         let source_size = (i32::from(source.width()), i32::from(source.height()));
         let regions = glass::compute_regions(
@@ -1814,20 +1866,7 @@ impl Backend for Cpu {
             self.check_memory(copies.saturating_add(scratch), "glass working set")?;
         }
         let within = glass::clip_within_from_open(open);
-        let mut backdrop_src = self.backdrop_layer(base).1.data_as_u8_slice().to_vec();
-        for layer in interiors {
-            let (origin, paint) = self.backdrop_layer(Some(layer));
-            crate::blend::blend_cpu(
-                paint.data_as_u8_slice(),
-                &mut backdrop_src,
-                (source_size.0 as u32, source_size.1 as u32),
-                (u32::from(paint.width()), u32::from(paint.height())),
-                (origin.0 - source_origin.0, origin.1 - source_origin.1),
-                0,
-                1.0,
-                None,
-            );
-        }
+        let backdrop_src = self.compose_reader_prefix(base, interiors, self.prefix_bounds(base));
         let target_w = target_size.0;
         // Rasterize open non-context clip mask once over the union of all chunk outputs.
         let mut union_paints = IRect {
@@ -1960,11 +1999,11 @@ impl Backend for Cpu {
             return Ok(());
         }
         let frame_size = (i32::from(self.frame_size.0), i32::from(self.frame_size.1));
-        let (origin, backdrop) = self.readable_backdrop();
-        let source = (u32::from(backdrop.width()), u32::from(backdrop.height()));
-        let target_size = (source.0 as i32, source.1 as i32);
-        let shift = (-origin.0, -origin.1);
-        let Some(dirty) = progressive_blur::blur_dirty_rect(paths, device, frame_size, shift, target_size) else {
+        let (origin, target) = self.main();
+        let target_size = (i32::from(target.width()), i32::from(target.height()));
+        let Some(dirty) =
+            progressive_blur::blur_dirty_rect(paths, device, frame_size, (-origin.0, -origin.1), target_size)
+        else {
             return Ok(());
         };
         let bw = (dirty.x1 - dirty.x0) as u32;
@@ -1974,6 +2013,16 @@ impl Backend for Cpu {
         }
         let buf_bytes = bw as usize * bh as usize * 4;
         let sigma = blur::sigma_from_radius(op.radius) * scale;
+        let (base, interiors) = reader_backdrop_layers(&self.offscreen_stack, false, |scope| scope.isolation);
+        let bounds = self.prefix_bounds(base);
+        let prefix = if interiors.is_empty() {
+            bounds
+        } else {
+            let reach = blur::blur_reach(sigma) as i32;
+            bounds.reader_crop(dirty.translate(origin.0, origin.1).inflate(reach, reach))
+        };
+        let source = prefix.size();
+        let sample = dirty.translate(origin.0 - prefix.x0, origin.1 - prefix.y0);
         let size = (bw, bh);
         if self.memory_budget > 0 {
             self.blur.clear();
@@ -1983,14 +2032,16 @@ impl Backend for Cpu {
                 .then(|| (self.scene.width() as usize, self.scene.height() as usize));
             let work = blur::cpu_work_bytes(source, size, sigma);
             self.check_memory(
-                reader_copy_bytes(source, clip_scene) + blur_buffer_bytes(size) + work,
+                reader_copy_bytes(source, (target_size.0 as u32, target_size.1 as u32), clip_scene)
+                    + blur_buffer_bytes(size)
+                    + work,
                 "background blur working set",
             )?;
         }
 
         let frame_x0 = dirty.x0 + origin.0;
         let frame_y0 = dirty.y0 + origin.1;
-        let mask_pix = self.reader_shape_mask(paths, device, (frame_x0, frame_y0), size);
+        let mask_pix = self.reader_shape_mask(paths, device, (frame_x0, frame_y0), size, open);
 
         let paints = IRect {
             x0: frame_x0,
@@ -2000,15 +2051,20 @@ impl Backend for Cpu {
         };
         let clip_pix = self.rasterize_open_clips(paints, open);
         let within = glass::clip_within_from_open(open);
-        let (clamp_bounds, edge) =
-            progressive_blur::blur_bounds_and_edge(within, frame_size, shift, target_size, sigma);
+        let (clamp_bounds, edge) = progressive_blur::blur_bounds_and_edge(
+            within,
+            frame_size,
+            (-prefix.x0, -prefix.y0),
+            (source.0 as i32, source.1 as i32),
+            sigma,
+        );
         let spec = blur::BlurSpec {
             sigma,
             edge,
             clamp_bounds,
-            dirty,
+            dirty: sample,
         };
-        let backdrop_src = self.readable_backdrop().1.data_as_u8_slice().to_vec();
+        let backdrop_src = self.compose_reader_prefix(base, interiors, prefix);
         let mut blurred = vec![0u8; buf_bytes];
         self.blur.try_blur(
             self.backdrop_gen,
@@ -2016,7 +2072,7 @@ impl Backend for Cpu {
             source,
             &mut blurred,
             (bw, bh),
-            (dirty.x0, dirty.y0),
+            (sample.x0, sample.y0),
             &spec,
         )?;
         let cm = clip_pix.as_ref().map(Pixmap::data_as_u8_slice);
@@ -2065,11 +2121,11 @@ impl Backend for Cpu {
         };
         self.flush_barrier(open);
         let frame_size = (i32::from(self.frame_size.0), i32::from(self.frame_size.1));
-        let (origin, backdrop) = self.readable_backdrop();
-        let source = (u32::from(backdrop.width()), u32::from(backdrop.height()));
-        let target_size = (source.0 as i32, source.1 as i32);
-        let shift = (-origin.0, -origin.1);
-        let Some(dirty) = progressive_blur::blur_dirty_rect(paths, device, frame_size, shift, target_size) else {
+        let (origin, target) = self.main();
+        let target_size = (i32::from(target.width()), i32::from(target.height()));
+        let Some(dirty) =
+            progressive_blur::blur_dirty_rect(paths, device, frame_size, (-origin.0, -origin.1), target_size)
+        else {
             return Ok(());
         };
         let bw = (dirty.x1 - dirty.x0) as u32;
@@ -2078,6 +2134,18 @@ impl Backend for Cpu {
             return Err(EngineError::limit("progressive blur region exceeds target dimensions"));
         }
         let buf_bytes = bw as usize * bh as usize * 4;
+        let max_sigma = plan.start_sigma.max(plan.end_sigma);
+        let (base, interiors) = reader_backdrop_layers(&self.offscreen_stack, false, |scope| scope.isolation);
+        let bounds = self.prefix_bounds(base);
+        let prefix = if interiors.is_empty() {
+            bounds
+        } else {
+            let reach = blur::blur_reach(max_sigma) as i32;
+            bounds.reader_crop(dirty.translate(origin.0, origin.1).inflate(reach, reach))
+        };
+        let source = prefix.size();
+        let source_origin = (prefix.x0, prefix.y0);
+        let sample = dirty.translate(origin.0 - prefix.x0, origin.1 - prefix.y0);
         let size = (bw, bh);
         if self.memory_budget > 0 {
             self.blur.clear();
@@ -2087,14 +2155,16 @@ impl Backend for Cpu {
                 .then(|| (self.scene.width() as usize, self.scene.height() as usize));
             let work = progressive_blur::cpu_work_bytes(source, size, &plan.stops);
             self.check_memory(
-                reader_copy_bytes(source, clip_scene) + blur_buffer_bytes(size) + work,
+                reader_copy_bytes(source, (target_size.0 as u32, target_size.1 as u32), clip_scene)
+                    + blur_buffer_bytes(size)
+                    + work,
                 "progressive blur working set",
             )?;
         }
 
         let frame_x0 = dirty.x0 + origin.0;
         let frame_y0 = dirty.y0 + origin.1;
-        let mask_pix = self.reader_shape_mask(paths, device, (frame_x0, frame_y0), size);
+        let mask_pix = self.reader_shape_mask(paths, device, (frame_x0, frame_y0), size, open);
 
         let paints = IRect {
             x0: frame_x0,
@@ -2104,10 +2174,14 @@ impl Backend for Cpu {
         };
         let clip_pix = self.rasterize_open_clips(paints, open);
         let within = glass::clip_within_from_open(open);
-        let max_sigma = plan.start_sigma.max(plan.end_sigma);
-        let (clamp_bounds, edge) =
-            progressive_blur::blur_bounds_and_edge(within, frame_size, shift, target_size, max_sigma);
-        let backdrop_src = self.readable_backdrop().1.data_as_u8_slice().to_vec();
+        let (clamp_bounds, edge) = progressive_blur::blur_bounds_and_edge(
+            within,
+            frame_size,
+            (-prefix.x0, -prefix.y0),
+            (source.0 as i32, source.1 as i32),
+            max_sigma,
+        );
+        let backdrop_src = self.compose_reader_prefix(base, interiors, prefix);
         let mut blurred = vec![0u8; buf_bytes];
         progressive_blur::eval_progressive_cpu(
             &mut self.blur,
@@ -2116,8 +2190,8 @@ impl Backend for Cpu {
             source,
             clamp_bounds,
             edge,
-            dirty,
-            origin,
+            sample,
+            source_origin,
             &plan,
             &mut blurred,
         )?;
