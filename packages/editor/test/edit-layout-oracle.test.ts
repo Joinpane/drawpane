@@ -829,6 +829,10 @@ function unexplained(before: Snapshot, after: Snapshot, doc: Doc): string[] {
     if (stable(was) === stable(now)) continue;
     const source = was && getProp(was.props, "mirrors");
     if (was && !now && orphaned(before, id, doc)) continue;
+    // Issue 280 too: an instance whose main is gone, emptied by the redo, hugs down to its padding;
+    // only its size differs.
+    const main = was ? getProp(was.props, "instanceOf") : null;
+    if (was && now && main && !doc.has(main) && placedOnly(was, now)) continue;
     if (was && now && placedOnly(was, now) && inGroupedFlow(before, id)) continue;
     // Issue 310: a Fill layer directly in a grid has more than one settled layout.
     const grid = was ? before[was.parent] : undefined;

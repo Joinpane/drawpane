@@ -752,6 +752,8 @@ export class Editor {
       // Derived writes until nothing changes: instances follow their main
       // component, bound properties follow their variables, text sizes to its
       // content, auto layout places children. Each can feed the next.
+      /** Copies the copy pass placed in this commit. */
+      const placedCopies = new Set<string>();
       for (let round = 0; round < MAX_FIXUP_ROUNDS && touched.size > 0; round++) {
         const live = [...touched].filter((id) => this.doc.has(id));
         // Compact copies follow their mains unwritten; the ones laid out differently go again.
@@ -761,6 +763,7 @@ export class Editor {
         let roundInverse: Op[] = synced.length > 0 ? this.sync.commit(synced) : [];
         // Compact copies' layers placed by constraints in a resized copy follow their main layers.
         const placed = copyConstraintOps(this.doc, lastOps);
+        for (const op of placed) placedCopies.add(op.id);
         if (placed.length > 0) {
           roundInverse = [...this.sync.commit(placed), ...roundInverse];
           synced = [...synced, ...placed];
@@ -811,7 +814,9 @@ export class Editor {
         // and layers they changed only in ways no layout reads (a fill), laid out not at all.
         const roundOps = [...lastOps, ...derived];
         const { moved, neutral } = layoutChanges(roundOps, [...inverse, ...roundInverse]);
-        for (const id of [...relayout.layout, ...resolvedAgain]) {
+        // A copy the copy pass placed may sit in a frame of another size, or mode, than its insides
+        // were laid out in (a swap, say): it's laid out inside too, not only moved.
+        for (const id of [...relayout.layout, ...resolvedAgain, ...placedCopies]) {
           moved.delete(id);
           neutral.delete(id);
         }
