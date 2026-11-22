@@ -37,6 +37,7 @@ import {
   type NodeRecord,
   nodeReader,
   type Op,
+  type Props,
   ROOT_ID,
 } from "@drawpane/model";
 import fc from "fast-check";
@@ -67,8 +68,8 @@ function layers(doc: Doc): NodeRecord[] {
 }
 
 /** The document as people see it: every layer's place and values. */
-function snapshot(doc: Doc): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
+function snapshot(doc: Doc): Snapshot {
+  const out: Snapshot = {};
   for (const node of layers(doc))
     out[node.id] = { parent: node.parent, key: node.key, type: node.type, props: node.props };
   return out;
@@ -130,7 +131,19 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
       if (was && !was.hugV && state.hugV) shrinkEmpty.add(`${node.id}:v`);
     }
   }
-  const out: unknown[] = [...layoutOps(doc, frames, { shrinkEmpty, keepEmpty })];
+  // Issue 283: an empty layout frame turned a quarter with Fill across and Hug on its height has
+  // two answers; what a full layout would change of one is set aside, nothing else.
+  const twoAnswers = (id: string) => {
+    const n = doc.get(id);
+    if (!n || !isLayoutFrame(n) || frameStates(doc).get(id)?.flow) return false;
+    if (Math.abs(getProp(n.props, "rotation")) % 180 !== 90) return false;
+    const h = getProp(n.props, "sizingH");
+    const v = getProp(n.props, "sizingV");
+    return (h === "fill" && v === "hug") || (h === "hug" && v === "fill");
+  };
+  const out: unknown[] = layoutOps(doc, frames, { shrinkEmpty, keepEmpty }).filter(
+    (op) => !twoAnswers(op.id),
+  );
   for (const node of all) {
     if (node.type !== "text") continue;
     const size = autoSize(node, measurer);
@@ -183,7 +196,7 @@ const base = {
   text: fc.constantFrom<Spec["text"]>("width", "height", "none"),
   constraintH: constraint,
   constraintV: constraint,
-  main: fc.nat(1),
+  main: fc.nat(3),
 };
 const tree = fc.letrec<{ node: Spec; frame: Spec }>((tie) => ({
   node: fc.oneof(
@@ -203,6 +216,8 @@ const VARIABLES = {
   shown: "shown",
   pad: "pad",
   gap: "gapv",
+  words: "words",
+  size: "size",
 } as const;
 
 /** Makes the document through the editor, a commit at a time, as a person would. */
@@ -280,6 +295,26 @@ function build(editor: Editor, spec: Spec): void {
         values: { light: 2, dark: 10 },
       },
     },
+    {
+      op: "create",
+      id: VARIABLES.words,
+      type: "variable",
+      parent: "c",
+      key: "a4",
+      props: {
+        name: "Words",
+        variableType: "string",
+        values: { light: "Column", dark: "A longer dark column" },
+      },
+    },
+    {
+      op: "create",
+      id: VARIABLES.size,
+      type: "variable",
+      parent: "c",
+      key: "a5",
+      props: { name: "Size", variableType: "number", values: { light: 10, dark: 14 } },
+    },
   ]);
   // Two components: a hugging row with a text and a padded inner row, and a column. The
   // inner row's padding and the column's text's visibility are bound, so copies shown in
@@ -322,7 +357,10 @@ function build(editor: Editor, spec: Spec): void {
           characters: i ? "Column" : "Label",
           fontSize: 10,
           textAutoResize: "width",
-          ...(i ? { bindings: { visible: VARIABLES.show } } : {}),
+          // Words and sizes that differ by mode, so copies in Dark measure for themselves.
+          bindings: i
+            ? { visible: VARIABLES.show, characters: VARIABLES.words }
+            : { fontSize: VARIABLES.size },
         },
       },
       {
@@ -383,6 +421,80 @@ function build(editor: Editor, spec: Spec): void {
       props: { name: "Dark", x: 0, y: 600, width: 400, height: 200, variableModes: { c: "dark" } },
     },
   ]);
+  // A component holding an instance of the first, and one with a plain root whose layers its
+  // constraints place: a stretched auto-width text and a stretched row.
+  commit([
+    {
+      op: "create",
+      id: "main2",
+      type: "frame",
+      parent: "p",
+      key: key(),
+      props: {
+        name: "Main 2",
+        isComponent: true,
+        x: 1200,
+        y: 0,
+        width: 120,
+        height: 50,
+        layoutMode: "row",
+        sizingH: "hug",
+        sizingV: "hug",
+        paddingLeft: 6,
+        gap: 4,
+      },
+    },
+    {
+      op: "create",
+      id: "main3",
+      type: "frame",
+      parent: "p",
+      key: key(),
+      props: { name: "Main 3", isComponent: true, x: 1500, y: 0, width: 160, height: 80 },
+    },
+    {
+      op: "create",
+      id: "main3t",
+      type: "text",
+      parent: "main3",
+      key: "a0",
+      props: {
+        x: 10,
+        y: 10,
+        characters: "Words that wrap",
+        fontSize: 10,
+        textAutoResize: "width",
+        constraintH: "stretch",
+      },
+    },
+    {
+      op: "create",
+      id: "main3f",
+      type: "frame",
+      parent: "main3",
+      key: "a1",
+      props: {
+        x: 10,
+        y: 40,
+        width: 140,
+        height: 20,
+        layoutMode: "row",
+        constraintH: "stretch",
+        paddingLeft: 4,
+        bindings: { paddingLeft: VARIABLES.pad },
+      },
+    },
+    {
+      op: "create",
+      id: "main3r",
+      type: "rect",
+      parent: "main3f",
+      key: "a0",
+      props: { width: 8, height: 8, sizingH: "fill" },
+    },
+  ]);
+  instance("main0", "main2");
+  mains.push("main2", "main3");
   for (const main of mains) instance(main, "dark");
   const make = (s: Spec, parent: string) => {
     if (s.kind === "instance") {
@@ -466,6 +578,7 @@ type Edit =
   | { kind: "visible" | "absolute"; at: number }
   | { kind: "constraint"; at: number; prop: "constraintH" | "constraintV"; value: Constraint }
   | { kind: "rotate"; at: number; value: number }
+  | { kind: "fill"; at: number; value: number }
   | { kind: "text"; at: number; words: number }
   | { kind: "nudge"; at: number; dx: number; dy: number }
   | { kind: "move"; at: number; into: number }
@@ -503,6 +616,7 @@ const edit: fc.Arbitrary<Edit> = fc.oneof(
     value: constraint,
   }),
   fc.record({ kind: fc.constant("rotate" as const), at, value: fc.constantFrom(0, 15, 30, 90) }),
+  fc.record({ kind: fc.constant("fill" as const), at, value: fc.nat(2) }),
   fc.record({ kind: fc.constant("text" as const), at, words: fc.integer({ min: 0, max: 8 }) }),
   fc.record({
     kind: fc.constant("nudge" as const),
@@ -513,7 +627,7 @@ const edit: fc.Arbitrary<Edit> = fc.oneof(
   fc.record({ kind: fc.constant("move" as const), at, into: at }),
   fc.record({ kind: fc.constant("delete" as const), at }),
   fc.record({ kind: fc.constantFrom("group" as const, "ungroup" as const), at }),
-  fc.record({ kind: fc.constantFrom("bind" as const, "unbind" as const), at, binding: fc.nat(4) }),
+  fc.record({ kind: fc.constantFrom("bind" as const, "unbind" as const), at, binding: fc.nat(6) }),
   fc.record({
     kind: fc.constant("variable" as const),
     variable: fc.nat(3),
@@ -534,6 +648,7 @@ const KINDS: readonly Edit["kind"][] = [
   "absolute",
   "constraint",
   "rotate",
+  "fill",
   "text",
   "nudge",
   "move",
@@ -557,6 +672,8 @@ const BINDINGS: Array<[BindingKey, string]> = [
   ["paddingLeft", VARIABLES.pad],
   ["gap", VARIABLES.gap],
   ["width", VARIABLES.pad],
+  ["characters", VARIABLES.words],
+  ["fontSize", VARIABLES.size],
 ];
 
 const isFrame = (node: NodeRecord) => node.type === "frame";
@@ -568,8 +685,6 @@ const TARGETS: Partial<Record<Edit["kind"], (node: NodeRecord) => boolean>> = {
   layoutMode: isFrame,
   mode: isFrame,
   text: (node) => node.type === "text",
-  // Issue 283: a turned empty frame's Fill and Hug can land on one axis, with two answers.
-  rotate: (node) => node.type !== "frame",
   ungroup: (node) => node.type === "group",
   swap: isInstance,
   detach: isInstance,
@@ -577,8 +692,110 @@ const TARGETS: Partial<Record<Edit["kind"], (node: NodeRecord) => boolean>> = {
   unbind: (node) => Object.keys(getProp(node.props, "bindings")).length > 0,
 };
 
-/** Makes the edit through the editor's own commands, on a layer it applies to. */
-function perform(editor: Editor, e: Edit): void {
+type Snapshot = Record<string, { parent: string; key: string; type: string; props: Props }>;
+
+/**
+ * How `after` differs from `before`, less what two known issues explain,
+ * each by its own signature: #280, a layer of an instance whose main is
+ * gone, lost when its delete is redone; #281, a materialized layer (a copy
+ * layer or an instance) only moved or resized by the redo; #290, a layer
+ * only moved or resized in a flow holding a group with an absolute member.
+ */
+function unexplained(before: Snapshot, after: Snapshot, doc: Doc): string[] {
+  const out: string[] = [];
+  for (const id of new Set([...Object.keys(before), ...Object.keys(after)])) {
+    const was = before[id];
+    const now = after[id];
+    if (stable(was) === stable(now)) continue;
+    const source = was && getProp(was.props, "mirrors");
+    if (was && !now && orphaned(before, id, doc)) continue;
+    if (was && now && placedOnly(was, now) && inGroupedFlow(before, id)) continue;
+    if (was && now && !doc.compactCopies && getProp(now.props, "mirrors") === (source ?? null)) {
+      const same = (n: typeof was) => stable({ ...n, props: placeless(n.props) });
+      if (same(was) === same(now)) continue;
+    }
+    out.push(id);
+  }
+  return out;
+}
+
+/** Whether two states of a layer differ in nothing but place and size. */
+function placedOnly(a: Snapshot[string], b: Snapshot[string]): boolean {
+  return (
+    stable({ ...a, props: placeless(a.props) }) === stable({ ...b, props: placeless(b.props) })
+  );
+}
+
+/**
+ * Whether a layer is, or is in (through groups), a layout frame holding a
+ * group with an absolute member: issue 290's flow, whose placement isn't
+ * one answer.
+ */
+function inGroupedFlow(before: Snapshot, id: string): boolean {
+  const kids = new Map<string, string[]>();
+  for (const [kid, n] of Object.entries(before)) {
+    const list = kids.get(n.parent) ?? [];
+    list.push(kid);
+    kids.set(n.parent, list);
+  }
+  const holds = (frameId: string) =>
+    (kids.get(frameId) ?? []).some(
+      (g) =>
+        before[g]?.type === "group" &&
+        (kids.get(g) ?? []).some(
+          (m) => getProp(before[m]?.props ?? {}, "positioning") === "absolute",
+        ),
+    );
+  for (let at: string | undefined = id; at && before[at]; at = before[at]?.parent) {
+    const n = before[at];
+    if (n?.type === "frame" && getProp(n.props, "layoutMode") !== "none" && holds(at)) return true;
+    if (at !== id && n?.type !== "group") break;
+  }
+  return false;
+}
+
+/** Every layer under `id`, as presented. */
+function collectDescendants(doc: Doc, id: string): NodeRecord[] {
+  const out: NodeRecord[] = [];
+  const stack = [...doc.childIds(id)];
+  for (let at = stack.pop(); at !== undefined; at = stack.pop()) {
+    const n = doc.get(at);
+    if (n) out.push(n);
+    stack.push(...doc.childIds(at));
+  }
+  return out;
+}
+
+/** Whether a layer sat, before, in an instance whose main is gone now (issue 280's). */
+function orphaned(before: Snapshot, id: string, doc: Doc): boolean {
+  for (let at = before[id]; at; at = before[at.parent]) {
+    const main = getProp(at.props, "instanceOf");
+    if (main && !doc.has(main)) return true;
+  }
+  return false;
+}
+
+/** A value as JSON with its keys in order, so two orders of the same fields compare equal. */
+function stable(value: unknown): string {
+  return JSON.stringify(value, (_key, v) =>
+    v && typeof v === "object" && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : v,
+  );
+}
+
+/** Props without a place or size. */
+function placeless(props: Props): Props {
+  const { x: _x, y: _y, width: _w, height: _h, ...rest } = props as Record<string, unknown>;
+  return rest as Props;
+}
+
+/**
+ * Makes the edit through the editor's own commands, on a layer it applies
+ * to. "lost" when it deleted a component a swapped copy shows (issue 289:
+ * compact copies drop that layer, and the run can't go on from there).
+ */
+function perform(editor: Editor, e: Edit): "lost" | undefined {
   const doc = editor.doc;
   if (e.kind === "undo") {
     editor.undo();
@@ -587,15 +804,9 @@ function perform(editor: Editor, e: Edit): void {
   if (e.kind === "undo-redo") {
     // Back where it was, layout and all.
     const before = snapshot(doc);
-    // Issue 280: redoing a main's delete empties the instances that kept its layers. Issue
-    // 281: redo re-derives materialized copies' layers where the edit didn't.
-    const orphaned = layers(doc).some((n) => {
-      const source = getProp(n.props, "mirrors");
-      return !!source && !doc.has(source);
-    });
     editor.undo();
     editor.redo();
-    if (doc.compactCopies && !orphaned) expect(snapshot(doc), "undone and redone").toEqual(before);
+    expect(unexplained(before, snapshot(doc), doc), "undone and redone").toEqual([]);
     return;
   }
   if (e.kind === "variable") {
@@ -611,7 +822,9 @@ function perform(editor: Editor, e: Edit): void {
   const fits =
     e.kind === "bind" && (binding === "paddingLeft" || binding === "gap")
       ? isFrame
-      : TARGETS[e.kind];
+      : e.kind === "bind" && (binding === "characters" || binding === "fontSize")
+        ? (n: NodeRecord) => n.type === "text"
+        : TARGETS[e.kind];
   const candidates = fits ? all.filter(fits) : all;
   const node = candidates[e.at % Math.max(1, candidates.length)];
   if (!node) return;
@@ -648,6 +861,12 @@ function perform(editor: Editor, e: Edit): void {
     case "rotate":
       editor.setProp([id], "rotation", e.value);
       break;
+    case "fill":
+      // Nothing a layout reads: mains' copies lay out nothing for it.
+      editor.setProp([id], "fills", [
+        { type: "solid", color: ["#ff0000", "#00aa00", "#0000ff"][e.value] as string },
+      ]);
+      break;
     case "text":
       editor.setProp(
         [id],
@@ -671,10 +890,25 @@ function perform(editor: Editor, e: Edit): void {
       editor.commit([{ op: "move", id, parent: into.id, key: editor.topKey(into.id) }]);
       break;
     }
-    case "delete":
+    case "delete": {
+      const gone = new Set(
+        [node, ...collectDescendants(doc, id)]
+          .filter((n) => getProp(n.props, "isComponent"))
+          .map((n) => n.id),
+      );
+      const swapped =
+        doc.compactCopies &&
+        all.some((n) => {
+          const to = getProp(n.props, "instanceOf");
+          const source = getProp(n.props, "mirrors");
+          const from = source ? getProp(doc.get(source)?.props ?? {}, "instanceOf") : null;
+          return !!to && !!source && to !== from && gone.has(to);
+        });
       editor.select([id]);
       editor.deleteSelection();
+      if (swapped) return "lost";
       break;
+    }
     case "group":
       editor.select(doc.childIds(node.parent).slice(0, 2));
       editor.group();
@@ -696,7 +930,9 @@ function perform(editor: Editor, e: Edit): void {
       break;
     case "swap": {
       // Only to a component the swap menu offers: none that would hold an instance of itself.
-      const to = getProp(node.props, "instanceOf") === "main0" ? "main1" : "main0";
+      const mains = ["main0", "main1", "main2", "main3"];
+      const now = mains.indexOf(getProp(node.props, "instanceOf") ?? "");
+      const to = mains[(now + 1 + (e.at % 3)) % mains.length] as string;
       if (!wouldCycle(doc, to, node.parent)) editor.swapInstance(id, to);
       break;
     }
@@ -729,15 +965,73 @@ function check(
   copies: "compact" | "materialized",
   step: string,
   before?: ReadonlyMap<string, FrameState>,
+  replay = true,
 ) {
   expect(unsettled(editor.doc, before), `a full layout changes nothing ${step}`).toEqual([]);
   const now = snapshot(editor.doc);
   const reloaded = new Doc();
   reloaded.resetStored(editor.doc.stored(), copies);
   expect(snapshot(reloaded), `read back from its stored form ${step}`).toEqual(now);
+  if (!replay) return;
   const sent = editor.sync.takeUnsent();
   if (sent.length > 0) mirror.applyStored(sent, { held: true });
   expect(snapshot(mirror), `replayed ${step}`).toEqual(now);
+}
+
+/**
+ * Connects the editor to a room that holds `nodes`, and gives what a
+ * collaborator does there: `remote` makes a layer, arriving while the
+ * editor's own edits are still unsent (so they're rebased on it), and
+ * `settle` sends them at last and checks the room ends as the editor did,
+ * with no desync.
+ */
+function connect(editor: Editor, nodes: readonly NodeRecord[], copies: "compact" | "materialized") {
+  const sent: { t: string; ops?: Op[] }[] = [];
+  let desync: string | null = null;
+  let revn = 1;
+  editor.sync.on("desync", (reason: string) => {
+    desync = reason;
+  });
+  editor.sync.connected((m) => sent.push(m as never));
+  const receive = (m: unknown) => editor.sync.receive(m as never);
+  receive({
+    t: "welcome",
+    mode: "snapshot",
+    revn,
+    sessionId: "room",
+    role: "editor",
+    peers: [],
+    lastSeq: 0,
+    copies,
+  });
+  receive({ t: "snapshot", nodes, done: true });
+  editor.setPage("p");
+  const remote: Op[][] = [];
+  return {
+    remote(step: number) {
+      const last = editor.doc.childIds("p").at(-1);
+      const ops: Op[] = [
+        {
+          op: "create",
+          id: `remote${step}`,
+          type: "rect",
+          parent: "p",
+          key: keyBetween(last ? (editor.doc.get(last)?.key ?? null) : null, null),
+          props: { x: 40 * step, y: 1000, width: 10, height: 10 },
+        },
+      ];
+      remote.push(ops);
+      revn += 1;
+      receive({ t: "txn", revn, ops });
+    },
+    settle(mirror: Doc, step: string) {
+      editor.sync.flush();
+      for (const ops of remote) mirror.applyStored(ops, { held: true });
+      for (const m of sent) if (m.t === "txn" && m.ops) mirror.applyStored(m.ops, { held: true });
+      expect(desync, `no desync ${step}`).toBeNull();
+      expect(snapshot(mirror), `the room, rebased ${step}`).toEqual(snapshot(editor.doc));
+    },
+  };
 }
 
 describe("an edit leaves the document as a full layout would", () => {
@@ -747,53 +1041,63 @@ describe("an edit leaves the document as a full layout would", () => {
       /** How many edits of each kind changed the document. */
       const ran = new Map<Edit["kind"], number>(KINDS.map((k) => [k, 0]));
       fc.assert(
-        fc.property(tree, fc.array(edit, { minLength: 1, maxLength: 16 }), (spec, edits) => {
-          const editor = makeEditor(null, copies);
-          build(editor, spec);
-          const start = editor.doc.stored();
-          const mirror = new Doc();
-          mirror.resetStored(editor.doc.stored(), copies);
-          editor.sync.takeUnsent();
-          check(editor, mirror, copies, "after making it");
-          const history: string[] = [];
-          for (const e of edits) {
-            // What an undo restores is the document as it was, empty frames' boxes included.
-            const undoing = e.kind === "undo" || e.kind === "undo-redo";
-            const before = undoing ? undefined : frameStates(editor.doc);
-            const version = editor.doc.version;
-            perform(editor, e);
-            if (editor.doc.version !== version) ran.set(e.kind, (ran.get(e.kind) ?? 0) + 1);
-            history.push(JSON.stringify(e));
-            check(editor, mirror, copies, `after ${history.join(", ")}`, before);
-          }
-          // Merged back into where it started, as a branch is.
-          const mainReader = nodeReader(start);
-          const branchReader = nodeReader(editor.doc.stored());
-          // Issue 279: a merge can't yet stop an instance with override records being one (it
-          // was detached, or its main deleted while it kept its layers): it unsets the instance
-          // before its records go, and can't turn a record into a layer of the same id.
-          const unlinked = (n: NodeRecord) => {
-            if (n.type !== "override") return false;
-            const now = branchReader.get(n.id);
-            const instance = branchReader.get(n.parent);
-            return (
-              (now !== undefined && now.type !== "override") ||
-              (instance !== undefined && !getProp(instance.props, "instanceOf"))
+        fc.property(
+          tree,
+          fc.array(edit, { minLength: 1, maxLength: 16 }),
+          fc.boolean(),
+          (spec, edits, batched) => {
+            const editor = makeEditor(null, copies);
+            build(editor, spec);
+            const start = editor.doc.stored();
+            const mirror = new Doc();
+            mirror.resetStored(editor.doc.stored(), copies);
+            editor.sync.takeUnsent();
+            // Half the runs keep their edits unsent through the whole sequence, as a client does
+            // between flushes, while a collaborator's edits arrive and rebase them.
+            const room = batched ? connect(editor, start, copies) : null;
+            check(editor, mirror, copies, "after making it", undefined, !room);
+            const history: string[] = [];
+            for (const [step, e] of edits.entries()) {
+              // What an undo restores is the document as it was, empty frames' boxes included.
+              const undoing = e.kind === "undo" || e.kind === "undo-redo";
+              const before = undoing ? undefined : frameStates(editor.doc);
+              const version = editor.doc.version;
+              if (perform(editor, e) === "lost") return;
+              if (editor.doc.version !== version) ran.set(e.kind, (ran.get(e.kind) ?? 0) + 1);
+              history.push(JSON.stringify(e));
+              check(editor, mirror, copies, `after ${history.join(", ")}`, before, !room);
+              if (room && step % 2 === 1) room.remote(step);
+            }
+            if (room) room.settle(mirror, `after ${history.join(", ")}`);
+            // Merged back into where it started, as a branch is.
+            const mainReader = nodeReader(start);
+            const branchReader = nodeReader(editor.doc.stored());
+            // Issue 279: a merge can't yet stop an instance with override records being one (it
+            // was detached, or its main deleted while it kept its layers): it unsets the instance
+            // before its records go, and can't turn a record into a layer of the same id.
+            const unlinked = (n: NodeRecord) => {
+              if (n.type !== "override") return false;
+              const now = branchReader.get(n.id);
+              const instance = branchReader.get(n.parent);
+              return (
+                (now !== undefined && now.type !== "override") ||
+                (instance !== undefined && !getProp(instance.props, "instanceOf"))
+              );
+            };
+            if (start.some(unlinked)) return;
+            const mainDoc = new Doc();
+            mainDoc.resetStored(start, copies);
+            const ops: Op[] = mergeOps(
+              mainReader,
+              branchReader,
+              branchChanges(mainReader, branchReader, mainReader),
             );
-          };
-          if (start.some(unlinked)) return;
-          const mainDoc = new Doc();
-          mainDoc.resetStored(start, copies);
-          const ops: Op[] = mergeOps(
-            mainReader,
-            branchReader,
-            branchChanges(mainReader, branchReader, mainReader),
-          );
-          if (ops.length > 0) mainDoc.applyStored(ops, { held: true });
-          expect(snapshot(mainDoc), `merged as a branch after ${history.join(", ")}`).toEqual(
-            snapshot(editor.doc),
-          );
-        }),
+            if (ops.length > 0) mainDoc.applyStored(ops, { held: true });
+            expect(snapshot(mainDoc), `merged as a branch after ${history.join(", ")}`).toEqual(
+              snapshot(editor.doc),
+            );
+          },
+        ),
         { numRuns: runs },
       );
       // Each kind of edit did something somewhere: none is refused every time (a value the
