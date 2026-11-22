@@ -85,6 +85,17 @@ pub struct Outcome {
     pub render_ms: f64,
     pub submit_ms: f64,
     pub cpu_ms: f64,
+    pub prepare_masks_ms: f64,
+    pub vello_render_ms: f64,
+    pub reader_ms: f64,
+    pub shadow_ms: f64,
+    pub submits: u32,
+    pub vello_renders: u32,
+    pub glass_ops: u32,
+    pub glass_batched: u32,
+    pub bg_blur_ops: u32,
+    pub shadow_ops: u32,
+    pub shadow_hits: u32,
 }
 
 #[wasm_bindgen]
@@ -131,6 +142,17 @@ impl Outcome {
             render_ms: 0.0,
             submit_ms: 0.0,
             cpu_ms: 0.0,
+            prepare_masks_ms: 0.0,
+            vello_render_ms: 0.0,
+            reader_ms: 0.0,
+            shadow_ms: 0.0,
+            submits: 0,
+            vello_renders: 0,
+            glass_ops: 0,
+            glass_batched: 0,
+            bg_blur_ops: 0,
+            shadow_ops: 0,
+            shadow_hits: 0,
         }
     }
     fn err(e: EngineError) -> Self {
@@ -1014,6 +1036,17 @@ impl Engine {
                 o.render_ms = draw.render_ms;
                 o.submit_ms = draw.submit_ms;
                 o.cpu_ms = draw.cpu_ms;
+                o.prepare_masks_ms = draw.prepare_masks_ms;
+                o.vello_render_ms = draw.vello_render_ms;
+                o.reader_ms = draw.reader_ms;
+                o.shadow_ms = draw.shadow_ms;
+                o.submits = draw.submits;
+                o.vello_renders = draw.vello_renders;
+                o.glass_ops = draw.glass_ops;
+                o.glass_batched = draw.glass_batched;
+                o.bg_blur_ops = draw.bg_blur_ops;
+                o.shadow_ops = draw.shadow_ops;
+                o.shadow_hits = draw.shadow_hits;
                 o
             }
             Err(e) => Outcome::err(e),
@@ -1069,6 +1102,36 @@ impl Engine {
         if let Some(g) = self.core.gpu.as_ref() {
             g.destroy();
         }
+    }
+
+    /// Enables or disables per-frame GPU timestamp queries (WebGPU `timestamp-query` only).
+    /// Returns true if timestamp queries are active on the attached GPU.
+    #[wasm_bindgen(js_name = setGpuTimestamps)]
+    pub fn set_gpu_timestamps(&mut self, enabled: bool) -> bool {
+        self.core.gpu.as_mut().is_some_and(|g| g.set_gpu_timestamps(enabled))
+    }
+
+    /// Reads the last frame's GPU timestamp duration in milliseconds, or `undefined` when
+    /// timestamp queries are unsupported or disabled, or an `Outcome` on error (never rejects).
+    #[wasm_bindgen(js_name = gpuTimestampMs)]
+    pub fn gpu_timestamp_ms(&self) -> js_sys::Promise {
+        let pair = self.core.gpu.as_ref().map(|g| (g.device.clone(), g.health.clone()));
+        let start = self.core.gpu.as_ref().map(|g| g.gpu_timestamp_start());
+        wasm_bindgen_futures::future_to_promise(async move {
+            let (Some((device, health)), Some(start)) = (pair, start) else {
+                return Ok(failure(EngineError::new(error::ErrorCode::State, "no GPU attached")));
+            };
+            let Some((buffer, period_ns)) = (match start {
+                Ok(s) => s,
+                Err(e) => return Ok(failure(e)),
+            }) else {
+                return Ok(JsValue::UNDEFINED);
+            };
+            match gpu::read_timestamp_ms(device, health, buffer, period_ns).await {
+                Ok(ms) => Ok(JsValue::from_f64(ms)),
+                Err(e) => Ok(failure(e)),
+            }
+        })
     }
 
     /// Resolves when the GPU has finished what it was given, or to an `Outcome` on failure

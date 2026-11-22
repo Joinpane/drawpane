@@ -380,12 +380,24 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
             !activeEngineCanvas ||
             activeEngineCanvas !== view.canvas
           ) {
+            view.readbackDiag.canvasGuardDropped++;
             return;
           }
           const seq = frameN !== undefined ? submittedFrameSeq.get(frameN) : engineSubmittedFrames;
-          if (frameN !== undefined && seq === undefined) return;
+          if (frameN !== undefined && seq === undefined) {
+            view.readbackDiag.canvasNoSeq++;
+            return;
+          }
           enginePresentedFrames++;
-          if (seq !== undefined) timing.confirmMotionFrame(seq);
+          if (seq !== undefined) {
+            if (!timing.motion) {
+              view.readbackDiag.canvasNoMotion++;
+            } else {
+              const before = timing.motion.confirmed;
+              timing.confirmMotionFrame(seq);
+              if (timing.motion.confirmed > before) view.readbackDiag.canvasConfirmed++;
+            }
+          }
           if (seq !== undefined && seq > engineConfirmedFrame) engineConfirmedFrame = seq;
           showEngine(true);
           syncRendererAttr();
@@ -567,6 +579,33 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           clearTimeout(settle);
           const seq = ++engineSubmittedFrames;
           timing.submitMotionFrame(seq, r.exact);
+          if (timing.motionCapture) {
+            const view = engine;
+            const frameN = view.last.n;
+            timing.motionCapture.submitted(
+              seq,
+              s.camera,
+              contentCanvas.width,
+              contentCanvas.height,
+              r.exact,
+              async () => {
+                // Readback mode has just painted the confirmed pixels into its 2D canvas.
+                if (view.readsBack) {
+                  const canvas = view.canvas;
+                  const ctx = canvas.getContext("2d");
+                  if (!ctx) throw new Error("Camera replay cannot read the presented canvas");
+                  const data = ctx.getImageData(0, 0, canvas.width, canvas.height).data;
+                  return new Uint8Array(data.buffer, data.byteOffset, data.byteLength);
+                }
+                // Direct presentation can coalesce confirmations. Only copy the frame for
+                // this sequence while it is still the latest engine submission.
+                if (view.last.n !== frameN) throw new Error("Camera replay frame was superseded");
+                const pixels = await view.pixels();
+                if (!pixels.ok) throw new Error(pixels.message);
+                return pixels.value;
+              },
+            );
+          }
           if (engine.last.n > 0) {
             submittedFrameSeq.set(engine.last.n, seq);
             if (submittedFrameSeq.size > 128) {

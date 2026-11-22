@@ -39,6 +39,7 @@ import { writeFileSync } from "node:fs";
 import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "../fresh-instance";
 import { importConverted } from "../import-converted";
+import { cameraReplay, type ReplayScore } from "./camera-replay";
 import { type Opening, opening, openingRow, pan, type Summary, summaryRow, zoom } from "./frames";
 import { type PageInfo, pagesOf } from "./kit-pages";
 import { profiled } from "./profile";
@@ -49,6 +50,9 @@ const FRAMES = Number(process.env.BENCH_FRAMES ?? 120);
 const NAMED = process.env.BENCH_PAGES
   ? process.env.BENCH_PAGES.split(",").map((s) => s.trim())
   : null;
+const GESTURES = process.env.BENCH_GESTURES
+  ? new Set(process.env.BENCH_GESTURES.split(";").map((s) => s.trim()))
+  : null;
 /** A folder for a CPU profile of each measurement (`.cpuprofile`, for Chrome's performance panel). */
 const PROFILE = process.env.BENCH_PROFILE;
 /** Which renderer draws: "canvas" (default) or "engine" (decision 0040's switch). */
@@ -56,6 +60,7 @@ const PRESENT = process.env.BENCH_ENGINE_PRESENT;
 const VERIFIED = process.env.BENCH_VERIFIED_BACKENDS;
 const READBACK = PRESENT === "readback" || (PRESENT === "auto" && VERIFIED === "webgpu");
 const RENDERER = process.env.BENCH_RENDERER === "engine" ? "engine" : "canvas";
+const REPLAY = RENDERER === "engine" && process.env.BENCH_W4_REPLAY === "1";
 /** Decision 0040's confirmed targets on the heaviest page, on real GPU hardware. */
 const USEFUL_IMAGE_MS = 1000;
 const EXACT_MS = 3000;
@@ -69,6 +74,32 @@ interface EngineFacts {
   software: boolean;
   /** GPU time per frame while panning, from submit to `onSubmittedWorkDone` (ms). */
   gpuMs: { p50: number; p95: number; max: number } | null;
+  /** Hardware GPU timestamp query duration per frame (ms), when WebGPU `timestamp-query` is available. */
+  gpuTimestampMs?: { p50: number; p95: number; max: number } | null;
+  /** Per-frame CPU/GPU split measured on native whole-view zoom frames. */
+  cpuGpuSplit?: {
+    frames: number;
+    timestampsSupported: boolean;
+    cpuMs: { p50: number; p95: number; max: number };
+    patchMs: { p50: number };
+    encodeMs: { p50: number };
+    prepareMasksMs: { p50: number };
+    velloRenderMs: { p50: number };
+    readerMs: { p50: number };
+    shadowMs: { p50: number };
+    submitMs: { p50: number };
+    gpuFinishedMs: { p50: number; p95: number; max: number };
+    gpuTimestampMs: { p50: number; p95: number; max: number } | null;
+    counts: {
+      submits: number;
+      velloRenders: number;
+      glassOps: number;
+      glassBatched: number;
+      bgBlurOps: number;
+      shadowOps: number;
+      shadowHits: number;
+    };
+  } | null;
   note?: string;
 }
 
@@ -78,23 +109,54 @@ interface PageResult {
   open: Opening;
   canvas: Record<string, Summary>;
   engine?: EngineFacts;
+  replay?: Record<string, ReplayScore>;
 }
 
-/** What the engine did on the page shown, and its GPU's time per frame over a pan. */
+/** What the engine did on the page shown, and its GPU's time per frame over a pan + native zoom split. */
 async function engineFacts(page: Page, frames: number): Promise<EngineFacts> {
   return page.evaluate(async (frames) => {
+    type Breakdown = {
+      patch: number;
+      encode: number;
+      render: number;
+      submit: number;
+      prepareMasks: number;
+      velloRender: number;
+      reader: number;
+      shadow: number;
+    };
+    type Counts = {
+      submits: number;
+      velloRenders: number;
+      glassOps: number;
+      glassBatched: number;
+      bgBlurOps: number;
+      shadowOps: number;
+      shadowHits: number;
+    };
     type View = {
-      last: { supported: boolean };
+      last: { supported: boolean; ms: number; breakdown: Breakdown; counts: Counts };
       unsupported(): Record<string, number>;
       engine: {
         gpu: { adapter: string; fallback: boolean; backend: string } | null;
-        gpuFinished(): Promise<void>;
+        gpuFinished(): Promise<{ ok: boolean }>;
+        setGpuTimestamps?(enabled: boolean): boolean;
+        gpuTimestampMs?(): Promise<{ ok: boolean; value?: number | null }>;
       };
     };
     const w = window as unknown as {
       drawpaneEngineView?: View;
+      drawpaneFrames?: { beginMotion?(native: boolean): unknown; endMotion?(): void };
       drawpane: {
-        s: { camera: { pan(x: number, y: number): unknown } };
+        s: {
+          camera: {
+            zoom: number;
+            pan(x: number, y: number): unknown;
+            zoomAt(screen: { x: number; y: number }, zoom: number): unknown;
+          };
+          viewport: { width: number; height: number };
+        };
+        zoomToFit(): void;
         state: { set(p: object): void };
       };
     };
@@ -118,27 +180,118 @@ async function engineFacts(page: Page, frames: number): Promise<EngineFacts> {
         software: !!gpu?.fallback,
         gpuMs: null,
       };
-    const times: number[] = [];
-    const frame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
-    for (let i = 0; i < frames; i++) {
-      w.drawpane.state.set({ camera: w.drawpane.s.camera.pan(i % 60 < 30 ? 6 : -6, 3) });
-      await frame();
-      const t = performance.now();
-      await view.engine.gpuFinished();
-      times.push(performance.now() - t);
-    }
-    times.sort((a, b) => a - b);
-    const at = (q: number) =>
-      Math.round((times[Math.floor(q * (times.length - 1))] ?? 0) * 10) / 10;
-    return {
-      renderer: "engine" as const,
-      unsupported,
-      adapter: gpu?.adapter ?? null,
-      ...(gpu ? { backend: gpu.backend } : {}),
-      software: !!gpu?.fallback,
-      gpuMs: { p50: at(0.5), p95: at(0.95), max: at(1) },
-      ...(gpu?.fallback ? { note: "software adapter: GPU timings not representative" } : {}),
+    const quantiles = (xs: number[]) => {
+      const s = [...xs].sort((a, b) => a - b);
+      const at = (q: number) => Math.round((s[Math.floor(q * (s.length - 1))] ?? 0) * 10) / 10;
+      return { p50: at(0.5), p95: at(0.95), max: at(1) };
     };
+    const p50 = (xs: number[]) => quantiles(xs).p50;
+    const frame = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
+
+    const tsEnabled = view.engine.setGpuTimestamps?.(true) ?? false;
+    const times: number[] = [];
+    const tsTimes: number[] = [];
+    const panCount = Math.min(frames, 12);
+    try {
+      for (let i = 0; i < panCount; i++) {
+        w.drawpane.state.set({ camera: w.drawpane.s.camera.pan(i % 60 < 30 ? 6 : -6, 3) });
+        await frame();
+        const t = performance.now();
+        await view.engine.gpuFinished();
+        times.push(performance.now() - t);
+        if (tsEnabled && view.engine.gpuTimestampMs) {
+          const ts = await view.engine.gpuTimestampMs();
+          if (ts.ok && typeof ts.value === "number") tsTimes.push(ts.value);
+        }
+      }
+
+      // Paired CPU/GPU split on native whole-view zoom frames.
+      w.drawpane.zoomToFit();
+      await frame();
+      await view.engine.gpuFinished();
+      w.drawpaneFrames?.beginMotion?.(true);
+      const splitCount = Math.min(frames, 6);
+      const centre = { x: w.drawpane.s.viewport.width / 2, y: w.drawpane.s.viewport.height / 2 };
+      const cpuAll: number[] = [];
+      const patchAll: number[] = [];
+      const encodeAll: number[] = [];
+      const prepareMasksAll: number[] = [];
+      const velloRenderAll: number[] = [];
+      const readerAll: number[] = [];
+      const shadowAll: number[] = [];
+      const submitAll: number[] = [];
+      const gpuFinAll: number[] = [];
+      const gpuTsAll: number[] = [];
+      const countsAll: Counts[] = [];
+      try {
+        for (let i = 0; i < splitCount; i++) {
+          const cam = w.drawpane.s.camera;
+          w.drawpane.state.set({
+            camera: cam.zoomAt(centre, cam.zoom * (i % 2 === 0 ? 1.03 : 1 / 1.03)),
+          });
+          await frame();
+          const last = view.last;
+          const tFin = performance.now();
+          await view.engine.gpuFinished();
+          const finMs = performance.now() - tFin;
+          cpuAll.push(last.ms);
+          patchAll.push(last.breakdown.patch);
+          encodeAll.push(last.breakdown.encode);
+          prepareMasksAll.push(last.breakdown.prepareMasks);
+          velloRenderAll.push(last.breakdown.velloRender);
+          readerAll.push(last.breakdown.reader);
+          shadowAll.push(last.breakdown.shadow);
+          submitAll.push(last.breakdown.submit);
+          gpuFinAll.push(finMs);
+          countsAll.push({ ...last.counts });
+          if (tsEnabled && view.engine.gpuTimestampMs) {
+            const ts = await view.engine.gpuTimestampMs();
+            if (ts.ok && typeof ts.value === "number") gpuTsAll.push(ts.value);
+          }
+        }
+      } finally {
+        w.drawpaneFrames?.endMotion?.();
+      }
+      const cpuGpuSplit =
+        cpuAll.length > 0
+          ? {
+              frames: cpuAll.length,
+              timestampsSupported: tsEnabled,
+              cpuMs: quantiles(cpuAll),
+              patchMs: { p50: p50(patchAll) },
+              encodeMs: { p50: p50(encodeAll) },
+              prepareMasksMs: { p50: p50(prepareMasksAll) },
+              velloRenderMs: { p50: p50(velloRenderAll) },
+              readerMs: { p50: p50(readerAll) },
+              shadowMs: { p50: p50(shadowAll) },
+              submitMs: { p50: p50(submitAll) },
+              gpuFinishedMs: quantiles(gpuFinAll),
+              gpuTimestampMs: gpuTsAll.length > 0 ? quantiles(gpuTsAll) : null,
+              counts: {
+                submits: p50(countsAll.map((c) => c.submits)),
+                velloRenders: p50(countsAll.map((c) => c.velloRenders)),
+                glassOps: p50(countsAll.map((c) => c.glassOps)),
+                glassBatched: p50(countsAll.map((c) => c.glassBatched)),
+                bgBlurOps: p50(countsAll.map((c) => c.bgBlurOps)),
+                shadowOps: p50(countsAll.map((c) => c.shadowOps)),
+                shadowHits: p50(countsAll.map((c) => c.shadowHits)),
+              },
+            }
+          : null;
+      return {
+        renderer: "engine" as const,
+        unsupported,
+        adapter: gpu?.adapter ?? null,
+        ...(gpu ? { backend: gpu.backend } : {}),
+        software: !!gpu?.fallback,
+        gpuMs: quantiles(times),
+        gpuTimestampMs: tsTimes.length > 0 ? quantiles(tsTimes) : null,
+        cpuGpuSplit,
+        ...(gpu?.fallback ? { note: "software adapter: GPU timings not representative" } : {}),
+      };
+    } finally {
+      view.engine.setGpuTimestamps?.(false);
+    }
   }, frames);
 }
 
@@ -247,26 +400,35 @@ test.describe("A real file", () => {
       const at = (what: string) => `${info.name} ${what}`;
       const shown = await profiled(cdp, PROFILE, at("first frame"), async () => {
         const shown = await opening(page, info.id);
+        if (shown.timedOut) {
+          console.log(
+            `open timeout diag: openDiag=${JSON.stringify(shown.openDiag)} readbackDiag=${JSON.stringify(shown.readbackDiag)}`,
+          );
+        }
         await settle(page);
         return shown;
       });
       const canvas: Record<string, Summary> = {};
-      canvas["pan, whole"] = await profiled(cdp, PROFILE, at("pan whole"), () =>
-        pan(page, "fit", FRAMES),
-      );
-      await settle(page);
-      canvas["zoom, whole"] = await profiled(cdp, PROFILE, at("zoom whole"), () =>
-        zoom(page, FRAMES),
-      );
-      await settle(page);
+      const wantGesture = (name: string) => !GESTURES || GESTURES.has(name);
+      if (wantGesture("pan, whole")) {
+        canvas["pan, whole"] = await profiled(cdp, PROFILE, at("pan whole"), () =>
+          pan(page, "fit", FRAMES),
+        );
+        await settle(page);
+      }
+      if (wantGesture("zoom, whole")) {
+        canvas["zoom, whole"] = await profiled(cdp, PROFILE, at("zoom whole"), () =>
+          zoom(page, FRAMES),
+        );
+        await settle(page);
+      }
       if (info.busiest)
         for (const level of [0.5, 1]) {
+          const name = `pan, ${level * 100}%`;
+          if (!wantGesture(name)) continue;
           await focus(page, info.busiest);
-          canvas[`pan, ${level * 100}%`] = await profiled(
-            cdp,
-            PROFILE,
-            at(`pan ${level * 100}`),
-            () => pan(page, level, FRAMES),
+          canvas[name] = await profiled(cdp, PROFILE, at(`pan ${level * 100}`), () =>
+            pan(page, level, FRAMES),
           );
           await settle(page);
         }
@@ -276,6 +438,17 @@ test.describe("A real file", () => {
         canvas,
         ...(RENDERER === "engine" ? { engine: await engineFacts(page, Math.min(FRAMES, 60)) } : {}),
       };
+      if (REPLAY) {
+        const replay: Record<string, ReplayScore> = {};
+        for (const gesture of Object.keys(canvas)) {
+          const kind = gesture.startsWith("zoom") ? "zoom" : "pan";
+          const level = gesture.endsWith("100%") ? 1 : gesture.endsWith("50%") ? 0.5 : "fit";
+          if (typeof level === "number" && info.busiest) await focus(page, info.busiest);
+          await settle(page);
+          replay[gesture] = await cameraReplay(page, kind, level, FRAMES);
+        }
+        result.replay = replay;
+      }
       results.push(result);
       console.log(
         [
@@ -283,10 +456,22 @@ test.describe("A real file", () => {
           openingRow(result.open),
           ...(result.engine
             ? [
-                `drawn by ${result.engine.renderer}${result.engine.renderer === "canvas" ? ` (${JSON.stringify(result.engine.unsupported)})` : ""} on ${result.engine.adapter}${result.engine.gpuMs ? `, GPU ${result.engine.gpuMs.p50} / ${result.engine.gpuMs.p95} ms per frame` : ""}${result.engine.note ? ` (${result.engine.note})` : ""}`,
+                `drawn by ${result.engine.renderer}${result.engine.renderer === "canvas" ? ` (${JSON.stringify(result.engine.unsupported)})` : ""} on ${result.engine.adapter}${result.engine.gpuMs ? `, GPU ${result.engine.gpuMs.p50} / ${result.engine.gpuMs.p95} ms per frame` : ""}${result.engine.gpuTimestampMs ? ` (timestamp ${result.engine.gpuTimestampMs.p50} / ${result.engine.gpuTimestampMs.p95} ms)` : ""}${result.engine.note ? ` (${result.engine.note})` : ""}`,
+                ...(result.engine.cpuGpuSplit
+                  ? [
+                      `native split (p50, ${result.engine.cpuGpuSplit.frames} frames): CPU ${result.engine.cpuGpuSplit.cpuMs.p50} ms (patch ${result.engine.cpuGpuSplit.patchMs.p50}, encode ${result.engine.cpuGpuSplit.encodeMs.p50}, prepMasks ${result.engine.cpuGpuSplit.prepareMasksMs.p50}, vello ${result.engine.cpuGpuSplit.velloRenderMs.p50}, reader ${result.engine.cpuGpuSplit.readerMs.p50}, shadow ${result.engine.cpuGpuSplit.shadowMs.p50}, submit ${result.engine.cpuGpuSplit.submitMs.p50}) · GPU finished ${result.engine.cpuGpuSplit.gpuFinishedMs.p50} ms${result.engine.cpuGpuSplit.gpuTimestampMs ? ` · GPU ts ${result.engine.cpuGpuSplit.gpuTimestampMs.p50} ms` : " · GPU ts n/a"} · submits ${result.engine.cpuGpuSplit.counts.submits}, vello ${result.engine.cpuGpuSplit.counts.velloRenders}, glass ${result.engine.cpuGpuSplit.counts.glassBatched}/${result.engine.cpuGpuSplit.counts.glassOps}, blur ${result.engine.cpuGpuSplit.counts.bgBlurOps}, shadow ${result.engine.cpuGpuSplit.counts.shadowHits}/${result.engine.cpuGpuSplit.counts.shadowOps}`,
+                    ]
+                  : []),
               ]
             : []),
-          ...Object.entries(canvas).map(([name, r]) => summaryRow(name, r)),
+          ...Object.entries(canvas).flatMap(([name, r]) => [
+            summaryRow(name, r),
+            ...(r.motion
+              ? [
+                  `  motion (${name}): submitted ${r.motion.submitted} (degraded ${r.motion.degradedSubmitted}), confirmed ${r.motion.confirmed} (degraded ${r.motion.degradedConfirmed}), fallback ${r.motion.fallback}, missed ${r.motion.missed}${r.engine?.readbackDiag ? ` · readbackDiag=${JSON.stringify(r.engine.readbackDiag)}` : ""}`,
+                ]
+              : []),
+          ]),
         ].join("\n"),
       );
     }
@@ -295,6 +480,16 @@ test.describe("A real file", () => {
     if (process.env.BENCH_OUT)
       writeFileSync(process.env.BENCH_OUT, `${JSON.stringify(report, null, 1)}\n`);
     expect(results.length).toBeGreaterThan(0);
+    if (REPLAY) {
+      for (const result of results) {
+        for (const [gesture, score] of Object.entries(result.replay ?? {})) {
+          const detail = "error" in score ? `: ${score.error}` : "";
+          expect
+            .soft(score.pass, `${result.page.name}, ${gesture} pixel fidelity${detail}`)
+            .toBe(true);
+        }
+      }
+    }
     if (RENDERER === "engine" && process.env.BENCH_W4_CAMERA_GATE === "1") {
       for (const result of results) {
         expect.soft(result.engine?.renderer, result.page.name).toBe("engine");
@@ -307,8 +502,10 @@ test.describe("A real file", () => {
           const motion = summary.motion;
           expect.soft(motion, `${label} motion samples`).toBeDefined();
           if (!motion) continue;
-          expect.soft(motion.degradedConfirmed, `${label} degraded presentations`).toBe(0);
-          expect.soft(motion.degradedSubmitted, `${label} degraded submissions`).toBe(0);
+          if (!REPLAY) {
+            expect.soft(motion.degradedConfirmed, `${label} degraded presentations`).toBe(0);
+            expect.soft(motion.degradedSubmitted, `${label} degraded submissions`).toBe(0);
+          }
           expect.soft(motion.fallback, `${label} renderer fallbacks`).toBe(0);
           expect.soft(motion.missed, `${label} camera requests without a frame`).toBe(0);
           expect.soft(motion.confirmed, `${label} confirmed presentations`).toBeGreaterThan(1);

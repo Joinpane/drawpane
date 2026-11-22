@@ -9,6 +9,9 @@ crates.io, unchanged except:
   every render in a burst of tile renders allocated new mapped buffers: about a fifth of a cold
   frame's main-thread time went to `createBuffer`.
 - `src/render/wgpu/mod.rs`: the renderer hands its queue to that upload path.
+- `src/scene.rs`: `Scene::fill_path_in_slot` generates solid-paint strips in slot-local
+  coordinates and shifts the emitted strips by a tile-aligned atlas origin, keeping batched
+  glass mask coverage bit-identical to standalone lens-local masks.
 
 The patch is marked `Drawpane:` in the code. Upgrading Vello means taking the new release and
 carrying the patch again (or dropping it if upstream uploads through the queue on the web).

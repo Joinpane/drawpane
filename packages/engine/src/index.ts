@@ -105,6 +105,20 @@ export interface FrameStats {
     /** Presenting and submitting. */
     readonly submit: number;
     readonly total: number;
+    readonly prepareMasks: number;
+    readonly velloRender: number;
+    readonly reader: number;
+    readonly shadow: number;
+  };
+  /** Per-frame GPU dispatch counters. */
+  readonly counts: {
+    readonly submits: number;
+    readonly velloRenders: number;
+    readonly glassOps: number;
+    readonly glassBatched: number;
+    readonly bgBlurOps: number;
+    readonly shadowOps: number;
+    readonly shadowHits: number;
   };
 }
 
@@ -217,7 +231,25 @@ function stats(o: Glue.Outcome, gpu = false): FrameStats {
       evicted: o.evicted,
       dragged: o.dragged,
     },
-    ms: { encode: o.encode_ms, render: o.render_ms, submit: o.submit_ms, total: o.cpu_ms },
+    ms: {
+      encode: o.encode_ms,
+      render: o.render_ms,
+      submit: o.submit_ms,
+      total: o.cpu_ms,
+      prepareMasks: o.prepare_masks_ms,
+      velloRender: o.vello_render_ms,
+      reader: o.reader_ms,
+      shadow: o.shadow_ms,
+    },
+    counts: {
+      submits: o.submits,
+      velloRenders: o.vello_renders,
+      glassOps: o.glass_ops,
+      glassBatched: o.glass_batched,
+      bgBlurOps: o.bg_blur_ops,
+      shadowOps: o.shadow_ops,
+      shadowHits: o.shadow_hits,
+    },
   };
 }
 
@@ -1164,6 +1196,68 @@ export class RenderEngine {
   /** Destroys the GPU device, as a driver reset loses it: for testing the fallback. */
   loseGpu(): void {
     this.#call((e) => e.gpuDestroy?.());
+  }
+
+  /** Enables or disables per-frame WebGPU timestamp queries. Returns true when active. */
+  setGpuTimestamps(enabled: boolean): boolean {
+    const r = this.#call((e) => e.setGpuTimestamps?.(enabled) ?? false);
+    return typeof r === "boolean" ? r : false;
+  }
+
+  /** Reads the last frame's GPU timestamp duration in ms (null if unsupported or disabled). */
+  async gpuTimestampMs(): Promise<Result<number | null>> {
+    const startEpoch = this.#epoch;
+    const state = glueState(this.#module.glue);
+    const genTrap = this.#genTrapNotice;
+    const p = this.#call((e) => e.gpuTimestampMs?.());
+    if (isFailure(p)) return p;
+    if (!(p instanceof Promise)) return fail(ErrorCode.NotAvailable, "no GPU");
+    p.then(
+      (stale) => {
+        if (state.epoch !== startEpoch && stale !== undefined && typeof stale !== "number")
+          unfinalized(stale);
+      },
+      () => {},
+    );
+    let v: number | Glue.Outcome | undefined;
+    try {
+      const settled = await Promise.race([
+        p.then((value) => ({ kind: "value" as const, value })),
+        genTrap.then(() => ({ kind: "trapped" as const })),
+      ]);
+      if (settled.kind === "trapped") {
+        this.#live();
+        return (
+          this.#dead ?? fail(ErrorCode.Trap, "the engine instance changed during gpuTimestampMs")
+        );
+      }
+      v = settled.value;
+    } catch (err) {
+      if (err instanceof WebAssembly.RuntimeError || state.epoch !== startEpoch) {
+        return this.#trapped(err);
+      }
+      return fail(ErrorCode.Gpu, String(err));
+    }
+    if (state.epoch !== startEpoch) {
+      if (v !== undefined && typeof v !== "number") unfinalized(v);
+      this.#live();
+      return (
+        this.#dead ?? fail(ErrorCode.Trap, "the engine instance changed during gpuTimestampMs")
+      );
+    }
+    if (!this.#live()) {
+      if (v !== undefined && typeof v !== "number") {
+        try {
+          v.free();
+        } catch (err) {
+          return this.#trapped(err);
+        }
+      }
+      return this.#dead ?? fail(ErrorCode.State, "the engine was disposed");
+    }
+    if (v === undefined) return { ok: true, value: null };
+    if (typeof v === "number") return { ok: true, value: v };
+    return outcome(v) as Result<number | null>;
   }
 
   /** Resolves when the GPU has finished what it was given (how the bench times GPU work). */

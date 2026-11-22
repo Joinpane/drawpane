@@ -224,3 +224,21 @@ Installing dependencies and building apps/web takes 5 to 15 s per checkout.
 T4 is the default: a Turing part with roughly a laptop GPU's 2D throughput,
 and the cheapest. L4 (Ada) is closer to a recent laptop's; compare a
 baseline and a change on the same type.
+
+## Camera fidelity replay
+
+Set `BENCH_W4_REPLAY=1` with the real-file engine bench to capture motion
+pixels in a second, untimed run of each gesture. The harness captures each
+requested camera after its presentation, and waits for that readback before
+advancing the gesture. It re-renders each selected camera at the original DPR in exact
+mode. The final pair measures the change between motion and exact rendering
+at the stopping camera. The report includes tile content errors, sharpness,
+LDR FLIP, and sharpness changes for adjacent captured steps. The thresholds
+are provisional until calibrated on a laptop.
+
+Set `BENCH_W4_REPLAY_PPD` to the target display's pixels per degree, such as
+80 for a 2× laptop at typical viewing distance. Modal installs the evaluator
+only for replay runs. To run locally, set `BENCH_W4_REPLAY_PYTHON` to a Python
+environment with `numpy`, `scikit-image`, and NVIDIA's `flip-evaluator`.
+Capture pixels stay in temporary storage until scoring completes. Cadence
+still comes from the earlier gesture with no pixel readback.

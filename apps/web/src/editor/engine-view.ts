@@ -1101,7 +1101,70 @@ export class EngineView {
       dragged: 0,
     } as FrameStats["tiles"],
     /** Where the frame's CPU time went: the patch, the engine's encoding, its renderer, submit. */
-    breakdown: { patch: 0, encode: 0, render: 0, submit: 0, readback: 0 },
+    breakdown: {
+      patch: 0,
+      encode: 0,
+      render: 0,
+      submit: 0,
+      readback: 0,
+      prepareMasks: 0,
+      velloRender: 0,
+      reader: 0,
+      shadow: 0,
+    },
+    counts: {
+      submits: 0,
+      velloRenders: 0,
+      glassOps: 0,
+      glassBatched: 0,
+      bgBlurOps: 0,
+      shadowOps: 0,
+      shadowHits: 0,
+    },
+  };
+  /** Readback presentation diagnostics (for debugging and verifying WebGPU readback confirmation). */
+  readbackDiag: {
+    started: number;
+    ok: number;
+    timeout: number;
+    limit: number;
+    error: number;
+    epochDropped: number;
+    sizeDropped: number;
+    genDropped: number;
+    deadDropped: number;
+    presented: number;
+    busySkipped: number;
+    canvasGuardDropped: number;
+    canvasNoSeq: number;
+    canvasNoMotion: number;
+    canvasConfirmed: number;
+    events: Array<{
+      t: number;
+      k: string;
+      n: number;
+      frame: number;
+      ms?: number;
+      code?: number;
+      msg?: string;
+    }>;
+  } = {
+    started: 0,
+    ok: 0,
+    timeout: 0,
+    limit: 0,
+    error: 0,
+    epochDropped: 0,
+    sizeDropped: 0,
+    genDropped: 0,
+    deadDropped: 0,
+    presented: 0,
+    busySkipped: 0,
+    canvasGuardDropped: 0,
+    canvasNoSeq: 0,
+    canvasNoMotion: 0,
+    canvasConfirmed: 0,
+    events: [],
   };
   readonly #health: number;
   #lastGpuWidth = 0;
@@ -1312,6 +1375,11 @@ export class EngineView {
   /** Whether frames reach the screen asynchronously (GPU read-back or CPU worker tiles). */
   get readsBack(): boolean {
     return this.#readback !== null || this.#backend === "cpu-worker";
+  }
+
+  /** Whether an async GPU read-back is currently in flight. */
+  get reading(): boolean {
+    return this.#reading;
   }
 
   /** Whether the latest engine draw presented a frame cleanly (not recovering or stalled). */
@@ -2469,7 +2537,12 @@ export class EngineView {
         encode: f.ms.encode,
         render: f.ms.render,
         submit: f.ms.submit,
+        prepareMasks: f.ms.prepareMasks,
+        velloRender: f.ms.velloRender,
+        reader: f.ms.reader,
+        shadow: f.ms.shadow,
       },
+      counts: f.counts,
     };
     this.trace?.push({
       t: performance.now(),
@@ -2648,6 +2721,39 @@ export class EngineView {
     };
   }
 
+  resetReadbackDiag(): void {
+    this.readbackDiag = {
+      started: 0,
+      ok: 0,
+      timeout: 0,
+      limit: 0,
+      error: 0,
+      epochDropped: 0,
+      sizeDropped: 0,
+      genDropped: 0,
+      deadDropped: 0,
+      presented: 0,
+      busySkipped: 0,
+      canvasGuardDropped: 0,
+      canvasNoSeq: 0,
+      canvasNoMotion: 0,
+      canvasConfirmed: 0,
+      events: [],
+    };
+  }
+
+  #diagEvent(k: string, n: number, extra?: { ms?: number; code?: number; msg?: string }): void {
+    const events = this.readbackDiag.events;
+    if (events.length >= 60) events.splice(20, 1);
+    events.push({
+      t: Math.round(performance.now()),
+      k,
+      n,
+      frame: this.#frame,
+      ...(extra ?? {}),
+    });
+  }
+
   /**
    * Reads the latest GPU frame back into the 2D canvas: one read-back at a time, always of the
    * newest frame (frames drawn meanwhile are skipped, never queued).
@@ -2656,19 +2762,39 @@ export class EngineView {
     const want = this.#want;
     const ctx = this.#readback;
     const engine = this.#engine;
-    if (this.#reading || !want || !ctx || !engine || this.#dead || this.#recovering) return;
+    if (this.#reading) {
+      if (want) this.readbackDiag.busySkipped++;
+      return;
+    }
+    if (!want || !ctx || !engine || this.#dead || this.#recovering) return;
     this.#want = null;
     this.#reading = true;
+    this.readbackDiag.started++;
+    this.#diagEvent("start", want.n);
     const gen = this.#deviceGeneration;
     const t = performance.now();
     void engine.gpuPixels().then((px) => {
-      if (gen !== this.#deviceGeneration) return;
+      if (gen !== this.#deviceGeneration) {
+        this.readbackDiag.genDropped++;
+        this.#diagEvent("genDrop", want.n, { ms: Math.round(performance.now() - t) });
+        return;
+      }
       this.#reading = false;
-      if (this.#dead || this.#recovering || this.#engine !== engine) return;
+      if (this.#dead || this.#recovering || this.#engine !== engine) {
+        this.readbackDiag.deadDropped++;
+        this.#diagEvent("deadDrop", want.n, { ms: Math.round(performance.now() - t) });
+        return;
+      }
       if (!px.ok) {
         // Keep the existing timeout backoff in charge of waking the next opening slice.
         if (this.#openingFrame === want.n) this.#clearOpeningFrame();
         if (px.code === ErrorCode.Limit) {
+          this.readbackDiag.limit++;
+          this.#diagEvent("limit", want.n, {
+            ms: Math.round(performance.now() - t),
+            code: px.code,
+            msg: px.message,
+          });
           if (want.epoch === this.#epoch && want.n === this.#frame) {
             // A smaller raster is a size recovery only. Timeouts follow the
             // bounded device recovery path below, regardless of raster scale.
@@ -2685,6 +2811,12 @@ export class EngineView {
           return;
         }
         if (px.code === ErrorCode.Timeout) {
+          this.readbackDiag.timeout++;
+          this.#diagEvent("timeout", want.n, {
+            ms: Math.round(performance.now() - t),
+            code: px.code,
+            msg: px.message,
+          });
           const health = engine.gpuCheck();
           if (!health.ok) {
             this.#handleGpuFailure(health, true);
@@ -2720,6 +2852,12 @@ export class EngineView {
           }, delay);
           return;
         }
+        this.readbackDiag.error++;
+        this.#diagEvent("err", want.n, {
+          ms: Math.round(performance.now() - t),
+          code: px.code,
+          msg: px.message,
+        });
         if (this.#readbackFailTimer) window.clearTimeout(this.#readbackFailTimer);
         this.#readbackFailTimer = window.setTimeout(() => {
           this.#readbackFailTimer = 0;
@@ -2736,8 +2874,12 @@ export class EngineView {
         }, 300);
         return;
       }
+      this.readbackDiag.ok++;
       this.#consecutiveTimeouts = 0;
       if (want.epoch !== this.#epoch || px.value.length !== want.width * want.height * 4) {
+        if (want.epoch !== this.#epoch) this.readbackDiag.epochDropped++;
+        else this.readbackDiag.sizeDropped++;
+        this.#diagEvent("drop", want.n, { ms: Math.round(performance.now() - t) });
         this.#completeOpeningFrame(want.n);
         this.#readNext();
         return;
@@ -2781,6 +2923,8 @@ export class EngineView {
       this.shown = { n: want.n, at: performance.now() };
       if (this.stamps && !this.stamps.shown && want.exact && want.n === this.#frame)
         this.stamps.shown = { n: want.n, at: performance.now() };
+      this.readbackDiag.presented++;
+      this.#diagEvent("present", want.n, { ms: Math.round(performance.now() - t) });
       this.onPresented(want.exact && want.n === this.#frame, want.n);
       this.#completeOpeningFrame(want.n);
       this.#readNext();

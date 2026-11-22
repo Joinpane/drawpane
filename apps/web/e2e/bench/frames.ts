@@ -6,6 +6,26 @@
 import type { Page } from "@playwright/test";
 import type { MotionStats } from "../../src/editor/frame-stats";
 
+export interface CpuSplitSummary {
+  readonly frames: number;
+  readonly patchMs: number;
+  readonly encodeMs: number;
+  readonly prepareMasksMs: number;
+  readonly velloRenderMs: number;
+  readonly readerMs: number;
+  readonly shadowMs: number;
+  readonly renderMs: number;
+  readonly submitMs: number;
+  readonly totalMs: number;
+  readonly submits: number;
+  readonly velloRenders: number;
+  readonly glassOps: number;
+  readonly glassBatched: number;
+  readonly bgBlurOps: number;
+  readonly shadowOps: number;
+  readonly shadowHits: number;
+}
+
 export interface Summary {
   frames: number;
   motion?: MotionStats;
@@ -26,6 +46,8 @@ export interface Summary {
     exactMs: number | null;
     worst: { ms: number; plan: string; tiles: number };
     settle?: Settle;
+    split?: CpuSplitSummary;
+    readbackDiag?: unknown;
   };
 }
 
@@ -94,9 +116,42 @@ async function move(
         return { p50: at(0.5), p95: at(0.95), p99: at(0.99), max: at(1) };
       };
       const nextFrame = () => new Promise<number>((r) => requestAnimationFrame(r));
+      type Breakdown = {
+        patch: number;
+        encode: number;
+        render: number;
+        submit: number;
+        readback: number;
+        prepareMasks: number;
+        velloRender: number;
+        reader: number;
+        shadow: number;
+      };
+      type Counts = {
+        submits: number;
+        velloRenders: number;
+        glassOps: number;
+        glassBatched: number;
+        bgBlurOps: number;
+        shadowOps: number;
+        shadowHits: number;
+      };
       type View = {
-        last: { exact: boolean; ms: number; plan: string; tiles: { drawn: number } };
+        readonly readsBack?: boolean;
+        readonly reading?: boolean;
+        readonly shown?: { readonly n: number; readonly at: number };
+        last: {
+          n: number;
+          exact: boolean;
+          ms: number;
+          plan: string;
+          tiles: { drawn: number };
+          breakdown: Breakdown;
+          counts: Counts;
+        };
         idle: { slices: number; tiles: number; ms: number };
+        readbackDiag?: unknown;
+        resetReadbackDiag?(): void;
         trace: Array<{
           t: number;
           k: string;
@@ -113,15 +168,53 @@ async function move(
       };
       const view = () => (window as unknown as { drawpaneEngineView?: View }).drawpaneEngineView;
       let worst = { ms: 0, plan: "", tiles: 0 };
+      const splitSamples: Array<{ ms: number; breakdown: Breakdown; counts: Counts }> = [];
+      let lastWatchedN = -1;
       const watch = () => {
         const l = view()?.last;
-        if (l && l.ms > worst.ms)
+        if (!l) return;
+        if (l.ms > worst.ms)
           worst = { ms: Math.round(l.ms * 10) / 10, plan: l.plan, tiles: l.tiles.drawn };
+        if (l.n !== lastWatchedN) {
+          lastWatchedN = l.n;
+          splitSamples.push({
+            ms: l.ms,
+            breakdown: { ...l.breakdown },
+            counts: { ...l.counts },
+          });
+        }
       };
-      const exactAfter = async () => {
-        const t = performance.now();
+      const medianOf = (xs: number[]) => {
+        if (xs.length === 0) return 0;
+        const s = [...xs].sort((a, b) => a - b);
+        return Math.round((s[Math.floor(0.5 * (s.length - 1))] ?? 0) * 10) / 10;
+      };
+      const summarizeSplit = () =>
+        splitSamples.length === 0
+          ? undefined
+          : {
+              frames: splitSamples.length,
+              patchMs: medianOf(splitSamples.map((s) => s.breakdown.patch)),
+              encodeMs: medianOf(splitSamples.map((s) => s.breakdown.encode)),
+              prepareMasksMs: medianOf(splitSamples.map((s) => s.breakdown.prepareMasks)),
+              velloRenderMs: medianOf(splitSamples.map((s) => s.breakdown.velloRender)),
+              readerMs: medianOf(splitSamples.map((s) => s.breakdown.reader)),
+              shadowMs: medianOf(splitSamples.map((s) => s.breakdown.shadow)),
+              renderMs: medianOf(splitSamples.map((s) => s.breakdown.render)),
+              submitMs: medianOf(splitSamples.map((s) => s.breakdown.submit)),
+              totalMs: medianOf(splitSamples.map((s) => s.ms)),
+              submits: medianOf(splitSamples.map((s) => s.counts.submits)),
+              velloRenders: medianOf(splitSamples.map((s) => s.counts.velloRenders)),
+              glassOps: medianOf(splitSamples.map((s) => s.counts.glassOps)),
+              glassBatched: medianOf(splitSamples.map((s) => s.counts.glassBatched)),
+              bgBlurOps: medianOf(splitSamples.map((s) => s.counts.bgBlurOps)),
+              shadowOps: medianOf(splitSamples.map((s) => s.counts.shadowOps)),
+              shadowHits: medianOf(splitSamples.map((s) => s.counts.shadowHits)),
+            };
+      const exactAfter = async (since: number) => {
         const f = (window as unknown as { drawpaneFrames: { exact: boolean } }).drawpaneFrames;
-        let drawn = -1;
+        const limitMs = view()?.readsBack ? 25_000 : 10_000;
+        let drawn = view()?.last.exact ? 0 : -1;
         const idle0 = view()?.idle;
         const traced = view();
         if (traced) traced.trace = [];
@@ -148,20 +241,26 @@ async function move(
             settle.idleTiles = v.idle.tiles - idle0.tiles;
             settle.idleMs = Math.round((v.idle.ms - idle0.ms) * 10) / 10;
           }
-          if (v.last.exact) drawn = performance.now() - t;
+          if (v.last.exact) drawn = Math.max(0, performance.now() - since);
         };
-        await nextFrame();
-        while (!f.exact && performance.now() - t < 10_000) {
-          tally();
+        if (!f.exact) {
           await nextFrame();
+          while (!f.exact && performance.now() - since < limitMs) {
+            tally();
+            await nextFrame();
+          }
         }
         tally();
         settle.frameMs = Math.round(settle.frameMs * 10) / 10;
-        const shown = Math.round(performance.now() - t);
+        const shownAt = view()?.shown?.at;
+        const shown = Math.max(
+          0,
+          Math.round((shownAt && shownAt >= since ? shownAt : performance.now()) - since),
+        );
         const trace = (traced?.trace ?? [])
           .map(
             (e) =>
-              `${e.k === "frame" ? "f" : e.k === "present" ? "p" : e.k === "text" ? "t" : "i"}${Math.round(e.t - t)}:${Math.round(e.ms)}(${Math.round(e.encode)}+${Math.round(e.render)})/${e.tiles}/${e.pending}/m${e.misses}/r${e.records}/g${e.masked}+${e.outlined}`,
+              `${e.k === "frame" ? "f" : e.k === "present" ? "p" : e.k === "text" ? "t" : "i"}${Math.round(e.t - since)}:${Math.round(e.ms)}(${Math.round(e.encode)}+${Math.round(e.render)})/${e.tiles}/${e.pending}/m${e.misses}/r${e.records}/g${e.masked}+${e.outlined}`,
           )
           .join(" ");
         if (traced) traced.trace = null;
@@ -173,9 +272,26 @@ async function move(
           settle: { ...settle, trace },
         };
       };
+      const waitReadback = async (targetN: number | null, timeoutMs: number) => {
+        const start = performance.now();
+        while (performance.now() - start < timeoutMs) {
+          const v = view();
+          if (!v?.readsBack) break;
+          const shownN = v.shown?.n ?? 0;
+          const done = targetN === null ? !v.reading && shownN >= v.last.n : shownN >= targetN;
+          if (done) break;
+          await nextFrame();
+        }
+      };
       await nextFrame();
       await nextFrame();
+      // In read-back mode (headless WebGPU), let any pre-motion read-back finish before
+      // beginMotion() so frame 0 of the gesture starts with a free read-back slot.
+      if (view()?.readsBack) {
+        await waitReadback(null, 25_000);
+      }
       w.drawpaneFrames.reset();
+      view()?.resetReadbackDiag?.();
       const motion = instrument && view() ? w.drawpaneFrames.beginMotion?.(native) : undefined;
       const centre = { x: e.s.viewport.width / 2, y: e.s.viewport.height / 2 };
       const times: number[] = [];
@@ -191,15 +307,39 @@ async function move(
         times.push(await nextFrame());
         if (motion && motion.submitted === submitted) motion.missed++;
         watch();
+        // Whole-view WebGPU uses a single readback slot. Pace this native benchmark
+        // by presentation so each request can finish before the next expensive draw.
+        const drawn = view();
+        if (native && motion && motion.submitted !== submitted && drawn?.readsBack) {
+          await waitReadback(drawn.last.n, 30_000);
+        }
       }
       const summary = w.drawpaneFrames.summary();
-      // Give the final submitted camera frame the same completion-probe window as earlier frames.
+      const moveEnd = performance.now();
+      const lastMotionN = view()?.last.n ?? 0;
+      // Give the final submitted camera frame a completion-probe window before closing motion.
+      // Read-back presentation (headless WebGPU) delivers asynchronously after the frame loop.
       if (motion) {
-        await nextFrame();
-        await nextFrame();
+        if (view()?.readsBack && lastMotionN > 0) {
+          await waitReadback(lastMotionN, 30_000);
+        } else {
+          await nextFrame();
+          await nextFrame();
+        }
         w.drawpaneFrames.endMotion?.();
       }
-      const exact = await exactAfter();
+      const exact = await exactAfter(moveEnd);
+      const split = summarizeSplit();
+      const vNow = view();
+      const readbackDiag = vNow?.readbackDiag
+        ? {
+            ...(structuredClone(vNow.readbackDiag) as Record<string, unknown>),
+            snapAt: Math.round(performance.now()),
+            lastN: vNow.last.n,
+            shownN: vNow.shown?.n ?? 0,
+            reading: vNow.reading ?? false,
+          }
+        : undefined;
       return {
         ...summary,
         interval: intervals(times),
@@ -208,7 +348,17 @@ async function move(
           ? { presentedInterval: intervals(motion.presentations) }
           : {}),
         exactMs: exact.shown,
-        ...(view() ? { engine: { exactMs: exact.drawn, worst, settle: exact.settle } } : {}),
+        ...(view()
+          ? {
+              engine: {
+                exactMs: exact.drawn,
+                worst,
+                settle: exact.settle,
+                ...(split ? { split } : {}),
+                ...(readbackDiag ? { readbackDiag } : {}),
+              },
+            }
+          : {}),
       };
     },
     {
@@ -384,6 +534,16 @@ export interface Opening {
   stamp: { renderer: "engine" | "canvas"; pageId: string; revision: number | null };
   /** `performance.now()` in the page when the page was shown: other clocks are from it. */
   t0: number;
+  readbackDiag?: unknown;
+  openDiag?: {
+    opening: boolean;
+    pending: number;
+    pendingVisible: number;
+    lastN: number;
+    shownN: number;
+    lastExact: boolean;
+    limitReason: string | null;
+  };
 }
 
 /**
@@ -402,8 +562,12 @@ export async function opening(page: Page, pageId: string): Promise<Opening> {
       canvas: HTMLCanvasElement;
       stamps: { drawn?: Stamp; gpu?: Stamp; shown?: Stamp } | null;
       shown: Stamp;
-      last: { pageId: string; supported: boolean };
+      last: { n: number; exact: boolean; pageId: string; supported: boolean };
       engine: { revision: number };
+      limitReason?: string | null;
+      builder?: { opening: boolean; pending: number; pendingVisible: number };
+      readbackDiag?: unknown;
+      resetReadbackDiag?(): void;
     };
     const w = window as unknown as {
       drawpane: { setPage(id: string): void; zoomToFit(): void };
@@ -427,6 +591,7 @@ export async function opening(page: Page, pageId: string): Promise<Opening> {
     };
     const samples: Array<{ n: number; at: number; px: Uint8ClampedArray }> = [];
     const shownBefore = v?.shown.n ?? 0;
+    v?.resetReadbackDiag?.();
     if (v) v.stamps = {};
     const t0 = performance.now();
     w.drawpane.setPage(pageId);
@@ -514,6 +679,18 @@ export async function opening(page: Page, pageId: string): Promise<Opening> {
       }
     }
     if (v) v.stamps = null;
+    const readbackDiag = v?.readbackDiag ? structuredClone(v.readbackDiag) : undefined;
+    const openDiag = v
+      ? {
+          opening: v.builder?.opening ?? false,
+          pending: v.builder?.pending ?? 0,
+          pendingVisible: v.builder?.pendingVisible ?? 0,
+          lastN: v.last.n,
+          shownN: v.shown.n,
+          lastExact: v.last.exact,
+          limitReason: v.limitReason ?? null,
+        }
+      : undefined;
     return {
       twoFrames: Math.round(twoFrames),
       useful,
@@ -527,6 +704,8 @@ export async function opening(page: Page, pageId: string): Promise<Opening> {
         revision: v ? v.engine.revision : null,
       },
       t0,
+      ...(readbackDiag ? { readbackDiag } : {}),
+      ...(openDiag ? { openDiag } : {}),
     } satisfies Opening;
   }, pageId);
 }

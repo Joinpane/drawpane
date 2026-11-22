@@ -428,6 +428,16 @@ def bench(job: dict, sources: list[dict]) -> dict:
                 raise RuntimeError(f"The kit {job['kit']} isn't on the volume.")
 
         browsers = job.get("browsers") or ["chromium"]
+        replay_python = None
+        if job.get("env", {}).get("BENCH_W4_REPLAY") == "1":
+            replay_venv = Path("/tmp/drawpane-camera-replay")
+            replay_python = str(replay_venv / "bin" / "python")
+            replay_log = out / "camera-replay-setup.log"
+            if _run([sys.executable, "-m", "venv", str(replay_venv)], log=replay_log) != 0 or _run(
+                [replay_python, "-m", "pip", "install", "numpy==2.4.6", "scikit-image==0.26.0", "flip-evaluator==1.6"],
+                log=replay_log,
+            ) != 0:
+                raise RuntimeError("Camera replay dependency setup failed. See camera-replay-setup.log.")
         port_offset = 0
         for n, source in enumerate(sources):
             label = source["label"]
@@ -554,6 +564,8 @@ def bench(job: dict, sources: list[dict]) -> dict:
                     if kit:
                         test_env["BENCH_FILE"] = kit
                         test_env.setdefault("BENCH_OUT", str(at / "file.json"))
+                    if replay_python:
+                        test_env.setdefault("BENCH_W4_REPLAY_PYTHON", replay_python)
                     if job.get("profile") and browser == "chromium":
                         test_env["BENCH_PROFILE"] = str(at / "profiles")
                     code = _run(

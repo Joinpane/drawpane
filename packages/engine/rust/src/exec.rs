@@ -495,6 +495,18 @@ pub struct DrawStats {
     pub render_ms: f64,
     pub submit_ms: f64,
     pub cpu_ms: f64,
+    /// Per-frame GPU CPU-side sub-timings (milliseconds) and dispatch counts.
+    pub prepare_masks_ms: f64,
+    pub vello_render_ms: f64,
+    pub reader_ms: f64,
+    pub shadow_ms: f64,
+    pub submits: u32,
+    pub vello_renders: u32,
+    pub glass_ops: u32,
+    pub glass_batched: u32,
+    pub bg_blur_ops: u32,
+    pub shadow_ops: u32,
+    pub shadow_hits: u32,
 }
 
 impl DrawStats {
