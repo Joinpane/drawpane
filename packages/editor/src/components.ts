@@ -807,12 +807,28 @@ export function copyConstraintOps(doc: Doc, ops: readonly Op[]): Op[] {
           mains.add(outer);
           queue.push(outer);
         }
+  // An instance laid out otherwise than its main (it stores a layout value, or it's shown in
+  // another mode, where a bound size resolves otherwise), as `relayoutTargets` counts it.
+  const differs = (root: string, main: string) =>
+    doc.layoutDiffers(root) || doc.tokens.modesDiffer(root, main);
   const roots = new Set<string>();
   for (const main of mains)
     for (const root of doc.instanceRoots(main)) {
-      if (roots.has(root) || !doc.layoutDiffers(root)) continue;
+      if (roots.has(root) || !differs(root, main)) continue;
       roots.add(root);
       starts.push(...doc.childIds(root));
+    }
+  // An instance just made or moved (into another mode, say) is placed where it now is.
+  if (doc.compactCopies)
+    for (const op of ops) {
+      if (op.op !== "move" && op.op !== "create") continue;
+      const node = doc.get(op.id);
+      const main =
+        node && !getProp(node.props, "mirrors") ? getProp(node.props, "instanceOf") : null;
+      if (main && !roots.has(op.id) && differs(op.id, main)) {
+        roots.add(op.id);
+        starts.push(...doc.childIds(op.id));
+      }
     }
   if (starts.length === 0) return [];
   // Starts shallowest first (a start inside another comes with it), each walked parents first.
