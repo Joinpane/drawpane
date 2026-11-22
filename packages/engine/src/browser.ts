@@ -5,6 +5,11 @@ export async function loadBrowserEngine(): Promise<EngineModule> {
   return loadEngineAsync(await import("@drawpane/engine/browser-glue"), "browser");
 }
 
+/** Loads the separate WebGPU build used by the opt-in compute experiment. */
+export async function loadComputeEngine(): Promise<EngineModule> {
+  return loadEngineAsync(await import("@drawpane/engine/compute-glue"), "browser");
+}
+
 /** Loads the WebGL2 fallback and keeps its glue out of CPU-only hosts. */
 export async function loadWebglEngine(): Promise<EngineModule> {
   return loadEngineAsync(await import("@drawpane/engine/webgl-glue"), "webgl");

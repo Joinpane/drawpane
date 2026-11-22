@@ -26,6 +26,8 @@ pub mod limits;
 pub mod mask;
 pub mod masks;
 pub mod noise;
+#[cfg(any(feature = "compute", test))]
+pub mod ordinary;
 pub mod png;
 pub mod progressive_blur;
 pub mod record;
@@ -34,6 +36,8 @@ pub mod store;
 pub mod stroke;
 pub mod texture;
 pub mod tiles;
+#[cfg(feature = "compute")]
+pub mod vello_compute;
 pub mod wire;
 
 use engine::{Camera, Engine as Core};
@@ -1256,5 +1260,53 @@ impl Engine {
             ],
             None => vec![0.0; 4],
         }
+    }
+
+    /// Enables the experimental compute pipeline for explicit diagnostics.
+    #[cfg(feature = "compute")]
+    #[wasm_bindgen(js_name = setComputeOrdinary)]
+    pub fn set_compute_ordinary(&mut self, enabled: bool) -> Outcome {
+        let Some(gpu) = self.core.gpu.as_mut() else {
+            return Outcome::err(EngineError::new(error::ErrorCode::State, "no GPU attached"));
+        };
+        gpu.set_compute_ordinary(enabled);
+        Outcome::ok()
+    }
+
+    /// Whether the most recent GPU frame ran on the compute pipeline.
+    #[cfg(feature = "compute")]
+    #[wasm_bindgen(js_name = computeUsed)]
+    pub fn compute_used(&self) -> bool {
+        self.core.gpu.as_ref().is_some_and(|g| g.last_compute_used)
+    }
+
+    /// Resets accumulated bump and hardware timestamp diagnostics.
+    #[cfg(feature = "compute")]
+    #[wasm_bindgen(js_name = computeResetStats)]
+    pub fn compute_reset_stats(&mut self) {
+        if let Some(gpu) = self.core.gpu.as_mut() {
+            gpu.compute_reset_stats();
+        }
+    }
+
+    /// Resolves to a JSON report or an `Outcome` on failure.
+    #[cfg(feature = "compute")]
+    #[wasm_bindgen(js_name = computeStats)]
+    pub fn compute_stats(&mut self) -> js_sys::Promise {
+        let start = self.core.gpu.as_mut().map(|gpu| {
+            gpu.compute_stats_start()
+                .map(|readback| (gpu.device.clone(), gpu.health.clone(), readback))
+        });
+        wasm_bindgen_futures::future_to_promise(async move {
+            let (device, health, readback) = match start {
+                Some(Ok(start)) => start,
+                Some(Err(err)) => return Ok(failure(err)),
+                None => return Ok(failure(EngineError::new(error::ErrorCode::State, "no GPU attached"))),
+            };
+            match vello_compute::finish_stats_readback(device, health, readback).await {
+                Ok(json) => Ok(JsValue::from_str(&json)),
+                Err(err) => Ok(failure(err)),
+            }
+        })
     }
 }

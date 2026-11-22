@@ -12,7 +12,7 @@
  * - one-click "Copy report" exporting structured Markdown + JSON.
  */
 import { type GpuInfo, RenderEngine } from "@drawpane/engine";
-import { loadBrowserEngine, loadWebglEngine } from "@drawpane/engine/browser";
+import { loadBrowserEngine, loadComputeEngine, loadWebglEngine } from "@drawpane/engine/browser";
 import { CPU_GPU_TOLERANCE, outsideTolerance, type Score, score } from "@drawpane/engine/compare";
 import { Badge, Button, Logo, SegmentedControl } from "@drawpane/ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -344,8 +344,19 @@ export function RendererDiagnosticsPage() {
     let selected: Selected | null = null;
 
     const tryWebGpu = async (): Promise<Selected | null> => {
-      const mod = await loadBrowserEngine();
+      // Without WebGPU there is nothing for the compute module to run on: don't download it.
+      const computeRequested =
+        new URLSearchParams(window.location.search).get("compute") === "1" &&
+        typeof navigator !== "undefined" &&
+        "gpu" in navigator;
       for (const compatibility of [false, true]) {
+        const mod =
+          computeRequested && !compatibility
+            ? await loadComputeEngine().catch((error: unknown) => {
+                fallbackNotes.push(`Compute module unavailable: ${String(error)}`);
+                return loadBrowserEngine();
+              })
+            : await loadBrowserEngine();
         const candidate = new RenderEngine(mod);
         const attached = await candidate.attachGpu(null, { compatibility });
         if (!attached.ok) {

@@ -1406,6 +1406,20 @@ impl Engine {
             .gpu
             .as_mut()
             .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
+        #[cfg(feature = "compute")]
+        if gpu.compute_ordinary
+            && gpu.supports_compute()
+            && width <= 4096
+            && height <= 4096
+            && crate::ordinary::is_ordinary_page(&self.store)
+        {
+            let mut stats = gpu.render_compute(&self.store, &frame, background, self.generation)?;
+            if stats.exact && self.store.provisional_shown().is_some() {
+                stats.exact = false;
+                stats.standin = true;
+            }
+            return Ok(stats);
+        }
         // One pass avoids rasterizing the same reader and prefix in each touched tile. For
         // interactive drags bound the scene walk. Dense pages use their retained tiles.
         let whole = halo_opt != Some(0) && (options.budget_ms <= 0.0 || simple_reader_drag);

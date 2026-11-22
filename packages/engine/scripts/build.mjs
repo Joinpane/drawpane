@@ -2,6 +2,7 @@
 // their size budgets (gzipped):
 //   dist/worker/   the CPU backend alone, for Workers                 at most 400 KB
 //   dist/browser/  the WebGPU backend and the CPU backend             at most 1 MB
+//   dist/compute/  the opt-in WebGPU compute experiment               at most 1 MB
 //   dist/webgl/    the WebGL2 backend (naga + GL) and CPU (lazy)      at most 1.4 MB
 //   dist/decoder/  image decoding for headless exports               at most 200 KB
 // The toolchain is this package's mise.toml (Rust with the wasm32 target, wasm-bindgen).
@@ -17,6 +18,7 @@ const rust = join(here, "rust");
 const BUDGETS = {
   worker: 400 * 1000,
   browser: 1000 * 1000,
+  compute: 1000 * 1000,
   webgl: 1400 * 1000,
   decoder: 200 * 1000,
 };
@@ -34,6 +36,7 @@ const all = [
     rustflags: `-C link-arg=--max-memory=${WORKER_MEMORY_BYTES}`,
   },
   { name: "browser", features: ["--features", "gpu"], rustflags: "" },
+  { name: "compute", features: ["--features", "compute"], rustflags: "" },
   { name: "webgl", features: ["--features", "webgl"], rustflags: "" },
   {
     name: "decoder",
