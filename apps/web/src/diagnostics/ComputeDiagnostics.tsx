@@ -70,6 +70,8 @@ export function ComputeDiagnostics({
     return () => controller.abort();
   }, [start, allowSoftware]);
 
+  // The report is ready to copy once the matrix and the bench after it have both ended, so a
+  // copy taken as soon as the button enables holds both.
   const markdown = useMemo(() => {
     const matrix =
       state.kind === "done"
@@ -77,8 +79,8 @@ export function ComputeDiagnostics({
         : state.kind === "failed"
           ? `## Compute capacity matrix\n- Failed: ${state.message}`
           : "";
-    if (!matrix) return "";
-    return bench ? `${matrix}\n\n${bench}` : matrix;
+    if (!matrix || !bench) return "";
+    return `${matrix}\n\n${bench}`;
   }, [state, bench]);
 
   const copy = useCallback(async () => {
@@ -104,7 +106,11 @@ export function ComputeDiagnostics({
           onClick={() => void copy()}
           data-testid="compute-copy"
         >
-          {copied ? "Copied" : "Copy compute report"}
+          {copied
+            ? "Copied"
+            : !markdown && (state.kind === "done" || state.kind === "failed")
+              ? "Waiting for the bench…"
+              : "Copy compute report"}
         </Button>
       </div>
       <p className="diag__cell-desc">

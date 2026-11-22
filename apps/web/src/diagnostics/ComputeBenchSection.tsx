@@ -63,7 +63,7 @@ export function benchMarkdown(report: BenchReport): string {
   return [
     "## Compute Retina bench",
     `- Browser: ${navigator.userAgent}`,
-    `- GPU: ${report.adapter.trim() || "(the browser hides its name)"}${report.software ? " (software)" : ""}; timestamps ${report.timestamps ? "yes" : "no"}; presented to ${report.presentation === "canvas" ? "a canvas" : "an offscreen texture"}`,
+    `- GPU: ${report.adapter.trim() || "(the browser hides its name)"}${report.software ? " (software)" : ""}; timestamps ${report.timestamps ? "yes" : "no"}; both engines presented to ${report.presentation === "canvas" ? "a canvas each" : "offscreen textures"}`,
     `- Page: ${report.layers.toLocaleString("en-US")} layers at ${report.width}x${report.height}`,
     `- Laptop gate: ${gateText(gate(report))}`,
     `- Encodes: ${report.encodes ? `${report.encodes.full} whole page, ${report.encodes.patched} patched moves` : "n/a"}; overflow checks ${report.overflowChecks}${report.fallback ? `; compute fell back: ${report.fallback}` : ""}`,
@@ -104,14 +104,15 @@ export function ComputeBenchSection({
   readonly onReport: (markdown: string) => void;
 }) {
   const [state, setState] = useState<BenchState>({ kind: "waiting" });
-  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const computeCanvas = useRef<HTMLCanvasElement | null>(null);
+  const velloCanvas = useRef<HTMLCanvasElement | null>(null);
 
   useEffect(() => {
     if (!start) return;
     const controller = new AbortController();
     setState({ kind: "running", step: "starting" });
     runComputeBench({
-      canvas: canvasRef.current,
+      canvases: { compute: computeCanvas.current, vello: velloCanvas.current },
       allowSoftware,
       signal: controller.signal,
       onProgress: (step) => {
@@ -148,12 +149,20 @@ export function ComputeBenchSection({
         Vello GPU, then edits and drags of the card in the middle of the view, on this page and on a
         40,000-layer one. CPU counts every engine call a frame takes.
       </p>
-      <canvas
-        ref={canvasRef}
-        className="diag__bench-canvas"
-        style={{ width: 360, height: 225, display: "block", marginBottom: 8 }}
-        aria-label="Compute bench frames"
-      />
+      <div style={{ display: "flex", flexWrap: "wrap", gap: 8, marginBottom: 8 }}>
+        <canvas
+          ref={computeCanvas}
+          className="diag__bench-canvas"
+          style={{ width: 360, maxWidth: "100%", aspectRatio: "16 / 10", display: "block" }}
+          aria-label="Compute bench frames"
+        />
+        <canvas
+          ref={velloCanvas}
+          className="diag__bench-canvas"
+          style={{ width: 360, maxWidth: "100%", aspectRatio: "16 / 10", display: "block" }}
+          aria-label="Vello GPU bench frames"
+        />
+      </div>
       <p className="diag__mono" role="status" data-testid="compute-bench-status">
         {state.kind === "waiting"
           ? "Waiting for the capacity matrix…"

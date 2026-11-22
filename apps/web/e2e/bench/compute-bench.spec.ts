@@ -14,8 +14,16 @@ test("compute Retina bench: zoom, edits and drags against vello_gpu", async ({ p
   await page.goto("/diagnostics/renderer?compute=1");
   const done = page.getByTestId("compute-bench");
   const failed = page.getByTestId("compute-bench-error");
+  const copy = page.getByTestId("compute-copy");
+  // The bench runs after the matrix, and the report can't be copied until both have ended (a
+  // copy taken when the matrix ended used to leave the bench out).
+  await expect(
+    page.getByTestId("compute-matrix").or(page.getByTestId("compute-matrix-error")),
+  ).toBeAttached({ timeout: 15 * 60_000 });
+  if (!(await done.or(failed).count())) await expect(copy).toBeDisabled();
   await expect(done.or(failed)).toBeAttached({ timeout: 24 * 60_000 });
   if (await failed.count()) throw new Error(`bench failed: ${await failed.textContent()}`);
+  await expect(copy).toBeEnabled();
   const report = JSON.parse((await done.textContent()) ?? "{}");
   test.info().annotations.push({ type: "bench", description: JSON.stringify(report) });
   const sweeps = report.sweeps as ReadonlyArray<{ label: string; cpuMs: unknown; gpuMs: unknown }>;

@@ -2401,7 +2401,12 @@ export class EngineView {
     const computeOn = this.#backend === "webgpu" && computeRequested() && !sessionComputeFallback;
     let verifiedCompute: Result<FrameStats> | null = null;
     let frameKey = key;
-    if (computeOn) {
+    if (computeOn && !exact) {
+      // Moving frames stay on vello_gpu: a checked frame takes two or three display frames to
+      // show, so motion would stall on it. A candidate staged before the motion began is for a
+      // camera that's gone; drop it, and the first still frame stages afresh.
+      this.#cancelCompute(engine);
+    } else if (computeOn) {
       const step = this.#computeStep(engine, key, content, width, height, cam, bg, {
         stage: !textFirst && (initialScale ?? 1) === 1,
       });
@@ -2652,6 +2657,13 @@ export class EngineView {
         (!!this.#limitReason ||
           (f.tiles.pending === 0 && f.tiles.queued === 0 && this.#builder.pending === 0)),
     };
+  }
+
+  /** Drops the compute candidate being checked, if any: it can no longer be shown. */
+  #cancelCompute(engine: RenderEngine): void {
+    if (!this.#pendingCompute) return;
+    engine.cancelComputeFrame();
+    this.#pendingCompute = null;
   }
 
   /**

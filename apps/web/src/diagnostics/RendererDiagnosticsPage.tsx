@@ -32,7 +32,19 @@ type ActiveBackend = "webgpu" | "webgl2" | "cpu";
 
 import { SectionBoundary } from "./SectionBoundary";
 
-/** The opt-in compute checks (`?compute=1`), loaded only with that flag. */
+/**
+ * Whether `?compute=1` asks for the compute checks and this browser can run them. Without WebGPU
+ * there is nothing for the compute module to run on, so neither it nor its checks download.
+ */
+function computeRequested(): boolean {
+  return (
+    new URLSearchParams(window.location.search).get("compute") === "1" &&
+    typeof navigator !== "undefined" &&
+    Boolean((navigator as Navigator & { gpu?: unknown }).gpu)
+  );
+}
+
+/** The opt-in compute checks (`?compute=1`), loaded only with that flag and WebGPU. */
 const ComputeDiagnostics = lazy(() =>
   import("./ComputeDiagnostics").then((m) => ({ default: m.ComputeDiagnostics })),
 );
@@ -351,14 +363,10 @@ export function RendererDiagnosticsPage() {
     let selected: Selected | null = null;
 
     const tryWebGpu = async (): Promise<Selected | null> => {
-      // Without WebGPU there is nothing for the compute module to run on: don't download it.
-      const computeRequested =
-        new URLSearchParams(window.location.search).get("compute") === "1" &&
-        typeof navigator !== "undefined" &&
-        "gpu" in navigator;
+      const compute = computeRequested();
       for (const compatibility of [false, true]) {
         const mod =
-          computeRequested && !compatibility
+          compute && !compatibility
             ? await loadComputeEngine().catch((error: unknown) => {
                 fallbackNotes.push(`Compute module unavailable: ${String(error)}`);
                 return loadBrowserEngine();
@@ -628,10 +636,11 @@ export function RendererDiagnosticsPage() {
     };
   }, [requested, allowSoftware, runDiagnostics]);
 
-  const computeRequested = useMemo(
+  const computeAsked = useMemo(
     () => new URLSearchParams(window.location.search).get("compute") === "1",
     [],
   );
+  const computeShown = useMemo(computeRequested, []);
   const passedCount = state.cells.filter((c) => c.ok).length;
   const totalCount = state.cells.length;
   const allPassed = !state.running && !state.error && totalCount > 0 && passedCount === totalCount;
@@ -955,7 +964,15 @@ export function RendererDiagnosticsPage() {
           </div>
         </section>
 
-        {computeRequested ? (
+        {computeAsked && !computeShown ? (
+          <section className="diag__section" aria-label="Compute checks">
+            <h2 className="diag__section-title">Compute capacity matrix</h2>
+            <p className="diag__mono" role="status" data-testid="compute-unavailable">
+              Not run: the compute checks need WebGPU, and this browser has none.
+            </p>
+          </section>
+        ) : null}
+        {computeShown ? (
           <SectionBoundary title="Compute capacity matrix">
             <Suspense fallback={null}>
               <ComputeDiagnostics

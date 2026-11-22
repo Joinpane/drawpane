@@ -3,12 +3,68 @@
  * itself (`?renderer=engine&compute=1`, read-back presentation): a frame staged under one
  * background must never be shown, let alone reported exact, after the background changed while
  * it was being checked (the stack review's live T4 repro showed the old background as exact).
- * Runs only with `BENCH_COMPUTE_MATRIX=1`, on `pnpm gpu-bench --modes webgpu`.
+ * Moving frames stay on vello_gpu: a checked frame takes two or three display frames to show, so
+ * motion must not wait for one. Runs only with `BENCH_COMPUTE_MATRIX=1`, on
+ * `pnpm gpu-bench --modes webgpu`.
  */
-import { expect, test } from "@playwright/test";
+import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "../fresh-instance";
 
 test.use({ trace: "off" });
+
+/** A new file in the editor with one white board, on compute with read-back presentation. */
+async function openBoard(instance: Instance): Promise<Page> {
+  const p = await instance.context.newPage();
+  await p.setViewportSize({ width: 1440, height: 900 });
+  await p.goto(`${instance.url}/`);
+  await p.evaluate(() => {
+    localStorage.setItem("drawpane:debug", "1");
+    localStorage.setItem("drawpane:renderer", "engine");
+    localStorage.setItem("drawpane:engine-present", "readback");
+  });
+  await p.getByRole("button", { name: "New file" }).first().click({ timeout: 20_000 });
+  await p.waitForURL(/\/f\//, { timeout: 30_000 });
+  await p.goto(`${p.url().split("?")[0]}?renderer=engine&compute=1`);
+  await p.waitForFunction(
+    () =>
+      Boolean(
+        (window as unknown as { drawpaneEngineView?: { engine?: { gpu?: unknown } } })
+          .drawpaneEngineView?.engine?.gpu,
+      ),
+    undefined,
+    { timeout: 45_000 },
+  );
+  await p.evaluate(async () => {
+    // biome-ignore lint/suspicious/noExplicitAny: the editor's debug handles
+    const w = window as any;
+    const pageId = w.drawpane.s.pageId;
+    const page = [...w.drawpane.doc.stored()].find((n: { id: string }) => n.id === pageId);
+    w.drawpane.doc.resetStored(
+      [
+        page,
+        {
+          id: "board",
+          type: "frame",
+          parent: pageId,
+          key: "a0",
+          props: {
+            name: "Board",
+            x: 400,
+            y: 300,
+            width: 300,
+            height: 200,
+            fills: [{ type: "solid", color: "#ffffff" }],
+          },
+        },
+      ],
+      "materialized",
+    );
+    const raf = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
+    for (let i = 0; i < 240 && !(w.drawpaneFrames?.exact && w.drawpaneEngineView?.last?.exact); i++)
+      await raf();
+  });
+  return p;
+}
 
 test.describe("Checked compute frames in the editor", () => {
   test.skip(process.env.BENCH_COMPUTE_MATRIX !== "1", "set BENCH_COMPUTE_MATRIX=1 on a real GPU");
@@ -26,58 +82,11 @@ test.describe("Checked compute frames in the editor", () => {
 
   test("a background change while a frame is checked shows the new background", async () => {
     test.setTimeout(6 * 60_000);
-    const p = await instance.context.newPage();
-    await p.setViewportSize({ width: 1440, height: 900 });
-    await p.goto(`${instance.url}/`);
-    await p.evaluate(() => {
-      localStorage.setItem("drawpane:debug", "1");
-      localStorage.setItem("drawpane:renderer", "engine");
-      localStorage.setItem("drawpane:engine-present", "readback");
-    });
-    await p.getByRole("button", { name: "New file" }).first().click({ timeout: 20_000 });
-    await p.waitForURL(/\/f\//, { timeout: 30_000 });
-    await p.goto(`${p.url().split("?")[0]}?renderer=engine&compute=1`);
-    await p.waitForFunction(
-      () =>
-        Boolean(
-          (window as unknown as { drawpaneEngineView?: { engine?: { gpu?: unknown } } })
-            .drawpaneEngineView?.engine?.gpu,
-        ),
-      undefined,
-      { timeout: 45_000 },
-    );
+    const p = await openBoard(instance);
     const result = await p.evaluate(async () => {
       // biome-ignore lint/suspicious/noExplicitAny: the editor's debug handles
       const w = window as any;
       const pageId = w.drawpane.s.pageId;
-      const page = [...w.drawpane.doc.stored()].find((n: { id: string }) => n.id === pageId);
-      w.drawpane.doc.resetStored(
-        [
-          page,
-          {
-            id: "board",
-            type: "frame",
-            parent: pageId,
-            key: "a0",
-            props: {
-              name: "Board",
-              x: 400,
-              y: 300,
-              width: 300,
-              height: 200,
-              fills: [{ type: "solid", color: "#ffffff" }],
-            },
-          },
-        ],
-        "materialized",
-      );
-      const raf = () => new Promise<void>((r) => requestAnimationFrame(() => r()));
-      for (
-        let i = 0;
-        i < 240 && !(w.drawpaneFrames?.exact && w.drawpaneEngineView?.last?.exact);
-        i++
-      )
-        await raf();
       const view = w.drawpaneEngineView;
       // Quiet the editor's own loop, then drive the view by hand.
       const editorChange = view.onChange;
@@ -132,6 +141,59 @@ test.describe("Checked compute frames in the editor", () => {
     // Whatever was reported exact shows the background asked for.
     expect(result.exact).toBe(true);
     expect(result.pixel.slice(0, 3)).toEqual([255, 0, 255]);
+    await p.close();
+  });
+  test("moving frames stay on vello_gpu and drop the candidate being checked", async () => {
+    test.setTimeout(6 * 60_000);
+    const p = await openBoard(instance);
+    const result = await p.evaluate(async () => {
+      // biome-ignore lint/suspicious/noExplicitAny: the editor's debug handles
+      const w = window as any;
+      const pageId = w.drawpane.s.pageId;
+      const view = w.drawpaneEngineView;
+      const editorChange = view.onChange;
+      view.onChange = () => {};
+      const canvas = view.canvas as HTMLCanvasElement;
+      const cam = w.drawpane.s.camera;
+      const dpr = window.devicePixelRatio || 1;
+      const state = { hidden: new Set(), whole: null };
+      const draw = (c: { x: number; y: number; zoom: number }, exact: boolean) =>
+        view.draw(pageId, c, canvas.width, canvas.height, dpr, "#f4f4f2", state, exact, 0);
+      const wait = () => new Promise((r) => setTimeout(r, 16));
+      // A still view: compute shows it once its check lands.
+      let still = false;
+      for (let i = 0; i < 120 && !still; i++) {
+        still = Boolean(draw(cam, true).exact) && view.engine.computeUsed();
+        if (!still) await wait();
+      }
+      // Stage a candidate for a new still camera, then start moving before it lands.
+      let staged = false;
+      for (let i = 0; i < 30 && !staged; i++) {
+        staged = Boolean(draw({ ...cam, x: cam.x + 40 }, true).awaitingPreview);
+        if (!staged) await wait();
+      }
+      const motion = [];
+      for (let i = 0; i < 8; i++) {
+        const frame = draw({ ...cam, x: cam.x + 40 + 6 * (i + 1) }, false);
+        motion.push({
+          drawn: frame.drawn,
+          waiting: Boolean(frame.awaitingPreview),
+          compute: view.engine.computeUsed(),
+        });
+        await wait();
+      }
+      view.onChange = editorChange;
+      return { still, staged, motion, fallback: view.computeFallbackReason };
+    });
+    test.info().annotations.push({ type: "bench", description: JSON.stringify(result) });
+    console.log(JSON.stringify(result));
+    expect(result.fallback).toBeNull();
+    expect(result.still).toBe(true);
+    expect(result.staged).toBe(true);
+    // Every moving frame drew at once on vello_gpu: none waited for a check, none used compute.
+    expect(result.motion).toEqual(
+      Array.from({ length: 8 }, () => ({ drawn: true, waiting: false, compute: false })),
+    );
     await p.close();
   });
 });

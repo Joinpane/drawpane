@@ -10,10 +10,11 @@
  * - Edits and drags are patches to the card in the middle of the view (an off-screen card costs
  *   vello_gpu nothing, which hid its real drag cost), on the 10k page and on a 40k one, against
  *   vello_gpu on its own device, with how long each took to show.
- * - It presents to a real canvas in a browser a person drives; automated runs (WebDriver) read
- *   back instead, because headless Chromium loses a WebGPU device that presents.
+ * - Both engines present the same way, so their shown times compare: each to a real canvas of its
+ *   own in a browser a person drives, both offscreen in automated runs (WebDriver), because
+ *   headless Chromium loses a WebGPU device that presents.
  */
-import { type Camera, RenderEngine } from "@drawpane/engine";
+import { type Camera, type GpuInfo, RenderEngine, type Result } from "@drawpane/engine";
 import { loadBrowserEngine, loadComputeEngine } from "@drawpane/engine/browser";
 import { CAP, JOIN, ListWriter, ROOT } from "@drawpane/engine/wire";
 import { type CheckedFrame, COMPUTE_BG, drawChecked } from "./compute-check";
@@ -391,12 +392,15 @@ async function editLoop(
     if (kind === "drag") {
       w.transform(card.id, [1, 0, 0, 1, card.x + 6 * ((i % 10) + 1), card.y + 4 * ((i % 10) + 1)]);
     } else {
-      w.set(card.id, ROOT, cardRecord(card.x, card.y, [1, i % 2 ? 0.94 : 1, i % 2 ? 0.86 : 1, 1]));
+      // Even samples tint the card and odd ones restore it: the card starts white, so sample 0
+      // must tint or it changes nothing.
+      w.set(card.id, ROOT, cardRecord(card.x, card.y, [1, i % 2 ? 1 : 0.94, i % 2 ? 1 : 0.86, 1]));
     }
     const t0 = performance.now();
     const applied = engine.apply(w.finish());
     const t1 = performance.now();
     if (!applied.ok) throw new Error(`${label} edit ${i}: ${applied.message}`);
+    if (applied.value.changes.length === 0) throw new Error(`${label} edit ${i} changed nothing`);
     apply.push(t1 - t0);
     const frame = await draw(engine, camera);
     await nextFrame();
@@ -421,8 +425,11 @@ function presentsToCanvas(): boolean {
 }
 
 export async function runComputeBench(options: {
-  /** A mounted canvas to present to; used unless automation drives the browser. */
-  readonly canvas: HTMLCanvasElement | null;
+  /** Mounted canvases to present to, one per engine; used unless automation drives the browser. */
+  readonly canvases: {
+    readonly compute: HTMLCanvasElement | null;
+    readonly vello: HTMLCanvasElement | null;
+  };
   readonly allowSoftware: boolean;
   readonly frames?: number;
   readonly signal: AbortSignal;
@@ -436,23 +443,38 @@ export async function runComputeBench(options: {
     loadBrowserEngine(),
   ]);
   const scene = { ...buildOrdinaryScene(20, 20), columns: 20, rows: 20 };
-  const compute = new RenderEngine(computeModule);
-  const vello = new RenderEngine(legacyModule);
+  let compute = new RenderEngine(computeModule);
+  let vello = new RenderEngine(legacyModule);
   const totals = { overflow: 0, full: 0, patched: 0 };
   try {
+    // Both present the same way: each to its own canvas, or both offscreen when automation
+    // drives the browser or either one can't present.
     let presentation: "canvas" | "offscreen" = "offscreen";
-    const canvas = presentsToCanvas() ? options.canvas : null;
-    if (canvas) {
-      canvas.width = BENCH_WIDTH;
-      canvas.height = BENCH_HEIGHT;
+    let attached: Result<GpuInfo> | null = null;
+    let legacy: Result<GpuInfo> | null = null;
+    const { compute: computeCanvas, vello: velloCanvas } = options.canvases;
+    if (presentsToCanvas() && computeCanvas && velloCanvas) {
+      for (const c of [computeCanvas, velloCanvas]) {
+        c.width = BENCH_WIDTH;
+        c.height = BENCH_HEIGHT;
+      }
+      attached = await compute.attachGpu(computeCanvas, { compatibility: false });
+      legacy = attached.ok ? await vello.attachGpu(velloCanvas, { compatibility: false }) : null;
+      if (attached.ok && legacy?.ok) presentation = "canvas";
+      else {
+        compute.dispose();
+        vello.dispose();
+        compute = new RenderEngine(computeModule);
+        vello = new RenderEngine(legacyModule);
+        attached = null;
+        legacy = null;
+      }
     }
-    let attached = canvas ? await compute.attachGpu(canvas, { compatibility: false }) : null;
-    if (attached?.ok) presentation = "canvas";
-    else attached = await compute.attachGpu(null, { compatibility: false });
+    attached ??= await compute.attachGpu(null, { compatibility: false });
     if (!attached.ok) throw new Error(`WebGPU Core unavailable: ${attached.message}`);
     if (attached.value.fallback && !options.allowSoftware)
       throw new Error(`refused a software adapter (${attached.value.adapter})`);
-    const legacy = await vello.attachGpu(null, { compatibility: false });
+    legacy ??= await vello.attachGpu(null, { compatibility: false });
     if (!legacy.ok) throw new Error(`vello_gpu device: ${legacy.message}`);
     for (const engine of [compute, vello]) {
       const applied = engine.apply(scene.list);

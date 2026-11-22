@@ -119,6 +119,8 @@ export interface MatrixReport {
   readonly adapter: string;
   readonly software: boolean;
   readonly cells: readonly MatrixCell[];
+  /** The cells the run planned, which progress counts toward: `cells` ends at this length. */
+  readonly planned: number;
   /** Checks that found an overflow (each one redrew; none was shown). */
   readonly overflowChecks: number;
   readonly ms: number;
@@ -144,7 +146,9 @@ export async function runComputeMatrix(options: {
     loadBrowserEngine(),
   ]);
   const cells: MatrixCell[] = [];
-  const total = PAGES.length * 2 * (3 + 2);
+  // Every cell the run adds, so progress counts toward the real end: the page cells, the floor
+  // reset, then the drag steps.
+  const total = PAGES.length * 2 * (3 + 2) + 1 + DRAG_CELLS;
   let adapter = "";
   let software = false;
   let overflowChecks = 0;
@@ -232,7 +236,7 @@ export async function runComputeMatrix(options: {
   options.signal.throwIfAborted();
   const floor = await checkFloorReset(computeModule, options.allowSoftware);
   cells.push(floor);
-  options.onCell?.(floor, cells.length, total + 1);
+  options.onCell?.(floor, cells.length, total);
   options.signal.throwIfAborted();
   for (const cell of await runDragChecks(
     computeModule,
@@ -241,12 +245,13 @@ export async function runComputeMatrix(options: {
     options.signal,
   )) {
     cells.push(cell);
-    options.onCell?.(cell, cells.length, total + DRAG_CELLS);
+    options.onCell?.(cell, cells.length, total);
   }
   return {
     adapter,
     software,
     cells,
+    planned: total,
     overflowChecks,
     ms: Math.round(performance.now() - started),
   };

@@ -109,4 +109,24 @@ test.describe("Renderer diagnostics page", () => {
       });
     }
   });
+  test("doesn't download the compute checks without WebGPU", async ({ page }) => {
+    test.setTimeout(120_000);
+    await page.addInitScript(() => {
+      // Both ways a browser can lack WebGPU: no property at all, or one that's undefined.
+      delete (Navigator.prototype as { gpu?: unknown }).gpu;
+      Object.defineProperty(navigator, "gpu", { value: undefined, configurable: true });
+    });
+    const fetched: string[] = [];
+    page.on("request", (req) => fetched.push(new URL(req.url()).pathname));
+    await page.goto("/diagnostics/renderer?software=1&compute=1");
+    // The main checks ran to the end (the compute section mounts beside them, if at all).
+    await expect(page.getByTestId("diag-summary")).toContainText(/\d+\/10 passed/, {
+      timeout: 60_000,
+    });
+    await expect(page.getByTestId("compute-unavailable")).toBeVisible();
+    // Neither the compute checks nor the compute module (885 KB gzipped) was requested.
+    expect(
+      fetched.filter((path) => /ComputeDiagnostics|compute-glue|dist\/compute/.test(path)),
+    ).toEqual([]);
+  });
 });
