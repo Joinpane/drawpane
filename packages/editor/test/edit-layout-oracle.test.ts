@@ -31,25 +31,26 @@
 import {
   type BindingKey,
   branchChanges,
-  constrainedValues,
   getProp,
-  hugsOn,
   keyBetween,
-  measuresOn,
   mergeOps,
   type NodeRecord,
   nodeReader,
   type Op,
   type Props,
+  placedGeometry,
   ROOT_ID,
 } from "@drawpane/model";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { affectedComponents, canMoveInto, instancesOf, wouldCycle } from "../src/components";
+import { canMoveInto, wouldCycle } from "../src/components";
 import { Doc } from "../src/doc";
 import { Editor } from "../src/editor";
 import { layoutOps } from "../src/layout";
 import { autoSize, type TextMeasurer } from "../src/text";
+
+/** A layer's place and size. */
+type Box = "x" | "y" | "width" | "height";
 
 const measurer: TextMeasurer = {
   width: (font, text) => text.length * Number(font.match(/(\d+(?:\.\d+)?)px/)?.[1] ?? 16) * 0.5,
@@ -198,74 +199,45 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
     );
   });
   const out: unknown[] = ops;
-  // A copy layer its frame places freely sits where its constraints put it, from its main layer
-  // (moved by the difference in size where its frame differs from its main's), unless it
-  // overrides its own place.
+  // A copy layer its frame places freely sits where the one derivation both formats use puts it
+  // (`placedGeometry`): its constraints' place and size where its frame differs in size from its
+  // main's, its main layer's otherwise, but what it keeps (its own layout's, or its own).
   for (const node of all) {
     const sourceId = getProp(node.props, "mirrors");
     const source = sourceId ? doc.get(sourceId) : undefined;
-    const parent = doc.get(node.parent);
-    if (!source || parent?.type !== "frame" || node.type === "group") continue;
-    if (isLayoutFrame(parent) && getProp(node.props, "positioning") !== "absolute") continue;
-    // Placed otherwise by the copy's own choice: made absolute, or in a frame it gave (or took)
-    // auto layout. Its place then is where that left it.
-    const parentSource = doc.get(source.parent);
-    if (
-      getProp(node.props, "positioning") !== getProp(source.props, "positioning") ||
-      getProp(parent.props, "layoutMode") !== getProp(parentSource?.props ?? {}, "layoutMode") ||
-      getProp(parent.props, "overrides").includes("layoutMode")
-    )
-      continue;
-    // Issue 305: an instance sized by a binding, or a nested instance nothing lays out left at a
-    // size its main layer no longer has (swapped), doesn't place its layers again; their places
-    // and sizes are set aside, nothing else.
+    if (!source) continue;
+    const placed = placedGeometry(node, source, doc.get(node.parent), doc.get(source.parent));
+    if (!placed) continue;
     const instances = doc.ancestors(node.id).filter((a) => getProp(a.props, "instanceOf"));
     // Issue 306: layers kept by an instance whose main is gone lose what placed them.
     if (instances.some((a) => !doc.has(getProp(a.props, "instanceOf") as string))) continue;
+    // Issue 305: an instance sized by a binding, or a swapped nested instance nothing lays out
+    // left at a size its main layer no longer has, doesn't place its layers again; their places
+    // and sizes are set aside, nothing else.
     if (
       instances.some((a) => {
         const bound = getProp(a.props, "bindings") as Record<string, unknown>;
-        // A nested instance nothing lays out (hidden, or not in a flow) keeps a size its main
-        // layer no longer has (after a swap).
+        if (bound.width || bound.height) return true;
         const layer = doc.get(getProp(a.props, "mirrors") ?? "");
+        if (!layer || getProp(a.props, "instanceOf") === getProp(layer.props, "instanceOf"))
+          return false;
+        const own = getProp(a.props, "overrides");
+        if (own.includes("width") || own.includes("height")) return false;
         const frame = doc.get(a.parent);
         const unplaced =
           !getProp(a.props, "visible") ||
           getProp(a.props, "positioning") === "absolute" ||
           !frame ||
           !isLayoutFrame(frame);
-        const stale =
-          !!layer &&
+        return (
           unplaced &&
           (getProp(a.props, "width") !== getProp(layer.props, "width") ||
-            getProp(a.props, "height") !== getProp(layer.props, "height"));
-        return !!bound.width || !!bound.height || stale;
+            getProp(a.props, "height") !== getProp(layer.props, "height"))
+        );
       })
     )
       continue;
-    const derived = constrainedValues(node, source, parent, parentSource);
-    const own = getProp(node.props, "overrides");
-    for (const [prop, axis] of [
-      ["x", "h"],
-      ["y", "v"],
-      ["width", "h"],
-      ["height", "v"],
-    ] as const) {
-      // A bound value is its variable's, in the copy's mode (decision 0034).
-      const bound = getProp(node.props, "bindings") as Record<string, unknown>;
-      if (own.includes(prop) || bound[prop]) continue;
-      // A size its own layout decides (it hugs, its text measures itself, or it's an instance,
-      // sized as its own main is in its mode) is checked above; one whose sizing it overrides is
-      // its own (made fixed, it keeps the size it had).
-      if (
-        (prop === "width" || prop === "height") &&
-        (hugsOn(node, axis) ||
-          measuresOn(node, axis) ||
-          getProp(node.props, "instanceOf") ||
-          own.includes(axis === "h" ? "sizingH" : "sizingV"))
-      )
-        continue;
-      const want = derived[prop] ?? getProp(source.props, prop);
+    for (const [prop, want] of Object.entries(placed.derived) as [Box, number][]) {
       const have = getProp(node.props, prop);
       // Both are kept to two places: compare them there.
       if (Math.round(Math.abs(want - have) * 100) > 1)
@@ -1073,21 +1045,6 @@ function perform(
       );
       const into = frames[e.into % Math.max(1, frames.length)];
       if (!into || doc.ancestors(into.id).some((a) => a.id === id)) break;
-      // Issue 311: a component moved into one its instances show through a swap makes a cycle
-      // `canMoveInto` doesn't see yet; that move isn't made.
-      if (getProp(node.props, "isComponent")) {
-        const above = new Set(affectedComponents(doc, [into.id]));
-        const swappedTo = instancesOf(doc, id).flatMap((root) =>
-          collectDescendants(doc, root)
-            .filter((n) => {
-              const shown = getProp(n.props, "instanceOf");
-              const layer = doc.get(getProp(n.props, "mirrors") ?? "");
-              return !!shown && !!layer && shown !== getProp(layer.props, "instanceOf");
-            })
-            .map((n) => getProp(n.props, "instanceOf") as string),
-        );
-        if (swappedTo.some((c) => above.has(c))) break;
-      }
       editor.commit([{ op: "move", id, parent: into.id, key: editor.topKey(into.id) }]);
       break;
     }
@@ -1230,12 +1187,34 @@ function connect(editor: Editor, nodes: readonly NodeRecord[], copies: "compact"
   const rebased = new Set<string>();
   /** Layers the collaborator's edits changed, with where they moved them from and to. */
   const theirs = new Set<string>();
+  /** The layers each side changed itself (not the frames around them), rebased or not. */
+  const oursOwn = new Set<string>();
+  const rebasedOwn = new Set<string>();
+  const theirsOwn = new Set<string>();
   return {
     rebased,
     theirs,
-    /** Records layers an edit of the editor's changed. */
-    note(ids: Iterable<string>) {
-      for (const id of ids) ours.add(id);
+    /**
+     * Copy and instance layers both sides changed themselves while the editor's edits were unsent
+     * (issue 307's: their override marks can collide).
+     */
+    concurrent(): Set<string> {
+      return new Set(
+        [...rebasedOwn].filter((id) => {
+          const node = editor.doc.get(id);
+          const linked =
+            !!node && (!!getProp(node.props, "mirrors") || !!getProp(node.props, "instanceOf"));
+          return linked && theirsOwn.has(id);
+        }),
+      );
+    },
+    /** Records layers an edit of the editor's changed, and the frames they were and are in. */
+    note(changed: Iterable<string>, frames: Iterable<string>) {
+      for (const id of changed) {
+        ours.add(id);
+        oursOwn.add(id);
+      }
+      for (const id of frames) ours.add(id);
     },
     /**
      * The collaborator's edit for this step, arriving as a rebase. True when the same edit, made
@@ -1288,11 +1267,13 @@ function connect(editor: Editor, nodes: readonly NodeRecord[], copies: "compact"
         : !!target && ours.has(target.id) && !editor.doc.has(target.id);
       for (const op of ops) {
         theirs.add(op.id);
+        theirsOwn.add(op.id);
         if (op.op === "create" || op.op === "move") theirs.add(op.parent);
         const was = editor.doc.get(op.id)?.parent;
         if (op.op === "move" && was) theirs.add(was);
       }
       for (const id of ours) rebased.add(id);
+      for (const id of oursOwn) rebasedOwn.add(id);
       remote.push(ops);
       revn += 1;
       receive({ t: "txn", revn, ops });
@@ -1354,13 +1335,11 @@ describe("an edit leaves the document as a full layout would", () => {
             // edit, made serially on the editor's document instead, leaves nothing newly stale. A
             // later check sets aside only stale layout all of which was noted then. Anything an
             // edit of the editor's makes stale is checked, and so are runs with no collaborator.
+            // Noted by layer and what about it was stale, and dropped once that's laid out right, so
+            // a later bug on the same layer is still caught.
             const fromRebase = new Set<string>();
-            const entryId = (o: unknown) => {
-              const e = o as Record<string, unknown>;
-              return String(e.id ?? e.constrained ?? e.text);
-            };
             const ofRebase = (stale: readonly unknown[]) =>
-              !!room && stale.length > 0 && stale.every((o) => fromRebase.has(entryId(o)));
+              !!room && stale.length > 0 && stale.every((o) => fromRebase.has(entryKey(o)));
             check(editor, mirror, copies, "after making it", undefined, !room);
             const history: string[] = [];
             for (const [step, e] of edits.entries()) {
@@ -1372,9 +1351,7 @@ describe("an edit leaves the document as a full layout would", () => {
               const roundTrip = e.kind !== "undo-redo" || !ofRebase(unsettled(editor.doc));
               const was = room ? snapshot(editor.doc) : undefined;
               const version = editor.doc.version;
-              const concurrent = new Set(
-                room ? [...room.rebased].filter((id) => room.theirs.has(id)) : [],
-              );
+              const concurrent = room ? room.concurrent() : new Set<string>();
               if (perform(editor, e, roundTrip, concurrent) === "lost") return;
               if (editor.doc.version !== version) ran.set(e.kind, (ran.get(e.kind) ?? 0) + 1);
               history.push(JSON.stringify(e));
@@ -1385,20 +1362,24 @@ describe("an edit leaves the document as a full layout would", () => {
                 const changed = [...new Set([...Object.keys(was), ...Object.keys(now)])].filter(
                   (id) => stable(was[id]) !== stable(now[id]),
                 );
-                room.note([
-                  ...changed,
-                  ...changed
+                room.note(
+                  changed,
+                  changed
                     .flatMap((id) => [was[id]?.parent, now[id]?.parent])
                     .filter((id): id is string => !!id),
-                ]);
+                );
               }
               const layout = !ofRebase(unsettled(editor.doc, before));
               check(editor, mirror, copies, `after ${history.join(", ")}`, before, !room, layout);
+              if (fromRebase.size > 0) {
+                const still = new Set(unsettled(editor.doc).map(entryKey));
+                for (const key of fromRebase) if (!still.has(key)) fromRebase.delete(key);
+              }
               if (room && step % 2 === 1) {
                 const serialSettled = room.remote(step);
                 const stale = unsettled(editor.doc);
                 if (stale.length > 0 && room.rebased.size > 0 && serialSettled)
-                  for (const o of stale) fromRebase.add(entryId(o));
+                  for (const o of stale) fromRebase.add(entryKey(o));
               }
             }
             if (room) room.settle(mirror, `after ${history.join(", ")}`);
