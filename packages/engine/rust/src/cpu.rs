@@ -1559,25 +1559,11 @@ impl Backend for Cpu {
                 .checked_mul(mask_h as usize)
                 .and_then(|n| n.checked_mul(4))
                 .ok_or_else(|| EngineError::limit("shadow mask size overflow"))?;
-            // Mask pixmap + scene + blur scratch (~1.5x mask) + output.
-            let need = mask_bytes
-                .saturating_mul(2)
-                .saturating_add(mask_bytes / 2)
-                .saturating_add(scene_estimate_bytes(mask_w, mask_h))
-                .saturating_add(out_bytes);
-            self.check_memory(need, "a blurred shadow")?;
-
             let scene_origin = match cast {
-                ShadowCast::Fill { paths, .. } => {
-                    use vello_common::kurbo::Shape;
-                    let mut bbox: Option<Rect> = None;
-                    for p in *paths {
-                        if !p.is_empty() {
-                            let b = p.bounding_box();
-                            bbox = Some(bbox.map_or(b, |o| o.union(b)));
-                        }
-                    }
-                    let b = bbox.map_or(mask_rect, |r| IRect::around(r).inflate(2, 2));
+                ShadowCast::Fill { raster_bounds, .. } => {
+                    // A tile can omit distant glyphs from the cast. Keep the same
+                    // origin so retained contours round to the same Vello coordinates.
+                    let b = IRect::around(*raster_bounds).inflate(2, 2);
                     let ox = b.x0.max(mask_rect.x0 - 4096).min(mask_rect.x0);
                     let oy = b.y0.max(mask_rect.y0 - 4096).min(mask_rect.y0);
                     if mask_rect.x1 - ox <= 8192 && mask_rect.y1 - oy <= 8192 {
@@ -1590,11 +1576,18 @@ impl Backend for Cpu {
             };
             let scene_w = (mask_rect.x1 - scene_origin.0).max(1) as u16;
             let scene_h = (mask_rect.y1 - scene_origin.1).max(1) as u16;
+            // Mask pixmap + scene + blur scratch (~1.5x mask) + output.
+            let need = mask_bytes
+                .saturating_mul(2)
+                .saturating_add(mask_bytes / 2)
+                .saturating_add(scene_estimate_bytes(u32::from(scene_w), u32::from(scene_h)))
+                .saturating_add(out_bytes);
+            self.check_memory(need, "a blurred shadow")?;
             let mut mask_scene = RenderContext::new(scene_w, scene_h);
             let base_shift = Affine::translate((-f64::from(scene_origin.0), -f64::from(scene_origin.1)));
             mask_scene.set_paint(AlphaColor::<Srgb>::new([1.0, 1.0, 1.0, 1.0]));
             match cast {
-                ShadowCast::Fill { paths, even_odd } => {
+                ShadowCast::Fill { paths, even_odd, .. } => {
                     mask_scene.set_transform(base_shift);
                     mask_scene.set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
                     for p in *paths {
@@ -1681,7 +1674,7 @@ impl Backend for Cpu {
                 * Affine::translate((-f64::from(mask_rect.x0), -f64::from(mask_rect.y0)));
             mask_scene.set_paint(AlphaColor::<Srgb>::new([1.0, 1.0, 1.0, 1.0]));
             match cast {
-                ShadowCast::Fill { paths, even_odd } => {
+                ShadowCast::Fill { paths, even_odd, .. } => {
                     mask_scene.set_transform(red_tf);
                     mask_scene.set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
                     for p in *paths {

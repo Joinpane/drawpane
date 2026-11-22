@@ -352,13 +352,51 @@ fn bands_reproduce_the_whole_frame_for_rotated_glyph_outlines() {
     bands_match(Rng(1_795_215_203_959_853_517), 212);
 }
 
+#[test]
+fn bands_match_for_a_blurred_glyph_run_shadow() {
+    // The tile starting at x = 96 omits the first glyph from the shadow cast.
+    // The remaining outlines must rasterize at the same subpixel positions.
+    let mut rec = Rec::new(
+        [1.0, 0.0, 0.0, 1.0, 69.16212463378906, 31.058765411376953],
+        [16.642899, 41.32984],
+    );
+    rec.flags = 2;
+    rec.opacity = 0.71289533;
+    rec.paths.push(Entry::Glyphs {
+        scale: 0.020390728,
+        glyphs: vec![(5, 0.0, 41.32984), (4, 25.620796, 41.32984), (6, 33.070835, 41.32984)],
+    });
+    rec.ops.push(Op::DropShadow {
+        paths: vec![0],
+        even_odd: false,
+        dx: 2.8119097,
+        dy: -8.109604,
+        blur: 5.437962,
+        color: [0.590207, 0.6368347, 0.32833868, 0.38753042],
+        blend: 0,
+    });
+
+    let mut w = W::new(ANY, 1);
+    w.reset();
+    for id in [4, 5, 6] {
+        w.glyph(id, &glyph_outline(id));
+    }
+    w.set(1, 0, &rec);
+
+    assert_bands_match(&w.finish(), "blurred glyph run shadow");
+}
+
 /// Draws the given case whole and in bands. Historical regressions pass their original RNG state.
 fn bands_match(mut r: Rng, case: u32) {
     let model = Model::new(&mut r, 24, case.is_multiple_of(2));
+    assert_bands_match(&model.fresh(1), format_args!("case {case}"));
+}
+
+fn assert_bands_match(scene: &[u8], label: impl std::fmt::Display) {
     let mut e = engine();
     // Tiles narrower than the frame, so a band is several tiles.
     e.store.limits.export_tile = 48;
-    e.apply(&model.fresh(1)).expect("fresh");
+    e.apply(scene).expect("fresh");
     let cam = Camera {
         zoom: 1.0,
         x: 0.0,
@@ -398,11 +436,11 @@ fn bands_match(mut r: Rng, case: u32) {
         .take(8)
         .collect();
     if differing > 0 {
-        eprintln!("case {case}: readers {:?}, differing at {at:?}", e.store.readers());
+        eprintln!("{label}: readers {:?}, differing at {at:?}", e.store.readers());
     }
     assert!(
         differing == 0,
-        "case {case}: {differing} pixels differ between bands and the whole frame (worst {worst})"
+        "{label}: {differing} pixels differ between bands and the whole frame (worst {worst})"
     );
 }
 

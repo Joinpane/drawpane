@@ -233,7 +233,12 @@ impl IRect {
 
 pub enum ShadowCast<'a> {
     /// Filled device-space paths (general shapes, spread shapes, text runs + decoration bars).
-    Fill { paths: &'a [BezPath], even_odd: bool },
+    Fill {
+        paths: &'a [BezPath],
+        even_odd: bool,
+        /// Device-space bounds before tile culling, to anchor CPU rasterization.
+        raster_bounds: Rect,
+    },
     /// Stroked local-space paths under `transform` (open stroke-only layers).
     Stroke {
         paths: &'a [BezPath],
@@ -3734,7 +3739,11 @@ impl<B: Backend> Walk<'_, B> {
 
         let mut dev_paths = Vec::with_capacity(paths.len());
         let mut bbox: Option<Rect> = None;
+        let mut glyph_bounds: Option<Rect> = None;
         for &pi in paths {
+            if let Some(b) = self.shadow_glyph_bounds(r, pi, shifted_device) {
+                glyph_bounds = Some(glyph_bounds.map_or(b, |other| other.union(b)));
+            }
             let mut p = self.path(r, pi, shifted_device, margin_local)?;
             if p.is_empty() {
                 continue;
@@ -3756,6 +3765,7 @@ impl<B: Backend> Walk<'_, B> {
         let cast = ShadowCast::Fill {
             paths: &dev_paths,
             even_odd,
+            raster_bounds: glyph_bounds.map_or(bbox, |b| b.union(bbox)),
         };
         let open = self.open.clone();
         self.backend
@@ -3924,6 +3934,9 @@ impl<B: Backend> Walk<'_, B> {
         let cast = ShadowCast::Fill {
             paths: &hole_slice,
             even_odd,
+            raster_bounds: self
+                .shadow_glyph_bounds(r, hole_idx, shifted_device)
+                .unwrap_or_else(|| hole_slice[0].bounding_box()),
         };
         let res = self
             .backend
@@ -3931,6 +3944,14 @@ impl<B: Backend> Walk<'_, B> {
         self.open.pop();
         self.backend.scene().pop_clip();
         res
+    }
+
+    fn shadow_glyph_bounds(&self, r: &Record, path: u32, device: Affine) -> Option<Rect> {
+        if !matches!(r.paths.get(path as usize), Some(PathEntry::Glyphs { .. })) {
+            return None;
+        }
+        r.entry_bounds(path, &|g| self.store.glyphs.bounds(g))
+            .map(|bounds| device.transform_rect_bbox(bounds))
     }
 
     /// A run of glyphs in one solid colour: each from the glyph cache where it can be, else

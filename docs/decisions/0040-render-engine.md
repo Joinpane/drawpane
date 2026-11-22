@@ -1000,6 +1000,12 @@ In the two-shadow `drop-layered` parity cell, the stacked mask path scored 0.21 
 ceiling was the rounded GPU score itself. This cell uses the same Figma and live-canvas
 gates as the rest of the shadow suite, including the 0.01 mean allowance against live canvas.
 
+For full-resolution CPU shadow masks, the bounds of the entire glyph cast anchor
+Vello's scene coordinates. Each tile still expands only the glyphs within reach
+of its pixels and allocates a cropped mask. Anchoring to the culled outlines
+moves the scene origin when a distant glyph drops out, changing how Vello rounds
+the remaining outlines.
+
 A normal-blend shadow draws its mask into the Vello scene. It can stay inside a Vello
 opacity layer, which keeps adding or removing the shadow from changing when unrelated
 pixels are quantized during a scene flush.
