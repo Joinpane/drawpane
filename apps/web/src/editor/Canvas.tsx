@@ -380,12 +380,24 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
             !activeEngineCanvas ||
             activeEngineCanvas !== view.canvas
           ) {
+            view.readbackDiag.canvasGuardDropped++;
             return;
           }
           const seq = frameN !== undefined ? submittedFrameSeq.get(frameN) : engineSubmittedFrames;
-          if (frameN !== undefined && seq === undefined) return;
+          if (frameN !== undefined && seq === undefined) {
+            view.readbackDiag.canvasNoSeq++;
+            return;
+          }
           enginePresentedFrames++;
-          if (seq !== undefined) timing.confirmMotionFrame(seq);
+          if (seq !== undefined) {
+            if (!timing.motion) {
+              view.readbackDiag.canvasNoMotion++;
+            } else {
+              const before = timing.motion.confirmed;
+              timing.confirmMotionFrame(seq);
+              if (timing.motion.confirmed > before) view.readbackDiag.canvasConfirmed++;
+            }
+          }
           if (seq !== undefined && seq > engineConfirmedFrame) engineConfirmedFrame = seq;
           showEngine(true);
           syncRendererAttr();

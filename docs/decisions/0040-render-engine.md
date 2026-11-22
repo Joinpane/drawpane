@@ -1399,12 +1399,14 @@ range for analytic height only after it passes the same-camera pixel gate.
 The first batch groups raster mask coverage for simple lenses into one
 bounded atlas in exact whole-view draws. Coverage is independent of the
 backdrop, so this step can cross any number of backdrop changes without
-reordering paints. Atlas slots preserve the integral strip phase, carry
-their original lens-local dimensions, and use the serial path if the lens
-is clipped to a different region, split, or too large to fit. The atlas
-uses the existing reader memory budget and caps coverage plus depth at
-8 MiB. Source extraction, frost, height filtering, and visible writes
-remain in paint order. Dual-plane paint uses one attachment pass when
+reordering paints. The atlas packs lenses in display-list paint order,
+visiting children where their parent draws them. Vello flattens geometry
+and generates coverage in each lens's local coordinates, then translates
+the finished strips to tile-aligned slots. A lens keeps its original
+raster dimensions and uses the serial path when clipped to a different
+region, split, or too large to fit. Coverage plus depth fits within the
+reader budget and is capped at 8 MiB. Source extraction, frost, height
+filtering, and visible writes remain in paint order. Dual-plane paint uses one attachment pass when
 both targets have matching allocated extents. Mismatched pooled targets
 use the serial composite passes.
 
@@ -1426,10 +1428,14 @@ This does not establish a motion improvement on the full page. The core
 WebGPU adapters passed GPU verification. All four core WebGPU cases timed
 out waiting for the opening view to settle before zoom.
 
-A second fixture with 24 overlapping lenses reduced submissions from 49 to
-26 on both backends and WebGPU's Vello render passes from 73 to 27. Each
-backend differed from the serial path by one level in three color bytes
-out of 133,400. Its p99 difference was zero.
+An early atlas prototype reduced submissions from 49 to 26 in a
+24-lens fixture. It rasterized at atlas coordinates, which changed three
+of 133,400 color bytes by one level. The slot-local rasterizer makes current
+atlas and serial whole-frame draws byte-identical. The regression suite
+compares a seven-lens atlas to a budget-forced serial render and compares
+an edited six-lens atlas to a fresh engine. Both comparisons are byte-exact
+on WebGPU and WebGL2. The separate whole-frame versus tiled fixture
+permits up to two levels of edge rounding across the tile boundary.
 
 The 24-request T4 pairs against main 4957f364 used hardware WebGL2
 presentation and submitted the same exact camera sequence on each arm.
@@ -1444,3 +1450,39 @@ readback before advancing, with the cadence run unchanged. A two-camera
 WebGL2 smoke run on T4 after #270 passed both same-camera comparisons at
 2× DPR. Content error and FLIP were zero and the sharpness ratio was 1.0,
 including at the stopping camera.
+
+
+### CPU encoding on the T4
+
+The engine skips rasterizing an open clip when its coverage is provably
+full over the pixels being drawn. It keeps the same scope compositing
+arithmetic. A blend uniform buffer holds 256 aligned parameter slots, so
+consecutive blends can share a submission.
+
+Before those two changes, an eight-input WebGPU Examples zoom measured
+5,614.5 ms of CPU work at p50, with 16,354 submissions and 12,246 Vello
+renders per frame. Vello render preparation accounted for 2,811.3 ms
+and submission for 445.5 ms. A separate six-sample near-fit measurement
+recorded 4,092.6 ms on the CPU and a 154.9 ms GPU completion tail, with
+14,814 submissions and 11,322 Vello renders per frame.
+
+In the main-first paired run against main 42b7fb7e, WebGPU zoom CPU p50
+was 5,458.9 ms on main and 5,293.8 ms on the PR. Submissions per frame
+fell from 16,885 to 15,419 and Vello renders from 16,100 to 15,293. The
+six near-fit samples measured 3,936.8 ms CPU and 153.0 ms GPU tail on
+main, and 3,892.9 ms CPU and 146.9 ms GPU tail on the PR. The tail starts
+after the CPU draw returns. GPU timestamps spanning the frame also
+include gaps while the CPU prepares later submissions.
+
+Both arms sent 24 camera inputs. WebGL2 confirmed all 24 presentations
+in each arm, with confirmed p95 falling from 13.593 s to 11.797 s.
+Core WebGPU waited for each requested frame's asynchronous readback
+before advancing. Main confirmed 24 of 24 submissions and the PR
+confirmed 26 of 28, including additional draws during the gesture.
+These timings leave the opening and interaction gates open.
+
+WebGPU still spends seconds preparing and submitting Vello work. Vello
+render preparation took 3,211.5 ms of the PR's 5,293.8 ms zoom CPU p50.
+The compute path should address that preparation cost and reduce the
+number of Vello render segments by batching reader work. On WebGL2,
+most of the measured draw time is spent inside submission.
