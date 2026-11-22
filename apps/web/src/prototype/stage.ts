@@ -58,6 +58,11 @@ const MAX_PIXELS = 24_000_000;
 /** Bound how long a GPU transition waits on live `gpuPixels()` readback before proceeding. */
 const GPU_CAPTURE_TIMEOUT_MS = 150;
 /**
+ * Maximum wait for an engine overlay's first paint before showing a CanvasRenderer fallback
+ * (swapped to the engine render once it arrives). Keeps overlays responsive on slow/stuck Workers.
+ */
+const OVERLAY_FIRST_PAINT_DEADLINE_MS = 400;
+/**
  * On a phone, fitting the whole screen may shrink it to this much of the
  * width-filling size (a 393 × 852 design in a 390 × 791 browser fits at 93%);
  * past that, the design is a long page, so it fills the width and scrolls.
@@ -92,6 +97,10 @@ interface OverlaySurface {
   readonly canvas: HTMLCanvasElement;
   readonly contentScale: number;
   painted: boolean;
+  painting: boolean;
+  dirty: boolean;
+  disposed: boolean;
+  firstPaintTimer: ReturnType<typeof setTimeout> | null;
   onFirstPaint: (() => void) | null;
   onCleanup: (() => void) | null;
   abort: AbortController | null;
@@ -118,6 +127,8 @@ export interface StageOptions extends StageCallbacks {
   readonly device: DeviceId;
   /** Override the renderer switch (for tests). Defaults to `rendererChoice()`. */
   readonly choice?: RendererChoice;
+  /** Override the engine overlay first-paint canvas-fallback deadline (ms, for tests). */
+  readonly overlayFirstPaintDeadlineMs?: number;
 }
 
 /**
@@ -159,6 +170,7 @@ export class PlayerStage {
   readonly #callbacks: StageCallbacks;
   readonly #choice: RendererChoice;
   readonly #useEngine: boolean;
+  readonly #overlayFirstPaintDeadlineMs: number;
   #device: DeviceId;
 
   readonly #deviceEl: HTMLDivElement;
@@ -207,6 +219,8 @@ export class PlayerStage {
     this.#callbacks = options;
     this.#choice = options.choice ?? rendererChoice();
     this.#useEngine = this.#choice !== "canvas";
+    this.#overlayFirstPaintDeadlineMs =
+      options.overlayFirstPaintDeadlineMs ?? OVERLAY_FIRST_PAINT_DEADLINE_MS;
 
     if (this.#editor.measurer instanceof ShapingMeasurer) {
       this.#editor.measurer.setEngineText(this.#useEngine);
@@ -689,6 +703,10 @@ export class PlayerStage {
       canvas,
       contentScale: this.#contentScale(root, base),
       painted: false,
+      painting: false,
+      dirty: false,
+      disposed: false,
+      firstPaintTimer: null,
       onFirstPaint: null,
       onCleanup: null,
       abort: null,
@@ -697,7 +715,15 @@ export class PlayerStage {
     return layer;
   }
 
+  #clearOverlayFirstPaintTimer(layer: OverlaySurface): void {
+    if (layer.firstPaintTimer !== null) {
+      clearTimeout(layer.firstPaintTimer);
+      layer.firstPaintTimer = null;
+    }
+  }
+
   #markOverlayPainted(layer: OverlaySurface): void {
+    this.#clearOverlayFirstPaintTimer(layer);
     const wasPainted = layer.painted;
     layer.painted = true;
     layer.el.dataset.painted = "true";
@@ -710,7 +736,12 @@ export class PlayerStage {
   }
 
   #disposeOverlayLayer(layer: OverlaySurface): void {
+    layer.disposed = true;
+    layer.dirty = false;
+    layer.painting = false;
+    this.#clearOverlayFirstPaintTimer(layer);
     layer.abort?.abort();
+    layer.abort = null;
     layer.onFirstPaint = null;
     if (layer.onCleanup) {
       const cleanup = layer.onCleanup;
@@ -720,6 +751,7 @@ export class PlayerStage {
   }
 
   #paintOverlay(layer: OverlaySurface): void {
+    if (this.#disposed || layer.disposed) return;
     if (!this.#useEngine) {
       const drew = this.#paintCanvasSurface(layer.root, layer.contentScale, layer.canvas);
       if (drew) this.#markOverlayPainted(layer);
@@ -731,7 +763,22 @@ export class PlayerStage {
     canvas.style.width = `${m.cssWidth}px`;
     canvas.style.height = `${m.cssHeight}px`;
     if (!bounds) return;
-    layer.abort?.abort();
+    // Keep at most one snapshot in flight and coalesce subsequent invalidations behind a dirty
+    // flag so continuous document edits never starve the overlay's paint.
+    if (layer.painting) {
+      layer.dirty = true;
+      return;
+    }
+    layer.painting = true;
+    layer.dirty = false;
+    if (!layer.painted && layer.firstPaintTimer === null && this.#overlayFirstPaintDeadlineMs > 0) {
+      layer.firstPaintTimer = setTimeout(() => {
+        layer.firstPaintTimer = null;
+        if (this.#disposed || layer.disposed || layer.painted) return;
+        const drew = this.#paintCanvasSurface(layer.root, layer.contentScale, canvas);
+        if (drew) this.#markOverlayPainted(layer);
+      }, this.#overlayFirstPaintDeadlineMs);
+    }
     const abort = new AbortController();
     layer.abort = abort;
     void renderEngineSnapshot(this.#editor, {
@@ -748,10 +795,10 @@ export class PlayerStage {
       signal: abort.signal,
     })
       .then(async (blob) => {
-        if (abort.signal.aborted || this.#disposed) return;
+        if (abort.signal.aborted || this.#disposed || layer.disposed) return;
         const bitmap = await createImageBitmap(blob);
         try {
-          if (abort.signal.aborted || this.#disposed) return;
+          if (abort.signal.aborted || this.#disposed || layer.disposed) return;
           if (canvas.width !== m.width || canvas.height !== m.height) {
             canvas.width = m.width;
             canvas.height = m.height;
@@ -766,9 +813,19 @@ export class PlayerStage {
         }
       })
       .catch((error) => {
-        if (abort.signal.aborted || this.#disposed || isAbortError(error)) return;
+        if (abort.signal.aborted || this.#disposed || layer.disposed || isAbortError(error)) return;
+        this.#clearOverlayFirstPaintTimer(layer);
         const drew = this.#paintCanvasSurface(layer.root, layer.contentScale, canvas);
         if (drew) this.#markOverlayPainted(layer);
+      })
+      .finally(() => {
+        if (layer.abort !== abort) return;
+        layer.abort = null;
+        layer.painting = false;
+        if (!this.#disposed && !layer.disposed && layer.dirty) {
+          layer.dirty = false;
+          this.#paintOverlay(layer);
+        }
       });
   }
 
@@ -1110,10 +1167,10 @@ export class PlayerStage {
     this.#viewport.append(dim, layer.el);
     this.#overlays.push(view);
     this.#placeOverlay(view);
-    if (layer.painted) {
+    if (!this.#useEngine || layer.painted) {
       reveal();
     } else {
-      // Hold the overlay and its dim hidden until first paint arrives so overlays never open blank.
+      // Hold engine-mode overlays and dim hidden until first paint arrives (or deadline falls back).
       dim.style.visibility = "hidden";
       layer.el.style.visibility = "hidden";
       layer.onFirstPaint = reveal;
@@ -1137,7 +1194,7 @@ export class PlayerStage {
         view.layer.el.remove();
         view.dim.remove();
       };
-      if (!view.layer.painted) {
+      if (this.#useEngine && !view.layer.painted) {
         remove();
         continue;
       }
@@ -1184,7 +1241,7 @@ export class PlayerStage {
       if (a) a.finished.then(removeOld, removeOld);
       else removeOld();
     };
-    if (layer.painted) {
+    if (!this.#useEngine || layer.painted) {
       reveal();
     } else {
       layer.el.style.visibility = "hidden";
@@ -1250,8 +1307,8 @@ export class PlayerStage {
         if (top && layer === top.layer) return { root: layer.root, chain: [], outside: top };
         continue;
       }
-      // Never fire hotspots on an overlay that hasn't painted yet, nor let taps fall through.
-      if (isOverlay && !layer.painted) return null;
+      // Never fire hotspots on an engine overlay that hasn't painted yet, nor let taps fall through.
+      if (isOverlay && this.#useEngine && !layer.painted) return null;
       const bounds = this.#editor.scene.bounds(layer.root);
       if (!bounds) return null;
       const s = layer.contentScale * this.#scale;
@@ -1373,7 +1430,7 @@ export class PlayerStage {
     const topOverlay = this.#overlays.at(-1)?.layer;
     const layer = topOverlay ?? this.#screen;
     if (!layer) return;
-    if (topOverlay && !topOverlay.painted) return;
+    if (topOverlay && this.#useEngine && !topOverlay.painted) return;
     if (layer === this.#screen && !this.#screenDrawable) return;
     const rects = hotspotRects(this.#editor.scene, layer.root);
     this.#callbacks.onHint?.("hotspots");

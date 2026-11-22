@@ -16,6 +16,7 @@ import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "reac
 import { isMac } from "../app/format";
 import { shortcutFor } from "./actions";
 import {
+  estimateCanvasReducedExportImages,
   estimateReducedExportImages,
   formatReducedImagesNote,
   isAbortError,
@@ -198,7 +199,16 @@ export function ExportSection({
     }
     if (!useEngineRenderer()) return [];
     const { reduced, omitted } = estimateReducedExportImages(editor, list, settings.scale);
-    const note = formatReducedImagesNote(reduced, omitted);
+    if (reduced === 0 && omitted === 0) return [];
+    // When the engine would reduce photos, raster exports route through the canvas exporter if
+    // available, so only warn when canvas is unavailable or would also reduce photos.
+    const note =
+      typeof OffscreenCanvas === "undefined"
+        ? formatReducedImagesNote(reduced, omitted)
+        : formatReducedImagesNote(
+            estimateCanvasReducedExportImages(editor, list, settings.scale),
+            0,
+          );
     return note ? [note] : [];
   }, [editor, key, version, settings.format, settings.scale]);
   return (

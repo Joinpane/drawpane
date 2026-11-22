@@ -342,8 +342,8 @@ test.describe
       ).toBeVisible();
       await formats.getByRole("radio", { name: "PNG" }).click();
 
-      // Photo export at 2x fits raised browser image budget without reduction; a tiny budget
-      // reports `reducedImages: 1`.
+      // Photo export at 2x fits raised browser image budget without reduction; when the engine
+      // budget would reduce a photo, product export routes to the sharp canvas exporter instead.
       const photoFull = await page.evaluate(
         (id) =>
           (window as unknown as W).drawpaneHeadless.exportLayer([id], {
@@ -365,7 +365,12 @@ test.describe
           }),
         ids.photo,
       );
-      expect(photoConstrained.reducedImages).toBe(1);
+      expect(photoConstrained.reducedImages).toBe(0);
+      expect(photoConstrained.omittedImages).toBe(0);
+      expect(pngSize(Buffer.from(photoConstrained.data, "base64"))).toEqual({
+        width: 2000,
+        height: 1500,
+      });
 
       // Progressive layer blur with offsets exports cleanly via canvas fallback (never refuses).
       const blurExport = await page.evaluate(
@@ -693,6 +698,7 @@ test.describe
       await page.evaluate(() => localStorage.removeItem("drawpane:engine-present"));
 
       // Launch prototype player on live EngineView.
+      const editorUrl = page.url();
       await page.getByRole("button", { name: "Play prototype" }).click();
       await expect(page).toHaveURL(/\/present/);
       const device = page.locator(".stage__device");
@@ -824,6 +830,49 @@ test.describe
       await expect
         .poll(() => device.getAttribute("data-renderer"), { timeout: 10_000 })
         .toMatch(/^(webgpu|webgl2|cpu-worker)$/);
+
+      // Continuous remote edits from another tab on an unrelated layer must not starve overlay reveal.
+      const remotePage = await page.context().newPage();
+      try {
+        await remotePage.goto(editorUrl);
+        await expect(remotePage.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
+          timeout: 15_000,
+        });
+        await remotePage.evaluate(() => {
+          const e = (window as unknown as W).drawpane;
+          const p = e.s.pageId;
+          const remote = e.createLayer("rect", { x: 4000, y: 0, width: 40, height: 40 }, p, {
+            name: "Remote mover",
+            fills: [{ type: "solid", color: "#22b8cf" }],
+          }) as string;
+          let step = 0;
+          const id = window.setInterval(() => {
+            step++;
+            e.commit([{ op: "set", id: remote, prop: "x", value: 4000 + step }]);
+          }, 50);
+          (window as unknown as { __stopRemoteEdits?: () => void }).__stopRemoteEdits = () =>
+            window.clearInterval(id);
+        });
+        await page.bringToFront();
+        await page.evaluate(() => {
+          const s = document.querySelector(".stage__screen") as HTMLElement | null;
+          if (s) s.scrollTop = s.scrollHeight;
+        });
+        await page.mouse.click(box.x + box.width * 0.5, box.y + box.height * 0.85);
+        const liveOverlay = viewport.locator(".stage__overlay");
+        await expect(liveOverlay).toHaveCount(1);
+        await expect(liveOverlay).toHaveAttribute("data-painted", "true", { timeout: 5000 });
+        await expect(liveOverlay).toBeVisible({ timeout: 2000 });
+        await page.mouse.click(box.x + box.width * 0.5, box.y + box.height * 0.15);
+        await expect(liveOverlay).toHaveCount(0, { timeout: 5000 });
+      } finally {
+        await remotePage
+          .evaluate(() =>
+            (window as unknown as { __stopRemoteEdits?: () => void }).__stopRemoteEdits?.(),
+          )
+          .catch(() => {});
+        await remotePage.close();
+      }
 
       // New-file template previews render via the engine snapshot service.
       await page.goto("/");
