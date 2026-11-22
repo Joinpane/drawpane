@@ -246,6 +246,14 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
   }
   for (const node of all) {
     if (node.type !== "text") continue;
+    // Issue 306: text kept by an instance whose main is gone isn't measured again in another mode.
+    if (
+      doc.ancestors(node.id).some((a) => {
+        const main = getProp(a.props, "instanceOf");
+        return !!main && !doc.has(main);
+      })
+    )
+      continue;
     const size = autoSize(node, measurer);
     if (!size) continue;
     const r = (v: number) => Math.round(v * 100) / 100;
