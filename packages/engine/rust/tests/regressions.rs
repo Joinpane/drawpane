@@ -2249,6 +2249,121 @@ fn export_allows_large_enclosing_layer_blur_halo_while_capping_reader_reach() {
     );
 }
 
+/// Browser exports run with `Limits::memory_bytes == 0`, so memory admission is disabled, yet
+/// the banded export work bound must still refuse huge enclosing layer blurs up front across
+/// `admit_export`, `check_png`, `png_begin`, and `render_band` instead of running until a
+/// watchdog timeout.
+#[test]
+fn zero_budget_browser_export_bounds_huge_layer_blur_work() {
+    let build = |layer_blur: f32, bg_radius: Option<f32>, pw: f64, ph: f64| {
+        let mut list = W::new(ANY, 1);
+        list.reset();
+        list.set(
+            1,
+            0,
+            &positioned_rect(0.0, 0.0, pw as f32, ph as f32, Some([0.95, 0.94, 0.92, 1.0])),
+        );
+        let mut frame = positioned_rect(pw * 0.05, ph * 0.05, (pw * 0.9) as f32, (ph * 0.9) as f32, None);
+        frame.ops.push(Op::Children);
+        frame.post.push(common::Post::LayerBlur(layer_blur));
+        list.set(20, 0, &frame);
+        list.set(
+            21,
+            20,
+            &positioned_rect(
+                10.0,
+                10.0,
+                (pw * 0.35) as f32,
+                (ph * 0.25) as f32,
+                Some([0.27, 0.65, 0.87, 0.74]),
+            ),
+        );
+        if let Some(radius) = bg_radius {
+            let mut lens = positioned_rect(
+                pw * 0.18,
+                ph * 0.18,
+                (pw * 0.45) as f32,
+                (ph * 0.45) as f32,
+                Some([1.0, 1.0, 1.0, 0.2]),
+            );
+            lens.ops.insert(
+                0,
+                Op::BackgroundBlur {
+                    paths: vec![0],
+                    even_odd: false,
+                    radius,
+                },
+            );
+            list.set(22, 20, &lens);
+        }
+        list.finish()
+    };
+
+    // Huge layer blurs at 8192x8192 with memory_bytes == 0 (both with and without a scoped
+    // background blur, and at the sigma limit) are refused immediately with a typed Limit.
+    for (lb, bg, zoom, w, h) in [
+        (250.0, Some(20.0), 4.0, 8192u32, 8192u32),
+        (250.0, None, 4.0, 8192, 8192),
+        (2844.0, Some(10.0), 2.0, 8192, 8192),
+    ] {
+        let bytes = build(lb, bg, f64::from(w) / zoom, f64::from(h) / zoom);
+        let cam = Camera {
+            zoom,
+            x: 0.0,
+            y: 0.0,
+            dpr: 1.0,
+        };
+        let mut core = Engine::new(Limits::default());
+        assert_eq!(core.store.limits.memory_bytes, 0);
+        core.apply(&bytes).unwrap();
+        let admit = core.admit_export(w, h, cam).expect_err("admit_export must bound work");
+        assert_eq!(admit.code, ErrorCode::Limit);
+        assert!(admit.message.contains("rendering work"), "{}", admit.message);
+
+        let rows = core.band_rows(w).min(h);
+        let band = core
+            .render_band(w, h, cam, [0.0; 4], 0, rows)
+            .expect_err("render_band must bound work for JPEG/WebP path");
+        assert_eq!(band.code, ErrorCode::Limit);
+        assert!(band.message.contains("rendering work"), "{}", band.message);
+
+        let mut facade = drawpane_engine::Engine::new(0, 0);
+        assert!(facade.apply(&bytes).ok);
+        let chk = facade.check_png(w, h, zoom, 0.0, 0.0, 1.0, rows);
+        assert!(!chk.ok);
+        assert_eq!(chk.code, ErrorCode::Limit as u32);
+        assert!(chk.message().contains("rendering work"), "{}", chk.message());
+
+        let beg = facade.png_begin(w, h, zoom, 0.0, 0.0, 1.0, rows);
+        assert!(!beg.ok);
+        assert_eq!(beg.code, ErrorCode::Limit as u32);
+        assert!(beg.message().contains("rendering work"), "{}", beg.message());
+    }
+
+    // Moderate large-halo browser exports still admit cleanly with memory_bytes == 0.
+    for (lb, bg, zoom, w, h) in [
+        (60.0, Some(100.0), 2.0, 520u32, 360u32),
+        (200.0, Some(20.0), 2.0, 900, 700),
+    ] {
+        let bytes = build(lb, bg, f64::from(w) / zoom, f64::from(h) / zoom);
+        let cam = Camera {
+            zoom,
+            x: 0.0,
+            y: 0.0,
+            dpr: 1.0,
+        };
+        let mut core = Engine::new(Limits::default());
+        core.apply(&bytes).unwrap();
+        core.admit_export(w, h, cam)
+            .expect("moderate large-halo export must stay admitted");
+        let rows = core.band_rows(w).min(h);
+        let mut facade = drawpane_engine::Engine::new(0, 0);
+        assert!(facade.apply(&bytes).ok);
+        let chk = facade.check_png(w, h, zoom, 0.0, 0.0, 1.0, rows);
+        assert!(chk.ok, "{}", chk.message());
+    }
+}
+
 /// Rust-side execution check for `FLAG_ISOLATE` on a faded layer combining a background blur and
 /// a fill inside a picture mask over a see-through backdrop (the Scroll Edge Effect case). The
 /// `layer.ts` emission rule is verified end-to-end in `packages/editor/test/engine-regressions.test.ts`.

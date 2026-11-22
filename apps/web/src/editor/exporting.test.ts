@@ -145,4 +145,40 @@ describe("renderExportWithMeta photo-reduction canvas fallback", () => {
     expect(res.reducedImages).toBe(4);
     expect(engineSpy).toHaveBeenCalledTimes(1);
   });
+
+  it("surfaces engine work-limit refusals directly without falling back to CanvasRenderer", async () => {
+    localStorage.setItem("drawpane:renderer", "engine");
+    const editor = makePhotoEditor([]);
+    const limitErr = new editorPkg.ExportError(
+      "This export needs too much rendering work at this scale. Try a smaller scale.",
+      "limit",
+    );
+    vi.spyOn(snapshot, "renderEngineRasterExportWithMeta").mockRejectedValue(limitErr);
+    const canvasSpy = vi.spyOn(editorPkg, "exportRaster");
+
+    await expect(renderExportWithMeta(editor, ["wall"], { format: "png", scale: 1 })).rejects.toBe(
+      limitErr,
+    );
+    expect(canvasSpy).not.toHaveBeenCalled();
+  });
+
+  it("still falls back to CanvasRenderer for 8,193..16,384 px size errors and unsupported effects", async () => {
+    localStorage.setItem("drawpane:renderer", "engine");
+    const editor = makePhotoEditor([]);
+    const canvasBlob = new Blob([new Uint8Array([1, 2])], { type: "image/png" });
+    const canvasSpy = vi.spyOn(editorPkg, "exportRaster").mockResolvedValue(canvasBlob);
+
+    vi.spyOn(snapshot, "renderEngineRasterExportWithMeta").mockRejectedValueOnce(
+      editorPkg.exportSizeError(10_000, 64, 8192),
+    );
+    const sizeRes = await renderExportWithMeta(editor, ["wall"], { format: "png", scale: 1 });
+    expect(sizeRes.blob).toBe(canvasBlob);
+
+    vi.spyOn(snapshot, "renderEngineRasterExportWithMeta").mockRejectedValueOnce(
+      new editorPkg.ExportError("Unsupported progressive blur.", "unsupported"),
+    );
+    const unsupRes = await renderExportWithMeta(editor, ["wall"], { format: "webp", scale: 1 });
+    expect(unsupRes.blob).toBe(canvasBlob);
+    expect(canvasSpy).toHaveBeenCalledTimes(2);
+  });
 });

@@ -229,6 +229,11 @@ export async function renderExportWithMeta(
     return result;
   } catch (error) {
     if (signal?.aborted || isAbortError(error)) throw error;
+    // Surface engine limit refusals (such as excessive export work, halo, or glyph limits)
+    // directly instead of falling back to main-thread CanvasRenderer. Canvas fallback still
+    // applies to 8,193..16,384 px exports (`reason: "size"`), unsupported features
+    // (`reason: "unsupported"`), and worker or runtime failures.
+    if (error instanceof ExportError && error.reason === "limit") throw error;
     const fallback = tryCanvasRasterExport(editor, ids, canvasOptions);
     if (fallback) {
       try {

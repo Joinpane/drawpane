@@ -482,13 +482,26 @@ async function runJob(job: Extract<SnapshotWorkerRequest, { type: "render" }>): 
       return;
     }
 
-    // JPEG and WebP: render band by band into an OffscreenCanvas and encode via the browser.
+    // JPEG and WebP: check export work/limits up front (matching PNG) before allocating the
+    // output canvas, then render band by band into an OffscreenCanvas and encode via the browser.
     if (typeof OffscreenCanvas === "undefined") {
       post({
         type: "error",
         jobId: job.jobId,
         code: ErrorCode.NotAvailable,
         message: "This browser can't encode JPEG or WebP exports. Try PNG instead.",
+        wasmBytes: currentWasmBytes(),
+      });
+      return;
+    }
+    const rowsPerBand = engine.bandRows(job.width);
+    const admitted = engine.checkPng(job.width, job.height, job.camera, rowsPerBand);
+    if (!admitted.ok) {
+      post({
+        type: "error",
+        jobId: job.jobId,
+        code: admitted.code,
+        message: admitted.message,
         wasmBytes: currentWasmBytes(),
       });
       return;
@@ -506,7 +519,6 @@ async function runJob(job: Extract<SnapshotWorkerRequest, { type: "render" }>): 
         });
         return;
       }
-      const rowsPerBand = engine.bandRows(job.width);
       let lastYield = performance.now();
       for (let y0 = 0; y0 < job.height; y0 += rowsPerBand) {
         if (isCancelled()) {

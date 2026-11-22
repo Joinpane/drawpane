@@ -649,9 +649,10 @@ impl Engine {
     /// memory: the compressed bytes are taken as they're made (`pngTake`).
     ///
     /// Refused before it starts when the page holds a record the engine doesn't draw (anywhere
-    /// on it), when another export is streaming, or when the export wouldn't fit the engine's
-    /// memory budget. Until it ends (`pngEnd`) or is cancelled (`pngAbort`), the engine refuses
-    /// changes, so every band draws the same revision.
+    /// on it), when another export is streaming, when total banded rendering work exceeds the
+    /// export work bound (all builds), or when the export wouldn't fit the engine's memory budget
+    /// (`memory_bytes > 0`, as in Worker builds). Until it ends (`pngEnd`) or is cancelled
+    /// (`pngAbort`), the engine refuses changes, so every band draws the same revision.
     #[wasm_bindgen(js_name = pngBegin)]
     #[allow(clippy::too_many_arguments)]
     pub fn png_begin(&mut self, width: u32, height: u32, zoom: f64, x: f64, y: f64, dpr: f64, rows: u32) -> Outcome {
@@ -705,7 +706,7 @@ impl Engine {
         let rows = p.band_rows.min(h - y0);
         let result = self
             .core
-            .render_band_straight(w, h, p.camera, bg, y0, rows)
+            .render_band_straight_admitted(w, h, p.camera, bg, y0, rows)
             .and_then(|px| p.encoder.write_rows(px, rows));
         match result {
             Ok(()) => {
