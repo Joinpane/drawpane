@@ -177,6 +177,8 @@ pub struct Store {
     pub limits: Limits,
     pub nodes: HashMap<u32, Node>,
     pub glyphs: GlyphStore,
+    /// Bytes and recency of the kept stroke outlines (`Limits::stroke_bytes`).
+    pub strokes: crate::stroke::StrokeBudget,
     pub revision: u32,
     /// Records with backdrop readers, for invalidation.
     readers: Vec<u32>,
@@ -271,6 +273,7 @@ impl Store {
             limits,
             nodes,
             glyphs: GlyphStore::default(),
+            strokes: crate::stroke::StrokeBudget::default(),
             revision: 0,
             readers: Vec::new(),
             dirty_checks: Cell::new(0),
@@ -979,6 +982,79 @@ impl Store {
             }
         }
         Ok(())
+    }
+
+    /// Starts a frame for the stroke budget: drops the least recently drawn outlines (never one
+    /// drawn this frame or the last) once what is kept passes `Limits::stroke_bytes`, down to
+    /// three quarters of it. What the budget counts can only overstate, so the live outlines are
+    /// recounted first and nothing is dropped when they fit.
+    pub fn begin_stroke_frame(&self) {
+        self.strokes.advance();
+        let cap = self.limits.stroke_bytes;
+        if self.strokes.held() <= cap {
+            return;
+        }
+        let mut held = 0usize;
+        let mut kept: Vec<(u64, usize, u32, usize, u8)> = Vec::new();
+        for (id, node) in &self.nodes {
+            let r = &node.record;
+            for (k, op) in r.ops.iter().chain(&r.coarse).enumerate() {
+                if let crate::record::Op::Stroke { cache, .. } = op {
+                    for (used, bytes, level) in cache.usage() {
+                        held += bytes;
+                        kept.push((used, bytes, *id, k, level));
+                    }
+                }
+            }
+        }
+        if held > cap {
+            let recent = self.strokes.tick().saturating_sub(1);
+            kept.sort_unstable_by_key(|e| e.0);
+            let target = cap / 4 * 3;
+            for (used, _, id, k, level) in kept {
+                if held <= target || used >= recent {
+                    break;
+                }
+                let Some(node) = self.nodes.get(&id) else { continue };
+                let r = &node.record;
+                if let Some(crate::record::Op::Stroke { cache, .. }) = r.ops.iter().chain(&r.coarse).nth(k) {
+                    held = held.saturating_sub(cache.evict(level));
+                }
+            }
+        }
+        self.strokes.set_held(held);
+    }
+
+    /// Summarises cached stroke outlines across all records currently held in the store.
+    pub fn stroke_cache_stats(&self) -> crate::stroke::StrokeCacheStats {
+        let mut s = crate::stroke::StrokeCacheStats::default();
+        for node in self.nodes.values() {
+            let r = &node.record;
+            for op in r.ops.iter().chain(&r.coarse) {
+                if let crate::record::Op::Stroke { path, cache, .. } = op {
+                    s.ops_total += 1;
+                    let in_verbs = match r.paths.get(*path as usize) {
+                        Some(crate::record::PathEntry::Path(c)) => c.len() as u64,
+                        Some(crate::record::PathEntry::Rect { .. } | crate::record::PathEntry::Box { .. }) => 9,
+                        Some(crate::record::PathEntry::Ellipse { .. } | crate::record::PathEntry::Oval { .. }) => 34,
+                        Some(crate::record::PathEntry::Glyphs { glyphs, .. }) => glyphs
+                            .iter()
+                            .filter_map(|g| self.glyphs.get(g.glyph))
+                            .map(|g| g.path.elements().len() as u64)
+                            .sum(),
+                        _ => 0,
+                    };
+                    s.input_verbs += in_verbs;
+                    let cached_verbs = cache.cached_verbs();
+                    if cached_verbs > 0 || cache.is_cached() {
+                        s.ops_cached += 1;
+                        s.expanded_verbs += cached_verbs as u64;
+                        s.cached_bytes += cache.cached_bytes() as u64;
+                    }
+                }
+            }
+        }
+        s
     }
 
     /// Whether `id` is one of `of` or lies inside one of them.

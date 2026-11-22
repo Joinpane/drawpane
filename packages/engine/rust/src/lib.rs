@@ -31,6 +31,7 @@ pub mod progressive_blur;
 pub mod record;
 pub mod shadow;
 pub mod store;
+pub mod stroke;
 pub mod texture;
 pub mod tiles;
 pub mod wire;
@@ -319,6 +320,7 @@ impl Engine {
             "tile_bytes" => l.tile_bytes = v,
             "band_bytes" => l.band_bytes = v.max(4),
             "frame_verbs" => l.frame_verbs = v,
+            "stroke_bytes" => l.stroke_bytes = v,
             "glyph_mask_bytes" => {
                 l.glyph_mask_bytes = v;
                 self.core.cpu.masks.set_budget(v);
@@ -729,6 +731,20 @@ impl Engine {
     #[wasm_bindgen(getter)]
     pub fn exporting_png(&self) -> bool {
         self.png.is_some()
+    }
+
+    /// Cached stroke outline statistics across all records:
+    /// `[ops_total, ops_cached, input_verbs, expanded_verbs, cached_bytes]`.
+    #[wasm_bindgen(js_name = strokeCacheStats)]
+    pub fn stroke_cache_stats(&self) -> Vec<f64> {
+        let s = self.core.store.stroke_cache_stats();
+        vec![
+            f64::from(s.ops_total),
+            f64::from(s.ops_cached),
+            s.input_verbs as f64,
+            s.expanded_verbs as f64,
+            s.cached_bytes as f64,
+        ]
     }
 
     /// Runs the reference Gaussian blur on premultiplied RGBA8 pixels on the CPU (for conformance

@@ -1145,6 +1145,7 @@ impl Engine {
         background: [f32; 4],
         detail: bool,
     ) -> Result<FrameStats> {
+        self.store.begin_stroke_frame();
         self.check_size(width, height)?;
         camera.check()?;
         self.check_supported()?;
@@ -1273,6 +1274,7 @@ impl Engine {
         background: [f32; 4],
         detail: bool,
     ) -> Result<(&[u8], FrameStats)> {
+        self.store.begin_stroke_frame();
         if self.store.limits.memory_bytes > 0 {
             let mut buf = std::mem::take(&mut self.band);
             let res = self.render_cpu_into(&mut buf, width, height, camera, background, detail);
@@ -1317,6 +1319,7 @@ impl Engine {
     /// `budget_ms` (`Gpu::ahead`): what a browser runs between frames at rest.
     #[cfg(feature = "gpu-common")]
     pub fn render_gpu_ahead(&mut self, background: [f32; 4], budget_ms: f64) -> Result<DrawStats> {
+        self.store.begin_stroke_frame();
         self.check_supported()?;
         let gpu = self
             .gpu
@@ -1349,6 +1352,7 @@ impl Engine {
         options: TiledOptions,
         editor_viewport: bool,
     ) -> Result<DrawStats> {
+        self.store.begin_stroke_frame();
         self.check_size(width, height)?;
         camera.check()?;
         self.check_supported()?;
@@ -1874,6 +1878,7 @@ impl Engine {
         background: [f32; 4],
         options: TiledOptions,
     ) -> Result<(&[u8], TiledStats)> {
+        self.store.begin_stroke_frame();
         self.check_size(width, height)?;
         camera.check()?;
         self.check_supported()?;
@@ -1898,6 +1903,7 @@ impl Engine {
     /// Draws tiles on the CPU for the next frame of the view last drawn (`Gpu::ahead`'s twin,
     /// at most `max_jobs` tiles): what the tests hold the GPU's idle drawing to.
     pub fn render_cpu_ahead(&mut self, background: [f32; 4], max_jobs: usize) -> Result<TiledStats> {
+        self.store.begin_stroke_frame();
         self.check_supported()?;
         let Some(mut tiles) = self.cpu_tiles.take() else {
             return Ok(TiledStats::default());
@@ -2225,6 +2231,7 @@ impl Engine {
         y0: u32,
         rows: u32,
     ) -> Result<&[u8]> {
+        self.store.begin_stroke_frame();
         self.check_size(width, height)?;
         camera.check()?;
         self.check_supported()?;
@@ -2285,6 +2292,7 @@ impl Engine {
         y0: u32,
         rows: u32,
     ) -> Result<&[u8]> {
+        self.store.begin_stroke_frame();
         self.render_band(width, height, camera, background, y0, rows)?;
         unpremultiply(&mut self.band);
         Ok(self.band.as_slice())

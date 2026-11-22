@@ -154,6 +154,7 @@ export class Engine {
   pngTake(): Uint8Array;
   pngEnd(): Uint8Array;
   pngAbort(): void;
+  strokeCacheStats(): Float64Array;
   blurCpu(
     src: Uint8Array,
     srcW: number,

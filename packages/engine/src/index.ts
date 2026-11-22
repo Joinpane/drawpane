@@ -271,6 +271,15 @@ export interface AheadStats {
   readonly glyphsOutlined: number;
 }
 
+/** Cached stroke outline footprint across all records currently held in the render graph. */
+export interface StrokeCacheStats {
+  readonly opsTotal: number;
+  readonly opsCached: number;
+  readonly inputVerbs: number;
+  readonly expandedVerbs: number;
+  readonly cachedBytes: number;
+}
+
 export interface EngineOptions {
   /** Bytes of rasterised glyph masks to keep per backend (default 4 MiB). */
   readonly glyphMaskBytes?: number;
@@ -1443,6 +1452,22 @@ export class RenderEngine {
           misses: s[1] ?? 0,
           evicted: s[2] ?? 0,
           bytes: s[3] ?? 0,
+        };
+      }),
+    );
+  }
+
+  /** Cached stroke outline statistics across all records currently in the render graph. */
+  strokeCacheStats(): Result<StrokeCacheStats> {
+    return this.#value(() =>
+      this.#call((e) => {
+        const s = e.strokeCacheStats();
+        return {
+          opsTotal: s[0] ?? 0,
+          opsCached: s[1] ?? 0,
+          inputVerbs: s[2] ?? 0,
+          expandedVerbs: s[3] ?? 0,
+          cachedBytes: s[4] ?? 0,
         };
       }),
     );

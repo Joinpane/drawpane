@@ -73,6 +73,10 @@ pub struct Limits {
     /// How far a backdrop reader may read past where it paints (device pixels), summed through
     /// readers reading readers: what a band adds above and below itself.
     pub halo: u32,
+    /// Bytes of expanded stroke outlines kept between frames (`stroke::StrokeBudget`). Past it,
+    /// the least recently drawn are dropped and expanded again when next drawn. The largest page
+    /// of the kits measured holds 26 MiB at the base level.
+    pub stroke_bytes: usize,
 }
 
 impl Default for Limits {
@@ -102,6 +106,7 @@ impl Default for Limits {
             memory_bytes: memory_budget(0),
             export_tile: 1024,
             halo: 512,
+            stroke_bytes: 48 * 1024 * 1024,
         }
     }
 }
