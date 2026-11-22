@@ -336,14 +336,20 @@ export interface BudgetExportImagesOptions {
   readonly exactDrawn?: boolean;
   /** Maximum side for any uploaded image level (defaults to `MAX_SIDE`, 8,192 px). */
   readonly maxSide?: number;
+  /**
+   * Working-memory multiplier on the largest decoded image's RGBA bytes (e.g. `2` for browser
+   * OffscreenCanvas + ImageData / Wasm upload copies alongside already resident mipmaps).
+   * Defaults to `0` (resident mipmap bytes only).
+   */
+  readonly decodeWorkingMultiplier?: number;
 }
 
 /**
  * Budgets every image in an export within `budgetBytes` (default `WORKER_LIMITS.imageBytes`,
- * 6 MiB). Each image starts at the level covering its largest drawn size; when the total
- * exceeds the budget, the largest reducible image steps down one mip level at a time so no
- * single photo starves the rest. Any image that still cannot fit at its smallest level maps to
- * null.
+ * 6 MiB). Each image starts at the level covering its largest drawn size; when resident mipmaps
+ * plus any decode working memory exceed the budget, the largest reducible image steps down one
+ * mip level at a time so no single photo starves the rest. Any image that still cannot fit at
+ * its smallest level maps to null.
  */
 export function budgetExportImages(
   candidates: readonly ExportImageCandidate[],
@@ -351,6 +357,10 @@ export function budgetExportImages(
   options: BudgetExportImagesOptions = {},
 ): Map<string, ExportImagePlan | null> {
   const maxSide = options.maxSide ?? MAX_SIDE;
+  const decodeMult = Math.max(0, options.decodeWorkingMultiplier ?? 0);
+  const decodeBytesOf = (width: number, height: number) =>
+    decodeMult > 0 ? Math.floor(width) * Math.floor(height) * 4 * decodeMult : 0;
+
   const items = candidates.map((c) => {
     let level = options.exactDrawn
       ? chooseDrawnImageSize(c.natural, c.uses, maxSide)
@@ -365,11 +375,21 @@ export function budgetExportImages(
       wanted: level,
       target: level,
       bytes: imageLevelsBytes(level.width, level.height),
+      decodeBytes: decodeBytesOf(level.width, level.height),
     };
   });
 
-  let total = items.reduce((sum, item) => sum + item.bytes, 0);
-  while (total > budgetBytes) {
+  const peakTotal = () => {
+    let resident = 0;
+    let maxDecode = 0;
+    for (const item of items) {
+      resident += item.bytes;
+      if (item.decodeBytes > maxDecode) maxDecode = item.decodeBytes;
+    }
+    return resident + maxDecode;
+  };
+
+  while (peakTotal() > budgetBytes) {
     let pick = -1;
     let pickBytes = 0;
     let pickNext: Size | null = null;
@@ -384,17 +404,19 @@ export function budgetExportImages(
     }
     if (pick < 0 || !pickNext) break;
     const chosen = items[pick] as (typeof items)[number];
-    const nextBytes = imageLevelsBytes(pickNext.width, pickNext.height);
-    total = total - chosen.bytes + nextBytes;
     chosen.target = pickNext;
-    chosen.bytes = nextBytes;
+    chosen.bytes = imageLevelsBytes(pickNext.width, pickNext.height);
+    chosen.decodeBytes = decodeBytesOf(pickNext.width, pickNext.height);
   }
 
   const plan = new Map<string, ExportImagePlan | null>();
   let used = 0;
+  let maxDecode = 0;
   for (const item of items) {
-    if (used + item.bytes <= budgetBytes) {
+    const nextMaxDecode = Math.max(maxDecode, item.decodeBytes);
+    if (used + item.bytes + nextMaxDecode <= budgetBytes) {
       used += item.bytes;
+      maxDecode = nextMaxDecode;
       plan.set(item.ref, {
         target: item.target,
         reduced: item.target.width < item.wanted.width || item.target.height < item.wanted.height,

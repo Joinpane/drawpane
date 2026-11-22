@@ -20,7 +20,11 @@ import {
   MAX_EXPORT_SIDE,
   snapToPixels,
 } from "@drawpane/editor";
-import { formatReducedImagesNote, renderEngineRasterExportWithMeta } from "./engine-snapshot";
+import {
+  formatReducedImagesNote,
+  isAbortError,
+  renderEngineRasterExportWithMeta,
+} from "./engine-snapshot";
 import { embeddedImages } from "./export-assets";
 import { imagesFor } from "./media";
 import { type PdfPage, pdfPageOf, pdfPages, renderPdf } from "./pdf";
@@ -108,27 +112,6 @@ function tryCanvasRasterExport(
   });
 }
 
-function canFallbackEngineError(
-  editor: Editor,
-  ids: readonly string[],
-  scale: number,
-  error: unknown,
-): boolean {
-  if (!(error instanceof ExportError)) return false;
-  if (error.reason === "unsupported" || error.reason === "limit") return true;
-  if (error.reason === "size") {
-    const bounds = exportBounds(editor.scene, ids);
-    if (!bounds) return false;
-    const rect = snapToPixels(bounds, scale);
-    const width = Math.max(1, Math.round(rect.width * scale));
-    const height = Math.max(1, Math.round(rect.height * scale));
-    return (
-      width <= MAX_EXPORT_SIDE && height <= MAX_EXPORT_SIDE && width * height <= MAX_EXPORT_PIXELS
-    );
-  }
-  return false;
-}
-
 /**
  * Renders layers in the given format, returning the file blob plus image-reduction metadata
  * when rendered through the engine snapshot service.
@@ -201,14 +184,17 @@ export async function renderExportWithMeta(
       ...(signal ? { signal } : {}),
     });
   } catch (error) {
-    if (canFallbackEngineError(editor, ids, scale, error)) {
-      const fallback = tryCanvasRasterExport(editor, ids, {
-        format,
-        scale,
-        ...(background !== undefined ? { background } : {}),
-      });
-      if (fallback) {
+    if (signal?.aborted || isAbortError(error)) throw error;
+    const fallback = tryCanvasRasterExport(editor, ids, {
+      format,
+      scale,
+      ...(background !== undefined ? { background } : {}),
+    });
+    if (fallback) {
+      try {
         return { blob: await fallback, reducedImages: 0, omittedImages: 0 };
+      } catch {
+        // Keep the original engine error only when the canvas also fails.
       }
     }
     throw error;

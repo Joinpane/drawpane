@@ -950,4 +950,184 @@ test.describe
         )
         .toBeGreaterThan(0);
     });
+
+    test("falls back to canvas across all snapshot flows when the snapshot Worker fails to load", async () => {
+      test.setTimeout(120_000);
+      await page.route(/engine-snapshot\.worker/, (route) => route.abort("failed"));
+      try {
+        await page.evaluate(() => {
+          localStorage.setItem("drawpane:renderer", "engine");
+          localStorage.setItem("drawpane:engine-software", "allow");
+          localStorage.setItem("drawpane:debug", "1");
+        });
+        await page.goto("/");
+        await page.getByRole("button", { name: "New file" }).first().click();
+        await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible({
+          timeout: 15_000,
+        });
+        await expect(
+          page.locator(
+            '[data-renderer="webgpu"], [data-renderer="webgl2"], [data-renderer="cpu-worker"]',
+          ),
+        ).toBeVisible({ timeout: 60_000 });
+
+        const { cardId } = await page.evaluate(() => {
+          const e = (window as unknown as W).drawpane;
+          const p = e.s.pageId;
+          e.commit([{ op: "set", id: p, prop: "prototypeDevice", value: "iphone-16" }]);
+          const cardId = e.createLayer("frame", { x: 0, y: 0, width: 393, height: 852 }, p, {
+            name: "Home",
+            fills: [{ type: "solid", color: "#e03131" }],
+          }) as string;
+          const sheetId = e.createLayer("frame", { x: 500, y: 0, width: 393, height: 260 }, p, {
+            name: "Sheet",
+            fills: [{ type: "solid", color: "#f59f00" }],
+          }) as string;
+          const openBtn = e.createLayer(
+            "rect",
+            { x: 40, y: 660, width: 313, height: 140 },
+            cardId,
+            {
+              name: "Open sheet",
+              fills: [{ type: "solid", color: "#ffffff" }],
+            },
+          ) as string;
+          e.commit([
+            {
+              op: "set",
+              id: openBtn,
+              prop: "reactions",
+              value: [
+                {
+                  id: "r-ov",
+                  trigger: { type: "tap" },
+                  action: {
+                    type: "overlay",
+                    to: sheetId,
+                    position: "bottom",
+                    closeOnOutside: true,
+                    dim: 0.4,
+                  },
+                  transition: {
+                    type: "instant",
+                    direction: "up",
+                    duration: 0,
+                    easing: { type: "linear" },
+                  },
+                },
+              ],
+            },
+            {
+              op: "set",
+              id: p,
+              prop: "flows",
+              value: [{ id: "flow1", name: "Main", start: cardId, description: "" }],
+            },
+          ]);
+          const comp = e.createLayer("frame", { x: 0, y: 920, width: 120, height: 60 }, p, {
+            name: "Fallback comp",
+            fills: [{ type: "solid", color: "#1971c2" }],
+          }) as string;
+          e.select([comp]);
+          e.createComponent();
+          e.select([cardId]);
+          return { cardId };
+        });
+
+        // 1. Export preview falls back to canvas.
+        await page.locator(".inspector-export").evaluate((el) => el.scrollIntoView());
+        const previewImg = page.locator(".export-section__preview img");
+        await expect(previewImg).toBeVisible({ timeout: 15_000 });
+        await expect
+          .poll(() =>
+            previewImg.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth),
+          )
+          .toBeGreaterThan(0);
+
+        // 2. Raster export succeeds via canvas fallback with expected dimensions and red pixels.
+        const exported = await page.evaluate(
+          (id) =>
+            (window as unknown as W).drawpaneHeadless.exportLayer([id], {
+              format: "png",
+              scale: 1,
+            }),
+          cardId,
+        );
+        expect(pngSize(Buffer.from(exported.data, "base64"))).toEqual({ width: 393, height: 852 });
+        const decoded = await decodeRgba(page, exported.data, "image/png");
+        const raw = Buffer.from(decoded.rgba, "base64");
+        const mid = (100 * decoded.width + 160) * 4;
+        expect(raw[mid] ?? 0).toBeGreaterThan(180);
+        expect(raw[mid + 2] ?? 255).toBeLessThan(100);
+
+        // 3. Dashboard thumbnail succeeds via canvas fallback under 64 KiB.
+        const thumb = await page.evaluate(() =>
+          (window as unknown as W).drawpaneHeadless.thumbnail(),
+        );
+        expect(thumb?.type).toBe("image/webp");
+        expect(thumb?.bytes ?? 0).toBeGreaterThan(100);
+        expect(thumb?.bytes ?? 0).toBeLessThanOrEqual(64 * 1024);
+
+        // 4. Assets component preview falls back to canvas.
+        await page.getByRole("radio", { name: "Assets" }).click();
+        const assetImg = page.locator(".assets__preview img").first();
+        await expect(assetImg).toBeVisible({ timeout: 15_000 });
+        await expect
+          .poll(() =>
+            assetImg.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth),
+          )
+          .toBeGreaterThan(0);
+
+        // 5. Prototype screen thumbnails and overlays fall back to canvas.
+        await page.evaluate(() => (window as unknown as W).drawpane.select([]));
+        await page.getByRole("button", { name: "Play prototype" }).click();
+        await expect(page).toHaveURL(/\/present/);
+        const device = page.locator(".stage__device");
+        await expect
+          .poll(() => device.getAttribute("data-renderer"), { timeout: 45_000 })
+          .not.toBe("starting");
+        const screenThumb = page.locator(".present__thumb img").first();
+        await expect(screenThumb).toBeVisible({ timeout: 15_000 });
+        await expect
+          .poll(() =>
+            screenThumb.evaluate((img: HTMLImageElement) => img.complete && img.naturalWidth),
+          )
+          .toBeGreaterThan(0);
+
+        const viewport = page.locator(".stage__viewport");
+        const box = (await viewport.boundingBox()) as {
+          x: number;
+          y: number;
+          width: number;
+          height: number;
+        };
+        await page.mouse.click(box.x + box.width * 0.5, box.y + box.height * 0.85);
+        const overlay = viewport.locator(".stage__overlay");
+        await expect(overlay).toHaveCount(1);
+        await expect(overlay).toHaveAttribute("data-painted", "true", { timeout: 15_000 });
+        await expect
+          .poll(() =>
+            page.evaluate(() => {
+              const c = document.querySelector(
+                ".stage__overlay canvas",
+              ) as HTMLCanvasElement | null;
+              if (!c || c.width === 0 || c.height === 0) return 0;
+              const ctx = c.getContext("2d");
+              if (!ctx) return 0;
+              const px = ctx.getImageData(
+                Math.floor(c.width / 2),
+                Math.floor(c.height / 2),
+                1,
+                1,
+              ).data;
+              return (px[0] ?? 0) - (px[2] ?? 0);
+            }),
+          )
+          .toBeGreaterThan(120);
+        await page.mouse.click(box.x + box.width * 0.5, box.y + box.height * 0.15);
+        await expect(overlay).toHaveCount(0, { timeout: 5000 });
+      } finally {
+        await page.unroute(/engine-snapshot\.worker/);
+      }
+    });
   });

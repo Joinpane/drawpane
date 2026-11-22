@@ -70,13 +70,15 @@ export type SnapshotWorkerReply =
       readonly bytes: ArrayBuffer;
       readonly reducedImages: number;
       readonly omittedImages: number;
+      readonly wasmBytes?: number;
     }
-  | { readonly type: "cancelled"; readonly jobId: number }
+  | { readonly type: "cancelled"; readonly jobId: number; readonly wasmBytes?: number }
   | {
       readonly type: "error";
       readonly jobId?: number;
       readonly code: ErrorCode | null;
       readonly message: string;
+      readonly wasmBytes?: number;
     };
 
 const scope = self as unknown as {
@@ -91,12 +93,22 @@ const post = (message: SnapshotWorkerReply, transfer: Transferable[] = []) =>
 const YIELD_INTERVAL_MS = 16;
 const yieldTick = () => new Promise<void>((resolve) => setTimeout(resolve, 0));
 const DECODER_BUDGET = 16 << 20;
+const DECODE_CONCURRENCY = 4;
+/** Cap concurrent decode working set so large photos decode one at a time while small icons batch. */
+const DECODE_BATCH_BYTES = 16 << 20;
 
 let engineModule: EngineModule | null = null;
 let wasmDecoderPromise: Promise<ReturnType<typeof imageDecoder> | null> | null = null;
 let disposed = false;
 let lastFinishedJobId = 0;
 const cancelled = new Set<number>();
+
+const currentWasmBytes = () => engineModule?.memoryBytes() ?? 0;
+
+function decodeFootprint(img: SnapshotImageTransfer): number {
+  if (img.kind === "rgba") return img.width * img.height * 4;
+  return Math.max(img.width * img.height, img.naturalWidth * img.naturalHeight) * 4;
+}
 
 function pruneCancelled(): void {
   for (const id of cancelled) {
@@ -132,6 +144,7 @@ async function decodeTargetRgba(
 ): Promise<{ width: number; height: number; rgba: Uint8Array } | null> {
   if (typeof createImageBitmap === "function" && typeof OffscreenCanvas !== "undefined") {
     let bitmap: ImageBitmap | null = null;
+    let surface: OffscreenCanvas | null = null;
     try {
       bitmap = await createImageBitmap(blob, {
         resizeWidth: target.width,
@@ -139,14 +152,23 @@ async function decodeTargetRgba(
         resizeQuality: "high",
       });
       if (isCancelled()) return null;
-      const surface = new OffscreenCanvas(bitmap.width, bitmap.height);
+      const bw = bitmap.width;
+      const bh = bitmap.height;
+      surface = new OffscreenCanvas(bw, bh);
       const ctx = surface.getContext("2d", { willReadFrequently: true });
       if (ctx) {
         ctx.drawImage(bitmap, 0, 0);
-        const data = ctx.getImageData(0, 0, bitmap.width, bitmap.height).data;
+        // Close the bitmap before reading pixels so bitmap, canvas, and ImageData never coexist.
+        bitmap.close();
+        bitmap = null;
+        const data = ctx.getImageData(0, 0, bw, bh).data;
+        // Shrink the canvas immediately so the browser frees its backing store before upload.
+        surface.width = 0;
+        surface.height = 0;
+        surface = null;
         return {
-          width: bitmap.width,
-          height: bitmap.height,
+          width: bw,
+          height: bh,
           rgba: new Uint8Array(data.buffer, data.byteOffset, data.byteLength),
         };
       }
@@ -154,6 +176,10 @@ async function decodeTargetRgba(
       // Fall through to streaming Wasm decoder below.
     } finally {
       bitmap?.close();
+      if (surface) {
+        surface.width = 0;
+        surface.height = 0;
+      }
     }
   }
   const decoder = await getWasmDecoder();
@@ -227,7 +253,7 @@ async function runJob(job: Extract<SnapshotWorkerRequest, { type: "render" }>): 
   if (isCancelled()) {
     lastFinishedJobId = Math.max(lastFinishedJobId, job.jobId);
     pruneCancelled();
-    post({ type: "cancelled", jobId: job.jobId });
+    post({ type: "cancelled", jobId: job.jobId, wasmBytes: currentWasmBytes() });
     return;
   }
   if (!engineModule) {
@@ -236,6 +262,7 @@ async function runJob(job: Extract<SnapshotWorkerRequest, { type: "render" }>): 
       jobId: job.jobId,
       code: ErrorCode.State,
       message: "Snapshot worker is not initialized",
+      wasmBytes: 0,
     });
     return;
   }
@@ -253,20 +280,37 @@ async function runJob(job: Extract<SnapshotWorkerRequest, { type: "render" }>): 
         jobId: job.jobId,
         code: engine.failure.code,
         message: engine.failure.message,
+        wasmBytes: currentWasmBytes(),
       });
       return;
     }
 
-    // Decode blob images in bounded parallel batches (4 at a time), then upload in deterministic
-    // handle order so large photo/kit pages stay fast without spiking memory.
-    const DECODE_CONCURRENCY = 4;
-    for (let i = 0; i < job.images.length; i += DECODE_CONCURRENCY) {
+    // Decode blob images in byte-bounded batches (up to 4 small images in parallel, or 1 large
+    // photo at a time) so high-res multi-photo exports never hold four simultaneous decodes.
+    let cursor = 0;
+    while (cursor < job.images.length) {
       if (isCancelled()) {
-        post({ type: "cancelled", jobId: job.jobId });
+        post({ type: "cancelled", jobId: job.jobId, wasmBytes: currentWasmBytes() });
         return;
       }
-      const batch = job.images.slice(i, i + DECODE_CONCURRENCY);
-      const prepared = await Promise.all(
+      const batch: SnapshotImageTransfer[] = [];
+      let batchBytes = 0;
+      while (cursor < job.images.length && batch.length < DECODE_CONCURRENCY) {
+        const nextImg = job.images[cursor] as SnapshotImageTransfer;
+        const cost = decodeFootprint(nextImg);
+        if (batch.length > 0 && batchBytes + cost > DECODE_BATCH_BYTES) break;
+        batch.push(nextImg);
+        batchBytes += cost;
+        cursor++;
+      }
+      const prepared: Array<
+        | { readonly kind: "rgba"; readonly img: Extract<SnapshotImageTransfer, { kind: "rgba" }> }
+        | {
+            readonly kind: "blob";
+            readonly img: Extract<SnapshotImageTransfer, { kind: "blob" }>;
+            decoded: { width: number; height: number; rgba: Uint8Array } | null;
+          }
+      > = await Promise.all(
         batch.map(async (img) => {
           if (img.kind === "rgba") return { kind: "rgba" as const, img };
           const decoded = await decodeTargetRgba(
@@ -279,12 +323,12 @@ async function runJob(job: Extract<SnapshotWorkerRequest, { type: "render" }>): 
         }),
       );
       if (isCancelled()) {
-        post({ type: "cancelled", jobId: job.jobId });
+        post({ type: "cancelled", jobId: job.jobId, wasmBytes: currentWasmBytes() });
         return;
       }
       for (const item of prepared) {
         if (isCancelled()) {
-          post({ type: "cancelled", jobId: job.jobId });
+          post({ type: "cancelled", jobId: job.jobId, wasmBytes: currentWasmBytes() });
           return;
         }
         if (item.kind === "rgba") {
@@ -301,19 +345,17 @@ async function runJob(job: Extract<SnapshotWorkerRequest, { type: "render" }>): 
               jobId: job.jobId,
               code: uploaded.code,
               message: uploaded.message,
+              wasmBytes: currentWasmBytes(),
             });
             return;
           }
         } else if (item.decoded) {
-          const uploaded = engine.putImage(
-            item.img.handle,
-            item.decoded.width,
-            item.decoded.height,
-            item.decoded.rgba,
-            false,
-          );
+          const { width: dw, height: dh, rgba } = item.decoded;
+          // Release reference immediately after passing to putImage so GC can reclaim it.
+          item.decoded = null;
+          const uploaded = engine.putImage(item.img.handle, dw, dh, rgba, false);
           if (uploaded.ok) {
-            if (item.decoded.width < item.img.width || item.decoded.height < item.img.height) {
+            if (dw < item.img.width || dh < item.img.height) {
               reducedImages++;
             }
             continue;
@@ -324,13 +366,20 @@ async function runJob(job: Extract<SnapshotWorkerRequest, { type: "render" }>): 
               jobId: job.jobId,
               code: uploaded.code,
               message: uploaded.message,
+              wasmBytes: currentWasmBytes(),
             });
             return;
           }
           if (uploaded.code === ErrorCode.Limit) {
             const res = await decodeAndUploadBlob(engine, item.img, isCancelled);
             if (!res.ok) {
-              post({ type: "error", jobId: job.jobId, code: res.code, message: res.message });
+              post({
+                type: "error",
+                jobId: job.jobId,
+                code: res.code,
+                message: res.message,
+                wasmBytes: currentWasmBytes(),
+              });
               return;
             }
             if (res.reduced) reducedImages++;
@@ -341,7 +390,13 @@ async function runJob(job: Extract<SnapshotWorkerRequest, { type: "render" }>): 
         } else {
           const res = await decodeAndUploadBlob(engine, item.img, isCancelled);
           if (!res.ok) {
-            post({ type: "error", jobId: job.jobId, code: res.code, message: res.message });
+            post({
+              type: "error",
+              jobId: job.jobId,
+              code: res.code,
+              message: res.message,
+              wasmBytes: currentWasmBytes(),
+            });
             return;
           }
           if (res.reduced) reducedImages++;
@@ -351,20 +406,32 @@ async function runJob(job: Extract<SnapshotWorkerRequest, { type: "render" }>): 
     }
 
     if (isCancelled()) {
-      post({ type: "cancelled", jobId: job.jobId });
+      post({ type: "cancelled", jobId: job.jobId, wasmBytes: currentWasmBytes() });
       return;
     }
 
     const applied = engine.apply(new Uint8Array(job.list));
     if (!applied.ok) {
-      post({ type: "error", jobId: job.jobId, code: applied.code, message: applied.message });
+      post({
+        type: "error",
+        jobId: job.jobId,
+        code: applied.code,
+        message: applied.message,
+        wasmBytes: currentWasmBytes(),
+      });
       return;
     }
 
     if (job.format === "png") {
       const stream = engine.renderPngStream(job.width, job.height, job.camera, job.background);
       if (!stream.ok) {
-        post({ type: "error", jobId: job.jobId, code: stream.code, message: stream.message });
+        post({
+          type: "error",
+          jobId: job.jobId,
+          code: stream.code,
+          message: stream.message,
+          wasmBytes: currentWasmBytes(),
+        });
         return;
       }
       const reader = stream.value.getReader();
@@ -375,7 +442,7 @@ async function runJob(job: Extract<SnapshotWorkerRequest, { type: "render" }>): 
         for (;;) {
           if (isCancelled()) {
             await reader.cancel().catch(() => {});
-            post({ type: "cancelled", jobId: job.jobId });
+            post({ type: "cancelled", jobId: job.jobId, wasmBytes: currentWasmBytes() });
             return;
           }
           const next = await reader.read();
@@ -391,7 +458,7 @@ async function runJob(job: Extract<SnapshotWorkerRequest, { type: "render" }>): 
         reader.releaseLock();
       }
       if (isCancelled()) {
-        post({ type: "cancelled", jobId: job.jobId });
+        post({ type: "cancelled", jobId: job.jobId, wasmBytes: currentWasmBytes() });
         return;
       }
       const combined = new Uint8Array(totalBytes);
@@ -408,6 +475,7 @@ async function runJob(job: Extract<SnapshotWorkerRequest, { type: "render" }>): 
           bytes: combined.buffer,
           reducedImages,
           omittedImages,
+          wasmBytes: currentWasmBytes(),
         },
         [combined.buffer],
       );
@@ -421,118 +489,132 @@ async function runJob(job: Extract<SnapshotWorkerRequest, { type: "render" }>): 
         jobId: job.jobId,
         code: ErrorCode.NotAvailable,
         message: "This browser can't encode JPEG or WebP exports. Try PNG instead.",
+        wasmBytes: currentWasmBytes(),
       });
       return;
     }
     const canvas = new OffscreenCanvas(job.width, job.height);
-    const ctx = canvas.getContext("2d");
-    if (!ctx) {
-      post({
-        type: "error",
-        jobId: job.jobId,
-        code: ErrorCode.NotAvailable,
-        message: "This browser can't encode JPEG or WebP exports. Try PNG instead.",
-      });
-      return;
-    }
-    const rowsPerBand = engine.bandRows(job.width);
-    let lastYield = performance.now();
-    for (let y0 = 0; y0 < job.height; y0 += rowsPerBand) {
-      if (isCancelled()) {
-        post({ type: "cancelled", jobId: job.jobId });
-        return;
-      }
-      const bandHeight = Math.min(rowsPerBand, job.height - y0);
-      const band = engine.renderBand(
-        job.width,
-        job.height,
-        job.camera,
-        job.background,
-        y0,
-        bandHeight,
-      );
-      if (!band.ok) {
+    try {
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
         post({
           type: "error",
           jobId: job.jobId,
-          code: band.code,
-          message: band.message,
+          code: ErrorCode.NotAvailable,
+          message: "This browser can't encode JPEG or WebP exports. Try PNG instead.",
+          wasmBytes: currentWasmBytes(),
         });
         return;
       }
-      ctx.putImageData(
-        new ImageData(new Uint8ClampedArray(band.value), job.width, bandHeight),
-        0,
-        y0,
+      const rowsPerBand = engine.bandRows(job.width);
+      let lastYield = performance.now();
+      for (let y0 = 0; y0 < job.height; y0 += rowsPerBand) {
+        if (isCancelled()) {
+          post({ type: "cancelled", jobId: job.jobId, wasmBytes: currentWasmBytes() });
+          return;
+        }
+        const bandHeight = Math.min(rowsPerBand, job.height - y0);
+        const band = engine.renderBand(
+          job.width,
+          job.height,
+          job.camera,
+          job.background,
+          y0,
+          bandHeight,
+        );
+        if (!band.ok) {
+          post({
+            type: "error",
+            jobId: job.jobId,
+            code: band.code,
+            message: band.message,
+            wasmBytes: currentWasmBytes(),
+          });
+          return;
+        }
+        ctx.putImageData(
+          new ImageData(new Uint8ClampedArray(band.value), job.width, bandHeight),
+          0,
+          y0,
+        );
+        if (performance.now() - lastYield >= YIELD_INTERVAL_MS) {
+          await yieldTick();
+          lastYield = performance.now();
+        }
+      }
+      if (isCancelled()) {
+        post({ type: "cancelled", jobId: job.jobId, wasmBytes: currentWasmBytes() });
+        return;
+      }
+      const type = `image/${job.format}`;
+      let blob = await canvas.convertToBlob({ type, quality: job.quality });
+      if (isCancelled()) {
+        post({ type: "cancelled", jobId: job.jobId, wasmBytes: currentWasmBytes() });
+        return;
+      }
+      // When a byte budget is set (e.g. 64 KiB thumbnail keepalive), re-encode the already-rendered
+      // pixels at stepped WebP qualities and then downscaled dimensions without re-rendering.
+      const maxBytes = job.maxBytes;
+      if (maxBytes !== undefined && maxBytes > 0 && job.format === "webp" && blob.size > maxBytes) {
+        for (const q of [0.72, 0.58]) {
+          if (q >= job.quality) continue;
+          if (isCancelled()) {
+            post({ type: "cancelled", jobId: job.jobId, wasmBytes: currentWasmBytes() });
+            return;
+          }
+          blob = await canvas.convertToBlob({ type, quality: q });
+          if (blob.size <= maxBytes) break;
+        }
+        let scale = 0.5;
+        while (blob.size > maxBytes && Math.max(job.width, job.height) * scale >= 120) {
+          if (isCancelled()) {
+            post({ type: "cancelled", jobId: job.jobId, wasmBytes: currentWasmBytes() });
+            return;
+          }
+          const sw = Math.max(1, Math.round(job.width * scale));
+          const sh = Math.max(1, Math.round(job.height * scale));
+          const small = new OffscreenCanvas(sw, sh);
+          try {
+            const sctx = small.getContext("2d");
+            if (!sctx) break;
+            sctx.imageSmoothingQuality = "high";
+            sctx.drawImage(canvas, 0, 0, sw, sh);
+            blob = await small.convertToBlob({ type, quality: 0.72 });
+          } finally {
+            small.width = 0;
+            small.height = 0;
+          }
+          scale *= 0.5;
+        }
+      }
+      if (isCancelled()) {
+        post({ type: "cancelled", jobId: job.jobId, wasmBytes: currentWasmBytes() });
+        return;
+      }
+      const bytes = await blob.arrayBuffer();
+      post(
+        {
+          type: "done",
+          jobId: job.jobId,
+          mime: blob.type || type,
+          bytes,
+          reducedImages,
+          omittedImages,
+          wasmBytes: currentWasmBytes(),
+        },
+        [bytes],
       );
-      if (performance.now() - lastYield >= YIELD_INTERVAL_MS) {
-        await yieldTick();
-        lastYield = performance.now();
-      }
+    } finally {
+      canvas.width = 0;
+      canvas.height = 0;
     }
-    if (isCancelled()) {
-      post({ type: "cancelled", jobId: job.jobId });
-      return;
-    }
-    const type = `image/${job.format}`;
-    let blob = await canvas.convertToBlob({ type, quality: job.quality });
-    if (isCancelled()) {
-      post({ type: "cancelled", jobId: job.jobId });
-      return;
-    }
-    // When a byte budget is set (e.g. 64 KiB thumbnail keepalive), re-encode the already-rendered
-    // pixels at stepped WebP qualities and then downscaled dimensions without re-rendering.
-    const maxBytes = job.maxBytes;
-    if (maxBytes !== undefined && maxBytes > 0 && job.format === "webp" && blob.size > maxBytes) {
-      for (const q of [0.72, 0.58]) {
-        if (q >= job.quality) continue;
-        if (isCancelled()) {
-          post({ type: "cancelled", jobId: job.jobId });
-          return;
-        }
-        blob = await canvas.convertToBlob({ type, quality: q });
-        if (blob.size <= maxBytes) break;
-      }
-      let scale = 0.5;
-      while (blob.size > maxBytes && Math.max(job.width, job.height) * scale >= 120) {
-        if (isCancelled()) {
-          post({ type: "cancelled", jobId: job.jobId });
-          return;
-        }
-        const sw = Math.max(1, Math.round(job.width * scale));
-        const sh = Math.max(1, Math.round(job.height * scale));
-        const small = new OffscreenCanvas(sw, sh);
-        const sctx = small.getContext("2d");
-        if (!sctx) break;
-        sctx.imageSmoothingQuality = "high";
-        sctx.drawImage(canvas, 0, 0, sw, sh);
-        blob = await small.convertToBlob({ type, quality: 0.72 });
-        scale *= 0.5;
-      }
-    }
-    if (isCancelled()) {
-      post({ type: "cancelled", jobId: job.jobId });
-      return;
-    }
-    const bytes = await blob.arrayBuffer();
-    post(
-      {
-        type: "done",
-        jobId: job.jobId,
-        mime: blob.type || type,
-        bytes,
-        reducedImages,
-        omittedImages,
-      },
-      [bytes],
-    );
   } catch (err) {
     const code =
       typeof err === "object" && err !== null && "code" in err && typeof err.code === "number"
         ? (err.code as ErrorCode)
         : null;
     const message = err instanceof Error ? err.message : String(err);
-    post({ type: "error", jobId: job.jobId, code, message });
+    post({ type: "error", jobId: job.jobId, code, message, wasmBytes: currentWasmBytes() });
   } finally {
     lastFinishedJobId = Math.max(lastFinishedJobId, job.jobId);
     pruneCancelled();

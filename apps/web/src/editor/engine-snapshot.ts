@@ -58,7 +58,13 @@ const FONT_TIMEOUT_MS = 15_000;
 const IMAGE_TIMEOUT_MS = 10_000;
 const WORKER_START_TIMEOUT_MS = 30_000;
 const DEFAULT_JOB_TIMEOUT_MS = 60_000;
+const DEFAULT_IDLE_TIMEOUT_MS = 10_000;
+const DEFAULT_PREEMPT_TIMEOUT_MS = 300;
+/** Recycle the snapshot Worker immediately after any job that grew Wasm linear memory past 64 MiB. */
+const DEFAULT_RECYCLE_WASM_BYTES = 64 << 20;
 const MAX_BROWSER_SNAPSHOT_IMAGE_BUDGET = 192 << 20;
+/** Transient decode + Wasm upload working memory counted inside the snapshot image budget. */
+const SNAPSHOT_DECODE_WORKING_MULTIPLIER = 2;
 
 /** Device-scaled image memory budget for browser snapshot jobs (128 MiB mobile, 192 MiB desktop). */
 export function snapshotImageBudget(): number {
@@ -138,12 +144,13 @@ export interface SnapshotJobPayload {
 }
 
 interface QueuedJob {
-  readonly jobId: number;
+  jobId: number;
   readonly priority: SnapshotPriority;
   readonly seq: number;
   readonly payload: SnapshotJobPayload;
   readonly signal?: AbortSignal;
-  readonly onAbort?: () => void;
+  onAbort?: () => void;
+  preempted: boolean;
   readonly resolve: (result: SnapshotResult) => void;
   readonly reject: (error: Error) => void;
 }
@@ -152,8 +159,9 @@ function abortError(): DOMException {
   return new DOMException("Snapshot cancelled", "AbortError");
 }
 
-function isAbortError(error: unknown): boolean {
-  return error instanceof DOMException && error.name === "AbortError";
+/** True when `error` represents an explicit AbortSignal cancellation. */
+export function isAbortError(error: unknown): boolean {
+  return (error instanceof DOMException || error instanceof Error) && error.name === "AbortError";
 }
 
 /** Portable timeout + caller-signal combiner (avoids Safari < 17.4 `AbortSignal.any`). */
@@ -246,20 +254,33 @@ function createDefaultWorker(): SnapshotWorkerPort {
 export class EngineSnapshotService {
   readonly #makeWorker: () => SnapshotWorkerPort;
   readonly #jobTimeoutMs: number;
+  readonly #idleTimeoutMs: number;
+  readonly #preemptTimeoutMs: number;
+  readonly #recycleWasmBytes: number;
   #worker: SnapshotWorkerPort | null = null;
   #starting: Promise<SnapshotWorkerPort> | null = null;
   #queue: QueuedJob[] = [];
   #active: QueuedJob | null = null;
   #watchdog: ReturnType<typeof setTimeout> | null = null;
+  #preemptTimer: ReturnType<typeof setTimeout> | null = null;
+  #idleTimer: ReturnType<typeof setTimeout> | null = null;
   #nextJobId = 1;
   #seq = 0;
 
   constructor(
     makeWorker: () => SnapshotWorkerPort = createDefaultWorker,
-    options: { readonly jobTimeoutMs?: number } = {},
+    options: {
+      readonly jobTimeoutMs?: number;
+      readonly idleTimeoutMs?: number;
+      readonly preemptTimeoutMs?: number;
+      readonly recycleWasmBytes?: number;
+    } = {},
   ) {
     this.#makeWorker = makeWorker;
     this.#jobTimeoutMs = options.jobTimeoutMs ?? DEFAULT_JOB_TIMEOUT_MS;
+    this.#idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
+    this.#preemptTimeoutMs = options.preemptTimeoutMs ?? DEFAULT_PREEMPT_TIMEOUT_MS;
+    this.#recycleWasmBytes = options.recycleWasmBytes ?? DEFAULT_RECYCLE_WASM_BYTES;
   }
 
   enqueueWithMeta(
@@ -277,15 +298,18 @@ export class EngineSnapshotService {
         seq,
         payload,
         ...(signal ? { signal } : {}),
+        preempted: false,
         resolve,
         reject,
       };
       if (signal) {
         const onAbort = () => this.#cancel(job);
-        (job as { onAbort?: () => void }).onAbort = onAbort;
+        job.onAbort = onAbort;
         signal.addEventListener("abort", onAbort, { once: true });
       }
+      this.#clearIdleTimer();
       this.#insert(job);
+      this.#maybePreempt(priority);
       void this.#pump();
     });
   }
@@ -301,6 +325,8 @@ export class EngineSnapshotService {
   /** Terminates the Worker and rejects any pending jobs (for cleanup and tests). */
   dispose(): void {
     this.#clearWatchdog();
+    this.#clearPreemptTimer();
+    this.#clearIdleTimer();
     const err = abortError();
     if (this.#active) {
       this.#detachSignal(this.#active);
@@ -322,17 +348,88 @@ export class EngineSnapshotService {
     }
   }
 
+  #clearPreemptTimer(): void {
+    if (this.#preemptTimer !== null) {
+      clearTimeout(this.#preemptTimer);
+      this.#preemptTimer = null;
+    }
+  }
+
+  #clearIdleTimer(): void {
+    if (this.#idleTimer !== null) {
+      clearTimeout(this.#idleTimer);
+      this.#idleTimer = null;
+    }
+  }
+
+  #scheduleIdleRecycle(): void {
+    this.#clearIdleTimer();
+    if (this.#idleTimeoutMs <= 0 || !this.#worker || this.#active || this.#queue.length > 0) {
+      return;
+    }
+    this.#idleTimer = setTimeout(() => {
+      this.#idleTimer = null;
+      if (!this.#active && this.#queue.length === 0) {
+        this.#killWorker();
+      }
+    }, this.#idleTimeoutMs);
+  }
+
   #insert(job: QueuedJob): void {
     const rank = PRIORITY_RANK[job.priority];
     let at = this.#queue.length;
     for (let i = 0; i < this.#queue.length; i++) {
       const other = this.#queue[i] as QueuedJob;
-      if (PRIORITY_RANK[other.priority] > rank) {
+      const otherRank = PRIORITY_RANK[other.priority];
+      if (otherRank > rank || (otherRank === rank && other.seq > job.seq)) {
         at = i;
         break;
       }
     }
     this.#queue.splice(at, 0, job);
+  }
+
+  #requeuePreempted(job: QueuedJob): void {
+    job.preempted = false;
+    job.jobId = this.#nextJobId++;
+    this.#insert(job);
+  }
+
+  #maybePreempt(incomingPriority: SnapshotPriority): void {
+    const active = this.#active;
+    if (!active || active.preempted || active.signal?.aborted) return;
+    // Preempt a running background ("low") job so user-triggered exports and previews never stall
+    // behind a slow page thumbnail.
+    if (active.priority !== "low") return;
+    if (PRIORITY_RANK[incomingPriority] >= PRIORITY_RANK[active.priority]) return;
+    active.preempted = true;
+    try {
+      this.#worker?.postMessage({ type: "cancel", jobId: active.jobId });
+    } catch {
+      // Worker will be recycled on error or timeout.
+    }
+    this.#clearPreemptTimer();
+    if (this.#preemptTimeoutMs > 0) {
+      this.#preemptTimer = setTimeout(() => {
+        if (this.#active !== active) return;
+        this.#preemptTimer = null;
+        this.#clearWatchdog();
+        this.#active = null;
+        this.#killWorker();
+        if (active.preempted && !active.signal?.aborted) {
+          this.#requeuePreempted(active);
+        } else {
+          this.#detachSignal(active);
+        }
+        void this.#pump();
+      }, this.#preemptTimeoutMs);
+    }
+  }
+
+  #shouldRecycleWorker(wasmBytes: number | undefined): boolean {
+    return (
+      wasmBytes !== undefined && this.#recycleWasmBytes > 0 && wasmBytes >= this.#recycleWasmBytes
+    );
   }
 
   #detachSignal(job: QueuedJob): void {
@@ -343,6 +440,7 @@ export class EngineSnapshotService {
 
   #cancel(job: QueuedJob): void {
     this.#detachSignal(job);
+    job.preempted = false;
     const idx = this.#queue.indexOf(job);
     if (idx !== -1) {
       this.#queue.splice(idx, 1);
@@ -350,12 +448,18 @@ export class EngineSnapshotService {
       return;
     }
     if (this.#active === job) {
-      this.#worker?.postMessage({ type: "cancel", jobId: job.jobId });
+      try {
+        this.#worker?.postMessage({ type: "cancel", jobId: job.jobId });
+      } catch {
+        // Worker may already be dead.
+      }
       job.reject(abortError());
     }
   }
 
   #killWorker(): void {
+    this.#clearIdleTimer();
+    this.#clearPreemptTimer();
     const w = this.#worker;
     this.#worker = null;
     this.#starting = null;
@@ -426,9 +530,10 @@ export class EngineSnapshotService {
       if (!active || (msg.type !== "error" && msg.jobId !== active.jobId)) return;
       if (msg.type === "error" && msg.jobId !== undefined && msg.jobId !== active.jobId) return;
       this.#clearWatchdog();
+      this.#clearPreemptTimer();
       this.#active = null;
-      this.#detachSignal(active);
       if (msg.type === "done") {
+        this.#detachSignal(active);
         if (!active.signal?.aborted) {
           active.resolve({
             blob: new Blob([msg.bytes], { type: msg.mime }),
@@ -437,19 +542,30 @@ export class EngineSnapshotService {
           });
         }
       } else if (msg.type === "cancelled") {
-        // Already rejected synchronously when #cancel fired.
+        if (active.preempted && !active.signal?.aborted) {
+          // Re-queue preempted background work behind the urgent job without rejecting the caller.
+          this.#requeuePreempted(active);
+        } else {
+          // Already rejected synchronously when #cancel fired.
+          this.#detachSignal(active);
+        }
       } else if (msg.type === "error") {
+        this.#detachSignal(active);
         if (!active.signal?.aborted) {
           active.reject(
             mapEngineError(msg.code, msg.message, active.payload.width, active.payload.height),
           );
         }
       }
+      if (this.#shouldRecycleWorker(msg.wasmBytes)) {
+        this.#killWorker();
+      }
       void this.#pump();
     };
     worker.onerror = (event) => {
       if (this.#worker !== worker) return;
       this.#clearWatchdog();
+      this.#clearPreemptTimer();
       const active = this.#active;
       this.#active = null;
       this.#killWorker();
@@ -464,7 +580,12 @@ export class EngineSnapshotService {
   }
 
   async #pump(): Promise<void> {
-    if (this.#active || this.#queue.length === 0) return;
+    if (this.#active) return;
+    if (this.#queue.length === 0) {
+      this.#scheduleIdleRecycle();
+      return;
+    }
+    this.#clearIdleTimer();
     let worker: SnapshotWorkerPort;
     try {
       worker = await this.#ensureWorker();
@@ -477,7 +598,11 @@ export class EngineSnapshotService {
       }
       return;
     }
-    if (this.#worker !== worker || this.#active || this.#queue.length === 0) return;
+    if (this.#worker !== worker || this.#active) return;
+    if (this.#queue.length === 0) {
+      this.#scheduleIdleRecycle();
+      return;
+    }
     const job = this.#queue.shift();
     if (!job) return;
     if (job.signal?.aborted) {
@@ -492,6 +617,7 @@ export class EngineSnapshotService {
       this.#watchdog = setTimeout(() => {
         if (this.#active !== job) return;
         this.#watchdog = null;
+        this.#clearPreemptTimer();
         this.#active = null;
         this.#detachSignal(job);
         this.#killWorker();
@@ -502,6 +628,9 @@ export class EngineSnapshotService {
       }, this.#jobTimeoutMs);
     }
     try {
+      // Structured-clone "low" priority payloads (do not transfer) so an active thumbnail can be
+      // preempted by a higher-priority job and re-queued with intact buffers.
+      const transfer = job.priority === "low" ? [] : job.payload.transfer;
       worker.postMessage(
         {
           type: "render",
@@ -517,10 +646,11 @@ export class EngineSnapshotService {
           list: job.payload.list,
           images: job.payload.images,
         },
-        job.payload.transfer,
+        transfer,
       );
     } catch (err) {
       this.#clearWatchdog();
+      this.#clearPreemptTimer();
       this.#active = null;
       this.#detachSignal(job);
       job.reject(err instanceof Error ? err : new ExportError(String(err)));
@@ -664,6 +794,7 @@ export function estimateReducedExportImages(
   const budgeted = budgetExportImages(candidates, imageBudget, {
     exactDrawn: true,
     maxSide: MAX_SIDE,
+    decodeWorkingMultiplier: SNAPSHOT_DECODE_WORKING_MULTIPLIER,
   });
   let reduced = 0;
   let omitted = 0;
@@ -783,6 +914,7 @@ export async function prepareSnapshotJob(
   const imagePlan = budgetExportImages(candidates, imageBudget, {
     exactDrawn: true,
     maxSide: MAX_SIDE,
+    decodeWorkingMultiplier: SNAPSHOT_DECODE_WORKING_MULTIPLIER,
   });
 
   const transfers: SnapshotImageTransfer[] = [];

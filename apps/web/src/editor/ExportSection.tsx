@@ -1,7 +1,6 @@
 import {
   CanvasRenderer,
   type Editor,
-  ExportError,
   exportBounds,
   exportFileName,
   fitScale,
@@ -19,6 +18,7 @@ import { shortcutFor } from "./actions";
 import {
   estimateReducedExportImages,
   formatReducedImagesNote,
+  isAbortError,
   renderEngineSnapshot,
 } from "./engine-snapshot";
 import { type ExportSettings, exportName, exportSelection, exportSettings } from "./exporting";
@@ -130,10 +130,7 @@ function useExportPreview(
               signal: abort.signal,
             });
           } catch (error) {
-            if (
-              error instanceof ExportError &&
-              (error.reason === "unsupported" || error.reason === "limit")
-            ) {
+            if (!abort.signal.aborted && !isAbortError(error)) {
               blob = await renderCanvasPreview(editor, list, rect, width, height, scale);
             } else {
               throw error;
