@@ -292,6 +292,8 @@ export interface ComputeBumpCounters {
 }
 
 export interface ComputeStats {
+  /** Whole-page encodes and in-place patched moves since the last reset, when reported. */
+  readonly encodes?: { readonly full: number; readonly patched: number };
   readonly framesSubmitted: number;
   readonly framesChecked: number;
   readonly failedFrames: number;
