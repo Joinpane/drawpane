@@ -48,7 +48,7 @@ import {
   refusingBits,
   unsupportedNames,
 } from "@drawpane/engine";
-import { loadBrowserEngine, loadWebglEngine } from "@drawpane/engine/browser";
+import { loadBrowserEngine, loadComputeEngine, loadWebglEngine } from "@drawpane/engine/browser";
 import type { CpuWorkerReply, CpuWorkerRequest } from "./engine-cpu.worker";
 import { CPU_IMAGE_BUDGET, CPU_IMAGE_SIDE, ViewImages } from "./engine-image";
 import { fitEngineRaster, MIN_RASTER_SCALE } from "./engine-raster";
@@ -553,6 +553,23 @@ export interface EngineDraw {
   readonly awaitingPreview?: boolean;
 }
 
+const WAITING_FOR_COMPUTE: EngineDraw = {
+  drawn: true,
+  ready: false,
+  exact: false,
+  ahead: false,
+  settled: true,
+  awaitingPreview: true,
+};
+
+/** Draws of one frame before repeated overflow turns compute off for the session. */
+const MAX_COMPUTE_ATTEMPTS = 6;
+let sessionComputeFallback: string | null = null;
+
+function computeRequested(): boolean {
+  return new URLSearchParams(window.location.search).get("compute") === "1";
+}
+
 const NOT_DRAWN: EngineDraw = {
   drawn: false,
   ready: false,
@@ -757,7 +774,13 @@ async function initBackend(
           kind: level.kind,
         };
       }
-      const mod = await loadBrowserEngine();
+      const useCompute = computeRequested() && !level.compatibility && !sessionComputeFallback;
+      const mod = useCompute
+        ? await loadComputeEngine().catch((error: unknown) => {
+            sessionComputeFallback = `compute module unavailable (${String(error)})`;
+            return loadBrowserEngine();
+          })
+        : await loadBrowserEngine();
       if (signal?.aborted) return aborted();
       const engine = new RenderEngine(mod, { glyphMaskBytes: 32 << 20 });
       if (engine.failure) {
@@ -789,6 +812,10 @@ async function initBackend(
           adapter: null,
           kind: "error",
         };
+      }
+      if (useCompute && !sessionComputeFallback) {
+        const compute = engine.setComputeOrdinary(true);
+        if (!compute.ok) sessionComputeFallback = compute.message;
       }
       const rawClass = classifyAdapter(gpu.value.adapter, gpu.value.fallback);
       const adapterClass: AdapterClassification =
@@ -1004,6 +1031,18 @@ export class EngineView {
   #cpuLimitMessage: string | null = null;
   /** Why the engine is drawing at reduced detail or retaining its last usable picture. */
   #limitReason: string | null = null;
+  /** The canvas, images and background the last compute step saw (`#computeStep`). */
+  #computeContent: string | null = null;
+  /** The frame on screen came from compute: drawing ahead with vello_gpu would be wasted. */
+  #computeShown = false;
+  /** The compute candidate being checked (`?compute=1`), at most one. */
+  #pendingCompute: {
+    readonly key: string;
+    readonly content: string;
+    ready: boolean;
+    succeeded: boolean;
+    readonly attempt: number;
+  } | null = null;
   /** Aborted on dispose so any in-flight step-down probe stops immediately. */
   readonly #lifecycle = new AbortController();
   /**
@@ -1360,6 +1399,10 @@ export class EngineView {
     return this.#recovering !== null;
   }
 
+  get computeFallbackReason(): string | null {
+    return computeRequested() ? sessionComputeFallback : null;
+  }
+
   get limitReason(): string | null {
     return this.#limitReason;
   }
@@ -1683,6 +1726,9 @@ export class EngineView {
         }
       }
       return { drawn: true, ready: true, exact: false, ahead: false, settled: true };
+    }
+    if (this.#backend === "webgpu" && computeRequested() && !sessionComputeFallback) {
+      sessionComputeFallback = this.#engine?.computeFallbackReason() ?? r.message;
     }
     this.#supersede();
     this.#bumpDeviceGeneration();
@@ -2210,6 +2256,8 @@ export class EngineView {
       const engine = this.#engine;
       if (!engine) return null;
       if (this.#gpuRaster) return b.pageId === pageId && b.pending > 0 ? text() : null;
+      // Compute draws the whole view each frame: tiles drawn ahead would only take GPU memory.
+      if (this.#computeShown) return b.pageId === pageId && b.pending > 0 ? text() : null;
       const r = engine.renderGpuAhead(colour(background), budgetMs);
       if (!r.ok) {
         // A layer the engine refuses: the next frame draws this page on the canvas.
@@ -2252,6 +2300,10 @@ export class EngineView {
   /** Drops every read-back, direct-GPU presentation stamp, or CPU tile job on its way: a newer content frame decided otherwise. */
   #supersede(): void {
     this.#epoch++;
+    if (this.#pendingCompute) {
+      this.#engine?.cancelComputeFrame();
+      this.#pendingCompute = null;
+    }
     this.#shownWaiting = false;
     this.#clearOpeningFrame();
     this.#want = null;
@@ -2340,6 +2392,28 @@ export class EngineView {
         ? 1
         : previous?.scale;
     const bg = colour(background);
+    // Opt-in compute (`?compute=1`): a frame is drawn into a back buffer and shown only after
+    // its bump counters and GPU errors come back clean (decision 0040, P1-0).
+    // What a candidate's pixels must match to be shown at all: the canvas, the images and the
+    // background. An older revision or camera is shown as behind (not exact) and the current
+    // one is staged.
+    const content = `${viewport}|${this.#imageVersion}|${background}`;
+    const computeOn = this.#backend === "webgpu" && computeRequested() && !sessionComputeFallback;
+    let verifiedCompute: Result<FrameStats> | null = null;
+    let frameKey = key;
+    if (computeOn) {
+      const step = this.#computeStep(engine, key, content, width, height, cam, bg, {
+        stage: !textFirst && (initialScale ?? 1) === 1,
+      });
+      if (step.kind === "wait") return WAITING_FOR_COMPUTE;
+      if (step.kind === "frame") {
+        verifiedCompute = step.result;
+        frameKey = step.key;
+      }
+    }
+    // A checked frame drawn for an earlier camera (verification takes a frame or two): shown,
+    // since it's exact for where the camera was, but not counted as this frame's exact picture.
+    const computeBehind = verifiedCompute !== null && frameKey !== key;
     const {
       raster,
       result: frame,
@@ -2349,6 +2423,7 @@ export class EngineView {
       height,
       cam,
       (r) =>
+        (r.scale === 1 ? verifiedCompute : null) ??
         engine.renderGpu(
           r.width,
           r.height,
@@ -2360,6 +2435,7 @@ export class EngineView {
         ),
       initialScale,
     );
+    this.#computeShown = verifiedCompute !== null && raster.scale === 1 && frame.ok;
     const rasterLimit =
       limit ?? pendingLimit ?? (raster.scale < 1 ? previous?.reason : null) ?? null;
     this.#gpuRaster = rasterLimit
@@ -2421,6 +2497,7 @@ export class EngineView {
     // (fonts arrived) leaves the frame a stand-in, whatever the engine drew.
     const shownExact =
       f.exact &&
+      !computeBehind &&
       !opening &&
       imagesExact &&
       this.#builder.pendingVisible === 0 &&
@@ -2510,7 +2587,7 @@ export class EngineView {
         height: raster.height,
         exact: shownExact,
         epoch: this.#epoch,
-        key,
+        key: frameKey,
         scale: raster.scale,
       };
       this.#readNext();
@@ -2557,6 +2634,12 @@ export class EngineView {
       masked: f.glyphsMasked,
       outlined: f.glyphsOutlined,
     });
+    // Behind the camera: stage the frame for where it is now; its check redraws.
+    const caughtUp =
+      !computeBehind ||
+      this.#computeStep(engine, key, content, width, height, cam, bg, {
+        stage: !textFirst && (initialScale ?? 1) === 1,
+      }).kind === "wait";
     // A GPU canvas shows the frame once it's presented; a read-back one when it lands.
     return {
       drawn: true,
@@ -2565,9 +2648,81 @@ export class EngineView {
       ahead: this.#builder.pending > 0 || (!rasterLimit && f.tiles.queued > 0),
       settled:
         !opening &&
+        caughtUp &&
         (!!this.#limitReason ||
           (f.tiles.pending === 0 && f.tiles.queued === 0 && this.#builder.pending === 0)),
     };
+  }
+
+  /**
+   * One step of the checked compute path. `wait`: a candidate is being checked (its check
+   * redraws); `frame`: a checked frame was shown (for `key`, possibly an earlier camera's); and
+   * `legacy`: draw this frame with vello_gpu (the page isn't ordinary, compute is off for the
+   * session, or `stage` is false).
+   */
+  #computeStep(
+    engine: RenderEngine,
+    key: string,
+    content: string,
+    width: number,
+    height: number,
+    cam: Camera,
+    bg: readonly [number, number, number, number],
+    opts: { readonly stage: boolean },
+  ):
+    | { readonly kind: "wait" }
+    | { readonly kind: "legacy" }
+    | { readonly kind: "frame"; readonly result: Result<FrameStats>; readonly key: string } {
+    // A candidate drawn for another canvas, images or background can never be shown: drop it
+    // at once, checked or not. Until those hold still for a frame, vello_gpu draws, so a
+    // continuous resize keeps showing frames instead of cancelling every candidate unseen.
+    const stable = this.#computeContent === content;
+    this.#computeContent = content;
+    let pending = this.#pendingCompute;
+    if (pending && pending.content !== content) {
+      engine.cancelComputeFrame();
+      this.#pendingCompute = null;
+      pending = null;
+    }
+    let attempt = 1;
+    if (pending) {
+      if (!pending.ready) return { kind: "wait" };
+      this.#pendingCompute = null;
+      if (!pending.succeeded) {
+        // The check never finished: the engine trapped or was replaced under it.
+        engine.cancelComputeFrame();
+        sessionComputeFallback ??= "a compute frame could not be checked";
+        return { kind: "legacy" };
+      }
+      const checked = engine.finishComputeFrame(pending.attempt >= MAX_COMPUTE_ATTEMPTS);
+      if (!checked.ok) return { kind: "frame", result: checked, key: pending.key };
+      const value = checked.value;
+      if (value === "fallback") {
+        sessionComputeFallback = engine.computeFallbackReason() ?? "compute fell back";
+        return { kind: "legacy" };
+      }
+      if (value === "retry") attempt = pending.attempt + 1;
+      else if (value !== "stale")
+        return { kind: "frame", result: { ok: true, value }, key: pending.key };
+    }
+    if (!opts.stage || sessionComputeFallback || !stable) return { kind: "legacy" };
+    const staged = engine.stageComputeFrame(width, height, cam, bg);
+    const reason = engine.computeFallbackReason();
+    if (reason) {
+      sessionComputeFallback = reason;
+      return { kind: "legacy" };
+    }
+    // Not staged: the page isn't ordinary, or something the vello_gpu frame will report.
+    if (!staged.ok || !staged.value) return { kind: "legacy" };
+    const candidate = { key, content, ready: false, succeeded: false, attempt };
+    this.#pendingCompute = candidate;
+    void staged.value.then((succeeded) => {
+      if (this.#pendingCompute !== candidate || this.#dead) return;
+      candidate.ready = true;
+      candidate.succeeded = succeeded;
+      this.onChange();
+    });
+    return { kind: "wait" };
   }
 
   #drawCpu(

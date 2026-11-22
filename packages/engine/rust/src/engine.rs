@@ -425,6 +425,12 @@ impl Engine {
         self.generation += 1;
         self.invalidate_tiles(&applied.changes, applied.full, applied.moved.is_none());
         self.follow_drag(&applied);
+        #[cfg(feature = "compute")]
+        if applied.full
+            && let Some(gpu) = self.gpu.as_mut()
+        {
+            gpu.compute_page_reset();
+        }
         Ok(applied)
     }
 
@@ -1406,20 +1412,6 @@ impl Engine {
             .gpu
             .as_mut()
             .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
-        #[cfg(feature = "compute")]
-        if gpu.compute_ordinary
-            && gpu.supports_compute()
-            && width <= 4096
-            && height <= 4096
-            && crate::ordinary::is_ordinary_page(&self.store)
-        {
-            let mut stats = gpu.render_compute(&self.store, &frame, background, self.generation)?;
-            if stats.exact && self.store.provisional_shown().is_some() {
-                stats.exact = false;
-                stats.standin = true;
-            }
-            return Ok(stats);
-        }
         // One pass avoids rasterizing the same reader and prefix in each touched tile. For
         // interactive drags bound the scene walk. Dense pages use their retained tiles.
         let whole = halo_opt != Some(0) && (options.budget_ms <= 0.0 || simple_reader_drag);
@@ -1495,6 +1487,70 @@ impl Engine {
             stats.standin = true;
         }
         Ok(stats)
+    }
+
+    #[cfg(feature = "compute")]
+    pub fn stage_compute(
+        &mut self,
+        width: u32,
+        height: u32,
+        camera: Camera,
+        background: [f32; 4],
+    ) -> Result<Option<crate::gpu::ComputeCheck>> {
+        self.store.begin_stroke_frame();
+        self.check_size(width, height)?;
+        camera.check()?;
+        self.check_supported()?;
+        let Some(gpu) = self.gpu.as_mut() else {
+            return Ok(None);
+        };
+        if !gpu.compute_ordinary
+            || gpu.compute_reason.is_some()
+            || !gpu.supports_compute()
+            || width > 4096
+            || height > 4096
+        {
+            return Ok(None);
+        }
+        let revision = self.store.revision;
+        let ordinary = gpu
+            .ordinary_revision
+            .filter(|(cached, _)| *cached == revision)
+            .map_or_else(
+                || {
+                    let ordinary = crate::ordinary::is_ordinary_page(&self.store);
+                    gpu.ordinary_revision = Some((revision, ordinary));
+                    ordinary
+                },
+                |(_, ordinary)| ordinary,
+            );
+        if !ordinary || self.store.provisional_shown().is_some() {
+            return Ok(None);
+        }
+        let view = camera.view();
+        let frame = Frame {
+            width: width as u16,
+            height: height as u16,
+            view,
+            detail: false,
+            area: IRect {
+                x0: 0,
+                y0: 0,
+                x1: width as i32,
+                y1: height as i32,
+            },
+        };
+        match gpu.stage_compute(&self.store, &frame, background, self.generation) {
+            Ok(check) => Ok(Some(check)),
+            Err(error) => {
+                gpu.disable_compute(error.message.clone());
+                if error.code == ErrorCode::DeviceLost {
+                    Err(error)
+                } else {
+                    Ok(None)
+                }
+            }
+        }
     }
 
     /// Longest geometric backdrop-dependency reach across all visible readers on the page:

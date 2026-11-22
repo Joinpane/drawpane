@@ -33,4 +33,12 @@ describe("renderer status text", () => {
       "Drawing with WebGPU at reduced detail. The lens exceeds the raster budget.",
     );
   });
+
+  it("says when compute is off for the session", () => {
+    const off = { ...webGpu, computeFallback: "compute buffers still overflowed after growing" };
+    expect(rendererChipLabel(off)).toBe("Engine · WebGPU · Compute off");
+    expect(formatRendererReason(off)).toBe(
+      "Drawing with WebGPU. Compute is off for this session, so Vello GPU draws instead: compute buffers still overflowed after growing",
+    );
+  });
 });

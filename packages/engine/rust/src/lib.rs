@@ -8,6 +8,8 @@
 
 pub mod blend;
 pub mod blur;
+#[cfg(any(feature = "compute", test))]
+pub mod compute_caps;
 pub mod cpu;
 pub mod diamond;
 pub mod engine;
@@ -1273,6 +1275,89 @@ impl Engine {
         Outcome::ok()
     }
 
+    /// Schedules a candidate in a private GPU texture. The promise resolves after all checks.
+    #[cfg(feature = "compute")]
+    #[allow(clippy::too_many_arguments)]
+    #[wasm_bindgen(js_name = stageComputeFrame)]
+    pub fn stage_compute_frame(
+        &mut self,
+        width: u32,
+        height: u32,
+        zoom: f64,
+        x: f64,
+        y: f64,
+        dpr: f64,
+        background: Vec<f32>,
+    ) -> Option<js_sys::Promise> {
+        let check = self
+            .core
+            .stage_compute(width, height, Camera { zoom, x, y, dpr }, rgba(&background));
+        match check {
+            Ok(Some(check)) => Some(wasm_bindgen_futures::future_to_promise(async move {
+                check.await;
+                Ok(JsValue::UNDEFINED)
+            })),
+            Ok(None) | Err(_) => None,
+        }
+    }
+
+    /// Shows a checked candidate. Returns its frame's outcome (not exact when an edit landed
+    /// while it was checked); `None` to draw the same frame again (a buffer grew); or a plain
+    /// success (no plan) when there is no frame to show: compute is off for the session if
+    /// `computeFallbackReason` says so, otherwise there was no checked candidate to show.
+    #[cfg(feature = "compute")]
+    #[wasm_bindgen(js_name = finishComputeFrame)]
+    pub fn finish_compute_frame(&mut self, final_attempt: bool) -> Option<Outcome> {
+        let generation = self.core.generation;
+        let gpu = self.core.gpu.as_mut()?;
+        match gpu.finish_compute(generation, final_attempt) {
+            Ok(gpu::ComputeFinish::Retry) => None,
+            Ok(gpu::ComputeFinish::Fallback | gpu::ComputeFinish::Stale) => Some(Outcome::ok()),
+            Ok(gpu::ComputeFinish::Frame(draw)) => {
+                let mut o = Outcome::stats(engine::FrameStats {
+                    draw,
+                    masks: gpu.masks.stats,
+                });
+                o.presented = draw.presented;
+                o.exact = draw.exact;
+                o.standin = draw.standin;
+                o.plan = draw.plan;
+                o.encode_ms = draw.encode_ms;
+                o.render_ms = draw.render_ms;
+                o.submit_ms = draw.submit_ms;
+                o.cpu_ms = draw.cpu_ms;
+                Some(o)
+            }
+            Err(err) => Some(Outcome::err(err)),
+        }
+    }
+
+    #[cfg(feature = "compute")]
+    #[wasm_bindgen(js_name = computeFallbackReason)]
+    pub fn compute_fallback_reason(&self) -> Option<String> {
+        self.core.gpu.as_ref()?.compute_reason.clone()
+    }
+
+    #[cfg(feature = "compute")]
+    #[wasm_bindgen(js_name = cancelComputeFrame)]
+    pub fn cancel_compute_frame(&mut self) {
+        if let Some(gpu) = self.core.gpu.as_mut() {
+            gpu.cancel_compute_frame();
+        }
+    }
+
+    /// Starts compute frames from minimal buffers so the grow-and-redraw path runs (the
+    /// diagnostics' capacity matrix), or from the usual ones.
+    #[cfg(feature = "compute")]
+    #[wasm_bindgen(js_name = computeTight)]
+    pub fn compute_tight(&mut self, tight: bool) -> Outcome {
+        let Some(gpu) = self.core.gpu.as_mut() else {
+            return Outcome::err(EngineError::new(error::ErrorCode::State, "no GPU attached"));
+        };
+        gpu.compute_tight(tight);
+        Outcome::ok()
+    }
+
     /// Whether the most recent GPU frame ran on the compute pipeline.
     #[cfg(feature = "compute")]
     #[wasm_bindgen(js_name = computeUsed)]
@@ -1289,24 +1374,15 @@ impl Engine {
         }
     }
 
-    /// Resolves to a JSON report or an `Outcome` on failure.
+    /// The compute path's diagnostics as JSON (every checked frame's counters and pass times),
+    /// or an empty string before it has run.
     #[cfg(feature = "compute")]
     #[wasm_bindgen(js_name = computeStats)]
-    pub fn compute_stats(&mut self) -> js_sys::Promise {
-        let start = self.core.gpu.as_mut().map(|gpu| {
-            gpu.compute_stats_start()
-                .map(|readback| (gpu.device.clone(), gpu.health.clone(), readback))
-        });
-        wasm_bindgen_futures::future_to_promise(async move {
-            let (device, health, readback) = match start {
-                Some(Ok(start)) => start,
-                Some(Err(err)) => return Ok(failure(err)),
-                None => return Ok(failure(EngineError::new(error::ErrorCode::State, "no GPU attached"))),
-            };
-            match vello_compute::finish_stats_readback(device, health, readback).await {
-                Ok(json) => Ok(JsValue::from_str(&json)),
-                Err(err) => Ok(failure(err)),
-            }
-        })
+    pub fn compute_stats(&self) -> String {
+        self.core
+            .gpu
+            .as_ref()
+            .and_then(|gpu| gpu.compute_stats_json().ok())
+            .unwrap_or_default()
     }
 }

@@ -156,9 +156,22 @@ export class Engine {
   pngAbort(): void;
   strokeCacheStats(): Float64Array;
   setComputeOrdinary?(enabled: boolean): Outcome;
+  stageComputeFrame?(
+    width: number,
+    height: number,
+    zoom: number,
+    x: number,
+    y: number,
+    dpr: number,
+    background: Float32Array,
+  ): Promise<void> | undefined;
+  finishComputeFrame?(finalAttempt: boolean): Outcome | undefined;
+  cancelComputeFrame?(): void;
+  computeFallbackReason?(): string | undefined;
+  computeTight?(tight: boolean): Outcome;
   computeUsed?(): boolean;
   computeResetStats?(): void;
-  computeStats?(): Promise<string | Outcome>;
+  computeStats?(): string;
   blurCpu(
     src: Uint8Array,
     srcW: number,

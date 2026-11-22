@@ -303,9 +303,7 @@ export interface ComputeStats {
   readonly gpuMs: readonly number[];
   readonly gpuSpanMs: readonly number[];
   readonly passAvgMs: Readonly<Record<string, number>>;
-  readonly capacities:
-    | (Omit<ComputeBumpCounters, "failed"> & { readonly maxBindBytes: number })
-    | null;
+  readonly capacities: Omit<ComputeBumpCounters, "failed"> | null;
   readonly scene: {
     readonly nPaths: number;
     readonly nDrawObjects: number;
@@ -1523,6 +1521,79 @@ export class RenderEngine {
     ) as Result;
   }
 
+  /** Stages a compute frame without changing the displayed frame. */
+  stageComputeFrame(
+    width: number,
+    height: number,
+    camera: Camera,
+    background: readonly [number, number, number, number],
+  ): Result<Promise<boolean> | null> {
+    const pending = this.#call((e) =>
+      e.stageComputeFrame?.(
+        width,
+        height,
+        camera.zoom,
+        camera.x,
+        camera.y,
+        camera.dpr,
+        bg(background),
+      ),
+    );
+    if (isFailure(pending)) return pending;
+    const token = this.#epoch;
+    return {
+      ok: true,
+      value: pending
+        ? Promise.race([
+            pending.then(() => this.#epoch === token && this.#live() !== null),
+            this.#genTrapNotice.then(() => false),
+          ]).catch((error: unknown) => {
+            this.#trapped(error);
+            return false;
+          })
+        : null,
+    };
+  }
+
+  /**
+   * Shows the staged compute frame once `stageComputeFrame`'s promise has resolved: its frame;
+   * `"retry"` when a buffer overflowed and grew (stage the same frame again); `"fallback"` when
+   * compute is off for this session (`computeFallbackReason` says why); `"stale"` when the
+   * candidate no longer matches the page (stage a new one).
+   */
+  finishComputeFrame(finalAttempt: boolean): Result<FrameStats | "retry" | "fallback" | "stale"> {
+    return this.#call((e) => {
+      if (!e.finishComputeFrame) return { ok: true as const, value: "fallback" as const };
+      const o = e.finishComputeFrame(finalAttempt);
+      if (!o) return { ok: true as const, value: "retry" as const };
+      const s = o.plan
+        ? stats(o, true)
+        : e.computeFallbackReason?.()
+          ? ("fallback" as const)
+          : ("stale" as const);
+      const result = outcome(o);
+      return result.ok ? { ok: true as const, value: s } : result;
+    }) as Result<FrameStats | "retry" | "fallback" | "stale">;
+  }
+
+  /** Starts compute frames from minimal buffers, so the grow-and-redraw path runs (diagnostics). */
+  computeTight(tight: boolean): Result {
+    return this.#call((e) =>
+      e.computeTight
+        ? outcome(e.computeTight(tight))
+        : fail(ErrorCode.NotAvailable, "no GPU compute backend"),
+    ) as Result;
+  }
+
+  cancelComputeFrame(): void {
+    this.#call((e) => e.cancelComputeFrame?.());
+  }
+
+  computeFallbackReason(): string | null {
+    const result = this.#call((e) => e.computeFallbackReason?.());
+    return typeof result === "string" ? result : null;
+  }
+
   /** Whether the most recent GPU render frame executed on the Vello 0.12 GPU compute path. */
   computeUsed(): boolean {
     const r = this.#call((e) => e.computeUsed?.() ?? false);
@@ -1534,62 +1605,16 @@ export class RenderEngine {
     this.#call((e) => e.computeResetStats?.());
   }
 
-  /**
-   * Drains all in-flight GPU compute frame diagnostics (per-frame bump allocator counters and
-   * hardware GPU timestamps) and returns the structured report.
-   */
-  async computeStats(): Promise<Result<ComputeStats>> {
-    const startEpoch = this.#epoch;
-    const state = glueState(this.#module.glue);
-    const genTrap = this.#genTrapNotice;
-    const p = this.#call((e) => e.computeStats?.());
-    if (isFailure(p)) return p;
-    if (!(p instanceof Promise)) return fail(ErrorCode.NotAvailable, "no GPU compute backend");
-    p.then(
-      (stale) => {
-        if (state.epoch !== startEpoch && typeof stale !== "string") unfinalized(stale);
-      },
-      () => {},
-    );
-    let v: string | Glue.Outcome;
+  /** The compute path's diagnostics so far: every checked frame's counters and GPU pass times. */
+  computeStats(): Result<ComputeStats> {
+    const json = this.#call((e) => e.computeStats?.() ?? "");
+    if (isFailure(json)) return json;
+    if (!json) return fail(ErrorCode.NotAvailable, "the compute pipeline has not run");
     try {
-      const settled = await Promise.race([
-        p.then((value) => ({ kind: "value" as const, value })),
-        genTrap.then(() => ({ kind: "trapped" as const })),
-      ]);
-      if (settled.kind === "trapped") {
-        this.#live();
-        return (
-          this.#dead ?? fail(ErrorCode.Trap, "the engine instance changed during computeStats")
-        );
-      }
-      v = settled.value;
+      return { ok: true, value: JSON.parse(json) as ComputeStats };
     } catch (err) {
-      return this.#trapped(err);
+      return fail(ErrorCode.Gpu, `invalid computeStats JSON: ${String(err)}`);
     }
-    if (state.epoch !== startEpoch) {
-      if (typeof v !== "string") unfinalized(v);
-      this.#live();
-      return this.#dead ?? fail(ErrorCode.Trap, "the engine instance changed during computeStats");
-    }
-    if (!this.#live()) {
-      if (typeof v !== "string") {
-        try {
-          v.free();
-        } catch (err) {
-          return this.#trapped(err);
-        }
-      }
-      return this.#dead ?? fail(ErrorCode.State, "the engine was disposed");
-    }
-    if (typeof v === "string") {
-      try {
-        return { ok: true, value: JSON.parse(v) as ComputeStats };
-      } catch (err) {
-        return fail(ErrorCode.Gpu, `invalid computeStats JSON: ${String(err)}`);
-      }
-    }
-    return outcome(v) as Result<ComputeStats>;
   }
 
   /** Frees the engine's memory (nothing, if its instance is gone). */
