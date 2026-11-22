@@ -1498,3 +1498,98 @@ render preparation took 3,211.5 ms of the PR's 5,293.8 ms zoom CPU p50.
 The compute path should address that preparation cost and reduce the
 number of Vello render segments by batching reader work. On WebGL2,
 most of the measured draw time is spent inside submission.
+
+## Amendment: the compute P0 review and P1-0 (2026-11-21, corrected 2026-11-22)
+
+PR #291 recorded P0, the kill gate for Vello 0.12's GPU compute pipeline on ordinary paint, as passed. **It did not pass.** The independent review of #291 blocked it, and this records what it found, what was rebuilt since, and the gates P1-0 has to clear before P1 begins. A second independent review, of the rebuilt stack, found bugs in it too; the fixes and the numbers below are from after that review.
+
+**What the review found.**
+
+- **Undersized buffers, reported exact.** Bump buffers were sized from the path count alone. `coarse` reserves `PTCL_INITIAL_ALLOC` (64) command words for every 16 x 16 tile before it allocates anything: 1,301,760 words at 2,880 x 1,800. On a Tesla T4, an 857-path page at 100% drew nothing below row 352, and a 40k-path page at fit overflowed its line buffer, leaving 71% of its pixels more than 16 levels off. Both frames were reported exact, with `bump.failed` clear in the first case.
+- **No failure path.** Bump counters were read back after the frame was presented, for statistics only. Nothing grew a buffer, redrew a frame, fell back, or stopped after validation errors.
+- **Understated CPU cost.** The reported 0.2 ms per frame excluded `is_ordinary_page`, which walked the whole store on every frame. The main-thread wall time of the render call was 2.6 to 3.3 ms at 10.8k records and 10.1 ms at 40k. Every edit rebuilt and uploaded the whole page: 42 to 68 ms at 10.7k paths with warm caches, 155 to 270 ms at 40k.
+- **Real files aren't ordinary.** Routing whole pages to compute covered 1.6% of the visible layers in a large iOS UI kit and 0.04% in shadcn. Routing per top-level board would cover 5.9% and 8.7%. Drop shadows alone blocked 52 of shadcn's 83 pages. In the iOS kit, more layers use a non-normal blend than a drop shadow: 5,143 fill blends and 3,851 layer blends, against 4,480 drop shadows and 1,517 images. Glass and background blur block most of the rest.
+- **Cost for every user.** The default browser module grew from 608 to 849 KB gzipped for every WebGPU user, flag or no flag.
+- **What held.** Fidelity held. All 100 compute-drawn parity cells met the CPU/GPU tolerance (worst mean 0.214, p99 at most 1). The shared geometry moved the CPU oracle closer to Figma on 26 cells, farther on 4 (each by at most 0.02), and left 276 unchanged. #291's high-zoom stroke test held 0.04 device px at 256x Retina, but it only drew circles; the stack review found other curves far off (see #293 below).
+- **Methodology.** The GPU median for 10.7k paths was 4.5 ms at 100% and 8.4 ms at fit, with a repeatable 25 ms p99 at 100%. The bench kept only quantiles, so which frames were slow was lost. The vello_gpu baseline was 24 forced whole-frame samples, so its p95 and p99 were its second-worst and worst frames.
+- **Upstream status.** `vello_shaders` 0.12 ships from Vello's `research/` directory: the classic compute pipeline is no longer Vello's main line, and P1 to P3 own a fork of it.
+
+**What was rebuilt (P1-0 items 1 and 2).** These pieces are separate PRs: #293, #297, #298, #299 and #300 are merged, #304 follows up their second review, and #303 is an open prototype.
+
+- **The shared geometry merges on its own (#293).** That covers one flattener for every backend, cached stroke outlines, camera-independent ellipses and the cross-line glyph sweep.
+  - **High zoom.** A cached outline is expanded once, at 0.025 record units, so zooming in magnifies its error. At 256x Retina (512 device px per unit) the stack review measured a 200 x 40 ellipse 3.52 px off the true stroke, a 3,000 x 200 ellipse 10.29 px and two cubic S-curves 6.84 and 16.72 px. A draw now passes its device scale. Past 5 px per unit it gets a finer outline, the base tolerance halved until it is within 0.125 device px, and up to two finer outlines are kept per stroke beside the base one. The same four shapes are now 0.09, 0.30, 0.30 and 0.69 px off, against main's 0.24, 0.43, 0.30 and 0.69. The S-curves' remaining error is their round caps, as on main: kurbo draws a cap as one cubic per quarter turn.
+  - **Memory.** Kept outlines count against a 48 MiB cap per engine (`Limits::stroke_bytes`). Past it, each frame drops the least recently drawn outlines down to three quarters of the cap, never one drawn in this frame or the last. The largest kit page the review measured holds 26 MiB (shadcn; 1.8 MiB in the iOS kit).
+  - #291 also clipped reader-free frames and outline masks with isolated clip layers. In vello_gpu that cost opening time: over three paired T4 runs against main with #278, the clip-heavy Colors page opened in 1,016 to 1,067 ms against main's 762 to 959 ms, failing the 1 s gate each time. Without the clip layers it opened in 837 ms in the same container, and in 786 to 895 ms in two later pairs. #293 therefore keeps vello_gpu on clip paths.
+  - Only compute uses clip layers, because Vello 0.12 compute has nothing else. The two differ only where children overlap an anti-aliased clip edge (up to about 48 levels on those pixels). The capacity matrix's pages don't put children on clip edges; real pages do, so P1 needs a parity cell for it.
+  - GPU pan medians moved by -1.5 to +6.0 ms across six paired runs, and by +0.4 and -0.5 ms on the two pages in the pair on #293's head.
+  - On a T4 against main with #278, CPU parity against Figma moved closer on 26 cells and farther on 4 (by at most 0.02). WebGPU parity moved closer on 27 and farther on 3. All 27 suites passed with no fallbacks.
+- **Compute is a separate, opt-in module (#297).** The `compute` Cargo feature builds `dist/compute`, which only `?compute=1` loads. The editor loads it only where `navigator.gpu` exists; the diagnostics page checked only for the property, and mounts its compute checks only where WebGPU exists from #304 on. The default browser module carries no compute code: 637 KB gzipped with the whole stack, against 630 KB on main before it. The compute module is 885 KB gzipped. Both are decimal kilobytes of gzip at level 9, from the second review's bundle audit.
+- **Every compute frame is checked before it is shown (#298).**
+  - Buffers are sized from the canvas as well as the scene, and the per-tile command region is always included (`compute_caps.rs`).
+  - Each frame draws into a back buffer and is presented only after its bump counters, error scopes and the device check come back clean.
+  - A count past its capacity is an overflow even without Vello's flag, because Vello never bounds-checks `segments`.
+  - On overflow, buffers grow to what was asked for plus half again, and the same frame is redrawn.
+  - Six draws of one frame, any GPU error or a lost device turns compute off for the session, and the status chip says so.
+  - Binding limits and the engine's GPU budget are checked before every buffer is allocated, the scan scratch included, which is sized after the page's encoding.
+  - A frame is checked for the content it was staged for, background included: one staged before a background change is dropped, never shown. While content changes, vello_gpu draws, and compute takes over once it holds still for a frame, so a resize can't starve the canvas.
+  - A fresh page resets the buffer sizes learned on the last one.
+  - Moving frames stay on vello_gpu (#304): a checked frame takes one to two display frames longer to show, and 7 of 8 moving frames waited for one. A candidate staged before the motion began is dropped.
+  - The page's encoding is kept apart from the canvas-sized buffers, so growth and resizes never re-encode it.
+  - The ordinary-page check is cached per revision.
+- **The capacity matrix is the gate.** `/diagnostics/renderer?compute=1` and `bench/compute-matrix.spec.ts` run it.
+  - It draws generated ordinary pages of 900, 10,000 and 40,000 layers at 1x and 2x, at 100%, 200% and fit, plus "tight" cells that start from minimal buffers so they must grow and redraw. Each is compared with vello_gpu on its own device. Later cells check a fresh page after a large one and nine drag steps (#300), and on #303 the bump gate.
+  - On a T4, all 40 of the merged matrix's cells were drawn by compute and passed, and so were the 44 with #303's gate cells. Across the 30 page cells the worst mean was 0.173, p99 at most 3 and the worst 32 x 32 tile 0.386; the largest single channel difference was 26, on the 40k page. 49 checks caught an overflow and redrew, and none of those frames was shown.
+  - The 857-path Retina page the review reproduced is now drawn by compute within tolerance. Its 40,031-record page at fit passes by falling back: compute would take 428 MiB of its 424 MiB GPU budget there, so the frame is refused before anything is allocated and vello_gpu draws it, with no wrong pixels. The matrix's own 40k page fits on compute at fit.
+  - `bench/compute-editor.spec.ts` drives the editor itself: a frame staged under one background never shows once the background has changed.
+- **Benchmarks are honest (#299).** CPU counts the main-thread wall of every engine call a frame takes, routing included, split into staging, showing, any vello_gpu fallback and the engine's own encode, render and submit. Every frame is kept in order with its GPU pass times, and the slowest are listed. Edits and drags patch the card in the middle of the view, at 10k and 40k layers, against vello_gpu. A browser a person drives presents to a real canvas; automation reads back, because headless Chromium loses a WebGPU device that presents. Safari has no timestamps and shows "No timestamps" rather than a failure.
+  - On a T4 (all figures from one run on the stack's head), compute cost 0.3 / 0.5 / 0.7 ms of main thread per frame (p50 / p95 / p99) on the 10k page, and 1.95 / 2.47 / 2.49 ms of GPU at 100% and 4.46 / 5.51 / 5.78 ms at fit. The 25 ms p99 #291 reported did not appear: around 100%, the slowest frames are the most zoomed-out ones.
+  - The check delays showing. Checked frames reached the screen 25 to 52 ms after they were asked for at p95, across four runs, against 17.5 ms for vello_gpu's moving frames (gate 4 below).
+  - #299's first version edited a card 3,000 px off screen, so vello_gpu drew nothing and its drag cost read about 15 times too low. On screen, a vello_gpu drag frame costs 9.0 / 11.0 ms of main thread (p50 / p95) at 10k layers and 10.7 / 11.2 ms at 40k.
+  - A recolour re-encodes the page on compute: 35 ms of main thread at 10k and 142 ms at 40k (p50), against vello_gpu's 8.4 and 9.7 ms.
+- **Drags don't re-encode the page (#300).** A patch that only moves records (`Applied::moved`) changes nothing in the encoding but the world transforms of the moved subtrees.
+  - The encoder records each record's span of the transform stream and forces a fresh transform at each record boundary.
+  - A move left-multiplies `new_world * old_world⁻¹` into its subtree's spans, in f64, and uploads only those transforms. The subtree comes from the store's tree, so a group that draws nothing of its own doesn't move with its only child, and a move costs its own subtree, not the page.
+  - A move under an ancestor that bounds its children with a fixed layer rect (an isolated translucent group, a blend or an `Op::Layer`) re-encodes, since the rect was sized from where the children were.
+  - Patched equals fresh to one f32 ulp (`tests/compute_moves.rs`, including one-child groups, bounded ancestors and 500 cards moved at once on a 40k page).
+  - The stack review's repros of the first version (a one-child group, a child dragged out of an isolated group, 500 cards in one move) showed 7,200 and 1,600 wrong pixels reported exact, and 103 ms per move. Each now has a native test and a matrix cell.
+  - On a T4, with the card on screen, a drag frame costs 0.6 / 0.8 ms of main thread (p50 / p95) at 10k layers and 1.4 / 2.4 ms at 40k, against vello_gpu's 9.0 / 11.0 and 10.7 / 11.2 ms. All 60 drag patches in the bench were applied in place.
+- **A prototype to skip the wait (#303), open behind `?gate=1`.** A checked frame waits for its read-back before it shows. The gate draws the frame into a private texture. Then a pass in the same command buffer reads the bump counters on the GPU and copies the frame onto the canvas only if every stage fit. Otherwise the canvas keeps its last good pixels, and the read-back still decides exactness and growth.
+  - Its first T4 figure, 17.6 ms at p95, came from a sweep that didn't wait for the GPU, and is withdrawn. The second review measured 66.4 ms with the fence.
+  - That review also found:
+    - a stale frame settled as exact after a background change;
+    - moving frames drawn through the gate;
+    - checks dropped past eight in flight;
+    - the back texture outside the budget.
+  - #303 now fixes those, each with a T4 test, and is waiting on a further review.
+  - With the same fence as vello_gpu, gated frames now show in 36.6 ms at p95 around 100% and 49.2 ms around fit. Checked frames take 49.2 and 49.6 ms, and vello_gpu's moving frames 17.3 ms.
+  - The remaining tail isn't the check. Paced one per display frame, a compute frame staged with nothing presented has the same 30 to 50 ms tail. Back to back, it completes in 5.4 to 7.1 ms, with 2.3 to 2.7 ms of GPU work.
+  - Until laptops show whether that tail belongs to the headless T4 container or to compute, the gate stays a flag.
+
+**P1-0 gates, before any of P1.**
+
+1. **Correctness.** The capacity matrix passes on every device class measured: every cell exact or fallen back, never wrong. *Met on a T4.*
+2. **Laptops.** The 10k Retina bench on Apple Silicon (base and Pro) and an Intel iGPU, in Chrome and Safari on Apple Silicon, through `/diagnostics/renderer?compute=1`.
+   - The gate is GPU p95 at most 8 ms at 100%.
+   - If 100% runs past about 10 ms of GPU time, viewport culling becomes P1's first task. Today flatten's work is O(page), not O(view).
+   - Safari has no timestamp queries, so it reports CPU and shown times only. *Open: the page is ready; the reports are not in yet.*
+3. **Edits.**
+   - Drag frames cost at most 8 ms of main thread at 10k and 40k paths. *Met for drags on a T4, multi-card moves included (0.8 ms p95 at 10k, 2.4 ms at 40k). Open for other edits: a recolour costs 35 ms at 10k and 142 ms at 40k (p50).*
+   - Edits other than moves need per-board encodings spliced into the packed scene. Vello 0.12 consumes one packed scene with prefix scans over the whole tag stream, so a splice re-uploads from the edit onward and reruns the scans on the GPU. That is cheap on the GPU, but uploads are O(page) unless boards get fixed-capacity slots. This decides whether compute can be the only rasterizer.
+   - Per-board (or spatial-chunk) encodings with viewport culling would address both this and gate 2's O(page) flatten, so if either gate misses, that is P1's first build.
+4. **Latency.** A compute frame reaches the screen within one display frame of vello_gpu's on the same device, at p95, measured with the same GPU fence, and never shows an overflowed frame. Checked frames miss this by one to two display frames. *Open: on a T4, gated frames show in 36.6 to 49.2 ms at p95 against vello_gpu's 17.3 (#303, a prototype whose review blockers are fixed but not yet re-reviewed).*
+5. **Coverage.** Report the share of visible kit layers compute actually draws for each routing expansion, and state what each kit should expect. P1's scope (below) is chosen from these counts: shadcn gains most from drop shadows and images, while the iOS kit needs blends first and still stops at its readers.
+6. **Bundle.** Attribute the compute module's size (twiggy) and set a realistic gate. P3's "main + 100 KB" doesn't fit a separate module that is loaded only when asked for.
+
+**P1 scope: drop shadows, image fills and blends.**
+
+- **Drop shadows** stay exact by reusing the existing Gaussian path rather than Vello's analytic blurred rounded rect, which approximates corners.
+  - The GPU shadow pass already renders each shadow's blurred, tinted mask at device scale and caches it by shape, blur, colour and scale.
+  - Compute draws those masks as image fills from its image atlas, at the shadow's place in paint order and on whole device pixels, so sampling is exact under translation.
+  - A zoom re-renders the masks, as vello_gpu's shadows already do.
+  - Inner shadows follow the same path, inside the shape's clip.
+- **Image fills** use Vello 0.12's image draw, which is already in the encoding.
+  - Visible image levels are chosen as vello_gpu chooses them and packed into atlas pages with the local sampling transform and extend mode.
+  - They stay premultiplied, as now.
+- **Blends.** Non-normal fill and layer blends are the iOS kit's largest blocker. Vello 0.12 compute already draws blend layers (the vendored `blend.wgsl`, with its patches), so they need routing and parity rather than a new pass.
+- All three need CPU-reference and Figma parity gates before routing counts them.
+- **Readers** (glass, background and progressive blur) stay out of P1. A page with readers either splits into compute chunks between reader passes, or keeps a stable rasterizer per chunk. Swapping rasterizers mid-page shifts anti-aliased edges, which 0040's item 6 forbids on Core devices.
