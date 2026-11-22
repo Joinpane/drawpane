@@ -7,7 +7,7 @@
 //! Figma-checked vectors in `packages/editor/test/fixtures/corner-vectors.json`.
 
 use core::f64::consts::{PI, SQRT_2};
-use vello_common::kurbo::{Affine, BezPath, Ellipse, Point, Rect, Shape, Vec2};
+use vello_common::kurbo::{BezPath, Ellipse, Point, Rect, Shape, Vec2};
 
 /// The canvas's tolerance for turning arcs into curves is far finer than a pixel; kurbo's
 /// default (0.1) is a tenth of a unit, which at high zoom shows. Shapes are generated at this.
@@ -305,29 +305,27 @@ fn quarter(r: f64, which: usize, mut out: impl FnMut(Vec2, Vec2, Vec2)) {
     });
 }
 
+/// Fixed quarter-ellipse cubic count (32 cubics total; radial error < 1e-7 * r).
+/// Camera-independent so CPU, GPU, and cached stroke outlines feed identical cubics
+/// to the flattener at every zoom level.
+const ELLIPSE_QUARTER_SEGMENTS: usize = 8;
+
 /// The ellipse inscribed in a `w` × `h` box, from its rightmost point, clockwise (the canvas's
 /// `ellipse(w/2, h/2, w/2, h/2, 0, 0, 2π)`).
-pub fn ellipse(w: f32, h: f32, device: Affine) -> BezPath {
+pub fn ellipse(w: f32, h: f32) -> BezPath {
     let (w, h) = (f64::from(w), f64::from(h));
     let (rx, ry) = (w.abs() / 2.0, h.abs() / 2.0);
     if !rx.is_finite() || !ry.is_finite() || (rx == 0.0 && ry == 0.0) {
         return Ellipse::new((w / 2.0, h / 2.0), (rx, ry), 0.0).to_path(tolerance(rx.max(ry)));
     }
     use core::f64::consts::{FRAC_PI_2, PI};
-    // Limit the sagitta of each segment's chord to one device pixel when picking its
-    // endpoints. The Frobenius norm bounds the radius after scale, rotation, or shear.
-    // Vello subdivides longer cubics to its own device-space tolerance, so we can cap the
-    // number of path elements here even for an enormous zoom.
-    let [a, b, c, d, _, _] = device.as_coeffs();
-    let device_radius = (rx * a.hypot(b)).hypot(ry * c.hypot(d));
-    let n = (FRAC_PI_2 * (device_radius / 8.0).sqrt()).ceil().clamp(1.0, 8.0) as usize;
     let c = Point::new(w / 2.0, h / 2.0);
     let mut p = BezPath::new();
     p.move_to((c.x + rx, c.y));
-    push_quarter_arc(&mut p, c, rx, ry, 0.0, n);
-    push_quarter_arc(&mut p, c, rx, ry, FRAC_PI_2, n);
-    push_quarter_arc(&mut p, c, rx, ry, PI, n);
-    push_quarter_arc(&mut p, c, rx, ry, 3.0 * FRAC_PI_2, n);
+    push_quarter_arc(&mut p, c, rx, ry, 0.0, ELLIPSE_QUARTER_SEGMENTS);
+    push_quarter_arc(&mut p, c, rx, ry, FRAC_PI_2, ELLIPSE_QUARTER_SEGMENTS);
+    push_quarter_arc(&mut p, c, rx, ry, PI, ELLIPSE_QUARTER_SEGMENTS);
+    push_quarter_arc(&mut p, c, rx, ry, 3.0 * FRAC_PI_2, ELLIPSE_QUARTER_SEGMENTS);
     p.close_path();
     p
 }
@@ -361,18 +359,15 @@ mod tests {
 
     #[test]
     fn huge_curves_stay_a_few_cubics() {
-        assert!(ellipse(3.0e38, 3.0e38, Affine::IDENTITY).elements().len() < 128);
+        assert!(ellipse(3.0e38, 3.0e38).elements().len() < 128);
         assert!(rounded_rect(3.0e38, 3.0e38, [1.0e38; 4], 0.0).elements().len() < 128);
         assert!(rounded_rect(3.0e38, 3.0e38, [1.0e38; 4], 0.6).elements().len() < 128);
     }
 
     #[test]
-    fn ellipse_subdivision_tracks_projected_size() {
-        let at_scale = |zoom| ellipse(10.0, 8.0, Affine::scale(zoom)).elements().len();
-        assert_eq!(at_scale(0.25), 6);
-        assert!(at_scale(0.25) < at_scale(1.0));
-        assert!(at_scale(1.0) < at_scale(10.0));
-        assert_eq!(at_scale(1000.0), 34);
+    fn ellipse_is_camera_independent_and_bounded() {
+        assert_eq!(ellipse(10.0, 8.0).elements().len(), 34);
+        assert_eq!(ellipse(1000.0, 800.0).elements().len(), 34);
     }
 
     #[test]

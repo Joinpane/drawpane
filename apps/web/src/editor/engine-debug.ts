@@ -17,10 +17,13 @@ import {
   type BlurCacheStats,
   type BlurEdge,
   type BlurRect,
+  type ComputeStats,
   type EngineModule,
+  type EngineOptions,
   type FrameStats,
   type GpuInfo,
   RenderEngine,
+  type StrokeCacheStats,
   unsupportedNames,
 } from "@drawpane/engine";
 import { loadBrowserEngine, loadWebglEngine } from "@drawpane/engine/browser";
@@ -54,6 +57,9 @@ export interface EngineRender {
   readonly ms?: { build: number; apply: number; render: number };
   readonly gpu?: GpuInfo | null;
   readonly images?: { bytes: number; budget: number };
+  readonly computeUsed?: boolean;
+  readonly computeStats?: ComputeStats;
+  readonly strokeCache?: StrokeCacheStats;
 }
 
 export function engineDebug(editor: Editor) {
@@ -143,6 +149,7 @@ export function engineDebug(editor: Editor) {
       backend: "cpu" | "gpu" | "webgl";
       background?: [number, number, number, number];
       compatibility?: boolean;
+      compute?: boolean;
     }): Promise<EngineRender> {
       const e = await engineFor(options.backend, options.compatibility ?? false);
       if (typeof e === "string") return { ok: false, error: e, unsupported: {} };
@@ -206,6 +213,10 @@ export function engineDebug(editor: Editor) {
           ms: { build: t1 - t0, apply: t2 - t1, render: t3 - t2 },
         };
       }
+      if (options.backend === "gpu") {
+        e.setComputeOrdinary(Boolean(options.compute));
+        e.computeResetStats();
+      }
       const r = e.renderGpu(options.width, options.height, camera, bg, false);
       if (!r.ok) return { ok: false, error: r.message, code: r.code, unsupported, gpu: e.gpu };
       const fin = await e.gpuFinished();
@@ -214,6 +225,10 @@ export function engineDebug(editor: Editor) {
       const t3 = performance.now();
       const px = await e.gpuPixels();
       if (!px.ok) return { ok: false, error: px.message, code: px.code, unsupported, gpu: e.gpu };
+      const computeUsed = options.backend === "gpu" ? e.computeUsed() : false;
+      const computeStats =
+        options.backend === "gpu" && options.compute ? await e.computeStats() : null;
+      const strokeCache = e.strokeCacheStats();
       return {
         ok: true,
         ...(imageStats ? { images: imageStats } : {}),
@@ -222,6 +237,9 @@ export function engineDebug(editor: Editor) {
         stats: r.value,
         ms: { build: t1 - t0, apply: t2 - t1, render: t3 - t2 },
         gpu: e.gpu,
+        ...(options.backend === "gpu" ? { computeUsed } : {}),
+        ...(computeStats?.ok ? { computeStats: computeStats.value } : {}),
+        ...(strokeCache.ok ? { strokeCache: strokeCache.value } : {}),
       };
     },
 
@@ -489,6 +507,12 @@ export function engineDebug(editor: Editor) {
       const t0 = performance.now();
       const list = b.build(pageId);
       return { buildMs: performance.now() - t0, records: b.stats.records, bytes: list.length };
+    },
+
+    /** Creates an isolated browser `RenderEngine` instance for e2e and P0 compute benchmarks. */
+    async createBrowserEngine(options?: EngineOptions): Promise<RenderEngine> {
+      const mod = await moduleFor("gpu");
+      return new RenderEngine(mod, options);
     },
   };
 }

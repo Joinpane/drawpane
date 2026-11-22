@@ -28,7 +28,7 @@ use crate::record::{
 use crate::store::Store;
 use std::collections::{HashMap, HashSet};
 use vello_common::color::{AlphaColor, Srgb};
-use vello_common::kurbo::{Affine, BezPath, Cap, Join, Rect, Stroke};
+use vello_common::kurbo::{Affine, BezPath, Rect, Stroke};
 use vello_common::paint::{Image, ImageSource, PaintType, Tint, TintMode};
 use vello_common::peniko::{
     BlendMode, ColorStop, ColorStops, Compose, Extend, Fill, Gradient, ImageQuality, ImageSampler,
@@ -49,6 +49,7 @@ pub trait Draw {
     fn fill_blurred_rounded_rect_in(&mut self, p: &BezPath, r: &Rect, radius: f32, std_dev: f32, invert: bool);
     fn stroke_path(&mut self, p: &BezPath);
     fn push_clip_path(&mut self, p: &BezPath);
+    fn push_clip_layer(&mut self, p: &BezPath);
     fn pop_clip(&mut self);
     fn push_opacity(&mut self, opacity: f32);
     fn push_layer(&mut self, compose: Compose, opacity: Option<f32>);
@@ -100,6 +101,9 @@ macro_rules! impl_draw {
             }
             fn push_clip_path(&mut self, p: &vello_common::kurbo::BezPath) {
                 <$t>::push_clip_path(self, p);
+            }
+            fn push_clip_layer(&mut self, p: &vello_common::kurbo::BezPath) {
+                <$t>::push_clip_layer(self, p);
             }
             fn pop_clip(&mut self) {
                 <$t>::pop_clip(self);
@@ -1679,6 +1683,7 @@ fn subtree_flushes_in_full_frame(
                 style,
                 paint,
                 blend,
+                ..
             } if *blend != 0 && style.width > 0.0 && paint_visible(paint, inner) => {
                 if let Some(local_b) = r.entry_bounds(*path, &|g| store.glyphs.bounds(g)) {
                     let grow =
@@ -1987,9 +1992,9 @@ impl<B: Backend> Walk<'_, B> {
         if !has_mask {
             return self.children(parent_id, &parent_node.children, world, inner, parent_context);
         }
-        let mut clipping = false;
+        let mut clipping: Option<bool> = None;
         let mut pic_scope: Option<(u32, u32, Vec<u32>)> = None;
-        for &cid in &parent_node.children {
+        for (idx, &cid) in parent_node.children.iter().enumerate() {
             let Some(cn) = self.store.nodes.get(&cid) else {
                 continue;
             };
@@ -2001,10 +2006,13 @@ impl<B: Backend> Walk<'_, B> {
                 if let Some((mid, mkind, ids)) = pic_scope.take() {
                     self.draw_picture_mask(mid, mkind, &ids, world, inner, parent_context)?;
                 }
-                if clipping {
+                if let Some(is_layer) = clipping.take() {
                     self.open.pop();
-                    self.backend.scene().pop_clip();
-                    clipping = false;
+                    if is_layer {
+                        self.backend.scene().pop_layer();
+                    } else {
+                        self.backend.scene().pop_clip();
+                    }
                 }
                 let refused = cr.refusing_bits();
                 if refused != 0 {
@@ -2025,19 +2033,34 @@ impl<B: Backend> Walk<'_, B> {
                         let p = self.path(cr, 0, mask_dev, 0.0)?;
                         let even_odd = cr.mask == crate::record::MASK_OUTLINE_EVENODD;
                         let sd = self.scene_device(mask_dev);
+                        let scope_has_pass = parent_node.children[idx + 1..]
+                            .iter()
+                            .take_while(|&&sid| {
+                                self.store.nodes.get(&sid).is_none_or(|sn| {
+                                    sn.record.hidden() || (!sn.record.is_mask() && !sn.record.ends_mask())
+                                })
+                            })
+                            .any(|&sid| self.store.subtree_has_pass(sid));
+                        let isolate_mask = !self.readers_active && !parent_context && !scope_has_pass;
                         let scene = self.backend.scene();
                         scene.set_transform(sd);
                         scene.set_fill_rule(if even_odd { Fill::EvenOdd } else { Fill::NonZero });
-                        scene.push_clip_path(&p);
-                        self.open.push(Open::Clip {
-                            transform: sd,
-                            path: p,
-                            even_odd,
-                            frame_clip: None,
-                            context_only: parent_context,
-                            active_on_scene: true,
-                        });
-                        clipping = true;
+                        if isolate_mask {
+                            scene.push_clip_layer(&p);
+                            self.open.push(Open::Layer);
+                            clipping = Some(true);
+                        } else {
+                            scene.push_clip_path(&p);
+                            self.open.push(Open::Clip {
+                                transform: sd,
+                                path: p,
+                                even_odd,
+                                frame_clip: None,
+                                context_only: parent_context,
+                                active_on_scene: true,
+                            });
+                            clipping = Some(false);
+                        }
                     }
                     kind => {
                         pic_scope = Some((cid, kind, Vec::new()));
@@ -2045,14 +2068,17 @@ impl<B: Backend> Walk<'_, B> {
                 }
                 continue;
             }
-            if (clipping || pic_scope.is_some()) && cr.ends_mask() {
+            if (clipping.is_some() || pic_scope.is_some()) && cr.ends_mask() {
                 if let Some((mid, mkind, ids)) = pic_scope.take() {
                     self.draw_picture_mask(mid, mkind, &ids, world, inner, parent_context)?;
                 }
-                if clipping {
+                if let Some(is_layer) = clipping.take() {
                     self.open.pop();
-                    self.backend.scene().pop_clip();
-                    clipping = false;
+                    if is_layer {
+                        self.backend.scene().pop_layer();
+                    } else {
+                        self.backend.scene().pop_clip();
+                    }
                 }
                 self.node(cid, world, inner, parent_context)?;
                 continue;
@@ -2066,9 +2092,13 @@ impl<B: Backend> Walk<'_, B> {
         if let Some((mid, mkind, ids)) = pic_scope.take() {
             self.draw_picture_mask(mid, mkind, &ids, world, inner, parent_context)?;
         }
-        if clipping {
+        if let Some(is_layer) = clipping.take() {
             self.open.pop();
-            self.backend.scene().pop_clip();
+            if is_layer {
+                self.backend.scene().pop_layer();
+            } else {
+                self.backend.scene().pop_clip();
+            }
         }
         Ok(())
     }
@@ -2630,9 +2660,10 @@ impl<B: Backend> Walk<'_, B> {
                         style,
                         paint,
                         blend,
+                        cache,
                     } => {
                         self.sync_targets(is_context)?;
-                        self.stroke(r, *path, device, style, paint, *blend, active_alpha)?;
+                        self.stroke(r, *path, device, style, paint, *blend, active_alpha, cache)?;
                     }
                     Op::Clip { path, .. }
                         if !is_context
@@ -2646,31 +2677,47 @@ impl<B: Backend> Walk<'_, B> {
                         self.scope()?;
                         let p = self.path(r, *path, device, 0.0)?;
                         let sd = self.scene_device(device);
+                        let wraps_kids = clip_wraps_children(ops, at);
+                        let isolate_clip =
+                            wraps_kids && !self.readers_active && !is_context && !self.store.subtree_has_pass(id);
                         let scene = self.backend.scene();
                         scene.set_transform(sd);
                         scene.set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
-                        scene.push_clip_path(&p);
-                        self.open.push(Open::Clip {
-                            transform: sd,
-                            path: p,
-                            even_odd: *even_odd,
-                            frame_clip: clip_wraps_children(ops, at).then(|| FrameClip {
-                                device_box: device.transform_rect_bbox(Rect::new(
-                                    0.0,
-                                    0.0,
-                                    f64::from(r.size[0]),
-                                    f64::from(r.size[1]),
-                                )),
-                                fill: frame_solid_fill(ops, at, active_alpha),
-                            }),
-                            context_only: is_context,
-                            active_on_scene: true,
-                        });
+                        if isolate_clip {
+                            scene.push_clip_layer(&p);
+                            self.open.push(Open::Layer);
+                        } else {
+                            scene.push_clip_path(&p);
+                            self.open.push(Open::Clip {
+                                transform: sd,
+                                path: p,
+                                even_odd: *even_odd,
+                                frame_clip: wraps_kids.then(|| FrameClip {
+                                    device_box: device.transform_rect_bbox(Rect::new(
+                                        0.0,
+                                        0.0,
+                                        f64::from(r.size[0]),
+                                        f64::from(r.size[1]),
+                                    )),
+                                    fill: frame_solid_fill(ops, at, active_alpha),
+                                }),
+                                context_only: is_context,
+                                active_on_scene: true,
+                            });
+                        }
                     }
                     Op::Unclip => {
-                        if self.open.len() > depth {
-                            self.open.pop();
-                            self.backend.scene().pop_clip();
+                        if self.open.len() > depth
+                            && let Some(open) = self.open.pop()
+                        {
+                            match open {
+                                Open::Clip { active_on_scene, .. } => {
+                                    if active_on_scene {
+                                        self.backend.scene().pop_clip();
+                                    }
+                                }
+                                Open::Layer => self.backend.scene().pop_layer(),
+                            }
                         }
                     }
                     Op::Layer { compose } => {
@@ -3074,7 +3121,7 @@ impl<B: Backend> Walk<'_, B> {
                     self.path(r, *of, device, 0.0)?
                 } else {
                     let p = r
-                        .entry_path(*of, device)
+                        .entry_path(*of)
                         .ok_or_else(|| EngineError::malformed(format!("no path {of}")))?;
                     self.spend(p.elements().len())?;
                     p
@@ -3095,7 +3142,7 @@ impl<B: Backend> Walk<'_, B> {
             }
             _ => {
                 let p = r
-                    .entry_path(i, device)
+                    .entry_path(i)
                     .ok_or_else(|| EngineError::malformed(format!("no path {i}")))?;
                 self.spend(p.elements().len())?;
                 Ok(p)
@@ -3164,47 +3211,10 @@ impl<B: Backend> Walk<'_, B> {
                 g.extend = Extend::Pad;
                 // The canvas interpolates gradient colours unpremultiplied.
                 g.interpolation_alpha_space = InterpolationAlphaSpace::Unpremultiplied;
-                // Vello sizes its gradient LUT from the stop count (256 for 2 stops, 512 for 3,
-                // 1024 for 4+) and truncates the LUT index. Inserting exact unpremultiplied
-                // linear midpoints on 2- and 3-stop ramps is mathematically identical while
-                // upgrading the LUT to 1024 entries (avoiding 1-2 LSB bias on linear-dodge
-                // transparent fades).
-                let expanded_stops: Vec<ColorStop> = if stops.len() >= 2 && stops.len() < 4 {
-                    let mut out = Vec::with_capacity(5);
-                    for pair in stops.windows(2) {
-                        let (t0, c0) = pair[0];
-                        let (t1, c1) = pair[1];
-                        out.push(ColorStop::from((t0, color(c0, alpha))));
-                        let dt = t1 - t0;
-                        let subdivs: usize = if dt <= 0.0 {
-                            1
-                        } else if stops.len() == 2 {
-                            4
-                        } else {
-                            2
-                        };
-                        for k in 1..subdivs {
-                            let f = k as f32 / subdivs as f32;
-                            let tm = t0 + dt * f;
-                            let cm = [
-                                c0[0] + (c1[0] - c0[0]) * f,
-                                c0[1] + (c1[1] - c0[1]) * f,
-                                c0[2] + (c1[2] - c0[2]) * f,
-                                c0[3] + (c1[3] - c0[3]) * f,
-                            ];
-                            out.push(ColorStop::from((tm, color(cm, alpha))));
-                        }
-                    }
-                    if let Some(&(tl, cl)) = stops.last() {
-                        out.push(ColorStop::from((tl, color(cl, alpha))));
-                    }
-                    out
-                } else {
-                    stops
-                        .iter()
-                        .map(|(offset, c)| ColorStop::from((*offset, color(*c, alpha))))
-                        .collect()
-                };
+                let expanded_stops: Vec<ColorStop> = expand_gradient_stops(stops, alpha)
+                    .into_iter()
+                    .map(|(t, c)| ColorStop::from((t, color(c, 1.0))))
+                    .collect();
                 g.stops = ColorStops(expanded_stops.into_iter().collect());
                 let scene = self.backend.scene();
                 scene.set_paint(g.into());
@@ -3363,6 +3373,7 @@ impl<B: Backend> Walk<'_, B> {
         paint: &Paint,
         blend: u8,
         alpha: f32,
+        cache: &crate::stroke::StrokeCache,
     ) -> Result<()> {
         if style.width <= 0.0 {
             return Ok(());
@@ -3390,7 +3401,7 @@ impl<B: Backend> Walk<'_, B> {
                 return Ok(());
             }
             let prev_open = std::mem::take(&mut self.open);
-            let res = self.stroke(r, i, device, style, paint, 0, alpha);
+            let res = self.stroke(r, i, device, style, paint, 0, alpha, cache);
             self.open = prev_open;
             if res.is_ok() {
                 self.backend.pop_blended(u32::from(blend), 1.0, &self.open)?;
@@ -3399,108 +3410,59 @@ impl<B: Backend> Walk<'_, B> {
             }
             return res;
         }
-        if let Some(ring) = stroke_ring(r, i, style) {
-            self.spend(ring.elements().len())?;
+        let stroke_limits = crate::limits::Limits {
+            frame_verbs: self.verbs_left,
+            ..self.store.limits
+        };
+        if let Some(expanded) =
+            crate::stroke::resolve_stroke_outline(r, i, style, cache, &self.store.glyphs, &stroke_limits)?
+        {
+            if expanded.path.is_empty() {
+                return Ok(());
+            }
+            self.spend(expanded.path.len())?;
             if !self.set_paint(paint, device, alpha, self.region(r, i, style.reach()))? {
                 return Ok(());
             }
+            let outline = expanded.path.to_bez();
             let sd = self.scene_device(device);
             let scene = self.backend.scene();
             scene.set_transform(sd);
-            scene.set_fill_rule(Fill::EvenOdd);
-            scene.fill_path(&ring);
+            scene.set_fill_rule(if expanded.even_odd {
+                Fill::EvenOdd
+            } else {
+                Fill::NonZero
+            });
+            scene.fill_path(&outline);
             self.backend.mark_dirty();
             return Ok(());
         }
-        // A glyph off the viewport by less than the stroke's reach still shows its stroke.
+        // Fallback only for viewport-dependent `PathEntry::Outside` strokes (fuzz inputs).
         let reach = stroke_paint_reach(style);
         let p = self.path(r, i, device, reach)?;
         if p.is_empty() {
             return Ok(());
         }
         if !style.dashes.is_empty() {
-            // Decode checked the dashes on shapes whose length it knows; a glyph run's is known now.
             let length = polygon_length(&p);
-            crate::record::check_dashes(
-                style,
-                length,
-                &crate::limits::Limits {
-                    frame_verbs: self.verbs_left,
-                    ..self.store.limits
-                },
-            )?;
+            crate::record::check_dashes(style, length, &stroke_limits)?;
             let period: f64 = style.dashes.iter().map(|d| f64::from(*d)).sum();
             self.spend((length / period * style.dashes.len() as f64).ceil() as usize)?;
         }
         if !self.set_paint(paint, device, alpha, self.region(r, i, style.reach()))? {
             return Ok(());
         }
-        // Zoomed out, vello strokes to a tolerance of a quarter of the path's own units, finer on
-        // the device the further out (a fortieth of a pixel at 10%), where most of a dense tile's
-        // time went offsetting curves. Under a uniform scale (with any rotation or flip), the
-        // stroke of the path scaled to its device size, as wide as it is there, is the same
-        // outline: stroked so, it's to the quarter pixel everything else is flattened to. Only the
-        // scale is applied first, the translation after, as before: a band or tile of the frame,
-        // drawn under another translation, strokes the same outline. A solid paint only (another's
-        // place follows the transform).
-        let [a, b, c, d, e, f] = device.as_coeffs();
-        let (sx, sy) = (a.hypot(b), c.hypot(d));
-        let uniform = sx > 0.0
-            && sx < 1.0
-            && (sx - sy).abs() <= 1e-9 * sx
-            && (a * c + b * d).abs() <= 1e-9 * sx * sy
-            && matches!(paint, Paint::Solid(_));
-        let (p, k, transform) = if uniform {
-            let mut q = p;
-            q.apply_affine(Affine::new([a, b, c, d, 0.0, 0.0]));
-            (q, sx, Affine::translate((e, f)))
-        } else {
-            (p, 1.0, device)
-        };
-        let mut s = Stroke::new(f64::from(style.width) * k)
-            .with_join(match style.join {
-                1 => Join::Round,
-                2 => Join::Bevel,
-                _ => Join::Miter,
-            })
-            .with_caps(match style.cap {
-                1 => Cap::Round,
-                2 => Cap::Square,
-                _ => Cap::Butt,
-            })
-            .with_miter_limit(f64::from(style.miter.max(1.0)));
-        if !style.dashes.is_empty() {
-            s = s.with_dashes(
-                f64::from(style.dash_offset) * k,
-                style.dashes.iter().map(|d| f64::from(*d) * k),
-            );
-        }
-        let sd = self.scene_device(transform);
+        let sd = self.scene_device(device);
         let scene = self.backend.scene();
         scene.set_transform(sd);
-        scene.set_stroke(s);
+        scene.set_stroke(crate::stroke::make_kurbo_stroke(style));
         scene.stroke_path(&p);
         self.backend.mark_dirty();
         Ok(())
     }
 
     fn make_kurbo_stroke(style: &StrokeStyle) -> Stroke {
-        let mut s = Stroke::new(f64::from(style.width))
-            .with_join(match style.join {
-                1 => Join::Round,
-                2 => Join::Bevel,
-                _ => Join::Miter,
-            })
-            .with_caps(match style.cap {
-                1 => Cap::Round,
-                2 => Cap::Square,
-                _ => Cap::Butt,
-            })
-            .with_miter_limit(f64::from(style.miter.max(1.0)));
-        if !style.dashes.is_empty() {
-            s = s.with_dashes(f64::from(style.dash_offset), style.dashes.iter().map(|d| f64::from(*d)));
-        }
-        s
+        crate::stroke::make_kurbo_stroke(style)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3945,20 +3907,10 @@ impl<B: Backend> Walk<'_, B> {
         let tint = color(c, alpha);
         let mut outlines = BezPath::new();
         let mut drew_any = false;
-        // An outline fill is one path, so glyphs that overlap aren't laid over each other; masks
-        // are. Opaque, that's the same picture. See-through, a run whose glyphs touch fills its
-        // outlines.
-        let place = |g: &crate::record::GlyphInstance| {
-            self.store
-                .glyphs
-                .bounds(g.glyph)
-                .map(|b| Affine::new([s, 0.0, 0.0, -s, f64::from(g.x), f64::from(g.y)]).transform_rect_bbox(b))
-        };
-        let masks = c[3] * alpha >= 1.0
-            || glyphs.windows(2).all(|w| match (place(&w[0]), place(&w[1])) {
-                (Some(a), Some(b)) => !overlaps(a, b),
-                _ => true,
-            });
+        // An outline fill is one path, so glyphs that overlap (including across lines) aren't laid
+        // over each other; masks are. Opaque, that's the same picture. See-through, a run whose
+        // glyphs touch fills its outlines.
+        let masks = c[3] * alpha >= 1.0 || crate::ordinary::glyphs_non_overlapping(self.store, s, glyphs);
         // The run's place on the device is the same for every glyph but its offset: whether masks
         // can be used at all, and their scale, are the run's.
         let [a, b, cc, d, _, _] = (device * Affine::new([s, 0.0, 0.0, -s, 0.0, 0.0])).as_coeffs();
@@ -4120,44 +4072,47 @@ impl<B: Backend> Walk<'_, B> {
     }
 }
 
-/// A stroke of a box (its corners round or not) as the ring it paints: the box grown by half the
-/// width, less the box shrunk by it, filled even-odd. The same outline the stroker makes, without
-/// offsetting curves for every tile it's drawn into (a tenth of a cold tile's time on pages of
-/// cards). Only where the join can't matter: every corner rounder than half the width (the
-/// outline is smooth there), or every corner square under a miter join that holds at a right
-/// angle (the outer corner is the box's) or a round one (rounded by half the width). Not for
-/// dashes. None where the stroker is needed.
-fn stroke_ring(r: &Record, i: u32, style: &StrokeStyle) -> Option<BezPath> {
-    let Some(PathEntry::Rect { w, h, radii, smoothing }) = r.paths.get(i as usize) else {
-        return None;
-    };
-    let (w, h) = (f64::from(*w), f64::from(*h));
-    if *smoothing != 0.0 || !style.dashes.is_empty() || !(w > 0.0 && h > 0.0) {
-        return None;
-    }
-    let half = f64::from(style.width) / 2.0;
-    let fitted = geometry::fit_radii(w, h, radii.map(f64::from));
-    let square = fitted.iter().all(|r| *r == 0.0);
-    let outer_round = if fitted.iter().all(|r| *r >= half) {
-        fitted.map(|r| r + half)
-    } else if square && style.join == 0 && style.miter.max(1.0) >= core::f32::consts::SQRT_2 {
-        [0.0; 4]
-    } else if square && style.join == 1 {
-        [half; 4]
+/// Expands 2- and 3-stop gradient ramps with exact unpremultiplied linear midpoints, scaling each
+/// stop's alpha by `alpha`.
+///
+/// Vello 0.4 sizes its gradient LUT from stop count (256 for 2 stops, 512 for 3, 1024 for 4+) and
+/// truncates the LUT index; expanding to 4+ stops upgrades the LUT to 1024 entries while remaining
+/// mathematically identical and shared across CPU, `vello_gpu`, and GPU compute.
+pub(crate) fn expand_gradient_stops(stops: &[(f32, Rgba)], alpha: f32) -> Vec<(f32, Rgba)> {
+    let mul_alpha = |c: Rgba| [c[0], c[1], c[2], (c[3] * alpha).clamp(0.0, 1.0)];
+    if stops.len() >= 2 && stops.len() < 4 {
+        let mut out = Vec::with_capacity(5);
+        for pair in stops.windows(2) {
+            let (t0, c0) = pair[0];
+            let (t1, c1) = pair[1];
+            out.push((t0, mul_alpha(c0)));
+            let dt = t1 - t0;
+            let subdivs: usize = if dt <= 0.0 {
+                1
+            } else if stops.len() == 2 {
+                4
+            } else {
+                2
+            };
+            for k in 1..subdivs {
+                let f = k as f32 / subdivs as f32;
+                let tm = t0 + dt * f;
+                let cm = [
+                    c0[0] + (c1[0] - c0[0]) * f,
+                    c0[1] + (c1[1] - c0[1]) * f,
+                    c0[2] + (c1[2] - c0[2]) * f,
+                    c0[3] + (c1[3] - c0[3]) * f,
+                ];
+                out.push((tm, mul_alpha(cm)));
+            }
+        }
+        if let Some(&(tl, cl)) = stops.last() {
+            out.push((tl, mul_alpha(cl)));
+        }
+        out
     } else {
-        return None;
-    };
-    let mut ring = geometry::rounded_rect_at((-half, -half), w + 2.0 * half, h + 2.0 * half, outer_round);
-    if w > 2.0 * half && h > 2.0 * half {
-        let inner = fitted.map(|r| (r - half).max(0.0));
-        ring.extend(geometry::rounded_rect_at(
-            (half, half),
-            w - 2.0 * half,
-            h - 2.0 * half,
-            inner,
-        ));
+        stops.iter().map(|(offset, c)| (*offset, mul_alpha(*c))).collect()
     }
-    Some(ring)
 }
 
 /// Conservative local-space reach around a stroked path's bounding box, shared by draw-time

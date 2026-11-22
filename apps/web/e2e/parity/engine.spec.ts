@@ -123,6 +123,41 @@ const WANT_BACKENDS = (process.env.ENGINE_PARITY_BACKENDS ?? "gpu,webgl")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
+const COMPUTE_P0 = process.env.ENGINE_PARITY_COMPUTE === "1";
+/**
+ * Ordinary-paint suites that MUST execute on the Vello 0.12 GPU compute path on every drawn cell
+ * when `ENGINE_PARITY_COMPUTE=1` is set (the P0 kill gate).
+ */
+const ORDINARY_COMPUTE_SUITES = new Set([
+  "strokes",
+  "text-strokes",
+  "text",
+  "text-overlap",
+  "text-ranges",
+  "lists",
+  "vertical-trim",
+]);
+
+/**
+ * Mixed suites containing both ordinary-paint cells (which MUST run on compute in P0) and
+ * effect/reader cells (shadows, layer blur, non-normal blends, which stay on vello_gpu until P2).
+ */
+function expectsComputeCell(suite: string, cellId: string): boolean {
+  if (ORDINARY_COMPUTE_SUITES.has(suite)) return true;
+  if (suite === "corners") {
+    return ![
+      "drop-shadow",
+      "shadow-spread",
+      "shadow-shrink",
+      "inner-shadow",
+      "layer-blur",
+    ].includes(cellId);
+  }
+  if (suite === "fills") {
+    return !cellId.startsWith("blend-");
+  }
+  return false;
+}
 
 if (!process.env.ENGINE_BROWSER || process.env.ENGINE_BROWSER === "chromium") {
   test.use({
@@ -149,6 +184,7 @@ type Engine = {
       height: number;
       backend: "cpu" | "gpu" | "webgl";
       compatibility?: boolean;
+      compute?: boolean;
       ids?: string[];
       context?: boolean;
       background?: [number, number, number, number];
@@ -159,6 +195,13 @@ type Engine = {
       rgba?: string;
       unsupported: Record<string, string[]>;
       gpu?: { adapter: string; backend: "webgpu" | "webgl2"; fallback: boolean } | null;
+      computeUsed?: boolean;
+      computeStats?: {
+        framesSubmitted: number;
+        framesChecked: number;
+        failedFrames: number;
+        anyFailedMask: number;
+      };
     }>;
     canvasRender(o: {
       pageId: string;
@@ -231,6 +274,7 @@ interface CellResult {
   };
   readonly workerIdentical?: boolean;
   readonly workerFailure?: { readonly code: number; readonly message: string };
+  readonly computeUsed?: boolean;
 }
 
 const strip = <T extends { heat: unknown }>(s: T): Omit<T, "heat"> => {
@@ -436,14 +480,20 @@ test.describe("Render engine parity", () => {
         let vsFigmaWebgl: ReturnType<typeof score> | undefined;
         let cpuGpu: Omit<ReturnType<typeof score>, "heat"> | undefined;
         let cpuWebgl: Omit<ReturnType<typeof score>, "heat"> | undefined;
+        let computeUsed: boolean | undefined;
         const backendImgs: string[] = [];
         const backendNotes: string[] = [];
 
         for (const { backend, compatibility } of backends) {
-          const label = backend === "webgl" ? "WebGL2" : "WebGPU";
+          const label = backend === "webgl" ? "WebGL2" : COMPUTE_P0 ? "WebGPU(compute)" : "WebGPU";
           const out = await page.evaluate(
             (o) => (window as unknown as Engine).drawpaneEngine.render(o),
-            { ...opts, backend, compatibility },
+            {
+              ...opts,
+              backend,
+              compatibility,
+              ...(backend === "gpu" && COMPUTE_P0 ? { compute: true } : {}),
+            },
           );
           const expectedBackend = backend === "webgl" ? "webgl2" : "webgpu";
           if (out.gpu)
@@ -466,6 +516,27 @@ test.describe("Render engine parity", () => {
           const worse = outsideTolerance(cg, CPU_GPU_TOLERANCE);
           if (worse.length > 0)
             failures.push(`${cell.id}: CPU against ${label} ${worse.join(", ")}`);
+          if (backend === "gpu" && COMPUTE_P0) {
+            computeUsed = Boolean(out.computeUsed);
+            if (expectsComputeCell(suite.suite, cell.id) && !out.computeUsed) {
+              failures.push(
+                `${cell.id}: ordinary-paint cell in ${suite.suite} did not use GPU compute path`,
+              );
+            }
+            if (out.computeUsed) {
+              if (cg.severe > 0) {
+                failures.push(
+                  `${cell.id}: CPU against ${label} has ${cg.severe} severe pixel(s) (P0 gate requires 0)`,
+                );
+              }
+              const cs = out.computeStats;
+              if (!cs || cs.framesChecked < 1 || cs.failedFrames > 0 || cs.anyFailedMask !== 0) {
+                failures.push(
+                  `${cell.id}: GPU compute bump check failed (${JSON.stringify(cs ?? null)})`,
+                );
+              }
+            }
+          }
           if (effectiveLimit !== undefined && f > effectiveLimit)
             failures.push(`${cell.id}: ${label} ${f} from Figma (limit ${effectiveLimit})`);
           if (backend === "gpu") {
@@ -478,7 +549,7 @@ test.describe("Render engine parity", () => {
             cpuWebgl = strip(cg);
           }
           backendNotes.push(
-            `CPU/${label}: mean ${cg.mean.toFixed(3)} · p99 ${cg.p99} · worst tile ${cg.worstTile.toFixed(2)}`,
+            `CPU/${label}${backend === "gpu" && COMPUTE_P0 ? (out.computeUsed ? " [compute]" : " [vello_gpu]") : ""}: mean ${cg.mean.toFixed(3)} · p99 ${cg.p99} · worst tile ${cg.worstTile.toFixed(2)} · severe ${cg.severe}`,
           );
           backendImgs.push(
             `<td><img src="${await encodePng(page, out.rgba, width, height)}"></td>`,
@@ -599,6 +670,7 @@ test.describe("Render engine parity", () => {
             ...(vsFigmaCanvas ? { canvas: strip(vsFigmaCanvas) } : {}),
           },
           ...(w.ok ? { workerIdentical } : { workerFailure: { code: w.code, message: w.message } }),
+          ...(computeUsed !== undefined ? { computeUsed } : {}),
         });
         const img = async (b64: string) => encodePng(page, b64, width, height);
         const figmaLine = [
@@ -629,8 +701,17 @@ test.describe("Render engine parity", () => {
       report.push(
         `<h2>${suite.suite} <small>${drawn.length} drawn, ${results.length - drawn.length} fall back · mean from Figma ${summaryParts.join(", ")}</small></h2><table><tr><th></th><th>Figma</th><th>CPU</th>${cols}</tr>${rows.join("")}</table>`,
       );
+      const computeCount = drawn.filter((r) => r.computeUsed === true).length;
+      const cgStats = drawn
+        .map((r) => r.cpuGpu)
+        .filter((v): v is NonNullable<CellResult["cpuGpu"]> => v !== undefined);
+      const cgNote =
+        cgStats.length > 0
+          ? `, CPU/GPU worst mean ${Math.max(...cgStats.map((s) => s.mean)).toFixed(4)} p99 ${Math.max(...cgStats.map((s) => s.p99))} tile ${Math.max(...cgStats.map((s) => s.worstTile)).toFixed(2)} severe ${cgStats.reduce((a, s) => a + s.severe, 0)}`
+          : "";
+      const computeNote = COMPUTE_P0 ? `, compute ${computeCount}/${drawn.length}` : "";
       console.log(
-        `${suite.suite}: ${drawn.length} drawn (Figma ${summaryParts.join(", ")}), ${results.length - drawn.length} fall back`,
+        `${suite.suite}: ${drawn.length} drawn (Figma ${summaryParts.join(", ")}), ${results.length - drawn.length} fall back${computeNote}${cgNote}`,
       );
       const minDrawn = MIN_DRAWN[suite.suite];
       if (minDrawn !== undefined && drawn.length < minDrawn) {
@@ -830,14 +911,22 @@ test.describe("Render engine parity", () => {
       for (const { backend, compatibility } of backends) {
         const gpu = await page.evaluate(
           (o) => (window as unknown as Engine).drawpaneEngine.render(o),
-          { ...engineOpts, backend, compatibility },
+          {
+            ...engineOpts,
+            backend,
+            compatibility,
+            ...(backend === "gpu" && COMPUTE_P0 ? { compute: true } : {}),
+          },
         );
         expect(gpu.ok, gpu.error).toBe(true);
         const gpuPx = Buffer.from(gpu.rgba ?? "", "base64");
-        expect(
-          outsideTolerance(score(px, gpuPx, width, height), CPU_GPU_TOLERANCE),
-          cell.id,
-        ).toEqual([]);
+        const cg = score(px, gpuPx, width, height);
+        expect(outsideTolerance(cg, CPU_GPU_TOLERANCE), cell.id).toEqual([]);
+        if (backend === "gpu" && COMPUTE_P0) {
+          expect(cg.severe, `${cell.id}: zero severe pixels on compute P0`).toBe(0);
+          expect(gpu.computeUsed, `${cell.id}: missing-faces should use compute P0`).toBe(true);
+          expect(gpu.computeStats?.failedFrames ?? -1, `${cell.id}: zero bump failures`).toBe(0);
+        }
         gpuScores[backend] = strip(score(gpuPx, reference, width, height));
         expect(gpuScores[backend].mean, cell.id).toBeLessThan(limits[cell.id] ?? 0);
       }

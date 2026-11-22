@@ -8,6 +8,8 @@ import {
   sameRendererStatus,
 } from "./renderer-status";
 import {
+  COMPUTE_STORAGE_KEY,
+  computeOrdinary,
   engineSearch,
   PRESENT_STORAGE_KEY,
   presentation,
@@ -143,6 +145,28 @@ describe("renderer-switch", () => {
     rememberRendererSwitches("?present=webgpu");
     expect(presentation("")).toBe("webgpu");
     expect(sessionStorage.getItem(PRESENT_STORAGE_KEY)).toBeNull();
+  });
+
+  it("keeps compute ordinary paint opt-in and remembers ?compute=1 / ?compute=0", () => {
+    expect(computeOrdinary("")).toBe(false);
+    expect(engineSearch({ renderer: "engine", compute: "1" })).toEqual({
+      renderer: "engine",
+      compute: "1",
+    });
+    expect(engineSearch({ compute: "bogus" })).toEqual({});
+
+    rememberRendererSwitches("?compute=1");
+    expect(sessionStorage.getItem(COMPUTE_STORAGE_KEY)).toBe("1");
+    expect(computeOrdinary("")).toBe(true);
+
+    rememberRendererSwitches("?compute=0");
+    expect(computeOrdinary("")).toBe(false);
+    expect(sessionStorage.getItem(COMPUTE_STORAGE_KEY)).toBeNull();
+
+    localStorage.setItem(COMPUTE_STORAGE_KEY, "1");
+    expect(computeOrdinary("")).toBe(true);
+    expect(computeOrdinary("?compute=0")).toBe(false);
+    expect(computeOrdinary("")).toBe(false);
   });
 });
 

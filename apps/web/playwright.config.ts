@@ -90,6 +90,9 @@ export default defineConfig({
         viewport: { width: 1440, height: 900 },
         // A retina laptop: twice the pixels to fill.
         deviceScaleFactor: 2,
+        ...(process.env.BENCH_BROWSER_CHANNEL && !process.env.CHROMIUM_PATH
+          ? { channel: process.env.BENCH_BROWSER_CHANNEL }
+          : {}),
         ...(process.env.CHROMIUM_PATH
           ? { launchOptions: { executablePath: process.env.CHROMIUM_PATH } }
           : {}),

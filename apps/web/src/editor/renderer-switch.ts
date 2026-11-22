@@ -17,15 +17,18 @@
 
 export type RendererChoice = "canvas" | "engine" | "engine-compat" | "engine-webgl" | "engine-cpu";
 export type PresentationMode = "webgpu" | "readback";
+export type ComputeMode = "1" | "0";
 
 export interface EngineSearch {
   renderer?: RendererChoice;
   present?: PresentationMode;
+  compute?: ComputeMode;
 }
 
 export const RENDERER_STORAGE_KEY = "drawpane:renderer";
 export const PRESENT_STORAGE_KEY = "drawpane:engine-present";
 export const SOFTWARE_STORAGE_KEY = "drawpane:engine-software";
+export const COMPUTE_STORAGE_KEY = "drawpane:engine-compute";
 
 export function parseRenderer(value: unknown): RendererChoice | undefined {
   return value === "canvas" ||
@@ -41,13 +44,21 @@ export function parsePresent(value: unknown): PresentationMode | undefined {
   return value === "webgpu" || value === "readback" ? value : undefined;
 }
 
+export function parseCompute(value: unknown): ComputeMode | undefined {
+  if (value === "1" || value === "true" || value === 1 || value === true) return "1";
+  if (value === "0" || value === "false" || value === 0 || value === false) return "0";
+  return undefined;
+}
+
 /** Validated render engine switches for route `validateSearch` hooks. */
 export function engineSearch(search: Record<string, unknown>): EngineSearch {
   const renderer = parseRenderer(search.renderer);
   const present = parsePresent(search.present);
+  const compute = parseCompute(search.compute);
   return {
     ...(renderer ? { renderer } : {}),
     ...(present ? { present } : {}),
+    ...(compute ? { compute } : {}),
   };
 }
 
@@ -110,6 +121,22 @@ function rememberPresent(mode: PresentationMode): void {
   }
 }
 
+function rememberCompute(mode: ComputeMode): void {
+  try {
+    if (mode === "0") {
+      if (parseCompute(getLocal(COMPUTE_STORAGE_KEY)) === "1") {
+        sessionStorage.setItem(COMPUTE_STORAGE_KEY, "0");
+      } else {
+        sessionStorage.removeItem(COMPUTE_STORAGE_KEY);
+      }
+      return;
+    }
+    sessionStorage.setItem(COMPUTE_STORAGE_KEY, mode);
+  } catch {
+    // Storage blocked.
+  }
+}
+
 /**
  * Captures any render engine switches present in a URL query string into `sessionStorage`,
  * so subsequent navigations and login redirects keep them for the session.
@@ -121,6 +148,8 @@ export function rememberRendererSwitches(search: string | URLSearchParams): void
     if (renderer) rememberRenderer(renderer);
     const present = parsePresent(params.get("present"));
     if (present) rememberPresent(present);
+    const compute = parseCompute(params.get("compute"));
+    if (compute) rememberCompute(compute);
   } catch {
     // URL or storage unavailable.
   }
@@ -171,4 +200,24 @@ export function presentation(search?: string): PresentationMode {
  */
 export function softwareAllowed(): boolean {
   return getLocal(SOFTWARE_STORAGE_KEY) === "allow";
+}
+
+/**
+ * Whether the P0 Vello 0.12 GPU compute path is enabled for ordinary paint on WebGPU Core
+ * (`?compute=1` or `drawpane:engine-compute` = "1"). Default off so nothing changes for users.
+ */
+export function computeOrdinary(search?: string): boolean {
+  try {
+    const url = parseCompute(readParams(search).get("compute"));
+    if (url) {
+      rememberCompute(url);
+      return url === "1";
+    }
+  } catch {
+    // URL unavailable.
+  }
+  const session = parseCompute(getSession(COMPUTE_STORAGE_KEY));
+  if (session) return session === "1";
+  const stored = parseCompute(getLocal(COMPUTE_STORAGE_KEY));
+  return stored === "1";
 }

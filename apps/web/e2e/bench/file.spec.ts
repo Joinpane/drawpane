@@ -205,14 +205,17 @@ test.describe("A real file", () => {
     }
     page.on("pageerror", (error) => console.log(`page error: ${error.message}`));
     await page.evaluate(
-      ({ renderer, present }) => {
+      ({ renderer, present, compute }) => {
         localStorage.setItem("drawpane:debug", "1");
         localStorage.setItem("drawpane:renderer", renderer);
         localStorage.setItem("drawpane:engine-present", present);
+        if (compute) localStorage.setItem("drawpane:engine-compute", "1");
+        else localStorage.removeItem("drawpane:engine-compute");
       },
       {
         renderer: RENDERER,
         present: process.env.BENCH_ENGINE_PRESENT === "readback" ? "readback" : "webgpu",
+        compute: process.env.BENCH_COMPUTE === "1",
       },
     );
     const started = Date.now();

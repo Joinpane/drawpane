@@ -26,13 +26,17 @@ pub mod limits;
 pub mod mask;
 pub mod masks;
 pub mod noise;
+pub mod ordinary;
 pub mod png;
 pub mod progressive_blur;
 pub mod record;
 pub mod shadow;
 pub mod store;
+pub mod stroke;
 pub mod texture;
 pub mod tiles;
+#[cfg(feature = "gpu")]
+pub mod vello_compute;
 pub mod wire;
 
 use engine::{Camera, Engine as Core};
@@ -709,6 +713,20 @@ impl Engine {
         self.png.is_some()
     }
 
+    /// Cached stroke outline statistics across all records:
+    /// `[ops_total, ops_cached, input_verbs, expanded_verbs, cached_bytes]`.
+    #[wasm_bindgen(js_name = strokeCacheStats)]
+    pub fn stroke_cache_stats(&self) -> Vec<f64> {
+        let s = self.core.store.stroke_cache_stats();
+        vec![
+            f64::from(s.ops_total),
+            f64::from(s.ops_cached),
+            s.input_verbs as f64,
+            s.expanded_verbs as f64,
+            s.cached_bytes as f64,
+        ]
+    }
+
     /// Runs the reference Gaussian blur on premultiplied RGBA8 pixels on the CPU (for conformance
     /// tests): `edge_mode` is 0=Zero, 1=Clamp, 2=Border; `reference` forces the full-resolution
     /// semantic oracle even above `DIRECT_SIGMA_MAX`. On success, premultiplied RGBA8 pixels are
@@ -1176,6 +1194,84 @@ impl Engine {
                 g.blur.stats.bytes as f64,
             ],
             None => vec![0.0; 4],
+        }
+    }
+
+    /// Enables or disables the P0 Vello 0.12 GPU compute path for ordinary paint (WebGPU only).
+    #[wasm_bindgen(js_name = setComputeOrdinary)]
+    pub fn set_compute_ordinary(&mut self, enabled: bool) -> Outcome {
+        #[cfg(feature = "gpu")]
+        {
+            match self.core.gpu.as_mut() {
+                Some(g) => {
+                    g.set_compute_ordinary(enabled);
+                    Outcome::ok()
+                }
+                None => Outcome::err(EngineError::new(error::ErrorCode::State, "no GPU attached")),
+            }
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            let _ = enabled;
+            Outcome::err(EngineError::new(
+                error::ErrorCode::Unsupported,
+                "GPU compute path requires WebGPU Core build",
+            ))
+        }
+    }
+
+    /// Whether the most recent GPU frame ran on the Vello 0.12 GPU compute path.
+    #[wasm_bindgen(js_name = computeUsed)]
+    pub fn compute_used(&self) -> bool {
+        #[cfg(feature = "gpu")]
+        {
+            self.core.gpu.as_ref().is_some_and(|g| g.last_compute_used)
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            false
+        }
+    }
+
+    /// Resets accumulated GPU compute per-frame bump and timestamp diagnostics.
+    #[wasm_bindgen(js_name = computeResetStats)]
+    pub fn compute_reset_stats(&mut self) {
+        #[cfg(feature = "gpu")]
+        if let Some(g) = self.core.gpu.as_mut() {
+            g.compute_reset_stats();
+        }
+    }
+
+    /// Resolves to a JSON string of per-frame GPU compute diagnostics (bump counters and hardware
+    /// timestamp queries across every rendered frame), or to an `Outcome` on failure.
+    #[wasm_bindgen(js_name = computeStats)]
+    pub fn compute_stats(&mut self) -> js_sys::Promise {
+        #[cfg(feature = "gpu")]
+        {
+            let pair = self.core.gpu.as_ref().map(|g| (g.device.clone(), g.health.clone()));
+            let start = self.core.gpu.as_mut().map(|g| g.compute_stats_start());
+            wasm_bindgen_futures::future_to_promise(async move {
+                let (Some((device, health)), Some(start)) = (pair, start) else {
+                    return Ok(failure(EngineError::new(error::ErrorCode::State, "no GPU attached")));
+                };
+                let readback = match start {
+                    Ok(r) => r,
+                    Err(e) => return Ok(failure(e)),
+                };
+                match vello_compute::finish_stats_readback(device, health, readback).await {
+                    Ok(json) => Ok(JsValue::from_str(&json)),
+                    Err(e) => Ok(failure(e)),
+                }
+            })
+        }
+        #[cfg(not(feature = "gpu"))]
+        {
+            wasm_bindgen_futures::future_to_promise(async move {
+                Ok(failure(EngineError::new(
+                    error::ErrorCode::Unsupported,
+                    "GPU compute path requires WebGPU Core build",
+                )))
+            })
         }
     }
 }

@@ -1228,3 +1228,78 @@ have a smaller padded work budget. A rejected display list or a view that still
 exceeds the raster floor uses Canvas for the affected page or view while the
 engine stays active. CPU view mode admits tiles by their working target and
 tries a direct viewport render at full resolution before reducing it.
+
+## Amendment: GPU compute ordinary paint plan and P0 kill gate (2026-11-21)
+
+Following the draft PR #276 zoom-transform spike (`bac1ee2a190d470e57c9aed82dc2b76b2b5ff6cb`) and its independent review, the program adopts Vello 0.12's GPU compute pipeline (`fine_area`) for ordinary paint on WebGPU Core devices behind an opt-in flag (`?compute=1` / `drawpane:engine-compute`, default off), gated by a four-phase plan (P0 to P3, roughly 7 to 9 weeks total). The spike code is not merged as-is; P0 proves fidelity, fixes the benchmark, and leaves a single shared ordinary-paint traversal seam (`packages/engine/rust/src/ordinary.rs`) ready for P1's one-walker, two-encoder integration.
+
+### Corrections to the PR #276 spike memo
+
+1. **Glyph subpixel phases:** Main's glyph mask cache uses **8 subpixel phases per axis** (`masks.rs::PHASES = 8.0`, at most 1/16 px offset from the exact origin), not 4.
+2. **Root cause of the CPU-vs-GPU parity gap:** Both `vello_common 0.4` (`TOL = 0.25`) and Vello 0.12 `flatten.wgsl` (`tol = 0.25`) already flattened at 0.25 device px. The spike's parity failure (mean 0.28 to 0.53 with severe pixel clusters) came from two separate causes, not Euler strokes vs kurbo alone:
+   - Missing 1/8 px glyph origin snapping on the GPU compute path.
+   - Two different curve flattening algorithms at 0.25 px (`vello_common`'s SIMD Wang/parabola-integral flattener vs Vello 0.12's Euler-spiral flattener), which disagree by up to 0.25 to 0.5 px on high-contrast curves.
+   - Coverage itself already agrees: when fed identical flattened lines, `fine_area` and `vello_cpu` pass 24/24 review lab cases with mean <= 0.09 and zero severe pixels.
+3. **Bump allocator checking:** PR #276 read `bump.failed` only once at the end of each 1x sweep (and cleared `bump` every frame), so only the last frame of each 1x sweep was checked and Retina sweeps were not asserted. P0 checks `bump.failed` on every submitted frame of every sweep.
+4. **Benchmark methodology:** PR #276 measured serialized submit-to-fence latency (`render` + `gpuFinished`) on a Modal Tesla T4 without canvas presentation, without GPU timestamp queries, and with only 24 frames per sweep (making p95 the second-worst frame; the 40k p95 outlier was not established as deterministic from the data). Similarly, independent review of PR #278 (batched glass) confirmed that the current `vello_gpu` engine is bound by main-thread CPU encoding rather than GPU passes (batching passes gained only ~5%), and that unconfirmed WebGPU presentations mask stand-in frames. P0's fixed bench reports a per-frame CPU split (`encode` / `render` / `submit` / `total`) vs GPU (`TIMESTAMP_QUERY` pass timings and post-submit fence) for both `main vello_gpu` and `compute P0`, requires >= 240 frames per sweep, checks `bump.failed === 0` on every frame, and verifies non-blank zoom-responsive pixels on both readback and live onscreen canvas screenshots (`BENCH_REQUIRE_PRESENT=1` where the driver supports WebGPU swapchain presentation).
+5. **Projections vs measurements:** The spike memo's "2 to 4 ms after chunking" and "+70 to 90 KB gz after trimming" figures were projections, not measured numbers.
+6. **One rasterizer per Core device:** Core devices must not swap between GPU compute during zoom and `vello_gpu` tiles when settled. Swapping rasterizers on stop shifts edges and causes visible pop or shimmer. On Core devices, one geometry definition applies across every frame, moving or settled.
+7. **Schedule:** Productionization is roughly 7 to 9 weeks across P0 to P3 (below), not 4 to 6 weeks.
+
+### Architecture and risks
+
+- **Unified geometry across every backend:** P0 vendors `vello_shaders` 0.12 (`packages/engine/rust/vendor/vello_shaders/`), replaces `flatten.wgsl` with a direct WGSL port of `vello_common 0.4`'s `flatten_simd` (0.25 px, plus conservative-bbox viewport culling preserving left-of-viewport backdrop chords), patches `fine.wgsl` to store premultiplied RGBA8 directly, trims shader permutations to `pathtag_scan_large`, `pathtag_scan_small`, and `fine_area`, and shares camera-independent `geometry::ellipse` (8 cubics per quarter) and cached kurbo stroke outlines (`packages/engine/rust/src/stroke.rs`) across `vello_cpu`, `vello_gpu`, and GPU compute.
+- **Exact 1/8 px glyph snapping on GPU:** `VelloComputeSink` encodes each glyph run as one Vello path with per-glyph `PathTag::TRANSFORM` and a 1:1 `TransformMeta` table; `APPLY_VIEW_WGSL` snaps axis-aligned small solid glyphs to 1/8 px (`floor((t - floor(t)) * 8 + 0.5) * 0.125`) under the exact same eligibility rules as `exec.rs`.
+- **Key risks:**
+  - **Laptop iGPU speed:** A laptop integrated GPU (Apple Silicon, Intel, AMD) can be significantly slower than a Tesla T4 at compute. Laptop numbers cannot be produced on this Linux VM and must be verified on real hardware (target: GPU p95 <= 8 ms on a 10k-layer page at 100%, Retina 2x) before exiting P0.
+  - **40k fit-all views and memory:** Per-board chunking fixes 100% zoom on 40k pages but does not fix fit-all where all 40k layers are visible (231 MiB working set and ~33 ms T4 p50 in the spike). P3 addresses this with coverage-preserving GPU sub-pixel LOD and strict memory caps (retained scene <= 64 MiB, dynamic working set <= 96 MiB, per-binding <= 128 MiB).
+  - **256-bin viewport limit:** Vello 0.12's 256-bin grid caps single-pass renders at 4096 x 4096 px; P0 falls back to `vello_gpu` above 4096 px and P1 splits larger views.
+  - **Cached stroke outline growth:** Pre-expanding strokes once per revision in record units trades a small retained outline footprint for identical strokes across backends and zero per-zoom stroke expansion; growth is measured on the generated kit.
+  - **Fallback at every phase:** Any adapter lacking WebGPU Core limits (8 storage buffers per shader stage, 16 KiB workgroup storage), any validation error, device loss, or repeated bump failure falls back to `vello_gpu` tiles. Compat and WebGL2 remain on `vello_gpu` (decision 0040 criterion 1). If the unified `vello_common` flattener port cannot hold parity, the fallback is moving every backend onto Vello's Euler flattener (`vello_shaders` Rust CPU port), which requires re-baselining Figma parity suites.
+
+### Phased plan and kill gates (7 to 9 weeks)
+
+| Phase | Duration | Scope | Kill / exit gates |
+| --- | --- | --- | --- |
+| **P0. Fidelity and laptop proof** | 1 to 1.5 weeks | Vendored `vello_shaders` 0.12 with `vello_common` flattener port and premul `fine_area`; cached kurbo stroke outlines shared across all backends; 1/8 px GPU glyph snap; shared `ordinary.rs` seam; fixed bench (GPU timestamps, presented rAF frames, >= 240 frames, per-frame bump check); laptop verification script + Safari diagnostics bench. | Unchanged CPU vs GPU tolerance on every engine parity cell (mean <= 0.25, p99 <= 4, worst tile <= 2, zero severe pixels) with compute drawing; Figma parity suites with stroke cells no worse than `main`; Modal T4 10k @ 100% Retina 2x timing with 0 bump failures; laptop target GPU p95 <= 8 ms on Apple GPU (Chrome + Safari) and iGPU. |
+| **P1. Engine integration** | 2 to 3 weeks | Split `exec.rs` into one shared walker with two encoders (device strips for `vello_cpu`/`vello_gpu`, retained page-space chunks for compute); per-board chunks and spatial grid cells for loose layers; dirty-chunk rebuild on `Store::apply`; progressive viewport-order cold open; CPU chunk culling; Core draws every ordinary frame (moving or idle) on compute; pipelined frames, async bump readback with grow-and-redraw, split views > 4096 px. | Patched-equals-fresh fuzz on chunk invalidation; CPU-vs-compute on kit frames; presented frame interval p95 <= 16.7 ms and p99 <= 20 ms zooming/panning 10k page on T4 and laptops; main thread <= 8 ms p95 including edits; replay gate with zero degraded frames. |
+| **P2. Render graph and effects** | 2 weeks | Design glass as reader waves inside the compute path, reusing the batched lens-mask atlas and one-pass dual-plane write (dropping analytic rims, whose 36.6-degree corner rim-direction error is inherent); composite compute segments directly into Drawpane's premultiplied targets; map images (on-demand levels), diamond gradients, picture masks, and non-normal blends or report typed `Unsupported`. | All Figma suites on compute; large iOS UI kit heavy pages (17,922 layers, 921 readers) zoom with presented p95 <= 16.7 ms on T4 and laptops; zero degraded frames by replay. |
+| **P3. Scale, memory, size** | 1.5 to 2 weeks | Coverage-preserving GPU sub-pixel LOD (sub-1 px glyphs/paths drawn as precomputed ink-fraction bboxes, gated replay vs exact: mean <= 0.25, zero severe clusters); memory caps (retained <= 64 MiB, dynamic <= 96 MiB, <= 128 MiB/binding, typed `Limit` fallback to `vello_gpu`); vendor `vello_encoding` without `skrifa`/`read-fonts` and ship only `fine_area`. | 40k fit-all and 100% presented p95 <= 16.7 ms on T4 (measured and reported on laptops); browser Wasm <= `main` + 100 KB gz and within 1,000 KB budget. |
+
+### P0 measured results
+
+Measured on branch `t3/vello-gpu-compute-p0` (opt-in flag `?compute=1` / `drawpane:engine-compute`, default off):
+
+- **WASM bundle sizes (all 4 modules within budget):**
+  - `worker`: 950 KB raw, 367 KB gzipped (budget 400 KB; glue 40 KB)
+  - `browser`: 2,385 KB raw, 849 KB gzipped (budget 1,000 KB; glue 127 KB)
+  - `webgl`: 3,702 KB raw, 1,351 KB gzipped (budget 1,400 KB; glue 120 KB)
+  - `decoder`: 379 KB raw, 161 KB gzipped (budget 200 KB; glue 8 KB)
+- **Cached stroke outline growth (10,805-layer generated kit):** `3,098 / 3,098` stroke ops expanded once per revision in record units; path verbs grow `25,285 -> 166,712` (`6.59x`), retained outline footprint `3,155.0 KiB` (`3.08 MiB`).
+- **Parity kill gate (Modal NVIDIA Tesla T4, driver `620.70.06`, Chromium `--modes webgpu`, unchanged tolerance `mean <= 0.25`, `p99 <= 4`, `tile <= 2.0`, zero severe pixels):**
+  - **100 / 100 GPU-compute-drawn cells across all 24 Figma parity suites passed with zero (`0`) severe pixels and `0` bump failures.** Worst CPU-vs-compute cell across all 100 compute cells: `fills/paint-opacity` mean `0.2135` (limit `0.25`), `max = 1`, `p99 = 1` (limit `4`), worst 32x32 tile `0.64` (limit `2.0`, 1-LSB alpha rounding); across all non-gradient/non-opacity geometry and text suites, worst mean is `<= 0.0453` (`corners`), p99 `<= 1`, tile `<= 0.36`.
+  - Figma scores (CPU / WebGPU with compute enabled):
+    - `strokes` (17/17 compute): **0.05 / 0.05** (improves on `main` 0.06), CPU/GPU worst mean `0.0211`, p99 `1`, tile `0.14`, severe `0`
+    - `text-strokes` (4/4 compute): **0.48 / 0.48** (matches `main` 0.48), CPU/GPU worst mean `0.0091`, p99 `0`, tile `0.23`, severe `0`
+    - `corners` (21/26 compute; 5 shadow/blur on `vello_gpu`): **0.12 / 0.13**, CPU/GPU worst mean `0.0453`, p99 `1`, tile `0.36`, severe `0`
+    - `fills` (10/25 compute; 15 non-normal blends on `vello_gpu`): **0.18 / 0.17** (improves on `main` 0.21 / 0.20), all 10 compute cells `max = 1`, worst mean `0.2135` (`paint-opacity`), tile `0.64`, severe `0`
+    - `text-overlap` (3/3 compute): **0.66 / 0.66**, CPU/GPU worst mean `0.0070`, p99 `0`, tile `0.16`, severe `0`
+    - `text` (20/20 compute): **2.60 / 2.60**, CPU/GPU worst mean `0.0304`, p99 `1`, tile `0.27`, severe `0`
+    - `text-ranges` (3/3 compute): **1.32 / 1.32**, CPU/GPU worst mean `0.0173`, p99 `1`, tile `0.32`, severe `0`
+    - `lists` (6/6 compute): **1.75 / 1.75**, CPU/GPU worst mean `0.0229`, p99 `1`, tile `0.34`, severe `0`
+    - `vertical-trim` (12/12 compute): **1.47 / 1.47**, CPU/GPU worst mean `0.0205`, p99 `1`, tile `0.27`, severe `0`
+    - Mixed effect suites (`blurs`, `glass-alpha`, `glass-context`, `masks`, plus remaining 11 reader/effect suites): all passed with `0` severe pixels on compute cells.
+  - **Flag-off regression check (`ENGINE_PARITY_COMPUTE=0`):** `corners`, `fills`, `strokes`, `text-overlap`, `text-strokes` all passed (`5/5`) with identical Figma scores (`0.12/0.13`, `0.18/0.17`, `0.05/0.05`, `0.66/0.66`, `0.48/0.48`).
+- **Fixed P0 benchmark on Modal Tesla T4 (10,805-layer generated kit, `12,000` nodes, `10,748` paths, `1,435,124` segments, `60,158` glyphs, `2880 x 1800` Retina 2x, `212.29 MiB` GPU memory, cold encode/resolve/upload `255.5 / 11.1 / 33.8 ms`):**
+
+| Runner & mode | Path & zoom | Frames (exact / presented) | CPU main thread p50 / p95 / p99 (ms) | GPU `TIMESTAMP_QUERY` or fence p50 / p95 / p99 (ms) | rAF interval p50 / p95 / p99 (ms) | Bump failures |
+| --- | --- | --- | --- | --- | --- | --- |
+| Chromium `--modes webgpu` (`render-only-raf`, readback OK `nonBlank=0.99/0.982`, `zoomDelta=0.3146`) | Compute P0 @ 100% | 240 / 0 (`render-only-raf`) | **0.20 / 0.30 / 0.40** (`encode=0`, `render=0`, `submit=0.20/0.30/0.40`) | **4.45 / 4.78 / 25.23** (ts; `flatten=2.46`, `fine_area=0.86`, `backdrop=0.41`, `present_blit=0.29`, `path_count=0.26`) | 16.70 / 33.40 / 33.40 | **0 / 240** |
+| Chromium `--modes webgpu` (`render-only-raf`) | Compute P0 @ fit-all | 240 / 0 (`render-only-raf`) | **0.20 / 0.30 / 0.30** | **8.42 / 10.78 / 10.95** (ts; `fine_area=4.18`, `flatten=2.43`, `path_count=0.68`, `path_tiling=0.56`) | 16.70 / 33.40 / 33.40 | **0 / 240** |
+| Chromium `--modes webgpu` (`render-only-raf`) | Main `vello_gpu` @ 100% | 24 / 0 (`render-only-raf`) | **69.10 / 78.20 / 83.00** (`encode=37.0/45.0/49.7`, `render=30.4/35.3/35.4`, `submit=0.1`) | 21.40 / 41.20 / 42.70 (fence) | 100.00 / 116.70 / 116.70 | n/a |
+| Firefox `--browsers firefox --modes gpu` (`BENCH_REQUIRE_PRESENT=1`, `presented-canvas`, `onscreen=CONFIRMED`, `zoomDelta=0.3146`) | Compute P0 @ 100% | **240 / 240** | **0.00 / 1.00 / 1.00** (1 ms timer; `jsCall=4/5/6`) | **5.70 / 5.99 / 28.45** (ts) | 50.86 / 68.28 / 84.96 (Xvfb floor) | **0 / 240** |
+| Firefox `--browsers firefox --modes gpu` (`presented-canvas`) | Compute P0 @ fit-all | **240 / 240** | **0.00 / 1.00 / 1.00** | **14.76 / 15.13 / 15.25** (ts) | 50.83 / 68.02 / 84.88 (Xvfb floor) | **0 / 240** |
+| Firefox `--browsers firefox --modes gpu` (`presented-canvas`) | Main `vello_gpu` @ 100% | **24 / 24** | **121.00 / 139.00 / 142.00** (`encode=19/26/28`, `render=121/141/141`) | 69.00 / 92.00 / 92.00 (fence) | 203.38 / 204.08 / 220.22 | n/a |
+
+- **Key benchmark takeaway:** On Tesla T4, `main vello_gpu` spends `69.1 to 142.0 ms` per exact zoom frame on the browser main thread (`encode` + `render`), whereas GPU compute P0 spends `0.20 to 0.30 ms` CPU (`345x` lower on Chromium) and `4.45 / 4.78 ms` p50/p95 GPU (`TIMESTAMP_QUERY`) at 100% Retina 2x with `0/240` bump failures and `240/240` confirmed onscreen WebGPU presentations on Firefox. Headless Chromium on Linux (`--disable-vulkan-surface`) does not composite WebGPU surfaces to screenshots, so the bench honestly classifies it as `render-only-raf` (while still verifying non-blank zoom-responsive pixels via readback), and confirms live onscreen presentation on Firefox (`BENCH_REQUIRE_PRESENT=1`).
+- **Remaining P0 laptop check (real hardware required):** Apple GPU (Chrome + Safari) and laptop iGPU verification targeting GPU p95 `<= 8.0 ms` on the 10k-layer Retina 2x scene cannot run on this Linux VM. Run `./tools/gpu-bench/laptop-p0-check.sh` (Chrome/Chromium) and open `/diagnostics/renderer?compute=1` (Safari 26+ WebGPU) on a MacBook to complete the hardware exit gate before starting P1.

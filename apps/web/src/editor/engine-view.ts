@@ -53,6 +53,7 @@ import type { CpuWorkerReply, CpuWorkerRequest } from "./engine-cpu.worker";
 import { CPU_IMAGE_BUDGET, CPU_IMAGE_SIDE, ViewImages } from "./engine-image";
 import { fitEngineRaster, MIN_RASTER_SCALE } from "./engine-raster";
 import {
+  computeOrdinary,
   type PresentationMode,
   presentation,
   type RendererChoice,
@@ -61,6 +62,7 @@ import {
 } from "./renderer-switch";
 
 export {
+  computeOrdinary,
   type PresentationMode,
   presentation,
   type RendererChoice,
@@ -802,8 +804,11 @@ async function initBackend(
           kind: "software-gpu",
         };
       }
+      if (computeOrdinary()) {
+        engine.setComputeOrdinary(true);
+      }
       console.info(
-        `Drawpane: drawing with the render engine on ${gpu.value.adapter} (WebGPU${level.compatibility ? " compatibility mode" : ""})${gpu.value.fallback ? " (a software adapter)" : ""}`,
+        `Drawpane: drawing with the render engine on ${gpu.value.adapter} (WebGPU${level.compatibility ? " compatibility mode" : ""}${computeOrdinary() ? ", compute P0" : ""})${gpu.value.fallback ? " (a software adapter)" : ""}`,
       );
       return {
         ok: true,
@@ -1638,6 +1643,9 @@ export class EngineView {
           code: ErrorCode.NoAdapter,
         });
         return;
+      }
+      if (backend === "webgpu" && computeOrdinary()) {
+        engine.setComputeOrdinary(true);
       }
       // Commit the fresh canvas into the DOM slot only after recovery attach succeeded.
       if (this.#slot && typeof this.#slot.replaceChildren === "function") {

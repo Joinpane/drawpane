@@ -17,6 +17,12 @@ import { CPU_GPU_TOLERANCE, outsideTolerance, type Score, score } from "@drawpan
 import { Badge, Button, Logo, SegmentedControl } from "@drawpane/ui";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useCopy } from "../app/CopyField";
+import {
+  type ComputeBenchReport,
+  P0_BENCH_FRAMES,
+  P0_LAPTOP_GPU_P95_TARGET_MS,
+  runP0RetinaBench,
+} from "./compute-bench";
 import { EXPECTED_PNGS } from "./expected-pixels";
 import {
   CELL_CAMERA,
@@ -66,6 +72,7 @@ interface CellReport {
   readonly violations: readonly string[];
   readonly score: Omit<Score, "heat"> | null;
   readonly renderMs: { readonly p50: number; readonly p95: number } | null;
+  readonly computeUsed?: boolean;
   readonly expectedPngUrl: string;
   readonly actualRgba: Uint8Array | null;
   readonly diffHeat: Uint8Array | null;
@@ -74,6 +81,7 @@ interface CellReport {
 interface RunState {
   readonly running: boolean;
   readonly requested: RequestedMode;
+  readonly compute: boolean;
   readonly backend: ActiveBackend | null;
   readonly adapter: string;
   readonly software: boolean;
@@ -82,6 +90,7 @@ interface RunState {
   readonly rawDetails: string | null;
   readonly probes: ProbeSummary | null;
   readonly cells: readonly CellReport[];
+  readonly computeFailedFrames: number;
   readonly totalMs: number;
   readonly error: string | null;
 }
@@ -304,9 +313,20 @@ export function RendererDiagnosticsPage() {
       return false;
     }
   });
+  const [computeOn, setComputeOn] = useState<boolean>(() => {
+    try {
+      const params = new URLSearchParams(window.location.search);
+      return (
+        params.get("compute") === "1" || localStorage.getItem("drawpane:engine-compute") === "1"
+      );
+    } catch {
+      return false;
+    }
+  });
   const [state, setState] = useState<RunState>({
     running: true,
     requested: "auto",
+    compute: false,
     backend: null,
     adapter: "Probing…",
     software: false,
@@ -315,102 +335,106 @@ export function RendererDiagnosticsPage() {
     rawDetails: null,
     probes: null,
     cells: [],
+    computeFailedFrames: 0,
     totalMs: 0,
     error: null,
   });
+  const [benchRunning, setBenchRunning] = useState(false);
+  const [benchProgress, setBenchProgress] = useState<string | null>(null);
+  const [benchError, setBenchError] = useState<string | null>(null);
+  const [benchReport, setBenchReport] = useState<ComputeBenchReport | null>(null);
+  const benchCanvasRef = useRef<HTMLCanvasElement | null>(null);
   const [copied, copy] = useCopy<"report">();
   const runSeq = useRef(0);
 
-  const runDiagnostics = useCallback(async (mode: RequestedMode, softwareOk: boolean) => {
-    const seq = ++runSeq.current;
-    const started = performance.now();
-    setState((prev) => ({
-      ...prev,
-      running: true,
-      requested: mode,
-      error: null,
-    }));
+  const runDiagnostics = useCallback(
+    async (mode: RequestedMode, softwareOk: boolean, useCompute: boolean) => {
+      const seq = ++runSeq.current;
+      const started = performance.now();
+      setState((prev) => ({
+        ...prev,
+        running: true,
+        requested: mode,
+        compute: useCompute,
+        error: null,
+      }));
 
-    const probes = await probeEnvironment();
-    if (seq !== runSeq.current) return;
+      const probes = await probeEnvironment();
+      if (seq !== runSeq.current) return;
 
-    const fallbackNotes: string[] = [];
-    type Selected = {
-      readonly backend: ActiveBackend;
-      readonly engine: RenderEngine;
-      readonly gpuInfo: GpuInfo | null;
-      readonly software: boolean;
-    };
-    let selected: Selected | null = null;
+      const fallbackNotes: string[] = [];
+      type Selected = {
+        readonly backend: ActiveBackend;
+        readonly engine: RenderEngine;
+        readonly gpuInfo: GpuInfo | null;
+        readonly software: boolean;
+      };
+      let selected: Selected | null = null;
 
-    const tryWebGpu = async (): Promise<Selected | null> => {
-      const mod = await loadBrowserEngine();
-      for (const compatibility of [false, true]) {
+      const tryWebGpu = async (): Promise<Selected | null> => {
+        const mod = await loadBrowserEngine();
+        for (const compatibility of [false, true]) {
+          const candidate = new RenderEngine(mod);
+          const attached = await candidate.attachGpu(null, { compatibility });
+          if (!attached.ok) {
+            candidate.dispose();
+            fallbackNotes.push(
+              `WebGPU (${compatibility ? "compat" : "core"}): ${attached.message}`,
+            );
+            continue;
+          }
+          const isSoft = attached.value.fallback || SOFTWARE_RE.test(attached.value.adapter);
+          if (isSoft && !softwareOk) {
+            candidate.dispose();
+            fallbackNotes.push(
+              `WebGPU (${compatibility ? "compat" : "core"}): refused software adapter (${attached.value.adapter})`,
+            );
+            continue;
+          }
+          return {
+            backend: "webgpu",
+            engine: candidate,
+            gpuInfo: attached.value,
+            software: isSoft,
+          };
+        }
+        return null;
+      };
+
+      const tryWebGl2 = async (): Promise<Selected | null> => {
+        const mod = await loadWebglEngine();
+        const canvas = document.createElement("canvas");
+        canvas.width = CELL_WIDTH;
+        canvas.height = CELL_HEIGHT;
         const candidate = new RenderEngine(mod);
-        const attached = await candidate.attachGpu(null, { compatibility });
+        const attached = await candidate.attachGpu(canvas);
         if (!attached.ok) {
           candidate.dispose();
-          fallbackNotes.push(`WebGPU (${compatibility ? "compat" : "core"}): ${attached.message}`);
-          continue;
+          fallbackNotes.push(`WebGL2: ${attached.message}`);
+          return null;
         }
         const isSoft = attached.value.fallback || SOFTWARE_RE.test(attached.value.adapter);
         if (isSoft && !softwareOk) {
           candidate.dispose();
-          fallbackNotes.push(
-            `WebGPU (${compatibility ? "compat" : "core"}): refused software adapter (${attached.value.adapter})`,
-          );
-          continue;
+          fallbackNotes.push(`WebGL2: refused software adapter (${attached.value.adapter})`);
+          return null;
         }
         return {
-          backend: "webgpu",
+          backend: "webgl2",
           engine: candidate,
           gpuInfo: attached.value,
           software: isSoft,
         };
-      }
-      return null;
-    };
-
-    const tryWebGl2 = async (): Promise<Selected | null> => {
-      const mod = await loadWebglEngine();
-      const canvas = document.createElement("canvas");
-      canvas.width = CELL_WIDTH;
-      canvas.height = CELL_HEIGHT;
-      const candidate = new RenderEngine(mod);
-      const attached = await candidate.attachGpu(canvas);
-      if (!attached.ok) {
-        candidate.dispose();
-        fallbackNotes.push(`WebGL2: ${attached.message}`);
-        return null;
-      }
-      const isSoft = attached.value.fallback || SOFTWARE_RE.test(attached.value.adapter);
-      if (isSoft && !softwareOk) {
-        candidate.dispose();
-        fallbackNotes.push(`WebGL2: refused software adapter (${attached.value.adapter})`);
-        return null;
-      }
-      return {
-        backend: "webgl2",
-        engine: candidate,
-        gpuInfo: attached.value,
-        software: isSoft,
       };
-    };
 
-    try {
-      if (mode === "webgpu") {
-        selected = await tryWebGpu();
-        if (!selected) throw new Error(fallbackNotes.at(-1) ?? "WebGPU unavailable");
-      } else if (mode === "webgl2") {
-        selected = await tryWebGl2();
-        if (!selected) throw new Error(fallbackNotes.at(-1) ?? "WebGL2 unavailable");
-      } else if (mode === "cpu") {
-        const mod = await loadBrowserEngine();
-        selected = { backend: "cpu", engine: new RenderEngine(mod), gpuInfo: null, software: true };
-      } else {
-        // Auto: WebGPU -> WebGL2 -> CPU (same order as the editor).
-        selected = (await tryWebGpu()) ?? (await tryWebGl2());
-        if (!selected) {
+      try {
+        if (mode === "webgpu") {
+          selected = await tryWebGpu();
+          if (!selected) throw new Error(fallbackNotes.at(-1) ?? "WebGPU unavailable");
+        } else if (mode === "webgl2") {
+          selected = await tryWebGl2();
+          if (!selected) throw new Error(fallbackNotes.at(-1) ?? "WebGL2 unavailable");
+        } else if (mode === "cpu") {
           const mod = await loadBrowserEngine();
           selected = {
             backend: "cpu",
@@ -418,171 +442,202 @@ export function RendererDiagnosticsPage() {
             gpuInfo: null,
             software: true,
           };
+        } else {
+          // Auto: WebGPU -> WebGL2 -> CPU (same order as the editor).
+          selected = (await tryWebGpu()) ?? (await tryWebGl2());
+          if (!selected) {
+            const mod = await loadBrowserEngine();
+            selected = {
+              backend: "cpu",
+              engine: new RenderEngine(mod),
+              gpuInfo: null,
+              software: true,
+            };
+          }
         }
-      }
 
-      if (seq !== runSeq.current) {
-        selected.engine.dispose();
-        return;
-      }
+        if (seq !== runSeq.current) {
+          selected.engine.dispose();
+          return;
+        }
 
-      const { backend: activeBackend, engine: activeEngine, gpuInfo, software } = selected;
-      const sampleCount = software ? 1 : 5;
-      const cells: CellReport[] = [];
+        const { backend: activeBackend, engine: activeEngine, gpuInfo, software } = selected;
+        if (activeBackend === "webgpu") {
+          activeEngine.setComputeOrdinary(useCompute);
+          activeEngine.computeResetStats();
+        }
+        const sampleCount = software ? 1 : 5;
+        const cells: CellReport[] = [];
 
-      for (const [cellIndex, cell] of DIAGNOSTIC_CELLS.entries()) {
-        if (seq !== runSeq.current) return;
-        const expectedB64 = EXPECTED_PNGS[cell.id];
-        const expectedPngUrl = expectedB64 ? `data:image/png;base64,${expectedB64}` : "";
-        try {
-          for (const img of cell.images ?? []) {
-            const put = activeEngine.putImage(img.id, img.width, img.height, img.rgba, false);
-            if (!put.ok) throw new Error(`putImage: ${put.message}`);
-          }
-          const applied = activeEngine.apply(cell.build(cellIndex + 1));
-          if (!applied.ok) throw new Error(`apply: ${applied.message}`);
+        for (const [cellIndex, cell] of DIAGNOSTIC_CELLS.entries()) {
+          if (seq !== runSeq.current) return;
+          const expectedB64 = EXPECTED_PNGS[cell.id];
+          const expectedPngUrl = expectedB64 ? `data:image/png;base64,${expectedB64}` : "";
+          try {
+            for (const img of cell.images ?? []) {
+              const put = activeEngine.putImage(img.id, img.width, img.height, img.rgba, false);
+              if (!put.ok) throw new Error(`putImage: ${put.message}`);
+            }
+            const applied = activeEngine.apply(cell.build(cellIndex + 1));
+            if (!applied.ok) throw new Error(`apply: ${applied.message}`);
 
-          let actualRgba: Uint8Array;
-          const samples: number[] = [];
+            let actualRgba: Uint8Array;
+            const samples: number[] = [];
+            let computeUsed = false;
 
-          if (activeBackend === "cpu") {
-            // Correctness render (kept separate from the warm timing samples).
-            const first = activeEngine.renderCpu(
-              CELL_WIDTH,
-              CELL_HEIGHT,
-              CELL_CAMERA,
-              cell.background,
-              false,
-            );
-            if (!first.ok) throw new Error(first.message);
-            actualRgba = first.value.pixels;
-            for (let i = 0; i < sampleCount; i++) {
-              const ts = performance.now();
-              const r = activeEngine.renderCpu(
+            if (activeBackend === "cpu") {
+              // Correctness render (kept separate from the warm timing samples).
+              const first = activeEngine.renderCpu(
                 CELL_WIDTH,
                 CELL_HEIGHT,
                 CELL_CAMERA,
                 cell.background,
                 false,
               );
-              if (!r.ok) throw new Error(r.message);
-              samples.push(performance.now() - ts);
-            }
-          } else {
-            // Correctness render + readback (excluded from warm frame timings so every sample
-            // measures the same renderGpu + gpuFinished work on both hardware and software GPUs).
-            const first = activeEngine.renderGpu(
-              CELL_WIDTH,
-              CELL_HEIGHT,
-              CELL_CAMERA,
-              cell.background,
-              false,
-            );
-            if (!first.ok) throw new Error(first.message);
-            const px = await activeEngine.gpuPixels();
-            if (!px.ok) throw new Error(px.message);
-            actualRgba = px.value;
-            for (let i = 0; i < sampleCount; i++) {
-              const ts = performance.now();
-              const r = activeEngine.renderGpu(
+              if (!first.ok) throw new Error(first.message);
+              actualRgba = first.value.pixels;
+              for (let i = 0; i < sampleCount; i++) {
+                const ts = performance.now();
+                const r = activeEngine.renderCpu(
+                  CELL_WIDTH,
+                  CELL_HEIGHT,
+                  CELL_CAMERA,
+                  cell.background,
+                  false,
+                );
+                if (!r.ok) throw new Error(r.message);
+                samples.push(performance.now() - ts);
+              }
+            } else {
+              // Correctness render + readback (excluded from warm frame timings so every sample
+              // measures the same renderGpu + gpuFinished work on both hardware and software GPUs).
+              const first = activeEngine.renderGpu(
                 CELL_WIDTH,
                 CELL_HEIGHT,
                 CELL_CAMERA,
                 cell.background,
                 false,
               );
-              if (!r.ok) throw new Error(r.message);
-              const done = await activeEngine.gpuFinished();
-              if (!done.ok) throw new Error(done.message);
-              samples.push(performance.now() - ts);
+              if (!first.ok) throw new Error(first.message);
+              computeUsed = activeBackend === "webgpu" && activeEngine.computeUsed();
+              const px = await activeEngine.gpuPixels();
+              if (!px.ok) throw new Error(px.message);
+              actualRgba = px.value;
+              for (let i = 0; i < sampleCount; i++) {
+                const ts = performance.now();
+                const r = activeEngine.renderGpu(
+                  CELL_WIDTH,
+                  CELL_HEIGHT,
+                  CELL_CAMERA,
+                  cell.background,
+                  false,
+                );
+                if (!r.ok) throw new Error(r.message);
+                const done = await activeEngine.gpuFinished();
+                if (!done.ok) throw new Error(done.message);
+                samples.push(performance.now() - ts);
+              }
             }
-          }
 
-          if (!expectedPngUrl) throw new Error("Missing expected PNG for cell");
-          const expectedRgba = await decodePngDataUrl(expectedPngUrl);
-          const diff = score(actualRgba, expectedRgba, CELL_WIDTH, CELL_HEIGHT);
-          const violations = outsideTolerance(diff);
-          const { heat, ...metrics } = diff;
-          cells.push({
-            id: cell.id,
-            title: cell.title,
-            category: cell.category,
-            description: cell.description,
-            ok: violations.length === 0,
+            if (!expectedPngUrl) throw new Error("Missing expected PNG for cell");
+            const expectedRgba = await decodePngDataUrl(expectedPngUrl);
+            const diff = score(actualRgba, expectedRgba, CELL_WIDTH, CELL_HEIGHT);
+            const violations = outsideTolerance(diff);
+            const { heat, ...metrics } = diff;
+            cells.push({
+              id: cell.id,
+              title: cell.title,
+              category: cell.category,
+              description: cell.description,
+              ok: violations.length === 0,
+              error: null,
+              violations,
+              score: metrics,
+              renderMs: quant(samples),
+              ...(activeBackend === "webgpu" && useCompute ? { computeUsed } : {}),
+              expectedPngUrl,
+              actualRgba,
+              diffHeat: heat,
+            });
+          } catch (err) {
+            cells.push({
+              id: cell.id,
+              title: cell.title,
+              category: cell.category,
+              description: cell.description,
+              ok: false,
+              error: err instanceof Error ? err.message : String(err),
+              violations: [],
+              score: null,
+              renderMs: null,
+              expectedPngUrl,
+              actualRgba: null,
+              diffHeat: null,
+            });
+          }
+        }
+
+        let computeFailedFrames = 0;
+        if (activeBackend === "webgpu" && useCompute) {
+          const cs = await activeEngine.computeStats();
+          if (cs.ok) computeFailedFrames = cs.value.failedFrames;
+        }
+
+        const rawDetails = gpuInfo?.details ?? null;
+        let parsedDetails: AdapterDetailsJson | null = null;
+        if (rawDetails) {
+          try {
+            parsedDetails = JSON.parse(rawDetails) as AdapterDetailsJson;
+          } catch {
+            parsedDetails = null;
+          }
+        }
+
+        if (seq === runSeq.current) {
+          setState({
+            running: false,
+            requested: mode,
+            compute: useCompute,
+            backend: activeBackend,
+            adapter:
+              gpuInfo?.adapter ??
+              (activeBackend === "cpu" ? "vello_cpu (WebAssembly CPU)" : "none"),
+            software,
+            fallbackNotes,
+            details: parsedDetails,
+            rawDetails,
+            probes,
+            cells,
+            computeFailedFrames,
+            totalMs: Math.round(performance.now() - started),
             error: null,
-            violations,
-            score: metrics,
-            renderMs: quant(samples),
-            expectedPngUrl,
-            actualRgba,
-            diffHeat: heat,
           });
-        } catch (err) {
-          cells.push({
-            id: cell.id,
-            title: cell.title,
-            category: cell.category,
-            description: cell.description,
-            ok: false,
+        }
+      } catch (err) {
+        if (seq === runSeq.current) {
+          setState({
+            running: false,
+            requested: mode,
+            compute: useCompute,
+            backend: null,
+            adapter: "unavailable",
+            software: false,
+            fallbackNotes,
+            details: null,
+            rawDetails: null,
+            probes,
+            cells: [],
+            computeFailedFrames: 0,
+            totalMs: Math.round(performance.now() - started),
             error: err instanceof Error ? err.message : String(err),
-            violations: [],
-            score: null,
-            renderMs: null,
-            expectedPngUrl,
-            actualRgba: null,
-            diffHeat: null,
           });
         }
+      } finally {
+        selected?.engine.dispose();
       }
-
-      const rawDetails = gpuInfo?.details ?? null;
-      let parsedDetails: AdapterDetailsJson | null = null;
-      if (rawDetails) {
-        try {
-          parsedDetails = JSON.parse(rawDetails) as AdapterDetailsJson;
-        } catch {
-          parsedDetails = null;
-        }
-      }
-
-      if (seq === runSeq.current) {
-        setState({
-          running: false,
-          requested: mode,
-          backend: activeBackend,
-          adapter:
-            gpuInfo?.adapter ?? (activeBackend === "cpu" ? "vello_cpu (WebAssembly CPU)" : "none"),
-          software,
-          fallbackNotes,
-          details: parsedDetails,
-          rawDetails,
-          probes,
-          cells,
-          totalMs: Math.round(performance.now() - started),
-          error: null,
-        });
-      }
-    } catch (err) {
-      if (seq === runSeq.current) {
-        setState({
-          running: false,
-          requested: mode,
-          backend: null,
-          adapter: "unavailable",
-          software: false,
-          fallbackNotes,
-          details: null,
-          rawDetails: null,
-          probes,
-          cells: [],
-          totalMs: Math.round(performance.now() - started),
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    } finally {
-      selected?.engine.dispose();
-    }
-  }, []);
+    },
+    [],
+  );
 
   useEffect(() => {
     const existing = document.querySelector<HTMLMetaElement>('meta[name="robots"]');
@@ -604,11 +659,33 @@ export function RendererDiagnosticsPage() {
   }, []);
 
   useEffect(() => {
-    void runDiagnostics(requested, allowSoftware);
+    void runDiagnostics(requested, allowSoftware, computeOn);
     return () => {
       runSeq.current++;
     };
-  }, [requested, allowSoftware, runDiagnostics]);
+  }, [requested, allowSoftware, computeOn, runDiagnostics]);
+
+  const handleRunBench = useCallback(async () => {
+    const canvas = benchCanvasRef.current;
+    if (!canvas || benchRunning) return;
+    setBenchRunning(true);
+    setBenchError(null);
+    setBenchProgress(`0 / ${P0_BENCH_FRAMES}`);
+    try {
+      const report = await runP0RetinaBench({
+        canvas,
+        allowSoftware,
+        frames: P0_BENCH_FRAMES,
+        onProgress: (frame, total) => setBenchProgress(`${frame} / ${total}`),
+      });
+      setBenchReport(report);
+    } catch (err) {
+      setBenchError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBenchRunning(false);
+      setBenchProgress(null);
+    }
+  }, [allowSoftware, benchRunning]);
 
   const passedCount = state.cells.filter((c) => c.ok).length;
   const totalCount = state.cells.length;
@@ -626,6 +703,7 @@ export function RendererDiagnosticsPage() {
       selection: {
         requested: state.requested,
         allowSoftware,
+        compute: state.compute,
         backend: state.backend,
         adapter: state.adapter,
         software: state.software,
@@ -637,12 +715,14 @@ export function RendererDiagnosticsPage() {
       summary: {
         passed: passedCount,
         total: totalCount,
+        computeFailedFrames: state.computeFailedFrames,
         totalMs: state.totalMs,
         error: state.error,
       },
       cells: state.cells.map((c) => ({
         id: c.id,
         ok: c.ok,
+        ...(c.computeUsed !== undefined ? { computeUsed: c.computeUsed } : {}),
         error: c.error,
         violations: c.violations,
         renderMs: c.renderMs,
@@ -657,14 +737,20 @@ export function RendererDiagnosticsPage() {
             }
           : null,
       })),
+      ...(benchReport ? { computeP0Bench: benchReport } : {}),
     };
     const header = [
       "# Drawpane Renderer Diagnostics",
       `- Browser: ${navigator.userAgent}`,
-      `- Backend: ${state.backend ?? "none"} (${state.adapter}${state.software ? ", software" : ""})`,
-      `- Result: ${passedCount}/${totalCount} cells passed in ${state.totalMs} ms`,
+      `- Backend: ${state.backend ?? "none"} (${state.adapter}${state.software ? ", software" : ""}${state.compute ? ", compute P0" : ""})`,
+      `- Result: ${passedCount}/${totalCount} cells passed in ${state.totalMs} ms${state.compute ? ` (compute bump failures: ${state.computeFailedFrames})` : ""}`,
       ...(state.fallbackNotes.length
         ? [`- Fallback notes: ${state.fallbackNotes.join(" | ")}`]
+        : []),
+      ...(benchReport
+        ? [
+            `- P0 10k Retina 2x (${benchReport.width}x${benchReport.height}, ${benchReport.layers} layers, ${benchReport.frames} frames, ${benchReport.presentationMode}): rAF p50/p95/p99 ${benchReport.rafIntervalMs.p50}/${benchReport.rafIntervalMs.p95}/${benchReport.rafIntervalMs.p99} ms · CPU p50/p95/p99 ${benchReport.cpuMs.p50}/${benchReport.cpuMs.p95}/${benchReport.cpuMs.p99} ms · GPU timestamps ${benchReport.gpuMs ? `p50/p95/p99 ${benchReport.gpuMs.p50}/${benchReport.gpuMs.p95}/${benchReport.gpuMs.p99} ms` : "unsupported"} · bump failed ${benchReport.bump.failedFrames}/${benchReport.bump.framesChecked}`,
+          ]
         : []),
       "",
       "| Cell | Status | Mean | p99 | Worst tile | Severe | Max | Frame p50 / p95 ms |",
@@ -680,7 +766,7 @@ export function RendererDiagnosticsPage() {
       "```",
     ];
     return header.join("\n");
-  }, [state, allowSoftware, passedCount, totalCount]);
+  }, [state, allowSoftware, passedCount, totalCount, benchReport]);
 
   return (
     <div className="diag">
@@ -728,10 +814,18 @@ export function RendererDiagnosticsPage() {
               />
               Allow software GPU
             </label>
+            <label className="diag__toggle">
+              <input
+                type="checkbox"
+                checked={computeOn}
+                onChange={(e) => setComputeOn(e.target.checked)}
+              />
+              Compute P0 (ordinary paint)
+            </label>
             <Button
               size="sm"
               disabled={state.running}
-              onClick={() => void runDiagnostics(requested, allowSoftware)}
+              onClick={() => void runDiagnostics(requested, allowSoftware, computeOn)}
             >
               Re-run
             </Button>
@@ -922,6 +1016,9 @@ export function RendererDiagnosticsPage() {
                         {cell.renderMs.p50}/{cell.renderMs.p95} ms
                       </span>
                     ) : null}
+                    {cell.computeUsed !== undefined ? (
+                      <span>{cell.computeUsed ? "compute" : "vello_gpu"}</span>
+                    ) : null}
                   </div>
                 ) : null}
                 {cell.error ? <p className="diag__error">{cell.error}</p> : null}
@@ -931,6 +1028,102 @@ export function RendererDiagnosticsPage() {
               </article>
             ))}
           </div>
+        </section>
+
+        <section className="diag__section" aria-label="Compute P0 Retina benchmark">
+          <div className="diag__section-head">
+            <h2 className="diag__section-title">Compute P0 10k-layer Retina 2x benchmark</h2>
+            <Button size="sm" disabled={benchRunning} onClick={() => void handleRunBench()}>
+              {benchRunning
+                ? `Running (${benchProgress ?? "…"})`
+                : `Run 10k Retina 2x (${P0_BENCH_FRAMES} frames)`}
+            </Button>
+          </div>
+          <p className="diag__cell-desc">
+            Runs {P0_BENCH_FRAMES} presented rAF zoom frames around 100% zoom at 2880x1800 (Retina
+            2x) on a 10,000-layer ordinary page using WebGPU Core compute, checking per-frame bump
+            counters and hardware GPU timestamps where available (laptop target: GPU p95 &le;{" "}
+            {P0_LAPTOP_GPU_P95_TARGET_MS} ms, 0 bump failures). Results are included in Copy report.
+          </p>
+          <canvas
+            ref={benchCanvasRef}
+            width={2880}
+            height={1800}
+            aria-label="Compute P0 10k Retina 2x live surface"
+            style={{
+              width: "100%",
+              maxWidth: "480px",
+              aspectRatio: "16 / 10",
+              borderRadius: "var(--radius-sm)",
+              boxShadow: "inset 0 0 0 1px var(--line)",
+              display: benchRunning || benchReport ? "block" : "none",
+            }}
+          />
+          {benchError ? (
+            <p className="diag__error" role="alert">
+              {benchError}
+            </p>
+          ) : null}
+          {benchReport ? (
+            <div className="diag__table-wrap">
+              <table className="diag__table">
+                <tbody>
+                  <tr>
+                    <th>Adapter &amp; mode</th>
+                    <td className="diag__mono">
+                      {benchReport.adapter} ({benchReport.presentationMode},{" "}
+                      {benchReport.computeFrames}/{benchReport.frames} compute,{" "}
+                      {benchReport.presentedFrames}/{benchReport.frames} presented)
+                    </td>
+                  </tr>
+                  <tr>
+                    <th>rAF frame interval (ms)</th>
+                    <td className="diag__mono">
+                      p50 {benchReport.rafIntervalMs.p50} · p95 {benchReport.rafIntervalMs.p95} ·
+                      p99 {benchReport.rafIntervalMs.p99} · max {benchReport.rafIntervalMs.max}
+                    </td>
+                  </tr>
+                  <tr>
+                    <th>Main-thread CPU (ms)</th>
+                    <td className="diag__mono">
+                      p50 {benchReport.cpuMs.p50} · p95 {benchReport.cpuMs.p95} · p99{" "}
+                      {benchReport.cpuMs.p99} · max {benchReport.cpuMs.max}
+                    </td>
+                  </tr>
+                  <tr>
+                    <th>GPU timestamps (ms)</th>
+                    <td className="diag__mono">
+                      {benchReport.gpuMs
+                        ? `sum p50 ${benchReport.gpuMs.p50} · p95 ${benchReport.gpuMs.p95} · p99 ${benchReport.gpuMs.p99} · max ${benchReport.gpuMs.max}${benchReport.gpuSpanMs ? ` (span p95 ${benchReport.gpuSpanMs.p95})` : ""}`
+                        : "timestamp-query not exposed by this browser/adapter"}
+                    </td>
+                  </tr>
+                  <tr>
+                    <th>Bump allocator check</th>
+                    <td className="diag__mono">
+                      {benchReport.bump.failedFrames === 0 &&
+                      benchReport.bump.framesChecked >= benchReport.frames
+                        ? `PASS (0/${benchReport.bump.framesChecked} failed)`
+                        : `FAIL (${benchReport.bump.failedFrames}/${benchReport.bump.framesChecked} failed, mask 0x${benchReport.bump.anyFailedMask.toString(16)})`}{" "}
+                      · max lines {benchReport.bump.maxLines} · max segments{" "}
+                      {benchReport.bump.maxSegments}
+                    </td>
+                  </tr>
+                  {benchReport.strokeCache ? (
+                    <tr>
+                      <th>Cached stroke outlines</th>
+                      <td className="diag__mono">
+                        {benchReport.strokeCache.opsCached}/{benchReport.strokeCache.opsTotal} ops ·
+                        verbs {benchReport.strokeCache.inputVerbs} -&gt;{" "}
+                        {benchReport.strokeCache.expandedVerbs} ·{" "}
+                        {Math.round(benchReport.strokeCache.cachedBytes / 1024)} KiB
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
         </section>
 
         <details className="diag__details">

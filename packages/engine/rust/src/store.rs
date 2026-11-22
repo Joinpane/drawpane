@@ -981,6 +981,38 @@ impl Store {
         Ok(())
     }
 
+    /// Summarises cached stroke outlines across all records currently held in the store.
+    pub fn stroke_cache_stats(&self) -> crate::stroke::StrokeCacheStats {
+        let mut s = crate::stroke::StrokeCacheStats::default();
+        for node in self.nodes.values() {
+            let r = &node.record;
+            for op in r.ops.iter().chain(&r.coarse) {
+                if let crate::record::Op::Stroke { path, cache, .. } = op {
+                    s.ops_total += 1;
+                    let in_verbs = match r.paths.get(*path as usize) {
+                        Some(crate::record::PathEntry::Path(c)) => c.len() as u64,
+                        Some(crate::record::PathEntry::Rect { .. } | crate::record::PathEntry::Box { .. }) => 9,
+                        Some(crate::record::PathEntry::Ellipse { .. } | crate::record::PathEntry::Oval { .. }) => 34,
+                        Some(crate::record::PathEntry::Glyphs { glyphs, .. }) => glyphs
+                            .iter()
+                            .filter_map(|g| self.glyphs.get(g.glyph))
+                            .map(|g| g.path.elements().len() as u64)
+                            .sum(),
+                        _ => 0,
+                    };
+                    s.input_verbs += in_verbs;
+                    let cached_verbs = cache.cached_verbs();
+                    if cached_verbs > 0 || cache.get().is_some() {
+                        s.ops_cached += 1;
+                        s.expanded_verbs += cached_verbs as u64;
+                        s.cached_bytes += cache.cached_bytes() as u64;
+                    }
+                }
+            }
+        }
+        s
+    }
+
     /// Whether `id` is one of `of` or lies inside one of them.
     pub fn within(&self, mut id: u32, of: &[u32]) -> bool {
         loop {

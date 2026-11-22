@@ -23,9 +23,10 @@ gpu-common = [
   "dep:web-sys",
   "dep:futures-channel",
 ]
-# The primary browser build: vello_gpu on wgpu's WebGPU backend. It always carries the CPU backend
+# The primary browser build: vello_gpu on wgpu's WebGPU backend, plus Vello 0.12's GPU compute
+# pipeline (behind an opt-in flag in P0) for ordinary paint. It always carries the CPU backend
 # too, so one page can draw both and compare them.
-gpu = ["gpu-common", "wgpu/webgpu"]
+gpu = ["gpu-common", "wgpu/webgpu", "dep:vello_encoding", "dep:vello_shaders", "dep:bytemuck"]
 # The WebGL2 fallback build: vello_gpu on wgpu's GL backend (naga -> GLSL ES 3.0). Built as a
 # separate module that loads only after the WebGPU probe fails (decision 0040).
 webgl = ["gpu-common", "wgpu/webgl"]
@@ -37,6 +38,9 @@ test-kernels = []
 vello_common = { version = "=0.4.0", default-features = false, features = ["std"] }
 vello_cpu = { version = "=0.4.0", default-features = false, features = ["std", "u8_pipeline", "f32_pipeline"] }
 vello_gpu = { version = "=0.4.0", default-features = false, features = ["wgpu", "full_image_support", "gradient_sweep", "blurred_rounded_rect"], optional = true }
+vello_encoding = { version = "=0.12.0", optional = true }
+vello_shaders = { path = "vendor/vello_shaders", default-features = false, features = ["wgsl"], optional = true }
+bytemuck = { version = "1.25", features = ["derive"], optional = true }
 wgpu = { version = "30.0.2", default-features = false, features = ["std", "wgsl"], optional = true }
 miniz_oxide = { version = "0.8", default-features = false, features = ["with-alloc"] }
 wasm-bindgen = "=0.2.130"

@@ -208,6 +208,11 @@ export class Engine {
     sourceId: number,
   ): Promise<Uint8Array | Outcome>;
   blurGpuStats?(): Float64Array;
+  strokeCacheStats(): Float64Array;
+  setComputeOrdinary?(enabled: boolean): Outcome;
+  computeUsed?(): boolean;
+  computeResetStats?(): void;
+  computeStats?(): Promise<string | Outcome>;
 }
 
 export function listVersion(): Uint32Array;

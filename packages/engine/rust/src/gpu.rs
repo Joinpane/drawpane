@@ -193,10 +193,11 @@ fn format_details(
     features: wgpu::Features,
     backend: &str,
     fallback: bool,
+    timestamp_query: bool,
 ) -> String {
     let features_list = format!("{features:?}");
     format!(
-        "{{\"backend\":{},\"wgpuBackend\":{},\"name\":{},\"vendor\":{},\"device\":{},\"deviceType\":{},\"driver\":{},\"driverInfo\":{},\"fallback\":{},\"features\":{},\"limits\":{{\"maxTextureDimension1D\":{},\"maxTextureDimension2D\":{},\"maxTextureDimension3D\":{},\"maxTextureArrayLayers\":{},\"maxBindGroups\":{},\"maxSampledTexturesPerShaderStage\":{},\"maxSamplersPerShaderStage\":{},\"maxUniformBuffersPerShaderStage\":{},\"maxUniformBufferBindingSize\":{},\"maxBufferSize\":{},\"maxColorAttachments\":{},\"maxInterStageShaderVariables\":{}}}}}",
+        "{{\"backend\":{},\"wgpuBackend\":{},\"name\":{},\"vendor\":{},\"device\":{},\"deviceType\":{},\"driver\":{},\"driverInfo\":{},\"fallback\":{},\"timestampQuery\":{},\"features\":{},\"limits\":{{\"maxTextureDimension1D\":{},\"maxTextureDimension2D\":{},\"maxTextureDimension3D\":{},\"maxTextureArrayLayers\":{},\"maxBindGroups\":{},\"maxSampledTexturesPerShaderStage\":{},\"maxSamplersPerShaderStage\":{},\"maxUniformBuffersPerShaderStage\":{},\"maxUniformBufferBindingSize\":{},\"maxBufferSize\":{},\"maxColorAttachments\":{},\"maxInterStageShaderVariables\":{}}}}}",
         json_escape(backend),
         json_escape(&format!("{:?}", info.backend)),
         json_escape(&info.name),
@@ -206,6 +207,7 @@ fn format_details(
         json_escape(&info.driver),
         json_escape(&info.driver_info),
         fallback,
+        timestamp_query,
         json_escape(&features_list),
         limits.max_texture_dimension_1d,
         limits.max_texture_dimension_2d,
@@ -354,7 +356,7 @@ impl Health {
         false
     }
 
-    fn stop_error(&self) -> Option<EngineError> {
+    pub(crate) fn stop_error(&self) -> Option<EngineError> {
         if self.lost.load(Ordering::SeqCst) {
             let reason = self.lost_reason.lock().map(|r| r.clone()).unwrap_or_default();
             return Some(EngineError::new(
@@ -396,6 +398,8 @@ impl Health {
 struct Main {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+    #[allow(dead_code)]
+    view_id: u64,
     present_group: Option<wgpu::BindGroup>,
     width: u32,
     height: u32,
@@ -516,7 +520,7 @@ struct DiamondPipeline {
 }
 
 /// Milliseconds now, for the frame's breakdown.
-fn now() -> f64 {
+pub(crate) fn now() -> f64 {
     web_sys::window().and_then(|w| w.performance()).map_or(0.0, |p| p.now())
 }
 
@@ -702,6 +706,7 @@ pub struct Gpu {
     backdrop_gen: u64,
     /// Frame textures: the one shown (`cur`) and the one being made.
     frames: Vec<Main>,
+    next_frame_view_id: u64,
     cur: Option<usize>,
     surface_bytes: usize,
     /// The board textures (decision 0040, phase 2): which tiles are held, where, and how fresh.
@@ -784,11 +789,25 @@ pub struct Gpu {
     max_buffer_size: u64,
     /// Read-backs in flight.
     readbacks: Rc<Flights>,
+    /// Whether the WebGPU device has hardware timestamp queries enabled.
+    pub timestamp_query: bool,
+    pub timestamp_period_ns: f32,
+    /// P0 Vello 0.12 GPU compute path for ordinary paint (WebGPU Core only, behind flag).
+    #[cfg(feature = "gpu")]
+    compute: Option<crate::vello_compute::VelloCompute>,
+    #[cfg(feature = "gpu")]
+    pub compute_ordinary: bool,
+    #[cfg(feature = "gpu")]
+    pub last_compute_used: bool,
 }
 
 impl Drop for Gpu {
     fn drop(&mut self) {
         self.health.cancel();
+        #[cfg(feature = "gpu")]
+        {
+            self.compute.take();
+        }
         for m in self.frames.drain(..) {
             m.texture.destroy();
         }
@@ -1029,15 +1048,26 @@ impl Gpu {
         } else {
             adapter_limits.clone()
         };
+        let required_features = if !IS_WEBGL && adapter_features.contains(wgpu::Features::TIMESTAMP_QUERY) {
+            wgpu::Features::TIMESTAMP_QUERY
+        } else {
+            wgpu::Features::empty()
+        };
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
                 label: Some("drawpane engine"),
-                required_features: wgpu::Features::empty(),
+                required_features,
                 required_limits,
                 ..Default::default()
             })
             .await
             .map_err(|e| EngineError::new(ErrorCode::NoAdapter, format!("no {backend_name} device: {e}")))?;
+        let timestamp_query = device.features().contains(wgpu::Features::TIMESTAMP_QUERY);
+        let timestamp_period_ns = if timestamp_query {
+            queue.get_timestamp_period()
+        } else {
+            0.0
+        };
         let device_limits = device.limits();
         if device_limits.max_texture_dimension_2d < ATLAS_SIDE {
             return Err(EngineError::new(
@@ -1170,7 +1200,14 @@ impl Gpu {
         bindings.insert(ATLAS_ID, atlas_tex.create_view(&Default::default()));
         bindings.insert(CHECKER_ID, checker.create_view(&Default::default()));
         let fallback_adapter = is_software_adapter(&info);
-        let details = format_details(&info, &adapter_limits, adapter_features, backend_name, fallback_adapter);
+        let details = format_details(
+            &info,
+            &adapter_limits,
+            adapter_features,
+            backend_name,
+            fallback_adapter,
+            timestamp_query,
+        );
         let blur_fmt = crate::blur::gpu::preferred_intermediate_format(&adapter);
         let blur = crate::blur::gpu::GpuBlur::new(&device, blur_fmt, 32 << 20);
         let shadow = crate::shadow::gpu::GpuShadow::new(&device);
@@ -1211,6 +1248,7 @@ impl Gpu {
             active: None,
             backdrop_gen: 0,
             frames: Vec::new(),
+            next_frame_view_id: 1,
             cur: None,
             surface_bytes: 0,
             tiles: TileCache::new(TILE, 0),
@@ -1263,6 +1301,14 @@ impl Gpu {
             max_texture_2d: device_limits.max_texture_dimension_2d,
             max_buffer_size: device_limits.max_buffer_size,
             readbacks: Rc::new(Flights::default()),
+            timestamp_query,
+            timestamp_period_ns,
+            #[cfg(feature = "gpu")]
+            compute: None,
+            #[cfg(feature = "gpu")]
+            compute_ordinary: false,
+            #[cfg(feature = "gpu")]
+            last_compute_used: false,
         };
         gpu.ensure_compositor();
         gpu.ensure_diamond();
@@ -1425,12 +1471,17 @@ impl Gpu {
 
     /// GPU memory the engine has allocated.
     pub fn bytes(&self) -> usize {
+        #[cfg(feature = "gpu")]
+        let compute_bytes = self.compute.as_ref().map_or(0, |c| c.gpu_bytes());
+        #[cfg(not(feature = "gpu"))]
+        let compute_bytes = 0;
         self.bytes
             + self.readers.bytes()
             + self.blur.bytes()
             + self.pool_bytes
             + self.shadow_cache.bytes()
             + self.noise.gpu_bytes()
+            + compute_bytes
     }
 
     /// Refuses an allocation of `bytes` (beside `freed`, about to go) past the budget.
@@ -1926,17 +1977,21 @@ impl Gpu {
         if let Some(old) = self.frames.get(dst) {
             old.texture.destroy();
         }
-        let tex = texture(
-            &self.device,
-            width,
-            height,
-            wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC
-                | wgpu::TextureUsages::COPY_DST,
-            "frame",
-        );
+        #[cfg(feature = "gpu")]
+        let usage = wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::STORAGE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST;
+        #[cfg(not(feature = "gpu"))]
+        let usage = wgpu::TextureUsages::RENDER_ATTACHMENT
+            | wgpu::TextureUsages::TEXTURE_BINDING
+            | wgpu::TextureUsages::COPY_SRC
+            | wgpu::TextureUsages::COPY_DST;
+        let tex = texture(&self.device, width, height, usage, "frame");
         let view = tex.create_view(&Default::default());
+        let view_id = self.next_frame_view_id;
+        self.next_frame_view_id = self.next_frame_view_id.wrapping_add(1);
         let present_group = self.blit.as_ref().map(|blit| {
             self.device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: Some("present"),
@@ -1949,6 +2004,7 @@ impl Gpu {
         });
         let frame = Main {
             view,
+            view_id,
             texture: tex,
             present_group,
             width,
@@ -2051,6 +2107,143 @@ impl Gpu {
             scratch.texture.destroy();
             self.bytes -= scratch.width as usize * scratch.height as usize * 8;
         }
+        #[cfg(feature = "gpu")]
+        if let Some(c) = self.compute.as_mut() {
+            c.reset();
+        }
+    }
+
+    #[cfg(feature = "gpu")]
+    pub fn supports_compute(&self) -> bool {
+        let l = self.device.limits();
+        l.max_storage_buffers_per_shader_stage >= 8 && l.max_compute_workgroup_storage_size >= 16384
+    }
+
+    #[cfg(feature = "gpu")]
+    pub fn set_compute_ordinary(&mut self, enabled: bool) {
+        self.compute_ordinary = enabled;
+        if !enabled {
+            self.last_compute_used = false;
+            if let Some(c) = self.compute.as_mut() {
+                c.reset();
+            }
+        }
+    }
+
+    #[cfg(feature = "gpu")]
+    pub fn compute_reset_stats(&mut self) {
+        if let Some(c) = self.compute.as_mut() {
+            c.reset_stats();
+        }
+    }
+
+    #[cfg(feature = "gpu")]
+    pub fn compute_stats_start(&mut self) -> Result<crate::vello_compute::StatsReadback> {
+        let c = self
+            .compute
+            .as_mut()
+            .ok_or_else(|| EngineError::new(ErrorCode::State, "GPU compute pipeline has not run yet"))?;
+        c.start_stats_readback()
+    }
+
+    /// Renders an ordinary-paint frame on Vello 0.12's GPU compute pipeline directly into
+    /// `self.frames[dst]`, presenting onto the canvas surface in the same command buffer when one
+    /// is attached.
+    #[cfg(feature = "gpu")]
+    pub fn render_compute(
+        &mut self,
+        store: &Store,
+        frame: &Frame,
+        background: [f32; 4],
+        generation: u64,
+    ) -> Result<DrawStats> {
+        self.check()?;
+        #[cfg(feature = "gpu")]
+        {
+            self.last_compute_used = false;
+        }
+        let (width, height) = (u32::from(frame.width), u32::from(frame.height));
+        let dst = self.next_frame();
+        self.ensure_frame(dst, width, height)?;
+        self.configure_surface(dst)?;
+        let acquired = self.acquire()?;
+        let presented = self.surface.is_none() || acquired.is_some();
+
+        if self.compute.is_none() {
+            self.compute = Some(crate::vello_compute::VelloCompute::new(
+                &self.device,
+                &self.queue,
+                self.timestamp_query,
+            ));
+        }
+        let surface_view = acquired
+            .as_ref()
+            .map(|t| t.texture.create_view(&Default::default()));
+        let main = &self.frames[dst];
+        let fallback_group;
+        let present = match (surface_view.as_ref(), self.blit.as_ref()) {
+            (Some(sv), Some(blit)) => {
+                let group = match main.present_group.as_ref() {
+                    Some(g) => g,
+                    None => {
+                        fallback_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+                            label: None,
+                            layout: &blit.get_bind_group_layout(0),
+                            entries: &[wgpu::BindGroupEntry {
+                                binding: 0,
+                                resource: wgpu::BindingResource::TextureView(&main.view),
+                            }],
+                        });
+                        &fallback_group
+                    }
+                };
+                Some((blit, group, sv))
+            }
+            _ => None,
+        };
+
+        let compute = self.compute.as_mut().expect("compute initialized");
+        let cstats = compute.render_into(
+            &self.device,
+            &self.queue,
+            store,
+            generation,
+            width,
+            height,
+            frame.view,
+            background,
+            dst,
+            main.view_id,
+            &main.view,
+            present,
+        )?;
+        drop(surface_view);
+        if let Some(t) = acquired {
+            self.queue.present(t);
+        }
+        self.submits += 1;
+        self.cur = Some(dst);
+        self.last = Some(Last {
+            view: frame.view,
+            size: (width, height),
+        });
+        self.last_scale = Some(frame.view.as_coeffs()[0]);
+        self.shown = Some((generation, background.map(f32::to_bits), true));
+        self.last_compute_used = true;
+        self.check()?;
+        Ok(DrawStats {
+            direct: true,
+            plan: 2,
+            exact: true,
+            standin: false,
+            presented,
+            glyphs_outlined: cstats.glyphs,
+            encode_ms: cstats.encode_ms,
+            render_ms: cstats.render_ms,
+            submit_ms: cstats.submit_ms,
+            cpu_ms: cstats.cpu_ms,
+            ..DrawStats::default()
+        })
     }
 
     /// Bytes the engine holds on the GPU outside its tile pages.
@@ -2295,6 +2488,10 @@ impl Gpu {
         samples: Option<IRect>,
     ) -> Result<DrawStats> {
         self.check()?;
+        #[cfg(feature = "gpu")]
+        {
+            self.last_compute_used = false;
+        }
         let (width, height) = (u32::from(frame.width), u32::from(frame.height));
         let t0 = now();
         let view = frame.view;
@@ -2486,6 +2683,10 @@ impl Gpu {
         drag: Option<&DragFrame>,
     ) -> Result<DrawStats> {
         self.check()?;
+        #[cfg(feature = "gpu")]
+        {
+            self.last_compute_used = false;
+        }
         self.forget_motion_prefix();
         if store.readers().is_empty() && !store.has_context() && self.readers.bytes() > 0 {
             self.readers.evict_frame_scratch();
@@ -4737,7 +4938,7 @@ fn ensure_poll_driver(device: &wgpu::Device, health: &Arc<Health>) {
 
 /// Waits for a wgpu callback with a hard timeout and cancellation tied to `Health` (device loss
 /// or `Gpu` drop). On WebGL2, shares one non-blocking poll driver across all active waits.
-async fn pump<T>(
+pub(crate) async fn pump<T>(
     device: &wgpu::Device,
     health: &Arc<Health>,
     mut rx: futures_channel::oneshot::Receiver<T>,
