@@ -1,10 +1,11 @@
 /**
- * The opt-in compute path's checks on `/diagnostics/renderer?compute=1` (decision 0040, P1-0).
- * Loaded only with that flag, so the page's default bundle carries none of it. Runs after the
- * main diagnostics finish, so the two never share the GPU.
+ * The opt-in compute path's checks on `/diagnostics/renderer?compute=1` (decision 0040, P1-0):
+ * the capacity matrix, then the Retina bench. Loaded only with that flag, so the page's default
+ * bundle carries none of it. Runs after the main diagnostics finish, so nothing shares the GPU.
  */
 import { Badge, Button } from "@drawpane/ui";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { ComputeBenchSection } from "./ComputeBenchSection";
 import { type MatrixCell, type MatrixReport, runComputeMatrix } from "./compute-check";
 
 type MatrixState =
@@ -42,6 +43,7 @@ export function ComputeDiagnostics({
   readonly allowSoftware: boolean;
 }) {
   const [state, setState] = useState<MatrixState>({ kind: "waiting" });
+  const [bench, setBench] = useState("");
   const [copied, setCopied] = useState(false);
 
   useEffect(() => {
@@ -69,11 +71,15 @@ export function ComputeDiagnostics({
   }, [start, allowSoftware]);
 
   const markdown = useMemo(() => {
-    if (state.kind === "done")
-      return `${matrixMarkdown(state.report)}\n\n\`\`\`json\n${JSON.stringify(state.report, null, 2)}\n\`\`\``;
-    if (state.kind === "failed") return `## Compute capacity matrix\n- Failed: ${state.message}`;
-    return "";
-  }, [state]);
+    const matrix =
+      state.kind === "done"
+        ? `${matrixMarkdown(state.report)}\n\n\`\`\`json\n${JSON.stringify(state.report)}\n\`\`\``
+        : state.kind === "failed"
+          ? `## Compute capacity matrix\n- Failed: ${state.message}`
+          : "";
+    if (!matrix) return "";
+    return bench ? `${matrix}\n\n${bench}` : matrix;
+  }, [state, bench]);
 
   const copy = useCallback(async () => {
     try {
@@ -92,7 +98,12 @@ export function ComputeDiagnostics({
     <section className="diag__section" aria-label="Compute checks">
       <div className="diag__section-head">
         <h2 className="diag__section-title">Compute capacity matrix</h2>
-        <Button size="sm" disabled={!markdown} onClick={() => void copy()}>
+        <Button
+          size="sm"
+          disabled={!markdown}
+          onClick={() => void copy()}
+          data-testid="compute-copy"
+        >
           {copied ? "Copied" : "Copy compute report"}
         </Button>
       </div>
@@ -156,6 +167,11 @@ export function ComputeDiagnostics({
           {state.message}
         </pre>
       ) : null}
+      <ComputeBenchSection
+        start={state.kind === "done" || state.kind === "failed"}
+        allowSoftware={allowSoftware}
+        onReport={setBench}
+      />
     </section>
   );
 }

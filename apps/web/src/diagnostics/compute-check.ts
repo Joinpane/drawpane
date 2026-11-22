@@ -23,6 +23,10 @@ export interface CheckedFrame {
   readonly attempts: number;
   /** Main-thread time of every engine call the frame took (staging, showing, any fallback). */
   readonly cpuMs: number;
+  /** The parts of `cpuMs`: `stageComputeFrame`, `finishComputeFrame`, and a vello_gpu frame. */
+  readonly stageMs: number;
+  readonly finishMs: number;
+  readonly fallbackMs: number;
   /** Time waiting for the GPU check, off the main thread. */
   readonly checkMs: number;
   /** Why compute is off for the session, when it fell back. */
@@ -40,13 +44,14 @@ export async function drawChecked(
   camera: Camera,
   maxAttempts = 4,
 ): Promise<CheckedFrame> {
-  let cpuMs = 0;
+  let stageMs = 0;
+  let finishMs = 0;
   let checkMs = 0;
   let attempts = 0;
   while (attempts < maxAttempts) {
     let t = performance.now();
     const staged = engine.stageComputeFrame(width, height, camera, COMPUTE_BG);
-    cpuMs += performance.now() - t;
+    stageMs += performance.now() - t;
     if (!staged.ok) throw new Error(staged.message);
     if (!staged.value) break;
     attempts++;
@@ -56,22 +61,35 @@ export async function drawChecked(
     if (!checked) throw new Error("the compute check was interrupted");
     t = performance.now();
     const finished = engine.finishComputeFrame(attempts >= maxAttempts);
-    cpuMs += performance.now() - t;
+    finishMs += performance.now() - t;
     if (!finished.ok) throw new Error(finished.message);
     const value = finished.value;
     if (value === "fallback") break;
     if (value === "retry" || value === "stale") continue;
-    return { stats: value, backend: "compute", attempts, cpuMs, checkMs, fallback: null };
+    return {
+      stats: value,
+      backend: "compute",
+      attempts,
+      cpuMs: stageMs + finishMs,
+      stageMs,
+      finishMs,
+      fallbackMs: 0,
+      checkMs,
+      fallback: null,
+    };
   }
   const t = performance.now();
   const drawn = engine.renderGpu(width, height, camera, COMPUTE_BG, false);
-  cpuMs += performance.now() - t;
+  const fallbackMs = performance.now() - t;
   if (!drawn.ok) throw new Error(drawn.message);
   return {
     stats: drawn.value,
     backend: "vello_gpu",
     attempts,
-    cpuMs,
+    cpuMs: stageMs + finishMs + fallbackMs,
+    stageMs,
+    finishMs,
+    fallbackMs,
     checkMs,
     fallback: engine.computeFallbackReason(),
   };
