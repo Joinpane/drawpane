@@ -2802,9 +2802,17 @@ export class Editor {
     const swappedBack = [...rebuilt];
     const inside = (id: string) =>
       rebuilt.has(id) || this.doc.ancestors(id).some((a) => rebuilt.has(a.id));
-    // A reset of how layers are placed (auto layout, positioning, constraints) places them again:
+    // A reset of how layers are placed or sized (auto layout, positioning, constraints, sizing)
+    // places them again:
     // the layer's own place, size and text mode, and its layers', as sync derives them.
-    const PLACING = ["layoutMode", "positioning", "constraintH", "constraintV"];
+    const PLACING = [
+      "layoutMode",
+      "positioning",
+      "constraintH",
+      "constraintV",
+      "sizingH",
+      "sizingV",
+    ];
     const PLACED = new Set(["x", "y", "width", "height", "textAutoResize"]);
     const placing = (id: string | undefined) =>
       !!id && PLACING.some((prop) => reset.get(id)?.has(prop));

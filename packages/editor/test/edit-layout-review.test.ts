@@ -1366,6 +1366,32 @@ describe.each(["materialized", "compact"] as const)("re-check 3 with copies %s",
     ]);
   });
 
+  it("gives a copy its main layer's size back once a reset takes its Hug away (seed 713246673)", () => {
+    const editor = make(
+      [
+        page,
+        node("main", "frame", "p", { isComponent: true, width: 160, height: 80 }),
+        node("row", "frame", "main", {
+          x: 10,
+          y: 10,
+          width: 40,
+          height: 10,
+          layoutMode: "row",
+          paddingLeft: 4,
+        }),
+        node("dot", "rect", "row", { x: 4, width: 6, height: 6 }),
+      ],
+      copies,
+    );
+    const instance = editor.insertInstance("main", { x: 0, y: 300 }) as string;
+    const row = editor.doc.childIds(instance)[0] as string;
+    editor.setProp([row], "sizingH", "hug");
+    expect(num(editor, row, "width")).toBe(10);
+    editor.resetOverrides([{ id: row, props: ["sizingH"] }]);
+    expect(num(editor, row, "width")).toBe(40);
+    expect(unsettled(editor)).toEqual([]);
+  });
+
   it("scales a copy from its main layer, not from where an earlier resize left it (seed -41827364)", () => {
     const editor = make(
       [
