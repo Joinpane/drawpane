@@ -570,6 +570,14 @@ function computeRequested(): boolean {
   return new URLSearchParams(window.location.search).get("compute") === "1";
 }
 
+/**
+ * Still compute frames go through the bump gate with `?gate=1` (a prototype, decision 0040's
+ * P1-0 latency gate); otherwise every compute frame is checked before it shows.
+ */
+function computeGated(): boolean {
+  return new URLSearchParams(window.location.search).get("gate") === "1";
+}
+
 const NOT_DRAWN: EngineDraw = {
   drawn: false,
   ready: false,
@@ -1035,6 +1043,8 @@ export class EngineView {
   #computeContent: string | null = null;
   /** The frame on screen came from compute: drawing ahead with vello_gpu would be wasted. */
   #computeShown = false;
+  /** The newest gated compute frame on screen whose check is in flight (`#presentGated`). */
+  #pendingGate: { readonly key: string; readonly stats: FrameStats; ready: boolean } | null = null;
   /** The compute candidate being checked (`?compute=1`), at most one. */
   #pendingCompute: {
     readonly key: string;
@@ -2300,9 +2310,10 @@ export class EngineView {
   /** Drops every read-back, direct-GPU presentation stamp, or CPU tile job on its way: a newer content frame decided otherwise. */
   #supersede(): void {
     this.#epoch++;
-    if (this.#pendingCompute) {
+    if (this.#pendingCompute || this.#pendingGate) {
       this.#engine?.cancelComputeFrame();
       this.#pendingCompute = null;
+      this.#pendingGate = null;
     }
     this.#shownWaiting = false;
     this.#clearOpeningFrame();
@@ -2375,7 +2386,9 @@ export class EngineView {
     const textFirst = opening || this.#builder.pendingVisible > 0;
     const viewport = `${pageId}|${width}x${height}|${dpr}`;
     const revision = engine.revision;
-    const key = `${viewport}|${revision}|${this.#imageVersion}|${cam.zoom}|${cam.x}|${cam.y}`;
+    // Everything a frame's pixels depend on: a compute frame checked for one key is exact only
+    // for that key, so the background is part of it.
+    const key = `${viewport}|${revision}|${this.#imageVersion}|${background}|${cam.zoom}|${cam.x}|${cam.y}`;
     if (this.#readbackLimit?.key === key)
       return this.#pageLimit(pageId, this.#readbackLimit.reason);
     this.#readbackLimit = null;
@@ -2659,11 +2672,70 @@ export class EngineView {
     };
   }
 
-  /** Drops the compute candidate being checked, if any: it can no longer be shown. */
+  /**
+   * Drops the compute candidate being checked and the gated frame whose check is in flight, if
+   * any: neither can be reported for what's asked now. The engine still settles a dropped gated
+   * frame's check (growth, errors), but never as exact.
+   */
   #cancelCompute(engine: RenderEngine): void {
-    if (!this.#pendingCompute) return;
+    if (!this.#pendingCompute && !this.#pendingGate) return;
     engine.cancelComputeFrame();
     this.#pendingCompute = null;
+    this.#pendingGate = null;
+  }
+
+  /**
+   * The gated compute path (decision 0040, P1-0): the frame is drawn and presented at once, and
+   * the GPU itself keeps the frame on screen wherever a stage overflowed, so nothing overflowed
+   * shows and presenting waits for no read-back. The frame is exact once its check lands clean:
+   * then the same key is reported again as exact without drawing. `null`: there is no frame of
+   * this size to keep, so stage instead.
+   */
+  #presentGated(
+    engine: RenderEngine,
+    key: string,
+    width: number,
+    height: number,
+    cam: Camera,
+    bg: readonly [number, number, number, number],
+  ):
+    | { readonly kind: "wait" }
+    | { readonly kind: "legacy" }
+    | { readonly kind: "frame"; readonly result: Result<FrameStats>; readonly key: string }
+    | null {
+    const shown = this.#pendingGate;
+    if (shown?.ready) {
+      this.#pendingGate = null;
+      const verdict = engine.finishComputeGate();
+      if (verdict === "fallback" || verdict === "lost") {
+        sessionComputeFallback = engine.computeFallbackReason() ?? "compute fell back";
+        return { kind: "legacy" };
+      }
+      if (verdict === "verified" && shown.key === key)
+        return { kind: "frame", result: { ok: true, value: { ...shown.stats, exact: true } }, key };
+      // Redraw (the gate kept the last good frame and the buffers grew), or another view.
+    } else if (shown && shown.key === key) {
+      // This view is on screen; its check redraws when it lands.
+      return { kind: "wait" };
+    }
+    const presented = engine.presentComputeFrame(width, height, cam, bg);
+    if (!presented.ok) return { kind: "frame", result: presented, key };
+    const reason = engine.computeFallbackReason();
+    if (reason) {
+      sessionComputeFallback = reason;
+      return { kind: "legacy" };
+    }
+    // Too many checks in flight: vello_gpu draws this one, rather than drop a check.
+    if (presented.value === "busy") return { kind: "legacy" };
+    if (!presented.value) return null;
+    const candidate = { key, stats: presented.value.stats, ready: false };
+    this.#pendingGate = candidate;
+    void presented.value.check.then(() => {
+      if (this.#pendingGate !== candidate || this.#dead) return;
+      candidate.ready = true;
+      this.onChange();
+    });
+    return { kind: "frame", result: { ok: true, value: presented.value.stats }, key };
   }
 
   /**
@@ -2690,10 +2762,10 @@ export class EngineView {
     // continuous resize keeps showing frames instead of cancelling every candidate unseen.
     const stable = this.#computeContent === content;
     this.#computeContent = content;
+    if (!stable) this.#cancelCompute(engine);
     let pending = this.#pendingCompute;
     if (pending && pending.content !== content) {
-      engine.cancelComputeFrame();
-      this.#pendingCompute = null;
+      this.#cancelCompute(engine);
       pending = null;
     }
     let attempt = 1;
@@ -2718,6 +2790,10 @@ export class EngineView {
         return { kind: "frame", result: { ok: true, value }, key: pending.key };
     }
     if (!opts.stage || sessionComputeFallback || !stable) return { kind: "legacy" };
+    if (computeGated()) {
+      const gated = this.#presentGated(engine, key, width, height, cam, bg);
+      if (gated) return gated;
+    }
     const staged = engine.stageComputeFrame(width, height, cam, bg);
     const reason = engine.computeFallbackReason();
     if (reason) {
