@@ -1514,7 +1514,7 @@ PR #291 recorded P0, the kill gate for Vello 0.12's GPU compute pipeline on ordi
 - **Methodology.** The GPU median for 10.7k paths was 4.5 ms at 100% and 8.4 ms at fit, with a repeatable 25 ms p99 at 100%. The bench kept only quantiles, so which frames were slow was lost. The vello_gpu baseline was 24 forced whole-frame samples, so its p95 and p99 were its second-worst and worst frames.
 - **Upstream status.** `vello_shaders` 0.12 ships from Vello's `research/` directory: the classic compute pipeline is no longer Vello's main line, and P1 to P3 own a fork of it.
 
-**What was rebuilt (P1-0 items 1 and 2).** These pieces are separate PRs: #293, #297, #298, #299 and #300 are merged, #304 follows up their second review, and #303 is an open prototype.
+**What was rebuilt (P1-0 items 1 and 2).** These pieces are separate PRs, all merged: #293, #297, #298, #299 and #300, then #304 following up their second review, and #303, the bump gate prototype behind `?gate=1`.
 
 - **The shared geometry merges on its own (#293).** That covers one flattener for every backend, cached stroke outlines, camera-independent ellipses and the cross-line glyph sweep.
   - **High zoom.** A cached outline is expanded once, at 0.025 record units, so zooming in magnifies its error. At 256x Retina (512 device px per unit) the stack review measured a 200 x 40 ellipse 3.52 px off the true stroke, a 3,000 x 200 ellipse 10.29 px and two cubic S-curves 6.84 and 16.72 px. A draw now passes its device scale. Past 5 px per unit it gets a finer outline, the base tolerance halved until it is within 0.125 device px, and up to two finer outlines are kept per stroke beside the base one. The same four shapes are now 0.09, 0.30, 0.30 and 0.69 px off, against main's 0.24, 0.43, 0.30 and 0.69. The S-curves' remaining error is their round caps, as on main: kurbo draws a cap as one cubic per quarter turn.
@@ -1553,17 +1553,24 @@ PR #291 recorded P0, the kill gate for Vello 0.12's GPU compute pipeline on ordi
   - Patched equals fresh to one f32 ulp (`tests/compute_moves.rs`, including one-child groups, bounded ancestors and 500 cards moved at once on a 40k page).
   - The stack review's repros of the first version (a one-child group, a child dragged out of an isolated group, 500 cards in one move) showed 7,200 and 1,600 wrong pixels reported exact, and 103 ms per move. Each now has a native test and a matrix cell.
   - On a T4, with the card on screen, a drag frame costs 0.6 / 0.8 ms of main thread (p50 / p95) at 10k layers and 1.4 / 2.4 ms at 40k, against vello_gpu's 9.0 / 11.0 and 10.7 / 11.2 ms. All 60 drag patches in the bench were applied in place.
-- **A prototype to skip the wait (#303), open behind `?gate=1`.** A checked frame waits for its read-back before it shows. The gate draws the frame into a private texture. Then a pass in the same command buffer reads the bump counters on the GPU and copies the frame onto the canvas only if every stage fit. Otherwise the canvas keeps its last good pixels, and the read-back still decides exactness and growth.
+- **A prototype to skip the wait (#303), behind `?gate=1`.** A checked frame waits for its read-back before it shows. The gate draws the frame into a private texture. Then a pass in the same command buffer reads the bump counters on the GPU and copies the frame onto the canvas only if every stage fit. Otherwise the canvas keeps its last good pixels, and the read-back still decides exactness and growth.
   - Its first T4 figure, 17.6 ms at p95, came from a sweep that didn't wait for the GPU, and is withdrawn. The second review measured 66.4 ms with the fence.
   - That review also found:
     - a stale frame settled as exact after a background change;
     - moving frames drawn through the gate;
     - checks dropped past eight in flight;
     - the back texture outside the budget.
-  - #303 now fixes those, each with a T4 test, and is waiting on a further review.
+  - #303 fixed those, each with a T4 test. A third review reproduced all seven fixes on the T4 and couldn't make the gate show overflowed or stale pixels as exact, so it merged behind the flag. The follow-ups that review found are fixed in #309: a gated frame could keep the last page's pixels after a fresh page or cleared view caches, a busy gate could stall the view for one check, and a staged frame's budget left out the back texture.
   - With the same fence as vello_gpu, gated frames now show in 36.6 ms at p95 around 100% and 49.2 ms around fit. Checked frames take 49.2 and 49.6 ms, and vello_gpu's moving frames 17.3 ms.
-  - The remaining tail isn't the check. Paced one per display frame, a compute frame staged with nothing presented has the same 30 to 50 ms tail. Back to back, it completes in 5.4 to 7.1 ms, with 2.3 to 2.7 ms of GPU work.
-  - Until laptops show whether that tail belongs to the headless T4 container or to compute, the gate stays a flag.
+  - The remaining tail is neither the gate nor the check. On the T4 two things drive it:
+    - **Headless Chromium can pace WebGPU by its animation frames.** On the editor page, a trivial submission (16 one-workgroup passes and a 288-byte read-back, almost no GPU work) took 21.4 to 21.9 ms to fence at p50 when paced by animation frames, and 3.1 to 3.3 ms back to back or on a 16 ms timer. On the diagnostics page, with nothing else drawing, the same submission paced by animation frames fenced in 0.8 ms at p50 and 3.2 at p95 (#309).
+    - **The shared T4 host schedules heavy work unevenly.** In the third review, real compute frames back to back still reached 51.7 ms at p95, and the GPU's clock or time slice halved mid-sweep, with every pass doubling at once. The trivial submission stayed under 4.8 ms. vello_gpu's heavy whole frames spiked to 20 to 27 ms there too.
+  - Neither says what a laptop does. The Mac report on `/diagnostics/renderer?compute=1` (#309) now measures:
+    - the display's frame interval;
+    - the same trivial fence, paced and back to back;
+    - a back-to-back gated sweep;
+    - for every frame, the check, fence, GPU and span times, with the slowest frames picked by when they showed.
+  - Until that report is in, the gate stays a flag.
 
 **P1-0 gates, before any of P1.**
 
@@ -1576,7 +1583,7 @@ PR #291 recorded P0, the kill gate for Vello 0.12's GPU compute pipeline on ordi
    - Drag frames cost at most 8 ms of main thread at 10k and 40k paths. *Met for drags on a T4, multi-card moves included (0.8 ms p95 at 10k, 2.4 ms at 40k). Open for other edits: a recolour costs 35 ms at 10k and 142 ms at 40k (p50).*
    - Edits other than moves need per-board encodings spliced into the packed scene. Vello 0.12 consumes one packed scene with prefix scans over the whole tag stream, so a splice re-uploads from the edit onward and reruns the scans on the GPU. That is cheap on the GPU, but uploads are O(page) unless boards get fixed-capacity slots. This decides whether compute can be the only rasterizer.
    - Per-board (or spatial-chunk) encodings with viewport culling would address both this and gate 2's O(page) flatten, so if either gate misses, that is P1's first build.
-4. **Latency.** A compute frame reaches the screen within one display frame of vello_gpu's on the same device, at p95, measured with the same GPU fence, and never shows an overflowed frame. Checked frames miss this by one to two display frames. *Open: on a T4, gated frames show in 36.6 to 49.2 ms at p95 against vello_gpu's 17.3 (#303, a prototype whose review blockers are fixed but not yet re-reviewed).*
+4. **Latency.** A compute frame reaches the screen within one display frame of vello_gpu's on the same device, at p95, measured with the same GPU fence, and never shows an overflowed frame. Checked frames miss this by one to two display frames. *Open: on a T4, gated frames show in 36.6 to 49.2 ms at p95 against vello_gpu's 17.3, a tail partly the headless container's own (above). The Mac report decides it.*
 5. **Coverage.** Report the share of visible kit layers compute actually draws for each routing expansion, and state what each kit should expect. P1's scope (below) is chosen from these counts: shadcn gains most from drop shadows and images, while the iOS kit needs blends first and still stops at its readers.
 6. **Bundle.** Attribute the compute module's size (twiggy) and set a realistic gate. P3's "main + 100 KB" doesn't fit a separate module that is loaded only when asked for.
 
