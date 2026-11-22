@@ -178,6 +178,8 @@ export function useThumbnailPublisher(
     let dirty = false;
     /** Edits since the last publish: worth publishing even as the page goes away. */
     let edited = false;
+    /** Set when a publish trigger (settle timer, tab hide, or unmount) arrived while running. */
+    let pending = false;
     let timer = 0;
     let running = false;
     /** Whether the server has a thumbnail: unknown (null) until metadata loads or this publishes. */
@@ -187,10 +189,17 @@ export function useThumbnailPublisher(
 
     const publish = async () => {
       clearTimeout(timer);
-      if (!dirty || running || !editor.canEdit) return;
+      timer = 0;
+      if (!dirty || !editor.canEdit) return;
+      if (running) {
+        pending = true;
+        return;
+      }
       dirty = false;
       edited = false;
+      pending = false;
       running = true;
+      let failed = false;
       try {
         const blob = await render(editor);
         const url = `/api/files/${encodeURIComponent(fileId)}/thumbnail`;
@@ -214,15 +223,22 @@ export function useThumbnailPublisher(
       } catch {
         // A thumbnail is a nicety: try again after the next edit.
         dirty = true;
+        failed = true;
       } finally {
         running = false;
+        if (!failed && dirty && editor.canEdit && (pending || timer === 0)) {
+          void publish();
+        }
       }
     };
 
     const schedule = () => {
       dirty = true;
       clearTimeout(timer);
-      timer = window.setTimeout(() => void publish(), SETTLE_MS);
+      timer = window.setTimeout(() => {
+        timer = 0;
+        void publish();
+      }, SETTLE_MS);
     };
 
     const offDoc = editor.doc.subscribe((change) => {
@@ -257,6 +273,8 @@ export function useThumbnailPublisher(
     document.addEventListener("visibilitychange", onHidden);
     window.addEventListener("pagehide", onPageHide);
     return () => {
+      clearTimeout(timer);
+      timer = 0;
       offDoc();
       offState();
       document.removeEventListener("visibilitychange", onHidden);

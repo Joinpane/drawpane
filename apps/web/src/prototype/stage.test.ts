@@ -384,4 +384,293 @@ describe("PlayerStage gating and unavailable fallback", () => {
     stage2.destroy();
     images2.clear();
   });
+
+  it("coalesces continuous remote edits without cancelling an engine overlay paint in flight", async () => {
+    globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
+    vi.spyOn(EngineView, "create").mockResolvedValue(null);
+    const drawImage = vi.fn();
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
+      clearRect: vi.fn(),
+      drawImage,
+    } as unknown as CanvasRenderingContext2D);
+    vi.spyOn(CanvasRenderer.prototype, "renderNodes").mockImplementation(() => {});
+    const origCreateImageBitmap = globalThis.createImageBitmap;
+    globalThis.createImageBitmap = vi.fn(async () => ({
+      width: 200,
+      height: 150,
+      close: vi.fn(),
+    })) as unknown as typeof createImageBitmap;
+
+    const pending: Array<{
+      readonly signal: AbortSignal | undefined;
+      resolve(blob: Blob): void;
+    }> = [];
+    const snapSpy = vi.spyOn(snapshot, "renderEngineSnapshot").mockImplementation(
+      (_editor, options) =>
+        new Promise<Blob>((resolve) => {
+          pending.push({ signal: options.signal, resolve });
+        }),
+    );
+
+    const editor = new Editor({ measurer: { width: () => 0 }, clientId: "test" });
+    editor.doc.apply([
+      { op: "create", id: "p", type: "page", parent: ROOT_ID, key: "a0", props: { name: "P" } },
+      {
+        op: "create",
+        id: "s1",
+        type: "frame",
+        parent: "p",
+        key: "a0",
+        props: {
+          x: 0,
+          y: 0,
+          width: 300,
+          height: 400,
+          fills: [{ type: "solid", color: "#ffffff" }],
+        },
+      },
+      {
+        op: "create",
+        id: "ov",
+        type: "frame",
+        parent: "p",
+        key: "a1",
+        props: {
+          x: 500,
+          y: 0,
+          width: 200,
+          height: 150,
+          fills: [{ type: "solid", color: "#ffaa00" }],
+        },
+      },
+      {
+        op: "create",
+        id: "remote",
+        type: "rect",
+        parent: "p",
+        key: "a2",
+        props: {
+          x: 2000,
+          y: 0,
+          width: 50,
+          height: 50,
+          fills: [{ type: "solid", color: "#00aa88" }],
+        },
+      },
+    ]);
+    editor.setPage("p");
+
+    const images = new ImageCache();
+    const player = new PrototypePlayer(editor.doc, "s1");
+    const host = document.createElement("div");
+    host.getBoundingClientRect = () => new DOMRect(0, 0, 800, 800);
+    document.body.append(host);
+
+    const rafCallbacks: FrameRequestCallback[] = [];
+    const origRaf = globalThis.requestAnimationFrame;
+    const origCancelRaf = globalThis.cancelAnimationFrame;
+    globalThis.requestAnimationFrame = ((cb: FrameRequestCallback) => {
+      rafCallbacks.push(cb);
+      return rafCallbacks.length;
+    }) as typeof requestAnimationFrame;
+    globalThis.cancelAnimationFrame = vi.fn();
+
+    try {
+      const stage = new PlayerStage({
+        editor,
+        images,
+        player,
+        host,
+        device: "none",
+        choice: "engine",
+        overlayFirstPaintDeadlineMs: 10_000,
+      });
+      stage.play({
+        type: "open-overlay",
+        overlay: {
+          key: 1,
+          screen: "ov",
+          position: "center",
+          closeOnOutside: true,
+          dim: 0.4,
+          transition: {
+            type: "instant",
+            direction: "up",
+            duration: 0,
+            easing: { type: "linear" },
+          },
+        },
+      });
+
+      expect(snapSpy).toHaveBeenCalledTimes(1);
+      const firstCall = pending[0];
+      expect(firstCall).toBeDefined();
+
+      // Simulate continuous remote edits on an unrelated layer while the first paint is in flight.
+      for (let i = 1; i <= 8; i++) {
+        editor.doc.apply([{ op: "set", id: "remote", prop: "x", value: 2000 + i }]);
+        const cb = rafCallbacks.pop();
+        cb?.(i * 33);
+      }
+
+      // First snapshot must NOT be aborted or restarted while still in flight.
+      expect(firstCall?.signal?.aborted).toBe(false);
+      expect(snapSpy).toHaveBeenCalledTimes(1);
+
+      // Resolving the first paint reveals the overlay and kicks off exactly one coalesced repaint.
+      firstCall?.resolve(new Blob([new Uint8Array([1])], { type: "image/png" }));
+      await new Promise((r) => setTimeout(r, 0));
+
+      const overlayEl = host.querySelector(".stage__overlay") as HTMLElement;
+      const dimEl = host.querySelector(".stage__dim") as HTMLElement;
+      expect(overlayEl.dataset.painted).toBe("true");
+      expect(overlayEl.style.visibility).toBe("");
+      expect(dimEl.style.visibility).toBe("");
+      expect(snapSpy).toHaveBeenCalledTimes(2);
+      expect(drawImage).toHaveBeenCalledTimes(1);
+
+      // Resolving the coalesced repaint settles cleanly with no further paints.
+      pending[1]?.resolve(new Blob([new Uint8Array([2])], { type: "image/png" }));
+      await new Promise((r) => setTimeout(r, 0));
+      expect(snapSpy).toHaveBeenCalledTimes(2);
+      expect(drawImage).toHaveBeenCalledTimes(2);
+
+      stage.destroy();
+      images.clear();
+    } finally {
+      globalThis.createImageBitmap = origCreateImageBitmap;
+      globalThis.requestAnimationFrame = origRaf;
+      globalThis.cancelAnimationFrame = origCancelRaf;
+    }
+  });
+
+  it("shows canvas fallback when an engine overlay first paint passes the deadline, then swaps to engine", async () => {
+    globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
+    vi.spyOn(EngineView, "create").mockResolvedValue(null);
+    const drawImage = vi.fn();
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue({
+      clearRect: vi.fn(),
+      drawImage,
+    } as unknown as CanvasRenderingContext2D);
+    const canvasRenderSpy = vi
+      .spyOn(CanvasRenderer.prototype, "renderNodes")
+      .mockImplementation(() => {});
+    const origCreateImageBitmap = globalThis.createImageBitmap;
+    globalThis.createImageBitmap = vi.fn(async () => ({
+      width: 200,
+      height: 150,
+      close: vi.fn(),
+    })) as unknown as typeof createImageBitmap;
+
+    const resolvers: Array<(blob: Blob) => void> = [];
+    vi.spyOn(snapshot, "renderEngineSnapshot").mockImplementation(
+      () =>
+        new Promise<Blob>((resolve) => {
+          resolvers.push(resolve);
+        }),
+    );
+
+    const editor = makePrototypeEditor();
+    const images = new ImageCache();
+    const player = new PrototypePlayer(editor.doc, "s1");
+    const host = document.createElement("div");
+    host.getBoundingClientRect = () => new DOMRect(0, 0, 800, 800);
+    document.body.append(host);
+
+    try {
+      const stage = new PlayerStage({
+        editor,
+        images,
+        player,
+        host,
+        device: "none",
+        choice: "engine",
+        overlayFirstPaintDeadlineMs: 25,
+      });
+      stage.play({
+        type: "open-overlay",
+        overlay: {
+          key: 1,
+          screen: "s2",
+          position: "center",
+          closeOnOutside: true,
+          dim: 0.4,
+          transition: {
+            type: "instant",
+            direction: "up",
+            duration: 0,
+            easing: { type: "linear" },
+          },
+        },
+      });
+
+      const overlayEl = host.querySelector(".stage__overlay") as HTMLElement;
+      const dimEl = host.querySelector(".stage__dim") as HTMLElement;
+      expect(overlayEl.dataset.painted).toBe("false");
+      expect(overlayEl.style.visibility).toBe("hidden");
+      expect(dimEl.style.visibility).toBe("hidden");
+
+      // After the deadline, canvas fallback paints and reveals the overlay while engine is still pending.
+      await new Promise((r) => setTimeout(r, 60));
+      expect(canvasRenderSpy).toHaveBeenCalled();
+      expect(overlayEl.dataset.painted).toBe("true");
+      expect(overlayEl.style.visibility).toBe("");
+      expect(dimEl.style.visibility).toBe("");
+      expect(drawImage).not.toHaveBeenCalled();
+
+      // When the engine render arrives later, it swaps onto the overlay canvas cleanly.
+      resolvers[0]?.(new Blob([new Uint8Array([9])], { type: "image/png" }));
+      await new Promise((r) => setTimeout(r, 0));
+      expect(drawImage).toHaveBeenCalledTimes(1);
+
+      stage.destroy();
+      images.clear();
+    } finally {
+      globalThis.createImageBitmap = origCreateImageBitmap;
+    }
+  });
+
+  it("keeps canvas-mode overlay dim visible even when 2D canvas context is unavailable", () => {
+    globalThis.ResizeObserver = StubResizeObserver as unknown as typeof ResizeObserver;
+    vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+    const editor = makePrototypeEditor();
+    const images = new ImageCache();
+    const player = new PrototypePlayer(editor.doc, "s1");
+    const host = document.createElement("div");
+    host.getBoundingClientRect = () => new DOMRect(0, 0, 800, 800);
+    document.body.append(host);
+
+    const stage = new PlayerStage({
+      editor,
+      images,
+      player,
+      host,
+      device: "none",
+      choice: "canvas",
+    });
+    stage.play({
+      type: "open-overlay",
+      overlay: {
+        key: 1,
+        screen: "s2",
+        position: "center",
+        closeOnOutside: true,
+        dim: 0.4,
+        transition: {
+          type: "instant",
+          direction: "up",
+          duration: 0,
+          easing: { type: "linear" },
+        },
+      },
+    });
+
+    const overlayEl = host.querySelector(".stage__overlay") as HTMLElement;
+    const dimEl = host.querySelector(".stage__dim") as HTMLElement;
+    expect(dimEl.style.visibility).toBe("");
+    expect(overlayEl.style.visibility).toBe("");
+
+    stage.destroy();
+    images.clear();
+  });
 });

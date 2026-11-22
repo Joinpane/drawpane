@@ -21,6 +21,8 @@ import {
   snapToPixels,
 } from "@drawpane/editor";
 import {
+  canvasExportIsSharper,
+  estimateCanvasReducedExportImages,
   formatReducedImagesNote,
   isAbortError,
   renderEngineRasterExportWithMeta,
@@ -173,8 +175,32 @@ export async function renderExportWithMeta(
     throw exportSizeError(width, height, MAX_EXPORT_SIDE);
   }
 
+  const canvasOptions = {
+    format,
+    scale,
+    ...(background !== undefined ? { background } : {}),
+  };
+
+  // If the engine's image budget would downsample or omit photos that canvas draws sharper, use
+  // the canvas exporter so multi-photo exports stay sharp instead of upscaling reduced levels.
+  if (canvasExportIsSharper(editor, ids, scale, imagesFor(editor), imageBudget)) {
+    const fallback = tryCanvasRasterExport(editor, ids, canvasOptions);
+    if (fallback) {
+      try {
+        const blob = await fallback;
+        return {
+          blob,
+          reducedImages: estimateCanvasReducedExportImages(editor, ids, scale),
+          omittedImages: 0,
+        };
+      } catch {
+        // Fall through to the engine export when canvas cannot render this export.
+      }
+    }
+  }
+
   try {
-    return await renderEngineRasterExportWithMeta(editor, ids, {
+    const result = await renderEngineRasterExportWithMeta(editor, ids, {
       format,
       scale,
       ...(background !== undefined ? { background } : {}),
@@ -183,16 +209,35 @@ export async function renderExportWithMeta(
       priority: "high",
       ...(signal ? { signal } : {}),
     });
+    // The engine reduced photos the plan didn't expect (a cold cache or a Worker step-down).
+    // Its reductions halve a photo, which canvas's 4,096 px cap beats for any photo it can hold.
+    if (result.reducedImages > 0 || result.omittedImages > 0) {
+      const fallback = tryCanvasRasterExport(editor, ids, canvasOptions);
+      if (fallback) {
+        try {
+          const blob = await fallback;
+          return {
+            blob,
+            reducedImages: estimateCanvasReducedExportImages(editor, ids, scale),
+            omittedImages: 0,
+          };
+        } catch {
+          // Keep the engine export (with its reduction note) if canvas also fails.
+        }
+      }
+    }
+    return result;
   } catch (error) {
     if (signal?.aborted || isAbortError(error)) throw error;
-    const fallback = tryCanvasRasterExport(editor, ids, {
-      format,
-      scale,
-      ...(background !== undefined ? { background } : {}),
-    });
+    const fallback = tryCanvasRasterExport(editor, ids, canvasOptions);
     if (fallback) {
       try {
-        return { blob: await fallback, reducedImages: 0, omittedImages: 0 };
+        const blob = await fallback;
+        return {
+          blob,
+          reducedImages: estimateCanvasReducedExportImages(editor, ids, scale),
+          omittedImages: 0,
+        };
       } catch {
         // Keep the original engine error only when the canvas also fails.
       }
