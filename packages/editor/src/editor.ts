@@ -2802,6 +2802,14 @@ export class Editor {
     const swappedBack = [...rebuilt];
     const inside = (id: string) =>
       rebuilt.has(id) || this.doc.ancestors(id).some((a) => rebuilt.has(a.id));
+    // A reset of how layers are placed (auto layout, positioning, constraints) places them again:
+    // the layer's own place, size and text mode, and its layers', as sync derives them.
+    const PLACING = ["layoutMode", "positioning", "constraintH", "constraintV"];
+    const PLACED = new Set(["x", "y", "width", "height", "textAutoResize"]);
+    const placing = (id: string | undefined) =>
+      !!id && PLACING.some((prop) => reset.get(id)?.has(prop));
+    const replaced = (id: string, prop: string) =>
+      PLACED.has(prop) && (placing(id) || placing(this.doc.get(id)?.parent));
     const sync = [...outer]
       .flatMap((id) => syncInstanceOps(this.doc, id))
       .filter((op) => {
@@ -2810,7 +2818,8 @@ export class Editor {
           rebuilt.add(op.id);
           return true;
         }
-        if (op.op === "set") return !!reset.get(op.id)?.has(op.prop) || inside(op.id);
+        if (op.op === "set")
+          return !!reset.get(op.id)?.has(op.prop) || inside(op.id) || replaced(op.id, op.prop);
         if (op.op === "move") return inside(op.id) || rebuilt.has(op.parent);
         return inside(op.id);
       });

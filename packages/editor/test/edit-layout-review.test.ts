@@ -897,3 +897,213 @@ describe.each(["materialized", "compact"] as const)("deriving copies with copies
     expect(num(editor, copy, "x")).toBe(num(editor, "dot", "x") + 40);
   });
 });
+
+// The oracle's 300-run seeds (1367222296 and -1453399284): a layer that leaves an auto layout
+// frame, by a move in its main or a reset of its instance, sits where its main layer does.
+describe.each(["materialized", "compact"] as const)(
+  "layers placed again with copies %s",
+  (copies) => {
+    it("moves a copy out of its instance's row to where its main layer is (seed 1367222296)", () => {
+      const editor = make(
+        [
+          page,
+          modes,
+          node("pad", "variable", "c", { variableType: "number", values: { light: 4, dark: 12 } }),
+          node("main", "frame", "p", { isComponent: true, width: 160, height: 80 }),
+          node("row", "frame", "main", {
+            x: 10,
+            y: 40,
+            width: 140,
+            height: 20,
+            layoutMode: "row",
+            paddingLeft: 4,
+            bindings: { paddingLeft: "pad" },
+          }),
+          node("bar", "rect", "row", { x: 4, width: 136, height: 8, sizingH: "fill" }),
+          dark,
+        ],
+        copies,
+      );
+      const instance = editor.insertInstance("main", { x: 0, y: 300 }) as string;
+      expect(editor.commit([{ op: "move", id: instance, parent: "dark", key: "a0" }])).toBe(true);
+      expect(editor.commit([{ op: "move", id: "bar", parent: "main", key: "a1" }])).toBe(true);
+      const bar = editor.doc.childIds(instance)[1] as string;
+      expect(getProp(editor.doc.get(bar)?.props ?? {}, "mirrors")).toBe("bar");
+      expect([num(editor, bar, "x"), num(editor, bar, "width")]).toEqual([
+        num(editor, "bar", "x"),
+        num(editor, "bar", "width"),
+      ]);
+      expect(unsettled(editor)).toEqual([]);
+    });
+
+    it("places a copy layer by the constraint it's given in a resized instance (seed -1039204193)", () => {
+      const editor = make(
+        [
+          page,
+          node("main", "frame", "p", { isComponent: true, width: 160, height: 80 }),
+          node("dot", "rect", "main", { x: 10, y: 10, width: 20, height: 20 }),
+        ],
+        copies,
+      );
+      const instance = editor.insertInstance("main", { x: 0, y: 300 }) as string;
+      editor.setProp([instance], "height", 40);
+      const dot = editor.doc.childIds(instance)[0] as string;
+      expect(getProp(editor.doc.get(dot)?.props ?? {}, "y")).toBe(10);
+      editor.setProp([dot], "constraintV", "scale");
+      // Scaled with its frame: half as tall, so half as far down.
+      expect(getProp(editor.doc.get(dot)?.props ?? {}, "y")).toBe(5);
+      expect(getProp(editor.doc.get(dot)?.props ?? {}, "height")).toBe(10);
+    });
+
+    it("places the layers of a frame moved into a main in its copies' new size (seeds 208567029, 928280465)", () => {
+      const editor = make(
+        [
+          page,
+          node("main", "frame", "p", { isComponent: true, width: 160, height: 80 }),
+          node(
+            "box",
+            "frame",
+            "p",
+            { x: 400, y: 10, width: 40, height: 40, constraintV: "stretch" },
+            "a1",
+          ),
+          node("dot", "rect", "box", {
+            x: 10,
+            y: 10,
+            width: 20,
+            height: 20,
+            constraintV: "center",
+          }),
+        ],
+        copies,
+      );
+      const instance = editor.insertInstance("main", { x: 0, y: 300 }) as string;
+      editor.setProp([instance], "height", 120);
+      expect(
+        editor.commit([
+          { op: "move", id: "box", parent: "main", key: "a0" },
+          { op: "set", id: "box", prop: "x", value: 10 },
+        ]),
+      ).toBe(true);
+      const box = editor.doc.childIds(instance)[0] as string;
+      const dot = editor.doc.childIds(box)[0] as string;
+      // The frame stretches with the instance (40 taller), and the layer stays centred in it.
+      expect(num(editor, box, "height")).toBe(80);
+      expect(getProp(editor.doc.get(dot)?.props ?? {}, "y")).toBe(30);
+    });
+
+    it("lets a stretched copy row keep its Hug height, and what's pinned in it stay (seed 208567029)", () => {
+      const editor = make(
+        [
+          page,
+          node("main", "frame", "p", { isComponent: true, width: 160, height: 80 }),
+          node(
+            "box",
+            "frame",
+            "p",
+            {
+              x: 400,
+              y: 10,
+              width: 40,
+              height: 20,
+              layoutMode: "row",
+              sizingV: "hug",
+              constraintV: "stretch",
+            },
+            "a1",
+          ),
+          node("bar", "rect", "box", { width: 20, height: 20 }),
+          node(
+            "dot",
+            "rect",
+            "box",
+            { x: 4, y: 4, width: 8, height: 8, positioning: "absolute", constraintV: "center" },
+            "a1",
+          ),
+        ],
+        copies,
+      );
+      const instance = editor.insertInstance("main", { x: 0, y: 300 }) as string;
+      editor.setProp([instance], "height", 120);
+      expect(
+        editor.commit([
+          { op: "move", id: "box", parent: "main", key: "a0" },
+          { op: "set", id: "box", prop: "x", value: 10 },
+        ]),
+      ).toBe(true);
+      const box = editor.doc.childIds(instance)[0] as string;
+      const dot = editor.doc.childIds(box)[1] as string;
+      expect(num(editor, box, "height")).toBe(20);
+      expect(getProp(editor.doc.get(dot)?.props ?? {}, "y")).toBe(4);
+      expect(unsettled(editor)).toEqual([]);
+    });
+
+    it("puts a scaled layer where its main layer is after a swap to a bigger component (seed 79905429)", () => {
+      const editor = make(
+        [
+          page,
+          node("small", "frame", "p", { isComponent: true, width: 87, height: 25 }),
+          node("big", "frame", "p", { isComponent: true, y: 100, width: 160, height: 80 }, "a1"),
+          node("bar", "rect", "big", { x: 16, width: 8, height: 8, constraintH: "scale" }),
+        ],
+        copies,
+      );
+      const instance = editor.insertInstance("small", { x: 0, y: 300 }) as string;
+      editor.swapInstance(instance, "big");
+      expect(num(editor, instance, "width")).toBe(160);
+      const bar = editor.doc.childIds(instance)[0] as string;
+      expect([num(editor, bar, "x"), num(editor, bar, "width")]).toEqual([16, 8]);
+    });
+
+    it("shrinks a copy's Hug row once its only layer moves to another component (seed 2040888141)", () => {
+      const editor = make(
+        [
+          page,
+          node("main", "frame", "p", { isComponent: true, width: 160, height: 80 }),
+          node("row", "frame", "main", {
+            x: 10,
+            y: 40,
+            width: 140,
+            height: 20,
+            layoutMode: "row",
+            paddingLeft: 6,
+            paddingRight: 6,
+          }),
+          node("bar", "rect", "row", { x: 6, width: 128, height: 8, sizingH: "fill" }),
+          node("other", "frame", "p", { isComponent: true, x: 400, width: 160, height: 80 }, "a1"),
+        ],
+        copies,
+      );
+      const instance = editor.insertInstance("main", { x: 0, y: 300 }) as string;
+      const row = editor.doc.childIds(instance)[0] as string;
+      editor.setProp([row], "sizingH", "hug");
+      expect(editor.commit([{ op: "move", id: "bar", parent: "other", key: "a0" }])).toBe(true);
+      expect(editor.doc.childIds(row)).toEqual([]);
+      expect(num(editor, row, "width")).toBe(12);
+      expect(unsettled(editor)).toEqual([]);
+    });
+
+    it("puts an instance's layers back once a reset takes its auto layout away (seed -1453399284)", () => {
+      const editor = make(
+        [
+          page,
+          node("main", "frame", "p", { isComponent: true, width: 160, height: 80 }),
+          node("top", "rect", "main", { x: 10, y: 10, width: 70, height: 20 }),
+          node("box", "frame", "main", { x: 10, y: 40, width: 140, height: 20 }, "a1"),
+        ],
+        copies,
+      );
+      const instance = editor.insertInstance("main", { x: 0, y: 300 }) as string;
+      editor.setLayoutMode([instance], "row");
+      const box = editor.doc.childIds(instance)[1] as string;
+      // The row lays them side by side.
+      expect(num(editor, box, "x")).not.toBe(10);
+      const own = getProp(editor.doc.get(instance)?.props ?? {}, "overrides");
+      expect(own).toContain("layoutMode");
+      editor.resetOverrides([{ id: instance, props: own }]);
+      expect([num(editor, box, "x"), getProp(editor.doc.get(box)?.props ?? {}, "y")]).toEqual([
+        10, 40,
+      ]);
+    });
+  },
+);

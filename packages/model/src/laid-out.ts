@@ -194,7 +194,8 @@ const round2 = (n: number) => Math.round(n * 100) / 100;
  * auto layout differs in size from its main's, a child pinned to the end or
  * centre, stretched or scaled sits where its main layer does, moved by the
  * difference. Only the values that differ from the main layer's are given;
- * an axis pinned to the start (or a frame of the same size) gives none.
+ * an axis pinned to the start (or a frame of the same size) gives none, and
+ * an axis the layer's own auto layout hugs on gives no size.
  */
 export function constrainedValues(
   copy: NodeRecord,
@@ -224,7 +225,12 @@ export function constrainedValues(
       to,
     );
     out[axis.pos] = round2(span.pos);
-    if (c === "stretch" || c === "scale") out[axis.size] = round2(span.size);
+    // A frame whose auto layout hugs on this axis is sized by that layout, not its constraints.
+    const hugs =
+      copy.type === "frame" &&
+      getProp(copy.props, "layoutMode") !== "none" &&
+      getProp(copy.props, axis.sizing) === "hug";
+    if ((c === "stretch" || c === "scale") && !hugs) out[axis.size] = round2(span.size);
   }
   return out;
 }
