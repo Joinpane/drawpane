@@ -1,9 +1,9 @@
 /** A component's thumbnail, for the Assets panel: this file's own, or a team library's. */
-import { Camera, CanvasRenderer, type Editor, ExportError } from "@drawpane/editor";
+import { Camera, CanvasRenderer, type Editor } from "@drawpane/editor";
 import type { NodeRecord } from "@drawpane/model";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useResolvedTheme } from "../app/theme";
-import { renderEngineSnapshot } from "./engine-snapshot";
+import { isAbortError, renderEngineSnapshot } from "./engine-snapshot";
 import { useDeferredDocVersion, useEditor } from "./hooks";
 import { imagesFor } from "./media";
 import { useEngineRenderer } from "./renderer-switch";
@@ -62,8 +62,7 @@ async function renderCanvasComponentPreview(editor: Editor, nodeId: string): Pro
 function CanvasComponentPreview({ node, source }: { node: NodeRecord; source?: Editor }) {
   const live = useEditor();
   const editor = source ?? live;
-  const liveVersion = useDeferredDocVersion();
-  const version = source ? 0 : liveVersion;
+  const version = useDeferredDocVersion();
   const ref = useRef<HTMLCanvasElement>(null);
   const renderer = useMemo(
     () => new CanvasRenderer(editor.scene, editor.measurer, { images: imagesFor(editor) }),
@@ -98,8 +97,7 @@ function CanvasComponentPreview({ node, source }: { node: NodeRecord; source?: E
 function EngineComponentPreview({ node, source }: { node: NodeRecord; source?: Editor }) {
   const live = useEditor();
   const editor = source ?? live;
-  const liveVersion = useDeferredDocVersion();
-  const version = source ? 0 : liveVersion;
+  const version = useDeferredDocVersion();
   const host = useRef<HTMLSpanElement>(null);
   const [shown, setShown] = useState(typeof IntersectionObserver === "undefined");
   const [url, setUrl] = useState<string | null>(null);
@@ -154,10 +152,7 @@ function EngineComponentPreview({ node, source }: { node: NodeRecord; source?: E
               signal: abort.signal,
             });
           } catch (error) {
-            if (
-              error instanceof ExportError &&
-              (error.reason === "unsupported" || error.reason === "limit")
-            ) {
+            if (!abort.signal.aborted && !isAbortError(error)) {
               blob = await renderCanvasComponentPreview(editor, node.id);
             } else {
               throw error;

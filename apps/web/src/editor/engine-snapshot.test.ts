@@ -4,6 +4,7 @@ import { type Op, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import {
   EngineSnapshotService,
+  isAbortError,
   renderEngineRasterExport,
   type SnapshotJobPayload,
   type SnapshotWorkerPort,
@@ -286,6 +287,213 @@ describe("EngineSnapshotService", () => {
     await expect(job).rejects.toThrow(/too many different glyph outlines/);
 
     service.dispose();
+  });
+
+  it("preempts a running low-priority thumbnail when a high-priority export arrives and resumes it after", async () => {
+    const worker = new FakeWorker();
+    const service = new EngineSnapshotService(() => worker);
+
+    const lowJob = service.enqueue(payload(100, 100), "low");
+    await flush();
+    const firstRender = must(rendersOf(worker)[0], "initial low render");
+    expect(firstRender.width).toBe(100);
+
+    // Enqueue a high-priority export while the thumbnail is running: cancels and preempts low.
+    const highJob = service.enqueue(payload(800, 600), "high");
+    const cancelMsg = worker.sent.find(
+      (m): m is Extract<SnapshotWorkerRequest, { type: "cancel" }> => m.type === "cancel",
+    );
+    expect(cancelMsg?.jobId).toBe(firstRender.jobId);
+
+    // Worker yields on the cancel check -> high-priority export runs immediately.
+    worker.emit({ type: "cancelled", jobId: firstRender.jobId, wasmBytes: 6 << 20 });
+    await flush();
+
+    const afterPreempt = rendersOf(worker);
+    expect(afterPreempt.map((r) => r.width)).toEqual([100, 800]);
+    const highRender = must(afterPreempt[1], "high render");
+    worker.emit({
+      type: "done",
+      jobId: highRender.jobId,
+      mime: "image/png",
+      bytes: new Uint8Array([1, 2]).buffer,
+      reducedImages: 0,
+      omittedImages: 0,
+      wasmBytes: 12 << 20,
+    });
+    expect((await highJob).size).toBe(2);
+
+    // Preempted thumbnail resumes automatically with a fresh jobId and intact payload buffer.
+    await flush();
+    const resumed = rendersOf(worker);
+    expect(resumed.map((r) => r.width)).toEqual([100, 800, 100]);
+    const resumedRender = must(resumed[2], "resumed low render");
+    expect(resumedRender.jobId).toBeGreaterThan(firstRender.jobId);
+    expect(resumedRender.list.byteLength).toBe(16);
+    worker.emit({
+      type: "done",
+      jobId: resumedRender.jobId,
+      mime: "image/png",
+      bytes: new Uint8Array([3, 4, 5]).buffer,
+      reducedImages: 0,
+      omittedImages: 0,
+      wasmBytes: 12 << 20,
+    });
+    expect((await lowJob).size).toBe(3);
+
+    service.dispose();
+  });
+
+  it("recycles a slow low-priority worker on preemption timeout so an urgent export starts promptly", async () => {
+    const workers: FakeWorker[] = [];
+    const service = new EngineSnapshotService(
+      () => {
+        const w = new FakeWorker();
+        workers.push(w);
+        return w;
+      },
+      { preemptTimeoutMs: 20, jobTimeoutMs: 5000 },
+    );
+
+    const lowJob = service.enqueue(payload(100, 100), "low");
+    await flush();
+    const highJob = service.enqueue(payload(500, 500), "high");
+
+    // Worker 0 ignores cancel; preemption timeout kills it and starts Worker 1 for high first.
+    await new Promise((r) => setTimeout(r, 40));
+    expect(workers).toHaveLength(2);
+    expect(must(workers[0], "preempted worker").terminated).toBe(true);
+
+    const worker1 = must(workers[1], "fresh worker");
+    const highRender = must(rendersOf(worker1)[0], "high render on worker1");
+    expect(highRender.width).toBe(500);
+    worker1.emit({
+      type: "done",
+      jobId: highRender.jobId,
+      mime: "image/png",
+      bytes: new Uint8Array([8]).buffer,
+      reducedImages: 0,
+      omittedImages: 0,
+      wasmBytes: 8 << 20,
+    });
+    expect((await highJob).size).toBe(1);
+
+    await flush();
+    const lowRender = must(rendersOf(worker1)[1], "resumed low render on worker1");
+    expect(lowRender.width).toBe(100);
+    worker1.emit({
+      type: "done",
+      jobId: lowRender.jobId,
+      mime: "image/png",
+      bytes: new Uint8Array([9, 9]).buffer,
+      reducedImages: 0,
+      omittedImages: 0,
+      wasmBytes: 8 << 20,
+    });
+    expect((await lowJob).size).toBe(2);
+
+    service.dispose();
+  });
+
+  it("terminates an idle worker after idleTimeoutMs and spawns a fresh worker on the next job", async () => {
+    const workers: FakeWorker[] = [];
+    const service = new EngineSnapshotService(
+      () => {
+        const w = new FakeWorker();
+        workers.push(w);
+        return w;
+      },
+      { idleTimeoutMs: 25 },
+    );
+
+    const first = service.enqueue(payload(64, 64), "low");
+    await flush();
+    const worker0 = must(workers[0], "worker 0");
+    worker0.emit({
+      type: "done",
+      jobId: must(rendersOf(worker0)[0], "first render").jobId,
+      mime: "image/png",
+      bytes: new Uint8Array([1]).buffer,
+      reducedImages: 0,
+      omittedImages: 0,
+      wasmBytes: 6 << 20,
+    });
+    expect((await first).size).toBe(1);
+    expect(worker0.terminated).toBe(false);
+
+    await new Promise((r) => setTimeout(r, 50));
+    expect(worker0.terminated).toBe(true);
+
+    const second = service.enqueue(payload(64, 64), "low");
+    await flush();
+    expect(workers).toHaveLength(2);
+    const worker1 = must(workers[1], "worker 1");
+    worker1.emit({
+      type: "done",
+      jobId: must(rendersOf(worker1)[0], "second render").jobId,
+      mime: "image/png",
+      bytes: new Uint8Array([2]).buffer,
+      reducedImages: 0,
+      omittedImages: 0,
+      wasmBytes: 6 << 20,
+    });
+    expect((await second).size).toBe(1);
+
+    service.dispose();
+  });
+
+  it("recycles the worker immediately after a large job exceeding recycleWasmBytes", async () => {
+    const workers: FakeWorker[] = [];
+    const service = new EngineSnapshotService(
+      () => {
+        const w = new FakeWorker();
+        workers.push(w);
+        return w;
+      },
+      { recycleWasmBytes: 64 << 20, idleTimeoutMs: 60_000 },
+    );
+
+    const big = service.enqueue(payload(4000, 3000), "high");
+    await flush();
+    const worker0 = must(workers[0], "worker 0");
+    worker0.emit({
+      type: "done",
+      jobId: must(rendersOf(worker0)[0], "big render").jobId,
+      mime: "image/png",
+      bytes: new Uint8Array([1, 2, 3]).buffer,
+      reducedImages: 0,
+      omittedImages: 0,
+      wasmBytes: 128 << 20,
+    });
+    expect((await big).size).toBe(3);
+    expect(worker0.terminated).toBe(true);
+
+    const small = service.enqueue(payload(100, 100), "low");
+    await flush();
+    expect(workers).toHaveLength(2);
+    const worker1 = must(workers[1], "worker 1");
+    worker1.emit({
+      type: "done",
+      jobId: must(rendersOf(worker1)[0], "small render").jobId,
+      mime: "image/png",
+      bytes: new Uint8Array([4]).buffer,
+      reducedImages: 0,
+      omittedImages: 0,
+      wasmBytes: 6 << 20,
+    });
+    expect((await small).size).toBe(1);
+    expect(worker1.terminated).toBe(false);
+
+    service.dispose();
+  });
+
+  it("classifies AbortError cleanly without catching ordinary export errors", () => {
+    expect(isAbortError(new DOMException("cancelled", "AbortError"))).toBe(true);
+    const err = new Error("aborted");
+    err.name = "AbortError";
+    expect(isAbortError(err)).toBe(true);
+    expect(isAbortError(new Error("worker load failed"))).toBe(false);
+    expect(isAbortError(null)).toBe(false);
   });
 });
 

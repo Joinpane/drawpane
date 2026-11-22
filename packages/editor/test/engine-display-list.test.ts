@@ -648,6 +648,180 @@ describe.skipIf(!built("worker") && !process.env.CI)("the display-list builder",
     const r = engine.renderCpu(W, H, camera, BG);
     expect(r.ok).toBe(true);
   });
+
+  it("thumbnail LOD keeps sub-pixel mask enders so following siblings stay unmasked", () => {
+    const doc = new Doc();
+    doc.apply([
+      { op: "create", id: "p1", type: "page", parent: ROOT_ID, key: "a0", props: {} },
+      {
+        op: "create",
+        id: "holder",
+        type: "frame",
+        parent: "p1",
+        key: "a0",
+        props: { x: 0, y: 0, width: 2000, height: 2000, clipContent: false, fills: [] },
+      },
+      {
+        op: "create",
+        id: "mask",
+        type: "ellipse",
+        parent: "holder",
+        key: "a0",
+        props: {
+          x: 0,
+          y: 0,
+          width: 1000,
+          height: 1000,
+          isMask: true,
+          maskType: "outline",
+          fills: [{ type: "solid", color: "#000000" }],
+        },
+      },
+      {
+        op: "create",
+        id: "ender",
+        type: "frame",
+        parent: "holder",
+        key: "a1",
+        props: {
+          x: 1500,
+          y: 100,
+          width: 10,
+          height: 10,
+          clipContent: true,
+          fills: [{ type: "solid", color: "#2f9e44" }],
+        },
+      },
+      {
+        op: "create",
+        id: "enderChild",
+        type: "rect",
+        parent: "ender",
+        key: "a0",
+        props: {
+          x: 1501,
+          y: 101,
+          width: 8,
+          height: 8,
+          fills: [{ type: "solid", color: "#ff0000" }],
+        },
+      },
+      {
+        op: "create",
+        id: "blue",
+        type: "rect",
+        parent: "holder",
+        key: "a2",
+        props: {
+          x: 0,
+          y: 0,
+          width: 2000,
+          height: 2000,
+          fills: [{ type: "solid", color: "#1971c2" }],
+        },
+      },
+    ]);
+    const scene = new Scene(doc);
+    const builder = new DisplayListBuilder(scene, measurer);
+    const plan = builder.planLayers(["holder"], { detailScale: 0.03 });
+    const planned = new Set([...plan.visibleNodes()].map((n) => n.id));
+    expect(planned.has("ender")).toBe(true);
+    expect(planned.has("enderChild")).toBe(false);
+
+    const engine = new RenderEngine(mod);
+    expect(engine.apply(builder.build("p1", ["holder"], { detailScale: 0.03 })).ok).toBe(true);
+    const r = engine.renderCpu(64, 64, { zoom: 0.03, x: 0, y: 0, dpr: 1 }, BG);
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    // (1800, 1800) * 0.03 = (54, 54) is outside the 1000x1000 ellipse mask and must stay blue.
+    const idx = (54 * 64 + 54) * 4;
+    expect(r.value.pixels[idx]).toBeLessThan(80);
+    expect(r.value.pixels[idx + 1]).toBeGreaterThan(80);
+    expect(r.value.pixels[idx + 2]).toBeGreaterThan(150);
+  });
+});
+
+describe("thumbnail LOD speck culling", () => {
+  it("culls sub-pixel clipped frames in unmasked parents while keeping mask enders and active masks", () => {
+    const doc = new Doc();
+    doc.apply([
+      { op: "create", id: "p1", type: "page", parent: ROOT_ID, key: "a0", props: {} },
+      {
+        op: "create",
+        id: "plain",
+        type: "frame",
+        parent: "p1",
+        key: "a0",
+        props: { x: 0, y: 0, width: 2000, height: 2000, clipContent: false, fills: [] },
+      },
+      {
+        op: "create",
+        id: "speck",
+        type: "frame",
+        parent: "plain",
+        key: "a0",
+        props: {
+          x: 100,
+          y: 100,
+          width: 10,
+          height: 10,
+          clipContent: true,
+          fills: [{ type: "solid", color: "#2f9e44" }],
+        },
+      },
+      {
+        op: "create",
+        id: "masked",
+        type: "frame",
+        parent: "p1",
+        key: "a1",
+        props: { x: 0, y: 0, width: 2000, height: 2000, clipContent: false, fills: [] },
+      },
+      {
+        op: "create",
+        id: "tinyMask",
+        type: "ellipse",
+        parent: "masked",
+        key: "a0",
+        props: {
+          x: 0,
+          y: 0,
+          width: 8,
+          height: 8,
+          isMask: true,
+          fills: [{ type: "solid", color: "#000000" }],
+        },
+      },
+      {
+        op: "create",
+        id: "maskedEnder",
+        type: "frame",
+        parent: "masked",
+        key: "a1",
+        props: { x: 50, y: 50, width: 8, height: 8, clipContent: true, fills: [] },
+      },
+      {
+        op: "create",
+        id: "maskedEnderChild",
+        type: "rect",
+        parent: "maskedEnder",
+        key: "a0",
+        props: { x: 51, y: 51, width: 4, height: 4, fills: [{ type: "solid", color: "#ff0000" }] },
+      },
+    ]);
+    const builder = new DisplayListBuilder(new Scene(doc), measurer);
+    const plainNodes = new Set(
+      [...builder.planLayers(["plain"], { detailScale: 0.03 }).visibleNodes()].map((n) => n.id),
+    );
+    expect(plainNodes.has("speck")).toBe(false);
+
+    const maskedNodes = new Set(
+      [...builder.planLayers(["masked"], { detailScale: 0.03 }).visibleNodes()].map((n) => n.id),
+    );
+    expect(maskedNodes.has("tinyMask")).toBe(true);
+    expect(maskedNodes.has("maskedEnder")).toBe(true);
+    expect(maskedNodes.has("maskedEnderChild")).toBe(false);
+  });
 });
 
 describe("image demand from painted geometry", () => {

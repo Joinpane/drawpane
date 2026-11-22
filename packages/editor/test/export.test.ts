@@ -931,9 +931,59 @@ describe("engine export helpers", () => {
     const plan2x = budgetExportImages(
       [{ ref: SHA, natural: { width: 4000, height: 3000 }, uses: uses2x.get(SHA) ?? [] }],
       browserBudget,
-      { exactDrawn: true },
+      { exactDrawn: true, decodeWorkingMultiplier: 2 },
     );
     expect(plan2x.get(SHA)).toEqual({ target: { width: 2880, height: 2160 }, reduced: false });
+    const plan3x = budgetExportImages(
+      [{ ref: SHA, natural: { width: 4000, height: 3000 }, uses: uses3x.get(SHA) ?? [] }],
+      browserBudget,
+      { exactDrawn: true, decodeWorkingMultiplier: 2 },
+    );
+    expect(plan3x.get(SHA)).toEqual({ target: { width: 4000, height: 3000 }, reduced: false });
+  });
+
+  it("counts decode working memory inside the browser image budget for multi-photo exports", () => {
+    const refs = ["1", "2", "3", "4"].map((c) => c.repeat(64));
+    const editor = makeEditor(
+      refs.map((ref, idx) =>
+        rect(
+          `photo-${idx}`,
+          {
+            x: (idx % 2) * 2000,
+            y: Math.floor(idx / 2) * 1500,
+            width: 2000,
+            height: 1500,
+            fills: [{ type: "image", ref, scaleMode: "fill" }],
+          },
+          "p",
+          `a${idx}`,
+        ),
+      ),
+    );
+    const uses = collectExportImageUses(editor.scene, editor.doc.nodes(), 2);
+    const candidates = refs.map((ref) => ({
+      ref,
+      natural: { width: 4000, height: 3000 },
+      uses: uses.get(ref) ?? [],
+    }));
+    const browserBudget = 192 << 20;
+    const plan = budgetExportImages(candidates, browserBudget, {
+      exactDrawn: true,
+      decodeWorkingMultiplier: 2,
+    });
+    let resident = 0;
+    let maxDecode = 0;
+    let reduced = 0;
+    for (const ref of refs) {
+      const entry = plan.get(ref);
+      expect(entry).not.toBeNull();
+      if (!entry) continue;
+      if (entry.reduced) reduced++;
+      resident += imageLevelsBytes(entry.target.width, entry.target.height);
+      maxDecode = Math.max(maxDecode, entry.target.width * entry.target.height * 4 * 2);
+    }
+    expect(reduced).toBeGreaterThan(0);
+    expect(resident + maxDecode).toBeLessThanOrEqual(browserBudget);
   });
 
   it("parses hex, keyword, and CSS rgb/rgba export backgrounds", () => {

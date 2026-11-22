@@ -152,6 +152,56 @@ jobs:
             apps/web/test-results
           retention-days: 14
 
+  e2e-browser-parity:
+    # Canvas vs browser snapshot Worker parity across all 18 suites (237 cells, ~15-18 min,
+    # comparable to one e2e shard), run in parallel with the sharded e2e suite.
+    name: End to end (browser snapshot parity)
+    needs: engine
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      WRANGLER_SEND_METRICS: "false"
+      ENGINE_SKIP_BUILD: "1"
+      HEADLESS_PARITY_BROWSER: "1"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .node-version
+          cache: pnpm
+      - uses: actions/download-artifact@v4
+        with:
+          name: engine-dist
+          path: packages/engine/dist
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm build
+      - name: Playwright's version, for the browser cache
+        id: playwright
+        run: echo "version=$(pnpm --filter @drawpane/web exec playwright --version | awk '{print $2}')" >> "$GITHUB_OUTPUT"
+      - uses: actions/cache@v4
+        id: browsers
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+      - name: Install Chromium
+        if: steps.browsers.outputs.cache-hit != 'true'
+        run: pnpm --filter @drawpane/web exec playwright install --with-deps chromium
+      - name: Install Chromium's system libraries
+        if: steps.browsers.outputs.cache-hit == 'true'
+        run: pnpm --filter @drawpane/web exec playwright install-deps chromium
+      - name: Run browser snapshot parity
+        run: pnpm --filter @drawpane/web exec playwright test e2e/parity/headless.spec.ts --project=chromium
+      - name: Keep the report, traces and screenshots of failures
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-report-browser-parity
+          path: |
+            apps/web/playwright-report
+            apps/web/test-results
+          retention-days: 14
+
   system-text:
     name: System text (${{ matrix.os }})
     needs: engine
@@ -181,7 +231,7 @@ jobs:
 
   deploy:
     name: Deploy to the dogfooding instance
-    needs: [engine, check, e2e]
+    needs: [engine, check, e2e, e2e-browser-parity]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15

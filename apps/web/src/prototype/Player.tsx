@@ -2,7 +2,6 @@ import {
   CanvasRenderer,
   defaultStart,
   type Editor,
-  ExportError,
   flowScreens,
   hotspotIds,
   type ImageCache,
@@ -14,7 +13,7 @@ import { DEVICE_IDS, DEVICES, type DeviceId, type Flow, getProp } from "@drawpan
 import { Icon, IconButton } from "@drawpane/ui";
 import { type ReactNode, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { isMac } from "../app/format";
-import { renderEngineSnapshot } from "../editor/engine-snapshot";
+import { isAbortError, renderEngineSnapshot } from "../editor/engine-snapshot";
 import { useEngineRenderer } from "../editor/renderer-switch";
 import { PlayerStage } from "./stage";
 import "./present.css";
@@ -428,8 +427,7 @@ function EngineScreenThumb({
         .catch(async (error) => {
           if (
             abort.signal.aborted ||
-            !(error instanceof ExportError) ||
-            (error.reason !== "unsupported" && error.reason !== "limit") ||
+            isAbortError(error) ||
             typeof OffscreenCanvas === "undefined"
           ) {
             throw error;

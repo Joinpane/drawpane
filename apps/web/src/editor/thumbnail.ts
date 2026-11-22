@@ -8,16 +8,10 @@
  * inside the 64 KiB keepalive budget where possible) when the engine is on, and CanvasRenderer
  * when canvas mode is active.
  */
-import {
-  CanvasRenderer,
-  type Editor,
-  ExportError,
-  renderThumbnail,
-  thumbnailLayout,
-} from "@drawpane/editor";
+import { CanvasRenderer, type Editor, renderThumbnail, thumbnailLayout } from "@drawpane/editor";
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
-import { renderEngineSnapshot, type SnapshotPriority } from "./engine-snapshot";
+import { isAbortError, renderEngineSnapshot, type SnapshotPriority } from "./engine-snapshot";
 import { imagesFor } from "./media";
 import { useEngineRenderer } from "./renderer-switch";
 
@@ -144,12 +138,20 @@ export async function renderPageThumbnail(
     }
     return blob && blob.size <= MAX_BYTES ? blob : null;
   } catch (error) {
-    if (
-      !options.forceEngine &&
-      error instanceof ExportError &&
-      (error.reason === "unsupported" || error.reason === "limit")
-    ) {
-      return renderCanvasPageThumbnail(editor, pageId, maxWidth, maxHeight, format, baseQuality);
+    if (!options.forceEngine && !options.signal?.aborted && !isAbortError(error)) {
+      try {
+        const fallback = await renderCanvasPageThumbnail(
+          editor,
+          pageId,
+          maxWidth,
+          maxHeight,
+          format,
+          baseQuality,
+        );
+        if (fallback) return fallback;
+      } catch {
+        // Keep the original engine error only when the canvas also fails.
+      }
     }
     throw error;
   }

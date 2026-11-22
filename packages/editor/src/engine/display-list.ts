@@ -31,7 +31,7 @@ import { getProp, type NodeRecord } from "@drawpane/model";
 import { boxOf, type Rect } from "../geometry";
 import { glassParams } from "../glass";
 import { imageDrawnSize, type Size } from "../images";
-import { isActiveMask } from "../masks";
+import { endsMask, hasMask, isActiveMask } from "../masks";
 import { blurSigma } from "../post-effects";
 import { glyphTable } from "../saved-glyphs";
 import type { Scene } from "../scene";
@@ -301,10 +301,23 @@ export class DisplayListBuilder {
     };
   }
 
+  /** True when a node's painted extent is sub-pixel at `detailScale`. */
+  #isSubpixelExtent(node: NodeRecord, detailScale: number): boolean {
+    const bounds = this.#scene.extent(node.id) ?? this.#scene.bounds(node.id);
+    return !!bounds && bounds.width * detailScale < 0.75 && bounds.height * detailScale < 0.75;
+  }
+
   /** Sub-pixel specks skipped during thumbnail level-of-detail builds (never during exports). */
-  #isThumbnailSpeck(node: NodeRecord, detailScale: number): boolean {
+  #isThumbnailSpeck(
+    node: NodeRecord,
+    detailScale: number,
+    parentHasMask: (parentId: string) => boolean,
+  ): boolean {
     if (node.type === "page" || node.type === "group") return false;
-    if (getProp(node.props, "isMask")) return false;
+    // Never cull a mask, nor a clipped frame that ends a sibling mask's scope.
+    const candidate: NodeRecord | undefined = node;
+    if (isActiveMask(candidate) || getProp(node.props, "isMask")) return false;
+    if (endsMask(node) && parentHasMask(node.parent)) return false;
     // Unclipped frames with children may have larger descendants: keep the container and cull leaves.
     if (
       node.type === "frame" &&
@@ -313,8 +326,7 @@ export class DisplayListBuilder {
     ) {
       return false;
     }
-    const bounds = this.#scene.bounds(node.id);
-    return !!bounds && bounds.width * detailScale < 0.75 && bounds.height * detailScale < 0.75;
+    return this.#isSubpixelExtent(node, detailScale);
   }
 
   #encode(node: NodeRecord, ctx: LayerContext): WireRecord {
@@ -587,9 +599,22 @@ export class DisplayListBuilder {
       options?.detailScale !== undefined && options.detailScale > 0
         ? options.detailScale
         : undefined;
+    const maskedParents = new Map<string, boolean>();
+    const parentHasMask = (parentId: string): boolean => {
+      let has = maskedParents.get(parentId);
+      if (has === undefined) {
+        has = hasMask(doc, parentId);
+        maskedParents.set(parentId, has);
+      }
+      return has;
+    };
     const isSpeck =
       detailScale !== undefined
-        ? (node: NodeRecord) => this.#isThumbnailSpeck(node, detailScale)
+        ? (node: NodeRecord) => this.#isThumbnailSpeck(node, detailScale, parentHasMask)
+        : null;
+    const isSubpixel =
+      detailScale !== undefined
+        ? (node: NodeRecord) => this.#isSubpixelExtent(node, detailScale)
         : null;
     const parts = options?.context && pageId ? this.#readerContextParts(ids) : [];
     const context = pageId && parts.length > 0 ? this.#contextPrefix(pageId, ids, parts) : null;
@@ -604,6 +629,10 @@ export class DisplayListBuilder {
           if (isSpeck?.(node)) continue;
           seen.add(id);
           yield node;
+          // A kept sub-pixel clipped frame only stays for `endsMask`: its clipped kids can't show.
+          if (isSubpixel && endsMask(node) && isSubpixel(node)) {
+            continue;
+          }
           for (const child of doc.childIds(id)) stack.push(child);
         }
         for (const id of context ?? []) {
@@ -1002,6 +1031,15 @@ export class DisplayListBuilder {
       Math.max(1 << 20, Math.ceil(this.#lastFresh * 1.1)),
     );
     w.reset();
+    const maskedParents = new Map<string, boolean>();
+    const parentHasMask = (parentId: string): boolean => {
+      let has = maskedParents.get(parentId);
+      if (has === undefined) {
+        has = hasMask(doc, parentId);
+        maskedParents.set(parentId, has);
+      }
+      return has;
+    };
     const stack = [...(roots ?? doc.childIds(pageId))].reverse();
     const top = roots ? new Set(roots) : null;
     let records = 0;
@@ -1011,10 +1049,23 @@ export class DisplayListBuilder {
       const node = doc.get(id);
       if (!node) continue;
       if (detailScale !== undefined) {
-        if (node.props.visible === false || this.#isThumbnailSpeck(node, detailScale)) continue;
+        if (
+          node.props.visible === false ||
+          this.#isThumbnailSpeck(node, detailScale, parentHasMask)
+        ) {
+          continue;
+        }
       }
       glyphs += this.#writePageRecord(w, node, ctx, top?.has(id));
       records++;
+      // Keep a sub-pixel clipped frame's record for `endsMask`, without encoding clipped kids.
+      if (
+        detailScale !== undefined &&
+        endsMask(node) &&
+        this.#isSubpixelExtent(node, detailScale)
+      ) {
+        continue;
+      }
       const kids = doc.childIds(id);
       for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i] as string);
     }

@@ -19,7 +19,6 @@ import {
   CanvasRenderer,
   chainAt,
   type Editor,
-  ExportError,
   easingCss,
   type Hit,
   hotspotRects,
@@ -41,7 +40,7 @@ import {
   SafeUrl,
   type Transition,
 } from "@drawpane/model";
-import { renderEngineSnapshot } from "../editor/engine-snapshot";
+import { isAbortError, renderEngineSnapshot } from "../editor/engine-snapshot";
 import {
   EngineView,
   IDLE_SLICE_MS,
@@ -92,6 +91,9 @@ interface OverlaySurface {
   readonly el: HTMLDivElement;
   readonly canvas: HTMLCanvasElement;
   readonly contentScale: number;
+  painted: boolean;
+  onFirstPaint: (() => void) | null;
+  onCleanup: (() => void) | null;
   abort: AbortController | null;
 }
 
@@ -421,7 +423,7 @@ export class PlayerStage {
     for (const fn of this.#cleanup) fn();
     for (const t of this.#timers.values()) clearTimeout(t);
     for (const a of this.#animations) a.cancel();
-    for (const view of this.#overlays) view.layer.abort?.abort();
+    for (const view of this.#overlays) this.#disposeOverlayLayer(view.layer);
     this.#engine?.dispose();
     this.#engine = null;
     this.#deviceEl.remove();
@@ -524,11 +526,14 @@ export class PlayerStage {
     let dpr = window.devicePixelRatio || 1;
     const pixels = size.width * size.height * (css * dpr) ** 2;
     if (pixels > MAX_PIXELS) dpr *= Math.sqrt(MAX_PIXELS / pixels);
-    const maxSide = this.#useEngine ? MAX_SIDE : 16_384;
-    const longest = Math.max(size.width * css * dpr, size.height * css * dpr);
-    if (longest > maxSide) dpr *= maxSide / longest;
-    const width = Math.max(1, Math.min(maxSide, Math.round(size.width * css * dpr)));
-    const height = Math.max(1, Math.min(maxSide, Math.round(size.height * css * dpr)));
+    if (this.#useEngine) {
+      const longest = Math.max(size.width * css * dpr, size.height * css * dpr);
+      if (longest > MAX_SIDE) dpr *= MAX_SIDE / longest;
+    }
+    const rawWidth = Math.max(1, Math.round(size.width * css * dpr));
+    const rawHeight = Math.max(1, Math.round(size.height * css * dpr));
+    const width = this.#useEngine ? Math.min(MAX_SIDE, rawWidth) : rawWidth;
+    const height = this.#useEngine ? Math.min(MAX_SIDE, rawHeight) : rawHeight;
     return {
       size,
       css,
@@ -674,6 +679,7 @@ export class PlayerStage {
   #makeOverlay(root: string, base?: ScreenLayer): OverlaySurface {
     const el = document.createElement("div");
     el.className = "stage__overlay";
+    el.dataset.painted = "false";
     const canvas = document.createElement("canvas");
     canvas.className = "stage__canvas";
     el.append(canvas);
@@ -682,15 +688,41 @@ export class PlayerStage {
       el,
       canvas,
       contentScale: this.#contentScale(root, base),
+      painted: false,
+      onFirstPaint: null,
+      onCleanup: null,
       abort: null,
     };
     this.#paintOverlay(layer);
     return layer;
   }
 
+  #markOverlayPainted(layer: OverlaySurface): void {
+    const wasPainted = layer.painted;
+    layer.painted = true;
+    layer.el.dataset.painted = "true";
+    layer.el.style.visibility = "";
+    if (!wasPainted && layer.onFirstPaint) {
+      const cb = layer.onFirstPaint;
+      layer.onFirstPaint = null;
+      cb();
+    }
+  }
+
+  #disposeOverlayLayer(layer: OverlaySurface): void {
+    layer.abort?.abort();
+    layer.onFirstPaint = null;
+    if (layer.onCleanup) {
+      const cleanup = layer.onCleanup;
+      layer.onCleanup = null;
+      cleanup();
+    }
+  }
+
   #paintOverlay(layer: OverlaySurface): void {
     if (!this.#useEngine) {
-      this.#paintCanvasSurface(layer.root, layer.contentScale, layer.canvas);
+      const drew = this.#paintCanvasSurface(layer.root, layer.contentScale, layer.canvas);
+      if (drew) this.#markOverlayPainted(layer);
       return;
     }
     const bounds = this.#editor.scene.bounds(layer.root);
@@ -728,18 +760,15 @@ export class PlayerStage {
           if (!ctx) return;
           ctx.clearRect(0, 0, canvas.width, canvas.height);
           ctx.drawImage(bitmap, 0, 0, canvas.width, canvas.height);
+          this.#markOverlayPainted(layer);
         } finally {
           bitmap.close();
         }
       })
       .catch((error) => {
-        if (abort.signal.aborted || this.#disposed) return;
-        if (
-          error instanceof ExportError &&
-          (error.reason === "unsupported" || error.reason === "limit")
-        ) {
-          this.#paintCanvasSurface(layer.root, layer.contentScale, canvas);
-        }
+        if (abort.signal.aborted || this.#disposed || isAbortError(error)) return;
+        const drew = this.#paintCanvasSurface(layer.root, layer.contentScale, canvas);
+        if (drew) this.#markOverlayPainted(layer);
       });
   }
 
@@ -755,7 +784,7 @@ export class PlayerStage {
   #rebuild(): void {
     this.#navGen++;
     this.#finishAnimations();
-    for (const view of this.#overlays) view.layer.abort?.abort();
+    for (const view of this.#overlays) this.#disposeOverlayLayer(view.layer);
     // Keep the live EngineView slot detached across viewport rebuilds rather than discarding it.
     if (this.#useEngine) this.#engineSlot.remove();
     this.#viewport.replaceChildren();
@@ -907,7 +936,7 @@ export class PlayerStage {
     const navGen = ++this.#navGen;
     // Overlays close with the navigation, at once.
     for (const view of this.#overlays) {
-      view.layer.abort?.abort();
+      this.#disposeOverlayLayer(view.layer);
       view.layer.el.remove();
       view.dim.remove();
     }
@@ -1067,14 +1096,28 @@ export class PlayerStage {
     dim.className = "stage__dim";
     dim.style.background = `rgba(0, 0, 0, ${overlay.dim})`;
     const view: OverlayView = { overlay, layer, dim };
+    const reveal = () => {
+      if (this.#disposed || !this.#overlays.includes(view)) return;
+      dim.style.visibility = "";
+      layer.el.style.visibility = "";
+      this.#placeOverlay(view);
+      if (!animate) return;
+      const transition = this.#effective(overlay.transition);
+      const timing = this.#timing(transition);
+      this.#animate(layer.el, this.#overlayFrames(view, transition), timing);
+      this.#animate(dim, [{ opacity: 0 }, { opacity: 1 }], timing);
+    };
     this.#viewport.append(dim, layer.el);
     this.#overlays.push(view);
     this.#placeOverlay(view);
-    if (!animate) return;
-    const transition = this.#effective(overlay.transition);
-    const timing = this.#timing(transition);
-    this.#animate(layer.el, this.#overlayFrames(view, transition), timing);
-    this.#animate(dim, [{ opacity: 0 }, { opacity: 1 }], timing);
+    if (layer.painted) {
+      reveal();
+    } else {
+      // Hold the overlay and its dim hidden until first paint arrives so overlays never open blank.
+      dim.style.visibility = "hidden";
+      layer.el.style.visibility = "hidden";
+      layer.onFirstPaint = reveal;
+    }
   }
 
   #closeOverlay(overlay: OverlayLayer): void {
@@ -1089,7 +1132,15 @@ export class PlayerStage {
     )
       this.#hover = null;
     for (const view of closing) {
-      view.layer.abort?.abort();
+      this.#disposeOverlayLayer(view.layer);
+      const remove = () => {
+        view.layer.el.remove();
+        view.dim.remove();
+      };
+      if (!view.layer.painted) {
+        remove();
+        continue;
+      }
       const transition = this.#effective(view.overlay.transition);
       const timing = this.#timing(transition);
       const frames = this.#overlayFrames(view, transition);
@@ -1097,10 +1148,6 @@ export class PlayerStage {
       const reversed = timing ? { ...timing, direction: "reverse" as const } : null;
       const a = this.#animate(view.layer.el, frames, reversed);
       this.#animate(view.dim, [{ opacity: 0 }, { opacity: 1 }], reversed);
-      const remove = () => {
-        view.layer.el.remove();
-        view.dim.remove();
-      };
       if (a) a.finished.then(remove, remove);
       else remove();
     }
@@ -1110,23 +1157,40 @@ export class PlayerStage {
     const index = this.#overlays.findIndex((v) => v.overlay.key === step.from.key);
     const old = this.#overlays[index];
     if (!old) return;
-    old.layer.abort?.abort();
+    this.#disposeOverlayLayer(old.layer);
     const layer = this.#makeOverlay(step.to.screen, this.#screen ?? undefined);
     const view: OverlayView = { overlay: step.to, layer, dim: old.dim };
     old.layer.el.after(layer.el);
     this.#overlays[index] = view;
     this.#placeOverlay(view);
-    const transition = this.#effective(step.transition);
-    const timing = this.#timing(transition);
     old.layer.el.style.pointerEvents = "none";
-    const a = this.#animate(
-      layer.el,
-      transition.type === "instant" ? null : [{ opacity: 0 }, { opacity: 1 }],
-      timing,
-    );
-    const remove = () => old.layer.el.remove();
-    if (a) a.finished.then(remove, remove);
-    else remove();
+    const removeOld = () => old.layer.el.remove();
+    const reveal = () => {
+      layer.onCleanup = null;
+      if (this.#disposed || !this.#overlays.includes(view)) {
+        removeOld();
+        return;
+      }
+      old.dim.style.visibility = "";
+      layer.el.style.visibility = "";
+      this.#placeOverlay(view);
+      const transition = this.#effective(step.transition);
+      const timing = this.#timing(transition);
+      const a = this.#animate(
+        layer.el,
+        transition.type === "instant" ? null : [{ opacity: 0 }, { opacity: 1 }],
+        timing,
+      );
+      if (a) a.finished.then(removeOld, removeOld);
+      else removeOld();
+    };
+    if (layer.painted) {
+      reveal();
+    } else {
+      layer.el.style.visibility = "hidden";
+      layer.onCleanup = removeOld;
+      layer.onFirstPaint = reveal;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1174,6 +1238,7 @@ export class PlayerStage {
     ].reverse();
     if (this.#screen && this.#screenDrawable) layers.push(this.#screen);
     for (const layer of layers) {
+      const isOverlay = "painted" in layer;
       const rect = this.#canvasOf(layer).getBoundingClientRect();
       if (
         clientX < rect.left ||
@@ -1185,6 +1250,8 @@ export class PlayerStage {
         if (top && layer === top.layer) return { root: layer.root, chain: [], outside: top };
         continue;
       }
+      // Never fire hotspots on an overlay that hasn't painted yet, nor let taps fall through.
+      if (isOverlay && !layer.painted) return null;
       const bounds = this.#editor.scene.bounds(layer.root);
       if (!bounds) return null;
       const s = layer.contentScale * this.#scale;
@@ -1303,8 +1370,11 @@ export class PlayerStage {
 
   /** Briefly highlights everything you can tap on what's showing. */
   flashHotspots(): void {
-    const layer = this.#overlays.at(-1)?.layer ?? this.#screen;
-    if (!layer || (layer === this.#screen && !this.#screenDrawable)) return;
+    const topOverlay = this.#overlays.at(-1)?.layer;
+    const layer = topOverlay ?? this.#screen;
+    if (!layer) return;
+    if (topOverlay && !topOverlay.painted) return;
+    if (layer === this.#screen && !this.#screenDrawable) return;
     const rects = hotspotRects(this.#editor.scene, layer.root);
     this.#callbacks.onHint?.("hotspots");
     const s = layer.contentScale * this.#scale;
