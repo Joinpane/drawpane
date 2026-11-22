@@ -863,9 +863,11 @@ function copyPlaceOps(doc: Doc, id: string, view: (id: string) => NodeRecord | u
   ][])
     if (Math.abs(getProp(copy.props, prop) - want) > PLACE_EPSILON)
       out.push({ op: "set", id, prop, value: want });
-  // A copy text keeps its main layer's auto-resize (decision 0043): constraints never switch it.
+  // Placed freely, a copy text keeps its main layer's auto-resize (decision 0043): constraints
+  // never switch it. In a flow, the flow's Fill and stretch decide it.
   const own = getProp(source.props, "textAutoResize");
   if (
+    placed &&
     copy.type === "text" &&
     !getProp(copy.props, "overrides").includes("textAutoResize") &&
     getProp(copy.props, "textAutoResize") !== own
