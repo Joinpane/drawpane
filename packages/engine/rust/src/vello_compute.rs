@@ -637,7 +637,8 @@ struct Working {
     bg_path_tiling_setup: wgpu::BindGroup,
     bg_path_tiling: wgpu::BindGroup,
     /// `fine_area` bind groups per frame slot (`FRAMES = 2`), keyed by the target view's id.
-    bg_fine_slots: [Option<(u64, wgpu::BindGroup)>; 2],
+    /// `fine_area` bind groups per target: the two frame slots, then the gate's back texture.
+    bg_fine_slots: [Option<(u64, wgpu::BindGroup)>; 3],
 }
 
 impl Working {
@@ -671,6 +672,161 @@ pub struct VelloCompute {
     /// Encodes of the whole page, and patches that only moved transforms, since the last reset.
     full_encodes: u32,
     patched_moves: u32,
+    /// The gated path (`render_gated`): the private texture compute draws into, the pass that
+    /// copies it to the frame on screen only when every stage fit, and its capacities uniform.
+    back: Option<Back>,
+    gate: Option<Gate>,
+}
+
+/// The private texture a gated frame is drawn into.
+struct Back {
+    size: (u32, u32),
+    id: u64,
+    tex: wgpu::Texture,
+    view: wgpu::TextureView,
+}
+
+struct Gate {
+    pipeline: wgpu::RenderPipeline,
+    layout: wgpu::BindGroupLayout,
+    caps: wgpu::Buffer,
+}
+
+/// The bump gate: a full-canvas pass that copies the back texture where every stage of the frame
+/// fit its buffer, and discards everywhere otherwise, so the frame on screen keeps its last good
+/// pixels. It reads the same counters the asynchronous check reads, on the GPU, right after the
+/// frame's compute passes, so presenting never waits for a read-back.
+const GATE_WGSL: &str = r#"
+struct Caps {
+    binning: u32,
+    ptcl: u32,
+    tile: u32,
+    seg_counts: u32,
+    segments: u32,
+    blend: u32,
+    lines: u32,
+    always: u32,
+}
+
+@group(0) @binding(0) var<storage, read> bump: array<u32, 8>;
+@group(0) @binding(1) var<uniform> caps: Caps;
+@group(0) @binding(2) var back: texture_2d<f32>;
+
+@vertex
+fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
+    let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
+    return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
+}
+
+@fragment
+fn fs(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let ok = caps.always != 0u || (bump[0] == 0u
+        && bump[1] <= caps.binning
+        && bump[2] <= caps.ptcl
+        && bump[3] <= caps.tile
+        && bump[4] <= caps.seg_counts
+        && bump[5] <= caps.segments
+        && bump[6] <= caps.blend
+        && bump[7] <= caps.lines);
+    if !ok {
+        discard;
+    }
+    return textureLoad(back, vec2<i32>(pos.xy), 0);
+}
+"#;
+
+#[derive(Clone, Copy, Pod, Zeroable)]
+#[repr(C)]
+struct GateCaps {
+    binning: u32,
+    ptcl: u32,
+    tile: u32,
+    seg_counts: u32,
+    segments: u32,
+    blend: u32,
+    lines: u32,
+    always: u32,
+}
+
+impl Gate {
+    fn new(device: &wgpu::Device, format: wgpu::TextureFormat) -> Self {
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("compute.gate"),
+            source: wgpu::ShaderSource::Wgsl(GATE_WGSL.into()),
+        });
+        let layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("compute.gate"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
+                    },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
+                        view_dimension: wgpu::TextureViewDimension::D2,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
+            ],
+        });
+        let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("compute.gate"),
+            bind_group_layouts: &[Some(&layout)],
+            immediate_size: 0,
+        });
+        let pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("compute.gate"),
+            layout: Some(&pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some("vs"),
+                compilation_options: Default::default(),
+                buffers: &[],
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            primitive: wgpu::PrimitiveState::default(),
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: None,
+        });
+        let caps = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("compute.gate_caps"),
+            size: size_of::<GateCaps>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        Self { pipeline, layout, caps }
+    }
 }
 
 impl Drop for VelloCompute {
@@ -727,6 +883,8 @@ impl VelloCompute {
             diag_summary: DiagSummary::default(),
             full_encodes: 0,
             patched_moves: 0,
+            back: None,
+            gate: None,
         }
     }
 
@@ -738,6 +896,9 @@ impl VelloCompute {
 
     pub fn reset(&mut self) {
         self.floor = Needs::default();
+        if let Some(back) = self.back.take() {
+            back.tex.destroy();
+        }
         if let Some(work) = self.working.take() {
             work.destroy();
         }
@@ -906,7 +1067,7 @@ impl VelloCompute {
             )?);
         }
         let work = self.working.as_mut().expect("working buffers");
-        let slot = dst_slot % 2;
+        let slot = dst_slot.min(2);
         if work.bg_fine_slots[slot]
             .as_ref()
             .is_none_or(|(id, _)| *id != dst_view_id)
@@ -1173,6 +1334,128 @@ impl VelloCompute {
             },
             Some(readback),
         ))
+    }
+
+    /// Draws the page into the private back texture, then, in a submission right behind it on
+    /// the same queue, runs the bump gate into `shown` (the frame on screen): every pixel is the
+    /// new frame's if every stage fit, and stays what it was otherwise. The caller presents
+    /// `shown` at once; the returned read-back still decides whether the frame was exact, and
+    /// grows the buffers if it wasn't (`check_frame`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_gated(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        store: &Store,
+        generation: u64,
+        width: u32,
+        height: u32,
+        view: Affine,
+        background: [f32; 4],
+        shown: &wgpu::TextureView,
+        format: wgpu::TextureFormat,
+        budget: u64,
+    ) -> Result<(ComputeFrameStats, Option<PendingDiag>)> {
+        let back = match self.back.take() {
+            Some(back) if back.size == (width, height) => back,
+            old => {
+                if let Some(old) = old {
+                    old.tex.destroy();
+                }
+                let tex = device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("compute.back"),
+                    size: wgpu::Extent3d {
+                        width: width.max(1),
+                        height: height.max(1),
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format,
+                    usage: wgpu::TextureUsages::STORAGE_BINDING
+                        | wgpu::TextureUsages::TEXTURE_BINDING
+                        | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                    view_formats: &[],
+                });
+                let view = tex.create_view(&Default::default());
+                // Ids for the frame slots count up from 1; the back texture's count down.
+                let id = u64::MAX - u64::from(width) * 65_536 - u64::from(height);
+                Back {
+                    size: (width, height),
+                    id,
+                    tex,
+                    view,
+                }
+            }
+        };
+        let drawn = self.render_into(
+            device, queue, store, generation, width, height, view, background, 2, back.id, &back.view, budget,
+        );
+        let result = drawn.and_then(|(stats, diag)| {
+            let gate = self.gate.get_or_insert_with(|| Gate::new(device, format));
+            let caps = self.working.as_ref().map_or(BumpCaps::default(), |w| w.caps);
+            let uniform = GateCaps {
+                binning: caps.binning,
+                ptcl: caps.ptcl_dynamic(),
+                tile: caps.tile,
+                seg_counts: caps.seg_counts,
+                segments: caps.segments,
+                blend: caps.blend,
+                lines: caps.lines,
+                // An empty page clears the back texture without touching the counters.
+                always: u32::from(diag.is_none()),
+            };
+            queue.write_buffer(&gate.caps, 0, bytemuck::bytes_of(&uniform));
+            let bump = &self
+                .retained
+                .as_ref()
+                .ok_or_else(|| EngineError::new(ErrorCode::State, "no retained compute scene"))?
+                .bump_buf;
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("compute.gate"),
+                layout: &gate.layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: bump.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: gate.caps.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(&back.view),
+                    },
+                ],
+            });
+            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("compute.gate"),
+            });
+            {
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("compute.gate"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: shown,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+                pass.set_pipeline(&gate.pipeline);
+                pass.set_bind_group(0, &group, &[]);
+                pass.draw(0..3, 0..1);
+            }
+            queue.submit([encoder.finish()]);
+            Ok((stats, diag))
+        });
+        self.back = Some(back);
+        result
     }
 
     /// Judges a staged frame from its read-back counters. Vello flags most overflows in
@@ -2102,7 +2385,7 @@ fn build_working(
         bg_coarse,
         bg_path_tiling_setup,
         bg_path_tiling,
-        bg_fine_slots: [None, None],
+        bg_fine_slots: [None, None, None],
     })
 }
 

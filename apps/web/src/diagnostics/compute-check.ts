@@ -146,9 +146,9 @@ export async function runComputeMatrix(options: {
     loadBrowserEngine(),
   ]);
   const cells: MatrixCell[] = [];
-  // Every cell the run adds, so progress counts toward the real end: the page cells, the floor
-  // reset, then the drag steps.
-  const total = PAGES.length * 2 * (3 + 2) + 1 + DRAG_CELLS;
+  // Every cell the run adds, so progress counts toward the real end: the page cells, the bump
+  // gate, the floor reset, then the drag steps.
+  const total = PAGES.length * 2 * (3 + 2) + GATE_CELLS + 1 + DRAG_CELLS;
   let adapter = "";
   let software = false;
   let overflowChecks = 0;
@@ -234,6 +234,11 @@ export async function runComputeMatrix(options: {
     }
   }
   options.signal.throwIfAborted();
+  for (const cell of await checkGate(computeModule, legacyModule, options.allowSoftware)) {
+    cells.push(cell);
+    options.onCell?.(cell, cells.length, total);
+  }
+  options.signal.throwIfAborted();
   const floor = await checkFloorReset(computeModule, options.allowSoftware);
   cells.push(floor);
   options.onCell?.(floor, cells.length, total);
@@ -259,6 +264,9 @@ export async function runComputeMatrix(options: {
 
 type Module = Awaited<ReturnType<typeof loadBrowserEngine>>;
 type Patch = (w: ListWriter) => void;
+
+/** Cells `checkGate` adds to the matrix. */
+const GATE_CELLS = 2;
 
 /** Cells `runDragChecks` adds to the matrix: one per drag step of each scene. */
 const DRAG_CELLS = 4 + 2 + 3;
@@ -508,4 +516,118 @@ async function checkFloorReset(
     severeInTile: 0,
     violations,
   };
+}
+
+/**
+ * The bump gate (decision 0040, P1-0): a gated frame that overflows must leave the frame on
+ * screen exactly as it was (nothing overflowed shows), and once the buffers grew, the gated
+ * frame must be exact. Tight buffers make the fit view overflow after a 100% one.
+ */
+async function checkGate(
+  computeModule: Awaited<ReturnType<typeof loadComputeEngine>>,
+  legacyModule: Awaited<ReturnType<typeof loadBrowserEngine>>,
+  allowSoftware: boolean,
+): Promise<MatrixCell[]> {
+  const scene = buildOrdinaryScene(20, 20);
+  const W = CSS_WIDTH;
+  const H = CSS_HEIGHT;
+  const fit = Math.min(W / scene.pageWidth, H / scene.pageHeight);
+  const at = (zoom: number): Camera => ({
+    zoom,
+    x: (W - scene.pageWidth * zoom) / 2,
+    y: (H - scene.pageHeight * zoom) / 2,
+    dpr: 1,
+  });
+  const reference = new RenderEngine(legacyModule);
+  const candidate = new RenderEngine(computeModule);
+  const cell = (
+    zoom: string,
+    violations: string[],
+    attempts: number,
+    s?: ReturnType<typeof score>,
+  ): MatrixCell => ({
+    page: "bump gate",
+    layers: scene.layers,
+    tight: true,
+    dpr: 1,
+    zoom,
+    backend: "compute",
+    attempts,
+    fallback: candidate.computeFallbackReason(),
+    ok: violations.length === 0,
+    mean: s ? Number(s.mean.toFixed(4)) : 0,
+    p99: s?.p99 ?? 0,
+    max: s?.max ?? 0,
+    worstTile: s ? Number(s.worstTile.toFixed(3)) : 0,
+    severeInTile: s?.severeInTile ?? 0,
+    violations,
+  });
+  try {
+    const [refGpu, gpu] = await Promise.all([
+      reference.attachGpu(null, { compatibility: false }),
+      candidate.attachGpu(null, { compatibility: false }),
+    ]);
+    if (!refGpu.ok) throw new Error(`vello_gpu device: ${refGpu.message}`);
+    if (!gpu.ok) throw new Error(`compute device: ${gpu.message}`);
+    if (gpu.value.fallback && !allowSoftware) throw new Error("only a software GPU is available");
+    for (const engine of [reference, candidate]) {
+      const applied = engine.apply(scene.list);
+      if (!applied.ok) throw new Error(applied.message);
+    }
+    for (const r of [candidate.setComputeOrdinary(true), candidate.computeTight(true)]) {
+      if (!r.ok) throw new Error(r.message);
+    }
+    // A checked frame at 100% to keep.
+    await drawChecked(candidate, W, H, at(1), MATRIX_ATTEMPTS);
+    const kept = await candidate.gpuPixels();
+    if (!kept.ok) throw new Error(kept.message);
+    const before = new Uint8Array(kept.value);
+    // The fit view needs far more than 100% grew to: the first gated draws overflow.
+    let overflowed = 0;
+    let keptViolations: string[] | null = null;
+    let verified = false;
+    let draws = 0;
+    for (; draws < MATRIX_ATTEMPTS && !verified; draws++) {
+      const presented = candidate.presentComputeFrame(W, H, at(fit), COMPUTE_BG);
+      if (!presented.ok) throw new Error(presented.message);
+      if (!presented.value) throw new Error("the gated path didn't draw");
+      if (!(await presented.value.check)) throw new Error("the gate check was interrupted");
+      const verdict = candidate.finishComputeGate();
+      if (verdict === "redraw") {
+        overflowed++;
+        if (keptViolations === null) {
+          const shown = await candidate.gpuPixels();
+          if (!shown.ok) throw new Error(shown.message);
+          const s = score(shown.value, before, W, H);
+          keptViolations =
+            s.max === 0 ? [] : [`the overflowed frame changed the screen (max ${s.max})`];
+        }
+      } else if (verdict === "verified") {
+        verified = true;
+      } else {
+        throw new Error(`the gate check said ${verdict}`);
+      }
+    }
+    const expected = reference.renderGpu(W, H, at(fit), COMPUTE_BG, false);
+    if (!expected.ok) throw new Error(expected.message);
+    const [want, got] = await Promise.all([reference.gpuPixels(), candidate.gpuPixels()]);
+    if (!want.ok) throw new Error(want.message);
+    if (!got.ok) throw new Error(got.message);
+    const s = score(got.value, want.value, W, H);
+    const exactViolations = outsideTolerance(s, CPU_GPU_TOLERANCE);
+    if (!verified) exactViolations.push(`not verified after ${draws} gated draws`);
+    return [
+      cell(
+        "overflow keeps the last good frame",
+        overflowed === 0
+          ? ["no gated draw overflowed, so the gate wasn't exercised"]
+          : (keptViolations ?? []),
+        overflowed,
+      ),
+      cell("exact after growing", exactViolations, draws, s),
+    ];
+  } finally {
+    candidate.dispose();
+    reference.dispose();
+  }
 }

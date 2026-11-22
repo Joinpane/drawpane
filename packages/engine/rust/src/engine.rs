@@ -1501,6 +1501,55 @@ impl Engine {
         camera: Camera,
         background: [f32; 4],
     ) -> Result<Option<crate::gpu::ComputeCheck>> {
+        let Some(frame) = self.compute_frame(width, height, camera)? else {
+            return Ok(None);
+        };
+        let gpu = self.gpu.as_mut().expect("routed to compute");
+        match gpu.stage_compute(&self.store, &frame, background, self.generation) {
+            Ok(check) => Ok(Some(check)),
+            Err(error) => {
+                gpu.disable_compute(error.message.clone());
+                if error.code == ErrorCode::DeviceLost {
+                    Err(error)
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    /// Draws and presents a compute frame through the bump gate (`Gpu::present_compute`): its
+    /// stats and its check, or `None` to stage instead (no frame of this size to keep) or to draw
+    /// with vello_gpu (not routed, or compute is off).
+    #[cfg(feature = "compute")]
+    pub fn present_compute(
+        &mut self,
+        width: u32,
+        height: u32,
+        camera: Camera,
+        background: [f32; 4],
+    ) -> Result<Option<(DrawStats, crate::gpu::ComputeCheck)>> {
+        let Some(frame) = self.compute_frame(width, height, camera)? else {
+            return Ok(None);
+        };
+        let gpu = self.gpu.as_mut().expect("routed to compute");
+        match gpu.present_compute(&self.store, &frame, background, self.generation) {
+            Ok(drawn) => Ok(drawn),
+            Err(error) => {
+                gpu.disable_compute(error.message.clone());
+                if error.code == ErrorCode::DeviceLost {
+                    Err(error)
+                } else {
+                    Ok(None)
+                }
+            }
+        }
+    }
+
+    /// The frame for a compute draw of this view, or `None` when it isn't routed to compute: no
+    /// GPU, compute off, past 4096 px, not an ordinary page, or text still provisional.
+    #[cfg(feature = "compute")]
+    fn compute_frame(&mut self, width: u32, height: u32, camera: Camera) -> Result<Option<Frame>> {
         self.store.begin_stroke_frame();
         self.check_size(width, height)?;
         camera.check()?;
@@ -1531,11 +1580,10 @@ impl Engine {
         if !ordinary || self.store.provisional_shown().is_some() {
             return Ok(None);
         }
-        let view = camera.view();
-        let frame = Frame {
+        Ok(Some(Frame {
             width: width as u16,
             height: height as u16,
-            view,
+            view: camera.view(),
             detail: false,
             area: IRect {
                 x0: 0,
@@ -1543,18 +1591,7 @@ impl Engine {
                 x1: width as i32,
                 y1: height as i32,
             },
-        };
-        match gpu.stage_compute(&self.store, &frame, background, self.generation) {
-            Ok(check) => Ok(Some(check)),
-            Err(error) => {
-                gpu.disable_compute(error.message.clone());
-                if error.code == ErrorCode::DeviceLost {
-                    Err(error)
-                } else {
-                    Ok(None)
-                }
-            }
-        }
+        }))
     }
 
     /// Longest geometric backdrop-dependency reach across all visible readers on the page:

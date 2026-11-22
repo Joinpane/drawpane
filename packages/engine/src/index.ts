@@ -1587,6 +1587,55 @@ export class RenderEngine {
     ) as Result;
   }
 
+  /**
+   * Draws and presents a compute frame at once through the bump gate (the GPU keeps the frame
+   * on screen wherever a stage overflowed): its stats (not exact yet) and a promise that
+   * resolves when `finishComputeGate` can say whether it was exact. `null`: no frame of this size
+   * to keep (stage instead), or compute doesn't draw this view.
+   */
+  presentComputeFrame(
+    width: number,
+    height: number,
+    camera: Camera,
+    background: readonly [number, number, number, number],
+  ): Result<{ readonly stats: FrameStats; readonly check: Promise<boolean> } | null> {
+    const token = this.#epoch;
+    return this.#call((e) => {
+      if (!e.presentComputeFrame) return { ok: true as const, value: null };
+      const o = e.presentComputeFrame(
+        width,
+        height,
+        camera.zoom,
+        camera.x,
+        camera.y,
+        camera.dpr,
+        bg(background),
+      );
+      if (!o) return { ok: true as const, value: null };
+      const s = stats(o, true);
+      const result = outcome(o);
+      if (!result.ok) return result;
+      const pending = e.takeComputeGateCheck?.();
+      const check = pending
+        ? Promise.race([
+            pending.then(() => this.#epoch === token && this.#live() !== null),
+            this.#genTrapNotice.then(() => false),
+          ]).catch((error: unknown) => {
+            this.#trapped(error);
+            return false;
+          })
+        : Promise.resolve(false);
+      return { ok: true as const, value: { stats: s, check } };
+    }) as Result<{ readonly stats: FrameStats; readonly check: Promise<boolean> } | null>;
+  }
+
+  /** Settles the gated frame's check (`presentComputeFrame`). */
+  finishComputeGate(): "verified" | "redraw" | "fallback" | "pending" | "lost" {
+    const code = this.#call((e) => e.finishComputeGate?.() ?? 2);
+    if (typeof code !== "number") return "fallback";
+    return (["verified", "redraw", "fallback", "pending", "lost"] as const)[code] ?? "fallback";
+  }
+
   cancelComputeFrame(): void {
     this.#call((e) => e.cancelComputeFrame?.());
   }

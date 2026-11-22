@@ -860,6 +860,33 @@ struct PendingCompute {
     stats: crate::vello_compute::ComputeFrameStats,
 }
 
+/// A gated compute frame already on screen (`present_compute`), whose check decides whether it
+/// was exact, or what was kept when a stage overflowed.
+#[cfg(feature = "compute")]
+struct PendingGate {
+    result: ComputeResult,
+    generation: u64,
+    view: Affine,
+    background: [u32; 4],
+}
+
+/// Gated frames whose checks may still be in flight: enough for a few frames of motion.
+#[cfg(feature = "compute")]
+const GATES_IN_FLIGHT: usize = 8;
+
+/// What a gated frame's check found (`finish_gate`).
+#[cfg(feature = "compute")]
+pub enum GateFinish {
+    /// Every stage fit: the frame on screen is exact.
+    Verified,
+    /// A stage overflowed: the gate kept the last good frame and the buffers grew; draw again.
+    Redraw,
+    /// Compute is off for the session (`compute_reason`).
+    Fallback,
+    /// Nothing gated to settle, or its check hasn't landed.
+    Pending,
+}
+
 #[cfg(feature = "compute")]
 pub enum ComputeFinish {
     /// Checked and presented.
@@ -999,6 +1026,8 @@ pub struct Gpu {
     pub last_compute_used: bool,
     #[cfg(feature = "compute")]
     pending_compute: Option<PendingCompute>,
+    #[cfg(feature = "compute")]
+    pending_gates: std::collections::VecDeque<PendingGate>,
     #[cfg(feature = "compute")]
     pub compute_reason: Option<String>,
     #[cfg(feature = "compute")]
@@ -1584,6 +1613,8 @@ impl Gpu {
             last_compute_used: false,
             #[cfg(feature = "compute")]
             pending_compute: None,
+            #[cfg(feature = "compute")]
+            pending_gates: std::collections::VecDeque::new(),
             #[cfg(feature = "compute")]
             compute_reason: None,
             #[cfg(feature = "compute")]
@@ -2457,6 +2488,7 @@ impl Gpu {
     #[cfg(feature = "compute")]
     pub fn compute_page_reset(&mut self) {
         self.pending_compute = None;
+        self.pending_gates.clear();
         self.ordinary_revision = None;
         if let Some(c) = self.compute.as_mut() {
             c.reset();
@@ -2589,6 +2621,174 @@ impl Gpu {
         }))
     }
 
+    /// Draws a compute frame and presents it at once, through the bump gate: the GPU itself keeps
+    /// the frame on screen wherever a stage overflowed, so nothing overflowed is ever shown and
+    /// presenting never waits for a read-back. Needs a frame of this size on screen to keep;
+    /// without one, `Ok(None)` (use `stage_compute`). The returned check decides exactness and
+    /// grows the buffers (`finish_gate`); a check that landed since the last gated frame is
+    /// settled first, so growth keeps up with continuous motion.
+    #[cfg(feature = "compute")]
+    pub fn present_compute(
+        &mut self,
+        store: &Store,
+        frame: &Frame,
+        background: [f32; 4],
+        generation: u64,
+    ) -> Result<Option<(DrawStats, ComputeCheck)>> {
+        self.check()?;
+        if !matches!(
+            self.finish_gate(generation)?,
+            GateFinish::Pending | GateFinish::Verified | GateFinish::Redraw
+        ) || self.compute_reason.is_some()
+        {
+            return Ok(None);
+        }
+        let (width, height) = (u32::from(frame.width), u32::from(frame.height));
+        let Some(cur) = self.cur.filter(|&c| {
+            self.frames
+                .get(c)
+                .is_some_and(|m| m.width == width && m.height == height)
+        }) else {
+            return Ok(None);
+        };
+        self.pending_compute = None;
+        let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
+        let memory = self.device.push_error_scope(wgpu::ErrorFilter::OutOfMemory);
+        let internal = self.device.push_error_scope(wgpu::ErrorFilter::Internal);
+        let existing = self.compute.as_ref().map_or(0, |c| c.gpu_bytes());
+        let working_budget = self.budget.saturating_sub(
+            self.bytes()
+                .saturating_sub(existing)
+                .saturating_add(self.readbacks.bytes.get()),
+        );
+        let tight = self.compute_tight;
+        let pipeline = self.compute.get_or_insert_with(|| {
+            let mut pipeline = crate::vello_compute::VelloCompute::new(&self.device, &self.queue, self.timestamp_query);
+            pipeline.set_tight(tight);
+            pipeline
+        });
+        let (c, diagnostic) = pipeline.render_gated(
+            &self.device,
+            &self.queue,
+            store,
+            generation,
+            width,
+            height,
+            frame.view,
+            background,
+            &self.frames[cur].view,
+            FORMAT,
+            working_budget as u64,
+        )?;
+        let internal = internal.pop();
+        let memory = memory.pop();
+        let validation = validation.pop();
+        let t0 = now();
+        let submits0 = self.submits;
+        self.submits += 2;
+        let mut stats = self.finish_frame(
+            cur,
+            DrawStats {
+                direct: true,
+                plan: 2,
+                exact: false,
+                standin: false,
+                glyphs_outlined: c.glyphs,
+                encode_ms: c.encode_ms,
+                render_ms: c.render_ms,
+                ..DrawStats::default()
+            },
+            t0,
+            submits0,
+        )?;
+        stats.submit_ms += c.submit_ms;
+        stats.cpu_ms += c.cpu_ms;
+        let background = background.map(f32::to_bits);
+        let result = Rc::new(std::cell::RefCell::new(None));
+        if self.pending_gates.len() >= GATES_IN_FLIGHT {
+            // Too many unsettled: the oldest is dropped (a newer check covers what it would say).
+            self.pending_gates.pop_front();
+        }
+        self.pending_gates.push_back(PendingGate {
+            result: result.clone(),
+            generation,
+            view: frame.view,
+            background,
+        });
+        // What the canvas shows is this frame's camera unless the gate kept the last one, which
+        // the check says (and `finish_gate` puts back); nothing is exact until it does.
+        self.last = Some(Last {
+            view: frame.view,
+            size: (width, height),
+        });
+        self.last_scale = Some(frame.view.as_coeffs()[0]);
+        self.shown = Some((generation, background, false));
+        self.last_compute_used = true;
+        let device = self.device.clone();
+        let health = self.health.clone();
+        let check: ComputeCheck = Box::pin(async move {
+            let diagnostic = match diagnostic {
+                Some(item) => crate::vello_compute::verify_compute_frame(&device, &health, item)
+                    .await
+                    .map(Some),
+                None => Ok(None),
+            };
+            let error = internal.await.or(memory.await).or(validation.await);
+            let value = match (health.stop_error(), error) {
+                (Some(error), _) => Err(error),
+                (None, Some(error)) => Err(EngineError::new(ErrorCode::Gpu, error.to_string())),
+                (None, None) => diagnostic,
+            };
+            *result.borrow_mut() = Some(value);
+        });
+        Ok(Some((stats, check)))
+    }
+
+    /// Settles every gated frame whose check has landed, oldest first: overflows grow the buffers
+    /// (and forget what the canvas shows, since the gate may have kept an older frame there), and
+    /// the newest frame is exact once its own check landed clean. `Redraw` when any landed check
+    /// overflowed, `Verified` when the newest landed clean, `Pending` otherwise.
+    #[cfg(feature = "compute")]
+    pub fn finish_gate(&mut self, generation: u64) -> Result<GateFinish> {
+        let mut overflowed = false;
+        let mut newest_clean = None;
+        while let Some(front) = self.pending_gates.front() {
+            let landed = front.result.borrow_mut().take();
+            let Some(landed) = landed else { break };
+            let gated = self.pending_gates.pop_front().expect("front");
+            let diagnostic = match landed {
+                Ok(diagnostic) => diagnostic,
+                Err(error) => {
+                    // The gate never showed bad pixels, but a GPU error stops compute.
+                    self.pending_gates.clear();
+                    self.disable_compute(format!("a compute frame failed its GPU check: {}", error.message));
+                    if error.code == ErrorCode::DeviceLost {
+                        return Err(error);
+                    }
+                    return Ok(GateFinish::Fallback);
+                }
+            };
+            let over = diagnostic.is_some_and(|d| {
+                let compute = self.compute.as_mut().expect("gated compute pipeline");
+                matches!(compute.check_frame(d), crate::vello_compute::FrameCheck::Overflow(_))
+            });
+            overflowed |= over;
+            newest_clean = (!over && self.pending_gates.is_empty()).then_some(gated);
+        }
+        if overflowed {
+            self.last = None;
+            self.shown = None;
+            return Ok(GateFinish::Redraw);
+        }
+        if let Some(gated) = newest_clean {
+            if gated.generation == generation && self.last.is_some_and(|l| l.view == gated.view) {
+                self.shown = Some((gated.generation, gated.background, true));
+            }
+            return Ok(GateFinish::Verified);
+        }
+        Ok(GateFinish::Pending)
+    }
+
     /// Shows a staged compute frame once its check has come back, or says why not. A frame
     /// whose check found an overflow, an error or a lost device is never presented.
     #[cfg(feature = "compute")]
@@ -2664,12 +2864,14 @@ impl Gpu {
     #[cfg(feature = "compute")]
     pub fn cancel_compute_frame(&mut self) {
         self.pending_compute = None;
+        self.pending_gates.clear();
     }
 
     #[cfg(feature = "compute")]
     pub fn disable_compute(&mut self, reason: String) {
         self.compute_reason = Some(reason);
         self.pending_compute = None;
+        self.pending_gates.clear();
         self.compute = None;
         self.last_compute_used = false;
     }

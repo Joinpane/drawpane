@@ -239,6 +239,9 @@ pub struct Engine {
     pixels: Vec<u8>,
     png: Option<ActivePng>,
     changes: Vec<store::Dirty>,
+    /// The last gated compute frame's check (`presentComputeFrame`), until taken.
+    #[cfg(feature = "compute")]
+    gate_check: Option<js_sys::Promise>,
 }
 
 struct ActivePng {
@@ -265,6 +268,8 @@ impl Engine {
             pixels: Vec::new(),
             png: None,
             changes: Vec::new(),
+            #[cfg(feature = "compute")]
+            gate_check: None,
         }
     }
 
@@ -1275,6 +1280,74 @@ impl Engine {
         };
         gpu.set_compute_ordinary(enabled);
         Outcome::ok()
+    }
+
+    /// Draws and presents a compute frame through the bump gate: wherever a stage overflowed,
+    /// the GPU keeps the frame that was on screen, so nothing overflowed is shown and nothing
+    /// waits for a read-back. Returns the frame's outcome (never exact: `finishComputeGate`
+    /// decides that once `takeComputeGateCheck`'s promise resolves), or nothing when there is no
+    /// frame of this size to keep (stage instead) or compute doesn't draw this view.
+    #[cfg(feature = "compute")]
+    #[allow(clippy::too_many_arguments)]
+    #[wasm_bindgen(js_name = presentComputeFrame)]
+    pub fn present_compute_frame(
+        &mut self,
+        width: u32,
+        height: u32,
+        zoom: f64,
+        x: f64,
+        y: f64,
+        dpr: f64,
+        background: Vec<f32>,
+    ) -> Option<Outcome> {
+        let drawn = self
+            .core
+            .present_compute(width, height, Camera { zoom, x, y, dpr }, rgba(&background));
+        match drawn {
+            Ok(Some((draw, check))) => {
+                self.gate_check = Some(wasm_bindgen_futures::future_to_promise(async move {
+                    check.await;
+                    Ok(JsValue::UNDEFINED)
+                }));
+                let masks = self.core.gpu.as_ref().map(|g| g.masks.stats).unwrap_or_default();
+                let mut o = Outcome::stats(engine::FrameStats { draw, masks });
+                o.presented = draw.presented;
+                o.exact = false;
+                o.plan = draw.plan;
+                o.encode_ms = draw.encode_ms;
+                o.render_ms = draw.render_ms;
+                o.submit_ms = draw.submit_ms;
+                o.cpu_ms = draw.cpu_ms;
+                Some(o)
+            }
+            Ok(None) | Err(_) => None,
+        }
+    }
+
+    /// The promise of the last gated frame's check (once; `None` after).
+    #[cfg(feature = "compute")]
+    #[wasm_bindgen(js_name = takeComputeGateCheck)]
+    pub fn take_compute_gate_check(&mut self) -> Option<js_sys::Promise> {
+        self.gate_check.take()
+    }
+
+    /// Settles the gated frame's check: 0 the frame on screen is exact; 1 a stage overflowed,
+    /// the gate kept the last good frame and the buffers grew, so draw again; 2 compute is off
+    /// for the session; 3 nothing to settle yet; 4 the device was lost.
+    #[cfg(feature = "compute")]
+    #[wasm_bindgen(js_name = finishComputeGate)]
+    pub fn finish_compute_gate(&mut self) -> u32 {
+        let generation = self.core.generation;
+        let Some(gpu) = self.core.gpu.as_mut() else {
+            return 2;
+        };
+        match gpu.finish_gate(generation) {
+            Ok(gpu::GateFinish::Verified) => 0,
+            Ok(gpu::GateFinish::Redraw) => 1,
+            Ok(gpu::GateFinish::Fallback) => 2,
+            Ok(gpu::GateFinish::Pending) => 3,
+            Err(_) => 4,
+        }
     }
 
     /// Schedules a candidate in a private GPU texture. The promise resolves after all checks.

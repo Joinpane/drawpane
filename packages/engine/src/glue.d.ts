@@ -166,6 +166,17 @@ export class Engine {
     background: Float32Array,
   ): Promise<void> | undefined;
   finishComputeFrame?(finalAttempt: boolean): Outcome | undefined;
+  presentComputeFrame?(
+    width: number,
+    height: number,
+    zoom: number,
+    x: number,
+    y: number,
+    dpr: number,
+    background: Float32Array,
+  ): Outcome | undefined;
+  takeComputeGateCheck?(): Promise<void> | undefined;
+  finishComputeGate?(): number;
   cancelComputeFrame?(): void;
   computeFallbackReason?(): string | undefined;
   computeTight?(tight: boolean): Outcome;

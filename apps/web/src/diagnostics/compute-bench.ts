@@ -253,6 +253,95 @@ async function computeSweep(
   return sweepReport(label, frames, passes);
 }
 
+/**
+ * A zoom sweep through the bump gate: each frame presented at once (the GPU keeps the last good
+ * frame wherever a stage overflowed), its check landing later. Shown is the request to the next
+ * animation frame, as for vello_gpu; wait is how long after the request its check landed.
+ */
+async function gatedSweep(
+  engine: RenderEngine,
+  label: string,
+  zooms: readonly number[],
+  page: { readonly pageWidth: number; readonly pageHeight: number },
+  totals: { overflow: number; full: number; patched: number },
+  signal: AbortSignal,
+): Promise<SweepReport> {
+  // The gate keeps the frame on screen, so there has to be one: draw the first one checked.
+  await drawChecked(
+    engine,
+    BENCH_WIDTH,
+    BENCH_HEIGHT,
+    cameraAt(page.pageWidth, page.pageHeight, zooms[0] ?? 1),
+  );
+  takeStats(engine, totals);
+  const frames: FrameSample[] = [];
+  const landed: Array<Promise<number>> = [];
+  let redraws = 0;
+  await nextFrame();
+  for (const [i, zoom] of zooms.entries()) {
+    signal.throwIfAborted();
+    const t0 = performance.now();
+    const presented = engine.presentComputeFrame(
+      BENCH_WIDTH,
+      BENCH_HEIGHT,
+      cameraAt(page.pageWidth, page.pageHeight, zoom),
+      COMPUTE_BG,
+    );
+    const cpuMs = performance.now() - t0;
+    if (!presented.ok) throw new Error(`gated frame ${i}: ${presented.message}`);
+    if (!presented.value) throw new Error(`gated frame ${i}: compute didn't draw it`);
+    landed.push(presented.value.check.then(() => performance.now() - t0));
+    await nextFrame();
+    const verdict = engine.finishComputeGate();
+    if (verdict === "redraw") redraws++;
+    if (verdict === "fallback" || verdict === "lost")
+      throw new Error(`gated frame ${i}: ${verdict}`);
+    const stats = presented.value.stats;
+    frames.push({
+      i,
+      zoom: round(zoom),
+      backend: "compute",
+      draws: 1,
+      cpuMs: round(cpuMs),
+      split: {
+        ...EMPTY_SPLIT,
+        stage: round(cpuMs),
+        encode: round(stats.ms.encode),
+        render: round(stats.ms.render),
+        submit: round(stats.ms.submit),
+      },
+      waitMs: 0,
+      gpuMs: null,
+      shownMs: round(performance.now() - t0),
+    });
+  }
+  const waits = await Promise.all(landed);
+  for (const [k, ms] of waits.entries()) {
+    const f = frames[k];
+    if (f) frames[k] = { ...f, waitMs: round(ms) };
+  }
+  engine.finishComputeGate();
+  const stats = takeStats(engine, totals);
+  if (stats?.timestampsSupported && stats.gpuMs.length === frames.length) {
+    for (const [k, ms] of stats.gpuMs.entries()) {
+      const f = frames[k];
+      if (f) frames[k] = { ...f, gpuMs: round(ms) };
+    }
+  }
+  const passes = stats?.timestampsSupported
+    ? Object.fromEntries(
+        Object.entries(stats.passAvgMs)
+          .filter(([, ms]) => ms > 0)
+          .map(([k, ms]) => [k, round(ms)]),
+      )
+    : null;
+  return sweepReport(
+    `${label}${redraws ? ` (${redraws} redrew after an overflow)` : ""}`,
+    frames,
+    passes,
+  );
+}
+
 /** The same sweep on vello_gpu: `moving` is the editor's moving-frame path, else whole frames. */
 async function velloSweep(
   engine: RenderEngine,
@@ -516,6 +605,28 @@ export async function runComputeBench(options: {
     options.onProgress?.("compute zoom around fit");
     sweeps.push(
       await computeSweep(compute, "compute · zoom around fit", around(fit), scene, totals, signal),
+    );
+    options.onProgress?.("compute zoom at 100%, through the bump gate");
+    sweeps.push(
+      await gatedSweep(
+        compute,
+        "compute gated · zoom around 100%",
+        around(1),
+        scene,
+        totals,
+        signal,
+      ),
+    );
+    options.onProgress?.("compute zoom around fit, through the bump gate");
+    sweeps.push(
+      await gatedSweep(
+        compute,
+        "compute gated · zoom around fit",
+        around(fit),
+        scene,
+        totals,
+        signal,
+      ),
     );
     const short = Math.min(frames, 60);
     options.onProgress?.("vello_gpu zoom (editor moving frames)");
