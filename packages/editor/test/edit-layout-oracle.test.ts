@@ -45,7 +45,7 @@ import {
 } from "@drawpane/model";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { affectedComponents, canMoveInto, instancesOf, wouldCycle } from "../src/components";
+import { canMoveInto, wouldCycle } from "../src/components";
 import { Doc } from "../src/doc";
 import { Editor } from "../src/editor";
 import { layoutOps } from "../src/layout";
@@ -1158,54 +1158,10 @@ function check(
   expect(snapshot(mirror), `replayed ${step}`).toEqual(now);
 }
 
-/**
- * Issue 294's signature: whether stale layout comes of a rebase collision.
- * The editor's rebased edits and the collaborator's must touch overlapping
- * scopes (the layers, the frames above them, the components they're in and
- * those components' instances), and every stale layer must be one their
- * edits influence: a layer in those scopes, one in a frame in them (a
- * sibling in a flow), or one inside a layer they touched or inside an
- * instance of a component they touched.
- */
-function rebasedStale(
-  doc: Doc,
-  rebased: ReadonlySet<string>,
-  theirs: ReadonlySet<string>,
-  stale: readonly unknown[],
-): boolean {
-  if (rebased.size === 0 || theirs.size === 0) return false;
-  const copiesOf = (ids: Iterable<string>) => {
-    const out = new Set<string>();
-    for (const main of affectedComponents(
-      doc,
-      [...ids].filter((id) => doc.has(id)),
-    ))
-      for (const root of instancesOf(doc, main)) out.add(root);
-    return out;
-  };
-  const scopes = (ids: ReadonlySet<string>) => {
-    const out = new Set<string>();
-    for (const id of [...ids, ...copiesOf(ids)]) {
-      out.add(id);
-      for (const a of doc.has(id) ? doc.ancestors(id) : [])
-        if (a.type !== "page" && a.id !== ROOT_ID) out.add(a.id);
-    }
-    return out;
-  };
-  const ours = scopes(rebased);
-  const all = scopes(theirs);
-  if (![...ours].some((id) => all.has(id))) return false;
-  for (const id of ours) all.add(id);
-  const touched = new Set([...rebased, ...theirs, ...copiesOf(rebased), ...copiesOf(theirs)]);
-  return stale.every((entry) => {
-    const o = entry as Record<string, unknown>;
-    const id = String(o.id ?? o.constrained ?? o.text);
-    if (all.has(id)) return true;
-    const node = doc.get(id);
-    if (!node) return false;
-    if (all.has(node.parent)) return true;
-    return doc.ancestors(id).some((a) => touched.has(a.id));
-  });
+/** A stale entry's layer and what about it is stale, to tell two checks' entries apart. */
+function entryKey(o: unknown): string {
+  const e = o as Record<string, unknown>;
+  return `${String(e.id ?? e.constrained ?? e.text)}:${String(e.prop ?? (e.width ? "width" : "height"))}`;
 }
 
 /**
@@ -1253,7 +1209,12 @@ function connect(editor: Editor, nodes: readonly NodeRecord[], copies: "compact"
     note(ids: Iterable<string>) {
       for (const id of ids) ours.add(id);
     },
-    remote(step: number) {
+    /**
+     * The collaborator's edit for this step, arriving as a rebase. True when the same edit, made
+     * after the editor's own instead of concurrently (on a copy of the editor's document), leaves
+     * nothing newly stale: then whatever the rebase leaves stale is issue 294's.
+     */
+    remote(step: number): boolean {
       const all = layers(other.doc);
       const pick = (fits: (n: NodeRecord) => boolean) => {
         const list = all.filter(fits);
@@ -1261,27 +1222,39 @@ function connect(editor: Editor, nodes: readonly NodeRecord[], copies: "compact"
       };
       const copy = pick((n) => !!getProp(n.props, "mirrors"));
       const instance = pick(isInstance);
-      switch (step % 4) {
-        case 0:
-          if (copy) other.setProp([copy.id], "opacity", 0.5);
-          break;
-        case 1:
-          if (copy) other.setProp([copy.id], "fills", [{ type: "solid", color: "#336699" }]);
-          break;
-        case 2: {
-          const own = pick((n) => getProp(n.props, "overrides").length > 0);
-          if (own) other.resetOverrides([{ id: own.id, props: getProp(own.props, "overrides") }]);
-          break;
+      const own = pick((n) => getProp(n.props, "overrides").length > 0);
+      const act = (ed: Editor): boolean => {
+        const has = (n: NodeRecord | undefined): n is NodeRecord => !!n && ed.doc.has(n.id);
+        switch (step % 4) {
+          case 0:
+            if (!has(copy)) return false;
+            ed.setProp([copy.id], "opacity", 0.5);
+            return true;
+          case 1:
+            if (!has(copy)) return false;
+            ed.setProp([copy.id], "fills", [{ type: "solid", color: "#336699" }]);
+            return true;
+          case 2:
+            if (!has(own)) return false;
+            ed.resetOverrides([{ id: own.id, props: getProp(own.props, "overrides") }]);
+            return true;
+          default:
+            if (!has(instance) || !canMoveInto(ed.doc, [instance.id], "dark")) return false;
+            ed.commit([{ op: "move", id: instance.id, parent: "dark", key: ed.topKey("dark") }]);
+            return true;
         }
-        case 3:
-          if (instance && canMoveInto(other.doc, [instance.id], "dark"))
-            other.commit([
-              { op: "move", id: instance.id, parent: "dark", key: other.topKey("dark") },
-            ]);
-          break;
-      }
+      };
+      act(other);
       const ops = other.sync.takeUnsent();
-      if (ops.length === 0) return;
+      if (ops.length === 0) return false;
+      // The same edit, made serially on the editor's document as it is now.
+      const staleBefore = new Set(unsettled(editor.doc).map(entryKey));
+      const serial = makeEditor(editor.doc.stored(), copies);
+      const serialSettled =
+        act(serial) &&
+        unsettled(serial.doc)
+          .map(entryKey)
+          .every((key) => staleBefore.has(key));
       for (const op of ops) {
         theirs.add(op.id);
         if (op.op === "create" || op.op === "move") theirs.add(op.parent);
@@ -1292,6 +1265,7 @@ function connect(editor: Editor, nodes: readonly NodeRecord[], copies: "compact"
       remote.push(ops);
       revn += 1;
       receive({ t: "txn", revn, ops });
+      return serialSettled;
     },
     settle(mirror: Doc, step: string) {
       for (const ops of remote) mirror.applyStored(ops, { held: true });
@@ -1343,12 +1317,12 @@ describe("an edit leaves the document as a full layout would", () => {
             // between flushes, while a collaborator's edits arrive and rebase them.
             const room = batched ? connect(editor, start, copies) : null;
             // Issue 294: a collaborator's edits are worked out against their own document, and a
-            // rebase lays out nothing, so where they collide with edits of the editor's that were
-            // unsent when they arrived, layout depending on both can be stale. Right after a
-            // collaborator's edit lands, layers stale from such a collision (`rebasedStale`) are
-            // noted; a later check sets aside only stale layout all of which was noted then.
-            // Anything an edit of the editor's makes stale is checked, and so are runs with no
-            // collaborator (half of them) and collaborator runs with no collision.
+            // rebase lays out nothing, so where they meet edits of the editor's that were unsent
+            // when they arrived, layout can be stale. Right after a collaborator's edit lands with
+            // unsent edits rebased on it, its staleness is noted as issue 294's only when the same
+            // edit, made serially on the editor's document instead, leaves nothing newly stale. A
+            // later check sets aside only stale layout all of which was noted then. Anything an
+            // edit of the editor's makes stale is checked, and so are runs with no collaborator.
             const fromRebase = new Set<string>();
             const entryId = (o: unknown) => {
               const e = o as Record<string, unknown>;
@@ -1390,9 +1364,9 @@ describe("an edit leaves the document as a full layout would", () => {
               const layout = !ofRebase(unsettled(editor.doc, before));
               check(editor, mirror, copies, `after ${history.join(", ")}`, before, !room, layout);
               if (room && step % 2 === 1) {
-                room.remote(step);
+                const serialSettled = room.remote(step);
                 const stale = unsettled(editor.doc);
-                if (stale.length > 0 && rebasedStale(editor.doc, room.rebased, room.theirs, stale))
+                if (stale.length > 0 && room.rebased.size > 0 && serialSettled)
                   for (const o of stale) fromRebase.add(entryId(o));
               }
             }
