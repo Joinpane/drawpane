@@ -32,6 +32,7 @@ test("compute frames are exact or fall back at every page size, scale and zoom",
   const report = JSON.parse((await done.textContent()) ?? "{}") as {
     readonly adapter: string;
     readonly cells: readonly Cell[];
+    readonly planned: number;
     readonly overflowChecks: number;
   };
   test.info().annotations.push({ type: "bench", description: JSON.stringify(report) });
@@ -44,6 +45,8 @@ test("compute frames are exact or fall back at every page size, scale and zoom",
   // 30 capacity cells, the floor check after a fresh page, then 9 drag steps (#300) against
   // fresh vello_gpu frames.
   expect(report.cells).toHaveLength(40);
+  // Progress counts toward the cells the run actually adds (it ended on 40/39).
+  expect(report.planned).toBe(report.cells.length);
   expect(
     report.cells.filter((c) => !c.ok).map((c) => `${label(c)}: ${c.violations.join("; ")}`),
   ).toEqual([]);
