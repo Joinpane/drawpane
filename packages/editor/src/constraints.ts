@@ -12,10 +12,15 @@
  * Figma (decision 0043): auto width becomes auto height, wrapping at the
  * width it's given, and a height it's given makes it fixed.
  */
-import { constrainSpan, getProp, type NodeRecord, type Op } from "@drawpane/model";
+import {
+  constrainSpan,
+  getProp,
+  type NodeRecord,
+  type Op,
+  textResizeWhenSized,
+} from "@drawpane/model";
 import type { Doc } from "./doc";
 import { round2 } from "./geometry";
-import { textResizeWhenSized } from "./layout";
 
 type Axis = "h" | "v";
 type Constraint = "start" | "end" | "center" | "stretch" | "scale";

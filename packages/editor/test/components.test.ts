@@ -312,6 +312,30 @@ describe("components and instances", () => {
     expect(getProp(props(editor, instance), "instanceOf")).toBe(card);
   });
 
+  it("offers no swap to a component that holds, as itself, the one the instance is in", () => {
+    // Card holds a Button; Card is then put inside Panel, a component too. In an instance of
+    // Card, its Button can't become a Panel: the Panel would show the Card again (the oracle).
+    const card = editor.createLayer("frame", { x: 400, y: 0, width: 200, height: 100 }, "p", {
+      name: "Card",
+    }) as string;
+    editor.select([card]);
+    editor.createComponent();
+    editor.insertInstance(button.frame, { x: 450, y: 50 });
+    const panel = editor.createLayer("frame", { x: 700, y: 0, width: 300, height: 200 }, "p", {
+      name: "Panel",
+    }) as string;
+    editor.select([panel]);
+    editor.createComponent();
+    expect(editor.commit([{ op: "move", id: card, parent: panel, key: "a0" }])).toBe(true);
+    const cardInstance = editor.insertInstance(card, { x: 0, y: 400 }) as string;
+    const nested = editor.doc
+      .childIds(cardInstance)
+      .find((id) => getProp(props(editor, id), "instanceOf") === button.frame) as string;
+    expect(swapTargets(editor.doc, nested).map((t) => t.id)).not.toContain(panel);
+    editor.swapInstance(nested, panel);
+    expect(getProp(props(editor, nested), "instanceOf")).toBe(button.frame);
+  });
+
   it("offers no swap that would show a component in itself through one of its instances", () => {
     // Card holds a Button; in an instance of Card, that Button can't become a Card: the Card
     // it would show holds the same Button, swapped again, forever (the edit-layout oracle).

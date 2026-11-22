@@ -17,7 +17,13 @@
  * same transaction. Every peer then sees identical positions without running
  * layout itself, and files stay plain data.
  */
-import { type GridTrack, getProp, type NodeRecord, type Op } from "@drawpane/model";
+import {
+  type GridTrack,
+  getProp,
+  type NodeRecord,
+  type Op,
+  textResizeWhenSized,
+} from "@drawpane/model";
 import type { Doc } from "./doc";
 import { round2 } from "./geometry";
 import { strokeWidths } from "./stroke-sides";
@@ -1359,21 +1365,6 @@ export class LayoutEngine {
     }
     return ops;
   }
-}
-
-/**
- * A text layer's auto-resize once something else sizes it on `axes` (auto
- * layout's Fill or stretch, a constraint), as Figma has it: auto width
- * becomes auto height when its width is taken, and any auto size becomes
- * fixed when its height is (decision 0043).
- */
-export function textResizeWhenSized(
-  mode: "none" | "width" | "height",
-  axes: ReadonlySet<"h" | "v">,
-): "none" | "width" | "height" {
-  if (axes.has("v") && mode !== "none") return "none";
-  if (axes.has("h") && mode === "width") return "height";
-  return mode;
 }
 
 /** A grid frame's tracks and cells as they stand, or null for anything else. */

@@ -147,6 +147,15 @@ function layoutBindings(bindings: unknown): string {
   return out.sort().join("\n");
 }
 
+/** Whether an override record binds its copy otherwise: layout bindings of its own, or none. */
+function rebinds(props: unknown): boolean {
+  const p = props as { unset?: unknown };
+  return (
+    bindsLayout(props as NodeRecord["props"]) ||
+    (Array.isArray(p.unset) && p.unset.includes("bindings"))
+  );
+}
+
 /**
  * The stored nodes whose layout bindings (a padding's, a visibility's)
  * differ after the stored operations `inverse` undoes, read from it in undo
@@ -171,8 +180,8 @@ function reboundLayout(
     } else if (op.op === "delete") {
       // Made by the change: a layer's copies are new and laid out anyway, a record's aren't.
       const node = now(op.id);
-      if (node?.type === "override" && bindsLayout(node.props)) out.add(op.id);
-    } else if (op.op === "create" && op.type === "override" && bindsLayout(op.props)) {
+      if (node?.type === "override" && rebinds(node.props)) out.add(op.id);
+    } else if (op.op === "create" && op.type === "override" && rebinds(op.props)) {
       // A record removed: its copy reads its main's bindings again.
       out.add(op.id);
     }

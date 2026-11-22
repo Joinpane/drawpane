@@ -76,6 +76,15 @@ export function laidOutProps(
       if (resize !== "none") out.add("height");
     }
   }
+  if (copy.type === "text" && !context.root && !inFlow && parent?.type === "frame") {
+    // Constraints that stretch or scale a text layer take that axis's size from it (decision
+    // 0043): its main layer's auto-resize, or the one that gives, is laid out, never an override.
+    const axes = sizedAxes(copy);
+    const mode = getProp(copy.props, "textAutoResize");
+    const own = getProp(source.props, "textAutoResize");
+    if (axes.size > 0 && (mode === own || mode === textResizeWhenSized(own, axes)))
+      out.add("textAutoResize");
+  }
   if (!context.root && !inFlow && parent && parentSource) {
     // A frame the copy resized moved and stretched its children by their constraints: a place or
     // size is laid out where it's what they derive from the main layer's. Anything else is a
@@ -87,6 +96,54 @@ export function laidOutProps(
     }
   }
   return out;
+}
+
+/** The axes a layer's constraints stretch or scale it on, so its frame's size sets its size. */
+function sizedAxes(node: NodeRecord): Set<"h" | "v"> {
+  const out = new Set<"h" | "v">();
+  for (const [axis, prop] of [
+    ["h", "constraintH"],
+    ["v", "constraintV"],
+  ] as const) {
+    const c = getProp(node.props, prop);
+    if (c === "stretch" || c === "scale") out.add(axis);
+  }
+  return out;
+}
+
+/**
+ * A text layer's auto-resize once something else sizes it on `axes` (auto
+ * layout's Fill or stretch, a constraint), as Figma has it: auto width
+ * becomes auto height when its width is taken, and any auto size becomes
+ * fixed when its height is (decision 0043).
+ */
+export function textResizeWhenSized(
+  mode: "none" | "width" | "height",
+  axes: ReadonlySet<"h" | "v">,
+): "none" | "width" | "height" {
+  if (axes.has("v") && mode !== "none") return "none";
+  if (axes.has("h") && mode === "width") return "height";
+  return mode;
+}
+
+/**
+ * The auto-resize a copy text layer's constraints give it, from the main
+ * layer it copies, where they size it (its frame differs in size from its
+ * main's on an axis it stretches or scales on): undefined where they don't.
+ */
+export function constrainedTextResize(
+  copy: NodeRecord,
+  source: NodeRecord,
+  parent: NodeRecord | undefined,
+  parentSource: NodeRecord | undefined,
+): "none" | "width" | "height" | undefined {
+  if (copy.type !== "text") return undefined;
+  const derived = constrainedValues(copy, source, parent, parentSource);
+  const axes = new Set<"h" | "v">();
+  if (derived.width !== undefined) axes.add("h");
+  if (derived.height !== undefined) axes.add("v");
+  if (axes.size === 0) return undefined;
+  return textResizeWhenSized(getProp(source.props, "textAutoResize"), axes);
 }
 
 /** How a layer follows its frame on one axis (Figma's and Penpot's constraints). */

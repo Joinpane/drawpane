@@ -670,7 +670,11 @@ export class SyncEngine {
     const kept: PendingTxn[] = [];
     for (const txn of this.#pending) {
       try {
-        if (txn.seq !== null) {
+        // Replayed as the room will apply it: its stored operations. Only a change of form
+        // (copies kept compact or not) goes back to what it did as presented, to find those
+        // layers in the new form; presented operations replayed on another document can store
+        // otherwise than they did (a copy layer's value set as its main's was, or not).
+        if (txn.seq !== null || !reformed) {
           const stored = reformed ? reformed.remap(this.#doc, txn.stored) : txn.stored;
           if (!stored) throw new ModelError("not_found", "it names layers the file no longer has");
           txn.stored = stored;
@@ -721,28 +725,26 @@ export class SyncEngine {
 
 /**
  * Drops `set` operations that a later `set` of the same property overrides,
- * unless a create, delete or move of that node sits between them, or a
- * create or move into it: what may go under a node can hang on its values
- * then (an override record only goes under an instance, so undoing a detach
- * and redoing it needs the instance it was in between).
+ * unless a create, delete or move sits between them. Whether one of those
+ * applies can hang on values set before it, of any node and at any depth
+ * (an override record goes only under an instance, a layer only outside
+ * one), so none is compacted across: detaching, editing inside, undoing and
+ * moving, all unsent, must replay as it applied, through a rebase too. A
+ * gesture's stream of sets (a drag, typing) still compacts to its last.
  */
+/** Sets that change what a node's copy layers are (a swap, a detach): as structural as a move. */
+const LINKS: ReadonlySet<string> = new Set(["instanceOf", "unset", "mirrors", "path"]);
+
 export function compactOps(ops: readonly Op[]): Op[] {
   const keep = new Array<boolean>(ops.length).fill(true);
   const seen = new Set<string>();
-  const end = (id: string) => {
-    for (const key of seen) if (key.startsWith(`${id}\u0000`)) seen.delete(key);
-  };
   for (let i = ops.length - 1; i >= 0; i--) {
     const op = ops[i] as Op;
-    if (op.op === "set") {
+    if (op.op === "set" && !LINKS.has(op.prop)) {
       const key = `${op.id}\u0000${op.prop}`;
       if (seen.has(key)) keep[i] = false;
       else seen.add(key);
-    } else {
-      // A structural op on a node ends any run of sets that could be merged across it.
-      end(op.id);
-      if (op.op === "create" || op.op === "move") end(op.parent);
-    }
+    } else seen.clear();
   }
   return ops.filter((_, i) => keep[i]);
 }

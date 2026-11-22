@@ -22,6 +22,7 @@
  */
 import {
   boundaryDrivenProps,
+  constrainedTextResize,
   constrainedValues,
   copyChildId,
   getProp,
@@ -225,8 +226,9 @@ export function swapTargets(
   const instance = doc.getUnresolved(instanceId);
   const current = instance ? getProp(instance.props, "instanceOf") : null;
   if (!instance || current === null) return [];
+  const forbidden = cycleForbidden(doc, instance.parent);
   return listComponents(doc)
-    .filter((c) => c.id !== current && !wouldCycle(doc, c.id, instance.parent))
+    .filter((c) => c.id !== current && !forbidden.has(c.id))
     .map((c) => {
       const set = componentSetOf(doc, c.id);
       const name = getProp(c.props, "name") || "Component";
@@ -250,36 +252,51 @@ export function listComponents(doc: Doc): NodeRecord[] {
 }
 
 /**
- * Would placing an instance of `componentId` under `parent` make a component
- * contain itself? It would inside any component the placed one shows, itself
- * or one it holds an instance of however deep, and inside an instance of one
- * of those: a nested instance swapped there shows in it, so swapping the
- * nested instance in an instance of B to B would show B in B forever.
+ * The components an instance placed under `parent` can't be of, as that
+ * would make a component contain itself: every component above `parent`
+ * (a main it's in, or what an instance it's in shows, since a nested
+ * instance swapped there shows in it, so swapping the nested instance in
+ * an instance of B to B would show B in B forever), and every component
+ * holding one of those, itself or an instance of it, however deep. Read from the
+ * instances of what's above, once, so asking about every component in a
+ * large file (the swap menu) costs one walk.
  */
-export function wouldCycle(doc: Doc, componentId: string, parent: string): boolean {
-  // What's above, as components: a main itself, or what an instance shows. Most places are in
-  // neither, and need nothing more read.
-  const above: string[] = [];
+export function cycleForbidden(doc: Doc, parent: string): Set<string> {
+  const out = new Set<string>();
   for (
     let node = doc.getUnresolved(parent);
     node && node.type !== "page";
     node = doc.getUnresolved(node.parent)
   ) {
-    if (isMainComponent(node)) above.push(node.id);
+    if (isMainComponent(node)) out.add(node.id);
     const of = node.type === "frame" ? getProp(node.props, "instanceOf") : null;
-    if (of) above.push(of);
+    if (of) out.add(of);
   }
-  if (above.length === 0) return false;
-  // Every component an instance of `componentId` shows, however nested, itself included.
-  const shown = new Set([componentId]);
-  const queue = [componentId];
-  for (let i = 0; i < queue.length; i++)
-    for (const of of instancedIn(doc, queue[i] as string))
-      if (!shown.has(of)) {
-        shown.add(of);
-        queue.push(of);
-      }
-  return above.some((id) => shown.has(id));
+  const queue = [...out];
+  for (let i = 0; i < queue.length; i++) {
+    const componentId = queue[i] as string;
+    // Held by a main as itself (a component inside another), or as an instance of it.
+    const roots = [
+      componentId,
+      ...(doc.compactCopies ? doc.instanceRoots(componentId) : instancesOf(doc, componentId)),
+    ];
+    for (const root of roots)
+      for (
+        let node = doc.getUnresolved(root);
+        node && node.type !== "page";
+        node = doc.getUnresolved(node.parent)
+      )
+        if (isMainComponent(node) && !out.has(node.id)) {
+          out.add(node.id);
+          queue.push(node.id);
+        }
+  }
+  return out;
+}
+
+/** Would placing an instance of `componentId` under `parent` make a component contain itself? */
+export function wouldCycle(doc: Doc, componentId: string, parent: string): boolean {
+  return cycleForbidden(doc, parent).has(componentId);
 }
 
 /** The components a subtree holds instances of. */
@@ -418,6 +435,23 @@ export function syncInstanceOps(
   const ops: Op[] = [];
   const mainIds = new Set<string>();
 
+  /**
+   * What this sync sets so far, per node: a child is derived from its parent as it'll be. Not
+   * without `derive`, whose operations say what differs rather than what's applied.
+   */
+  const pending = new Map<string, Record<string, unknown>>();
+  const push = (op: Op) => {
+    ops.push(op);
+    if (op.op !== "set") return;
+    const props = pending.get(op.id) ?? {};
+    props[op.prop] = op.value;
+    pending.set(op.id, props);
+  };
+  const synced = (node: NodeRecord | undefined): NodeRecord | undefined => {
+    const props = derive && node && pending.get(node.id);
+    return props ? { ...node, props: { ...node.props, ...props } as NodeRecord["props"] } : node;
+  };
+
   const syncProps = (
     from: NodeRecord,
     to: NodeRecord,
@@ -425,19 +459,38 @@ export function syncInstanceOps(
     only?: (prop: string) => boolean,
   ) => {
     const overridden = new Set<string>(getProp(to.props, "overrides"));
+    // The copy as this sync leaves it where it decides how it's placed and sized: its main
+    // layer's constraints, positioning and sizing, unless it overrides them (a main made fixed
+    // width gives its instances that width, though they hugged).
+    // Not without `derive`, which reads what differs (an import's own Fill stays its own).
+    const placed: Record<string, unknown> = {};
+    if (derive)
+      for (const prop of [
+        "constraintH",
+        "constraintV",
+        "positioning",
+        "sizingH",
+        "sizingV",
+      ] as const)
+        if (!overridden.has(prop)) placed[prop] = from.props[prop];
+    const next = { ...to, props: { ...to.props, ...placed } as NodeRecord["props"] };
+    const parent = isRoot ? undefined : synced(doc.getUnresolved(to.parent));
+    const parentSource = isRoot ? undefined : doc.getUnresolved(from.parent);
     // What layout decides (auto layout, hug and fill, auto-sized text, constraints in a resized
     // frame): the instance runs its own layout, so never copy those (decision 0035).
-    const laidOut = laidOutProps(to, from, {
-      root: isRoot,
-      parent: isRoot ? undefined : doc.getUnresolved(to.parent),
-      parentSource: isRoot ? undefined : doc.getUnresolved(from.parent),
-    });
+    const laidOut = laidOutProps(next, from, { root: isRoot, parent, parentSource });
     // What constraints decide is derived from the main layer's place, not left as it was.
     const derived: Record<string, number> =
-      derive && !isRoot
-        ? constrainedValues(to, from, doc.getUnresolved(to.parent), doc.getUnresolved(from.parent))
-        : {};
+      derive && !isRoot ? constrainedValues(next, from, parent, parentSource) : {};
     for (const prop of laidOut) if (!(prop in derived)) overridden.add(prop);
+    // Text whose size they derive gives that axis up, as its main layer would (decision 0043).
+    const resize =
+      derive && !isRoot ? constrainedTextResize(next, from, parent, parentSource) : undefined;
+    if (resize !== undefined && !getProp(to.props, "overrides").includes("textAutoResize")) {
+      overridden.add("textAutoResize");
+      if (getProp(to.props, "textAutoResize") !== resize && (!only || only("textAutoResize")))
+        push({ op: "set", id: to.id, prop: "textAutoResize", value: resize });
+    }
     // Glyphs saved with a file were laid out for each copy (decision 0037); a stale set is
     // never drawn, so the copy's own is kept rather than replaced by its main's.
     if (from.type === "text") overridden.add("glyphLayout");
@@ -450,17 +503,17 @@ export function syncInstanceOps(
       if (prop in derived) {
         const want = derived[prop] as number;
         if (typeof have !== "number" || Math.abs(have - want) > PLACE_EPSILON)
-          ops.push({ op: "set", id: to.id, prop, value: want });
+          push({ op: "set", id: to.id, prop, value: want });
         continue;
       }
       const want = from.props[prop];
       if (sameValue(want, have)) continue;
-      ops.push({ op: "set", id: to.id, prop, value: want === undefined ? null : want });
+      push({ op: "set", id: to.id, prop, value: want === undefined ? null : want });
     }
     // A derived axis whose value the main layer doesn't hold (its default) is derived too.
     for (const [prop, want] of Object.entries(derived)) {
       if (keys.has(prop) || overridden.has(prop) || (only && !only(prop))) continue;
-      ops.push({ op: "set", id: to.id, prop: prop as PropName, value: want });
+      push({ op: "set", id: to.id, prop: prop as PropName, value: want });
     }
   };
 
@@ -675,6 +728,19 @@ export function copyConstraintOps(doc: Doc, ops: readonly Op[]): Op[] {
           if (typeof have !== "number" || Math.abs(have - want) > PLACE_EPSILON)
             out.push({ op: "set", id, prop: prop as PropName, value: want });
         }
+        // Text whose size they derive gives that axis up, as materialized sync has it (0043).
+        const resize = constrainedTextResize(
+          copy,
+          source,
+          doc.get(copy.parent),
+          doc.get(source.parent),
+        );
+        if (
+          resize !== undefined &&
+          !overridden.includes("textAutoResize") &&
+          getProp(copy.props, "textAutoResize") !== resize
+        )
+          out.push({ op: "set", id, prop: "textAutoResize", value: resize });
       }
     }
   return out;
@@ -735,10 +801,15 @@ export function relayoutTargets(
   };
   const isLayout = (node: NodeRecord | undefined) =>
     node?.type === "frame" && getProp(node.props, "layoutMode") !== "none";
+  // In a layout here, or in one of its copies: an instance can give a copy of a plain frame
+  // auto layout of its own (an override), so what's in that frame lays out there.
   const inLayout = (node: NodeRecord) => {
     let parent = doc.getUnresolved(node.parent);
     while (parent?.type === "group") parent = doc.getUnresolved(parent.parent);
-    return isLayout(parent);
+    if (!parent || isLayout(parent)) return !!parent;
+    for (const copy of doc.tokens.source().builtFrom([parent.id]))
+      if (isLayout(doc.getUnresolved(copy))) return true;
+    return false;
   };
   /** Mains whose layout inside may have changed. */
   const inner = new Set<string>();
@@ -772,6 +843,16 @@ export function relayoutTargets(
           queue.push(outer);
         }
     }
+  // A main holding instances of one whose layout inside changed holds copies of the change: an
+  // instance of it laid out otherwise (in another mode) lays them out too, however deep.
+  const around = [...inner];
+  for (let i = 0; i < around.length; i++)
+    for (const root of doc.instanceRoots(around[i] as string))
+      for (const outer of affectedComponents(doc, [root]))
+        if (!inner.has(outer)) {
+          inner.add(outer);
+          around.push(outer);
+        }
   const seen = new Set<string>();
   /** Instances laid out differently from their mains, whose layout inside may have changed. */
   const differing: string[] = [];

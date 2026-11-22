@@ -28,6 +28,7 @@ import {
   type ApplyOptions,
   applyOp,
   type BuildBudget,
+  bindsLayout,
   CopyView,
   collectSubtree,
   isMainNode,
@@ -464,7 +465,10 @@ export class CompactCopies {
       return;
     }
     const reads = (prop: string) => !LAYOUT_NEUTRAL.has(prop) && !RECORD_BOOKKEEPING.has(prop);
-    const listsRead = (props: Props) => (props.unset ?? []).some(reads);
+    // A binding is neutral only by its own value: binding a layout value, or unbinding the
+    // main's, can resolve to another size than the main's though nothing else differs.
+    const listsRead = (props: Props) =>
+      (props.unset ?? []).some((p) => reads(p) || p === "bindings") || bindsLayout(props);
     let differs =
       Object.keys(root.props).some((p) => !ROOT_LOCAL_PROPS.has(p) && reads(p)) ||
       listsRead(root.props);

@@ -36,5 +36,8 @@ The stored mode is the source of truth, as before. A file saved with constrained
 ## Consequences
 
 - Narrowing a frame wraps its stretched text and grows it downward, as in Figma. Widening it again unwraps the lines, but the text stays auto height, as in Figma.
-- An instance resized in an editor gives its stretched text the same switch, as a laid-out value on the copy. Its main keeps auto width.
+- **Copies:** an instance resized in an editor gives its stretched text the same switch, as a laid-out value on the copy (never an override). Its main keeps auto width.
+  - The copy's mode is derived like the place and size its constraints give: from its main layer's mode, on the axes where the copy's frame differs in size from the main's (`constrainedTextResize`). Materialized sync and compact copy constraints both write it, so the two formats agree, and a main edit that doesn't touch it leaves it alone.
+  - `laidOutProps` counts either mode as laid out (the main layer's, or the one its stretch or scale constraints give), so pinning an imported file doesn't mark it overridden.
+  - The copy's width still follows its main layer's box by the constraint's margins. If the main's own auto width text grows past its frame, the copy's text overflows its frame by the same amount, wrapping at that width.
 - `packages/editor/test/constraints.test.ts` ("text a constraint resizes") checks the table's rows. The edit-layout oracle now generates constrained auto-sized text, which it used to leave out because of the old disagreement.
