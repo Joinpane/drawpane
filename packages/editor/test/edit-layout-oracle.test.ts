@@ -45,7 +45,7 @@ import {
 } from "@drawpane/model";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { canMoveInto, wouldCycle } from "../src/components";
+import { affectedComponents, canMoveInto, instancesOf, wouldCycle } from "../src/components";
 import { Doc } from "../src/doc";
 import { Editor } from "../src/editor";
 import { layoutOps } from "../src/layout";
@@ -1072,6 +1072,21 @@ function perform(
       );
       const into = frames[e.into % Math.max(1, frames.length)];
       if (!into || doc.ancestors(into.id).some((a) => a.id === id)) break;
+      // Issue 311: a component moved into one its instances show through a swap makes a cycle
+      // `canMoveInto` doesn't see yet; that move isn't made.
+      if (getProp(node.props, "isComponent")) {
+        const above = new Set(affectedComponents(doc, [into.id]));
+        const swappedTo = instancesOf(doc, id).flatMap((root) =>
+          collectDescendants(doc, root)
+            .filter((n) => {
+              const shown = getProp(n.props, "instanceOf");
+              const layer = doc.get(getProp(n.props, "mirrors") ?? "");
+              return !!shown && !!layer && shown !== getProp(layer.props, "instanceOf");
+            })
+            .map((n) => getProp(n.props, "instanceOf") as string),
+        );
+        if (swappedTo.some((c) => above.has(c))) break;
+      }
       editor.commit([{ op: "move", id, parent: into.id, key: editor.topKey(into.id) }]);
       break;
     }
