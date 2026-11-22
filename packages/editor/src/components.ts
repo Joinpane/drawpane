@@ -326,6 +326,8 @@ export function canMoveInto(doc: Doc, ids: readonly string[], parent: string): b
   if (instanceRootOf(doc, parent)) return false;
   if (ids.some((id) => isInsideInstance(doc, id))) return false;
   const forbidden = cycleForbidden(doc, parent);
+  // Under no component, nothing it moves can end up inside itself.
+  if (forbidden.size === 0) return true;
   for (const id of ids) {
     for (const componentId of instancedIn(doc, id)) if (forbidden.has(componentId)) return false;
     // A component moved in whose instances show one of those through a swap would show itself
@@ -807,10 +809,20 @@ export function copyConstraintOps(doc: Doc, ops: readonly Op[]): Op[] {
           mains.add(outer);
           queue.push(outer);
         }
-  // An instance laid out otherwise than its main (it stores a layout value, or it's shown in
-  // another mode, where a bound size resolves otherwise), as `relayoutTargets` counts it.
+  // An instance whose copies may sit otherwise than its main's layers: it stores a layout value,
+  // or it's shown in another mode where a bound size makes it another size than its main.
+  const sized = (root: string, main: string) => {
+    const a = doc.get(root);
+    const b = doc.get(main);
+    return (
+      !!a &&
+      !!b &&
+      (getProp(a.props, "width") !== getProp(b.props, "width") ||
+        getProp(a.props, "height") !== getProp(b.props, "height"))
+    );
+  };
   const differs = (root: string, main: string) =>
-    doc.layoutDiffers(root) || doc.tokens.modesDiffer(root, main);
+    doc.layoutDiffers(root) || (doc.tokens.modesDiffer(root, main) && sized(root, main));
   const roots = new Set<string>();
   for (const main of mains)
     for (const root of doc.instanceRoots(main)) {
