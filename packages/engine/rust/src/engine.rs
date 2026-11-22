@@ -1394,18 +1394,20 @@ impl Engine {
         self.check_size(width, height)?;
         camera.check()?;
         self.check_supported()?;
+        let replay_limit = self
+            .gpu
+            .as_ref()
+            .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?
+            .halo_replay_limit();
         let view = camera.view();
         let frame_rect = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
-        let (reach, _, samples, native_samples) = self.reader_reach(view, Some(frame_rect));
+        let (reach, _, halo_plan) = self.reader_halo_plan(
+            view,
+            Some(frame_rect),
+            editor_viewport && !self.store.has_context(),
+            replay_limit,
+        );
         let halo_opt = self.limit_halo(reach).ok();
-        let samples = (editor_viewport && !self.store.has_context())
-            .then(|| IRect::around(samples))
-            .filter(|sample| *sample != IRect::around(frame_rect));
-        let native_samples = samples
-            .and_then(|samples| (samples != IRect::around(native_samples)).then_some(IRect::around(native_samples)));
-        if self.gpu.is_none() {
-            return Err(EngineError::new(ErrorCode::State, "no GPU attached"));
-        }
         let frame = Frame {
             width: width as u16,
             height: height as u16,
@@ -1455,8 +1457,7 @@ impl Engine {
                 self.generation,
                 options.moving,
                 prefix,
-                samples,
-                native_samples,
+                halo_plan.as_ref(),
             );
             if prefix.is_some() && result.as_ref().is_err_and(|e| e.code == ErrorCode::Limit) {
                 result = gpu.render_whole(
@@ -1466,8 +1467,7 @@ impl Engine {
                     self.generation,
                     options.moving,
                     None,
-                    samples,
-                    native_samples,
+                    halo_plan.as_ref(),
                 );
             }
             match result {
@@ -1491,8 +1491,10 @@ impl Engine {
                 drag.as_ref(),
             )?
         } else if options.moving && options.budget_ms > 0.0 {
-            // Coarse tiles do not need an exact halo. At rest this view draws whole.
-            gpu.render(
+            // Coarse tiles do not need an exact halo. If a high-zoom tile hits a backend limit
+            // (for example an oversized glass chunk at 25,600% zoom), fall back to the device-res
+            // reader-halo path rather than forcing whole-view canvas downscaling.
+            match gpu.render(
                 &self.store,
                 &frame,
                 background,
@@ -1500,7 +1502,20 @@ impl Engine {
                 i32::try_from(self.store.limits.halo.max(1)).unwrap_or(i32::MAX),
                 options,
                 drag.as_ref(),
-            )?
+            ) {
+                Ok(stats) => stats,
+                Err(e) if e.code == ErrorCode::Limit && halo_plan.as_ref().is_some_and(|p| p.use_coarse_halo) => gpu
+                    .render_whole(
+                        &self.store,
+                        &frame,
+                        background,
+                        self.generation,
+                        options.moving,
+                        None,
+                        halo_plan.as_ref(),
+                    )?,
+                Err(e) => return Err(e),
+            }
         } else {
             gpu.render_whole(
                 &self.store,
@@ -1509,8 +1524,7 @@ impl Engine {
                 self.generation,
                 options.moving,
                 None,
-                samples,
-                native_samples,
+                halo_plan.as_ref(),
             )?
         };
         // No frame is exact while text is still to come: it may paint past its box.
@@ -1627,14 +1641,20 @@ impl Engine {
     /// disjoint readers take their maximum reach rather than summing, and glass never feeds into
     /// later readers (decision 0007).
     pub fn halo(&self, view: Affine) -> Result<i32> {
-        self.limit_halo(self.reader_reach(view, None).0)
+        self.limit_halo(
+            self.reader_halo_plan(view, None, false, crate::halo::HALO_REPLAY_SIDE)
+                .0,
+        )
     }
 
     /// Longest geometric backdrop-dependency reach affecting `crop` (in device pixels): unrelated
     /// readers outside `crop` (that don't transitively feed a reader overlapping `crop`) never
     /// inflate an export's halo.
     pub fn halo_for_rect(&self, view: Affine, crop: Rect) -> Result<i32> {
-        self.limit_halo(self.reader_reach(view, Some(crop)).0)
+        self.limit_halo(
+            self.reader_halo_plan(view, Some(crop), false, crate::halo::HALO_REPLAY_SIDE)
+                .0,
+        )
     }
 
     fn limit_halo(&self, total: f64) -> Result<i32> {
@@ -1655,7 +1675,7 @@ impl Engine {
     /// additionally bounds peak memory in Worker builds (`memory_bytes > 0`).
     fn export_halo(&self, view: Affine, width: u32, height: u32) -> Result<i32> {
         let crop = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
-        let (total, reader_only, _, _) = self.reader_reach(view, Some(crop));
+        let (total, reader_only, _) = self.reader_halo_plan(view, Some(crop), false, crate::halo::HALO_REPLAY_SIDE);
         self.limit_halo(reader_only)?;
         if !total.is_finite() {
             return self.limit_halo(total);
@@ -1663,55 +1683,207 @@ impl Engine {
         Ok(total.min(f64::from(width.max(height))).ceil() as i32)
     }
 
-    /// Dependency reach `(total, reader_only, samples, native_samples)` outside a view.
-    fn reader_reach(&self, view: Affine, crop: Option<Rect>) -> (f64, f64, Rect, Rect) {
-        let mut samples = crop.unwrap_or(Rect::ZERO);
-        let mut native_samples = samples;
+    /// Dependency reach `(total, reader_only, halo_plan)` outside a view, with an optional
+    /// divisor-aware viewport halo plan.
+    fn reader_halo_plan(
+        &self,
+        view: Affine,
+        crop: Option<Rect>,
+        plan_viewport: bool,
+        replay_limit: u32,
+    ) -> (f64, f64, Option<crate::halo::ViewportHaloPlan>) {
         if self.store.readers().is_empty() {
-            return (0.0, 0.0, samples, native_samples);
+            return (0.0, 0.0, None);
+        }
+        enum ReaderKind {
+            Glass,
+            Read,
+            UniformBlur {
+                sigma: f32,
+            },
+            ProgressiveBlur {
+                lo: f32,
+                hi: f32,
+                plan: Option<crate::progressive_blur::ProgressivePlan>,
+            },
         }
         struct ReaderNode {
+            key: (u32, usize),
             paint: Rect,
             read: Rect,
             reach_px: f64,
             post_reach_px: f64,
             writes_backdrop: bool,
-            native_reach_px: f64,
+            kind: ReaderKind,
+            spatial_post_overflow: bool,
+            paint_order: usize,
+            unfilled_clip: Option<[f32; 4]>,
         }
-        fn post_effect_reach(r: &crate::record::Record, view_scale: f64) -> f64 {
+        let view_scale = view.determinant().abs().sqrt();
+        let max_side = f64::from(self.store.limits.texture_side);
+        fn paint_alpha_visible(paint: &crate::record::Paint, alpha: f32) -> bool {
+            match paint {
+                crate::record::Paint::Solid(c) => c[3] * alpha >= 0.03,
+                crate::record::Paint::Gradient(g) => {
+                    !g.stops.is_empty() && g.stops.iter().any(|(_, c)| c[3] * alpha >= 0.03)
+                }
+                crate::record::Paint::Image(img) => img.opacity * alpha >= 0.03,
+                crate::record::Paint::Placeholder(o) => *o * alpha >= 0.03,
+            }
+        }
+        #[inline(never)]
+        fn entry_feature_px(
+            store: &Store,
+            r: &crate::record::Record,
+            path_idx: u32,
+            paint: &crate::record::Paint,
+            stroke_width: Option<f32>,
+            device: Affine,
+            det_scale: f32,
+        ) -> Option<(Rect, f32)> {
+            let entry = r.paths.get(path_idx as usize)?;
+            let local_b = r.entry_bounds(path_idx, &|g| store.glyphs.bounds(g))?;
+            let dev_b = if let Some(sw) = stroke_width {
+                device.transform_rect_bbox(local_b.inflate(f64::from(sw), f64::from(sw)))
+            } else {
+                device.transform_rect_bbox(local_b)
+            };
+            if dev_b.width() <= 0.0 && dev_b.height() <= 0.0 {
+                return None;
+            }
+            let mut feat = if let Some(sw) = stroke_width {
+                if sw <= 0.0 {
+                    return None;
+                }
+                sw * det_scale
+            } else {
+                match entry {
+                    crate::record::PathEntry::Rect { w, h, .. }
+                    | crate::record::PathEntry::Ellipse { w, h }
+                    | crate::record::PathEntry::Box { w, h, .. }
+                    | crate::record::PathEntry::Oval { w, h, .. } => w.min(*h) * det_scale,
+                    crate::record::PathEntry::Glyphs { scale, glyphs } => {
+                        let glyph_h = glyphs
+                            .iter()
+                            .find_map(|g| store.glyphs.bounds(g.glyph).map(|b| b.height() as f32))
+                            .filter(|&h| h > 0.0)
+                            .unwrap_or(1000.0);
+                        glyph_h * *scale * 0.14 * det_scale
+                    }
+                    crate::record::PathEntry::Path(compact) => {
+                        let b = compact.bounds()?;
+                        let span = b.width().min(b.height()) as f32;
+                        if span <= 0.0 {
+                            return None;
+                        }
+                        let factor = if compact.len() > 6 { 0.25 } else { 1.0 };
+                        span * factor * det_scale
+                    }
+                    crate::record::PathEntry::Outside(_) => return None,
+                }
+            };
+            if stroke_width.is_none()
+                && let crate::record::Paint::Image(img) = paint
+            {
+                let img_span = (device * img.matrix).determinant().abs().sqrt() as f32;
+                if img_span > 0.0 && img_span.is_finite() {
+                    feat = feat.min((img_span / 64.0).max(1.0));
+                }
+            }
+            (feat > 0.0 && feat.is_finite()).then_some((dev_b, feat))
+        }
+        type ClipFrameEntry = Option<(Rect, Option<[u8; 4]>)>;
+        #[inline(never)]
+        fn unfilled_clip_from_stack(stack: &[ClipFrameEntry]) -> Option<[f32; 4]> {
+            let mut bounds: Option<[f32; 4]> = None;
+            let mut inner_fill: Option<[u8; 4]> = None;
+            for item in stack.iter().rev() {
+                if let Some((b, fill)) = *item {
+                    bounds = Some(match bounds {
+                        Some([x0, y0, x1, y1]) => [
+                            x0.max(b.x0 as f32),
+                            y0.max(b.y0 as f32),
+                            x1.min(b.x1 as f32),
+                            y1.min(b.y1 as f32),
+                        ],
+                        None => {
+                            inner_fill = fill;
+                            [b.x0 as f32, b.y0 as f32, b.x1 as f32, b.y1 as f32]
+                        }
+                    });
+                }
+            }
+            bounds.filter(|[x0, y0, x1, y1]| inner_fill.is_none() && x1 > x0 && y1 > y0)
+        }
+        /// Spatial post-effect reach (LayerBlur, Texture) for enclosing scopes.
+        /// Noise is pointwise and adds zero reach. When `plan_viewport` is true, adds exec.rs's
+        /// 4 px padded-output rounding and pyramid-alignment slack so coarse captures and native
+        /// samples cover the full post-effect `src_area`, and reports whether any spatial
+        /// post-effect overflows native GPU limits.
+        #[inline(never)]
+        fn post_effect_reach(
+            r: &crate::record::Record,
+            view_scale: f64,
+            max_side: f64,
+            plan_viewport: bool,
+        ) -> (f64, bool) {
             let mut reach = 0.0f64;
+            let mut max_step = 4i32;
+            let mut overflow = false;
             for pe in &r.post_effects {
                 match *pe {
-                    crate::record::PostEffect::LayerBlur { radius } => {
+                    crate::record::PostEffect::LayerBlur { radius } if radius > 0.0 => {
                         let sigma = (f64::from(crate::blur::sigma_from_radius(radius)) * view_scale) as f32;
-                        if sigma >= 1e-4 {
+                        if !sigma.is_finite() || sigma > crate::blur::MAX_BLUR_SIGMA {
+                            overflow = true;
+                            if !plan_viewport && sigma >= 1e-4 {
+                                reach += f64::from(crate::shadow::blur_support_pad(sigma))
+                                    .max(f64::from(crate::blur::blur_reach(sigma)));
+                            }
+                        } else if sigma >= 1e-4 {
                             reach += f64::from(crate::shadow::blur_support_pad(sigma))
                                 .max(f64::from(crate::blur::blur_reach(sigma)));
+                            if plan_viewport && sigma > crate::blur::DIRECT_SIGMA_MAX {
+                                let (lvl, _) = crate::blur::choose_level(sigma, crate::blur::MAX_PYRAMID_LEVELS);
+                                max_step = max_step.max(1i32 << lvl.min(8));
+                            }
                         }
                     }
-                    crate::record::PostEffect::Texture { size, radius, .. } => {
-                        let radius_dev = (f64::from(radius) * view_scale) as f32;
-                        if size > 0.0 && radius_dev >= 1e-4 {
+                    crate::record::PostEffect::Texture { size, radius, .. } if size > 0.0 && radius > 0.0 => {
+                        let radius_dev = f64::from(radius) * view_scale;
+                        if !radius_dev.is_finite() || radius_dev > max_side {
+                            overflow = true;
+                            if !plan_viewport && radius_dev >= 1e-4 {
+                                reach += f64::from((radius_dev.ceil() as i32).saturating_add(2));
+                            }
+                        } else if radius_dev >= 1e-4 {
                             reach += f64::from((radius_dev.ceil() as i32).saturating_add(2));
                         }
                     }
-                    crate::record::PostEffect::Noise { .. } => {}
+                    _ => {}
                 }
             }
-            reach
+            if plan_viewport && reach > 0.0 {
+                reach += f64::from(max_step) + 8.0;
+            }
+            (reach, overflow)
         }
-        let view_scale = view.determinant().abs().sqrt();
         #[allow(clippy::too_many_arguments)]
         fn collect(
             store: &Store,
             view: Affine,
             view_scale: f64,
+            max_side: f64,
+            plan_viewport: bool,
             id: u32,
             parent: Affine,
             alpha: f32,
             parent_context: bool,
-            inside_post_scope: bool,
             post_reach_px: f64,
+            spatial_post_overflow: bool,
+            order: &mut usize,
+            clip_stack: &mut Vec<ClipFrameEntry>,
+            features: &mut Vec<(Rect, f32, usize)>,
             out: &mut Vec<ReaderNode>,
         ) {
             let Some(node) = store.nodes.get(&id) else {
@@ -1733,133 +1905,247 @@ impl Engine {
                 return;
             }
             let inner = if r.isolate() && r.opacity < 1.0 { 1.0 } else { opacity };
-            // Post-effects can sample outside the nominal target of a reader in the picture.
-            let inside_post_scope = inside_post_scope || !r.post_effects.is_empty();
-            let post_reach_px = post_reach_px + post_effect_reach(r, view_scale);
+            let (own_post_reach, own_overflow) = if r.post_effects.iter().any(crate::record::PostEffect::is_spatial) {
+                post_effect_reach(r, view_scale, max_side, plan_viewport)
+            } else {
+                (0.0, false)
+            };
+            let post_reach_px = post_reach_px + own_post_reach;
+            let spatial_post_overflow = spatial_post_overflow || own_overflow;
             let box_rect = Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1]));
             let local = r
                 .content_bounds(&|g| store.glyphs.bounds(g))
                 .map_or(box_rect, |cb| cb.union(box_rect));
             let [a, b, c, d, _, _] = device.as_coeffs();
             let scale = (a.abs() + c.abs()).max(b.abs() + d.abs());
-            for op in &r.ops {
+            let det_scale = device.determinant().abs().sqrt() as f32;
+            let clip_base = clip_stack.len();
+            for (at, op) in r.ops.iter().enumerate() {
                 match op {
+                    crate::record::Op::Clip { path, .. } if plan_viewport => {
+                        let entry = if exec::clip_wraps_children(&r.ops, at) {
+                            r.entry_bounds(*path, &|g| store.glyphs.bounds(g)).map(|lb| {
+                                (
+                                    device.transform_rect_bbox(lb),
+                                    exec::frame_solid_fill(&r.ops, at, inner),
+                                )
+                            })
+                        } else {
+                            None
+                        };
+                        clip_stack.push(entry);
+                    }
+                    crate::record::Op::Unclip if plan_viewport => {
+                        if clip_stack.len() > clip_base {
+                            clip_stack.pop();
+                        }
+                    }
+                    crate::record::Op::Fill { path, paint, .. } if plan_viewport && !is_context => {
+                        *order += 1;
+                        if paint_alpha_visible(paint, inner)
+                            && let Some((dev_b, feat)) =
+                                entry_feature_px(store, r, *path, paint, None, device, det_scale)
+                        {
+                            features.push((dev_b, feat, *order));
+                        }
+                    }
+                    crate::record::Op::Stroke { path, style, paint, .. } if plan_viewport && !is_context => {
+                        *order += 1;
+                        if paint_alpha_visible(paint, inner)
+                            && let Some((dev_b, feat)) =
+                                entry_feature_px(store, r, *path, paint, Some(style.width), device, det_scale)
+                        {
+                            features.push((dev_b, feat, *order));
+                        }
+                    }
                     crate::record::Op::Children => {
                         for &kid in &node.children {
                             collect(
                                 store,
                                 view,
                                 view_scale,
+                                max_side,
+                                plan_viewport,
                                 kid,
                                 world,
                                 inner,
                                 is_context,
-                                inside_post_scope,
                                 post_reach_px,
+                                spatial_post_overflow,
+                                order,
+                                clip_stack,
+                                features,
                                 out,
                             );
                         }
                     }
                     crate::record::Op::Glass(g) if !is_context => {
+                        *order += 1;
                         let reach_px = (f64::from(crate::glass::local_halo(g)) * scale).ceil() + 2.0;
                         let paint = device.transform_rect_bbox(local);
                         out.push(ReaderNode {
+                            key: (id, at),
                             paint,
                             read: paint.inflate(reach_px, reach_px),
                             reach_px,
                             post_reach_px,
                             writes_backdrop: false,
-                            native_reach_px: 0.0,
+                            kind: ReaderKind::Glass,
+                            spatial_post_overflow,
+                            paint_order: *order,
+                            unfilled_clip: None,
                         });
                     }
                     crate::record::Op::Read { halo, .. } => {
+                        *order += 1;
                         let reach_px = (f64::from(*halo) * scale).ceil() + 2.0;
                         let paint = device.transform_rect_bbox(local);
                         out.push(ReaderNode {
+                            key: (id, at),
                             paint,
                             read: paint.inflate(reach_px, reach_px),
                             reach_px,
                             post_reach_px,
                             writes_backdrop: true,
-                            native_reach_px: reach_px,
+                            kind: ReaderKind::Read,
+                            spatial_post_overflow,
+                            paint_order: *order,
+                            unfilled_clip: None,
                         });
                     }
                     crate::record::Op::BackgroundBlur(b_op) => {
+                        *order += 1;
                         let sigma_px = crate::blur::sigma_from_radius(b_op.radius) * scale as f32;
                         let reach_px = f64::from(crate::blur::replay_reach(sigma_px)).ceil() + 2.0;
                         let paint = device.transform_rect_bbox(local);
+                        let sigma_det = crate::blur::sigma_from_radius(b_op.radius) * det_scale;
+                        let unfilled_clip = if plan_viewport {
+                            unfilled_clip_from_stack(clip_stack)
+                        } else {
+                            None
+                        };
                         out.push(ReaderNode {
+                            key: (id, at),
                             paint,
                             read: paint.inflate(reach_px, reach_px),
                             reach_px,
                             post_reach_px,
                             writes_backdrop: true,
-                            native_reach_px: if inside_post_scope
-                                || crate::blur::sigma_from_radius(b_op.radius)
-                                    * (device.determinant().abs().sqrt() as f32)
-                                    < crate::blur::VIEWPORT_HALO_MIN_SIGMA
-                            {
-                                reach_px
-                            } else {
-                                0.0
-                            },
+                            kind: ReaderKind::UniformBlur { sigma: sigma_det },
+                            spatial_post_overflow,
+                            paint_order: *order,
+                            unfilled_clip,
                         });
                     }
                     crate::record::Op::ProgressiveBlur(p_op) => {
-                        let r = p_op.start_radius.max(p_op.end_radius);
-                        let sigma_px = crate::blur::sigma_from_radius(r) * scale as f32;
+                        *order += 1;
+                        let max_r = p_op.start_radius.max(p_op.end_radius);
+                        let sigma_px = crate::blur::sigma_from_radius(max_r) * scale as f32;
                         let reach_px = f64::from(crate::blur::replay_reach(sigma_px)).ceil() + 2.0;
                         let paint = device.transform_rect_bbox(local);
-                        #[cfg(feature = "gpu-common")]
-                        let native_reach_px = if inside_post_scope {
-                            reach_px
+                        let s0 = crate::blur::sigma_from_radius(p_op.start_radius) * det_scale;
+                        let s1 = crate::blur::sigma_from_radius(p_op.end_radius) * det_scale;
+                        let plan = crate::progressive_blur::ProgressivePlan::new(p_op, device, r.size, det_scale);
+                        let unfilled_clip = if plan_viewport {
+                            unfilled_clip_from_stack(clip_stack)
                         } else {
-                            let factor = device.determinant().abs().sqrt() as f32;
-                            let sigma = crate::progressive_blur::viewport_native_sigma(
-                                crate::blur::sigma_from_radius(p_op.start_radius) * factor,
-                                crate::blur::sigma_from_radius(p_op.end_radius) * factor,
-                            );
-                            sigma.map_or(reach_px, |sigma| {
-                                if sigma > 0.0 {
-                                    f64::from(crate::blur::blur_reach(sigma)).ceil() + 2.0
-                                } else {
-                                    0.0
-                                }
-                            })
+                            None
                         };
-                        #[cfg(not(feature = "gpu-common"))]
-                        let native_reach_px = reach_px;
                         out.push(ReaderNode {
+                            key: (id, at),
                             paint,
                             read: paint.inflate(reach_px, reach_px),
                             reach_px,
                             post_reach_px,
                             writes_backdrop: true,
-                            native_reach_px,
+                            kind: ReaderKind::ProgressiveBlur {
+                                lo: s0.min(s1),
+                                hi: s0.max(s1),
+                                plan,
+                            },
+                            spatial_post_overflow,
+                            paint_order: *order,
+                            unfilled_clip,
                         });
                     }
                     _ => {}
                 }
             }
+            clip_stack.truncate(clip_base);
         }
         let mut nodes = Vec::new();
+        let mut features = Vec::new();
+        let mut clip_stack = Vec::new();
+        let mut order = 0usize;
         if let Some(root) = self.store.nodes.get(&crate::store::ROOT) {
             for &kid in &root.children {
                 collect(
                     &self.store,
                     view,
                     view_scale,
+                    max_side,
+                    plan_viewport,
                     kid,
                     Affine::IDENTITY,
                     1.0,
                     false,
-                    false,
                     0.0,
+                    false,
+                    &mut order,
+                    &mut clip_stack,
+                    &mut features,
                     &mut nodes,
                 );
             }
         }
         let overlaps = |a: Rect, b: Rect| a.x0 <= b.x1 && b.x0 <= a.x1 && a.y0 <= b.y1 && b.y0 <= a.y1;
+        #[inline(never)]
+        fn propagate_writers(
+            writers: &[usize],
+            nodes: &[ReaderNode],
+            i: usize,
+            reach: f64,
+            needed: &mut [f64],
+            mut reader_only: Option<(&mut [f64], f64)>,
+            mut downstream: Option<&mut Vec<(u32, usize)>>,
+        ) {
+            let earlier = writers.partition_point(|&writer| writer < i);
+            let read = nodes[i].read;
+            for &writer in &writers[..earlier] {
+                let wp = nodes[writer]
+                    .paint
+                    .inflate(nodes[writer].post_reach_px, nodes[writer].post_reach_px);
+                if wp.x0 <= read.x1 && read.x0 <= wp.x1 && wp.y0 <= read.y1 && read.y0 <= wp.y1 {
+                    needed[writer] = needed[writer].max(reach);
+                    if let Some((ro_needed, ro_reach)) = reader_only.as_mut() {
+                        ro_needed[writer] = ro_needed[writer].max(*ro_reach);
+                    }
+                    if let Some(ds) = downstream.as_deref_mut()
+                        && !ds.contains(&nodes[writer].key)
+                    {
+                        ds.push(nodes[writer].key);
+                    }
+                }
+            }
+        }
+        #[inline(never)]
+        fn split_prog_for_rect(
+            lo: f32,
+            hi: f32,
+            plan: Option<&crate::progressive_blur::ProgressivePlan>,
+            rect: Rect,
+            min_el: f32,
+            nat_cut: f32,
+            far_cut: f32,
+        ) -> crate::halo::ProgressiveTierSplit {
+            match plan {
+                Some(p) if rect.width() > 0.0 && rect.height() > 0.0 => {
+                    let (vf, ve) = p.active_stop_range(rect);
+                    crate::halo::split_progressive_stops_slice(&p.stops[vf..ve], hi, min_el, nat_cut, far_cut)
+                }
+                _ => crate::halo::split_progressive_stops(lo, hi, min_el, nat_cut, far_cut),
+            }
+        }
         // A reader contributes only when its output reaches the crop or a later relevant
         // reader. Glass can be a sink but never a source of another reader's backdrop.
         let writers: Vec<_> = nodes
@@ -1869,72 +2155,406 @@ impl Engine {
             .collect();
         let mut needed_by_later = vec![0.0f64; nodes.len()];
         let mut reader_only_needed = vec![0.0f64; nodes.len()];
-        let mut native_needed = vec![0.0f64; nodes.len()];
+        let mut active_node = vec![false; nodes.len()];
+        let mut downstream_readers: Vec<(u32, usize)> = Vec::new();
+        let mut samples = crop.unwrap_or(Rect::ZERO);
         let mut total = 0.0f64;
         let mut reader_only = 0.0f64;
         for (i, node) in nodes.iter().enumerate().rev() {
             let downstream = needed_by_later[i];
             let reader_downstream = reader_only_needed[i];
-            let native_downstream = native_needed[i];
+            let vis_pad = downstream + node.post_reach_px;
             let affected = node.paint.inflate(node.post_reach_px, node.post_reach_px);
             if downstream == 0.0 && crop.is_some_and(|rect| !overlaps(affected, rect)) {
                 continue;
             }
+            active_node[i] = true;
             let reach = node.reach_px + node.post_reach_px + downstream;
-            total = total.max(reach);
             let reader_reach_only = node.reach_px + reader_downstream;
+            total = total.max(reach);
             reader_only = reader_only.max(reader_reach_only);
             if let Some(crop) = crop {
-                let visible = node
-                    .paint
-                    .intersect(crop.inflate(downstream + node.post_reach_px, downstream + node.post_reach_px));
+                let visible = node.paint.intersect(crop.inflate(vis_pad, vis_pad));
                 if visible.width() > 0.0 && visible.height() > 0.0 {
                     samples = samples.union(visible.inflate(node.reach_px, node.reach_px));
                 }
             }
-            let native_reach = if node.native_reach_px > 0.0 {
-                if let Some(crop) = crop {
-                    let visible = node.paint.intersect(crop.inflate(
-                        native_downstream + node.post_reach_px,
-                        native_downstream + node.post_reach_px,
-                    ));
-                    if visible.width() > 0.0 && visible.height() > 0.0 {
-                        let reach = node.native_reach_px;
-                        native_samples = native_samples.union(visible.inflate(reach, reach));
-                        reach + node.post_reach_px + native_downstream
-                    } else {
+            propagate_writers(
+                &writers,
+                &nodes,
+                i,
+                reach,
+                &mut needed_by_later,
+                Some((&mut reader_only_needed, reader_reach_only)),
+                Some(&mut downstream_readers),
+            );
+        }
+        let Some(crop) = crop.filter(|_| plan_viewport) else {
+            return (total, reader_only, None);
+        };
+        let frame_irect = IRect::around(crop);
+        let samples_rect = IRect::around(samples);
+        if samples_rect == frame_irect {
+            return (total, reader_only, None);
+        }
+
+        let far_divisor = crate::halo::replay_divisor(samples_rect, replay_limit);
+        let far_prog_cut = crate::halo::progressive_cutover_sigma(far_divisor);
+        let far_unif_cut = crate::halo::uniform_cutover_sigma(far_divisor);
+
+        // Determine if any visible reader benefits from coarse halo mode, and whether a mid-range
+        // coarse tier is needed when `far_divisor > 16` so native padding stays compact and glass
+        // lenses stacked over wide blurs never sample sub-3*d_far stops.
+        let mut any_coarse = false;
+        let mut far_has_blur = false;
+        let mut any_mid = false;
+        let mut mid_needed = vec![0.0f64; nodes.len()];
+        let mut downstream_mid_readers: Vec<(u32, usize)> = Vec::new();
+        let mut mid_samples_f = crop;
+        let mut glass_mid_rects: Vec<Rect> = Vec::new();
+        let mut max_far_blur_order = 0usize;
+        let mut max_mid_blur_order = 0usize;
+        let mut node_uses_coarse_blur = vec![false; nodes.len()];
+        for (i, node) in nodes.iter().enumerate().rev() {
+            if !active_node[i] {
+                continue;
+            }
+            let mid_downstream = mid_needed[i];
+            let post_pad = if node.spatial_post_overflow {
+                0.0
+            } else {
+                node.post_reach_px
+            };
+            let vis_pad = mid_downstream + post_pad;
+            let visible = node.paint.intersect(crop.inflate(vis_pad, vis_pad));
+            let mid_reach_px = if node.spatial_post_overflow {
+                0.0
+            } else {
+                match node.kind {
+                    ReaderKind::Glass => {
+                        any_coarse = true;
+                        // If this visible glass lens overlaps an earlier active blur that has stops
+                        // below `far_cut`, pull that blur into `downstream_mid_readers` so glass
+                        // can sample a mid-tier (or mid-patched) prefix obeying `sigma >= 3 * d`.
+                        if far_divisor > crate::halo::MID_TIER_TRIGGER_DIVISOR {
+                            let earlier = writers.partition_point(|&writer| writer < i);
+                            let mut feeds_sub_far_blur = false;
+                            for &writer in &writers[..earlier] {
+                                if !active_node[writer] || nodes[writer].spatial_post_overflow {
+                                    continue;
+                                }
+                                let writer_paint = nodes[writer]
+                                    .paint
+                                    .inflate(nodes[writer].post_reach_px, nodes[writer].post_reach_px);
+                                if !overlaps(writer_paint, node.read) {
+                                    continue;
+                                }
+                                let has_sub_far = match nodes[writer].kind {
+                                    ReaderKind::UniformBlur { sigma } => sigma > 0.0 && sigma < far_unif_cut,
+                                    ReaderKind::ProgressiveBlur { lo, hi, ref plan } => {
+                                        if hi <= 0.0 {
+                                            false
+                                        } else {
+                                            let overlap = writer_paint.intersect(node.read);
+                                            match plan {
+                                                Some(p) if overlap.width() > 0.0 && overlap.height() > 0.0 => {
+                                                    let (vf, ve) = p.active_stop_range(overlap);
+                                                    p.stops[vf..ve].iter().any(|&s| s > 0.0 && s < far_prog_cut)
+                                                }
+                                                _ => lo < far_prog_cut,
+                                            }
+                                        }
+                                    }
+                                    _ => false,
+                                };
+                                if has_sub_far {
+                                    feeds_sub_far_blur = true;
+                                    if !downstream_mid_readers.contains(&nodes[writer].key) {
+                                        downstream_mid_readers.push(nodes[writer].key);
+                                    }
+                                    // Ensure the mid tier covers the visible glass lens (plus
+                                    // modest padding capped below the blur's own mid reach) so
+                                    // mid captures the blur under the lens.
+                                    let lens_vis = visible.inflate(node.reach_px.min(512.0), node.reach_px.min(512.0));
+                                    if lens_vis.width() > 0.0 && lens_vis.height() > 0.0 {
+                                        let dx = (lens_vis.x0 - crop.x0)
+                                            .abs()
+                                            .max((lens_vis.x1 - crop.x1).abs())
+                                            .max((lens_vis.y0 - crop.y0).abs())
+                                            .max((lens_vis.y1 - crop.y1).abs());
+                                        mid_needed[writer] = mid_needed[writer].max(dx.max(1.0));
+                                    } else {
+                                        mid_needed[writer] = mid_needed[writer].max(1.0);
+                                    }
+                                }
+                            }
+                            if feeds_sub_far_blur {
+                                any_mid = true;
+                                if visible.width() > 0.0 && visible.height() > 0.0 {
+                                    glass_mid_rects.push(visible.inflate(node.reach_px, node.reach_px));
+                                }
+                            }
+                        }
                         0.0
                     }
-                } else {
-                    0.0
-                }
-            } else if node.post_reach_px > 0.0 {
-                if let Some(crop) = crop {
-                    let visible = node.paint.intersect(crop.inflate(
-                        native_downstream + node.post_reach_px,
-                        native_downstream + node.post_reach_px,
-                    ));
-                    if visible.width() > 0.0 && visible.height() > 0.0 {
-                        native_samples = native_samples.union(visible);
+                    ReaderKind::Read => node.reach_px,
+                    ReaderKind::UniformBlur { sigma } => {
+                        if sigma >= far_unif_cut {
+                            any_coarse = true;
+                            far_has_blur = true;
+                            node_uses_coarse_blur[i] = true;
+                            max_far_blur_order = max_far_blur_order.max(node.paint_order);
+                            0.0
+                        } else if far_divisor > crate::halo::MID_TIER_TRIGGER_DIVISOR
+                            && sigma >= crate::blur::VIEWPORT_HALO_MIN_SIGMA
+                        {
+                            any_coarse = true;
+                            any_mid = true;
+                            node_uses_coarse_blur[i] = true;
+                            max_mid_blur_order = max_mid_blur_order.max(node.paint_order);
+                            f64::from(crate::blur::blur_reach(sigma)).ceil() + 2.0
+                        } else {
+                            0.0
+                        }
+                    }
+                    ReaderKind::ProgressiveBlur { lo, hi, ref plan } => {
+                        let split = split_prog_for_rect(
+                            lo,
+                            hi,
+                            plan.as_ref(),
+                            visible,
+                            crate::blur::VIEWPORT_HALO_MIN_SIGMA,
+                            crate::progressive_blur::VIEWPORT_NATIVE_SIGMA,
+                            far_prog_cut,
+                        );
+                        if split.uses_coarse || (hi >= far_unif_cut && hi >= far_prog_cut) {
+                            any_coarse = true;
+                            node_uses_coarse_blur[i] = true;
+                            if hi >= far_unif_cut && hi >= far_prog_cut {
+                                far_has_blur = true;
+                                max_far_blur_order = max_far_blur_order.max(node.paint_order);
+                            }
+                        }
+                        if far_divisor > crate::halo::MID_TIER_TRIGGER_DIVISOR && split.mid_max_sigma > 0.0 {
+                            any_mid = true;
+                            max_mid_blur_order = max_mid_blur_order.max(node.paint_order);
+                            f64::from(crate::blur::blur_reach(split.mid_max_sigma)).ceil() + 2.0
+                        } else {
+                            0.0
+                        }
                     }
                 }
-                0.0
+            };
+            let mid_reach = if mid_reach_px > 0.0 && visible.width() > 0.0 && visible.height() > 0.0 {
+                mid_samples_f = mid_samples_f.union(visible.inflate(mid_reach_px, mid_reach_px));
+                mid_reach_px + post_pad + mid_downstream
             } else {
                 0.0
             };
-            let earlier = writers.partition_point(|&writer| writer < i);
-            for &writer in &writers[..earlier] {
-                let writer_paint = nodes[writer]
-                    .paint
-                    .inflate(nodes[writer].post_reach_px, nodes[writer].post_reach_px);
-                if overlaps(writer_paint, node.read) {
-                    needed_by_later[writer] = needed_by_later[writer].max(reach);
-                    reader_only_needed[writer] = reader_only_needed[writer].max(reader_reach_only);
-                    native_needed[writer] = native_needed[writer].max(native_reach);
+            if mid_reach > 0.0 {
+                propagate_writers(
+                    &writers,
+                    &nodes,
+                    i,
+                    mid_reach,
+                    &mut mid_needed,
+                    None,
+                    Some(&mut downstream_mid_readers),
+                );
+            }
+        }
+        if !any_coarse {
+            return (
+                total,
+                reader_only,
+                Some(crate::halo::ViewportHaloPlan {
+                    samples: samples_rect,
+                    mid_samples: None,
+                    far_divisor,
+                    mid_divisor: None,
+                    native_samples: samples_rect,
+                    capture_bounds: samples_rect,
+                    downstream_readers,
+                    downstream_mid_readers,
+                    use_coarse_halo: false,
+                    far_has_blur: false,
+                    far_min_feature_px: f32::INFINITY,
+                    mid_min_feature_px: f32::INFINITY,
+                    clamp_clips: Vec::new(),
+                }),
+            );
+        }
+
+        let mid_limit = replay_limit.saturating_add(replay_limit / 2);
+        let (mid_samples, mid_divisor) = if any_mid {
+            let base_rect = IRect::around(mid_samples_f);
+            let base_div = crate::halo::replay_divisor(base_rect, mid_limit).max(crate::halo::MID_TIER_MIN_DIVISOR);
+            // Expand `mid_samples_f` to include glass lens read rects ONLY when doing so does not
+            // inflate `d_mid` above `base_div` (or `far_divisor / 2`), keeping native padding compact.
+            let max_glass_div = base_div.max(crate::halo::MID_TIER_MIN_DIVISOR).min(far_divisor / 2);
+            for gr in &glass_mid_rects {
+                let cand = IRect::around(mid_samples_f.union(*gr));
+                let cand_div = crate::halo::replay_divisor(cand, mid_limit).max(crate::halo::MID_TIER_MIN_DIVISOR);
+                if cand_div <= max_glass_div {
+                    mid_samples_f = mid_samples_f.union(*gr);
+                }
+            }
+            let mid_rect = IRect::around(mid_samples_f);
+            let d_mid = crate::halo::replay_divisor(mid_rect, mid_limit).max(crate::halo::MID_TIER_MIN_DIVISOR);
+            if d_mid < far_divisor {
+                (Some(mid_rect), Some(d_mid))
+            } else {
+                (None, None)
+            }
+        } else {
+            (None, None)
+        };
+
+        // Compute device-resolution native padding and coarse capture coverage against the finest
+        // active coarse tier's divisor-aware cut-over.
+        let lowest_div = mid_divisor.unwrap_or(far_divisor);
+        let native_prog_cut = crate::halo::progressive_cutover_sigma(lowest_div);
+        let native_unif_cut = crate::halo::uniform_cutover_sigma(lowest_div);
+        let mut native_needed = vec![0.0f64; nodes.len()];
+        let mut native_samples_f = crop;
+        for (i, node) in nodes.iter().enumerate().rev() {
+            if !active_node[i] {
+                continue;
+            }
+            let native_downstream = native_needed[i];
+            let post_pad = if node.spatial_post_overflow {
+                0.0
+            } else {
+                node.post_reach_px
+            };
+            let vis_pad = native_downstream + post_pad;
+            let visible = node.paint.intersect(crop.inflate(vis_pad, vis_pad));
+            if post_pad > 0.0 && visible.width() > 0.0 && visible.height() > 0.0 {
+                // Keep the device pass large enough to cover enclosing LayerBlur/Texture src_area
+                // so `blur_dirty_rect` blurs the full apron and inherited prefixes cover it.
+                native_samples_f = native_samples_f.union(visible);
+            }
+            let native_reach_px = match node.kind {
+                ReaderKind::Glass => 0.0,
+                ReaderKind::Read => node.reach_px,
+                ReaderKind::UniformBlur { sigma } => {
+                    if node.spatial_post_overflow || sigma < native_unif_cut {
+                        node.reach_px
+                    } else {
+                        0.0
+                    }
+                }
+                ReaderKind::ProgressiveBlur { lo, hi, ref plan } => {
+                    if node.spatial_post_overflow {
+                        node.reach_px
+                    } else if visible.width() <= 0.0 || visible.height() <= 0.0 {
+                        0.0
+                    } else {
+                        let split = split_prog_for_rect(
+                            lo,
+                            hi,
+                            plan.as_ref(),
+                            visible,
+                            native_unif_cut,
+                            native_prog_cut,
+                            f32::INFINITY,
+                        );
+                        if split.native_max_sigma > 0.0 {
+                            f64::from(crate::blur::blur_reach(split.native_max_sigma)).ceil() + 2.0
+                        } else {
+                            0.0
+                        }
+                    }
+                }
+            };
+            let native_reach = if native_reach_px > 0.0 && visible.width() > 0.0 && visible.height() > 0.0 {
+                native_samples_f = native_samples_f.union(visible.inflate(native_reach_px, native_reach_px));
+                native_reach_px + post_pad + native_downstream
+            } else {
+                0.0
+            };
+            propagate_writers(&writers, &nodes, i, native_reach, &mut native_needed, None, None);
+        }
+        let native_samples = IRect::around(native_samples_f);
+        // Enclosing native spatial post-effects (LayerBlur / Texture) clamp their out_area to the
+        // device target (`native_samples`) and inflate `src_area` by `post_reach_px`. Ensure coarse
+        // captures and replay bounds cover that full `src_area`.
+        let mut capture_bounds_f = native_samples_f;
+        let mut samples_final_f = samples;
+        for (i, node) in nodes.iter().enumerate() {
+            if !active_node[i] || node.post_reach_px <= 0.0 || node.spatial_post_overflow {
+                continue;
+            }
+            let post_vis = node
+                .paint
+                .intersect(native_samples_f.inflate(node.post_reach_px, node.post_reach_px));
+            if post_vis.width() > 0.0 && post_vis.height() > 0.0 {
+                capture_bounds_f = capture_bounds_f.union(post_vis);
+                samples_final_f = samples_final_f.union(post_vis.inflate(node.reach_px, node.reach_px));
+            }
+        }
+        let capture_bounds = IRect::around(capture_bounds_f);
+        let samples_rect = IRect::around(samples_final_f);
+
+        // Compute finest backdrop feature size (device px) preceding active blurs in each tier.
+        let far_min_feature_px = if max_far_blur_order > 0 {
+            features
+                .iter()
+                .filter(|(b, _, ord)| *ord < max_far_blur_order && overlaps(*b, samples_final_f))
+                .map(|(_, f, _)| *f)
+                .fold(f32::INFINITY, f32::min)
+        } else {
+            f32::INFINITY
+        };
+        let mid_min_feature_px = if mid_samples.is_some() && max_mid_blur_order > 0 {
+            features
+                .iter()
+                .filter(|(b, _, ord)| *ord < max_mid_blur_order && overlaps(*b, mid_samples_f))
+                .map(|(_, f, _)| *f)
+                .fold(f32::INFINITY, f32::min)
+        } else {
+            f32::INFINITY
+        };
+
+        // Record unfilled `EdgeMode::Clamp` clip frames wrapping active coarse-tier blurs so the
+        // GPU can capture exact 1-pixel-aligned edge strips before blurring.
+        let mut clamp_clips = Vec::new();
+        for (i, node) in nodes.iter().enumerate() {
+            if !active_node[i] || !node_uses_coarse_blur[i] || node.spatial_post_overflow {
+                continue;
+            }
+            if let Some(clip_dev) = node.unfilled_clip {
+                let vis = node.paint.intersect(capture_bounds_f);
+                if vis.width() > 0.0 && vis.height() > 0.0 {
+                    let reach_rect = IRect::around(vis.inflate(node.reach_px, node.reach_px));
+                    clamp_clips.push(crate::halo::HaloClampClip {
+                        reader_key: node.key,
+                        clip_dev,
+                        reach_rect,
+                    });
                 }
             }
         }
-        (total, reader_only, samples, native_samples)
+
+        (
+            total,
+            reader_only,
+            Some(crate::halo::ViewportHaloPlan {
+                samples: samples_rect,
+                mid_samples,
+                far_divisor,
+                mid_divisor,
+                native_samples,
+                capture_bounds,
+                downstream_readers,
+                downstream_mid_readers,
+                use_coarse_halo: true,
+                far_has_blur,
+                far_min_feature_px,
+                mid_min_feature_px,
+                clamp_clips,
+            }),
+        )
     }
 
     /// Draws `area` of a `width` × `height` frame into the CPU target, extended by the readers'
@@ -2083,7 +2703,10 @@ impl Engine {
 
     /// Viewport tiles can grow past the export-band halo if their working target fits.
     fn cpu_view_halo(&self, view: Affine, crop: Rect, tile: u32) -> Result<i32> {
-        let halo = self.reader_reach(view, Some(crop)).0.ceil();
+        let halo = self
+            .reader_halo_plan(view, Some(crop), false, crate::halo::HALO_REPLAY_SIDE)
+            .0
+            .ceil();
         let side = f64::from(tile) + 2.0 * halo;
         let tile_bytes = side * side * 4.0;
         let budget = self.store.limits.memory_bytes;
@@ -2623,5 +3246,562 @@ fn blend(frame: &mut [u8], width: u32, height: u32, tile: &[u8], t: usize, fx: i
                 frame[to + c] = (u32::from(tile[from + c]) + (d * (255 - a) + 127) / 255).min(255) as u8;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod halo_plan_tests {
+    use super::*;
+    use crate::record::{BackgroundBlurOp, Op, PathEntry, PostEffect, ProgressiveBlurOp, Record};
+    use crate::store::ROOT;
+
+    fn make_record(size: [f32; 2], ops: Vec<Op>, post_effects: Vec<PostEffect>) -> Record {
+        Record {
+            flags: 0,
+            opacity: 1.0,
+            transform: Affine::IDENTITY,
+            size,
+            coarse_below: 0.0,
+            reach: 0.0,
+            unsupported: 0,
+            blend: 0,
+            mask: 0,
+            paths: vec![PathEntry::Box {
+                x: 0.0,
+                y: 0.0,
+                w: size[0],
+                h: size[1],
+                radii: [0.0; 4],
+                smoothing: 0.0,
+            }],
+            ops,
+            coarse: Vec::new(),
+            post_effects,
+        }
+    }
+
+    #[test]
+    fn post_effect_is_spatial_excludes_noise() {
+        assert!(
+            !PostEffect::Noise {
+                noise_type: 0,
+                size: 2.0,
+                density: 0.5,
+                color: [0.0, 0.0, 0.0, 1.0],
+                secondary_color: [0.0; 4],
+                opacity: 1.0,
+            }
+            .is_spatial()
+        );
+        assert!(PostEffect::LayerBlur { radius: 4.0 }.is_spatial());
+        assert!(!PostEffect::LayerBlur { radius: 0.0 }.is_spatial());
+        assert!(
+            PostEffect::Texture {
+                size: 8.0,
+                radius: 4.0,
+                clip_to_shape: false,
+            }
+            .is_spatial()
+        );
+        assert!(
+            !PostEffect::Texture {
+                size: 8.0,
+                radius: 0.0,
+                clip_to_shape: false,
+            }
+            .is_spatial()
+        );
+    }
+
+    #[test]
+    fn extreme_zoom_progressive_blur_uses_two_coarse_tiers_and_compact_native_pad() {
+        let mut engine = Engine::new(Limits::default());
+        let blur = make_record(
+            [100.0, 100.0],
+            vec![Op::ProgressiveBlur(Box::new(ProgressiveBlurOp {
+                paths: vec![0],
+                even_odd: false,
+                start_radius: 0.0,
+                end_radius: 40.0,
+                start: [0.0, 0.0],
+                end: [0.0, 1.0],
+            }))],
+            Vec::new(),
+        );
+        engine.store.insert_for_test(1, ROOT, blur);
+
+        // 25,600% zoom, DPR 2 (scale 512), 2880 x 1800 viewport -> sigma_max = 9216 px.
+        let view = Camera {
+            zoom: 256.0,
+            x: 0.0,
+            y: 0.0,
+            dpr: 2.0,
+        }
+        .view();
+        let crop = Rect::new(0.0, 0.0, 2880.0, 1800.0);
+        let (_, _, plan) = engine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
+        let plan = plan.expect("viewport halo plan");
+        assert!(plan.far_divisor >= 64, "far_divisor={}", plan.far_divisor);
+        assert_eq!(plan.mid_divisor, Some(8), "mid tier keeps native cut-over at 32 px");
+        // Native padding covers only stops < 32 px (~114 px reach), never 3 * far_divisor (~1344 px).
+        let native_pad = (-plan.native_samples.x0)
+            .max(-plan.native_samples.y0)
+            .max(plan.native_samples.x1 - 2880)
+            .max(plan.native_samples.y1 - 1800);
+        assert!(native_pad <= 160, "native_pad={native_pad} should stay compact");
+
+        // Panning into the deep-blur interior (y = 50 -> local sigma ~4600 px) needs neither the
+        // mid tier nor any native padding because every visible stop is >= 3 * far_divisor.
+        let deep_view = Camera {
+            zoom: 256.0,
+            x: 0.0,
+            y: -50.0 * 256.0,
+            dpr: 2.0,
+        }
+        .view();
+        let (_, _, deep_plan) = engine.reader_halo_plan(deep_view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
+        let deep_plan = deep_plan.expect("deep blur halo plan");
+        assert!(deep_plan.far_divisor >= 64);
+        assert_eq!(deep_plan.mid_divisor, None, "deep interior skips unused mid tier");
+        assert_eq!(deep_plan.native_samples, IRect::around(crop));
+    }
+
+    #[test]
+    fn noise_scope_uses_coarse_halo_without_extra_post_pad_and_layer_blur_grows_capture_only() {
+        let clipped_ops = vec![
+            Op::Clip {
+                path: 0,
+                even_odd: false,
+            },
+            Op::Children,
+            Op::Unclip,
+        ];
+        let wide_blur = make_record(
+            [200.0, 200.0],
+            vec![Op::BackgroundBlur(Box::new(BackgroundBlurOp {
+                paths: vec![0],
+                even_odd: false,
+                radius: 40.0,
+            }))],
+            Vec::new(),
+        );
+        let noise_pe = vec![PostEffect::Noise {
+            noise_type: 0,
+            size: 4.0,
+            density: 0.5,
+            color: [1.0, 1.0, 1.0, 0.5],
+            secondary_color: [0.0; 4],
+            opacity: 1.0,
+        }];
+        let view = Camera {
+            zoom: 128.0,
+            x: -2000.0,
+            y: -2000.0,
+            dpr: 2.0,
+        }
+        .view();
+        let crop = Rect::new(0.0, 0.0, 640.0, 384.0);
+
+        // 1a. Clipped Noise scope around wide background blur: coarse halo with zero extra pad.
+        let mut noise_engine = Engine::new(Limits::default());
+        noise_engine.store.insert_for_test(
+            1,
+            ROOT,
+            make_record([200.0, 200.0], clipped_ops.clone(), noise_pe.clone()),
+        );
+        noise_engine.store.insert_for_test(2, 1, wide_blur.clone());
+        let (_, _, noise_plan) = noise_engine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
+        let noise_plan = noise_plan.expect("clipped noise scope uses halo");
+        assert!(noise_plan.use_coarse_halo);
+        assert_eq!(
+            noise_plan.native_samples,
+            IRect {
+                x0: 0,
+                y0: 0,
+                x1: 640,
+                y1: 384
+            }
+        );
+        assert_eq!(noise_plan.capture_bounds, noise_plan.native_samples);
+
+        // 1b. Unclipped Noise scope also stays in coarse halo mode with zero extra pad.
+        let mut unclipped_noise = Engine::new(Limits::default());
+        unclipped_noise
+            .store
+            .insert_for_test(1, ROOT, make_record([200.0, 200.0], vec![Op::Children], noise_pe));
+        unclipped_noise.store.insert_for_test(2, 1, wide_blur.clone());
+        let (_, _, unclipped_plan) =
+            unclipped_noise.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
+        let unclipped_plan = unclipped_plan.expect("unclipped noise scope uses halo");
+        assert!(unclipped_plan.use_coarse_halo);
+        assert_eq!(unclipped_plan.native_samples, noise_plan.native_samples);
+
+        // 2a. Clipped native-fitting LayerBlur (radius 1 -> sigma = 115.2 <= 2560) stays in coarse
+        //     halo mode and grows both `native_samples` and `capture_bounds` to cover its full
+        //     `src_area` apron so `blur_dirty_rect` blurs the entire scope cleanly.
+        let mut lb_engine = Engine::new(Limits::default());
+        lb_engine.store.insert_for_test(
+            1,
+            ROOT,
+            make_record(
+                [200.0, 200.0],
+                clipped_ops.clone(),
+                vec![PostEffect::LayerBlur { radius: 1.0 }],
+            ),
+        );
+        lb_engine.store.insert_for_test(2, 1, wide_blur.clone());
+        let (_, _, lb_plan) = lb_engine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
+        let lb_plan = lb_plan.expect("clipped native-fitting LayerBlur uses halo");
+        assert!(lb_plan.use_coarse_halo);
+        assert!(lb_plan.native_samples.x0 <= -400 && lb_plan.native_samples.x1 >= 1040);
+        assert!(lb_plan.capture_bounds.x0 <= -400 && lb_plan.capture_bounds.x1 >= 1040);
+
+        // 2b. Unclipped native-fitting LayerBlur scope also stays in coarse halo mode with full
+        //     `src_area` padding in both `native_samples` and `capture_bounds`.
+        let mut unclipped_lb = Engine::new(Limits::default());
+        unclipped_lb.store.insert_for_test(
+            1,
+            ROOT,
+            make_record(
+                [200.0, 200.0],
+                vec![Op::Children],
+                vec![PostEffect::LayerBlur { radius: 1.0 }],
+            ),
+        );
+        unclipped_lb.store.insert_for_test(2, 1, wide_blur.clone());
+        let (_, _, unclipped_lb_plan) =
+            unclipped_lb.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
+        let unclipped_lb_plan = unclipped_lb_plan.expect("unclipped LayerBlur plan");
+        assert!(unclipped_lb_plan.use_coarse_halo);
+        assert!(unclipped_lb_plan.native_samples.x0 <= -400 && unclipped_lb_plan.native_samples.x1 >= 1040);
+
+        // 3. Overflowing LayerBlur (radius 30 -> sigma = 3456 > 2560) refuses coarse halo replay
+        //    even when clipped (keeps whole-frame padding with `use_coarse_halo == false`).
+        let mut ovf_engine = Engine::new(Limits::default());
+        ovf_engine.store.insert_for_test(
+            1,
+            ROOT,
+            make_record(
+                [200.0, 200.0],
+                clipped_ops,
+                vec![PostEffect::LayerBlur { radius: 30.0 }],
+            ),
+        );
+        ovf_engine.store.insert_for_test(2, 1, wide_blur);
+        let (_, _, ovf_plan) = ovf_engine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
+        let ovf_plan = ovf_plan.expect("padded whole-frame plan");
+        assert!(!ovf_plan.use_coarse_halo);
+    }
+
+    #[test]
+    fn uniform_cutover_routes_below_3d_to_mid_tier_and_native_above_d64() {
+        // Test BOTH orders: mid blur before overlapping far driver AND after, verifying the far
+        // driver never inflates `mid_samples` with its own far-tier reach.
+        for mid_first in [false, true] {
+            let mut engine = Engine::new(Limits::default());
+            // Wide driver blur pushes far_divisor to 64 (span ~36k / 1024 -> 64).
+            let driver = make_record(
+                [10.0, 10.0],
+                vec![Op::BackgroundBlur(Box::new(BackgroundBlurOp {
+                    paths: vec![0],
+                    even_odd: false,
+                    radius: 40.0,
+                }))],
+                Vec::new(),
+            );
+            // Secondary uniform blur with sigma = 144 (< 3 * 64 = 192, >= 128) -> routes to mid tier.
+            let mid_blur = make_record(
+                [10.0, 10.0],
+                vec![Op::BackgroundBlur(Box::new(BackgroundBlurOp {
+                    paths: vec![0],
+                    even_odd: false,
+                    radius: 1.25,
+                }))],
+                Vec::new(),
+            );
+            if mid_first {
+                engine.store.insert_for_test(1, ROOT, mid_blur);
+                engine.store.insert_for_test(2, ROOT, driver);
+            } else {
+                engine.store.insert_for_test(1, ROOT, driver);
+                engine.store.insert_for_test(2, ROOT, mid_blur);
+            }
+            let view = Camera {
+                zoom: 128.0,
+                x: 0.0,
+                y: 0.0,
+                dpr: 2.0,
+            }
+            .view();
+            let crop = Rect::new(0.0, 0.0, 640.0, 384.0);
+            let (_, _, plan) = engine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
+            let plan = plan.expect("two-tier halo plan");
+            assert!(plan.use_coarse_halo);
+            assert!(
+                plan.far_divisor >= 32,
+                "mid_first={mid_first} far_divisor={}",
+                plan.far_divisor
+            );
+            assert_eq!(
+                plan.mid_divisor,
+                Some(8),
+                "mid_first={mid_first}: mid tier must stay compact (d_mid=8) even under a later far driver"
+            );
+        }
+    }
+
+    #[test]
+    fn narrow_blur_keeps_whole_frame_padding_without_entering_coarse_halo() {
+        let mut engine = Engine::new(Limits::default());
+        let narrow = make_record(
+            [156.0, 160.0],
+            vec![Op::BackgroundBlur(Box::new(BackgroundBlurOp {
+                paths: vec![0],
+                even_odd: false,
+                radius: 48.0,
+            }))],
+            Vec::new(),
+        );
+        engine.store.insert_for_test(1, ROOT, narrow);
+        let view = Camera {
+            zoom: 1.0,
+            x: -20.0,
+            y: 0.0,
+            dpr: 1.0,
+        }
+        .view();
+        let crop = Rect::new(0.0, 0.0, 224.0, 224.0);
+        let (_, _, plan) = engine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
+        let plan = plan.expect("narrow whole-frame padding");
+        assert!(!plan.use_coarse_halo);
+        assert!(plan.samples.x0 < 0, "must pad left of viewport: {:?}", plan.samples);
+    }
+
+    #[test]
+    fn feature_scale_skips_supersample_for_coarse_backdrop_and_enables_it_for_fine_detail() {
+        use crate::record::{Paint, StrokeStyle};
+        // Bench-style coarse backdrop (5-unit bar = 100 px at scale 20) + 1-unit stroke AFTER blur.
+        let mut coarse = Engine::new(Limits::default());
+        let bar = make_record(
+            [200.0, 5.0],
+            vec![Op::Fill {
+                path: 0,
+                even_odd: false,
+                paint: Paint::Solid([0.1, 0.2, 0.8, 1.0]),
+                blend: 0,
+            }],
+            Vec::new(),
+        );
+        let blur = make_record(
+            [200.0, 200.0],
+            vec![Op::BackgroundBlur(Box::new(BackgroundBlurOp {
+                paths: vec![0],
+                even_odd: false,
+                radius: 40.0,
+            }))],
+            Vec::new(),
+        );
+        let after_stroke = make_record(
+            [200.0, 200.0],
+            vec![Op::Stroke {
+                path: 0,
+                style: Box::new(StrokeStyle {
+                    width: 1.0,
+                    cap: 0,
+                    join: 0,
+                    miter: 4.0,
+                    dashes: Vec::new(),
+                    dash_offset: 0.0,
+                }),
+                paint: Paint::Solid([1.0, 1.0, 1.0, 1.0]),
+                blend: 0,
+                cache: crate::stroke::StrokeCache::new(),
+            }],
+            Vec::new(),
+        );
+        coarse.store.insert_for_test(1, ROOT, bar);
+        coarse.store.insert_for_test(2, ROOT, blur.clone());
+        coarse.store.insert_for_test(3, ROOT, after_stroke);
+        let view = Camera {
+            zoom: 10.0,
+            x: 0.0,
+            y: 0.0,
+            dpr: 2.0,
+        }
+        .view();
+        let crop = Rect::new(0.0, 0.0, 2880.0, 1800.0);
+        let (_, _, plan) = coarse.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
+        let plan = plan.expect("coarse halo plan");
+        assert!(plan.use_coarse_halo);
+        // Feature width before blur is 5 * 20 = 100 px (the 1-unit stroke is AFTER the blur).
+        assert!(
+            (plan.far_min_feature_px - 100.0).abs() < 0.5,
+            "far_min_feature_px={}",
+            plan.far_min_feature_px
+        );
+        assert_eq!(
+            crate::halo::choose_supersample(plan.far_divisor, (768, 768), plan.far_min_feature_px, 4096, 12_000_000),
+            1
+        );
+
+        // Fine 0.5-unit stripe (10 px at scale 20) BEFORE blur forces supersampling.
+        let mut fine = Engine::new(Limits::default());
+        let thin = make_record(
+            [200.0, 0.5],
+            vec![Op::Fill {
+                path: 0,
+                even_odd: false,
+                paint: Paint::Solid([0.0, 0.0, 0.0, 1.0]),
+                blend: 0,
+            }],
+            Vec::new(),
+        );
+        fine.store.insert_for_test(1, ROOT, thin);
+        fine.store.insert_for_test(2, ROOT, blur);
+        let (_, _, fine_plan) = fine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
+        let fine_plan = fine_plan.expect("fine halo plan");
+        assert!(
+            (fine_plan.far_min_feature_px - 10.0).abs() < 0.5,
+            "fine_plan.far_min_feature_px={}",
+            fine_plan.far_min_feature_px
+        );
+        assert!(
+            crate::halo::choose_supersample(
+                fine_plan.far_divisor,
+                (768, 768),
+                fine_plan.far_min_feature_px,
+                4096,
+                12_000_000
+            ) >= 2
+        );
+    }
+
+    #[test]
+    fn glass_over_wide_blur_pulls_sub_far_blur_into_mid_tier() {
+        use crate::record::GlassOp;
+        let mut engine = Engine::new(Limits::default());
+        let blur = make_record(
+            [52.0, 100.0],
+            vec![Op::ProgressiveBlur(Box::new(ProgressiveBlurOp {
+                paths: vec![0],
+                even_odd: false,
+                start_radius: 0.0,
+                end_radius: 56.0,
+                start: [0.0, 0.0],
+                end: [0.0, 1.0],
+            }))],
+            Vec::new(),
+        );
+        let mut glass = make_record(
+            [26.0, 30.0],
+            vec![Op::Glass(Box::new(GlassOp {
+                paths: vec![0],
+                even_odd: false,
+                kind: crate::glass::KIND_BOX,
+                inradius: 13.0,
+                angle: -45.0,
+                intensity: 80.0,
+                refraction: 80.0,
+                depth: 20.0,
+                dispersion: 50.0,
+                frost: 4.0,
+                splay: 0.0,
+                box_radii: [4.0; 4],
+                box_smoothing: [0.0; 4],
+                measured_inradius: std::cell::Cell::new(-1.0),
+            }))],
+            Vec::new(),
+        );
+        glass.transform = Affine::translate((13.0, 55.0));
+        engine.store.insert_for_test(1, ROOT, blur);
+        engine.store.insert_for_test(2, ROOT, glass);
+
+        let view = Camera {
+            zoom: 5.0,
+            x: -0.4 * 5.0,
+            y: -68.0 * 5.0,
+            dpr: 2.0,
+        }
+        .view();
+        let crop = Rect::new(0.0, 0.0, 512.0, 320.0);
+        let (_, _, plan) = engine.reader_halo_plan(view, Some(crop), true, 50);
+        let plan = plan.expect("glass over blur plan");
+        assert_eq!(plan.far_divisor, 64);
+        assert!(
+            plan.mid_divisor.is_some_and(|d| d < plan.far_divisor),
+            "mid_divisor={:?}",
+            plan.mid_divisor
+        );
+        assert!(
+            plan.downstream_mid_readers.contains(&(1, 0)),
+            "upstream blur must run in mid tier for stacked glass"
+        );
+    }
+
+    #[test]
+    fn unfilled_clip_frame_records_clamp_clip_for_coarse_blur() {
+        use crate::record::Paint;
+        let mut unfilled = Engine::new(Limits::default());
+        let clip_frame = make_record(
+            [40.0, 200.0],
+            vec![
+                Op::Clip {
+                    path: 0,
+                    even_odd: false,
+                },
+                Op::Children,
+                Op::Unclip,
+            ],
+            Vec::new(),
+        );
+        let blur = make_record(
+            [52.0, 100.0],
+            vec![Op::BackgroundBlur(Box::new(BackgroundBlurOp {
+                paths: vec![0],
+                even_odd: false,
+                radius: 56.0,
+            }))],
+            Vec::new(),
+        );
+        unfilled.store.insert_for_test(1, ROOT, clip_frame);
+        unfilled.store.insert_for_test(2, 1, blur.clone());
+
+        let view = Camera {
+            zoom: 5.0,
+            x: 0.0,
+            y: 0.0,
+            dpr: 2.0,
+        }
+        .view();
+        let crop = Rect::new(0.0, 0.0, 512.0, 320.0);
+        let (_, _, plan) = unfilled.reader_halo_plan(view, Some(crop), true, 50);
+        let plan = plan.expect("unfilled clip halo plan");
+        assert_eq!(plan.clamp_clips.len(), 1);
+        assert_eq!(plan.clamp_clips[0].reader_key, (2, 0));
+
+        // Solid-fill clip uses EdgeMode::Border subtexel prefiltering, not clamp edge strips.
+        let mut filled = Engine::new(Limits::default());
+        let solid_frame = make_record(
+            [40.0, 200.0],
+            vec![
+                Op::Fill {
+                    path: 0,
+                    even_odd: false,
+                    paint: Paint::Solid([1.0, 0.9, 0.8, 1.0]),
+                    blend: 0,
+                },
+                Op::Clip {
+                    path: 0,
+                    even_odd: false,
+                },
+                Op::Children,
+                Op::Unclip,
+            ],
+            Vec::new(),
+        );
+        filled.store.insert_for_test(1, ROOT, solid_frame);
+        filled.store.insert_for_test(2, 1, blur);
+        let (_, _, filled_plan) = filled.reader_halo_plan(view, Some(crop), true, 50);
+        assert!(filled_plan.expect("filled clip plan").clamp_clips.is_empty());
     }
 }

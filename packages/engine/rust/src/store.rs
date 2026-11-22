@@ -1831,3 +1831,16 @@ fn next_command(r: &mut Reader, limits: &Limits, minor: u16) -> Result<Command> 
     }
     Ok(command)
 }
+
+#[cfg(test)]
+impl Store {
+    pub(crate) fn insert_for_test(&mut self, id: u32, parent: u32, record: Record) {
+        if record.ops.iter().any(Op::is_reader) {
+            self.readers.push(id);
+        }
+        self.nodes.insert(id, Node::new(record, parent, 0));
+        if let Some(p) = self.nodes.get_mut(&parent) {
+            p.children.push(id);
+        }
+    }
+}

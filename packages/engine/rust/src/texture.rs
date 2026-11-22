@@ -157,7 +157,7 @@ pub mod gpu {
     use super::*;
     use wgpu::util::DeviceExt;
 
-    const TEXTURE_WGSL: &str = include_str!("texture.wgsl");
+    const TEXTURE_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/texture.wgsl"));
 
     /// GPU texture displacement pass (`texture.wgsl`).
     pub struct GpuTexture {

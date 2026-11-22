@@ -1516,7 +1516,7 @@ pub mod gpu {
     use super::*;
     use crate::error::{EngineError, Result};
 
-    const SHADER: &str = include_str!("blur.wgsl");
+    const SHADER: &str = include_str!(concat!(env!("OUT_DIR"), "/blur.wgsl"));
     const DST_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
     const UNIFORM_BYTES: usize = 64;
     /// Uniform slots allocated per dynamic uniform slab (256 * 256 B = 64 KiB).
@@ -1876,11 +1876,18 @@ pub mod gpu {
         }
 
         /// Releases evicted pyramids and replaced scratch textures after `queue.submit` (or once
-        /// an abandoned `CommandEncoder` is dropped), reclaiming their tracked GPU bytes.
+        /// an abandoned `CommandEncoder` is dropped), reclaiming their tracked GPU bytes and
+        /// explicitly destroying the WebGPU texture handles so VRAM does not wait for JS GC.
         pub fn flush_retired(&mut self) {
-            self.retired.clear();
+            for pyr in self.retired.drain(..) {
+                for lvl in pyr.levels {
+                    lvl.texture.destroy();
+                }
+            }
             self.retired_bytes = 0;
-            self.retired_scratch.clear();
+            for tex in self.retired_scratch.drain(..) {
+                tex._texture.destroy();
+            }
             self.retired_scratch_bytes = 0;
         }
 
@@ -2045,10 +2052,18 @@ pub mod gpu {
         /// Releases all cached pyramids and scratch textures (call only between submissions).
         pub fn clear(&mut self) {
             self.stats.evicted += self.pyramids.len() as u64;
-            self.pyramids.clear();
+            for (_, pyr) in self.pyramids.drain() {
+                for lvl in pyr.levels {
+                    lvl.texture.destroy();
+                }
+            }
             self.pyramid_bytes = 0;
-            self.scratch_h = None;
-            self.scratch_v = None;
+            if let Some(tex) = self.scratch_h.take() {
+                tex._texture.destroy();
+            }
+            if let Some(tex) = self.scratch_v.take() {
+                tex._texture.destroy();
+            }
             self.flush_retired();
             self.sync_stats();
         }

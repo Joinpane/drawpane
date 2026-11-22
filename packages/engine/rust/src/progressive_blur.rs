@@ -173,23 +173,7 @@ pub struct ProgressivePlan {
 }
 
 /// Preserve small radii on the device grid, including the sharp end of a gradient.
-#[cfg(feature = "gpu-common")]
 pub(crate) const VIEWPORT_NATIVE_SIGMA: f32 = 32.0;
-
-#[cfg(feature = "gpu-common")]
-pub(crate) fn viewport_native_sigma(start: f32, end: f32) -> Option<f32> {
-    let (lo, hi) = (start.min(end), start.max(end));
-    if hi < blur::VIEWPORT_HALO_MIN_SIGMA {
-        return None;
-    }
-    Some(
-        choose_stops(lo, hi)
-            .into_iter()
-            .take_while(|sigma| *sigma < VIEWPORT_NATIVE_SIGMA)
-            .last()
-            .unwrap_or(0.0),
-    )
-}
 
 /// Builds a monotonic ladder of `2..=MAX_PROGRESSIVE_STOPS` sigma stops spanning `[min_s, max_s]`.
 pub fn choose_stops(min_s: f32, max_s: f32) -> Vec<f32> {
@@ -259,6 +243,28 @@ impl ProgressivePlan {
         let t =
             ((x - self.start[0]) * self.dir_inv_len2[0] + (y - self.start[1]) * self.dir_inv_len2[1]).clamp(0.0, 1.0);
         self.start_sigma + (self.end_sigma - self.start_sigma) * t
+    }
+
+    /// Returns the half-open stop index range `(first, end)` into `self.stops` covering every stop
+    /// that `bracket(sigma_at(x, y))` can sample anywhere inside `rect` (in frame coordinates).
+    /// Inflates `rect` by 1 px so floating-point rounding near stop boundaries is always covered.
+    pub fn active_stop_range(&self, rect: Rect) -> (usize, usize) {
+        let count = self.stops.len();
+        if count <= 1 || !rect.is_finite() || rect.width() <= 0.0 || rect.height() <= 0.0 {
+            return (0, count);
+        }
+        let r = rect.inflate(1.0, 1.0);
+        let corners = [
+            self.sigma_at(r.x0 as f32, r.y0 as f32),
+            self.sigma_at(r.x1 as f32, r.y0 as f32),
+            self.sigma_at(r.x0 as f32, r.y1 as f32),
+            self.sigma_at(r.x1 as f32, r.y1 as f32),
+        ];
+        let min_s = corners.into_iter().fold(f32::INFINITY, f32::min);
+        let max_s = corners.into_iter().fold(f32::NEG_INFINITY, f32::max);
+        let (lo_idx, _, _) = self.bracket(min_s);
+        let (_, hi_idx, _) = self.bracket(max_s);
+        (lo_idx, (hi_idx + 1).min(count))
     }
 
     /// Returns `(lo_idx, hi_idx, frac)` matching `fs_progressive_blur` in `readers.wgsl`.
