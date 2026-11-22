@@ -8936,7 +8936,7 @@ impl Backend for Gpu {
                 let base_shift = Affine::translate((-f64::from(mask_rect.x0), -f64::from(mask_rect.y0)));
                 self.mask_scene.set_paint(AlphaColor::<Srgb>::new([1.0, 1.0, 1.0, 1.0]));
                 match cast {
-                    ShadowCast::Fill { paths, even_odd } => {
+                    ShadowCast::Fill { paths, even_odd, .. } => {
                         self.mask_scene.set_transform(base_shift);
                         self.mask_scene
                             .set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
@@ -9058,7 +9058,7 @@ impl Backend for Gpu {
                     * Affine::translate((-f64::from(mask_rect.x0), -f64::from(mask_rect.y0)));
                 self.mask_scene.set_paint(AlphaColor::<Srgb>::new([1.0, 1.0, 1.0, 1.0]));
                 match cast {
-                    ShadowCast::Fill { paths, even_odd } => {
+                    ShadowCast::Fill { paths, even_odd, .. } => {
                         self.mask_scene.set_transform(red_tf);
                         self.mask_scene
                             .set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
