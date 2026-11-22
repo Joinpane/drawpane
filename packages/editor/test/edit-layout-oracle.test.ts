@@ -219,6 +219,8 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
     // size its main layer no longer has (swapped), doesn't place its layers again; their places
     // and sizes are set aside, nothing else.
     const instances = doc.ancestors(node.id).filter((a) => getProp(a.props, "instanceOf"));
+    // Issue 306: layers kept by an instance whose main is gone lose what placed them.
+    if (instances.some((a) => !doc.has(getProp(a.props, "instanceOf") as string))) continue;
     if (
       instances.some((a) => {
         const bound = getProp(a.props, "bindings") as Record<string, unknown>;
@@ -1372,12 +1374,18 @@ describe("an edit leaves the document as a full layout would", () => {
               if (editor.doc.version !== version) ran.set(e.kind, (ran.get(e.kind) ?? 0) + 1);
               history.push(JSON.stringify(e));
               if (room && was) {
+                // What it changed, with the frames those were and are in (a layer it deleted, or
+                // moved, changed them too).
                 const now = snapshot(editor.doc);
-                room.note(
-                  [...new Set([...Object.keys(was), ...Object.keys(now)])].filter(
-                    (id) => stable(was[id]) !== stable(now[id]),
-                  ),
+                const changed = [...new Set([...Object.keys(was), ...Object.keys(now)])].filter(
+                  (id) => stable(was[id]) !== stable(now[id]),
                 );
+                room.note([
+                  ...changed,
+                  ...changed
+                    .flatMap((id) => [was[id]?.parent, now[id]?.parent])
+                    .filter((id): id is string => !!id),
+                ]);
               }
               const layout = !ofRebase(unsettled(editor.doc, before));
               check(editor, mirror, copies, `after ${history.join(", ")}`, before, !room, layout);

@@ -128,14 +128,23 @@ export function constraintOps(doc: Doc, ops: readonly Op[]): Op[] {
     const frame = doc.get(child.parent);
     const frameSource = source ? doc.get(source.parent) : undefined;
     if (!source || !frame || !frameSource) return undefined;
+    // Its main layer's frame resized in this same pass: the main layer moves by its constraints
+    // too, and the copy follows it the same way, from where it is.
+    if (sizes.has(frameSource.id) || explicit.has(source.id)) return undefined;
     const { pos, size } = AXIS[axis];
-    const own = getProp(child.props, "overrides");
-    if (own.includes(pos) || own.includes(size)) return undefined;
+    const overrides = getProp(child.props, "overrides");
+    if (overrides.includes(pos) || overrides.includes(size)) return undefined;
     const sized = { ...frame, props: { ...frame.props, width: to.width, height: to.height } };
     const derived = constrainedValues(child, source, sized as NodeRecord, frameSource);
+    // What isn't derived is its main layer's, but a size its own layout decides.
+    const own =
+      hugsOn(child, axis) ||
+      measuresOn(child, axis) ||
+      overrides.includes(axis === "h" ? "sizingH" : "sizingV");
+    const want = derived[size] ?? (own ? undefined : getProp(source.props, size));
     return {
       pos: derived[pos] ?? getProp(source.props, pos),
-      ...(derived[size] !== undefined ? { size: derived[size] } : {}),
+      ...(want !== undefined ? { size: want } : {}),
     };
   };
   const keeps = (id: string, axis: Axis) => {
