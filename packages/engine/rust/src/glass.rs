@@ -161,7 +161,7 @@ pub fn plan_glass_masks(store: &Store, frame: &Frame, max_texture_2d: u32, max_b
             if w == 0 || h == 0 || w > side || h > side {
                 continue;
             }
-            let Some(path) = record.entry_path(*path_id, device) else {
+            let Some(path) = record.entry_path(*path_id) else {
                 continue;
             };
             let bounds = device.transform_rect_bbox(path.bounding_box()).inflate(1.0, 1.0);

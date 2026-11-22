@@ -365,7 +365,7 @@ pub fn canonical_shadow(
     }
     let mut path = match shape {
         CanonicalShadowShape::Box { w, h, radii, .. } => geometry::rounded_rect(w, h, radii, 0.0),
-        CanonicalShadowShape::Oval { w, h, .. } => geometry::ellipse(w, h, linear_aff),
+        CanonicalShadowShape::Oval { w, h, .. } => geometry::ellipse(w, h),
     };
     path.apply_affine(linear_aff);
     let key = ShadowMaskKey {

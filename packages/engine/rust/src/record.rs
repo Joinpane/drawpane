@@ -125,6 +125,14 @@ impl CompactPath {
         self.verbs.len()
     }
 
+    pub fn verbs(&self) -> &[u8] {
+        &self.verbs
+    }
+
+    pub fn coords(&self) -> &[f32] {
+        &self.coords
+    }
+
     /// Bytes it holds.
     pub fn heap_bytes(&self) -> usize {
         self.verbs.capacity() + self.coords.capacity() * 4
@@ -408,6 +416,7 @@ pub enum Op {
         style: Box<StrokeStyle>,
         paint: Paint,
         blend: u8,
+        cache: crate::stroke::StrokeCache,
     },
     Clip {
         path: u32,
@@ -909,11 +918,11 @@ impl Record {
     }
 
     /// An entry as a path in the record's units (glyph runs are built by the glyph store).
-    pub fn entry_path(&self, i: u32, device: Affine) -> Option<BezPath> {
+    pub fn entry_path(&self, i: u32) -> Option<BezPath> {
         match self.paths.get(i as usize)? {
             PathEntry::Path(p) => Some(p.to_bez()),
             PathEntry::Rect { w, h, radii, smoothing } => Some(geometry::rounded_rect(*w, *h, *radii, *smoothing)),
-            PathEntry::Ellipse { w, h } => Some(geometry::ellipse(*w, *h, device)),
+            PathEntry::Ellipse { w, h } => Some(geometry::ellipse(*w, *h)),
             PathEntry::Box {
                 x,
                 y,
@@ -929,7 +938,7 @@ impl Record {
                 Some(p)
             }
             PathEntry::Oval { x, y, w, h } => {
-                let mut p = geometry::ellipse(*w, *h, device);
+                let mut p = geometry::ellipse(*w, *h);
                 if *x != 0.0 || *y != 0.0 {
                     p.apply_affine(Affine::translate((f64::from(*x), f64::from(*y))));
                 }
@@ -1065,6 +1074,7 @@ fn ops(
                     style,
                     paint,
                     blend,
+                    cache: crate::stroke::StrokeCache::new(),
                 }
             }
             3 => {
