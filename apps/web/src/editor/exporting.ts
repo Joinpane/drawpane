@@ -21,8 +21,8 @@ import {
   snapToPixels,
 } from "@drawpane/editor";
 import {
+  canvasExportIsSharper,
   estimateCanvasReducedExportImages,
-  estimateReducedExportImages,
   formatReducedImagesNote,
   isAbortError,
   renderEngineRasterExportWithMeta,
@@ -181,10 +181,9 @@ export async function renderExportWithMeta(
     ...(background !== undefined ? { background } : {}),
   };
 
-  // If the engine's image budget would downsample or omit any photo, prefer the canvas exporter
-  // so multi-photo exports stay sharp instead of upscaling reduced levels.
-  const estimated = estimateReducedExportImages(editor, ids, scale, imagesFor(editor), imageBudget);
-  if (estimated.reduced > 0 || estimated.omitted > 0) {
+  // If the engine's image budget would downsample or omit photos that canvas draws sharper, use
+  // the canvas exporter so multi-photo exports stay sharp instead of upscaling reduced levels.
+  if (canvasExportIsSharper(editor, ids, scale, imagesFor(editor), imageBudget)) {
     const fallback = tryCanvasRasterExport(editor, ids, canvasOptions);
     if (fallback) {
       try {
@@ -210,6 +209,8 @@ export async function renderExportWithMeta(
       priority: "high",
       ...(signal ? { signal } : {}),
     });
+    // The engine reduced photos the plan didn't expect (a cold cache or a Worker step-down).
+    // Its reductions halve a photo, which canvas's 4,096 px cap beats for any photo it can hold.
     if (result.reducedImages > 0 || result.omittedImages > 0) {
       const fallback = tryCanvasRasterExport(editor, ids, canvasOptions);
       if (fallback) {

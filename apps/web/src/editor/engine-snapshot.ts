@@ -839,6 +839,50 @@ export function estimateCanvasReducedExportImages(
   return reduced;
 }
 
+/**
+ * Whether the canvas exporter draws this export's photos sharper than the engine would. Each
+ * photo's sharpness is its drawn size over its wanted size: the engine's image budget halves or
+ * omits photos, and canvas caps bitmaps at 4,096 px on the longest side (`ImageCache`). Canvas
+ * wins when its worst photo is sharper than the engine's worst, so neither path is chosen for a
+ * gain on one photo that costs another more.
+ */
+export function canvasExportIsSharper(
+  editor: Editor,
+  ids: readonly string[],
+  scale: number,
+  cache: ImageCache = imagesFor(editor),
+  imageBudget = snapshotImageBudget(),
+): boolean {
+  const builder = new DisplayListBuilder(editor.scene, editor.measurer);
+  const plan = builder.planLayers(ids, { context: true });
+  const usesByRef = collectExportImageUses(editor.scene, plan.visibleNodes(), scale);
+  const candidates: ExportImageCandidate[] = [];
+  for (const [ref, uses] of usesByRef) {
+    const natural = cache.natural(ref);
+    if (natural && natural.width > 0 && natural.height > 0) {
+      candidates.push({ ref, natural, uses });
+    }
+  }
+  if (candidates.length === 0) return false;
+  const budgeted = budgetExportImages(candidates, imageBudget, {
+    exactDrawn: true,
+    maxSide: MAX_SIDE,
+    decodeWorkingMultiplier: SNAPSHOT_DECODE_WORKING_MULTIPLIER,
+  });
+  let canvasWorst = 1;
+  let engineWorst = 1;
+  for (const { ref, natural, uses } of candidates) {
+    const desired = chooseDrawnImageSize(natural, uses, MAX_EXPORT_SIDE);
+    const wanted = Math.max(desired.width, desired.height);
+    const canvasSide = Math.min(wanted, CANVAS_IMAGE_MAX_SIDE);
+    const engine = budgeted.get(ref);
+    const engineSide = engine ? Math.max(engine.target.width, engine.target.height) : 0;
+    canvasWorst = Math.min(canvasWorst, canvasSide / wanted);
+    engineWorst = Math.min(engineWorst, Math.min(engineSide, wanted) / wanted);
+  }
+  return canvasWorst > engineWorst;
+}
+
 /** Human-readable notice when large photos were downsampled or omitted to fit memory. */
 export function formatReducedImagesNote(reduced: number, omitted = 0): string | null {
   if (omitted > 0 && reduced > 0) {

@@ -100,6 +100,31 @@ describe("renderExportWithMeta photo-reduction canvas fallback", () => {
     expect(engineSpy).not.toHaveBeenCalled();
   });
 
+  it("keeps the engine export when canvas's 4,096 px cap would soften a photo more than the engine", async () => {
+    localStorage.setItem("drawpane:renderer", "engine");
+    // A 12,000 px panorama drawn at its full size: canvas caps it at 4,096 px (a third), while a
+    // generous engine budget only steps it down to the engine's 8,192 px side limit.
+    const ref = "c".repeat(64);
+    const editor = makePhotoEditor([{ ref, w: 12000, h: 1000, drawW: 6000, drawH: 500 }]);
+    vi.spyOn(ImageCache.prototype, "natural").mockReturnValue({ width: 12000, height: 1000 });
+    const canvasSpy = vi.spyOn(editorPkg, "exportRaster");
+    const engineBlob = new Blob([new Uint8Array([7])], { type: "image/png" });
+    const engineSpy = vi.spyOn(snapshot, "renderEngineRasterExportWithMeta").mockResolvedValue({
+      blob: engineBlob,
+      reducedImages: 0,
+      omittedImages: 0,
+    });
+
+    const res = await renderExportWithMeta(editor, ["wall"], {
+      format: "png",
+      scale: 2,
+      imageBudget: 512 << 20,
+    });
+    expect(res.blob).toBe(engineBlob);
+    expect(engineSpy).toHaveBeenCalledTimes(1);
+    expect(canvasSpy).not.toHaveBeenCalled();
+  });
+
   it("falls back to the engine export and preserves its reduction count when canvas fails", async () => {
     localStorage.setItem("drawpane:renderer", "engine");
     const refs = ["5".repeat(64), "6".repeat(64), "7".repeat(64), "8".repeat(64)];
