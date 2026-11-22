@@ -650,9 +650,11 @@ export class SyncEngine {
    * Re-apply pending edits oldest first. An edit already sent is applied as
    * it was sent (`stored`), exactly as the room will apply it: once sent, its
    * operations are fixed, so what this client shows for it is what the room
-   * stores. An edit not sent yet is stored again against the document as it
-   * is now (with compact copies, a copy's value equal to its main's again
-   * is no longer stored as an override). Edits that no longer apply stay
+   * stores. An edit not sent yet is applied as stored too, while that still
+   * applies, so it stores what it did before; when a collaborator's edit made
+   * its stored form stale (an override record it makes was made meanwhile,
+   * or one it changes was reset), it's stored again from what it did as
+   * presented, against the document as it is now. Edits that no longer apply stay
    * queued; the room will reject them too. When the file has changed form
    * (`reformed`), they can't be sent as they were: the layer ids they hold
    * are found in the new form first, and those that don't apply, or hold an
@@ -665,20 +667,35 @@ export class SyncEngine {
    * translated the same way, and left unapplied, for the room to refuse,
    * when it can't be.
    */
+  /**
+   * Applies an unsent edit's stored operations as they are, when they still
+   * apply: false (nothing applied) when a collaborator's edit made them stale
+   * (an override record they make or change was made, reset or removed
+   * meanwhile), to be stored again from what it did as presented.
+   */
+  #replayStored(txn: PendingTxn): boolean {
+    try {
+      this.#doc.applyStored(txn.stored);
+      return true;
+    } catch (error) {
+      if (!(error instanceof ModelError)) throw error;
+      return false;
+    }
+  }
+
   #redoPending(reformed: FormChange | null = null): number {
     let dropped = 0;
     const kept: PendingTxn[] = [];
     for (const txn of this.#pending) {
       try {
-        // Replayed as the room will apply it: its stored operations. Only a change of form
-        // (copies kept compact or not) goes back to what it did as presented, to find those
-        // layers in the new form; presented operations replayed on another document can store
-        // otherwise than they did (a copy layer's value set as its main's was, or not).
-        if (txn.seq !== null || !reformed) {
+        if (txn.seq !== null) {
           const stored = reformed ? reformed.remap(this.#doc, txn.stored) : txn.stored;
           if (!stored) throw new ModelError("not_found", "it names layers the file no longer has");
           txn.stored = stored;
           this.#doc.applyStored(stored);
+        } else if (!reformed && this.#replayStored(txn)) {
+          // Stored as it was: replaying what it did as presented can store otherwise on a
+          // changed document (a copy layer's value set as its main's was, or not).
         } else {
           const ops = reformed ? reformed.remap(this.#doc, txn.ops) : txn.ops;
           if (!ops) throw new ModelError("not_found", "it names layers the file no longer has");

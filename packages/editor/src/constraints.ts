@@ -99,6 +99,37 @@ export function constraintOps(doc: Doc, ops: readonly Op[]): Op[] {
     }
     props.set(prop, round2(value));
   };
+  /**
+   * A copy text layer's mode, from its main layer's (decision 0043): given up on each axis
+   * where its frame, as resized, differs in size from its main's and its constraints size it,
+   * its main layer's own where none does (an instance made its main's size again). Undefined
+   * for a layer that isn't a copy.
+   */
+  const copyResize = (node: NodeRecord): "none" | "width" | "height" | undefined => {
+    const sourceId = getProp(node.props, "mirrors");
+    const source = sourceId ? doc.get(sourceId) : undefined;
+    if (!source) return undefined;
+    // In a group, the outermost group's constraints decide, against the frame it's in.
+    let pinned: NodeRecord = node;
+    let frame = doc.get(node.parent);
+    let frameSource = doc.get(source.parent);
+    while (frame?.type === "group" && frameSource) {
+      pinned = frame;
+      frame = doc.get(frame.parent);
+      frameSource = doc.get(frameSource.parent);
+    }
+    if (!frame || !frameSource) return undefined;
+    const differ = new Set<Axis>();
+    for (const axis of ["h", "v"] as const) {
+      const c = getProp(pinned.props, AXIS[axis].constraint);
+      if (c !== "stretch" && c !== "scale") continue;
+      const size = AXIS[axis].size;
+      // As this edit leaves it: the size it sets, or what its constraints give.
+      const now = sizes.get(frame.id)?.[size] ?? read(frame, size);
+      if (Math.abs(now - getProp(frameSource.props, size)) > 0.01) differ.add(axis);
+    }
+    return textResizeWhenSized(getProp(source.props, "textAutoResize"), differ);
+  };
   const keeps = (id: string, axis: Axis) => {
     const props = explicit.get(id);
     return !!props && (props.has(AXIS[axis].pos) || props.has(AXIS[axis].size));
@@ -147,7 +178,7 @@ export function constraintOps(doc: Doc, ops: readonly Op[]): Op[] {
     const node = doc.get(id);
     if (!node || explicit.get(id)?.has("textAutoResize")) continue;
     const mode = getProp(node.props, "textAutoResize");
-    const now = textResizeWhenSized(mode, axes);
+    const now = copyResize(node) ?? textResizeWhenSized(mode, axes);
     if (now !== mode) out.push({ op: "set", id, prop: "textAutoResize", value: now });
   }
   return out;

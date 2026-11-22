@@ -76,14 +76,24 @@ export function laidOutProps(
       if (resize !== "none") out.add("height");
     }
   }
-  if (copy.type === "text" && !context.root && !inFlow && parent?.type === "frame") {
+  if (
+    copy.type === "text" &&
+    !context.root &&
+    !inFlow &&
+    (parent?.type === "frame" || parent?.type === "group")
+  ) {
     // Constraints that stretch or scale a text layer take that axis's size from it (decision
-    // 0043): its main layer's auto-resize, or the one that gives, is laid out, never an override.
-    const axes = sizedAxes(copy);
+    // 0043): its main layer's auto-resize is laid out, and so is the one they give where its
+    // frame differs in size from its main's (in a group, the group's constraints decide).
     const mode = getProp(copy.props, "textAutoResize");
     const own = getProp(source.props, "textAutoResize");
-    if (axes.size > 0 && (mode === own || mode === textResizeWhenSized(own, axes)))
-      out.add("textAutoResize");
+    const given =
+      parent?.type === "group"
+        ? sizedAxes(parent).size > 0
+          ? textResizeWhenSized(own, sizedAxes(parent))
+          : own
+        : constrainedTextResize(copy, source, parent, parentSource);
+    if (mode === own || mode === given) out.add("textAutoResize");
   }
   if (!context.root && !inFlow && parent && parentSource) {
     // A frame the copy resized moved and stretched its children by their constraints: a place or

@@ -449,7 +449,18 @@ export function syncInstanceOps(
   };
   const synced = (node: NodeRecord | undefined): NodeRecord | undefined => {
     const props = derive && node && pending.get(node.id);
-    return props ? { ...node, props: { ...node.props, ...props } as NodeRecord["props"] } : node;
+    if (!props) return node;
+    // A null set clears the field: it reads as its default once applied, or with compact
+    // copies as its main's (an instance root's main, a copy layer's main layer).
+    const linked = getProp(node.props, "instanceOf") ?? getProp(node.props, "mirrors");
+    const main = doc.compactCopies && linked ? doc.getUnresolved(linked) : undefined;
+    const next: Record<string, unknown> = { ...node.props };
+    for (const [prop, value] of Object.entries(props)) {
+      const now = value === null || value === undefined ? main?.props[prop as PropName] : value;
+      if (now === undefined) delete next[prop];
+      else next[prop] = now;
+    }
+    return { ...node, props: next as NodeRecord["props"] };
   };
 
   const syncProps = (
@@ -473,7 +484,11 @@ export function syncInstanceOps(
         "sizingV",
       ] as const)
         if (!overridden.has(prop)) placed[prop] = from.props[prop];
-    const next = { ...to, props: { ...to.props, ...placed } as NodeRecord["props"] };
+    const nextProps: Record<string, unknown> = { ...to.props };
+    for (const [prop, value] of Object.entries(placed))
+      if (value === undefined) delete nextProps[prop];
+      else nextProps[prop] = value;
+    const next = { ...to, props: nextProps as NodeRecord["props"] };
     const parent = isRoot ? undefined : synced(doc.getUnresolved(to.parent));
     const parentSource = isRoot ? undefined : doc.getUnresolved(from.parent);
     // What layout decides (auto layout, hug and fill, auto-sized text, constraints in a resized
@@ -551,6 +566,18 @@ export function syncInstanceOps(
         if (existing) ops.push({ op: "delete", id: existing.id });
         // Create the missing subtree under its counterpart parent.
         const created = createMirror(doc, mainChild, instanceParent.id, ops);
+        if (derive) {
+          // Made where its frame differs from its main layer's: placed as its constraints say.
+          const parentNow = synced(instanceParent);
+          const parentMain = doc.getUnresolved(mainChild.parent);
+          Object.assign(
+            created.props,
+            constrainedValues(created, mainChild, parentNow, parentMain),
+          );
+          const resize = constrainedTextResize(created, mainChild, parentNow, parentMain);
+          if (resize !== undefined)
+            (created.props as Record<string, unknown>).textAutoResize = resize;
+        }
         counterpart.set(mainChild.id, created);
         continue;
       }
@@ -676,6 +703,7 @@ const GEOMETRY: ReadonlySet<string> = new Set([
   "constraintV",
   "layoutMode",
   "positioning",
+  "textAutoResize",
 ]);
 
 /**
@@ -688,7 +716,12 @@ const GEOMETRY: ReadonlySet<string> = new Set([
  */
 export function copyConstraintOps(doc: Doc, ops: readonly Op[]): Op[] {
   if (!doc.compactCopies) return [];
-  const touched = ops.filter((op) => op.op === "set" && GEOMETRY.has(op.prop)).map((op) => op.id);
+  // What moved or resized, re-pinned, or came into a main (made there, or moved in).
+  const touched = ops
+    .filter(
+      (op) => (op.op === "set" && GEOMETRY.has(op.prop)) || op.op === "create" || op.op === "move",
+    )
+    .map((op) => op.id);
   if (touched.length === 0) return [];
   const mains = affectedComponents(doc, touched);
   if (mains.size === 0) return [];
@@ -728,6 +761,26 @@ export function copyConstraintOps(doc: Doc, ops: readonly Op[]): Op[] {
           if (typeof have !== "number" || Math.abs(have - want) > PLACE_EPSILON)
             out.push({ op: "set", id, prop: prop as PropName, value: want });
         }
+        // Placed freely (no flow places it) on an axis its constraints don't move: where its main
+        // layer is, as materialized sync has it. A value layout gave it before (in a flow, or one
+        // laid out in another mode) isn't kept once nothing lays it out.
+        const parent = doc.get(copy.parent);
+        const free =
+          parent?.type === "frame" &&
+          copy.type !== "group" &&
+          !getProp(copy.props, "instanceOf") &&
+          (getProp(parent.props, "layoutMode") === "none" ||
+            getProp(copy.props, "positioning") === "absolute") &&
+          getProp(copy.props, "positioning") === getProp(source.props, "positioning") &&
+          getProp(parent.props, "layoutMode") ===
+            getProp(doc.get(source.parent)?.props ?? {}, "layoutMode");
+        if (free)
+          for (const prop of ["x", "y"] as const) {
+            if (prop in derived || overridden.includes(prop)) continue;
+            const want = getProp(source.props, prop);
+            if (Math.abs(getProp(copy.props, prop) - want) > PLACE_EPSILON)
+              out.push({ op: "set", id, prop, value: want });
+          }
         // Text whose size they derive gives that axis up, as materialized sync has it (0043).
         const resize = constrainedTextResize(
           copy,
@@ -741,6 +794,17 @@ export function copyConstraintOps(doc: Doc, ops: readonly Op[]): Op[] {
           getProp(copy.props, "textAutoResize") !== resize
         )
           out.push({ op: "set", id, prop: "textAutoResize", value: resize });
+        // Its constraints no longer size it (its frame is its main's size again, or they pin
+        // it now): its main layer's auto-resize, as materialized sync gives it.
+        const own = getProp(source.props, "textAutoResize");
+        if (
+          free &&
+          copy.type === "text" &&
+          resize === undefined &&
+          !overridden.includes("textAutoResize") &&
+          getProp(copy.props, "textAutoResize") !== own
+        )
+          out.push({ op: "set", id, prop: "textAutoResize", value: own });
       }
     }
   return out;
