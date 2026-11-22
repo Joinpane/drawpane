@@ -1578,6 +1578,24 @@ describe.each(["materialized", "compact"] as const)("re-check 4 with copies %s",
     },
   );
 
+  it("ungroups beside a sibling that shares its key (two clients inserting at once)", () => {
+    const editor = make(
+      [
+        page,
+        node("frame", "frame", "p", { width: 200, height: 200 }),
+        node("grp", "group", "frame", {}, "aA"),
+        node("a", "rect", "grp", { x: 10, y: 10, width: 10, height: 10 }),
+        node("twin", "rect", "frame", { x: 50, y: 50, width: 10, height: 10 }, "aA"),
+      ],
+      copies,
+    );
+    // Equal keys order by id: the group comes first, its twin next.
+    expect(editor.doc.childIds("frame")).toEqual(["grp", "twin"]);
+    editor.select(["grp"]);
+    expect(() => editor.ungroup()).not.toThrow();
+    expect(editor.doc.childIds("frame")).toContain("a");
+  });
+
   it("refuses moving a component into one its instances show through a swap (issue 311)", () => {
     const editor = make(
       [

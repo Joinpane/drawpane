@@ -2124,14 +2124,15 @@ export class Editor {
       if (group?.type !== "group" && !(group?.type === "frame" && this.doc.childIds(id).length > 0))
         continue;
       if (!group) continue;
+      // Its layers take its place: between it and the next sibling whose key is after its own (two
+      // clients inserting at once can give siblings the same key).
       const siblings = this.doc.childIds(group.parent);
-      const next = siblings[siblings.indexOf(id) + 1];
+      const after = siblings
+        .slice(siblings.indexOf(id) + 1)
+        .map((sibling) => this.doc.get(sibling)?.key)
+        .find((key): key is string => !!key && key > group.key);
       const children = this.doc.childIds(id);
-      const keys = keysBetween(
-        group.key,
-        next ? (this.doc.get(next)?.key ?? null) : null,
-        children.length,
-      );
+      const keys = keysBetween(group.key, after ?? null, children.length);
       children.forEach((child, i) => {
         ops.push(...this.reparentOps(child, group.parent, keys[i] as string));
         released.push(child);
