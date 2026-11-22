@@ -212,7 +212,8 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
     const parentSource = doc.get(source.parent);
     if (
       getProp(node.props, "positioning") !== getProp(source.props, "positioning") ||
-      getProp(parent.props, "layoutMode") !== getProp(parentSource?.props ?? {}, "layoutMode")
+      getProp(parent.props, "layoutMode") !== getProp(parentSource?.props ?? {}, "layoutMode") ||
+      getProp(parent.props, "overrides").includes("layoutMode")
     )
       continue;
     // Issue 305: an instance sized by a binding, or a nested instance nothing lays out left at a
