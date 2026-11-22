@@ -26,16 +26,52 @@ test("compute Retina bench: zoom, edits and drags against vello_gpu", async ({ p
   await expect(copy).toBeEnabled();
   const report = JSON.parse((await done.textContent()) ?? "{}");
   test.info().annotations.push({ type: "bench", description: JSON.stringify(report) });
-  const sweeps = report.sweeps as ReadonlyArray<{ label: string; cpuMs: unknown; gpuMs: unknown }>;
+  type Q = { n: number; p50: number; p95: number; max: number } | null;
+  const sweeps = report.sweeps as ReadonlyArray<{
+    label: string;
+    frames: readonly unknown[];
+    cpuMs: Q;
+    checkMs: Q;
+    fenceMs: Q;
+    gpuMs: Q;
+    gpuSpanMs: Q;
+    shownMs: NonNullable<Q>;
+    slowest: ReadonlyArray<{ shownMs: number }>;
+  }>;
   const edits = report.edits as ReadonlyArray<{ label: string; cpuMs: unknown }>;
+  const f = (x: Q) => (x ? `${x.p50}/${x.p95}/${x.max}` : "n/a");
   console.log(
     [
       `GPU ${report.adapter}; encodes ${JSON.stringify(report.encodes)}`,
+      `baseline ${JSON.stringify(report.baseline)}`,
       ...sweeps.map(
-        (s) => `${s.label}: cpu ${JSON.stringify(s.cpuMs)} gpu ${JSON.stringify(s.gpuMs)}`,
+        (s) =>
+          `${s.label}: cpu ${f(s.cpuMs)} check ${f(s.checkMs)} fence ${f(s.fenceMs)} gpu ${f(s.gpuMs)} span ${f(s.gpuSpanMs)} shown ${f(s.shownMs)}`,
       ),
       ...edits.map((e) => `${e.label}: cpu ${JSON.stringify(e.cpuMs)}`),
     ].join("\n"),
   );
   expect(sweeps.length).toBeGreaterThan(0);
+  // The Mac report's floor: the display's interval and a trivial WebGPU fence, both ways.
+  expect(report.baseline.refreshHz).toBeGreaterThan(0);
+  expect(report.baseline.rafMs.n).toBe(60);
+  expect(report.baseline.trivialFence?.paced.n).toBe(30);
+  expect(report.baseline.trivialFence?.backToBack.n).toBe(30);
+  expect(
+    sweeps.some(
+      (s) => s.label.startsWith("compute gated · back to back") && s.frames.length === 30,
+    ),
+  ).toBe(true);
+  for (const s of sweeps) {
+    // Every frame is fenced; compute frames also say when their check landed.
+    expect(s.fenceMs?.n, s.label).toBe(s.frames.length);
+    if (s.label.startsWith("compute")) expect(s.checkMs?.n, s.label).toBe(s.frames.length);
+    // With timestamps, every compute frame has its pass sum and span.
+    if (report.timestamps && s.label.startsWith("compute")) {
+      expect(s.gpuSpanMs?.n, s.label).toBe(s.frames.length);
+      expect(s.gpuSpanMs?.p50 ?? 0, s.label).toBeGreaterThanOrEqual(s.gpuMs?.p50 ?? 0);
+    }
+    // The slowest frames start with the slowest to show, whatever its GPU time.
+    expect(s.slowest[0]?.shownMs, s.label).toBe(s.shownMs.max);
+  }
 });

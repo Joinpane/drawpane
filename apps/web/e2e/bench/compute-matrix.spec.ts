@@ -42,9 +42,9 @@ test("compute frames are exact or fall back at every page size, scale and zoom",
       .map((c) => `${label(c)}: ${c.ok ? "ok" : "WRONG"} (${c.backend}) ${c.violations.join("; ")}`)
       .join("\n"),
   );
-  // 30 capacity cells, 4 bump-gate cells, the floor check after a fresh page, then 9 drag
+  // 30 capacity cells, 5 bump-gate cells, the floor check after a fresh page, then 9 drag
   // steps (#300) against fresh vello_gpu frames.
-  expect(report.cells).toHaveLength(44);
+  expect(report.cells).toHaveLength(45);
   // Progress counts toward the cells the run actually adds (it ended on 40/39).
   expect(report.planned).toBe(report.cells.length);
   expect(

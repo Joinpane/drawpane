@@ -1075,6 +1075,11 @@ pub struct Gpu {
     gate_growths: u64,
     #[cfg(feature = "compute")]
     gate_overflows: u32,
+    /// The frame in `frames[cur]` was drawn for the page loaded now: a fresh list or a cleared
+    /// view cache leaves `cur` pointing at another page's pixels, which a gated frame must not
+    /// keep (`present_compute` stages instead).
+    #[cfg(feature = "compute")]
+    cur_page: bool,
     #[cfg(feature = "compute")]
     pub compute_reason: Option<String>,
     #[cfg(feature = "compute")]
@@ -1668,6 +1673,8 @@ impl Gpu {
             gate_growths: 0,
             #[cfg(feature = "compute")]
             gate_overflows: 0,
+            #[cfg(feature = "compute")]
+            cur_page: false,
             #[cfg(feature = "compute")]
             compute_reason: None,
             #[cfg(feature = "compute")]
@@ -2481,6 +2488,18 @@ impl Gpu {
         self.last = None;
         self.last_scale = None;
         self.shown = None;
+        self.set_cur_page(false);
+    }
+
+    /// Whether `frames[cur]` holds a frame of the page loaded now (`cur_page`).
+    #[inline]
+    fn set_cur_page(&mut self, drawn: bool) {
+        #[cfg(feature = "compute")]
+        {
+            self.cur_page = drawn;
+        }
+        #[cfg(not(feature = "compute"))]
+        let _ = drawn;
     }
 
     /// Drops every tile (benches and tests time cold frames this way).
@@ -2492,6 +2511,7 @@ impl Gpu {
     pub fn clear_view_caches(&mut self) {
         self.clear_tiles();
         self.fit_tiles(0);
+        // `forget_last` also forgets that `frames[cur]` was this page's.
         self.forget_last();
         self.forget_motion_prefix();
         self.trim_pools(0);
@@ -2562,6 +2582,7 @@ impl Gpu {
     #[cfg(feature = "compute")]
     pub fn compute_page_reset(&mut self) {
         self.pending_compute = None;
+        self.cur_page = false;
         self.new_compute_epoch();
         self.ordinary_revision = None;
         if let Some(c) = self.compute.as_mut() {
@@ -2723,10 +2744,14 @@ impl Gpu {
             return Ok(GatePresent::Busy);
         }
         let (width, height) = (u32::from(frame.width), u32::from(frame.height));
+        // The gate keeps what `frames[cur]` shows wherever a stage overflows: that has to be a
+        // frame of this page and this size.
         let Some(cur) = self.cur.filter(|&c| {
-            self.frames
-                .get(c)
-                .is_some_and(|m| m.width == width && m.height == height)
+            self.cur_page
+                && self
+                    .frames
+                    .get(c)
+                    .is_some_and(|m| m.width == width && m.height == height)
         }) else {
             return Ok(GatePresent::Stage);
         };
@@ -2957,6 +2982,7 @@ impl Gpu {
         stats.cpu_ms += c.cpu_ms;
         if stats.presented {
             self.cur = Some(staged.dst);
+            self.cur_page = true;
             self.last_scale = Some(staged.last.view.as_coeffs()[0]);
             self.last = Some(staged.last);
             self.shown = Some((staged.generation, staged.background, true));
@@ -3879,6 +3905,7 @@ impl Gpu {
         stats.evicted = self.tiles.stats.evicted;
         let stats = self.finish_frame(dst, stats, t0, submits0)?;
         self.cur = Some(dst);
+        self.set_cur_page(true);
         self.last = Some(Last {
             view,
             size: (width, height),
@@ -4082,6 +4109,7 @@ impl Gpu {
         stats.evicted = self.tiles.stats.evicted;
         let stats = self.finish_frame(dst, stats, t0, submits0)?;
         self.cur = Some(dst);
+        self.set_cur_page(true);
         self.last = Some(Last { view, size: (w, h) });
         self.last_scale = Some(scale);
         self.whole_samples = None;

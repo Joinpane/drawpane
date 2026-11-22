@@ -266,7 +266,7 @@ type Module = Awaited<ReturnType<typeof loadBrowserEngine>>;
 type Patch = (w: ListWriter) => void;
 
 /** Cells `checkGate` adds to the matrix. */
-const GATE_CELLS = 4;
+const GATE_CELLS = 5;
 
 /** Cells `runDragChecks` adds to the matrix: one per drag step of each scene. */
 const DRAG_CELLS = 4 + 2 + 3;
@@ -524,7 +524,8 @@ async function checkFloorReset(
  * frame must be exact. Tight buffers make the fit view overflow after a 100% one. Then two
  * cells the stack review's re-check asked for: a vello_gpu frame drawn over a gated one whose
  * check is in flight must not be reported exact or redrawn when that check lands, and past
- * `GATES_IN_FLIGHT` checks the gate draws nothing rather than drop one.
+ * `GATES_IN_FLIGHT` checks the gate draws nothing rather than drop one. Last, after a fresh page
+ * or cleared view caches the gate must stage rather than keep another page's pixels.
  */
 async function checkGate(
   computeModule: Awaited<ReturnType<typeof loadComputeEngine>>,
@@ -655,6 +656,24 @@ async function checkGate(
     if (!refused) busyViolations.push(`${inFlight.length} checks in flight and none refused`);
     if (checked !== inFlight.length)
       busyViolations.push(`${inFlight.length} gated frames presented, ${checked} checked`);
+
+    // A fresh page, then cleared view caches: either way the canvas holds pixels of no page now
+    // loaded, so the gate has nothing to keep and must say stage (the re-check's stale-cur repro).
+    const freshViolations: string[] = [];
+    const said = (r: ReturnType<typeof candidate.presentComputeFrame>) =>
+      !r.ok ? r.message : r.value === null ? "stage" : r.value === "busy" ? "busy" : "presented";
+    const fresh = buildOrdinaryScene(6, 6, candidate.revision + 1);
+    const reset = candidate.apply(fresh.list);
+    if (!reset.ok) throw new Error(reset.message);
+    const afterReset = said(candidate.presentComputeFrame(W, H, at(1), COMPUTE_BG));
+    if (afterReset !== "stage")
+      freshViolations.push(`after a fresh page the gate said ${afterReset}`);
+    const drawn = candidate.renderGpu(W, H, at(1), COMPUTE_BG, false);
+    if (!drawn.ok) throw new Error(drawn.message);
+    candidate.clearViewCaches();
+    const afterClear = said(candidate.presentComputeFrame(W, H, at(1), COMPUTE_BG));
+    if (afterClear !== "stage")
+      freshViolations.push(`after clearing the view caches the gate said ${afterClear}`);
     return [
       cell(
         "overflow keeps the last good frame",
@@ -666,6 +685,7 @@ async function checkGate(
       cell("exact after growing", exactViolations, draws, s),
       cell("a vello_gpu frame over a gated one", overViolations, 1),
       cell("checks in flight are never dropped", busyViolations, inFlight.length),
+      cell("a fresh page has no frame to keep", freshViolations, 2),
     ];
   } finally {
     candidate.dispose();
