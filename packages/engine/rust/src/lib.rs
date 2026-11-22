@@ -25,6 +25,7 @@ pub mod glyphs;
 pub mod gpu;
 #[cfg(feature = "gpu-common")]
 pub mod gpu_readers;
+pub mod halo;
 pub mod images;
 pub mod kernels;
 pub mod limits;

@@ -345,7 +345,7 @@ pub(crate) fn composite_cpu(
 
 #[cfg(feature = "gpu-common")]
 pub mod gpu {
-    const BLEND_WGSL: &str = include_str!("blend.wgsl");
+    const BLEND_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/blend.wgsl"));
     const SLAB_SLOTS: u32 = 256;
     const UNIFORM_SIZE: usize = 32;
 

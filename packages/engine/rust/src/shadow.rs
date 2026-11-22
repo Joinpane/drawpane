@@ -517,7 +517,7 @@ impl<T> ShadowMaskCache<T> {
 /// bilinear upsampling.
 #[cfg(feature = "gpu-common")]
 pub mod gpu {
-    const SHADER: &str = include_str!("shadow.wgsl");
+    const SHADER: &str = include_str!(concat!(env!("OUT_DIR"), "/shadow.wgsl"));
     const UPSAMPLE_UNIFORM_BYTES: u32 = 48;
     const SLAB_SLOTS: u32 = 64;
 

@@ -273,9 +273,6 @@ pub enum PostStep {
 /// How an isolated picture reads and where its result goes when the scope closes.
 #[derive(Clone, Copy, Debug)]
 pub struct Isolation {
-    /// The isolated source extends past the region the parent will display.
-    pub source_for_post_effect: bool,
-
     pub on_main: bool,
     pub on_backdrop: bool,
     pub separate: bool,
@@ -358,6 +355,11 @@ pub trait Backend {
     /// Snapshots `main` into `backdrop` right before the first glass op (when `!has_context`).
     fn snapshot_backdrop(&mut self, _open: &[Open]) -> Result<()> {
         Ok(())
+    }
+    /// Whether the backend has captured what it needed and the current walk should unwind early
+    /// (used for fractional clip edge-strip captures in reduced halo mode).
+    fn stop_early(&self) -> bool {
+        false
     }
     /// Switches which targets subsequent scene draws write into, flushing pending scene ops first.
     fn set_targets(&mut self, _write_main: bool, _write_backdrop: bool, _open: &[Open]) -> Result<()> {
@@ -1253,7 +1255,7 @@ fn color(c: Rgba, alpha: f32) -> AlphaColor<Srgb> {
 /// Snaps `raw` outward to a `step`-pixel grid whose phase matches the page origin under `view`,
 /// so tiles of any size (including non-power-of-two test tiles) share identical pyramid block
 /// boundaries with a whole-frame render.
-fn clip_wraps_children(ops: &[Op], clip_idx: usize) -> bool {
+pub(crate) fn clip_wraps_children(ops: &[Op], clip_idx: usize) -> bool {
     let mut depth = 1usize;
     for op in &ops[clip_idx + 1..] {
         match op {
@@ -1272,7 +1274,7 @@ fn clip_wraps_children(ops: &[Op], clip_idx: usize) -> bool {
 }
 
 /// Innermost opaque solid fill painted before `clip_idx`, as premultiplied RGBA8 (decision 0007).
-fn frame_solid_fill(ops: &[Op], clip_idx: usize, alpha: f32) -> Option<[u8; 4]> {
+pub(crate) fn frame_solid_fill(ops: &[Op], clip_idx: usize, alpha: f32) -> Option<[u8; 4]> {
     for op in ops[..clip_idx].iter().rev() {
         if let Op::Fill {
             paint: Paint::Solid(c), ..
@@ -1936,7 +1938,6 @@ impl<B: Backend> Walk<'_, B> {
         let reading = self.needs_backdrop && self.reader_seq < self.last_reader_seq;
         let on_backdrop = reading && (self.backdrop_live || self.isolated_backdrop_depth != 0 || has_reader);
         Isolation {
-            source_for_post_effect: false,
             on_main: !self.current_context,
             on_backdrop,
             separate: on_backdrop && (has_reader || copy_parent),
@@ -2248,6 +2249,16 @@ impl<B: Backend> Walk<'_, B> {
             self.backend.abort_isolated();
             return Err(e);
         }
+        if self.backend.stop_early() {
+            self.viewport = prev_viewport;
+            self.full_frame = prev_full_frame;
+            self.full_viewport = prev_full_viewport;
+            self.open = prev_open;
+            self.ancestor_clips.truncate(previous_reader_clips);
+            self.isolated_backdrop_depth -= usize::from(paired);
+            self.backend.abort_isolated();
+            return Ok(());
+        }
         let pushed_pic = match self.isolate_area(content_tb, false, None, picture_has_reader, false) {
             Ok(p) => p,
             Err(e) => {
@@ -2317,6 +2328,9 @@ impl<B: Backend> Walk<'_, B> {
     }
 
     fn node_inner(&mut self, id: u32, parent: Affine, alpha: f32, parent_context: bool) -> Result<()> {
+        if self.backend.stop_early() {
+            return Ok(());
+        }
         let store = self.store;
         let Some(node) = store.nodes.get(&id) else {
             return Ok(());
@@ -2412,7 +2426,6 @@ impl<B: Backend> Walk<'_, B> {
             && (store.subtree_has_blend(id) || reader_fade || crosses_context);
         let use_offscreen = has_post || layer_blend != 0 || through || (isolate && store.subtree_has_pass(id));
         let mut isolation = self.isolation(has_reader, through);
-        isolation.source_for_post_effect = has_post;
         isolation.inherit_prefix = has_reader;
         if crosses_context {
             isolation.on_main = true;
@@ -2644,6 +2657,9 @@ impl<B: Backend> Walk<'_, B> {
         let mut mask_depth = 0usize;
         let res = (|| -> Result<()> {
             for (at, op) in ops.iter().enumerate() {
+                if self.backend.stop_early() {
+                    break;
+                }
                 self.stats.ops += 1;
                 match op {
                     Op::Fill { .. }
@@ -2936,7 +2952,7 @@ impl<B: Backend> Walk<'_, B> {
                 }
             }
             self.open = post.prev_open;
-            if res.is_ok() {
+            if res.is_ok() && !self.backend.stop_early() {
                 let max_side = self.store.limits.texture_side as i32;
                 let mut steps = Vec::with_capacity(post.posts.len());
                 let mut post_res = Ok(());
@@ -3003,7 +3019,7 @@ impl<B: Backend> Walk<'_, B> {
                 }
             }
             self.open = prev_open;
-            if res.is_ok() {
+            if res.is_ok() && !self.backend.stop_early() {
                 if through {
                     self.backend
                         .pop_blended(crate::blend::BLEND_LERP, opacity, &self.open)?;

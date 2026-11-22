@@ -751,10 +751,14 @@ struct ProgBlurU {
     stops2: vec4<f32>,
     // (frame_x_of_target, frame_y_of_target, unused, unused)
     frame_origin: vec4<f32>,
-    // (coarse patch offset x/y, inverse replay divisor, first coarse sigma stop)
+    // Tier 1 coarse patch: (offset x/y, inverse divisor, first stop)
     halo_map: vec4<f32>,
-    // (stop cell width and height, atlas columns, unused)
+    // Tier 1 atlas: (stop cell width and height, atlas columns, unused)
     halo_atlas: vec4<f32>,
+    // Tier 2 (farther) coarse patch: (offset x/y, inverse divisor, first stop)
+    halo2_map: vec4<f32>,
+    // Tier 2 atlas: (stop cell width and height, atlas columns, unused)
+    halo2_atlas: vec4<f32>,
 };
 
 @group(0) @binding(0) var pb_atlas: texture_2d<f32>;
@@ -763,6 +767,7 @@ struct ProgBlurU {
 @group(0) @binding(3) var pb_clip: texture_2d<f32>;
 @group(0) @binding(4) var<uniform> pbu: ProgBlurU;
 @group(0) @binding(5) var pb_halo: texture_2d<f32>;
+@group(0) @binding(6) var pb_halo2: texture_2d<f32>;
 
 fn prog_stop(i: i32) -> f32 {
     if (i < 4) {
@@ -783,25 +788,173 @@ fn prog_stop(i: i32) -> f32 {
     return pbu.stops2.w;
 }
 
+fn sample_halo_atlas(
+    tex: texture_2d<f32>,
+    cell: i32,
+    map: vec4<f32>,
+    atlas: vec4<f32>,
+    pos: vec2<f32>,
+) -> vec4<f32> {
+    let cols = max(1, i32(atlas.z));
+    let start = vec2<i32>(cell % cols, cell / cols) * vec2<i32>(atlas.xy);
+    let last = atlas.xy - vec2<f32>(1.0);
+    let p = clamp(pos * map.z + map.xy - vec2<f32>(0.5), vec2<f32>(0.0), last);
+    let a = vec2<i32>(floor(p)) + start;
+    let b = vec2<i32>(min(floor(p) + 1.0, last)) + start;
+    let f = fract(p);
+    return mix(
+        mix(textureLoad(tex, a, 0), textureLoad(tex, vec2<i32>(b.x, a.y), 0), f.x),
+        mix(textureLoad(tex, vec2<i32>(a.x, b.y), 0), textureLoad(tex, b, 0), f.x),
+        f.y
+    );
+}
+
 fn sample_progressive_stop(stop: i32, local: vec2<i32>, pos: vec2<f32>) -> vec4<f32> {
+    if (pbu.halo2_map.z > 0.0 && stop >= i32(pbu.halo2_map.w)) {
+        return sample_halo_atlas(pb_halo2, stop - i32(pbu.halo2_map.w), pbu.halo2_map, pbu.halo2_atlas, pos);
+    }
     if (pbu.halo_map.z > 0.0 && stop >= i32(pbu.halo_map.w)) {
-        let cell = stop - i32(pbu.halo_map.w);
-        let cols = max(1, i32(pbu.halo_atlas.z));
-        let start = vec2<i32>(cell % cols, cell / cols) * vec2<i32>(pbu.halo_atlas.xy);
-        let last = pbu.halo_atlas.xy - vec2<f32>(1.0);
-        let p = clamp(pos * pbu.halo_map.z + pbu.halo_map.xy - vec2<f32>(0.5), vec2<f32>(0.0), last);
-        let a = vec2<i32>(floor(p)) + start;
-        let b = vec2<i32>(min(floor(p) + 1.0, last)) + start;
-        let f = fract(p);
-        return mix(
-            mix(textureLoad(pb_halo, a, 0), textureLoad(pb_halo, vec2<i32>(b.x, a.y), 0), f.x),
-            mix(textureLoad(pb_halo, vec2<i32>(a.x, b.y), 0), textureLoad(pb_halo, b, 0), f.x),
-            f.y
-        );
+        return sample_halo_atlas(pb_halo, stop - i32(pbu.halo_map.w), pbu.halo_map, pbu.halo_atlas, pos);
     }
     let cols = max(1, i32(pbu.params.w));
     let start = vec2<i32>(stop % cols, stop / cols) * vec2<i32>(pbu.tile.zw);
     return textureLoad(pb_atlas, start + local, 0);
+}
+
+struct HaloClipBorderU {
+    clip: vec4<f32>,
+    inner: vec4<f32>,
+    border: vec4<f32>,
+    crop_off: vec4<f32>,
+};
+
+@group(0) @binding(0) var hcb_src: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> hcb_u: HaloClipBorderU;
+
+@fragment
+fn fs_halo_clip_border(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let p = floor(pos.xy) + hcb_u.crop_off.xy;
+    let cx = clamp(min(p.x + 1.0, hcb_u.clip.z) - max(p.x, hcb_u.clip.x), 0.0, 1.0);
+    let cy = clamp(min(p.y + 1.0, hcb_u.clip.w) - max(p.y, hcb_u.clip.y), 0.0, 1.0);
+    let cov = cx * cy;
+    if (cov <= 0.0) {
+        return hcb_u.border;
+    }
+    if (cov >= 1.0) {
+        return textureLoad(hcb_src, vec2<i32>(p), 0);
+    }
+    let ix = i32(clamp(p.x, hcb_u.inner.x, hcb_u.inner.z));
+    let iy = i32(clamp(p.y, hcb_u.inner.y, hcb_u.inner.w));
+    return mix(hcb_u.border, textureLoad(hcb_src, vec2<i32>(ix, iy), 0), cov);
+}
+
+struct HaloClipClampU {
+    crop: vec4<f32>,
+    edges: vec4<f32>,
+    left_a: vec4<f32>,
+    left_b: vec4<f32>,
+    right_a: vec4<f32>,
+    right_b: vec4<f32>,
+    top_a: vec4<f32>,
+    top_b: vec4<f32>,
+    bot_a: vec4<f32>,
+    bot_b: vec4<f32>,
+};
+
+@group(0) @binding(0) var hcc_src: texture_2d<f32>;
+@group(0) @binding(1) var hcc_left: texture_2d<f32>;
+@group(0) @binding(2) var hcc_right: texture_2d<f32>;
+@group(0) @binding(3) var hcc_top: texture_2d<f32>;
+@group(0) @binding(4) var hcc_bot: texture_2d<f32>;
+@group(0) @binding(5) var<uniform> hcc_u: HaloClipClampU;
+
+fn sample_strip(
+    strip: texture_2d<f32>,
+    coord: i32,
+    is_straddling: bool,
+    clamp_idx: i32,
+    vertical: bool,
+    info_a: vec4<f32>,
+    info_b: vec4<f32>,
+) -> vec4<f32> {
+    let k = info_a.x;
+    let short_n = clamp(i32(round(select(info_a.z, info_a.y, vertical))), 1, 256);
+    let long_max = max(i32(round(select(info_a.y, info_a.z, vertical))) - 1, 0);
+    let spt = clamp(i32(round(info_a.w)), 1, 256);
+    let base = f32(coord) * f32(spt) + info_b.x + 0.001;
+    var sum = vec4<f32>(0.0);
+    for (var i = 0; i < spt; i = i + 1) {
+        let l = clamp(i32(floor(base + f32(i))), 0, long_max);
+        let uv_c = select(vec2<i32>(l, clamp_idx), vec2<i32>(clamp_idx, l), vertical);
+        if (!is_straddling) {
+            sum = sum + textureLoad(strip, uv_c, 0);
+        } else {
+            if (k > 0.0) {
+                sum = sum + textureLoad(strip, uv_c, 0) * k;
+            }
+            for (var s = 0; s < short_n; s = s + 1) {
+                let uv_s = select(vec2<i32>(l, s), vec2<i32>(s, l), vertical);
+                sum = sum + textureLoad(strip, uv_s, 0);
+            }
+        }
+    }
+    let denom = select(f32(spt), max((k + f32(short_n)) * f32(spt), 1.0), is_straddling);
+    return sum / denom;
+}
+
+@fragment
+fn fs_halo_clip_clamp(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let p = vec2<i32>(floor(pos.xy)) + vec2<i32>(floor(hcc_u.crop.xy));
+    let tx_l = i32(round(hcc_u.edges.x));
+    let ty_t = i32(round(hcc_u.edges.y));
+    let tx_r = i32(round(hcc_u.edges.z));
+    let ty_b = i32(round(hcc_u.edges.w));
+    if (p.x <= tx_l) {
+        return sample_strip(hcc_left, p.y, p.x == tx_l, 0, true, hcc_u.left_a, hcc_u.left_b);
+    }
+    if (p.x >= tx_r) {
+        let w_r = clamp(i32(round(hcc_u.right_a.y)), 1, 256);
+        return sample_strip(hcc_right, p.y, p.x == tx_r, w_r - 1, true, hcc_u.right_a, hcc_u.right_b);
+    }
+    if (p.y <= ty_t) {
+        return sample_strip(hcc_top, p.x, p.y == ty_t, 0, false, hcc_u.top_a, hcc_u.top_b);
+    }
+    if (p.y >= ty_b) {
+        let h_b = clamp(i32(round(hcc_u.bot_a.z)), 1, 256);
+        return sample_strip(hcc_bot, p.x, p.y == ty_b, h_b - 1, false, hcc_u.bot_a, hcc_u.bot_b);
+    }
+    return textureLoad(hcc_src, clamp(p, vec2<i32>(0), vec2<i32>(floor(hcc_u.crop.zw))), 0);
+}
+
+struct DownsampleRectU {
+    map: vec4<f32>,
+    size: vec4<f32>,
+};
+
+@group(0) @binding(0) var dr_src: texture_2d<f32>;
+@group(0) @binding(1) var<uniform> dr_u: DownsampleRectU;
+
+@fragment
+fn fs_downsample_rect(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let p = floor(pos.xy);
+    let ratio = max(i32(round(dr_u.size.z)), 1);
+    let max_c = max(vec2<i32>(floor(dr_u.size.xy)) - 1, vec2<i32>(0));
+    let base = vec2<i32>(floor(p * dr_u.map.zw + dr_u.map.xy + 0.001));
+    let step = max((ratio + 7) / 8, 1);
+    let taps = min(ratio, 8);
+    var sum = vec4<f32>(0.0);
+    var count = 0.0;
+    for (var dy = 0; dy < taps; dy = dy + 1) {
+        let oy = dy * step;
+        if (oy >= ratio) { break; }
+        for (var dx = 0; dx < taps; dx = dx + 1) {
+            let ox = dx * step;
+            if (ox >= ratio) { break; }
+            sum = sum + textureLoad(dr_src, clamp(base + vec2<i32>(ox, oy), vec2<i32>(0), max_c), 0);
+            count = count + 1.0;
+        }
+    }
+    return sum / max(count, 1.0);
 }
 
 @fragment

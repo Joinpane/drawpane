@@ -10,7 +10,7 @@ use crate::glass::{self, ClipWithin, DEFAULT_GLASS_TUNING, GlassParams, GlassReg
 use crate::progressive_blur::ProgressivePlan;
 use vello_gpu::{RenderSize, Renderer};
 
-const SHADER: &str = include_str!("readers.wgsl");
+const SHADER: &str = include_str!(concat!(env!("OUT_DIR"), "/readers.wgsl"));
 const RGBA8: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const SLAB_SLOTS: u32 = 256;
 const MIP_POOL_CAP: usize = 6;
@@ -38,6 +38,13 @@ pub struct CoarseAnalytic {
     pub radii: [f32; 4],
     pub smoothing: [f32; 4],
     pub unit_px: f32,
+}
+
+/// Crop-sized prefiltered source returned by `encode_halo_clip_border` and `encode_halo_clip_clamp`.
+pub struct PrefilteredSource {
+    pub view: wgpu::TextureView,
+    pub size: (u32, u32),
+    pub crop_origin: (i32, i32),
 }
 
 /// A single-level Rgba8 or Rgba16F pooled texture.
@@ -73,6 +80,7 @@ impl VelloTex {
 
 /// A full mipmapped Rgba8 texture with per-level views for 2x2 box downsampling.
 struct MipTex {
+    texture: wgpu::Texture,
     pub full_view: wgpu::TextureView,
     pub mip_views: Vec<wgpu::TextureView>,
     downsample_groups: Vec<wgpu::BindGroup>,
@@ -153,6 +161,7 @@ impl MipTex {
             })
             .collect();
         Self {
+            texture,
             full_view,
             mip_views,
             downsample_groups,
@@ -183,6 +192,28 @@ pub struct ProgressiveHaloSample {
     pub cell_size: (u32, u32),
     pub first: usize,
     pub cols: u32,
+}
+
+/// One device-aligned edge strip captured for fractional `EdgeMode::Clamp` halo prefiltering.
+pub struct HaloClampEdge<'a> {
+    pub view: &'a wgpu::TextureView,
+    /// Straddling source texel index (`tx_L`, `tx_R`, `ty_T`, or `ty_B`).
+    pub straddle: i32,
+    /// Number of clamped outside strip pixels in the straddling texel (`k >= 0`).
+    pub clamp_weight: f32,
+    /// Strip dimensions `(width, height)` in strip pixels.
+    pub size: (u32, u32),
+    /// Strip pixels per coarse source texel (`d_render / d_strip`).
+    pub samples_per_texel: u32,
+    /// Strip coordinate offset so `coord(texel, r) = texel * samples_per_texel + r + offset`.
+    pub axis_offset: f32,
+}
+
+pub struct HaloClampEdges<'a> {
+    pub left: Option<HaloClampEdge<'a>>,
+    pub right: Option<HaloClampEdge<'a>>,
+    pub top: Option<HaloClampEdge<'a>>,
+    pub bottom: Option<HaloClampEdge<'a>>,
 }
 
 pub struct GlassResolve<'a> {
@@ -218,6 +249,7 @@ pub struct GpuReaders {
     comp_bgl: wgpu::BindGroupLayout,
     bg_blur_bgl: wgpu::BindGroupLayout,
     prog_blur_bgl: wgpu::BindGroupLayout,
+    halo_clip_clamp_bgl: wgpu::BindGroupLayout,
 
     // Pipelines
     copy_ext_pipe: wgpu::RenderPipeline,
@@ -234,6 +266,9 @@ pub struct GpuReaders {
     lerp_pipe: wgpu::RenderPipeline,
     bg_blur_pipe: wgpu::RenderPipeline,
     prog_blur_pipe: wgpu::RenderPipeline,
+    halo_clip_border_pipe: wgpu::RenderPipeline,
+    halo_clip_clamp_pipe: wgpu::RenderPipeline,
+    downsample_rect_pipe: wgpu::RenderPipeline,
 
     // Height field format (Rgba16Float or packed Rgba8Unorm fallback)
     pub height_format: wgpu::TextureFormat,
@@ -272,7 +307,11 @@ pub struct GpuReaders {
     pub clip_tex: Option<VelloTex>,
     pub blur_out: Option<PlainTex>,
     pub blur_source: Option<PlainTex>,
+    pub(crate) halo_border_src: Option<PlainTex>,
     dst_copy: Option<PlainTex>,
+    /// Replaced or evicted textures still referenced by an unsubmitted encoder, destroyed on
+    /// `flush_retired()` after `queue.submit` so WebGPU VRAM does not wait for JS GC.
+    retired: Vec<wgpu::Texture>,
 }
 
 fn tex_binding(binding: u32, filterable: bool) -> wgpu::BindGroupLayoutEntry {
@@ -480,8 +519,20 @@ impl GpuReaders {
                 tex_binding(1, false),
                 tex_binding(2, false),
                 tex_binding(3, false),
-                uni_binding(4, 160),
+                uni_binding(4, 192),
                 tex_binding(5, false),
+                tex_binding(6, false),
+            ],
+        });
+        let halo_clip_clamp_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("halo_clip_clamp bgl"),
+            entries: &[
+                tex_binding(0, false),
+                tex_binding(1, false),
+                tex_binding(2, false),
+                tex_binding(3, false),
+                tex_binding(4, false),
+                uni_binding(5, 160),
             ],
         });
 
@@ -604,6 +655,33 @@ impl GpuReaders {
             None,
             "reader prog_blur",
         );
+        let halo_clip_border_pipe = make_pipeline(
+            device,
+            &copy_ext_bgl,
+            &module,
+            "fs_halo_clip_border",
+            RGBA8,
+            None,
+            "reader halo_clip_border",
+        );
+        let halo_clip_clamp_pipe = make_pipeline(
+            device,
+            &halo_clip_clamp_bgl,
+            &module,
+            "fs_halo_clip_clamp",
+            RGBA8,
+            None,
+            "reader halo_clip_clamp",
+        );
+        let downsample_rect_pipe = make_pipeline(
+            device,
+            &blur_bgl,
+            &module,
+            "fs_downsample_rect",
+            RGBA8,
+            None,
+            "reader downsample_rect",
+        );
 
         let lin_samp = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("reader linear"),
@@ -666,6 +744,7 @@ impl GpuReaders {
             comp_bgl,
             bg_blur_bgl,
             prog_blur_bgl,
+            halo_clip_clamp_bgl,
             copy_ext_pipe,
             mip_pipe,
             coarse_down_pipe,
@@ -680,6 +759,9 @@ impl GpuReaders {
             lerp_pipe,
             bg_blur_pipe,
             prog_blur_pipe,
+            halo_clip_border_pipe,
+            halo_clip_clamp_pipe,
+            downsample_rect_pipe,
             height_format,
             height_bpp,
             height_packed,
@@ -706,7 +788,9 @@ impl GpuReaders {
             clip_tex: None,
             blur_out: None,
             blur_source: None,
+            halo_border_src: None,
             dst_copy: None,
+            retired: Vec::new(),
         }
     }
 
@@ -758,6 +842,9 @@ impl GpuReaders {
         if let Some(t) = &self.blur_source {
             total += t.bytes();
         }
+        if let Some(t) = &self.halo_border_src {
+            total += t.bytes();
+        }
         if let Some(t) = &self.dst_copy {
             total += t.bytes();
         }
@@ -786,26 +873,66 @@ impl GpuReaders {
         self.uniform_bytes.clear();
     }
 
+    pub fn retire(&mut self, tex: wgpu::Texture) {
+        self.retired.push(tex);
+    }
+
+    /// Destroys replaced or evicted reader textures after `queue.submit` (or encoder discard).
+    pub fn flush_retired(&mut self) {
+        for tex in self.retired.drain(..) {
+            tex.destroy();
+        }
+    }
+
     pub fn clear_frame_targets(&mut self) {
-        self.backdrop_frame = None;
-        self.delta_frame = None;
-        self.blur_source = None;
-        self.shared_coarse_mips = None;
+        if let Some(t) = self.backdrop_frame.take() {
+            self.retired.push(t.texture);
+        }
+        if let Some(t) = self.delta_frame.take() {
+            self.retired.push(t.texture);
+        }
+        if let Some(t) = self.blur_source.take() {
+            self.retired.push(t.texture);
+        }
+        if let Some(t) = self.halo_border_src.take() {
+            self.retired.push(t.texture);
+        }
+        if let Some(t) = self.shared_coarse_mips.take() {
+            self.retired.push(t.texture);
+        }
         self.shared_coarse_key = None;
     }
 
     /// Drops all cached reader frame targets and scratch pools (called when a frame has no readers).
     pub fn evict_frame_scratch(&mut self) {
         self.clear_frame_targets();
-        self.mip_pool.clear();
-        self.frosted_tmp = None;
-        self.low_0 = None;
-        self.low_1 = None;
-        self.mask_tex = None;
-        self.glass_mask_atlas = None;
-        self.clip_tex = None;
-        self.blur_out = None;
-        self.dst_copy = None;
+        for t in self.mip_pool.drain(..) {
+            self.retired.push(t.texture);
+        }
+        if let Some(t) = self.frosted_tmp.take() {
+            self.retired.push(t.texture);
+        }
+        if let Some(t) = self.low_0.take() {
+            self.retired.push(t.texture);
+        }
+        if let Some(t) = self.low_1.take() {
+            self.retired.push(t.texture);
+        }
+        if let Some(t) = self.mask_tex.take() {
+            self.retired.push(t.texture);
+        }
+        if let Some(t) = self.glass_mask_atlas.take() {
+            self.retired.push(t.texture);
+        }
+        if let Some(t) = self.clip_tex.take() {
+            self.retired.push(t.texture);
+        }
+        if let Some(t) = self.blur_out.take() {
+            self.retired.push(t.texture);
+        }
+        if let Some(t) = self.dst_copy.take() {
+            self.retired.push(t.texture);
+        }
     }
 
     fn reserve_bytes(&self, add: usize, freed: usize, what: &str, max_bytes: usize) -> Result<()> {
@@ -845,6 +972,9 @@ impl GpuReaders {
         } else {
             &mut self.delta_frame
         };
+        if let Some(old) = slot.take() {
+            self.retired.push(old.texture);
+        }
         Self::ensure_frame_tex(slot, device, w, h, label);
         Ok(())
     }
@@ -922,6 +1052,9 @@ impl GpuReaders {
             } else {
                 &mut self.mask_tex
             };
+            if let Some(old) = slot.take() {
+                self.retired.push(old.texture);
+            }
             Self::ensure_vello_tex(slot, device, renderer, w, h, label);
         }
         Ok(())
@@ -932,7 +1065,9 @@ impl GpuReaders {
     }
 
     pub fn drop_glass_mask_atlas(&mut self) {
-        self.glass_mask_atlas = None;
+        if let Some(old) = self.glass_mask_atlas.take() {
+            self.retired.push(old.texture);
+        }
     }
 
     pub fn ensure_glass_mask_atlas(
@@ -963,6 +1098,9 @@ impl GpuReaders {
             return false;
         }
         if !reuse {
+            if let Some(old) = self.glass_mask_atlas.take() {
+                self.retired.push(old.texture);
+            }
             Self::ensure_vello_tex(
                 &mut self.glass_mask_atlas,
                 device,
@@ -1073,7 +1211,9 @@ impl GpuReaders {
                     None
                 }
             });
-            self.mip_pool.clear();
+            for t in self.mip_pool.drain(..) {
+                self.retired.push(t.texture);
+            }
             if let Some(t) = keep {
                 self.mip_pool.push(t);
             }
@@ -1083,7 +1223,8 @@ impl GpuReaders {
         self.reserve_bytes(add, freed, label, max_bytes)?;
         let tex = MipTex::new(device, &self.mip_bgl, w, h, levels, label, tick);
         if let Some(v) = victim {
-            self.mip_pool[v] = tex;
+            let old = std::mem::replace(&mut self.mip_pool[v], tex);
+            self.retired.push(old.texture);
             Ok(v)
         } else {
             self.mip_pool.push(tex);
@@ -1137,24 +1278,7 @@ impl GpuReaders {
         };
         let data = &[source_scale, dst_origin.0 as f32, dst_origin.1 as f32, 0.0];
         let (slab_idx, offset) = self.push_uniform(device, queue, data);
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &self.comp_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(src_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &self.slabs[slab_idx],
-                        offset: 0,
-                        size: wgpu::BufferSize::new(16),
-                    }),
-                },
-            ],
-        });
+        let group = self.make_tex_uniform_bg(device, &self.comp_bgl, src_view, slab_idx, 16);
         let (pipeline, first, second) = match destination {
             CompositeTarget::Over(view) => (&self.comp_pipe, view, None),
             CompositeTarget::OverBoth(main, backdrop) => (&self.comp_dual_pipe, main, Some(backdrop)),
@@ -1211,22 +1335,16 @@ impl GpuReaders {
 
     fn encode_build_mipmaps(&self, encoder: &mut wgpu::CommandEncoder, mips: &MipTex) {
         for (view, group) in mips.mip_views[1..].iter().zip(&mips.downsample_groups) {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("reader mip_down"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            pass.set_pipeline(&self.mip_pipe);
-            pass.set_bind_group(0, group, &[]);
-            pass.draw(0..3, 0..1);
+            Self::encode_fullscreen_pass(
+                encoder,
+                "reader mip_down",
+                view,
+                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                None,
+                &self.mip_pipe,
+                group,
+                None,
+            );
         }
     }
 
@@ -1255,6 +1373,9 @@ impl GpuReaders {
             let levels = COARSE_MAX_MIPS - 1;
             let add = MipTex::estimate_bytes(w, h, levels);
             self.reserve_bytes(add, freed, "shared coarse backdrop", max_bytes)?;
+            if let Some(old) = self.shared_coarse_mips.take() {
+                self.retired.push(old.texture);
+            }
             self.shared_coarse_mips = Some(MipTex::new(
                 device,
                 &self.mip_bgl,
@@ -1280,24 +1401,16 @@ impl GpuReaders {
                 },
             ],
         });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("coarse backdrop downsample"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &mips.mip_views[0],
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            pass.set_pipeline(&self.coarse_down_pipe);
-            pass.set_bind_group(0, &group, &[]);
-            pass.draw(0..3, 0..1);
-        }
+        Self::encode_fullscreen_pass(
+            encoder,
+            "coarse backdrop downsample",
+            &mips.mip_views[0],
+            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+            None,
+            &self.coarse_down_pipe,
+            &group,
+            None,
+        );
         self.encode_build_mipmaps(encoder, mips);
         self.shared_coarse_key = Some(key);
         Ok(())
@@ -1391,43 +1504,17 @@ impl GpuReaders {
             fill_rgba[3],
         ];
         let (slab_idx, u_off) = self.push_uniform(device, queue, u_bytes);
-        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &self.copy_ext_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(backdrop_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &self.slabs[slab_idx],
-                        offset: 0,
-                        size: wgpu::BufferSize::new(64),
-                    }),
-                },
-            ],
-        });
-        {
-            let dst_view = &self.mip_pool[idx].mip_views[0];
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("reader copy_ext"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: dst_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            pass.set_pipeline(&self.copy_ext_pipe);
-            pass.set_bind_group(0, &group, &[u_off]);
-            pass.draw(0..3, 0..1);
-        }
+        let group = self.make_tex_uniform_bg(device, &self.copy_ext_bgl, backdrop_view, slab_idx, 64);
+        Self::encode_fullscreen_pass(
+            encoder,
+            "reader copy_ext",
+            &self.mip_pool[idx].mip_views[0],
+            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+            None,
+            &self.copy_ext_pipe,
+            &group,
+            Some(u_off),
+        );
         self.encode_build_mipmaps(encoder, &self.mip_pool[idx]);
         Ok(idx)
     }
@@ -1487,6 +1574,9 @@ impl GpuReaders {
                 "reader dst_copy",
                 max_bytes,
             )?;
+            if let Some(old) = self.dst_copy.take() {
+                self.retired.push(old.texture);
+            }
             Self::ensure_growable_plain(
                 &mut self.dst_copy,
                 device,
@@ -1498,29 +1588,7 @@ impl GpuReaders {
                 "reader dst_copy",
             );
         }
-        encoder.copy_texture_to_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: dst_tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: out_x0,
-                    y: out_y0,
-                    z: 0,
-                },
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.dst_copy.as_ref().expect("dst_copy").texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::Extent3d {
-                width: out_w,
-                height: out_h,
-                depth_or_array_layers: 1,
-            },
-        );
+        self.copy_to_dst_copy(encoder, dst_tex, out_x0, out_y0, out_w, out_h);
 
         let mask_x0 = (region.x0 + dst_offset.0) as f32;
         let mask_y0 = (region.y0 + dst_offset.1) as f32;
@@ -1662,23 +1730,15 @@ impl GpuReaders {
                     },
                 ],
             });
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("reader glass_coarse"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: dst_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            pass.set_scissor_rect(out_x0, out_y0, out_w, out_h);
-            pass.set_pipeline(&self.coarse_pipe);
-            pass.set_bind_group(0, &group, &[u_off]);
-            pass.draw(0..3, 0..1);
+            Self::encode_scissored_pass(
+                encoder,
+                "reader glass_coarse",
+                dst_view,
+                (out_x0, out_y0, out_w, out_h),
+                &self.coarse_pipe,
+                &group,
+                u_off,
+            );
             return Ok(());
         }
 
@@ -1721,6 +1781,9 @@ impl GpuReaders {
                     "reader frosted_tmp",
                     max_bytes,
                 )?;
+                if let Some(old) = self.frosted_tmp.take() {
+                    self.retired.push(old.texture);
+                }
                 Self::ensure_frame_tex(&mut self.frosted_tmp, device, fp.fw, fp.fh, "reader frosted_tmp");
             }
             let base_view = self.mip_pool[base_mip_idx].full_view.clone();
@@ -1745,42 +1808,17 @@ impl GpuReaders {
                 0.0,
             ];
             let (sh_idx, sh_off) = self.push_uniform(device, queue, u_h);
-            let group_h = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &self.frost_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&base_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &self.slabs[sh_idx],
-                            offset: 0,
-                            size: wgpu::BufferSize::new(32),
-                        }),
-                    },
-                ],
-            });
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("reader frost_h"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.frosted_tmp.as_ref().expect("frosted_tmp").view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    ..Default::default()
-                });
-                pass.set_pipeline(&self.frost_pipe);
-                pass.set_bind_group(0, &group_h, &[sh_off]);
-                pass.draw(0..3, 0..1);
-            }
+            let group_h = self.make_tex_uniform_bg(device, &self.frost_bgl, &base_view, sh_idx, 32);
+            Self::encode_fullscreen_pass(
+                encoder,
+                "reader frost_h",
+                &self.frosted_tmp.as_ref().expect("frosted_tmp").view,
+                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                None,
+                &self.frost_pipe,
+                &group_h,
+                Some(sh_off),
+            );
 
             // Vertical pass: frosted_tmp -> frosted[0]
             let u_v = &[
@@ -1794,42 +1832,18 @@ impl GpuReaders {
                 0.0,
             ];
             let (sv_idx, sv_off) = self.push_uniform(device, queue, u_v);
-            let group_v = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &self.frost_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&self.frosted_tmp.as_ref().expect("ft").view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &self.slabs[sv_idx],
-                            offset: 0,
-                            size: wgpu::BufferSize::new(32),
-                        }),
-                    },
-                ],
-            });
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("reader frost_v"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.mip_pool[frosted_idx].mip_views[0],
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    ..Default::default()
-                });
-                pass.set_pipeline(&self.frost_pipe);
-                pass.set_bind_group(0, &group_v, &[sv_off]);
-                pass.draw(0..3, 0..1);
-            }
+            let ft_view = &self.frosted_tmp.as_ref().expect("ft").view;
+            let group_v = self.make_tex_uniform_bg(device, &self.frost_bgl, ft_view, sv_idx, 32);
+            Self::encode_fullscreen_pass(
+                encoder,
+                "reader frost_v",
+                &self.mip_pool[frosted_idx].mip_views[0],
+                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                None,
+                &self.frost_pipe,
+                &group_v,
+                Some(sv_off),
+            );
             self.encode_build_mipmaps(encoder, &self.mip_pool[frosted_idx]);
             frosted_idx
         } else {
@@ -1864,6 +1878,9 @@ impl GpuReaders {
                 let add = low_nw as usize * low_nh as usize * self.height_bpp;
                 self.reserve_bytes(add, freed, label, max_bytes)?;
                 let slot = if slot_is_zero { &mut self.low_0 } else { &mut self.low_1 };
+                if let Some(old) = slot.take() {
+                    self.retired.push(old.texture);
+                }
                 Self::ensure_growable_plain(
                     slot,
                     device,
@@ -1889,43 +1906,17 @@ impl GpuReaders {
             // Downsample mask -> low_0
             let u_down = &[rim_w as f32, rim_h as f32, k as f32, mask_offset];
             let (sd_idx, sd_off) = self.push_uniform(device, queue, u_down);
-            let group_down = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &self.down_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(&mask_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &self.slabs[sd_idx],
-                            offset: 0,
-                            size: wgpu::BufferSize::new(16),
-                        }),
-                    },
-                ],
-            });
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("reader down"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: &self.low_0.as_ref().expect("low_0").view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    ..Default::default()
-                });
-                pass.set_scissor_rect(0, 0, lw, lh);
-                pass.set_pipeline(&self.down_pipe);
-                pass.set_bind_group(0, &group_down, &[sd_off]);
-                pass.draw(0..3, 0..1);
-            }
+            let group_down = self.make_tex_uniform_bg(device, &self.down_bgl, &mask_view, sd_idx, 16);
+            Self::encode_fullscreen_pass(
+                encoder,
+                "reader down",
+                &self.low_0.as_ref().expect("low_0").view,
+                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                Some((0, 0, lw, lh)),
+                &self.down_pipe,
+                &group_down,
+                Some(sd_off),
+            );
 
             self.low_0.as_ref().expect("low_0").view.clone()
         };
@@ -1946,82 +1937,31 @@ impl GpuReaders {
         let (sb_idx, sb_off) = self.push_uniform(device, queue, u_blur);
 
         // blur_x: low_0 -> low_1
-        let group_bx = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &self.blur_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&blur_x_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &self.slabs[sb_idx],
-                        offset: 0,
-                        size: wgpu::BufferSize::new(32),
-                    }),
-                },
-            ],
-        });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("reader blur_x"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.low_1.as_ref().expect("low_1").view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            pass.set_scissor_rect(0, 0, lw, lh);
-            pass.set_pipeline(&self.blur_x_pipe);
-            pass.set_bind_group(0, &group_bx, &[sb_off]);
-            pass.draw(0..3, 0..1);
-        }
+        let group_bx = self.make_tex_uniform_bg(device, &self.blur_bgl, &blur_x_view, sb_idx, 32);
+        Self::encode_fullscreen_pass(
+            encoder,
+            "reader blur_x",
+            &self.low_1.as_ref().expect("low_1").view,
+            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+            Some((0, 0, lw, lh)),
+            &self.blur_x_pipe,
+            &group_bx,
+            Some(sb_off),
+        );
 
         // blur_y: low_1 -> low_0
-        let group_by = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: None,
-            layout: &self.blur_bgl,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.low_1.as_ref().expect("low_1").view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &self.slabs[sb_idx],
-                        offset: 0,
-                        size: wgpu::BufferSize::new(32),
-                    }),
-                },
-            ],
-        });
-        {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("reader blur_y"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &self.low_0.as_ref().expect("low_0").view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            pass.set_scissor_rect(0, 0, lw, lh);
-            pass.set_pipeline(&self.blur_y_pipe);
-            pass.set_bind_group(0, &group_by, &[sb_off]);
-            pass.draw(0..3, 0..1);
-        }
+        let low1_view = &self.low_1.as_ref().expect("low_1").view;
+        let group_by = self.make_tex_uniform_bg(device, &self.blur_bgl, low1_view, sb_idx, 32);
+        Self::encode_fullscreen_pass(
+            encoder,
+            "reader blur_y",
+            &self.low_0.as_ref().expect("low_0").view,
+            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+            Some((0, 0, lw, lh)),
+            &self.blur_y_pipe,
+            &group_by,
+            Some(sb_off),
+        );
 
         // 4. Final glass refraction, dispersion, splay, lighting, and premultiplied replace.
         let tune = DEFAULT_GLASS_TUNING;
@@ -2204,23 +2144,15 @@ impl GpuReaders {
                 },
             ],
         });
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("reader glass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: dst_view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            ..Default::default()
-        });
-        pass.set_scissor_rect(out_x0, out_y0, out_w, out_h);
-        pass.set_pipeline(&self.glass_pipe);
-        pass.set_bind_group(0, &group_glass, &[sg_off]);
-        pass.draw(0..3, 0..1);
+        Self::encode_scissored_pass(
+            encoder,
+            "reader glass",
+            dst_view,
+            (out_x0, out_y0, out_w, out_h),
+            &self.glass_pipe,
+            &group_glass,
+            sg_off,
+        );
         Ok(())
     }
 
@@ -2253,6 +2185,9 @@ impl GpuReaders {
         let freed = self.blur_source.as_ref().map_or(0, PlainTex::bytes);
         let add = nw as usize * nh as usize * 4;
         self.reserve_bytes(add, freed, "reader prefix snapshot", max_bytes)?;
+        if let Some(old) = self.blur_source.take() {
+            self.retired.push(old.texture);
+        }
         self.blur_source = Some(make_plain(
             device,
             nw,
@@ -2265,6 +2200,42 @@ impl GpuReaders {
                 | wgpu::TextureUsages::RENDER_ATTACHMENT,
             "reader prefix snapshot",
         ));
+        Ok(())
+    }
+
+    fn ensure_halo_border_src_budgeted(
+        &mut self,
+        device: &wgpu::Device,
+        size: (u32, u32),
+        max_bytes: usize,
+    ) -> Result<()> {
+        let (w, h) = (size.0.max(1), size.1.max(1));
+        let nw = w.next_multiple_of(64);
+        let nh = h.next_multiple_of(64);
+        let reuse = self.halo_border_src.as_ref().is_some_and(|t| {
+            t.width >= w
+                && t.height >= h
+                && (t.width as usize * t.height as usize) <= (nw as usize * nh as usize * 4).max(262_144)
+        });
+        if reuse {
+            return Ok(());
+        }
+        let freed = self.halo_border_src.as_ref().map_or(0, PlainTex::bytes);
+        let add = nw as usize * nh as usize * 4;
+        self.reserve_bytes(add, freed, "reader halo border", max_bytes)?;
+        if let Some(old) = self.halo_border_src.take() {
+            self.retired.push(old.texture);
+        }
+        Self::ensure_growable_plain(
+            &mut self.halo_border_src,
+            device,
+            w,
+            h,
+            RGBA8,
+            4,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            "reader halo border",
+        );
         Ok(())
     }
 
@@ -2282,6 +2253,9 @@ impl GpuReaders {
             let freed = self.blur_out.as_ref().map_or(0, PlainTex::bytes);
             let add = nw as usize * nh as usize * 4;
             self.reserve_bytes(add, freed, "reader blur_out", max_bytes)?;
+            if let Some(old) = self.blur_out.take() {
+                self.retired.push(old.texture);
+            }
             Self::ensure_growable_plain(
                 &mut self.blur_out,
                 device,
@@ -2310,6 +2284,9 @@ impl GpuReaders {
             let freed = self.dst_copy.as_ref().map_or(0, PlainTex::bytes);
             let add = nw as usize * nh as usize * 4;
             self.reserve_bytes(add, freed, "reader dst_copy", max_bytes)?;
+            if let Some(old) = self.dst_copy.take() {
+                self.retired.push(old.texture);
+            }
             Self::ensure_growable_plain(
                 &mut self.dst_copy,
                 device,
@@ -2322,6 +2299,37 @@ impl GpuReaders {
             );
         }
         Ok(())
+    }
+
+    #[inline(never)]
+    fn copy_to_dst_copy(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        dst_tex: &wgpu::Texture,
+        x0: u32,
+        y0: u32,
+        width: u32,
+        height: u32,
+    ) {
+        encoder.copy_texture_to_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: dst_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: x0, y: y0, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.dst_copy.as_ref().expect("dst_copy").texture,
+                mip_level: 0,
+                origin: wgpu::Origin3d::ZERO,
+                aspect: wgpu::TextureAspect::All,
+            },
+            wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+        );
     }
 
     /// Snapshots `dst_tex[dirty]` and composites `blur_out` onto `dst_view` masked by
@@ -2348,25 +2356,7 @@ impl GpuReaders {
         let x0 = dirty.x0 as u32;
         let y0 = dirty.y0 as u32;
         self.ensure_dst_copy_budgeted(device, bw, bh, max_bytes)?;
-        encoder.copy_texture_to_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: dst_tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d { x: x0, y: y0, z: 0 },
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.dst_copy.as_ref().expect("dst_copy").texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::Extent3d {
-                width: bw,
-                height: bh,
-                depth_or_array_layers: 1,
-            },
-        );
+        self.copy_to_dst_copy(encoder, dst_tex, x0, y0, bw, bh);
         let (map, bound) = if let Some(halo) = halo {
             (
                 [halo.offset.0, halo.offset.1, halo.inv, 0.0],
@@ -2426,24 +2416,369 @@ impl GpuReaders {
                 },
             ],
         });
+        Self::encode_scissored_pass(
+            encoder,
+            "reader bg_blur_comp",
+            dst_view,
+            (x0, y0, bw, bh),
+            &self.bg_blur_pipe,
+            &group,
+            u_off,
+        );
+        Ok(())
+    }
+
+    /// Prefilters `src_view[crop]` into crop-sized `halo_border_src`, applying exact sub-texel
+    /// area weighting along a fractional solid-fill clip frame boundary. Returns
+    /// `(view, target_size, crop_origin)` so the caller shifts `clamp_bounds`, `dirty`, and
+    /// `dst_origin` by `(-crop_origin.0, -crop_origin.1)`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_halo_clip_border(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        src_view: &wgpu::TextureView,
+        src_size: (u32, u32),
+        crop: IRect,
+        clip_rect: [f32; 4],
+        border: [f32; 4],
+        max_bytes: usize,
+    ) -> Result<PrefilteredSource> {
+        let crop = crop.clamp(src_size.0 as i32, src_size.1 as i32);
+        if crop.is_empty() {
+            return Ok(PrefilteredSource {
+                view: src_view.clone(),
+                size: src_size,
+                crop_origin: (0, 0),
+            });
+        }
+        let cw = (crop.x1 - crop.x0) as u32;
+        let ch = (crop.y1 - crop.y0) as u32;
+        self.ensure_halo_border_src_budgeted(device, (cw, ch), max_bytes)?;
+        let max_x = src_size.0.saturating_sub(1) as f32;
+        let max_y = src_size.1.saturating_sub(1) as f32;
+        let inner_axis = |lo: f32, hi: f32, limit: f32| -> (f32, f32) {
+            let a = lo.ceil().clamp(0.0, limit);
+            let b = (hi.floor() - 1.0).clamp(0.0, limit);
+            if a <= b {
+                (a, b)
+            } else {
+                let p = lo.floor().clamp(0.0, limit);
+                (p, p)
+            }
+        };
+        let (ix0, ix1) = inner_axis(clip_rect[0], clip_rect[2], max_x);
+        let (iy0, iy1) = inner_axis(clip_rect[1], clip_rect[3], max_y);
+        let u_bytes = &[
+            clip_rect[0],
+            clip_rect[1],
+            clip_rect[2],
+            clip_rect[3],
+            ix0,
+            iy0,
+            ix1,
+            iy1,
+            border[0],
+            border[1],
+            border[2],
+            border[3],
+            crop.x0 as f32,
+            crop.y0 as f32,
+            0.0,
+            0.0,
+        ];
+        let (slab_idx, u_off) = self.push_uniform(device, queue, u_bytes);
+        let group = self.make_tex_uniform_bg(device, &self.copy_ext_bgl, src_view, slab_idx, 64);
+        let target = self.halo_border_src.as_ref().expect("halo_border_src");
+        let dst_view = target.view.clone();
+        Self::encode_scissored_pass(
+            encoder,
+            "reader halo_clip_border",
+            &dst_view,
+            (0, 0, cw, ch),
+            &self.halo_clip_border_pipe,
+            &group,
+            u_off,
+        );
+        Ok(PrefilteredSource {
+            view: dst_view,
+            size: (cw, ch),
+            crop_origin: (crop.x0, crop.y0),
+        })
+    }
+
+    #[inline(never)]
+    fn make_tex_uniform_bg(
+        &self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        src_view: &wgpu::TextureView,
+        slab_idx: usize,
+        size: u64,
+    ) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(src_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &self.slabs[slab_idx],
+                        offset: 0,
+                        size: wgpu::BufferSize::new(size),
+                    }),
+                },
+            ],
+        })
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn encode_fullscreen_pass(
+        encoder: &mut wgpu::CommandEncoder,
+        label: &str,
+        dst_view: &wgpu::TextureView,
+        load: wgpu::LoadOp<wgpu::Color>,
+        scissor: Option<(u32, u32, u32, u32)>,
+        pipeline: &wgpu::RenderPipeline,
+        group: &wgpu::BindGroup,
+        u_off: Option<u32>,
+    ) {
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("reader bg_blur_comp"),
+            label: Some(label),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: dst_view,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
+                    load,
                     store: wgpu::StoreOp::Store,
                 },
             })],
             ..Default::default()
         });
-        pass.set_scissor_rect(x0, y0, bw, bh);
-        pass.set_pipeline(&self.bg_blur_pipe);
-        pass.set_bind_group(0, &group, &[u_off]);
+        if let Some((x, y, w, h)) = scissor {
+            pass.set_scissor_rect(x, y, w, h);
+        }
+        pass.set_pipeline(pipeline);
+        match u_off {
+            Some(off) => pass.set_bind_group(0, group, &[off]),
+            None => pass.set_bind_group(0, group, &[]),
+        }
         pass.draw(0..3, 0..1);
-        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn encode_scissored_pass(
+        encoder: &mut wgpu::CommandEncoder,
+        label: &str,
+        dst_view: &wgpu::TextureView,
+        scissor: (u32, u32, u32, u32),
+        pipeline: &wgpu::RenderPipeline,
+        group: &wgpu::BindGroup,
+        u_off: u32,
+    ) {
+        Self::encode_fullscreen_pass(
+            encoder,
+            label,
+            dst_view,
+            wgpu::LoadOp::Load,
+            Some(scissor),
+            pipeline,
+            group,
+            Some(u_off),
+        );
+    }
+
+    /// Prefilters `src_view[crop]` into crop-sized `halo_border_src`, replacing straddling and
+    /// outside-clamped texels along an unfilled `EdgeMode::Clamp` clip frame using exact
+    /// device-aligned edge strips.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_halo_clip_clamp(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        src_view: &wgpu::TextureView,
+        src_size: (u32, u32),
+        crop: IRect,
+        edges: &HaloClampEdges<'_>,
+        max_bytes: usize,
+    ) -> Result<PrefilteredSource> {
+        if crop.is_empty() {
+            return Ok(PrefilteredSource {
+                view: src_view.clone(),
+                size: src_size,
+                crop_origin: (0, 0),
+            });
+        }
+        let cw = (crop.x1 - crop.x0) as u32;
+        let ch = (crop.y1 - crop.y0) as u32;
+        self.ensure_halo_border_src_budgeted(device, (cw, ch), max_bytes)?;
+        let pack_edge = |edge: Option<&HaloClampEdge<'_>>, inactive: f32| -> (f32, [f32; 4], [f32; 4]) {
+            match edge {
+                Some(e) => (
+                    e.straddle as f32,
+                    [
+                        e.clamp_weight,
+                        e.size.0 as f32,
+                        e.size.1 as f32,
+                        e.samples_per_texel as f32,
+                    ],
+                    [e.axis_offset, 0.0, 0.0, 0.0],
+                ),
+                None => (inactive, [0.0, 1.0, 1.0, 1.0], [0.0; 4]),
+            }
+        };
+        let (tx_l, la, lb) = pack_edge(edges.left.as_ref(), -1e7);
+        let (tx_r, ra, rb) = pack_edge(edges.right.as_ref(), 1e7);
+        let (ty_t, ta, tb) = pack_edge(edges.top.as_ref(), -1e7);
+        let (ty_b, ba, bb) = pack_edge(edges.bottom.as_ref(), 1e7);
+        let u_bytes = &[
+            crop.x0 as f32,
+            crop.y0 as f32,
+            src_size.0.saturating_sub(1) as f32,
+            src_size.1.saturating_sub(1) as f32,
+            tx_l,
+            ty_t,
+            tx_r,
+            ty_b,
+            la[0],
+            la[1],
+            la[2],
+            la[3],
+            lb[0],
+            lb[1],
+            lb[2],
+            lb[3],
+            ra[0],
+            ra[1],
+            ra[2],
+            ra[3],
+            rb[0],
+            rb[1],
+            rb[2],
+            rb[3],
+            ta[0],
+            ta[1],
+            ta[2],
+            ta[3],
+            tb[0],
+            tb[1],
+            tb[2],
+            tb[3],
+            ba[0],
+            ba[1],
+            ba[2],
+            ba[3],
+            bb[0],
+            bb[1],
+            bb[2],
+            bb[3],
+        ];
+        let (slab_idx, u_off) = self.push_uniform(device, queue, u_bytes);
+        let white_view = &self.white_1x1.view;
+        let left_view = edges.left.as_ref().map_or(white_view, |e| e.view);
+        let right_view = edges.right.as_ref().map_or(white_view, |e| e.view);
+        let top_view = edges.top.as_ref().map_or(white_view, |e| e.view);
+        let bot_view = edges.bottom.as_ref().map_or(white_view, |e| e.view);
+        let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: None,
+            layout: &self.halo_clip_clamp_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(src_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(left_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(right_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(top_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::TextureView(bot_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &self.slabs[slab_idx],
+                        offset: 0,
+                        size: wgpu::BufferSize::new(160),
+                    }),
+                },
+            ],
+        });
+        let target = self.halo_border_src.as_ref().expect("halo_border_src");
+        let dst_view = target.view.clone();
+        Self::encode_scissored_pass(
+            encoder,
+            "reader halo_clip_clamp",
+            &dst_view,
+            (0, 0, cw, ch),
+            &self.halo_clip_clamp_pipe,
+            &group,
+            u_off,
+        );
+        Ok(PrefilteredSource {
+            view: dst_view,
+            size: (cw, ch),
+            crop_origin: (crop.x0, crop.y0),
+        })
+    }
+
+    /// Box-downsamples a region of `src_view` into `dst_view` scissored to `scissor`, used when a
+    /// mid-tier glass lens patches the overlapping sub-region of an existing far-tier glass prefix.
+    #[allow(clippy::too_many_arguments)]
+    pub fn encode_downsample_rect(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        src_view: &wgpu::TextureView,
+        src_size: (u32, u32),
+        dst_view: &wgpu::TextureView,
+        scissor: (u32, u32, u32, u32),
+        src_origin: (f32, f32),
+        ratio: u32,
+    ) {
+        if scissor.2 == 0 || scissor.3 == 0 {
+            return;
+        }
+        let scale = ratio.max(1) as f32;
+        let u_bytes = &[
+            src_origin.0,
+            src_origin.1,
+            scale,
+            scale,
+            src_size.0 as f32,
+            src_size.1 as f32,
+            scale,
+            0.0,
+        ];
+        let (slab_idx, u_off) = self.push_uniform(device, queue, u_bytes);
+        let group = self.make_tex_uniform_bg(device, &self.blur_bgl, src_view, slab_idx, 32);
+        Self::encode_scissored_pass(
+            encoder,
+            "reader downsample_rect",
+            dst_view,
+            scissor,
+            &self.downsample_rect_pipe,
+            &group,
+            u_off,
+        );
     }
 
     /// Snapshots `dst_tex[tile]` and blends bracketing progressive blur slices from `blur_out`
@@ -2464,6 +2799,7 @@ impl GpuReaders {
         alpha: f32,
         has_clip_mask: bool,
         halo: Option<&ProgressiveHaloSample>,
+        halo_far: Option<&ProgressiveHaloSample>,
         max_bytes: usize,
     ) -> Result<()> {
         let tw = (tile.x1 - tile.x0) as u32;
@@ -2474,37 +2810,23 @@ impl GpuReaders {
         let x0 = tile.x0 as u32;
         let y0 = tile.y0 as u32;
         self.ensure_dst_copy_budgeted(device, tw, th, max_bytes)?;
-        encoder.copy_texture_to_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: dst_tex,
-                mip_level: 0,
-                origin: wgpu::Origin3d { x: x0, y: y0, z: 0 },
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.dst_copy.as_ref().expect("dst_copy").texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d::ZERO,
-                aspect: wgpu::TextureAspect::All,
-            },
-            wgpu::Extent3d {
-                width: tw,
-                height: th,
-                depth_or_array_layers: 1,
-            },
-        );
+        self.copy_to_dst_copy(encoder, dst_tex, x0, y0, tw, th);
         let stops = plan.padded_stops();
-        let (halo_map, halo_atlas) = halo.map_or(([0.0; 4], [0.0; 4]), |halo| {
-            (
-                [
-                    halo.sample.offset.0,
-                    halo.sample.offset.1,
-                    halo.sample.inv,
-                    halo.first as f32,
-                ],
-                [halo.cell_size.0 as f32, halo.cell_size.1 as f32, halo.cols as f32, 0.0],
-            )
-        });
+        let pack_halo = |h: Option<&ProgressiveHaloSample>| {
+            h.map_or(([0.0; 4], [0.0; 4]), |halo| {
+                (
+                    [
+                        halo.sample.offset.0,
+                        halo.sample.offset.1,
+                        halo.sample.inv,
+                        halo.first as f32,
+                    ],
+                    [halo.cell_size.0 as f32, halo.cell_size.1 as f32, halo.cols as f32, 0.0],
+                )
+            })
+        };
+        let (halo_map, halo_atlas) = pack_halo(halo);
+        let (halo2_map, halo2_atlas) = pack_halo(halo_far);
         let u_bytes = &[
             // tile
             x0 as f32,
@@ -2551,6 +2873,14 @@ impl GpuReaders {
             halo_atlas[1],
             halo_atlas[2],
             halo_atlas[3],
+            halo2_map[0],
+            halo2_map[1],
+            halo2_map[2],
+            halo2_map[3],
+            halo2_atlas[0],
+            halo2_atlas[1],
+            halo2_atlas[2],
+            halo2_atlas[3],
         ];
         let (slab_idx, u_off) = self.push_uniform(device, queue, u_bytes);
         let clip_view = if has_clip_mask {
@@ -2564,7 +2894,9 @@ impl GpuReaders {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&self.blur_out.as_ref().expect("blur_out").view),
+                    resource: wgpu::BindingResource::TextureView(
+                        self.blur_out.as_ref().map_or(&self.white_1x1.view, |b| &b.view),
+                    ),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
@@ -2583,7 +2915,7 @@ impl GpuReaders {
                     resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
                         buffer: &self.slabs[slab_idx],
                         offset: 0,
-                        size: wgpu::BufferSize::new(160),
+                        size: wgpu::BufferSize::new(192),
                     }),
                 },
                 wgpu::BindGroupEntry {
@@ -2592,25 +2924,23 @@ impl GpuReaders {
                         halo.map_or(&self.white_1x1.view, |halo| &halo.sample.view),
                     ),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::TextureView(
+                        halo_far.map_or(&self.white_1x1.view, |halo| &halo.sample.view),
+                    ),
+                },
             ],
         });
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("reader prog_blur"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: dst_view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            ..Default::default()
-        });
-        pass.set_scissor_rect(x0, y0, tw, th);
-        pass.set_pipeline(&self.prog_blur_pipe);
-        pass.set_bind_group(0, &group, &[u_off]);
-        pass.draw(0..3, 0..1);
+        Self::encode_scissored_pass(
+            encoder,
+            "reader prog_blur",
+            dst_view,
+            (x0, y0, tw, th),
+            &self.prog_blur_pipe,
+            &group,
+            u_off,
+        );
         Ok(())
     }
 
@@ -2797,42 +3127,16 @@ impl GpuReaders {
             ],
         });
         for (dst_tex, dst_view) in targets {
-            encoder.copy_texture_to_texture(
-                wgpu::TexelCopyTextureInfo {
-                    texture: dst_tex,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d { x: x0, y: y0, z: 0 },
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::TexelCopyTextureInfo {
-                    texture: &self.dst_copy.as_ref().expect("dst_copy").texture,
-                    mip_level: 0,
-                    origin: wgpu::Origin3d::ZERO,
-                    aspect: wgpu::TextureAspect::All,
-                },
-                wgpu::Extent3d {
-                    width: bw,
-                    height: bh,
-                    depth_or_array_layers: 1,
-                },
+            self.copy_to_dst_copy(encoder, dst_tex, x0, y0, bw, bh);
+            Self::encode_scissored_pass(
+                encoder,
+                "reader coarse_blur",
+                dst_view,
+                (x0, y0, bw, bh),
+                &self.coarse_pipe,
+                &group,
+                u_off,
             );
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("reader coarse_blur"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: dst_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            pass.set_scissor_rect(x0, y0, bw, bh);
-            pass.set_pipeline(&self.coarse_pipe);
-            pass.set_bind_group(0, &group, &[u_off]);
-            pass.draw(0..3, 0..1);
         }
         Ok(())
     }

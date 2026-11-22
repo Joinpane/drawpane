@@ -464,7 +464,7 @@ pub mod gpu {
     use super::*;
     use wgpu::util::DeviceExt;
 
-    const NOISE_WGSL: &str = include_str!("noise.wgsl");
+    const NOISE_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/noise.wgsl"));
     const MAX_GPU_TILES: usize = 8;
 
     struct GpuNoiseTile {

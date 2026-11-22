@@ -504,6 +504,18 @@ pub enum PostEffect {
     },
 }
 
+impl PostEffect {
+    /// True when this post-effect samples neighbouring pixels of its source picture.
+    /// Pointwise effects such as `Noise` do not read outside the destination pixel.
+    pub fn is_spatial(&self) -> bool {
+        match *self {
+            PostEffect::LayerBlur { radius } => radius > 0.0,
+            PostEffect::Texture { size, radius, .. } => size > 0.0 && radius > 0.0,
+            PostEffect::Noise { .. } => false,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Record {
     pub flags: u32,

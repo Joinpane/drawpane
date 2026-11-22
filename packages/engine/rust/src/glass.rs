@@ -662,6 +662,92 @@ pub fn compute_regions(
     Ok(out)
 }
 
+/// Computes a single target-clamped region for coarse interactive glass (`fs_glass_coarse`).
+///
+/// Coarse moving glass samples only the blurred backdrop mipmap at the output pixel without
+/// height-map rim blur or refraction displacement, so it never needs the `params.margin` padding
+/// that can exceed texture limits at extreme zoom (1,500% to 25,600%).
+pub fn compute_coarse_region(
+    op: &GlassOp,
+    device: Affine,
+    size: [f32; 2],
+    target_origin: (i32, i32),
+    target_size: (i32, i32),
+) -> Option<GlassRegion> {
+    let (w, h) = (f64::from(size[0]), f64::from(size[1]));
+    let [a, b, c, d, e, f] = device.as_coeffs();
+    let corners = [(0.0, 0.0), (w, 0.0), (0.0, h), (w, h)];
+    let mut min_x = f64::INFINITY;
+    let mut max_x = f64::NEG_INFINITY;
+    let mut min_y = f64::INFINITY;
+    let mut max_y = f64::NEG_INFINITY;
+    for (px, py) in corners {
+        let x = a * px + c * py + e;
+        let y = b * px + d * py + f;
+        min_x = min_x.min(x);
+        max_x = max_x.max(x);
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
+    }
+    if !min_x.is_finite() || !max_x.is_finite() || !min_y.is_finite() || !max_y.is_finite() {
+        return None;
+    }
+    let paint_x0 = min_x.floor().clamp(-1e12, 1e12) as i64 - 2;
+    let paint_y0 = min_y.floor().clamp(-1e12, 1e12) as i64 - 2;
+    let paint_x1 = max_x.ceil().clamp(-1e12, 1e12) as i64 + 2;
+    let paint_y1 = max_y.ceil().clamp(-1e12, 1e12) as i64 + 2;
+    let vis_x0 = paint_x0.max(i64::from(target_origin.0));
+    let vis_y0 = paint_y0.max(i64::from(target_origin.1));
+    let vis_x1 = paint_x1.min(i64::from(target_origin.0) + i64::from(target_size.0));
+    let vis_y1 = paint_y1.min(i64::from(target_origin.1) + i64::from(target_size.1));
+    if vis_x1 <= vis_x0 || vis_y1 <= vis_y0 {
+        return None;
+    }
+    let fx0 = vis_x0 as f64;
+    let fy0 = vis_y0 as f64;
+    let center = [
+        ((min_x + max_x) * 0.5 - fx0) as f32,
+        ((min_y + max_y) * 0.5 - fy0) as f32,
+    ];
+    let half_size = [((max_x - min_x) * 0.5) as f32, ((max_y - min_y) * 0.5) as f32];
+    let det = a * d - b * c;
+    let box_geom = (op.kind == KIND_BOX && w > 0.0 && h > 0.0 && det.abs() > 1e-12).then(|| {
+        let ia = d / det;
+        let ib = -b / det;
+        let ic = -c / det;
+        let id = a / det;
+        let ie = (c * f - d * e) / det;
+        let jf = (b * e - a * f) / det;
+        BoxGeom {
+            to_box: [
+                ia as f32,
+                ib as f32,
+                ic as f32,
+                id as f32,
+                (ia * fx0 + ic * fy0 + ie) as f32,
+                (ib * fx0 + id * fy0 + jf) as f32,
+            ],
+            size,
+            radii: op.box_radii,
+            smoothing: op.box_smoothing,
+            unit_px: det.abs().sqrt() as f32,
+        }
+    });
+    Some(GlassRegion {
+        x0: vis_x0 as i32,
+        y0: vis_y0 as i32,
+        rw: (vis_x1 - vis_x0) as u32,
+        rh: (vis_y1 - vis_y0) as u32,
+        out_x0: (vis_x0 - i64::from(target_origin.0)) as i32,
+        out_y0: (vis_y0 - i64::from(target_origin.1)) as i32,
+        out_x1: (vis_x1 - i64::from(target_origin.0)) as i32,
+        out_y1: (vis_y1 - i64::from(target_origin.1)) as i32,
+        center,
+        half_size,
+        box_geom,
+    })
+}
+
 /// Computes a single extended region for a glass layer (used by unit tests).
 #[allow(clippy::too_many_arguments)]
 pub fn compute_region(
@@ -2141,5 +2227,38 @@ mod tests {
             target.iter().all(|&b| b == 0),
             "glass over empty backdrop must stay clear"
         );
+    }
+
+    #[test]
+    fn coarse_region_clamps_extreme_zoom_lens_to_target_without_margin_blowup() {
+        let op = GlassOp {
+            paths: vec![0],
+            even_odd: false,
+            kind: KIND_BOX,
+            inradius: 100.0,
+            angle: -45.0,
+            intensity: 80.0,
+            refraction: 80.0,
+            depth: 20.0,
+            dispersion: 50.0,
+            frost: 4.0,
+            splay: 0.0,
+            box_radii: [16.0; 4],
+            box_smoothing: [0.0; 4],
+            measured_inradius: std::cell::Cell::new(-1.0),
+        };
+        // 25,600% zoom at DPR 2 (`scale = 512`): full exact margin exceeds 10k px, while a coarse
+        // tile region stays strictly bounded to the 512 x 512 tile target.
+        let device = Affine::translate((-20_000.0, -20_000.0)) * Affine::scale(512.0);
+        let region = compute_coarse_region(&op, device, [200.0, 200.0], (0, 0), (512, 512))
+            .expect("visible tile gets coarse region");
+        assert_eq!((region.rw, region.rh), (512, 512));
+        assert_eq!(
+            (region.out_x0, region.out_y0, region.out_x1, region.out_y1),
+            (0, 0, 512, 512)
+        );
+        // Off-screen lens returns None.
+        let off = compute_coarse_region(&op, Affine::translate((2000.0, 0.0)), [40.0, 40.0], (0, 0), (512, 512));
+        assert!(off.is_none());
     }
 }
