@@ -860,26 +860,53 @@ struct PendingCompute {
     stats: crate::vello_compute::ComputeFrameStats,
 }
 
-/// A gated compute frame already on screen (`present_compute`), whose check decides whether it
-/// was exact, or what was kept when a stage overflowed.
+/// A gated compute frame that was presented (`present_compute`), whose check decides whether it
+/// was exact, or grows the buffers when a stage overflowed. Every one is settled
+/// (`finish_gate`); none is dropped unchecked, since its check may carry growth or a GPU error.
 #[cfg(feature = "compute")]
 struct PendingGate {
     result: ComputeResult,
     generation: u64,
-    view: Affine,
+    last: Last,
     background: [u32; 4],
+    /// Still what the canvas shows: no frame was drawn or presented after it.
+    on_screen: bool,
+    /// The compute page it was drawn from (`compute_epoch`): growth from an older page is moot.
+    epoch: u64,
+    /// Buffer growths before it was drawn (`gate_growths`): an overflow drawn before the latest
+    /// growth was expected, so only one drawn after it counts toward the session fallback.
+    growths: u64,
 }
 
-/// Gated frames whose checks may still be in flight: enough for a few frames of motion.
+/// Gated frames whose checks may be in flight. Past it, `present_compute` draws nothing
+/// (`GatePresent::Busy`) until one lands: checks are never dropped.
 #[cfg(feature = "compute")]
 const GATES_IN_FLIGHT: usize = 8;
+
+/// Gated frames in a row that overflowed after the buffers last grew before compute turns off
+/// for the session, as for six draws of one staged frame.
+#[cfg(feature = "compute")]
+const GATE_OVERFLOWS_MAX: u32 = 6;
+
+/// What `present_compute` did.
+#[cfg(feature = "compute")]
+pub enum GatePresent {
+    /// Drawn and presented; its check decides whether it was exact (`finish_gate`).
+    Presented(DrawStats, ComputeCheck),
+    /// Nothing drawn: there is no frame of this size on screen to keep (stage one instead), or
+    /// compute doesn't draw this view.
+    Stage,
+    /// Nothing drawn: `GATES_IN_FLIGHT` checks are in flight. Try again once one lands.
+    Busy,
+}
 
 /// What a gated frame's check found (`finish_gate`).
 #[cfg(feature = "compute")]
 pub enum GateFinish {
     /// Every stage fit: the frame on screen is exact.
     Verified,
-    /// A stage overflowed: the gate kept the last good frame and the buffers grew; draw again.
+    /// The frame on screen overflowed: the gate kept older pixels there and the buffers grew;
+    /// draw again.
     Redraw,
     /// Compute is off for the session (`compute_reason`).
     Fallback,
@@ -1028,6 +1055,14 @@ pub struct Gpu {
     pending_compute: Option<PendingCompute>,
     #[cfg(feature = "compute")]
     pending_gates: std::collections::VecDeque<PendingGate>,
+    /// Counts compute pages: a fresh page, a reset or a change of buffer policy starts a new one.
+    #[cfg(feature = "compute")]
+    compute_epoch: u64,
+    /// Buffer growths that gated checks caused, and gated overflows in a row after the latest.
+    #[cfg(feature = "compute")]
+    gate_growths: u64,
+    #[cfg(feature = "compute")]
+    gate_overflows: u32,
     #[cfg(feature = "compute")]
     pub compute_reason: Option<String>,
     #[cfg(feature = "compute")]
@@ -1615,6 +1650,12 @@ impl Gpu {
             pending_compute: None,
             #[cfg(feature = "compute")]
             pending_gates: std::collections::VecDeque::new(),
+            #[cfg(feature = "compute")]
+            compute_epoch: 0,
+            #[cfg(feature = "compute")]
+            gate_growths: 0,
+            #[cfg(feature = "compute")]
+            gate_overflows: 0,
             #[cfg(feature = "compute")]
             compute_reason: None,
             #[cfg(feature = "compute")]
@@ -2452,10 +2493,30 @@ impl Gpu {
         #[cfg(feature = "compute")]
         {
             self.pending_compute = None;
+            self.new_compute_epoch();
             if let Some(c) = self.compute.as_mut() {
                 c.reset();
             }
         }
+    }
+
+    /// Gated frames still in flight no longer show on the canvas: something else was drawn or
+    /// presented over them. Their checks still settle (growth, errors) but never report exact.
+    #[cfg(feature = "compute")]
+    fn gates_off_screen(&mut self) {
+        for gate in &mut self.pending_gates {
+            gate.on_screen = false;
+        }
+    }
+
+    /// Compute's buffers and grown capacities went (a fresh page, a reset, a change of buffer
+    /// policy): checks still in flight describe buffers that are gone, so they may not grow the
+    /// new ones.
+    #[cfg(feature = "compute")]
+    fn new_compute_epoch(&mut self) {
+        self.gates_off_screen();
+        self.compute_epoch += 1;
+        self.gate_overflows = 0;
     }
 
     #[cfg(feature = "compute")]
@@ -2470,6 +2531,7 @@ impl Gpu {
         if !enabled {
             self.pending_compute = None;
             self.last_compute_used = false;
+            self.new_compute_epoch();
             if let Some(c) = self.compute.as_mut() {
                 c.reset();
             }
@@ -2488,7 +2550,7 @@ impl Gpu {
     #[cfg(feature = "compute")]
     pub fn compute_page_reset(&mut self) {
         self.pending_compute = None;
-        self.pending_gates.clear();
+        self.new_compute_epoch();
         self.ordinary_revision = None;
         if let Some(c) = self.compute.as_mut() {
             c.reset();
@@ -2530,6 +2592,7 @@ impl Gpu {
     pub fn compute_tight(&mut self, tight: bool) {
         self.compute_tight = tight;
         self.pending_compute = None;
+        self.new_compute_epoch();
         if let Some(c) = self.compute.as_mut() {
             c.set_tight(tight);
         }
@@ -2554,6 +2617,7 @@ impl Gpu {
         self.check()?;
         self.pending_compute = None;
         self.last_compute_used = false;
+        self.gates_off_screen();
         let (width, height) = (u32::from(frame.width), u32::from(frame.height));
         let dst = self.next_frame();
         let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -2585,6 +2649,7 @@ impl Gpu {
             dst,
             main.view_id,
             &main.view,
+            None,
             working_budget as u64,
         )?;
         let internal = internal.pop();
@@ -2623,10 +2688,13 @@ impl Gpu {
 
     /// Draws a compute frame and presents it at once, through the bump gate: the GPU itself keeps
     /// the frame on screen wherever a stage overflowed, so nothing overflowed is ever shown and
-    /// presenting never waits for a read-back. Needs a frame of this size on screen to keep;
-    /// without one, `Ok(None)` (use `stage_compute`). The returned check decides exactness and
-    /// grows the buffers (`finish_gate`); a check that landed since the last gated frame is
-    /// settled first, so growth keeps up with continuous motion.
+    /// presenting never waits for a read-back. Checks that landed since the last call are settled
+    /// first (`finish_gate`), so growth keeps up with continuous motion. Needs a frame of this
+    /// size on screen to keep (`GatePresent::Stage` otherwise), and at most `GATES_IN_FLIGHT`
+    /// checks in flight (`GatePresent::Busy` otherwise: none is ever dropped).
+    ///
+    /// What the canvas shows is unknown until the frame's check lands (the gate may have kept
+    /// the older pixels), so nothing reuses it as the last frame until `finish_gate` says so.
     #[cfg(feature = "compute")]
     pub fn present_compute(
         &mut self,
@@ -2634,14 +2702,13 @@ impl Gpu {
         frame: &Frame,
         background: [f32; 4],
         generation: u64,
-    ) -> Result<Option<(DrawStats, ComputeCheck)>> {
+    ) -> Result<GatePresent> {
         self.check()?;
-        if !matches!(
-            self.finish_gate(generation)?,
-            GateFinish::Pending | GateFinish::Verified | GateFinish::Redraw
-        ) || self.compute_reason.is_some()
-        {
-            return Ok(None);
+        if matches!(self.finish_gate(generation)?, GateFinish::Fallback) || self.compute_reason.is_some() {
+            return Ok(GatePresent::Stage);
+        }
+        if self.pending_gates.len() >= GATES_IN_FLIGHT {
+            return Ok(GatePresent::Busy);
         }
         let (width, height) = (u32::from(frame.width), u32::from(frame.height));
         let Some(cur) = self.cur.filter(|&c| {
@@ -2649,7 +2716,7 @@ impl Gpu {
                 .get(c)
                 .is_some_and(|m| m.width == width && m.height == height)
         }) else {
-            return Ok(None);
+            return Ok(GatePresent::Stage);
         };
         self.pending_compute = None;
         let validation = self.device.push_error_scope(wgpu::ErrorFilter::Validation);
@@ -2667,7 +2734,7 @@ impl Gpu {
             pipeline.set_tight(tight);
             pipeline
         });
-        let (c, diagnostic) = pipeline.render_gated(
+        let drawn = pipeline.render_gated(
             &self.device,
             &self.queue,
             store,
@@ -2679,13 +2746,15 @@ impl Gpu {
             &self.frames[cur].view,
             FORMAT,
             working_budget as u64,
-        )?;
+        );
+        // Pop the scopes whatever happened, so a refusal doesn't leave them pushed.
         let internal = internal.pop();
         let memory = memory.pop();
         let validation = validation.pop();
+        let (c, diagnostic) = drawn?;
         let t0 = now();
         let submits0 = self.submits;
-        self.submits += 2;
+        self.submits += 1;
         let mut stats = self.finish_frame(
             cur,
             DrawStats {
@@ -2703,26 +2772,24 @@ impl Gpu {
         )?;
         stats.submit_ms += c.submit_ms;
         stats.cpu_ms += c.cpu_ms;
-        let background = background.map(f32::to_bits);
+        // Only the newest gated frame can be the one on screen.
+        self.gates_off_screen();
         let result = Rc::new(std::cell::RefCell::new(None));
-        if self.pending_gates.len() >= GATES_IN_FLIGHT {
-            // Too many unsettled: the oldest is dropped (a newer check covers what it would say).
-            self.pending_gates.pop_front();
-        }
         self.pending_gates.push_back(PendingGate {
             result: result.clone(),
             generation,
-            view: frame.view,
-            background,
+            last: Last {
+                view: frame.view,
+                size: (width, height),
+            },
+            background: background.map(f32::to_bits),
+            on_screen: true,
+            epoch: self.compute_epoch,
+            growths: self.gate_growths,
         });
-        // What the canvas shows is this frame's camera unless the gate kept the last one, which
-        // the check says (and `finish_gate` puts back); nothing is exact until it does.
-        self.last = Some(Last {
-            view: frame.view,
-            size: (width, height),
-        });
-        self.last_scale = Some(frame.view.as_coeffs()[0]);
-        self.shown = Some((generation, background, false));
+        self.last = None;
+        self.last_scale = None;
+        self.shown = None;
         self.last_compute_used = true;
         let device = self.device.clone();
         let health = self.health.clone();
@@ -2741,17 +2808,18 @@ impl Gpu {
             };
             *result.borrow_mut() = Some(value);
         });
-        Ok(Some((stats, check)))
+        Ok(GatePresent::Presented(stats, check))
     }
 
-    /// Settles every gated frame whose check has landed, oldest first: overflows grow the buffers
-    /// (and forget what the canvas shows, since the gate may have kept an older frame there), and
-    /// the newest frame is exact once its own check landed clean. `Redraw` when any landed check
-    /// overflowed, `Verified` when the newest landed clean, `Pending` otherwise.
+    /// Settles every gated frame whose check has landed, oldest first. An error or a lost device
+    /// turns compute off. An overflow grows the buffers; if that frame was the one on screen,
+    /// the gate kept older pixels there, so `Redraw`. The newest frame on screen is exact once
+    /// its check lands clean (`Verified`), and only then is it the last frame. Gated frames that
+    /// keep overflowing after the buffers grew turn compute off, as six draws of one staged frame
+    /// do. `Pending` when nothing on screen was settled.
     #[cfg(feature = "compute")]
     pub fn finish_gate(&mut self, generation: u64) -> Result<GateFinish> {
-        let mut overflowed = false;
-        let mut newest_clean = None;
+        let mut verdict = GateFinish::Pending;
         while let Some(front) = self.pending_gates.front() {
             let landed = front.result.borrow_mut().take();
             let Some(landed) = landed else { break };
@@ -2760,7 +2828,6 @@ impl Gpu {
                 Ok(diagnostic) => diagnostic,
                 Err(error) => {
                     // The gate never showed bad pixels, but a GPU error stops compute.
-                    self.pending_gates.clear();
                     self.disable_compute(format!("a compute frame failed its GPU check: {}", error.message));
                     if error.code == ErrorCode::DeviceLost {
                         return Err(error);
@@ -2768,25 +2835,50 @@ impl Gpu {
                     return Ok(GateFinish::Fallback);
                 }
             };
-            let over = diagnostic.is_some_and(|d| {
-                let compute = self.compute.as_mut().expect("gated compute pipeline");
-                matches!(compute.check_frame(d), crate::vello_compute::FrameCheck::Overflow(_))
-            });
-            overflowed |= over;
-            newest_clean = (!over && self.pending_gates.is_empty()).then_some(gated);
-        }
-        if overflowed {
-            self.last = None;
-            self.shown = None;
-            return Ok(GateFinish::Redraw);
-        }
-        if let Some(gated) = newest_clean {
-            if gated.generation == generation && self.last.is_some_and(|l| l.view == gated.view) {
-                self.shown = Some((gated.generation, gated.background, true));
+            let current = gated.epoch == self.compute_epoch;
+            let over = match (diagnostic, self.compute.as_mut()) {
+                (Some(d), Some(compute)) if current => {
+                    matches!(compute.check_frame(d), crate::vello_compute::FrameCheck::Overflow(_))
+                }
+                (Some(d), Some(compute)) => {
+                    compute.discard_diagnostic(d);
+                    false
+                }
+                (Some(d), None) => {
+                    d.discard();
+                    false
+                }
+                (None, _) => false,
+            };
+            if over {
+                if gated.growths == self.gate_growths {
+                    self.gate_overflows += 1;
+                }
+                self.gate_growths += 1;
+                if self.gate_overflows >= GATE_OVERFLOWS_MAX {
+                    self.disable_compute(format!(
+                        "{GATE_OVERFLOWS_MAX} gated compute frames in a row overflowed after their buffers grew"
+                    ));
+                    return Ok(GateFinish::Fallback);
+                }
+                if gated.on_screen {
+                    verdict = GateFinish::Redraw;
+                }
+            } else {
+                if current {
+                    self.gate_overflows = 0;
+                }
+                if gated.on_screen {
+                    if gated.generation == generation {
+                        self.shown = Some((gated.generation, gated.background, true));
+                    }
+                    self.last_scale = Some(gated.last.view.as_coeffs()[0]);
+                    self.last = Some(gated.last);
+                    verdict = GateFinish::Verified;
+                }
             }
-            return Ok(GateFinish::Verified);
         }
-        Ok(GateFinish::Pending)
+        Ok(verdict)
     }
 
     /// Shows a staged compute frame once its check has come back, or says why not. A frame
@@ -2864,7 +2956,7 @@ impl Gpu {
     #[cfg(feature = "compute")]
     pub fn cancel_compute_frame(&mut self) {
         self.pending_compute = None;
-        self.pending_gates.clear();
+        self.gates_off_screen();
     }
 
     #[cfg(feature = "compute")]
@@ -3603,6 +3695,7 @@ impl Gpu {
         {
             self.pending_compute = None;
             self.last_compute_used = false;
+            self.gates_off_screen();
         }
         let (width, height) = (u32::from(frame.width), u32::from(frame.height));
         let capturing = self.reader_halo.as_ref().is_some_and(|halo| halo.capturing);
@@ -3811,6 +3904,7 @@ impl Gpu {
         {
             self.pending_compute = None;
             self.last_compute_used = false;
+            self.gates_off_screen();
         }
         self.forget_motion_prefix();
         self.readers.drop_glass_mask_atlas();

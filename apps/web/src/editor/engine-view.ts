@@ -570,9 +570,12 @@ function computeRequested(): boolean {
   return new URLSearchParams(window.location.search).get("compute") === "1";
 }
 
-/** Compute frames go through the bump gate unless `?gate=0` asks for the checked-only path. */
+/**
+ * Still compute frames go through the bump gate with `?gate=1` (a prototype, decision 0040's
+ * P1-0 latency gate); otherwise every compute frame is checked before it shows.
+ */
 function computeGated(): boolean {
-  return new URLSearchParams(window.location.search).get("gate") !== "0";
+  return new URLSearchParams(window.location.search).get("gate") === "1";
 }
 
 const NOT_DRAWN: EngineDraw = {
@@ -2383,7 +2386,9 @@ export class EngineView {
     const textFirst = opening || this.#builder.pendingVisible > 0;
     const viewport = `${pageId}|${width}x${height}|${dpr}`;
     const revision = engine.revision;
-    const key = `${viewport}|${revision}|${this.#imageVersion}|${cam.zoom}|${cam.x}|${cam.y}`;
+    // Everything a frame's pixels depend on: a compute frame checked for one key is exact only
+    // for that key, so the background is part of it.
+    const key = `${viewport}|${revision}|${this.#imageVersion}|${background}|${cam.zoom}|${cam.x}|${cam.y}`;
     if (this.#readbackLimit?.key === key)
       return this.#pageLimit(pageId, this.#readbackLimit.reason);
     this.#readbackLimit = null;
@@ -2667,11 +2672,16 @@ export class EngineView {
     };
   }
 
-  /** Drops the compute candidate being checked, if any: it can no longer be shown. */
+  /**
+   * Drops the compute candidate being checked and the gated frame whose check is in flight, if
+   * any: neither can be reported for what's asked now. The engine still settles a dropped gated
+   * frame's check (growth, errors), but never as exact.
+   */
   #cancelCompute(engine: RenderEngine): void {
-    if (!this.#pendingCompute) return;
+    if (!this.#pendingCompute && !this.#pendingGate) return;
     engine.cancelComputeFrame();
     this.#pendingCompute = null;
+    this.#pendingGate = null;
   }
 
   /**
@@ -2715,6 +2725,8 @@ export class EngineView {
       sessionComputeFallback = reason;
       return { kind: "legacy" };
     }
+    // Too many checks in flight: vello_gpu draws this one, rather than drop a check.
+    if (presented.value === "busy") return { kind: "legacy" };
     if (!presented.value) return null;
     const candidate = { key, stats: presented.value.stats, ready: false };
     this.#pendingGate = candidate;
@@ -2750,10 +2762,10 @@ export class EngineView {
     // continuous resize keeps showing frames instead of cancelling every candidate unseen.
     const stable = this.#computeContent === content;
     this.#computeContent = content;
+    if (!stable) this.#cancelCompute(engine);
     let pending = this.#pendingCompute;
     if (pending && pending.content !== content) {
-      engine.cancelComputeFrame();
-      this.#pendingCompute = null;
+      this.#cancelCompute(engine);
       pending = null;
     }
     let attempt = 1;

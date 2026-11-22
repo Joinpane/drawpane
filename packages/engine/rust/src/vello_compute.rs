@@ -60,7 +60,7 @@ const PASS_NAMES: [&str; NUM_TS_PASSES] = [
     "path_tiling_setup",
     "path_tiling",
     "fine_area",
-    "present_blit",
+    "gate",
 ];
 
 const APPLY_VIEW_WGSL: &str = r#"
@@ -265,12 +265,23 @@ pub struct PendingDiag {
     pass_mask: u16,
     has_ts: bool,
     period_ns: f32,
+    /// The capacities the frame was drawn with: its counts are judged against these, not the
+    /// buffers that exist when the check lands (they may have grown since).
+    caps: BumpCaps,
 }
 
 pub struct FrameDiagnostic {
     staging: wgpu::Buffer,
     bump: BumpAllocators,
     timestamps: Option<([u64; TS_QUERY_COUNT as usize], u16, f32)>,
+    caps: BumpCaps,
+}
+
+impl FrameDiagnostic {
+    /// Frees the read-back of a check nothing will judge (the compute pipeline is gone).
+    pub fn discard(self) {
+        self.staging.destroy();
+    }
 }
 
 struct PipelineEntry {
@@ -678,9 +689,10 @@ pub struct VelloCompute {
     gate: Option<Gate>,
 }
 
-/// The private texture a gated frame is drawn into.
+/// The private texture a gated frame is drawn into, counted against the compute budget.
 struct Back {
     size: (u32, u32),
+    bytes: u64,
     id: u64,
     tex: wgpu::Texture,
     view: wgpu::TextureView,
@@ -891,7 +903,8 @@ impl VelloCompute {
     pub fn gpu_bytes(&self) -> usize {
         let ret = self.retained.as_ref().map_or(0, |r| r.bytes);
         let work = self.working.as_ref().map_or(0, |w| w.bytes);
-        (ret + work) as usize
+        let back = self.back.as_ref().map_or(0, |b| b.bytes);
+        (ret + work + back) as usize
     }
 
     pub fn reset(&mut self) {
@@ -989,6 +1002,10 @@ impl VelloCompute {
     /// counters (and timestamps) out for the check. Nothing is presented here: the caller makes
     /// the texture current only after `check_frame` says every stage fit.
     ///
+    /// With `gate` (the frame on screen and its format), the same command buffer then runs the
+    /// bump gate into it (`render_gated`): one submission, so a draw that fails validation never
+    /// leaves the gate to copy a stale back texture, and the gate is in the GPU timestamps.
+    ///
     /// `budget` is the GPU memory the compute buffers may hold in all (decision 0040's budget,
     /// less what the rest of the engine holds). Past it, or past a binding limit, this refuses
     /// with `ErrorCode::Limit` before allocating.
@@ -1006,9 +1023,15 @@ impl VelloCompute {
         dst_slot: usize,
         dst_view_id: u64,
         dst_view: &wgpu::TextureView,
+        gate: Option<(&wgpu::TextureView, wgpu::TextureFormat)>,
         budget: u64,
     ) -> Result<(ComputeFrameStats, Option<PendingDiag>)> {
         let t_total = gpu::now();
+        if let Some((_, format)) = gate
+            && self.gate.is_none()
+        {
+            self.gate = Some(Gate::new(device, format));
+        }
         let mut encode_ms = 0.0;
 
         let stroke_scale = stroke_bucket(view);
@@ -1105,10 +1128,11 @@ impl VelloCompute {
                 f64::from(background[3]),
             ];
             {
+                // Nothing can overflow on an empty page: a gated frame clears the canvas itself.
                 let _rpass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("compute.clear"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: dst_view,
+                        view: gate.map_or(dst_view, |(shown, _)| shown),
                         depth_slice: None,
                         resolve_target: None,
                         ops: wgpu::Operations {
@@ -1293,6 +1317,62 @@ impl VelloCompute {
         );
         dispatch!(14, "compute.fine_area", self.pipelines.fine_area, bg_fine, wg.fine);
 
+        if let Some((shown, _)) = gate {
+            let gate = self.gate.as_ref().expect("gate pipeline");
+            let caps = work.caps;
+            let uniform = GateCaps {
+                binning: caps.binning,
+                ptcl: caps.ptcl_dynamic(),
+                tile: caps.tile,
+                seg_counts: caps.seg_counts,
+                segments: caps.segments,
+                blend: caps.blend,
+                lines: caps.lines,
+                always: 0,
+            };
+            queue.write_buffer(&gate.caps, 0, bytemuck::bytes_of(&uniform));
+            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("compute.gate"),
+                layout: &gate.layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: ret.bump_buf.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: gate.caps.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: wgpu::BindingResource::TextureView(dst_view),
+                    },
+                ],
+            });
+            pass_mask |= 1u16 << 15;
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("compute.gate"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: shown,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                timestamp_writes: ts_qs.map(|qs| wgpu::RenderPassTimestampWrites {
+                    query_set: qs,
+                    beginning_of_pass_write_index: Some(30),
+                    end_of_pass_write_index: Some(31),
+                }),
+                ..Default::default()
+            });
+            pass.set_pipeline(&gate.pipeline);
+            pass.set_bind_group(0, &group, &[]);
+            pass.draw(0..3, 0..1);
+        }
+
         let has_ts = if let (Some(qs), Some(ts_buf)) = (ts_qs, self.ts_resolve_buf.as_ref()) {
             encoder.resolve_query_set(qs, 0..TS_QUERY_COUNT, ts_buf, 0);
             true
@@ -1320,6 +1400,7 @@ impl VelloCompute {
             pass_mask,
             has_ts,
             period_ns: self.timestamp_period_ns,
+            caps: work.caps,
         };
 
         let submit_ms = gpu::now() - t_sub;
@@ -1336,11 +1417,11 @@ impl VelloCompute {
         ))
     }
 
-    /// Draws the page into the private back texture, then, in a submission right behind it on
-    /// the same queue, runs the bump gate into `shown` (the frame on screen): every pixel is the
-    /// new frame's if every stage fit, and stays what it was otherwise. The caller presents
-    /// `shown` at once; the returned read-back still decides whether the frame was exact, and
-    /// grows the buffers if it wasn't (`check_frame`).
+    /// Draws the page into the private back texture, then, in the same command buffer, runs the
+    /// bump gate into `shown` (the frame on screen): every pixel is the new frame's if every
+    /// stage fit, and stays what it was otherwise. The caller presents `shown` at once; the
+    /// returned read-back still decides whether the frame was exact, and grows the buffers if it
+    /// wasn't (`check_frame`). The back texture counts against `budget` like any compute buffer.
     #[allow(clippy::too_many_arguments)]
     pub fn render_gated(
         &mut self,
@@ -1356,11 +1437,23 @@ impl VelloCompute {
         format: wgpu::TextureFormat,
         budget: u64,
     ) -> Result<(ComputeFrameStats, Option<PendingDiag>)> {
+        let bytes = u64::from(width.max(1)) * u64::from(height.max(1)) * 4;
         let back = match self.back.take() {
             Some(back) if back.size == (width, height) => back,
             old => {
                 if let Some(old) = old {
                     old.tex.destroy();
+                }
+                let held = self.gpu_bytes() as u64;
+                if held + bytes > budget {
+                    return Err(EngineError::new(
+                        ErrorCode::Limit,
+                        format!(
+                            "compute.back would take compute's GPU memory to {} MiB, past its {} MiB budget",
+                            (held + bytes) >> 20,
+                            budget >> 20
+                        ),
+                    ));
                 }
                 let tex = device.create_texture(&wgpu::TextureDescriptor {
                     label: Some("compute.back"),
@@ -1383,79 +1476,41 @@ impl VelloCompute {
                 let id = u64::MAX - u64::from(width) * 65_536 - u64::from(height);
                 Back {
                     size: (width, height),
+                    bytes,
                     id,
                     tex,
                     view,
                 }
             }
         };
-        let drawn = self.render_into(
-            device, queue, store, generation, width, height, view, background, 2, back.id, &back.view, budget,
-        );
-        let result = drawn.and_then(|(stats, diag)| {
-            let gate = self.gate.get_or_insert_with(|| Gate::new(device, format));
-            let caps = self.working.as_ref().map_or(BumpCaps::default(), |w| w.caps);
-            let uniform = GateCaps {
-                binning: caps.binning,
-                ptcl: caps.ptcl_dynamic(),
-                tile: caps.tile,
-                seg_counts: caps.seg_counts,
-                segments: caps.segments,
-                blend: caps.blend,
-                lines: caps.lines,
-                // An empty page clears the back texture without touching the counters.
-                always: u32::from(diag.is_none()),
-            };
-            queue.write_buffer(&gate.caps, 0, bytemuck::bytes_of(&uniform));
-            let bump = &self
-                .retained
-                .as_ref()
-                .ok_or_else(|| EngineError::new(ErrorCode::State, "no retained compute scene"))?
-                .bump_buf;
-            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("compute.gate"),
-                layout: &gate.layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: bump.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: gate.caps.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&back.view),
-                    },
-                ],
-            });
-            let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("compute.gate"),
-            });
-            {
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("compute.gate"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: shown,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    ..Default::default()
-                });
-                pass.set_pipeline(&gate.pipeline);
-                pass.set_bind_group(0, &group, &[]);
-                pass.draw(0..3, 0..1);
-            }
-            queue.submit([encoder.finish()]);
-            Ok((stats, diag))
-        });
+        let (id, back_view) = (back.id, back.view.clone());
+        // The rest of compute's buffers get what the back texture leaves of the budget.
         self.back = Some(back);
-        result
+        self.render_into(
+            device,
+            queue,
+            store,
+            generation,
+            width,
+            height,
+            view,
+            background,
+            2,
+            id,
+            &back_view,
+            Some((shown, format)),
+            budget.saturating_sub(bytes),
+        )
+    }
+
+    /// Frees a read-back whose frame belonged to a page compute has since dropped: its counts say
+    /// nothing about the buffers now, so it grows nothing, but its buffer goes back to the pool.
+    pub fn discard_diagnostic(&mut self, diagnostic: FrameDiagnostic) {
+        if self.diag_pool.len() < MAX_DIAG_POOL {
+            self.diag_pool.push(diagnostic.staging);
+        } else {
+            diagnostic.staging.destroy();
+        }
     }
 
     /// Judges a staged frame from its read-back counters. Vello flags most overflows in
@@ -1468,6 +1523,7 @@ impl VelloCompute {
             staging,
             mut bump,
             timestamps,
+            caps,
         } = diagnostic;
         let seen = Needs {
             binning: bump.binning,
@@ -1478,7 +1534,7 @@ impl VelloCompute {
             blend: bump.blend,
             lines: bump.lines,
         };
-        if bump.failed == 0 && self.working.as_ref().is_some_and(|w| w.caps.exceeded_by(&seen)) {
+        if bump.failed == 0 && caps.exceeded_by(&seen) {
             bump.failed = 1 << 31;
         }
         self.diag_summary.record_frame(
@@ -2120,6 +2176,7 @@ pub async fn verify_compute_frame(
         pass_mask,
         has_ts,
         period_ns,
+        caps,
     } = item;
     let mapped = gpu::pump(device, health, rx, 12_000)
         .await
@@ -2157,6 +2214,7 @@ pub async fn verify_compute_frame(
         staging,
         bump,
         timestamps,
+        caps,
     })
 }
 

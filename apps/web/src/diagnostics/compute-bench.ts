@@ -217,6 +217,10 @@ async function computeSweep(
       BENCH_HEIGHT,
       cameraAt(page.pageWidth, page.pageHeight, zoom),
     );
+    // Fenced like every sweep: the frame counts as shown at the animation frame after the GPU
+    // finished presenting it.
+    const fence = await engine.gpuFinished();
+    if (!fence.ok) throw new Error(`compute fence ${i}: ${fence.message}`);
     await nextFrame();
     frames.push({
       i,
@@ -255,8 +259,10 @@ async function computeSweep(
 
 /**
  * A zoom sweep through the bump gate: each frame presented at once (the GPU keeps the last good
- * frame wherever a stage overflowed), its check landing later. Shown is the request to the next
- * animation frame, as for vello_gpu; wait is how long after the request its check landed.
+ * frame wherever a stage overflowed), its check landing later. Fenced exactly as the vello_gpu
+ * sweep is: wait is how long the GPU took to finish after the request, and shown is the
+ * animation frame after that. Every frame's check is kept and settled; when the engine has as
+ * many in flight as it allows, the sweep waits for the oldest before presenting again.
  */
 async function gatedSweep(
   engine: RenderEngine,
@@ -275,22 +281,31 @@ async function gatedSweep(
   );
   takeStats(engine, totals);
   const frames: FrameSample[] = [];
-  const landed: Array<Promise<number>> = [];
+  const checks: Array<Promise<boolean>> = [];
+  let settled = 0;
   let redraws = 0;
+  let busy = 0;
   await nextFrame();
   for (const [i, zoom] of zooms.entries()) {
     signal.throwIfAborted();
-    const t0 = performance.now();
-    const presented = engine.presentComputeFrame(
-      BENCH_WIDTH,
-      BENCH_HEIGHT,
-      cameraAt(page.pageWidth, page.pageHeight, zoom),
-      COMPUTE_BG,
-    );
+    const camera = cameraAt(page.pageWidth, page.pageHeight, zoom);
+    let t0 = performance.now();
+    let presented = engine.presentComputeFrame(BENCH_WIDTH, BENCH_HEIGHT, camera, COMPUTE_BG);
+    while (presented.ok && presented.value === "busy" && settled < checks.length) {
+      busy++;
+      await checks[settled++];
+      t0 = performance.now();
+      presented = engine.presentComputeFrame(BENCH_WIDTH, BENCH_HEIGHT, camera, COMPUTE_BG);
+    }
     const cpuMs = performance.now() - t0;
     if (!presented.ok) throw new Error(`gated frame ${i}: ${presented.message}`);
-    if (!presented.value) throw new Error(`gated frame ${i}: compute didn't draw it`);
-    landed.push(presented.value.check.then(() => performance.now() - t0));
+    if (!presented.value || presented.value === "busy")
+      throw new Error(`gated frame ${i}: compute didn't draw it`);
+    checks.push(presented.value.check);
+    const t1 = performance.now();
+    const fence = await engine.gpuFinished();
+    if (!fence.ok) throw new Error(`gated fence ${i}: ${fence.message}`);
+    const waitMs = performance.now() - t1;
     await nextFrame();
     const verdict = engine.finishComputeGate();
     if (verdict === "redraw") redraws++;
@@ -310,16 +325,13 @@ async function gatedSweep(
         render: round(stats.ms.render),
         submit: round(stats.ms.submit),
       },
-      waitMs: 0,
+      waitMs: round(waitMs),
       gpuMs: null,
       shownMs: round(performance.now() - t0),
     });
   }
-  const waits = await Promise.all(landed);
-  for (const [k, ms] of waits.entries()) {
-    const f = frames[k];
-    if (f) frames[k] = { ...f, waitMs: round(ms) };
-  }
+  await Promise.all(checks);
+
   engine.finishComputeGate();
   const stats = takeStats(engine, totals);
   if (stats?.timestampsSupported && stats.gpuMs.length === frames.length) {
@@ -335,11 +347,11 @@ async function gatedSweep(
           .map(([k, ms]) => [k, round(ms)]),
       )
     : null;
-  return sweepReport(
-    `${label}${redraws ? ` (${redraws} redrew after an overflow)` : ""}`,
-    frames,
-    passes,
-  );
+  const notes = [
+    redraws ? `${redraws} redrew after an overflow` : "",
+    busy ? `${busy} waited for a check` : "",
+  ].filter(Boolean);
+  return sweepReport(`${label}${notes.length ? ` (${notes.join("; ")})` : ""}`, frames, passes);
 }
 
 /** The same sweep on vello_gpu: `moving` is the editor's moving-frame path, else whole frames. */

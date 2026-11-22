@@ -1519,8 +1519,9 @@ impl Engine {
     }
 
     /// Draws and presents a compute frame through the bump gate (`Gpu::present_compute`): its
-    /// stats and its check, or `None` to stage instead (no frame of this size to keep) or to draw
-    /// with vello_gpu (not routed, or compute is off).
+    /// stats and its check; `Stage` to stage instead (no frame of this size to keep) or to draw
+    /// with vello_gpu (not routed, or compute is off: `compute_reason` says which); or `Busy`.
+    /// A failed draw turns compute off; only a lost device comes back as an error.
     #[cfg(feature = "compute")]
     pub fn present_compute(
         &mut self,
@@ -1528,9 +1529,9 @@ impl Engine {
         height: u32,
         camera: Camera,
         background: [f32; 4],
-    ) -> Result<Option<(DrawStats, crate::gpu::ComputeCheck)>> {
+    ) -> Result<crate::gpu::GatePresent> {
         let Some(frame) = self.compute_frame(width, height, camera)? else {
-            return Ok(None);
+            return Ok(crate::gpu::GatePresent::Stage);
         };
         let gpu = self.gpu.as_mut().expect("routed to compute");
         match gpu.present_compute(&self.store, &frame, background, self.generation) {
@@ -1540,7 +1541,7 @@ impl Engine {
                 if error.code == ErrorCode::DeviceLost {
                     Err(error)
                 } else {
-                    Ok(None)
+                    Ok(crate::gpu::GatePresent::Stage)
                 }
             }
         }

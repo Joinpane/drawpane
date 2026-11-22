@@ -1590,15 +1590,17 @@ export class RenderEngine {
   /**
    * Draws and presents a compute frame at once through the bump gate (the GPU keeps the frame
    * on screen wherever a stage overflowed): its stats (not exact yet) and a promise that
-   * resolves when `finishComputeGate` can say whether it was exact. `null`: no frame of this size
-   * to keep (stage instead), or compute doesn't draw this view.
+   * resolves when `finishComputeGate` can say whether it was exact. `"busy"`: too many checks
+   * are in flight, nothing was drawn; try again once one lands. `null`: no frame of this size to
+   * keep (stage instead), or compute doesn't draw this view (`computeFallbackReason` says if
+   * compute is off).
    */
   presentComputeFrame(
     width: number,
     height: number,
     camera: Camera,
     background: readonly [number, number, number, number],
-  ): Result<{ readonly stats: FrameStats; readonly check: Promise<boolean> } | null> {
+  ): Result<{ readonly stats: FrameStats; readonly check: Promise<boolean> } | "busy" | null> {
     const token = this.#epoch;
     return this.#call((e) => {
       if (!e.presentComputeFrame) return { ok: true as const, value: null };
@@ -1611,7 +1613,8 @@ export class RenderEngine {
         camera.dpr,
         bg(background),
       );
-      if (!o) return { ok: true as const, value: null };
+      if (o === undefined) return { ok: true as const, value: null };
+      if (typeof o === "number") return { ok: true as const, value: "busy" as const };
       const s = stats(o, true);
       const result = outcome(o);
       if (!result.ok) return result;
@@ -1626,7 +1629,7 @@ export class RenderEngine {
           })
         : Promise.resolve(false);
       return { ok: true as const, value: { stats: s, check } };
-    }) as Result<{ readonly stats: FrameStats; readonly check: Promise<boolean> } | null>;
+    }) as Result<{ readonly stats: FrameStats; readonly check: Promise<boolean> } | "busy" | null>;
   }
 
   /** Settles the gated frame's check (`presentComputeFrame`). */

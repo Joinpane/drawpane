@@ -68,7 +68,7 @@ export function benchMarkdown(report: BenchReport): string {
     `- Laptop gate: ${gateText(gate(report))}`,
     `- Encodes: ${report.encodes ? `${report.encodes.full} whole page, ${report.encodes.patched} patched moves` : "n/a"}; overflow checks ${report.overflowChecks}${report.fallback ? `; compute fell back: ${report.fallback}` : ""}`,
     "",
-    "CPU is the main-thread wall of every engine call a frame takes (routing included); wait is the GPU check (compute) or fence (vello_gpu), off the main thread; shown is from the request to the animation frame after it was shown. Columns are p50 / p95 / p99 / max ms.",
+    "CPU is the main-thread wall of every engine call a frame takes (routing included); wait is the check (checked compute) or the GPU fence (gated compute and vello_gpu), off the main thread; shown is from the request to the animation frame after the GPU finished showing it, the same fence for every sweep. Columns are p50 / p95 / p99 / max ms.",
     "",
     "| Sweep | Frames | Compute | CPU | Wait | GPU | Shown |",
     "| --- | --- | --- | --- | --- | --- | --- |",

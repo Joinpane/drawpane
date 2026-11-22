@@ -1285,8 +1285,10 @@ impl Engine {
     /// Draws and presents a compute frame through the bump gate: wherever a stage overflowed,
     /// the GPU keeps the frame that was on screen, so nothing overflowed is shown and nothing
     /// waits for a read-back. Returns the frame's outcome (never exact: `finishComputeGate`
-    /// decides that once `takeComputeGateCheck`'s promise resolves), or nothing when there is no
-    /// frame of this size to keep (stage instead) or compute doesn't draw this view.
+    /// decides that once `takeComputeGateCheck`'s promise resolves), or a failed outcome (a lost
+    /// device, or a call the engine refused); the number 1 when too many checks are in flight
+    /// (nothing drawn: try again once one lands); or nothing when there is no frame of this size
+    /// to keep (stage instead) or compute doesn't draw this view.
     #[cfg(feature = "compute")]
     #[allow(clippy::too_many_arguments)]
     #[wasm_bindgen(js_name = presentComputeFrame)]
@@ -1299,12 +1301,12 @@ impl Engine {
         y: f64,
         dpr: f64,
         background: Vec<f32>,
-    ) -> Option<Outcome> {
+    ) -> JsValue {
         let drawn = self
             .core
             .present_compute(width, height, Camera { zoom, x, y, dpr }, rgba(&background));
         match drawn {
-            Ok(Some((draw, check))) => {
+            Ok(gpu::GatePresent::Presented(draw, check)) => {
                 self.gate_check = Some(wasm_bindgen_futures::future_to_promise(async move {
                     check.await;
                     Ok(JsValue::UNDEFINED)
@@ -1318,9 +1320,11 @@ impl Engine {
                 o.render_ms = draw.render_ms;
                 o.submit_ms = draw.submit_ms;
                 o.cpu_ms = draw.cpu_ms;
-                Some(o)
+                JsValue::from(o)
             }
-            Ok(None) | Err(_) => None,
+            Ok(gpu::GatePresent::Busy) => JsValue::from(1),
+            Ok(gpu::GatePresent::Stage) => JsValue::UNDEFINED,
+            Err(error) => failure(error),
         }
     }
 

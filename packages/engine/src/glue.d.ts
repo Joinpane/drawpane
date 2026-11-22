@@ -174,7 +174,7 @@ export class Engine {
     y: number,
     dpr: number,
     background: Float32Array,
-  ): Outcome | undefined;
+  ): Outcome | number | undefined;
   takeComputeGateCheck?(): Promise<void> | undefined;
   finishComputeGate?(): number;
   cancelComputeFrame?(): void;

@@ -266,7 +266,7 @@ type Module = Awaited<ReturnType<typeof loadBrowserEngine>>;
 type Patch = (w: ListWriter) => void;
 
 /** Cells `checkGate` adds to the matrix. */
-const GATE_CELLS = 2;
+const GATE_CELLS = 4;
 
 /** Cells `runDragChecks` adds to the matrix: one per drag step of each scene. */
 const DRAG_CELLS = 4 + 2 + 3;
@@ -521,7 +521,10 @@ async function checkFloorReset(
 /**
  * The bump gate (decision 0040, P1-0): a gated frame that overflows must leave the frame on
  * screen exactly as it was (nothing overflowed shows), and once the buffers grew, the gated
- * frame must be exact. Tight buffers make the fit view overflow after a 100% one.
+ * frame must be exact. Tight buffers make the fit view overflow after a 100% one. Then two
+ * cells the stack review's re-check asked for: a vello_gpu frame drawn over a gated one whose
+ * check is in flight must not be reported exact or redrawn when that check lands, and past
+ * `GATES_IN_FLIGHT` checks the gate draws nothing rather than drop one.
  */
 async function checkGate(
   computeModule: Awaited<ReturnType<typeof loadComputeEngine>>,
@@ -590,7 +593,8 @@ async function checkGate(
     for (; draws < MATRIX_ATTEMPTS && !verified; draws++) {
       const presented = candidate.presentComputeFrame(W, H, at(fit), COMPUTE_BG);
       if (!presented.ok) throw new Error(presented.message);
-      if (!presented.value) throw new Error("the gated path didn't draw");
+      if (!presented.value || presented.value === "busy")
+        throw new Error("the gated path didn't draw");
       if (!(await presented.value.check)) throw new Error("the gate check was interrupted");
       const verdict = candidate.finishComputeGate();
       if (verdict === "redraw") {
@@ -616,6 +620,41 @@ async function checkGate(
     const s = score(got.value, want.value, W, H);
     const exactViolations = outsideTolerance(s, CPU_GPU_TOLERANCE);
     if (!verified) exactViolations.push(`not verified after ${draws} gated draws`);
+
+    // A vello_gpu frame over a gated one: the gated check lands after, and must neither report
+    // the canvas exact nor ask for a redraw (the canvas shows vello_gpu's frame).
+    const overViolations: string[] = [];
+    const under = candidate.presentComputeFrame(W, H, at(1), COMPUTE_BG);
+    if (!under.ok) throw new Error(under.message);
+    if (!under.value || under.value === "busy") throw new Error("the gated path didn't draw");
+    const over = candidate.renderGpu(W, H, at(1), COMPUTE_BG, false);
+    if (!over.ok) throw new Error(over.message);
+    await under.value.check;
+    const afterVello = candidate.finishComputeGate();
+    if (afterVello !== "pending")
+      overViolations.push(`the gated check said ${afterVello} after a vello_gpu frame`);
+
+    // Back-pressure: present until the engine refuses, without letting a check land.
+    const busyViolations: string[] = [];
+    const before0 = candidate.computeStats();
+    if (!before0.ok) throw new Error(before0.message);
+    const inFlight: Array<Promise<boolean>> = [];
+    let refused = false;
+    for (let i = 0; i < 12 && !refused; i++) {
+      const r = candidate.presentComputeFrame(W, H, at(1), COMPUTE_BG);
+      if (!r.ok) throw new Error(r.message);
+      if (r.value === "busy") refused = true;
+      else if (r.value) inFlight.push(r.value.check);
+      else throw new Error("the gated path didn't draw");
+    }
+    await Promise.all(inFlight);
+    candidate.finishComputeGate();
+    const after0 = candidate.computeStats();
+    if (!after0.ok) throw new Error(after0.message);
+    const checked = after0.value.framesChecked - before0.value.framesChecked;
+    if (!refused) busyViolations.push(`${inFlight.length} checks in flight and none refused`);
+    if (checked !== inFlight.length)
+      busyViolations.push(`${inFlight.length} gated frames presented, ${checked} checked`);
     return [
       cell(
         "overflow keeps the last good frame",
@@ -625,6 +664,8 @@ async function checkGate(
         overflowed,
       ),
       cell("exact after growing", exactViolations, draws, s),
+      cell("a vello_gpu frame over a gated one", overViolations, 1),
+      cell("checks in flight are never dropped", busyViolations, inFlight.length),
     ];
   } finally {
     candidate.dispose();
