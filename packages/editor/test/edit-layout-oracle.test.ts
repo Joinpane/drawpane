@@ -842,7 +842,8 @@ type Snapshot = Record<string, { parent: string; key: string; type: string; prop
 
 /**
  * How `after` differs from `before`, less what two known issues explain,
- * each by its own signature: #280, a layer of an instance whose main is
+ * each by its own signature (and #310's, a Fill layer in a grid only moved or
+ * resized): #280, a layer of an instance whose main is
  * gone, lost when its delete is redone; #281, a materialized layer (a copy
  * layer or an instance) only moved or resized by the redo; #290, a layer
  * only moved or resized in a flow holding a group with an absolute member.
@@ -856,6 +857,17 @@ function unexplained(before: Snapshot, after: Snapshot, doc: Doc): string[] {
     const source = was && getProp(was.props, "mirrors");
     if (was && !now && orphaned(before, id, doc)) continue;
     if (was && now && placedOnly(was, now) && inGroupedFlow(before, id)) continue;
+    // Issue 310: a Fill layer directly in a grid has more than one settled layout.
+    const grid = was ? before[was.parent] : undefined;
+    if (
+      was &&
+      now &&
+      placedOnly(was, now) &&
+      grid &&
+      getProp(grid.props, "layoutMode") === "grid" &&
+      (getProp(was.props, "sizingH") === "fill" || getProp(was.props, "sizingV") === "fill")
+    )
+      continue;
     const linked = source !== null || getProp(was?.props ?? {}, "instanceOf") !== null;
     if (was && now && linked && !doc.compactCopies && getProp(now.props, "mirrors") === source) {
       const same = (n: typeof was) => stable({ ...n, props: placeless(n.props) });
