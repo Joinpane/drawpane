@@ -223,6 +223,7 @@ export class Engine {
   ): Outcome;
   renderGpuAhead?(background: Float32Array, budgetMs: number): Outcome;
   clearTiles?(): void;
+  gpuCounters?(): Uint32Array;
   gpuCheck?(): Outcome;
   gpuDestroy?(): void;
   setGpuTimestamps?(enabled: boolean): boolean;

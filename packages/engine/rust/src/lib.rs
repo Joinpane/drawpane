@@ -1147,6 +1147,22 @@ impl Engine {
         }
     }
 
+    /// What made the GPU's Vello renders and scene flushes since it started (`GpuCounters`), for
+    /// profiling: the renders by purpose (11), the flushes by cause (15), then isolation scopes,
+    /// shadow mask misses and hits, and tile pauses. Empty without a GPU.
+    #[wasm_bindgen(js_name = gpuCounters)]
+    pub fn gpu_counters(&self) -> Vec<u32> {
+        let Some(g) = self.core.gpu.as_ref() else {
+            return Vec::new();
+        };
+        let c = g.counters;
+        let mut v = Vec::with_capacity(30);
+        v.extend_from_slice(&c.renders);
+        v.extend_from_slice(&c.flushes);
+        v.extend_from_slice(&[c.scopes, c.shadow_misses, c.shadow_hits, c.pauses]);
+        v
+    }
+
     /// Destroys the GPU device, as a driver reset would lose it: for testing the fallback.
     #[wasm_bindgen(js_name = gpuDestroy)]
     pub fn gpu_destroy(&self) {

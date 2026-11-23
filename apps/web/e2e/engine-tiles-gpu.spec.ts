@@ -92,11 +92,29 @@ function directStripes(count = 12): number[] {
   return [...list.finish()];
 }
 
-function checkpointScene(neighbour: "green" | "empty" | "none"): number[] {
+function checkpointScene(neighbour: "green" | "empty" | "none" | "clipped"): number[] {
   const list = new ListWriter(0xffffffff, 1);
   list.reset();
+  // "clipped": the overlapping stars under a rounded clip at a fractional place, so a slice
+  // pauses with the clip open and resumes under it.
+  const clipped = neighbour === "clipped";
+  const parent = clipped ? 1000 : ROOT;
+  if (clipped)
+    list.set(parent, ROOT, {
+      flags: 0,
+      transform: [1, 0, 0, 1, 3.5, 2.25],
+      opacity: 1,
+      width: 230,
+      height: 58,
+      coarseBelow: 0,
+      reach: 0,
+      unsupported: 0,
+      paths: [{ kind: "rect", w: 230, h: 58, radii: [17, 17, 17, 17], smoothing: 0 }],
+      ops: [{ op: "clip", path: 0, evenOdd: false }, { op: "children" }, { op: "unclip" }],
+      coarse: [],
+    });
   const add = (id: number, path: PathData, color: [number, number, number, number]) =>
-    list.set(id, ROOT, {
+    list.set(id, parent, {
       flags: 0,
       transform: [1, 0, 0, 1, 0, 0],
       opacity: 1,
@@ -109,7 +127,7 @@ function checkpointScene(neighbour: "green" | "empty" | "none"): number[] {
       ops: [{ op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color } }],
       coarse: [],
     });
-  const overlap = neighbour === "none";
+  const overlap = neighbour === "none" || clipped;
   const count = overlap ? 48 : 120;
   for (let i = 0; i < count; i++) {
     const cx = overlap ? 40 + (i % 20) * 9 : 8 + (i % 30) * 16;
@@ -273,7 +291,10 @@ async function sample(
         }
         return sampled;
       } finally {
-        engine.free();
+        // After a trap the engine is still borrowed and can't be freed: keep the trap's error.
+        try {
+          engine.free();
+        } catch {}
       }
     },
     { list, frames, tileBytes, expectedBackend },
@@ -524,7 +545,7 @@ for (const build of ["browser", "webgl"] as const) {
       }
     });
 
-    for (const neighbour of ["green", "empty", "none"] as const) {
+    for (const neighbour of ["green", "empty", "none", "clipped"] as const) {
       test(`a paused tile completes with identical pixels with ${neighbour} neighbour`, async ({
         page,
       }) => {
@@ -532,7 +553,7 @@ for (const build of ["browser", "webgl"] as const) {
         test.setTimeout(180_000);
         const frame: Frame = {
           camera: [1, 0, 0, 1],
-          size: [neighbour === "none" ? 256 : 1000, 64],
+          size: [neighbour === "none" || neighbour === "clipped" ? 256 : 1000, 64],
           pixel: [32, 32],
           moving: false,
           budget: 8,
@@ -543,7 +564,7 @@ for (const build of ["browser", "webgl"] as const) {
           checkpointScene(neighbour),
           [
             { ...frame, camera: [1, -5000, 0, 1], budget: 0 },
-            { ...frame, budget: neighbour === "none" ? 8 : 1 },
+            { ...frame, budget: neighbour === "none" || neighbour === "clipped" ? 8 : 1 },
             { ...frame, repeatUntilExact: 80 },
             { ...frame, budget: 0, freshReference: true },
           ],
