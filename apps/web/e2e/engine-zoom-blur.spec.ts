@@ -2243,6 +2243,332 @@ for (const build of ["browser", "webgl"] as const) {
         ).toBeLessThan(2);
       });
 
+    // A whole frame over slices against what can happen between its slices (the #333 review's
+    // repros), on the native fixture above: an edit, a present-only frame of its view, an image
+    // upload refused for memory while it's paused (the trim must leave its glass masks), and too
+    // little GPU memory. It never shows a frame drawn for the old list, keeps drawing through a
+    // present-only frame, never traps, and ends as the frame drawn at once does.
+    test("a whole frame over slices holds through edits, present-only frames, refused uploads and short memory", async ({
+      page,
+    }) => {
+      test.setTimeout(300_000);
+      await openEngine(page, build);
+      const expectedBackend = build === "webgl" ? "webgl2" : "webgpu";
+      const fill = (r: number, g: number, b: number): WireRecord["ops"] => [
+        { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [r, g, b, 1] } },
+      ];
+      const record = (
+        x: number,
+        y: number,
+        rw: number,
+        rh: number,
+        ops: WireRecord["ops"],
+      ): WireRecord => ({
+        flags: 0,
+        transform: [1, 0, 0, 1, x, y],
+        opacity: 1,
+        width: rw,
+        height: rh,
+        coarseBelow: 0,
+        reach: 0,
+        unsupported: 0,
+        paths: [{ kind: "rect", w: rw, h: rh, radii: [0, 0, 0, 0], smoothing: 0 }],
+        ops,
+        coarse: [],
+      });
+      const red: [number, number, number] = [0.95, 0.05, 0.15];
+      const blue: [number, number, number] = [0.05, 0.1, 0.95];
+      const scene = (prefix: [number, number, number], glass: boolean) => {
+        const list = new ListWriter(0xffffffff, 1);
+        list.reset();
+        let id = 1;
+        list.set(id++, ROOT, record(-400, -400, 800, 800, fill(...prefix)));
+        for (let i = 0; i < 400; i++) {
+          list.set(
+            id++,
+            ROOT,
+            record(-400, -400 + i * 2, 800, 1, fill(16 / 255, 16 / 255, 16 / 255)),
+          );
+        }
+        list.set(
+          id++,
+          ROOT,
+          record(-70, -52, 140, 104, [
+            { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 150 },
+          ]),
+        );
+        if (glass) {
+          for (const x of [-36, 12]) {
+            list.set(
+              id++,
+              ROOT,
+              record(x, -12, 24, 24, [
+                {
+                  op: "glass",
+                  paths: [0],
+                  evenOdd: false,
+                  kind: GLASS_KIND.box,
+                  inradius: 8,
+                  angle: -45,
+                  intensity: 0.8,
+                  refraction: 0.8,
+                  depth: 4,
+                  dispersion: 0.5,
+                  frost: 2,
+                  splay: 0,
+                  boxRadii: [0, 0, 0, 0],
+                  boxSmoothing: [0, 0, 0, 0],
+                },
+              ]),
+            );
+          }
+        }
+        return [...list.finish()];
+      };
+      // The prefix, already drawn when it changes, turns from red to blue.
+      const edit = new ListWriter(1, 2);
+      edit.set(1, ROOT, record(-400, -400, 800, 800, fill(...blue)));
+
+      const out = await page.evaluate(
+        async ({ redList, blueList, glassList, editBytes, expectedBackend }) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          type Engine = InstanceType<typeof glue.Engine>;
+          const bg = new Float32Array([1, 1, 1, 1]);
+          const [w, h, zoom, dpr] = [256, 192, 1, 2];
+          type Facts = {
+            ok: boolean;
+            code: number;
+            message: string;
+            plan: number;
+            pending: number;
+            inProgress: boolean;
+            exact: boolean;
+            drawn: number;
+          };
+          const facts = (o: {
+            ok: boolean;
+            code: number;
+            message: string;
+            plan: number;
+            pending: number;
+            in_progress: boolean;
+            exact: boolean;
+            tiles_drawn: number;
+            free(): void;
+          }): Facts => {
+            const f = {
+              ok: o.ok,
+              code: o.code,
+              message: o.message,
+              plan: o.plan,
+              pending: o.pending,
+              inProgress: o.in_progress,
+              exact: o.exact,
+              drawn: o.tiles_drawn,
+            };
+            o.free();
+            return f;
+          };
+          const must = (f: Facts) => {
+            if (!f.ok) throw new Error(f.message);
+            return f;
+          };
+          const entry = <T>(answer: T | undefined): T => {
+            if (answer === undefined) throw new Error("missing GPU entry point");
+            return answer;
+          };
+          const withEngine = async <T>(
+            list: number[],
+            draw: (e: Engine) => Promise<T>,
+            gpuMiB = 0,
+          ) => {
+            const dev = await glue.createGpu(null, 0);
+            if (!dev.ok) throw new Error(dev.message);
+            if (dev.backend !== expectedBackend) throw new Error(`wrong backend ${dev.backend}`);
+            const engine = new glue.Engine(0, 0);
+            try {
+              if (gpuMiB > 0)
+                must(facts(engine.setLimit("gpu_bytes", gpuMiB * 1024 * 1024) as never));
+              must(facts(entry(engine.attachGpu?.(dev)) as never));
+              dev.free();
+              must(facts(engine.apply(new Uint8Array(list)) as never));
+              return await draw(engine);
+            } finally {
+              engine.free();
+            }
+          };
+          const frame = (e: Engine, budget: number) =>
+            facts(
+              entry(
+                e.renderGpu?.(
+                  w,
+                  h,
+                  zoom,
+                  w / (2 * dpr),
+                  h / (2 * dpr),
+                  dpr,
+                  bg,
+                  false,
+                  budget,
+                  true,
+                ),
+              ) as never,
+            );
+          const ahead = (e: Engine) => facts(entry(e.renderGpuAhead?.(bg, 0.05)) as never);
+          const drain = (e: Engine) => {
+            let last = ahead(e);
+            let slices = 1;
+            while (last.ok && last.inProgress && slices < 20_000) {
+              last = ahead(e);
+              slices++;
+            }
+            return { last, slices };
+          };
+          const pixels = async (e: Engine) => {
+            const px = await entry(e.gpuPixels?.());
+            if (!(px instanceof Uint8Array)) throw new Error(px.message);
+            return px;
+          };
+          // Under a tight memory cap the read-back itself may not fit: then only the facts compare.
+          const pixelsIfRoom = (e: Engine) => pixels(e).catch(() => null);
+          const differing = (a: Uint8Array, b: Uint8Array) => {
+            let n = 0;
+            for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) n++;
+            return n;
+          };
+          const atOnce = (list: number[], gpuMiB = 0) =>
+            withEngine(
+              list,
+              async (e) => {
+                const f = frame(e, 0);
+                return { facts: f, px: f.ok ? await pixelsIfRoom(e) : null };
+              },
+              gpuMiB,
+            );
+
+          // An edit to paint the paused frame already drew.
+          const blueAtOnce = await atOnce(blueList);
+          const edited = await withEngine(redList, async (e) => {
+            const first = must(frame(e, 0.05));
+            must(facts(e.apply(new Uint8Array(editBytes)) as never));
+            const afterEdit = must(ahead(e));
+            const next = must(frame(e, 0.05));
+            const { last, slices } = drain(e);
+            return { first, afterEdit, next, last, slices, px: await pixels(e) };
+          });
+          // A present-only frame of the same view while it's drawn.
+          const redAtOnce = await atOnce(redList);
+          const presented = await withEngine(redList, async (e) => {
+            const first = must(frame(e, 0.05));
+            const shown = must(frame(e, -1));
+            const { last, slices } = drain(e);
+            return { first, shown, last, slices, px: await pixels(e) };
+          });
+          // An image upload refused for memory while it's paused, with two lenses reading glass masks.
+          const glassAtOnce = await atOnce(glassList, 48);
+          const refused = await withEngine(
+            glassList,
+            async (e) => {
+              const first = must(frame(e, 0.05));
+              const canvas = new OffscreenCanvas(3072, 3072);
+              canvas.getContext("2d")?.fillRect(0, 0, 1, 1);
+              const bitmap = canvas.transferToImageBitmap();
+              const upload = facts(entry(e.putGpuImageLevel?.(991, bitmap)) as never);
+              bitmap.close();
+              const { last, slices } = drain(e);
+              return { first, upload, last, slices, px: last.ok ? await pixelsIfRoom(e) : null };
+            },
+            48,
+          );
+          // Little GPU memory: whatever the frame drawn at once makes of it, the slices make too.
+          const short = [];
+          for (const mib of [18, 18.2, 19, 20, 40]) {
+            const sync = await atOnce(redList, mib);
+            const sliced = await withEngine(
+              redList,
+              async (e) => {
+                const first = frame(e, 0.05);
+                const { last, slices } =
+                  first.ok && first.inProgress ? drain(e) : { last: first, slices: 0 };
+                // An idle slice's answer has no plan: a present-only frame shows what it finished.
+                const shown = last.ok ? frame(e, -1) : last;
+                return { first, last, shown, slices, px: last.ok ? await pixelsIfRoom(e) : null };
+              },
+              mib,
+            );
+            short.push({
+              mib,
+              sync: sync.facts,
+              first: sliced.first,
+              last: sliced.last,
+              shown: sliced.shown,
+              slices: sliced.slices,
+              differing: sync.px && sliced.px ? differing(sync.px, sliced.px) : -1,
+            });
+          }
+          return {
+            edited: {
+              ...edited,
+              px: undefined,
+              differing: differing(edited.px, entry(blueAtOnce.px ?? undefined)),
+              fromOld: differing(edited.px, entry(redAtOnce.px ?? undefined)),
+            },
+            presented: {
+              ...presented,
+              px: undefined,
+              differing: differing(presented.px, entry(redAtOnce.px ?? undefined)),
+            },
+            refused: {
+              ...refused,
+              px: undefined,
+              reference: glassAtOnce.facts,
+              differing: refused.px && glassAtOnce.px ? differing(refused.px, glassAtOnce.px) : -1,
+            },
+            short,
+          };
+        },
+        {
+          redList: scene(red, false),
+          blueList: scene(blue, false),
+          glassList: scene(red, true),
+          editBytes: [...edit.finish()],
+          expectedBackend,
+        },
+      );
+      console.log(
+        `[zoom-blur ${build}] whole frame over slices vs the world: ${JSON.stringify(out)}`,
+      );
+      // An edit: the next idle slice drops the draw unshown; the next frame draws the new list.
+      expect(out.edited.first.inProgress, "the first frame at rest is a stand-in").toBe(true);
+      expect(out.edited.afterEdit.drawn, "nothing drawn for the old list is shown").toBe(0);
+      expect(out.edited.afterEdit.inProgress).toBe(false);
+      expect(out.edited.last.drawn, "the slices finish the new frame").toBe(1);
+      expect(out.edited.differing, "it's the new list's frame, byte for byte").toBe(0);
+      expect(out.edited.fromOld, "and not the old one").toBeGreaterThan(0);
+      // A present-only frame of the view keeps the draw going.
+      expect(out.presented.shown.inProgress, "a present-only frame keeps the draw").toBe(true);
+      expect(out.presented.shown.pending).toBeGreaterThan(0);
+      expect(out.presented.slices, "the next slices go on with it").toBeGreaterThan(1);
+      expect(out.presented.last.drawn).toBe(1);
+      expect(out.presented.differing).toBe(0);
+      // A refused upload: no trap, and the frame drawn at once.
+      expect(out.refused.upload.ok, "the upload is refused for memory").toBe(false);
+      expect(out.refused.last.ok, out.refused.last.message).toBe(true);
+      expect(out.refused.last.drawn).toBe(1);
+      expect(out.refused.differing).toBe(0);
+      // Short memory: never an error or a stand-in left up where the frame drawn at once draws.
+      for (const s of out.short) {
+        if (!s.sync.ok) continue;
+        expect(s.last.ok, `${s.mib} MiB: ${s.last.message}`).toBe(true);
+        expect(s.last.inProgress, `${s.mib} MiB: finished`).toBe(false);
+        expect(s.shown.plan, `${s.mib} MiB: the plan drawn at once`).toBe(s.sync.plan);
+        // -1: a read-back didn't fit the cap.
+        if (s.differing >= 0) expect(s.differing, `${s.mib} MiB: the frame drawn at once`).toBe(0);
+      }
+    });
+
     test("glass stacked over wide progressive blur at d>=32 matches full-res reference", async ({
       page,
     }) => {

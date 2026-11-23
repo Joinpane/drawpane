@@ -1880,8 +1880,21 @@ zoom on the iOS kit's Control Center ran at a frame interval p95 of 150 to 480 m
   slices' walk budget, as a tile slice's does.
 - **The same frame:** the finished frame is the one drawn at once, byte for byte (e2e:
   engine-zoom-blur "drawn over slices", the reduced and the native route, on WebGPU and WebGL2).
-  A native pass that hits a memory limit falls back to the reduced reader-halo frame, and that
-  frame frees tiles and pools and starts again once on a limit, as `render_whole` does.
+- **What a paused walk owns:** a paused walk, a tile's or a whole pass's, is one checkpoint
+  (`PausedWalk`): its scratch slot, its target with the backdrop plane its readers read, the
+  backdrop generation and the glass mask atlas, until it resumes or is dropped. Trimming pools
+  for memory (an image upload refused, say) leaves that atlas while a walk is paused.
+- **What it was asked for:** a draw over slices resumes, and what it drew is shown, only while
+  its inputs hold: the list's generation, the background and the limits (`DrawInputs`; another
+  view or size goes through a draw that drops it). An idle slice after an edit drops it unshown,
+  and the next frame draws afresh. A present-only frame of its view shows its stand-in again and
+  the draw goes on.
+- **Memory:** a native pass that hits a memory limit goes on as the reduced reader-halo frame,
+  as `render_whole` does. Any other memory limit while slicing (in the reduced frame's stages, or
+  finishing a pass) drops what the slices held, frees the view's caches and draws the frame at
+  once with `render_whole`: what a frame drawn at once shows, never an error or a stand-in left
+  up where that frame draws (e2e: "a whole frame over slices holds through edits, present-only
+  frames, refused uploads and short memory").
 - **Unchanged:** frames with no budget (budget 0: exports, tests, `whole` redraws) and moving
   frames draw as before.
 

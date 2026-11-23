@@ -1406,7 +1406,7 @@ impl Engine {
             .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
         // A whole frame being drawn over slices: the next slice.
         if gpu.has_pending_whole() {
-            return gpu.ahead_whole(&self.store, budget_ms);
+            return gpu.ahead_whole(&self.store, background, self.generation, budget_ms);
         }
         let Some(last) = gpu.last() else {
             return Ok(DrawStats::default());
@@ -1587,7 +1587,7 @@ impl Engine {
         // never all at once in a frame with a budget.
         let sliced = !options.moving && options.budget_ms > 0.0;
         let shown_halo = if composite_only {
-            gpu.present_sliced_frame(view, (width, height), self.generation, background)
+            gpu.present_sliced_frame(&self.store, view, (width, height), self.generation, background)
         } else {
             None
         };

@@ -15,7 +15,7 @@ pub(crate) fn memory_budget(requested: usize) -> usize {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Records held at once (a 500,000-layer file's largest page is far below this).
     pub records: usize,
