@@ -1413,7 +1413,14 @@ impl Engine {
         };
         let halo = match self.cached_halo(last.view, last.size) {
             Ok(h) => h,
-            Err(e) if e.code == ErrorCode::Limit => return Ok(DrawStats::default()),
+            // A view drawn as whole frames: no tiles of its own to draw ahead, only the overview.
+            Err(e) if e.code == ErrorCode::Limit => {
+                let gpu = self
+                    .gpu
+                    .as_mut()
+                    .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
+                return gpu.ahead_overview(&self.store, background, self.generation, budget_ms);
+            }
             Err(e) => return Err(e),
         };
         let gpu = self

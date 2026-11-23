@@ -1955,3 +1955,64 @@ Center, a 901 × 900 canvas, 15% to 254% in 14 steps four frames apart.
   at 1.93-1.95 s on both sides): making it exact is the per-tile large blur's job.
 - The Examples gestures don't use whole frames: zoom p95 16.7 ms on both sides, and pans and the
   zoom's time to exact within run-to-run noise.
+
+## Amendment: zooming out on stand-ins, with GPU work held per frame (2026-11-24)
+
+The real-input gate showed zooming out on a board as the editor's worst lag. On the iOS kit's
+Control Center, pinch-out ran at 29 to 40 fps with 34 to 51% of frames dropped, 0.6 to 1.3 s
+p95 input-to-frame lag and up to 1.35 s of backlog, against Figma's 60 fps and about 55 ms. The
+view drew newly exposed areas in full detail while the gesture went on (the ladder level's tiles,
+with their glass, blend scopes and shadows). The frame budget bounded main-thread time only, so the
+GPU work a frame queued had no bound, and input waited behind it.
+
+### What changes
+
+- **An overview level.** The tile cache keeps the page's content at one coarse scale: the √2
+  ladder level that fits it in 1,024 device pixels a side, at most 64 tiles and an eighth of the
+  slots (`TileCache::set_overview`). Its tiles have level of detail. They're drawn at rest, in
+  frames with a budget and between frames, after the frame's own tiles; never in a frame drawn at
+  once, nor in one while the camera moves. They're evicted last. An overview tile that fails to
+  draw (past a limit) drops the overview until the cache clears, so the time between frames never
+  fails on it.
+- **It stands in while moving.** In a frame while the camera moves, the overview covers what
+  nothing nearer does, at any scale it's at least 4× coarser than (nearer levels keep the 4× rule
+  of `stands_in`). A zoom out then has nothing it must draw. The composite lays the overview
+  beneath the last frame (`Composite::under`). At rest nothing changes: what nothing nearer
+  stands in for is drawn. A view drawn as whole frames (readers reaching past a tile's halo) has
+  no tiles of its own to draw between frames; once its whole frame shows, that time draws the
+  overview instead (`Gpu::ahead_overview`), reported as work in progress, not as tiles to show.
+- **GPU work per moving frame is held.** A frame while moving starts at most 48 GPU passes of
+  tile work (`MOVING_PASSES`: Vello renders and isolation scopes; Figma caps a frame at about 255
+  framebuffer binds, about 55 of ours). Past them, a walk pauses as at its deadline and further
+  tiles wait, except one tile a frame that nothing stands in for, so it fills in.
+- **Back-pressure.** Each frame and idle slice asks the GPU when its submitted work is done
+  (`on_submitted_work_done`; WebGL2 polls in `check`). A frame while moving starts no tile work
+  while the last frame's isn't done. An idle slice waits while two are still in flight, so the CPU
+  and GPU still overlap. This holds only at real budgets (1 ms and up): frames drawn at once and
+  tests' microscopic budgets are unchanged, and the GPU's silence is ignored after 250 ms (a lost
+  device never answers).
+- **Counters.** `gpuCounters()` adds the tiles nothing stood in for started while moving, the
+  moving frames held back for the GPU, and the overview tiles drawn.
+
+### Measured on a T4 (real-input gate, hardware WebGL2)
+
+Pinch-out on Control Center (300% to 38%). Main: six gate runs. This change: its final version on
+the gate twice, and once in the lag audit's harness, which leaves the overview time to be drawn
+before the pinch-out.
+
+| Pinch-out | Main (six runs) | This change, gate | This change, overview ready |
+| --- | --- | --- | --- |
+| fps | 27.1-39.5 | 36.5 / 47.3 | 56.2 |
+| Dropped frames | 34-55% | 39.2% / 21.1% | 6.3% |
+| Lag p95 | 641-1,588 ms | 825 / 268 ms | 64 ms |
+| Backlog | 691-1,591 ms | 872 / 285 ms | 10 ms |
+
+- What decides a run is whether the overview is drawn when the pinch-out starts. The gate opens
+  the board, rests 250 ms, pinches in, and rests 4 s; on Control Center that time first finishes
+  the view's whole frame, then the overview, whose tiles hold thousands of layers each. When
+  it's drawn, the pinch-out draws no tile that nothing stands in for (counter `motionMust` 0) and
+  meets the gate's budgets; when it isn't, back-pressure keeps the lag below main's but not
+  below them. Drawing the overview sooner is the next step.
+- Elsewhere: the 100% pan and both Cmd+scroll directions vary as much on main as here; Shift+2's
+  time to exact stays at 0.8-0.9 s (main 0.77-0.82 s); time to exact after Cmd+scroll out is
+  slower, 1.7-2.5 s against main's 1.4-1.6 s (fewer idle slices in flight).

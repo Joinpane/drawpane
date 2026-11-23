@@ -46,13 +46,13 @@ use crate::shadow::{
     scaled_shadow_sigma,
 };
 use crate::store::Store;
-use crate::tiles::{Composite, Last, TILE, TileCache, TileKey};
+use crate::tiles::{Composite, Last, Scaled, TILE, TileCache, TileKey};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use vello_common::TextureId;
 use vello_common::color::{AlphaColor, Srgb};
@@ -251,6 +251,18 @@ const TEMP_TEX_BASE: u64 = 1 << 49;
 const GPU_TEMP_FLUSH_BYTES: usize = 16 << 20;
 /// Soft cap on pooled offscreen/temp GPU textures kept warm between frames.
 const GPU_POOL_KEEP_BYTES: usize = 32 << 20;
+
+/// GPU passes (Vello renders and isolation scopes) a frame may start while the camera moves.
+/// The main-thread budget can't bound GPU work (a 4 ms walk can queue tens of passes of blend
+/// scopes and glass); Figma caps a frame at about 255 framebuffer binds, about 55 of ours.
+const MOVING_PASSES: u32 = 48;
+
+/// Idle slices (between frames, at rest) the GPU may still be working on when the next starts:
+/// enough that the CPU and GPU overlap, few enough that the next input waits on little.
+const IDLE_IN_FLIGHT: u64 = 2;
+
+/// Back-pressure gives up on the GPU's answer after this long (a lost device never answers).
+const BACKPRESSURE_MAX_MS: f64 = 250.0;
 /// Budget for the GPU canonical shadow mask cache (strictly enforced LRU).
 const GPU_SHADOW_CACHE_BYTES: usize = 16 << 20;
 
@@ -1332,6 +1344,12 @@ pub struct GpuCounters {
     pub shadow_hits: u32,
     /// Tile walks paused to keep a slice within its budget.
     pub pauses: u32,
+    /// Tiles nothing stood in for, started in frames while the camera moved.
+    pub motion_must: u32,
+    /// Frames while the camera moved that started no tile work: the GPU was behind.
+    pub motion_backoff: u32,
+    /// Overview tiles drawn.
+    pub overview: u32,
 }
 
 pub struct Gpu {
@@ -1358,6 +1376,17 @@ pub struct Gpu {
     active: Option<ActiveDraw>,
     /// Hard wall-clock deadline (`now()` ms) checked cooperatively during budgeted tile walks.
     deadline_ms: Option<f64>,
+    /// GPU passes (Vello renders and isolation scopes) a moving frame may start
+    /// (`MOVING_PASSES`): past it, `deadline_reached` pauses the walk as a deadline does.
+    pass_budget: Option<u32>,
+    /// GPU passes started so far, and where the frame with a pass budget began counting.
+    passes: u32,
+    passes_at: u32,
+    /// Frames (and idle slices) whose GPU work was submitted, the last of them the GPU finished
+    /// (`queue.on_submitted_work_done`), and when the last was submitted: back-pressure.
+    gpu_seq: u64,
+    gpu_done: Arc<AtomicU64>,
+    gpu_seq_at: f64,
     /// Tile cooperatively paused mid-walk so no single frame stalls past its CPU budget.
     pending_tile: Option<PendingTile>,
     pending_whole: Option<PendingWhole>,
@@ -2029,6 +2058,12 @@ impl Gpu {
             reader_halo: None,
             active: None,
             deadline_ms: None,
+            pass_budget: None,
+            passes: 0,
+            passes_at: 0,
+            gpu_seq: 0,
+            gpu_done: Arc::new(AtomicU64::new(0)),
+            gpu_seq_at: 0.0,
             pending_tile: None,
             pending_whole: None,
             sliced_frame: None,
@@ -3058,6 +3093,30 @@ impl Gpu {
         self.scene.reset();
     }
 
+    /// Notes that GPU work was submitted for a frame or an idle slice: the GPU says when it has
+    /// finished it (`gpu_behind`).
+    fn note_submitted(&mut self) {
+        self.gpu_seq += 1;
+        self.gpu_seq_at = now();
+        let seq = self.gpu_seq;
+        let done = self.gpu_done.clone();
+        self.queue.on_submitted_work_done(move || {
+            done.fetch_max(seq, Ordering::SeqCst);
+        });
+    }
+
+    /// Whether the GPU still has more than `in_flight` of the last frames' (or idle slices')
+    /// work to finish: new tile work would only queue behind it, and input behind that. On
+    /// WebGL2 `check` polls first.
+    fn gpu_behind(&self, in_flight: u64) -> bool {
+        self.gpu_done.load(Ordering::SeqCst) + in_flight < self.gpu_seq && now() - self.gpu_seq_at < BACKPRESSURE_MAX_MS
+    }
+
+    /// The page's shown content (page units), for the overview.
+    fn page_bounds(store: &Store) -> Option<Rect> {
+        store.bounds(crate::store::ROOT)
+    }
+
     /// Forgets the frame shown as a stand-in (after a fresh list: it shows a page that's gone).
     pub fn forget_last(&mut self) {
         self.abort_pending_tile();
@@ -3752,6 +3811,7 @@ impl Gpu {
             _ => 10,
         };
         self.counters.renders[kind] = self.counters.renders[kind].wrapping_add(1);
+        self.passes = self.passes.wrapping_add(1);
         Ok(())
     }
 
@@ -4404,6 +4464,105 @@ impl Gpu {
         self.pending_whole.is_some()
     }
 
+    /// The time between frames for a view drawn as whole frames (its readers reach past a tile's
+    /// halo, so it has no tiles to draw ahead): the overview's tiles, coarse and without an apron,
+    /// within `budget_ms`, so a zoom out from it has its stand-in. A tile that fails drops the
+    /// overview, never the slice.
+    pub fn ahead_overview(
+        &mut self,
+        store: &Store,
+        background: [f32; 4],
+        generation: u64,
+        budget_ms: f64,
+    ) -> Result<DrawStats> {
+        self.check()?;
+        self.pass_budget = None;
+        let mut stats = DrawStats::default();
+        let Some(last) = self.last else {
+            return Ok(stats);
+        };
+        // Only once the view's own whole frame is shown: until then nothing here, so the caller
+        // draws that frame.
+        let inputs = Self::inputs(store, generation, background);
+        if !self.sliced_frame.is_some_and(|f| f.inputs == inputs) {
+            return Ok(stats);
+        }
+        if budget_ms >= 1.0 && self.gpu_behind(IDLE_IN_FLIGHT) {
+            stats.in_progress = true;
+            return Ok(stats);
+        }
+        if self
+            .pending_tile
+            .as_ref()
+            .is_some_and(|pt| pt.inputs != inputs || !self.tiles.is_overview(&pt.key))
+        {
+            self.abort_pending_tile();
+        }
+        let t0 = now();
+        let submits0 = self.submits;
+        let scale = last.view.as_coeffs()[0];
+        self.masks.begin_frame();
+        self.blur.begin_frame();
+        self.shadow.begin_frame();
+        self.tiles.begin_scaled(background, scale, self.tiles.halo());
+        self.tiles.set_overview(Self::page_bounds(store));
+        self.fit_tiles(store.limits.tile_bytes);
+        let jobs = self.tiles.overview_ahead(scale);
+        let deadline = (budget_ms > 0.0).then_some(t0 + self.walk_budget_ms(budget_ms));
+        let mut verbs = store.limits.frame_verbs;
+        let mut paused = false;
+        if self.pending_tile.is_some() {
+            self.deadline_ms = deadline;
+            let step = self.resume_pending_tile(store, &mut stats);
+            self.deadline_ms = None;
+            match step {
+                Ok(TileStep::Paused) => paused = true,
+                Ok(_) => {}
+                Err(e) if e.code == ErrorCode::DeviceLost => return Err(e),
+                Err(_) => self.tiles.refuse_overview(),
+            }
+        }
+        if !paused {
+            for job in &jobs {
+                // Drawn by the resume above.
+                if self.tiles.get(&job.key).is_some_and(|e| !e.stale) {
+                    continue;
+                }
+                if deadline.is_some_and(|d| now() >= d) {
+                    break;
+                }
+                self.deadline_ms = deadline;
+                let step = self.start_slot_tile(store, job, true, 0, background, inputs, &mut stats, &mut verbs);
+                self.deadline_ms = None;
+                match step {
+                    Ok(TileStep::Paused) => {
+                        paused = true;
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(e) if e.code == ErrorCode::DeviceLost => return Err(e),
+                    Err(_) => {
+                        self.tiles.refuse_overview();
+                        break;
+                    }
+                }
+            }
+        }
+        // Nothing the view shows changed: no tile drawn to present, only work going on.
+        stats.tiles_drawn = 0;
+        stats.in_progress = paused || !self.tiles.overview_ahead(scale).is_empty();
+        stats.held = self.tiles.len() as u32;
+        stats.evicted = self.tiles.stats.evicted;
+        stats.submits = self.submits.saturating_sub(submits0);
+        if stats.submits > 0 {
+            self.note_submitted();
+        }
+        stats.cpu_ms = now() - t0;
+        self.scene.reset();
+        self.check()?;
+        Ok(stats)
+    }
+
     /// Runs a slice of the pending whole frame between frames, at most `budget_ms`: what `ahead`
     /// does for tiles. Once it finishes (and shows) it counts as one tile drawn with none pending,
     /// so the caller presents it. A frame asked for with other inputs (an edit, another
@@ -4423,17 +4582,32 @@ impl Gpu {
         if self.pending_whole.as_ref().is_some_and(|p| p.inputs != inputs) {
             self.abort_pending_whole();
         }
+        // As for tiles: between frames a slice or two may be in flight, no more.
+        if budget_ms >= 1.0 && self.pending_whole.is_some() && self.gpu_behind(IDLE_IN_FLIGHT) {
+            return Ok(DrawStats {
+                pending: 1,
+                in_progress: true,
+                cpu_ms: now() - t0,
+                ..DrawStats::default()
+            });
+        }
         let mut stats = match self.advance_pending_whole(store, budget_ms)? {
             Some(mut stats) => {
                 stats.tiles_drawn = 1;
                 stats.pending = 0;
                 stats
             }
-            None => DrawStats {
-                pending: u32::from(self.pending_whole.is_some()),
-                in_progress: self.pending_whole.is_some(),
-                ..DrawStats::default()
-            },
+            None => {
+                // A paused slice's work, submitted without a frame.
+                if self.submits > submits0 {
+                    self.note_submitted();
+                }
+                DrawStats {
+                    pending: u32::from(self.pending_whole.is_some()),
+                    in_progress: self.pending_whole.is_some(),
+                    ..DrawStats::default()
+                }
+            }
         };
         stats.submits = self.submits.saturating_sub(submits0);
         stats.cpu_ms = now() - t0;
@@ -4485,11 +4659,14 @@ impl Gpu {
         let matches = key.view_bits == view_bits && key.size == size && key.inputs == inputs;
         let cur = self.cur.filter(|_| matches)?;
         let (t0, submits0) = (now(), self.submits);
+        let scale = f64::from_bits(view_bits[0]);
         let stats = DrawStats {
             direct: true,
             plan: key.plan,
             exact: key.exact,
             standin: !key.exact,
+            // The time between frames still has the overview to draw (`ahead_overview`).
+            queued: self.tiles.overview_left(scale),
             ..DrawStats::default()
         };
         Some(self.finish_frame(cur, stats, t0, submits0, None))
@@ -4695,6 +4872,7 @@ impl Gpu {
     ) -> Result<DrawStats> {
         self.abort_pending_tile();
         self.abort_pending_whole();
+        self.pass_budget = None;
         self.opening_pending = false;
         let samples = halo_plan.map(|p| p.samples);
         let size = (u32::from(frame.width), u32::from(frame.height));
@@ -6280,6 +6458,7 @@ impl Gpu {
         // What this shows is made of tiles, not a whole frame (`present_sliced_frame` and
         // `render_whole` show one again only while it's shown).
         self.whole_reader_halo = false;
+        self.pass_budget = None;
         #[cfg(feature = "compute")]
         {
             self.pending_compute = None;
@@ -6309,6 +6488,9 @@ impl Gpu {
         let view = frame.view;
         let scale = view.as_coeffs()[0];
         self.tiles.begin_scaled(background, scale, halo);
+        self.tiles.set_overview(Self::page_bounds(store));
+        self.tiles.moving = options.moving;
+        self.tiles.bake_overview = !options.moving && options.budget_ms > 0.0;
         self.fit_tiles(store.limits.tile_bytes);
         let zooming = options.moving && self.last_scale.is_some_and(|s| s != scale);
         // A page just shown (opened, switched to, its list made afresh): nothing to stand on.
@@ -6407,8 +6589,20 @@ impl Gpu {
         {
             self.abort_pending_tile();
         }
+        // While the camera moves, a frame starts at most `MOVING_PASSES` GPU passes of tile work,
+        // and none while the GPU hasn't finished the last frame's: what isn't drawn shows its
+        // stand-in (the overview at worst), and input never queues behind GPU work.
+        let motion_capped = options.moving && options.budget_ms >= 1.0;
+        let gpu_behind = motion_capped && self.gpu_behind(0);
+        if gpu_behind {
+            self.counters.motion_backoff = self.counters.motion_backoff.wrapping_add(1);
+        }
+        self.pass_budget = motion_capped.then_some(MOVING_PASSES);
+        self.passes_at = self.passes;
         let mut budget_hit = false;
         let mut unfinished_must = false;
+        // Tiles nothing stands in for drawn this frame (moving frames draw one past their passes).
+        let mut must_drawn = 0u32;
         if !composite_only {
             // If we have a paused tile matching a job in this plan, resume it first so earlier
             // work completes cleanly before starting a new tile.
@@ -6425,7 +6619,7 @@ impl Gpu {
                 } else {
                     deadline
                 };
-                if pt_deadline.is_some_and(|d| now() >= d) {
+                if gpu_behind || pt_deadline.is_some_and(|d| now() >= d) {
                     budget_hit = true;
                     stats.in_progress = true;
                     if pt_must {
@@ -6434,6 +6628,7 @@ impl Gpu {
                     }
                 } else {
                     self.deadline_ms = pt_deadline;
+                    must_drawn += u32::from(pt_must);
                     let step = self.resume_pending_tile(store, &mut stats);
                     self.deadline_ms = None;
                     match or_standin!(step) {
@@ -6490,12 +6685,19 @@ impl Gpu {
                 // At rest, finish them together so a low-memory view can settle.
                 let enforce_must =
                     budgeted && options.budget_ms >= 1.0 && stats.records >= 64 && (options.moving || !job.direct);
+                // Moving: behind the GPU, tile work waits; past the frame's GPU passes too, but of
+                // what nothing stands in for one tile a frame is still drawn, so it fills in.
+                let passes_spent = motion_capped
+                    && (gpu_behind
+                        || ((!job.must || must_drawn > 0)
+                            && self.passes.wrapping_sub(self.passes_at) >= MOVING_PASSES));
                 let job_deadline = if job.must && !enforce_must { None } else { deadline };
-                let over_budget = if job.must {
-                    enforce_must && (budget_hit || deadline.is_some_and(|d| now() >= d))
-                } else {
-                    budget_hit || deadline.is_some_and(|d| now() >= d)
-                };
+                let over_budget = passes_spent
+                    || if job.must {
+                        enforce_must && (budget_hit || deadline.is_some_and(|d| now() >= d))
+                    } else {
+                        budget_hit || deadline.is_some_and(|d| now() >= d)
+                    };
                 if over_budget {
                     budget_hit = true;
                     if job.must {
@@ -6524,10 +6726,21 @@ impl Gpu {
                     continue;
                 }
                 if job.direct {
+                    // Drawn straight into the frame: one a moving frame, none while it's behind.
+                    if motion_capped && (gpu_behind || must_drawn > 0) {
+                        self.tiles.mark_unpainted(job.key);
+                        unfinished_must = true;
+                        continue;
+                    }
                     late.push(*job);
+                    must_drawn += 1;
                     continue;
                 }
                 let elapsed = now() - t0;
+                must_drawn += u32::from(job.must);
+                if job.must && options.moving {
+                    self.counters.motion_must = self.counters.motion_must.wrapping_add(1);
+                }
                 if budgeted {
                     // A drag composite also writes scratch this frame. Complete any tile
                     // started for it in one walk.
@@ -6599,6 +6812,7 @@ impl Gpu {
                     }
                 }
             }
+            self.pass_budget = None;
         } else {
             // Composite-only presentation: keep any paused tile intact and note remaining work.
             if self.pending_tile.is_some() {
@@ -6712,10 +6926,19 @@ impl Gpu {
     ) -> Result<DrawStats> {
         self.check()?;
         self.abort_pending_whole();
+        self.pass_budget = None;
         let mut stats = DrawStats::default();
         let Some(last) = self.last else {
             return Ok(stats);
         };
+        // The GPU hasn't finished the last frame's or slice's work: more would only queue behind
+        // it (and the next input behind that). Come back next frame.
+        // Between frames a slice or two may be in flight, so the CPU and GPU still overlap.
+        if budget_ms >= 1.0 && self.gpu_behind(IDLE_IN_FLIGHT) {
+            stats.pending = 1;
+            stats.in_progress = true;
+            return Ok(stats);
+        }
         let inputs = Self::inputs(store, generation, background);
         if self
             .pending_tile
@@ -6733,6 +6956,9 @@ impl Gpu {
         self.blur.begin_frame();
         self.shadow.begin_frame();
         self.tiles.begin_scaled(background, last.view.as_coeffs()[0], halo);
+        self.tiles.set_overview(Self::page_bounds(store));
+        self.tiles.moving = false;
+        self.tiles.bake_overview = true;
         self.fit_tiles(store.limits.tile_bytes);
         let opening = self.opening_pending;
         self.tiles.opening = opening;
@@ -6772,6 +6998,14 @@ impl Gpu {
             self.deadline_ms = deadline;
             let step = self.resume_pending_tile(store, &mut stats);
             self.deadline_ms = None;
+            // An overview tile that can't be drawn drops the overview, never the slice.
+            let step = match step {
+                Err(e) if e.code != ErrorCode::DeviceLost && self.tiles.is_overview(&key) => {
+                    self.tiles.refuse_overview();
+                    Ok(TileStep::Complete)
+                }
+                step => step,
+            };
             match step? {
                 TileStep::Complete => resumed_key = Some(key),
                 TileStep::NoSlot => {
@@ -6804,6 +7038,13 @@ impl Gpu {
                     &mut verbs,
                 );
                 self.deadline_ms = None;
+                let step = match step {
+                    Err(e) if e.code != ErrorCode::DeviceLost && self.tiles.is_overview(&job.key) => {
+                        self.tiles.refuse_overview();
+                        continue;
+                    }
+                    step => step,
+                };
                 match step? {
                     TileStep::Complete => {}
                     TileStep::NoSlot => needs_direct |= plan.needs_on_screen(job),
@@ -6825,6 +7066,9 @@ impl Gpu {
         stats.held = self.tiles.len() as u32;
         stats.evicted = self.tiles.stats.evicted;
         stats.submits = self.submits.saturating_sub(submits0);
+        if stats.submits > 0 {
+            self.note_submitted();
+        }
         stats.cpu_ms = now() - t0;
         self.scene.reset();
         self.check()?;
@@ -6909,6 +7153,7 @@ impl Gpu {
         }
         stats.submit_ms += now() - t1;
         stats.submits = self.submits.saturating_sub(submits0);
+        self.note_submitted();
         self.end_frame_timestamp();
         stats.cpu_ms = now() - t0;
         self.scene.reset();
@@ -7410,6 +7655,9 @@ impl Gpu {
                 active.record_into(stats, slice_total);
                 self.update_submit_ratio(slice_total, stats.submit_ms - sub0);
                 if let Some((s, _)) = place {
+                    if self.tiles.is_overview(&key) {
+                        self.counters.overview = self.counters.overview.wrapping_add(1);
+                    }
                     self.tiles.drawn(key, s, exact, !coarse_readers, reduced);
                     stats.tiles_drawn += 1;
                     Ok(TileStep::Complete)
@@ -8782,8 +9030,43 @@ impl Gpu {
             label: Some("composite"),
         });
         if !comp.complete {
-            // Quads by source texture: the last frame first, then pages, in the order given.
+            // Quads by source texture: the overview beneath, the last frame, then pages, in the
+            // order given.
             let mut quads: Vec<(Option<usize>, [f32; 12])> = Vec::new();
+            let page_quad = |sc: &Scaled| -> Option<(Option<usize>, [f32; 12])> {
+                let page = (sc.slot / per_page) as usize;
+                let within = sc.slot % per_page;
+                let (x, y) = (
+                    f64::from((within % per_row) * TILE),
+                    f64::from((within / per_row) * TILE),
+                );
+                let (p, t) = (f64::from(page_side), f64::from(TILE));
+                let d = sc.dst;
+                Some((
+                    Some(page),
+                    [
+                        d.x0 as f32,
+                        d.y0 as f32,
+                        d.x1 as f32,
+                        d.y1 as f32,
+                        (x / p) as f32,
+                        (y / p) as f32,
+                        ((x + t) / p) as f32,
+                        ((y + t) / p) as f32,
+                        ((x + 0.5) / p) as f32,
+                        ((y + 0.5) / p) as f32,
+                        ((x + t - 0.5) / p) as f32,
+                        ((y + t - 0.5) / p) as f32,
+                    ],
+                ))
+            };
+            for sc in &comp.under {
+                if ((sc.slot / per_page) as usize) < self.pages.len()
+                    && let Some(q) = page_quad(sc)
+                {
+                    quads.push(q);
+                }
+            }
             if let Some(m) = comp.base
                 && let Some(l) = self.last
                 && self
@@ -9873,6 +10156,9 @@ impl Backend for Gpu {
 
     fn deadline_reached(&self) -> bool {
         self.deadline_ms.is_some_and(|d| now() >= d)
+            || self
+                .pass_budget
+                .is_some_and(|b| self.passes.wrapping_sub(self.passes_at) >= b)
     }
 
     fn set_targets(&mut self, write_main: bool, write_backdrop: bool, open: &[Open]) -> Result<()> {
@@ -10679,6 +10965,7 @@ impl Backend for Gpu {
             return Ok(false);
         }
         self.counters.scopes = self.counters.scopes.wrapping_add(1);
+        self.passes = self.passes.wrapping_add(1);
         let area = if clip_to_parent {
             // Match the CPU scope's sampling extent and preserve frame-relative raster cells.
             IRect {
