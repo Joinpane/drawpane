@@ -1795,12 +1795,16 @@ for (const build of ["browser", "webgl"] as const) {
 
       // Real 1440x900 @ DPR 2 (2880x1800 device px):
       // 1) 100% zoom (s=2), radius=250 uniform blur (sigma=225 px, reach~960 px -> padded view
-      //    4800x3720 = 17.8M px > 16M px -> naturally enters reader-halo) over 0.5-unit (1 px)
-      //    stripes (exact mean 135.5).
-      // 2) 1000% zoom (s=20), radius=56 uniform blur (sigma=504 px, reach~2150 px -> coarse
-      //    frame ~768x640, realistic real-viewport coarse size) over 0.2-unit (4 px) fine stripes
-      //    (exact mean 135.5). Content-aware supersampling picks S >= 4 so fine detail does not
-      //    wash out on real viewports.
+      //    4800x3720 = 17.8M px > `Limits::padded_view_pixels` (16M)) over 0.5-unit (1 px)
+      //    stripes (exact mean 135.5). On hardware the view at rest bakes 960 px apron tiles
+      //    (decision 0040, 2026-11-23): an exact frame drawn from tiles, byte for byte the native
+      //    reference stitched from four 1440x900 quadrants, each one native padded pass (9.5M px).
+      //    A software adapter's apron cap (768 px) is too small, so it keeps the reduced
+      //    reader-halo frame, which is not exact.
+      // 2) 1000% zoom (s=20), radius=56 uniform blur (sigma=504 px, reach~2150 px, past any
+      //    apron -> coarse frame ~768x640, realistic real-viewport coarse size) over 0.2-unit
+      //    (4 px) fine stripes (exact mean 135.5). Content-aware supersampling picks S >= 4 so
+      //    fine detail does not wash out on real viewports. Reduced, so never exact.
       const buildStripeBlur = (opts: {
         span: number;
         period: number;
@@ -1873,6 +1877,7 @@ for (const build of ["browser", "webgl"] as const) {
           }),
           // Measure central 600x400 px crop well inside the striped support.
           crop: [1140, 700, 1740, 1100] as [number, number, number, number],
+          apronOnHardware: true,
         },
         {
           name: "real2880-1000pct-fine4px",
@@ -1893,6 +1898,7 @@ for (const build of ["browser", "webgl"] as const) {
             radius: 56,
           }),
           crop: [1140, 700, 1740, 1100] as [number, number, number, number],
+          apronOnHardware: false,
         },
       ];
 
@@ -1907,12 +1913,14 @@ for (const build of ["browser", "webgl"] as const) {
             o.free();
             if (!ok) throw new Error(message);
           };
-          const out = [];
-          for (const c of cases) {
+          type Case = (typeof cases)[number];
+          // One unbounded editor-viewport frame at rest on a fresh engine. `at` is the device
+          // pixel of the full view where this `vw` x `vh` view starts.
+          const draw = async (c: Case, vw: number, vh: number, at: [number, number]) => {
             const dev = await glue.createGpu(null, 0);
             if (!dev.ok) throw new Error(dev.message);
             if (dev.backend !== expectedBackend) throw new Error(`wrong backend ${dev.backend}`);
-            const bytes = dev.fallback ? c.bytesSoft : c.bytesHw;
+            const fallback = dev.fallback;
             const engine = new glue.Engine(0, 0);
             try {
               if (!engine.attachGpu || !engine.renderGpu || !engine.gpuPixels) {
@@ -1920,47 +1928,84 @@ for (const build of ["browser", "webgl"] as const) {
               }
               requireOk(engine.attachGpu(dev));
               dev.free();
-              requireOk(engine.apply(new Uint8Array(bytes)));
+              requireOk(engine.apply(new Uint8Array(fallback ? c.bytesSoft : c.bytesHw)));
               const r = engine.renderGpu(
-                w,
-                h,
+                vw,
+                vh,
                 c.zoom,
-                w / (2 * c.dpr),
-                h / (2 * c.dpr),
+                (w / 2 - at[0]) / c.dpr,
+                (h / 2 - at[1]) / c.dpr,
                 c.dpr,
                 bg,
                 false,
                 0,
                 true,
               );
-              const plan = r.plan;
+              const stats = { plan: r.plan, exact: r.exact, pending: r.pending, fallback };
               requireOk(r);
               const px = await engine.gpuPixels();
               if (!(px instanceof Uint8Array)) throw new Error(px.message);
-              const [cx0, cy0, cx1, cy1] = c.crop;
-              const diffs: number[] = [];
-              let max = 0;
-              let sumVal = 0;
-              for (let y = cy0; y < cy1; y++) {
-                for (let x = cx0; x < cx1; x++) {
-                  const v = px[(y * w + x) * 4] ?? 0;
-                  sumVal += v;
-                  const d = Math.abs(v - 136);
-                  diffs.push(d);
-                  if (d > max) max = d;
-                }
-              }
-              diffs.sort((a, b) => a - b);
-              out.push({
-                name: c.name,
-                plan,
-                max,
-                p99: diffs[Math.floor((diffs.length - 1) * 0.99)] ?? 0,
-                meanVal: sumVal / diffs.length,
-              });
+              return { ...stats, px };
             } finally {
               engine.free();
             }
+          };
+          const out = [];
+          for (const c of cases) {
+            const frame = await draw(c, w, h, [0, 0]);
+            const [cx0, cy0, cx1, cy1] = c.crop;
+            const diffs: number[] = [];
+            let max = 0;
+            let sumVal = 0;
+            for (let y = cy0; y < cy1; y++) {
+              for (let x = cx0; x < cx1; x++) {
+                const v = frame.px[(y * w + x) * 4] ?? 0;
+                sumVal += v;
+                const d = Math.abs(v - 136);
+                diffs.push(d);
+                if (d > max) max = d;
+              }
+            }
+            diffs.sort((a, b) => a - b);
+            // The native reference: four quadrants, each drawn in one native padded pass.
+            let native: { plans: number[]; exact: boolean; max: number; differing: number } | null =
+              null;
+            if (c.apronOnHardware && !frame.fallback) {
+              const [qw, qh] = [w / 2, h / 2];
+              native = { plans: [], exact: true, max: 0, differing: 0 };
+              for (const [qx, qy] of [
+                [0, 0],
+                [qw, 0],
+                [0, qh],
+                [qw, qh],
+              ] as const) {
+                const q = await draw(c, qw, qh, [qx, qy]);
+                native.plans.push(q.plan);
+                native.exact &&= q.exact;
+                for (let y = 0; y < qh; y++) {
+                  for (let x = 0; x < qw; x++) {
+                    for (let ch = 0; ch < 4; ch++) {
+                      const a = q.px[(y * qw + x) * 4 + ch] ?? 0;
+                      const b = frame.px[((qy + y) * w + qx + x) * 4 + ch] ?? 0;
+                      const d = Math.abs(a - b);
+                      if (d > 0) native.differing++;
+                      if (d > native.max) native.max = d;
+                    }
+                  }
+                }
+              }
+            }
+            out.push({
+              name: c.name,
+              apron: c.apronOnHardware && !frame.fallback,
+              plan: frame.plan,
+              exact: frame.exact,
+              pending: frame.pending,
+              max,
+              p99: diffs[Math.floor((diffs.length - 1) * 0.99)] ?? 0,
+              meanVal: sumVal / diffs.length,
+              native,
+            });
           }
           return out;
         },
@@ -1969,9 +2014,29 @@ for (const build of ["browser", "webgl"] as const) {
 
       for (const r of results) {
         console.log(
-          `[zoom-blur ${build}] ${r.name}: plan=${r.plan} max=${r.max} p99=${r.p99} meanVal=${r.meanVal.toFixed(2)} (target 135.5)`,
+          `[zoom-blur ${build}] ${r.name}: plan=${r.plan} exact=${r.exact} max=${r.max} p99=${r.p99} meanVal=${r.meanVal.toFixed(2)} (target 135.5)` +
+            (r.native
+              ? ` native plans=${r.native.plans} exact=${r.native.exact} max=${r.native.max} differing=${r.native.differing}`
+              : ""),
         );
-        expect(r.plan, `${r.name} must run reader-halo (plan 4)`).toBe(4);
+        if (r.apron) {
+          // Apron tiles at rest: an exact frame from tiles, all of them drawn.
+          expect(r.plan, `${r.name} draws from apron tiles (plan 0)`).toBe(0);
+          expect(r.exact, `${r.name} is exact`).toBe(true);
+          expect(r.pending, `${r.name} leaves no tile pending`).toBe(0);
+          expect(r.native?.plans, `${r.name} reference quadrants draw natively`).toEqual([
+            2, 2, 2, 2,
+          ]);
+          expect(r.native?.exact, `${r.name} reference quadrants are exact`).toBe(true);
+          // Exact means what the native pass draws, byte for byte.
+          expect(r.native?.differing, `${r.name} vs native: max difference ${r.native?.max}`).toBe(
+            0,
+          );
+        } else {
+          // Past any apron (or a software adapter's): the reduced reader-halo frame, not exact.
+          expect(r.plan, `${r.name} runs the reader halo (plan 4)`).toBe(4);
+          expect(r.exact, `${r.name} is reduced, so not exact`).toBe(false);
+        }
         expect(r.max, `${r.name} meanVal=${r.meanVal.toFixed(2)}`).toBeLessThanOrEqual(4);
         expect(r.p99, `${r.name} meanVal=${r.meanVal.toFixed(2)}`).toBeLessThanOrEqual(2);
       }
