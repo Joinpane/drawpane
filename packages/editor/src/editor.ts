@@ -2339,7 +2339,11 @@ export class Editor {
     if (this.#refuseInsideInstance()) return;
     const ids = this.#topmost(this.s.selection);
     const only = ids.length === 1 ? this.doc.get(ids[0] as string) : undefined;
-    if (only?.type === "frame") {
+    // As with ⇧A, an instance that can't take a flow (its component has none) is wrapped instead.
+    if (
+      only?.type === "frame" &&
+      (getProp(only.props, "layoutMode") !== "none" || this.canToggleLayout(only.id, true))
+    ) {
       this.setLayoutMode([only.id], "grid");
       return;
     }

@@ -1696,7 +1696,7 @@ describe.each(["materialized", "compact"] as const)("re-check 5 with copies %s",
     expect(unsettled(editor)).toEqual([]);
   });
 
-  it.each(["setLayoutMode", "frameSelection"] as const)(
+  it.each(["setLayoutMode", "frameSelection", "addGridLayout"] as const)(
     "doesn't give an instance auto layout its component lacks (%s, Figma)",
     (how) => {
       const editor = make(
@@ -1724,13 +1724,18 @@ describe.each(["materialized", "compact"] as const)("re-check 5 with copies %s",
         editor.setLayoutMode([instance], "column");
         expect(editor.doc.stored()).toEqual(before);
       } else {
-        // ⇧A: Figma wraps it in a new auto layout frame, leaving the instance as it was.
+        // ⇧A: Figma wraps it in a new auto layout frame, leaving the instance as it was. Adding a
+        // grid (⌥⇧A here) does the same.
         editor.select([instance]);
-        editor.frameSelection(true);
+        if (how === "frameSelection") editor.frameSelection(true);
+        else editor.addGridLayout();
         const wrapper = editor.doc.get(editor.doc.get(instance)?.parent ?? "");
         expect(wrapper?.type).toBe("frame");
         expect(wrapper?.id).not.toBe("p");
-        expect(getProp(wrapper?.props ?? {}, "layoutMode")).not.toBe("none");
+        // The wrapper's direction and padding are #319's.
+        if (how === "addGridLayout")
+          expect(getProp(wrapper?.props ?? {}, "layoutMode")).toBe("grid");
+        else expect(getProp(wrapper?.props ?? {}, "layoutMode")).not.toBe("none");
         expect(editor.s.selection).toEqual([wrapper?.id]);
       }
       expect(getProp(editor.doc.get(instance)?.props ?? {}, "layoutMode")).toBe("none");
