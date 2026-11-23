@@ -585,7 +585,11 @@ test.describe("A real file", () => {
               `frames ${g2.frame.width}x${g2.frame.height}, ${g2.frames} after the last step; ` +
               `first (stayed) within 0.5% ${f.within05} (${st.within05}) ms, within 0.1% ` +
               `${f.within01} (${st.within01}), identical ${f.identical} (${st.identical}); ` +
-              `Figma first: 465, 2,236, 2,317 ms\n  timeline ${g2.timeline}`,
+              `Figma first: 465, 2,236, 2,317 ms\n  motion: frame interval p95 ` +
+              `${g2.summary.interval?.p95} / p99 ${g2.summary.interval?.p99} / max ` +
+              `${g2.summary.interval?.max} ms, content max ${g2.summary.content.max} ms, longest task ` +
+              `${g2.summary.longTaskMaxMs} ms, slowest engine frame ${g2.summary.engine?.worst.ms} ms ` +
+              `(${g2.summary.engine?.worst.plan})\n  timeline ${g2.timeline}`,
           );
           console.log(
             `  ${g2.facts}\n  console: ${g2.console.slice(0, 20).join("\n    ") || "quiet"}`,
