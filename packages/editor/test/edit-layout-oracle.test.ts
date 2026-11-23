@@ -288,6 +288,8 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
       if (getProp(node.props, sizing) !== "fixed" || getProp(source.props, sizing) !== "fixed")
         continue;
       if (own.includes(size) || own.includes(sizing) || bound[size]) continue;
+      // Bound in its main layer: it resolves by mode, or it's the copy's own once taken off.
+      if ((getProp(source.props, "bindings") as Record<string, unknown>)[size]) continue;
       if (
         measuresOn(node, axis) ||
         flowSized(node, parent, axis) ||

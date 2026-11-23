@@ -1655,6 +1655,33 @@ describe.each(["materialized", "compact"] as const)("re-check 5 with copies %s",
     },
   );
 
+  it("keeps the width a copy took off its main layer's variable when the variable changes", () => {
+    const editor = make(
+      [
+        page,
+        node("c", "collection", ROOT_ID, { modes: [{ id: "light", name: "Light" }] }, "a1"),
+        node("w10", "variable", "c", { variableType: "number", values: { light: 10 } }),
+        node("main", "frame", "p", {
+          isComponent: true,
+          layoutMode: "row",
+          width: 100,
+          height: 20,
+        }),
+        node("dot1", "rect", "main", { width: 10, height: 10, bindings: { width: "w10" } }),
+        node("dot2", "rect", "main", { x: 10, width: 20, height: 10 }, "a1"),
+      ],
+      copies,
+    );
+    const instance = editor.insertInstance("main", { x: 0, y: 200 }) as string;
+    const [dot1, dot2] = editor.doc.childIds(instance) as [string, string];
+    editor.unbindVariable([dot1], "width");
+    editor.setVariableValue("w10", "light", 50);
+    expect(getProp(editor.doc.get("dot1")?.props ?? {}, "width")).toBe(50);
+    expect(width(editor, dot1)).toBe(10);
+    expect(getProp(editor.doc.get(dot2)?.props ?? {}, "x")).toBe(10);
+    expect(unsettled(editor)).toEqual([]);
+  });
+
   it("keeps the size a flow stretched a copy to once its frame takes the flow away", () => {
     const editor = make(
       [

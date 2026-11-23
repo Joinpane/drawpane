@@ -240,10 +240,12 @@ type Box = "x" | "y" | "width" | "height";
  * Why a copy keeps a value of its own instead of the one derived from its
  * main layer: its own layout decides it ("layout": it hugs, its text
  * measures itself, it's bound to a variable), or it's the copy's own
- * ("own": overridden, a swapped instance's size, the place of a layer that
- * left its flow, made absolute or in a frame that took its auto layout
- * away, and the size that flow gave it with Fill). An own value still follows its constraints from
- * where it is when its frame resizes; a laid-out one isn't touched.
+ * ("own": overridden, a swapped instance's size, a value it took off its
+ * main layer's variable, the place of a layer that left its flow, made
+ * absolute or in a frame that took its auto layout away, and the size that
+ * flow gave it with Fill or Stretch). An own value still follows its
+ * constraints from where it is when its frame resizes; a laid-out one isn't
+ * touched.
  */
 export type Kept = "layout" | "own";
 
@@ -320,18 +322,22 @@ export function placedGeometry(
   // A nested instance swapped for another component is that component's size.
   const shown = getProp(copy.props, "instanceOf");
   const swapped = !!shown && shown !== getProp(source.props, "instanceOf");
+  // A value its main layer binds and the copy took off the variable is the copy's own.
+  const sourceBound = getProp(source.props, "bindings") as Record<string, unknown>;
+  const unbound = (prop: Box) => !!sourceBound[prop] && !bound[prop];
   const derived: Partial<Record<Box, number>> = {};
   const kept: Partial<Record<Box, Kept>> = {};
   for (const axis of AXES) {
     const a = axis.size === "width" ? "h" : "v";
     if (bound[axis.pos]) kept[axis.pos] = "layout";
-    else if (overrides.includes(axis.pos) || ownPlace) kept[axis.pos] = "own";
+    else if (overrides.includes(axis.pos) || ownPlace || unbound(axis.pos)) kept[axis.pos] = "own";
     else derived[axis.pos] = constrained[axis.pos] ?? getProp(source.props, axis.pos);
     if (bound[axis.size] || hugsOn(copy, a) || measuresOn(copy, a)) kept[axis.size] = "layout";
     else if (
       overrides.includes(axis.size) ||
       overrides.includes(axis.sizing) ||
       swapped ||
+      unbound(axis.size) ||
       (ownPlace && flowSized(copy, parentSource, a))
     )
       kept[axis.size] = "own";
@@ -370,6 +376,8 @@ export function flowCopySizes(
     if (getProp(source.props, axis.sizing) !== "fixed") continue;
     if (overrides.includes(axis.size) || overrides.includes(axis.sizing) || bound[axis.size])
       continue;
+    // Bound in its main layer: the variable's value, or the copy's own once it's taken off it.
+    if ((getProp(source.props, "bindings") as Record<string, unknown>)[axis.size]) continue;
     if (measuresOn(copy, a) || flowSized(copy, parent, a)) continue;
     out[axis.size] = getProp(source.props, axis.size);
   }
