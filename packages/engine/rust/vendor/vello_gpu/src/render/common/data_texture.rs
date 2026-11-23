@@ -66,6 +66,24 @@ impl<T> DataTexture<T> {
         self.format
     }
 
+    #[allow(dead_code)]
+    pub(crate) fn width_u32(&self) -> u32 {
+        self.width
+    }
+
+    #[allow(dead_code)]
+    pub(crate) fn rows(&self) -> u32 {
+        self.rows
+    }
+
+    pub(crate) fn capacity_texels(&self) -> u32 {
+        self.width.saturating_mul(self.rows)
+    }
+
+    pub(crate) fn capacity_bytes(&self) -> usize {
+        (self.capacity_texels() as usize).saturating_mul(self.format.bytes_per_texel() as usize)
+    }
+
     #[cfg(feature = "webgl")]
     pub(crate) fn width(&self) -> u32 {
         self.width

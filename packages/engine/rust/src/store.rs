@@ -20,9 +20,43 @@ use crate::glyphs::GlyphStore;
 use crate::limits::Limits;
 use crate::record::{self, Op, PathEntry, Record};
 use crate::wire::{MAGIC, MAJOR, MINOR, Reader};
-use std::cell::Cell;
+use std::cell::{Cell, Ref, RefCell};
 use std::collections::{HashMap, HashSet};
 use vello_common::kurbo::{Affine, BezPath, Rect};
+
+/// Cached per-revision metadata for a single visible backdrop-reader op in exact paint order.
+pub struct CachedReader {
+    pub key: (u32, usize),
+    pub world: Affine,
+    pub local: Rect,
+    pub size: [f32; 2],
+    pub writes_backdrop: bool,
+    /// Ancestor/self node IDs with spatial post-effects (`LayerBlur` / `Texture`).
+    pub spatial_post_records: Vec<u32>,
+    /// When the innermost wrapping clip frame has no opaque solid fill, stores each wrapping
+    /// ancestor clip's `(world_transform, local_bounds)` so device-space intersection is exact.
+    pub unfilled_clips: Vec<(Affine, Rect)>,
+    pub kind: CachedReaderKind,
+}
+
+#[derive(Clone, Copy)]
+pub enum CachedReaderKind {
+    Glass { local_halo: f32 },
+    Read { halo: f32 },
+    BackgroundBlur { radius: f32 },
+    ProgressiveBlur,
+}
+
+/// Lazily computed per-revision reader acceleration structure, avoiding full-graph walks on
+/// camera-only pan/zoom frames and per-tile `plan_readers` / `has_reader_in_rect` checks.
+pub struct ReaderCache {
+    pub readers_world_bbox: Option<Rect>,
+    pub reader_extents: Vec<Rect>,
+    pub isolated_with_reader: HashSet<u32>,
+    /// Every node on the path from `ROOT` to a visible reader or `FLAG_CONTEXT` node (inclusive).
+    pub reader_ancestors: HashSet<u32>,
+    pub visible_readers: Vec<CachedReader>,
+}
 
 /// The page: the root every top-level record hangs from. Never set or removed.
 pub const ROOT: u32 = 0;
@@ -203,6 +237,8 @@ pub struct Store {
     order: Option<HashMap<u32, (u32, u32)>>,
     /// Bumped whenever the structure (parents, children, their order) changes.
     structure: u64,
+    /// Cached per-revision reader index, invalidated whenever the graph mutates.
+    reader_cache: RefCell<Option<ReaderCache>>,
 }
 
 struct PassAncestor {
@@ -224,6 +260,7 @@ struct PageScope {
 /// fresh list is built into a staged graph that isn't tracked (it's dropped whole on failure).
 struct Txn {
     track: bool,
+    before_structure: u64,
     undo: Vec<Undo>,
     before: Vec<Dirty>,
     before_seen: HashSet<u32>,
@@ -240,9 +277,10 @@ struct Txn {
 }
 
 impl Txn {
-    fn new(track: bool) -> Self {
+    fn new(track: bool, before_structure: u64) -> Self {
         Self {
             track,
+            before_structure,
             undo: Vec::new(),
             before: Vec::new(),
             before_seen: HashSet::new(),
@@ -286,6 +324,7 @@ impl Store {
             bytes: 0,
             order: None,
             structure: 0,
+            reader_cache: RefCell::new(None),
         }
     }
 
@@ -363,8 +402,8 @@ impl Store {
                 ),
             ));
         }
-        let mut txn = Txn::new(true);
         let before_structure = self.structure;
+        let mut txn = Txn::new(true, before_structure);
         let mut moved: Option<Vec<u32>> = (n > 0).then(Vec::new);
         let mut changed = false;
         // Each command is applied as it's read (never all of them decoded at once), with an undo
@@ -400,6 +439,9 @@ impl Store {
             return Err(EngineError::malformed("bytes after the last command"));
         }
         self.revision = next;
+        if changed || txn.full {
+            *self.reader_cache.borrow_mut() = None;
+        }
         if txn.full {
             return Ok(Applied {
                 changes: Vec::new(),
@@ -499,7 +541,7 @@ impl Store {
     fn apply_fresh(&mut self, r: &mut Reader, next: u32, n: usize, minor: u16) -> Result<Applied> {
         let limits = self.limits;
         let mut staged = Store::new(limits);
-        let mut txn = Txn::new(false);
+        let mut txn = Txn::new(false, 0);
         let held = self.bytes();
         for i in 0..n {
             let command = next_command(r, &limits, minor)?;
@@ -534,6 +576,7 @@ impl Store {
         self.order = None;
         self.structure += 1;
         self.revision = next;
+        *self.reader_cache.borrow_mut() = None;
         Ok(Applied {
             changes: Vec::new(),
             full: true,
@@ -1143,7 +1186,13 @@ impl Store {
                     let had_pad = self.bounds_and_pad(at).1;
                     let had_blend = self.subtree_has_blend(at);
                     let rect = self.dirty_extent(at);
-                    let ord = self.order_of(at);
+                    // Once structure changes mid-patch, every `txn.before` entry is marked
+                    // `stale = true` on commit, so rebuilding the full preorder map is dead work.
+                    let ord = if self.structure == txn.before_structure {
+                        self.order_of(at)
+                    } else {
+                        (0, u32::MAX)
+                    };
                     txn.pass_ancestors.push(PassAncestor {
                         id: at,
                         isolated: iso,
@@ -1194,7 +1243,11 @@ impl Store {
         // mask pass by becoming the first or last record in its scope.
         let may_flush = self.parent_has_mask(node.parent) || self.subtree_has_pass(id);
         self.note_pass_ancestors(id, txn, may_flush.then_some(id));
-        let (order, end) = self.order_of(id);
+        let (order, end) = if self.structure == txn.before_structure {
+            self.order_of(id)
+        } else {
+            (0, u32::MAX)
+        };
         if let Some(rect) = self.dirty_extent(id) {
             txn.before.push(Dirty {
                 rect,
@@ -1429,17 +1482,274 @@ impl Store {
         Some(if anc_pad > 0.0 { r.inflate(anc_pad, anc_pad) } else { r })
     }
 
+    /// Returns the lazily built per-revision reader acceleration cache.
+    pub fn reader_cache(&self) -> Ref<'_, ReaderCache> {
+        if self.reader_cache.borrow().is_none() {
+            let built = self.build_reader_cache();
+            *self.reader_cache.borrow_mut() = Some(built);
+        }
+        Ref::map(self.reader_cache.borrow(), |opt| opt.as_ref().expect("reader cache"))
+    }
+
+    fn build_reader_cache(&self) -> ReaderCache {
+        let mut readers_world_bbox: Option<Rect> = None;
+        let mut reader_extents = Vec::with_capacity(self.readers.len());
+        for &id in &self.readers {
+            if let Some(wb) = self.world_extent(id) {
+                readers_world_bbox = Some(readers_world_bbox.map_or(wb, |acc| acc.union(wb)));
+                reader_extents.push(wb);
+            }
+        }
+        let mut isolated_with_reader = HashSet::new();
+        let mut reader_ancestors = HashSet::new();
+        let mut mark_ancestors = |start_id: u32, mark_isolated: bool| {
+            let mut chain = Vec::new();
+            let mut cur = start_id;
+            let mut child_of_cur = false;
+            while cur != ROOT {
+                let Some(n) = self.nodes.get(&cur) else {
+                    return;
+                };
+                if n.record.hidden() {
+                    return;
+                }
+                if child_of_cur && !n.record.ops.iter().any(|op| matches!(op, Op::Children)) {
+                    return;
+                }
+                chain.push((cur, n.record.isolate() && n.record.opacity < 1.0));
+                child_of_cur = true;
+                cur = n.parent;
+            }
+            for (id, iso) in chain {
+                reader_ancestors.insert(id);
+                if mark_isolated && iso {
+                    isolated_with_reader.insert(id);
+                }
+            }
+        };
+        for &rid in &self.readers {
+            mark_ancestors(rid, true);
+        }
+        if !self.context.is_empty() {
+            for &cid in &self.context {
+                mark_ancestors(cid, false);
+            }
+            for (&nid, node) in &self.nodes {
+                if nid != ROOT && !node.record.context() && !node.record.hidden() {
+                    let mut cur = node.parent;
+                    let mut under_context = false;
+                    while cur != ROOT {
+                        let Some(p) = self.nodes.get(&cur) else {
+                            break;
+                        };
+                        if p.record.context() {
+                            under_context = true;
+                            break;
+                        }
+                        cur = p.parent;
+                    }
+                    if under_context {
+                        mark_ancestors(nid, true);
+                    }
+                }
+            }
+        }
+
+        let mut visible_readers = Vec::new();
+        if !self.readers.is_empty() {
+            type ClipEntry = Option<(Affine, Rect, Option<[u8; 4]>)>;
+            #[allow(clippy::too_many_arguments)]
+            fn walk(
+                store: &Store,
+                ancestors: &HashSet<u32>,
+                id: u32,
+                parent: Affine,
+                alpha: f32,
+                parent_context: bool,
+                post_records: &mut Vec<u32>,
+                clip_stack: &mut Vec<ClipEntry>,
+                out: &mut Vec<CachedReader>,
+            ) {
+                if !ancestors.contains(&id) {
+                    return;
+                }
+                let Some(node) = store.nodes.get(&id) else {
+                    return;
+                };
+                let r = &node.record;
+                if r.hidden() {
+                    return;
+                }
+                let world = parent * r.transform;
+                if !world.as_coeffs().iter().all(|v| v.is_finite()) {
+                    return;
+                }
+                let is_context = r.context();
+                let in_alpha = if parent_context && !is_context { 1.0 } else { alpha };
+                let opacity = in_alpha * r.opacity;
+                if opacity <= 0.0 {
+                    return;
+                }
+                let inner = if r.isolate() && r.opacity < 1.0 { 1.0 } else { opacity };
+                let post_base = post_records.len();
+                if r.post_effects.iter().any(crate::record::PostEffect::is_spatial) {
+                    post_records.push(id);
+                }
+                let mut local_cache: Option<Rect> = None;
+                let mut local_rect = || -> Rect {
+                    *local_cache.get_or_insert_with(|| {
+                        let box_rect = Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1]));
+                        r.content_bounds(&|g| store.glyphs.bounds(g))
+                            .map_or(box_rect, |cb| cb.union(box_rect))
+                    })
+                };
+                let collect_unfilled = |stack: &[ClipEntry]| -> Vec<(Affine, Rect)> {
+                    let mut inner_fill: Option<Option<[u8; 4]>> = None;
+                    for item in stack.iter().rev() {
+                        if let Some((_, _, fill)) = *item {
+                            inner_fill = Some(fill);
+                            break;
+                        }
+                    }
+                    if matches!(inner_fill, Some(None)) {
+                        stack.iter().filter_map(|item| item.map(|(w, lb, _)| (w, lb))).collect()
+                    } else {
+                        Vec::new()
+                    }
+                };
+                let clip_base = clip_stack.len();
+                for (at, op) in r.ops.iter().enumerate() {
+                    match op {
+                        Op::Clip { path, .. } => {
+                            let entry = if crate::exec::clip_wraps_children(&r.ops, at) {
+                                r.entry_bounds(*path, &|g| store.glyphs.bounds(g))
+                                    .map(|lb| (world, lb, crate::exec::frame_solid_fill(&r.ops, at, inner)))
+                            } else {
+                                None
+                            };
+                            clip_stack.push(entry);
+                        }
+                        Op::Unclip => {
+                            if clip_stack.len() > clip_base {
+                                clip_stack.pop();
+                            }
+                        }
+                        Op::Children => {
+                            for &kid in &node.children {
+                                walk(
+                                    store,
+                                    ancestors,
+                                    kid,
+                                    world,
+                                    inner,
+                                    is_context,
+                                    post_records,
+                                    clip_stack,
+                                    out,
+                                );
+                            }
+                        }
+                        Op::Glass(g) if !is_context => {
+                            out.push(CachedReader {
+                                key: (id, at),
+                                world,
+                                local: local_rect(),
+                                size: r.size,
+                                writes_backdrop: false,
+                                spatial_post_records: post_records.clone(),
+                                unfilled_clips: Vec::new(),
+                                kind: CachedReaderKind::Glass {
+                                    local_halo: crate::glass::local_halo(g),
+                                },
+                            });
+                        }
+                        Op::Read { halo, .. } => {
+                            out.push(CachedReader {
+                                key: (id, at),
+                                world,
+                                local: local_rect(),
+                                size: r.size,
+                                writes_backdrop: true,
+                                spatial_post_records: post_records.clone(),
+                                unfilled_clips: Vec::new(),
+                                kind: CachedReaderKind::Read { halo: *halo },
+                            });
+                        }
+                        Op::BackgroundBlur(b_op) => {
+                            out.push(CachedReader {
+                                key: (id, at),
+                                world,
+                                local: local_rect(),
+                                size: r.size,
+                                writes_backdrop: true,
+                                spatial_post_records: post_records.clone(),
+                                unfilled_clips: collect_unfilled(clip_stack),
+                                kind: CachedReaderKind::BackgroundBlur { radius: b_op.radius },
+                            });
+                        }
+                        Op::ProgressiveBlur(_) => {
+                            out.push(CachedReader {
+                                key: (id, at),
+                                world,
+                                local: local_rect(),
+                                size: r.size,
+                                writes_backdrop: true,
+                                spatial_post_records: post_records.clone(),
+                                unfilled_clips: collect_unfilled(clip_stack),
+                                kind: CachedReaderKind::ProgressiveBlur,
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+                clip_stack.truncate(clip_base);
+                post_records.truncate(post_base);
+            }
+            let mut post_records = Vec::new();
+            let mut clip_stack = Vec::new();
+            if let Some(root) = self.nodes.get(&ROOT) {
+                for &kid in &root.children {
+                    walk(
+                        self,
+                        &reader_ancestors,
+                        kid,
+                        Affine::IDENTITY,
+                        1.0,
+                        false,
+                        &mut post_records,
+                        &mut clip_stack,
+                        &mut visible_readers,
+                    );
+                }
+            }
+        }
+
+        ReaderCache {
+            readers_world_bbox,
+            reader_extents,
+            isolated_with_reader,
+            reader_ancestors,
+            visible_readers,
+        }
+    }
+
     /// Whether any visible backdrop reader may paint inside `rect` (in device pixels under `view`).
     pub fn has_reader_in_rect(&self, view: Affine, rect: Rect) -> bool {
         if self.readers.is_empty() {
             return false;
         }
-        for &id in &self.readers {
-            if let Some(wb) = self.world_extent(id) {
-                let db = view.transform_rect_bbox(wb);
-                if db.x0 <= rect.x1 && rect.x0 <= db.x1 && db.y0 <= rect.y1 && rect.y0 <= db.y1 {
-                    return true;
-                }
+        let cache = self.reader_cache();
+        let Some(all) = cache.readers_world_bbox else {
+            return false;
+        };
+        let all_dev = view.transform_rect_bbox(all);
+        if !(all_dev.x0 <= rect.x1 && rect.x0 <= all_dev.x1 && all_dev.y0 <= rect.y1 && rect.y0 <= all_dev.y1) {
+            return false;
+        }
+        for &wb in &cache.reader_extents {
+            let db = view.transform_rect_bbox(wb);
+            if db.x0 <= rect.x1 && rect.x0 <= db.x1 && db.y0 <= rect.y1 && rect.y0 <= db.y1 {
+                return true;
             }
         }
         false
@@ -1842,5 +2152,6 @@ impl Store {
         if let Some(p) = self.nodes.get_mut(&parent) {
             p.children.push(id);
         }
+        self.reader_cache.borrow_mut().take();
     }
 }

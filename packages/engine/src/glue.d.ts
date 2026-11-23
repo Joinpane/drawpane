@@ -41,12 +41,14 @@ export class Outcome {
   readonly reader_ms: number;
   readonly shadow_ms: number;
   readonly submits: number;
+  readonly draws: number;
   readonly vello_renders: number;
   readonly glass_ops: number;
   readonly glass_batched: number;
   readonly bg_blur_ops: number;
   readonly shadow_ops: number;
   readonly shadow_hits: number;
+  readonly in_progress: boolean;
 }
 
 export class GpuInit {

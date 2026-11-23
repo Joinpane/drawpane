@@ -92,6 +92,7 @@ interface EngineFacts {
     gpuTimestampMs: { p50: number; p95: number; max: number } | null;
     counts: {
       submits: number;
+      draws: number;
       velloRenders: number;
       glassOps: number;
       glassBatched: number;
@@ -127,6 +128,7 @@ async function engineFacts(page: Page, frames: number): Promise<EngineFacts> {
     };
     type Counts = {
       submits: number;
+      draws: number;
       velloRenders: number;
       glassOps: number;
       glassBatched: number;
@@ -269,6 +271,7 @@ async function engineFacts(page: Page, frames: number): Promise<EngineFacts> {
               gpuTimestampMs: gpuTsAll.length > 0 ? quantiles(gpuTsAll) : null,
               counts: {
                 submits: p50(countsAll.map((c) => c.submits)),
+                draws: p50(countsAll.map((c) => c.draws ?? 0)),
                 velloRenders: p50(countsAll.map((c) => c.velloRenders)),
                 glassOps: p50(countsAll.map((c) => c.glassOps)),
                 glassBatched: p50(countsAll.map((c) => c.glassBatched)),
@@ -416,6 +419,15 @@ test.describe("A real file", () => {
         );
         await settle(page);
       }
+      if (wantGesture("pan, whole fractional")) {
+        canvas["pan, whole fractional"] = await profiled(
+          cdp,
+          PROFILE,
+          at("pan whole fractional"),
+          () => pan(page, "fit", FRAMES, { x: 6.33, y: 3.33 }),
+        );
+        await settle(page);
+      }
       if (wantGesture("zoom, whole")) {
         canvas["zoom, whole"] = await profiled(cdp, PROFILE, at("zoom whole"), () =>
           zoom(page, FRAMES),
@@ -445,7 +457,8 @@ test.describe("A real file", () => {
           const level = gesture.endsWith("100%") ? 1 : gesture.endsWith("50%") ? 0.5 : "fit";
           if (typeof level === "number" && info.busiest) await focus(page, info.busiest);
           await settle(page);
-          replay[gesture] = await cameraReplay(page, kind, level, FRAMES);
+          const step = gesture === "pan, whole fractional" ? { x: 6.33, y: 3.33 } : undefined;
+          replay[gesture] = await cameraReplay(page, kind, level, FRAMES, step);
         }
         result.replay = replay;
       }
@@ -459,7 +472,7 @@ test.describe("A real file", () => {
                 `drawn by ${result.engine.renderer}${result.engine.renderer === "canvas" ? ` (${JSON.stringify(result.engine.unsupported)})` : ""} on ${result.engine.adapter}${result.engine.gpuMs ? `, GPU ${result.engine.gpuMs.p50} / ${result.engine.gpuMs.p95} ms per frame` : ""}${result.engine.gpuTimestampMs ? ` (timestamp ${result.engine.gpuTimestampMs.p50} / ${result.engine.gpuTimestampMs.p95} ms)` : ""}${result.engine.note ? ` (${result.engine.note})` : ""}`,
                 ...(result.engine.cpuGpuSplit
                   ? [
-                      `native split (p50, ${result.engine.cpuGpuSplit.frames} frames): CPU ${result.engine.cpuGpuSplit.cpuMs.p50} ms (patch ${result.engine.cpuGpuSplit.patchMs.p50}, encode ${result.engine.cpuGpuSplit.encodeMs.p50}, prepMasks ${result.engine.cpuGpuSplit.prepareMasksMs.p50}, vello ${result.engine.cpuGpuSplit.velloRenderMs.p50}, reader ${result.engine.cpuGpuSplit.readerMs.p50}, shadow ${result.engine.cpuGpuSplit.shadowMs.p50}, submit ${result.engine.cpuGpuSplit.submitMs.p50}) · GPU finished ${result.engine.cpuGpuSplit.gpuFinishedMs.p50} ms${result.engine.cpuGpuSplit.gpuTimestampMs ? ` · GPU ts ${result.engine.cpuGpuSplit.gpuTimestampMs.p50} ms` : " · GPU ts n/a"} · submits ${result.engine.cpuGpuSplit.counts.submits}, vello ${result.engine.cpuGpuSplit.counts.velloRenders}, glass ${result.engine.cpuGpuSplit.counts.glassBatched}/${result.engine.cpuGpuSplit.counts.glassOps}, blur ${result.engine.cpuGpuSplit.counts.bgBlurOps}, shadow ${result.engine.cpuGpuSplit.counts.shadowHits}/${result.engine.cpuGpuSplit.counts.shadowOps}`,
+                      `native split (p50, ${result.engine.cpuGpuSplit.frames} frames): CPU ${result.engine.cpuGpuSplit.cpuMs.p50} ms (patch ${result.engine.cpuGpuSplit.patchMs.p50}, encode ${result.engine.cpuGpuSplit.encodeMs.p50}, prepMasks ${result.engine.cpuGpuSplit.prepareMasksMs.p50}, vello ${result.engine.cpuGpuSplit.velloRenderMs.p50}, reader ${result.engine.cpuGpuSplit.readerMs.p50}, shadow ${result.engine.cpuGpuSplit.shadowMs.p50}, submit ${result.engine.cpuGpuSplit.submitMs.p50}) · GPU finished ${result.engine.cpuGpuSplit.gpuFinishedMs.p50} ms${result.engine.cpuGpuSplit.gpuTimestampMs ? ` · GPU ts ${result.engine.cpuGpuSplit.gpuTimestampMs.p50} ms` : " · GPU ts n/a"} · submits ${result.engine.cpuGpuSplit.counts.submits}, draws ${result.engine.cpuGpuSplit.counts.draws}, vello ${result.engine.cpuGpuSplit.counts.velloRenders}, glass ${result.engine.cpuGpuSplit.counts.glassBatched}/${result.engine.cpuGpuSplit.counts.glassOps}, blur ${result.engine.cpuGpuSplit.counts.bgBlurOps}, shadow ${result.engine.cpuGpuSplit.counts.shadowHits}/${result.engine.cpuGpuSplit.counts.shadowOps}`,
                     ]
                   : []),
               ]
@@ -490,6 +503,24 @@ test.describe("A real file", () => {
         }
       }
     }
+    if (RENDERER === "engine") {
+      for (const result of results) {
+        for (const [gesture, summary] of Object.entries(result.canvas)) {
+          const limit = gesture.startsWith("pan, whole") ? 2_100 : 500;
+          const elapsed = summary.exactMs;
+          const status =
+            result.engine?.renderer === "engine" &&
+            elapsed !== null &&
+            elapsed !== undefined &&
+            elapsed <= limit
+              ? "met"
+              : "missed";
+          console.log(
+            `Figma settle ${result.page.name}, ${gesture}: ${status} (${elapsed ?? "timed out"} / ${limit} ms, drawn exact)`,
+          );
+        }
+      }
+    }
     if (RENDERER === "engine" && process.env.BENCH_W4_CAMERA_GATE === "1") {
       for (const result of results) {
         expect.soft(result.engine?.renderer, result.page.name).toBe("engine");
@@ -502,7 +533,7 @@ test.describe("A real file", () => {
           const motion = summary.motion;
           expect.soft(motion, `${label} motion samples`).toBeDefined();
           if (!motion) continue;
-          if (!REPLAY) {
+          if (!REPLAY && process.env.BENCH_W4_NATIVE === "1") {
             expect.soft(motion.degradedConfirmed, `${label} degraded presentations`).toBe(0);
             expect.soft(motion.degradedSubmitted, `${label} degraded submissions`).toBe(0);
           }

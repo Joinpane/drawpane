@@ -89,13 +89,17 @@ for (const backend of ["webgpu", "webgl2"] as const) {
     // Allow setup submissions while catching a return to one submit per blend.
     expect(result.blendSlab.submits).toBeLessThan(32);
 
-    // 1. Atlas active vs whole-frame budget refusal: bit-identical pixels, fewer submits.
+    // 1. Atlas active vs whole-frame budget refusal: bit-identical pixels, fewer Vello renders
+    // and never more submissions (both paths share batched command encoders).
     expect(result.budgetAtlasVsSerial.batchedOps).toBe(7);
     expect(result.budgetAtlasVsSerial.batchedCount).toBe(7);
     expect(result.budgetAtlasVsSerial.refusedOps).toBe(7);
     expect(result.budgetAtlasVsSerial.refusedCount).toBe(0);
-    expect(result.budgetAtlasVsSerial.batchedSubmits).toBeLessThan(
+    expect(result.budgetAtlasVsSerial.batchedSubmits).toBeLessThanOrEqual(
       result.budgetAtlasVsSerial.refusedSubmits,
+    );
+    expect(result.budgetAtlasVsSerial.batchedVelloRenders).toBeLessThan(
+      result.budgetAtlasVsSerial.refusedVelloRenders,
     );
     expect(result.budgetAtlasVsSerial.diff.differingBytes).toBe(0);
 
@@ -109,13 +113,13 @@ for (const backend of ["webgpu", "webgl2"] as const) {
     expect(result.patchedVsFresh.freshBatched).toBe(6);
     expect(result.patchedVsFresh.diff.differingBytes).toBe(0);
 
-    // 4. Whole frame (batched atlas) vs tiled (never uses atlas) on a glass page straddling x=512.
+    // 4. Whole frame (batched atlas) vs tiled (per-tile batched atlas) on a glass page straddling x=512.
     // Whole-atlas matches whole-serial bit-for-bit (case 1); remaining 1-2 level edge diffs on
     // <0.02% of bytes come from tile-origin coordinate/quad shifts on curved shapes.
     expect(result.wholeVsTiled.wholePlan).toBe("direct");
     expect(result.wholeVsTiled.wholeBatched).toBe(6);
     expect(result.wholeVsTiled.tiledPlan).toBe("tiles");
-    expect(result.wholeVsTiled.tiledBatched).toBe(0);
+    expect(result.wholeVsTiled.tiledBatched).toBeGreaterThanOrEqual(6);
     expect(result.wholeVsTiled.tiledDrawn).toBeGreaterThanOrEqual(2);
     expect(
       result.wholeVsTiled.diff.maxDiff,

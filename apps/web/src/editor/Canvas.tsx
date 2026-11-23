@@ -23,14 +23,17 @@ import { fonts } from "../fonts/fonts";
 import { COMPONENT_DRAG_MIME } from "./AssetsPanel";
 import { passesToCanvas } from "./canvas-gestures";
 import {
+  COMPOSITE_ONLY_MS,
   EngineView,
   engineFallback,
   type FallbackEvent,
   IDLE_SLICE_MS,
   MOVING_BUDGET_MS,
+  motionPolicy,
   presentation,
   REST_BUDGET_MS,
   rendererChoice,
+  snapViewCamera,
 } from "./engine-view";
 import { FrameNameEditor } from "./FrameNameEditor";
 import { frameStatsFor } from "./frame-stats";
@@ -486,22 +489,29 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     let fadeTimer = 0;
     /** The camera the engine last drew: another one this frame means the camera is moving. */
     let engineCamera: unknown = null;
-    // Between frames at rest the engine draws the tiles the next frame wants, a slice at a time
-    // (decision 0040, phase 2), until the frame it last drew is all drawn and the tiles round
-    // it too. Any frame stops it; a frame at rest that leaves work starts it again.
+    // Between frames at rest the engine draws the tiles the next frame wants, paced to one ~8 ms
+    // slice per animation frame (decision 0040, phase 2), so no slice stalls input past one frame
+    // and completed visible tiles present progressively from viewport center outward.
     let idleOn = false;
-    let idlePosted = false;
+    let idleFrame = 0;
     /** The engine's last frame was drawn moving (stand-ins), at the camera it still has. */
     let engineMoved = false;
     let idleBackground = "";
-    const idle = new MessageChannel();
-    const postIdle = () => {
-      if (idlePosted) return;
-      idlePosted = true;
-      idle.port2.postMessage(0);
+    let unpresentedTiles = 0;
+    let presentOnly = false;
+    const cancelIdle = () => {
+      idleOn = false;
+      if (idleFrame) {
+        cancelAnimationFrame(idleFrame);
+        idleFrame = 0;
+      }
     };
-    idle.port1.onmessage = () => {
-      idlePosted = false;
+    const postIdle = () => {
+      if (idleFrame) return;
+      idleFrame = requestAnimationFrame(runIdle);
+    };
+    const runIdle = () => {
+      idleFrame = 0;
       const pageId = editor.s.pageId;
       if (!idleOn || !engine || disposed || !pageId) return;
       const a = engine.ahead(pageId, idleBackground, IDLE_SLICE_MS);
@@ -514,18 +524,38 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         if (contentDirty) schedule();
         return;
       }
+      if (a.drawn > 0) unpresentedTiles += a.drawn;
       if (a.tiles === 0 && a.textVisible === 0 && contentDirty) {
-        // The frame it drew for is all drawn: shown now rather than a frame later, and nothing
-        // holds it back (that frame starts the rest again: text out of view, tiles round it).
+        // All visible tiles are ready: composite and present now in this same animation frame.
         idleOn = false;
-        if (frame) cancelAnimationFrame(frame);
+        if (frame) {
+          cancelAnimationFrame(frame);
+          frame = 0;
+        }
+        presentOnly = true;
         draw();
-      } else if (a.tiles > 0 || a.queued > 0 || a.text > 0) postIdle();
-      else idleOn = false;
+      } else if (unpresentedTiles > 0 && contentDirty && !engine.reading) {
+        // One or more visible tiles finished: composite and present progressively without
+        // starting another tile bake in this frame.
+        idleOn = false;
+        if (frame) {
+          cancelAnimationFrame(frame);
+          frame = 0;
+        }
+        presentOnly = true;
+        draw();
+      } else if (a.tiles > 0 || a.queued > 0 || a.text > 0 || a.inProgress) {
+        postIdle();
+      } else {
+        idleOn = false;
+      }
     };
+    const exactMotion = motionPolicy() === "exact";
     const draw = () => {
       frame = 0;
-      idleOn = false;
+      const compositeOnly = presentOnly;
+      presentOnly = false;
+      cancelIdle();
       const liveDpr = window.devicePixelRatio || 1;
       if (liveDpr !== dpr) applySize();
       const s = editor.s;
@@ -535,45 +565,78 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       // when a content frame is drawn, and only to one whose frame is on screen: an overlay-only
       // redraw never hides the engine's frame, and a read-back frame shows once it lands.
       let drewEngine = false;
+      let runCompositeOnly = compositeOnly;
       const gestureMoving = s.gesture && s.editingText === null;
-      if (contentDirty && s.pageId !== null && engine && engineMoved && !whole) {
-        if (!gestureMoving && engineCamera === s.camera && engineShowing && !changed) {
-          // The camera came to rest where the last frame was drawn: that frame stays on screen
-          // while the time between frames draws the rest, and the exact frame follows (a frame
-          // now would only show the same stand-ins again).
-          drewEngine = true;
-          idleOn = true;
-          idleBackground = (page && getProp(page.props, "backgroundColor")) ?? canvasColor;
-          postIdle();
-        }
+      if (
+        contentDirty &&
+        s.pageId !== null &&
+        engine &&
+        engine.backend !== "cpu-worker" &&
+        engineMoved &&
+        !whole &&
+        !compositeOnly
+      ) {
         engineMoved = false;
+        if (!gestureMoving && engineCamera === s.camera && engineShowing && !changed) {
+          // The camera came to rest where the last frame was drawn: run one ~8 ms refine slice
+          // immediately in this rAF, presenting right away if any visible tile finishes, else
+          // keeping the stand-in on screen and continuing next rAF.
+          idleBackground = (page && getProp(page.props, "backgroundColor")) ?? canvasColor;
+          const a = engine.ahead(s.pageId, idleBackground, IDLE_SLICE_MS);
+          if (a?.progressed) {
+            if (a.drawn > 0) unpresentedTiles += a.drawn;
+            if (
+              (a.tiles === 0 && a.textVisible === 0) ||
+              (unpresentedTiles > 0 && !engine.reading)
+            ) {
+              runCompositeOnly = true;
+            } else {
+              drewEngine = true;
+              if (a.tiles > 0 || a.queued > 0 || a.text > 0 || a.inProgress) {
+                idleOn = true;
+                postIdle();
+              }
+            }
+          }
+        }
       }
       if (!drewEngine && contentDirty && s.pageId !== null && engine) {
-        // Camera motion and pointer gestures have the same moving-frame budget. Once they stop,
-        // idle slices fill the remaining exact tiles (decision 0040).
-        const nativeMotion = timing.motion?.native === true;
+        // Camera motion and pointer gestures share the moving-frame policy (one switch: standin
+        // vs exact). Once motion stops, rAF-paced ~8 ms slices refine visible tiles progressively.
+        const nativeMotion = timing.motion?.native === true || exactMotion;
         const moving =
-          !nativeMotion && !whole && !exact && (gestureMoving || engineCamera !== s.camera);
+          !runCompositeOnly &&
+          !nativeMotion &&
+          !whole &&
+          !exact &&
+          (gestureMoving || engineCamera !== s.camera);
         const background = (page && getProp(page.props, "backgroundColor")) ?? canvasColor;
         changed = false;
         const r = engine.draw(
           s.pageId,
-          s.camera,
+          snapViewCamera(s.camera, dpr),
           contentCanvas.width,
           contentCanvas.height,
           dpr,
           background,
           { hidden: rendererRef.current.instance?.hidden ?? emptyHidden, whole: s.editingText },
           !moving,
-          whole || nativeMotion ? 0 : moving ? MOVING_BUDGET_MS : REST_BUDGET_MS,
+          runCompositeOnly
+            ? COMPOSITE_ONLY_MS
+            : whole || nativeMotion
+              ? 0
+              : moving
+                ? MOVING_BUDGET_MS
+                : REST_BUDGET_MS,
         );
         engineCamera = s.camera;
-        engineMoved = r.drawn && moving && !r.exact && engine.backend !== "cpu-worker";
+        engineMoved = r.drawn && moving && !r.exact;
         if (r.awaitingPreview) {
           drewEngine = true;
           contentDirty = false;
         } else if (r.drawn) {
           drewEngine = true;
+          unpresentedTiles = 0;
           contentDirty = false;
           exact = false;
           whole = false;
@@ -850,7 +913,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       ) {
         contentDirty = true;
         // What's drawn ahead is for the frame before: the next one decides again.
-        idleOn = false;
+        cancelIdle();
         dirty = true;
       }
       if (overlayStateChanged(last, s)) {
@@ -950,7 +1013,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       offShaper();
       offFonts();
       if (frame) cancelAnimationFrame(frame);
-      idle.port1.close();
+      cancelIdle();
       clearTimeout(settle);
       clearTimeout(fadeTimer);
     };

@@ -9,6 +9,8 @@ import {
 } from "./renderer-status";
 import {
   engineSearch,
+  MOTION_POLICY_STORAGE_KEY,
+  motionPolicy,
   PRESENT_STORAGE_KEY,
   presentation,
   RENDERER_STORAGE_KEY,
@@ -143,6 +145,27 @@ describe("renderer-switch", () => {
     rememberRendererSwitches("?present=webgpu");
     expect(presentation("")).toBe("webgpu");
     expect(sessionStorage.getItem(PRESENT_STORAGE_KEY)).toBeNull();
+  });
+
+  it("switches motion policy between standin (default) and exact via URL or storage", () => {
+    expect(motionPolicy("")).toBe("standin");
+    expect(engineSearch({ motion: "exact" })).toEqual({ motion: "exact" });
+    expect(engineSearch({ motion: "standin" })).toEqual({ motion: "standin" });
+    expect(engineSearch({ motion: "bogus" })).toEqual({});
+
+    rememberRendererSwitches("?motion=exact");
+    expect(sessionStorage.getItem(MOTION_POLICY_STORAGE_KEY)).toBe("exact");
+    expect(motionPolicy("")).toBe("exact");
+
+    rememberRendererSwitches("?motion=standin");
+    expect(motionPolicy("")).toBe("standin");
+    expect(sessionStorage.getItem(MOTION_POLICY_STORAGE_KEY)).toBeNull();
+
+    localStorage.setItem(MOTION_POLICY_STORAGE_KEY, "exact");
+    expect(motionPolicy("")).toBe("exact");
+    expect(motionPolicy("?motion=standin")).toBe("standin");
+    expect(sessionStorage.getItem(MOTION_POLICY_STORAGE_KEY)).toBe("standin");
+    expect(motionPolicy("")).toBe("standin");
   });
 });
 

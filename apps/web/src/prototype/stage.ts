@@ -314,7 +314,7 @@ export class PlayerStage {
       if (a.tiles === 0 && a.textVisible === 0) {
         this.#idleOn = false;
         this.#paintScreen();
-      } else if (a.tiles > 0 || a.queued > 0 || a.text > 0) {
+      } else if (a.tiles > 0 || a.queued > 0 || a.text > 0 || a.inProgress) {
         this.#postIdle();
       } else {
         this.#idleOn = false;

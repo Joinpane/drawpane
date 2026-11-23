@@ -243,6 +243,7 @@ import {
   MAX_CPU_PIXELS,
   probeWebgl2Support,
   resetSessionBackendsForTest,
+  snapViewCamera,
 } from "./engine-view";
 
 class FakeCanvas {
@@ -607,6 +608,15 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
     ac.abort();
     expect(await pending).toBeNull();
     expect(initial.isConnected).toBe(true);
+  });
+
+  it("snaps editor translation to the device grid without changing zoom or logical position", () => {
+    const camera = { x: 6.33, y: -3.33, zoom: 0.1783 };
+    expect(snapViewCamera(camera, 2)).toEqual({ x: 6.5, y: -3.5, zoom: camera.zoom, dpr: 2 });
+    expect(camera).toEqual({ x: 6.33, y: -3.33, zoom: 0.1783 });
+    const fractionalDpr = snapViewCamera(camera, 1.25);
+    expect(fractionalDpr.x * 1.25).toBe(8);
+    expect(fractionalDpr.y * 1.25).toBe(-4);
   });
 
   it("deduplicates unchanged CPU worker exact jobs and bounds oversized CPU viewports", async () => {

@@ -135,7 +135,8 @@ pub use render::{
 };
 #[cfg(feature = "wgpu")]
 pub use render::{
-    RenderOptions, RenderTarget, RenderTargetConfig, Renderer, TextureBinding, TextureBindings,
+    PreparedBatchRender, RenderOptions, RenderTarget, RenderTargetConfig, Renderer, TextureBinding,
+    TextureBindings,
 };
 #[cfg(all(feature = "webgl", feature = "probe"))]
 pub use render::{WebGlPendingProbe, WebGlProbeError, WebGlProbeOperation, WebGlProbeStatus};

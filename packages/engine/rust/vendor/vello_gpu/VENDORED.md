@@ -3,12 +3,13 @@
 Decision 0040 pins Vello and lets the engine carry patches to it. This is vello_gpu 0.4.0 from
 crates.io, unchanged except:
 
-- `src/render/wgpu/resources.rs`: on the web, uploads (strips, the config, the alpha and paint
-  textures) go through the queue (`write_buffer_with`, `write_texture`), which the browser
-  stages itself. wgpu's `StagingBelt` gets its chunks back only after an asynchronous map, so
-  every render in a burst of tile renders allocated new mapped buffers: about a fifth of a cold
-  frame's main-thread time went to `createBuffer`.
-- `src/render/wgpu/mod.rs`: the renderer hands its queue to that upload path.
+- `src/render/wgpu/` (and `src/render/common/data_texture.rs`, `src/schedule/mod.rs`):
+  multi-render encoder batching via `Renderer::prepare_batch_render`,
+  `Renderer::execute_batch_render`, `Renderer::flush_uploads`, and `Renderer::discard_uploads`.
+  Multiple `render` calls share one `CommandEncoder` and one `queue.submit()`: alphas, encoded
+  paints, strip/blend/clear/copy vertex data, and dynamic-offset view configs are staged in CPU
+  memory and uploaded once right before submit via `queue.write_buffer` / `queue.write_texture`,
+  and external-texture bind groups are cached across renders using versioned `TextureBindings`.
 - `src/scene.rs`: `Scene::fill_path_in_slot` generates solid-paint strips in slot-local
   coordinates and shifts the emitted strips by a tile-aligned atlas origin, keeping batched
   glass mask coverage bit-identical to standalone lens-local masks.

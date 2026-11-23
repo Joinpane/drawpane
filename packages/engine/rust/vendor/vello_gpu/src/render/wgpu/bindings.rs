@@ -49,7 +49,10 @@ impl TextureBinding {
 /// Runtime bindings for [externally owned textures](`TextureId`) sampled by image paints.
 #[derive(Debug, Default, Clone)]
 pub struct TextureBindings {
-    bindings: HashMap<TextureId, TextureBinding>,
+    bindings: HashMap<TextureId, (TextureBinding, u64)>,
+    /// Drawpane: monotonic version assigned per insert so cached external-texture bind groups
+    /// automatically invalidate when a `TextureId` is replaced or removed.
+    next_version: u64,
 }
 
 impl TextureBindings {
@@ -82,8 +85,10 @@ impl TextureBindings {
     /// mip level 0 is read. The view must start at mip level 0 of its texture.
     #[inline]
     pub fn insert(&mut self, texture_id: TextureId, view: TextureView) {
+        self.next_version = self.next_version.wrapping_add(1);
+        let version = self.next_version;
         self.bindings
-            .insert(texture_id, TextureBinding::TextureView(view));
+            .insert(texture_id, (TextureBinding::TextureView(view), version));
     }
 
     /// Insert or replace a [`wgpu::ExternalTexture`] binding.
@@ -119,13 +124,18 @@ impl TextureBindings {
             width > 0 && height > 0,
             "wgpu external texture size must be non-zero, got {width}x{height}"
         );
+        self.next_version = self.next_version.wrapping_add(1);
+        let version = self.next_version;
         self.bindings.insert(
             texture_id,
-            TextureBinding::WgpuExternalTexture {
-                texture: external_texture,
-                width,
-                height,
-            },
+            (
+                TextureBinding::WgpuExternalTexture {
+                    texture: external_texture,
+                    width,
+                    height,
+                },
+                version,
+            ),
         );
     }
 
@@ -167,7 +177,15 @@ impl TextureBindings {
     /// Get a texture binding.
     #[inline]
     pub(crate) fn get(&self, texture_id: TextureId) -> Option<&TextureBinding> {
-        self.bindings.get(&texture_id)
+        self.bindings.get(&texture_id).map(|(binding, _)| binding)
+    }
+
+    /// Drawpane: get a texture binding and its monotonic version.
+    #[inline]
+    pub(crate) fn get_versioned(&self, texture_id: TextureId) -> Option<(&TextureBinding, u64)> {
+        self.bindings
+            .get(&texture_id)
+            .map(|(binding, version)| (binding, *version))
     }
 
     /// Remove a texture binding.
@@ -175,6 +193,6 @@ impl TextureBindings {
     /// This returns the removed binding if it existed.
     #[inline]
     pub fn remove(&mut self, texture_id: TextureId) -> Option<TextureBinding> {
-        self.bindings.remove(&texture_id)
+        self.bindings.remove(&texture_id).map(|(binding, _)| binding)
     }
 }

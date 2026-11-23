@@ -18,6 +18,7 @@ export interface CpuSplitSummary {
   readonly submitMs: number;
   readonly totalMs: number;
   readonly submits: number;
+  readonly draws: number;
   readonly velloRenders: number;
   readonly glassOps: number;
   readonly glassBatched: number;
@@ -38,6 +39,8 @@ export interface Summary {
   culled: number;
   /** Ms from the last frame of the movement until the canvas showed an exact frame (null: never, within 10 s). */
   exactMs?: number | null;
+  /** Longest browser main-thread long task (ms) observed during the gesture + settle window. */
+  longTaskMaxMs?: number;
   /**
    * The render engine only: ms until it drew an exact frame (before a read-back shows it, in
    * headless browsers), and its slowest frame of the movement (ms, how it was made, tiles drawn).
@@ -62,18 +65,24 @@ export interface Settle {
   idleSlices: number;
   idleTiles: number;
   idleMs: number;
+  idleMaxSliceMs?: number;
   /** Each frame (f) and slice between frames (i): ms after the movement, its ms, tiles, pending. */
   trace?: string;
 }
 
 /** Pans for `frames` animation frames and returns what drawing them took. */
-export function pan(page: Page, zoom: number | "fit", frames: number): Promise<Summary> {
-  return move(page, "pan", zoom, frames);
+export function pan(
+  page: Page,
+  zoom: number | "fit",
+  frames: number,
+  step: { x: number; y: number } = { x: 6, y: 3 },
+): Promise<Summary> {
+  return move(page, "pan", zoom, frames, step);
 }
 
 /** Zooms in and out about the centre for `frames` frames, from the whole file. */
 export function zoom(page: Page, frames: number): Promise<Summary> {
-  return move(page, "zoom", "fit", frames);
+  return move(page, "zoom", "fit", frames, { x: 0, y: 0 });
 }
 
 async function move(
@@ -81,9 +90,10 @@ async function move(
   kind: "pan" | "zoom",
   zoom: number | "fit",
   frames: number,
+  step: { x: number; y: number },
 ): Promise<Summary> {
   return page.evaluate(
-    async ({ kind, zoom, frames, instrument, native }) => {
+    async ({ kind, zoom, frames, step, instrument, native }) => {
       type Camera = {
         zoom: number;
         pan(dx: number, dy: number): Camera;
@@ -97,6 +107,7 @@ async function move(
           zoomTo(z: number): void;
         };
         drawpaneFrames: {
+          readonly exact: boolean;
           reset(): void;
           summary(): Summary;
           beginMotion?(native: boolean): MotionStats;
@@ -129,6 +140,7 @@ async function move(
       };
       type Counts = {
         submits: number;
+        draws: number;
         velloRenders: number;
         glassOps: number;
         glassBatched: number;
@@ -137,19 +149,21 @@ async function move(
         shadowHits: number;
       };
       type View = {
+        readonly backend?: string;
         readonly readsBack?: boolean;
         readonly reading?: boolean;
         readonly shown?: { readonly n: number; readonly at: number };
+        stamps: { drawn?: { n: number; at: number }; shown?: { n: number; at: number } } | null;
         last: {
           n: number;
           exact: boolean;
           ms: number;
           plan: string;
-          tiles: { drawn: number };
+          tiles: { drawn: number; pending: number };
           breakdown: Breakdown;
           counts: Counts;
         };
-        idle: { slices: number; tiles: number; ms: number };
+        idle: { slices: number; tiles: number; ms: number; maxSliceMs?: number };
         readbackDiag?: unknown;
         resetReadbackDiag?(): void;
         trace: Array<{
@@ -204,6 +218,7 @@ async function move(
               submitMs: medianOf(splitSamples.map((s) => s.breakdown.submit)),
               totalMs: medianOf(splitSamples.map((s) => s.ms)),
               submits: medianOf(splitSamples.map((s) => s.counts.submits)),
+              draws: medianOf(splitSamples.map((s) => s.counts.draws ?? 0)),
               velloRenders: medianOf(splitSamples.map((s) => s.counts.velloRenders)),
               glassOps: medianOf(splitSamples.map((s) => s.counts.glassOps)),
               glassBatched: medianOf(splitSamples.map((s) => s.counts.glassBatched)),
@@ -211,10 +226,9 @@ async function move(
               shadowOps: medianOf(splitSamples.map((s) => s.counts.shadowOps)),
               shadowHits: medianOf(splitSamples.map((s) => s.counts.shadowHits)),
             };
-      const exactAfter = async (since: number) => {
-        const f = (window as unknown as { drawpaneFrames: { exact: boolean } }).drawpaneFrames;
+      const exactAfter = async (since: number, previousN: number) => {
         const limitMs = view()?.readsBack ? 25_000 : 10_000;
-        let drawn = view()?.last.exact ? 0 : -1;
+        let drawn: number | null = null;
         const idle0 = view()?.idle;
         const traced = view();
         if (traced) traced.trace = [];
@@ -229,7 +243,10 @@ async function move(
         };
         const tally = () => {
           const v = view();
-          if (!v || drawn >= 0) return;
+          if (!v) {
+            if (w.drawpaneFrames.exact) drawn = performance.now();
+            return;
+          }
           if (v.last !== seen) {
             seen = v.last;
             settle.frames++;
@@ -241,35 +258,33 @@ async function move(
             settle.idleTiles = v.idle.tiles - idle0.tiles;
             settle.idleMs = Math.round((v.idle.ms - idle0.ms) * 10) / 10;
           }
-          if (v.last.exact) drawn = Math.max(0, performance.now() - since);
+          if (v.last.n <= previousN || !v.last.exact || v.last.tiles.pending !== 0) return;
+          // The worker is complete when its exact result reaches the canvas. On the GPU use
+          // the actual exact submission, which may have finished before this RAF sampled it.
+          const stamp = v.backend === "cpu-worker" ? v.stamps?.shown : v.stamps?.drawn;
+          drawn = stamp && stamp.n > previousN ? stamp.at : performance.now();
         };
-        if (!f.exact) {
-          await nextFrame();
-          while (!f.exact && performance.now() - since < limitMs) {
-            tally();
-            await nextFrame();
-          }
-        }
         tally();
+        while (drawn === null && performance.now() - since < limitMs) {
+          await nextFrame();
+          tally();
+        }
         settle.frameMs = Math.round(settle.frameMs * 10) / 10;
-        const shownAt = view()?.shown?.at;
-        const shown = Math.max(
-          0,
-          Math.round((shownAt && shownAt >= since ? shownAt : performance.now()) - since),
-        );
-        const trace = (traced?.trace ?? [])
+        const traceEntries = traced?.trace ?? [];
+        const idleMaxSliceMs =
+          Math.round(
+            traceEntries.filter((e) => e.k === "idle").reduce((m, e) => Math.max(m, e.ms), 0) * 10,
+          ) / 10;
+        const trace = traceEntries
           .map(
             (e) =>
               `${e.k === "frame" ? "f" : e.k === "present" ? "p" : e.k === "text" ? "t" : "i"}${Math.round(e.t - since)}:${Math.round(e.ms)}(${Math.round(e.encode)}+${Math.round(e.render)})/${e.tiles}/${e.pending}/m${e.misses}/r${e.records}/g${e.masked}+${e.outlined}`,
           )
           .join(" ");
         if (traced) traced.trace = null;
-        // A wait that ran out is reported as such, never as the time it waited.
-        const timedOut = !f.exact;
         return {
-          shown: timedOut ? null : shown,
-          drawn: drawn < 0 ? null : Math.round(drawn),
-          settle: { ...settle, trace },
+          drawn: drawn === null ? null : Math.max(0, Math.round(drawn - since)),
+          settle: { ...settle, idleMaxSliceMs, trace },
         };
       };
       const waitReadback = async (targetN: number | null, timeoutMs: number) => {
@@ -292,9 +307,23 @@ async function move(
       }
       w.drawpaneFrames.reset();
       view()?.resetReadbackDiag?.();
+      let longTaskMaxMs = 0;
+      let longTaskObserver: PerformanceObserver | null = null;
+      try {
+        longTaskObserver = new PerformanceObserver((list) => {
+          for (const entry of list.getEntries()) {
+            if (entry.duration > longTaskMaxMs) longTaskMaxMs = entry.duration;
+          }
+        });
+        longTaskObserver.observe({ entryTypes: ["longtask"] });
+      } catch {
+        // Long Tasks API unsupported in this browser.
+      }
       const motion = instrument && view() ? w.drawpaneFrames.beginMotion?.(native) : undefined;
       const centre = { x: e.s.viewport.width / 2, y: e.s.viewport.height / 2 };
       const times: number[] = [];
+      let moveEnd = performance.now();
+      let previousN = view()?.last.n ?? 0;
       for (let i = 0; i < frames; i++) {
         const forward = i % 120 < 60;
         const submitted = motion?.submitted;
@@ -302,7 +331,13 @@ async function move(
         const next =
           kind === "zoom"
             ? camera.zoomAt(centre, camera.zoom * (forward ? 1.03 : 1 / 1.03))
-            : camera.pan(forward ? 6 : -6, forward ? 3 : -3);
+            : camera.pan(forward ? step.x : -step.x, forward ? step.y : -step.y);
+        if (i === frames - 1) {
+          const v = view();
+          previousN = v?.last.n ?? 0;
+          if (v) v.stamps = {};
+          moveEnd = performance.now();
+        }
         e.state.set({ camera: next });
         times.push(await nextFrame());
         if (motion && motion.submitted === submitted) motion.missed++;
@@ -315,7 +350,7 @@ async function move(
         }
       }
       const summary = w.drawpaneFrames.summary();
-      const moveEnd = performance.now();
+      const exactResult = exactAfter(moveEnd, previousN);
       const lastMotionN = view()?.last.n ?? 0;
       // Give the final submitted camera frame a completion-probe window before closing motion.
       // Read-back presentation (headless WebGPU) delivers asynchronously after the frame loop.
@@ -328,7 +363,10 @@ async function move(
         }
         w.drawpaneFrames.endMotion?.();
       }
-      const exact = await exactAfter(moveEnd);
+      const exact = await exactResult;
+      const settledView = view();
+      if (settledView) settledView.stamps = null;
+      longTaskObserver?.disconnect();
       const split = summarizeSplit();
       const vNow = view();
       const readbackDiag = vNow?.readbackDiag
@@ -347,7 +385,8 @@ async function move(
         ...(motion && motion.presentations.length > 1
           ? { presentedInterval: intervals(motion.presentations) }
           : {}),
-        exactMs: exact.shown,
+        exactMs: exact.drawn,
+        longTaskMaxMs: Math.round(longTaskMaxMs * 10) / 10,
         ...(view()
           ? {
               engine: {
@@ -365,6 +404,7 @@ async function move(
       kind,
       zoom,
       frames,
+      step,
       instrument: process.env.BENCH_W4_CAMERA_GATE === "1",
       native: process.env.BENCH_W4_NATIVE === "1",
     },
@@ -373,12 +413,17 @@ async function move(
 
 function settleText(s: Settle | undefined): string {
   if (!s) return "";
-  return `; settling: ${s.frames} frames drew ${s.frameTiles} tiles in ${s.frameMs} ms, ${s.idleSlices} idle slices ${s.idleTiles} tiles in ${s.idleMs} ms${s.trace ? `; trace (end at: ms (encode+render) / tiles / pending / mask misses / records / glyphs masked+outlined) ${s.trace}` : ""}`;
+  const maxIdle = s.idleMaxSliceMs !== undefined ? ` (max ${s.idleMaxSliceMs} ms)` : "";
+  return `; settling: ${s.frames} frames drew ${s.frameTiles} tiles in ${s.frameMs} ms, ${s.idleSlices} idle slices ${s.idleTiles} tiles in ${s.idleMs} ms${maxIdle}${s.trace ? `; trace (end at: ms (encode+render) / tiles / pending / mask misses / records / glyphs masked+outlined) ${s.trace}` : ""}`;
 }
 
 /** One line of a frame summary for the console. */
 export function summaryRow(name: string, r: Summary): string {
-  return `${name.padEnd(12)} content p50 ${String(r.content.p50).padStart(6)} ms · p95 ${String(r.content.p95).padStart(6)} ms · p99 ${String(r.content.p99 ?? "-").padStart(6)} ms · max ${String(r.content.max).padStart(6)} ms · overlay p95 ${String(r.overlay.p95).padStart(5)} ms · frame interval p50 ${r.interval?.p50} / p95 ${r.interval?.p95} / p99 ${r.interval?.p99} ms · exact after ${r.exactMs ?? "-"} ms${r.engine ? ` (drawn exact after ${r.engine.exactMs} ms; slowest engine frame ${r.engine.worst.ms} ms, ${r.engine.worst.plan}, ${r.engine.worst.tiles} tiles${settleText(r.engine.settle)})` : ""} · drawn ${r.drawn}, culled ${r.culled}`;
+  const lt = r.longTaskMaxMs !== undefined ? ` · longTask max ${r.longTaskMaxMs} ms` : "";
+  const split = r.engine?.split
+    ? ` · split submits ${r.engine.split.submits}, draws ${r.engine.split.draws}`
+    : "";
+  return `${name.padEnd(12)} content p50 ${String(r.content.p50).padStart(6)} ms · p95 ${String(r.content.p95).padStart(6)} ms · p99 ${String(r.content.p99 ?? "-").padStart(6)} ms · max ${String(r.content.max).padStart(6)} ms · overlay p95 ${String(r.overlay.p95).padStart(5)} ms · frame interval p50 ${r.interval?.p50} / p95 ${r.interval?.p95} / p99 ${r.interval?.p99} ms · draws exact after ${r.exactMs ?? "-"} ms${lt}${split}${r.engine ? ` (slowest engine frame ${r.engine.worst.ms} ms, ${r.engine.worst.plan}, ${r.engine.worst.tiles} tiles${settleText(r.engine.settle)})` : ""} · drawn ${r.drawn}, culled ${r.culled}`;
 }
 
 /** p50, p95 and the worst of some samples, in ms (empty: nulls). */
@@ -534,6 +579,10 @@ export interface Opening {
   stamp: { renderer: "engine" | "canvas"; pageId: string; revision: number | null };
   /** `performance.now()` in the page when the page was shown: other clocks are from it. */
   t0: number;
+  /** Longest browser main-thread long task (ms) observed during opening until exact. */
+  longTaskMaxMs?: number;
+  /** Longest between-frame idle slice (ms) observed during opening until exact. */
+  idleMaxSliceMs?: number;
   readbackDiag?: unknown;
   openDiag?: {
     opening: boolean;
@@ -593,6 +642,20 @@ export async function opening(page: Page, pageId: string): Promise<Opening> {
     const shownBefore = v?.shown.n ?? 0;
     v?.resetReadbackDiag?.();
     if (v) v.stamps = {};
+    let longTaskMaxMs = 0;
+    let longTaskObserver: PerformanceObserver | null = null;
+    try {
+      longTaskObserver = new PerformanceObserver((list) => {
+        for (const entry of list.getEntries()) {
+          if (entry.duration > longTaskMaxMs) longTaskMaxMs = entry.duration;
+        }
+      });
+      longTaskObserver.observe({ entryTypes: ["longtask"] });
+    } catch {
+      // Long Tasks API unsupported in this browser.
+    }
+    const idleView = v as unknown as { idle?: { maxSliceMs?: number } } | undefined;
+    if (idleView?.idle) idleView.idle.maxSliceMs = 0;
     const t0 = performance.now();
     w.drawpane.setPage(pageId);
     w.drawpane.zoomToFit();
@@ -619,6 +682,7 @@ export async function opening(page: Page, pageId: string): Promise<Opening> {
       take();
     }
     take();
+    longTaskObserver?.disconnect();
     const timedOut = performance.now() - t0 > 60_000;
     const st = v?.stamps;
     const rel = (s?: Stamp) => (s ? Math.round(s.at - t0) : null);
@@ -704,6 +768,8 @@ export async function opening(page: Page, pageId: string): Promise<Opening> {
         revision: v ? v.engine.revision : null,
       },
       t0,
+      longTaskMaxMs: Math.round(longTaskMaxMs * 10) / 10,
+      idleMaxSliceMs: Math.round((idleView?.idle?.maxSliceMs ?? 0) * 10) / 10,
       ...(readbackDiag ? { readbackDiag } : {}),
       ...(openDiag ? { openDiag } : {}),
     } satisfies Opening;
@@ -715,5 +781,7 @@ export function openingRow(o: Opening): string {
   const u = o.useful
     ? `useful image shown at ${o.useful.shown} ms (frame ${o.useful.n}, ${Math.round(o.useful.foreground * 100)}% of the foreground)`
     : "no useful image sampled";
-  return `open        ${u} · exact drawn ${o.exact.drawn ?? "-"} / gpu done ${o.exact.gpu ?? "-"} / shown ${o.exact.shown ?? "-"} ms (editor's flag ${o.exactAny} ms) · ${o.sampled} frames sampled · two frames ${o.twoFrames} ms · ${o.stamp.renderer} on ${o.stamp.pageId}, revision ${o.stamp.revision}${o.timedOut ? " · TIMED OUT" : ""}`;
+  const lt = o.longTaskMaxMs !== undefined ? ` · longTask max ${o.longTaskMaxMs} ms` : "";
+  const idle = o.idleMaxSliceMs !== undefined ? ` · idle max ${o.idleMaxSliceMs} ms` : "";
+  return `open        ${u} · exact drawn ${o.exact.drawn ?? "-"} / gpu done ${o.exact.gpu ?? "-"} / shown ${o.exact.shown ?? "-"} ms (editor's flag ${o.exactAny} ms)${lt}${idle} · ${o.sampled} frames sampled · two frames ${o.twoFrames} ms · ${o.stamp.renderer} on ${o.stamp.pageId}, revision ${o.stamp.revision}${o.timedOut ? " · TIMED OUT" : ""}`;
 }

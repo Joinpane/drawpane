@@ -517,9 +517,12 @@ impl<T> ShadowMaskCache<T> {
 /// bilinear upsampling.
 #[cfg(feature = "gpu-common")]
 pub mod gpu {
+    use std::collections::HashMap;
+
     const SHADER: &str = include_str!(concat!(env!("OUT_DIR"), "/shadow.wgsl"));
     const UPSAMPLE_UNIFORM_BYTES: u32 = 48;
-    const SLAB_SLOTS: u32 = 64;
+    const SLAB_SLOTS: u32 = 256;
+    const BG_CACHE_CAP: usize = 256;
 
     pub struct GpuShadow {
         invert_layout: wgpu::BindGroupLayout,
@@ -528,8 +531,13 @@ pub mod gpu {
         upsample_mask: wgpu::RenderPipeline,
         linear_sampler: wgpu::Sampler,
         uniform_align: u32,
-        uniform_buf: wgpu::Buffer,
-        slot: u32,
+        uniform_slabs: Vec<wgpu::Buffer>,
+        uniform_bytes: Vec<Vec<u8>>,
+        slab_idx: usize,
+        slab_slot: u32,
+        invert_bgs: HashMap<u64, wgpu::BindGroup>,
+        upsample_bgs: HashMap<(u64, usize), wgpu::BindGroup>,
+        draws: u32,
     }
 
     impl GpuShadow {
@@ -630,12 +638,7 @@ pub mod gpu {
                 min_filter: wgpu::FilterMode::Linear,
                 ..Default::default()
             });
-            let uniform_buf = device.create_buffer(&wgpu::BufferDescriptor {
-                label: Some("shadow upsample uniforms"),
-                size: u64::from(uniform_align) * u64::from(SLAB_SLOTS),
-                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-                mapped_at_creation: false,
-            });
+            let slab = Self::make_slab(device, uniform_align);
             Self {
                 invert_layout,
                 invert_alpha,
@@ -643,20 +646,88 @@ pub mod gpu {
                 upsample_mask,
                 linear_sampler,
                 uniform_align,
-                uniform_buf,
-                slot: 0,
+                uniform_slabs: vec![slab],
+                uniform_bytes: vec![Vec::new()],
+                slab_idx: 0,
+                slab_slot: 0,
+                invert_bgs: HashMap::new(),
+                upsample_bgs: HashMap::new(),
+                draws: 0,
             }
         }
 
-        pub fn begin_frame(&mut self) {
-            self.slot = 0;
+        fn make_slab(device: &wgpu::Device, align: u32) -> wgpu::Buffer {
+            device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some("shadow upsample uniforms"),
+                size: u64::from(align) * u64::from(SLAB_SLOTS),
+                usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            })
         }
 
+        pub fn begin_frame(&mut self) {
+            self.discard_uniforms();
+        }
+
+        pub fn flush_uniforms(&mut self, queue: &wgpu::Queue) {
+            for (slab, bytes) in self.uniform_slabs.iter().zip(self.uniform_bytes.iter_mut()) {
+                if !bytes.is_empty() {
+                    queue.write_buffer(slab, 0, bytes);
+                    bytes.clear();
+                }
+            }
+            self.slab_idx = 0;
+            self.slab_slot = 0;
+            if self.invert_bgs.len() > BG_CACHE_CAP {
+                self.invert_bgs.clear();
+            }
+            if self.upsample_bgs.len() > BG_CACHE_CAP {
+                self.upsample_bgs.clear();
+            }
+        }
+
+        pub fn discard_uniforms(&mut self) {
+            for bytes in &mut self.uniform_bytes {
+                bytes.clear();
+            }
+            self.slab_idx = 0;
+            self.slab_slot = 0;
+            if self.invert_bgs.len() > BG_CACHE_CAP {
+                self.invert_bgs.clear();
+            }
+            if self.upsample_bgs.len() > BG_CACHE_CAP {
+                self.upsample_bgs.clear();
+            }
+        }
+
+        pub fn take_draws(&mut self) -> u32 {
+            std::mem::take(&mut self.draws)
+        }
+
+        fn push_uniform(&mut self, device: &wgpu::Device, bytes: &[u8; 48]) -> (usize, u32) {
+            if self.slab_slot >= SLAB_SLOTS {
+                self.slab_idx += 1;
+                self.slab_slot = 0;
+                if self.slab_idx >= self.uniform_slabs.len() {
+                    self.uniform_slabs.push(Self::make_slab(device, self.uniform_align));
+                    self.uniform_bytes.push(Vec::new());
+                }
+            }
+            let offset = self.slab_slot * self.uniform_align;
+            self.slab_slot += 1;
+            let buf = &mut self.uniform_bytes[self.slab_idx];
+            buf.resize(offset as usize, 0);
+            buf.extend_from_slice(bytes);
+            (self.slab_idx, offset)
+        }
+
+        #[allow(clippy::too_many_arguments)]
         pub fn encode_invert_alpha(
-            &self,
+            &mut self,
             device: &wgpu::Device,
             encoder: &mut wgpu::CommandEncoder,
             src_view: &wgpu::TextureView,
+            src_id: u64,
             dst_view: &wgpu::TextureView,
             width: u32,
             height: u32,
@@ -664,14 +735,27 @@ pub mod gpu {
             if width == 0 || height == 0 {
                 return;
             }
-            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &self.invert_layout,
-                entries: &[wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(src_view),
-                }],
-            });
+            let make_bg = || {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &self.invert_layout,
+                    entries: &[wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: wgpu::BindingResource::TextureView(src_view),
+                    }],
+                })
+            };
+            let group = if src_id != 0 {
+                if let Some(cached) = self.invert_bgs.get(&src_id) {
+                    cached.clone()
+                } else {
+                    let created = make_bg();
+                    self.invert_bgs.insert(src_id, created.clone());
+                    created
+                }
+            } else {
+                make_bg()
+            };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow invert alpha"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -689,15 +773,16 @@ pub mod gpu {
             pass.set_pipeline(&self.invert_alpha);
             pass.set_bind_group(0, &group, &[]);
             pass.draw(0..3, 0..1);
+            self.draws += 1;
         }
 
         #[allow(clippy::too_many_arguments)]
         pub fn encode_upsample_mask(
             &mut self,
             device: &wgpu::Device,
-            queue: &wgpu::Queue,
             encoder: &mut wgpu::CommandEncoder,
             src_view: &wgpu::TextureView,
+            src_id: u64,
             src_tex_size: (u32, u32),
             src_active_size: (u32, u32),
             red_origin: (i32, i32),
@@ -711,8 +796,6 @@ pub mod gpu {
             if dw == 0 || dh == 0 {
                 return;
             }
-            let offset = (self.slot % SLAB_SLOTS) * self.uniform_align;
-            self.slot = self.slot.wrapping_add(1);
             let inv_s = 1.0f32 / f32::from(1u16 << shift);
             let vals: [f32; 12] = [
                 dst_origin_in_mask.0 as f32,
@@ -732,29 +815,43 @@ pub mod gpu {
             for (i, v) in vals.iter().enumerate() {
                 bytes[i * 4..(i + 1) * 4].copy_from_slice(&v.to_le_bytes());
             }
-            queue.write_buffer(&self.uniform_buf, u64::from(offset), &bytes);
-            let group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: None,
-                layout: &self.upsample_layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(src_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &self.uniform_buf,
-                            offset: 0,
-                            size: wgpu::BufferSize::new(u64::from(UPSAMPLE_UNIFORM_BYTES)),
-                        }),
-                    },
-                ],
-            });
+            let (slab_idx, offset) = self.push_uniform(device, &bytes);
+            let key = (src_id, slab_idx);
+            let make_bg = || {
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: None,
+                    layout: &self.upsample_layout,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(src_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::Sampler(&self.linear_sampler),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: &self.uniform_slabs[slab_idx],
+                                offset: 0,
+                                size: wgpu::BufferSize::new(u64::from(UPSAMPLE_UNIFORM_BYTES)),
+                            }),
+                        },
+                    ],
+                })
+            };
+            let group = if src_id != 0 {
+                if let Some(cached) = self.upsample_bgs.get(&key) {
+                    cached.clone()
+                } else {
+                    let created = make_bg();
+                    self.upsample_bgs.insert(key, created.clone());
+                    created
+                }
+            } else {
+                make_bg()
+            };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("shadow upsample mask"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -772,6 +869,7 @@ pub mod gpu {
             pass.set_pipeline(&self.upsample_mask);
             pass.set_bind_group(0, &group, &[offset]);
             pass.draw(0..3, 0..1);
+            self.draws += 1;
         }
     }
 }

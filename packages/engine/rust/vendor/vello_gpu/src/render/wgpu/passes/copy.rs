@@ -6,9 +6,10 @@
 use crate::copy::GpuCopyInstance;
 use crate::render::wgpu::passes::Programs;
 use crate::render::wgpu::passes::create_texture_op_pipeline;
+use crate::render::wgpu::resources::GpuResources;
 use wgpu::{
     BindGroup, BindGroupLayout, CommandEncoder, Device, RenderPassColorAttachment,
-    RenderPassDescriptor, RenderPipeline, TextureView, util::DeviceExt,
+    RenderPassDescriptor, RenderPipeline, TextureView,
 };
 
 /// Bind group layout and pipeline of the copy pass.
@@ -89,19 +90,16 @@ impl Programs {
 }
 
 pub(crate) fn encode_copy_pass(
-    device: &Device,
     encoder: &mut CommandEncoder,
+    resources: &mut GpuResources,
     copy_pipeline: &RenderPipeline,
     instances: &[GpuCopyInstance],
     source_bind_group: &BindGroup,
     output_view: &TextureView,
     label: &'static str,
 ) {
-    let instance_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-        label: Some(label),
-        contents: bytemuck::cast_slice(instances),
-        usage: wgpu::BufferUsages::VERTEX,
-    });
+    // Drawpane: allocate instance vertices from the batched arena instead of create_buffer_init.
+    let range = resources.upload_vertex_bytes(bytemuck::cast_slice(instances));
     let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
         label: Some(label),
         color_attachments: &[Some(RenderPassColorAttachment {
@@ -120,6 +118,6 @@ pub(crate) fn encode_copy_pass(
     });
     render_pass.set_pipeline(copy_pipeline);
     render_pass.set_bind_group(0, source_bind_group, &[]);
-    render_pass.set_vertex_buffer(0, instance_buffer.slice(..));
+    render_pass.set_vertex_buffer(0, resources.strips_arena.buffer.slice(range));
     render_pass.draw(0..4, 0..u32::try_from(instances.len()).unwrap());
 }

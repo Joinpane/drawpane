@@ -125,6 +125,7 @@ impl GradientRampCache {
     }
 
     /// Check if the packed luts is empty.
+    #[allow(dead_code)]
     pub(crate) fn is_empty(&self) -> bool {
         self.luts.is_empty()
     }
