@@ -1492,23 +1492,9 @@ impl Engine {
                 (Some(c.halo), None)
             } else {
                 let (reach, _, halo_plan) = self.reader_halo_plan(view, Some(frame_rect), plan_viewport, replay_limit);
-                // At rest, an editor view whose readers reach past the band halo bakes its tiles
-                // with their whole device-resolution apron when one padded tile fits the GPU, so
-                // the settled frame is exact (export bands keep `Limits::halo`).
-                let refused = self.apron_refused.is_some_and(|c| {
-                    c.generation == self.generation && c.view_bits == view_bits && c.size == (width, height)
-                });
-                // Where the whole padded view fits at device resolution, one native pass is exact
-                // and cheaper than apron tiles, so aprons are only for views it doesn't fit.
-                let whole_fits = halo_plan.as_ref().is_none_or(|p| {
-                    !p.use_coarse_halo
-                        || self.gpu.as_ref().is_some_and(|g| {
-                            g.padded_whole_fits(p, (width, height), self.store.limits.padded_view_pixels)
-                        })
-                });
-                let apron =
-                    (plan_viewport && !options.moving && !refused && !whole_fits && reach <= f64::from(max_apron))
-                        .then(|| reach.ceil() as i32);
+                let apron = (plan_viewport && !options.moving)
+                    .then(|| self.rest_apron(halo_plan.as_ref(), reach, (width, height), view_bits, max_apron))
+                    .flatten();
                 let halo_opt = self.limit_halo(reach).ok().or(apron);
                 if let Some(halo) = halo_opt {
                     self.halo_cache = Some(HaloCache {
@@ -1787,6 +1773,29 @@ impl Engine {
             self.reader_halo_plan(view, Some(crop), false, crate::halo::HALO_REPLAY_SIDE)
                 .0,
         )
+    }
+
+    /// The tile apron an editor view at rest bakes with when its readers reach past the band
+    /// halo (decision 0040, 2026-11-23): their whole device-resolution reach, so the settled
+    /// frame is exact. None where one native pass of the padded view is the exact route
+    /// (`Gpu::prefers_padded_view`, the same check `render_whole` draws by), where one padded tile
+    /// would not fit `max_apron`, or where this view's apron tiles already hit a GPU limit; the
+    /// view then keeps the reduced halo frame, which is not exact. Exports keep `Limits::halo`.
+    #[cfg(feature = "gpu-common")]
+    fn rest_apron(
+        &self,
+        plan: Option<&crate::halo::ViewportHaloPlan>,
+        reach: f64,
+        size: (u32, u32),
+        view_bits: [u64; 6],
+        max_apron: i32,
+    ) -> Option<i32> {
+        let refused = self
+            .apron_refused
+            .is_some_and(|c| c.generation == self.generation && c.view_bits == view_bits && c.size == size);
+        let gpu = self.gpu.as_ref()?;
+        let native_fits = plan.is_none_or(|p| gpu.prefers_padded_view(p, size, self.store.limits.padded_view_pixels));
+        (!refused && !native_fits && reach <= f64::from(max_apron)).then(|| reach.ceil() as i32)
     }
 
     fn limit_halo(&self, total: f64) -> Result<i32> {

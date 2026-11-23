@@ -3522,54 +3522,61 @@ for (const build of ["browser", "webgl"] as const) {
             ref.free();
           }
           // The view settles the way the editor does: frames at the rest budget, then slices
-          // between frames, until a frame says exact.
-          const engine = await open(true);
-          try {
-            const cam = [zoom, -view.x * zoom, -view.y * zoom, dpr] as const;
-            const moving = engine.renderGpu?.(tw, th, ...cam, bg, true, 4, true);
-            const movingExact = moving?.exact ?? true;
-            moving?.free();
-            const t0 = performance.now();
-            let frames = 0;
-            let last = { plan: -1, exact: false, standin: true };
-            for (; frames < 400 && !last.exact; frames++) {
-              const a = engine.renderGpuAhead?.(bg, 8);
-              a?.free();
-              const r = engine.renderGpu?.(tw, th, ...cam, bg, false, 8, true);
-              if (!r) throw new Error("no frame");
-              last = { plan: r.plan, exact: r.exact, standin: r.standin };
-              requireOk(r);
+          // between frames, until a frame says exact or it settles without being exact.
+          const settle = async (aprons: boolean) => {
+            const engine = await open(aprons);
+            try {
+              const cam = [zoom, -view.x * zoom, -view.y * zoom, dpr] as const;
+              const moving = engine.renderGpu?.(tw, th, ...cam, bg, true, 4, true);
+              const movingExact = moving?.exact ?? true;
+              moving?.free();
+              const t0 = performance.now();
+              let frames = 0;
+              let last = { plan: -1, exact: false, standin: true, pending: -1 };
+              while (frames < 400) {
+                frames++;
+                const r = engine.renderGpu?.(tw, th, ...cam, bg, false, 8, true);
+                if (!r) throw new Error("no frame");
+                last = { plan: r.plan, exact: r.exact, standin: r.standin, pending: r.pending };
+                const inProgress = r.in_progress;
+                requireOk(r);
+                if (last.exact || (last.pending === 0 && !inProgress)) break;
+                engine.renderGpuAhead?.(bg, 8)?.free();
+              }
+              const ms = performance.now() - t0;
+              const px = await engine.gpuPixels?.();
+              if (!(px instanceof Uint8Array)) throw new Error(px?.message ?? "no pixels");
+              return { aprons, movingExact, last, frames, ms, test: Array.from(px) };
+            } finally {
+              engine.free();
             }
-            const ms = performance.now() - t0;
-            const px = await engine.gpuPixels?.();
-            if (!(px instanceof Uint8Array)) throw new Error(px?.message ?? "no pixels");
-            return {
-              refInfo,
-              movingExact,
-              last,
-              frames,
-              ms,
-              test: Array.from(px),
-              ref: Array.from(refPx),
-            };
-          } finally {
-            engine.free();
-          }
+          };
+          return {
+            refInfo,
+            ref: Array.from(refPx),
+            runs: [await settle(true), await settle(false)],
+          };
         },
         { bytes, zoom, dpr, tw, th, view, margin, s },
       );
-      const stats = diffRegions(res.test, res.ref, tw, th);
-      console.log(
-        `[zoom-blur ${build}] apron settle: ref=${JSON.stringify(res.refInfo)} moving exact=${res.movingExact} ` +
-          `settled=${JSON.stringify(res.last)} after ${res.frames} frames, ${Math.round(res.ms)} ms; ` +
-          `max=${stats.max} p99=${stats.p99} mean=${stats.mean.toFixed(3)}`,
-      );
       expect(res.refInfo.exact, "the reference is a native frame").toBe(true);
-      expect(res.movingExact, "a moving frame is a stand-in").toBe(false);
-      expect(res.last.exact, "the settled frame is exact").toBe(true);
-      expect(res.last.plan, "the settled frame is made of tiles, not the reduced halo").not.toBe(4);
-      expect(stats.max, `max=${stats.max} p99=${stats.p99}`).toBeLessThanOrEqual(2);
-      expect(stats.p99, `max=${stats.max} p99=${stats.p99}`).toBeLessThanOrEqual(1);
+      for (const run of res.runs) {
+        const stats = diffRegions(run.test, res.ref, tw, th);
+        const route = run.aprons ? "forced aprons" : "default limits";
+        console.log(
+          `[zoom-blur ${build}] apron settle (${route}): ref=${JSON.stringify(res.refInfo)} ` +
+            `moving exact=${run.movingExact} settled=${JSON.stringify(run.last)} after ${run.frames} ` +
+            `frames, ${Math.round(run.ms)} ms; max=${stats.max} p99=${stats.p99} mean=${stats.mean.toFixed(3)}`,
+        );
+        expect(run.movingExact, `${route}: a moving frame is a stand-in`).toBe(false);
+        // With default limits a software adapter refuses the padded view (about 2.3 M pixels);
+        // the view must still settle exact, through aprons, not on the reduced halo.
+        expect(run.last.exact, `${route}: the settled frame is exact`).toBe(true);
+        expect(run.last.plan, `${route}: not the reduced halo`).not.toBe(4);
+        if (run.aprons) expect(run.last.plan, "forced aprons settle on tiles").toBe(0);
+        expect(stats.max, `${route}: max=${stats.max} p99=${stats.p99}`).toBeLessThanOrEqual(2);
+        expect(stats.p99, `${route}: max=${stats.max} p99=${stats.p99}`).toBeLessThanOrEqual(1);
+      }
     });
   });
 }

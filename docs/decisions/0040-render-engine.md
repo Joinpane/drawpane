@@ -1787,8 +1787,10 @@ device-resolution tile can hold.
 
 At rest, an editor view whose readers reach past the 512 px band halo is drawn exact one of two
 ways. Where the view padded with the readers' whole reach fits one device-resolution pass
-(`Limits::padded_view_pixels`, 16 million pixels by default, within the texture limit and the
-GPU budget), that pass draws it, as before. Otherwise its tiles bake with the readers' whole
+(`Limits::padded_view_pixels`, 16 million pixels by default, within the texture limit, the
+software raster budget and the GPU budget), that pass draws it, as before. The engine's planner
+and the renderer decide this with one check (`Gpu::padded_view`), so a view never settles on the
+reduced halo while an exact route fits. Otherwise its tiles bake with the readers' whole
 device-resolution apron, the way Figma bakes effects per tile. One padded tile must fit the halo
 render side: 4,096 px on hardware GPUs and 2,048 px on software adapters, so the apron is at most
 1,792 px or 768 px. The tiles bake under the 8 ms frame budget with resumable walks, in frames

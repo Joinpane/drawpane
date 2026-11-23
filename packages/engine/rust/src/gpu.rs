@@ -3893,24 +3893,29 @@ impl Gpu {
         }
     }
 
-    /// Whether a frame needing `plan`'s coarse tiers can instead draw its whole padded view at
-    /// device resolution (exact): the padded view fits the texture limit, `max_pixels`
-    /// (`Limits::padded_view_pixels`) and the GPU budget, and no layer-blur scope needs the far
-    /// tier.
-    pub fn padded_whole_fits(&self, plan: &ViewportHaloPlan, size: (u32, u32), max_pixels: usize) -> bool {
-        if !plan.coarse_post_scopes.is_empty() {
-            return false;
+    /// Where a `size` view padded to its readers' `samples` sits in the padded target, and that
+    /// target's size, if one device-resolution pass of it fits this GPU: the texture limit, the
+    /// software raster budget and the GPU memory budget. `draw_whole_pass` draws by this check,
+    /// and the engine and `render_whole` decide by it (`prefers_padded_view`).
+    fn padded_view(&self, samples: IRect, size: (u32, u32)) -> Result<((u32, u32), (u32, u32))> {
+        // Keep the same strip phase at the original viewport origin.
+        let x = samples.x0.unsigned_abs().next_multiple_of(4);
+        let y = samples.y0.unsigned_abs().next_multiple_of(4);
+        let padded = (
+            (samples.x1.max(0) as u32).saturating_add(x),
+            (samples.y1.max(0) as u32).saturating_add(y),
+        );
+        let pixels = (padded.0 as usize).saturating_mul(padded.1 as usize);
+        if self.fallback_adapter && pixels > SOFTWARE_PADDED_PIXELS.max(size.0 as usize * size.1 as usize) {
+            return Err(EngineError::limit(
+                "viewport readers exceed the software GPU raster budget",
+            ));
         }
-        let b = plan.samples;
-        let x = b.x0.unsigned_abs().next_multiple_of(4);
-        let y = b.y0.unsigned_abs().next_multiple_of(4);
-        let w = (b.x1 as u32).saturating_add(x);
-        let h = (b.y1 as u32).saturating_add(y);
-        let pixels = (w as usize).saturating_mul(h as usize);
-        let max_tex = self.max_texture_2d.min(u32::from(u16::MAX));
-        if w > max_tex || h > max_tex || pixels > max_pixels {
-            return false;
+        if padded.0 > u32::from(u16::MAX) || padded.1 > u32::from(u16::MAX) {
+            return Err(EngineError::limit("a padded view past the frame size limit"));
         }
+        self.check_texture_size(padded.0, padded.1, "a padded view")?;
+        // Beside colour/depth scratch, the padded view needs room for its backdrop plane.
         let scratch_bytes = self.scratches[1]
             .as_ref()
             .map_or(0, |s| s.width as usize * s.height as usize * 8);
@@ -3918,10 +3923,20 @@ impl Gpu {
             self.next_frame(),
             size.0,
             size.1,
-            pixels.saturating_mul(24),
+            pixels.saturating_mul(12),
             scratch_bytes.saturating_add(self.readers.bytes()),
-        )
-        .is_ok()
+        )?;
+        Ok(((x, y), padded))
+    }
+
+    /// Whether a `size` view needing `plan` is drawn exact in one device-resolution pass: no
+    /// layer-blur scope needs the far tier, the padded view fits (`padded_view`), and it holds at
+    /// most `max_pixels` (`Limits::padded_view_pixels`), past which apron tiles are cheaper.
+    pub fn prefers_padded_view(&self, plan: &ViewportHaloPlan, size: (u32, u32), max_pixels: usize) -> bool {
+        plan.coarse_post_scopes.is_empty()
+            && self
+                .padded_view(plan.samples, size)
+                .is_ok_and(|(_, (w, h))| (w as usize).saturating_mul(h as usize) <= max_pixels)
     }
 
     /// Draws an untiled frame when a reader exceeds the tile halo or a whole draw is cheaper.
@@ -3956,7 +3971,7 @@ impl Gpu {
             return self.finish_frame(self.cur.expect("unchanged frame"), stats, now(), submits0, None);
         }
         let skip_native_whole = halo_plan
-            .is_some_and(|p| p.use_coarse_halo && !self.padded_whole_fits(p, size, store.limits.padded_view_pixels));
+            .is_some_and(|p| p.use_coarse_halo && !self.prefers_padded_view(p, size, store.limits.padded_view_pixels));
         let result = if skip_native_whole {
             Err(EngineError::limit("padded reader view exceeds whole-frame budget"))
         } else {
@@ -5057,36 +5072,9 @@ impl Gpu {
             return self.finish_frame(self.cur.expect("unchanged frame"), stats, t0, submits0, None);
         }
         let dst = self.next_frame();
-        let padded = if let Some(bounds) = samples {
-            // Keep the same strip phase at the original viewport origin.
-            let x = bounds.x0.unsigned_abs().next_multiple_of(4);
-            let y = bounds.y0.unsigned_abs().next_multiple_of(4);
-            let size = (
-                (bounds.x1 as u32).saturating_add(x),
-                (bounds.y1 as u32).saturating_add(y),
-            );
-            // In addition to colour/depth scratch, the padded view must have room
-            // for its backdrop plane. Do not begin a frame that cannot hold both.
-            let pixels = (size.0 as usize).saturating_mul(size.1 as usize);
-            if self.fallback_adapter && pixels > SOFTWARE_PADDED_PIXELS.max(width as usize * height as usize) {
-                return Err(EngineError::limit(
-                    "viewport readers exceed the software GPU raster budget",
-                ));
-            }
-            let scratch_bytes = self.scratches[1]
-                .as_ref()
-                .map_or(0, |s| s.width as usize * s.height as usize * 8);
-            self.check_texture_size(size.0, size.1, "a padded view")?;
-            self.check_frame(
-                dst,
-                width,
-                height,
-                pixels.saturating_mul(12),
-                scratch_bytes.saturating_add(self.readers.bytes()),
-            )?;
-            Some(((x, y), size))
-        } else {
-            None
+        let padded = match samples {
+            Some(bounds) => Some(self.padded_view(bounds, (width, height))?),
+            None => None,
         };
         if !capturing {
             self.ensure_frame(dst, width, height)?;
@@ -5579,7 +5567,6 @@ impl Gpu {
                             stats.in_progress = true;
                             if job.must {
                                 self.tiles.mark_unpainted(job.key);
-                            let reduced_before = stats.reduced;
                                 unfinished_must = true;
                             }
                         }
@@ -5592,6 +5579,7 @@ impl Gpu {
                 } else {
                     match self.tiles.slot_for(job.key) {
                         Some(s) => {
+                            let reduced_before = stats.reduced;
                             let exact = self.draw_job(
                                 store,
                                 job,
@@ -5640,8 +5628,6 @@ impl Gpu {
         } else {
             // What's drawn straight into the frame after it covers its tile there: the composite
             // counts it so (what no slot could be found for included).
-            // A frame shows a reduced effect when a visible tile holds one, whenever it was drawn.
-            stats.reduced = stats.reduced.max(comp.reduced);
             if self.pending_tile.is_some() && !late.is_empty() {
                 // Direct tiles share scratch too. Present their stand-ins until the checkpoint
                 // completes, rather than throwing away its progress to draw them this frame.
@@ -5654,6 +5640,8 @@ impl Gpu {
             let comp = self.tiles.compose(&plan, plan_last);
             stats.exact = comp.exact;
             stats.pending = comp.pending;
+            // A frame shows a reduced effect when a visible tile holds one, whenever it was drawn.
+            stats.reduced = stats.reduced.max(comp.reduced);
             stats.plan = if comp.complete && !self.opening_pending && !unfinished_must {
                 0
             } else {
@@ -6383,8 +6371,6 @@ impl Gpu {
                     background,
                     bg_bits,
                     generation,
-                let exact = total.exact();
-                let reduced = total.reduced > 0;
                     active_scratch: self.active_scratch,
                     active,
                     checkpoint,
@@ -6397,6 +6383,8 @@ impl Gpu {
                 stats: slice_stats,
                 total,
             } => {
+                let exact = total.exact();
+                let reduced = total.reduced > 0;
                 stats.add(&slice_stats);
                 let sub0 = stats.submit_ms;
                 let h = tile_halo as u32;
