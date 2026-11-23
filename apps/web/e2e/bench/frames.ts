@@ -39,6 +39,8 @@ export interface Summary {
   culled: number;
   /** Ms from the last frame of the movement until the canvas showed an exact frame (null: never, within 10 s). */
   exactMs?: number | null;
+  /** Wall-clock time (`Date.now()`) the movement's last camera change was set. */
+  moveEndWall?: number;
   /** Longest browser main-thread long task (ms) observed during the gesture + settle window. */
   longTaskMaxMs?: number;
   /**
@@ -115,15 +117,47 @@ export function zoom(page: Page, frames: number): Promise<Summary> {
   return move(page, "zoom", "fit", frames, { x: 0, y: 0 });
 }
 
+/**
+ * Zooms in `steps` steps of `factor` each, holding the camera still for `hold` frames between
+ * steps, as mouse wheel notches do; the time to exact counts from the last step. One step is a
+ * jump. It zooms about `at` (fractions of the viewport), from the whole file or, with `from`
+ * "keep", from the camera as it is.
+ */
+export function zoomSteps(
+  page: Page,
+  steps: number,
+  factor: number,
+  hold: number,
+  options: { at?: { x: number; y: number }; from?: "fit" | "keep" } = {},
+): Promise<Summary> {
+  return move(
+    page,
+    "zoom",
+    options.from ?? "fit",
+    steps * (hold + 1) - hold,
+    { x: 0, y: 0 },
+    {
+      factor,
+      hold,
+      at: options.at ?? { x: 0.5, y: 0.5 },
+    },
+  );
+}
+
 async function move(
   page: Page,
   kind: "pan" | "zoom",
-  zoom: number | "fit",
+  zoom: number | "fit" | "keep",
   frames: number,
   step: { x: number; y: number },
+  stepping: { factor: number; hold: number; at: { x: number; y: number } } = {
+    factor: 1.03,
+    hold: 0,
+    at: { x: 0.5, y: 0.5 },
+  },
 ): Promise<Summary> {
   return page.evaluate(
-    async ({ kind, zoom, frames, step, instrument, native }) => {
+    async ({ kind, zoom, frames, step, stepping, instrument, native }) => {
       type Camera = {
         zoom: number;
         pan(dx: number, dy: number): Camera;
@@ -146,7 +180,7 @@ async function move(
       };
       const e = w.drawpane;
       if (zoom === "fit") e.zoomToFit();
-      else e.zoomTo(zoom);
+      else if (zoom !== "keep") e.zoomTo(zoom);
       const intervals = (times: number[]) => {
         const gaps = times
           .slice(1)
@@ -241,6 +275,9 @@ async function move(
         flat.shadowMisses = c.shadowMisses;
         flat.shadowHits = c.shadowHits;
         flat.pauses = c.pauses;
+        // WebGL calls, when the page runs with the bench's spy (BENCH_GL_SPY=1, gl-spy.ts).
+        const spy = (window as unknown as { __glSpy?: Record<string, number> }).__glSpy;
+        if (spy) for (const [k, n] of Object.entries(spy)) flat[`gl.${k}`] = n;
         return flat;
       };
       let counters0: Record<string, number> | null = null;
@@ -437,17 +474,25 @@ async function move(
         // Long Tasks API unsupported in this browser.
       }
       const motion = instrument && view() ? w.drawpaneFrames.beginMotion?.(native) : undefined;
-      const centre = { x: e.s.viewport.width / 2, y: e.s.viewport.height / 2 };
+      const centre = {
+        x: e.s.viewport.width * stepping.at.x,
+        y: e.s.viewport.height * stepping.at.y,
+      };
       const times: number[] = [];
       let moveEnd = performance.now();
+      let moveEndWall = Date.now();
       let previousN = view()?.last.n ?? 0;
       for (let i = 0; i < frames; i++) {
         const forward = i % 120 < 60;
         const submitted = motion?.submitted;
         const camera = e.s.camera;
-        const next =
-          kind === "zoom"
-            ? camera.zoomAt(centre, camera.zoom * (forward ? 1.03 : 1 / 1.03))
+        // Between steps the camera holds still (`stepping.hold` frames).
+        const held = stepping.hold > 0 && i % (stepping.hold + 1) !== 0;
+        const factor = forward ? stepping.factor : 1 / stepping.factor;
+        const next = held
+          ? camera
+          : kind === "zoom"
+            ? camera.zoomAt(centre, camera.zoom * factor)
             : camera.pan(forward ? step.x : -step.x, forward ? step.y : -step.y);
         if (i === frames - 1) {
           const v = view();
@@ -455,8 +500,9 @@ async function move(
           if (v) v.stamps = {};
           counters0 = counters();
           moveEnd = performance.now();
+          moveEndWall = Date.now();
         }
-        e.state.set({ camera: next });
+        if (!held) e.state.set({ camera: next });
         times.push(await nextFrame());
         if (motion && motion.submitted === submitted) motion.missed++;
         watch();
@@ -513,6 +559,7 @@ async function move(
           ? { presentedInterval: intervals(motion.presentations) }
           : {}),
         exactMs: exact.drawn,
+        moveEndWall,
         longTaskMaxMs: Math.round(longTaskMaxMs * 10) / 10,
         ...(view()
           ? {
@@ -533,6 +580,7 @@ async function move(
       zoom,
       frames,
       step,
+      stepping,
       instrument: process.env.BENCH_W4_CAMERA_GATE === "1",
       native: process.env.BENCH_W4_NATIVE === "1",
     },

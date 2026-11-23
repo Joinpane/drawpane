@@ -40,7 +40,18 @@ import { expect, type Page, test } from "@playwright/test";
 import { freshInstance, type Instance } from "../fresh-instance";
 import { importConverted } from "../import-converted";
 import { cameraReplay, type ReplayScore } from "./camera-replay";
-import { type Opening, opening, openingRow, pan, type Summary, summaryRow, zoom } from "./frames";
+import { figmaG2 } from "./figma-g2";
+import {
+  type Opening,
+  opening,
+  openingRow,
+  pan,
+  type Summary,
+  summaryRow,
+  zoom,
+  zoomSteps,
+} from "./frames";
+import { installGlSpy } from "./gl-spy";
 import { type PageInfo, pagesOf } from "./kit-pages";
 import { profiled } from "./profile";
 
@@ -494,6 +505,8 @@ test.describe("A real file", () => {
     const fileId = await importConverted(page, folder, "Bench");
     const importSeconds = Math.round((Date.now() - started) / 1000);
     const openingAt = Date.now();
+    // Counts WebGL calls for the GPU counters (time nothing on such a run).
+    if (process.env.BENCH_GL_SPY === "1") await page.addInitScript(installGlSpy);
     await page.goto(`/f/${fileId}`);
     await page.waitForFunction(
       () =>
@@ -544,6 +557,49 @@ test.describe("A real file", () => {
         await settle(page);
         if (process.env.BENCH_REBAKE === "1" && RENDERER === "engine") {
           console.log(`${info.name}, zoom end, tiles drawn again:\n${await rebake(page)}`);
+          await settle(page);
+        }
+      }
+      // Opt-in (name them in BENCH_GESTURES): the same zoom as "zoom, whole" (1.03^60, about
+      // 5.9x) as 8 mouse-wheel-like steps 7 frames apart (about 0.95 s), and as one jump. Both
+      // time exact from the last step, so the pair shows what refining between steps buys.
+      for (const [name, steps, hold] of [
+        ["zoom, steps", 8, 7],
+        ["zoom, jump", 1, 0],
+      ] as const) {
+        if (!GESTURES?.has(name)) continue;
+        canvas[name] = await profiled(cdp, PROFILE, at(name), () =>
+          zoomSteps(page, steps, 1.03 ** (60 / steps), hold),
+        );
+        await settle(page);
+      }
+      // Opt-in: Figma's G2 wheel zoom, same board and camera path, timed both ways (figma-g2.ts).
+      if (GESTURES?.has("zoom, figma G2")) {
+        const g2 = await profiled(cdp, PROFILE, at("zoom figma G2"), () => figmaG2(page, settle));
+        if (g2) {
+          canvas["zoom, figma G2"] = g2.summary;
+          const f = g2.first;
+          const st = g2.stayed;
+          console.log(
+            `${info.name}, figma G2: canvas ${g2.canvas.width}x${g2.canvas.height} CSS px, ` +
+              `frames ${g2.frame.width}x${g2.frame.height}, ${g2.frames} after the last step; ` +
+              `first (stayed) within 0.5% ${f.within05} (${st.within05}) ms, within 0.1% ` +
+              `${f.within01} (${st.within01}), identical ${f.identical} (${st.identical}); ` +
+              `Figma first: 465, 2,236, 2,317 ms\n  motion: frame interval p95 ` +
+              `${g2.summary.interval?.p95} / p99 ${g2.summary.interval?.p99} / max ` +
+              `${g2.summary.interval?.max} ms, content max ${g2.summary.content.max} ms, longest task ` +
+              `${g2.summary.longTaskMaxMs} ms, slowest engine frame ${g2.summary.engine?.worst.ms} ms ` +
+              `(${g2.summary.engine?.worst.plan})\n  timeline ${g2.timeline}`,
+          );
+          console.log(
+            `  ${g2.facts}\n  console: ${g2.console.slice(0, 20).join("\n    ") || "quiet"}`,
+          );
+          writeFileSync(test.info().outputPath(`${info.name}-figma-G2-settled.png`), g2.settled);
+          writeFileSync(test.info().outputPath(`${info.name}-figma-G2-start.png`), g2.start);
+          // Its end view may never be exact (a reduced frame): go back to the whole file first.
+          await page.evaluate(() =>
+            (window as unknown as { drawpane: { zoomToFit(): void } }).drawpane.zoomToFit(),
+          );
           await settle(page);
         }
       }
