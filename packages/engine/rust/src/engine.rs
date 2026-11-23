@@ -1862,38 +1862,48 @@ impl Engine {
             }
             (feat > 0.0 && feat.is_finite()).then_some((dev_b, feat))
         }
-        /// Spatial post-effect reach (LayerBlur, Texture) for enclosing scopes.
-        /// Noise is pointwise and adds zero reach. When `plan_viewport` is true, adds exec.rs's
-        /// 4 px padded-output rounding and pyramid-alignment slack so coarse captures and native
-        /// samples cover the full post-effect `src_area`, and reports whether any spatial
-        /// post-effect overflows native GPU limits.
+        /// Spatial post-effect reach (LayerBlur, Texture) for enclosing scopes, whether a spatial
+        /// post-effect overflows, and the record's widest layer-blur sigma. Noise is pointwise and
+        /// adds zero reach. A viewport plan (`plan_viewport`) takes any finite layer-blur sigma
+        /// (the GPU view pyramid has no sigma cap) and adds exec.rs's 4 px padded-output rounding
+        /// and pyramid-alignment slack so coarse captures and native samples cover the full
+        /// post-effect `src_area`. Export plans keep the native sigma limit and its refusals.
         #[inline(never)]
         fn post_effect_reach(
             r: &crate::record::Record,
             view_scale: f64,
             max_side: f64,
             plan_viewport: bool,
-        ) -> (f64, bool) {
+        ) -> (f64, bool, f32) {
             let mut reach = 0.0f64;
             let mut max_step = 4i32;
             let mut overflow = false;
+            let mut max_lb_sigma = 0.0f32;
             for pe in &r.post_effects {
                 match *pe {
                     crate::record::PostEffect::LayerBlur { radius } if radius > 0.0 => {
                         let sigma = (f64::from(crate::blur::sigma_from_radius(radius)) * view_scale) as f32;
-                        if !sigma.is_finite() || sigma > crate::blur::MAX_BLUR_SIGMA {
+                        if plan_viewport {
+                            if !sigma.is_finite() {
+                                overflow = true;
+                            } else if sigma >= 1e-4 {
+                                max_lb_sigma = max_lb_sigma.max(sigma);
+                                reach += f64::from(crate::shadow::blur_support_pad_view(sigma))
+                                    .max(f64::from(crate::blur::blur_reach_view(sigma)));
+                                if sigma > crate::blur::DIRECT_SIGMA_MAX {
+                                    let (lvl, _) = crate::blur::choose_level_view(sigma);
+                                    max_step = max_step.max(crate::blur::level_step(lvl));
+                                }
+                            }
+                        } else if !sigma.is_finite() || sigma > crate::blur::MAX_BLUR_SIGMA {
                             overflow = true;
-                            if !plan_viewport && sigma >= 1e-4 {
+                            if sigma >= 1e-4 {
                                 reach += f64::from(crate::shadow::blur_support_pad(sigma))
                                     .max(f64::from(crate::blur::blur_reach(sigma)));
                             }
                         } else if sigma >= 1e-4 {
                             reach += f64::from(crate::shadow::blur_support_pad(sigma))
                                 .max(f64::from(crate::blur::blur_reach(sigma)));
-                            if plan_viewport && sigma > crate::blur::DIRECT_SIGMA_MAX {
-                                let (lvl, _) = crate::blur::choose_level(sigma, crate::blur::MAX_PYRAMID_LEVELS);
-                                max_step = max_step.max(1i32 << lvl.min(8));
-                            }
                         }
                     }
                     crate::record::PostEffect::Texture { size, radius, .. } if size > 0.0 && radius > 0.0 => {
@@ -1913,8 +1923,25 @@ impl Engine {
             if plan_viewport && reach > 0.0 {
                 reach += f64::from(max_step) + 8.0;
             }
-            (reach, overflow)
+            (reach, overflow, max_lb_sigma)
         }
+        /// A layer blur too wide for a native device-resolution scope around readers: past the
+        /// native pyramid, or a wide uniform-class blur reaching over 1,024 px.
+        fn wide_layer_blur(sigma: f32, reach: f64) -> bool {
+            sigma > crate::blur::MAX_BLUR_SIGMA || (sigma >= crate::blur::VIEWPORT_HALO_MIN_SIGMA && reach > 1024.0)
+        }
+        /// The outermost wide layer-blur scope around some readers (case L3): its blur runs in
+        /// the far tier and the native pass upsamples the captured result.
+        struct CoarsePostCandidate {
+            id: u32,
+            max_lb_sigma: f32,
+            own_post_reach: f64,
+            content_bbox: Rect,
+            last_reader: usize,
+        }
+        let mut candidates: Vec<CoarsePostCandidate> = Vec::new();
+        // For each reader node, the coarse post scope it sits in.
+        let mut node_scope: Vec<Option<usize>> = Vec::new();
         let overlaps = |a: Rect, b: Rect| a.x0 <= b.x1 && b.x0 <= a.x1 && a.y0 <= b.y1 && b.y0 <= a.y1;
         let cache = self.store.reader_cache();
         let mut nodes = Vec::with_capacity(cache.visible_readers.len());
@@ -1928,13 +1955,18 @@ impl Engine {
             let det_scale = device.determinant().abs().sqrt() as f32;
             let mut post_reach_px = 0.0f64;
             let mut spatial_post_overflow = false;
+            let mut wide_scope: Option<(u32, f32, f64)> = None;
             for &pid in &cr.spatial_post_records {
                 if let Some(pnode) = self.store.nodes.get(&pid) {
-                    let (pr, ov) = post_effect_reach(&pnode.record, view_scale, max_side, plan_viewport);
+                    let (pr, ov, lb) = post_effect_reach(&pnode.record, view_scale, max_side, plan_viewport);
                     post_reach_px += pr;
                     spatial_post_overflow |= ov;
+                    if plan_viewport && wide_scope.is_none() && !ov && lb > 0.0 && wide_layer_blur(lb, pr) {
+                        wide_scope = Some((pid, lb, pr));
+                    }
                 }
             }
+            let pushed_before = nodes.len();
             let paint = device.transform_rect_bbox(cr.local);
             let unfilled_clip = if plan_viewport && !cr.unfilled_clips.is_empty() {
                 let mut bounds: Option<[f32; 4]> = None;
@@ -1987,7 +2019,12 @@ impl Engine {
                 }
                 crate::store::CachedReaderKind::BackgroundBlur { radius } => {
                     let sigma_px = crate::blur::sigma_from_radius(radius) * scale as f32;
-                    let reach_px = f64::from(crate::blur::replay_reach(sigma_px)).ceil() + 2.0;
+                    let reach = if plan_viewport {
+                        crate::blur::replay_reach_view(sigma_px)
+                    } else {
+                        crate::blur::replay_reach(sigma_px)
+                    };
+                    let reach_px = f64::from(reach).ceil() + 2.0;
                     let sigma_det = crate::blur::sigma_from_radius(radius) * det_scale;
                     nodes.push(ReaderNode {
                         key: cr.key,
@@ -2010,7 +2047,12 @@ impl Engine {
                     };
                     let max_r = p_op.start_radius.max(p_op.end_radius);
                     let sigma_px = crate::blur::sigma_from_radius(max_r) * scale as f32;
-                    let reach_px = f64::from(crate::blur::replay_reach(sigma_px)).ceil() + 2.0;
+                    let reach = if plan_viewport {
+                        crate::blur::replay_reach_view(sigma_px)
+                    } else {
+                        crate::blur::replay_reach(sigma_px)
+                    };
+                    let reach_px = f64::from(reach).ceil() + 2.0;
                     let s0 = crate::blur::sigma_from_radius(p_op.start_radius) * det_scale;
                     let s1 = crate::blur::sigma_from_radius(p_op.end_radius) * det_scale;
                     let plan = crate::progressive_blur::ProgressivePlan::new(p_op, device, cr.size, det_scale);
@@ -2031,6 +2073,42 @@ impl Engine {
                         unfilled_clip,
                     });
                 }
+            }
+            if nodes.len() > pushed_before {
+                let scope = wide_scope.map(|(pid, lb, pr)| {
+                    let reader = nodes.len() - 1;
+                    if let Some(at) = candidates.iter().position(|c| c.id == pid) {
+                        candidates[at].last_reader = reader;
+                        return at;
+                    }
+                    let content_bbox = match self.store.bounds_and_pad(pid) {
+                        (Some(b), page_pad) => {
+                            let inner_pad = self
+                                .store
+                                .nodes
+                                .get(&pid)
+                                .map_or(0.0, |n| (page_pad - n.record.post_pad()).max(0.0));
+                            let inner_pad_dev = if inner_pad > 0.0 {
+                                inner_pad * view_scale + 2.0
+                            } else {
+                                0.0
+                            };
+                            (view * self.store.world(pid))
+                                .transform_rect_bbox(b)
+                                .inflate(inner_pad_dev, inner_pad_dev)
+                        }
+                        (None, _) => nodes[reader].paint,
+                    };
+                    candidates.push(CoarsePostCandidate {
+                        id: pid,
+                        max_lb_sigma: lb,
+                        own_post_reach: pr,
+                        content_bbox,
+                        last_reader: reader,
+                    });
+                    candidates.len() - 1
+                });
+                node_scope.resize(nodes.len(), scope);
             }
         }
         type DownstreamWriters<'a> = (&'a mut Vec<(u32, usize)>, &'a mut [bool]);
@@ -2130,8 +2208,35 @@ impl Engine {
             return (total, reader_only, None);
         };
         let frame_irect = IRect::around(crop);
+        // Wide layer-blur scopes whose readers draw, or whose blurred output reaches the crop:
+        // the far tier covers their source and output.
+        let active_candidates: Vec<usize> = (0..candidates.len())
+            .filter(|&ci| {
+                let c = &candidates[ci];
+                (0..nodes.len()).any(|i| node_scope[i] == Some(ci) && active_node[i])
+                    || overlaps(c.content_bbox.inflate(c.own_post_reach, c.own_post_reach), crop)
+            })
+            .collect();
+        for &ci in &active_candidates {
+            let c = &candidates[ci];
+            for r in [
+                c.content_bbox
+                    .intersect(crop.inflate(c.own_post_reach, c.own_post_reach)),
+                c.content_bbox
+                    .inflate(c.own_post_reach, c.own_post_reach)
+                    .intersect(crop),
+            ] {
+                if r.width() > 0.0 && r.height() > 0.0 {
+                    samples = samples.union(r);
+                }
+            }
+        }
         let samples_rect = IRect::around(samples);
-        if samples_rect == frame_irect {
+        if samples_rect == frame_irect
+            && !active_candidates
+                .iter()
+                .any(|&ci| candidates[ci].max_lb_sigma > crate::blur::MAX_BLUR_SIGMA)
+        {
             return (total, reader_only, None);
         }
 
@@ -2155,8 +2260,42 @@ impl Engine {
         let mut max_far_blur_key: Option<(u32, usize)> = None;
         let mut max_mid_blur_key: Option<(u32, usize)> = None;
         let mut node_uses_coarse_blur = vec![false; nodes.len()];
+        // Readers inside a coarse post scope draw in the far tier with their scope.
+        let mut in_coarse_post_scope = vec![false; nodes.len()];
+        let mut coarse_post_scopes: Vec<u32> = Vec::new();
+        let mut coarse_post_min_sigma = f32::INFINITY;
+        for &ci in &active_candidates {
+            let c = &candidates[ci];
+            if c.max_lb_sigma <= crate::blur::MAX_BLUR_SIGMA && c.max_lb_sigma < far_unif_cut {
+                continue;
+            }
+            coarse_post_scopes.push(c.id);
+            coarse_post_min_sigma = coarse_post_min_sigma.min(c.max_lb_sigma);
+            any_coarse = true;
+            far_has_blur = true;
+            let last = &nodes[c.last_reader];
+            if last.paint_order > max_far_blur_order {
+                max_far_blur_order = last.paint_order;
+                max_far_blur_key = Some(last.key);
+            }
+            for i in 0..nodes.len() {
+                if node_scope[i] != Some(ci) {
+                    continue;
+                }
+                in_coarse_post_scope[i] = true;
+                if matches!(
+                    nodes[i].kind,
+                    ReaderKind::UniformBlur { .. } | ReaderKind::ProgressiveBlur { .. }
+                ) {
+                    node_uses_coarse_blur[i] = true;
+                }
+                if nodes[i].writes_backdrop && !downstream_readers.contains(&nodes[i].key) {
+                    downstream_readers.push(nodes[i].key);
+                }
+            }
+        }
         for (i, node) in nodes.iter().enumerate().rev() {
-            if !active_node[i] {
+            if !active_node[i] || in_coarse_post_scope[i] {
                 continue;
             }
             let mid_downstream = mid_needed[i];
@@ -2341,6 +2480,8 @@ impl Engine {
                     far_min_feature_px: f32::INFINITY,
                     mid_min_feature_px: f32::INFINITY,
                     clamp_clips: Vec::new(),
+                    coarse_post_scopes: Vec::new(),
+                    coarse_post_min_sigma: f32::INFINITY,
                 }),
             );
         }
@@ -2378,7 +2519,7 @@ impl Engine {
         let mut native_needed = vec![0.0f64; nodes.len()];
         let mut native_samples_f = crop;
         for (i, node) in nodes.iter().enumerate().rev() {
-            if !active_node[i] {
+            if !active_node[i] || in_coarse_post_scope[i] {
                 continue;
             }
             let native_downstream = native_needed[i];
@@ -2442,7 +2583,7 @@ impl Engine {
         let mut capture_bounds_f = native_samples_f;
         let mut samples_final_f = samples;
         for (i, node) in nodes.iter().enumerate() {
-            if !active_node[i] || node.post_reach_px <= 0.0 || node.spatial_post_overflow {
+            if !active_node[i] || in_coarse_post_scope[i] || node.post_reach_px <= 0.0 || node.spatial_post_overflow {
                 continue;
             }
             let post_vis = node
@@ -2662,6 +2803,8 @@ impl Engine {
                 far_min_feature_px,
                 mid_min_feature_px,
                 clamp_clips,
+                coarse_post_scopes,
+                coarse_post_min_sigma,
             }),
         )
     }
@@ -3584,8 +3727,9 @@ mod halo_plan_tests {
         assert!(unclipped_lb_plan.use_coarse_halo);
         assert!(unclipped_lb_plan.native_samples.x0 <= -400 && unclipped_lb_plan.native_samples.x1 >= 1040);
 
-        // 3. Overflowing LayerBlur (radius 30 -> sigma = 3456 > 2560) refuses coarse halo replay
-        //    even when clipped (keeps whole-frame padding with `use_coarse_halo == false`).
+        // 3. A layer blur past the native pyramid (radius 30 -> sigma = 3456 > 2560) wrapping a
+        //    reader runs in the far tier as a coarse post scope (case L3), keeping the
+        //    device-resolution pass to the crop. Export plans still refuse it (below).
         let mut ovf_engine = Engine::new(Limits::default());
         ovf_engine.store.insert_for_test(
             1,
@@ -3598,8 +3742,16 @@ mod halo_plan_tests {
         );
         ovf_engine.store.insert_for_test(2, 1, wide_blur);
         let (_, _, ovf_plan) = ovf_engine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
-        let ovf_plan = ovf_plan.expect("padded whole-frame plan");
-        assert!(!ovf_plan.use_coarse_halo);
+        let ovf_plan = ovf_plan.expect("coarse post-scope plan");
+        assert!(ovf_plan.use_coarse_halo);
+        assert_eq!(ovf_plan.coarse_post_scopes, vec![1]);
+        assert!(ovf_plan.coarse_post_min_sigma > crate::blur::MAX_BLUR_SIGMA);
+        assert_eq!(ovf_plan.native_samples, IRect::around(crop));
+        // The same scope in an export plan keeps main's reach and refuses past the band halo.
+        let (export_total, _, export_plan) =
+            ovf_engine.reader_halo_plan(view, Some(crop), false, crate::halo::HALO_REPLAY_SIDE);
+        assert!(export_plan.is_none());
+        assert!(ovf_engine.limit_halo(export_total).is_err());
     }
 
     #[test]

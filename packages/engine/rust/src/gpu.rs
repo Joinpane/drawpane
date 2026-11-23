@@ -24,12 +24,12 @@
 //!   so the editor recovers or falls back.
 //! - Glass samples a backdrop plane that excludes prior glass draws.
 
-use crate::blur::{self, BlurSpec, EdgeMode, validate_sigma};
+use crate::blur::{self, BlurSpec, EdgeMode, validate_view_sigma};
 use crate::engine::{DragFrame, TiledOptions};
 use crate::error::{EngineError, ErrorCode, Result};
 use crate::exec::{
-    self, Backend, DrawStats, Frame, GlyphMask, IRect, ImageView, Isolation, Open, Pass, PostStep, ShadowCast, Split,
-    impl_draw, resolve_inradius,
+    self, Backend, DrawStats, Frame, GlyphMask, IRect, ImageView, Isolation, Open, Pass, PostStep, ReducedBlurLimits,
+    ReducedPost, ShadowCast, Split, impl_draw, resolve_inradius,
 };
 use crate::glass::{self, GlassMaskSlot};
 use crate::gpu_readers::{
@@ -42,8 +42,8 @@ use crate::masks::{self, MaskCache, MaskKey};
 use crate::progressive_blur;
 use crate::record::{BackgroundBlurOp, GlassOp, ProgressiveBlurOp};
 use crate::shadow::{
-    CanonicalShadow, ShadowMaskCache, compute_mask_rect, compute_mask_rect_bounds, reduced_dirty_rect,
-    scaled_shadow_sigma, shadow_raster_shift,
+    CanonicalShadow, ShadowMaskCache, compute_view_mask_rect, compute_view_mask_rect_bounds, reduced_dirty_rect_i64,
+    scaled_shadow_sigma,
 };
 use crate::store::Store;
 use crate::tiles::{Composite, Last, TILE, TileCache, TileKey};
@@ -958,6 +958,13 @@ impl<V> HaloMap<V> {
     }
 }
 
+/// A coarse post scope's blurred picture kept by the far tier (case L3), with its backdrop plane
+/// when the scope has one.
+struct PostScopePatch {
+    main: HaloPatch,
+    backdrop: Option<HaloPatch>,
+}
+
 struct ReaderHalo {
     capture: Option<HaloTierCapture>,
     strip_capture: Option<HaloStripCapture>,
@@ -965,6 +972,11 @@ struct ReaderHalo {
     native_unif_cutover: f32,
     downstream_readers: Vec<(u32, usize)>,
     downstream_mid_readers: Vec<(u32, usize)>,
+    /// Layer-blur scopes the far tier blurs and keeps (case L3), and how deep the walk is inside
+    /// one: glass there draws straight into the scope's reduced picture.
+    coarse_post_scopes: Vec<u32>,
+    inside_coarse_post_scope: usize,
+    post_scopes: HaloMap<PostScopePatch>,
     prefixes: HaloMap<HaloPatch>,
     blurred: HaloMap<HaloPatch>,
     progressive_mid: HaloMap<ProgressiveHaloPatch>,
@@ -3904,6 +3916,10 @@ impl Gpu {
             if !p.use_coarse_halo {
                 return false;
             }
+            // A coarse post scope only exists in the halo tiers.
+            if !p.coarse_post_scopes.is_empty() {
+                return true;
+            }
             let b = p.samples;
             let x = b.x0.unsigned_abs().next_multiple_of(4);
             let y = b.y0.unsigned_abs().next_multiple_of(4);
@@ -4327,6 +4343,9 @@ impl Gpu {
             native_unif_cutover: halo::uniform_cutover_sigma(lowest_div),
             downstream_readers: plan.downstream_readers.clone(),
             downstream_mid_readers: plan.downstream_mid_readers.clone(),
+            coarse_post_scopes: plan.coarse_post_scopes.clone(),
+            inside_coarse_post_scope: 0,
+            post_scopes: HaloMap::new(),
             prefixes: HaloMap::new(),
             blurred: HaloMap::new(),
             progressive_mid: HaloMap::new(),
@@ -4368,6 +4387,11 @@ impl Gpu {
             dst.shadow_hits += src.shadow_hits;
         }
         let mut replay = DrawStats::default();
+        let far_max_render_divisor = plan.coarse_post_min_sigma.is_finite().then(|| {
+            (plan.coarse_post_min_sigma / halo::HALO_MIN_COARSE_SIGMA)
+                .floor()
+                .max(1.0) as i32
+        });
         let mut tier_result = self.run_halo_tier(
             store,
             frame,
@@ -4381,7 +4405,7 @@ impl Gpu {
             true,
             plan.far_has_blur,
             plan.far_min_feature_px,
-            None,
+            far_max_render_divisor,
             &plan.clamp_clips,
         );
         if let Ok((far_stats, far_render_div)) = &tier_result {
@@ -4435,6 +4459,12 @@ impl Gpu {
         for (_, s) in halo.clamp_strips.into_vec() {
             for p in s.into_patches() {
                 self.recycle_halo_prefix(p);
+            }
+        }
+        for (_, ps) in halo.post_scopes.into_vec() {
+            self.recycle_halo_prefix(ps.main);
+            if let Some(b) = ps.backdrop {
+                self.recycle_halo_prefix(b);
             }
         }
         self.release_oversized_halo_storage();
@@ -7228,6 +7258,98 @@ impl Gpu {
         result.map(|_| output)
     }
 
+    /// Upsamples a reduced-grid layer blur (grid spacing `divisor`, texel (0, 0) at device
+    /// `origin`) into device pixels over `area`, runs `tail_steps` there, and composites it onto
+    /// the parent with `blend`, `opacity` and `open` clips (cases L2 and L3).
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn upsample_and_composite_post(
+        &mut self,
+        main: (&wgpu::TextureView, u64, (u32, u32), (u32, u32)),
+        backdrop: Option<(&wgpu::TextureView, u64, (u32, u32), (u32, u32))>,
+        origin: (f64, f64),
+        divisor: i32,
+        area: IRect,
+        tail_steps: &[PostStep],
+        isolation: Isolation,
+        blend: u32,
+        opacity: f32,
+        open: &[Open],
+    ) -> Result<()> {
+        if area.is_empty() {
+            return Ok(());
+        }
+        let (w, h) = area.size();
+        let active = self.active.as_ref().expect("active draw");
+        let previous_targets = (active.write_main, active.write_backdrop);
+        let up_main = self.acquire_offscreen(w, h, (area.x0, area.y0))?;
+        let up_backdrop = match backdrop {
+            Some(_) => match self.acquire_offscreen(w, h, (area.x0, area.y0)) {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    self.offscreen_pool.push(up_main);
+                    return Err(e);
+                }
+            },
+            None => None,
+        };
+        let mut encoder = self.take_encoder("upsample layer blur");
+        for (src, dst) in std::iter::once((main, &up_main)).chain(backdrop.zip(up_backdrop.as_ref())) {
+            self.blur.encode_upsample_rect(
+                &self.device,
+                &mut encoder,
+                src.0,
+                src.1,
+                src.2,
+                src.3,
+                origin,
+                divisor,
+                &dst.view,
+                (area.x0, area.y0),
+                (w, h),
+            );
+        }
+        self.stash_encoder(encoder);
+        let mut scope = GpuIsolation {
+            main: up_main,
+            backdrop: up_backdrop,
+            isolation,
+            previous_targets,
+        };
+        if !tail_steps.is_empty() {
+            let tail = (|| -> Result<()> {
+                let main = self.post_plane(&scope.main, tail_steps)?;
+                let backdrop = match &scope.backdrop {
+                    Some(src) => match self.post_plane(src, tail_steps) {
+                        Ok(out) => out,
+                        Err(e) => {
+                            self.offscreen_pool.extend(main);
+                            return Err(e);
+                        }
+                    },
+                    None => None,
+                };
+                if let Some(out) = main {
+                    self.offscreen_pool.push(std::mem::replace(&mut scope.main, out));
+                } else {
+                    scope.main.active_size = (0, 0);
+                }
+                if let Some(out) = backdrop {
+                    self.offscreen_pool.extend(scope.backdrop.replace(out));
+                } else if let Some(target) = scope.backdrop.as_mut() {
+                    target.active_size = (0, 0);
+                }
+                Ok(())
+            })();
+            if let Err(e) = tail {
+                self.retire_scope(scope);
+                return Err(e);
+            }
+        }
+        let result = self.composite_scope(&scope, None, blend, opacity, open);
+        self.retire_scope(scope);
+        result
+    }
+
     /// A drag's tiles (decision 0040, "Dragging"): each tile the selection touched whose own
     /// tile isn't up to date shows the page's part below the selection (kept for the drag), the
     /// selection drawn afresh at its real position, and the part above (kept), laid over each
@@ -8022,7 +8144,7 @@ impl Gpu {
             ));
         }
         let cb = spec.clamp_bounds.clamp(sw as i32, sh as i32);
-        crate::blur::validate_sigma(spec.sigma, cb, spec.edge)?;
+        crate::blur::validate_view_sigma(spec.sigma, cb, spec.edge)?;
         let key = source_id.map(|id| crate::blur::PyramidKey::new(id, spec.clamp_bounds, spec.edge));
         let blur_work = self.blur.estimate_work_bytes(src_size, dst_size, dst_origin, spec, key);
         let row = (dw * 4).next_multiple_of(256);
@@ -8777,7 +8899,12 @@ impl Backend for Gpu {
                 && reads.x1 <= bounds.x1
                 && reads.y1 <= bounds.y1
         }
-        if let Some(tier) = self.reader_halo.as_ref().and_then(|halo| halo.capture) {
+        if let Some(tier) = self
+            .reader_halo
+            .as_ref()
+            .filter(|halo| halo.inside_coarse_post_scope == 0)
+            .and_then(|halo| halo.capture)
+        {
             let visible = tier.visible;
             let lens = device.transform_rect_bbox(Rect::new(0.0, 0.0, f64::from(size[0]), f64::from(size[1])));
             if IRect::around(lens.inflate(2.0, 2.0)).intersect(visible).is_empty() {
@@ -8925,7 +9052,10 @@ impl Backend for Gpu {
         // In reader-halo mode, if this lens's entire device-resolution read rect fits inside the
         // device backdrop plane and exact glass chunking is compact, render directly at divisor=1
         // so the lens reads the exact device-resolution backdrop (including native/mid/far blurs).
-        let use_native_direct = if !coarse && self.reader_halo.is_some() {
+        // The native pass of a reader-halo frame (not a tier capture, where a lens inside a
+        // coarse post scope draws straight into the scope).
+        let native_halo_pass = self.reader_halo.as_ref().is_some_and(|h| h.capture.is_none());
+        let use_native_direct = if !coarse && native_halo_pass {
             let fits_source = glass_reads_fit(
                 native_lens,
                 f64::from(native_params.margin) + 2.0,
@@ -8957,36 +9087,38 @@ impl Backend for Gpu {
         } else {
             false
         };
-        let (optical_device, optical_frame, optical_area, divisor, halo_offset, low_prefix) =
-            if !use_native_direct && let Some(halo) = &self.reader_halo {
-                if let Some(prefix) = halo.prefixes.get(&key) {
-                    let g_div = prefix.divisor;
-                    let g_off = prefix.halo_offset;
-                    let offset = (g_off.0 * g_div - high_origin.0, g_off.1 * g_div - high_origin.1);
-                    let map = Affine::scale(1.0 / f64::from(g_div))
-                        * Affine::translate((f64::from(offset.0), f64::from(offset.1)));
-                    let opt_area = ReaderHalo::map_rect_to_grid(output, high_origin, g_div, g_off);
-                    (
-                        map * device,
-                        prefix.frame_size,
-                        opt_area,
-                        g_div,
-                        offset,
-                        Some((
-                            prefix.origin,
-                            prefix.size,
-                            prefix.view.clone(),
-                            prefix.view_id,
-                            prefix.within,
-                        )),
-                    )
-                } else {
-                    // No captured prefix; fall back to checking whether the lens is visible on screen.
-                    (device, frame_size, output, 1, (0, 0), None)
-                }
+        let (optical_device, optical_frame, optical_area, divisor, halo_offset, low_prefix) = if !use_native_direct
+            && native_halo_pass
+            && let Some(halo) = &self.reader_halo
+        {
+            if let Some(prefix) = halo.prefixes.get(&key) {
+                let g_div = prefix.divisor;
+                let g_off = prefix.halo_offset;
+                let offset = (g_off.0 * g_div - high_origin.0, g_off.1 * g_div - high_origin.1);
+                let map = Affine::scale(1.0 / f64::from(g_div))
+                    * Affine::translate((f64::from(offset.0), f64::from(offset.1)));
+                let opt_area = ReaderHalo::map_rect_to_grid(output, high_origin, g_div, g_off);
+                (
+                    map * device,
+                    prefix.frame_size,
+                    opt_area,
+                    g_div,
+                    offset,
+                    Some((
+                        prefix.origin,
+                        prefix.size,
+                        prefix.view.clone(),
+                        prefix.view_id,
+                        prefix.within,
+                    )),
+                )
             } else {
+                // No captured prefix; fall back to checking whether the lens is visible on screen.
                 (device, frame_size, output, 1, (0, 0), None)
-            };
+            }
+        } else {
+            (device, frame_size, output, 1, (0, 0), None)
+        };
         let output_origin = (optical_area.x0, optical_area.y0);
         let output_size = (optical_area.x1 - optical_area.x0, optical_area.y1 - optical_area.y0);
         let scale = high_scale / divisor as f32;
@@ -9021,7 +9153,7 @@ impl Backend for Gpu {
         if regions.is_empty() {
             return Ok(());
         }
-        if !use_native_direct && self.reader_halo.is_some() && low_prefix.is_none() {
+        if !use_native_direct && native_halo_pass && low_prefix.is_none() {
             return Err(EngineError::limit("a visible glass lens has no coarse backdrop"));
         }
         for region in &mut regions {
@@ -9538,6 +9670,231 @@ impl Backend for Gpu {
         self.scene.reset_and_resize(w, h);
     }
 
+    const ALLOW_UNBOUNDED_VIEW_BLUR: bool = true;
+
+    fn reduced_layer_blur_limits(&self) -> ReducedBlurLimits {
+        let (native_side, native_pixels) = if self.fallback_adapter {
+            (
+                self.max_texture_2d.min(SOFTWARE_HALO_RENDER_MAX_SIDE),
+                SOFTWARE_HALO_RENDER_MAX_PIXELS,
+            )
+        } else {
+            (self.max_texture_2d.min(HARDWARE_HALO_RENDER_MAX_SIDE), 16_000_000)
+        };
+        ReducedBlurLimits {
+            replay_side: self.halo_replay_limit(),
+            native_side,
+            native_pixels,
+        }
+    }
+
+    fn capturing_coarse_post_scope(&self, record_id: u32) -> Option<(i32, IRect, (i32, i32))> {
+        let halo = self.reader_halo.as_ref()?;
+        let tier = halo.capture?;
+        (tier.is_far && halo.coarse_post_scopes.contains(&record_id)).then_some((
+            tier.render_divisor,
+            tier.visible,
+            tier.frame_size,
+        ))
+    }
+
+    fn set_inside_coarse_post_scope(&mut self, delta: i32) {
+        if let Some(halo) = self.reader_halo.as_mut() {
+            halo.inside_coarse_post_scope = halo.inside_coarse_post_scope.saturating_add_signed(delta as isize);
+        }
+    }
+
+    fn capture_post_scope(&mut self, record_id: u32, cap_area: IRect) -> Result<()> {
+        let Some(tier) = self.reader_halo.as_ref().and_then(|h| h.capture) else {
+            return Ok(());
+        };
+        let Some(scope) = self.offscreen_stack.last() else {
+            return Ok(());
+        };
+        let bounds = |t: &GpuTarget| IRect {
+            x0: t.origin.0,
+            y0: t.origin.1,
+            x1: t.origin.0 + i32::from(t.active_size.0),
+            y1: t.origin.1 + i32::from(t.active_size.1),
+        };
+        let main_area = cap_area.intersect(bounds(&scope.main));
+        if main_area.is_empty() {
+            return Ok(());
+        }
+        let main_start = (
+            (main_area.x0 - scope.main.origin.0) as u32,
+            (main_area.y0 - scope.main.origin.1) as u32,
+        );
+        let main_tex = scope.main.tex.clone();
+        let backdrop = scope.backdrop.as_ref().and_then(|b| {
+            let area = cap_area.intersect(bounds(b));
+            (!area.is_empty()).then(|| {
+                (
+                    b.tex.clone(),
+                    area,
+                    ((area.x0 - b.origin.0) as u32, (area.y0 - b.origin.1) as u32),
+                )
+            })
+        });
+        let main_patch = self.acquire_halo_patch(
+            (main_area.x0, main_area.y0),
+            main_area.size(),
+            tier.render_divisor,
+            tier.offset,
+            tier.frame_size,
+            None,
+        )?;
+        let backdrop_patch = match backdrop.as_ref() {
+            Some((_, area, _)) => match self.acquire_halo_patch(
+                (area.x0, area.y0),
+                area.size(),
+                tier.render_divisor,
+                tier.offset,
+                tier.frame_size,
+                None,
+            ) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    self.recycle_halo_prefix(main_patch);
+                    return Err(e);
+                }
+            },
+            None => None,
+        };
+        let mut encoder = self.take_encoder("capture coarse post scope");
+        copy_rect(
+            &mut encoder,
+            &main_tex,
+            &main_patch.texture,
+            main_start,
+            (0, 0),
+            main_area.size(),
+        );
+        if let (Some((tex, area, start)), Some(patch)) = (&backdrop, &backdrop_patch) {
+            copy_rect(&mut encoder, tex, &patch.texture, *start, (0, 0), area.size());
+        }
+        self.stash_encoder(encoder);
+        let old = self.reader_halo.as_mut().expect("reader halo").post_scopes.insert(
+            (record_id, 0),
+            PostScopePatch {
+                main: main_patch,
+                backdrop: backdrop_patch,
+            },
+        );
+        if let Some(old) = old {
+            self.submit_active_encoder();
+            self.recycle_halo_prefix(old.main);
+            if let Some(b) = old.backdrop {
+                self.recycle_halo_prefix(b);
+            }
+        }
+        Ok(())
+    }
+
+    fn has_captured_post_scope(&self, record_id: u32) -> bool {
+        self.reader_halo
+            .as_ref()
+            .is_some_and(|h| h.capture.is_none() && h.post_scopes.contains_key(&(record_id, 0)))
+    }
+
+    fn composite_reduced_post(
+        &mut self,
+        source: ReducedPost<'_>,
+        upsample_area: IRect,
+        tail_steps: &[PostStep],
+        isolation: Isolation,
+        blend: u32,
+        opacity: f32,
+        open: &[Open],
+    ) -> Result<()> {
+        match source {
+            ReducedPost::Captured(record_id) => {
+                if upsample_area.is_empty() {
+                    return Ok(());
+                }
+                self.flush_preserving_clips(open, true)?;
+                let high_origin = self
+                    .active
+                    .as_ref()
+                    .and_then(|a| a.display_area)
+                    .map_or((0, 0), |r| (r.x0, r.y0));
+                let Some((main, backdrop, origin, divisor)) = self
+                    .reader_halo
+                    .as_ref()
+                    .and_then(|h| h.post_scopes.get(&(record_id, 0)))
+                    .map(|ps| {
+                        let m = &ps.main;
+                        let plane = |p: &HaloPatch| {
+                            (
+                                p.view.clone(),
+                                p.view_id,
+                                (p.texture.width(), p.texture.height()),
+                                p.size,
+                            )
+                        };
+                        let origin = (
+                            f64::from(m.origin.0 - m.halo_offset.0) * f64::from(m.divisor) + f64::from(high_origin.0),
+                            f64::from(m.origin.1 - m.halo_offset.1) * f64::from(m.divisor) + f64::from(high_origin.1),
+                        );
+                        (plane(m), ps.backdrop.as_ref().map(plane), origin, m.divisor)
+                    })
+                else {
+                    return Ok(());
+                };
+                self.upsample_and_composite_post(
+                    (&main.0, main.1, main.2, main.3),
+                    backdrop.as_ref().map(|b| (&b.0, b.1, b.2, b.3)),
+                    origin,
+                    divisor,
+                    upsample_area,
+                    tail_steps,
+                    isolation,
+                    blend,
+                    opacity,
+                    open,
+                )
+            }
+            ReducedPost::Top { steps, origin, divisor } => {
+                let stepped = self.apply_post_isolated(steps);
+                let Some(scope) = self.offscreen_stack.pop() else {
+                    return stepped;
+                };
+                let active = self.active.as_mut().expect("active draw");
+                (active.write_main, active.write_backdrop) = scope.previous_targets;
+                active.scene_dirty = false;
+                let (w, h) = self.active_scene_size();
+                self.scene.reset_and_resize(w, h);
+                let result = stepped.and_then(|()| {
+                    self.reopen_clips(open);
+                    let plane = |t: &GpuTarget| {
+                        (
+                            t.view.clone(),
+                            t.view_id,
+                            (t.width, t.height),
+                            (u32::from(t.active_size.0), u32::from(t.active_size.1)),
+                        )
+                    };
+                    let main = plane(&scope.main);
+                    let backdrop = scope.backdrop.as_ref().map(plane);
+                    self.upsample_and_composite_post(
+                        (&main.0, main.1, main.2, main.3),
+                        backdrop.as_ref().map(|b| (&b.0, b.1, b.2, b.3)),
+                        origin,
+                        divisor,
+                        upsample_area,
+                        tail_steps,
+                        isolation,
+                        blend,
+                        opacity,
+                        open,
+                    )
+                });
+                self.retire_scope(scope);
+                result
+            }
+        }
+    }
+
     fn draw_blurred_shadow(
         &mut self,
         cast: &ShadowCast<'_>,
@@ -9554,7 +9911,7 @@ impl Backend for Gpu {
         if let Some(a) = self.active.as_mut() {
             a.shadow_ops += 1;
         }
-        validate_sigma(
+        validate_view_sigma(
             sigma,
             IRect {
                 x0: 0,
@@ -9798,11 +10155,11 @@ impl Backend for Gpu {
         }
 
         let max_tex = self.device.limits().max_texture_dimension_2d as i32;
-        let mask_rect_opt = match cast {
-            ShadowCast::Fill { paths, .. } => compute_mask_rect(paths, dirty, sigma, max_tex),
-            ShadowCast::Stroke { bbox, .. } => compute_mask_rect_bounds(*bbox, dirty, sigma, max_tex),
+        let mask_opt = match cast {
+            ShadowCast::Fill { paths, .. } => compute_view_mask_rect(paths, dirty, sigma, max_tex),
+            ShadowCast::Stroke { bbox, .. } => compute_view_mask_rect_bounds(*bbox, dirty, sigma, max_tex),
         };
-        let Some(mask_rect) = mask_rect_opt else {
+        let Some(mask) = mask_opt else {
             if invert {
                 let (sox, soy) = self.scene_offset();
                 let x = f64::from(dirty.x0 - sox);
@@ -9822,18 +10179,18 @@ impl Backend for Gpu {
         if self.in_use_bytes >= GPU_TEMP_FLUSH_BYTES && !open.iter().any(|o| matches!(o, Open::Layer)) {
             self.flush_preserving_clips(open, false)?;
         }
-        let mask_w = (mask_rect.x1 - mask_rect.x0).max(1) as u32;
-        let mask_h = (mask_rect.y1 - mask_rect.y0).max(1) as u32;
         let dirty_w = (dirty.x1 - dirty.x0).max(1) as u32;
         let dirty_h = (dirty.y1 - dirty.y0).max(1) as u32;
-        let shift = shadow_raster_shift(sigma);
-        let dst_origin = (dirty.x0 - mask_rect.x0, dirty.y0 - mask_rect.y0);
+        let shift = mask.shift;
+        let dst_origin_i64 = (i64::from(dirty.x0) - mask.x0, i64::from(dirty.y0) - mask.y0);
 
         let t0 = now();
         let sub0 = self.active.as_ref().map_or(0.0, |a| a.submit_ms);
         let temp = self.acquire_temp(dirty_w, dirty_h)?;
         let res = (|| -> Result<()> {
             if shift == 0 {
+                let (mask_w, mask_h) = (mask.sw, mask.sh);
+                let dst_origin = (dst_origin_i64.0 as i32, dst_origin_i64.1 as i32);
                 let spec = BlurSpec {
                     sigma,
                     edge: EdgeMode::Zero,
@@ -9859,7 +10216,7 @@ impl Backend for Gpu {
                     self.ensure_scratch_blur(dirty_w, dirty_h)?;
                 }
                 self.mask_scene.reset_and_resize(mask_w as u16, mask_h as u16);
-                let base_shift = Affine::translate((-f64::from(mask_rect.x0), -f64::from(mask_rect.y0)));
+                let base_shift = Affine::translate((-(mask.x0 as f64), -(mask.y0 as f64)));
                 self.mask_scene.set_paint(AlphaColor::<Srgb>::new([1.0, 1.0, 1.0, 1.0]));
                 match cast {
                     ShadowCast::Fill { paths, even_odd, .. } => {
@@ -9960,10 +10317,9 @@ impl Backend for Gpu {
                 self.stash_encoder(encoder);
                 Ok(())
             } else {
-                let s = 1u32 << shift;
-                let sw = (mask_w / s).max(1);
-                let sh = (mask_h / s).max(1);
-                let (red_origin, (bd_w, bd_h)) = reduced_dirty_rect(mask_rect, dirty, shift);
+                let s = (1u64 << shift.min(30)) as f64;
+                let (sw, sh) = (mask.sw, mask.sh);
+                let (red_origin, (bd_w, bd_h)) = reduced_dirty_rect_i64((mask.x0, mask.y0), dirty, shift);
                 let spec = BlurSpec {
                     sigma: scaled_shadow_sigma(sigma, shift),
                     edge: EdgeMode::Zero,
@@ -9987,8 +10343,7 @@ impl Backend for Gpu {
                 self.ensure_scratch_mask(sw, sh)?;
                 self.ensure_scratch_blur(bd_w, bd_h)?;
                 self.mask_scene.reset_and_resize(sw as u16, sh as u16);
-                let red_tf = Affine::scale(1.0 / f64::from(s))
-                    * Affine::translate((-f64::from(mask_rect.x0), -f64::from(mask_rect.y0)));
+                let red_tf = Affine::scale(1.0 / s) * Affine::translate((-(mask.x0 as f64), -(mask.y0 as f64)));
                 self.mask_scene.set_paint(AlphaColor::<Srgb>::new([1.0, 1.0, 1.0, 1.0]));
                 match cast {
                     ShadowCast::Fill { paths, even_odd, .. } => {
@@ -10068,7 +10423,7 @@ impl Backend for Gpu {
                     red_origin,
                     &temp.view,
                     (dirty_w, dirty_h),
-                    dst_origin,
+                    dst_origin_i64,
                     shift,
                     invert,
                 );

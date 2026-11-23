@@ -85,7 +85,9 @@ pub fn compensate_halo_sigma(sigma_grid: f32, render_divisor: i32) -> f32 {
 /// Computes the power-of-two coarse divisor (`>= 2`) that fits `bounds` inside `replay_limit`.
 #[inline]
 pub fn replay_divisor(bounds: IRect, replay_limit: u32) -> i32 {
-    let span = ((bounds.x1 - bounds.x0).max(bounds.y1 - bounds.y0)).max(1) as u32;
+    let span_x = i64::from(bounds.x1) - i64::from(bounds.x0);
+    let span_y = i64::from(bounds.y1) - i64::from(bounds.y0);
+    let span = span_x.max(span_y).clamp(1, i64::from(u32::MAX / 2)) as u32;
     span.div_ceil(replay_limit.max(1)).max(2).next_power_of_two() as i32
 }
 
@@ -265,8 +267,8 @@ pub fn reduced_blur_bounds_and_edge(
             subtexel_clamp: None,
         };
     };
-    let (lvl, _) = blur::choose_level(max_sigma.clamp(0.0, blur::MAX_BLUR_SIGMA), blur::MAX_PYRAMID_LEVELS);
-    let align = 1i32 << lvl;
+    let (lvl, _) = blur::choose_level_view(max_sigma.max(0.0));
+    let align = blur::level_step(lvl);
     let anchor_min = |raw: i32, limit: i32| -> i32 {
         if raw < 0 {
             raw.rem_euclid(align).min(limit)
@@ -342,9 +344,9 @@ pub fn reduced_blur_bounds_and_edge(
 /// for the 2-texel pyramid apron.
 #[inline]
 pub fn subtexel_border_crop(dirty: IRect, sigma: f32) -> IRect {
-    let (lvl, _) = blur::choose_level(sigma.clamp(0.0, blur::MAX_BLUR_SIGMA), blur::MAX_PYRAMID_LEVELS);
-    let align = 1i32 << lvl;
-    let reach = blur::blur_reach(sigma).ceil() as i32 + (4 * align) + 4;
+    let (lvl, _) = blur::choose_level_view(sigma.max(0.0));
+    let align = blur::level_step(lvl);
+    let reach = blur::blur_reach_view(sigma).min(1.0e7).ceil() as i32 + (4 * align) + 4;
     dirty.inflate(reach, reach)
 }
 
@@ -412,6 +414,12 @@ pub struct ViewportHaloPlan {
     pub mid_min_feature_px: f32,
     /// Unfilled `EdgeMode::Clamp` clip frames wrapping active coarse-tier blurs.
     pub clamp_clips: Vec<HaloClampClip>,
+    /// Layer-blur scopes (record ids) wrapping active readers whose blur runs in the far tier
+    /// rather than at device resolution (a layer blur past the native limits: case L3).
+    pub coarse_post_scopes: Vec<u32>,
+    /// The smallest device-pixel layer-blur sigma among `coarse_post_scopes` (`f32::INFINITY`
+    /// when none): the far tier's render divisor stays at or below a third of it.
+    pub coarse_post_min_sigma: f32,
 }
 
 #[cfg(test)]

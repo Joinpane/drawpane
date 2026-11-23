@@ -23,7 +23,7 @@
 //!   blur + bilinear upsampling, bounding working memory under ~1 MiB even for `radius = 700` on
 //!   a `4096 x 1800` Worker export while keeping tiled exports bit-identical.
 
-use crate::blur::{DIRECT_SIGMA_MAX, MAX_PYRAMID_LEVELS, choose_level, kernel_radius};
+use crate::blur::{DIRECT_SIGMA_MAX, MAX_PYRAMID_LEVELS, choose_level, choose_level_view, kernel_radius, level_step};
 use crate::exec::IRect;
 use crate::geometry;
 use crate::record::CanonicalShadowShape;
@@ -99,6 +99,21 @@ pub fn blur_support_pad(sigma: f32) -> i32 {
     r.saturating_add(extra)
 }
 
+/// Device-pixel padding around a dirty region for unbounded GPU view blurs (`VIEW_MAX_PYRAMID_LEVELS`).
+pub fn blur_support_pad_view(sigma: f32) -> i32 {
+    let r = kernel_radius(sigma);
+    if r == 0 {
+        return 1;
+    }
+    let extra = if sigma <= DIRECT_SIGMA_MAX {
+        1
+    } else {
+        let (lvl, _) = choose_level_view(sigma);
+        level_step(lvl + 2).saturating_add(2)
+    };
+    r.saturating_add(extra)
+}
+
 /// Power-of-two downsample shift `k` (`scale = 2^k`) for rasterising a large-sigma shadow mask
 /// directly at reduced resolution.
 ///
@@ -115,6 +130,16 @@ pub fn shadow_raster_shift(sigma: f32) -> usize {
     lvl.saturating_sub(1)
 }
 
+/// Power-of-two downsample shift for unbounded GPU view shadows (`VIEW_MAX_PYRAMID_LEVELS`).
+#[inline]
+pub fn shadow_raster_shift_view(sigma: f32) -> usize {
+    if !sigma.is_finite() || sigma <= DIRECT_SIGMA_MAX {
+        return 0;
+    }
+    let (lvl, _) = choose_level_view(sigma);
+    lvl.saturating_sub(1)
+}
+
 /// Level-space sigma for a shadow mask rasterised at `1 / 2^shift` scale and bilinearly upsampled
 /// by `2^shift` back to full device resolution.
 ///
@@ -125,11 +150,105 @@ pub fn scaled_shadow_sigma(sigma: f32, shift: usize) -> f32 {
     if shift == 0 || !sigma.is_finite() || sigma <= 0.0 {
         return sigma;
     }
-    let s = f64::from(1u32 << shift);
+    let s = (1u64 << shift.min(30)) as f64;
     let s2 = s * s;
     let extra_var = (s2 - 1.0) / 12.0 + s2 / 6.0;
     let rem = (f64::from(sigma) * f64::from(sigma) - extra_var).max(0.0);
     (rem.sqrt() / s) as f32
+}
+
+/// Reduced or native device-space shadow mask rectangle computed in `i64` for unbounded view sigmas.
+#[derive(Clone, Copy, Debug)]
+pub struct ViewShadowMask {
+    pub x0: i64,
+    pub y0: i64,
+    pub sw: u32,
+    pub sh: u32,
+    pub shift: usize,
+}
+
+/// Computes the device-pixel shadow mask origin and reduced/native raster size in `i64` so
+/// arbitrary view sigmas never overflow `i32` or `max_side`.
+pub fn compute_view_mask_rect_bounds(bbox: Rect, dirty: IRect, sigma: f32, max_side: i32) -> Option<ViewShadowMask> {
+    if dirty.is_empty() || !bbox.is_finite() {
+        return None;
+    }
+    let pad = i64::from(blur_support_pad_view(sigma));
+    let clamp_i64 = |v: f64| v.clamp(-1.0e12, 1.0e12) as i64;
+    let bx0 = clamp_i64(bbox.x0.floor()) - 2;
+    let by0 = clamp_i64(bbox.y0.floor()) - 2;
+    let bx1 = clamp_i64(bbox.x1.ceil()) + 2;
+    let by1 = clamp_i64(bbox.y1.ceil()) + 2;
+    let mut x0 = bx0.max(i64::from(dirty.x0) - pad);
+    let mut y0 = by0.max(i64::from(dirty.y0) - pad);
+    let mut x1 = bx1.min(i64::from(dirty.x1) + pad);
+    let mut y1 = by1.min(i64::from(dirty.y1) + pad);
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let shift = shadow_raster_shift_view(sigma);
+    let step = if sigma <= DIRECT_SIGMA_MAX {
+        1i64
+    } else {
+        let (lvl, _) = choose_level_view(sigma);
+        i64::from(level_step(lvl))
+    };
+    let align_down = |v: i64| v.div_euclid(step) * step;
+    let align_up = |v: i64| (v + step - 1).div_euclid(step) * step;
+    x0 = align_down(x0);
+    y0 = align_down(y0);
+    x1 = align_up(x1);
+    y1 = align_up(y1);
+    let s = 1i64 << shift.min(24);
+    let max_full = i64::from(max_side.max(1)).saturating_mul(s);
+    let cap = align_down(max_full.max(step)).max(step);
+    if x1 - x0 > cap {
+        let cx = (i64::from(dirty.x0) + i64::from(dirty.x1)) / 2;
+        x0 = align_down(cx - cap / 2).clamp(x0, x1 - cap);
+        x1 = x0 + cap;
+    }
+    if y1 - y0 > cap {
+        let cy = (i64::from(dirty.y0) + i64::from(dirty.y1)) / 2;
+        y0 = align_down(cy - cap / 2).clamp(y0, y1 - cap);
+        y1 = y0 + cap;
+    }
+    let sw = (((x1 - x0) / s).max(1)).min(i64::from(max_side.max(1))) as u32;
+    let sh = (((y1 - y0) / s).max(1)).min(i64::from(max_side.max(1))) as u32;
+    Some(ViewShadowMask { x0, y0, sw, sh, shift })
+}
+
+/// Computes the `ViewShadowMask` from device-space filled paths.
+pub fn compute_view_mask_rect(
+    mask_paths: &[BezPath],
+    dirty: IRect,
+    sigma: f32,
+    max_side: i32,
+) -> Option<ViewShadowMask> {
+    let mut bbox: Option<Rect> = None;
+    for p in mask_paths {
+        if p.is_empty() {
+            continue;
+        }
+        let b = p.bounding_box();
+        bbox = Some(bbox.map_or(b, |o| o.union(b)));
+    }
+    compute_view_mask_rect_bounds(bbox?, dirty, sigma, max_side)
+}
+
+/// Reduced-resolution blurred dirty rectangle in `i64` mask coordinates for unbounded view sigmas.
+pub fn reduced_dirty_rect_i64(mask_origin: (i64, i64), dirty: IRect, shift: usize) -> ((i32, i32), (u32, u32)) {
+    let s = (1u64 << shift.min(30)) as f64;
+    let dx0 = (i64::from(dirty.x0) - mask_origin.0) as f64;
+    let dy0 = (i64::from(dirty.y0) - mask_origin.1) as f64;
+    let dx1 = (i64::from(dirty.x1) - mask_origin.0) as f64;
+    let dy1 = (i64::from(dirty.y1) - mask_origin.1) as f64;
+    let rx0 = ((dx0 + 0.5) / s - 0.5).floor() as i32;
+    let ry0 = ((dy0 + 0.5) / s - 0.5).floor() as i32;
+    let rx1 = ((dx1 - 0.5) / s - 0.5).floor() as i32 + 2;
+    let ry1 = ((dy1 - 0.5) / s - 0.5).floor() as i32 + 2;
+    let w = (rx1 - rx0).max(1) as u32;
+    let h = (ry1 - ry0).max(1) as u32;
+    ((rx0, ry0), (w, h))
 }
 
 /// Computes the exact device-pixel mask bounding rectangle for a blurred shadow over `dirty`,
@@ -788,7 +907,7 @@ pub mod gpu {
             red_origin: (i32, i32),
             dst_view: &wgpu::TextureView,
             dst_size: (u32, u32),
-            dst_origin_in_mask: (i32, i32),
+            dst_origin_in_mask: (i64, i64),
             shift: usize,
             invert: bool,
         ) {
@@ -796,14 +915,16 @@ pub mod gpu {
             if dw == 0 || dh == 0 {
                 return;
             }
-            let inv_s = 1.0f32 / f32::from(1u16 << shift);
+            let inv_s_f64 = 1.0 / (1u64 << shift.min(30)) as f64;
+            let rel_x = f64::from(red_origin.0) - (dst_origin_in_mask.0 as f64) * inv_s_f64;
+            let rel_y = f64::from(red_origin.1) - (dst_origin_in_mask.1 as f64) * inv_s_f64;
             let vals: [f32; 12] = [
-                dst_origin_in_mask.0 as f32,
-                dst_origin_in_mask.1 as f32,
-                inv_s,
+                0.0,
+                0.0,
+                inv_s_f64 as f32,
                 if invert { 1.0 } else { 0.0 },
-                red_origin.0 as f32,
-                red_origin.1 as f32,
+                rel_x as f32,
+                rel_y as f32,
                 1.0 / src_tex_size.0.max(1) as f32,
                 1.0 / src_tex_size.1.max(1) as f32,
                 (src_active_size.0.max(1) as f32 - 0.5).max(0.5),
@@ -877,6 +998,56 @@ pub mod gpu {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn view_mask_matches_the_native_mask_within_the_native_sigma_limit() {
+        // GPU view shadows use the i64 view mask at every sigma; inside the native limit it must
+        // be the same rectangle and raster as the CPU's.
+        let bbox = Rect::new(-37.3, 12.6, 913.9, 401.2);
+        for &(dirty, max_side) in &[
+            (
+                IRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: 512,
+                    y1: 512,
+                },
+                8192,
+            ),
+            (
+                IRect {
+                    x0: -300,
+                    y0: 100,
+                    x1: 1700,
+                    y1: 900,
+                },
+                2048,
+            ),
+        ] {
+            for sigma in [0.0f32, 0.4, 3.0, 9.9, 10.0, 10.1, 47.0, 300.0, 1280.0, 2559.0, 2560.0] {
+                let native = compute_mask_rect_bounds(bbox, dirty, sigma, max_side);
+                let view = compute_view_mask_rect_bounds(bbox, dirty, sigma, max_side);
+                match (native, view) {
+                    (None, None) => {}
+                    (Some(n), Some(v)) => {
+                        let shift = shadow_raster_shift(sigma);
+                        assert_eq!(v.shift, shift, "sigma {sigma}");
+                        assert_eq!((v.x0, v.y0), (i64::from(n.x0), i64::from(n.y0)), "sigma {sigma}");
+                        let s = 1i32 << shift;
+                        let (w, h) = (((n.x1 - n.x0) / s).max(1) as u32, ((n.y1 - n.y0) / s).max(1) as u32);
+                        assert_eq!((v.sw, v.sh), (w, h), "sigma {sigma}");
+                        assert_eq!(
+                            reduced_dirty_rect_i64((v.x0, v.y0), dirty, shift),
+                            reduced_dirty_rect(n, dirty, shift),
+                            "sigma {sigma}"
+                        );
+                    }
+                    (n, v) => panic!("sigma {sigma}: native {n:?}, view {v:?}"),
+                }
+                assert_eq!(blur_support_pad_view(sigma), blur_support_pad(sigma), "sigma {sigma}");
+            }
+        }
+    }
     use crate::blur::{BlurSpec, EdgeMode, blur_cpu, blur_reference, kernel_radius};
     use crate::exec::IRect;
     use crate::geometry;

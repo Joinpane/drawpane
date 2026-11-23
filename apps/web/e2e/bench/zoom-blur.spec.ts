@@ -31,6 +31,7 @@ type Stamp = { n: number; at: number };
 type EngineViewHandle = {
   canvas: HTMLCanvasElement;
   shown: Stamp;
+  stamps: { drawn?: Stamp; gpu?: Stamp; shown?: Stamp } | null;
   limitReason: string | null;
   last: {
     pageId: string;
@@ -157,7 +158,8 @@ async function waitForReady(page: Page) {
   });
   expect(state.fallback, `engine fell back: ${JSON.stringify(state.fallback)}`).toBeNull();
   expect(state.supported).toBe(true);
-  expect(state.reads).toBeGreaterThan(0);
+  // An exact frame can be a composite of cached tiles that draws no reader itself, so `reads`
+  // is recorded, not required.
   return state;
 }
 
@@ -493,10 +495,148 @@ test.describe("High-zoom glass and progressive blur sweep", () => {
       };
     }, stops);
 
+    // 3. Time to exact after the camera stops, the way the editor settles (decision 0040, Figma's
+    //    windows: 0.1 to 0.5 s after a continuous zoom, 0.3 to 2.1 s after a jump). Exact means
+    //    the engine stamped a frame exact with no limit reason: every visible tile at the current
+    //    scale landed with full-quality readers. `lastShown` is the last frame presented in the
+    //    window (a view that never turns exact still stops changing), and `maxFrame` the longest
+    //    animation-frame gap while settling (frames must not block the main thread).
+    const SETTLE_DEADLINE_MS = Number(process.env.BENCH_SETTLE_DEADLINE_MS ?? 6000);
+    const settleStops = await page.evaluate(async (deadlineMs) => {
+      const w = window as unknown as W;
+      const e = w.drawpane;
+      const view = w.drawpaneEngineView;
+      if (!view?.last.supported) throw new Error("engine lost before settle measurement");
+      const frame = () => new Promise<number>((r) => requestAnimationFrame(r));
+      const vp = e.s.viewport;
+      const focus = { x: 600, y: 400 };
+      const centre = { x: vp.width / 2, y: vp.height / 2 };
+      const setZoom = (z: number) => {
+        const cam = e.s.camera;
+        const centered = cam.pan(
+          centre.x - focus.x * cam.zoom - cam.x,
+          centre.y - focus.y * cam.zoom - cam.y,
+        );
+        e.state.set({ camera: centered.zoomAt(centre, z) });
+      };
+      const settle = async (stopAt: number) => {
+        let lastShownN = view.shown.n;
+        let lastShownAt = stopAt;
+        let prev = performance.now();
+        let maxFrame = 0;
+        const deadline = stopAt + deadlineMs;
+        while (performance.now() < deadline) {
+          const st = view.stamps;
+          if (st?.drawn && st.gpu && st.shown) break;
+          const t = await frame();
+          maxFrame = Math.max(maxFrame, t - prev);
+          prev = t;
+          if (view.shown.n !== lastShownN) {
+            lastShownN = view.shown.n;
+            lastShownAt = performance.now();
+          }
+        }
+        const st = view.stamps;
+        view.stamps = null;
+        const r = (x: number) => Math.round(x * 10) / 10;
+        return {
+          exact:
+            st?.drawn && st.gpu && st.shown
+              ? {
+                  drawn: r(st.drawn.at - stopAt),
+                  gpu: r(st.gpu.at - stopAt),
+                  shown: r(st.shown.at - stopAt),
+                }
+              : null,
+          lastShown: r(lastShownAt - stopAt),
+          maxFrame: r(maxFrame),
+          plan: view.last.plan,
+          exactFlag: view.last.exact,
+          limitReason: view.limitReason,
+          canvasWidth: view.canvas.width,
+        };
+      };
+      const med = (xs: number[]) => {
+        if (!xs.length) return null;
+        const v = [...xs].sort((a, b) => a - b);
+        return v[Math.floor(0.5 * (v.length - 1))] ?? null;
+      };
+      const summarise = (runs: Awaited<ReturnType<typeof settle>>[]) => {
+        const exact = runs.flatMap((x) => (x.exact ? [x.exact] : []));
+        const last = runs[runs.length - 1];
+        return {
+          gestures: runs.length,
+          neverExact: runs.length - exact.length,
+          drawnMs: med(exact.map((x) => x.drawn)),
+          gpuMs: med(exact.map((x) => x.gpu)),
+          shownMs: med(exact.map((x) => x.shown)),
+          lastShownMs: med(runs.map((x) => x.lastShown)),
+          maxFrameMs: Math.max(...runs.map((x) => x.maxFrame)),
+          plan: last?.plan,
+          exact: last?.exactFlag,
+          limitReason: last?.limitReason,
+          canvasWidth: last?.canvasWidth,
+          samples: runs.map((x) => ({
+            exact: x.exact,
+            lastShown: x.lastShown,
+            maxFrame: x.maxFrame,
+          })),
+        };
+      };
+      // A continuous zoom: 15 frames from 0.55x (or 1.45x) of the target, stopping on it.
+      const continuous = async (target: number, gestures: number) => {
+        const runs = [];
+        for (let g = 0; g < gestures; g++) {
+          const start = target * (g % 2 === 0 ? 0.55 : 1.45);
+          setZoom(start);
+          await frame();
+          await frame();
+          let stopAt = 0;
+          for (let i = 0; i < 15; i++) {
+            setZoom(start * (target / start) ** ((i + 1) / 15));
+            stopAt = performance.now();
+            if (i === 14) view.stamps = {};
+            await frame();
+          }
+          runs.push(await settle(stopAt));
+        }
+        return summarise(runs);
+      };
+      // A jump: settle at 0.25x (or 4x) of the target, then set the target in one step.
+      const jump = async (target: number, gestures: number) => {
+        const runs = [];
+        for (let g = 0; g < gestures; g++) {
+          setZoom(target * (g % 2 === 0 ? 0.25 : 4));
+          for (let i = 0; i < 30; i++) await frame();
+          view.stamps = {};
+          setZoom(target);
+          runs.push(await settle(performance.now()));
+        }
+        return summarise(runs);
+      };
+      const out: Record<string, object> = {};
+      for (const z of [1, 10, 25, 100]) {
+        out[`${z * 100}% continuous`] = await continuous(z, 3);
+        out[`${z * 100}% jump`] = await jump(z, 3);
+      }
+      // A radius 30 layer blur over the focus (sigma 2,700 at 10,000% and DPR 2, like the iOS
+      // kit's Examples page).
+      e.createLayer("rect", { x: 460, y: 280, width: 280, height: 240 }, e.s.pageId, {
+        cornerRadius: 24,
+        fills: [{ type: "solid", color: "#3b82f680" }],
+        effects: [{ type: "layer-blur", radius: 30 }],
+      });
+      await frame();
+      out["10000% + layer blur continuous"] = await continuous(100, 3);
+      out["10000% + layer blur jump"] = await jump(100, 3);
+      return out;
+    }, SETTLE_DEADLINE_MS);
+
     console.log(
       `\nZoom-blur sweep (${ready.backend}, adapter=${ready.adapter}, readsBack=${ready.readsBack}):\n` +
         `  interactive 100%..25600%: interval p50/p95/p99 ${interactiveSweep.summary.interval.p50}/${interactiveSweep.summary.interval.p95}/${interactiveSweep.summary.interval.p99} ms · content p50/p95 ${interactiveSweep.summary.content.p50}/${interactiveSweep.summary.content.p95} ms · minCanvasW=${interactiveSweep.minCanvasWidth}/${interactiveSweep.expectedCanvasWidth} · plans=${JSON.stringify(interactiveSweep.plans)} · limits=${JSON.stringify(interactiveSweep.limitReasons)}\n` +
-        `  exact zoom stops (${stopSweep.frame.width}x${stopSweep.frame.height}): ${JSON.stringify(stopSweep.stops)}\n`,
+        `  exact zoom stops (${stopSweep.frame.width}x${stopSweep.frame.height}): ${JSON.stringify(stopSweep.stops)}\n` +
+        `  time-to-exact after zoom stop: ${JSON.stringify(settleStops)}\n`,
     );
     test.info().annotations.push({
       type: "bench",
@@ -512,6 +652,7 @@ test.describe("High-zoom glass and progressive blur sweep", () => {
           frame: stopSweep.frame,
         },
         "engine: exact zoom stops": stopSweep.stops,
+        "engine: time-to-exact after zoom stop": settleStops,
       }),
     });
     expect(interactiveSweep.fallback).toBeNull();

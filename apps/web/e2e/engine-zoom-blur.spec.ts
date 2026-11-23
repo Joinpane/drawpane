@@ -2890,5 +2890,409 @@ for (const build of ["browser", "webgl"] as const) {
       }
       expect(Math.min(...res.after), `stand-in read back: ${res.after}`).toBeGreaterThan(240);
     });
+
+    test(`view blurs past MAX_BLUR_SIGMA (sigma 2,700) stay within <=4/255 max, <=2/255 p99 (${build})`, async ({
+      page,
+      browserName,
+    }) => {
+      test.skip(browserName !== "chromium", "Requires Chromium GPU build.");
+      test.setTimeout(240_000);
+      await openEngine(page, build);
+      const expectedBackend = build === "browser" ? "webgpu" : "webgl2";
+
+      // Exact 2D Gaussian integral over disjoint opaque rects composited over white (with optional
+      // alpha-only mode for EdgeMode::Zero LayerBlur / DropShadow over white page).
+      const evalZeroLayerOverWhite = (
+        rects: readonly DisjointRect[],
+        px: number,
+        py: number,
+        sigmaPage: number,
+      ): [number, number, number] => {
+        const inv = 1 / (sigmaPage * Math.SQRT2);
+        let rPrem = 0;
+        let gPrem = 0;
+        let bPrem = 0;
+        let aSum = 0;
+        for (const rc of rects) {
+          const wx = 0.5 * (erf((rc.x1 - px) * inv) - erf((rc.x0 - px) * inv));
+          if (wx <= 0) continue;
+          const wy = 0.5 * (erf((rc.y1 - py) * inv) - erf((rc.y0 - py) * inv));
+          const w = wx * wy;
+          if (w <= 0) continue;
+          rPrem += w * rc.color[0];
+          gPrem += w * rc.color[1];
+          bPrem += w * rc.color[2];
+          aSum += w;
+        }
+        const rem = Math.max(0, 1 - aSum);
+        return [rPrem + rem * 255, gPrem + rem * 255, bPrem + rem * 255];
+      };
+
+      const w = 384;
+      const h = 256;
+      const zoom = 100; // 10,000%
+      const dpr = 2;
+      const s = zoom * dpr; // 200 dev px / page unit
+      const radius = 30; // sigma = 0.45 * 30 * 200 = 2,700 px (> MAX_BLUR_SIGMA = 2,560)
+      const sigmaPage = 0.45 * radius; // 13.5 page units
+
+      const makeRecord = (
+        list: ListWriter,
+        id: number,
+        parent: number,
+        x: number,
+        y: number,
+        rw: number,
+        rh: number,
+        ops: WireRecord["ops"],
+        extra: Partial<WireRecord> = {},
+      ) => {
+        const autoFlags =
+          (extra.postEffects?.length ? FLAG.post : 0) |
+          (ops.some((o) => o.op === "children") ? FLAG.group : 0);
+        list.set(id, parent, {
+          transform: [1, 0, 0, 1, x, y],
+          opacity: 1,
+          width: rw,
+          height: rh,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [{ kind: "rect", w: rw, h: rh, radii: [0, 0, 0, 0], smoothing: 0 }],
+          ops,
+          coarse: [],
+          ...extra,
+          flags: autoFlags | (extra.flags ?? 0),
+        });
+      };
+      const solid = (c: [number, number, number], a = 1): WireRecord["ops"] => [
+        {
+          op: "fill",
+          path: 0,
+          evenOdd: false,
+          paint: { kind: "solid", color: [c[0] / 255, c[1] / 255, c[2] / 255, a] },
+        },
+      ];
+
+      // 1. BackgroundBlur at 10,000% with sigma = 2,700 (and 5,400) over disjoint backdrop.
+      const bg2700 = buildDisjointExtremeZoomScene({
+        zoom,
+        dpr,
+        radius,
+        uniform: true,
+        stripePeriodPx: 320,
+        centerPage: [50 + w / (2 * s), 50 + h / (2 * s)],
+        blurRect: [0, 0, 100, 100],
+      });
+
+      // 2. Standalone compact LayerBlur (Case L1, native fit): 5 x 5 page rect (1,000 x 1,000 dev px)
+      //    at 10,000% with sigma = 2,700 (> MAX_BLUR_SIGMA). High-contrast black/blue split ensures
+      //    both unblurred and all-white outputs fail the <= 4/255 gate.
+      const l1Rects: DisjointRect[] = [
+        { x0: 47.5, y0: 47.5, x1: 50, y1: 52.5, color: [0, 0, 0] },
+        { x0: 50, y0: 47.5, x1: 52.5, y1: 52.5, color: [24, 96, 216] },
+      ];
+      const l1List = new ListWriter(0xffffffff, 2);
+      l1List.reset();
+      makeRecord(l1List, 1, ROOT, -100, -100, 300, 300, solid([255, 255, 255]));
+      makeRecord(l1List, 2, ROOT, 47.5, 47.5, 5, 5, [{ op: "children" }], {
+        postEffects: [{ kind: "layerBlur", radius }],
+      });
+      makeRecord(l1List, 3, 2, 0, 0, 2.5, 5, solid([0, 0, 0]));
+      makeRecord(l1List, 4, 2, 2.5, 0, 2.5, 5, solid([24, 96, 216]));
+      const l1Bytes = [...l1List.finish()];
+
+      // 3. Standalone large LayerBlur (case L2, one reduced-grid pass): 120 x 120 page mosaic
+      //    (24,000 x 24,000 dev px) of abutting coloured tiles with sigma = 2,700.
+      const l2Rects: DisjointRect[] = [];
+      const l2List = new ListWriter(0xffffffff, 3);
+      l2List.reset();
+      makeRecord(l2List, 1, ROOT, -200, -200, 500, 500, solid([255, 255, 255]));
+      makeRecord(l2List, 2, ROOT, -10, -10, 120, 120, [{ op: "children" }], {
+        postEffects: [{ kind: "layerBlur", radius }],
+      });
+      let lid = 3;
+      const palette: [number, number, number][] = [
+        [220, 38, 38],
+        [37, 99, 235],
+        [22, 163, 74],
+        [234, 179, 8],
+      ];
+      for (let r = 0; r < 12; r++) {
+        for (let c = 0; c < 12; c++) {
+          const x = c * 10;
+          const y = r * 10;
+          const col = palette[(r * 3 + c) % palette.length] ?? [220, 38, 38];
+          makeRecord(l2List, lid++, 2, x, y, 10, 10, solid(col));
+          l2Rects.push({ x0: -10 + x, y0: -10 + y, x1: x, y1: y, color: col });
+        }
+      }
+      const l2Bytes = [...l2List.finish()];
+
+      // 4. LayerBlur scope over 2,560 wrapping a BackgroundBlur (Case L3): page striped backdrop
+      //    behind a LayerBlur(radius=30 -> sigma=2,700) frame containing a BackgroundBlur(radius=10
+      //    -> sigma=900) filling the frame. For a backdrop blurred by sigma_1=900 then LayerBlurred
+      //    by sigma_2=2700 inside the finite frame, compare directly against a full-resolution
+      //    scale-reduced GPU render (zoom=5 -> 1/20x exact scale, sigma_1=45, sigma_2=135) where
+      //    both blurs run natively below MAX_BLUR_SIGMA!
+      const l3List = new ListWriter(0xffffffff, 4);
+      l3List.reset();
+      makeRecord(l3List, 1, ROOT, -200, -200, 500, 500, solid([255, 255, 255]));
+      let l3id = 2;
+      for (let i = -20; i <= 20; i++) {
+        makeRecord(
+          l3List,
+          l3id++,
+          ROOT,
+          -100,
+          i * 6,
+          300,
+          3,
+          solid(i % 2 === 0 ? [20, 40, 180] : [200, 40, 30]),
+        );
+      }
+      const scopeId = l3id++;
+      makeRecord(l3List, scopeId, ROOT, 0, 0, 100, 100, [{ op: "children" }], {
+        postEffects: [{ kind: "layerBlur", radius }],
+      });
+      makeRecord(l3List, l3id++, scopeId, 0, 0, 100, 100, [
+        { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 10 },
+      ]);
+      const l3Bytes = [...l3List.finish()];
+
+      // 5. DropShadow at 10,000% with blur = 30 -> sigma = 2,700 (> MAX_BLUR_SIGMA).
+      const shRects: DisjointRect[] = [{ x0: 45, y0: 45, x1: 55, y1: 55, color: [30, 80, 210] }];
+      const shList = new ListWriter(0xffffffff, 5);
+      shList.reset();
+      makeRecord(shList, 1, ROOT, -100, -100, 300, 300, solid([255, 255, 255]));
+      makeRecord(
+        shList,
+        2,
+        ROOT,
+        45,
+        45,
+        10,
+        10,
+        [
+          {
+            op: "dropShadow",
+            paths: [0],
+            evenOdd: false,
+            dx: 0,
+            dy: 0,
+            blur: radius,
+            color: [30 / 255, 80 / 255, 210 / 255, 1],
+            blend: 0,
+          },
+        ],
+        { reach: 45 },
+      );
+      const shBytes = [...shList.finish()];
+
+      const gpuOut = await page.evaluate(
+        async ({
+          expectedBackend,
+          w,
+          h,
+          zoom,
+          dpr,
+          bg2700,
+          l1Bytes,
+          l2Bytes,
+          l3Bytes,
+          shBytes,
+        }) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          const bg = new Float32Array([1, 1, 1, 1]);
+          const requireOk = (o: { ok: boolean; message: string; free(): void }) => {
+            const { ok, message } = o;
+            o.free();
+            if (!ok) throw new Error(message);
+          };
+          const dev = await glue.createGpu(null, 0);
+          if (!dev.ok) throw new Error(dev.message);
+          if (dev.backend !== expectedBackend) throw new Error(`wrong backend ${dev.backend}`);
+          const engine = new glue.Engine(0, 0);
+          try {
+            if (!engine.attachGpu || !engine.renderGpu || !engine.gpuPixels) {
+              throw new Error("missing GPU entry points");
+            }
+            const renderGpu = engine.renderGpu.bind(engine);
+            const gpuPixels = engine.gpuPixels.bind(engine);
+            requireOk(engine.attachGpu(dev));
+            dev.free();
+            const renderCase = async (
+              label: string,
+              bytes: number[] | null,
+              rw: number,
+              rh: number,
+              z: number,
+              ox: number,
+              oy: number,
+              editorViewport: boolean,
+            ) => {
+              if (bytes) requireOk(engine.apply(new Uint8Array(bytes)));
+              const r = renderGpu(rw, rh, z, -ox * z, -oy * z, dpr, bg, false, 0, editorViewport);
+              const meta = {
+                ok: r.ok,
+                plan: r.plan,
+                exact: r.exact,
+                standin: r.standin,
+              };
+              requireOk(r);
+              const px = await gpuPixels();
+              if (!(px instanceof Uint8Array)) throw new Error(`${label}: ${px.message}`);
+              return { ...meta, pixels: Array.from(px) };
+            };
+
+            const bgRes = await renderCase("bg", bg2700, w, h, zoom, 50, 50, true);
+            const l1Res = await renderCase("L1", l1Bytes, w, h, zoom, 50, 50, true);
+            const l2Res = await renderCase("L2", l2Bytes, w, h, zoom, 50, 50, true);
+            const l3Res = await renderCase("L3", l3Bytes, w, h, zoom, 50, 50, true);
+            // Reference for Case L3: render a wide native view at zoom = 2 (50x smaller scale ->
+            // sigma_bg = 18, sigma_lb = 54, both well inside native limits) spanning 200 x 200 page
+            // units so the entire 100 x 100 scope and full BackgroundBlur reach fit without crop
+            // clamping, aligned to the exact page coordinate of pixel (floor(w/2), floor(h/2)).
+            const l3RefW = 800;
+            const l3RefH = 800;
+            const l3RefZoom = 2;
+            const l3RefS = l3RefZoom * dpr;
+            const cxPage = 50 + (Math.floor(w / 2) + 0.5) / (zoom * dpr);
+            const cyPage = 50 + (Math.floor(h / 2) + 0.5) / (zoom * dpr);
+            const l3RefOx = cxPage - (l3RefW / 2 + 0.5) / l3RefS;
+            const l3RefOy = cyPage - (l3RefH / 2 + 0.5) / l3RefS;
+            const l3Ref = await renderCase(
+              "L3-ref",
+              null,
+              l3RefW,
+              l3RefH,
+              l3RefZoom,
+              l3RefOx,
+              l3RefOy,
+              false,
+            );
+            const shRes = await renderCase("shadow", shBytes, w, h, zoom, 50, 50, true);
+            return { bgRes, l1Res, l2Res, l3Res, l3Ref, shRes };
+          } finally {
+            engine.free();
+          }
+        },
+        {
+          expectedBackend,
+          w,
+          h,
+          zoom,
+          dpr,
+          bg2700: bg2700.bytes,
+          l1Bytes,
+          l2Bytes,
+          l3Bytes,
+          shBytes,
+        },
+      );
+
+      const scoreAgainstOracle = (
+        pixels: number[],
+        evalAt: (px: number, py: number) => [number, number, number],
+      ) => {
+        const diffs: number[] = [];
+        let max = 0;
+        let sum = 0;
+        for (let y = 0; y < h; y++) {
+          const py = 50 + (y + 0.5) / s;
+          for (let x = 0; x < w; x++) {
+            const px = 50 + (x + 0.5) / s;
+            const [er, eg, eb] = evalAt(px, py);
+            const o = (y * w + x) * 4;
+            const d = Math.max(
+              Math.abs((pixels[o] ?? 0) - Math.round(er)),
+              Math.abs((pixels[o + 1] ?? 0) - Math.round(eg)),
+              Math.abs((pixels[o + 2] ?? 0) - Math.round(eb)),
+            );
+            diffs.push(d);
+            if (d > max) max = d;
+            sum += d;
+          }
+        }
+        diffs.sort((a, b) => a - b);
+        return {
+          max,
+          p99: diffs[Math.floor((diffs.length - 1) * 0.99)] ?? 0,
+          mean: Math.round((sum / diffs.length) * 100) / 100,
+        };
+      };
+
+      const bgStats = scoreAgainstOracle(gpuOut.bgRes.pixels, (px, py) =>
+        evalDisjointBlurAt(bg2700.rects, bg2700.bg, px, py, sigmaPage),
+      );
+      const l1Stats = scoreAgainstOracle(gpuOut.l1Res.pixels, (px, py) =>
+        evalZeroLayerOverWhite(l1Rects, px, py, sigmaPage),
+      );
+      const l2Stats = scoreAgainstOracle(gpuOut.l2Res.pixels, (px, py) =>
+        evalZeroLayerOverWhite(l2Rects, px, py, sigmaPage),
+      );
+      const shStats = scoreAgainstOracle(gpuOut.shRes.pixels, (px, py) =>
+        evalZeroLayerOverWhite(shRects, px, py, sigmaPage),
+      );
+
+      // Compare every L3 pixel with the native zoom=2 reference at the same page coordinate,
+      // sampled bilinearly (the reference's 4 px per page unit resolve a field blurred by 57 of
+      // its pixels exactly enough).
+      const l3RefS = 2 * dpr;
+      const cxPage = 50 + (Math.floor(w / 2) + 0.5) / s;
+      const cyPage = 50 + (Math.floor(h / 2) + 0.5) / s;
+      const l3RefOx = cxPage - (800 / 2 + 0.5) / l3RefS;
+      const l3RefOy = cyPage - (800 / 2 + 0.5) / l3RefS;
+      const l3Stats = scoreAgainstOracle(gpuOut.l3Res.pixels, (px, py) => {
+        const fx = (px - l3RefOx) * l3RefS - 0.5;
+        const fy = (py - l3RefOy) * l3RefS - 0.5;
+        const x0 = Math.floor(fx);
+        const y0 = Math.floor(fy);
+        const tx = fx - x0;
+        const ty = fy - y0;
+        const at = (x: number, y: number, c: number) =>
+          gpuOut.l3Ref.pixels[(y * 800 + x) * 4 + c] ?? 0;
+        const lerp = (c: number) =>
+          (at(x0, y0, c) * (1 - tx) + at(x0 + 1, y0, c) * tx) * (1 - ty) +
+          (at(x0, y0 + 1, c) * (1 - tx) + at(x0 + 1, y0 + 1, c) * tx) * ty;
+        return [lerp(0), lerp(1), lerp(2)];
+      });
+
+      console.log(
+        `[zoom-blur ${build}] F6 sigma=2700: ` +
+          `bg(plan=${gpuOut.bgRes.plan},exact=${gpuOut.bgRes.exact},max=${bgStats.max},p99=${bgStats.p99}) ` +
+          `L1(exact=${gpuOut.l1Res.exact},max=${l1Stats.max},p99=${l1Stats.p99}) ` +
+          `L2-mosaic(exact=${gpuOut.l2Res.exact},max=${l2Stats.max},p99=${l2Stats.p99}) ` +
+          `L3-scope(plan=${gpuOut.l3Res.plan},exact=${gpuOut.l3Res.exact},max=${l3Stats.max},p99=${l3Stats.p99}) ` +
+          `shadow(exact=${gpuOut.shRes.exact},max=${shStats.max},p99=${shStats.p99})`,
+      );
+
+      // Accuracy holds for every case. Exact means nothing in the frame was reduced: the
+      // background blur and the L3 scope run in the reduced halo tiers and L2 on a reduced grid,
+      // so those frames are never exact; L1 and the shadow are device-resolution and are.
+      expect(gpuOut.bgRes.plan).toBe(4);
+      expect(gpuOut.bgRes.exact).toBe(false);
+      expect(bgStats.max).toBeLessThanOrEqual(4);
+      expect(bgStats.p99).toBeLessThanOrEqual(2);
+
+      expect(gpuOut.l1Res.exact).toBe(true);
+      expect(l1Stats.max).toBeLessThanOrEqual(4);
+      expect(l1Stats.p99).toBeLessThanOrEqual(2);
+
+      expect(gpuOut.l2Res.exact).toBe(false);
+      expect(l2Stats.max).toBeLessThanOrEqual(4);
+      expect(l2Stats.p99).toBeLessThanOrEqual(2);
+
+      expect(gpuOut.l3Res.plan).toBe(4);
+      expect(gpuOut.l3Res.exact).toBe(false);
+      expect(l3Stats.max).toBeLessThanOrEqual(4);
+      expect(l3Stats.p99).toBeLessThanOrEqual(2);
+
+      expect(gpuOut.shRes.exact).toBe(true);
+      expect(shStats.max).toBeLessThanOrEqual(4);
+      expect(shStats.p99).toBeLessThanOrEqual(2);
+    });
   });
 }
