@@ -904,7 +904,9 @@ function copyPlaceOps(doc: Doc, id: string, view: (id: string) => NodeRecord | u
   const placed = placedGeometry(copy, source, parent, doc.get(source.parent));
   // In a flow, what's left is its own fixed size, its main layer's (a laid-out size it stored
   // before, say as Hug in another mode, no longer is one).
-  const derived = placed ? placed.derived : flowCopySizes(copy, source, parent);
+  const derived = placed
+    ? placed.derived
+    : flowCopySizes(copy, source, parent, doc.get(source.parent));
   // Compared as presented (a value it doesn't store reads as its default), so nothing it already
   // shows is written again.
   for (const [prop, want] of Object.entries(derived) as ["x" | "y" | "width" | "height", number][])

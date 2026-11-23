@@ -606,7 +606,12 @@ describe("with copies compact", () => {
     );
     const instance = editor.insertInstance("main", { x: 0, y: 200 }) as string;
     const inner = editor.doc.childIds(instance)[0] as string;
-    editor.setLayoutMode([inner], "row");
+    // Auto layout its main layer doesn't have: the editor refuses it now (as Figma does), but a
+    // file saved before can hold it.
+    editor.commit([
+      { op: "set", id: inner, prop: "layoutMode", value: "row" },
+      { op: "set", id: inner, prop: "gap", value: 30 },
+    ]);
     const b = editor.doc.childIds(inner)[1] as string;
     // The row reads its gap from where the layers sat: 30.
     expect(num(editor, b, "x")).toBe(50);
@@ -1123,7 +1128,9 @@ describe.each(["materialized", "compact"] as const)(
         copies,
       );
       const instance = editor.insertInstance("main", { x: 0, y: 300 }) as string;
-      editor.setLayoutMode([instance], "row");
+      // Auto layout its main doesn't have: refused by the editor now (as in Figma), but a file
+      // saved before can hold it.
+      editor.commit([{ op: "set", id: instance, prop: "layoutMode", value: "row" }]);
       const box = editor.doc.childIds(instance)[1] as string;
       // The row lays them side by side.
       expect(num(editor, box, "x")).not.toBe(10);
@@ -1682,27 +1689,105 @@ describe.each(["materialized", "compact"] as const)("re-check 5 with copies %s",
     expect(unsettled(editor)).toEqual([]);
   });
 
-  it("gives a copy its own fixed size back when its instance takes auto layout (seed 1042694721)", () => {
+  it.each(["setLayoutMode", "frameSelection"] as const)(
+    "leaves an instance of a component without auto layout as it is when given auto layout (%s, Figma)",
+    (how) => {
+      const editor = make(
+        [
+          page,
+          node("main", "frame", "p", { isComponent: true, width: 160, height: 80 }),
+          node("bar", "rect", "main", {
+            x: 10,
+            y: 10,
+            width: 140,
+            height: 20,
+            constraintH: "stretch",
+          }),
+        ],
+        copies,
+      );
+      const instance = editor.insertInstance("main", { x: 0, y: 200 }) as string;
+      const bar = editor.doc.childIds(instance)[0] as string;
+      editor.resize([instance], "width", 100);
+      expect(width(editor, bar)).toBe(80);
+      expect(editor.canGainLayout(instance)).toBe(false);
+      expect(editor.canGainLayout("main")).toBe(true);
+      const before = editor.doc.stored();
+      if (how === "setLayoutMode") editor.setLayoutMode([instance], "column");
+      else {
+        // ⇧A: Figma neither gives it auto layout nor wraps it.
+        editor.select([instance]);
+        editor.frameSelection(true);
+        expect(editor.s.selection).toEqual([instance]);
+      }
+      expect(editor.doc.stored()).toEqual(before);
+      expect(getProp(editor.doc.get(instance)?.props ?? {}, "layoutMode")).toBe("none");
+      expect(width(editor, bar)).toBe(80);
+      expect(unsettled(editor)).toEqual([]);
+    },
+  );
+
+  it("keeps a size its instance's own Stretch gave a copy once the instance takes the flow away", () => {
     const editor = make(
       [
         page,
-        node("main", "frame", "p", { isComponent: true, width: 160, height: 80 }),
-        node("bar", "rect", "main", {
-          x: 10,
-          y: 10,
-          width: 140,
-          height: 20,
-          constraintH: "stretch",
+        node("main", "frame", "p", {
+          isComponent: true,
+          width: 160,
+          height: 80,
+          layoutMode: "row",
+          alignItems: "start",
         }),
+        node("rect", "rect", "main", { width: 60, height: 20 }),
       ],
       copies,
     );
     const instance = editor.insertInstance("main", { x: 0, y: 200 }) as string;
-    const bar = editor.doc.childIds(instance)[0] as string;
-    editor.resize([instance], "width", 20);
-    expect(width(editor, bar)).toBe(0);
-    editor.setLayoutMode([instance], "column");
-    expect(width(editor, bar)).toBe(140);
+    const rect = editor.doc.childIds(instance)[0] as string;
+    editor.setProp([instance], "alignItems", "stretch");
+    editor.resize([instance], "height", 120);
+    const height = () => getProp(editor.doc.get(rect)?.props ?? {}, "height");
+    expect(height()).toBe(120);
+    editor.setLayoutMode([instance], "none");
+    expect(height()).toBe(120);
+    editor.setProp(["main"], "opacity", 0.5);
+    expect(height()).toBe(120);
+    expect(unsettled(editor)).toEqual([]);
+  });
+
+  it("owns only the axis a flow stretched a turned copy on once it's made absolute", () => {
+    const editor = make(
+      [
+        page,
+        node("main", "frame", "p", {
+          isComponent: true,
+          width: 160,
+          height: 80,
+          layoutMode: "row",
+          alignItems: "stretch",
+        }),
+        node("rect", "rect", "main", { width: 60, height: 20, rotation: 90 }),
+      ],
+      copies,
+    );
+    editor.commit(layoutOps(editor.doc, ["main"]));
+    const instance = editor.insertInstance("main", { x: 0, y: 200 }) as string;
+    const rect = editor.doc.childIds(instance)[0] as string;
+    editor.resize([instance], "height", 120);
+    const size = () => {
+      const props = editor.doc.get(rect)?.props ?? {};
+      return [getProp(props, "width"), getProp(props, "height")];
+    };
+    // Turned, its own width runs down the row: the row's Stretch gives it 120.
+    expect(size()).toEqual([120, 20]);
+    editor.setProp([rect], "positioning", "absolute");
+    editor.resize(["rect"], "height", 90);
+    expect(size()).toEqual([120, 90]);
+    editor.undo();
+    editor.redo();
+    expect(size()).toEqual([120, 90]);
+    editor.setProp([rect], "positioning", "auto");
+    expect(size()).toEqual([120, 90]);
     expect(unsettled(editor)).toEqual([]);
   });
 

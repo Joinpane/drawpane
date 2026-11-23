@@ -312,13 +312,25 @@ export function placedGeometry(
   const bound = getProp(copy.props, "bindings") as Record<string, unknown>;
   // Placed by its own choice: made absolute (or not) unlike its main layer, or in a frame that took
   // its auto layout away, which leaves its layers where the layout put them (Figma). That's its
-  // place; its size too only where the flow it left sized it (Fill, or Stretch alignment), since
+  // place; its size too only on an axis the flow it left sized (Fill, or Stretch alignment), since
   // nothing sizes it now. A size of its own still comes from its main layer.
   const ownPlace =
     getProp(copy.props, "positioning") !== getProp(source.props, "positioning") ||
     (!absolute &&
       (getProp(parentSource.props, "layoutMode") !== "none" ||
         getProp(parent.props, "overrides").includes("layoutMode")));
+  // The flow it left: its frame's, or where the frame took its auto layout away, the main frame's
+  // kind of flow with the frame's own alignment (which it may have set itself).
+  const left: NodeRecord =
+    getProp(parent.props, "layoutMode") !== "none"
+      ? parent
+      : {
+          ...parent,
+          props: {
+            ...parent.props,
+            layoutMode: getProp(parentSource.props, "layoutMode"),
+          } as NodeRecord["props"],
+        };
   // A nested instance swapped for another component is that component's size.
   const shown = getProp(copy.props, "instanceOf");
   const swapped = !!shown && shown !== getProp(source.props, "instanceOf");
@@ -338,7 +350,9 @@ export function placedGeometry(
       overrides.includes(axis.sizing) ||
       swapped ||
       unbound(axis.size) ||
-      (ownPlace && flowSized(copy, parentSource, a))
+      // The size that flow gave it stays, and so does one its main layer's flow gave the main
+      // layer: that isn't a size of the main layer's own to take.
+      (ownPlace && (flowSized(copy, left, a) || flowSized(source, parentSource, a)))
     )
       kept[axis.size] = "own";
     else derived[axis.size] = constrained[axis.size] ?? getProp(source.props, axis.size);
@@ -349,14 +363,15 @@ export function placedGeometry(
 /**
  * The sizes a copy layer in a flow takes from its main layer: the flow
  * places it (so `placedGeometry` gives nothing), but on an axis where it's
- * its own fixed size (no Fill, no Stretch alignment), that nothing
- * overrides or binds, that isn't a swapped instance's and that doesn't
- * measure itself, its size is its main layer's.
+ * its own fixed size (no Fill, no Stretch alignment, in its flow or its
+ * main layer's), that nothing overrides or binds, that isn't a swapped
+ * instance's and that doesn't measure itself, its size is its main layer's.
  */
 export function flowCopySizes(
   copy: NodeRecord,
   source: NodeRecord,
   parent: NodeRecord | undefined,
+  parentSource: NodeRecord | undefined,
 ): Partial<Record<"width" | "height", number>> {
   const out: Partial<Record<"width" | "height", number>> = {};
   // Only a size that differs from its main layer's can be one to give back: most copies show
@@ -385,27 +400,31 @@ export function flowCopySizes(
     // Bound in its main layer: the variable's value, or the copy's own once it's taken off it.
     if ((getProp(source.props, "bindings") as Record<string, unknown>)[axis.size]) continue;
     if (measuresOn(copy, a) || flowSized(copy, parent, a)) continue;
+    // A size its main layer's flow gave the main layer isn't one of its own to take.
+    if (parentSource && flowSized(source, parentSource, a)) continue;
     out[axis.size] = getProp(source.props, axis.size);
   }
   return out;
 }
 
 /**
- * Whether the flow of `frame` sizes `child` on an axis: Fill does, and so
- * does Stretch alignment across a row or column, or in a grid's cell,
- * unless the child hugs (as layout has it). A turned child is stretched on
- * whichever of its own axes lines up with the stretched one, so in a flow
- * it counts as sized on both when either is.
+ * Whether the flow of `frame` sizes `child` on one of its own axes: Fill
+ * does, and so does Stretch alignment across a row or column, or in a
+ * grid's cell, unless the child hugs (as layout has it). Layout stretches on
+ * the frame's axes, reading the child's sizing for that axis, and applies it
+ * to whichever of the child's own axes lines up with it: past 45 degrees of
+ * turn, the other one. So only that axis is the flow's.
  */
 export function flowSized(child: NodeRecord, frame: NodeRecord, axis: "h" | "v"): boolean {
   if (child.type === "group") return false;
-  const mode = getProp(frame.props, "layoutMode");
-  if (mode !== "none" && getProp(child.props, "rotation") % 360 !== 0)
-    return stretchedOn(child, frame, "h") || stretchedOn(child, frame, "v");
-  return stretchedOn(child, frame, axis);
+  const rad = (getProp(child.props, "rotation") * Math.PI) / 180;
+  const turned =
+    getProp(frame.props, "layoutMode") !== "none" &&
+    Math.abs(Math.sin(rad)) > Math.abs(Math.cos(rad));
+  return stretchedOn(child, frame, turned ? (axis === "h" ? "v" : "h") : axis);
 }
 
-/** Whether a flow stretches an unturned child on one of its axes. */
+/** Whether a flow stretches a child along one of the frame's axes. */
 function stretchedOn(child: NodeRecord, frame: NodeRecord, axis: "h" | "v"): boolean {
   const sizing = getProp(child.props, axis === "h" ? "sizingH" : "sizingV");
   if (sizing === "fill") return true;

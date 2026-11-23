@@ -487,6 +487,10 @@ interface ListItem {
   readonly listType: ListType;
   readonly listLevel: number;
 }
+/** Why an instance wasn't given auto layout. */
+const INSTANCE_LAYOUT_NOTICE =
+  "An instance takes its auto layout from its main component. Add auto layout there, or detach the instance.";
+
 export class Editor {
   readonly doc = new Doc();
   readonly scene = new Scene(this.doc);
@@ -2159,8 +2163,13 @@ export class Editor {
     const first = ids[0] && this.doc.get(ids[0]);
     if (!first || !bounds) return;
     if (autoLayout && ids.length === 1 && first.type === "frame") {
-      if (getProp(first.props, "layoutMode") === "none")
-        this.commit(this.#flowOps(first), "Add auto layout");
+      if (getProp(first.props, "layoutMode") !== "none") return;
+      // An instance of a component without auto layout stays as it is (Figma's ⇧A does nothing).
+      if (!this.canGainLayout(first.id)) {
+        this.notify(INSTANCE_LAYOUT_NOTICE);
+        return;
+      }
+      this.commit(this.#flowOps(first), "Add auto layout");
       return;
     }
     const slot = this.#wrapperSlot(ids);
@@ -2227,11 +2236,16 @@ export class Editor {
    */
   setLayoutMode(ids: readonly string[], mode: "none" | "row" | "column" | "grid"): void {
     const ops: Op[] = [];
+    let refused = false;
     for (const id of ids) {
       const frame = this.doc.get(id);
       if (frame?.type !== "frame") continue;
       const from = getProp(frame.props, "layoutMode");
       if (from === mode) continue;
+      if (from === "none" && !this.canGainLayout(id)) {
+        refused = true;
+        continue;
+      }
       if (mode !== "grid") {
         // From none, read gap, padding and order from how the layers sit.
         if (from === "none" && mode !== "none") ops.push(...this.#flowOps(frame, mode));
@@ -2282,11 +2296,32 @@ export class Editor {
         ),
       });
     }
+    if (refused) this.notify(INSTANCE_LAYOUT_NOTICE);
     if (ops.length > 0)
       this.commit(
         ops,
         mode === "none" ? "Remove auto layout" : mode === "grid" ? "Grid layout" : "Auto layout",
       );
+  }
+
+  /**
+   * Whether a frame can be given auto layout. An instance, or a layer in one,
+   * whose main layer has none can't: it keeps its main's layout, as in Figma,
+   * where adding auto layout to such an instance leaves it as it was. One
+   * whose main layer has auto layout can take it back after removing it.
+   */
+  canGainLayout(id: string): boolean {
+    const frame = this.doc.get(id);
+    if (frame?.type !== "frame") return false;
+    const mirrors = getProp(frame.props, "mirrors");
+    const instanceOf = getProp(frame.props, "instanceOf");
+    const main = mirrors
+      ? this.doc.get(mirrors)
+      : instanceOf
+        ? this.doc.get(instanceOf)
+        : undefined;
+    if (!mirrors && !instanceOf) return true;
+    return !!main && getProp(main.props, "layoutMode") !== "none";
   }
 
   /** Puts the selection in a grid: a frame becomes one, other layers are framed first. */
