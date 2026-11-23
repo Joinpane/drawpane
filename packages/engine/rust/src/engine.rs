@@ -2198,9 +2198,16 @@ impl Engine {
                     ReaderKind::Glass => {
                         any_coarse = true;
                         // If this visible glass lens overlaps an earlier active blur that has stops
-                        // below `far_cut`, pull that blur into `downstream_mid_readers` so glass
-                        // can sample a mid-tier (or mid-patched) prefix obeying `sigma >= 3 * d`.
-                        if far_divisor > crate::halo::MID_TIER_TRIGGER_DIVISOR {
+                        // below `far_cut` inside the lens's visible read area, pull that blur into
+                        // `downstream_mid_readers` so glass can sample a mid-tier (or mid-patched)
+                        // prefix obeying `sigma >= 3 * d`, without dragging stops that only sit
+                        // off-screen into the mid tier.
+                        let lens_read = if visible.width() > 0.0 && visible.height() > 0.0 {
+                            visible.inflate(node.reach_px, node.reach_px)
+                        } else {
+                            Rect::ZERO
+                        };
+                        if far_divisor > crate::halo::MID_TIER_TRIGGER_DIVISOR && !lens_read.is_zero_area() {
                             let earlier = writers.partition_point(|&writer| writer < i);
                             let mut feeds_sub_far_blur = false;
                             for &writer in &writers[..earlier] {
@@ -2210,7 +2217,7 @@ impl Engine {
                                 let writer_paint = nodes[writer]
                                     .paint
                                     .inflate(nodes[writer].post_reach_px, nodes[writer].post_reach_px);
-                                if !overlaps(writer_paint, node.read) {
+                                if !overlaps(writer_paint, lens_read) {
                                     continue;
                                 }
                                 let has_sub_far = match nodes[writer].kind {
@@ -2219,7 +2226,7 @@ impl Engine {
                                         if hi <= 0.0 {
                                             false
                                         } else {
-                                            let overlap = writer_paint.intersect(node.read);
+                                            let overlap = writer_paint.intersect(lens_read);
                                             match plan {
                                                 Some(p) if overlap.width() > 0.0 && overlap.height() > 0.0 => {
                                                     let (vf, ve) = p.active_stop_range(overlap);
@@ -3929,5 +3936,68 @@ mod halo_plan_tests {
         filled.store.insert_for_test(2, 1, blur);
         let (_, _, filled_plan) = filled.reader_halo_plan(view, Some(crop), true, 50);
         assert!(filled_plan.expect("filled clip plan").clamp_clips.is_empty());
+    }
+
+    #[test]
+    fn glass_mid_tier_admission_skips_offscreen_sub_far_stops() {
+        use crate::record::GlassOp;
+        // A glass lens deep in the far-only part of a progressive blur: the blur's sub-far stops
+        // lie thousands of device pixels off-screen, outside the lens's visible read area, so
+        // they must not pull the blur into the mid tier (F3).
+        let mut engine = Engine::new(Limits::default());
+        let mut prog = make_record(
+            [420.0, 320.0],
+            vec![Op::ProgressiveBlur(Box::new(ProgressiveBlurOp {
+                paths: vec![0],
+                even_odd: false,
+                start_radius: 0.0,
+                end_radius: 120.0,
+                start: [0.0, 0.0],
+                end: [0.0, 1.0],
+            }))],
+            Vec::new(),
+        );
+        prog.transform = Affine::translate((420.0, 240.0));
+        let mut glass = make_record(
+            [480.0, 320.0],
+            vec![Op::Glass(Box::new(GlassOp {
+                paths: vec![0],
+                even_odd: false,
+                kind: crate::glass::KIND_BOX,
+                inradius: 160.0,
+                angle: -45.0,
+                intensity: 80.0,
+                refraction: 80.0,
+                depth: 20.0,
+                dispersion: 50.0,
+                frost: 4.0,
+                splay: 0.0,
+                box_radii: [32.0; 4],
+                box_smoothing: [0.0; 4],
+                measured_inradius: std::cell::Cell::new(-1.0),
+            }))],
+            Vec::new(),
+        );
+        glass.transform = Affine::translate((360.0, 240.0));
+        engine.store.insert_for_test(1, ROOT, prog);
+        engine.store.insert_for_test(2, ROOT, glass);
+        // 2,500% centred on (600, 400) in a 2,880 x 1,800 view at DPR 2.
+        let zoom = 25.0;
+        let view = Camera {
+            zoom,
+            x: 1440.0 / 2.0 - 600.0 * zoom,
+            y: 900.0 / 2.0 - 400.0 * zoom,
+            dpr: 2.0,
+        }
+        .view();
+        let crop = Rect::new(0.0, 0.0, 2880.0, 1800.0);
+        let (_, _, plan) = engine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
+        let plan = plan.expect("2,500% glass over progressive blur plan");
+        assert!(plan.far_divisor >= 32, "far divisor {}", plan.far_divisor);
+        assert!(
+            !plan.downstream_mid_readers.contains(&(1, 0)),
+            "an off-screen sub-far progressive stop must not join the mid tier: {:?}",
+            plan.downstream_mid_readers
+        );
     }
 }

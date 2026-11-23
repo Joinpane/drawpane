@@ -907,7 +907,7 @@ const HARDWARE_HALO_RENDER_MAX_PIXELS: usize = 12_000_000;
 const SOFTWARE_HALO_RENDER_MAX_SIDE: u32 = 2048;
 const SOFTWARE_HALO_RENDER_MAX_PIXELS: usize = 4_200_000;
 const HARDWARE_HALO_STEADY_FAR_PIXELS: usize = 4_200_000;
-const HARDWARE_HALO_STEADY_MID_PIXELS: usize = 1_048_576;
+const HARDWARE_HALO_STEADY_MID_PIXELS: usize = 2_200_000;
 const SOFTWARE_HALO_STEADY_PIXELS: usize = 1_650_000;
 
 #[derive(Clone, Copy)]
@@ -3838,6 +3838,24 @@ impl Gpu {
         Ok(())
     }
 
+    /// The progressive blur tile side: 512 px on hardware GPUs when the stop atlas fits a third of
+    /// the reader budget (a quarter of the framebuffer switches and copies on WebGL2), else 256 px.
+    fn progressive_tile_side(&self, width: u32, height: u32, cols: u32, rows: u32, budget: usize) -> u32 {
+        let base = progressive_blur::PROGRESSIVE_TILE_MAX
+            .min(self.max_texture_2d / 4)
+            .max(1);
+        if self.fallback_adapter {
+            return base;
+        }
+        let hw = 512u32.min(self.max_texture_2d / 4).max(base);
+        let atlas_bytes = (width.min(hw) as usize)
+            .saturating_mul(height.min(hw) as usize)
+            .saturating_mul(cols as usize)
+            .saturating_mul(rows as usize)
+            .saturating_mul(4);
+        if atlas_bytes <= budget / 3 { hw } else { base }
+    }
+
     /// Logical coarse replay side cap used by `Engine::reader_halo_plan`.
     pub fn halo_replay_limit(&self) -> u32 {
         if self.fallback_adapter {
@@ -4258,11 +4276,12 @@ impl Gpu {
                 }
             }
         }
+        let border_keep = if self.fallback_adapter { 262_144 } else { 1_048_576 };
         if self
             .readers
             .halo_border_src
             .as_ref()
-            .is_some_and(|t| (t.width as usize).saturating_mul(t.height as usize) > 262_144)
+            .is_some_and(|t| (t.width as usize).saturating_mul(t.height as usize) > border_keep)
             && let Some(old) = self.readers.halo_border_src.take()
         {
             self.readers.retire(old.texture);
@@ -10277,6 +10296,7 @@ impl Backend for Gpu {
             }
         });
 
+        let mut captured_in_tier = false;
         if let Some(tier) = capture_tier {
             let d = tier.render_divisor as f32;
             let lo_dev = plan.start_sigma.min(plan.end_sigma) * d;
@@ -10321,6 +10341,7 @@ impl Backend for Gpu {
             } else {
                 None
             };
+            captured_in_tier = capture_bounds.is_some();
             if !has_downstream {
                 let Some(bounds) = capture_bounds else {
                     return Ok(());
@@ -10335,12 +10356,10 @@ impl Backend for Gpu {
                 let mut encoder = self.take_encoder("progressive halo capture");
                 let cols = (stop_count as u32).clamp(1, 4);
                 let rows = (stop_count as u32).div_ceil(cols).max(1);
-                let tile_side = progressive_blur::PROGRESSIVE_TILE_MAX
-                    .min(self.max_texture_2d / 4)
-                    .max(1);
                 let width = (active_dirty.x1 - active_dirty.x0) as u32;
                 let height = (active_dirty.y1 - active_dirty.y0) as u32;
                 let budget = self.reader_budget_room();
+                let tile_side = self.progressive_tile_side(width, height, cols, rows, budget);
                 self.readers.ensure_blur_out_budgeted(
                     &self.device,
                     width.min(tile_side) * cols,
@@ -10451,7 +10470,8 @@ impl Backend for Gpu {
             return Err(EngineError::limit("a visible progressive blur has no coarse backdrop"));
         }
         let resident = halo_1.as_ref().map_or(plan.stops.len(), |halo| halo.first);
-        let fast_halo_only = capture_tier.is_none() && dirty_first >= resident;
+        let mid_tier_reuses_far = !captured_in_tier && capture_tier.is_some_and(|t| !t.is_far);
+        let fast_halo_only = (capture_tier.is_none() || mid_tier_reuses_far) && dirty_first >= resident;
         let max_resident_sigma = plan
             .stops
             .get(resident.min(dirty_end).saturating_sub(1))
@@ -10464,7 +10484,7 @@ impl Backend for Gpu {
         let (width, height) = draw.dirty_size();
 
         // Fast path: when every active stop in `dirty` is already provided by captured halo tiers,
-        // skip native blur passes, blur_out atlas allocation, and 256 px tiling completely.
+        // skip native blur passes, blur_out atlas allocation, and progressive tiling completely.
         if fast_halo_only {
             let chunk_side = if (width as usize).saturating_mul(height as usize) <= 6_000_000 {
                 width.max(height).max(1)
@@ -10514,10 +10534,8 @@ impl Backend for Gpu {
         let clip_info = draw.halo_clip_bounds(capture_tier, within, max_resident_blur_sigma);
         let cols = (resident as u32).clamp(1, 4);
         let rows = (resident as u32).div_ceil(cols).max(1);
-        let tile_side = progressive_blur::PROGRESSIVE_TILE_MAX
-            .min(self.max_texture_2d / 4)
-            .max(1);
         let budget = self.reader_budget_room();
+        let tile_side = self.progressive_tile_side(width, height, cols, rows, budget);
         self.readers.ensure_blur_out_budgeted(
             &self.device,
             width.min(tile_side) * cols,
