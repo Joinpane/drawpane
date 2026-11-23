@@ -131,7 +131,7 @@ function bindsByMode(doc: Doc, node: NodeRecord): boolean {
 /**
  * Issue 306's signature: a layer kept by an instance (above it) whose main is gone, shown in a
  * mode set on it or above it, that binds a variable this mode resolves otherwise: the layer itself,
- * or for what a full layout changes, the frame laying it out (its padding, say) or a layer in it.
+ * or for what a full layout changes, the frame laying it out or anything in that frame.
  */
 function keptInMode(doc: Doc, id: string, inside = false): boolean {
   const above = doc.ancestors(id);
@@ -144,7 +144,9 @@ function keptInMode(doc: Doc, id: string, inside = false): boolean {
   if (!node) return false;
   const moded = (n: NodeRecord) => Object.keys(getProp(n.props, "variableModes")).length > 0;
   if (!moded(node) && !above.some(moded)) return false;
-  const laidOut = inside ? [doc.get(node.parent), ...collectDescendants(doc, id)] : [];
+  // A flow places a layer by everything in it, so its frame and all it holds (a sibling hidden by
+  // its mode, say) can be the cause.
+  const laidOut = inside ? [doc.get(node.parent), ...collectDescendants(doc, node.parent)] : [];
   return [node, ...laidOut].some((n) => !!n && bindsByMode(doc, n));
 }
 
