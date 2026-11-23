@@ -1223,6 +1223,9 @@ pub struct Gpu {
     /// The requested reader bounds of the last whole draw, if it fit.
     whole_samples: Option<Option<IRect>>,
     whole_reader_halo: bool,
+    /// The frame a limited moving frame presented (`present_motion_standin`), while `cur` keeps
+    /// the sharp frame it was warped from: what a read-back shows until the next frame.
+    standin_frame: Option<usize>,
     /// Milliseconds a tile has lately taken to draw (a running average).
     tile_ms: f64,
     /// Running EWMA of `submit_ms / work_ms` for tile slices so backends with synchronous submit
@@ -1871,6 +1874,7 @@ impl Gpu {
             shown: None,
             whole_samples: None,
             whole_reader_halo: false,
+            standin_frame: None,
             tile_ms: 0.0,
             submit_ratio: if IS_WEBGL { 1.0 } else { 0.0 },
             blit,
@@ -5172,6 +5176,62 @@ impl Gpu {
         Ok(stats)
     }
 
+    /// Presents the last frame warped to `view` (or the background) when a budgeted moving frame
+    /// hits a limit: a composite of one quad, never a whole-view replay. `cur` and `last` keep the
+    /// sharp frame it was warped from, so the next frame warps from that again; a read-back shows
+    /// this one (`standin_frame`).
+    #[allow(clippy::too_many_arguments)]
+    fn present_motion_standin(
+        &mut self,
+        view: Affine,
+        background: [f32; 4],
+        w: u32,
+        h: u32,
+        t0: f64,
+        submits0: u32,
+        timestamp_started: bool,
+    ) -> Result<DrawStats> {
+        self.abort_pending_tile();
+        self.scene.reset();
+        if !timestamp_started {
+            self.begin_frame_timestamp();
+        }
+        let dst = self.next_frame();
+        self.ensure_frame(dst, w, h)?;
+        let mut comp = Composite {
+            exact: false,
+            complete: false,
+            pending: 1,
+            ..Composite::default()
+        };
+        if self.cur.is_some()
+            && let Some(l) = self.last
+            && l.view.determinant().abs() > 0.0
+        {
+            comp.base = Some(view * l.view.inverse());
+        }
+        let mut stats = DrawStats {
+            standin: true,
+            plan: 1,
+            pending: 1,
+            held: self.tiles.len() as u32,
+            evicted: self.tiles.stats.evicted,
+            ..DrawStats::default()
+        };
+        let t1 = now();
+        let encoder = self.composite(&comp, dst, background, w, h, false, &mut stats)?;
+        stats.render_ms += now() - t1;
+        let stats = self.finish_frame(dst, stats, t0, submits0, encoder)?;
+        if self.cur.is_none() {
+            self.cur = Some(dst);
+            self.set_cur_page(true);
+        } else {
+            self.standin_frame = Some(dst);
+        }
+        self.shown = None;
+        Ok(stats)
+    }
+
     /// Draws a frame made of tiles (decision 0040, phase 2): draws the tiles it needs, as many as
     /// `options` allow beyond those nothing can stand in for, composites the frame from them
     /// (stand-ins beneath what isn't drawn yet), and, with a canvas, presents it. `exact` in the
@@ -5235,20 +5295,35 @@ impl Gpu {
         let last = self.last;
         let plan_last = if opening { None } else { last };
         let coarse_moving = options.moving && halo > 0;
+        // Moving and composite-only frames never wait on a limited draw: they show a stand-in.
+        let standin_on_limit = options.budget_ms < 0.0 || (options.moving && options.budget_ms > 0.0);
+        macro_rules! or_standin {
+            ($result:expr) => {
+                match $result {
+                    Ok(value) => value,
+                    Err(e) if standin_on_limit && e.code == ErrorCode::Limit => {
+                        return self.present_motion_standin(view, background, w, h, t0, submits0, true);
+                    }
+                    Err(e) => return Err(e),
+                }
+            };
+        }
         self.tiles.opening = opening;
         // During moving coarse reader frames, draw only visible tiles rather than spending frame
         // budget prefetching off-screen coarse stand-ins that must be redrawn exact at rest.
-        let mut plan = self
-            .tiles
-            .plan(
-                view,
-                (w, h),
-                zooming || opening,
-                plan_last,
-                options.prefetch && !coarse_moving && !opening,
-                coarse_moving,
-            )
-            .ok_or_else(|| EngineError::limit("a camera the tiles can't follow (too far out)"))?;
+        let Some(mut plan) = self.tiles.plan(
+            view,
+            (w, h),
+            zooming || opening,
+            plan_last,
+            options.prefetch && !coarse_moving && !opening,
+            coarse_moving,
+        ) else {
+            if standin_on_limit {
+                return self.present_motion_standin(view, background, w, h, t0, submits0, false);
+            }
+            return Err(EngineError::limit("a camera the tiles can't follow (too far out)"));
+        };
         let selection = self.tiles.drag_prepare(&mut plan, drag.map(DragFrame::input).as_ref());
         // A composite-only frame can present cached tiles; direct tiles and drag layers
         // need an actual draw to produce pixels.
@@ -5332,7 +5407,7 @@ impl Gpu {
                     self.deadline_ms = pt_deadline;
                     let step = self.resume_pending_tile(store, &mut stats);
                     self.deadline_ms = None;
-                    match step? {
+                    match or_standin!(step) {
                         TileStep::Complete => {}
                         TileStep::Paused => {
                             budget_hit = true;
@@ -5404,7 +5479,7 @@ impl Gpu {
                 }
                 let tile_detail = job.detail || coarse_moving;
                 if plan.direct {
-                    let exact = self.draw_job(
+                    let exact = or_standin!(self.draw_job(
                         store,
                         job,
                         tile_detail,
@@ -5415,7 +5490,7 @@ impl Gpu {
                         dst,
                         &mut stats,
                         &mut verbs,
-                    )?;
+                    ));
                     direct_exact &= !tile_detail && exact;
                     continue;
                 }
@@ -5448,7 +5523,7 @@ impl Gpu {
                         &mut verbs,
                     );
                     self.deadline_ms = None;
-                    match step? {
+                    match or_standin!(step) {
                         TileStep::Complete => {
                             let took = now() - t0 - elapsed;
                             self.tile_ms = self.tile_ms * 0.75 + took * 0.25;
@@ -5539,7 +5614,7 @@ impl Gpu {
             stats.render_ms += now() - t1;
             for job in &late {
                 let tile_detail = job.detail || coarse_moving;
-                let exact = self.draw_job(
+                let exact = or_standin!(self.draw_job(
                     store,
                     job,
                     tile_detail,
@@ -5550,13 +5625,16 @@ impl Gpu {
                     dst,
                     &mut stats,
                     &mut verbs,
-                )?;
+                ));
                 direct_exact &= !tile_detail && exact;
             }
             if let (Some(now), Some(split)) = (selection, drag.and_then(|d| d.split.as_ref())) {
                 let dragged = self.drag_composite(store, &plan, now, split, halo, background, dst, &mut stats);
                 if let Err(e) = dragged {
                     self.scene.reset();
+                    if standin_on_limit && e.code == ErrorCode::Limit {
+                        return self.present_motion_standin(view, background, w, h, t0, submits0, true);
+                    }
                     return Err(e);
                 }
             }
@@ -5722,6 +5800,7 @@ impl Gpu {
     ) -> Result<DrawStats> {
         let t1 = now();
         self.check()?;
+        self.standin_frame = None;
         self.configure_surface(frame)?;
         let acquired = match self.acquire() {
             Ok(t) => t,
@@ -7841,7 +7920,10 @@ impl Gpu {
     /// `read_back_straight` (which takes the in-flight count it answers). At most `READBACKS` at once.
     pub fn read_back_start(&self) -> Result<ReadBack> {
         self.check()?;
-        let main = self.current()?;
+        let main = match self.standin_frame {
+            Some(frame) => &self.frames[frame],
+            None => self.current()?,
+        };
         if self.readbacks.count.get() >= READBACKS {
             return Err(EngineError::new(
                 ErrorCode::State,

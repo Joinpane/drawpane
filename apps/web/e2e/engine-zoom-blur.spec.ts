@@ -2792,5 +2792,103 @@ for (const build of ["browser", "webgl"] as const) {
         expect(r.p99, `${r.name} max=${r.max} p99=${r.p99} mean=${r.mean}`).toBeLessThanOrEqual(2);
       }
     });
+
+    test("budgeted moving frames that hit a limit present a warped stand-in (F4)", async ({
+      page,
+    }) => {
+      test.setTimeout(120_000);
+      await openEngine(page, build);
+      // A sparse blue square at the page origin and, 2,000 units to the right, 150 small squares
+      // (about 750 path verbs) under a wide background blur. With `frame_verbs` at 400 a tile
+      // there hits the verb limit.
+      const list = new ListWriter(0xffffffff, 1);
+      list.reset();
+      let nextId = 1;
+      const addRect = (x: number, y: number, w: number, h: number, ops: WireRecord["ops"]) => {
+        list.set(nextId++, ROOT, {
+          flags: 0,
+          transform: [1, 0, 0, 1, x, y],
+          opacity: 1,
+          width: w,
+          height: h,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [{ kind: "rect", w, h, radii: [0, 0, 0, 0], smoothing: 0 }],
+          ops,
+          coarse: [],
+        });
+      };
+      const solid = (c: readonly [number, number, number, number]): WireRecord["ops"] => [
+        { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: c } },
+      ];
+      addRect(0, 0, 400, 400, solid([0.2, 0.4, 0.8, 1]));
+      for (let i = 0; i < 150; i++) {
+        addRect(2000 + (i % 15) * 30, Math.floor(i / 15) * 30, 20, 20, solid([0.8, 0.2, 0.2, 1]));
+      }
+      addRect(2000, 0, 500, 400, [
+        { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 1800 },
+      ]);
+      const bytes = [...list.finish()];
+      const res = await page.evaluate(async (bytes) => {
+        const name = "/engine.js";
+        const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+        await glue.default({ module_or_path: "/engine_bg.wasm" });
+        const bg = new Float32Array([1, 1, 1, 1]);
+        const requireOk = (o: { ok: boolean; message: string; free(): void }) => {
+          const { ok, message } = o;
+          o.free();
+          if (!ok) throw new Error(message);
+        };
+        const dev = await glue.createGpu(null, 0);
+        if (!dev.ok) throw new Error(dev.message);
+        const gpu = new glue.Engine(0, 0);
+        try {
+          if (!gpu.attachGpu || !gpu.renderGpu || !gpu.gpuPixels)
+            throw new Error("missing GPU entry points");
+          requireOk(gpu.setLimit("frame_verbs", 400));
+          requireOk(gpu.attachGpu(dev));
+          dev.free();
+          requireOk(gpu.apply(new Uint8Array(bytes)));
+          const pixel = async (x: number, y: number) => {
+            const px = await gpu.gpuPixels?.();
+            if (!(px instanceof Uint8Array)) throw new Error(px?.message ?? "no pixels");
+            const i = (y * 512 + x) * 4;
+            return [px[i] ?? 0, px[i + 1] ?? 0, px[i + 2] ?? 0];
+          };
+          // A settled frame over the blue square.
+          requireOk(gpu.renderGpu(512, 320, 1, 0, 0, 1, bg, false, 0, true));
+          const before = await pixel(100, 100);
+          // Pan into the dense region while moving, on a 16.7 ms budget.
+          const verb = gpu.renderGpu(512, 320, 1, -1900, 0, 1, bg, true, 16.7, true);
+          const verbOut = {
+            ok: verb.ok,
+            plan: verb.plan,
+            standin: verb.standin,
+            exact: verb.exact,
+          };
+          verb.free();
+          // What a read-back shows: the stand-in for the new camera (the square moved out of
+          // view, so background), not the previous frame.
+          const after = await pixel(100, 100);
+          const far = gpu.renderGpu(512, 320, 1, -1e13, 0, 1, bg, true, 16.7, true);
+          const farOut = { ok: far.ok, plan: far.plan, standin: far.standin, exact: far.exact };
+          far.free();
+          return { before, verbOut, after, farOut };
+        } finally {
+          gpu.free();
+        }
+      }, bytes);
+      console.log(`[zoom-blur ${build}] f4 ${JSON.stringify(res)}`);
+      expect(res.before[2]).toBeGreaterThan(150);
+      expect(res.before[0]).toBeLessThan(100);
+      for (const r of [res.verbOut, res.farOut]) {
+        expect(r.ok).toBe(true);
+        expect(r.plan).toBe(1);
+        expect(r.standin).toBe(true);
+        expect(r.exact).toBe(false);
+      }
+      expect(Math.min(...res.after), `stand-in read back: ${res.after}`).toBeGreaterThan(240);
+    });
   });
 }

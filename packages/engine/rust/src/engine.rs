@@ -1566,10 +1566,11 @@ impl Engine {
                 drag.as_ref(),
             )?
         } else if composite_only || (options.moving && options.budget_ms > 0.0) {
-            // Coarse tiles do not need an exact halo. If a high-zoom tile hits a backend limit
-            // (for example an oversized glass chunk at 25,600% zoom), fall back to the device-res
-            // reader-halo path rather than forcing whole-view canvas downscaling.
-            match gpu.render(
+            // Moving and composite-only frames stay on coarse tiles within the frame budget. A
+            // tile that hits a backend limit (an oversized glass chunk at 25,600%, say) makes
+            // `Gpu::render` present a stand-in from the last frame rather than this frame running
+            // an unbudgeted whole-view halo replay.
+            gpu.render(
                 &self.store,
                 &frame,
                 background,
@@ -1577,32 +1578,7 @@ impl Engine {
                 i32::try_from(self.store.limits.halo.max(1)).unwrap_or(i32::MAX),
                 options,
                 drag.as_ref(),
-            ) {
-                Ok(stats) => stats,
-                Err(e) if e.code == ErrorCode::Limit => {
-                    let lazy_plan = if halo_plan.is_some() {
-                        halo_plan
-                    } else if editor_viewport && !self.store.has_context() {
-                        self.reader_halo_plan(view, Some(frame_rect), true, replay_limit).2
-                    } else {
-                        None
-                    };
-                    if lazy_plan.as_ref().is_some_and(|p| p.use_coarse_halo) {
-                        self.gpu.as_mut().expect("GPU attached").render_whole(
-                            &self.store,
-                            &frame,
-                            background,
-                            self.generation,
-                            options.moving,
-                            None,
-                            lazy_plan.as_ref(),
-                        )?
-                    } else {
-                        return Err(e);
-                    }
-                }
-                Err(e) => return Err(e),
-            }
+            )?
         } else {
             gpu.render_whole(
                 &self.store,
