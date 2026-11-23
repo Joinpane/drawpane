@@ -308,9 +308,11 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
   const swings = (op: Op) =>
     swingRoots.has(op.id) || doc.ancestors(op.id).some((a) => swingRoots.has(a.id));
   if (ops.some(swings)) {
-    const again = new Doc();
-    again.resetStored(doc.stored(), doc.compactCopies ? "compact" : "materialized");
-    again.applyStored(ops, { held: true });
+    // Applied as the editor commits them: they name copy layers too, which compact copies store
+    // as override records made for them.
+    const scratch = makeEditor(doc.stored(), doc.compactCopies ? "compact" : "materialized");
+    scratch.sync.commit(ops);
+    const again = scratch.doc;
     if (layoutOps(again, frames, { shrinkEmpty, keepEmpty }).some(swings))
       ops = ops.filter((op) => !swings(op));
   }
