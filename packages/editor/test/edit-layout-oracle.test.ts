@@ -31,7 +31,6 @@
 import {
   type BindingKey,
   branchChanges,
-  flowSized,
   getProp,
   keyBetween,
   measuresOn,
@@ -117,11 +116,24 @@ function frameStates(doc: Doc): Map<string, FrameState> {
  * axes when it had something in its flow, on an axis it newly hugs on
  * otherwise. Any other empty frame keeps the box it has.
  */
+/** Whether a layer binds a variable whose values differ between modes. */
+function bindsByMode(doc: Doc, node: NodeRecord): boolean {
+  return Object.values(getProp(node.props, "bindings") as Record<string, unknown>).some((id) => {
+    const variable = typeof id === "string" ? doc.get(id) : undefined;
+    if (!variable) return typeof id !== "string";
+    const values = Object.values(
+      (getProp(variable.props, "values") as Record<string, unknown> | undefined) ?? {},
+    ).map((v) => JSON.stringify(v));
+    return new Set(values).size > 1;
+  });
+}
+
 /**
  * Issue 306's signature: a layer kept by an instance (above it) whose main is gone, shown in a
- * mode set on it or above it, where something kept binds a variable that mode resolves otherwise.
+ * mode set on it or above it, that binds a variable this mode resolves otherwise: the layer itself,
+ * or for what a full layout changes, a layer in it (whose new value it would lay out).
  */
-function keptInMode(doc: Doc, id: string): boolean {
+function keptInMode(doc: Doc, id: string, inside = false): boolean {
   const above = doc.ancestors(id);
   const orphan = above.find((a) => {
     const main = getProp(a.props, "instanceOf");
@@ -129,10 +141,69 @@ function keptInMode(doc: Doc, id: string): boolean {
   });
   if (!orphan) return false;
   const node = doc.get(id);
+  if (!node) return false;
   const moded = (n: NodeRecord) => Object.keys(getProp(n.props, "variableModes")).length > 0;
-  if (!(node && moded(node)) && !above.some(moded)) return false;
-  return [orphan, ...collectDescendants(doc, orphan.id)].some(
-    (n) => Object.keys(getProp(n.props, "bindings")).length > 0,
+  if (!moded(node) && !above.some(moded)) return false;
+  return [node, ...(inside ? collectDescendants(doc, id) : [])].some((n) => bindsByMode(doc, n));
+}
+
+/**
+ * Issue 294's layers: those a collaborator's edit, landing as a rebase, moved out of every
+ * component (with what's in them). A rebase syncs nothing, so the editor's copies can stay linked to
+ * them; only copies of these are set aside.
+ */
+const stranded = new WeakMap<Doc, Set<string>>();
+
+/**
+ * Whether a flow decides a layer's size on one of its own axes, asked of layout itself (not worked
+ * out here): the layer, a little off its size, alone in a copy of the frame (with `mode` as its
+ * kind of flow), is laid out, and layout writes that size back.
+ */
+function flowDecides(
+  frame: NodeRecord,
+  child: NodeRecord,
+  prop: "width" | "height",
+  mode?: string,
+): boolean {
+  const layoutMode = mode ?? getProp(frame.props, "layoutMode");
+  if (layoutMode === "none") return false;
+  const plain = (props: Props) => {
+    const {
+      instanceOf: _i,
+      mirrors: _m,
+      overrides: _o,
+      bindings: _b,
+      ...rest
+    } = props as Record<string, unknown>;
+    return rest as Props;
+  };
+  const scratch = new Doc();
+  scratch.resetStored(
+    [
+      { id: "p", type: "page", parent: ROOT_ID, key: "a0", props: {} },
+      {
+        id: "frame",
+        type: "frame",
+        parent: "p",
+        key: "a0",
+        props: { ...plain(frame.props), layoutMode } as Props,
+      },
+      {
+        id: "probe",
+        type: child.type,
+        parent: "frame",
+        key: "a0",
+        props: {
+          ...plain(child.props),
+          positioning: "auto",
+          [prop]: getProp(child.props, prop) + 7,
+        } as Props,
+      },
+    ],
+    "materialized",
+  );
+  return layoutOps(scratch, ["frame"]).some(
+    (op) => op.op === "set" && op.id === "probe" && op.prop === prop,
   );
 }
 
@@ -193,7 +264,7 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
   }
   // Issue 306: layers kept by an instance whose main is gone aren't laid out in another mode;
   // what a full layout changes inside one shown in a mode, with bound values, is set aside.
-  ops = ops.filter((op) => !keptInMode(doc, op.id));
+  ops = ops.filter((op) => !keptInMode(doc, op.id, true));
   // Issue 302: layout stretches a size bound to a variable, which the binding sets otherwise. A
   // full layout's width or height for a layer that binds it, in a flow stretching that axis, is
   // set aside.
@@ -277,7 +348,11 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
     if (keptInMode(doc, node.id)) continue;
     // Issue 294: a rebase syncs nothing either, so over a collaborator's move of a layer out of a
     // main, the editor's copies stay linked to a layer no main holds any more.
-    if (!doc.ancestors(source.id).some((a) => getProp(a.props, "isComponent"))) continue;
+    if (
+      stranded.get(doc)?.has(source.id) &&
+      !doc.ancestors(source.id).some((a) => getProp(a.props, "isComponent"))
+    )
+      continue;
     const own = getProp(node.props, "overrides");
     const bound = getProp(node.props, "bindings") as Record<string, unknown>;
     for (const axis of ["h", "v"] as const) {
@@ -290,19 +365,30 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
       if (own.includes(size) || own.includes(sizing) || bound[size]) continue;
       // Bound in its main layer: it resolves by mode, or it's the copy's own once taken off.
       if ((getProp(source.props, "bindings") as Record<string, unknown>)[size]) continue;
-      if (
-        measuresOn(node, axis) ||
-        flowSized(node, parent, axis) ||
-        flowSized(node, parentSource, axis) ||
-        flowSized(source, parentSource, axis)
-      )
-        continue;
+      if (measuresOn(node, axis)) continue;
       const c = getProp(node.props, constraint);
       if (free && (c === "stretch" || c === "scale")) continue;
       const have = getProp(node.props, size);
       const want = getProp(source.props, size);
-      if (Math.round(Math.abs(want - have) * 100) > 1)
-        out.push({ inherits: node.id, prop: size, have, want });
+      if (Math.round(Math.abs(want - have) * 100) <= 1) continue;
+      // A size a flow gave is the flow's, not the layer's own: its own flow, the one it left (a
+      // frame that took its auto layout away had its main frame's kind), or its main layer's.
+      const flowMode = getProp(parent.props, "layoutMode");
+      if (
+        flowDecides(
+          parent,
+          node,
+          size,
+          flowMode !== "none" ? flowMode : getProp(parentSource.props, "layoutMode"),
+        )
+      )
+        continue;
+      if (
+        getProp(source.props, "positioning") !== "absolute" &&
+        flowDecides(parentSource, source, size)
+      )
+        continue;
+      out.push({ inherits: node.id, prop: size, have, want });
     }
   }
   for (const node of all) {
@@ -1360,9 +1446,24 @@ function connect(editor: Editor, nodes: readonly NodeRecord[], copies: "compact"
       // Only edits of the editor's still pending meet this one in the rebase.
       if (editor.sync.pendingCount > 0)
         for (const op of ops) if (oursOwn.has(op.id)) overlapped.add(op.id);
+      const inComponent = (id: string) =>
+        [editor.doc.get(id), ...editor.doc.ancestors(id)].some(
+          (a) => !!a && !!getProp(a.props, "isComponent"),
+        );
+      const moving = ops
+        .filter((op) => op.op === "move" && editor.doc.has(op.id) && inComponent(op.id))
+        .map((op) => op.id);
       remote.push(ops);
       revn += 1;
       receive({ t: "txn", revn, ops });
+      // What the rebase moved out of every component (issue 294's layers, above).
+      for (const id of moving) {
+        if (!editor.doc.has(id) || inComponent(id)) continue;
+        const set = stranded.get(editor.doc) ?? new Set<string>();
+        for (const n of [editor.doc.get(id), ...collectDescendants(editor.doc, id)])
+          if (n) set.add(n.id);
+        stranded.set(editor.doc, set);
+      }
       return serialSettled;
     },
     settle(mirror: Doc, step: string) {
@@ -1631,6 +1732,114 @@ describe("the oracle's checks and waivers", () => {
         want: 50,
       });
     });
+
+  for (const copies of ["materialized", "compact"] as const)
+    it(`waives #306 only for a layer that binds a variable its mode resolves otherwise, with copies ${copies}`, () => {
+      const nodes = (labelBinds: boolean): NodeRecord[] => [
+        { id: "p", type: "page", parent: ROOT_ID, key: "a0", props: {} },
+        {
+          id: "modes",
+          type: "collection",
+          parent: ROOT_ID,
+          key: "a0",
+          props: {
+            modes: [
+              { id: "light", name: "Light" },
+              { id: "dark", name: "Dark" },
+            ],
+          },
+        },
+        {
+          id: "num",
+          type: "variable",
+          parent: "modes",
+          key: "a0",
+          props: { variableType: "number", values: { light: 20, dark: 20 } },
+        },
+        {
+          id: "words",
+          type: "variable",
+          parent: "modes",
+          key: "a1",
+          props: {
+            variableType: "string",
+            values: { light: "Short", dark: "A longer visible label" },
+          },
+        },
+        {
+          id: "orphan",
+          type: "frame",
+          parent: "p",
+          key: "a0",
+          props: {
+            instanceOf: "missing",
+            variableModes: { modes: "dark" },
+            width: 160,
+            height: 80,
+          },
+        },
+        {
+          id: "label",
+          type: "text",
+          parent: "orphan",
+          key: "a0",
+          props: {
+            characters: "A longer visible label",
+            textAutoResize: "width",
+            width: 10,
+            height: 20,
+            ...(labelBinds ? { bindings: { characters: "words" } } : {}),
+          },
+        },
+        // A sibling bound to a variable worth the same in both modes explains nothing.
+        {
+          id: "unrelated",
+          type: "rect",
+          parent: "orphan",
+          key: "a1",
+          props: { width: 20, height: 20, bindings: { width: "num" } },
+        },
+      ];
+      const unbound = makeEditor(nodes(false), copies);
+      expect(keptInMode(unbound.doc, "label")).toBe(false);
+      expect(unsettled(unbound.doc)).toContainEqual({ text: "label", width: [10, 176] });
+      const bound = makeEditor(nodes(true), copies);
+      expect(keptInMode(bound.doc, "label")).toBe(true);
+    });
+
+  it("waives #294 only for a copy whose main layer a rebase moved out of its component", () => {
+    const editor = makeEditor(null, "materialized");
+    expect(
+      editor.commit([
+        {
+          op: "create",
+          id: "main",
+          type: "frame",
+          parent: "p",
+          key: "a0",
+          props: { isComponent: true, layoutMode: "row", width: 160, height: 80 },
+        },
+        {
+          op: "create",
+          id: "rect",
+          type: "rect",
+          parent: "main",
+          key: "a0",
+          props: { width: 60, height: 20 },
+        },
+      ]),
+    ).toBe(true);
+    const instance = editor.insertInstance("main", { x: 5000, y: 5000 }) as string;
+    const rect = editor.doc.childIds(instance)[0] as string;
+    editor.sync.takeUnsent();
+    editor.sync.commit([{ op: "set", id: rect, prop: "width", value: 20 }]);
+    const stale = { inherits: rect, prop: "width", have: 20, want: 60 };
+    expect(unsettled(editor.doc)).toContainEqual(stale);
+    // The main layer moved out of its component by a plain local edit: no rebase, no waiver.
+    editor.sync.commit([{ op: "move", id: "rect", parent: "p", key: editor.topKey("p") }]);
+    expect(editor.doc.get(rect)).toBeDefined();
+    expect(unsettled(editor.doc)).toContainEqual(stale);
+  });
 
   it("counts as concurrent (#307) only edits that met in a rebase", () => {
     const copies = "materialized";
