@@ -5579,6 +5579,7 @@ impl Gpu {
                             stats.in_progress = true;
                             if job.must {
                                 self.tiles.mark_unpainted(job.key);
+                            let reduced_before = stats.reduced;
                                 unfinished_must = true;
                             }
                         }
@@ -5605,7 +5606,8 @@ impl Gpu {
                             )?;
                             let took = now() - t0 - elapsed;
                             self.tile_ms = self.tile_ms * 0.75 + took * 0.25;
-                            self.tiles.drawn(job.key, s, exact, !tile_detail);
+                            self.tiles
+                                .drawn(job.key, s, exact, !tile_detail, stats.reduced > reduced_before);
                         }
                         None => {
                             if job.must {
@@ -5638,6 +5640,8 @@ impl Gpu {
         } else {
             // What's drawn straight into the frame after it covers its tile there: the composite
             // counts it so (what no slot could be found for included).
+            // A frame shows a reduced effect when a visible tile holds one, whenever it was drawn.
+            stats.reduced = stats.reduced.max(comp.reduced);
             if self.pending_tile.is_some() && !late.is_empty() {
                 // Direct tiles share scratch too. Present their stand-ins until the checkpoint
                 // completes, rather than throwing away its progress to draw them this frame.
@@ -6379,6 +6383,8 @@ impl Gpu {
                     background,
                     bg_bits,
                     generation,
+                let exact = total.exact();
+                let reduced = total.reduced > 0;
                     active_scratch: self.active_scratch,
                     active,
                     checkpoint,
@@ -6389,7 +6395,7 @@ impl Gpu {
             }
             exec::WalkOutcome::Complete {
                 stats: slice_stats,
-                exact,
+                total,
             } => {
                 stats.add(&slice_stats);
                 let sub0 = stats.submit_ms;
@@ -6438,7 +6444,7 @@ impl Gpu {
                 active.record_into(stats, slice_total);
                 self.update_submit_ratio(slice_total, stats.submit_ms - sub0);
                 if let Some((s, _)) = place {
-                    self.tiles.drawn(key, s, exact, !coarse_readers);
+                    self.tiles.drawn(key, s, exact, !coarse_readers, reduced);
                     stats.tiles_drawn += 1;
                     Ok(TileStep::Complete)
                 } else {
@@ -7464,7 +7470,7 @@ impl Gpu {
                             self.tiles.release(key, slot);
                             return Err(e);
                         }
-                        self.tiles.drawn(key, slot, true, true);
+                        self.tiles.drawn(key, slot, true, true, false);
                         slot
                     }
                 };

@@ -2928,8 +2928,10 @@ for (const build of ["browser", "webgl"] as const) {
         return [rPrem + rem * 255, gPrem + rem * 255, bPrem + rem * 255];
       };
 
-      const w = 384;
-      const h = 256;
+      // A small view: each tile it covers repeats the sigma 2,700 work, which a software
+      // adapter (CI) does slowly.
+      const w = 256;
+      const h = 192;
       const zoom = 100; // 10,000%
       const dpr = 2;
       const s = zoom * dpr; // 200 dev px / page unit
@@ -3119,10 +3121,71 @@ for (const build of ["browser", "webgl"] as const) {
             if (!engine.attachGpu || !engine.renderGpu || !engine.gpuPixels) {
               throw new Error("missing GPU entry points");
             }
-            const renderGpu = engine.renderGpu.bind(engine);
             const gpuPixels = engine.gpuPixels.bind(engine);
             requireOk(engine.attachGpu(dev));
             dev.free();
+            const finished = async (label: string, target = engine) => {
+              const done = await target.gpuFinished?.();
+              if (done && !done.ok) throw new Error(`${label}: ${done.message}`);
+              done?.free();
+            };
+            // Settles a view the way the editor does: frames at `budget`, slices between them,
+            // and (unlike the editor) a GPU wait after each call, so no single wait holds a whole
+            // software-rendered frame of sigma 2,700 work. Counts the calls that said exact.
+            const settle = async (
+              label: string,
+              rw: number,
+              rh: number,
+              z: number,
+              ox: number,
+              oy: number,
+              editorViewport: boolean,
+              budget: number,
+              target = engine,
+            ) => {
+              let calls = 0;
+              let exactCalls = 0;
+              let last = {
+                ok: false,
+                plan: -1,
+                exact: false,
+                standin: true,
+                reduced: 0,
+                pending: -1,
+              };
+              while (calls < 400) {
+                calls++;
+                const r = target.renderGpu?.(
+                  rw,
+                  rh,
+                  z,
+                  -ox * z,
+                  -oy * z,
+                  dpr,
+                  bg,
+                  false,
+                  budget,
+                  editorViewport,
+                );
+                if (!r) throw new Error(`${label}: no GPU entry point`);
+                last = {
+                  ok: r.ok,
+                  plan: r.plan,
+                  exact: r.exact,
+                  standin: r.standin,
+                  reduced: r.reduced,
+                  pending: r.pending,
+                };
+                const inProgress = r.in_progress;
+                if (r.exact) exactCalls++;
+                requireOk(r);
+                await finished(label, target);
+                if (budget <= 0 || (last.pending === 0 && !inProgress)) break;
+                target.renderGpuAhead?.(bg, budget)?.free();
+                await finished(label, target);
+              }
+              return { ...last, calls, exactCalls };
+            };
             const renderCase = async (
               label: string,
               bytes: number[] | null,
@@ -3134,14 +3197,16 @@ for (const build of ["browser", "webgl"] as const) {
               editorViewport: boolean,
             ) => {
               if (bytes) requireOk(engine.apply(new Uint8Array(bytes)));
-              const r = renderGpu(rw, rh, z, -ox * z, -oy * z, dpr, bg, false, 0, editorViewport);
-              const meta = {
-                ok: r.ok,
-                plan: r.plan,
-                exact: r.exact,
-                standin: r.standin,
-              };
-              requireOk(r);
+              const meta = await settle(
+                label,
+                rw,
+                rh,
+                z,
+                ox,
+                oy,
+                editorViewport,
+                editorViewport ? 8 : 0,
+              );
               const px = await gpuPixels();
               if (!(px instanceof Uint8Array)) throw new Error(`${label}: ${px.message}`);
               return { ...meta, pixels: Array.from(px) };
@@ -3174,7 +3239,34 @@ for (const build of ["browser", "webgl"] as const) {
               false,
             );
             const shRes = await renderCase("shadow", shBytes, w, h, zoom, 50, 50, true);
-            return { bgRes, l1Res, l2Res, l3Res, l3Ref, shRes };
+            // Every reduced path stays not exact on the budgeted tile path too: from a cleared
+            // cache, over many small slices and over the editor's 8 ms ones. On a fresh engine,
+            // since revisions only move forward: the reduced halo (1), then L2 (3), then L3 (4).
+            const honesty = [];
+            const devH = await glue.createGpu(null, 0);
+            if (!devH.ok) throw new Error(devH.message);
+            const honest = new glue.Engine(0, 0);
+            try {
+              if (!honest.attachGpu) throw new Error("missing GPU entry points");
+              requireOk(honest.attachGpu(devH));
+              devH.free();
+              for (const [label, bytes] of [
+                ["reader halo", bg2700],
+                ["L2", l2Bytes],
+                ["L3", l3Bytes],
+              ] as const) {
+                requireOk(honest.apply(new Uint8Array(bytes)));
+                for (const budget of [1, 8]) {
+                  honest.clearTiles?.();
+                  const label2 = `${label} at ${budget} ms`;
+                  const r = await settle(label2, w, h, zoom, 50, 50, true, budget, honest);
+                  honesty.push({ label, budget, ...r });
+                }
+              }
+            } finally {
+              honest.free();
+            }
+            return { bgRes, l1Res, l2Res, l3Res, l3Ref, shRes, honesty };
           } finally {
             engine.free();
           }
@@ -3291,6 +3383,21 @@ for (const build of ["browser", "webgl"] as const) {
       expect(l3Stats.p99).toBeLessThanOrEqual(2);
 
       expect(gpuOut.shRes.exact).toBe(true);
+
+      for (const r of gpuOut.honesty) {
+        console.log(`[zoom-blur ${build}] F6 budgeted honesty: ${JSON.stringify(r)}`);
+        const what = `${r.label} at ${r.budget} ms`;
+        expect(r.exactCalls, `${what} never says exact`).toBe(0);
+        expect(r.exact, `${what} settles not exact`).toBe(false);
+        expect(r.pending, `${what} settles`).toBe(0);
+        if (r.label === "L2") {
+          expect(r.reduced, `${what} names its reduction`).toBeGreaterThan(0);
+        } else {
+          expect(r.plan, `${what} uses the reduced halo tiers`).toBe(4);
+        }
+      }
+      const l2Slices = gpuOut.honesty.find((r) => r.label === "L2" && r.budget === 1)?.calls ?? 0;
+      expect(l2Slices, "L2 at 1 ms settles over several slices").toBeGreaterThan(1);
       expect(shStats.max).toBeLessThanOrEqual(4);
       expect(shStats.p99).toBeLessThanOrEqual(2);
     });

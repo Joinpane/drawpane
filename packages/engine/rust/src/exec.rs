@@ -1136,15 +1136,16 @@ pub struct WalkCheckpoint {
     resume_path: Vec<(u32, usize, usize)>,
     reader_seq: usize,
     backdrop_live: bool,
-    total_coarse: u32,
-    total_specks: u32,
+    /// What the slices before this one drew, so the finished walk's exactness counts every
+    /// stand-in, speck and reduced effect across slices (`DrawStats::exact`).
+    so_far: DrawStats,
 }
 
 /// Result of one slice of a resumable tile walk.
 pub enum WalkOutcome {
-    /// The walk finished; `stats` is this slice's incremental counts and `exact` reflects the
-    /// complete walk across all slices.
-    Complete { stats: DrawStats, exact: bool },
+    /// The walk finished; `stats` is this slice's incremental counts and `total` the whole
+    /// walk's across all slices (its `exact()` says whether the tile is exact).
+    Complete { stats: DrawStats, total: DrawStats },
     /// The walk yielded cooperatively at a safe boundary; `stats` is this slice's incremental
     /// counts and `checkpoint` resumes the remainder.
     Paused {
@@ -1203,19 +1204,12 @@ pub fn draw_split_resumable<B: Backend>(
     let tiled = frame.area != full_frame;
     let full_viewport = Rect::new(-1.0, -1.0, f64::from(frame.width) + 1.0, f64::from(frame.height) + 1.0);
     let resuming = checkpoint.is_some();
-    let (plan, resume_path, reader_seq, backdrop_live, total_coarse, total_specks) = match checkpoint {
-        Some(cp) => (
-            cp.plan,
-            cp.resume_path,
-            cp.reader_seq,
-            cp.backdrop_live,
-            cp.total_coarse,
-            cp.total_specks,
-        ),
+    let (plan, resume_path, reader_seq, backdrop_live, so_far) = match checkpoint {
+        Some(cp) => (cp.plan, cp.resume_path, cp.reader_seq, cp.backdrop_live, cp.so_far),
         None => {
             let plan = plan_readers(store, frame);
             let has_ctx = plan.as_ref().is_some_and(|p| p.has_context);
-            (plan, Vec::new(), 0, has_ctx, 0, 0)
+            (plan, Vec::new(), 0, has_ctx, DrawStats::default())
         }
     };
     let (has_context, needs_backdrop, last_reader_seq, isolated_with_reader, subtree_readers) = match plan {
@@ -1310,15 +1304,19 @@ pub fn draw_split_resumable<B: Backend>(
                 resume_path: walk.paused_path,
                 reader_seq: walk.reader_seq,
                 backdrop_live: walk.backdrop_live,
-                total_coarse: total_coarse + walk.stats.coarse,
-                total_specks: total_specks + walk.stats.specks,
+                so_far: {
+                    let mut so_far = so_far;
+                    so_far.add(&walk.stats);
+                    so_far
+                },
             },
         });
     }
-    let exact = (total_coarse + walk.stats.coarse) == 0 && (total_specks + walk.stats.specks) == 0;
+    let mut total = so_far;
+    total.add(&walk.stats);
     Ok(WalkOutcome::Complete {
         stats: walk.stats,
-        exact,
+        total,
     })
 }
 

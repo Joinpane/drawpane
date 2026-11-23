@@ -3119,7 +3119,9 @@ impl Engine {
                     let from = ((y + h) * side + h) * 4;
                     out.extend_from_slice(&target[from..from + t * 4]);
                 }
-                tiles.cache.drawn(job.key, slot, fs.draw.exact(), !job.detail);
+                tiles
+                    .cache
+                    .drawn(job.key, slot, fs.draw.exact(), !job.detail, fs.draw.reduced > 0);
             }
             let (pending, _) = tiles.cache.left(&plan);
             stats.pending = pending;
@@ -3222,7 +3224,9 @@ impl Engine {
                 tiles.slots.resize_with(s + 1, Vec::new);
             }
             take(self.cpu.target.data_as_u8_slice(), &mut tiles.slots[s]);
-            tiles.cache.drawn(job.key, slot, exact, !job.detail);
+            tiles
+                .cache
+                .drawn(job.key, slot, exact, !job.detail, fs.draw.reduced > 0);
         }
         let mut comp_exact = true;
         if !plan.direct {
@@ -3344,7 +3348,7 @@ impl Engine {
                                     tiles.slots.resize_with(s + 1, Vec::new);
                                 }
                                 take(self.cpu.target.data_as_u8_slice(), &mut tiles.slots[s]);
-                                tiles.cache.drawn(key, slot, true, true);
+                                tiles.cache.drawn(key, slot, true, true, false);
                                 Some(slot)
                             }
                             None => None,

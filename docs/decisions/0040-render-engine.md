@@ -1774,8 +1774,10 @@ viewport.
 
 A frame is exact only when nothing in it is reduced. The reduced halo tiers, a layer blur drawn
 on a reduced grid, and a layer-blur scope blurred in the far tier are all reductions, so a frame
-that uses any of them is never exact, and the editor names the reduction. The reviewed version
-had stamped settled reduced frames exact; that is reverted.
+that uses any of them is never exact, and the editor names the reduction. A tile remembers that
+it holds a reduced layer blur, and a resumable tile walk carries the count across its slices, so
+a frame built from such tiles, in any number of slices or from the cache, stays not exact and
+says why. The reviewed version had stamped settled reduced frames exact; that is reverted.
 
 Reduced frames are still useful. While the camera moves they are stand-ins, which may be soft,
 as Figma's are. At rest they are only a fallback for views whose readers reach further than a
