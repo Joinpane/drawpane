@@ -2023,6 +2023,61 @@ describe.each(["materialized", "compact"] as const)("re-check 7 with copies %s",
     expect(unsettled(editor)).toEqual([]);
   });
 
+  it.each(["fill", "stretch"] as const)(
+    "lays an instance that stretches in a flow out again when what's in its main changes (%s, seed 330191586)",
+    (how) => {
+      const editor = make(
+        [
+          page,
+          // On the page, Fill and stretch size nothing, so the main's own box stays put whatever
+          // is in it.
+          node("main", "frame", "p", {
+            isComponent: true,
+            width: 30,
+            height: 34,
+            layoutMode: "column",
+            sizingH: "hug",
+            sizingV: how === "fill" ? "fill" : "fixed",
+            paddingTop: 4,
+            paddingBottom: 4,
+            gap: 4,
+          }),
+          node("a", "rect", "main", { y: 4, width: 30, height: 12 }),
+          node("b", "rect", "main", { y: 20, width: 30, height: 10 }, "a1"),
+          node("row", "frame", "p", {
+            y: 300,
+            width: 200,
+            height: 34,
+            layoutMode: "row",
+            layoutWrap: true,
+            sizingV: "hug",
+            alignItems: how === "fill" ? "start" : "stretch",
+          }),
+          // It doesn't stretch, so it sizes the row's line; the instance brings what's in it.
+          node("short", "frame", "row", {
+            width: 20,
+            height: 20,
+            layoutMode: "row",
+            sizingH: "hug",
+            sizingV: "hug",
+          }),
+          node("dot", "rect", "short", { width: 20, height: 20 }),
+        ],
+        copies,
+      );
+      const instance = editor.insertInstance("main", { x: 5000, y: 5000 }) as string;
+      expect(editor.commit([{ op: "move", id: instance, parent: "row", key: "a1" }])).toBe(true);
+      expect(size(editor, instance)).toEqual([30, 34]);
+      expect(unsettled(editor)).toEqual([]);
+      // Out of its flow, the rect no longer holds the instance (or the row) open.
+      editor.setProp(["b"], "positioning", "absolute");
+      expect(size(editor, "main")).toEqual([30, 34]);
+      expect(size(editor, instance)).toEqual([30, 20]);
+      expect(size(editor, "row")[1]).toBe(20);
+      expect(unsettled(editor)).toEqual([]);
+    },
+  );
+
   it("keeps each nested instance's layers when two are swapped to one component", () => {
     const editor = make(
       [

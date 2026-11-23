@@ -1105,6 +1105,23 @@ export function relayoutTargets(
           inner.add(outer);
           around.push(outer);
         }
+  // An auto layout frame that stretches in a flow brings what's in it to its line or track (layout's
+  // contribution), so a change inside its main can resize it, and that flow, even where the main's
+  // own box stays put (a main on the page, which Fill and stretch don't size): laid out again, as a
+  // resized main's instances are.
+  const stretchesInFlow = (root: string) => {
+    const node = doc.getUnresolved(root);
+    if (!node || !isLayout(node) || getProp(node.props, "positioning") === "absolute") return false;
+    let parent = doc.getUnresolved(node.parent);
+    while (parent?.type === "group") parent = doc.getUnresolved(parent.parent);
+    if (!parent || !isLayout(parent)) return false;
+    if (getProp(parent.props, "layoutMode") === "grid") return true;
+    const sizes = [getProp(node.props, "sizingH"), getProp(node.props, "sizingV")];
+    if (sizes.includes("fill")) return true;
+    const self = getProp(node.props, "alignSelf");
+    const align = self === "auto" ? getProp(parent.props, "alignItems") : self;
+    return align === "stretch" && sizes.some((size) => size !== "hug");
+  };
   const seen = new Set<string>();
   /** Instances laid out differently from their mains, whose layout inside may have changed. */
   const differing: string[] = [];
@@ -1119,7 +1136,8 @@ export function relayoutTargets(
       if (differs && inner.has(componentId)) {
         seen.add(root);
         differing.push(root);
-      } else if (sized.has(componentId)) layout.push(root);
+      } else if (sized.has(componentId) || (inner.has(componentId) && stretchesInFlow(root)))
+        layout.push(root);
     }
   }
   if (differing.length === 0) return { layout, text };
