@@ -31,8 +31,10 @@
 import {
   type BindingKey,
   branchChanges,
+  flowSized,
   getProp,
   keyBetween,
+  measuresOn,
   mergeOps,
   type NodeRecord,
   nodeReader,
@@ -115,6 +117,25 @@ function frameStates(doc: Doc): Map<string, FrameState> {
  * axes when it had something in its flow, on an axis it newly hugs on
  * otherwise. Any other empty frame keeps the box it has.
  */
+/**
+ * Issue 306's signature: a layer kept by an instance (above it) whose main is gone, shown in a
+ * mode set on it or above it, where something kept binds a variable that mode resolves otherwise.
+ */
+function keptInMode(doc: Doc, id: string): boolean {
+  const above = doc.ancestors(id);
+  const orphan = above.find((a) => {
+    const main = getProp(a.props, "instanceOf");
+    return !!main && !doc.has(main);
+  });
+  if (!orphan) return false;
+  const node = doc.get(id);
+  const moded = (n: NodeRecord) => Object.keys(getProp(n.props, "variableModes")).length > 0;
+  if (!(node && moded(node)) && !above.some(moded)) return false;
+  return [orphan, ...collectDescendants(doc, orphan.id)].some(
+    (n) => Object.keys(getProp(n.props, "bindings")).length > 0,
+  );
+}
+
 function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[] {
   const all = layers(doc);
   const frames = all.filter((n) => n.type === "frame").map((n) => n.id);
@@ -171,14 +192,8 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
       ops = ops.filter((op) => !swings(op));
   }
   // Issue 306: layers kept by an instance whose main is gone aren't laid out in another mode;
-  // what a full layout changes inside one is set aside.
-  ops = ops.filter(
-    (op) =>
-      !doc.ancestors(op.id).some((a) => {
-        const main = getProp(a.props, "instanceOf");
-        return !!main && !doc.has(main);
-      }),
-  );
+  // what a full layout changes inside one shown in a mode, with bound values, is set aside.
+  ops = ops.filter((op) => !keptInMode(doc, op.id));
   // Issue 302: layout stretches a size bound to a variable, which the binding sets otherwise. A
   // full layout's width or height for a layer that binds it, in a flow stretching that axis, is
   // set aside.
@@ -209,8 +224,8 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
     const placed = placedGeometry(node, source, doc.get(node.parent), doc.get(source.parent));
     if (!placed) continue;
     const instances = doc.ancestors(node.id).filter((a) => getProp(a.props, "instanceOf"));
-    // Issue 306: layers kept by an instance whose main is gone lose what placed them.
-    if (instances.some((a) => !doc.has(getProp(a.props, "instanceOf") as string))) continue;
+    // Issue 306: layers kept by an instance whose main is gone, shown in another mode.
+    if (keptInMode(doc, node.id)) continue;
     // Issue 305: an instance sized by a binding, or a swapped nested instance nothing lays out
     // left at a size its main layer no longer has, doesn't place its layers again; their places
     // and sizes are set aside, nothing else.
@@ -244,16 +259,54 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
         out.push({ constrained: node.id, prop, have, want });
     }
   }
+  // Independently of that derivation, a product rule: a copy layer of its own fixed size that
+  // nothing resizes (no override of its size or sizing, no binding, not swapped, not measuring
+  // itself, not sized by a flow, its own, its main layer's or one it left, and placed freely, no
+  // Stretch or Scale on that axis) has its main layer's size.
+  for (const node of all) {
+    const source = doc.get(getProp(node.props, "mirrors") ?? "");
+    if (!source || source.type !== node.type || node.type === "group") continue;
+    const parent = doc.get(node.parent);
+    const parentSource = doc.get(source.parent);
+    if (!parent || !parentSource || parent.type !== "frame") continue;
+    const free =
+      getProp(parent.props, "layoutMode") === "none" ||
+      getProp(node.props, "positioning") === "absolute";
+    const shown = getProp(node.props, "instanceOf");
+    if (shown && shown !== getProp(source.props, "instanceOf")) continue;
+    if (keptInMode(doc, node.id)) continue;
+    // Issue 294: a rebase syncs nothing either, so over a collaborator's move of a layer out of a
+    // main, the editor's copies stay linked to a layer no main holds any more.
+    if (!doc.ancestors(source.id).some((a) => getProp(a.props, "isComponent"))) continue;
+    const own = getProp(node.props, "overrides");
+    const bound = getProp(node.props, "bindings") as Record<string, unknown>;
+    for (const axis of ["h", "v"] as const) {
+      const [size, sizing, constraint] =
+        axis === "h"
+          ? (["width", "sizingH", "constraintH"] as const)
+          : (["height", "sizingV", "constraintV"] as const);
+      if (getProp(node.props, sizing) !== "fixed" || getProp(source.props, sizing) !== "fixed")
+        continue;
+      if (own.includes(size) || own.includes(sizing) || bound[size]) continue;
+      if (
+        measuresOn(node, axis) ||
+        flowSized(node, parent, axis) ||
+        flowSized(node, parentSource, axis) ||
+        flowSized(source, parentSource, axis)
+      )
+        continue;
+      const c = getProp(node.props, constraint);
+      if (free && (c === "stretch" || c === "scale")) continue;
+      const have = getProp(node.props, size);
+      const want = getProp(source.props, size);
+      if (Math.round(Math.abs(want - have) * 100) > 1)
+        out.push({ inherits: node.id, prop: size, have, want });
+    }
+  }
   for (const node of all) {
     if (node.type !== "text") continue;
     // Issue 306: text kept by an instance whose main is gone isn't measured again in another mode.
-    if (
-      doc.ancestors(node.id).some((a) => {
-        const main = getProp(a.props, "instanceOf");
-        return !!main && !doc.has(main);
-      })
-    )
-      continue;
+    if (keptInMode(doc, node.id)) continue;
     const size = autoSize(node, measurer);
     if (!size) continue;
     const r = (v: number) => Math.round(v * 100) / 100;
@@ -822,12 +875,11 @@ const TARGETS: Partial<Record<Edit["kind"], (node: NodeRecord) => boolean>> = {
 type Snapshot = Record<string, { parent: string; key: string; type: string; props: Props }>;
 
 /**
- * How `after` differs from `before`, less what two known issues explain,
- * each by its own signature (and #310's, a Fill layer in a grid only moved or
- * resized): #280, a layer of an instance whose main is
- * gone, lost when its delete is redone; #281, a materialized layer (a copy
- * layer or an instance) only moved or resized by the redo; #290, a layer
- * only moved or resized in a flow holding a group with an absolute member.
+ * How `after` differs from `before`, less what known issues explain, each
+ * by its own signature: #281, a materialized layer (a copy layer or an
+ * instance) only moved or resized by the redo; #290, a layer only moved or
+ * resized in a flow holding a group with an absolute member; #310, a Fill
+ * layer in a grid only moved or resized.
  */
 function unexplained(before: Snapshot, after: Snapshot, doc: Doc): string[] {
   const out: string[] = [];
@@ -836,11 +888,6 @@ function unexplained(before: Snapshot, after: Snapshot, doc: Doc): string[] {
     const now = after[id];
     if (stable(was) === stable(now)) continue;
     const source = was && getProp(was.props, "mirrors");
-    if (was && !now && orphaned(before, id, doc)) continue;
-    // Issue 280 too: an instance whose main is gone, emptied by the redo, hugs down to its padding;
-    // only its size differs.
-    const main = was ? getProp(was.props, "instanceOf") : null;
-    if (was && now && main && !doc.has(main) && placedOnly(was, now)) continue;
     if (was && now && placedOnly(was, now) && inGroupedFlow(before, id)) continue;
     // Issue 310: a Fill layer directly in a grid has more than one settled layout.
     const grid = was ? before[was.parent] : undefined;
@@ -908,15 +955,6 @@ function collectDescendants(doc: Doc, id: string): NodeRecord[] {
     stack.push(...doc.childIds(at));
   }
   return out;
-}
-
-/** Whether a layer sat, before, in an instance whose main is gone now (issue 280's). */
-function orphaned(before: Snapshot, id: string, doc: Doc): boolean {
-  for (let at = before[id]; at; at = before[at.parent]) {
-    const main = getProp(at.props, "instanceOf");
-    if (main && !doc.has(main)) return true;
-  }
-  return false;
 }
 
 /** Every layer as presented, and every record as stored (variables and styles included). */
@@ -1179,10 +1217,10 @@ function layOutRebase(editor: Editor): void {
     for (const entry of unsettled(editor.doc)) {
       const e = entry as Record<string, unknown>;
       if (e.op === "set") ops.push(entry as Op);
-      else if (e.constrained)
+      else if (e.constrained || e.inherits)
         ops.push({
           op: "set",
-          id: String(e.constrained),
+          id: String(e.constrained ?? e.inherits),
           prop: e.prop as "x",
           value: e.want as number,
         });
@@ -1200,7 +1238,7 @@ function layOutRebase(editor: Editor): void {
 /** A stale entry's layer and what about it is stale, to tell two checks' entries apart. */
 function entryKey(o: unknown): string {
   const e = o as Record<string, unknown>;
-  return `${String(e.id ?? e.constrained ?? e.text)}:${String(e.prop ?? (e.width ? "width" : "height"))}`;
+  return `${String(e.id ?? e.constrained ?? e.inherits ?? e.text)}:${String(e.prop ?? (e.width ? "width" : "height"))}`;
 }
 
 /**
@@ -1235,30 +1273,28 @@ function connect(editor: Editor, nodes: readonly NodeRecord[], copies: "compact"
   editor.setPage("p");
   const other = makeEditor(nodes, copies);
   const remote: Op[][] = [];
-  /** Layers the editor's edits changed, all unsent until `settle`. */
+  /** Layers the editor's edits changed, and the frames around them, all unsent until `settle`. */
   const ours = new Set<string>();
-  /** Of those, the ones a collaborator's edit arrived after (so they were rebased on it). */
-  const rebased = new Set<string>();
-  /** Layers the collaborator's edits changed, with where they moved them from and to. */
-  const theirs = new Set<string>();
-  /** The layers each side changed itself (not the frames around them), rebased or not. */
+  /** Of those, the layers the editor's edits changed themselves (not the frames around them). */
   const oursOwn = new Set<string>();
-  const rebasedOwn = new Set<string>();
-  const theirsOwn = new Set<string>();
+  /**
+   * Layers a collaborator's edit changed while an edit of the editor's to the same layer was
+   * still pending: the two met in a rebase. An edit either side makes after the other's arrived
+   * is serial, and isn't here.
+   */
+  const overlapped = new Set<string>();
   return {
-    rebased,
-    theirs,
     /**
-     * Copy and instance layers both sides changed themselves while the editor's edits were unsent
-     * (issue 307's: their override marks can collide).
+     * Copy and instance layers both sides changed concurrently, meeting in a rebase (issue 307's:
+     * their override marks can collide).
      */
     concurrent(): Set<string> {
       return new Set(
-        [...rebasedOwn].filter((id) => {
+        [...overlapped].filter((id) => {
           const node = editor.doc.get(id);
-          const linked =
-            !!node && (!!getProp(node.props, "mirrors") || !!getProp(node.props, "instanceOf"));
-          return linked && theirsOwn.has(id);
+          return (
+            !!node && (!!getProp(node.props, "mirrors") || !!getProp(node.props, "instanceOf"))
+          );
         }),
       );
     },
@@ -1319,15 +1355,9 @@ function connect(editor: Editor, nodes: readonly NodeRecord[], copies: "compact"
             .map(entryKey)
             .every((key) => staleBefore.has(key))
         : !!target && ours.has(target.id) && !editor.doc.has(target.id);
-      for (const op of ops) {
-        theirs.add(op.id);
-        theirsOwn.add(op.id);
-        if (op.op === "create" || op.op === "move") theirs.add(op.parent);
-        const was = editor.doc.get(op.id)?.parent;
-        if (op.op === "move" && was) theirs.add(was);
-      }
-      for (const id of ours) rebased.add(id);
-      for (const id of oursOwn) rebasedOwn.add(id);
+      // Only edits of the editor's still pending meet this one in the rebase.
+      if (editor.sync.pendingCount > 0)
+        for (const op of ops) if (oursOwn.has(op.id)) overlapped.add(op.id);
       remote.push(ops);
       revn += 1;
       receive({ t: "txn", revn, ops });
@@ -1465,4 +1495,187 @@ describe("an edit leaves the document as a full layout would", () => {
           `kinds of edit that never changed the document: ${JSON.stringify(Object.fromEntries(ran))}`,
         ).toEqual([]);
     }, 600_000);
+});
+
+// The oracle's own checks: each known issue's waiver covers its signature only, and the product
+// rules hold on their own (PR 286's fifth re-check).
+describe("the oracle's checks and waivers", () => {
+  it("reports an instance whose main is gone that only moved (no #280 waiver)", () => {
+    const editor = makeEditor(null, "compact");
+    const before: Snapshot = {
+      orphan: {
+        parent: "p",
+        type: "frame",
+        key: "a0",
+        props: { instanceOf: "missing", x: 1, width: 100, height: 40 } as Props,
+      },
+    };
+    const after: Snapshot = {
+      orphan: {
+        ...(before.orphan as Snapshot[string]),
+        props: { ...before.orphan?.props, x: 500 },
+      },
+    };
+    expect(unexplained(before, after, editor.doc)).toEqual(["orphan"]);
+  });
+
+  for (const copies of ["materialized", "compact"] as const)
+    it(`checks a fixed copy taken out of its flow against its main layer's size, with copies ${copies}`, () => {
+      const editor = makeEditor(null, copies);
+      editor.commit([
+        {
+          op: "create",
+          id: "main",
+          type: "frame",
+          parent: "p",
+          key: "a0",
+          props: { isComponent: true, width: 160, height: 80, layoutMode: "row" },
+        },
+        {
+          op: "create",
+          id: "rect",
+          type: "rect",
+          parent: "main",
+          key: "a0",
+          props: { width: 60, height: 20 },
+        },
+      ]);
+      const instance = editor.insertInstance("main", { x: 5000, y: 5000 }) as string;
+      const rect = editor.doc.childIds(instance)[0] as string;
+      editor.setProp([rect], "positioning", "absolute");
+      editor.resize(["rect"], "width", 90);
+      expect(getProp(editor.doc.get(rect)?.props ?? {}, "width")).toBe(90);
+      expect(unsettled(editor.doc)).toEqual([]);
+      // The rule stands on its own: a copy left at its old size is reported.
+      editor.sync.commit([{ op: "set", id: rect, prop: "width", value: 60 }]);
+      expect(unsettled(editor.doc)).toContainEqual({
+        inherits: rect,
+        prop: "width",
+        have: 60,
+        want: 90,
+      });
+    });
+
+  it("reports auto-size drift for visible, unbound text kept by an instance whose main is gone", () => {
+    const editor = makeEditor(
+      [
+        { id: "p", type: "page", parent: ROOT_ID, key: "a0", props: {} },
+        {
+          id: "orphan",
+          type: "frame",
+          parent: "p",
+          key: "a0",
+          props: { instanceOf: "missing", width: 160, height: 80 },
+        },
+        {
+          id: "label",
+          type: "text",
+          parent: "orphan",
+          key: "a0",
+          props: {
+            characters: "A longer visible label",
+            textAutoResize: "width",
+            width: 10,
+            height: 20,
+          },
+        },
+      ],
+      "materialized",
+    );
+    expect(unsettled(editor.doc)).toContainEqual({ text: "label", width: [10, 176] });
+  });
+
+  for (const copies of ["compact", "materialized"] as const)
+    it(`checks the constrained layer of a resized nested instance, with copies ${copies}`, () => {
+      const editor = makeEditor(null, copies);
+      editor.commit([
+        {
+          op: "create",
+          id: "leaf",
+          type: "frame",
+          parent: "p",
+          key: "a0",
+          props: { isComponent: true, width: 100, height: 60 },
+        },
+        {
+          op: "create",
+          id: "dot",
+          type: "rect",
+          parent: "leaf",
+          key: "a0",
+          props: { x: 10, y: 10, width: 20, height: 20, constraintH: "end" },
+        },
+        {
+          op: "create",
+          id: "outside",
+          type: "frame",
+          parent: "p",
+          key: "a1",
+          props: { isComponent: true, width: 200, height: 100 },
+        },
+      ]);
+      const nested = editor.insertInstance("leaf", { x: 5000, y: 5000 }) as string;
+      expect(editor.commit([{ op: "move", id: nested, parent: "outside", key: "a0" }])).toBe(true);
+      const root = editor.insertInstance("outside", { x: 8000, y: 8000 }) as string;
+      const copy = editor.doc.childIds(root)[0] as string;
+      editor.resize([copy], "width", 140);
+      const layer = editor.doc.childIds(copy)[0] as string;
+      expect(getProp(editor.doc.get(layer)?.props ?? {}, "x")).toBe(50);
+      editor.sync.commit([{ op: "set", id: layer, prop: "x", value: 10 }]);
+      expect(unsettled(editor.doc)).toContainEqual({
+        constrained: layer,
+        prop: "x",
+        have: 10,
+        want: 50,
+      });
+    });
+
+  it("counts as concurrent (#307) only edits that met in a rebase", () => {
+    const copies = "materialized";
+    const editor = makeEditor(null, copies);
+    editor.commit([
+      {
+        op: "create",
+        id: "main",
+        type: "frame",
+        parent: "p",
+        key: "a0",
+        props: { isComponent: true, width: 160, height: 80 },
+      },
+      {
+        op: "create",
+        id: "rect",
+        type: "rect",
+        parent: "main",
+        key: "a0",
+        props: { width: 60, height: 20 },
+      },
+      {
+        op: "create",
+        id: "dark",
+        type: "frame",
+        parent: "p",
+        key: "a1",
+        props: { width: 320, height: 120 },
+      },
+    ]);
+    const instance = editor.insertInstance("main", { x: 5000, y: 5000 }) as string;
+    const rect = editor.doc.childIds(instance)[0] as string;
+    const initial = editor.doc.stored();
+    editor.sync.takeUnsent();
+    const room = connect(editor, initial, copies);
+    // The collaborator fills the copy while the editor has nothing pending.
+    room.remote(1);
+    expect(editor.sync.pendingCount).toBe(0);
+    // Then the editor changes it, after seeing that fill, and the collaborator moves the root.
+    editor.setProp([rect], "opacity", 0.3);
+    room.note([rect], [instance]);
+    room.remote(3);
+    expect(editor.doc.get(instance)?.parent).toBe("dark");
+    expect(room.concurrent().has(rect)).toBe(false);
+    // An edit of the collaborator's to the same copy (its opacity) while the editor's is pending
+    // does meet it.
+    room.remote(4);
+    expect(room.concurrent().has(rect)).toBe(true);
+  });
 });
