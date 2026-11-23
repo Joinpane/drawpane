@@ -44,11 +44,26 @@ class FakeWorker extends EventTarget {
   onmessage: ((e: MessageEvent) => void) | null = null;
   onerror: ((e: ErrorEvent) => void) | null = null;
   terminated = false;
-  constructor() {
+  /** The image decode worker (engine-image.ts) decodes with the stubbed createImageBitmap. */
+  readonly decodes: boolean;
+  constructor(url?: string | URL) {
     super();
-    state.lastWorker = this;
+    this.decodes = String(url).includes("image-decode");
+    if (!this.decodes) state.lastWorker = this;
   }
   postMessage(message: { type: string; [k: string]: unknown }) {
+    if (this.decodes) {
+      const { id, blob, options } = message as unknown as {
+        id: number;
+        blob: Blob;
+        options: ImageBitmapOptions;
+      };
+      createImageBitmap(blob, options).then(
+        (bitmap) => this.emit({ id, bitmap }),
+        (error: unknown) => this.emit({ id, error: String(error) }),
+      );
+      return;
+    }
     state.workerMessages.push(message);
     if (message.type === "init") {
       queueMicrotask(() => {

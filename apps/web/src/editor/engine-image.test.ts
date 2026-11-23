@@ -1,6 +1,6 @@
 import type { ImageCache, ImageDemand } from "@drawpane/editor";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { deviceImageBudget, ViewImages } from "./engine-image";
+import { deviceImageBudget, imageDecoder, ViewImages } from "./engine-image";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -401,4 +401,72 @@ describe("image residency", () => {
       expect(deviceImageBudget(limit(64).bytes)).toBe(limit(64).bytes);
     },
   );
+});
+
+describe("image decoder", () => {
+  class FakeWorker {
+    onmessage: ((event: MessageEvent) => void) | null = null;
+    onerror: ((event: Event) => void) | null = null;
+    readonly sent: Array<{ id: number; options: ImageBitmapOptions }> = [];
+    terminated = false;
+    postMessage(message: { id: number; options: ImageBitmapOptions }) {
+      this.sent.push(message);
+    }
+    terminate() {
+      this.terminated = true;
+    }
+    reply(data: unknown) {
+      this.onmessage?.({ data } as MessageEvent);
+    }
+  }
+  const bitmap = (width: number) => ({
+    width,
+    height: width,
+    closed: false,
+    close() {
+      this.closed = true;
+    },
+  });
+
+  it("decodes in the worker and settles each request from its own reply", async () => {
+    const worker = new FakeWorker();
+    const spawn = vi.fn(() => worker as unknown as Worker);
+    const here = vi.fn();
+    vi.stubGlobal("createImageBitmap", here);
+    const decode = imageDecoder(spawn);
+    const a = decode(new Blob(["a"]), { resizeWidth: 10 });
+    const b = decode(new Blob(["b"]), { resizeWidth: 20 });
+    expect(spawn).toHaveBeenCalledTimes(1);
+    expect(worker.sent.map((message) => message.options.resizeWidth)).toEqual([10, 20]);
+    const [first, second] = worker.sent;
+    worker.reply({ id: second?.id, bitmap: bitmap(20) });
+    worker.reply({ id: first?.id, error: "corrupt" });
+    await expect(b).resolves.toMatchObject({ width: 20 });
+    await expect(a).rejects.toThrow("corrupt");
+    // A reply no request waits for is let go.
+    const stray = bitmap(5);
+    worker.reply({ id: 999, bitmap: stray });
+    expect(stray.closed).toBe(true);
+    expect(here).not.toHaveBeenCalled();
+  });
+
+  it("decodes here when no worker starts, and once its worker fails", async () => {
+    const here = vi.fn(async (_blob: Blob, options: ImageBitmapOptions) =>
+      bitmap(options.resizeWidth ?? 0),
+    );
+    vi.stubGlobal("createImageBitmap", here);
+    const blocked = imageDecoder(() => {
+      throw new Error("blocked by the content security policy");
+    });
+    await expect(blocked(new Blob(), { resizeWidth: 7 })).resolves.toMatchObject({ width: 7 });
+    const worker = new FakeWorker();
+    const decode = imageDecoder(() => worker as unknown as Worker);
+    const stranded = decode(new Blob(), { resizeWidth: 8 });
+    worker.onerror?.(new Event("error"));
+    expect(worker.terminated).toBe(true);
+    await expect(stranded).resolves.toMatchObject({ width: 8 });
+    await expect(decode(new Blob(), { resizeWidth: 9 })).resolves.toMatchObject({ width: 9 });
+    expect(worker.sent).toHaveLength(1);
+    expect(here).toHaveBeenCalledTimes(3);
+  });
 });
