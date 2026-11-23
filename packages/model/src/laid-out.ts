@@ -359,6 +359,12 @@ export function flowCopySizes(
   parent: NodeRecord | undefined,
 ): Partial<Record<"width" | "height", number>> {
   const out: Partial<Record<"width" | "height", number>> = {};
+  // Only a size that differs from its main layer's can be one to give back: most copies show
+  // their main layer's, and nothing else here needs reading for them.
+  const differs = AXES.filter(
+    (axis) => getProp(copy.props, axis.size) !== getProp(source.props, axis.size),
+  );
+  if (differs.length === 0) return out;
   if (parent?.type !== "frame" || copy.type === "group") return out;
   if (
     getProp(parent.props, "layoutMode") === "none" ||
@@ -370,7 +376,7 @@ export function flowCopySizes(
     return out;
   const overrides = getProp(copy.props, "overrides");
   const bound = getProp(copy.props, "bindings") as Record<string, unknown>;
-  for (const axis of AXES) {
+  for (const axis of differs) {
     const a = axis.size === "width" ? "h" : "v";
     if (getProp(copy.props, axis.sizing) !== "fixed") continue;
     if (getProp(source.props, axis.sizing) !== "fixed") continue;
