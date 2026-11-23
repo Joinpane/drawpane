@@ -463,6 +463,35 @@ Visual parity never gates 60 fps, and a frame-rate gate never shows stale glass.
   On WebGL2 the same suite runs and reports, gated only against regressions (criterion 1: supported, may be slower).
 - **When they fail:** if these fail on the phase 1 vertical slice, cache granularity, pass scheduling and batching are revisited before more features are built, and if that fails too, the engine choice. The trigger is a measured limit and a concrete alternative.
 
+### Real-input gate
+
+Run `pnpm gpu-bench --kit 2ddaf31f5bb47444 --gpu T4 --modes gpu -- bench/real-input.spec.ts`
+with access to the private Modal volume. This opens the iOS UI kit's Examples page
+cold, then replays 120 Hz trackpad swipes with momentum, both pinch and Cmd+scroll
+directions, and Shift+1, Shift+2 and Shift+0 from its Control Center board. Use
+Chromium with hardware WebGL2 for frame pacing. Headless WebGPU on Modal needs
+read-back to present, which changes the cadence.
+
+The report gives input-to-next-rAF lag (p50, p95 and max), rAF cadence and
+estimated missed 60 Hz frames, backlog from the last event sent to the last
+event handled, and the longest Long Tasks API entry (reports tasks of 50 ms or
+more). Shortcut cadence covers the first second. Time to exact starts when the
+sender stops and uses the engine's drawn stamp for the final camera, with full
+detail and zero pending tiles. Cold open reports time from navigation to first
+shown and drawn exact. Timings use neither a sampling profiler nor a screencast.
+The engine's stamp excludes visual changes from the minimap fade.
+
+Figma on the same replay held about 60 fps on pinch-out and the 100% pan.
+Pinch-out had 55–56 ms median lag, up to 64 ms p95, no dropped frames and at
+most 24 ms of backlog. The 100% pan had 39–48 ms median lag, 57 ms p95 and at
+most 0.3% dropped frames. Cmd+scroll-in had 45–48 ms p95 and no dropped frames.
+Cmd+scroll-out varied more, at 59–111 ms p95 and 3.6–35.5% dropped frames.
+The audit's initial budgets for pinch-out, the 100% pan and both Cmd+scroll
+directions are **p95 ≤ 100 ms, dropped frames ≤ 5%, backlog ≤ 100 ms**. Runs
+always print the measurements and budget misses. Add `--env BENCH_LAG_GATE=1`
+to fail on a miss. The other gestures and cold open are report-only. Figma's
+visual settling time is a separate measure from Drawpane's drawn-exact stamp.
+
 ## Language and libraries
 
 | | C++ with Skia | Rust with Vello (chosen) | Rust with our own renderer on wgpu |
