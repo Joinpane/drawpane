@@ -20,6 +20,8 @@
 import {
   type ClientMessage,
   type CopiesFormat,
+  getProp,
+  isPropName,
   LATENCY_BUCKETS_MS,
   latencyBucket,
   ModelError,
@@ -28,6 +30,7 @@ import {
   type Peer,
   PROTOCOL_VERSION,
   type Presence,
+  type PropName,
   type RestoredVersion,
   type ServerMessage,
 } from "@drawpane/model";
@@ -573,7 +576,11 @@ export class SyncEngine {
     }
     if (this.#revn !== null && revn <= this.#revn) return; // Already seen.
     this.#doc.batch(() => {
+      // What it marks as layers' own, read only when edits of ours wait to go on top of it: the
+      // overrides of the layers it marks with our edits, then as the room has them.
+      const ours = this.#pending.length > 0 ? this.#overridesOf(ops) : null;
       this.#undoPending();
+      const before = ours ? this.#overridesOf(ops) : null;
       try {
         // The room accepted it: applied as it is (as stored), however deep (decision 0026).
         this.#doc.applyStored(ops, { held: true });
@@ -583,8 +590,77 @@ export class SyncEngine {
         return;
       }
       this.#revn = revn;
+      const marked = before ? this.#marksSince(before) : null;
       this.#redoPending();
+      if (marked && ours) this.#keepMarks(marked, ours);
     });
+  }
+
+  /**
+   * The layers a received edit sets overrides on, with the overrides they have now. An override
+   * record's id is the copy layer's it stores for (the room refuses any other), so its operations
+   * name the layer as presented.
+   */
+  #overridesOf(ops: readonly Op[]): Map<string, readonly string[]> {
+    const out = new Map<string, readonly string[]>();
+    for (const op of ops) {
+      if (op.op === "delete" || op.op === "move") continue;
+      if (op.op === "set" ? op.prop !== "overrides" : !("overrides" in op.props)) continue;
+      const node = this.#doc.get(op.id);
+      if (node && !out.has(op.id)) out.set(op.id, getProp(node.props, "overrides"));
+    }
+    return out;
+  }
+
+  /** What each of those layers gained in overrides, with the values it has with them. */
+  #marksSince(before: ReadonlyMap<string, readonly string[]>): Map<string, Map<PropName, unknown>> {
+    const out = new Map<string, Map<PropName, unknown>>();
+    for (const [id, had] of before) {
+      const node = this.#doc.get(id);
+      if (!node) continue;
+      const gained = new Map<PropName, unknown>();
+      for (const prop of getProp(node.props, "overrides"))
+        if (!had.includes(prop) && isPropName(prop))
+          gained.set(prop, structuredClone(getProp(node.props, prop)));
+      if (gained.size > 0) out.set(id, gained);
+    }
+    return out;
+  }
+
+  /**
+   * Keeps what a collaborator's edit marked as layers' own through ours, made before it arrived: an
+   * edit of ours replayed on top writes values worked out where those layers weren't marked (a
+   * main's change propagated, a layout or constraint pass), which aren't ours to put over theirs
+   * (a received removal's marks, say, when our edit changed the main's flow; on main the second
+   * writer's derived values won). So each value they marked that ours changed is put back, as a
+   * fix-up of ours, sent after them: the room and everyone else end where serial edits would.
+   * Unless an edit of ours marked it too: then it's ours, the later.
+   */
+  #keepMarks(
+    marked: ReadonlyMap<string, ReadonlyMap<PropName, unknown>>,
+    ours: ReadonlyMap<string, readonly string[]>,
+  ): void {
+    const fix: Op[] = [];
+    for (const [id, gained] of marked) {
+      const node = this.#doc.get(id);
+      // Only on what's still a copy, or an instance: an edit of ours that detached it took it out.
+      if (!node || (!getProp(node.props, "mirrors") && !getProp(node.props, "instanceOf")))
+        continue;
+      // What our edits marked too (the room's overrides didn't have it, so it's ours, the later).
+      const theirs = [...gained].filter(([prop]) => !ours.get(id)?.includes(prop));
+      for (const [prop, value] of theirs)
+        if (JSON.stringify(getProp(node.props, prop)) !== JSON.stringify(value))
+          fix.push({ op: "set", id, prop, value } as Op);
+      const now = getProp(node.props, "overrides");
+      const lost = theirs.map(([prop]) => prop).filter((prop) => !now.includes(prop));
+      if (lost.length > 0) fix.push({ op: "set", id, prop: "overrides", value: [...now, ...lost] });
+    }
+    if (fix.length === 0) return;
+    try {
+      this.commit(fix);
+    } catch (error) {
+      if (!(error instanceof ModelError)) throw error;
+    }
   }
 
   #ack(seq: number, revn: number): void {

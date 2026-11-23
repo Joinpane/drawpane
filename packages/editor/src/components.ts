@@ -787,76 +787,127 @@ export function propagationOps(doc: Doc, ids: Iterable<string>): Op[] {
 const FRAME_PLACING: ReadonlySet<string> = new Set(["layoutMode", "alignItems", "justifyItems"]);
 
 /**
- * What keeps a frame's layers as the auto layout it took away left them (a frame of an instance
- * whose own layout mode is taken away), marked by the client taking it away in the same
- * transaction (protocol 4: clients from before don't write). Each layer the flow placed keeps
- * its place, and a text its mode; a size that flow or its main layer's own flow decided (Fill or
- * Stretch), or that differs from what its main layer and constraints give, is its own. Marked
- * with their values, so compact copies store them, whatever the main's flow does later.
+ * What an edit taking a frame's auto layout away marks (protocol 4: the client taking it away marks
+ * them, in the same transaction, and clients from before don't write): what that flow decided for
+ * the layers it placed, so they keep it, in the frame and in every copy of it the removal reaches.
+ *
+ * Only layers the flow placed: one out of it (absolute, or hidden) keeps following its main layer.
+ * In every frame that loses the flow, a place, size or text mode the flow gave a layer that differs
+ * from what its main layer and constraints give it is its own (an instance's Fill child keeps 42
+ * where its main layer is 82, as in Figma). An instance, or a layer in one, taking away a flow its
+ * main keeps marks more, since that main flow can change what its main layers show later: each
+ * layer's place, and its size on an axis a flow sized (Fill, or Stretch alignment), its own or its
+ * main layer's. A fixed size no flow decided isn't marked, so it follows its main layer.
  */
-function leftFlowMarks(
-  doc: Doc,
-  frame: NodeRecord,
-  view: (id: string) => NodeRecord | undefined,
-): Op[] {
+export function flowRemovalMarks(doc: Doc, ops: readonly Op[]): Op[] {
   const out: Op[] = [];
-  const shown = doc.get(
-    getProp(frame.props, "instanceOf") ?? getProp(frame.props, "mirrors") ?? "",
-  );
-  // The flow it left: its main's kind of flow, with its own alignment (its main's, unless it
-  // overrides it).
-  const mode = shown ? getProp(shown.props, "layoutMode") : "none";
-  const left =
-    getProp(frame.props, "layoutMode") === "none" && mode !== "none" && shown
-      ? ({
-          ...frame,
-          props: {
-            ...frame.props,
-            layoutMode: mode,
-            alignItems: getProp(frame.props, "overrides").includes("alignItems")
-              ? getProp(frame.props, "alignItems")
-              : getProp(shown.props, "alignItems"),
-          },
-        } as NodeRecord)
-      : frame;
+  const seen = new Set<string>();
+  for (const op of ops) {
+    if (op.op !== "set" || op.prop !== "layoutMode" || (op.value !== null && op.value !== "none"))
+      continue;
+    const frame = doc.get(op.id);
+    if (frame?.type !== "frame" || seen.has(frame.id)) continue;
+    // Read before the edit: a frame with no flow has nothing taken away.
+    if (getProp(frame.props, "layoutMode") === "none") continue;
+    seen.add(frame.id);
+    const shownId = getProp(frame.props, "instanceOf") ?? getProp(frame.props, "mirrors");
+    const shown = shownId ? doc.get(shownId) : undefined;
+    if (shown) out.push(...removalMarks(doc, frame, getProp(shown.props, "layoutMode") !== "none"));
+    for (const copy of flowCopies(doc, frame.id)) out.push(...removalMarks(doc, copy, false));
+  }
+  return out;
+}
+
+/**
+ * The copy frames that take their flow from `frameId` (its instances, for a main, and copies of it,
+ * through copies of copies), as they are before the edit: not one that sets its own layout mode.
+ */
+function flowCopies(doc: Doc, frameId: string): NodeRecord[] {
+  const mains = affectedComponents(doc, [frameId]);
+  const queue = [...mains];
+  for (let i = 0; i < queue.length; i++)
+    for (const root of instanceNodes(doc, queue[i] as string))
+      for (const outer of affectedComponents(doc, [root]))
+        if (!mains.has(outer)) {
+          mains.add(outer);
+          queue.push(outer);
+        }
+  const nodes: NodeRecord[] = [];
+  const walked = new Set<string>();
+  for (const main of mains)
+    for (const root of instanceNodes(doc, main)) {
+      const stack = [root];
+      while (stack.length > 0) {
+        const id = stack.pop() as string;
+        if (walked.has(id)) continue;
+        walked.add(id);
+        const node = doc.get(id);
+        if (!node) continue;
+        nodes.push(node);
+        stack.push(...doc.childIds(id));
+      }
+    }
+  // Copies of copies take it through the copy they copy: until nothing more is found.
+  const from = new Set([frameId]);
+  const out: NodeRecord[] = [];
+  for (let grew = true; grew; ) {
+    grew = false;
+    for (const node of nodes) {
+      if (from.has(node.id) || node.type !== "frame") continue;
+      const mirrors = getProp(node.props, "mirrors");
+      const shown = getProp(node.props, "instanceOf");
+      const copies =
+        (mirrors !== null && from.has(mirrors)) || (shown === frameId && mirrors === null);
+      if (!copies || getProp(node.props, "overrides").includes("layoutMode")) continue;
+      from.add(node.id);
+      out.push(node);
+      grew = true;
+    }
+  }
+  return out;
+}
+
+/** Every instance of a main: the stored roots (compact copies), or every instance layer. */
+function instanceNodes(doc: Doc, main: string): readonly string[] {
+  return doc.compactCopies ? doc.instanceRoots(main) : instancesOf(doc, main);
+}
+
+/** The marks keeping what the flow of `frame` (read before the edit) gave its layers. */
+function removalMarks(doc: Doc, frame: NodeRecord, ownedFlow: boolean): Op[] {
+  const out: Op[] = [];
+  const plain = { ...frame, props: { ...frame.props, layoutMode: "none" } } as NodeRecord;
   for (const child of doc.childIds(frame.id)) {
-    const copy = view(child);
+    const copy = doc.get(child);
     const source = copy ? doc.get(getProp(copy.props, "mirrors") ?? "") : undefined;
     if (!copy || !source) continue;
+    // Where the flow put it: a layer out of the flow (absolute, or hidden) it didn't place.
+    if (getProp(copy.props, "positioning") === "absolute" || !getProp(copy.props, "visible"))
+      continue;
     const own = getProp(copy.props, "overrides");
     const bound = getProp(copy.props, "bindings") as Record<string, unknown>;
-    // Where the flow put it: a layer out of the flow (absolute, or hidden) it didn't place.
-    const placed =
-      getProp(copy.props, "positioning") !== "absolute" && getProp(copy.props, "visible");
-    const marks: PropName[] = placed
-      ? (["x", "y"] as const).filter((prop) => !own.includes(prop) && !bound[prop])
-      : [];
-    // What its main layer and its constraints give it, with no flow: a size the flow gave it
-    // otherwise is kept, and so is one a flow decided, though it's its main layer's now (compact
-    // copies would show the main layer's once its own flow changes).
     const sourceParent = doc.get(source.parent);
-    const plain = constrainedValues(copy, source, frame, sourceParent);
+    // What its main layer and its constraints give it with no flow.
+    const given = constrainedValues(copy, source, plain, sourceParent);
+    const differs = (prop: "x" | "y" | "width" | "height") =>
+      Math.abs(getProp(copy.props, prop) - (given[prop] ?? getProp(source.props, prop))) >
+      PLACE_EPSILON;
+    const sized = (axis: "h" | "v") =>
+      flowSized(copy, frame, axis) || (!!sourceParent && flowSized(source, sourceParent, axis));
+    const marks: PropName[] = [];
+    for (const prop of ["x", "y"] as const)
+      if (!own.includes(prop) && !bound[prop] && (ownedFlow || differs(prop))) marks.push(prop);
     for (const prop of ["width", "height"] as const) {
       const axis = prop === "width" ? "h" : "v";
-      const want = plain[prop] ?? getProp(source.props, prop);
-      if (
-        !own.includes(prop) &&
-        !bound[prop] &&
-        !hugsOn(copy, axis) &&
-        !measuresOn(copy, axis) &&
-        (placed ||
-          flowSized(copy, left, axis) ||
-          (!!sourceParent && flowSized(source, sourceParent, axis)) ||
-          Math.abs(getProp(copy.props, prop) - want) > PLACE_EPSILON)
-      )
-        marks.push(prop);
+      if (own.includes(prop) || bound[prop] || hugsOn(copy, axis) || measuresOn(copy, axis))
+        continue;
+      if (differs(prop) || (ownedFlow && sized(axis))) marks.push(prop);
     }
-    // A text keeps the mode it has, the flow's or its main's (a main's flow can switch the main
-    // layer's later, decision 0043).
+    // A text keeps a mode the flow switched (decision 0043), or one its main's flow gave it.
     if (
       copy.type === "text" &&
       !own.includes("textAutoResize") &&
-      (placed || getProp(copy.props, "textAutoResize") !== getProp(source.props, "textAutoResize"))
+      (getProp(copy.props, "textAutoResize") !== getProp(source.props, "textAutoResize") ||
+        (ownedFlow && (sized("h") || sized("v"))))
     )
       marks.push("textAutoResize");
     if (marks.length === 0) continue;
@@ -977,29 +1028,6 @@ export function copyConstraintOps(doc: Doc, ops: readonly Op[]): Op[] {
     const props = node && pending.get(id);
     return props ? { ...node, props: { ...node.props, ...props } as Props } : node;
   };
-  // A frame of an instance that takes its own auto layout away (an older file's edit, or an older
-  // client's) leaves its layers as the layout made them, as Figma does (`leftFlowMarks`).
-  for (const op of ops) {
-    if (op.op !== "set" || op.prop !== "layoutMode" || (op.value !== null && op.value !== "none"))
-      continue;
-    const frame = doc.get(op.id);
-    if (!frame || (!getProp(frame.props, "mirrors") && !getProp(frame.props, "instanceOf")))
-      continue;
-    // Taken away, not reset: what it shows has a flow, or its own layout mode is an override.
-    const shown = doc.get(
-      getProp(frame.props, "instanceOf") ?? getProp(frame.props, "mirrors") ?? "",
-    );
-    if (
-      !(shown && getProp(shown.props, "layoutMode") !== "none") &&
-      !getProp(frame.props, "overrides").includes("layoutMode")
-    )
-      continue;
-    for (const mark of leftFlowMarks(doc, frame, view)) {
-      out.push(mark);
-      if (mark.op === "set")
-        pending.set(mark.id, { ...pending.get(mark.id), [mark.prop]: mark.value });
-    }
-  }
   for (const id of order)
     for (const op of copyPlaceOps(doc, id, view)) {
       out.push(op);

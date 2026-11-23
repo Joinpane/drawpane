@@ -3,7 +3,7 @@
  * independent review, F2 to F8): each ends where a full layout of the
  * document would, in both copy formats where both apply.
  */
-import { getProp, type NodeRecord, ROOT_ID } from "@drawpane/model";
+import { getProp, type NodeRecord, type Op, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { canMoveInto } from "../src/components";
 import { Doc } from "../src/doc";
@@ -928,14 +928,20 @@ describe.each(["materialized", "compact"] as const)("deriving copies with copies
     ]);
   });
 
-  it("places an end-pinned layer by its constraint once its main loses auto layout (R4b)", () => {
+  // Round 10 matched this to Figma: a main losing its auto layout leaves its instances' layers
+  // where their flow put them, and their constraints move them from there.
+  it("keeps an end-pinned layer where its flow put it once its main loses auto layout (R4b)", () => {
     const { editor, instance, copy } = setup(
       node("dot", "rect", "main", { x: 130, y: 20, width: 20, height: 10, constraintH: "end" }),
     );
     editor.resize([instance], "width", 200);
     editor.setLayoutMode(["main"], "row");
+    const placed = num(editor, copy, "x");
     editor.setLayoutMode(["main"], "none");
-    expect(num(editor, copy, "x")).toBe(num(editor, "dot", "x") + 40);
+    expect(num(editor, copy, "x")).toBe(placed);
+    editor.resize([instance], "width", 220);
+    expect(num(editor, copy, "x")).toBe(placed + 20);
+    expect(unsettled(editor)).toEqual([]);
   });
 });
 
@@ -2380,6 +2386,267 @@ describe.each(["materialized", "compact"] as const)("re-check 8 with copies %s",
       editor.setProp([copy], "visible", true);
       expect(box(editor, copy)[3]).toBe(42);
       expect(unsettled(editor)).toEqual([]);
+    },
+  );
+});
+
+// PR 286's tenth re-check: what a removal marks (only what the flow decided), a main's removal
+// (Figma), a layer swapped in after a removal, and a removal's marks through a collaborator's edit
+// made before it arrived.
+describe.each(["materialized", "compact"] as const)("re-check 10 with copies %s", (copies) => {
+  const box = (editor: Editor, id: string) =>
+    (["x", "y", "width", "height"] as const).map((prop) =>
+      getProp(editor.doc.get(id)?.props ?? {}, prop),
+    );
+  const boxes = (editor: Editor, instance: string) =>
+    editor.doc.childIds(instance).map((id) => box(editor, id));
+  // The reviewer's row (Figma's probe): a fixed child, a Fill child, an absolute child and a
+  // hidden one, in a 160 wide component, and an instance of it made 120 wide.
+  const row = (stretch = false) => {
+    const editor = make(
+      [
+        page,
+        node("main", "frame", "p", {
+          isComponent: true,
+          layoutMode: "row",
+          width: 160,
+          height: 100,
+          paddingLeft: 13,
+          paddingTop: 7,
+          gap: 5,
+        }),
+        node("fixed", "rect", "main", { width: 60, height: 20 }),
+        node("fill", "rect", "main", { width: 12, height: 10, sizingH: "fill" }, "a1"),
+        node(
+          "abs",
+          "rect",
+          "main",
+          { width: 20, height: 18, x: 4, y: 35, positioning: "absolute" },
+          "a2",
+        ),
+        node("hidden", "rect", "main", { width: 30, height: 16, visible: false }, "a3"),
+      ],
+      copies,
+    );
+    editor.commit(layoutOps(editor.doc, ["main"]));
+    const instance = editor.insertInstance("main", { x: 220, y: 0 }) as string;
+    editor.resize([instance], "width", 120);
+    if (stretch) editor.setProp([instance], "alignItems", "stretch");
+    return { editor, instance };
+  };
+  const resizeSources = (editor: Editor) => {
+    for (const [id, width, height] of [
+      ["fixed", 85, 42],
+      ["abs", 36, 25],
+      ["hidden", 44, 28],
+    ] as const) {
+      editor.resize([id], "width", width);
+      editor.resize([id], "height", height);
+    }
+  };
+
+  it("keeps a Fill child's width when its main loses auto layout, as Figma does (finding 3)", () => {
+    const { editor, instance } = row();
+    const before = boxes(editor, instance);
+    expect(before[1]).toEqual([78, 7, 42, 10]);
+    editor.setLayoutMode(["main"], "none");
+    expect(boxes(editor, instance)).toEqual(before);
+    editor.undo();
+    editor.redo();
+    expect(boxes(editor, instance)).toEqual(before);
+    // Figma: the fixed, absolute and hidden children follow their main layers; the Fill child
+    // keeps 42 where its main layer is 82, and padding moves nothing once there's no flow.
+    resizeSources(editor);
+    editor.setProp(["main"], "paddingLeft", 31);
+    expect(boxes(editor, instance)).toEqual([
+      [13, 7, 85, 42],
+      [78, 7, 42, 10],
+      [4, 35, 36, 25],
+      [0, 0, 44, 28],
+    ]);
+    expect(unsettled(editor)).toEqual([]);
+  });
+
+  it("marks only what the flow decided when an instance's own flow goes (finding 5)", () => {
+    const { editor, instance } = row(true);
+    expect(boxes(editor, instance).slice(0, 2)).toEqual([
+      [13, 7, 60, 93],
+      [78, 7, 42, 93],
+    ]);
+    expect(editor.commit([{ op: "set", id: instance, prop: "layoutMode", value: null }])).toBe(
+      true,
+    );
+    const overrides = editor.doc
+      .childIds(instance)
+      .map((id) => getProp(editor.doc.get(id)?.props ?? {}, "overrides"));
+    // Its place, and the sizes the flow gave (Stretch, Fill); the absolute and hidden children
+    // weren't in it.
+    expect(overrides).toEqual([["x", "y", "height"], ["x", "y", "width", "height"], [], []]);
+    resizeSources(editor);
+    expect(boxes(editor, instance)).toEqual([
+      [13, 7, 85, 93],
+      [78, 7, 42, 93],
+      [4, 35, 36, 25],
+      [0, 0, 44, 28],
+    ]);
+    expect(unsettled(editor)).toEqual([]);
+  });
+
+  it("has a layer swapped in after a removal follow its main layer (finding 4)", () => {
+    const editor = make(
+      [
+        page,
+        node("oldMain", "frame", "p", {
+          isComponent: true,
+          layoutMode: "row",
+          width: 160,
+          height: 80,
+          paddingLeft: 13,
+          paddingTop: 7,
+        }),
+        node("old", "rect", "oldMain", { name: "Old", x: 13, y: 7, width: 60, height: 20 }),
+        node("newMain", "frame", "p", { isComponent: true, width: 160, height: 80 }, "a1"),
+        node("new", "rect", "newMain", { name: "New", x: 17, y: 11, width: 40, height: 20 }),
+      ],
+      copies,
+    );
+    const instance = editor.insertInstance("oldMain", { x: 300, y: 0 }) as string;
+    expect(editor.commit([{ op: "set", id: instance, prop: "layoutMode", value: null }])).toBe(
+      true,
+    );
+    editor.swapInstance(instance, "newMain");
+    const copy = editor.doc.childIds(instance)[0] as string;
+    expect(box(editor, copy)).toEqual([17, 11, 40, 20]);
+    editor.setProp(["new"], "x", 65);
+    expect(box(editor, copy)).toEqual([65, 11, 40, 20]);
+    expect(getProp(editor.doc.get(copy)?.props ?? {}, "overrides")).toEqual([]);
+    expect(unsettled(editor)).toEqual([]);
+  });
+
+  it("reads a removal from before protocol 4 as stored, its layers following their main layers", () => {
+    // A file from before: the instance's flow taken away with nothing marked.
+    const { editor, instance } = row(true);
+    editor.sync.takeUnsent();
+    const legacy = editor.doc.stored().map(
+      (record): NodeRecord =>
+        record.id === instance
+          ? {
+              ...record,
+              props: {
+                ...record.props,
+                layoutMode: "none",
+                overrides: [...getProp(record.props, "overrides"), "layoutMode"],
+              },
+            }
+          : record,
+    );
+    const loaded = make(legacy, copies);
+    expect(boxes(loaded, instance).slice(0, 2)).toEqual([
+      [13, 7, 60, 93],
+      [78, 7, 42, 93],
+    ]);
+    // Nothing marks the layers, so once their main changes they show what their main layers give
+    // them, in both formats (pinned to the start, their main layers' boxes).
+    loaded.resize(["fixed"], "height", 21);
+    expect(boxes(loaded, instance)).toEqual(boxes(loaded, "main"));
+    expect(unsettled(loaded)).toEqual([]);
+  });
+
+  // The fixture of re-checks 8 and 9: two fixed rects, made 93 tall by the instance's Stretch.
+  const stretched = () => {
+    const editor = make(
+      [
+        page,
+        node("main", "frame", "p", {
+          isComponent: true,
+          width: 160,
+          height: 80,
+          layoutMode: "row",
+          paddingTop: 7,
+          paddingLeft: 13,
+          gap: 5,
+        }),
+        node("r", "rect", "main", { width: 60, height: 20, constraintH: "stretch" }),
+        node("s", "rect", "main", { width: 12, height: 10 }, "a1"),
+      ],
+      copies,
+    );
+    editor.commit(layoutOps(editor.doc, ["main"]));
+    const instance = editor.insertInstance("main", { x: 500, y: 500 }) as string;
+    editor.resize([instance], "width", 120);
+    editor.resize([instance], "height", 100);
+    editor.setProp([instance], "alignItems", "stretch");
+    editor.sync.takeUnsent();
+    return { base: editor.doc.stored(), instance };
+  };
+  /** An editor on the room's file, with what it sends. */
+  const connected = (base: NodeRecord[]) => {
+    const editor = make(base, copies);
+    const sent: { seq: number; ops: Op[] }[] = [];
+    editor.sync.connected((message) => {
+      if (message.t === "txn") sent.push(message as never);
+    });
+    editor.sync.receive({
+      t: "welcome",
+      mode: "snapshot",
+      revn: 1,
+      sessionId: "a",
+      role: "editor",
+      peers: [],
+      lastSeq: 0,
+      copies,
+    } as never);
+    editor.sync.receive({ t: "snapshot", nodes: base, done: true } as never);
+    editor.setPage("p");
+    const flush = () => {
+      editor.sync.flush();
+      return sent.shift();
+    };
+    return { editor, flush };
+  };
+
+  it.each(["unsent", "sent"] as const)(
+    "keeps a removal's marks through a main flow edit made before it arrived, %s (finding 1)",
+    (timing) => {
+      const { base, instance } = stretched();
+      const a = connected(base);
+      const b = make(base, copies);
+      const room = make(base, copies);
+      // B takes the instance's flow away, marking what it left; A, meanwhile, turns the main to a
+      // column, worked out while the instance still had its row.
+      expect(b.commit([{ op: "set", id: instance, prop: "layoutMode", value: null }])).toBe(true);
+      const removal = b.sync.takeUnsent();
+      const alone = boxes(b, instance);
+      a.editor.setLayoutMode(["main"], "column");
+      const early = timing === "sent" ? a.flush() : undefined;
+      // The room takes B's first.
+      room.doc.applyStored(removal);
+      a.editor.sync.receive({ t: "txn", revn: 2, ops: removal } as never);
+      let revn = 2;
+      const first = early ?? a.flush();
+      if (!first) throw new Error("nothing sent");
+      room.doc.applyStored(first.ops);
+      a.editor.sync.receive({ t: "ack", seq: first.seq, revn: ++revn } as never);
+      // An edit already sent can't be changed: what it put over B's marks is put back after it.
+      const fix = a.flush();
+      if (timing === "sent") expect(fix).toBeDefined();
+      if (fix) {
+        room.doc.applyStored(fix.ops);
+        a.editor.sync.receive({ t: "ack", seq: fix.seq, revn: ++revn } as never);
+      }
+      // Each layer keeps the place and the 93 B's removal marked as its own (main gave 20 and 10,
+      // but on main too the second's width is the column's 107: A's stale layout, #294).
+      const kept = (editor: Editor) =>
+        boxes(editor, instance).map(([x, y, , height]) => [x, y, height]);
+      expect(kept(room)).toEqual(alone.map(([x, y, , height]) => [x, y, height]));
+      expect(kept(room)).toEqual([
+        [13, 7, 93],
+        [78, 7, 93],
+      ]);
+      expect(box(room, room.doc.childIds(instance)[0] as string)).toEqual(alone[0]);
+      const sorted = (records: readonly NodeRecord[]) =>
+        [...records].sort((x, y) => x.id.localeCompare(y.id));
+      expect(sorted(a.editor.doc.stored())).toEqual(sorted(room.doc.stored()));
     },
   );
 });

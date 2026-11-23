@@ -31,6 +31,7 @@
 import {
   type BindingKey,
   branchChanges,
+  constrainedValues,
   getProp,
   hugsOn,
   isPropName,
@@ -1606,8 +1607,24 @@ function connect(editor: Editor, nodes: readonly NodeRecord[], copies: "compact"
       const copy = pick((n) => !!getProp(n.props, "mirrors"));
       const instance = pick(isInstance);
       const own = pick((n) => getProp(n.props, "overrides").length > 0);
+      // An instance showing its main's flow, which the collaborator takes away (PR 286's tenth
+      // re-check), now and then instead of a move into Dark.
+      const removes = step % 12 === 11;
+      const flowing = pick((n) => {
+        const main = other.doc.get(getProp(n.props, "instanceOf") ?? "");
+        return (
+          isInstance(n) &&
+          getProp(n.props, "layoutMode") !== "none" &&
+          !!main &&
+          getProp(main.props, "layoutMode") !== "none"
+        );
+      });
       const act = (ed: Editor): boolean => {
         const has = (n: NodeRecord | undefined): n is NodeRecord => !!n && ed.doc.has(n.id);
+        if (removes) {
+          if (!has(flowing)) return false;
+          return ed.commit([{ op: "set", id: flowing.id, prop: "layoutMode", value: null }]);
+        }
         switch (step % 4) {
           case 0:
             if (!has(copy)) return false;
@@ -1627,15 +1644,26 @@ function connect(editor: Editor, nodes: readonly NodeRecord[], copies: "compact"
             return true;
         }
       };
+      const hadOverrides = new Map(
+        layers(other.doc).map((n) => [n.id, getProp(n.props, "overrides")] as const),
+      );
       act(other);
       const ops = other.sync.takeUnsent();
       if (ops.length === 0) return false;
+      // What it marked as layers' own, with the values it gave them.
+      const theirMarks = layers(other.doc).flatMap((n) => {
+        const had = hadOverrides.get(n.id);
+        if (!had) return [];
+        return getProp(n.props, "overrides")
+          .filter((prop) => !had.includes(prop) && isPropName(prop))
+          .map((prop) => ({ id: n.id, prop, value: getProp(n.props, prop as never) }));
+      });
       // The same edit, made serially on the editor's document as it is now.
       const staleBefore = new Set(unsettled(editor.doc).map(entryKey));
       const serial = makeEditor(editor.doc.stored(), copies);
       // The collaborator's target, where the editor deleted it unsent: no serial order exists
       // (a deleted layer can't be edited), and the two edits collide on that layer.
-      const target = [copy, copy, own, instance][step % 4];
+      const target = removes ? flowing : [copy, copy, own, instance][step % 4];
       const serialSettled = act(serial)
         ? unsettled(serial.doc)
             .map(entryKey)
@@ -1655,7 +1683,26 @@ function connect(editor: Editor, nodes: readonly NodeRecord[], copies: "compact"
       remote.push(ops);
       last = ops.map((op) => op.id);
       revn += 1;
+      const mineBefore = new Map(
+        theirMarks.map(({ id }) => [id, getProp(editor.doc.get(id)?.props ?? {}, "overrides")]),
+      );
       receive({ t: "txn", revn, ops });
+      // What it marked stays its own through the edits of the editor's rebased on it, worked out
+      // where those layers weren't marked: unless the editor's marked it too (PR 286's tenth
+      // re-check: a main's flow edit rebased over a removal dropped the heights it marked).
+      if (rebasing)
+        for (const { id, prop, value } of theirMarks) {
+          const node = editor.doc.get(id);
+          if (!node || (!getProp(node.props, "mirrors") && !getProp(node.props, "instanceOf")))
+            continue;
+          if (mineBefore.get(id)?.includes(prop)) continue;
+          const now = getProp(node.props, prop as never);
+          expect(
+            sameNumber(now, value) || JSON.stringify(now) === JSON.stringify(value),
+            `the collaborator's ${prop} on ${id} kept through the rebase, ${step}`,
+          ).toBe(true);
+          expect(getProp(node.props, "overrides"), `${id} keeps ${prop} its own`).toContain(prop);
+        }
       // What a rebase moved out of every component (issue 294's, above): the editor's copies of
       // it, as they are now.
       if (rebasing)
@@ -2477,6 +2524,64 @@ function flowDocument(copies: "compact" | "materialized"): Editor {
   return editor;
 }
 
+const BOX_PROPS = ["x", "y", "width", "height"] as const;
+
+/**
+ * What an edit taking a flow away may mark as layers' own (PR 286's tenth re-check): only what
+ * that flow decided. Read before the edit; the returned check, run after it, lists each mark
+ * otherwise: any on a layer out of the flow (absolute, or hidden), and a size on a layer in it
+ * that no flow decided (layout writes it back neither in its frame's flow nor in its main layer's)
+ * and that its main layer and constraints give it as it is.
+ */
+function removalMarking(doc: Doc): () => unknown[] {
+  const copy = (n: NodeRecord | undefined) => (n ? { ...n, props: { ...n.props } } : undefined);
+  const before = layers(doc).flatMap((node) => {
+    const parent = doc.get(node.parent);
+    const source = doc.get(getProp(node.props, "mirrors") ?? "");
+    if (parent?.type !== "frame" || getProp(parent.props, "layoutMode") === "none" || !source)
+      return [];
+    return [
+      {
+        node: copy(node) as NodeRecord,
+        parent: copy(parent) as NodeRecord,
+        source: copy(source) as NodeRecord,
+        sourceParent: copy(doc.get(source.parent)),
+      },
+    ];
+  });
+  return () => {
+    const out: unknown[] = [];
+    for (const { node, parent, source, sourceParent } of before) {
+      const now = doc.get(node.id);
+      const frame = doc.get(parent.id);
+      if (!now || !frame || getProp(frame.props, "layoutMode") !== "none") continue;
+      const had = getProp(node.props, "overrides");
+      const gained = getProp(now.props, "overrides").filter((prop) => !had.includes(prop));
+      if (gained.length === 0) continue;
+      if (getProp(node.props, "positioning") === "absolute" || !getProp(node.props, "visible")) {
+        out.push({ marked: node.id, props: gained, outOfFlow: true });
+        continue;
+      }
+      const plain = { ...parent, props: { ...parent.props, layoutMode: "none" } } as NodeRecord;
+      const given = constrainedValues(node, source, plain, sourceParent);
+      for (const size of ["width", "height"] as const) {
+        if (!gained.includes(size)) continue;
+        if (flowDecides(doc, parent, node, size)) continue;
+        if (
+          sourceParent &&
+          getProp(source.props, "positioning") !== "absolute" &&
+          flowDecides(doc, sourceParent, source, size)
+        )
+          continue;
+        if (!sameNumber(getProp(node.props, size), given[size] ?? getProp(source.props, size)))
+          continue;
+        out.push({ marked: node.id, prop: size, fixed: getProp(node.props, size) });
+      }
+    }
+    return out;
+  };
+}
+
 /** Makes one edit of the family, checking a removal kept its layers' boxes. */
 /**
  * Frames of instances that took their auto layout away, in each document (`performFlow`), with
@@ -2520,7 +2625,11 @@ function performFlow(editor: Editor, e: FlowEdit): void {
     const boxes = doc.childIds(id).map((c) => [c, boxOf(doc, c)] as const);
     const frameWas = boxOf(doc, id);
     noteFlow(doc, id);
+    const marking = removalMarking(doc);
     act();
+    expect(marking(), `taking ${id}'s auto layout away marks only what the flow decided`).toEqual(
+      [],
+    );
     if (
       was !== "none" &&
       getProp(doc.get(id)?.props ?? {}, "layoutMode") === "none" &&
@@ -2580,7 +2689,15 @@ function performFlow(editor: Editor, e: FlowEdit): void {
         )
           continue;
       }
-      expectKept(doc, frame, child, box);
+      // What the removal marked as the layer's own stays; the rest follows its main layer, as a
+      // main's later change of a layer's size reaches it (Figma).
+      const marked = getProp(doc.get(child)?.props ?? {}, "overrides");
+      const keep = (b: readonly number[]) =>
+        b.map((v, i) => (marked.includes(BOX_PROPS[i] as string) ? v : null));
+      expect(
+        keep(boxOf(doc, child)),
+        `the main's flow changing keeps what taking ${frame}'s away marked on ${child}`,
+      ).toEqual(keep(box));
     }
   };
   switch (e.kind) {
@@ -2684,4 +2801,129 @@ describe("an instance's own flow against its main's", () => {
           `kinds of edit that never changed the document: ${JSON.stringify(Object.fromEntries(ran))}`,
         ).toEqual([]);
     }, 600_000);
+});
+
+// PR 286's tenth re-check found two things the oracle let through; these prove it reports them.
+describe("the oracle's checks after taking a flow away", () => {
+  for (const copies of ["materialized", "compact"] as const) {
+    it(`reports a wrong place on a layer swapped in after a removal, with copies ${copies}`, () => {
+      const editor = makeEditor(null, copies);
+      const doc = editor.doc;
+      expect(
+        editor.commit([
+          {
+            op: "create",
+            id: "rowMain",
+            parent: "p",
+            type: "frame",
+            key: "a0",
+            props: {
+              isComponent: true,
+              width: 160,
+              height: 80,
+              layoutMode: "row",
+              paddingLeft: 13,
+              paddingTop: 7,
+            },
+          },
+          {
+            op: "create",
+            id: "old",
+            parent: "rowMain",
+            type: "rect",
+            key: "a0",
+            props: { name: "Old", width: 60, height: 20 },
+          },
+          {
+            op: "create",
+            id: "plainMain",
+            parent: "p",
+            type: "frame",
+            key: "a1",
+            props: { isComponent: true, width: 160, height: 80 },
+          },
+          {
+            op: "create",
+            id: "new",
+            parent: "plainMain",
+            type: "rect",
+            key: "a0",
+            props: { name: "New", x: 17, y: 11, width: 40, height: 20 },
+          },
+        ]),
+      ).toBe(true);
+      const id = editor.insertInstance("rowMain", { x: 220, y: 0 }) as string;
+      performFlow(editor, { kind: "older-remove", at: 0 });
+      editor.swapInstance(id, "plainMain");
+      const next = doc.childIds(id)[0] as string;
+      expect(boxOf(doc, next)).toEqual([17, 11, 40, 20]);
+      expect(unsettled(doc)).toEqual([]);
+      // The reviewer's injection: a place nothing derives, and nothing marks as its own.
+      editor.sync.commit([{ op: "set", id: next, prop: "x", value: 65 }]);
+      expect(getProp(doc.get(next)?.props ?? {}, "overrides")).not.toContain("x");
+      expect(
+        unsettled(doc).some((entry) => JSON.stringify(entry).includes(next)),
+        "the wrong x is reported",
+      ).toBe(true);
+    });
+
+    it(`reports a removal's mark on a layer out of its flow, with copies ${copies}`, () => {
+      const editor = makeEditor(null, copies);
+      const doc = editor.doc;
+      expect(
+        editor.commit([
+          {
+            op: "create",
+            id: "rowMain",
+            parent: "p",
+            type: "frame",
+            key: "a0",
+            props: {
+              isComponent: true,
+              width: 160,
+              height: 100,
+              layoutMode: "row",
+              paddingLeft: 13,
+              paddingTop: 7,
+            },
+          },
+          {
+            op: "create",
+            id: "shown",
+            parent: "rowMain",
+            type: "rect",
+            key: "a0",
+            props: { x: 13, y: 7, width: 60, height: 20 },
+          },
+          {
+            op: "create",
+            id: "gone",
+            parent: "rowMain",
+            type: "rect",
+            key: "a1",
+            props: { width: 30, height: 16, visible: false },
+          },
+        ]),
+      ).toBe(true);
+      const id = editor.insertInstance("rowMain", { x: 220, y: 0 }) as string;
+      editor.setProp([id], "alignItems", "stretch");
+      const [shown, hidden] = doc.childIds(id) as [string, string];
+      const marking = removalMarking(doc);
+      expect(editor.commit([{ op: "set", id, prop: "layoutMode", value: null }])).toBe(true);
+      expect(marking()).toEqual([]);
+      // As the removal did before the fix: the hidden layer's height, and the shown one's width
+      // (fixed, its main layer's), marked as their own.
+      editor.undo();
+      const replay = removalMarking(doc);
+      editor.sync.commit([
+        { op: "set", id, prop: "layoutMode", value: "none" },
+        { op: "set", id: hidden, prop: "overrides", value: ["height"] },
+        { op: "set", id: shown, prop: "overrides", value: ["x", "y", "width", "height"] },
+      ]);
+      expect(replay()).toEqual([
+        { marked: shown, prop: "width", fixed: 60 },
+        { marked: hidden, props: ["height"], outOfFlow: true },
+      ]);
+    });
+  }
 });

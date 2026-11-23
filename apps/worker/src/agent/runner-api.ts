@@ -23,15 +23,19 @@ import type { CopiesFormat, Op } from "@drawpane/model";
  * The interface's version, sent with every request and note. 2 added
  * `reset`, `strike` and a run's `late` answer: a runner of version 1
  * refuses a request of version 2 (and the main Worker ignores its `held`),
- * so a main Worker deployed before its runner fails cleanly.
+ * so a main Worker deployed before its runner fails cleanly. 3 (protocol 4,
+ * PR 286): a run that takes an instance's auto layout away marks what that
+ * flow left, which a runner from before doesn't, so the room refuses a
+ * version 2 commit as out of step, and a runner from before refuses a
+ * version 3 run.
  */
-export const AGENT_RUNNER_V = 2;
+export const AGENT_RUNNER_V = 3;
 /**
  * The versions the runner answers. A release that changes the interface
  * keeps the one before in this list, because the runner is deployed first
  * and must still understand the main Worker of one release back.
  */
-export const AGENT_RUNNER_ACCEPTS: readonly number[] = [1, 2];
+export const AGENT_RUNNER_ACCEPTS: readonly number[] = [1, 2, 3];
 
 /**
  * The most a run may take in the runner, timed by the runner from when it

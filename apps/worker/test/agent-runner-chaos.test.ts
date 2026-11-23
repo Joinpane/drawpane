@@ -374,13 +374,14 @@ describe("the time limit", () => {
 });
 
 describe("the runner's interface version", () => {
-  it("is 2, and a request of the version before still runs", async () => {
-    // `reset` and `strike` came with version 2: a runner of version 1 refuses a version 2 call.
-    expect(AGENT_RUNNER_V).toBe(2);
+  it("is 3, and a request of the version before still runs", async () => {
+    // `reset` and `strike` came with version 2, and protocol 4's marks with 3 (PR 286): a runner
+    // from before refuses a call of the version after.
+    expect(AGENT_RUNNER_V).toBe(3);
     const { fileId, box } = await setup();
-    expect((await runnerOf(fileId).held(fileId)).v).toBe(2);
+    expect((await runnerOf(fileId).held(fileId)).v).toBe(3);
     const answer = await runnerOf(fileId).run({
-      v: 1,
+      v: 2,
       fileId,
       tool: "get_jsx",
       input: { id: box },

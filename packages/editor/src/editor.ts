@@ -37,6 +37,7 @@ import {
   copyConstraintOps,
   detachOps,
   findVariant,
+  flowRemovalMarks,
   instanceRootOf,
   instantiateOps,
   isInsideInstance,
@@ -724,6 +725,9 @@ export class Editor {
             ...unbindOps(this.doc, ops),
             ...textStyleDetachOps(this.doc, ops),
             ...textRunOps(this.doc, ops),
+            // Taking a frame's auto layout away keeps what it decided for its layers, read
+            // before the edit (protocol 4).
+            ...flowRemovalMarks(this.doc, ops),
           ]
         : [];
       // Resizing a frame moves its children by their constraints; resizing a

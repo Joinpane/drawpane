@@ -536,6 +536,10 @@ export class FileRoom extends DurableObject<Env> {
         this.#seed();
       } else if (copies === null) this.#setMeta("copies", "materialized");
       this.#copies = this.#meta("copies") === "compact" ? "compact" : "materialized";
+      // Agent calls recorded before this release are history from before protocol 4: noted once,
+      // as the revision the room first loads at with it (`stepAgentCall`).
+      if (this.#meta("agent_history_from") === null)
+        this.#setMeta("agent_history_from", String(this.#revn));
       // Tabs welcomed by an older release, kept across its update (hibernation): they reload
       // now, before they can write (decision 0034). A viewer of the reload page stays one.
       for (const ws of this.ctx.getWebSockets()) {
@@ -2445,6 +2449,14 @@ export class FileRoom extends DurableObject<Env> {
           direction === "undo"
             ? "Nothing to undo: this session has no changes left to take back."
             : "Nothing to redo: undo something first.",
+      };
+    // A call from before protocol 4 (PR 286) replays operations an editor from before worked out:
+    // taking an instance's auto layout away without marking what the flow left, which no client
+    // may send now (decision 0034's gate). Its history is closed instead.
+    if (target.revn <= Number(this.#meta("agent_history_from") ?? 0))
+      return {
+        ok: false,
+        message: `Can't ${direction} “${target.label}”: it was made before Drawpane was updated, and changes from before can't be undone or redone. Change the layers back with the tools instead.`,
       };
     const since = direction === "undo" ? target.revn : (target.undoneRevn ?? target.revn);
     const blocked = this.#editedSince(since, session.id, changedIds(target.ops, target.inverse));

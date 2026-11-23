@@ -253,9 +253,9 @@ type Box = "x" | "y" | "width" | "height";
  * main layer: its own layout decides it ("layout": it hugs, its text
  * measures itself, it's bound to a variable), or it's the copy's own
  * ("own": overridden, a swapped instance's size, a value it took off its
- * main layer's variable, the place of a layer that left its flow, made
- * absolute or in a frame that took its auto layout away, and the size that
- * flow gave it with Fill or Stretch). An own value still follows its
+ * main layer's variable, the place of a layer made absolute, or not, unlike
+ * its main layer, and the size the flow it left gave it with Fill or
+ * Stretch). An own value still follows its
  * constraints from where it is when its frame resizes; a laid-out one isn't
  * touched.
  */
@@ -322,15 +322,13 @@ export function placedGeometry(
   const constrained = constrainedValues(copy, source, parent, parentSource);
   const overrides = getProp(copy.props, "overrides");
   const bound = getProp(copy.props, "bindings") as Record<string, unknown>;
-  // Placed by its own choice: made absolute (or not) unlike its main layer, or in a frame that took
-  // its auto layout away, which leaves its layers where the layout put them (Figma). That's its
-  // place; its size too only on an axis the flow it left sized (Fill, or Stretch alignment), since
-  // nothing sizes it now. A size of its own still comes from its main layer.
-  const ownPlace =
-    getProp(copy.props, "positioning") !== getProp(source.props, "positioning") ||
-    (!absolute &&
-      (getProp(parentSource.props, "layoutMode") !== "none" ||
-        getProp(parent.props, "overrides").includes("layoutMode")));
+  // Placed by its own choice: made absolute (or not) unlike its main layer. That's its place; its
+  // size too only on an axis the flow it left sized (Fill, or Stretch alignment), since nothing
+  // sizes it now. A size of its own still comes from its main layer. A frame that took its auto
+  // layout away leaves its layers where the layout put them (Figma) by marking what that flow
+  // decided as theirs, as it takes it away (`flowRemovalMarks`): what isn't marked follows its main
+  // layer, as a layer swapped in, or one its main gained since, does.
+  const ownPlace = getProp(copy.props, "positioning") !== getProp(source.props, "positioning");
   // The flow it left: its frame's, or where the frame took its auto layout away, the main frame's
   // kind of flow with the frame's own alignment (which it may have set itself). Made only when
   // it's asked about.
