@@ -184,11 +184,14 @@ async function screenMatchesFresh(
     )[1] as HTMLCanvasElement;
     const { x, y, zoom } = w.drawpane.s.camera;
     const dpr = window.devicePixelRatio || 1;
+    // The editor presents retained tiles on the device-pixel grid. A fresh export
+    // accepts arbitrary raster origins, so ask it for the same pixel grid.
+    const snap = (offset: number) => Math.round(offset * dpr) / dpr;
     const at = {
       pageId: w.drawpane.s.pageId,
       rect: {
-        x: -x / zoom,
-        y: -y / zoom,
+        x: -snap(x) / zoom,
+        y: -snap(y) / zoom,
         width: canvas.width / (zoom * dpr),
         height: canvas.height / (zoom * dpr),
       },
@@ -420,7 +423,7 @@ test.describe
       expect(await screenMatchesFresh(page)).toMatchObject({ identical: true });
       await page.evaluate(() => {
         const e = (window as unknown as W).drawpane;
-        e.state.set({ camera: e.s.camera.pan(-137, 41) });
+        e.state.set({ camera: e.s.camera.pan(-137.33, 41.33) });
       });
       await frames(page);
       expect(await screenMatchesFresh(page)).toMatchObject({ identical: true });

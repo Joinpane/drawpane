@@ -71,13 +71,18 @@ export interface Settle {
 }
 
 /** Pans for `frames` animation frames and returns what drawing them took. */
-export function pan(page: Page, zoom: number | "fit", frames: number): Promise<Summary> {
-  return move(page, "pan", zoom, frames);
+export function pan(
+  page: Page,
+  zoom: number | "fit",
+  frames: number,
+  step: { x: number; y: number } = { x: 6, y: 3 },
+): Promise<Summary> {
+  return move(page, "pan", zoom, frames, step);
 }
 
 /** Zooms in and out about the centre for `frames` frames, from the whole file. */
 export function zoom(page: Page, frames: number): Promise<Summary> {
-  return move(page, "zoom", "fit", frames);
+  return move(page, "zoom", "fit", frames, { x: 0, y: 0 });
 }
 
 async function move(
@@ -85,9 +90,10 @@ async function move(
   kind: "pan" | "zoom",
   zoom: number | "fit",
   frames: number,
+  step: { x: number; y: number },
 ): Promise<Summary> {
   return page.evaluate(
-    async ({ kind, zoom, frames, instrument, native }) => {
+    async ({ kind, zoom, frames, step, instrument, native }) => {
       type Camera = {
         zoom: number;
         pan(dx: number, dy: number): Camera;
@@ -101,6 +107,7 @@ async function move(
           zoomTo(z: number): void;
         };
         drawpaneFrames: {
+          readonly exact: boolean;
           reset(): void;
           summary(): Summary;
           beginMotion?(native: boolean): MotionStats;
@@ -142,15 +149,17 @@ async function move(
         shadowHits: number;
       };
       type View = {
+        readonly backend?: string;
         readonly readsBack?: boolean;
         readonly reading?: boolean;
         readonly shown?: { readonly n: number; readonly at: number };
+        stamps: { drawn?: { n: number; at: number }; shown?: { n: number; at: number } } | null;
         last: {
           n: number;
           exact: boolean;
           ms: number;
           plan: string;
-          tiles: { drawn: number };
+          tiles: { drawn: number; pending: number };
           breakdown: Breakdown;
           counts: Counts;
         };
@@ -217,10 +226,9 @@ async function move(
               shadowOps: medianOf(splitSamples.map((s) => s.counts.shadowOps)),
               shadowHits: medianOf(splitSamples.map((s) => s.counts.shadowHits)),
             };
-      const exactAfter = async (since: number) => {
-        const f = (window as unknown as { drawpaneFrames: { exact: boolean } }).drawpaneFrames;
+      const exactAfter = async (since: number, previousN: number) => {
         const limitMs = view()?.readsBack ? 25_000 : 10_000;
-        let drawn = view()?.last.exact ? 0 : -1;
+        let drawn: number | null = null;
         const idle0 = view()?.idle;
         const traced = view();
         if (traced) traced.trace = [];
@@ -235,7 +243,10 @@ async function move(
         };
         const tally = () => {
           const v = view();
-          if (!v || drawn >= 0) return;
+          if (!v) {
+            if (w.drawpaneFrames.exact) drawn = performance.now();
+            return;
+          }
           if (v.last !== seen) {
             seen = v.last;
             settle.frames++;
@@ -247,22 +258,18 @@ async function move(
             settle.idleTiles = v.idle.tiles - idle0.tiles;
             settle.idleMs = Math.round((v.idle.ms - idle0.ms) * 10) / 10;
           }
-          if (v.last.exact) drawn = Math.max(0, performance.now() - since);
+          if (v.last.n <= previousN || !v.last.exact || v.last.tiles.pending !== 0) return;
+          // The worker is complete when its exact result reaches the canvas. On the GPU use
+          // the actual exact submission, which may have finished before this RAF sampled it.
+          const stamp = v.backend === "cpu-worker" ? v.stamps?.shown : v.stamps?.drawn;
+          drawn = stamp && stamp.n > previousN ? stamp.at : performance.now();
         };
-        if (!f.exact) {
-          await nextFrame();
-          while (!f.exact && performance.now() - since < limitMs) {
-            tally();
-            await nextFrame();
-          }
-        }
         tally();
+        while (drawn === null && performance.now() - since < limitMs) {
+          await nextFrame();
+          tally();
+        }
         settle.frameMs = Math.round(settle.frameMs * 10) / 10;
-        const shownAt = view()?.shown?.at;
-        const shown = Math.max(
-          0,
-          Math.round((shownAt && shownAt >= since ? shownAt : performance.now()) - since),
-        );
         const traceEntries = traced?.trace ?? [];
         const idleMaxSliceMs =
           Math.round(
@@ -275,11 +282,8 @@ async function move(
           )
           .join(" ");
         if (traced) traced.trace = null;
-        // A wait that ran out is reported as such, never as the time it waited.
-        const timedOut = !f.exact;
         return {
-          shown: timedOut ? null : shown,
-          drawn: drawn < 0 ? null : Math.round(drawn),
+          drawn: drawn === null ? null : Math.max(0, Math.round(drawn - since)),
           settle: { ...settle, idleMaxSliceMs, trace },
         };
       };
@@ -318,6 +322,8 @@ async function move(
       const motion = instrument && view() ? w.drawpaneFrames.beginMotion?.(native) : undefined;
       const centre = { x: e.s.viewport.width / 2, y: e.s.viewport.height / 2 };
       const times: number[] = [];
+      let moveEnd = performance.now();
+      let previousN = view()?.last.n ?? 0;
       for (let i = 0; i < frames; i++) {
         const forward = i % 120 < 60;
         const submitted = motion?.submitted;
@@ -325,7 +331,13 @@ async function move(
         const next =
           kind === "zoom"
             ? camera.zoomAt(centre, camera.zoom * (forward ? 1.03 : 1 / 1.03))
-            : camera.pan(forward ? 6 : -6, forward ? 3 : -3);
+            : camera.pan(forward ? step.x : -step.x, forward ? step.y : -step.y);
+        if (i === frames - 1) {
+          const v = view();
+          previousN = v?.last.n ?? 0;
+          if (v) v.stamps = {};
+          moveEnd = performance.now();
+        }
         e.state.set({ camera: next });
         times.push(await nextFrame());
         if (motion && motion.submitted === submitted) motion.missed++;
@@ -338,7 +350,7 @@ async function move(
         }
       }
       const summary = w.drawpaneFrames.summary();
-      const moveEnd = performance.now();
+      const exactResult = exactAfter(moveEnd, previousN);
       const lastMotionN = view()?.last.n ?? 0;
       // Give the final submitted camera frame a completion-probe window before closing motion.
       // Read-back presentation (headless WebGPU) delivers asynchronously after the frame loop.
@@ -351,7 +363,9 @@ async function move(
         }
         w.drawpaneFrames.endMotion?.();
       }
-      const exact = await exactAfter(moveEnd);
+      const exact = await exactResult;
+      const settledView = view();
+      if (settledView) settledView.stamps = null;
       longTaskObserver?.disconnect();
       const split = summarizeSplit();
       const vNow = view();
@@ -371,7 +385,7 @@ async function move(
         ...(motion && motion.presentations.length > 1
           ? { presentedInterval: intervals(motion.presentations) }
           : {}),
-        exactMs: exact.shown,
+        exactMs: exact.drawn,
         longTaskMaxMs: Math.round(longTaskMaxMs * 10) / 10,
         ...(view()
           ? {
@@ -390,6 +404,7 @@ async function move(
       kind,
       zoom,
       frames,
+      step,
       instrument: process.env.BENCH_W4_CAMERA_GATE === "1",
       native: process.env.BENCH_W4_NATIVE === "1",
     },
@@ -408,7 +423,7 @@ export function summaryRow(name: string, r: Summary): string {
   const split = r.engine?.split
     ? ` · split submits ${r.engine.split.submits}, draws ${r.engine.split.draws}`
     : "";
-  return `${name.padEnd(12)} content p50 ${String(r.content.p50).padStart(6)} ms · p95 ${String(r.content.p95).padStart(6)} ms · p99 ${String(r.content.p99 ?? "-").padStart(6)} ms · max ${String(r.content.max).padStart(6)} ms · overlay p95 ${String(r.overlay.p95).padStart(5)} ms · frame interval p50 ${r.interval?.p50} / p95 ${r.interval?.p95} / p99 ${r.interval?.p99} ms · exact after ${r.exactMs ?? "-"} ms${lt}${split}${r.engine ? ` (drawn exact after ${r.engine.exactMs} ms; slowest engine frame ${r.engine.worst.ms} ms, ${r.engine.worst.plan}, ${r.engine.worst.tiles} tiles${settleText(r.engine.settle)})` : ""} · drawn ${r.drawn}, culled ${r.culled}`;
+  return `${name.padEnd(12)} content p50 ${String(r.content.p50).padStart(6)} ms · p95 ${String(r.content.p95).padStart(6)} ms · p99 ${String(r.content.p99 ?? "-").padStart(6)} ms · max ${String(r.content.max).padStart(6)} ms · overlay p95 ${String(r.overlay.p95).padStart(5)} ms · frame interval p50 ${r.interval?.p50} / p95 ${r.interval?.p95} / p99 ${r.interval?.p99} ms · draws exact after ${r.exactMs ?? "-"} ms${lt}${split}${r.engine ? ` (slowest engine frame ${r.engine.worst.ms} ms, ${r.engine.worst.plan}, ${r.engine.worst.tiles} tiles${settleText(r.engine.settle)})` : ""} · drawn ${r.drawn}, culled ${r.culled}`;
 }
 
 /** p50, p95 and the worst of some samples, in ms (empty: nulls). */

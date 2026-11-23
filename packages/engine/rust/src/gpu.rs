@@ -5233,7 +5233,10 @@ impl Gpu {
         let selection = self.tiles.drag_prepare(&mut plan, drag.map(DragFrame::input).as_ref());
         // A composite-only frame can present cached tiles; direct tiles and drag layers
         // need an actual draw to produce pixels.
-        let composite_only = options.budget_ms < 0.0 && selection.is_none() && !plan.jobs.iter().any(|j| j.direct);
+        let composite_only = options.budget_ms < 0.0
+            && selection.is_none()
+            && !plan.direct
+            && (self.pending_tile.is_some() || !plan.jobs.iter().any(|j| j.direct));
         if !composite_only && (selection.is_some() || plan.direct || options.budget_ms <= 0.0) {
             self.abort_pending_tile();
         }
@@ -5276,6 +5279,7 @@ impl Gpu {
                         && j.detail == pt.detail
                         && (j.detail || coarse_moving) == pt.coarse_readers
                         && (!options.moving || j.must)
+                        && (plan.needs_on_screen(j) || !plan.jobs.iter().any(|j| plan.needs_on_screen(j)))
                 }))
         {
             self.abort_pending_tile();
@@ -5290,6 +5294,7 @@ impl Gpu {
                 && plan.jobs.iter().any(|j| j.key == pt.key && (!options.moving || j.must))
             {
                 let key = pt.key;
+                resumed_key = Some(key);
                 let pt_job = plan.jobs.iter().find(|j| j.key == key).copied();
                 let pt_must = pt_job.is_some_and(|j| j.must);
                 let pt_deadline = if pt_must && options.budget_ms < 1.0 {
@@ -5309,9 +5314,7 @@ impl Gpu {
                     let step = self.resume_pending_tile(store, &mut stats);
                     self.deadline_ms = None;
                     match step? {
-                        TileStep::Complete => {
-                            resumed_key = Some(key);
-                        }
+                        TileStep::Complete => {}
                         TileStep::Paused => {
                             budget_hit = true;
                             stats.in_progress = true;
@@ -5321,7 +5324,6 @@ impl Gpu {
                             }
                         }
                         TileStep::NoSlot => {
-                            resumed_key = Some(key);
                             if let Some(job) = pt_job
                                 && job.must
                             {
@@ -5338,6 +5340,22 @@ impl Gpu {
                 // Warm-cache fast path: during active budgeted motion, cached/stand-in tiles cover
                 // `!job.must` slots with zero tile bakes so pan/zoom stays locked at 60 fps.
                 if budgeted && options.moving && !job.must {
+                    stats.queued += 1;
+                    continue;
+                }
+                // A checkpoint owns its scratch, backdrop plane, and glass mask atlas.
+                // It can span multiple frames. Leave other work queued until it releases them.
+                if self.pending_tile.is_some() {
+                    if job.must {
+                        self.tiles.mark_unpainted(job.key);
+                        unfinished_must = true;
+                    } else {
+                        stats.queued += 1;
+                    }
+                    continue;
+                }
+                // Direct visible work is drawn after compositing. Keep scratch free for it.
+                if !late.is_empty() && !plan.needs_on_screen(job) {
                     stats.queued += 1;
                     continue;
                 }
@@ -5388,10 +5406,9 @@ impl Gpu {
                 }
                 let elapsed = now() - t0;
                 if budgeted {
-                    // For a `must` job on a cold small scene, allow cooperative mid-tile yield
-                    // inside dense tiles (once `records >= 64`, `exec` checks `deadline_reached`
-                    // after every 64 nodes) while still starting small scenes cleanly.
-                    self.deadline_ms = if job.must && options.budget_ms < 1.0 {
+                    // A drag composite also writes scratch this frame. Complete any tile
+                    // started for it in one walk.
+                    self.deadline_ms = if selection.is_some() || (job.must && options.budget_ms < 1.0) {
                         None
                     } else {
                         job_deadline.or(if job.must && options.budget_ms >= 1.0 {
@@ -5481,10 +5498,14 @@ impl Gpu {
         } else {
             // What's drawn straight into the frame after it covers its tile there: the composite
             // counts it so (what no slot could be found for included).
-            for job in plan.jobs.iter_mut() {
-                if late.iter().any(|l| l.key == job.key) {
-                    job.direct = true;
-                }
+            if self.pending_tile.is_some() && !late.is_empty() {
+                // Direct tiles share scratch too. Present their stand-ins until the checkpoint
+                // completes, rather than throwing away its progress to draw them this frame.
+                unfinished_must = true;
+                late.clear();
+            }
+            for job in &mut plan.jobs {
+                job.direct = late.iter().any(|l| l.key == job.key);
             }
             let comp = self.tiles.compose(&plan, plan_last);
             stats.exact = comp.exact;
@@ -5497,11 +5518,6 @@ impl Gpu {
             let fuse_present = late.is_empty() && selection.is_none();
             present_encoder = self.composite(&comp, dst, background, w, h, !fuse_present, &mut stats)?;
             stats.render_ms += now() - t1;
-            if !late.is_empty() || selection.is_some() {
-                // Direct late tiles and drag composites write into the scratch pool, so drop any
-                // paused slot tile rather than letting its scratch contents be overwritten.
-                self.abort_pending_tile();
-            }
             for job in &late {
                 let tile_detail = job.detail || coarse_moving;
                 let exact = self.draw_job(
@@ -5526,9 +5542,7 @@ impl Gpu {
                 }
             }
         }
-        stats.pending = stats.pending.max(u32::from(
-            self.opening_pending || unfinished_must || self.pending_tile.is_some(),
-        ));
+        stats.pending = stats.pending.max(u32::from(self.opening_pending || unfinished_must));
         stats.exact = (plan.direct || stats.exact) && direct_exact && stats.pending == 0;
         stats.direct = plan.direct || !late.is_empty();
         stats.standin = !stats.exact;
@@ -5602,11 +5616,17 @@ impl Gpu {
         let budgeted = budget_ms > 0.0;
         let walk_budget = self.walk_budget_ms(budget_ms);
         let deadline = budgeted.then_some(t0 + walk_budget);
+        // Ahead can't finish a direct tile. Let the caller present it, even when
+        // there is optional work left that could otherwise keep ahead reporting progress.
+        let mut needs_direct = plan.jobs.iter().any(|j| j.direct);
         if let Some(pt) = self.pending_tile.as_ref()
-            && !plan
-                .jobs
-                .iter()
-                .any(|j| !j.direct && j.key == pt.key && j.detail == pt.detail && j.detail == pt.coarse_readers)
+            && !plan.jobs.iter().any(|j| {
+                !j.direct
+                    && j.key == pt.key
+                    && j.detail == pt.detail
+                    && j.detail == pt.coarse_readers
+                    && (plan.needs_on_screen(j) || !plan.jobs.iter().any(|j| plan.needs_on_screen(j)))
+            })
         {
             self.abort_pending_tile();
         }
@@ -5619,8 +5639,10 @@ impl Gpu {
             let step = self.resume_pending_tile(store, &mut stats);
             self.deadline_ms = None;
             match step? {
-                TileStep::Complete | TileStep::NoSlot => {
+                TileStep::Complete => resumed_key = Some(key),
+                TileStep::NoSlot => {
                     resumed_key = Some(key);
+                    needs_direct = true;
                 }
                 TileStep::Paused => {
                     budget_hit = true;
@@ -5630,7 +5652,7 @@ impl Gpu {
         }
         if !budget_hit && !plan.direct {
             for job in &plan.jobs {
-                if job.direct || resumed_key == Some(job.key) {
+                if job.direct || resumed_key == Some(job.key) || (needs_direct && !plan.needs_on_screen(job)) {
                     continue;
                 }
                 if deadline.is_some_and(|d| now() >= d) {
@@ -5642,7 +5664,8 @@ impl Gpu {
                 );
                 self.deadline_ms = None;
                 match step? {
-                    TileStep::Complete | TileStep::NoSlot => {}
+                    TileStep::Complete => {}
+                    TileStep::NoSlot => needs_direct |= plan.needs_on_screen(job),
                     TileStep::Paused => {
                         stats.in_progress = true;
                         break;
@@ -5655,9 +5678,6 @@ impl Gpu {
             // Coarse opening ladder tiles are complete; next slices refine exact tiles.
             self.opening_pending = false;
             pending = 1;
-        }
-        if self.pending_tile.is_some() {
-            pending = pending.max(1);
         }
         stats.pending = pending;
         stats.queued = queued;
@@ -6019,6 +6039,7 @@ impl Gpu {
         stats: &mut DrawStats,
         verbs: &mut usize,
     ) -> Result<TileStep> {
+        debug_assert!(self.pending_tile.is_none(), "paused tile still owns scratch");
         let t0 = now();
         *verbs = store.limits.frame_verbs;
         let tile_halo = if halo <= 0

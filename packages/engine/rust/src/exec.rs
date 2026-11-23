@@ -1110,7 +1110,7 @@ pub fn draw_split<B: Backend>(
 
 /// `draw_split` with cooperative mid-tile yielding when `allow_yield` is true and
 /// `backend.deadline_reached()` triggers at a safe boundary (outside isolated and masked scopes).
-/// Pass `checkpoint` from `WalkOutcome::Paused` on the next slice to continue bit-identically.
+/// Pass `checkpoint` from `WalkOutcome::Paused` on the next slice to resume the same paint order.
 #[allow(clippy::too_many_arguments)]
 pub fn draw_split_resumable<B: Backend>(
     store: &Store,
@@ -1201,6 +1201,7 @@ pub fn draw_split_resumable<B: Backend>(
         resume_path,
         resume_depth: 0,
         records_since_probe: 0,
+        verbs_at_probe: 0,
         heavy_op_ran: false,
         made_progress: false,
     };
@@ -1284,6 +1285,7 @@ struct Walk<'a, B: Backend> {
     resume_path: Vec<(u32, usize, usize)>,
     resume_depth: usize,
     records_since_probe: u32,
+    verbs_at_probe: u64,
     heavy_op_ran: bool,
     made_progress: bool,
 }
@@ -1943,9 +1945,14 @@ impl<B: Backend> Walk<'_, B> {
         if !self.allow_yield || self.yield_safe_depth != 0 || !self.made_progress {
             return false;
         }
-        if self.heavy_op_ran || self.records_since_probe >= 16 {
+        // A single complex outline can cost as much as many simple records.
+        if self.heavy_op_ran
+            || self.records_since_probe >= 16
+            || self.stats.verbs.saturating_sub(self.verbs_at_probe) >= 1024
+        {
             self.heavy_op_ran = false;
             self.records_since_probe = 0;
+            self.verbs_at_probe = self.stats.verbs;
             return self.backend.deadline_reached();
         }
         false

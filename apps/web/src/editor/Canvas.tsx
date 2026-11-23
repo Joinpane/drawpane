@@ -33,6 +33,7 @@ import {
   presentation,
   REST_BUDGET_MS,
   rendererChoice,
+  snapViewCamera,
 } from "./engine-view";
 import { FrameNameEditor } from "./FrameNameEditor";
 import { frameStatsFor } from "./frame-stats";
@@ -549,6 +550,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         idleOn = false;
       }
     };
+    const exactMotion = motionPolicy() === "exact";
     const draw = () => {
       frame = 0;
       const compositeOnly = presentOnly;
@@ -601,7 +603,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       if (!drewEngine && contentDirty && s.pageId !== null && engine) {
         // Camera motion and pointer gestures share the moving-frame policy (one switch: standin
         // vs exact). Once motion stops, rAF-paced ~8 ms slices refine visible tiles progressively.
-        const nativeMotion = timing.motion?.native === true || motionPolicy() === "exact";
+        const nativeMotion = timing.motion?.native === true || exactMotion;
         const moving =
           !runCompositeOnly &&
           !nativeMotion &&
@@ -612,7 +614,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         changed = false;
         const r = engine.draw(
           s.pageId,
-          s.camera,
+          snapViewCamera(s.camera, dpr),
           contentCanvas.width,
           contentCanvas.height,
           dpr,

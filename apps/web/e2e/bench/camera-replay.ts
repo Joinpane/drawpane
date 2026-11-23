@@ -35,6 +35,7 @@ async function captureReplay(
   zoom: number | "fit",
   frames: number,
   dir: string,
+  panStep: { x: number; y: number },
 ): Promise<void> {
   const manifest: Array<Omit<ReplayEntry, "phase" | "pixels">> = [];
   const binding = `drawpaneSaveReplayFrame${nextBinding++}`;
@@ -43,7 +44,7 @@ async function captureReplay(
     if (phase === "exact") manifest.push(entry);
   });
   const lastStep = await page.evaluate(
-    async ({ binding, kind, zoom, frames, native, timeout }) => {
+    async ({ binding, kind, zoom, frames, panStep, native, timeout }) => {
       const w = window as unknown as {
         drawpane: Editor;
         drawpaneFrames: FrameStats;
@@ -159,7 +160,7 @@ async function captureReplay(
           const next =
             kind === "zoom"
               ? camera.zoomAt(centre, camera.zoom * (forward ? 1.03 : 1 / 1.03))
-              : camera.pan(forward ? 6 : -6, forward ? 3 : -3);
+              : camera.pan(forward ? panStep.x : -panStep.x, forward ? panStep.y : -panStep.y);
           shown.push(await drawAndCapture(next, step, "shown"));
         }
         stats.beginMotion(true);
@@ -177,6 +178,7 @@ async function captureReplay(
       kind,
       zoom,
       frames,
+      panStep,
       native: process.env.BENCH_W4_NATIVE === "1",
       timeout: REPLAY_TIMEOUT,
     },
@@ -193,6 +195,7 @@ export async function cameraReplay(
   kind: "pan" | "zoom",
   zoom: number | "fit",
   frames: number,
+  panStep = { x: 6, y: 3 },
 ): Promise<ReplayScore> {
   const ppd = Number(process.env.BENCH_W4_REPLAY_PPD);
   if (!Number.isFinite(ppd) || ppd <= 0) {
@@ -206,7 +209,7 @@ export async function cameraReplay(
   }
   const dir = mkdtempSync(join(tmpdir(), "drawpane-motion-"));
   try {
-    await captureReplay(page, kind, zoom, frames, dir);
+    await captureReplay(page, kind, zoom, frames, dir, panStep);
     const script = new URL("../../../../tools/gpu-bench/score-camera-replay.py", import.meta.url);
     const score = execFileSync(
       process.env.BENCH_W4_REPLAY_PYTHON ?? "python3",

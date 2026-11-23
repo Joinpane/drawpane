@@ -43,6 +43,8 @@ type Frame = {
   patch?: number[];
   /** Idle tile slice (`renderGpuAhead`) run before the frame. */
   aheadBudget?: number;
+  repeatUntilExact?: number;
+  freshReference?: boolean;
 };
 
 /** A square of `size` page units filled with `color`, as a fresh list or a patch on `base`. */
@@ -90,6 +92,59 @@ function directStripes(count = 12): number[] {
   return [...list.finish()];
 }
 
+function checkpointScene(neighbour: "green" | "empty" | "none"): number[] {
+  const list = new ListWriter(0xffffffff, 1);
+  list.reset();
+  const add = (id: number, path: PathData, color: [number, number, number, number]) =>
+    list.set(id, ROOT, {
+      flags: 0,
+      transform: [1, 0, 0, 1, 0, 0],
+      opacity: 1,
+      width: 1024,
+      height: 1024,
+      coarseBelow: 0,
+      reach: 0,
+      unsupported: 0,
+      paths: [{ kind: "path", path }],
+      ops: [{ op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color } }],
+      coarse: [],
+    });
+  const overlap = neighbour === "none";
+  const count = overlap ? 48 : 120;
+  for (let i = 0; i < count; i++) {
+    const cx = overlap ? 40 + (i % 20) * 9 : 8 + (i % 30) * 16;
+    const cy = overlap ? 30 + ((i * 7) % 11) * 2 : 10 + Math.floor(i / 30) * 14;
+    const radius = overlap ? 30 : 6;
+    const vertices = overlap ? 3000 : i < 16 ? 4000 : 64;
+    const path = new PathData();
+    for (let vertex = 0; vertex < vertices; vertex++) {
+      const angle = (vertex / vertices) * Math.PI * 2;
+      const r = vertex % 2 ? radius * 0.82 : radius;
+      const x = cx + Math.cos(angle) * r;
+      const y = cy + Math.sin(angle) * r;
+      if (vertex === 0) path.moveTo(x, y);
+      else path.lineTo(x, y);
+    }
+    add(
+      i + 1,
+      path.close(),
+      overlap
+        ? [(i % 3) / 2, ((i + 1) % 4) / 3, ((i + 2) % 5) / 4, 0.23 + (i % 7) * 0.05]
+        : [1, 0, 0, 1],
+    );
+  }
+  if (neighbour === "green") {
+    const path = new PathData()
+      .moveTo(520, 0)
+      .lineTo(1000, 0)
+      .lineTo(1000, 64)
+      .lineTo(520, 64)
+      .close();
+    add(count + 1, path, [0, 0.8, 0, 1]);
+  }
+  return [...list.finish()];
+}
+
 async function openEngine(page: Page, build: GpuBuild) {
   const root = ROOTS[build];
   await page.route(`${origin}/**`, async (route) => {
@@ -121,32 +176,43 @@ async function sample(
       const name = "/engine.js";
       const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
       await glue.default({ module_or_path: "/engine_bg.wasm" });
-      const engine = new glue.Engine(0, 0);
       const requireOk = (out: { ok: boolean; message: string; free(): void }) => {
         const { ok, message } = out;
         out.free();
         if (!ok) throw new Error(message);
       };
-      try {
-        if (tileBytes !== undefined) requireOk(engine.setLimit("tile_bytes", tileBytes));
-        const device = await glue.createGpu(null, 0);
-        if (!device.ok) throw new Error(device.message);
-        if (device.backend !== expectedBackend) {
-          const got = device.backend;
-          device.free();
-          throw new Error(`expected backend ${expectedBackend}, got ${got}`);
-        }
-        if (!engine.attachGpu || !engine.renderGpu || !engine.gpuPixels) {
-          throw new Error("the browser glue has no GPU entry points");
-        }
+      const makeEngine = async () => {
+        const engine = new glue.Engine(0, 0);
         try {
-          requireOk(engine.attachGpu(device));
-        } finally {
-          device.free();
+          if (tileBytes !== undefined) requireOk(engine.setLimit("tile_bytes", tileBytes));
+          const device = await glue.createGpu(null, 0);
+          try {
+            if (!device.ok) throw new Error(device.message);
+            if (device.backend !== expectedBackend)
+              throw new Error(`expected backend ${expectedBackend}, got ${device.backend}`);
+            if (!engine.attachGpu || !engine.renderGpu || !engine.gpuPixels)
+              throw new Error("the browser glue has no GPU entry points");
+            requireOk(engine.attachGpu(device));
+          } finally {
+            device.free();
+          }
+          requireOk(engine.apply(new Uint8Array(list)));
+          return engine;
+        } catch (error) {
+          engine.free();
+          throw error;
         }
-        requireOk(engine.apply(new Uint8Array(list)));
+      };
+      let engine = await makeEngine();
+      let previousPixels: Uint8Array | undefined;
+      try {
         const sampled = [];
         for (const frame of frames) {
+          if (frame.freshReference) {
+            const fresh = await makeEngine();
+            engine.free();
+            engine = fresh;
+          }
           if (frame.patch) requireOk(engine.apply(new Uint8Array(frame.patch)));
           let aheadDrawn = 0;
           if (frame.aheadBudget !== undefined && engine.renderGpuAhead) {
@@ -155,26 +221,55 @@ async function sample(
             requireOk(ahead);
           }
           const [width, height] = frame.size;
-          const outcome = engine.renderGpu(
-            width,
-            height,
-            ...frame.camera,
-            new Float32Array(4),
-            frame.moving,
-            frame.budget,
-            frame.editorViewport,
-          );
-          const stats = {
-            exact: outcome.exact,
-            drawn: outcome.tiles_drawn,
-            pending: outcome.pending,
-            aheadDrawn,
-          };
-          requireOk(outcome);
-          const pixels = await engine.gpuPixels();
-          if (!(pixels instanceof Uint8Array)) throw new Error(pixels.message);
+          let sawPause = false;
+          let attempts = 0;
+          let maxMs = 0;
+          let stats: { exact: boolean; drawn: number; pending: number };
+          do {
+            const started = performance.now();
+            const outcome = engine.renderGpu?.(
+              width,
+              height,
+              ...frame.camera,
+              new Float32Array(4),
+              frame.moving,
+              frame.budget,
+              frame.editorViewport,
+            );
+            maxMs = Math.max(maxMs, performance.now() - started);
+            if (!outcome) throw new Error("no GPU renderer");
+            stats = { exact: outcome.exact, drawn: outcome.tiles_drawn, pending: outcome.pending };
+            sawPause ||= outcome.in_progress;
+            attempts++;
+            requireOk(outcome);
+            if (frame.repeatUntilExact && engine.gpuFinished) {
+              const finished = await engine.gpuFinished();
+              if (finished && typeof finished === "object" && "ok" in finished)
+                requireOk(finished as never);
+            }
+          } while (!stats.exact && attempts < (frame.repeatUntilExact ?? 1));
+          const pixels = await engine.gpuPixels?.();
+          if (!(pixels instanceof Uint8Array))
+            throw new Error(pixels?.message ?? "no GPU readback");
+          const reference = frame.freshReference ? previousPixels : undefined;
+          const differingBytes = reference
+            ? pixels.reduce(
+                (count, byte, at) => count + Number(byte !== reference[at]),
+                Math.abs(pixels.length - reference.length),
+              )
+            : null;
+          previousPixels = pixels;
           const at = (frame.pixel[1] * width + frame.pixel[0]) * 4;
-          sampled.push({ ...stats, bytes: pixels.length, pixel: [...pixels.subarray(at, at + 4)] });
+          sampled.push({
+            ...stats,
+            aheadDrawn,
+            sawPause,
+            attempts,
+            maxMs: Math.round(maxMs * 10) / 10,
+            differingBytes,
+            bytes: pixels.length,
+            pixel: [...pixels.subarray(at, at + 4)],
+          });
         }
         return sampled;
       } finally {
@@ -428,6 +523,41 @@ for (const build of ["browser", "webgl"] as const) {
         expect(result).toMatchObject({ exact: true, pending: 0, drawn: 2, pixel: red });
       }
     });
+
+    for (const neighbour of ["green", "empty", "none"] as const) {
+      test(`a paused tile completes with identical pixels with ${neighbour} neighbour`, async ({
+        page,
+      }) => {
+        // Full geometry and a second device for the fresh reference can be slow in SwiftShader.
+        test.setTimeout(180_000);
+        const frame: Frame = {
+          camera: [1, 0, 0, 1],
+          size: [neighbour === "none" ? 256 : 1000, 64],
+          pixel: [32, 32],
+          moving: false,
+          budget: 8,
+          editorViewport: true,
+        };
+        const [_, interrupted, settled, fresh] = await sample(
+          page,
+          checkpointScene(neighbour),
+          [
+            { ...frame, camera: [1, -5000, 0, 1], budget: 0 },
+            { ...frame, budget: neighbour === "none" ? 8 : 1 },
+            { ...frame, repeatUntilExact: 80 },
+            { ...frame, budget: 0, freshReference: true },
+          ],
+          undefined,
+          build,
+        );
+        expect(interrupted).toMatchObject({ exact: false, sawPause: true });
+        expect(settled).toMatchObject({ exact: true, pending: 0 });
+        expect(fresh).toMatchObject({ exact: true, differingBytes: 0 });
+        console.log(
+          `Checkpoint ${build}/${neighbour} settled in ${settled?.attempts} further frames, max draw ${Math.max(interrupted?.maxMs ?? 0, settled?.maxMs ?? 0)} ms`,
+        );
+      });
+    }
 
     test("a see-through glyph run covers its overlaps once, on the GPU, the CPU and in a PNG", async ({
       page,

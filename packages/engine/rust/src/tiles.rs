@@ -202,6 +202,17 @@ pub struct Plan {
     pub zooming: bool,
 }
 
+impl Plan {
+    pub fn shows(&self, key: TileKey) -> bool {
+        key.level == self.level && self.visible.contains(&(key.i, key.j))
+    }
+
+    /// A coarse opening tile can be required even when it uses a different level.
+    pub fn needs_on_screen(&self, job: &Job) -> bool {
+        job.must || self.shows(job.key)
+    }
+}
+
 /// A tile of the frame's level laid into the frame, pixel for pixel.
 #[derive(Clone, Copy, Debug)]
 pub struct Copy {
@@ -1311,7 +1322,7 @@ impl TileCache {
         let queued = plan
             .jobs
             .iter()
-            .filter(|j| !j.direct && (j.key.level != plan.level || !plan.visible.contains(&(j.key.i, j.key.j))))
+            .filter(|j| !j.direct && !plan.shows(j.key))
             .filter(|j| {
                 self.tiles
                     .get(&j.key)

@@ -515,6 +515,19 @@ function colour(css: string): [number, number, number, number] {
   return [((n >> 16) & 255) / 255, ((n >> 8) & 255) / 255, (n & 255) / 255, a];
 }
 
+/** Align the editor's raster translation to the device grid used by retained tiles. */
+export function snapViewCamera(
+  camera: { x: number; y: number; zoom: number },
+  dpr: number,
+): Camera {
+  return {
+    x: Math.round(camera.x * dpr) / dpr,
+    y: Math.round(camera.y * dpr) / dpr,
+    zoom: camera.zoom,
+    dpr,
+  };
+}
+
 /** Bounds CPU view mode canvas dimensions so visible + backing surfaces stay within MAX_CPU_PIXELS. */
 export function boundCpuViewport(
   width: number,
@@ -620,7 +633,6 @@ export const REST_BUDGET_MS = 8;
  * capped to ~8 ms (`EngineView.ahead`), so input and compositing never block past one frame.
  */
 export const IDLE_SLICE_MS = 8;
-/** A budget that composites cached tiles without starting new tile bakes. */
 /** Negative sentinel budget: composite and present cached tiles without baking new ones. */
 export const COMPOSITE_ONLY_MS = -1;
 

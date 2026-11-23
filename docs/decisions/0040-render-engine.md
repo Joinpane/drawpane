@@ -1361,7 +1361,11 @@ reaches 0.34, and even a 2× cache with area filtering reaches only 0.82.
 Frosted interiors without a rim have smaller errors, with p99 of 1 to 2
 levels for the examples tested. This rules out a page-wide scale ladder.
 It also rules out freely resampling sharp paint and rerendering only glass.
-Keep exact tile reuse for matching scales and integer-device-pixel pans.
+Keep exact tile reuse at matching scales. The editor rounds the rendered
+translation to the nearest device pixel and keeps the logical camera and
+zoom at full precision. Fractional trackpad pans then reuse tiles on the
+same grid. The rendered position moves by at most half a device pixel,
+and text and edges keep their original sampling at rest.
 Use prediction to queue visible work, with the existing memory budget and
 speculative eviction policy.
 
@@ -1701,12 +1705,14 @@ Following the lead maintainer's decision to match Figma's measured interaction p
   - `TileCache::begin_scaled(background, scale, halo)` stores halo per zoom level so zooming across scales preserves cached tiles at other levels as stand-ins and instant cache hits.
   - `DisplayListBuilder.imageDemands` caches per document version, and `ViewImages.update` caches mip pyramids per `maxSide`.
 - **Cooperative ~8 ms tile budgeting across WebGPU, WebGL2, and CPU-worker (`exec.rs`, `gpu.rs`, `engine-cpu.worker.ts`, `engine-view.ts`, `Canvas.tsx`):**
-  - `exec::draw_split_resumable` checkpoints mid-tile walks (`WalkCheckpoint`) when `Backend::deadline_reached()` fires and fast-forwards clip state on resume while keeping output bitwise identical to an unsplit draw (`resumable_walk_matches_unsplit_bitwise`).
+  - `exec::draw_split_resumable` checkpoints mid-tile walks (`WalkCheckpoint`) when `Backend::deadline_reached()` fires and fast-forwards clip state on resume. The CPU reference matches bitwise without intermediate flushes and within one 8-bit level with flushes (`resumable_walk_matches_unsplit_bitwise`). The walker probes every 16 records, after reader operations, or after 1,024 additional geometry verbs so dense paths yield sooner.
   - `Gpu` tracks an active `PendingTile` across rAF-paced `IDLE_SLICE_MS = 8` slices (`MOVING_BUDGET_MS = 4`, `REST_BUDGET_MS = 8`, `COMPOSITE_ONLY_MS = -1`), skips optional `!job.must` bakes during budgeted motion, and adapts the walk budget via a dynamic `submit_ratio` EWMA so backends with synchronous GL translation inside `queue.submit()` (WebGL2 on Chrome, Safari, Firefox) stay inside the frame budget without stalling.
+  - A paused tile retains exclusive use of its scratch, backdrop plane, and glass masks until completion. When visible work arrives, it can replace an offscreen prefetch checkpoint. Exactness tracks visible tiles at the current scale with full reader detail. Offscreen prefetch can continue after the visible frame becomes exact.
+  - TODO: replace the budget sentinels with explicit frame modes across Rust and the WASM and TypeScript callers.
   - `engine-cpu.worker.ts` sets `MOVING_SLICE_TILES = 0` and uses `begin_scaled` so CPU-worker sessions composite cached stand-ins smoothly during motion and refine at rest.
   - Opening gates only slice #1 on `#openingFrame` so first content presents immediately while remaining `openSlice` patches stream in 8 ms rAF slices without per-slice readbacks.
 
-### 2. Verification and paired Modal T4 measurements
+### 2. Verification and paired Modal T4 measurements before review fixes
 
 - **Correctness and sizes:** All 4 `cargo clippy -- -D warnings` targets (`host`, `gpu`, `compute`, `webgl`), 232 Rust unit/integration/fuzz tests across 12 test binaries, `pnpm lint`, `pnpm -r typecheck` (19/19), `@drawpane/engine` (45/45), `@drawpane/editor` (92/92 files, default and `DRAWPANE_COMPACT_COPIES=1`), `@drawpane/web` (369/369), and `@drawpane/engine-workerd` pass. WASM gzipped sizes stay within budgets: `worker` 377 / 400 KB, `browser` 675 / 1,000 KB, `compute` 925 / 1,000 KB, `webgl` 1,379 / 1,400 KB, `decoder` 161 / 200 KB.
 - **Hardware Tesla T4 parity and GPU E2E:** 30/30 full Figma parity suites (`apps/web/e2e/parity/engine.spec.ts`, CPU + hardware WebGPU + hardware WebGL2, 0 fallbacks) and 27/27 GPU tile/glass/idle/open E2E tests (`engine-tiles-gpu`, `engine-glass-atlas`, `engine-glass-zoom`, `engine-idle`, `engine-page-open`) passed on T4.
