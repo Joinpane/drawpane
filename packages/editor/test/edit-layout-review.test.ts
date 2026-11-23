@@ -2018,6 +2018,40 @@ describe.each(["materialized", "compact"] as const)("re-check 7 with copies %s",
     expect(unsettled(editor)).toEqual([]);
   });
 
+  it("keeps each nested instance's layers when two are swapped to one component", () => {
+    const editor = make(
+      [
+        page,
+        node("row", "frame", "p", { isComponent: true, width: 160, height: 80, layoutMode: "row" }),
+        node("rowA", "rect", "row", { width: 60, height: 20 }),
+        node("col", "frame", "p", { isComponent: true, y: 200, width: 120, height: 100 }, "a1"),
+        node("colA", "rect", "col", { width: 50, height: 20 }),
+        node("plain", "frame", "p", { isComponent: true, y: 400, width: 160, height: 80 }, "a2"),
+        node("plainA", "rect", "plain", { x: 10, y: 10, width: 140, height: 20 }),
+        node("outer", "frame", "p", { isComponent: true, y: 600, width: 400, height: 260 }, "a3"),
+      ],
+      copies,
+    );
+    for (const main of ["row", "col"]) {
+      const id = editor.insertInstance(main, { x: 5000, y: 5000 }) as string;
+      expect(
+        editor.commit([{ op: "move", id, parent: "outer", key: editor.topKey("outer") }]),
+      ).toBe(true);
+    }
+    const outer = editor.insertInstance("outer", { x: 1000, y: 0 }) as string;
+    const [first, second] = editor.doc.childIds(outer) as [string, string];
+    editor.swapInstance(first, "plain");
+    editor.swapInstance(second, "plain");
+    const kids = () => editor.doc.childIds(outer).map((id) => editor.doc.childIds(id).length);
+    expect(kids()).toEqual([1, 1]);
+    const layersOf = () => editor.doc.childIds(outer).map((id) => [...editor.doc.childIds(id)]);
+    const before = layersOf();
+    editor.undo();
+    editor.redo();
+    expect(layersOf()).toEqual(before);
+    expect(unsettled(editor)).toEqual([]);
+  });
+
   it("undoes a batch that deletes a layer, sets another, then deletes its frames", () => {
     const editor = make(
       [

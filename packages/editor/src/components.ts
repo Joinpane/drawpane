@@ -462,23 +462,32 @@ export function syncInstanceOps(
   const main = componentId ? doc.getUnresolved(componentId) : undefined;
   if (!instance || !main || !isMainComponent(main)) return [];
 
-  // Map each main node id to its counterpart in this instance.
-  const counterpart = new Map<string, NodeRecord>([[main.id, instance]]);
+  // Each main node's copies in this instance. Two nested instances swapped to one component both
+  // copy its layers, so a main node can have more than one: each frame takes its own.
+  const copiesOf = new Map<string, NodeRecord[]>();
   const stray: NodeRecord[] = [];
   const walk = (id: string) => {
     for (const childId of doc.childIds(id)) {
       const child = doc.getUnresolved(childId);
       if (!child) continue;
       const mirrors = getProp(child.props, "mirrors");
-      if (mirrors && !counterpart.has(mirrors)) counterpart.set(mirrors, child);
+      if (mirrors) copiesOf.set(mirrors, [...(copiesOf.get(mirrors) ?? []), child]);
       else stray.push(child);
       walk(childId);
     }
   };
   walk(instance.id);
+  /** Copies already matched to a main node under their frame. */
+  const used = new Set<string>();
+  /** The copy of `mainId` for `parentId`: the one already there, else one elsewhere (moved). */
+  const take = (mainId: string, parentId: string): NodeRecord | undefined => {
+    const free = (copiesOf.get(mainId) ?? []).filter((c) => !used.has(c.id));
+    const found = free.find((c) => c.parent === parentId) ?? free[0];
+    if (found) used.add(found.id);
+    return found;
+  };
 
   const ops: Op[] = [];
-  const mainIds = new Set<string>();
 
   /**
    * What this sync sets so far, per node: a child is derived from its parent as it'll be. Not
@@ -625,8 +634,7 @@ export function syncInstanceOps(
     for (const childId of doc.childIds(mainNode.id)) {
       const mainChild = doc.getUnresolved(childId);
       if (!mainChild) continue;
-      mainIds.add(mainChild.id);
-      const existing = counterpart.get(mainChild.id);
+      const existing = take(mainChild.id, instanceParent.id);
       if (!existing || existing.type !== mainChild.type) {
         if (existing) ops.push({ op: "delete", id: existing.id });
         // Create the missing subtree under its counterpart parent.
@@ -638,7 +646,7 @@ export function syncInstanceOps(
           ops,
           derive ? synced(instanceParent) : undefined,
         );
-        counterpart.set(mainChild.id, created);
+        used.add(created.id);
         continue;
       }
       if (existing.parent !== instanceParent.id || existing.key !== mainChild.key) {
@@ -667,11 +675,11 @@ export function syncInstanceOps(
   nameAfterSet(instance, main.id);
   visit(main, instance);
 
-  // Layers whose main counterpart is gone (or that never had one) don't belong in an instance.
-  for (const [mainId, node] of counterpart) {
-    if (mainId !== main.id && !mainIds.has(mainId) && doc.has(node.id))
-      ops.push({ op: "delete", id: node.id });
-  }
+  // Layers whose main counterpart is gone, or that none took (or that never had one), don't
+  // belong in an instance.
+  for (const copies of copiesOf.values())
+    for (const node of copies)
+      if (!used.has(node.id) && doc.has(node.id)) ops.push({ op: "delete", id: node.id });
   for (const node of stray) {
     if (doc.has(node.id) && !ops.some((o) => o.op === "delete" && o.id === node.id)) {
       // Only delete strays whose ancestors aren't already being deleted.
