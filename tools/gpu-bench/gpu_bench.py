@@ -9,8 +9,8 @@ Run from a checkout (see README.md):
 
 Locally this packs each checkout to compare (a commit through `git archive`,
 or a worktree's tracked and untracked-but-not-ignored files as they are on
-disk), uploads the private kit named by --file to a Modal Volume (once per
-content hash), and calls one GPU container that, for every checkout in turn:
+disk), selects a private kit on a Modal Volume (uploading it first with
+--file if needed), and calls one GPU container that, for every checkout in turn:
 installs its dependencies, builds apps/web, passes the GPU gate (gate.mjs)
 and runs the Playwright project for each selected browser. The results come
 back as a tarball and are unpacked into the output folder, with a summary.
@@ -770,7 +770,9 @@ def main(argv: list[str]) -> int:
                         help="comma-separated: gpu (default; the canvas, WebGL and compositing on "
                              "the GPU), webgpu (core WebGPU on the GPU, software compositing), cpu "
                              "(GPU disabled)")
-    parser.add_argument("--file", help="a converted kit folder for bench/file.spec.ts (BENCH_FILE)")
+    kits = parser.add_mutually_exclusive_group()
+    kits.add_argument("--file", help="upload a converted kit folder for the bench (BENCH_FILE)")
+    kits.add_argument("--kit", help="use an existing private volume kit by its 16-digit content hash")
     parser.add_argument("--env", action="append", default=[], help="KEY=VALUE for the bench (repeatable)")
     parser.add_argument("--profile", action="store_true", help="CPU profiles (BENCH_PROFILE)")
     parser.add_argument("--timeout", type=int, default=45,
@@ -784,6 +786,8 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--doctor", action="store_true",
                         help="only check the GPU stack (Vulkan, then the gate across Chromium, Firefox, WebKit)")
     args, rest = parser.parse_known_args(argv)
+    if args.kit and not re.fullmatch(r"[a-f0-9]{16}", args.kit):
+        parser.error("--kit takes a 16-digit lowercase hexadecimal content hash")
     if "--" in rest:
         rest.remove("--")
     if args.doctor:
@@ -832,7 +836,7 @@ def main(argv: list[str]) -> int:
         "chromeFlags": args.chrome_flag,
         "profile": args.profile,
         "timeout": args.timeout * 60,
-        "kit": None,
+        "kit": args.kit,
     }
     stamp = time.strftime("%Y%m%d-%H%M%S")
     out = Path(args.out or HERE / "runs" / stamp).resolve()

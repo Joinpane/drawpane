@@ -20,6 +20,9 @@ pnpm gpu-bench --ref origin/main --ref HEAD -- bench/canvas.spec.ts
 
 # A real file, with Chromium's GPU disabled too for comparison:
 pnpm gpu-bench --file <converted kit folder> --modes gpu,cpu -- bench/file.spec.ts
+
+# Real input on the iOS kit's Examples page, using the private volume:
+pnpm gpu-bench --kit 2ddaf31f5bb47444 --modes gpu -- bench/real-input.spec.ts
 ```
 
 Results land in `tools/gpu-bench/runs/<time>/` (ignored by git): `summary.md`,
@@ -51,6 +54,7 @@ profiles with `--profile`, and Playwright's traces of failed tests.
 | `--modes <list>` | Comma-separated, run in order in the same container: `gpu` (default: the 2D canvas, WebGL and compositing on the GPU), `webgpu` (core WebGPU on the GPU, compositing in software), `cpu` (GPU disabled). See *Modes*. |
 | `--chrome-flag <flag>` | An extra Chromium flag for the `gpu` and `webgpu` runs (repeatable). |
 | `--file <folder>` | A kit folder from `tools/kit-parity`'s convert step, for `bench/file.spec.ts` (`BENCH_FILE`). See *Private data*. |
+| `--kit <hash>` | Reuse a converted kit already in the private volume by its 16-digit content hash. Sets `BENCH_FILE` just like `--file`. |
 | `--env KEY=VALUE` | Passed to the bench, e.g. `BENCH_PAGES`, `BENCH_FRAMES`, `BENCH_PAGE_COUNT`. |
 | `--profile` | CPU profiles of each measurement (`BENCH_PROFILE`). |
 | `--timeout <min>` | Per Playwright run, default 45. The container's own timeout is that per run plus room for builds. |
@@ -195,8 +199,9 @@ In addition, `bench/canvas.spec.ts` and `bench/interactions.spec.ts` verify in-a
 
 `--file` uploads the folder to the Modal Volume `drawpane-gpu-bench-data`
 in the account's workspace (private to it), under `/kits/<content hash>/`,
-once: later runs with the same content skip the upload. The container mounts
-the Volume and points `BENCH_FILE` at it. Kit content never goes into an
+once. Later runs with the same content skip the upload, and `--kit <hash>`
+can use it without a local copy. The container mounts the Volume and points
+`BENCH_FILE` at it. Kit content never goes into an
 image or this repository. Large licensed kits (such as a large iOS UI kit)
 stay on the Volume only; remove one with
 `modal volume rm -r drawpane-gpu-bench-data /kits/<hash>`.
