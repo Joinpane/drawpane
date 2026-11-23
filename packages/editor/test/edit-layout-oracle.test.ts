@@ -2596,14 +2596,48 @@ function performFlow(editor: Editor, e: FlowEdit, mirror: Doc, run: FlowRun): vo
   const mainFlow = (act: () => void) => {
     const before = leftFlowBoxes(doc);
     const frames = new Map(before.map(([frame]) => [frame, JSON.stringify(boxOf(doc, frame))]));
+    // Issue 325: what each layer copies, where that's a copy in a flow (compact copies let it take
+    // the size its main layer's flow gives it).
+    const flowCopy = (child: string) => {
+      const source = doc.get(getProp(doc.get(child)?.props ?? {}, "mirrors") ?? "");
+      const parent = source && doc.get(source.parent);
+      return doc.compactCopies &&
+        source &&
+        getProp(source.props, "mirrors") &&
+        parent &&
+        getProp(parent.props, "layoutMode") !== "none"
+        ? source.id
+        : undefined;
+    };
+    const sources = new Map(
+      before.flatMap(([, child]) => {
+        const source = flowCopy(child);
+        return source ? [[child, [source, boxOf(doc, source)] as const] as const] : [];
+      }),
+    );
     act();
-    for (const [frame, child, box] of before)
+    for (const [frame, child, box] of before) {
       if (
-        doc.has(child) &&
-        getProp(doc.get(frame)?.props ?? {}, "layoutMode") === "none" &&
-        JSON.stringify(boxOf(doc, frame)) === frames.get(frame)
+        !doc.has(child) ||
+        getProp(doc.get(frame)?.props ?? {}, "layoutMode") !== "none" ||
+        JSON.stringify(boxOf(doc, frame)) !== frames.get(frame)
       )
-        expectKept(doc, frame, child, box);
+        continue;
+      const followed = sources.get(child);
+      if (followed) {
+        const [source, was] = followed;
+        const now = boxOf(doc, source);
+        const mine = boxOf(doc, child);
+        // Its size only, where its copied layer's changed: it took that new size, in place.
+        if (
+          [0, 1].every((i) => mine[i] === box[i]) &&
+          [2, 3].some((i) => now[i] !== was[i]) &&
+          [2, 3].every((i) => mine[i] === box[i] || mine[i] === now[i])
+        )
+          continue;
+      }
+      expectKept(doc, frame, child, box);
+    }
   };
   switch (e.kind) {
     case "direction": {
