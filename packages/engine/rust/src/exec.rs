@@ -2347,7 +2347,11 @@ impl<B: Backend> Walk<'_, B> {
         self.full_viewport = self.viewport;
         self.tiled = false;
         self.skip_post_record = Some(id);
+        // The subtree is blurred and composited once below: a walk paused inside it would blur
+        // part of it now and the rest as a second blur on resume.
+        self.yield_safe_depth += 1;
         let walk_res = self.node_inner(id, parent, 1.0, false);
+        self.yield_safe_depth -= 1;
         self.skip_post_record = None;
         while let Some(o) = self.open.pop() {
             match o {
@@ -5164,13 +5168,38 @@ mod resumable_tests {
 
     /// Wraps `Cpu` and forces a cooperative yield on every probe check so we stress-test
     /// pause/resume across clips, nested frames, opacity layers, shadows, and readers.
-    struct AlwaysYieldCpu {
+    /// With `UNBOUNDED`, it also takes the GPU's reduced-grid layer blur path (case L2) past a
+    /// tiny native limit, counting the reduced composites.
+    struct AlwaysYieldCpu<const UNBOUNDED: bool> {
         inner: Cpu,
         probes: Cell<u32>,
+        reduced_composites: u32,
     }
 
-    impl Backend for AlwaysYieldCpu {
+    impl<const UNBOUNDED: bool> Backend for AlwaysYieldCpu<UNBOUNDED> {
         type Scene = <Cpu as Backend>::Scene;
+        const ALLOW_UNBOUNDED_VIEW_BLUR: bool = UNBOUNDED;
+        fn reduced_layer_blur_limits(&self) -> ReducedBlurLimits {
+            ReducedBlurLimits {
+                replay_side: crate::halo::HALO_REPLAY_SIDE,
+                native_side: if UNBOUNDED { 16 } else { 8192 },
+                native_pixels: if UNBOUNDED { 256 } else { usize::MAX },
+            }
+        }
+        fn composite_reduced_post(
+            &mut self,
+            _source: ReducedPost<'_>,
+            _upsample_area: IRect,
+            _tail_steps: &[PostStep],
+            _isolation: Isolation,
+            _blend: u32,
+            _opacity: f32,
+            _open: &[Open],
+        ) -> Result<()> {
+            self.reduced_composites += 1;
+            self.inner.abort_isolated();
+            Ok(())
+        }
         fn scene(&mut self) -> &mut Self::Scene {
             self.inner.scene()
         }
@@ -5430,9 +5459,10 @@ mod resumable_tests {
         let ref_px = ref_cpu.target.data_as_u8_slice().to_vec();
 
         // 2. Resumable render pausing/resuming across the same scene: must be 100% bitwise identical.
-        let mut ycpu_same = AlwaysYieldCpu {
+        let mut ycpu_same = AlwaysYieldCpu::<false> {
             inner: Cpu::new(limits.glyph_mask_bytes, limits.glyph_mask_side, 0),
             probes: Cell::new(0),
+            reduced_composites: 0,
         };
         ycpu_same.inner.begin(128, 128, frame.area, bg);
         let mut budget_same = limits.frame_verbs;
@@ -5487,9 +5517,10 @@ mod resumable_tests {
         // 3. Resumable render flushing between slices (simulating GPU per-slice submit):
         // under vello_cpu's f32_pipeline, flushing between overlapping translucent shapes adds at
         // most 1/255 quantization rounding; clip replay and reader sequencing stay exact.
-        let mut ycpu = AlwaysYieldCpu {
+        let mut ycpu = AlwaysYieldCpu::<false> {
             inner: Cpu::new(limits.glyph_mask_bytes, limits.glyph_mask_side, 0),
             probes: Cell::new(0),
+            reduced_composites: 0,
         };
         ycpu.inner.begin(128, 128, frame.area, bg);
         let mut budget = limits.frame_verbs;
@@ -5533,6 +5564,110 @@ mod resumable_tests {
             max_diff <= 1,
             "flushed resumable walk exceeded 1/255 rounding tolerance: slices={slices} max_diff={max_diff}"
         );
+    }
+
+    /// A layer blur past the native limits (case L2) blurs its whole subtree on a reduced grid
+    /// and composites it once. A walk that yields at every chance must not pause inside it.
+    #[test]
+    fn resumable_walk_never_pauses_inside_a_reduced_layer_blur() {
+        let limits = Limits::default();
+        let mut store = Store::new(limits);
+        let mut before = Record::empty();
+        before.size = [128.0, 128.0];
+        before.paths.push(rect_path(128.0, 128.0));
+        before.ops = vec![Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::Solid([1.0, 1.0, 1.0, 1.0]),
+            blend: 0,
+        }];
+        store.insert_for_test(1, ROOT, before);
+        let mut scope = Record::empty();
+        scope.transform = Affine::translate((8.0, 8.0));
+        scope.size = [112.0, 112.0];
+        scope.paths.push(rect_path(112.0, 112.0));
+        scope.ops = vec![Op::Children];
+        scope.post_effects = vec![PostEffect::LayerBlur { radius: 40.0 }];
+        store.insert_for_test(2, ROOT, scope);
+        // 48 children cross the 16-record yield probe several times inside the scope.
+        for i in 0..48u32 {
+            let mut r = Record::empty();
+            r.transform = Affine::translate(((i % 8) as f64 * 14.0, (i / 8) as f64 * 14.0));
+            r.size = [14.0, 14.0];
+            r.paths.push(rect_path(14.0, 14.0));
+            r.ops = vec![Op::Fill {
+                path: 0,
+                even_odd: false,
+                paint: Paint::Solid([(i % 4) as f32 * 0.25, 0.4, 0.8, 1.0]),
+                blend: 0,
+            }];
+            store.insert_for_test(100 + i, 2, r);
+        }
+        for i in 0..20u32 {
+            let mut r = Record::empty();
+            r.transform = Affine::translate((f64::from(i) * 6.0, 120.0));
+            r.size = [4.0, 4.0];
+            r.paths.push(rect_path(4.0, 4.0));
+            r.ops = vec![Op::Fill {
+                path: 0,
+                even_odd: false,
+                paint: Paint::Solid([0.0, 0.0, 0.0, 1.0]),
+                blend: 0,
+            }];
+            store.insert_for_test(200 + i, ROOT, r);
+        }
+        let area = IRect {
+            x0: 0,
+            y0: 0,
+            x1: 128,
+            y1: 128,
+        };
+        let frame = Frame {
+            width: 128,
+            height: 128,
+            view: Affine::IDENTITY,
+            detail: false,
+            area,
+        };
+        let mut ycpu = AlwaysYieldCpu::<true> {
+            inner: Cpu::new(limits.glyph_mask_bytes, limits.glyph_mask_side, 0),
+            probes: Cell::new(0),
+            reduced_composites: 0,
+        };
+        ycpu.inner.begin(128, 128, area, [255, 255, 255, 255]);
+        let mut budget = limits.frame_verbs;
+        let mut checkpoint = None;
+        let mut slices = 0u32;
+        let total = loop {
+            slices += 1;
+            match draw_split_resumable(
+                &store,
+                &mut ycpu,
+                &frame,
+                &limits,
+                &mut budget,
+                &Split::all(),
+                false,
+                checkpoint.take(),
+                true,
+            )
+            .expect("resumable slice")
+            {
+                WalkOutcome::Complete { total, .. } => break total,
+                WalkOutcome::Paused { checkpoint: cp, .. } => checkpoint = Some(cp),
+            }
+            assert!(slices < 100, "resumable walk failed to terminate");
+        };
+        assert!(
+            slices >= 2,
+            "expected the walk to yield outside the scope, got {slices} slices"
+        );
+        assert_eq!(
+            ycpu.reduced_composites, 1,
+            "the reduced layer blur was split across {slices} slices"
+        );
+        assert_eq!(total.reduced, 1);
+        assert!(!total.exact());
     }
 }
 

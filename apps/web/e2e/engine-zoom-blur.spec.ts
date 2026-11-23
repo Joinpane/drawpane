@@ -3260,7 +3260,14 @@ for (const build of ["browser", "webgl"] as const) {
                   honest.clearTiles?.();
                   const label2 = `${label} at ${budget} ms`;
                   const r = await settle(label2, w, h, zoom, 50, 50, true, budget, honest);
-                  honesty.push({ label, budget, ...r });
+                  // The L2 bake over slices must also draw what one pass draws.
+                  let pixels: number[] = [];
+                  if (label === "L2") {
+                    const px = await honest.gpuPixels?.();
+                    if (!(px instanceof Uint8Array)) throw new Error(`${label2}: ${px?.message}`);
+                    pixels = Array.from(px);
+                  }
+                  honesty.push({ label, budget, ...r, pixels });
                 }
               }
             } finally {
@@ -3384,7 +3391,7 @@ for (const build of ["browser", "webgl"] as const) {
 
       expect(gpuOut.shRes.exact).toBe(true);
 
-      for (const r of gpuOut.honesty) {
+      for (const { pixels, ...r } of gpuOut.honesty) {
         console.log(`[zoom-blur ${build}] F6 budgeted honesty: ${JSON.stringify(r)}`);
         const what = `${r.label} at ${r.budget} ms`;
         expect(r.exactCalls, `${what} never says exact`).toBe(0);
@@ -3392,6 +3399,11 @@ for (const build of ["browser", "webgl"] as const) {
         expect(r.pending, `${what} settles`).toBe(0);
         if (r.label === "L2") {
           expect(r.reduced, `${what} names its reduction`).toBeGreaterThan(0);
+          const stats = scoreAgainstOracle(pixels, (px, py) =>
+            evalZeroLayerOverWhite(l2Rects, px, py, sigmaPage),
+          );
+          expect(stats.max, `${what} max`).toBeLessThanOrEqual(4);
+          expect(stats.p99, `${what} p99`).toBeLessThanOrEqual(2);
         } else {
           expect(r.plan, `${what} uses the reduced halo tiers`).toBe(4);
         }
