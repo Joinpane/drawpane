@@ -2478,19 +2478,23 @@ function flowDocument(copies: "compact" | "materialized"): Editor {
 }
 
 /** Makes one edit of the family, checking a removal kept its layers' boxes. */
-/** Frames of instances that took their auto layout away, in each document (`performFlow`). */
-const leftFlows = new WeakMap<Doc, Set<string>>();
+/**
+ * Frames of instances that took their auto layout away, in each document (`performFlow`), with
+ * the layers each held then: the ones that flow left.
+ */
+const leftFlows = new WeakMap<Doc, Map<string, ReadonlySet<string>>>();
 
 /**
- * The layers of each frame that took its auto layout away, where the frame keeps its box: what
- * the main's flow changing must leave as they are.
+ * The layers a flow taken away left, still in their frame: what the main's flow changing must
+ * leave as they are. A layer a swap put there since was never in that flow, and follows its main.
  */
 function leftFlowBoxes(doc: Doc): [string, string, number[]][] {
   const out: [string, string, number[]][] = [];
-  for (const id of leftFlows.get(doc) ?? []) {
+  for (const [id, left] of leftFlows.get(doc) ?? []) {
     const frame = doc.get(id);
     if (!frame || getProp(frame.props, "layoutMode") !== "none") continue;
-    for (const child of doc.childIds(id)) out.push([id, child, boxOf(doc, child)]);
+    for (const child of doc.childIds(id))
+      if (left.has(child)) out.push([id, child, boxOf(doc, child)]);
   }
   return out;
 }
@@ -2525,9 +2529,9 @@ function performFlow(editor: Editor, e: FlowEdit): void {
       for (const [c, box] of boxes) expectKept(doc, id, c, box);
       const node = doc.get(id);
       if (getProp(node?.props ?? {}, "mirrors") || getProp(node?.props ?? {}, "instanceOf")) {
-        const set = leftFlows.get(doc) ?? new Set<string>();
-        set.add(id);
-        leftFlows.set(doc, set);
+        const map = leftFlows.get(doc) ?? new Map<string, ReadonlySet<string>>();
+        map.set(id, new Set(boxes.map(([c]) => c)));
+        leftFlows.set(doc, map);
       }
     }
   };
