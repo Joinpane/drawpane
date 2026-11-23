@@ -1164,6 +1164,24 @@ pub enum ComputeFinish {
     Stale,
 }
 
+/// What made the GPU's Vello renders and scene flushes, counted from the device's start (for
+/// profiling: `Engine::gpuCounters`). `renders` by purpose: scene flush, glass mask batch, blur
+/// reader clip, backdrop blur, scope composite clip, reader clip, reader glass, shadow cache,
+/// shadow, reduced shadow, other. `flushes` by cause (`Gpu::flush_why`): unknown, motion prefix,
+/// halo strip, whole frame, direct tile end, pause, slot tile end, blur reader, backdrop snapshot,
+/// target change, glass, isolation push, post effects, isolation pop, shadow memory.
+#[derive(Clone, Copy, Default)]
+pub struct GpuCounters {
+    pub renders: [u32; 11],
+    pub flushes: [u32; 15],
+    /// Offscreen isolation scopes pushed (blend modes, post effects, faded groups with passes).
+    pub scopes: u32,
+    pub shadow_misses: u32,
+    pub shadow_hits: u32,
+    /// Tile walks paused to keep a slice within its budget.
+    pub pauses: u32,
+}
+
 pub struct Gpu {
     /// Held for the device's lifetime: on the web, dropping the instance loses the device.
     _instance: wgpu::Instance,
@@ -1284,6 +1302,10 @@ pub struct Gpu {
     pub fallback_adapter: bool,
     /// Command buffers submitted, for the report.
     pub submits: u32,
+    /// What made Vello renders and scene flushes (profiling).
+    pub counters: GpuCounters,
+    /// The cause of the next scene flush, for `counters` (set just before it).
+    flush_why: u8,
     /// GPU memory allocated (`Limits::gpu_bytes`), and the budget.
     bytes: usize,
     pub budget: usize,
@@ -1907,6 +1929,8 @@ impl Gpu {
             in_use_bytes: 0,
             health,
             submits: 0,
+            counters: GpuCounters::default(),
+            flush_why: 0,
             bytes: (ATLAS_SIDE * ATLAS_SIDE * 4 + 16 * 16 * 4) as usize,
             budget: crate::limits::Limits::default().gpu_bytes,
             max_texture_2d: device_limits.max_texture_dimension_2d,
@@ -3477,6 +3501,20 @@ impl Gpu {
             a.vello_renders += 1;
             a.draws += draws;
         }
+        let kind = match label {
+            "scene flush" => 0,
+            "glass mask batch" => 1,
+            "blur reader clip" => 2,
+            "backdrop blur" => 3,
+            "scope composite" => 4,
+            "reader clip" => 5,
+            "reader glass" => 6,
+            "shadow cache" => 7,
+            "shadow" => 8,
+            "shadow reduced" => 9,
+            _ => 10,
+        };
+        self.counters.renders[kind] += 1;
         Ok(())
     }
 
@@ -3760,6 +3798,7 @@ impl Gpu {
             });
             let s = exec::draw_split(store, self, frame, &store.limits, verbs, &split, false)?;
             stats.add(&s);
+            self.flush_why = 1;
             self.flush_scene_gpu(true)?;
             self.scene.reset();
             let mut encoder = self.take_encoder("cache motion prefix");
@@ -4576,6 +4615,7 @@ impl Gpu {
         if reader != Some(target_key) {
             return Ok(false);
         }
+        self.flush_why = 2;
         self.flush_preserving_clips(open, true)?;
         let Some(active) = self.active.as_ref() else {
             return Ok(true);
@@ -5103,6 +5143,7 @@ impl Gpu {
             }
         };
         stats.add(&s);
+        self.flush_why = 3;
         if let Err(e) = self.flush_scene_gpu(true) {
             self.discard_draw();
             return Err(e);
@@ -5975,6 +6016,7 @@ impl Gpu {
             }
         };
 
+        self.flush_why = 4;
         if let Err(e) = self.flush_scene_gpu(true) {
             self.discard_draw();
             return Err(e);
@@ -6208,6 +6250,7 @@ impl Gpu {
             } => {
                 stats.add(&slice_stats);
                 let sub0 = stats.submit_ms;
+                self.flush_why = 5;
                 if let Err(e) = self.flush_scene_gpu(true) {
                     self.discard_draw();
                     self.readers.drop_glass_mask_atlas();
@@ -6237,6 +6280,7 @@ impl Gpu {
                     verbs,
                     backdrop_gen: self.backdrop_gen,
                 });
+                self.counters.pauses += 1;
                 Ok(TileStep::Paused)
             }
             exec::WalkOutcome::Complete {
@@ -6259,6 +6303,7 @@ impl Gpu {
                     },
                     None => None,
                 };
+                self.flush_why = 6;
                 if let Err(e) = self.flush_scene_gpu(true) {
                     if let Some((s, _)) = place {
                         self.tiles.release(key, s);
@@ -6394,6 +6439,7 @@ impl Gpu {
     /// Flushes the scene into the active scope, rasterizing a segment once when both planes
     /// need it. The delta and both depth targets match the local scope's allocation.
     fn flush_scene_gpu(&mut self, force_clear: bool) -> Result<()> {
+        let why = std::mem::take(&mut self.flush_why);
         let Some(active) = self.active.as_ref() else {
             return Ok(());
         };
@@ -6416,6 +6462,9 @@ impl Gpu {
         };
         let dual = write_main && write_backdrop;
         let draw = scene_dirty && (write_main || write_backdrop);
+        if draw {
+            self.counters.flushes[usize::from(why).min(14)] += 1;
+        }
 
         // Vello defaults to clearing the attachment. Existing planes already hold their
         // prefix, including readers and composites from earlier segments.
@@ -6520,6 +6569,7 @@ impl Gpu {
             .as_ref()
             .is_some_and(|a| a.scene_dirty || (force_clear && a.needs_clear && self.offscreen_stack.is_empty()));
         if !should {
+            self.flush_why = 0;
             return Ok(());
         }
         if open.iter().any(|o| matches!(o, Open::Layer)) {
@@ -6642,6 +6692,7 @@ impl Gpu {
         coarse: bool,
         open: &[Open],
     ) -> Result<Option<BlurReaderDraw>> {
+        self.flush_why = 7;
         self.flush_preserving_clips(open, true)?;
         let Some(active) = self.active.as_ref() else {
             return Ok(None);
@@ -8445,6 +8496,7 @@ impl Backend for Gpu {
     }
 
     fn snapshot_backdrop(&mut self, open: &[Open]) -> Result<()> {
+        self.flush_why = 8;
         self.flush_preserving_clips(open, true)?;
         let Some(active) = self.active.as_ref() else {
             return Ok(());
@@ -8504,6 +8556,7 @@ impl Backend for Gpu {
             (active.write_main, active.write_backdrop) != (write_main, write_backdrop)
         };
         if changed {
+            self.flush_why = 9;
             self.flush_preserving_clips(open, false)?;
         }
         let active = self.active.as_mut().expect("active draw");
@@ -8643,6 +8696,7 @@ impl Backend for Gpu {
             // Glass never writes to the glass-free backdrop (rule b*), so edge strips skip it.
             return Ok(());
         }
+        self.flush_why = 10;
         self.flush_preserving_clips(open, true)?;
         let Some(active) = self.active.as_ref() else {
             return Ok(());
@@ -9273,6 +9327,7 @@ impl Backend for Gpu {
         if area.is_empty() {
             return Ok(false);
         }
+        self.counters.scopes += 1;
         let area = if clip_to_parent {
             // Match the CPU scope's sampling extent and preserve frame-relative raster cells.
             IRect {
@@ -9293,6 +9348,7 @@ impl Backend for Gpu {
                 "offscreen isolation inside a Vello opacity layer",
             ));
         }
+        self.flush_why = 11;
         self.flush_preserving_clips(open, true)?;
         let active = self.active.as_ref().expect("active draw");
         let previous_targets = (active.write_main, active.write_backdrop);
@@ -9361,6 +9417,7 @@ impl Backend for Gpu {
         if steps.is_empty() || self.offscreen_stack.is_empty() {
             return Ok(());
         }
+        self.flush_why = 12;
         self.flush_scene_gpu(false)?;
         let mut scope = self.offscreen_stack.pop().expect("post scope");
         let result = (|| {
@@ -9402,6 +9459,7 @@ impl Backend for Gpu {
     }
 
     fn pop_composited(&mut self, blend: u32, opacity: f32, mask_kind: Option<u32>, open: &[Open]) -> Result<()> {
+        self.flush_why = 13;
         let flushed = self.flush_scene_gpu(false);
         let picture = mask_kind.and_then(|_| self.offscreen_stack.pop());
         let Some(content) = self.offscreen_stack.pop() else {
@@ -9477,6 +9535,7 @@ impl Backend for Gpu {
                     if let Some(a) = self.active.as_mut() {
                         a.shadow_hits += 1;
                     }
+                    self.counters.shadow_hits += 1;
                     let (sox, soy) = self.scene_offset();
                     let px = f64::from(origin.0 - sox);
                     let py = f64::from(origin.1 - soy);
@@ -9513,6 +9572,7 @@ impl Backend for Gpu {
                 }
 
                 // Cache miss: rasterise + blur canonical mask once and cache it.
+                self.counters.shadow_misses += 1;
                 let t0 = now();
                 let sub0 = self.active.as_ref().map_or(0.0, |a| a.submit_ms);
                 let max_tex = self.device.limits().max_texture_dimension_2d;
@@ -9719,6 +9779,7 @@ impl Backend for Gpu {
             return Ok(());
         };
         if self.in_use_bytes >= GPU_TEMP_FLUSH_BYTES && !open.iter().any(|o| matches!(o, Open::Layer)) {
+            self.flush_why = 14;
             self.flush_preserving_clips(open, false)?;
         }
         let mask_w = (mask_rect.x1 - mask_rect.x0).max(1) as u32;

@@ -257,6 +257,50 @@ function stats(o: Glue.Outcome, gpu = false): FrameStats {
 
 const bg = (c: readonly [number, number, number, number]) => new Float32Array(c);
 
+/** Vello renders by purpose (`RenderEngine.gpuCounters`). */
+export const GPU_RENDER_KINDS = [
+  "scene",
+  "glassMasks",
+  "blurClip",
+  "backdropBlur",
+  "scopeClip",
+  "readerClip",
+  "readerGlass",
+  "shadowCache",
+  "shadow",
+  "shadowReduced",
+  "other",
+] as const;
+
+/** Scene flushes by cause (`RenderEngine.gpuCounters`). */
+export const GPU_FLUSH_CAUSES = [
+  "unknown",
+  "motionPrefix",
+  "haloStrip",
+  "whole",
+  "directTile",
+  "pause",
+  "slotTile",
+  "blurReader",
+  "backdropSnapshot",
+  "targets",
+  "glass",
+  "isolationPush",
+  "postEffects",
+  "isolationPop",
+  "shadowMemory",
+] as const;
+
+/** What made the GPU's Vello renders and scene flushes, counted since it started. */
+export interface GpuCounters {
+  readonly renders: Record<string, number>;
+  readonly flushes: Record<string, number>;
+  readonly scopes: number;
+  readonly shadowMisses: number;
+  readonly shadowHits: number;
+  readonly pauses: number;
+}
+
 /** What drawing ahead between frames did (`RenderEngine.renderGpuAhead`). */
 export interface AheadStats {
   readonly drawn: number;
@@ -276,6 +320,15 @@ export interface AheadStats {
   readonly records: number;
   readonly glyphsMasked: number;
   readonly glyphsOutlined: number;
+  /** Where the slice's render time went (ms): glass masks, Vello renders, readers, shadows. */
+  readonly prepareMasksMs: number;
+  readonly velloRenderMs: number;
+  readonly readerMs: number;
+  readonly shadowMs: number;
+  readonly velloRenders: number;
+  readonly reads: number;
+  readonly glassOps: number;
+  readonly bgBlurOps: number;
 }
 
 /** Cached stroke outline footprint across all records currently held in the render graph. */
@@ -1236,6 +1289,14 @@ export class RenderEngine {
         records: o.records,
         glyphsMasked: o.glyphs_masked,
         glyphsOutlined: o.glyphs_outlined,
+        prepareMasksMs: o.prepare_masks_ms,
+        velloRenderMs: o.vello_render_ms,
+        readerMs: o.reader_ms,
+        shadowMs: o.shadow_ms,
+        velloRenders: o.vello_renders,
+        reads: o.reads,
+        glassOps: o.glass_ops,
+        bgBlurOps: o.bg_blur_ops,
       };
       const r = outcome(o);
       return r.ok ? { ok: true as const, value } : r;
@@ -1245,6 +1306,32 @@ export class RenderEngine {
   /** Drops every GPU tile (benches time cold frames this way). */
   clearTiles(): void {
     this.#call((e) => e.clearTiles?.());
+  }
+  /**
+   * What made the GPU's Vello renders and scene flushes since it started, for profiling
+   * (`GpuCounters` in the engine): renders by purpose, flushes by cause, isolation scopes, shadow
+   * mask misses and hits, tile pauses. Null without a GPU.
+   */
+  gpuCounters(): GpuCounters | null {
+    let raw: Uint32Array | undefined;
+    this.#call((e) => {
+      raw = e.gpuCounters?.();
+    });
+    const kinds = GPU_RENDER_KINDS.length;
+    const causes = GPU_FLUSH_CAUSES.length;
+    if (!raw || raw.length < kinds + causes + 4) return null;
+    const v = Array.from(raw);
+    const at = (names: readonly string[], from: number) =>
+      Object.fromEntries(names.map((n, i) => [n, v[from + i] ?? 0]));
+    const rest = kinds + causes;
+    return {
+      renders: at(GPU_RENDER_KINDS, 0),
+      flushes: at(GPU_FLUSH_CAUSES, kinds),
+      scopes: v[rest] ?? 0,
+      shadowMisses: v[rest + 1] ?? 0,
+      shadowHits: v[rest + 2] ?? 0,
+      pauses: v[rest + 3] ?? 0,
+    };
   }
 
   /** The GPU's health: an error recorded since the last frame, or the device's loss. */

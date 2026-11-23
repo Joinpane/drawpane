@@ -1135,6 +1135,18 @@ export class EngineView {
     records: number;
     masked: number;
     outlined: number;
+    /** Idle slices: where the render time went (ms) and what it ran (bench profiling). */
+    split?: {
+      submit: number;
+      masks: number;
+      vello: number;
+      reader: number;
+      shadow: number;
+      renders: number;
+      reads: number;
+      glass: number;
+      blur: number;
+    };
   }> | null = null;
   /** Called whenever the engine swaps in a fresh `<canvas>` DOM element. */
   onCanvas: (canvas: HTMLCanvasElement) => void = () => {};
@@ -2366,6 +2378,17 @@ export class EngineView {
         records: r.value.records,
         masked: r.value.glyphsMasked,
         outlined: r.value.glyphsOutlined,
+        split: {
+          submit: r.value.submitMs,
+          masks: r.value.prepareMasksMs,
+          vello: r.value.velloRenderMs,
+          reader: r.value.readerMs,
+          shadow: r.value.shadowMs,
+          renders: r.value.velloRenders,
+          reads: r.value.reads,
+          glass: r.value.glassOps,
+          blur: r.value.bgBlurOps,
+        },
       });
       if (r.value.drawn === 0 && !r.value.inProgress && b.pageId === pageId && b.pending > 0)
         return text();

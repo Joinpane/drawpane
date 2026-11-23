@@ -51,6 +51,8 @@ export interface Summary {
     settle?: Settle;
     split?: CpuSplitSummary;
     readbackDiag?: unknown;
+    /** GPU counters from the movement's last frame to the exact frame (`gpuCounters`). */
+    counters?: Record<string, number>;
   };
 }
 
@@ -66,8 +68,36 @@ export interface Settle {
   idleTiles: number;
   idleMs: number;
   idleMaxSliceMs?: number;
+  /**
+   * What the idle slices spent, summed (ms): the walk and encode, Vello's renders, readers
+   * (glass, background blur), shadows, glass masks and submits, with their counts.
+   */
+  idleSplit?: IdleSplit;
   /** Each frame (f) and slice between frames (i): ms after the movement, its ms, tiles, pending. */
   trace?: string;
+}
+
+/** Idle slices' time and work, summed (`Settle.idleSplit`). */
+export interface IdleSplit {
+  slices: number;
+  tiles: number;
+  ms: number;
+  encode: number;
+  /** Vello, readers, shadows, masks and the flushes round them. */
+  render: number;
+  submit: number;
+  vello: number;
+  reader: number;
+  shadow: number;
+  masks: number;
+  renders: number;
+  reads: number;
+  glass: number;
+  blur: number;
+  records: number;
+  glyphs: number;
+  /** Slices that finished no tile (a tile paused mid-walk). */
+  pausedSlices: number;
 }
 
 /** Pans for `frames` animation frames and returns what drawing them took. */
@@ -166,6 +196,7 @@ async function move(
         idle: { slices: number; tiles: number; ms: number; maxSliceMs?: number };
         readbackDiag?: unknown;
         resetReadbackDiag?(): void;
+        engine?: { gpuCounters?(): Counters | null };
         trace: Array<{
           t: number;
           k: string;
@@ -178,9 +209,41 @@ async function move(
           records: number;
           masked: number;
           outlined: number;
+          split?: {
+            submit: number;
+            masks: number;
+            vello: number;
+            reader: number;
+            shadow: number;
+            renders: number;
+            reads: number;
+            glass: number;
+            blur: number;
+          };
         }> | null;
       };
+      type Counters = {
+        renders: Record<string, number>;
+        flushes: Record<string, number>;
+        scopes: number;
+        shadowMisses: number;
+        shadowHits: number;
+        pauses: number;
+      };
       const view = () => (window as unknown as { drawpaneEngineView?: View }).drawpaneEngineView;
+      const counters = () => {
+        const c = view()?.engine?.gpuCounters?.();
+        if (!c) return null;
+        const flat: Record<string, number> = {};
+        for (const [k, n] of Object.entries(c.renders)) flat[`render.${k}`] = n;
+        for (const [k, n] of Object.entries(c.flushes)) flat[`flush.${k}`] = n;
+        flat.scopes = c.scopes;
+        flat.shadowMisses = c.shadowMisses;
+        flat.shadowHits = c.shadowHits;
+        flat.pauses = c.pauses;
+        return flat;
+      };
+      let counters0: Record<string, number> | null = null;
       let worst = { ms: 0, plan: "", tiles: 0 };
       const splitSamples: Array<{ ms: number; breakdown: Breakdown; counts: Counts }> = [];
       let lastWatchedN = -1;
@@ -275,6 +338,60 @@ async function move(
           Math.round(
             traceEntries.filter((e) => e.k === "idle").reduce((m, e) => Math.max(m, e.ms), 0) * 10,
           ) / 10;
+        const round = (v: number) => Math.round(v * 10) / 10;
+        const idleSplit = traceEntries
+          .filter((e) => e.k === "idle")
+          .reduce(
+            (a, e) => ({
+              slices: a.slices + 1,
+              tiles: a.tiles + e.tiles,
+              ms: a.ms + e.ms,
+              encode: a.encode + e.encode,
+              render: a.render + e.render,
+              submit: a.submit + (e.split?.submit ?? 0),
+              vello: a.vello + (e.split?.vello ?? 0),
+              reader: a.reader + (e.split?.reader ?? 0),
+              shadow: a.shadow + (e.split?.shadow ?? 0),
+              masks: a.masks + (e.split?.masks ?? 0),
+              renders: a.renders + (e.split?.renders ?? 0),
+              reads: a.reads + (e.split?.reads ?? 0),
+              glass: a.glass + (e.split?.glass ?? 0),
+              blur: a.blur + (e.split?.blur ?? 0),
+              records: a.records + e.records,
+              glyphs: a.glyphs + e.masked + e.outlined,
+              pausedSlices: a.pausedSlices + (e.tiles === 0 ? 1 : 0),
+            }),
+            {
+              slices: 0,
+              tiles: 0,
+              ms: 0,
+              encode: 0,
+              render: 0,
+              submit: 0,
+              vello: 0,
+              reader: 0,
+              shadow: 0,
+              masks: 0,
+              renders: 0,
+              reads: 0,
+              glass: 0,
+              blur: 0,
+              records: 0,
+              glyphs: 0,
+              pausedSlices: 0,
+            },
+          );
+        for (const k of [
+          "ms",
+          "encode",
+          "render",
+          "submit",
+          "vello",
+          "reader",
+          "shadow",
+          "masks",
+        ] as const)
+          idleSplit[k] = round(idleSplit[k]);
         const trace = traceEntries
           .map(
             (e) =>
@@ -284,7 +401,7 @@ async function move(
         if (traced) traced.trace = null;
         return {
           drawn: drawn === null ? null : Math.max(0, Math.round(drawn - since)),
-          settle: { ...settle, idleMaxSliceMs, trace },
+          settle: { ...settle, idleMaxSliceMs, idleSplit, trace },
         };
       };
       const waitReadback = async (targetN: number | null, timeoutMs: number) => {
@@ -336,6 +453,7 @@ async function move(
           const v = view();
           previousN = v?.last.n ?? 0;
           if (v) v.stamps = {};
+          counters0 = counters();
           moveEnd = performance.now();
         }
         e.state.set({ camera: next });
@@ -364,6 +482,15 @@ async function move(
         w.drawpaneFrames.endMotion?.();
       }
       const exact = await exactResult;
+      const counters1 = counters();
+      const countersDelta =
+        counters0 && counters1
+          ? Object.fromEntries(
+              Object.entries(counters1)
+                .map(([k, n]) => [k, n - (counters0?.[k] ?? 0)] as const)
+                .filter(([, n]) => n !== 0),
+            )
+          : undefined;
       const settledView = view();
       if (settledView) settledView.stamps = null;
       longTaskObserver?.disconnect();
@@ -395,6 +522,7 @@ async function move(
                 settle: exact.settle,
                 ...(split ? { split } : {}),
                 ...(readbackDiag ? { readbackDiag } : {}),
+                ...(countersDelta ? { counters: countersDelta } : {}),
               },
             }
           : {}),
@@ -414,7 +542,11 @@ async function move(
 function settleText(s: Settle | undefined): string {
   if (!s) return "";
   const maxIdle = s.idleMaxSliceMs !== undefined ? ` (max ${s.idleMaxSliceMs} ms)` : "";
-  return `; settling: ${s.frames} frames drew ${s.frameTiles} tiles in ${s.frameMs} ms, ${s.idleSlices} idle slices ${s.idleTiles} tiles in ${s.idleMs} ms${maxIdle}${s.trace ? `; trace (end at: ms (encode+render) / tiles / pending / mask misses / records / glyphs masked+outlined) ${s.trace}` : ""}`;
+  const sp = s.idleSplit;
+  const split = sp
+    ? `; idle split: ${sp.slices} slices (${sp.pausedSlices} finished no tile), ${sp.tiles} tiles, ${sp.ms} ms = encode ${sp.encode} + render ${sp.render} (vello ${sp.vello}, reader ${sp.reader}, shadow ${sp.shadow}, masks ${sp.masks}) + submit ${sp.submit}; ${sp.renders} vello renders, ${sp.reads} reads, ${sp.glass} glass, ${sp.blur} blur, ${sp.records} records, ${sp.glyphs} glyphs`
+    : "";
+  return `; settling: ${s.frames} frames drew ${s.frameTiles} tiles in ${s.frameMs} ms, ${s.idleSlices} idle slices ${s.idleTiles} tiles in ${s.idleMs} ms${maxIdle}${split}${s.trace ? `; trace (end at: ms (encode+render) / tiles / pending / mask misses / records / glyphs masked+outlined) ${s.trace}` : ""}`;
 }
 
 /** One line of a frame summary for the console. */
@@ -423,7 +555,7 @@ export function summaryRow(name: string, r: Summary): string {
   const split = r.engine?.split
     ? ` · split submits ${r.engine.split.submits}, draws ${r.engine.split.draws}`
     : "";
-  return `${name.padEnd(12)} content p50 ${String(r.content.p50).padStart(6)} ms · p95 ${String(r.content.p95).padStart(6)} ms · p99 ${String(r.content.p99 ?? "-").padStart(6)} ms · max ${String(r.content.max).padStart(6)} ms · overlay p95 ${String(r.overlay.p95).padStart(5)} ms · frame interval p50 ${r.interval?.p50} / p95 ${r.interval?.p95} / p99 ${r.interval?.p99} ms · draws exact after ${r.exactMs ?? "-"} ms${lt}${split}${r.engine ? ` (slowest engine frame ${r.engine.worst.ms} ms, ${r.engine.worst.plan}, ${r.engine.worst.tiles} tiles${settleText(r.engine.settle)})` : ""} · drawn ${r.drawn}, culled ${r.culled}`;
+  return `${name.padEnd(12)} content p50 ${String(r.content.p50).padStart(6)} ms · p95 ${String(r.content.p95).padStart(6)} ms · p99 ${String(r.content.p99 ?? "-").padStart(6)} ms · max ${String(r.content.max).padStart(6)} ms · overlay p95 ${String(r.overlay.p95).padStart(5)} ms · frame interval p50 ${r.interval?.p50} / p95 ${r.interval?.p95} / p99 ${r.interval?.p99} ms · draws exact after ${r.exactMs ?? "-"} ms${lt}${split}${r.engine ? ` (slowest engine frame ${r.engine.worst.ms} ms, ${r.engine.worst.plan}, ${r.engine.worst.tiles} tiles${settleText(r.engine.settle)})` : ""}${r.engine?.counters ? ` · GPU counters to exact ${JSON.stringify(r.engine.counters)}` : ""} · drawn ${r.drawn}, culled ${r.culled}`;
 }
 
 /** p50, p95 and the worst of some samples, in ms (empty: nulls). */

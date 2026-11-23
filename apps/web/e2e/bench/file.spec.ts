@@ -298,6 +298,115 @@ async function engineFacts(page: Page, frames: number): Promise<EngineFacts> {
   }, frames);
 }
 
+/**
+ * The tiles of the view drawn again from nothing, two ways (BENCH_REBAKE=1, after the zoom
+ * settles): in one unbudgeted call (the view's tiles and those round it, ahead of a pan), and in
+ * 8 ms slices back to back until the view's tiles are drawn (what the slices cost with no frames
+ * between them); each followed by the GPU's tail (`gpuFinished`). No frame is drawn between
+ * slices: the editor's own slices between frames would take the tiles back (another
+ * background). The engine draws over white here, so the page's tiles are dropped and the next
+ * frame draws them again.
+ */
+async function rebake(page: Page): Promise<string> {
+  return page.evaluate(async () => {
+    type Ahead = {
+      drawn: number;
+      inProgress: boolean;
+      pending: number;
+      ms: number;
+      encodeMs: number;
+      renderMs: number;
+      submitMs: number;
+      velloRenderMs: number;
+      readerMs: number;
+      shadowMs: number;
+      prepareMasksMs: number;
+      velloRenders: number;
+      reads: number;
+      records: number;
+      glyphsMasked: number;
+    };
+    type Engine = {
+      clearTiles(): void;
+      gpuFinished(): Promise<{ ok: boolean }>;
+      renderGpuAhead(
+        bg: readonly [number, number, number, number],
+        budget: number,
+      ): { ok: boolean; value?: Ahead };
+    };
+    const view = (window as unknown as { drawpaneEngineView?: { engine: Engine } })
+      .drawpaneEngineView;
+    if (!view) return "rebake: no engine view";
+    const e = view.engine;
+    const white = [1, 1, 1, 1] as const;
+    const r1 = (v: number) => Math.round(v * 10) / 10;
+    const sum = (xs: Ahead[]) =>
+      xs.reduce(
+        (a, x) => ({
+          ms: a.ms + x.ms,
+          encode: a.encode + x.encodeMs,
+          render: a.render + x.renderMs,
+          vello: a.vello + x.velloRenderMs,
+          reader: a.reader + x.readerMs,
+          shadow: a.shadow + x.shadowMs,
+          masks: a.masks + x.prepareMasksMs,
+          submit: a.submit + x.submitMs,
+          renders: a.renders + x.velloRenders,
+          reads: a.reads + x.reads,
+          records: a.records + x.records,
+          glyphs: a.glyphs + x.glyphsMasked,
+          tiles: a.tiles + x.drawn,
+        }),
+        {
+          ms: 0,
+          encode: 0,
+          render: 0,
+          vello: 0,
+          reader: 0,
+          shadow: 0,
+          masks: 0,
+          submit: 0,
+          renders: 0,
+          reads: 0,
+          records: 0,
+          glyphs: 0,
+          tiles: 0,
+        },
+      );
+    const text = (label: string, xs: Ahead[], wall: number, gpu: number) => {
+      const s = sum(xs);
+      return `${label}: ${xs.length} calls, ${s.tiles} tiles, wall ${r1(wall)} ms, CPU ${r1(s.ms)} ms (encode ${r1(s.encode)}, render ${r1(s.render)} = vello ${r1(s.vello)} + reader ${r1(s.reader)} + shadow ${r1(s.shadow)} + masks ${r1(s.masks)} + flush, submit ${r1(s.submit)}), GPU wait ${r1(gpu)} ms, ${s.renders} vello renders, ${s.reads} reads, ${s.records} records, ${s.glyphs} glyphs masked`;
+    };
+    const out: string[] = [];
+    // Warm: the zoom just drew these tiles, so glyph masks and caches are there.
+    e.clearTiles();
+    let t = performance.now();
+    const whole = e.renderGpuAhead(white, 0);
+    let cpu = performance.now() - t;
+    t = performance.now();
+    await e.gpuFinished();
+    let gpu = performance.now() - t;
+    if (whole.ok && whole.value)
+      out.push(text("rebake unbudgeted, view and tiles round it", [whole.value], cpu, gpu));
+    // 8 ms slices back to back.
+    e.clearTiles();
+    const back: Ahead[] = [];
+    t = performance.now();
+    for (let i = 0; i < 2000; i++) {
+      const r = e.renderGpuAhead(white, 8);
+      if (!r.ok || !r.value) break;
+      back.push(r.value);
+      if (r.value.pending === 0 && !r.value.inProgress) break;
+    }
+    cpu = performance.now() - t;
+    t = performance.now();
+    await e.gpuFinished();
+    gpu = performance.now() - t;
+    out.push(text("rebake view in 8 ms slices back to back", back, cpu + gpu, gpu));
+    return out.join("\n");
+  });
+}
+
 /** Centres the view on a layer, at most at 100%, and waits until the canvas is exact. */
 async function focus(page: Page, id: string): Promise<void> {
   await page.evaluate(async (id) => {
@@ -433,6 +542,10 @@ test.describe("A real file", () => {
           zoom(page, FRAMES),
         );
         await settle(page);
+        if (process.env.BENCH_REBAKE === "1" && RENDERER === "engine") {
+          console.log(`${info.name}, zoom end, tiles drawn again:\n${await rebake(page)}`);
+          await settle(page);
+        }
       }
       if (info.busiest)
         for (const level of [0.5, 1]) {
