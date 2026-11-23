@@ -1544,7 +1544,12 @@ impl Engine {
             .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
         // One pass avoids rasterizing the same reader and prefix in each touched tile. For
         // interactive drags bound the scene walk. Dense pages use their retained tiles.
-        let whole = !composite_only && halo_opt != Some(0) && (options.budget_ms == 0.0 || simple_reader_drag);
+        // Apron tiles chosen at rest are the exact route: a whole pass would only fall back to
+        // the reduced halo frame, so it is skipped at every budget, unbounded draws included.
+        let apron_chosen =
+            !options.moving && halo_opt.is_some_and(|h| i64::from(h) > i64::from(self.store.limits.halo));
+        let whole =
+            !composite_only && !apron_chosen && halo_opt != Some(0) && (options.budget_ms == 0.0 || simple_reader_drag);
         let whole_stats = if whole {
             let mut result = gpu.render_whole(
                 &self.store,

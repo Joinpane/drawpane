@@ -3535,7 +3535,9 @@ for (const build of ["browser", "webgl"] as const) {
           }
           // The view settles the way the editor does: frames at the rest budget, then slices
           // between frames, until a frame says exact or it settles without being exact.
-          const settle = async (aprons: boolean) => {
+          // Budget 0 is an unbounded draw: it must take the same exact route, not a whole pass
+          // that falls back to the reduced halo.
+          const settle = async (aprons: boolean, budget: number) => {
             const engine = await open(aprons);
             try {
               const cam = [zoom, -view.x * zoom, -view.y * zoom, dpr] as const;
@@ -3547,18 +3549,18 @@ for (const build of ["browser", "webgl"] as const) {
               let last = { plan: -1, exact: false, standin: true, pending: -1 };
               while (frames < 400) {
                 frames++;
-                const r = engine.renderGpu?.(tw, th, ...cam, bg, false, 8, true);
+                const r = engine.renderGpu?.(tw, th, ...cam, bg, false, budget, true);
                 if (!r) throw new Error("no frame");
                 last = { plan: r.plan, exact: r.exact, standin: r.standin, pending: r.pending };
                 const inProgress = r.in_progress;
                 requireOk(r);
                 if (last.exact || (last.pending === 0 && !inProgress)) break;
-                engine.renderGpuAhead?.(bg, 8)?.free();
+                if (budget > 0) engine.renderGpuAhead?.(bg, budget)?.free();
               }
               const ms = performance.now() - t0;
               const px = await engine.gpuPixels?.();
               if (!(px instanceof Uint8Array)) throw new Error(px?.message ?? "no pixels");
-              return { aprons, movingExact, last, frames, ms, test: Array.from(px) };
+              return { aprons, budget, movingExact, last, frames, ms, test: Array.from(px) };
             } finally {
               engine.free();
             }
@@ -3566,7 +3568,7 @@ for (const build of ["browser", "webgl"] as const) {
           return {
             refInfo,
             ref: Array.from(refPx),
-            runs: [await settle(true), await settle(false)],
+            runs: [await settle(true, 8), await settle(false, 8), await settle(false, 0)],
           };
         },
         { bytes, zoom, dpr, tw, th, view, margin, s },
@@ -3574,7 +3576,7 @@ for (const build of ["browser", "webgl"] as const) {
       expect(res.refInfo.exact, "the reference is a native frame").toBe(true);
       for (const run of res.runs) {
         const stats = diffRegions(run.test, res.ref, tw, th);
-        const route = run.aprons ? "forced aprons" : "default limits";
+        const route = `${run.aprons ? "forced aprons" : "default limits"}, budget ${run.budget}`;
         console.log(
           `[zoom-blur ${build}] apron settle (${route}): ref=${JSON.stringify(res.refInfo)} ` +
             `moving exact=${run.movingExact} settled=${JSON.stringify(run.last)} after ${run.frames} ` +

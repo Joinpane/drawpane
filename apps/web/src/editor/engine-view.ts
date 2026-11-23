@@ -2752,11 +2752,13 @@ export class EngineView {
       ready: this.#readback === null,
       exact: shownExact,
       ahead: this.#builder.pending > 0 || (!rasterLimit && f.tiles.queued > 0),
+      // A limit forgives only queued prefetch: visible tiles still pending must be drawn first.
       settled:
         !opening &&
         caughtUp &&
-        (!!this.#limitReason ||
-          (f.tiles.pending === 0 && f.tiles.queued === 0 && this.#builder.pending === 0)),
+        f.tiles.pending === 0 &&
+        this.#builder.pending === 0 &&
+        (!!this.#limitReason || f.tiles.queued === 0),
     };
   }
 
