@@ -881,6 +881,16 @@ function leftFlowMarks(
   return out;
 }
 
+/** What decides whether a flow sizes a layer, which a copy takes from what it copies. */
+const INHERITED_FLOW = [
+  "layoutMode",
+  "alignItems",
+  "sizingH",
+  "sizingV",
+  "alignSelf",
+  "rotation",
+] as const;
+
 /** A frame of an instance that took its own auto layout away (its layout mode, an override). */
 function leftItsFlow(node: NodeRecord | undefined): boolean {
   return (
@@ -947,18 +957,36 @@ export function leftFlowKeepOps(doc: Doc, ops: readonly Op[]): Op[] {
     if (op.op === "move") touched.add(op.parent);
   }
   const skip = new Set(ops.map((op) => op.id));
-  // A layer as the edit leaves it (what it sets on it).
+  // A layer as the edit leaves it: what it sets on it, and what the layer takes from what it
+  // copies or shows (its flow and sizing, where it doesn't override them), as that's left.
   const sets = new Map<string, Record<string, unknown>>();
   for (const op of ops)
     if (op.op === "set") sets.set(op.id, { ...sets.get(op.id), [op.prop]: op.value });
-  const later = (node: NodeRecord): NodeRecord => {
+  const seen = new Map<string, NodeRecord>();
+  const later = (node: NodeRecord, depth = 0): NodeRecord => {
+    const known = seen.get(node.id);
+    if (known) return known;
+    let props: Record<string, unknown> | null = null;
+    const from = doc.get(getProp(node.props, "mirrors") ?? getProp(node.props, "instanceOf") ?? "");
+    if (from && depth < 32) {
+      const next = later(from, depth + 1);
+      if (next !== from) {
+        const own = getProp(node.props, "overrides");
+        props = { ...node.props };
+        for (const prop of INHERITED_FLOW)
+          if (!own.includes(prop)) props[prop] = getProp(next.props, prop);
+      }
+    }
     const changed = sets.get(node.id);
-    if (!changed) return node;
-    const props = { ...node.props } as Record<string, unknown>;
-    for (const [prop, value] of Object.entries(changed))
-      if (value === null) delete props[prop];
-      else props[prop] = value;
-    return { ...node, props: props as Props };
+    if (changed) {
+      props ??= { ...node.props };
+      for (const [prop, value] of Object.entries(changed))
+        if (value === null) delete props[prop];
+        else props[prop] = value;
+    }
+    const out = props ? ({ ...node, props: props as Props } as NodeRecord) : node;
+    seen.set(node.id, out);
+    return out;
   };
   const out: Op[] = [];
   for (const id of left) {
