@@ -802,6 +802,95 @@ enum TileStep {
     NoSlot,
 }
 
+/// A whole pass (`Gpu::draw_whole_pass`) set up and possibly paused part way: its target, walk
+/// and counts, kept between budgeted slices (`Gpu::walk_whole_pass`).
+struct WholePass {
+    whole: Frame,
+    size: (u32, u32),
+    view: Affine,
+    bg_bits: [u32; 4],
+    dst: usize,
+    padded: Option<((u32, u32), (u32, u32))>,
+    samples: Option<IRect>,
+    capturing: bool,
+    moving: bool,
+    t0: f64,
+    submits0: u32,
+    stats: DrawStats,
+    verbs: usize,
+    split: Split,
+    coarse_readers: bool,
+    checkpoint: Option<exec::WalkCheckpoint>,
+    /// While paused: the target, its scratch slot and the backdrop generation.
+    paused: Option<(ActiveDraw, usize, u64)>,
+    /// The whole walk's counts once complete.
+    total: Option<DrawStats>,
+}
+
+enum WholeStart {
+    /// The frame shown is already this one.
+    Unchanged(DrawStats),
+    Pass(Box<WholePass>),
+}
+
+/// A reduced reader-halo frame in progress (`Gpu::render_reader_halo`): its stages run one after
+/// another, each a whole pass, and with a deadline they pause and resume over slices.
+struct HaloRun {
+    frame: Frame,
+    background: [f32; 4],
+    generation: u64,
+    moving: bool,
+    far_capture_bounds: IRect,
+    stage: HaloStage,
+    /// The stage's pass, begun and paused.
+    pass: Option<Box<WholePass>>,
+    /// The render divisor of the tier being drawn, and of the far tier once it's done.
+    tier_divisor: i32,
+    far_render_div: i32,
+    replay: DrawStats,
+    t0: f64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum HaloStage {
+    Far,
+    Mid,
+    Final,
+}
+
+/// A whole frame drawn over budgeted slices for a view at rest (`Gpu::render_whole_sliced`): its
+/// native pass, or the reduced reader-halo frame's stages, and the view it's for.
+struct PendingWhole {
+    stage: PendingStage,
+    /// The view's halo plan, if any: what the halo stage draws, and what a native pass that hits
+    /// a memory limit falls back to.
+    plan: Option<ViewportHaloPlan>,
+    frame: Frame,
+    background: [f32; 4],
+    generation: u64,
+    view_bits: [u64; 6],
+    bg_bits: [u32; 4],
+    /// The halo stage hit a memory limit once and started again with tiles and pools freed.
+    retried: bool,
+}
+
+enum PendingStage {
+    Native(Box<WholePass>),
+    Halo(Box<HaloRun>),
+}
+
+/// The whole frame a `PendingWhole` finished, shown now: what a present-only frame of the same
+/// view shows again (`Gpu::present_sliced_frame`).
+#[derive(Clone, Copy, PartialEq)]
+struct SlicedFrame {
+    view_bits: [u64; 6],
+    size: (u32, u32),
+    generation: u64,
+    bg_bits: [u32; 4],
+    exact: bool,
+    plan: u32,
+}
+
 /// The glass-free prefix or blurred patch captured at a reader's paint position in a halo pass.
 struct HaloPatch {
     texture: wgpu::Texture,
@@ -1220,6 +1309,8 @@ pub struct Gpu {
     deadline_ms: Option<f64>,
     /// Tile cooperatively paused mid-walk so no single frame stalls past its CPU budget.
     pending_tile: Option<PendingTile>,
+    pending_whole: Option<PendingWhole>,
+    sliced_frame: Option<SlicedFrame>,
     /// True while a freshly opened page is still completing its coarse opening ladder tiles.
     opening_pending: bool,
     backdrop_gen: u64,
@@ -1886,6 +1977,8 @@ impl Gpu {
             active: None,
             deadline_ms: None,
             pending_tile: None,
+            pending_whole: None,
+            sliced_frame: None,
             opening_pending: false,
             backdrop_gen: 0,
             frames: Vec::new(),
@@ -2842,6 +2935,7 @@ impl Gpu {
     /// Forgets the frame shown as a stand-in (after a fresh list: it shows a page that's gone).
     pub fn forget_last(&mut self) {
         self.abort_pending_tile();
+        self.abort_pending_whole();
         self.opening_pending = false;
         self.last = None;
         self.last_scale = None;
@@ -2862,6 +2956,7 @@ impl Gpu {
 
     /// Drops every tile (benches and tests time cold frames this way).
     pub fn clear_tiles(&mut self) {
+        self.abort_pending_whole();
         self.abort_pending_tile();
         self.opening_pending = false;
         self.tiles.clear();
@@ -3978,6 +4073,245 @@ impl Gpu {
                 .is_ok_and(|(_, (w, h))| (w as usize).saturating_mul(h as usize) <= max_pixels)
     }
 
+    /// Draws the whole frame of a view at rest (what `render_whole` draws: one native pass of
+    /// the padded view, else the reduced reader-halo frame) a slice at a time, at most
+    /// `budget_ms` a call, so no frame waits for all of it. Until its last slice lands each call
+    /// shows the last frame warped to the view (one quad, `present_motion_standin`) with one tile
+    /// pending; `ahead_whole` runs the slices between frames. The finished frame is the one
+    /// `render_whole` draws.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    pub fn render_whole_sliced(
+        &mut self,
+        store: &Store,
+        frame: &Frame,
+        background: [f32; 4],
+        generation: u64,
+        plan: Option<ViewportHaloPlan>,
+        budget_ms: f64,
+    ) -> Result<DrawStats> {
+        self.check()?;
+        let t0 = now();
+        let submits0 = self.submits;
+        let size = (u32::from(frame.width), u32::from(frame.height));
+        if let Some(shown) = self.present_sliced_frame(frame.view, size, generation, background) {
+            return shown;
+        }
+        let view_bits = frame.view.as_coeffs().map(f64::to_bits);
+        let bg_bits = background.map(f32::to_bits);
+        if self.pending_whole.as_ref().is_some_and(|p| {
+            p.view_bits != view_bits
+                || p.frame.width != frame.width
+                || p.frame.height != frame.height
+                || p.bg_bits != bg_bits
+                || p.generation != generation
+        }) {
+            self.abort_pending_whole();
+        }
+        self.abort_pending_tile();
+        self.opening_pending = false;
+        if self.pending_whole.is_none() {
+            let halo = plan.as_ref().is_some_and(|p| {
+                p.use_coarse_halo && !self.prefers_padded_view(p, size, store.limits.padded_view_pixels)
+            });
+            let stage = if halo {
+                let p = plan.as_ref().expect("a halo plan");
+                PendingStage::Halo(Box::new(
+                    self.begin_reader_halo(frame, background, generation, false, p)?,
+                ))
+            } else {
+                let samples = plan.as_ref().map(|p| p.samples);
+                match self.begin_whole_pass(store, frame, background, generation, false, None, samples, true) {
+                    Ok(WholeStart::Unchanged(stats)) => return Ok(stats),
+                    Ok(WholeStart::Pass(pass)) => PendingStage::Native(pass),
+                    Err(e) if e.code == ErrorCode::Limit && plan.as_ref().is_some_and(|p| p.use_coarse_halo) => {
+                        let p = plan.as_ref().expect("a halo plan");
+                        PendingStage::Halo(Box::new(
+                            self.begin_reader_halo(frame, background, generation, false, p)?,
+                        ))
+                    }
+                    Err(e) => return Err(e),
+                }
+            };
+            self.pending_whole = Some(PendingWhole {
+                stage,
+                plan,
+                frame: *frame,
+                background,
+                generation,
+                view_bits,
+                bg_bits,
+                retried: false,
+            });
+        }
+        if let Some(stats) = self.advance_pending_whole(store, budget_ms)? {
+            return Ok(stats);
+        }
+        let mut stats = self.present_motion_standin(frame.view, background, size.0, size.1, t0, submits0, false)?;
+        stats.pending = stats.pending.max(1);
+        stats.in_progress = true;
+        Ok(stats)
+    }
+
+    /// Whether a whole frame is being drawn over slices (`render_whole_sliced`).
+    pub fn has_pending_whole(&self) -> bool {
+        self.pending_whole.is_some()
+    }
+
+    /// Runs a slice of the pending whole frame between frames, at most `budget_ms`: what `ahead`
+    /// does for tiles. Once it finishes (and shows) it counts as one tile drawn with none pending,
+    /// so the caller presents it.
+    pub fn ahead_whole(&mut self, store: &Store, budget_ms: f64) -> Result<DrawStats> {
+        self.check()?;
+        let t0 = now();
+        let submits0 = self.submits;
+        let mut stats = match self.advance_pending_whole(store, budget_ms)? {
+            Some(mut stats) => {
+                stats.tiles_drawn = 1;
+                stats.pending = 0;
+                stats
+            }
+            None => DrawStats {
+                pending: u32::from(self.pending_whole.is_some()),
+                in_progress: self.pending_whole.is_some(),
+                ..DrawStats::default()
+            },
+        };
+        stats.submits = self.submits.saturating_sub(submits0);
+        stats.cpu_ms = now() - t0;
+        Ok(stats)
+    }
+
+    /// Shows again the whole frame drawn over slices when it's still the one shown and it's for
+    /// this view, size, generation and background (a present-only frame after `ahead_whole`
+    /// finished it).
+    pub fn present_sliced_frame(
+        &mut self,
+        view: Affine,
+        size: (u32, u32),
+        generation: u64,
+        background: [f32; 4],
+    ) -> Option<Result<DrawStats>> {
+        let key = self.sliced_frame?;
+        let matches = self.pending_whole.is_none()
+            && key.view_bits == view.as_coeffs().map(f64::to_bits)
+            && key.size == size
+            && key.generation == generation
+            && key.bg_bits == background.map(f32::to_bits);
+        let cur = self.cur.filter(|_| matches)?;
+        let (t0, submits0) = (now(), self.submits);
+        let stats = DrawStats {
+            direct: true,
+            plan: key.plan,
+            exact: key.exact,
+            standin: !key.exact,
+            ..DrawStats::default()
+        };
+        Some(self.finish_frame(cur, stats, t0, submits0, None))
+    }
+
+    /// Runs the pending whole frame until `budget_ms` runs out. Returns its counts once it
+    /// finished and showed. A native pass that hits a memory limit falls back to the reduced
+    /// reader-halo frame, and that one frees tiles and pools and starts again once on one, as
+    /// `render_whole` does; other errors drop it.
+    #[inline(never)]
+    fn advance_pending_whole(&mut self, store: &Store, budget_ms: f64) -> Result<Option<DrawStats>> {
+        let Some(mut pending) = self.pending_whole.take() else {
+            return Ok(None);
+        };
+        let budgeted = budget_ms > 0.0;
+        self.deadline_ms = budgeted.then(|| now() + self.walk_budget_ms(budget_ms));
+        let result = match pending.stage {
+            PendingStage::Native(mut pass) => match self.walk_whole_pass(store, &mut pass, budgeted) {
+                Ok(false) => {
+                    pending.stage = PendingStage::Native(pass);
+                    self.pending_whole = Some(pending);
+                    self.deadline_ms = None;
+                    return Ok(None);
+                }
+                Ok(true) => self.finish_whole_pass(pass, pending.generation),
+                Err(e) if e.code == ErrorCode::Limit && pending.plan.as_ref().is_some_and(|p| p.use_coarse_halo) => {
+                    let plan = pending.plan.as_ref().expect("a halo plan");
+                    let run =
+                        self.begin_reader_halo(&pending.frame, pending.background, pending.generation, false, plan);
+                    self.deadline_ms = None;
+                    pending.stage = PendingStage::Halo(Box::new(run?));
+                    self.pending_whole = Some(pending);
+                    return Ok(None);
+                }
+                Err(e) => Err(e),
+            },
+            PendingStage::Halo(mut run) => {
+                let plan = pending.plan.as_ref().expect("a halo plan");
+                match self.step_reader_halo(store, &mut run, plan, budgeted) {
+                    Ok(None) => {
+                        pending.stage = PendingStage::Halo(run);
+                        self.pending_whole = Some(pending);
+                        self.deadline_ms = None;
+                        return Ok(None);
+                    }
+                    Ok(Some(stats)) => {
+                        self.end_reader_halo(&mut run, plan, true);
+                        Ok(stats)
+                    }
+                    Err(e) => {
+                        self.end_reader_halo(&mut run, plan, false);
+                        if e.code != ErrorCode::Limit || pending.retried {
+                            Err(e)
+                        } else {
+                            self.fit_tiles(0);
+                            self.trim_pools(0);
+                            self.readers.flush_retired();
+                            let run = self.begin_reader_halo(
+                                &pending.frame,
+                                pending.background,
+                                pending.generation,
+                                false,
+                                plan,
+                            );
+                            self.deadline_ms = None;
+                            pending.stage = PendingStage::Halo(Box::new(run?));
+                            pending.retried = true;
+                            self.pending_whole = Some(pending);
+                            return Ok(None);
+                        }
+                    }
+                }
+            }
+        };
+        self.deadline_ms = None;
+        let stats = result?;
+        self.sliced_frame = Some(SlicedFrame {
+            view_bits: pending.view_bits,
+            size: (u32::from(pending.frame.width), u32::from(pending.frame.height)),
+            generation: pending.generation,
+            bg_bits: pending.bg_bits,
+            exact: stats.exact,
+            plan: stats.plan,
+        });
+        Ok(Some(stats))
+    }
+
+    /// Drops the whole frame being drawn over slices, if any, and forgets the one shown.
+    fn abort_pending_whole(&mut self) {
+        self.sliced_frame = None;
+        let Some(pending) = self.pending_whole.take() else {
+            return;
+        };
+        match pending.stage {
+            PendingStage::Native(pass) => {
+                if pass.paused.is_some() {
+                    self.readers.drop_glass_mask_atlas();
+                    self.scene.reset();
+                }
+            }
+            PendingStage::Halo(mut run) => {
+                let plan = pending.plan.as_ref().expect("a halo plan");
+                self.end_reader_halo(&mut run, plan, false);
+            }
+        }
+    }
+
     /// Draws an untiled frame when a reader exceeds the tile halo or a whole draw is cheaper.
     #[allow(clippy::too_many_arguments)]
     pub fn render_whole(
@@ -3991,6 +4325,7 @@ impl Gpu {
         halo_plan: Option<&ViewportHaloPlan>,
     ) -> Result<DrawStats> {
         self.abort_pending_tile();
+        self.abort_pending_whole();
         self.opening_pending = false;
         let samples = halo_plan.map(|p| p.samples);
         let size = (u32::from(frame.width), u32::from(frame.height));
@@ -4204,9 +4539,12 @@ impl Gpu {
         }
     }
 
-    /// Runs one supersampled reduced-resolution replay tier and captures eligible reader outputs.
+    /// Sets up one supersampled reduced-resolution replay tier that captures eligible reader
+    /// outputs: captures its clamp edge strips, swaps its reader planes in and begins its pass.
+    /// Returns the pass and its render divisor; the planes stay swapped in until it finishes.
     #[allow(clippy::too_many_arguments)]
-    fn run_halo_tier(
+    #[inline(never)]
+    fn begin_halo_tier(
         &mut self,
         store: &Store,
         frame: &Frame,
@@ -4222,7 +4560,7 @@ impl Gpu {
         min_feature_px: f32,
         max_render_divisor: Option<i32>,
         clamp_clips: &[halo::HaloClampClip],
-    ) -> Result<(DrawStats, i32)> {
+    ) -> Result<(Box<WholePass>, i32)> {
         let (coarse_offset, coarse_size) = halo::replay_grid(tier_bounds, coarse_divisor);
         let (max_side, max_pixels) = if self.fallback_adapter {
             (
@@ -4321,9 +4659,14 @@ impl Gpu {
             is_far,
         });
         self.swap_halo_reader_planes(is_far);
-        let result = self.draw_whole_pass(store, &coarse, background, generation, false, None, None);
-        self.swap_halo_reader_planes(is_far);
-        result.map(|stats| (stats, render_divisor))
+        match self.begin_whole_pass(store, &coarse, background, generation, false, None, None, false) {
+            Ok(WholeStart::Pass(pass)) => Ok((pass, render_divisor)),
+            Ok(WholeStart::Unchanged(_)) => unreachable!("a capturing halo tier always draws"),
+            Err(e) => {
+                self.swap_halo_reader_planes(is_far);
+                Err(e)
+            }
+        }
     }
 
     /// Releases oversized halo scratch targets and reader planes after a frame finishes so
@@ -4380,7 +4723,6 @@ impl Gpu {
     /// Draw the surrounding page at one or two supersampled lower-density tiers and snapshot each
     /// reader's backdrop/blurred stops. The final pass uses these samples for optics and renders
     /// the visible page at device resolution.
-    #[allow(clippy::too_many_arguments)]
     fn render_reader_halo(
         &mut self,
         store: &Store,
@@ -4390,6 +4732,25 @@ impl Gpu {
         moving: bool,
         plan: &ViewportHaloPlan,
     ) -> Result<DrawStats> {
+        let mut run = self.begin_reader_halo(frame, background, generation, moving, plan)?;
+        let result = self
+            .step_reader_halo(store, &mut run, plan, false)
+            .map(|done| done.expect("an unbudgeted halo frame finishes"));
+        self.end_reader_halo(&mut run, plan, result.is_ok());
+        result
+    }
+
+    /// Starts a reduced reader-halo frame (`render_reader_halo`): its stages run in
+    /// `step_reader_halo`, and `end_reader_halo` releases what they captured.
+    #[inline(never)]
+    fn begin_reader_halo(
+        &mut self,
+        frame: &Frame,
+        background: [f32; 4],
+        generation: u64,
+        moving: bool,
+        plan: &ViewportHaloPlan,
+    ) -> Result<HaloRun> {
         let native = plan.native_samples;
         let native_pixels = ((native.x1 - native.x0) as usize).saturating_mul((native.y1 - native.y0) as usize);
         let displayed_pixels = usize::from(frame.width) * usize::from(frame.height);
@@ -4401,10 +4762,7 @@ impl Gpu {
                 "viewport filters exceed the software GPU raster budget",
             ));
         }
-        let t0 = now();
         let lowest_div = plan.mid_divisor.unwrap_or(plan.far_divisor);
-        let far_prog_cut = halo::progressive_cutover_sigma(plan.far_divisor);
-        let far_unif_cut = halo::uniform_cutover_sigma(plan.far_divisor);
         self.reader_halo = Some(ReaderHalo {
             capture: None,
             strip_capture: None,
@@ -4438,6 +4796,33 @@ impl Gpu {
             }
             _ => plan.capture_bounds,
         };
+        Ok(HaloRun {
+            frame: *frame,
+            background,
+            generation,
+            moving,
+            far_capture_bounds,
+            stage: HaloStage::Far,
+            pass: None,
+            tier_divisor: 0,
+            far_render_div: 0,
+            replay: DrawStats::default(),
+            t0: now(),
+        })
+    }
+
+    /// Runs `run`'s stages on: the far tier, the mid tier if any, then the final pass. With
+    /// `allow_yield` a stage's pass pauses at the deadline (`deadline_ms`) and the next call
+    /// resumes it, so the frame's work spreads over slices; between slices a tier's reader planes
+    /// are swapped back out. Returns the finished frame's counts, or None while it isn't done.
+    #[inline(never)]
+    fn step_reader_halo(
+        &mut self,
+        store: &Store,
+        run: &mut HaloRun,
+        plan: &ViewportHaloPlan,
+        allow_yield: bool,
+    ) -> Result<Option<DrawStats>> {
         #[inline(never)]
         fn accumulate(dst: &mut DrawStats, src: &DrawStats) {
             dst.encode_ms += src.encode_ms;
@@ -4455,63 +4840,146 @@ impl Gpu {
             dst.shadow_ops += src.shadow_ops;
             dst.shadow_hits += src.shadow_hits;
         }
-        let mut replay = DrawStats::default();
-        let far_max_render_divisor = plan.coarse_post_min_sigma.is_finite().then(|| {
-            (plan.coarse_post_min_sigma / halo::HALO_MIN_COARSE_SIGMA)
-                .floor()
-                .max(1.0) as i32
-        });
-        let mut tier_result = self.run_halo_tier(
-            store,
-            frame,
-            background,
-            generation,
-            plan.samples,
-            plan.far_divisor,
-            far_capture_bounds,
-            (far_prog_cut, f32::INFINITY),
-            (far_unif_cut, f32::INFINITY),
-            true,
-            plan.far_has_blur,
-            plan.far_min_feature_px,
-            far_max_render_divisor,
-            &plan.clamp_clips,
-        );
-        if let Ok((far_stats, far_render_div)) = &tier_result {
-            accumulate(&mut replay, far_stats);
-            let far_rd = *far_render_div;
-            if let (Some(mid_samples), Some(mid_div)) = (plan.mid_samples, plan.mid_divisor) {
-                let mid_prog_cut = halo::progressive_cutover_sigma(mid_div);
-                let mid_unif_cut = halo::uniform_cutover_sigma(mid_div);
-                tier_result = self.run_halo_tier(
-                    store,
-                    frame,
-                    background,
-                    generation,
-                    mid_samples,
-                    mid_div,
-                    plan.capture_bounds,
-                    (mid_prog_cut, far_prog_cut),
-                    (mid_unif_cut, far_unif_cut),
-                    false,
-                    true,
-                    plan.mid_min_feature_px,
-                    Some(far_rd),
-                    &plan.clamp_clips,
-                );
-                if let Ok((mid_stats, _)) = &tier_result {
-                    accumulate(&mut replay, mid_stats);
+        let far_prog_cut = halo::progressive_cutover_sigma(plan.far_divisor);
+        let far_unif_cut = halo::uniform_cutover_sigma(plan.far_divisor);
+        loop {
+            match run.stage {
+                HaloStage::Far | HaloStage::Mid => {
+                    let is_far = run.stage == HaloStage::Far;
+                    let mut pass = match run.pass.take() {
+                        Some(pass) => {
+                            self.swap_halo_reader_planes(is_far);
+                            pass
+                        }
+                        None => {
+                            let (pass, divisor) = if is_far {
+                                let far_max_render_divisor = plan.coarse_post_min_sigma.is_finite().then(|| {
+                                    (plan.coarse_post_min_sigma / halo::HALO_MIN_COARSE_SIGMA)
+                                        .floor()
+                                        .max(1.0) as i32
+                                });
+                                self.begin_halo_tier(
+                                    store,
+                                    &run.frame,
+                                    run.background,
+                                    run.generation,
+                                    plan.samples,
+                                    plan.far_divisor,
+                                    run.far_capture_bounds,
+                                    (far_prog_cut, f32::INFINITY),
+                                    (far_unif_cut, f32::INFINITY),
+                                    true,
+                                    plan.far_has_blur,
+                                    plan.far_min_feature_px,
+                                    far_max_render_divisor,
+                                    &plan.clamp_clips,
+                                )?
+                            } else {
+                                let (Some(mid_samples), Some(mid_div)) = (plan.mid_samples, plan.mid_divisor) else {
+                                    unreachable!("a mid stage has a mid tier");
+                                };
+                                self.begin_halo_tier(
+                                    store,
+                                    &run.frame,
+                                    run.background,
+                                    run.generation,
+                                    mid_samples,
+                                    mid_div,
+                                    plan.capture_bounds,
+                                    (halo::progressive_cutover_sigma(mid_div), far_prog_cut),
+                                    (halo::uniform_cutover_sigma(mid_div), far_unif_cut),
+                                    false,
+                                    true,
+                                    plan.mid_min_feature_px,
+                                    Some(run.far_render_div),
+                                    &plan.clamp_clips,
+                                )?
+                            };
+                            run.tier_divisor = divisor;
+                            // Its setup (the clamp edge strips) may have used the slice up: keep
+                            // the pass, its target taken along as a paused walk's is.
+                            if allow_yield && self.deadline_reached() {
+                                let mut pass = pass;
+                                let active = self.active.take().expect("a begun pass");
+                                pass.paused = Some((active, self.active_scratch, self.backdrop_gen));
+                                self.scene.reset();
+                                self.swap_halo_reader_planes(is_far);
+                                run.pass = Some(pass);
+                                return Ok(None);
+                            }
+                            pass
+                        }
+                    };
+                    let walked = self.walk_whole_pass(store, &mut pass, allow_yield);
+                    match walked {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            self.swap_halo_reader_planes(is_far);
+                            run.pass = Some(pass);
+                            return Ok(None);
+                        }
+                        Err(e) => {
+                            self.swap_halo_reader_planes(is_far);
+                            return Err(e);
+                        }
+                    }
+                    let finished = self.finish_whole_pass(pass, run.generation);
+                    self.swap_halo_reader_planes(is_far);
+                    accumulate(&mut run.replay, &finished?);
+                    run.stage = if is_far && plan.mid_samples.is_some() && plan.mid_divisor.is_some() {
+                        run.far_render_div = run.tier_divisor;
+                        HaloStage::Mid
+                    } else {
+                        HaloStage::Final
+                    };
+                }
+                HaloStage::Final => {
+                    let mut pass = match run.pass.take() {
+                        Some(pass) => pass,
+                        None => {
+                            self.reader_halo.as_mut().expect("reader halo").capture = None;
+                            let native = plan.native_samples;
+                            let samples = (native != run.frame.area).then_some(native);
+                            match self.begin_whole_pass(
+                                store,
+                                &run.frame,
+                                run.background,
+                                run.generation,
+                                run.moving,
+                                None,
+                                samples,
+                                allow_yield,
+                            )? {
+                                WholeStart::Pass(pass) => pass,
+                                WholeStart::Unchanged(_) => unreachable!("a halo frame always draws"),
+                            }
+                        }
+                    };
+                    if !self.walk_whole_pass(store, &mut pass, allow_yield)? {
+                        run.pass = Some(pass);
+                        return Ok(None);
+                    }
+                    let mut stats = self.finish_whole_pass(pass, run.generation)?;
+                    accumulate(&mut stats, &run.replay);
+                    stats.cpu_ms = now() - run.t0;
+                    return Ok(Some(stats));
                 }
             }
+            // Between stages: a new stage's setup (its strips) waits for the next slice.
+            if allow_yield && self.deadline_reached() {
+                return Ok(None);
+            }
         }
-        let result = tier_result.and_then(|_| {
-            self.reader_halo.as_mut().expect("reader halo").capture = None;
-            let native = (native != frame.area).then_some(native);
-            let mut stats = self.draw_whole_pass(store, frame, background, generation, moving, None, native)?;
-            accumulate(&mut stats, &replay);
-            stats.cpu_ms = now() - t0;
-            Ok(stats)
-        });
+    }
+
+    /// Releases what `run` captured, finished or not (a paused pass is dropped), and keeps the
+    /// sample bounds of a frame that finished.
+    #[inline(never)]
+    fn end_reader_halo(&mut self, run: &mut HaloRun, plan: &ViewportHaloPlan, finished: bool) {
+        if run.pass.take().is_some_and(|pass| pass.paused.is_some()) {
+            self.readers.drop_glass_mask_atlas();
+            self.scene.reset();
+        }
         let halo = self.reader_halo.take().expect("reader halo");
         for (_, p) in halo.prefixes.into_vec() {
             self.recycle_halo_prefix(p);
@@ -4539,10 +5007,9 @@ impl Gpu {
         self.release_oversized_halo_storage();
         self.trim_pools(GPU_POOL_KEEP_BYTES);
         self.readers.flush_retired();
-        if result.is_ok() {
+        if finished {
             self.whole_samples = Some(Some(plan.samples));
         }
-        result
     }
 
     fn swap_halo_reader_planes(&mut self, is_far: bool) {
@@ -5082,6 +5549,31 @@ impl Gpu {
         prefix: Option<(u64, usize)>,
         samples: Option<IRect>,
     ) -> Result<DrawStats> {
+        let mut pass =
+            match self.begin_whole_pass(store, frame, background, generation, moving, prefix, samples, false)? {
+                WholeStart::Unchanged(stats) => return Ok(stats),
+                WholeStart::Pass(pass) => pass,
+            };
+        self.walk_whole_pass(store, &mut pass, false)?;
+        self.finish_whole_pass(pass, generation)
+    }
+
+    /// Sets up a whole pass (`draw_whole_pass`): its target and the walk's split. With
+    /// `scratch_target`, an unpadded frame draws into a scratch too and is copied to its frame
+    /// when it finishes, so a frame presented while it is paused can't draw over it.
+    #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
+    fn begin_whole_pass(
+        &mut self,
+        store: &Store,
+        frame: &Frame,
+        background: [f32; 4],
+        generation: u64,
+        moving: bool,
+        prefix: Option<(u64, usize)>,
+        samples: Option<IRect>,
+        scratch_target: bool,
+    ) -> Result<WholeStart> {
         self.check()?;
         #[cfg(feature = "compute")]
         {
@@ -5094,7 +5586,6 @@ impl Gpu {
         let t0 = now();
         let submits0 = self.submits;
         let view = frame.view;
-        let scale = view.as_coeffs()[0];
         let bg_bits = background.map(f32::to_bits);
         let mut stats = DrawStats {
             direct: true,
@@ -5109,12 +5600,13 @@ impl Gpu {
         {
             stats.exact = true;
             stats.plan = 3;
-            return self.finish_frame(self.cur.expect("unchanged frame"), stats, t0, submits0, None);
+            let stats = self.finish_frame(self.cur.expect("unchanged frame"), stats, t0, submits0, None)?;
+            return Ok(WholeStart::Unchanged(stats));
         }
         let dst = self.next_frame();
         let padded = match samples {
             Some(bounds) => Some(self.padded_view(bounds, (width, height))?),
-            None => None,
+            None => (scratch_target && !capturing).then_some(((0, 0), (width, height))),
         };
         if !capturing {
             self.ensure_frame(dst, width, height)?;
@@ -5179,31 +5671,134 @@ impl Gpu {
                 }
             }
         };
-        let draw = split.and_then(|split| {
-            exec::draw_split(
-                store,
-                self,
-                &whole,
-                &limits,
-                &mut verbs,
-                &split.unwrap_or_else(Split::all),
-                moving && self.reader_halo.is_none(),
-            )
-        });
-        let s = match draw {
-            Ok(s) => s,
+        let split = match split {
+            Ok(split) => split.unwrap_or_else(Split::all),
             Err(e) => {
                 self.forget_motion_prefix();
                 self.discard_draw();
                 return Err(e);
             }
         };
-        stats.add(&s);
+        Ok(WholeStart::Pass(Box::new(WholePass {
+            whole,
+            size: (width, height),
+            view,
+            bg_bits,
+            dst,
+            padded,
+            samples,
+            capturing,
+            moving,
+            t0,
+            submits0,
+            stats,
+            verbs,
+            split,
+            coarse_readers: moving && self.reader_halo.is_none(),
+            checkpoint: None,
+            paused: None,
+            total: None,
+        })))
+    }
+
+    /// Walks `pass` on: to its end, or with `allow_yield`, until the deadline (`deadline_ms`)
+    /// pauses it at a safe boundary. A paused pass keeps its target, flushed, and its checkpoint;
+    /// the next call resumes it as a paused tile resumes. Returns whether the walk is complete.
+    #[inline(never)]
+    fn walk_whole_pass(&mut self, store: &Store, pass: &mut WholePass, allow_yield: bool) -> Result<bool> {
+        let t0 = now();
+        if let Some((active, scratch, backdrop_gen)) = pass.paused.take() {
+            self.active_scratch = scratch;
+            self.backdrop_gen = backdrop_gen;
+            self.active = Some(active);
+            self.masks.begin_frame();
+            self.readers.begin_frame();
+            self.atlas.at = (0, 0, 0);
+            self.scene.reset_and_resize(pass.whole.width, pass.whole.height);
+        }
+        let limits = store.limits;
+        let outcome = exec::draw_split_resumable(
+            store,
+            self,
+            &pass.whole,
+            &limits,
+            &mut pass.verbs,
+            &pass.split,
+            pass.coarse_readers,
+            pass.checkpoint.take(),
+            allow_yield,
+        );
+        match outcome {
+            Err(e) => {
+                self.forget_motion_prefix();
+                self.discard_draw();
+                Err(e)
+            }
+            Ok(exec::WalkOutcome::Complete { stats, total }) => {
+                pass.stats.add(&stats);
+                pass.total = Some(total);
+                Ok(true)
+            }
+            Ok(exec::WalkOutcome::Paused { stats, checkpoint }) => {
+                pass.stats.add(&stats);
+                let sub0 = pass.stats.submit_ms;
+                self.flush_why = 5;
+                if let Err(e) = self.flush_scene_gpu(true) {
+                    self.discard_draw();
+                    return Err(e);
+                }
+                self.submit_active_encoder();
+                let mut active = self.active.take().expect("active draw");
+                self.recycle_scene_textures();
+                self.scene.reset();
+                let slice_total = now() - t0;
+                active.record_and_reset_slice(&mut pass.stats, slice_total);
+                // A slice's submit counts against the next slices' walk budget, as a tile's does.
+                self.update_submit_ratio(slice_total, pass.stats.submit_ms - sub0);
+                pass.paused = Some((active, self.active_scratch, self.backdrop_gen));
+                pass.checkpoint = Some(checkpoint);
+                self.counters.pauses = self.counters.pauses.wrapping_add(1);
+                Ok(false)
+            }
+        }
+    }
+
+    /// Finishes a walked `pass`: flushes it, copies a padded or scratch target to its frame,
+    /// and presents the frame (a capturing halo tier presents nothing).
+    #[inline(never)]
+    fn finish_whole_pass(&mut self, pass: Box<WholePass>, generation: u64) -> Result<DrawStats> {
+        let WholePass {
+            size: (width, height),
+            view,
+            bg_bits,
+            dst,
+            padded,
+            samples,
+            capturing,
+            moving,
+            t0,
+            submits0,
+            mut stats,
+            total,
+            ..
+        } = *pass;
+        let total = total.expect("a walked pass");
         self.flush_why = 3;
         if let Err(e) = self.flush_scene_gpu(true) {
             self.discard_draw();
             return Err(e);
         }
+        // A pass that paused may have seen other frames take `dst`: copy into the next one now.
+        let dst = if padded.is_some() && !capturing {
+            let next = self.next_frame();
+            if let Err(e) = self.ensure_frame(next, width, height) {
+                self.discard_draw();
+                return Err(e);
+            }
+            next
+        } else {
+            dst
+        };
         if let Some((start, _)) = padded {
             let mut encoder = self.take_encoder("crop padded frame");
             let source = &self.scratches[self.active_scratch]
@@ -5229,7 +5824,7 @@ impl Gpu {
             self.scene.reset();
             return Ok(stats);
         }
-        stats.exact = self.reader_halo.is_none() && !moving && s.exact();
+        stats.exact = self.reader_halo.is_none() && !moving && total.exact();
         stats.standin = !stats.exact;
         if self.reader_halo.is_some() {
             stats.plan = 4;
@@ -5243,7 +5838,7 @@ impl Gpu {
             view,
             size: (width, height),
         });
-        self.last_scale = Some(scale);
+        self.last_scale = Some(view.as_coeffs()[0]);
         self.whole_samples = (padded.is_some() == samples.is_some()).then_some(samples);
         self.whole_reader_halo = self.reader_halo.is_some() && !moving;
         self.shown = Some((generation, bg_bits, stats.exact));
@@ -5323,6 +5918,10 @@ impl Gpu {
         drag: Option<&DragFrame>,
     ) -> Result<DrawStats> {
         self.check()?;
+        self.abort_pending_whole();
+        // What this shows is made of tiles, not a whole frame (`present_sliced_frame` and
+        // `render_whole` show one again only while it's shown).
+        self.whole_reader_halo = false;
         #[cfg(feature = "compute")]
         {
             self.pending_compute = None;
@@ -5758,6 +6357,7 @@ impl Gpu {
         budget_ms: f64,
     ) -> Result<DrawStats> {
         self.check()?;
+        self.abort_pending_whole();
         let mut stats = DrawStats::default();
         let Some(last) = self.last else {
             return Ok(stats);

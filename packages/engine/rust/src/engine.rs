@@ -1402,8 +1402,12 @@ impl Engine {
         self.check_supported()?;
         let gpu = self
             .gpu
-            .as_ref()
+            .as_mut()
             .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
+        // A whole frame being drawn over slices: the next slice.
+        if gpu.has_pending_whole() {
+            return gpu.ahead_whole(&self.store, budget_ms);
+        }
         let Some(last) = gpu.last() else {
             return Ok(DrawStats::default());
         };
@@ -1477,7 +1481,7 @@ impl Engine {
                     && c.size == (width, height)
                     && c.halo == cached_gpu_halo
             });
-        let (halo_opt, halo_plan) = if composite_only || reuse_moving_halo {
+        let (halo_opt, mut halo_plan) = if composite_only || reuse_moving_halo {
             (Some(cached_gpu_halo), None)
         } else {
             let plan_viewport = editor_viewport
@@ -1579,8 +1583,19 @@ impl Engine {
         } else {
             None
         };
+        // A view at rest drawn as a whole frame draws it over slices (`Gpu::render_whole_sliced`),
+        // never all at once in a frame with a budget.
+        let sliced = !options.moving && options.budget_ms > 0.0;
+        let shown_halo = if composite_only {
+            gpu.present_sliced_frame(view, (width, height), self.generation, background)
+        } else {
+            None
+        };
+        let showed_halo = shown_halo.is_some();
         let mut stats = if let Some(stats) = whole_stats {
             stats
+        } else if let Some(shown) = shown_halo {
+            shown?
         } else if let Some(halo) = halo_opt {
             match gpu.render(
                 &self.store,
@@ -1606,15 +1621,27 @@ impl Engine {
                         halo,
                     });
                     self.halo_cache = None;
-                    self.gpu.as_mut().expect("GPU attached").render_whole(
-                        &self.store,
-                        &frame,
-                        background,
-                        self.generation,
-                        options.moving,
-                        None,
-                        halo_plan.as_ref(),
-                    )?
+                    let gpu = self.gpu.as_mut().expect("GPU attached");
+                    if sliced {
+                        gpu.render_whole_sliced(
+                            &self.store,
+                            &frame,
+                            background,
+                            self.generation,
+                            halo_plan.take(),
+                            options.budget_ms,
+                        )?
+                    } else {
+                        gpu.render_whole(
+                            &self.store,
+                            &frame,
+                            background,
+                            self.generation,
+                            options.moving,
+                            None,
+                            halo_plan.as_ref(),
+                        )?
+                    }
                 }
                 Err(e) => return Err(e),
             }
@@ -1632,6 +1659,15 @@ impl Engine {
                 options,
                 drag.as_ref(),
             )?
+        } else if sliced {
+            gpu.render_whole_sliced(
+                &self.store,
+                &frame,
+                background,
+                self.generation,
+                halo_plan.take(),
+                options.budget_ms,
+            )?
         } else {
             gpu.render_whole(
                 &self.store,
@@ -1645,7 +1681,8 @@ impl Engine {
         };
         // A cached halo may describe an earlier camera. Validate the current one before
         // calling the frame exact, even if all its tiles are already at the current scale.
-        if unverified_halo {
+        // (A reduced reader-halo frame shown again was drawn for this camera.)
+        if unverified_halo && !showed_halo {
             stats.exact = false;
             stats.standin = true;
             stats.pending = stats.pending.max(1);

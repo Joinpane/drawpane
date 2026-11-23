@@ -2042,6 +2042,207 @@ for (const build of ["browser", "webgl"] as const) {
       }
     });
 
+    // A whole frame at rest drawn over slices (`Gpu::render_whole_sliced`) against the same frame
+    // drawn at once, on fresh engines:
+    // - the 1000% wide blur of the real-viewport test (reach about 2,150 px: past any apron, so
+    //   the reduced reader-halo frame on every adapter) over 1,000 stripes, in a small view;
+    // - a 100% blur reaching about 576 px (past a tile's halo) in a view whose padded native
+    //   pass fits even a software adapter: one native pass, exact.
+    for (const c of [
+      {
+        label: "a reduced reader-halo frame",
+        size: [640, 400],
+        zoom: 10,
+        elsewhere: 1,
+        radius: 56,
+        span: 200,
+        period: 0.4,
+        blurBox: [-20, -12, 40, 24],
+        plan: 4,
+        exact: false,
+      },
+      {
+        label: "a native whole frame",
+        size: [256, 192],
+        zoom: 1,
+        elsewhere: 0.25,
+        radius: 150,
+        span: 400,
+        period: 2,
+        blurBox: [-70, -52, 140, 104],
+        plan: 2,
+        exact: true,
+      },
+    ] as const)
+      test(`${c.label} drawn over slices matches the frame drawn at once`, async ({ page }) => {
+        test.setTimeout(240_000);
+        await openEngine(page, build);
+        const expectedBackend = build === "webgl" ? "webgl2" : "webgpu";
+        const list = new ListWriter(0xffffffff, 1);
+        list.reset();
+        let id = 1;
+        const rect = (x: number, y: number, rw: number, rh: number, ops: WireRecord["ops"]) => {
+          list.set(id++, ROOT, {
+            flags: 0,
+            transform: [1, 0, 0, 1, x, y],
+            opacity: 1,
+            width: rw,
+            height: rh,
+            coarseBelow: 0,
+            reach: 0,
+            unsupported: 0,
+            paths: [{ kind: "rect", w: rw, h: rh, radii: [0, 0, 0, 0], smoothing: 0 }],
+            ops,
+            coarse: [],
+          });
+        };
+        const fill = (c: number): WireRecord["ops"] => [
+          { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [c, c, c, 1] } },
+        ];
+        rect(-c.span, -c.span, 2 * c.span, 2 * c.span, fill(1));
+        for (let i = 0; i < (2 * c.span) / c.period; i++) {
+          rect(-c.span, -c.span + i * c.period, 2 * c.span, c.period / 2, fill(16 / 255));
+        }
+        const [bx, by, bw, bh] = c.blurBox;
+        rect(bx, by, bw, bh, [
+          { op: "backgroundBlur", paths: [0], evenOdd: false, radius: c.radius },
+        ]);
+        const bytes = [...list.finish()];
+
+        const out = await page.evaluate(
+          async ({ bytes, expectedBackend, size, zoom, elsewhereZoom }) => {
+            const name = "/engine.js";
+            const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+            await glue.default({ module_or_path: "/engine_bg.wasm" });
+            const bg = new Float32Array([1, 1, 1, 1]);
+            const [w, h] = size;
+            const dpr = 2;
+            const requireOk = (o: { ok: boolean; message: string; free(): void }) => {
+              const { ok, message } = o;
+              o.free();
+              if (!ok) throw new Error(message);
+            };
+            const withEngine = async <T>(
+              draw: (engine: InstanceType<typeof glue.Engine>) => Promise<T>,
+            ) => {
+              const dev = await glue.createGpu(null, 0);
+              if (!dev.ok) throw new Error(dev.message);
+              if (dev.backend !== expectedBackend) throw new Error(`wrong backend ${dev.backend}`);
+              const engine = new glue.Engine(0, 0);
+              try {
+                if (
+                  !engine.attachGpu ||
+                  !engine.renderGpu ||
+                  !engine.renderGpuAhead ||
+                  !engine.gpuPixels
+                ) {
+                  throw new Error("missing GPU entry points");
+                }
+                requireOk(engine.attachGpu(dev));
+                dev.free();
+                requireOk(engine.apply(new Uint8Array(bytes)));
+                return await draw(engine);
+              } finally {
+                engine.free();
+              }
+            };
+            const frame = (
+              engine: InstanceType<typeof glue.Engine>,
+              budget: number,
+              at: number = zoom,
+              moving = false,
+            ) => {
+              const r = engine.renderGpu?.(
+                w,
+                h,
+                at,
+                w / (2 * dpr),
+                h / (2 * dpr),
+                dpr,
+                bg,
+                moving,
+                budget,
+                true,
+              );
+              if (!r) throw new Error("no renderGpu");
+              const facts = {
+                plan: r.plan,
+                pending: r.pending,
+                inProgress: r.in_progress,
+                exact: r.exact,
+              };
+              requireOk(r);
+              return facts;
+            };
+            const pixels = async (engine: InstanceType<typeof glue.Engine>) => {
+              const px = await engine.gpuPixels?.();
+              if (!(px instanceof Uint8Array)) throw new Error(px?.message ?? "no pixels");
+              return px;
+            };
+            // At once: an unbudgeted frame.
+            const whole = await withEngine(async (engine) => ({
+              facts: frame(engine, 0),
+              px: await pixels(engine),
+            }));
+            // Over slices: a frame at rest with a tiny budget shows a stand-in, and the time between
+            // frames finishes it a slice at a time; then a present-only frame shows it again.
+            const sliced = await withEngine(async (engine) => {
+              const first = frame(engine, 0.05);
+              let slices = 0;
+              let finished = false;
+              while (!finished && slices < 20_000) {
+                const r = engine.renderGpuAhead?.(bg, 0.05);
+                if (!r) throw new Error("no renderGpuAhead");
+                const done = r.tiles_drawn > 0;
+                const pending = r.pending;
+                requireOk(r);
+                slices++;
+                finished = done && pending === 0;
+              }
+              const px = await pixels(engine);
+              const shown = frame(engine, -1);
+              const again = await pixels(engine);
+              // Further out the blur's reach fits a tile's halo: tiles. A present-only frame there
+              // shows tiles, never the whole frame drawn for the other view.
+              frame(engine, 4, elsewhereZoom, true);
+              const elsewhere = frame(engine, -1, elsewhereZoom);
+              return { first, slices, finished, px, shown, again, elsewhere };
+            });
+            let differing = 0;
+            for (let i = 0; i < whole.px.length; i++) if (whole.px[i] !== sliced.px[i]) differing++;
+            let againDiffering = 0;
+            for (let i = 0; i < whole.px.length; i++)
+              if (whole.px[i] !== sliced.again[i]) againDiffering++;
+            return {
+              whole: whole.facts,
+              first: sliced.first,
+              slices: sliced.slices,
+              finished: sliced.finished,
+              shown: sliced.shown,
+              elsewhere: sliced.elsewhere,
+              differing,
+              againDiffering,
+            };
+          },
+          { bytes, expectedBackend, size: c.size, zoom: c.zoom, elsewhereZoom: c.elsewhere },
+        );
+        console.log(`[zoom-blur ${build}] ${c.label} over slices: ${JSON.stringify(out)}`);
+        expect(out.whole.plan, `drawn at once: ${c.label}`).toBe(c.plan);
+        expect(out.whole.exact).toBe(c.exact);
+        expect(out.first.pending, "the first frame at rest shows a stand-in").toBeGreaterThan(0);
+        expect(out.first.inProgress).toBe(true);
+        expect(out.finished, "the slices finish it").toBe(true);
+        expect(out.slices, "it took many slices").toBeGreaterThan(3);
+        expect(out.differing, "over slices it's the frame drawn at once, byte for byte").toBe(0);
+        expect(out.shown.plan, "a present-only frame shows the finished frame").toBe(c.plan);
+        expect(out.shown.exact).toBe(c.exact);
+        expect(out.againDiffering).toBe(0);
+        expect(
+          out.elsewhere.plan,
+          "a present-only frame of another view is made of tiles",
+        ).toBeLessThan(2);
+      });
+
     test("glass stacked over wide progressive blur at d>=32 matches full-res reference", async ({
       page,
     }) => {
