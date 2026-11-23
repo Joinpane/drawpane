@@ -1421,11 +1421,12 @@ impl Backend for Cpu {
         Ok(())
     }
 
-    fn abort_isolated(&mut self) {
+    fn abort_isolated(&mut self, open: &[Open]) {
         if let Some(scope) = self.offscreen_stack.pop() {
             (self.write_main, self.write_backdrop) = scope.parent_writes;
         }
         self.reset_parent_scene();
+        self.reopen_clips(open);
         self.temp_bytes = 0;
     }
 

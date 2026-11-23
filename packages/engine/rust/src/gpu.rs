@@ -9731,7 +9731,7 @@ impl Backend for Gpu {
         result
     }
 
-    fn abort_isolated(&mut self) {
+    fn abort_isolated(&mut self, open: &[Open]) {
         if let Some(scope) = self.offscreen_stack.pop() {
             let active = self.active.as_mut().expect("active draw");
             (active.write_main, active.write_backdrop) = scope.previous_targets;
@@ -9741,6 +9741,7 @@ impl Backend for Gpu {
         self.recycle_scene_textures();
         let (w, h) = self.active_scene_size();
         self.scene.reset_and_resize(w, h);
+        self.reopen_clips(open);
     }
 
     const ALLOW_UNBOUNDED_VIEW_BLUR: bool = true;
