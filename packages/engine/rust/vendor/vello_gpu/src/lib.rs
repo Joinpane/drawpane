@@ -143,6 +143,20 @@ pub use render::{WebGlPendingProbe, WebGlProbeError, WebGlProbeOperation, WebGlP
 #[cfg(all(feature = "wgpu", feature = "probe"))]
 pub use render::{WgpuPendingProbe, WgpuProbeError, WgpuProbeStatus};
 pub use resources::Resources;
+
+/// Drawpane: render passes the wgpu backend has begun, for profiling (`render_passes`).
+static RENDER_PASSES: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Drawpane: counts a render pass begun by the wgpu backend.
+#[inline]
+pub(crate) fn count_render_pass() {
+    RENDER_PASSES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Drawpane: render passes the wgpu backend has begun since start (wrapping), for profiling.
+pub fn render_passes() -> u32 {
+    RENDER_PASSES.load(core::sync::atomic::Ordering::Relaxed)
+}
 pub use scene::{LayersConfig, MemorySettings, RenderSettings, Scene};
 #[cfg(feature = "text")]
 pub use text::{GlyphRunBuilder, GpuGlyphRunBackend};

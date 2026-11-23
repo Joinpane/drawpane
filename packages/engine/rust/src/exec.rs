@@ -52,6 +52,8 @@ pub trait Draw {
     fn pop_clip(&mut self);
     fn push_opacity(&mut self, opacity: f32);
     fn push_layer(&mut self, compose: Compose, opacity: Option<f32>);
+    /// A layer composited with the engine's blend mode `mode` (`1..=17`) at `opacity`.
+    fn push_blend(&mut self, mode: u32, opacity: Option<f32>);
     fn pop_layer(&mut self);
 }
 
@@ -113,11 +115,50 @@ macro_rules! impl_draw {
                 );
                 <$t>::push_layer(self, None, blend, opacity, None, None);
             }
+            fn push_blend(&mut self, mode: u32, opacity: Option<f32>) {
+                <$t>::push_layer(
+                    self,
+                    None,
+                    Some(crate::exec::vello_blend(mode)),
+                    opacity,
+                    None,
+                    None,
+                );
+            }
             fn pop_layer(&mut self) {
                 <$t>::pop_layer(self);
             }
         }
     };
+}
+
+/// The Vello blend mode drawing the engine's blend mode `mode` (`1..=17`) as a layer in the scene.
+/// Vello's GPU blend shader composes non-normal mixes with the engine's arithmetic; Figma's
+/// linear-dodge (16) and linear-burn (17), which peniko has no `Mix` for, are Screen and Multiply
+/// over `Compose::Dest` (see vendor/vello_gpu/VENDORED.md). Only the GPU draws blend layers.
+pub fn vello_blend(mode: u32) -> vello_common::peniko::BlendMode {
+    use vello_common::peniko::{BlendMode, Compose, Mix};
+    let mix = match mode {
+        1 => Mix::Multiply,
+        2 => Mix::Screen,
+        3 => Mix::Overlay,
+        4 => Mix::Darken,
+        5 => Mix::Lighten,
+        6 => Mix::ColorDodge,
+        7 => Mix::ColorBurn,
+        8 => Mix::HardLight,
+        9 => Mix::SoftLight,
+        10 => Mix::Difference,
+        11 => Mix::Exclusion,
+        12 => Mix::Hue,
+        13 => Mix::Saturation,
+        14 => Mix::Color,
+        15 => Mix::Luminosity,
+        16 => return BlendMode::new(Mix::Screen, Compose::Dest),
+        17 => return BlendMode::new(Mix::Multiply, Compose::Dest),
+        _ => Mix::Normal,
+    };
+    BlendMode::new(mix, Compose::SrcOver)
 }
 pub(crate) use impl_draw;
 
@@ -370,6 +411,15 @@ pub trait Backend {
     /// cooperatively at the next safe boundary (outside isolated and masked scopes).
     fn deadline_reached(&self) -> bool {
         false
+    }
+    /// Readies the scene for a blend layer (`Draw::push_blend`) about to be pushed under `open`
+    /// clips: a blend member (a fill, stroke or record with a blend mode of its own and nothing in
+    /// it that needs an offscreen scope) drawn in the scene instead of as an offscreen scope
+    /// composited with the engine's kernel. The backend may bring the backdrop into the scene
+    /// first (flushing what it holds). `nested`: inside another such layer, whose own content is
+    /// all a blend there sees. False: draw the member offscreen.
+    fn scene_blend(&mut self, _open: &[Open], _nested: bool) -> Result<bool> {
+        Ok(false)
     }
     /// Switches which targets subsequent scene draws write into, flushing pending scene ops first.
     fn set_targets(&mut self, _write_main: bool, _write_backdrop: bool, _open: &[Open]) -> Result<()> {
@@ -1198,6 +1248,7 @@ pub fn draw_split_resumable<B: Backend>(
         yield_safe_depth: 0,
         paused: false,
         paused_path: Vec::new(),
+        scene_blends: 0,
         resume_path,
         resume_depth: 0,
         records_since_probe: 0,
@@ -1282,6 +1333,8 @@ struct Walk<'a, B: Backend> {
     yield_safe_depth: usize,
     paused: bool,
     paused_path: Vec<(u32, usize, usize)>,
+    /// Blend layers open in the scene (`Backend::scene_blend`).
+    scene_blends: usize,
     resume_path: Vec<(u32, usize, usize)>,
     resume_depth: usize,
     records_since_probe: u32,
@@ -2634,7 +2687,22 @@ impl<B: Backend> Walk<'_, B> {
             && r.isolate()
             && r.opacity < 1.0
             && (store.subtree_has_blend(id) || reader_fade || crosses_context);
-        let use_offscreen = has_post || layer_blend != 0 || through || (isolate && store.subtree_has_pass(id));
+        // A record blending onto what's beneath it, with nothing inside that flushes, can blend as a
+        // layer in the scene (`Backend::scene_blend`).
+        let scene_blend = layer_blend != 0
+            && !has_post
+            && !reader_fade
+            && !crosses_context
+            && !has_reader
+            && !is_context
+            && !self.current_context
+            && r.blends_alone()
+            && node.children.iter().all(|&c| !store.subtree_has_pass(c))
+            && self.backend.scene_blend(&self.open, self.scene_blends > 0)?;
+        let use_offscreen = has_post
+            || (layer_blend != 0 && !scene_blend)
+            || through
+            || (isolate && !scene_blend && store.subtree_has_pass(id));
         let mut isolation = self.isolation(has_reader, through);
         isolation.inherit_prefix = has_reader;
         if crosses_context {
@@ -2848,7 +2916,14 @@ impl<B: Backend> Walk<'_, B> {
         } else {
             if isolate {
                 self.scope()?;
-                self.backend.scene().push_opacity(opacity);
+                if scene_blend {
+                    self.backend
+                        .scene()
+                        .push_blend(layer_blend, (opacity < 1.0).then_some(opacity));
+                    self.scene_blends += 1;
+                } else {
+                    self.backend.scene().push_opacity(opacity);
+                }
                 self.open.push(Open::Layer);
             }
             None
@@ -3341,6 +3416,9 @@ impl<B: Backend> Walk<'_, B> {
         if isolate {
             self.open.pop();
             self.backend.scene().pop_layer();
+            if scene_blend {
+                self.scene_blends -= 1;
+            }
         }
         if suspended {
             self.resume_context_clips()?;
@@ -3664,6 +3742,18 @@ impl<B: Backend> Walk<'_, B> {
                 return Ok(());
             }
             self.scope()?;
+            if self.backend.scene_blend(&self.open, self.scene_blends > 0)? {
+                self.backend.scene().push_blend(u32::from(blend), None);
+                self.open.push(Open::Layer);
+                self.yield_safe_depth += 1;
+                self.scene_blends += 1;
+                let res = self.fill(r, i, device, even_odd, paint, 0, alpha, allow_glyph_masks);
+                self.scene_blends -= 1;
+                self.yield_safe_depth -= 1;
+                self.open.pop();
+                self.backend.scene().pop_layer();
+                return res;
+            }
             if !self.isolate_area(area, true, None, false, false)? {
                 return Ok(());
             }
@@ -3733,6 +3823,18 @@ impl<B: Backend> Walk<'_, B> {
                 return Ok(());
             }
             self.scope()?;
+            if self.backend.scene_blend(&self.open, self.scene_blends > 0)? {
+                self.backend.scene().push_blend(u32::from(blend), None);
+                self.open.push(Open::Layer);
+                self.yield_safe_depth += 1;
+                self.scene_blends += 1;
+                let res = self.stroke(r, i, device, style, paint, 0, alpha, cache);
+                self.scene_blends -= 1;
+                self.yield_safe_depth -= 1;
+                self.open.pop();
+                self.backend.scene().pop_layer();
+                return res;
+            }
             if !self.isolate_area(area, true, None, false, false)? {
                 return Ok(());
             }

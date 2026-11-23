@@ -585,6 +585,7 @@ impl RendererContext<'_> {
         let mut draws = 0u32;
 
         {
+            crate::count_render_pass(); // Drawpane: profiling
             let mut render_pass = self.encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("Render to Texture Pass"),
                 color_attachments: &[Some(RenderPassColorAttachment {

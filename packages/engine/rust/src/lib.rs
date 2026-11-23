@@ -1149,18 +1149,36 @@ impl Engine {
 
     /// What made the GPU's Vello renders and scene flushes since it started (`GpuCounters`), for
     /// profiling: the renders by purpose (11), the flushes by cause (15), then isolation scopes,
-    /// shadow mask misses and hits, and tile pauses. Empty without a GPU.
+    /// shadow mask misses and hits, tile pauses, the render passes Vello has begun, blend layers
+    /// drawn in the scene, the backdrops brought in for them, and members refused a layer there.
+    /// Empty without a GPU.
     #[wasm_bindgen(js_name = gpuCounters)]
     pub fn gpu_counters(&self) -> Vec<u32> {
         let Some(g) = self.core.gpu.as_ref() else {
             return Vec::new();
         };
         let c = g.counters;
-        let mut v = Vec::with_capacity(30);
+        let mut v = Vec::with_capacity(35);
         v.extend_from_slice(&c.renders);
         v.extend_from_slice(&c.flushes);
         v.extend_from_slice(&[c.scopes, c.shadow_misses, c.shadow_hits, c.pauses]);
+        v.extend_from_slice(&[
+            vello_gpu::render_passes(),
+            c.scene_blends,
+            c.backdrops,
+            c.scene_refusals,
+        ]);
         v
+    }
+
+    /// Whether blend members draw as blend layers in the scene (the default) or as offscreen scopes
+    /// composited with the engine's kernel; drops the tiles drawn the other way. For tests.
+    #[wasm_bindgen(js_name = setSceneBlends)]
+    pub fn set_scene_blends(&mut self, enabled: bool) {
+        if let Some(g) = self.core.gpu.as_mut() {
+            g.scene_blends = enabled;
+            g.clear_tiles();
+        }
     }
 
     /// Destroys the GPU device, as a driver reset would lose it: for testing the fallback.

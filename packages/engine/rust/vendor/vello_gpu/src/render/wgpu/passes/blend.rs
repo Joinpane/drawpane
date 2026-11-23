@@ -196,6 +196,7 @@ impl RendererContext<'_> {
         let blend_layer_bind_group = &self.resources.blend_layer_bind_groups[&bindings];
 
         {
+            crate::count_render_pass(); // Drawpane: profiling
             let mut render_pass = self.encoder.begin_render_pass(&RenderPassDescriptor {
                 label: Some("Blend To Scratch"),
                 color_attachments: &[Some(RenderPassColorAttachment {

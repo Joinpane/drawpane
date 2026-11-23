@@ -224,6 +224,7 @@ export class Engine {
   renderGpuAhead?(background: Float32Array, budgetMs: number): Outcome;
   clearTiles?(): void;
   gpuCounters?(): Uint32Array;
+  setSceneBlends?(enabled: boolean): void;
   gpuCheck?(): Outcome;
   gpuDestroy?(): void;
   setGpuTimestamps?(enabled: boolean): boolean;

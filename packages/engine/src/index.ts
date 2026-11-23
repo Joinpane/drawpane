@@ -289,6 +289,7 @@ export const GPU_FLUSH_CAUSES = [
   "postEffects",
   "isolationPop",
   "shadowMemory",
+  "sceneBackdrop",
 ] as const;
 
 /** What made the GPU's Vello renders and scene flushes, counted since it started. */
@@ -299,6 +300,13 @@ export interface GpuCounters {
   readonly shadowMisses: number;
   readonly shadowHits: number;
   readonly pauses: number;
+  /** Render passes Vello has begun (all its renders, not the engine's own passes). */
+  readonly velloPasses: number;
+  /** Blend layers drawn in the scene, and backdrops brought into a scene for them. */
+  readonly sceneBlends: number;
+  readonly backdrops: number;
+  /** Blend members refused a layer in the scene (drawn offscreen instead). */
+  readonly sceneRefusals: number;
 }
 
 /** What drawing ahead between frames did (`RenderEngine.renderGpuAhead`). */
@@ -1307,6 +1315,14 @@ export class RenderEngine {
   clearTiles(): void {
     this.#call((e) => e.clearTiles?.());
   }
+
+  /**
+   * Whether blend members draw as blend layers in the GPU's scene (the default) or as offscreen
+   * scopes composited with the engine's blend kernel; drops the tiles drawn the other way.
+   */
+  setSceneBlends(enabled: boolean): void {
+    this.#call((e) => e.setSceneBlends?.(enabled));
+  }
   /**
    * What made the GPU's Vello renders and scene flushes since it started, for profiling
    * (`GpuCounters` in the engine): renders by purpose, flushes by cause, isolation scopes, shadow
@@ -1319,7 +1335,7 @@ export class RenderEngine {
     });
     const kinds = GPU_RENDER_KINDS.length;
     const causes = GPU_FLUSH_CAUSES.length;
-    if (!raw || raw.length < kinds + causes + 4) return null;
+    if (!raw || raw.length < kinds + causes + 8) return null;
     const v = Array.from(raw);
     const at = (names: readonly string[], from: number) =>
       Object.fromEntries(names.map((n, i) => [n, v[from + i] ?? 0]));
@@ -1331,6 +1347,10 @@ export class RenderEngine {
       shadowMisses: v[rest + 1] ?? 0,
       shadowHits: v[rest + 2] ?? 0,
       pauses: v[rest + 3] ?? 0,
+      velloPasses: v[rest + 4] ?? 0,
+      sceneBlends: v[rest + 5] ?? 0,
+      backdrops: v[rest + 6] ?? 0,
+      sceneRefusals: v[rest + 7] ?? 0,
     };
   }
 

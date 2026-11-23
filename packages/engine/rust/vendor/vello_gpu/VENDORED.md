@@ -14,5 +14,14 @@ crates.io, unchanged except:
   coordinates and shifts the emitted strips by a tile-aligned atlas origin, keeping batched
   glass mask coverage bit-identical to standalone lens-local masks.
 
+- `src/blend.rs`: Figma's linear-dodge and linear-burn have no peniko `Mix`. The engine asks for
+  them as Screen and Multiply over `Compose::Dest` (a no-op compose nothing else draws with), and
+  `pack_blend_config` packs them as mix codes 16 and 17 over source-over for the blend shader.
+- `src/lib.rs` and `src/render/wgpu/passes/*.rs`: `render_passes()` counts the render passes the
+  wgpu backend begins, for profiling.
+
+The shaders are vendored too (`vendor/vello_gpu_shaders`, see its VENDORED.md): its blend pass
+composes non-normal mixes with the engine's own blend arithmetic.
+
 The patch is marked `Drawpane:` in the code. Upgrading Vello means taking the new release and
 carrying the patch again (or dropping it if upstream uploads through the queue on the web).

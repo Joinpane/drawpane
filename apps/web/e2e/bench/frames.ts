@@ -229,6 +229,10 @@ async function move(
         shadowMisses: number;
         shadowHits: number;
         pauses: number;
+        velloPasses?: number;
+        sceneBlends?: number;
+        backdrops?: number;
+        sceneRefusals?: number;
       };
       const view = () => (window as unknown as { drawpaneEngineView?: View }).drawpaneEngineView;
       const counters = () => {
@@ -241,6 +245,10 @@ async function move(
         flat.shadowMisses = c.shadowMisses;
         flat.shadowHits = c.shadowHits;
         flat.pauses = c.pauses;
+        flat.velloPasses = c.velloPasses ?? 0;
+        flat.sceneBlends = c.sceneBlends ?? 0;
+        flat.backdrops = c.backdrops ?? 0;
+        flat.sceneRefusals = c.sceneRefusals ?? 0;
         return flat;
       };
       let counters0: Record<string, number> | null = null;

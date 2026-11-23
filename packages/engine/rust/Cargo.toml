@@ -71,7 +71,8 @@ opt-level = 2
 [profile.dev]
 opt-level = 1
 
-# vello_gpu with Drawpane's patch (uploads through the queue on the web): see
-# vendor/vello_gpu/VENDORED.md.
+# vello_gpu and its shaders with Drawpane's patches (uploads through the queue on the web, the
+# engine's blend arithmetic for blend layers): see vendor/vello_gpu/VENDORED.md.
 [patch.crates-io]
 vello_gpu = { path = "vendor/vello_gpu" }
+vello_gpu_shaders = { path = "vendor/vello_gpu_shaders" }

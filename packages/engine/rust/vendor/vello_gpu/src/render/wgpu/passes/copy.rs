@@ -100,6 +100,7 @@ pub(crate) fn encode_copy_pass(
 ) {
     // Drawpane: allocate instance vertices from the batched arena instead of create_buffer_init.
     let range = resources.upload_vertex_bytes(bytemuck::cast_slice(instances));
+    crate::count_render_pass(); // Drawpane: profiling
     let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
         label: Some(label),
         color_attachments: &[Some(RenderPassColorAttachment {

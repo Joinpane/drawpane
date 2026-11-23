@@ -1169,17 +1169,23 @@ pub enum ComputeFinish {
 /// reader clip, backdrop blur, scope composite clip, reader clip, reader glass, shadow cache,
 /// shadow, reduced shadow, other. `flushes` by cause (`Gpu::flush_why`): unknown, motion prefix,
 /// halo strip, whole frame, direct tile end, pause, slot tile end, blur reader, backdrop snapshot,
-/// target change, glass, isolation push, post effects, isolation pop, shadow memory.
+/// target change, glass, isolation push, post effects, isolation pop, shadow memory, backdrop for
+/// a blend layer in the scene.
 #[derive(Clone, Copy, Default)]
 pub struct GpuCounters {
     pub renders: [u32; 11],
-    pub flushes: [u32; 15],
+    pub flushes: [u32; 16],
     /// Offscreen isolation scopes pushed (blend modes, post effects, faded groups with passes).
     pub scopes: u32,
     pub shadow_misses: u32,
     pub shadow_hits: u32,
     /// Tile walks paused to keep a slice within its budget.
     pub pauses: u32,
+    /// Backdrops brought into a scene for blend layers (`scene_blend`), blend layers drawn, and
+    /// blend members refused a layer in the scene (drawn offscreen).
+    pub backdrops: u32,
+    pub scene_blends: u32,
+    pub scene_refusals: u32,
 }
 
 pub struct Gpu {
@@ -1201,6 +1207,17 @@ pub struct Gpu {
     bindings: TextureBindings,
     scene: Scene,
     mask_scene: Scene,
+    /// Blend members draw as blend layers in the scene (`Backend::scene_blend`), not as offscreen
+    /// scopes composited with the engine's kernel. On by default; tests turn it off to compare.
+    pub scene_blends: bool,
+    /// The scene's root holds the whole backdrop of what it draws over (the background, or the
+    /// target's pixels drawn as an image), so a blend layer in it sees everything beneath.
+    scene_backdrop: bool,
+    /// The scene's render replaces its target (cleared first): it holds the target's own pixels.
+    scene_replaces: bool,
+    /// The texture id the scene's backdrop image draws from: bound, as each plane is rendered,
+    /// to a copy of that plane (`flush_scene_gpu`).
+    scene_backdrop_tid: Option<TextureId>,
     readers: GpuReaders,
     reader_halo: Option<ReaderHalo>,
     active: Option<ActiveDraw>,
@@ -1866,6 +1883,11 @@ impl Gpu {
             bindings,
             scene: Scene::new(1, 1),
             mask_scene: Scene::new(1, 1),
+            scene_blends: true,
+            scene_backdrop: false,
+            scene_replaces: false,
+            scene_backdrop_tid: None,
+
             readers,
             reader_halo: None,
             active: None,
@@ -2310,7 +2332,10 @@ impl Gpu {
             &self.device,
             need_w,
             need_h,
-            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            // Copied into too: a scene's backdrop for its blend layers (`scene_blend`).
+            wgpu::TextureUsages::RENDER_ATTACHMENT
+                | wgpu::TextureUsages::TEXTURE_BINDING
+                | wgpu::TextureUsages::COPY_DST,
             "shadow temp",
         );
         let view = tex.create_view(&Default::default());
@@ -2820,6 +2845,8 @@ impl Gpu {
             self.readers.drop_glass_mask_atlas();
             self.readers.flush_retired();
             self.scene.reset();
+            self.scene_backdrop = false;
+            self.scene_replaces = false;
         }
     }
 
@@ -3514,7 +3541,7 @@ impl Gpu {
             "shadow reduced" => 9,
             _ => 10,
         };
-        self.counters.renders[kind] += 1;
+        self.counters.renders[kind] = self.counters.renders[kind].wrapping_add(1);
         Ok(())
     }
 
@@ -5093,6 +5120,9 @@ impl Gpu {
         self.shadow.begin_frame();
         self.atlas.at = (0, 0, 0);
         self.scene.reset_and_resize(whole.width, whole.height);
+        self.scene_backdrop = false;
+        self.scene_replaces = false;
+        self.scene_backdrop_tid = None;
         self.readers.begin_frame();
         self.backdrop_gen += 1;
         if !capturing {
@@ -5942,11 +5972,15 @@ impl Gpu {
         self.masks.begin_frame();
         self.atlas.at = (0, 0, 0);
         self.scene.reset_and_resize(side as u16, side as u16);
+        self.scene_backdrop = false;
+        self.scene_replaces = false;
+        self.scene_backdrop_tid = None;
         self.readers.begin_frame();
         self.blur.begin_frame();
         self.shadow.begin_frame();
         self.backdrop_gen += 1;
         self.active = Some(ActiveDraw::new(None, None, side, side, background, coarse_readers));
+        self.begin_scene_backdrop(store);
         let tile = Frame {
             width: side as u16,
             height: side as u16,
@@ -6100,11 +6134,15 @@ impl Gpu {
         self.masks.begin_frame();
         self.atlas.at = (0, 0, 0);
         self.scene.reset_and_resize(side as u16, side as u16);
+        self.scene_backdrop = false;
+        self.scene_replaces = false;
+        self.scene_backdrop_tid = None;
         self.readers.begin_frame();
         self.blur.begin_frame();
         self.shadow.begin_frame();
         self.backdrop_gen += 1;
         self.active = Some(ActiveDraw::new(None, None, side, side, background, coarse_readers));
+        self.begin_scene_backdrop(store);
         let tile = Frame {
             width: side as u16,
             height: side as u16,
@@ -6174,6 +6212,9 @@ impl Gpu {
         self.readers.begin_frame();
         self.atlas.at = (0, 0, 0);
         self.scene.reset_and_resize(pt.side as u16, pt.side as u16);
+        self.scene_backdrop = false;
+        self.scene_replaces = false;
+        self.scene_backdrop_tid = None;
         let h = pt.tile_halo as u32;
         let tile = Frame {
             width: pt.side as u16,
@@ -6280,7 +6321,7 @@ impl Gpu {
                     verbs,
                     backdrop_gen: self.backdrop_gen,
                 });
-                self.counters.pauses += 1;
+                self.counters.pauses = self.counters.pauses.wrapping_add(1);
                 Ok(TileStep::Paused)
             }
             exec::WalkOutcome::Complete {
@@ -6402,6 +6443,9 @@ impl Gpu {
         }
         self.offscreen_pool.append(&mut self.offscreen_in_use);
         self.scene.reset();
+        self.scene_backdrop = false;
+        self.scene_replaces = false;
+        self.scene_backdrop_tid = None;
         self.recycle_scene_textures();
         self.atlas.at = (0, 0, 0);
     }
@@ -6409,6 +6453,7 @@ impl Gpu {
     /// Called after submitting the scene that references these textures, or dropping that scene.
     fn recycle_scene_textures(&mut self) {
         self.release_temp_textures();
+
         self.temp_pool.append(&mut self.temp_in_use);
         for shadow in self.retired_shadows.drain(..) {
             self.bindings.remove(shadow.tid);
@@ -6463,14 +6508,22 @@ impl Gpu {
         let dual = write_main && write_backdrop;
         let draw = scene_dirty && (write_main || write_backdrop);
         if draw {
-            self.counters.flushes[usize::from(why).min(14)] += 1;
+            let at = usize::from(why).min(15);
+            self.counters.flushes[at] = self.counters.flushes[at].wrapping_add(1);
         }
 
         // Vello defaults to clearing the attachment. Existing planes already hold their
         // prefix, including readers and composites from earlier segments.
         let mut options = RenderOptions::default();
         options.target_init = TargetInit::SrcOver;
-        if needs_clear && draw && write_main && !write_backdrop {
+        // A scene holding its target's pixels as its backdrop (`scene_blend`) replaces the target:
+        // composited over it, translucent pixels would count twice.
+        let replaces = std::mem::take(&mut self.scene_replaces) && draw && write_main;
+        let backdrop_tid = self.scene_backdrop_tid.take();
+        self.scene_backdrop = false;
+        if replaces {
+            // Each plane is rendered whole below.
+        } else if needs_clear && draw && write_main && !write_backdrop {
             options.target_init = TargetInit::Clear(ClearSettings::Viewport {
                 color: AlphaColor::new([r, g, b, a]),
             });
@@ -6490,7 +6543,42 @@ impl Gpu {
             self.stash_encoder(encoder);
         }
 
-        if draw {
+        if draw && replaces {
+            // The scene holds its backdrop: each plane it writes is rendered whole from it, the
+            // backdrop image drawing from a copy of that plane (Vello never samples its target).
+            let (w, h) = self.active_scene_size();
+            for backdrop in [false, true] {
+                if backdrop && !dual {
+                    continue;
+                }
+                if let Some(tid) = backdrop_tid {
+                    let temp = self.acquire_temp(u32::from(w), u32::from(h))?;
+                    let mut encoder = self.take_encoder("scene backdrop");
+                    copy_rect(
+                        &mut encoder,
+                        self.plane(backdrop)?.0,
+                        &temp.tex,
+                        (0, 0),
+                        (0, 0),
+                        (u32::from(w), u32::from(h)),
+                    );
+                    self.stash_encoder(encoder);
+                    self.bindings.insert(tid, temp.tex.create_view(&Default::default()));
+                    self.in_use_bytes += temp.bytes;
+                    self.temp_in_use.push(temp);
+                }
+                let (_, color, _, depth) = self.plane(backdrop)?;
+                let (color, depth) = (color.clone(), depth.clone());
+                let mut whole = RenderOptions::default();
+                whole.target_init = TargetInit::Clear(ClearSettings::Viewport {
+                    color: AlphaColor::TRANSPARENT,
+                });
+                self.vello_render(false, &color, Some(&depth), whole, "scene flush")?;
+            }
+            if let Some(tid) = backdrop_tid {
+                self.bindings.remove(tid);
+            }
+        } else if draw {
             let (target, color, color_id, depth) = self.plane(!write_main)?;
             let depth = depth.clone();
             let (width, height) = (target.width(), target.height());
@@ -6561,6 +6649,32 @@ impl Gpu {
             self.submit_active_encoder();
         }
         Ok(())
+    }
+
+    /// A tile's scene starts holding its backdrop (the background, as a fill under everything)
+    /// on a page with blend members, so they blend in the scene until it first flushes.
+    fn begin_scene_backdrop(&mut self, store: &Store) {
+        let Some(active) = self.active.as_ref() else {
+            return;
+        };
+        if !self.scene_blends
+            || store.has_context()
+            || !store.subtree_has_blend(crate::store::ROOT)
+            || !active.needs_clear
+        {
+            return;
+        }
+        let [r, g, b, a] = active.background;
+        let (w, h) = (active.width, active.height);
+        self.scene.set_transform(Affine::IDENTITY);
+        self.scene.reset_paint_transform();
+        self.scene.set_tint(None);
+        self.scene.set_fill_rule(Fill::NonZero);
+        self.scene.set_paint(AlphaColor::<Srgb>::new([r, g, b, a]));
+        self.scene.fill_rect(&Rect::new(0.0, 0.0, f64::from(w), f64::from(h)));
+        self.mark_dirty();
+        self.scene_backdrop = true;
+        self.scene_replaces = true;
     }
 
     fn flush_preserving_clips(&mut self, open: &[Open], force_clear: bool) -> Result<()> {
@@ -8545,6 +8659,93 @@ impl Backend for Gpu {
         self.deadline_ms.is_some_and(|d| now() >= d)
     }
 
+    fn scene_blend(&mut self, open: &[Open], nested: bool) -> Result<bool> {
+        // Inside a blend layer in the scene, a blend sees that layer's own content: all there.
+        if nested {
+            self.counters.scene_blends = self.counters.scene_blends.wrapping_add(1);
+            return Ok(true);
+        }
+        let Some(active) = self.active.as_ref() else {
+            return Ok(false);
+        };
+        // Nothing flushes inside a layer; a halo replay or a context draw takes the offscreen way.
+        if !self.scene_blends
+            || self.reader_halo.is_some()
+            || !active.write_main
+            || open.iter().any(|o| matches!(o, Open::Layer))
+        {
+            self.counters.scene_refusals = self.counters.scene_refusals.wrapping_add(1);
+            return Ok(false);
+        }
+        if self.scene_backdrop {
+            self.counters.scene_blends = self.counters.scene_blends.wrapping_add(1);
+            return Ok(true);
+        }
+        // Bring the backdrop into the scene, under everything else it draws, only while that's
+        // cheap: nothing drawn in the scene yet, on one plane. The background, before anything is
+        // drawn, else the target as an image. Flushing to make room, or rendering the scene once
+        // per plane, costs more than the offscreen scopes it saves (T4, iOS kit).
+        let root = self.offscreen_stack.is_empty();
+        let shared = self.offscreen_stack.last().is_some_and(|s| s.backdrop.is_none());
+        let dual = active.write_backdrop && !shared;
+        let fresh = root && active.needs_clear && !active.scene_dirty;
+        if active.scene_dirty || dual {
+            self.counters.scene_refusals = self.counters.scene_refusals.wrapping_add(1);
+            return Ok(false);
+        }
+        self.counters.scene_blends = self.counters.scene_blends.wrapping_add(1);
+        for o in open.iter().rev() {
+            if matches!(
+                o,
+                Open::Clip {
+                    active_on_scene: true,
+                    ..
+                }
+            ) {
+                self.scene.pop_clip();
+            }
+        }
+        let (w, h) = self.active_scene_size();
+        let area = Rect::new(0.0, 0.0, f64::from(w), f64::from(h));
+        self.scene.set_transform(Affine::IDENTITY);
+        self.scene.reset_paint_transform();
+        self.scene.set_tint(None);
+        self.scene.set_fill_rule(Fill::NonZero);
+        if fresh {
+            let [r, g, b, a] = self.active.as_ref().expect("active draw").background;
+            self.scene.set_paint(AlphaColor::<Srgb>::new([r, g, b, a]));
+        } else {
+            // Bound when the scene renders, to a copy of each plane it writes (`flush_scene_gpu`).
+            let tid = self.alloc_temp_id();
+            self.scene_backdrop_tid = Some(tid);
+            self.scene.set_paint(Image {
+                image: ImageSource::external_texture(
+                    tid,
+                    TextureRegion::Rect(RectU16 {
+                        x0: 0,
+                        y0: 0,
+                        x1: w,
+                        y1: h,
+                    }),
+                    true,
+                ),
+                sampler: ImageSampler {
+                    x_extend: Extend::Pad,
+                    y_extend: Extend::Pad,
+                    quality: ImageQuality::Low,
+                    alpha: 1.0,
+                },
+            });
+        }
+        self.scene.fill_rect(&area);
+        self.mark_dirty();
+        self.reopen_clips(open);
+        self.scene_backdrop = true;
+        self.scene_replaces = true;
+        self.counters.backdrops = self.counters.backdrops.wrapping_add(1);
+        Ok(true)
+    }
+
     fn set_targets(&mut self, write_main: bool, write_backdrop: bool, open: &[Open]) -> Result<()> {
         let Some(active) = self.active.as_ref() else {
             return Ok(());
@@ -9327,7 +9528,7 @@ impl Backend for Gpu {
         if area.is_empty() {
             return Ok(false);
         }
-        self.counters.scopes += 1;
+        self.counters.scopes = self.counters.scopes.wrapping_add(1);
         let area = if clip_to_parent {
             // Match the CPU scope's sampling extent and preserve frame-relative raster cells.
             IRect {
@@ -9410,6 +9611,10 @@ impl Backend for Gpu {
         active.write_main = true;
         active.write_backdrop = isolation.separate;
         self.scene.reset_and_resize(w as u16, h as u16);
+        // A scope starts clear: its scene holds all it draws over, unless it starts as a copy.
+        self.scene_backdrop = !isolation.copy_parent;
+        self.scene_replaces = false;
+        self.scene_backdrop_tid = None;
         Ok(true)
     }
 
@@ -9473,6 +9678,9 @@ impl Backend for Gpu {
         (active.write_main, active.write_backdrop) = content.previous_targets;
         active.scene_dirty = false;
         self.scene.reset_and_resize(w, h);
+        self.scene_backdrop = false;
+        self.scene_replaces = false;
+        self.scene_backdrop_tid = None;
         self.reopen_clips(open);
         let result = flushed
             .and_then(|()| self.composite_scope(&content, picture.as_ref().zip(mask_kind), blend, opacity, open));
@@ -9484,6 +9692,9 @@ impl Backend for Gpu {
     }
 
     fn abort_isolated(&mut self) {
+        self.scene_backdrop = false;
+        self.scene_replaces = false;
+        self.scene_backdrop_tid = None;
         if let Some(scope) = self.offscreen_stack.pop() {
             let active = self.active.as_mut().expect("active draw");
             (active.write_main, active.write_backdrop) = scope.previous_targets;
@@ -9535,7 +9746,7 @@ impl Backend for Gpu {
                     if let Some(a) = self.active.as_mut() {
                         a.shadow_hits += 1;
                     }
-                    self.counters.shadow_hits += 1;
+                    self.counters.shadow_hits = self.counters.shadow_hits.wrapping_add(1);
                     let (sox, soy) = self.scene_offset();
                     let px = f64::from(origin.0 - sox);
                     let py = f64::from(origin.1 - soy);
@@ -9572,7 +9783,7 @@ impl Backend for Gpu {
                 }
 
                 // Cache miss: rasterise + blur canonical mask once and cache it.
-                self.counters.shadow_misses += 1;
+                self.counters.shadow_misses = self.counters.shadow_misses.wrapping_add(1);
                 let t0 = now();
                 let sub0 = self.active.as_ref().map_or(0.0, |a| a.submit_ms);
                 let max_tex = self.device.limits().max_texture_dimension_2d;

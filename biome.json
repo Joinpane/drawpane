@@ -15,7 +15,8 @@
       "!**/*.md",
       "!**/*.svg",
       "!**/test/fixtures/*.json",
-      "!**/test/main-era/editor-*.mjs"
+      "!**/test/main-era/editor-*.mjs",
+      "!packages/engine/rust/vendor"
     ]
   },
   "formatter": {

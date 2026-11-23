@@ -98,6 +98,7 @@ impl RendererContext<'_> {
         view: &TextureView,
         color: wgpu::Color,
     ) {
+        crate::count_render_pass(); // Drawpane: profiling
         encoder.begin_render_pass(&RenderPassDescriptor {
             label: Some("Clear Target"),
             color_attachments: &[Some(RenderPassColorAttachment {
@@ -177,6 +178,7 @@ impl RendererContext<'_> {
             DrawPassTarget::Root(_) => self.view,
             DrawPassTarget::Layer(target) => self.resources.layer_view(target),
         };
+        crate::count_render_pass(); // Drawpane: profiling
         let mut render_pass = self.encoder.begin_render_pass(&RenderPassDescriptor {
             label: Some("Clear Rects"),
             color_attachments: &[Some(RenderPassColorAttachment {

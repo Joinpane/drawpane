@@ -760,4 +760,65 @@ mod tests {
         // Opaque touched pixel interpolates halfway.
         assert_eq!(&dst[4..8], &[150, 150, 100, 255]);
     }
+
+    /// The vendored Vello blend shader composes blend layers with a copy of this kernel's
+    /// arithmetic (`vendor/vello_gpu_shaders/shaders/helpers/drawpane_blend.wesl`): it must stay
+    /// the same, function for function, so blend layers in the scene match offscreen blends.
+    #[test]
+    fn the_vello_blend_layer_shader_carries_this_kernels_arithmetic() {
+        const KERNEL: &str = include_str!("blend.wgsl");
+        const VELLO: &str = include_str!("../vendor/vello_gpu_shaders/shaders/helpers/drawpane_blend.wesl");
+        const NAMES: [&str; 8] = [
+            "separable_ch",
+            "lum",
+            "clip_color",
+            "set_lum",
+            "sat",
+            "set_sat",
+            "non_separable",
+            "blend_pixel",
+        ];
+        let body = |src: &str, name: &str| -> String {
+            let start = src
+                .find(&format!("fn {name}("))
+                .unwrap_or_else(|| panic!("no fn {name}"));
+            let mut depth = 0;
+            for (i, c) in src[start..].char_indices() {
+                match c {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return src[start..=start + i].to_string();
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            panic!("fn {name} doesn't close");
+        };
+        let rename = |text: String| {
+            NAMES.iter().chain(["composite"].iter()).fold(text, |t, n| {
+                t.replace(&format!(" {n}("), &format!(" dp_{n}("))
+                    .replace(&format!("({n}("), &format!("(dp_{n}("))
+            })
+        };
+        for name in NAMES {
+            assert_eq!(
+                rename(body(KERNEL, name)),
+                body(VELLO, &format!("dp_{name}")),
+                "dp_{name} differs from the kernel's {name}"
+            );
+        }
+        // The byte-domain linear-burn and the source scaling of `composite`.
+        let kernel = body(KERNEL, "composite");
+        let ours = body(VELLO, "dp_composite");
+        let burn = &kernel[kernel.find("if (params.mode == 17u)").expect("linear-burn")..];
+        let burn = &burn[..burn.find("\n    }\n").expect("linear-burn ends")];
+        assert!(
+            ours.contains(&burn.replace("params.mode", "mode")),
+            "linear-burn differs"
+        );
+        assert!(ours.contains("return dp_blend_pixel(mode, s_raw * opacity, b);"));
+    }
 }

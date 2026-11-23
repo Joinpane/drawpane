@@ -285,6 +285,7 @@ pub(crate) fn encode_filter_pass(
         usage: wgpu::BufferUsages::VERTEX,
     });
 
+    crate::count_render_pass(); // Drawpane: profiling
     let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
         label: Some("Apply Filter Pass"),
         color_attachments: &[Some(RenderPassColorAttachment {

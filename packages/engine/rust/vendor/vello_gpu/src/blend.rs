@@ -133,8 +133,16 @@ fn pack_blend_config(
     child_texture_parity: TextureParity,
     has_alpha: bool,
 ) -> u32 {
+    // Drawpane: Figma's linear-dodge and linear-burn have no peniko `Mix`. The engine asks for them
+    // as Screen and Multiply over `Compose::Dest` (a no-op compose nothing else draws with), and
+    // the blend shader composes mix codes 16 and 17 with its arithmetic (`drawpane_blend.wesl`).
+    let (mix, compose) = match (pack_mix(mix), compose) {
+        (2, Compose::Dest) => (16, Compose::SrcOver),
+        (1, Compose::Dest) => (17, Compose::SrcOver),
+        (mix, compose) => (mix, compose),
+    };
     pack_compose(compose)
-        | (pack_mix(mix) << 8)
+        | (mix << 8)
         | (u32::from(pack_opacity(opacity)) << 16)
         | (u32::from(parent_texture_parity) << 24)
         | (u32::from(child_texture_parity) << 25)

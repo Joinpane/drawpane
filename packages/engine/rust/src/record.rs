@@ -718,6 +718,22 @@ impl Record {
             })
     }
 
+    /// Its own layer blend is all that takes it off the Vello scene: no post effects, picture
+    /// mask, readers, or blended fills, strokes or shadows of its own.
+    pub fn blends_alone(&self) -> bool {
+        self.blend != 0
+            && self.post_effects.is_empty()
+            && !self.is_picture_mask()
+            && !self.ops.iter().chain(&self.coarse).any(|op| {
+                op.is_reader()
+                    || match op {
+                        Op::Fill { blend, .. } | Op::Stroke { blend, .. } => *blend != 0,
+                        Op::DropShadow { blend, .. } | Op::InnerShadow { blend, .. } => *blend != 0,
+                        _ => false,
+                    }
+            })
+    }
+
     /// True if this record contains ops, post-effects, or blends that may flush the active Vello
     /// scene (so an enclosing `isolate` opacity scope must use the engine's offscreen target stack
     /// instead of a Vello opacity layer).
