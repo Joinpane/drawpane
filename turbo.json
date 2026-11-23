@@ -16,7 +16,7 @@
     "fuzz": {
       "dependsOn": ["^build"],
       "cache": false,
-      "passThroughEnv": ["FUZZ_SEED", "FUZZ_RUNS", "FUZZ_LENGTH"]
+      "passThroughEnv": ["FUZZ_SEED", "FUZZ_RUNS", "FUZZ_LENGTH", "FUZZ_NO_SHRINK"]
     },
     "dev": {
       "cache": false,
