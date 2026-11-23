@@ -54,17 +54,23 @@ export function laidOutProps(
     getProp(copy.props, "positioning") === "auto";
   if (inFlow) {
     // Auto layout places its children, and sizes the ones that hug or fill, or that its Stretch
-    // alignment stretches (a fixed size across): sync writing its main layer's there would only
-    // have layout write it back, moving what its constraints place in it each time.
+    // alignment stretches (a fixed size across) in a frame that doesn't hug that way (a hugging
+    // frame takes such a layer's own size): sync writing its main layer's there would only have
+    // layout write it back, moving what its constraints place in it each time.
     out.add("x");
     out.add("y");
-    for (const axis of AXES)
+    const rad = (getProp(copy.props, "rotation") * Math.PI) / 180;
+    const turned = Math.abs(Math.sin(rad)) > Math.abs(Math.cos(rad));
+    for (const axis of AXES) {
+      const own = axis.size === "width" ? "h" : "v";
+      const across = turned ? (own === "h" ? "sizingV" : "sizingH") : axis.sizing;
       if (
         getProp(source.props, axis.sizing) !== "fixed" ||
         getProp(copy.props, axis.sizing) !== "fixed" ||
-        flowSized(copy, parent, axis.size === "width" ? "h" : "v")
+        (getProp(parent.props, across) !== "hug" && flowSized(copy, parent, own))
       )
         out.add(axis.size);
+    }
   }
   for (const axis of AXES)
     if (getProp(source.props, axis.sizing) === "hug" || getProp(copy.props, axis.sizing) === "hug")

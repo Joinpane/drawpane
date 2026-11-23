@@ -2326,4 +2326,42 @@ describe.each(["materialized", "compact"] as const)("re-check 8 with copies %s",
     expect(box(editor, copy)[3]).toBe(260);
     expect(unsettled(editor)).toEqual([]);
   });
+
+  it("gives a turned copy in a frame that hugs it its main layer's new size (seed 713246673)", () => {
+    const editor = make(
+      [
+        page,
+        node("col", "frame", "p", {
+          isComponent: true,
+          width: 38,
+          height: 38,
+          layoutMode: "column",
+          sizingH: "hug",
+          sizingV: "hug",
+          paddingLeft: 4,
+          paddingRight: 4,
+          paddingTop: 4,
+          paddingBottom: 4,
+        }),
+        node("f", "frame", "col", {
+          x: 4,
+          y: 4,
+          width: 30,
+          height: 10,
+          layoutMode: "row",
+          sizingH: "fill",
+          sizingV: "fixed",
+        }),
+      ],
+      copies,
+    );
+    const instance = editor.insertInstance("col", { x: 500, y: 0 }) as string;
+    const copy = editor.doc.childIds(instance)[0] as string;
+    // Turned a quarter, its Fill width runs across the column, which hugs it: the column takes
+    // the copy's size there, so its height is still its own fixed one, its main layer's.
+    editor.setProp([copy], "rotation", 90);
+    editor.resize(["f"], "height", 196);
+    expect(box(editor, copy)[3]).toBe(196);
+    expect(unsettled(editor)).toEqual([]);
+  });
 });
