@@ -32,6 +32,7 @@ import {
   type BindingKey,
   branchChanges,
   getProp,
+  hugsOn,
   keyBetween,
   measuresOn,
   mergeOps,
@@ -116,46 +117,66 @@ function frameStates(doc: Doc): Map<string, FrameState> {
  * axes when it had something in its flow, on an axis it newly hugs on
  * otherwise. Any other empty frame keeps the box it has.
  */
-/** Whether a layer binds a variable whose values differ between modes. */
-function bindsByMode(doc: Doc, node: NodeRecord): boolean {
-  return Object.values(getProp(node.props, "bindings") as Record<string, unknown>).some((id) => {
-    const variable = typeof id === "string" ? doc.get(id) : undefined;
-    if (!variable) return typeof id !== "string";
-    const values = Object.values(
-      (getProp(variable.props, "values") as Record<string, unknown> | undefined) ?? {},
-    ).map((v) => JSON.stringify(v));
-    return new Set(values).size > 1;
-  });
-}
-
 /**
- * Issue 306's signature: a layer kept by an instance (above it) whose main is gone, shown in a
- * mode set on it or above it, that binds a variable this mode resolves otherwise: the layer itself,
- * or for what a full layout changes, the frame laying it out or anything in that frame.
+ * Issue 306's place: a layer kept by an instance (above it) whose main is gone, shown in a mode set
+ * on it or above it. Kept layers there aren't laid out or measured again in that mode.
  */
-function keptInMode(doc: Doc, id: string, inside = false): boolean {
+function orphanInMode(doc: Doc, id: string): boolean {
   const above = doc.ancestors(id);
-  const orphan = above.find((a) => {
-    const main = getProp(a.props, "instanceOf");
-    return !!main && !doc.has(main);
-  });
-  if (!orphan) return false;
+  if (
+    !above.some(
+      (a) => !!getProp(a.props, "instanceOf") && !doc.has(getProp(a.props, "instanceOf") as string),
+    )
+  )
+    return false;
   const node = doc.get(id);
-  if (!node) return false;
   const moded = (n: NodeRecord) => Object.keys(getProp(n.props, "variableModes")).length > 0;
-  if (!moded(node) && !above.some(moded)) return false;
-  // A flow places a layer by everything in it, so its frame and all it holds (a sibling hidden by
-  // its mode, say) can be the cause.
-  const laidOut = inside ? [doc.get(node.parent), ...collectDescendants(doc, node.parent)] : [];
-  return [node, ...laidOut].some((n) => !!n && bindsByMode(doc, n));
+  return (!!node && moded(node)) || above.some(moded);
 }
 
 /**
- * Issue 294's layers: those a collaborator's edit, landing as a rebase, moved out of every
- * component (with what's in them). A rebase syncs nothing, so the editor's copies can stay linked to
- * them; only copies of these are set aside.
+ * What issue 306 predicts: the document as it would be with no mode set anywhere (every variable at
+ * its first mode's value), where kept layers were laid out and measured. A value #306 left stale is
+ * that document's own; any other wrong value is reported.
  */
-const stranded = new WeakMap<Doc, Set<string>>();
+function modeless(doc: Doc): Doc {
+  const out = new Doc();
+  out.resetStored(
+    doc.stored().map((n) => {
+      const { variableModes: _modes, ...props } = n.props as Record<string, unknown>;
+      return { ...n, props: props as Props };
+    }),
+    doc.compactCopies ? "compact" : "materialized",
+  );
+  return out;
+}
+
+/**
+ * Issue 294's copies: those linked to layers a collaborator's edit, landing as a rebase over the
+ * editor's pending edits, moved out of every component, with the place and size each had then. A
+ * rebase syncs nothing, so they stay as they were; only a copy still at exactly that is set aside.
+ */
+const stranded = new WeakMap<Doc, Map<string, Record<"x" | "y" | "width" | "height", number>>>();
+
+/**
+ * The flow each frame had just before an edit took it away (its own direction and alignment, which
+ * an instance can set otherwise than its main): what its layers were sized by, for the rule that
+ * checks sizes on its own.
+ */
+const flowsLeft = new WeakMap<Doc, Map<string, Partial<Props>>>();
+
+/** Notes the flow a frame has now, before an edit takes it away. */
+function noteFlow(doc: Doc, id: string): void {
+  const frame = doc.get(id);
+  if (!frame || getProp(frame.props, "layoutMode") === "none") return;
+  const seen = flowsLeft.get(doc) ?? new Map<string, Partial<Props>>();
+  seen.set(id, {
+    layoutMode: getProp(frame.props, "layoutMode"),
+    alignItems: getProp(frame.props, "alignItems"),
+    justifyItems: getProp(frame.props, "justifyItems"),
+  });
+  flowsLeft.set(doc, seen);
+}
 
 /**
  * Whether a flow decides a layer's size on one of its own axes, asked of layout itself (not worked
@@ -207,6 +228,12 @@ function flowDecides(
 
 function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[] {
   const all = layers(doc);
+  // Issue 306's prediction (`modeless`), made only when a kept layer is wrong.
+  let light: Doc | undefined;
+  const lit = () => {
+    light ??= modeless(doc);
+    return light;
+  };
   const frames = all.filter((n) => n.type === "frame").map((n) => n.id);
   const shrinkEmpty = new Set<string>();
   const keepEmpty = new Set<string>();
@@ -260,9 +287,22 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
     if (layoutOps(again, frames, { shrinkEmpty, keepEmpty }).some(swings))
       ops = ops.filter((op) => !swings(op));
   }
-  // Issue 306: layers kept by an instance whose main is gone aren't laid out in another mode;
-  // what a full layout changes inside one shown in a mode, with bound values, is set aside.
-  ops = ops.filter((op) => !keptInMode(doc, op.id, true));
+  // Issue 306: layers kept by an instance whose main is gone aren't laid out in another mode. What
+  // a full layout changes in one is set aside only where the value is exactly what laying it out
+  // with no mode set gives (what #306 leaves); any other is reported.
+  if (ops.some((op) => orphanInMode(doc, op.id))) {
+    const settledLight = layoutOps(lit(), frames, { shrinkEmpty, keepEmpty });
+    ops = ops.filter((op) => {
+      if (op.op !== "set" || !orphanInMode(doc, op.id)) return true;
+      const now = getProp(doc.get(op.id)?.props ?? {}, op.prop);
+      const relaid = settledLight.find(
+        (o) => o.op === "set" && o.id === op.id && o.prop === op.prop,
+      );
+      const predicted =
+        relaid?.op === "set" ? relaid.value : getProp(lit().get(op.id)?.props ?? {}, op.prop);
+      return !sameNumber(now, predicted);
+    });
+  }
   // Issue 302: layout stretches a size bound to a variable, which the binding sets otherwise. A
   // full layout's width or height for a layer that binds it, in a flow stretching that axis, is
   // set aside.
@@ -293,8 +333,15 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
     const placed = placedGeometry(node, source, doc.get(node.parent), doc.get(source.parent));
     if (!placed) continue;
     const instances = doc.ancestors(node.id).filter((a) => getProp(a.props, "instanceOf"));
-    // Issue 306: layers kept by an instance whose main is gone, shown in another mode.
-    if (keptInMode(doc, node.id)) continue;
+    // Issue 306: in a kept layer shown in another mode, set aside only a place or size that is what
+    // the derivation gives with no mode set.
+    const lightPlaced = (prop: Box): number | undefined => {
+      if (!orphanInMode(doc, node.id)) return undefined;
+      const n = lit().get(node.id);
+      const src = lit().get(source.id);
+      if (!n || !src) return undefined;
+      return placedGeometry(n, src, lit().get(n.parent), lit().get(src.parent))?.derived[prop];
+    };
     // Issue 305: an instance sized by a binding, or a swapped nested instance nothing lays out
     // left at a size its main layer no longer has, doesn't place its layers again; their places
     // and sizes are set aside, nothing else.
@@ -324,8 +371,9 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
     for (const [prop, want] of Object.entries(placed.derived) as [Box, number][]) {
       const have = getProp(node.props, prop);
       // Both are kept to two places: compare them there.
-      if (Math.round(Math.abs(want - have) * 100) > 1)
-        out.push({ constrained: node.id, prop, have, want });
+      if (Math.round(Math.abs(want - have) * 100) <= 1) continue;
+      if (sameNumber(have, lightPlaced(prop))) continue;
+      out.push({ constrained: node.id, prop, have, want });
     }
   }
   // Independently of that derivation, a product rule: a copy layer of its own fixed size that
@@ -343,14 +391,9 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
       getProp(node.props, "positioning") === "absolute";
     const shown = getProp(node.props, "instanceOf");
     if (shown && shown !== getProp(source.props, "instanceOf")) continue;
-    if (keptInMode(doc, node.id)) continue;
     // Issue 294: a rebase syncs nothing either, so over a collaborator's move of a layer out of a
-    // main, the editor's copies stay linked to a layer no main holds any more.
-    if (
-      stranded.get(doc)?.has(source.id) &&
-      !doc.ancestors(source.id).some((a) => getProp(a.props, "isComponent"))
-    )
-      continue;
+    // main, the editor's copies stay linked to a layer no main holds any more, as they were then.
+    const stale = stranded.get(doc)?.get(node.id);
     const own = getProp(node.props, "overrides");
     const bound = getProp(node.props, "bindings") as Record<string, unknown>;
     for (const axis of ["h", "v"] as const) {
@@ -371,14 +414,18 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
       if (Math.round(Math.abs(want - have) * 100) <= 1) continue;
       // A size a flow gave is the flow's, not the layer's own: its own flow, the one it left (a
       // frame that took its auto layout away had its main frame's kind), or its main layer's.
+      // The flow it left is the frame's own as it was before (`flowsLeft`), not its main's now.
       const flowMode = getProp(parent.props, "layoutMode");
+      const left = flowMode === "none" ? flowsLeft.get(doc)?.get(parent.id) : undefined;
       if (
         flowDecides(
           doc,
-          parent,
+          left ? { ...parent, props: { ...parent.props, ...left } as Props } : parent,
           node,
           size,
-          flowMode !== "none" ? flowMode : getProp(parentSource.props, "layoutMode"),
+          flowMode !== "none"
+            ? flowMode
+            : (left?.layoutMode ?? getProp(parentSource.props, "layoutMode")),
         )
       )
         continue;
@@ -387,19 +434,30 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
         flowDecides(doc, parentSource, source, size)
       )
         continue;
+      if (stale && sameNumber(have, stale[size])) continue;
+      // Issue 306: a kept layer shown in another mode, at its main layer's size with no mode set.
+      if (
+        orphanInMode(doc, node.id) &&
+        sameNumber(have, getProp(lit().get(source.id)?.props ?? {}, size))
+      )
+        continue;
       out.push({ inherits: node.id, prop: size, have, want });
     }
   }
   for (const node of all) {
     if (node.type !== "text") continue;
-    // Issue 306: text kept by an instance whose main is gone isn't measured again in another mode.
-    if (keptInMode(doc, node.id)) continue;
     const size = autoSize(node, measurer);
     if (!size) continue;
     const r = (v: number) => Math.round(v * 100) / 100;
+    // Issue 306: text kept by an instance whose main is gone isn't measured again in another mode;
+    // set aside only a size that is what it measures with no mode set.
+    const lightNode = orphanInMode(doc, node.id) ? lit().get(node.id) : undefined;
+    const lightSize = lightNode ? autoSize(lightNode, measurer) : undefined;
+    const stale = (prop: "width" | "height") =>
+      !!lightSize && r(lightSize[prop]) === r(getProp(node.props, prop));
     // A bound size is its variable's, whatever the text measures (decision 0034).
     const bound = getProp(node.props, "bindings");
-    if (!bound.width && r(size.width) !== r(getProp(node.props, "width")))
+    if (!bound.width && r(size.width) !== r(getProp(node.props, "width")) && !stale("width"))
       out.push({ text: node.id, width: [getProp(node.props, "width"), r(size.width)] });
     // Issue 295: text with Fill across in a flow that wraps gets a height measured at another
     // width; its height alone is set aside, nothing else.
@@ -410,7 +468,12 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
       isLayoutFrame(parent) &&
       getProp(parent.props, "layoutWrap") &&
       getProp(node.props, "positioning") !== "absolute";
-    if (!bound.height && !wrapped && r(size.height) !== r(getProp(node.props, "height")))
+    if (
+      !bound.height &&
+      !wrapped &&
+      r(size.height) !== r(getProp(node.props, "height")) &&
+      !stale("height")
+    )
       out.push({ text: node.id, height: [getProp(node.props, "height"), r(size.height)] });
   }
   return out;
@@ -1132,7 +1195,15 @@ function perform(
       ? isFrame
       : e.kind === "bind" && (binding === "characters" || binding === "fontSize")
         ? (n: NodeRecord) => n.type === "text"
-        : TARGETS[e.kind];
+        : e.kind === "reset-all"
+          ? // Only an instance with something to reset (an override of its own or in a layer),
+            // so a run's resets reset something.
+            (n: NodeRecord) =>
+              isInstance(n) &&
+              [n, ...collectDescendants(doc, n.id)].some(
+                (k) => getProp(k.props, "overrides").length > 0,
+              )
+          : TARGETS[e.kind];
   const candidates = fits ? all.filter(fits) : all;
   const node = candidates[e.at % Math.max(1, candidates.length)];
   if (!node) return;
@@ -1150,9 +1221,19 @@ function perform(
     case "gap":
       editor.setProp([id], "gap", e.value);
       break;
-    case "layoutMode":
+    case "layoutMode": {
+      // Taking a frame's auto layout away leaves its layers where and as big as the layout made
+      // them (Figma), checked on its own terms: their boxes from before.
+      const boxes =
+        e.value === "none" && getProp(node.props, "layoutMode") !== "none"
+          ? doc.childIds(id).map((c) => [c, boxOf(doc, c)] as const)
+          : [];
+      if (e.value === "none") noteFlow(doc, id);
       editor.setLayoutMode([id], e.value);
+      if (getProp(doc.get(id)?.props ?? {}, "layoutMode") === "none")
+        for (const [c, was] of boxes) expectKept(doc, id, c, was);
       break;
+    }
     case "visible":
       editor.setProp([id], "visible", !getProp(node.props, "visible"));
       break;
@@ -1257,6 +1338,37 @@ function perform(
       editor.resetInstances();
       break;
   }
+}
+
+/**
+ * Taking a frame's auto layout away left a layer where and as big as the layout made it (Figma),
+ * but for a size it gives itself (text that measures itself, a frame that hugs), which is its own
+ * again once no flow sizes it.
+ */
+function expectKept(doc: Doc, frame: string, id: string, was: readonly number[]): void {
+  const node = doc.get(id);
+  if (!node) return;
+  const own = [
+    false,
+    false,
+    measuresOn(node, "h") || hugsOn(node, "h"),
+    measuresOn(node, "v") || hugsOn(node, "v"),
+  ];
+  const keep = (box: readonly number[]) => box.map((v, i) => (own[i] ? null : v));
+  expect(keep(boxOf(doc, id)), `taking ${frame}'s auto layout away keeps ${id}`).toEqual(keep(was));
+}
+
+/** Whether two values are the same number to two places. */
+function sameNumber(a: unknown, b: unknown): boolean {
+  return typeof a === "number" && typeof b === "number" && Math.round(Math.abs(a - b) * 100) <= 1;
+}
+
+/** A layer's place and size, to two places. */
+function boxOf(doc: Doc, id: string): number[] {
+  const props = doc.get(id)?.props ?? {};
+  return (["x", "y", "width", "height"] as const).map(
+    (prop) => Math.round(getProp(props, prop) * 100) / 100,
+  );
 }
 
 function makeEditor(nodes: readonly NodeRecord[] | null, copies: "compact" | "materialized") {
@@ -1449,20 +1561,32 @@ function connect(editor: Editor, nodes: readonly NodeRecord[], copies: "compact"
         [editor.doc.get(id), ...editor.doc.ancestors(id)].some(
           (a) => !!a && !!getProp(a.props, "isComponent"),
         );
+      const rebasing = editor.sync.pendingCount > 0;
       const moving = ops
         .filter((op) => op.op === "move" && editor.doc.has(op.id) && inComponent(op.id))
         .map((op) => op.id);
       remote.push(ops);
       revn += 1;
       receive({ t: "txn", revn, ops });
-      // What the rebase moved out of every component (issue 294's layers, above).
-      for (const id of moving) {
-        if (!editor.doc.has(id) || inComponent(id)) continue;
-        const set = stranded.get(editor.doc) ?? new Set<string>();
-        for (const n of [editor.doc.get(id), ...collectDescendants(editor.doc, id)])
-          if (n) set.add(n.id);
-        stranded.set(editor.doc, set);
-      }
+      // What a rebase moved out of every component (issue 294's, above): the editor's copies of
+      // it, as they are now.
+      if (rebasing)
+        for (const id of moving) {
+          if (!editor.doc.has(id) || inComponent(id)) continue;
+          const sources = new Set(
+            [editor.doc.get(id), ...collectDescendants(editor.doc, id)].map((n) => n?.id),
+          );
+          const kept = stranded.get(editor.doc) ?? new Map();
+          for (const n of layers(editor.doc))
+            if (sources.has(getProp(n.props, "mirrors") ?? undefined))
+              kept.set(n.id, {
+                x: getProp(n.props, "x"),
+                y: getProp(n.props, "y"),
+                width: getProp(n.props, "width"),
+                height: getProp(n.props, "height"),
+              });
+          stranded.set(editor.doc, kept);
+        }
       return serialSettled;
     },
     settle(mirror: Doc, step: string) {
@@ -1733,8 +1857,8 @@ describe("the oracle's checks and waivers", () => {
     });
 
   for (const copies of ["materialized", "compact"] as const)
-    it(`waives #306 only for a layer that binds a variable its mode resolves otherwise, with copies ${copies}`, () => {
-      const nodes = (labelBinds: boolean): NodeRecord[] => [
+    it(`waives #306 only for the value its mode leaves stale, with copies ${copies}`, () => {
+      const nodes = (label: Record<string, unknown>): NodeRecord[] => [
         { id: "p", type: "page", parent: ROOT_ID, key: "a0", props: {} },
         {
           id: "modes",
@@ -1753,7 +1877,7 @@ describe("the oracle's checks and waivers", () => {
           type: "variable",
           parent: "modes",
           key: "a0",
-          props: { variableType: "number", values: { light: 20, dark: 20 } },
+          props: { variableType: "number", values: { light: 1, dark: 1 } },
         },
         {
           id: "words",
@@ -1773,7 +1897,8 @@ describe("the oracle's checks and waivers", () => {
           props: {
             instanceOf: "missing",
             variableModes: { modes: "dark" },
-            width: 160,
+            layoutMode: "row",
+            width: 400,
             height: 80,
           },
         },
@@ -1787,23 +1912,33 @@ describe("the oracle's checks and waivers", () => {
             textAutoResize: "width",
             width: 10,
             height: 20,
-            ...(labelBinds ? { bindings: { characters: "words" } } : {}),
+            ...label,
           },
         },
-        // A sibling bound to a variable worth the same in both modes explains nothing.
+        // Placed by the row: a full layout puts it after the label, whatever mode it's in.
         {
-          id: "unrelated",
+          id: "box",
           type: "rect",
           parent: "orphan",
           key: "a1",
-          props: { width: 20, height: 20, bindings: { width: "num" } },
+          props: { x: 399, width: 20, height: 20 },
         },
       ];
-      const unbound = makeEditor(nodes(false), copies);
-      expect(keptInMode(unbound.doc, "label")).toBe(false);
-      expect(unsettled(unbound.doc)).toContainEqual({ text: "label", width: [10, 176] });
-      const bound = makeEditor(nodes(true), copies);
-      expect(keptInMode(bound.doc, "label")).toBe(true);
+      // A binding that can't make it stale (its opacity, worth the same in both modes): reported.
+      const unrelated = makeEditor(nodes({ bindings: { opacity: "num" } }), copies);
+      const reported = unsettled(unrelated.doc);
+      expect(reported).toContainEqual({ text: "label", width: [10, 176] });
+      expect(reported.some((e) => (e as { id?: string }).id === "box")).toBe(true);
+      // Its words bound by mode, and stored at what they measure with no mode set: #306's value.
+      const bound = makeEditor(nodes({ bindings: { characters: "words" } }), copies);
+      const light = autoSize(modeless(bound.doc).get("label") as NodeRecord, measurer);
+      bound.sync.commit([{ op: "set", id: "label", prop: "width", value: light?.width ?? 0 }]);
+      expect(unsettled(bound.doc).some((e) => (e as { text?: string }).text === "label")).toBe(
+        false,
+      );
+      // Bound by mode, but stored at another width than that: reported.
+      bound.sync.commit([{ op: "set", id: "label", prop: "width", value: 10 }]);
+      expect(unsettled(bound.doc)).toContainEqual({ text: "label", width: [10, 176] });
     });
 
   it("waives #294 only for a copy whose main layer a rebase moved out of its component", () => {
@@ -1839,6 +1974,77 @@ describe("the oracle's checks and waivers", () => {
     expect(editor.doc.get(rect)).toBeDefined();
     expect(unsettled(editor.doc)).toContainEqual(stale);
   });
+
+  for (const pending of [false, true])
+    it(`reports a stale copy after a collaborator's move with${pending ? "" : "out"} pending edits (#294)`, () => {
+      const editor = makeEditor(
+        [
+          { id: "p", type: "page", parent: ROOT_ID, key: "a0", props: {} },
+          {
+            id: "part",
+            type: "frame",
+            parent: "p",
+            key: "a0",
+            props: { width: 60, height: 20, isComponent: true },
+          },
+          {
+            id: "main",
+            type: "frame",
+            parent: "p",
+            key: "a1",
+            props: { width: 160, height: 80, isComponent: true, layoutMode: "row" },
+          },
+          {
+            id: "nested",
+            type: "frame",
+            parent: "main",
+            key: "a0",
+            props: { width: 60, height: 20, instanceOf: "part" },
+          },
+          {
+            id: "dark",
+            type: "frame",
+            parent: "p",
+            key: "a2",
+            props: { width: 160, height: 80 },
+          },
+        ],
+        "materialized",
+      );
+      const instance = editor.insertInstance("main", { x: 250, y: 30 }) as string;
+      const child = editor.doc.childIds(instance)[0] as string;
+      editor.sync.takeUnsent();
+      const record = editor.doc.get(child) as NodeRecord;
+      const room = connect(editor, editor.doc.stored(), "materialized");
+      if (pending) editor.setProp(["dark"], "opacity", 0.5);
+      room.remote(3);
+      expect(editor.doc.get("nested")?.parent).toBe("dark");
+      // A stale copy put there afterwards, not by the rebase: not #294's, so reported.
+      if (editor.doc.has(child))
+        editor.doc.applyStored([{ op: "set", id: child, prop: "width", value: 15 }], {
+          held: true,
+        });
+      else
+        editor.doc.applyStored(
+          [
+            {
+              op: "create",
+              id: child,
+              parent: record.parent,
+              key: record.key,
+              type: record.type,
+              props: { ...record.props, width: 15 },
+            },
+          ],
+          { held: true },
+        );
+      expect(unsettled(editor.doc)).toContainEqual({
+        inherits: child,
+        prop: "width",
+        have: 15,
+        want: 60,
+      });
+    });
 
   it("counts as concurrent (#307) only edits that met in a rebase", () => {
     const copies = "materialized";
@@ -1888,4 +2094,300 @@ describe("the oracle's checks and waivers", () => {
     room.remote(4);
     expect(room.concurrent().has(rect)).toBe(true);
   });
+});
+
+// An instance whose flow differs from its main's (its direction, alignment, its layers' sizing, a
+// nested instance swapped to another component), then auto layout added or taken away on either
+// side, by the editor (which follows Figma) or as an older client's edit (PR 286's seventh
+// re-check): every check above, and a removal keeps its layers' boxes.
+type FlowEdit =
+  | { kind: "direction"; at: number; value: "row" | "column" }
+  | { kind: "align"; at: number; value: "start" | "center" | "end" | "stretch" }
+  | { kind: "sizing"; at: number; prop: "sizingH" | "sizingV"; value: "fixed" | "fill" | "hug" }
+  | { kind: "resize"; at: number; prop: "width" | "height"; value: number }
+  | { kind: "main-layout"; at: number; value: "none" | "row" | "column" }
+  | { kind: "main-align"; at: number; value: "start" | "center" | "stretch" }
+  | { kind: "older-remove"; at: number }
+  | { kind: "older-add"; at: number; value: "row" | "column" }
+  | { kind: "toggle"; at: number; how: "remove" | "add" | "wrap" }
+  | { kind: "swap"; at: number; to: number }
+  | { kind: "undo" }
+  | { kind: "undo-redo" };
+
+const flowAt = fc.nat(400);
+const flowEdit: fc.Arbitrary<FlowEdit> = fc.oneof(
+  fc.record({
+    kind: fc.constant("direction" as const),
+    at: flowAt,
+    value: fc.constantFrom("row" as const, "column" as const),
+  }),
+  fc.record({
+    kind: fc.constant("align" as const),
+    at: flowAt,
+    value: fc.constantFrom("start" as const, "center" as const, "end" as const, "stretch" as const),
+  }),
+  fc.record({
+    kind: fc.constant("sizing" as const),
+    at: flowAt,
+    prop: fc.constantFrom("sizingH" as const, "sizingV" as const),
+    value: fc.constantFrom("fixed" as const, "fill" as const, "hug" as const),
+  }),
+  fc.record({
+    kind: fc.constant("resize" as const),
+    at: flowAt,
+    prop: fc.constantFrom("width" as const, "height" as const),
+    value: fc.integer({ min: 20, max: 260 }),
+  }),
+  fc.record({
+    kind: fc.constant("main-layout" as const),
+    at: flowAt,
+    value: fc.constantFrom("none" as const, "row" as const, "column" as const),
+  }),
+  fc.record({
+    kind: fc.constant("main-align" as const),
+    at: flowAt,
+    value: fc.constantFrom("start" as const, "center" as const, "stretch" as const),
+  }),
+  fc.record({ kind: fc.constant("older-remove" as const), at: flowAt }),
+  fc.record({
+    kind: fc.constant("older-add" as const),
+    at: flowAt,
+    value: fc.constantFrom("row" as const, "column" as const),
+  }),
+  fc.record({
+    kind: fc.constant("toggle" as const),
+    at: flowAt,
+    how: fc.constantFrom("remove" as const, "add" as const, "wrap" as const),
+  }),
+  fc.record({ kind: fc.constant("swap" as const), at: flowAt, to: fc.nat(2) }),
+  fc.constant({ kind: "undo" as const }),
+  fc.constant({ kind: "undo-redo" as const }),
+);
+const FLOW_KINDS: readonly FlowEdit["kind"][] = [
+  "direction",
+  "align",
+  "sizing",
+  "resize",
+  "main-layout",
+  "main-align",
+  "older-remove",
+  "older-add",
+  "toggle",
+  "swap",
+  "undo",
+  "undo-redo",
+];
+const FLOW_MAINS = ["rowMain", "colMain", "plainMain"];
+
+/** Components with a row, a column and no flow, one holding instances of the others, and instances. */
+function flowDocument(copies: "compact" | "materialized"): Editor {
+  const n = (id: string, type: NodeRecord["type"], parent: string, props: Props, key: string) =>
+    ({ id, type, parent, key, props }) as NodeRecord;
+  const editor = makeEditor(
+    [
+      n("p", "page", ROOT_ID, {}, "a0"),
+      n(
+        "rowMain",
+        "frame",
+        "p",
+        {
+          isComponent: true,
+          width: 160,
+          height: 80,
+          layoutMode: "row",
+          paddingLeft: 4,
+          paddingTop: 4,
+          gap: 4,
+        },
+        "a0",
+      ),
+      n("rowA", "rect", "rowMain", { width: 60, height: 20 }, "a0"),
+      n("rowB", "rect", "rowMain", { width: 40, height: 30, sizingH: "fill" }, "a1"),
+      n(
+        "rowT",
+        "text",
+        "rowMain",
+        { characters: "Label", fontSize: 10, textAutoResize: "width", width: 25, height: 12.5 },
+        "a2",
+      ),
+      n(
+        "colMain",
+        "frame",
+        "p",
+        {
+          isComponent: true,
+          y: 200,
+          width: 120,
+          height: 100,
+          layoutMode: "column",
+          alignItems: "center",
+          gap: 6,
+        },
+        "a1",
+      ),
+      n("colA", "rect", "colMain", { width: 50, height: 20 }, "a0"),
+      n("colB", "rect", "colMain", { width: 80, height: 20, sizingH: "fill" }, "a1"),
+      n("plainMain", "frame", "p", { isComponent: true, y: 400, width: 160, height: 80 }, "a2"),
+      n(
+        "plainA",
+        "rect",
+        "plainMain",
+        { x: 10, y: 10, width: 140, height: 20, constraintH: "stretch" },
+        "a0",
+      ),
+      n(
+        "plainB",
+        "rect",
+        "plainMain",
+        { x: 100, y: 40, width: 40, height: 20, constraintH: "end", constraintV: "scale" },
+        "a1",
+      ),
+      n("outer", "frame", "p", { isComponent: true, y: 600, width: 400, height: 260 }, "a3"),
+    ],
+    copies,
+  );
+  for (const main of [...FLOW_MAINS])
+    expect(
+      editor.commit([
+        {
+          op: "move",
+          id: editor.insertInstance(main, { x: 5000, y: 5000 }) as string,
+          parent: "outer",
+          key: editor.topKey("outer"),
+        },
+      ]),
+    ).toBe(true);
+  for (const [i, main] of [...FLOW_MAINS, "outer", "rowMain"].entries())
+    expect(editor.insertInstance(main, { x: 1000 + i * 450, y: 0 })).toBeTruthy();
+  editor.commit(
+    layoutOps(
+      editor.doc,
+      layers(editor.doc)
+        .filter(isFrame)
+        .map((f) => f.id),
+    ),
+  );
+  return editor;
+}
+
+/** Makes one edit of the family, checking a removal kept its layers' boxes. */
+function performFlow(editor: Editor, e: FlowEdit): void {
+  const doc = editor.doc;
+  if (e.kind === "undo") {
+    editor.undo();
+    return;
+  }
+  if (e.kind === "undo-redo") {
+    const before = snapshot(doc);
+    editor.undo();
+    editor.redo();
+    expect(unexplained(before, snapshot(doc), doc), "undone and redone").toEqual([]);
+    return;
+  }
+  const all = layers(doc);
+  const instances = all.filter(isInstance);
+  const pick = <T>(list: readonly T[]) => list[e.at % Math.max(1, list.length)];
+  const removing = (id: string, act: () => void) => {
+    const was = getProp(doc.get(id)?.props ?? {}, "layoutMode");
+    const boxes = doc.childIds(id).map((c) => [c, boxOf(doc, c)] as const);
+    noteFlow(doc, id);
+    act();
+    if (was !== "none" && getProp(doc.get(id)?.props ?? {}, "layoutMode") === "none")
+      for (const [c, box] of boxes) expectKept(doc, id, c, box);
+  };
+  switch (e.kind) {
+    case "direction": {
+      const node = pick(instances.filter((n) => getProp(n.props, "layoutMode") !== "none"));
+      if (node) editor.setLayoutMode([node.id], e.value);
+      return;
+    }
+    case "align": {
+      const node = pick(instances);
+      if (node) editor.setProp([node.id], "alignItems", e.value);
+      return;
+    }
+    case "sizing": {
+      const node = pick(all.filter((n) => !!getProp(n.props, "mirrors") && !isInstance(n)));
+      if (node) editor.setProp([node.id], e.prop, e.value);
+      return;
+    }
+    case "resize": {
+      const node = pick(instances);
+      if (node) editor.resize([node.id], e.prop, e.value);
+      return;
+    }
+    case "main-layout": {
+      const main = FLOW_MAINS[e.at % FLOW_MAINS.length] as string;
+      if (e.value === "none") removing(main, () => editor.setLayoutMode([main], "none"));
+      else editor.setLayoutMode([main], e.value);
+      return;
+    }
+    case "main-align":
+      editor.setProp([FLOW_MAINS[e.at % FLOW_MAINS.length] as string], "alignItems", e.value);
+      return;
+    case "older-remove": {
+      // What an older client could do: take an instance's auto layout away.
+      const node = pick(instances.filter((n) => getProp(n.props, "layoutMode") !== "none"));
+      if (node)
+        removing(node.id, () =>
+          editor.commit([{ op: "set", id: node.id, prop: "layoutMode", value: null }]),
+        );
+      return;
+    }
+    case "older-add": {
+      const node = pick(instances.filter((n) => getProp(n.props, "layoutMode") === "none"));
+      if (node) editor.commit([{ op: "set", id: node.id, prop: "layoutMode", value: e.value }]);
+      return;
+    }
+    case "toggle": {
+      const node = pick(instances);
+      if (!node) return;
+      if (e.how === "remove") removing(node.id, () => editor.setLayoutMode([node.id], "none"));
+      else if (e.how === "add") editor.setLayoutMode([node.id], "row");
+      else {
+        editor.select([node.id]);
+        editor.frameSelection(true);
+      }
+      return;
+    }
+    case "swap": {
+      const node = pick(instances.filter((n) => !!getProp(n.props, "mirrors")));
+      const to = FLOW_MAINS[e.to] as string;
+      if (node && !wouldCycle(doc, to, node.parent)) editor.swapInstance(node.id, to);
+      return;
+    }
+  }
+}
+
+describe("an instance's own flow against its main's", () => {
+  for (const copies of ["materialized", "compact"] as const)
+    it(`with copies ${copies}`, () => {
+      const runs = Number(process.env.FUZZ_RUNS) || 40;
+      const ran = new Map<FlowEdit["kind"], number>(FLOW_KINDS.map((k) => [k, 0]));
+      fc.assert(
+        fc.property(fc.array(flowEdit, { minLength: 1, maxLength: 12 }), (edits) => {
+          const editor = flowDocument(copies);
+          const mirror = new Doc();
+          mirror.resetStored(editor.doc.stored(), copies);
+          editor.sync.takeUnsent();
+          check(editor, mirror, copies, "after making it");
+          const history: string[] = [];
+          for (const e of edits) {
+            const undoing = e.kind === "undo" || e.kind === "undo-redo";
+            const before = undoing ? undefined : frameStates(editor.doc);
+            const version = editor.doc.version;
+            performFlow(editor, e);
+            if (editor.doc.version !== version) ran.set(e.kind, (ran.get(e.kind) ?? 0) + 1);
+            history.push(JSON.stringify(e));
+            check(editor, mirror, copies, `after ${history.join(", ")}`, before);
+          }
+        }),
+        { numRuns: runs },
+      );
+      if (runs >= 40)
+        expect(
+          FLOW_KINDS.filter((k) => !ran.get(k)),
+          `kinds of edit that never changed the document: ${JSON.stringify(Object.fromEntries(ran))}`,
+        ).toEqual([]);
+    }, 600_000);
 });
