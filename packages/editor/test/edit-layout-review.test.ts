@@ -2346,4 +2346,40 @@ describe.each(["materialized", "compact"] as const)("re-check 8 with copies %s",
     expect(box(editor, copy)[3]).toBe(196);
     expect(unsettled(editor)).toEqual([]);
   });
+
+  // Compact copies keep the hidden copy's size here, on main too (#328).
+  it.skipIf(copies === "compact")(
+    "gives a hidden copy its main layer's new size, though its flow would stretch it (round 9)",
+    () => {
+      const editor = make(
+        [
+          page,
+          node("main", "frame", "p", {
+            isComponent: true,
+            width: 160,
+            height: 80,
+            layoutMode: "row",
+            paddingTop: 7,
+          }),
+          node("r", "rect", "main", { y: 7, width: 60, height: 20 }),
+        ],
+        copies,
+      );
+      const instance = editor.insertInstance("main", { x: 500, y: 0 }) as string;
+      editor.setProp([instance], "alignItems", "stretch");
+      const copy = editor.doc.childIds(instance)[0] as string;
+      expect(box(editor, copy)[3]).toBe(73);
+      // Hidden, it's out of the flow: its main layer's size reaches it.
+      editor.setProp([copy], "visible", false);
+      editor.resize(["r"], "height", 42);
+      expect(box(editor, copy)[3]).toBe(42);
+      // Detached and taken out of its flow, it shows at that size.
+      editor.select([instance]);
+      editor.detachInstances();
+      editor.setLayoutMode([instance], "none");
+      editor.setProp([copy], "visible", true);
+      expect(box(editor, copy)[3]).toBe(42);
+      expect(unsettled(editor)).toEqual([]);
+    },
+  );
 });

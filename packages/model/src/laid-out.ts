@@ -56,7 +56,8 @@ export function laidOutProps(
     // Auto layout places its children, and sizes the ones that hug or fill, or that its Stretch
     // alignment stretches (a fixed size across) in a frame that doesn't hug that way (a hugging
     // frame takes such a layer's own size): sync writing its main layer's there would only have
-    // layout write it back, moving what its constraints place in it each time.
+    // layout write it back, moving what its constraints place in it each time. A hidden layer
+    // isn't in the flow, so nothing stretches it, and its main layer's size reaches it.
     out.add("x");
     out.add("y");
     const rad = (getProp(copy.props, "rotation") * Math.PI) / 180;
@@ -67,7 +68,9 @@ export function laidOutProps(
       if (
         getProp(source.props, axis.sizing) !== "fixed" ||
         getProp(copy.props, axis.sizing) !== "fixed" ||
-        (getProp(parent.props, across) !== "hug" && flowSized(copy, parent, own))
+        (getProp(copy.props, "visible") &&
+          getProp(parent.props, across) !== "hug" &&
+          flowSized(copy, parent, own))
       )
         out.add(axis.size);
     }
