@@ -185,9 +185,18 @@ export class CompactCopies {
   apply(ops: readonly Op[], { held = false }: ApplyOptions = {}): CompactApplied {
     const tx = this.#tx(held);
     let index = 0;
+    // The run of deletes `index` is in: each target's last place in it (issue 280, below).
+    let run = new Map<string, number>();
+    let runEnd = 0;
     try {
-      for (; index < ops.length; index++)
-        if (!this.#deletedWith(tx, ops, index)) this.#op(tx, ops[index] as Op);
+      for (; index < ops.length; index++) {
+        const op = ops[index] as Op;
+        if (op.op === "delete") {
+          if (index >= runEnd) [run, runEnd] = this.#deleteRun(tx, ops, index);
+          if (this.#deletedLater(tx, op.id, index, run)) continue;
+        }
+        this.#op(tx, op);
+      }
       for (const root of tx.absorbLater) if (this.#hasLayers(root)) this.#absorb(tx, root);
     } catch (error) {
       this.#rollback(tx);
@@ -290,25 +299,35 @@ export class CompactCopies {
   }
 
   /**
-   * Whether `ops[index]` deletes a stored layer that a later delete in the
-   * same run of deletes removes with its ancestor anyway. An undone create
-   * deletes each layer it made, children first (as redoing a main's delete
-   * does). Left to the ancestor's delete, the main's instances elsewhere
-   * keep what it held, as they did when it was deleted at once (issue 280).
+   * The run of deletes from `start`: each one's target, by the last place it
+   * has in the run, and where the run ends. Nothing in a run of deletes makes
+   * an alias, so targets resolve once for all of it.
    */
-  #deletedWith(tx: Tx, ops: readonly Op[], index: number): boolean {
-    const op = ops[index] as Op;
-    if (op.op !== "delete") return false;
-    const id = this.#resolve(tx, op.id);
+  #deleteRun(tx: Tx, ops: readonly Op[], start: number): [Map<string, number>, number] {
+    const run = new Map<string, number>();
+    let end = start;
+    for (; end < ops.length && (ops[end] as Op).op === "delete"; end++) {
+      const target = this.#resolve(tx, (ops[end] as Op).id);
+      if (target !== null) run.set(target, end);
+    }
+    return [run, end];
+  }
+
+  /**
+   * Whether the delete at `index` is of a stored layer that a later delete in
+   * the same run of deletes removes with its ancestor anyway. An undone
+   * create deletes each layer it made, children first (as redoing a main's
+   * delete does). Left to the ancestor's delete, the main's instances
+   * elsewhere keep what it held, as they did when it was deleted at once
+   * (issue 280). It walks up from the layer once, so a run costs its length
+   * times the layers' depth.
+   */
+  #deletedLater(tx: Tx, opId: string, index: number, run: ReadonlyMap<string, number>): boolean {
+    const id = this.#resolve(tx, opId);
     if (id === null) return false;
-    const above = new Set<string>();
-    for (let n = this.store.get(id); n && n.type !== "override"; n = this.store.get(n.parent))
-      above.add(n.parent);
-    for (let i = index + 1; i < ops.length; i++) {
-      const later = ops[i] as Op;
-      if (later.op !== "delete") return false;
-      const target = this.#resolve(tx, later.id);
-      if (target !== null && above.has(target)) return true;
+    for (let n = this.store.get(id); n && n.type !== "override"; n = this.store.get(n.parent)) {
+      const at = run.get(n.parent);
+      if (at !== undefined && at > index) return true;
     }
     return false;
   }
