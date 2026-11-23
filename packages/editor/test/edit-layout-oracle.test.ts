@@ -2553,13 +2553,15 @@ function performFlow(editor: Editor, e: FlowEdit, mirror: Doc, run: FlowRun): vo
     // lays out a frame that has no flow any more (compact copies), or replays what it wrote
     // (materialized). Its layers are set aside; everything else still round-trips.
     const across = run.arrivedAt !== null && run.depth <= run.arrivedAt;
-    const inArrived = (id: string) => {
-      for (let n = doc.get(after[id]?.parent ?? ""), depth = 0; n && depth < 32; depth++) {
+    // The frame, a copy of it, or a layer in either.
+    const copiesArrived = (id: string) => {
+      for (let n = doc.get(id), depth = 0; n && depth < 32; depth++) {
         if (run.arrivedIn.has(n.id)) return true;
         n = doc.get(getProp(n.props, "mirrors") ?? "");
       }
       return false;
     };
+    const inArrived = (id: string) => copiesArrived(id) || copiesArrived(after[id]?.parent ?? "");
     expect(
       unexplained(before, after, doc).filter((id) => !(across && inArrived(id))),
       "undone and redone",
