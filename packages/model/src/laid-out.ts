@@ -240,8 +240,9 @@ type Box = "x" | "y" | "width" | "height";
  * Why a copy keeps a value of its own instead of the one derived from its
  * main layer: its own layout decides it ("layout": it hugs, its text
  * measures itself, it's bound to a variable), or it's the copy's own
- * ("own": overridden, a swapped instance's size, a layer whose frame took
- * its auto layout away). An own value still follows its constraints from
+ * ("own": overridden, a swapped instance's size, the place of a layer that
+ * left its flow, made absolute or in a frame that took its auto layout
+ * away, and the size that flow gave it with Fill). An own value still follows its constraints from
  * where it is when its frame resizes; a laid-out one isn't touched.
  */
 export type Kept = "layout" | "own";
@@ -270,8 +271,14 @@ export const PLACED_INPUTS: ReadonlySet<string> = new Set([
   "positioning",
   "textAutoResize",
   "instanceOf",
+  "mirrors",
   "overrides",
   "bindings",
+  "alignItems",
+  "alignSelf",
+  "justifyItems",
+  "justifySelf",
+  "rotation",
 ]);
 
 /**
@@ -302,7 +309,9 @@ export function placedGeometry(
   const overrides = getProp(copy.props, "overrides");
   const bound = getProp(copy.props, "bindings") as Record<string, unknown>;
   // Placed by its own choice: made absolute (or not) unlike its main layer, or in a frame that took
-  // its auto layout away, which leaves its layers where the layout put them (Figma).
+  // its auto layout away, which leaves its layers where the layout put them (Figma). That's its
+  // place; its size too only where the flow it left sized it (Fill, or Stretch alignment), since
+  // nothing sizes it now. A size of its own still comes from its main layer.
   const ownPlace =
     getProp(copy.props, "positioning") !== getProp(source.props, "positioning") ||
     (!absolute &&
@@ -323,12 +332,80 @@ export function placedGeometry(
       overrides.includes(axis.size) ||
       overrides.includes(axis.sizing) ||
       swapped ||
-      ownPlace
+      (ownPlace && flowSized(copy, parentSource, a))
     )
       kept[axis.size] = "own";
     else derived[axis.size] = constrained[axis.size] ?? getProp(source.props, axis.size);
   }
   return { derived, kept };
+}
+
+/**
+ * The sizes a copy layer in a flow takes from its main layer: the flow
+ * places it (so `placedGeometry` gives nothing), but on an axis where it's
+ * its own fixed size (no Fill, no Stretch alignment), that nothing
+ * overrides or binds, that isn't a swapped instance's and that doesn't
+ * measure itself, its size is its main layer's.
+ */
+export function flowCopySizes(
+  copy: NodeRecord,
+  source: NodeRecord,
+  parent: NodeRecord | undefined,
+): Partial<Record<"width" | "height", number>> {
+  const out: Partial<Record<"width" | "height", number>> = {};
+  if (parent?.type !== "frame" || copy.type === "group") return out;
+  if (
+    getProp(parent.props, "layoutMode") === "none" ||
+    getProp(copy.props, "positioning") === "absolute"
+  )
+    return out;
+  const shown = getProp(copy.props, "instanceOf");
+  if (shown && (!getProp(copy.props, "mirrors") || shown !== getProp(source.props, "instanceOf")))
+    return out;
+  const overrides = getProp(copy.props, "overrides");
+  const bound = getProp(copy.props, "bindings") as Record<string, unknown>;
+  for (const axis of AXES) {
+    const a = axis.size === "width" ? "h" : "v";
+    if (getProp(copy.props, axis.sizing) !== "fixed") continue;
+    if (getProp(source.props, axis.sizing) !== "fixed") continue;
+    if (overrides.includes(axis.size) || overrides.includes(axis.sizing) || bound[axis.size])
+      continue;
+    if (measuresOn(copy, a) || flowSized(copy, parent, a)) continue;
+    out[axis.size] = getProp(source.props, axis.size);
+  }
+  return out;
+}
+
+/**
+ * Whether the flow of `frame` sizes `child` on an axis: Fill does, and so
+ * does Stretch alignment across a row or column, or in a grid's cell,
+ * unless the child hugs (as layout has it). A turned child is stretched on
+ * whichever of its own axes lines up with the stretched one, so in a flow
+ * it counts as sized on both when either is.
+ */
+export function flowSized(child: NodeRecord, frame: NodeRecord, axis: "h" | "v"): boolean {
+  if (child.type === "group") return false;
+  const mode = getProp(frame.props, "layoutMode");
+  if (mode !== "none" && getProp(child.props, "rotation") % 360 !== 0)
+    return stretchedOn(child, frame, "h") || stretchedOn(child, frame, "v");
+  return stretchedOn(child, frame, axis);
+}
+
+/** Whether a flow stretches an unturned child on one of its axes. */
+function stretchedOn(child: NodeRecord, frame: NodeRecord, axis: "h" | "v"): boolean {
+  const sizing = getProp(child.props, axis === "h" ? "sizingH" : "sizingV");
+  if (sizing === "fill") return true;
+  if (sizing === "hug") return false;
+  const mode = getProp(frame.props, "layoutMode");
+  if (mode === "none") return false;
+  const across = (axis === "v" && mode === "row") || (axis === "h" && mode === "column");
+  if (mode === "grid" && axis === "h") {
+    const self = getProp(child.props, "justifySelf");
+    return (self !== "auto" ? self : getProp(frame.props, "justifyItems")) === "stretch";
+  }
+  if (!across && mode !== "grid") return false;
+  const self = getProp(child.props, "alignSelf");
+  return (self !== "auto" ? self : getProp(frame.props, "alignItems")) === "stretch";
 }
 
 /**

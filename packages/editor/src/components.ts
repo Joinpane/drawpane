@@ -23,6 +23,7 @@
 import {
   boundaryDrivenProps,
   copyChildId,
+  flowCopySizes,
   getProp,
   isMainNode,
   isPropName,
@@ -882,13 +883,14 @@ function copyPlaceOps(doc: Doc, id: string, view: (id: string) => NodeRecord | u
   const sourceId = getProp(copy.props, "mirrors");
   const source = sourceId ? doc.get(sourceId) : undefined;
   if (!source) return out;
-  const placed = placedGeometry(copy, source, view(copy.parent), doc.get(source.parent));
+  const parent = view(copy.parent);
+  const placed = placedGeometry(copy, source, parent, doc.get(source.parent));
+  // In a flow, what's left is its own fixed size, its main layer's (a laid-out size it stored
+  // before, say as Hug in another mode, no longer is one).
+  const derived = placed ? placed.derived : flowCopySizes(copy, source, parent);
   // Compared as presented (a value it doesn't store reads as its default), so nothing it already
   // shows is written again.
-  for (const [prop, want] of Object.entries(placed?.derived ?? {}) as [
-    "x" | "y" | "width" | "height",
-    number,
-  ][])
+  for (const [prop, want] of Object.entries(derived) as ["x" | "y" | "width" | "height", number][])
     if (Math.abs(getProp(copy.props, prop) - want) > PLACE_EPSILON)
       out.push({ op: "set", id, prop, value: want });
   // Placed freely, a copy text keeps its main layer's auto-resize (decision 0043): constraints

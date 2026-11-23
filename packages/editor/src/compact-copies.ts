@@ -31,6 +31,7 @@ import {
   bindsLayout,
   CopyView,
   collectSubtree,
+  getProp,
   isMainNode,
   isPropName,
   MemoryStore,
@@ -185,7 +186,8 @@ export class CompactCopies {
     const tx = this.#tx(held);
     let index = 0;
     try {
-      for (; index < ops.length; index++) this.#op(tx, ops[index] as Op);
+      for (; index < ops.length; index++)
+        if (!this.#deletedWith(tx, ops, index)) this.#op(tx, ops[index] as Op);
       for (const root of tx.absorbLater) if (this.#hasLayers(root)) this.#absorb(tx, root);
     } catch (error) {
       this.#rollback(tx);
@@ -285,6 +287,30 @@ export class CompactCopies {
 
   #resolve(tx: Tx, id: string): string | null {
     return tx.alias.has(id) ? (tx.alias.get(id) as string | null) : id;
+  }
+
+  /**
+   * Whether `ops[index]` deletes a stored layer that a later delete in the
+   * same run of deletes removes with its ancestor anyway. An undone create
+   * deletes each layer it made, children first (as redoing a main's delete
+   * does). Left to the ancestor's delete, the main's instances elsewhere
+   * keep what it held, as they did when it was deleted at once (issue 280).
+   */
+  #deletedWith(tx: Tx, ops: readonly Op[], index: number): boolean {
+    const op = ops[index] as Op;
+    if (op.op !== "delete") return false;
+    const id = this.#resolve(tx, op.id);
+    if (id === null) return false;
+    const above = new Set<string>();
+    for (let n = this.store.get(id); n && n.type !== "override"; n = this.store.get(n.parent))
+      above.add(n.parent);
+    for (let i = index + 1; i < ops.length; i++) {
+      const later = ops[i] as Op;
+      if (later.op !== "delete") return false;
+      const target = this.#resolve(tx, later.id);
+      if (target !== null && above.has(target)) return true;
+    }
+    return false;
   }
 
   #op(tx: Tx, op: Op): void {
@@ -735,12 +761,27 @@ export class CompactCopies {
           const id = after[i];
           const layer = byId.get(old) as NodeRecord;
           if (!id || this.view.get(id)?.type !== layer.type) return;
-          this.#writeOwn(tx, id, layer.props);
+          this.#writeOwn(tx, id, this.#keptPlace(id, layer.props));
           pair(old, id);
         });
       };
       pair(top, top);
     }
+  }
+
+  /**
+   * A kept copy layer's look, with the place and size it differs in from its
+   * new main layer marked as its own: they came from the main that's gone,
+   * and nothing derives them now (`placedGeometry` keeps what's marked).
+   */
+  #keptPlace(id: string, props: Props): Props {
+    const base = this.view.base(id);
+    if (!base) return props;
+    const marks = new Set<string>(getProp(props, "overrides"));
+    const count = marks.size;
+    for (const prop of ["x", "y", "width", "height"] as const)
+      if (!sameValue(getProp(base.props as Props, prop), getProp(props, prop))) marks.add(prop);
+    return marks.size === count ? props : ({ ...props, overrides: [...marks] } as Props);
   }
 
   /**

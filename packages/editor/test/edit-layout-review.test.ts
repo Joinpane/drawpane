@@ -1616,3 +1616,146 @@ describe.each(["materialized", "compact"] as const)("re-check 4 with copies %s",
     ).not.toThrow();
   });
 });
+
+// The fifth re-check (at 9a4b6afd): a copy's place and size are owned separately, and a redone
+// delete of a main keeps its instances' layers.
+describe.each(["materialized", "compact"] as const)("re-check 5 with copies %s", (copies) => {
+  const width = (editor: Editor, id: string) => getProp(editor.doc.get(id)?.props ?? {}, "width");
+
+  it.each(["row", "none"] as const)(
+    "gives a copy made absolute in a %s frame its main layer's new size (P1)",
+    (layoutMode) => {
+      const editor = make(
+        [
+          page,
+          node("main", "frame", "p", {
+            isComponent: true,
+            width: 160,
+            height: 80,
+            layoutMode,
+            paddingLeft: 10,
+            paddingTop: 10,
+          }),
+          node("rect", "rect", "main", { x: 10, y: 10, width: 60, height: 20 }),
+        ],
+        copies,
+      );
+      const instance = editor.insertInstance("main", { x: 0, y: 200 }) as string;
+      const rect = editor.doc.childIds(instance)[0] as string;
+      editor.setProp([rect], "positioning", "absolute");
+      editor.resize(["rect"], "width", 90);
+      expect(width(editor, rect)).toBe(90);
+      editor.undo();
+      expect(width(editor, rect)).toBe(60);
+      editor.redo();
+      expect(width(editor, rect)).toBe(90);
+      editor.setProp([rect], "positioning", "auto");
+      expect(width(editor, rect)).toBe(90);
+      expect(unsettled(editor)).toEqual([]);
+    },
+  );
+
+  it("keeps the size a flow stretched a copy to once its frame takes the flow away", () => {
+    const editor = make(
+      [
+        page,
+        node("main", "frame", "p", {
+          isComponent: true,
+          width: 160,
+          height: 80,
+          layoutMode: "row",
+          alignItems: "stretch",
+        }),
+        node("rect", "rect", "main", { width: 60, height: 80 }),
+      ],
+      copies,
+    );
+    const instance = editor.insertInstance("main", { x: 0, y: 200 }) as string;
+    editor.resize([instance], "height", 120);
+    const rect = editor.doc.childIds(instance)[0] as string;
+    expect(getProp(editor.doc.get(rect)?.props ?? {}, "height")).toBe(120);
+    editor.setProp([instance], "layoutMode", "none");
+    expect(getProp(editor.doc.get(rect)?.props ?? {}, "height")).toBe(120);
+    editor.setProp(["main"], "fills", [{ type: "solid", color: "#ff0000" }]);
+    expect(getProp(editor.doc.get(rect)?.props ?? {}, "height")).toBe(120);
+    expect(unsettled(editor)).toEqual([]);
+  });
+
+  it("keeps where a layer kept through its main's delete was put (seed 951286467)", () => {
+    const editor = make(
+      [
+        page,
+        node("leaf", "frame", "p", { isComponent: true, width: 160, height: 80 }),
+        node("label", "rect", "leaf", { x: 10, y: 10, width: 40, height: 20 }),
+        node("mid", "frame", "p", { isComponent: true, y: 200, width: 200, height: 100 }, "a1"),
+        node("top", "frame", "p", { isComponent: true, y: 400, width: 240, height: 120 }, "a2"),
+      ],
+      copies,
+    );
+    const place = (id: string, parent: string) =>
+      expect(editor.commit([{ op: "move", id, parent, key: editor.topKey(parent) }])).toBe(true);
+    // An instance of the leaf moved into the middle component, and its label moved there.
+    const nested = editor.insertInstance("leaf", { x: 0, y: 600 }) as string;
+    place(nested, "mid");
+    const moved = editor.doc.childIds(nested)[0] as string;
+    editor.setProp([moved], "x", 21);
+    // The middle component in the top one, and an instance of the top one.
+    const mid = editor.insertInstance("mid", { x: 300, y: 600 }) as string;
+    place(mid, "top");
+    const instance = editor.insertInstance("top", { x: 600, y: 0 }) as string;
+    const kept = () => {
+      let at: string | undefined = instance;
+      for (let depth = 0; depth < 3 && at; depth++) at = editor.doc.childIds(at)[0];
+      return at as string;
+    };
+    expect(getProp(editor.doc.get(kept())?.props ?? {}, "x")).toBe(21);
+    editor.select(["mid"]);
+    editor.deleteSelection();
+    expect(getProp(editor.doc.get(kept())?.props ?? {}, "x")).toBe(21);
+    // A later change to the label's main layer doesn't put it back.
+    editor.setProp(["label"], "y", 12);
+    expect(getProp(editor.doc.get(kept())?.props ?? {}, "x")).toBe(21);
+    expect(unsettled(editor)).toEqual([]);
+  });
+
+  it("keeps an instance's layers when the delete of its main is redone (issue 280)", () => {
+    const editor = make(
+      [
+        page,
+        node("main", "frame", "p", {
+          isComponent: true,
+          layoutMode: "row",
+          sizingH: "hug",
+          sizingV: "hug",
+          width: 30,
+          height: 10,
+        }),
+        node("inner", "frame", "main", { layoutMode: "row", width: 30, height: 10 }),
+        node("dot", "rect", "inner", { width: 10, height: 10 }),
+      ],
+      copies,
+    );
+    const instance = editor.insertInstance("main", { x: 0, y: 300 }) as string;
+    const count = () => {
+      let n = 0;
+      const walk = (id: string) => {
+        for (const c of editor.doc.childIds(id)) {
+          n++;
+          walk(c);
+        }
+      };
+      walk(instance);
+      return n;
+    };
+    editor.select(["main"]);
+    editor.deleteSelection();
+    expect(count()).toBe(2);
+    const kept = width(editor, instance);
+    editor.undo();
+    expect(count()).toBe(2);
+    editor.redo();
+    expect(count()).toBe(2);
+    expect(width(editor, instance)).toBe(kept);
+    expect(unsettled(editor)).toEqual([]);
+  });
+});
