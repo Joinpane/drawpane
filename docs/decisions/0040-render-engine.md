@@ -1855,3 +1855,74 @@ Main-thread encode of a settled frame on the review's 2,400-tile mosaic board st
 6.5 ms on both sides. WebGL2 forced redraws at 1,000% take 44 to 53 ms here against 72 to 108 ms
 on main. The review's probes settle exact on 53 of 53 hardware views, as on main, with at most
 2/255 against a native reference.
+
+## Amendment: whole frames at rest drawn over 8 ms slices (2026-11-23)
+
+A view whose readers reach past a tile's halo and past any apron settles on a whole frame: one
+native pass of the padded view, else the reduced reader-halo frame (its far and mid tiers, then
+the final pass). Until now the frame at rest that asked for it drew all of it at once, 0.3 to
+1.8 s on a T4, and every pause in a gesture (a wheel step's hold) asked again: Figma's G2 wheel
+zoom on the iOS kit's Control Center ran at a frame interval p95 of 150 to 480 ms on WebGL2.
+
+### What changes
+
+- **A frame at rest with a budget never draws a whole frame at once.** `Gpu::render_whole_sliced`
+  starts it (or carries on with it) and runs it for at most the frame's budget; until it's done,
+  the frame shows the last frame warped to the view (one quad, as a budgeted moving frame that
+  hits a limit does), with one tile pending. The time between frames runs the rest, 8 ms a slice
+  (`Gpu::ahead_whole`, called where `ahead` draws tiles), and a present-only frame shows the
+  finished frame (`Gpu::present_sliced_frame`).
+- **How a pass slices:** a whole pass (`begin_whole_pass`, `walk_whole_pass`,
+  `finish_whole_pass`) pauses its walk at the deadline and resumes it from a checkpoint, as a
+  tile's does, keeping its target. The reduced reader-halo frame runs its stages in order
+  (`step_reader_halo`), swapping a tier's reader planes out between slices; a stage's setup
+  (the clamp edge strips) runs within one slice. A slice's submit counts against the next
+  slices' walk budget, as a tile slice's does.
+- **The same frame:** the finished frame is the one drawn at once, byte for byte (e2e:
+  engine-zoom-blur "drawn over slices", the reduced and the native route, on WebGPU and WebGL2).
+- **What a paused walk owns:** a paused walk, a tile's or a whole pass's, is one checkpoint
+  (`PausedWalk`): its scratch slot, its target with the backdrop plane its readers read, the
+  backdrop generation and the glass mask atlas, until it resumes or is dropped. Trimming pools
+  for memory (an image upload refused, say) leaves that atlas while a walk is paused.
+- **What it was asked for:** a draw over slices resumes, and what it drew is shown, only while
+  its inputs hold: the list's generation, the background and the limits (`DrawInputs`; another
+  view or size goes through a draw that drops it). An idle slice after an edit drops it unshown,
+  and the next frame draws afresh. A present-only frame of its view shows its stand-in again and
+  the draw goes on.
+- **Memory:** a native pass that hits a memory limit goes on as the reduced reader-halo frame,
+  as `render_whole` does. Any other memory limit while slicing (in the reduced frame's stages, or
+  finishing a pass) drops what the slices held, frees the view's caches and draws the frame at
+  once with `render_whole`: what a frame drawn at once shows, never an error or a stand-in left
+  up where that frame draws (e2e: "a whole frame over slices holds through edits, present-only
+  frames, refused uploads and short memory").
+- **Unchanged:** frames with no budget (budget 0: exports, tests, `whole` redraws) and moving
+  frames draw as before.
+
+### Size
+
+The WebGL2 module's budget goes from 1,400 to 1,450 KB gzipped. Slicing adds 6 KB to it (1,398 to
+1,404 KB on this change), and the per-tile large blur that comes next needs room too. There's no
+reasonable saving left in it: `wasm-opt -Os` makes it smaller raw but larger gzipped (1,396 to
+1,440 KB measured), and the module loads only where WebGPU can't.
+
+### Measured on a T4 (three paired runs against main with #330)
+
+Figma's G2 replayed in the file bench (`zoom, figma G2`, draft PR #331): the iOS kit's Control
+Center, a 901 × 900 canvas, 15% to 254% in 14 steps four frames apart.
+
+| G2, during the gesture | WebGL2, main | WebGL2, this change | WebGPU readback, main | WebGPU readback, this change |
+| --- | --- | --- | --- | --- |
+| Frame interval p95 | 167-200 ms | 33-67 ms | 167-233 ms | 50 ms |
+| Slowest engine frame | 342-479 ms (reduced halo frame) | 20-21 ms (stand-in) | 344-984 ms | 21-22 ms (stand-in) |
+| Longest task | 469-509 ms | 0-114 ms | 359-999 ms | 0 ms |
+
+- The webgpu bench mode composites in software: its rAF runs every 33 to 50 ms, so 50 ms is its
+  floor (its Examples zoom has the same p95).
+- The long tasks left on WebGL2 are mostly image-level uploads (`putGpuImageLevel`) while the
+  zoom crosses Control Center's large images, beside a frame and an idle slice in the same rAF
+  tick. Uploading those levels in row strips, tried on top, reached p95 16.8 ms in one run and
+  50 ms in another, so it isn't part of this change.
+- The end view still settles on the reduced reader-halo frame (within 0.5% of its settled frame
+  at 1.93-1.95 s on both sides): making it exact is the per-tile large blur's job.
+- The Examples gestures don't use whole frames: zoom p95 16.7 ms on both sides, and pans and the
+  zoom's time to exact within run-to-run noise.
