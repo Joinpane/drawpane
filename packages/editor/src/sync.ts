@@ -671,11 +671,31 @@ export class SyncEngine {
    * Applies an unsent edit's stored operations as they are, when they still
    * apply: false (nothing applied) when a collaborator's edit made them stale
    * (an override record they make or change was made, reset or removed
-   * meanwhile), to be stored again from what it did as presented.
+   * meanwhile, or a layer they copy was deleted), to be stored again from what
+   * it did as presented.
    */
   #replayStored(txn: PendingTxn): boolean {
+    // A copy it makes of a layer a collaborator deleted meanwhile goes, with what's in it: a main's
+    // delete keeps its instances' layers as they are, and that layer isn't one any more (as
+    // materialized copies have it, where the collaborator's edit deleted the copies).
+    const made = new Set<string>();
+    const gone = new Set<string>();
+    const stored = txn.stored.filter((op) => {
+      if (op.op !== "create") return !gone.has(op.id);
+      const mirrors = (op.props as Record<string, unknown>).mirrors;
+      if (
+        gone.has(op.parent) ||
+        (typeof mirrors === "string" && !made.has(mirrors) && !this.#doc.has(mirrors))
+      ) {
+        gone.add(op.id);
+        return false;
+      }
+      made.add(op.id);
+      return true;
+    });
     try {
-      this.#doc.applyStored(txn.stored);
+      this.#doc.applyStored(stored);
+      txn.stored = stored;
       return true;
     } catch (error) {
       if (!(error instanceof ModelError)) throw error;

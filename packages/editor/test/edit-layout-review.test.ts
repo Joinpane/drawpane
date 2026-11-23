@@ -913,9 +913,16 @@ describe.each(["materialized", "compact"] as const)("deriving copies with copies
     const { editor, instance, copy } = setup(
       node("dot", "rect", "main", { x: 50, y: 20, width: 10, height: 10 }),
     );
-    editor.setLayoutMode([instance], "row");
+    // Auto layout its main doesn't have: the editor refuses it now (as Figma does), but a file
+    // saved before can hold it.
+    editor.commit([{ op: "set", id: instance, prop: "layoutMode", value: "row" }]);
+    expect(getProp(editor.doc.get(instance)?.props ?? {}, "layoutMode")).toBe("row");
+    expect([num(editor, copy, "x"), getProp(editor.doc.get(copy)?.props ?? {}, "y")]).not.toEqual([
+      50, 20,
+    ]);
     editor.select([instance]);
     editor.resetInstances();
+    expect(getProp(editor.doc.get(instance)?.props ?? {}, "layoutMode")).toBe("none");
     expect([num(editor, copy, "x"), getProp(editor.doc.get(copy)?.props ?? {}, "y")]).toEqual([
       50, 20,
     ]);
@@ -1690,7 +1697,7 @@ describe.each(["materialized", "compact"] as const)("re-check 5 with copies %s",
   });
 
   it.each(["setLayoutMode", "frameSelection"] as const)(
-    "leaves an instance of a component without auto layout as it is when given auto layout (%s, Figma)",
+    "doesn't give an instance auto layout its component lacks (%s, Figma)",
     (how) => {
       const editor = make(
         [
@@ -1710,17 +1717,22 @@ describe.each(["materialized", "compact"] as const)("re-check 5 with copies %s",
       const bar = editor.doc.childIds(instance)[0] as string;
       editor.resize([instance], "width", 100);
       expect(width(editor, bar)).toBe(80);
-      expect(editor.canGainLayout(instance)).toBe(false);
-      expect(editor.canGainLayout("main")).toBe(true);
+      expect(editor.canToggleLayout(instance, true)).toBe(false);
+      expect(editor.canToggleLayout("main", true)).toBe(true);
       const before = editor.doc.stored();
-      if (how === "setLayoutMode") editor.setLayoutMode([instance], "column");
-      else {
-        // ⇧A: Figma neither gives it auto layout nor wraps it.
+      if (how === "setLayoutMode") {
+        editor.setLayoutMode([instance], "column");
+        expect(editor.doc.stored()).toEqual(before);
+      } else {
+        // ⇧A: Figma wraps it in a new auto layout frame, leaving the instance as it was.
         editor.select([instance]);
         editor.frameSelection(true);
-        expect(editor.s.selection).toEqual([instance]);
+        const wrapper = editor.doc.get(editor.doc.get(instance)?.parent ?? "");
+        expect(wrapper?.type).toBe("frame");
+        expect(wrapper?.id).not.toBe("p");
+        expect(getProp(wrapper?.props ?? {}, "layoutMode")).not.toBe("none");
+        expect(editor.s.selection).toEqual([wrapper?.id]);
       }
-      expect(editor.doc.stored()).toEqual(before);
       expect(getProp(editor.doc.get(instance)?.props ?? {}, "layoutMode")).toBe("none");
       expect(width(editor, bar)).toBe(80);
       expect(unsettled(editor)).toEqual([]);
@@ -1748,7 +1760,12 @@ describe.each(["materialized", "compact"] as const)("re-check 5 with copies %s",
     editor.resize([instance], "height", 120);
     const height = () => getProp(editor.doc.get(rect)?.props ?? {}, "height");
     expect(height()).toBe(120);
+    // Its component has auto layout, so the editor won't take it away (Figma).
     editor.setLayoutMode([instance], "none");
+    expect(getProp(editor.doc.get(instance)?.props ?? {}, "layoutMode")).toBe("row");
+    // An older client's edit can: the copy keeps what the flow gave it.
+    editor.commit([{ op: "set", id: instance, prop: "layoutMode", value: null }]);
+    expect(getProp(editor.doc.get(instance)?.props ?? {}, "layoutMode")).toBe("none");
     expect(height()).toBe(120);
     editor.setProp(["main"], "opacity", 0.5);
     expect(height()).toBe(120);
@@ -1893,5 +1910,179 @@ describe.each(["materialized", "compact"] as const)("re-check 5 with copies %s",
     expect(count()).toBe(2);
     expect(width(editor, instance)).toBe(kept);
     expect(unsettled(editor)).toEqual([]);
+  });
+});
+
+// The seventh re-check (at b0bd4cc7): what an instance shows decides its auto layout, a removal an
+// older client makes keeps what the flow gave, and a delete's snapshot follows the main as it is.
+describe.each(["materialized", "compact"] as const)("re-check 7 with copies %s", (copies) => {
+  const size = (editor: Editor, id: string) => {
+    const props = editor.doc.get(id)?.props ?? {};
+    return [getProp(props, "width"), getProp(props, "height")];
+  };
+  const layout = (editor: Editor, id: string) =>
+    getProp(editor.doc.get(id)?.props ?? {}, "layoutMode");
+  const rowMain = () => [
+    page,
+    node("main", "frame", "p", { isComponent: true, width: 160, height: 80, layoutMode: "row" }),
+    node("rect", "rect", "main", { width: 60, height: 20 }),
+  ];
+
+  it("keeps the width its own column's Stretch gave a copy once an older client takes the flow away", () => {
+    const editor = make(rowMain(), copies);
+    const instance = editor.insertInstance("main", { x: 0, y: 200 }) as string;
+    const rect = editor.doc.childIds(instance)[0] as string;
+    editor.resize([instance], "width", 120);
+    editor.resize([instance], "height", 100);
+    editor.setLayoutMode([instance], "column");
+    editor.setProp([instance], "alignItems", "stretch");
+    expect(size(editor, rect)).toEqual([120, 20]);
+    // The editor won't take its component's auto layout away (Figma).
+    editor.setLayoutMode([instance], "none");
+    expect(layout(editor, instance)).toBe("column");
+    editor.commit([{ op: "set", id: instance, prop: "layoutMode", value: null }]);
+    expect(size(editor, rect)).toEqual([120, 20]);
+    editor.undo();
+    editor.redo();
+    expect(size(editor, rect)).toEqual([120, 20]);
+    // The main's own direction changing later doesn't take it back.
+    editor.setLayoutMode(["main"], "column");
+    expect(size(editor, rect)).toEqual([120, 20]);
+    expect(unsettled(editor)).toEqual([]);
+  });
+
+  it("keeps the height a row's Stretch gave a copy through the main turning to a column", () => {
+    const editor = make(rowMain(), copies);
+    const instance = editor.insertInstance("main", { x: 0, y: 200 }) as string;
+    const rect = editor.doc.childIds(instance)[0] as string;
+    editor.resize([instance], "height", 100);
+    editor.setProp([instance], "alignItems", "stretch");
+    expect(size(editor, rect)).toEqual([60, 100]);
+    editor.commit([{ op: "set", id: instance, prop: "layoutMode", value: null }]);
+    expect(size(editor, rect)).toEqual([60, 100]);
+    editor.setLayoutMode(["main"], "column");
+    expect(size(editor, rect)).toEqual([60, 100]);
+    expect(unsettled(editor)).toEqual([]);
+  });
+
+  it("decides a swapped nested instance's auto layout by the component it shows now", () => {
+    const editor = make(
+      [
+        page,
+        node("row", "frame", "p", { isComponent: true, layoutMode: "row", width: 160, height: 80 }),
+        node("plain", "frame", "p", { isComponent: true, width: 160, height: 80 }, "a1"),
+        node("outer", "frame", "p", { isComponent: true, width: 160, height: 80 }, "a2"),
+        node("rowRect", "rect", "row", { width: 60, height: 20 }),
+        node("plainRect", "rect", "plain", { width: 90, height: 20 }),
+      ],
+      copies,
+    );
+    const nested = editor.insertInstance("row", { x: 0, y: 300 }) as string;
+    expect(editor.commit([{ op: "move", id: nested, parent: "outer", key: "a0" }])).toBe(true);
+    const outer = editor.insertInstance("outer", { x: 800, y: 500 }) as string;
+    const copy = editor.doc.childIds(outer)[0] as string;
+    editor.swapInstance(copy, "plain");
+    expect(layout(editor, copy)).toBe("none");
+    expect(editor.canToggleLayout(copy, true)).toBe(false);
+    editor.setLayoutMode([copy], "column");
+    expect(layout(editor, copy)).toBe("none");
+    editor.swapInstance(copy, "row");
+    expect(layout(editor, copy)).toBe("row");
+    expect(editor.canToggleLayout(copy, false)).toBe(false);
+    editor.setLayoutMode([copy], "none");
+    expect(layout(editor, copy)).toBe("row");
+    // Its flow's own settings stay its own.
+    editor.setLayoutMode([copy], "column");
+    expect(layout(editor, copy)).toBe("column");
+    expect(unsettled(editor)).toEqual([]);
+  });
+
+  it("lays a copy's own flow out again when its main layer's alignment changes", () => {
+    const editor = make(
+      [
+        page,
+        node("part", "frame", "p", { isComponent: true, width: 160, height: 80 }),
+        node("a", "rect", "part", { x: 10, y: 10, width: 60, height: 20 }),
+        node("outer", "frame", "p", { isComponent: true, y: 300, width: 300, height: 200 }, "a1"),
+      ],
+      copies,
+    );
+    const nested = editor.insertInstance("part", { x: 5000, y: 5000 }) as string;
+    expect(editor.commit([{ op: "move", id: nested, parent: "outer", key: "a0" }])).toBe(true);
+    const outer = editor.insertInstance("outer", { x: 1000, y: 0 }) as string;
+    const copy = editor.doc.childIds(outer)[0] as string;
+    // A row its component lacks, from a file saved before (the editor refuses it now).
+    editor.commit([{ op: "set", id: copy, prop: "layoutMode", value: "row" }]);
+    editor.setProp([nested], "alignItems", "stretch");
+    expect(size(editor, editor.doc.childIds(copy)[0] as string)).toEqual([60, 80]);
+    expect(unsettled(editor)).toEqual([]);
+  });
+
+  it("undoes a batch that deletes a layer, sets another, then deletes its frames", () => {
+    const editor = make(
+      [
+        page,
+        node("wrapper", "frame", "p", { width: 160, height: 80 }),
+        node("main", "frame", "wrapper", { isComponent: true, width: 160, height: 80 }),
+        node("inner", "frame", "main", { width: 90, height: 50 }),
+        node("dot", "rect", "inner", { width: 15, height: 10 }),
+        node("other", "rect", "p", { width: 30, height: 20 }, "a1"),
+      ],
+      copies,
+    );
+    const instance = editor.insertInstance("main", { x: 500, y: 500 }) as string;
+    const before = editor.doc.stored();
+    expect(
+      editor.commit([
+        { op: "delete", id: "dot" },
+        { op: "set", id: "other", prop: "opacity", value: 0.5 },
+        { op: "delete", id: "inner" },
+        { op: "delete", id: "wrapper" },
+      ]),
+    ).toBe(true);
+    // The instance keeps what the main held when the batch began, as materialized copies do.
+    const kept = editor.doc.childIds(instance)[0] as string;
+    expect(editor.doc.childIds(kept)).toHaveLength(1);
+    editor.undo();
+    expect(editor.doc.has("dot")).toBe(true);
+    const sorted = (records: readonly NodeRecord[]) =>
+      [...records].sort((a, b) => a.id.localeCompare(b.id));
+    expect(sorted(editor.doc.stored())).toEqual(sorted(before));
+  });
+
+  it("keeps no copy of a layer a collaborator deleted while a main's delete was pending", () => {
+    const nodes = [
+      page,
+      node("wrapper", "frame", "p", { width: 160, height: 80 }),
+      node("main", "frame", "wrapper", { isComponent: true, width: 160, height: 80 }),
+      node("inner", "frame", "main", { width: 90, height: 50 }),
+      node("dot", "rect", "inner", { width: 15, height: 10 }),
+    ];
+    const editor = make(nodes, copies);
+    const instance = editor.insertInstance("main", { x: 500, y: 500 }) as string;
+    editor.sync.takeUnsent();
+    const base = editor.doc.stored();
+    const other = make(base, copies);
+    let revn = 1;
+    editor.sync.connected(() => {});
+    editor.sync.receive({
+      t: "welcome",
+      mode: "snapshot",
+      revn,
+      sessionId: "room",
+      role: "editor",
+      peers: [],
+      lastSeq: 0,
+      copies,
+    } as never);
+    editor.sync.receive({ t: "snapshot", nodes: base, done: true } as never);
+    editor.setPage("p");
+    editor.select(["wrapper"]);
+    editor.deleteSelection();
+    other.select(["dot"]);
+    other.deleteSelection();
+    editor.sync.receive({ t: "txn", revn: ++revn, ops: other.sync.takeUnsent() } as never);
+    const kept = editor.doc.childIds(instance)[0] as string;
+    expect(editor.doc.childIds(kept)).toEqual([]);
   });
 });

@@ -22,12 +22,15 @@
  */
 import {
   boundaryDrivenProps,
+  constrainedValues,
   copyChildId,
   flowCopySizes,
   getProp,
+  hugsOn,
   isMainNode,
   isPropName,
   laidOutProps,
+  measuresOn,
   type NodeRecord,
   newId,
   type Op,
@@ -884,6 +887,50 @@ export function copyConstraintOps(doc: Doc, ops: readonly Op[]): Op[] {
     const props = node && pending.get(id);
     return props ? { ...node, props: { ...node.props, ...props } as Props } : node;
   };
+  // A frame of an instance that takes its own auto layout away (an older file's edit, or an older
+  // client's) leaves its layers as the layout made them, as Figma does: a size the flow gave one,
+  // where it would now be another, is its own, whatever its main's flow does later.
+  for (const op of ops) {
+    if (op.op !== "set" || op.prop !== "layoutMode" || (op.value !== null && op.value !== "none"))
+      continue;
+    const frame = doc.get(op.id);
+    if (!frame || (!getProp(frame.props, "mirrors") && !getProp(frame.props, "instanceOf")))
+      continue;
+    // Taken away, not reset: what it shows has a flow, or its own layout mode is an override.
+    const shown = doc.get(
+      getProp(frame.props, "instanceOf") ?? getProp(frame.props, "mirrors") ?? "",
+    );
+    if (
+      !(shown && getProp(shown.props, "layoutMode") !== "none") &&
+      !getProp(frame.props, "overrides").includes("layoutMode")
+    )
+      continue;
+    for (const child of doc.childIds(op.id)) {
+      const copy = doc.get(child);
+      const source = copy ? doc.get(getProp(copy.props, "mirrors") ?? "") : undefined;
+      if (!copy || !source) continue;
+      // What its main layer and its constraints give it, with no flow: a size the flow gave it
+      // otherwise is kept, as its own (so the main's own flow changing later can't take it).
+      const plain = constrainedValues(copy, source, frame, doc.get(source.parent));
+      const own = getProp(copy.props, "overrides");
+      const bound = getProp(copy.props, "bindings") as Record<string, unknown>;
+      const kept = (["width", "height"] as const).filter((prop) => {
+        const axis = prop === "width" ? "h" : "v";
+        const want = plain[prop] ?? getProp(source.props, prop);
+        return (
+          !own.includes(prop) &&
+          !bound[prop] &&
+          !hugsOn(copy, axis) &&
+          !measuresOn(copy, axis) &&
+          Math.abs(getProp(copy.props, prop) - want) > PLACE_EPSILON
+        );
+      });
+      if (kept.length === 0) continue;
+      const value = [...own, ...kept];
+      out.push({ op: "set", id: child, prop: "overrides", value });
+      pending.set(child, { ...pending.get(child), overrides: value });
+    }
+  }
   for (const id of order)
     for (const op of copyPlaceOps(doc, id, view)) {
       out.push(op);
@@ -895,7 +942,7 @@ export function copyConstraintOps(doc: Doc, ops: readonly Op[]): Op[] {
 /** The writes that put a copy layer where `placedGeometry` places it, and give it its main's text mode. */
 function copyPlaceOps(doc: Doc, id: string, view: (id: string) => NodeRecord | undefined): Op[] {
   const out: Op[] = [];
-  const copy = doc.get(id);
+  const copy = view(id);
   if (!copy) return out;
   const sourceId = getProp(copy.props, "mirrors");
   const source = sourceId ? doc.get(sourceId) : undefined;
@@ -990,6 +1037,13 @@ export function relayoutTargets(
       if (isLayout(doc.getUnresolved(copy))) return true;
     return false;
   };
+  // A layout in one of its own copies: an instance can give a copy of a plain frame auto layout of
+  // its own (an older file's edit), which reads what changed on its main layer (its alignment).
+  const layoutInCopy = (node: NodeRecord) => {
+    for (const copy of doc.tokens.source().builtFrom([node.id]))
+      if (isLayout(doc.getUnresolved(copy))) return true;
+    return false;
+  };
   /** Mains whose layout inside may have changed. */
   const inner = new Set<string>();
   /** Mains whose root changed in a way its instances' parents read. */
@@ -1008,7 +1062,7 @@ export function relayoutTargets(
     const isRoot = isMainComponent(node);
     if (isRoot && op.op === "set" && ROOT_LOCAL_PROPS.has(op.prop)) continue;
     if (isRoot) sized.add(node.id);
-    if (isRoot || node.type === "text" || isLayout(node) || inLayout(node))
+    if (isRoot || node.type === "text" || isLayout(node) || inLayout(node) || layoutInCopy(node))
       for (const id of around) inner.add(id);
   }
   /** What changed in the mains: the layers their copies are laid out again around. */
