@@ -131,7 +131,7 @@ function bindsByMode(doc: Doc, node: NodeRecord): boolean {
 /**
  * Issue 306's signature: a layer kept by an instance (above it) whose main is gone, shown in a
  * mode set on it or above it, that binds a variable this mode resolves otherwise: the layer itself,
- * or for what a full layout changes, a layer in it (whose new value it would lay out).
+ * or for what a full layout changes, the frame laying it out (its padding, say) or a layer in it.
  */
 function keptInMode(doc: Doc, id: string, inside = false): boolean {
   const above = doc.ancestors(id);
@@ -144,7 +144,8 @@ function keptInMode(doc: Doc, id: string, inside = false): boolean {
   if (!node) return false;
   const moded = (n: NodeRecord) => Object.keys(getProp(n.props, "variableModes")).length > 0;
   if (!moded(node) && !above.some(moded)) return false;
-  return [node, ...(inside ? collectDescendants(doc, id) : [])].some((n) => bindsByMode(doc, n));
+  const laidOut = inside ? [doc.get(node.parent), ...collectDescendants(doc, id)] : [];
+  return [node, ...laidOut].some((n) => !!n && bindsByMode(doc, n));
 }
 
 /**
