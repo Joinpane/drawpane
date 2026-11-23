@@ -23,8 +23,18 @@ import { type NodeRecord, type Op, OpsSchema } from "./ops";
  * says hello is told to reload (1, which reconnects on most closes, is shown
  * a page saying so), and a socket welcomed before the release, whose
  * attachment says no protocol, has its edits refused and is told the same.
+ *
+ * 4: an instance keeps what its own auto layout gave its layers when that
+ * flow is taken away (PR 286). The client taking it away marks those layers'
+ * places and the sizes and text modes the flow decided as their own, in the
+ * same transaction, so a later change to the main's flow can't take them. An
+ * older tab (3 or before) can take an instance's auto layout away without
+ * those marks, and nothing marks them after: the client that receives an edit
+ * lays nothing out. So it doesn't write, as for 3: it's told to reload at
+ * hello, and one welcomed before the release has its edits refused. Old data
+ * needs nothing: a removal saved before keeps reading as it did.
  */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 /** The close code that tells a client the room needs a newer one: reload the page. */
 export const RELOAD_CLOSE_CODE = 4426;
@@ -73,8 +83,11 @@ export function latencyBucket(ms: number): number {
 export const ClientMessage = z.discriminatedUnion("t", [
   z.object({
     t: z.literal("hello"),
-    /** Older clients (1: before compact copies, 2: before variables and styles) are told to reload. */
-    protocol: z.union([z.literal(1), z.literal(2), z.literal(PROTOCOL_VERSION)]),
+    /**
+     * Older clients (1: before compact copies, 2: before variables and styles, 3: before marking
+     * what an instance's own flow left) are told to reload.
+     */
+    protocol: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(PROTOCOL_VERSION)]),
     /** Stable per browser tab; used to make resent transactions idempotent. */
     clientId: Id,
     /** Last revision this client has fully applied, or null for a fresh load. */

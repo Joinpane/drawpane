@@ -40,7 +40,7 @@ async function newFile(name = "Kit") {
   );
   // The room learns its file id when someone opens it.
   const socket = await openSocket(owner.browser, file.id);
-  socket.send({ t: "hello", protocol: 3, clientId: `c-${file.id}`, revn: null, copies: BOTH });
+  socket.send({ t: "hello", protocol: 4, clientId: `c-${file.id}`, revn: null, copies: BOTH });
   await socket.next("welcome");
   socket.ws.close();
   return { ...owner, fileId: file.id };
@@ -70,7 +70,7 @@ async function open(browser: Browser, fileId: string, reads = BOTH) {
   const socket = await openSocket(browser, fileId);
   socket.send({
     t: "hello",
-    protocol: 3,
+    protocol: 4,
     clientId: `o-${crypto.randomUUID()}`,
     revn: null,
     copies: reads,
@@ -150,7 +150,7 @@ describe("converting a file stored materialized", { timeout: 120_000 }, () => {
       room.convertStepWork = 0;
     });
     const socket = await openSocket(browser, fileId);
-    socket.send({ t: "hello", protocol: 3, clientId: "editor", revn: null, copies: BOTH });
+    socket.send({ t: "hello", protocol: 4, clientId: "editor", revn: null, copies: BOTH });
     expect((await socket.next<{ copies: string }>("welcome")).copies).toBe("materialized");
     // A few steps in, someone edits a main and its copies, as a materialized editor does.
     for (let i = 0; i < 5; i++) await runDurableObjectAlarm(roomOf(fileId));
@@ -617,7 +617,7 @@ describe("what the review of the conversion found", { timeout: 120_000 }, () => 
     const { browser, fileId } = await materializedFile(kit.nodes);
     // A tab of this version (it reads both forms), loaded while the file was materialized.
     const socket = await openSocket(browser, fileId);
-    socket.send({ t: "hello", protocol: 3, clientId: "before", revn: null, copies: BOTH });
+    socket.send({ t: "hello", protocol: 4, clientId: "before", revn: null, copies: BOTH });
     const welcome = await socket.next<{ mode: string; copies: string }>("welcome");
     expect([welcome.mode, welcome.copies]).toEqual(["snapshot", "materialized"]);
     await convert(fileId);
@@ -1754,7 +1754,7 @@ describe("what the seventh review found", { timeout: 120_000 }, () => {
 
     // A client that doesn't say it can download. (A tab from before compact copies is told to
     // reload at hello since decision 0034, as any tab from before variables and styles is.)
-    for (const message of [{ protocol: 3, copies: BOTH }]) {
+    for (const message of [{ protocol: 4, copies: BOTH }]) {
       const { socket, welcome, nodes: seen } = await hello(browser, fileId, message);
       expect(welcome).toMatchObject({ role: "viewer", revn: 0, mode: "snapshot" });
       expect(seen.map((n) => n.id)).toEqual(placeholder);
@@ -1774,7 +1774,7 @@ describe("what the seventh review found", { timeout: 120_000 }, () => {
       again.socket.ws.close();
     }
     // A client that can download does.
-    const current = await hello(browser, fileId, { protocol: 3, copies: BOTH, download: true });
+    const current = await hello(browser, fileId, { protocol: 4, copies: BOTH, download: true });
     expect(current.welcome).toMatchObject({ role: "owner", mode: "download" });
     current.socket.ws.close();
     expect(await stored(fileId)).toHaveLength(46);

@@ -35,7 +35,7 @@ async function file() {
   const socket = await openSocket(owner.browser, file.id);
   socket.send({
     t: "hello",
-    protocol: 3,
+    protocol: 4,
     clientId: "existing",
     revn: null,
     copies: ["materialized", "compact"],
@@ -339,7 +339,7 @@ describe("PR 186 data preservation", { timeout: 60_000 }, () => {
     const reader = await openSocket(f.browser, f.fileId);
     reader.send({
       t: "hello",
-      protocol: 3,
+      protocol: 4,
       clientId: "reader",
       revn: null,
       copies: ["materialized", "compact"],
@@ -449,7 +449,7 @@ describe("PR 186 data preservation", { timeout: 60_000 }, () => {
     });
     f.socket.ws.close();
   });
-  it("protocol 1 placeholder rejects edits and protocol 2 reloads", async () => {
+  it("protocol 1 placeholder rejects edits and protocols 2 and 3 reload", async () => {
     const f = await file();
     f.socket.ws.close();
     const old = await openSocket(f.browser, f.fileId);
@@ -467,6 +467,9 @@ describe("PR 186 data preservation", { timeout: 60_000 }, () => {
     const newer = await openSocket(f.browser, f.fileId);
     newer.send({ t: "hello", protocol: 2, clientId: "old2", revn: null, copies: ["compact"] });
     expect(await newer.next("error")).toMatchObject({ code: "reload" });
+    const three = await openSocket(f.browser, f.fileId);
+    three.send({ t: "hello", protocol: 3, clientId: "old3", revn: null, copies: ["compact"] });
+    expect(await three.next("error")).toMatchObject({ code: "reload" });
   });
   it("restoring a legacy version reads its opacity as it did", async () => {
     const f = await file();

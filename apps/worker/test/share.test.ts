@@ -17,7 +17,7 @@ const tokenOf = (url: string) => new URL(url).pathname.replace(/^\/p\//, "");
 async function hello(socket: Awaited<ReturnType<typeof openSocketAt>>, clientId: string) {
   socket.send({
     t: "hello",
-    protocol: 3,
+    protocol: 4,
     clientId,
     revn: null,
     copies: ["materialized", "compact"],

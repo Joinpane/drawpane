@@ -2770,10 +2770,12 @@ export class FileRoom extends DurableObject<Env> {
     protocol: number,
     tickets: DocumentTickets | null,
   ): void {
-    // A tab from before variables and styles (decision 0034) would strip the bindings it doesn't
-    // know from what it rewrites, and read opacity variables the old way. One from before compact
-    // copies (1) reconnects on any close but a few, so it's shown a page saying to reload, as a
-    // viewer, never the file; a later one (2) is told to reload, which it does.
+    // A tab from before the current protocol can't keep what it doesn't know: one from before
+    // variables and styles (decision 0034) would strip the bindings it doesn't know from what it
+    // rewrites, and one from before 4 can take an instance's auto layout away without marking
+    // what that flow left (PR 286). One from before compact copies (1) reconnects on any close
+    // but a few, so it's shown a page saying to reload, as a viewer, never the file; a later one
+    // (2 or 3) is told to reload, which it does.
     if (protocol === 1) {
       this.#helloToPlaceholder(ws, me, clientId, ["materialized"], protocol);
       return;
@@ -3072,8 +3074,9 @@ export class FileRoom extends DurableObject<Env> {
       this.#reject(ws, seq, ops, "format", RELOAD_TO_EDIT);
       return;
     }
-    // A tab welcomed before variables and styles (no protocol recorded, or an older one): it would
-    // strip the bindings and links it doesn't know from what it rewrites (decision 0034).
+    // A tab welcomed before the current protocol (no protocol recorded, or an older one): it would
+    // strip the bindings and links it doesn't know from what it rewrites (decision 0034), or take
+    // an instance's auto layout away without the marks protocol 4 makes (PR 286).
     if ((me.protocol ?? 0) < PROTOCOL_VERSION) {
       this.#reject(ws, seq, ops, "format", RELOAD_TO_EDIT);
       this.#reloadOld(ws);
