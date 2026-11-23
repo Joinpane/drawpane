@@ -157,10 +157,11 @@ const stranded = new WeakMap<Doc, Set<string>>();
 
 /**
  * Whether a flow decides a layer's size on one of its own axes, asked of layout itself (not worked
- * out here): the layer, a little off its size, alone in a copy of the frame (with `mode` as its
- * kind of flow), is laid out, and layout writes that size back.
+ * out here): a copy of the frame and what's in it (with `mode` as its kind of flow), the layer a
+ * little off its size and in the flow, is laid out, and layout writes that size back.
  */
 function flowDecides(
+  doc: Doc,
   frame: NodeRecord,
   child: NodeRecord,
   prop: "width" | "height",
@@ -178,33 +179,27 @@ function flowDecides(
     } = props as Record<string, unknown>;
     return rest as Props;
   };
+  const inside = collectDescendants(doc, frame.id).map((n) => {
+    if (n.id !== child.id) return { ...n, props: plain(n.props) };
+    const props = { ...plain(n.props), positioning: "auto", [prop]: getProp(n.props, prop) + 7 };
+    return { ...n, props: props as Props };
+  });
   const scratch = new Doc();
   scratch.resetStored(
     [
       { id: "p", type: "page", parent: ROOT_ID, key: "a0", props: {} },
       {
-        id: "frame",
-        type: "frame",
+        ...frame,
         parent: "p",
         key: "a0",
         props: { ...plain(frame.props), layoutMode } as Props,
       },
-      {
-        id: "probe",
-        type: child.type,
-        parent: "frame",
-        key: "a0",
-        props: {
-          ...plain(child.props),
-          positioning: "auto",
-          [prop]: getProp(child.props, prop) + 7,
-        } as Props,
-      },
+      ...inside,
     ],
     "materialized",
   );
-  return layoutOps(scratch, ["frame"]).some(
-    (op) => op.op === "set" && op.id === "probe" && op.prop === prop,
+  return layoutOps(scratch, [frame.id]).some(
+    (op) => op.op === "set" && op.id === child.id && op.prop === prop,
   );
 }
 
@@ -377,6 +372,7 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
       const flowMode = getProp(parent.props, "layoutMode");
       if (
         flowDecides(
+          doc,
           parent,
           node,
           size,
@@ -386,7 +382,7 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
         continue;
       if (
         getProp(source.props, "positioning") !== "absolute" &&
-        flowDecides(parentSource, source, size)
+        flowDecides(doc, parentSource, source, size)
       )
         continue;
       out.push({ inherits: node.id, prop: size, have, want });
