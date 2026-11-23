@@ -471,8 +471,10 @@ pub trait Backend {
     /// Composites an isolated picture. With a mask kind, the stack top is the mask picture
     /// and the next target is the content. Apply mask coverage before the final RGBA8 store.
     fn pop_composited(&mut self, blend: u32, opacity: f32, mask_kind: Option<u32>, open: &[Open]) -> Result<()>;
-    /// Discards the active offscreen target on error unwind without compositing.
-    fn abort_isolated(&mut self);
+    /// Discards the active offscreen target without compositing: on error unwind, or when the
+    /// walk stops early inside it (an edge-strip capture). The parent's scene starts afresh, so
+    /// the clips `open` keeps on it go back on, as after a pop.
+    fn abort_isolated(&mut self, open: &[Open]);
     /// Whether this backend draws view blurs of any sigma (the GPU view pyramid, layer blurs on a
     /// reduced grid past the native limits). CPU and Worker exports keep the native limits.
     const ALLOW_UNBOUNDED_VIEW_BLUR: bool = false;
@@ -2371,7 +2373,7 @@ impl<B: Backend> Walk<'_, B> {
         self.open = prev_open;
         self.ancestor_clips = prev_ancestors;
         if let Err(e) = walk_res {
-            self.backend.abort_isolated();
+            self.backend.abort_isolated(&self.open);
             return Err(e);
         }
         let origin = (
@@ -2822,7 +2824,7 @@ impl<B: Backend> Walk<'_, B> {
             self.open = prev_open;
             self.ancestor_clips.truncate(previous_reader_clips);
             self.isolated_backdrop_depth -= usize::from(paired);
-            self.backend.abort_isolated();
+            self.backend.abort_isolated(&self.open);
             return Err(e);
         }
         if self.backend.stop_early() {
@@ -2832,7 +2834,7 @@ impl<B: Backend> Walk<'_, B> {
             self.open = prev_open;
             self.ancestor_clips.truncate(previous_reader_clips);
             self.isolated_backdrop_depth -= usize::from(paired);
-            self.backend.abort_isolated();
+            self.backend.abort_isolated(&self.open);
             return Ok(());
         }
         let pushed_pic = match self.isolate_area(content_tb, false, None, picture_has_reader, false) {
@@ -2844,7 +2846,7 @@ impl<B: Backend> Walk<'_, B> {
                 self.open = prev_open;
                 self.ancestor_clips.truncate(previous_reader_clips);
                 self.isolated_backdrop_depth -= usize::from(paired);
-                self.backend.abort_isolated();
+                self.backend.abort_isolated(&self.open);
                 return Err(e);
             }
         };
@@ -2855,7 +2857,7 @@ impl<B: Backend> Walk<'_, B> {
             self.open = prev_open;
             self.ancestor_clips.truncate(previous_reader_clips);
             self.isolated_backdrop_depth -= usize::from(paired);
-            self.backend.abort_isolated();
+            self.backend.abort_isolated(&self.open);
             return Ok(());
         }
         let mask_res = self.node(mask_id, world, 1.0, parent_context);
@@ -2876,8 +2878,8 @@ impl<B: Backend> Walk<'_, B> {
         self.ancestor_clips.truncate(previous_reader_clips);
         self.isolated_backdrop_depth -= usize::from(paired);
         if let Err(e) = mask_res {
-            self.backend.abort_isolated();
-            self.backend.abort_isolated();
+            self.backend.abort_isolated(&self.open);
+            self.backend.abort_isolated(&self.open);
             return Err(e);
         }
         self.backend.pop_composited(0, 1.0, Some(mask_kind), &self.open)?;
@@ -3861,7 +3863,7 @@ impl<B: Backend> Walk<'_, B> {
                     }
                 }
                 if let Err(e) = post_res {
-                    self.backend.abort_isolated();
+                    self.backend.abort_isolated(&self.open);
                     return Err(e);
                 }
                 if post.blend != 0 {
@@ -3870,7 +3872,7 @@ impl<B: Backend> Walk<'_, B> {
                     self.backend.pop_isolated(opacity, &self.open)?;
                 }
             } else {
-                self.backend.abort_isolated();
+                self.backend.abort_isolated(&self.open);
             }
             if res.is_ok() && suspended {
                 self.resume_context_clips()?;
@@ -3902,7 +3904,7 @@ impl<B: Backend> Walk<'_, B> {
                     self.backend.pop_isolated(opacity, &self.open)?;
                 }
             } else {
-                self.backend.abort_isolated();
+                self.backend.abort_isolated(&self.open);
             }
             if res.is_ok() && suspended {
                 self.resume_context_clips()?;
@@ -4245,7 +4247,7 @@ impl<B: Backend> Walk<'_, B> {
             if res.is_ok() {
                 self.backend.pop_blended(u32::from(blend), 1.0, &self.open)?;
             } else {
-                self.backend.abort_isolated();
+                self.backend.abort_isolated(&self.open);
             }
             return res;
         }
@@ -4314,7 +4316,7 @@ impl<B: Backend> Walk<'_, B> {
             if res.is_ok() {
                 self.backend.pop_blended(u32::from(blend), 1.0, &self.open)?;
             } else {
-                self.backend.abort_isolated();
+                self.backend.abort_isolated(&self.open);
             }
             return res;
         }
@@ -4469,7 +4471,7 @@ impl<B: Backend> Walk<'_, B> {
             if res.is_ok() {
                 self.backend.pop_blended(blend, 1.0, &self.open)?;
             } else {
-                self.backend.abort_isolated();
+                self.backend.abort_isolated(&self.open);
             }
             return res;
         }
@@ -4694,7 +4696,7 @@ impl<B: Backend> Walk<'_, B> {
             if res.is_ok() {
                 self.backend.pop_blended(blend, 1.0, &self.open)?;
             } else {
-                self.backend.abort_isolated();
+                self.backend.abort_isolated(&self.open);
             }
             return res;
         }
@@ -5174,6 +5176,10 @@ mod resumable_tests {
         inner: Cpu,
         probes: Cell<u32>,
         reduced_composites: u32,
+        /// Stops the walk early once a scope is open, as a GPU edge-strip capture does when it
+        /// meets its reader inside one.
+        stop_in_scope: bool,
+        stopping: bool,
     }
 
     impl<const UNBOUNDED: bool> Backend for AlwaysYieldCpu<UNBOUNDED> {
@@ -5194,10 +5200,10 @@ mod resumable_tests {
             _isolation: Isolation,
             _blend: u32,
             _opacity: f32,
-            _open: &[Open],
+            open: &[Open],
         ) -> Result<()> {
             self.reduced_composites += 1;
-            self.inner.abort_isolated();
+            self.inner.abort_isolated(open);
             Ok(())
         }
         fn scene(&mut self) -> &mut Self::Scene {
@@ -5252,7 +5258,7 @@ mod resumable_tests {
             self.inner.snapshot_backdrop(open)
         }
         fn stop_early(&self) -> bool {
-            self.inner.stop_early()
+            self.stopping || self.inner.stop_early()
         }
         fn deadline_reached(&self) -> bool {
             self.probes.set(self.probes.get() + 1);
@@ -5315,8 +5321,11 @@ mod resumable_tests {
             isolation: Isolation,
             open: &[Open],
         ) -> Result<bool> {
-            self.inner
-                .push_isolated(area, clip_to_parent, scene_origin_hint, isolation, open)
+            let pushed = self
+                .inner
+                .push_isolated(area, clip_to_parent, scene_origin_hint, isolation, open)?;
+            self.stopping |= self.stop_in_scope && pushed;
+            Ok(pushed)
         }
         fn apply_post_isolated(&mut self, steps: &[PostStep]) -> Result<()> {
             self.inner.apply_post_isolated(steps)
@@ -5327,8 +5336,8 @@ mod resumable_tests {
         fn pop_composited(&mut self, blend: u32, opacity: f32, mask_kind: Option<u32>, open: &[Open]) -> Result<()> {
             self.inner.pop_composited(blend, opacity, mask_kind, open)
         }
-        fn abort_isolated(&mut self) {
-            self.inner.abort_isolated();
+        fn abort_isolated(&mut self, open: &[Open]) {
+            self.inner.abort_isolated(open);
         }
         fn draw_blurred_shadow(
             &mut self,
@@ -5349,6 +5358,63 @@ mod resumable_tests {
         use vello_common::kurbo::Shape;
         let p = Rect::new(0.0, 0.0, f64::from(w), f64::from(h)).into_path(0.1);
         PathEntry::Path(crate::record::CompactPath::from_bez(&p))
+    }
+
+    /// A walk that stops early inside an isolated scope (a GPU edge-strip capture meeting its
+    /// reader there) aborts the scope: the frame's clip opened round it must stay on the scene,
+    /// so closing it pops a clip that is there.
+    #[test]
+    fn a_scope_stopped_early_under_a_clip_keeps_the_clip_on_the_scene() {
+        let limits = Limits::default();
+        let mut store = Store::new(limits);
+        let mut frame_rec = Record::empty();
+        frame_rec.size = [64.0, 64.0];
+        frame_rec.paths.push(rect_path(64.0, 64.0));
+        frame_rec.ops = vec![
+            Op::Clip {
+                path: 0,
+                even_odd: false,
+            },
+            Op::Children,
+            Op::Unclip,
+        ];
+        store.insert_for_test(1, ROOT, frame_rec);
+        let mut member = Record::empty();
+        member.size = [32.0, 32.0];
+        member.blend = 1;
+        member.paths.push(rect_path(32.0, 32.0));
+        member.ops = vec![Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::Solid([0.2, 0.4, 0.8, 1.0]),
+            blend: 0,
+        }];
+        store.insert_for_test(2, 1, member);
+        let area = IRect {
+            x0: 0,
+            y0: 0,
+            x1: 64,
+            y1: 64,
+        };
+        let frame = Frame {
+            width: 64,
+            height: 64,
+            view: Affine::IDENTITY,
+            detail: false,
+            area,
+        };
+        let mut cpu = AlwaysYieldCpu::<false> {
+            inner: Cpu::new(limits.glyph_mask_bytes, limits.glyph_mask_side, 0),
+            probes: Cell::new(0),
+            reduced_composites: 0,
+            stop_in_scope: true,
+            stopping: false,
+        };
+        cpu.inner.begin(64, 64, area, [255, 255, 255, 255]);
+        let mut budget = limits.frame_verbs;
+        draw_split(&store, &mut cpu, &frame, &limits, &mut budget, &Split::all(), false)
+            .expect("the walk stops early and closes the frame's clip");
+        assert!(cpu.stopping, "the member was drawn in a scope");
     }
 
     #[test]
@@ -5463,6 +5529,8 @@ mod resumable_tests {
             inner: Cpu::new(limits.glyph_mask_bytes, limits.glyph_mask_side, 0),
             probes: Cell::new(0),
             reduced_composites: 0,
+            stop_in_scope: false,
+            stopping: false,
         };
         ycpu_same.inner.begin(128, 128, frame.area, bg);
         let mut budget_same = limits.frame_verbs;
@@ -5521,6 +5589,8 @@ mod resumable_tests {
             inner: Cpu::new(limits.glyph_mask_bytes, limits.glyph_mask_side, 0),
             probes: Cell::new(0),
             reduced_composites: 0,
+            stop_in_scope: false,
+            stopping: false,
         };
         ycpu.inner.begin(128, 128, frame.area, bg);
         let mut budget = limits.frame_verbs;
@@ -5633,6 +5703,8 @@ mod resumable_tests {
             inner: Cpu::new(limits.glyph_mask_bytes, limits.glyph_mask_side, 0),
             probes: Cell::new(0),
             reduced_composites: 0,
+            stop_in_scope: false,
+            stopping: false,
         };
         ycpu.inner.begin(128, 128, area, [255, 255, 255, 255]);
         let mut budget = limits.frame_verbs;
