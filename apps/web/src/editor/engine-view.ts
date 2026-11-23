@@ -2605,6 +2605,10 @@ export class EngineView {
     const f = frame.value;
     if (f.plan === "reader-halo" && !this.#limitReason)
       this.#limitReason = "reader samples beyond the viewport use reduced detail";
+    // A layer blur past the native limits drawn on a reduced grid, in this frame or in a tile it
+    // shows: the frame is final but not exact, so it settles with a reason.
+    if (f.reduced > 0 && !this.#limitReason)
+      this.#limitReason = "a layer blur past the native limits uses reduced detail";
     if (!f.presented) {
       if (++this.#unpresented >= UNPRESENTED) {
         return this.#handleGpuFailure(
@@ -2771,11 +2775,13 @@ export class EngineView {
       ready: this.#readback === null,
       exact: shownExact,
       ahead: this.#builder.pending > 0 || (!rasterLimit && f.tiles.queued > 0),
+      // A limit forgives only queued prefetch: visible tiles still pending must be drawn first.
       settled:
         !opening &&
         caughtUp &&
-        (!!this.#limitReason ||
-          (f.tiles.pending === 0 && f.tiles.queued === 0 && this.#builder.pending === 0)),
+        f.tiles.pending === 0 &&
+        this.#builder.pending === 0 &&
+        (!!this.#limitReason || f.tiles.queued === 0),
     };
   }
 

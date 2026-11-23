@@ -73,6 +73,9 @@ pub struct Outcome {
     /// either is a level-of-detail stand-in, not exact.
     pub coarse: u32,
     pub specks: u32,
+    /// Effects drawn on a reduced grid (a layer blur past the native limits), or visible tiles
+    /// holding one: the frame isn't exact, and nothing more will make it so.
+    pub reduced: u32,
     /// The frame reached the canvas (a GPU frame with a canvas; always true otherwise).
     pub presented: bool,
     /// Something on screen stands in for what isn't drawn yet: not exact.
@@ -139,6 +142,7 @@ impl Outcome {
             mask_misses: 0.0,
             mask_bytes: 0.0,
             coarse: 0,
+            reduced: 0,
             specks: 0,
             presented: true,
             standin: false,
@@ -189,6 +193,7 @@ impl Outcome {
             mask_bytes: s.masks.bytes as f64,
             coarse: s.draw.coarse,
             specks: s.draw.specks,
+            reduced: s.draw.reduced,
             ..Self::ok()
         }
     }
@@ -339,6 +344,7 @@ impl Engine {
             "band_bytes" => l.band_bytes = v.max(4),
             "frame_verbs" => l.frame_verbs = v,
             "stroke_bytes" => l.stroke_bytes = v,
+            "padded_view_pixels" => l.padded_view_pixels = v,
             "glyph_mask_bytes" => {
                 l.glyph_mask_bytes = v;
                 self.core.cpu.masks.set_budget(v);

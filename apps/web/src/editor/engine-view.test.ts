@@ -36,6 +36,8 @@ const state = vi.hoisted(() => ({
   paintedX: -1,
   uploadedWidths: [] as number[],
   gpuFinishedFixture: null as null | (() => Promise<{ ok: boolean }>),
+  frameReduced: 0,
+  framePending: 0,
 }));
 
 class FakeWorker extends EventTarget {
@@ -190,11 +192,19 @@ vi.mock("@drawpane/engine", () => ({
           maskBytes: 0,
           coarse: 0,
           specks: 0,
+          reduced: state.frameReduced,
           standin: false,
-          exact: true,
+          exact: state.frameReduced === 0,
           presented: true,
           plan: "tiles",
-          tiles: { drawn: 1, pending: 0, queued: 0, held: 1, evicted: 0, dragged: 0 },
+          tiles: {
+            drawn: 1,
+            pending: state.framePending,
+            queued: 0,
+            held: 1,
+            evicted: 0,
+            dragged: 0,
+          },
           ms: { encode: 0, render: 0, submit: 0, total: 0 },
         },
       };
@@ -879,6 +889,43 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
     expect(state.rasterWidths.at(-1)).toBe(128);
     expect(view?.limitReason).toBeNull();
     view?.dispose();
+  });
+
+  it("settles a frame showing a reduced layer blur as not exact, with a reason", async () => {
+    vi.stubGlobal("navigator", {
+      gpu: { requestAdapter: async () => ({ info: { description: "NVIDIA T4" } }) },
+    });
+    const editor = { scene: {}, doc: { version: 1 } } as never;
+    const images = { subscribe: () => () => {}, natural: () => null, get: () => null } as never;
+    const view = await EngineView.create(
+      new FakeCanvas(true) as unknown as HTMLCanvasElement,
+      editor,
+      {} as never,
+      images,
+      "engine",
+    );
+    const frame = () =>
+      view?.draw("page", { zoom: 100, x: 0, y: 0 }, 128, 96, 2, "#ffffff", {
+        hidden: new Set(),
+        whole: null,
+      });
+    try {
+      state.frameReduced = 1;
+      // Visible tiles still pending: a reduced frame keeps refining until they are drawn.
+      state.framePending = 2;
+      expect(frame()).toMatchObject({ drawn: true, exact: false, settled: false });
+      state.framePending = 0;
+      expect(frame()).toMatchObject({ drawn: true, exact: false, settled: true });
+      expect(view?.limitReason).toBe("a layer blur past the native limits uses reduced detail");
+      expect(view?.last.exact).toBe(false);
+      state.frameReduced = 0;
+      expect(frame()).toMatchObject({ drawn: true, exact: true });
+      expect(view?.limitReason).toBeNull();
+    } finally {
+      state.frameReduced = 0;
+      state.framePending = 0;
+      view?.dispose();
+    }
   });
 
   it("uses Canvas for a rejected display list and resumes the same engine on another page", async () => {

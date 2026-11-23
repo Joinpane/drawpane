@@ -24,12 +24,12 @@
 //!   so the editor recovers or falls back.
 //! - Glass samples a backdrop plane that excludes prior glass draws.
 
-use crate::blur::{self, BlurSpec, EdgeMode, validate_sigma};
+use crate::blur::{self, BlurSpec, EdgeMode, validate_view_sigma};
 use crate::engine::{DragFrame, TiledOptions};
 use crate::error::{EngineError, ErrorCode, Result};
 use crate::exec::{
-    self, Backend, DrawStats, Frame, GlyphMask, IRect, ImageView, Isolation, Open, Pass, PostStep, ShadowCast, Split,
-    impl_draw, resolve_inradius,
+    self, Backend, DrawStats, Frame, GlyphMask, IRect, ImageView, Isolation, Open, Pass, PostStep, ReducedBlurLimits,
+    ReducedPost, ShadowCast, Split, impl_draw, resolve_inradius,
 };
 use crate::glass::{self, GlassMaskSlot};
 use crate::gpu_readers::{
@@ -42,8 +42,8 @@ use crate::masks::{self, MaskCache, MaskKey};
 use crate::progressive_blur;
 use crate::record::{BackgroundBlurOp, GlassOp, ProgressiveBlurOp};
 use crate::shadow::{
-    CanonicalShadow, ShadowMaskCache, compute_mask_rect, compute_mask_rect_bounds, reduced_dirty_rect,
-    scaled_shadow_sigma, shadow_raster_shift,
+    CanonicalShadow, ShadowMaskCache, compute_view_mask_rect, compute_view_mask_rect_bounds, reduced_dirty_rect_i64,
+    scaled_shadow_sigma,
 };
 use crate::store::Store;
 use crate::tiles::{Composite, Last, TILE, TileCache, TileKey};
@@ -907,7 +907,7 @@ const HARDWARE_HALO_RENDER_MAX_PIXELS: usize = 12_000_000;
 const SOFTWARE_HALO_RENDER_MAX_SIDE: u32 = 2048;
 const SOFTWARE_HALO_RENDER_MAX_PIXELS: usize = 4_200_000;
 const HARDWARE_HALO_STEADY_FAR_PIXELS: usize = 4_200_000;
-const HARDWARE_HALO_STEADY_MID_PIXELS: usize = 1_048_576;
+const HARDWARE_HALO_STEADY_MID_PIXELS: usize = 2_200_000;
 const SOFTWARE_HALO_STEADY_PIXELS: usize = 1_650_000;
 
 #[derive(Clone, Copy)]
@@ -958,6 +958,13 @@ impl<V> HaloMap<V> {
     }
 }
 
+/// A coarse post scope's blurred picture kept by the far tier (case L3), with its backdrop plane
+/// when the scope has one.
+struct PostScopePatch {
+    main: HaloPatch,
+    backdrop: Option<HaloPatch>,
+}
+
 struct ReaderHalo {
     capture: Option<HaloTierCapture>,
     strip_capture: Option<HaloStripCapture>,
@@ -965,6 +972,11 @@ struct ReaderHalo {
     native_unif_cutover: f32,
     downstream_readers: Vec<(u32, usize)>,
     downstream_mid_readers: Vec<(u32, usize)>,
+    /// Layer-blur scopes the far tier blurs and keeps (case L3), and how deep the walk is inside
+    /// one: glass there draws straight into the scope's reduced picture.
+    coarse_post_scopes: Vec<u32>,
+    inside_coarse_post_scope: usize,
+    post_scopes: HaloMap<PostScopePatch>,
     prefixes: HaloMap<HaloPatch>,
     blurred: HaloMap<HaloPatch>,
     progressive_mid: HaloMap<ProgressiveHaloPatch>,
@@ -1241,6 +1253,9 @@ pub struct Gpu {
     /// The requested reader bounds of the last whole draw, if it fit.
     whole_samples: Option<Option<IRect>>,
     whole_reader_halo: bool,
+    /// The frame a limited moving frame presented (`present_motion_standin`), while `cur` keeps
+    /// the sharp frame it was warped from: what a read-back shows until the next frame.
+    standin_frame: Option<usize>,
     /// Milliseconds a tile has lately taken to draw (a running average).
     tile_ms: f64,
     /// Running EWMA of `submit_ms / work_ms` for tile slices so backends with synchronous submit
@@ -1893,6 +1908,7 @@ impl Gpu {
             shown: None,
             whole_samples: None,
             whole_reader_halo: false,
+            standin_frame: None,
             tile_ms: 0.0,
             submit_ratio: if IS_WEBGL { 1.0 } else { 0.0 },
             blit,
@@ -3877,6 +3893,36 @@ impl Gpu {
         Ok(())
     }
 
+    /// The progressive blur tile side: 512 px on hardware GPUs when the stop atlas fits a third of
+    /// the reader budget (a quarter of the framebuffer switches and copies on WebGL2), else 256 px.
+    fn progressive_tile_side(&self, width: u32, height: u32, cols: u32, rows: u32, budget: usize) -> u32 {
+        let base = progressive_blur::PROGRESSIVE_TILE_MAX
+            .min(self.max_texture_2d / 4)
+            .max(1);
+        if self.fallback_adapter {
+            return base;
+        }
+        let hw = 512u32.min(self.max_texture_2d / 4).max(base);
+        let atlas_bytes = (width.min(hw) as usize)
+            .saturating_mul(height.min(hw) as usize)
+            .saturating_mul(cols as usize)
+            .saturating_mul(rows as usize)
+            .saturating_mul(4);
+        if atlas_bytes <= budget / 3 { hw } else { base }
+    }
+
+    /// The widest reader apron a view tile may bake with at rest: the padded tile stays within
+    /// the halo render side (4,096 px on hardware GPUs, 2,048 on software adapters) and the
+    /// texture limit. Memory is checked when the tile's targets are made.
+    pub fn max_view_apron(&self) -> i32 {
+        let side = if self.fallback_adapter {
+            SOFTWARE_HALO_RENDER_MAX_SIDE
+        } else {
+            HARDWARE_HALO_RENDER_MAX_SIDE
+        };
+        (side.min(self.max_texture_2d).saturating_sub(TILE) / 2) as i32
+    }
+
     /// Logical coarse replay side cap used by `Engine::reader_halo_plan`.
     pub fn halo_replay_limit(&self) -> u32 {
         if self.fallback_adapter {
@@ -3884,6 +3930,52 @@ impl Gpu {
         } else {
             halo::HALO_REPLAY_SIDE
         }
+    }
+
+    /// Where a `size` view padded to its readers' `samples` sits in the padded target, and that
+    /// target's size, if one device-resolution pass of it fits this GPU: the texture limit, the
+    /// software raster budget and the GPU memory budget. `draw_whole_pass` draws by this check,
+    /// and the engine and `render_whole` decide by it (`prefers_padded_view`).
+    fn padded_view(&self, samples: IRect, size: (u32, u32)) -> Result<((u32, u32), (u32, u32))> {
+        // Keep the same strip phase at the original viewport origin.
+        let x = samples.x0.unsigned_abs().next_multiple_of(4);
+        let y = samples.y0.unsigned_abs().next_multiple_of(4);
+        let padded = (
+            (samples.x1.max(0) as u32).saturating_add(x),
+            (samples.y1.max(0) as u32).saturating_add(y),
+        );
+        let pixels = (padded.0 as usize).saturating_mul(padded.1 as usize);
+        if self.fallback_adapter && pixels > SOFTWARE_PADDED_PIXELS.max(size.0 as usize * size.1 as usize) {
+            return Err(EngineError::limit(
+                "viewport readers exceed the software GPU raster budget",
+            ));
+        }
+        if padded.0 > u32::from(u16::MAX) || padded.1 > u32::from(u16::MAX) {
+            return Err(EngineError::limit("a padded view past the frame size limit"));
+        }
+        self.check_texture_size(padded.0, padded.1, "a padded view")?;
+        // Beside colour/depth scratch, the padded view needs room for its backdrop plane.
+        let scratch_bytes = self.scratches[1]
+            .as_ref()
+            .map_or(0, |s| s.width as usize * s.height as usize * 8);
+        self.check_frame(
+            self.next_frame(),
+            size.0,
+            size.1,
+            pixels.saturating_mul(12),
+            scratch_bytes.saturating_add(self.readers.bytes()),
+        )?;
+        Ok(((x, y), padded))
+    }
+
+    /// Whether a `size` view needing `plan` is drawn exact in one device-resolution pass: no
+    /// layer-blur scope needs the far tier, the padded view fits (`padded_view`), and it holds at
+    /// most `max_pixels` (`Limits::padded_view_pixels`), past which apron tiles are cheaper.
+    pub fn prefers_padded_view(&self, plan: &ViewportHaloPlan, size: (u32, u32), max_pixels: usize) -> bool {
+        plan.coarse_post_scopes.is_empty()
+            && self
+                .padded_view(plan.samples, size)
+                .is_ok_and(|(_, (w, h))| (w as usize).saturating_mul(h as usize) <= max_pixels)
     }
 
     /// Draws an untiled frame when a reader exceeds the tile halo or a whole draw is cheaper.
@@ -3917,32 +4009,8 @@ impl Gpu {
             };
             return self.finish_frame(self.cur.expect("unchanged frame"), stats, now(), submits0, None);
         }
-        let skip_native_whole = halo_plan.is_some_and(|p| {
-            if !p.use_coarse_halo {
-                return false;
-            }
-            let b = p.samples;
-            let x = b.x0.unsigned_abs().next_multiple_of(4);
-            let y = b.y0.unsigned_abs().next_multiple_of(4);
-            let w = (b.x1 as u32).saturating_add(x);
-            let h = (b.y1 as u32).saturating_add(y);
-            let pixels = (w as usize).saturating_mul(h as usize);
-            let max_tex = self.max_texture_2d.min(u32::from(u16::MAX));
-            if w > max_tex || h > max_tex || pixels > 16_000_000 {
-                return true;
-            }
-            let scratch_bytes = self.scratches[1]
-                .as_ref()
-                .map_or(0, |s| s.width as usize * s.height as usize * 8);
-            self.check_frame(
-                self.next_frame(),
-                size.0,
-                size.1,
-                pixels.saturating_mul(24),
-                scratch_bytes.saturating_add(self.readers.bytes()),
-            )
-            .is_err()
-        });
+        let skip_native_whole = halo_plan
+            .is_some_and(|p| p.use_coarse_halo && !self.prefers_padded_view(p, size, store.limits.padded_view_pixels));
         let result = if skip_native_whole {
             Err(EngineError::limit("padded reader view exceeds whole-frame budget"))
         } else {
@@ -4297,11 +4365,12 @@ impl Gpu {
                 }
             }
         }
+        let border_keep = if self.fallback_adapter { 262_144 } else { 1_048_576 };
         if self
             .readers
             .halo_border_src
             .as_ref()
-            .is_some_and(|t| (t.width as usize).saturating_mul(t.height as usize) > 262_144)
+            .is_some_and(|t| (t.width as usize).saturating_mul(t.height as usize) > border_keep)
             && let Some(old) = self.readers.halo_border_src.take()
         {
             self.readers.retire(old.texture);
@@ -4343,6 +4412,9 @@ impl Gpu {
             native_unif_cutover: halo::uniform_cutover_sigma(lowest_div),
             downstream_readers: plan.downstream_readers.clone(),
             downstream_mid_readers: plan.downstream_mid_readers.clone(),
+            coarse_post_scopes: plan.coarse_post_scopes.clone(),
+            inside_coarse_post_scope: 0,
+            post_scopes: HaloMap::new(),
             prefixes: HaloMap::new(),
             blurred: HaloMap::new(),
             progressive_mid: HaloMap::new(),
@@ -4384,6 +4456,11 @@ impl Gpu {
             dst.shadow_hits += src.shadow_hits;
         }
         let mut replay = DrawStats::default();
+        let far_max_render_divisor = plan.coarse_post_min_sigma.is_finite().then(|| {
+            (plan.coarse_post_min_sigma / halo::HALO_MIN_COARSE_SIGMA)
+                .floor()
+                .max(1.0) as i32
+        });
         let mut tier_result = self.run_halo_tier(
             store,
             frame,
@@ -4397,7 +4474,7 @@ impl Gpu {
             true,
             plan.far_has_blur,
             plan.far_min_feature_px,
-            None,
+            far_max_render_divisor,
             &plan.clamp_clips,
         );
         if let Ok((far_stats, far_render_div)) = &tier_result {
@@ -4451,6 +4528,12 @@ impl Gpu {
         for (_, s) in halo.clamp_strips.into_vec() {
             for p in s.into_patches() {
                 self.recycle_halo_prefix(p);
+            }
+        }
+        for (_, ps) in halo.post_scopes.into_vec() {
+            self.recycle_halo_prefix(ps.main);
+            if let Some(b) = ps.backdrop {
+                self.recycle_halo_prefix(b);
             }
         }
         self.release_oversized_halo_storage();
@@ -5029,36 +5112,9 @@ impl Gpu {
             return self.finish_frame(self.cur.expect("unchanged frame"), stats, t0, submits0, None);
         }
         let dst = self.next_frame();
-        let padded = if let Some(bounds) = samples {
-            // Keep the same strip phase at the original viewport origin.
-            let x = bounds.x0.unsigned_abs().next_multiple_of(4);
-            let y = bounds.y0.unsigned_abs().next_multiple_of(4);
-            let size = (
-                (bounds.x1 as u32).saturating_add(x),
-                (bounds.y1 as u32).saturating_add(y),
-            );
-            // In addition to colour/depth scratch, the padded view must have room
-            // for its backdrop plane. Do not begin a frame that cannot hold both.
-            let pixels = (size.0 as usize).saturating_mul(size.1 as usize);
-            if self.fallback_adapter && pixels > SOFTWARE_PADDED_PIXELS.max(width as usize * height as usize) {
-                return Err(EngineError::limit(
-                    "viewport readers exceed the software GPU raster budget",
-                ));
-            }
-            let scratch_bytes = self.scratches[1]
-                .as_ref()
-                .map_or(0, |s| s.width as usize * s.height as usize * 8);
-            self.check_texture_size(size.0, size.1, "a padded view")?;
-            self.check_frame(
-                dst,
-                width,
-                height,
-                pixels.saturating_mul(12),
-                scratch_bytes.saturating_add(self.readers.bytes()),
-            )?;
-            Some(((x, y), size))
-        } else {
-            None
+        let padded = match samples {
+            Some(bounds) => Some(self.padded_view(bounds, (width, height))?),
+            None => None,
         };
         if !capturing {
             self.ensure_frame(dst, width, height)?;
@@ -5194,6 +5250,62 @@ impl Gpu {
         Ok(stats)
     }
 
+    /// Presents the last frame warped to `view` (or the background) when a budgeted moving frame
+    /// hits a limit: a composite of one quad, never a whole-view replay. `cur` and `last` keep the
+    /// sharp frame it was warped from, so the next frame warps from that again; a read-back shows
+    /// this one (`standin_frame`).
+    #[allow(clippy::too_many_arguments)]
+    fn present_motion_standin(
+        &mut self,
+        view: Affine,
+        background: [f32; 4],
+        w: u32,
+        h: u32,
+        t0: f64,
+        submits0: u32,
+        timestamp_started: bool,
+    ) -> Result<DrawStats> {
+        self.abort_pending_tile();
+        self.scene.reset();
+        if !timestamp_started {
+            self.begin_frame_timestamp();
+        }
+        let dst = self.next_frame();
+        self.ensure_frame(dst, w, h)?;
+        let mut comp = Composite {
+            exact: false,
+            complete: false,
+            pending: 1,
+            ..Composite::default()
+        };
+        if self.cur.is_some()
+            && let Some(l) = self.last
+            && l.view.determinant().abs() > 0.0
+        {
+            comp.base = Some(view * l.view.inverse());
+        }
+        let mut stats = DrawStats {
+            standin: true,
+            plan: 1,
+            pending: 1,
+            held: self.tiles.len() as u32,
+            evicted: self.tiles.stats.evicted,
+            ..DrawStats::default()
+        };
+        let t1 = now();
+        let encoder = self.composite(&comp, dst, background, w, h, false, &mut stats)?;
+        stats.render_ms += now() - t1;
+        let stats = self.finish_frame(dst, stats, t0, submits0, encoder)?;
+        if self.cur.is_none() {
+            self.cur = Some(dst);
+            self.set_cur_page(true);
+        } else {
+            self.standin_frame = Some(dst);
+        }
+        self.shown = None;
+        Ok(stats)
+    }
+
     /// Draws a frame made of tiles (decision 0040, phase 2): draws the tiles it needs, as many as
     /// `options` allow beyond those nothing can stand in for, composites the frame from them
     /// (stand-ins beneath what isn't drawn yet), and, with a canvas, presents it. `exact` in the
@@ -5257,20 +5369,36 @@ impl Gpu {
         let last = self.last;
         let plan_last = if opening { None } else { last };
         let coarse_moving = options.moving && halo > 0;
+        // Moving and composite-only frames never wait on a limited draw: they show a stand-in.
+        let standin_on_limit = options.budget_ms < 0.0 || (options.moving && options.budget_ms > 0.0);
+        macro_rules! or_standin {
+            ($result:expr) => {
+                match $result {
+                    Ok(value) => value,
+                    Err(e) if standin_on_limit && e.code == ErrorCode::Limit => {
+                        return self.present_motion_standin(view, background, w, h, t0, submits0, true);
+                    }
+                    Err(e) => return Err(e),
+                }
+            };
+        }
         self.tiles.opening = opening;
         // During moving coarse reader frames, draw only visible tiles rather than spending frame
         // budget prefetching off-screen coarse stand-ins that must be redrawn exact at rest.
-        let mut plan = self
-            .tiles
-            .plan(
-                view,
-                (w, h),
-                zooming || opening,
-                plan_last,
-                options.prefetch && !coarse_moving && !opening,
-                coarse_moving,
-            )
-            .ok_or_else(|| EngineError::limit("a camera the tiles can't follow (too far out)"))?;
+        let Some(mut plan) = self.tiles.plan(
+            view,
+            (w, h),
+            zooming || opening,
+            plan_last,
+            // No off-screen prefetch while tiles carry a wide apron: each costs many tiles.
+            options.prefetch && !coarse_moving && !opening && i64::from(halo) <= i64::from(store.limits.halo),
+            coarse_moving,
+        ) else {
+            if standin_on_limit {
+                return self.present_motion_standin(view, background, w, h, t0, submits0, false);
+            }
+            return Err(EngineError::limit("a camera the tiles can't follow (too far out)"));
+        };
         let selection = self.tiles.drag_prepare(&mut plan, drag.map(DragFrame::input).as_ref());
         // A composite-only frame can present cached tiles; direct tiles and drag layers
         // need an actual draw to produce pixels.
@@ -5354,7 +5482,7 @@ impl Gpu {
                     self.deadline_ms = pt_deadline;
                     let step = self.resume_pending_tile(store, &mut stats);
                     self.deadline_ms = None;
-                    match step? {
+                    match or_standin!(step) {
                         TileStep::Complete => {}
                         TileStep::Paused => {
                             budget_hit = true;
@@ -5426,7 +5554,7 @@ impl Gpu {
                 }
                 let tile_detail = job.detail || coarse_moving;
                 if plan.direct {
-                    let exact = self.draw_job(
+                    let exact = or_standin!(self.draw_job(
                         store,
                         job,
                         tile_detail,
@@ -5437,7 +5565,7 @@ impl Gpu {
                         dst,
                         &mut stats,
                         &mut verbs,
-                    )?;
+                    ));
                     direct_exact &= !tile_detail && exact;
                     continue;
                 }
@@ -5470,7 +5598,7 @@ impl Gpu {
                         &mut verbs,
                     );
                     self.deadline_ms = None;
-                    match step? {
+                    match or_standin!(step) {
                         TileStep::Complete => {
                             let took = now() - t0 - elapsed;
                             self.tile_ms = self.tile_ms * 0.75 + took * 0.25;
@@ -5492,6 +5620,7 @@ impl Gpu {
                 } else {
                     match self.tiles.slot_for(job.key) {
                         Some(s) => {
+                            let reduced_before = stats.reduced;
                             let exact = self.draw_job(
                                 store,
                                 job,
@@ -5506,7 +5635,8 @@ impl Gpu {
                             )?;
                             let took = now() - t0 - elapsed;
                             self.tile_ms = self.tile_ms * 0.75 + took * 0.25;
-                            self.tiles.drawn(job.key, s, exact, !tile_detail);
+                            self.tiles
+                                .drawn(job.key, s, exact, !tile_detail, stats.reduced > reduced_before);
                         }
                         None => {
                             if job.must {
@@ -5551,6 +5681,8 @@ impl Gpu {
             let comp = self.tiles.compose(&plan, plan_last);
             stats.exact = comp.exact;
             stats.pending = comp.pending;
+            // A frame shows a reduced effect when a visible tile holds one, whenever it was drawn.
+            stats.reduced = stats.reduced.max(comp.reduced);
             stats.plan = if comp.complete && !self.opening_pending && !unfinished_must {
                 0
             } else {
@@ -5561,7 +5693,7 @@ impl Gpu {
             stats.render_ms += now() - t1;
             for job in &late {
                 let tile_detail = job.detail || coarse_moving;
-                let exact = self.draw_job(
+                let exact = or_standin!(self.draw_job(
                     store,
                     job,
                     tile_detail,
@@ -5572,13 +5704,16 @@ impl Gpu {
                     dst,
                     &mut stats,
                     &mut verbs,
-                )?;
+                ));
                 direct_exact &= !tile_detail && exact;
             }
             if let (Some(now), Some(split)) = (selection, drag.and_then(|d| d.split.as_ref())) {
                 let dragged = self.drag_composite(store, &plan, now, split, halo, background, dst, &mut stats);
                 if let Err(e) = dragged {
                     self.scene.reset();
+                    if standin_on_limit && e.code == ErrorCode::Limit {
+                        return self.present_motion_standin(view, background, w, h, t0, submits0, true);
+                    }
                     return Err(e);
                 }
             }
@@ -5648,10 +5783,14 @@ impl Gpu {
         let opening = self.opening_pending;
         self.tiles.opening = opening;
         let plan_last = if opening { None } else { Some(last) };
-        let Some(plan) = self
-            .tiles
-            .plan(last.view, last.size, opening, plan_last, !opening, false)
-        else {
+        let Some(plan) = self.tiles.plan(
+            last.view,
+            last.size,
+            opening,
+            plan_last,
+            !opening && i64::from(halo) <= i64::from(store.limits.halo),
+            false,
+        ) else {
             return Ok(stats);
         };
         let budgeted = budget_ms > 0.0;
@@ -5744,6 +5883,7 @@ impl Gpu {
     ) -> Result<DrawStats> {
         let t1 = now();
         self.check()?;
+        self.standin_frame = None;
         self.configure_surface(frame)?;
         let acquired = match self.acquire() {
             Ok(t) => t,
@@ -6285,8 +6425,10 @@ impl Gpu {
             }
             exec::WalkOutcome::Complete {
                 stats: slice_stats,
-                exact,
+                total,
             } => {
+                let exact = total.exact();
+                let reduced = total.reduced > 0;
                 stats.add(&slice_stats);
                 let sub0 = stats.submit_ms;
                 let h = tile_halo as u32;
@@ -6335,7 +6477,7 @@ impl Gpu {
                 active.record_into(stats, slice_total);
                 self.update_submit_ratio(slice_total, stats.submit_ms - sub0);
                 if let Some((s, _)) = place {
-                    self.tiles.drawn(key, s, exact, !coarse_readers);
+                    self.tiles.drawn(key, s, exact, !coarse_readers, reduced);
                     stats.tiles_drawn += 1;
                     Ok(TileStep::Complete)
                 } else {
@@ -7181,6 +7323,98 @@ impl Gpu {
         result.map(|_| output)
     }
 
+    /// Upsamples a reduced-grid layer blur (grid spacing `divisor`, texel (0, 0) at device
+    /// `origin`) into device pixels over `area`, runs `tail_steps` there, and composites it onto
+    /// the parent with `blend`, `opacity` and `open` clips (cases L2 and L3).
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn upsample_and_composite_post(
+        &mut self,
+        main: (&wgpu::TextureView, u64, (u32, u32), (u32, u32)),
+        backdrop: Option<(&wgpu::TextureView, u64, (u32, u32), (u32, u32))>,
+        origin: (f64, f64),
+        divisor: i32,
+        area: IRect,
+        tail_steps: &[PostStep],
+        isolation: Isolation,
+        blend: u32,
+        opacity: f32,
+        open: &[Open],
+    ) -> Result<()> {
+        if area.is_empty() {
+            return Ok(());
+        }
+        let (w, h) = area.size();
+        let active = self.active.as_ref().expect("active draw");
+        let previous_targets = (active.write_main, active.write_backdrop);
+        let up_main = self.acquire_offscreen(w, h, (area.x0, area.y0))?;
+        let up_backdrop = match backdrop {
+            Some(_) => match self.acquire_offscreen(w, h, (area.x0, area.y0)) {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    self.offscreen_pool.push(up_main);
+                    return Err(e);
+                }
+            },
+            None => None,
+        };
+        let mut encoder = self.take_encoder("upsample layer blur");
+        for (src, dst) in std::iter::once((main, &up_main)).chain(backdrop.zip(up_backdrop.as_ref())) {
+            self.blur.encode_upsample_rect(
+                &self.device,
+                &mut encoder,
+                src.0,
+                src.1,
+                src.2,
+                src.3,
+                origin,
+                divisor,
+                &dst.view,
+                (area.x0, area.y0),
+                (w, h),
+            );
+        }
+        self.stash_encoder(encoder);
+        let mut scope = GpuIsolation {
+            main: up_main,
+            backdrop: up_backdrop,
+            isolation,
+            previous_targets,
+        };
+        if !tail_steps.is_empty() {
+            let tail = (|| -> Result<()> {
+                let main = self.post_plane(&scope.main, tail_steps)?;
+                let backdrop = match &scope.backdrop {
+                    Some(src) => match self.post_plane(src, tail_steps) {
+                        Ok(out) => out,
+                        Err(e) => {
+                            self.offscreen_pool.extend(main);
+                            return Err(e);
+                        }
+                    },
+                    None => None,
+                };
+                if let Some(out) = main {
+                    self.offscreen_pool.push(std::mem::replace(&mut scope.main, out));
+                } else {
+                    scope.main.active_size = (0, 0);
+                }
+                if let Some(out) = backdrop {
+                    self.offscreen_pool.extend(scope.backdrop.replace(out));
+                } else if let Some(target) = scope.backdrop.as_mut() {
+                    target.active_size = (0, 0);
+                }
+                Ok(())
+            })();
+            if let Err(e) = tail {
+                self.retire_scope(scope);
+                return Err(e);
+            }
+        }
+        let result = self.composite_scope(&scope, None, blend, opacity, open);
+        self.retire_scope(scope);
+        result
+    }
+
     /// A drag's tiles (decision 0040, "Dragging"): each tile the selection touched whose own
     /// tile isn't up to date shows the page's part below the selection (kept for the drag), the
     /// selection drawn afresh at its real position, and the part above (kept), laid over each
@@ -7275,7 +7509,7 @@ impl Gpu {
                             self.tiles.release(key, slot);
                             return Err(e);
                         }
-                        self.tiles.drawn(key, slot, true, true);
+                        self.tiles.drawn(key, slot, true, true, false);
                         slot
                     }
                 };
@@ -7873,7 +8107,10 @@ impl Gpu {
     /// `read_back_straight` (which takes the in-flight count it answers). At most `READBACKS` at once.
     pub fn read_back_start(&self) -> Result<ReadBack> {
         self.check()?;
-        let main = self.current()?;
+        let main = match self.standin_frame {
+            Some(frame) => &self.frames[frame],
+            None => self.current()?,
+        };
         if self.readbacks.count.get() >= READBACKS {
             return Err(EngineError::new(
                 ErrorCode::State,
@@ -7972,7 +8209,7 @@ impl Gpu {
             ));
         }
         let cb = spec.clamp_bounds.clamp(sw as i32, sh as i32);
-        crate::blur::validate_sigma(spec.sigma, cb, spec.edge)?;
+        crate::blur::validate_view_sigma(spec.sigma, cb, spec.edge)?;
         let key = source_id.map(|id| crate::blur::PyramidKey::new(id, spec.clamp_bounds, spec.edge));
         let blur_work = self.blur.estimate_work_bytes(src_size, dst_size, dst_origin, spec, key);
         let row = (dw * 4).next_multiple_of(256);
@@ -8730,7 +8967,12 @@ impl Backend for Gpu {
                 && reads.x1 <= bounds.x1
                 && reads.y1 <= bounds.y1
         }
-        if let Some(tier) = self.reader_halo.as_ref().and_then(|halo| halo.capture) {
+        if let Some(tier) = self
+            .reader_halo
+            .as_ref()
+            .filter(|halo| halo.inside_coarse_post_scope == 0)
+            .and_then(|halo| halo.capture)
+        {
             let visible = tier.visible;
             let lens = device.transform_rect_bbox(Rect::new(0.0, 0.0, f64::from(size[0]), f64::from(size[1])));
             if IRect::around(lens.inflate(2.0, 2.0)).intersect(visible).is_empty() {
@@ -8878,7 +9120,10 @@ impl Backend for Gpu {
         // In reader-halo mode, if this lens's entire device-resolution read rect fits inside the
         // device backdrop plane and exact glass chunking is compact, render directly at divisor=1
         // so the lens reads the exact device-resolution backdrop (including native/mid/far blurs).
-        let use_native_direct = if !coarse && self.reader_halo.is_some() {
+        // The native pass of a reader-halo frame (not a tier capture, where a lens inside a
+        // coarse post scope draws straight into the scope).
+        let native_halo_pass = self.reader_halo.as_ref().is_some_and(|h| h.capture.is_none());
+        let use_native_direct = if !coarse && native_halo_pass {
             let fits_source = glass_reads_fit(
                 native_lens,
                 f64::from(native_params.margin) + 2.0,
@@ -8910,36 +9155,38 @@ impl Backend for Gpu {
         } else {
             false
         };
-        let (optical_device, optical_frame, optical_area, divisor, halo_offset, low_prefix) =
-            if !use_native_direct && let Some(halo) = &self.reader_halo {
-                if let Some(prefix) = halo.prefixes.get(&key) {
-                    let g_div = prefix.divisor;
-                    let g_off = prefix.halo_offset;
-                    let offset = (g_off.0 * g_div - high_origin.0, g_off.1 * g_div - high_origin.1);
-                    let map = Affine::scale(1.0 / f64::from(g_div))
-                        * Affine::translate((f64::from(offset.0), f64::from(offset.1)));
-                    let opt_area = ReaderHalo::map_rect_to_grid(output, high_origin, g_div, g_off);
-                    (
-                        map * device,
-                        prefix.frame_size,
-                        opt_area,
-                        g_div,
-                        offset,
-                        Some((
-                            prefix.origin,
-                            prefix.size,
-                            prefix.view.clone(),
-                            prefix.view_id,
-                            prefix.within,
-                        )),
-                    )
-                } else {
-                    // No captured prefix; fall back to checking whether the lens is visible on screen.
-                    (device, frame_size, output, 1, (0, 0), None)
-                }
+        let (optical_device, optical_frame, optical_area, divisor, halo_offset, low_prefix) = if !use_native_direct
+            && native_halo_pass
+            && let Some(halo) = &self.reader_halo
+        {
+            if let Some(prefix) = halo.prefixes.get(&key) {
+                let g_div = prefix.divisor;
+                let g_off = prefix.halo_offset;
+                let offset = (g_off.0 * g_div - high_origin.0, g_off.1 * g_div - high_origin.1);
+                let map = Affine::scale(1.0 / f64::from(g_div))
+                    * Affine::translate((f64::from(offset.0), f64::from(offset.1)));
+                let opt_area = ReaderHalo::map_rect_to_grid(output, high_origin, g_div, g_off);
+                (
+                    map * device,
+                    prefix.frame_size,
+                    opt_area,
+                    g_div,
+                    offset,
+                    Some((
+                        prefix.origin,
+                        prefix.size,
+                        prefix.view.clone(),
+                        prefix.view_id,
+                        prefix.within,
+                    )),
+                )
             } else {
+                // No captured prefix; fall back to checking whether the lens is visible on screen.
                 (device, frame_size, output, 1, (0, 0), None)
-            };
+            }
+        } else {
+            (device, frame_size, output, 1, (0, 0), None)
+        };
         let output_origin = (optical_area.x0, optical_area.y0);
         let output_size = (optical_area.x1 - optical_area.x0, optical_area.y1 - optical_area.y0);
         let scale = high_scale / divisor as f32;
@@ -8974,7 +9221,7 @@ impl Backend for Gpu {
         if regions.is_empty() {
             return Ok(());
         }
-        if !use_native_direct && self.reader_halo.is_some() && low_prefix.is_none() {
+        if !use_native_direct && native_halo_pass && low_prefix.is_none() {
             return Err(EngineError::limit("a visible glass lens has no coarse backdrop"));
         }
         for region in &mut regions {
@@ -9495,6 +9742,231 @@ impl Backend for Gpu {
         self.scene.reset_and_resize(w, h);
     }
 
+    const ALLOW_UNBOUNDED_VIEW_BLUR: bool = true;
+
+    fn reduced_layer_blur_limits(&self) -> ReducedBlurLimits {
+        let (native_side, native_pixels) = if self.fallback_adapter {
+            (
+                self.max_texture_2d.min(SOFTWARE_HALO_RENDER_MAX_SIDE),
+                SOFTWARE_HALO_RENDER_MAX_PIXELS,
+            )
+        } else {
+            (self.max_texture_2d.min(HARDWARE_HALO_RENDER_MAX_SIDE), 16_000_000)
+        };
+        ReducedBlurLimits {
+            replay_side: self.halo_replay_limit(),
+            native_side,
+            native_pixels,
+        }
+    }
+
+    fn capturing_coarse_post_scope(&self, record_id: u32) -> Option<(i32, IRect, (i32, i32))> {
+        let halo = self.reader_halo.as_ref()?;
+        let tier = halo.capture?;
+        (tier.is_far && halo.coarse_post_scopes.contains(&record_id)).then_some((
+            tier.render_divisor,
+            tier.visible,
+            tier.frame_size,
+        ))
+    }
+
+    fn set_inside_coarse_post_scope(&mut self, delta: i32) {
+        if let Some(halo) = self.reader_halo.as_mut() {
+            halo.inside_coarse_post_scope = halo.inside_coarse_post_scope.saturating_add_signed(delta as isize);
+        }
+    }
+
+    fn capture_post_scope(&mut self, record_id: u32, cap_area: IRect) -> Result<()> {
+        let Some(tier) = self.reader_halo.as_ref().and_then(|h| h.capture) else {
+            return Ok(());
+        };
+        let Some(scope) = self.offscreen_stack.last() else {
+            return Ok(());
+        };
+        let bounds = |t: &GpuTarget| IRect {
+            x0: t.origin.0,
+            y0: t.origin.1,
+            x1: t.origin.0 + i32::from(t.active_size.0),
+            y1: t.origin.1 + i32::from(t.active_size.1),
+        };
+        let main_area = cap_area.intersect(bounds(&scope.main));
+        if main_area.is_empty() {
+            return Ok(());
+        }
+        let main_start = (
+            (main_area.x0 - scope.main.origin.0) as u32,
+            (main_area.y0 - scope.main.origin.1) as u32,
+        );
+        let main_tex = scope.main.tex.clone();
+        let backdrop = scope.backdrop.as_ref().and_then(|b| {
+            let area = cap_area.intersect(bounds(b));
+            (!area.is_empty()).then(|| {
+                (
+                    b.tex.clone(),
+                    area,
+                    ((area.x0 - b.origin.0) as u32, (area.y0 - b.origin.1) as u32),
+                )
+            })
+        });
+        let main_patch = self.acquire_halo_patch(
+            (main_area.x0, main_area.y0),
+            main_area.size(),
+            tier.render_divisor,
+            tier.offset,
+            tier.frame_size,
+            None,
+        )?;
+        let backdrop_patch = match backdrop.as_ref() {
+            Some((_, area, _)) => match self.acquire_halo_patch(
+                (area.x0, area.y0),
+                area.size(),
+                tier.render_divisor,
+                tier.offset,
+                tier.frame_size,
+                None,
+            ) {
+                Ok(p) => Some(p),
+                Err(e) => {
+                    self.recycle_halo_prefix(main_patch);
+                    return Err(e);
+                }
+            },
+            None => None,
+        };
+        let mut encoder = self.take_encoder("capture coarse post scope");
+        copy_rect(
+            &mut encoder,
+            &main_tex,
+            &main_patch.texture,
+            main_start,
+            (0, 0),
+            main_area.size(),
+        );
+        if let (Some((tex, area, start)), Some(patch)) = (&backdrop, &backdrop_patch) {
+            copy_rect(&mut encoder, tex, &patch.texture, *start, (0, 0), area.size());
+        }
+        self.stash_encoder(encoder);
+        let old = self.reader_halo.as_mut().expect("reader halo").post_scopes.insert(
+            (record_id, 0),
+            PostScopePatch {
+                main: main_patch,
+                backdrop: backdrop_patch,
+            },
+        );
+        if let Some(old) = old {
+            self.submit_active_encoder();
+            self.recycle_halo_prefix(old.main);
+            if let Some(b) = old.backdrop {
+                self.recycle_halo_prefix(b);
+            }
+        }
+        Ok(())
+    }
+
+    fn has_captured_post_scope(&self, record_id: u32) -> bool {
+        self.reader_halo
+            .as_ref()
+            .is_some_and(|h| h.capture.is_none() && h.post_scopes.contains_key(&(record_id, 0)))
+    }
+
+    fn composite_reduced_post(
+        &mut self,
+        source: ReducedPost<'_>,
+        upsample_area: IRect,
+        tail_steps: &[PostStep],
+        isolation: Isolation,
+        blend: u32,
+        opacity: f32,
+        open: &[Open],
+    ) -> Result<()> {
+        match source {
+            ReducedPost::Captured(record_id) => {
+                if upsample_area.is_empty() {
+                    return Ok(());
+                }
+                self.flush_preserving_clips(open, true)?;
+                let high_origin = self
+                    .active
+                    .as_ref()
+                    .and_then(|a| a.display_area)
+                    .map_or((0, 0), |r| (r.x0, r.y0));
+                let Some((main, backdrop, origin, divisor)) = self
+                    .reader_halo
+                    .as_ref()
+                    .and_then(|h| h.post_scopes.get(&(record_id, 0)))
+                    .map(|ps| {
+                        let m = &ps.main;
+                        let plane = |p: &HaloPatch| {
+                            (
+                                p.view.clone(),
+                                p.view_id,
+                                (p.texture.width(), p.texture.height()),
+                                p.size,
+                            )
+                        };
+                        let origin = (
+                            f64::from(m.origin.0 - m.halo_offset.0) * f64::from(m.divisor) + f64::from(high_origin.0),
+                            f64::from(m.origin.1 - m.halo_offset.1) * f64::from(m.divisor) + f64::from(high_origin.1),
+                        );
+                        (plane(m), ps.backdrop.as_ref().map(plane), origin, m.divisor)
+                    })
+                else {
+                    return Ok(());
+                };
+                self.upsample_and_composite_post(
+                    (&main.0, main.1, main.2, main.3),
+                    backdrop.as_ref().map(|b| (&b.0, b.1, b.2, b.3)),
+                    origin,
+                    divisor,
+                    upsample_area,
+                    tail_steps,
+                    isolation,
+                    blend,
+                    opacity,
+                    open,
+                )
+            }
+            ReducedPost::Top { steps, origin, divisor } => {
+                let stepped = self.apply_post_isolated(steps);
+                let Some(scope) = self.offscreen_stack.pop() else {
+                    return stepped;
+                };
+                let active = self.active.as_mut().expect("active draw");
+                (active.write_main, active.write_backdrop) = scope.previous_targets;
+                active.scene_dirty = false;
+                let (w, h) = self.active_scene_size();
+                self.scene.reset_and_resize(w, h);
+                let result = stepped.and_then(|()| {
+                    self.reopen_clips(open);
+                    let plane = |t: &GpuTarget| {
+                        (
+                            t.view.clone(),
+                            t.view_id,
+                            (t.width, t.height),
+                            (u32::from(t.active_size.0), u32::from(t.active_size.1)),
+                        )
+                    };
+                    let main = plane(&scope.main);
+                    let backdrop = scope.backdrop.as_ref().map(plane);
+                    self.upsample_and_composite_post(
+                        (&main.0, main.1, main.2, main.3),
+                        backdrop.as_ref().map(|b| (&b.0, b.1, b.2, b.3)),
+                        origin,
+                        divisor,
+                        upsample_area,
+                        tail_steps,
+                        isolation,
+                        blend,
+                        opacity,
+                        open,
+                    )
+                });
+                self.retire_scope(scope);
+                result
+            }
+        }
+    }
+
     fn draw_blurred_shadow(
         &mut self,
         cast: &ShadowCast<'_>,
@@ -9511,7 +9983,7 @@ impl Backend for Gpu {
         if let Some(a) = self.active.as_mut() {
             a.shadow_ops += 1;
         }
-        validate_sigma(
+        validate_view_sigma(
             sigma,
             IRect {
                 x0: 0,
@@ -9757,11 +10229,11 @@ impl Backend for Gpu {
         }
 
         let max_tex = self.device.limits().max_texture_dimension_2d as i32;
-        let mask_rect_opt = match cast {
-            ShadowCast::Fill { paths, .. } => compute_mask_rect(paths, dirty, sigma, max_tex),
-            ShadowCast::Stroke { bbox, .. } => compute_mask_rect_bounds(*bbox, dirty, sigma, max_tex),
+        let mask_opt = match cast {
+            ShadowCast::Fill { paths, .. } => compute_view_mask_rect(paths, dirty, sigma, max_tex),
+            ShadowCast::Stroke { bbox, .. } => compute_view_mask_rect_bounds(*bbox, dirty, sigma, max_tex),
         };
-        let Some(mask_rect) = mask_rect_opt else {
+        let Some(mask) = mask_opt else {
             if invert {
                 let (sox, soy) = self.scene_offset();
                 let x = f64::from(dirty.x0 - sox);
@@ -9782,18 +10254,18 @@ impl Backend for Gpu {
             self.flush_why = 14;
             self.flush_preserving_clips(open, false)?;
         }
-        let mask_w = (mask_rect.x1 - mask_rect.x0).max(1) as u32;
-        let mask_h = (mask_rect.y1 - mask_rect.y0).max(1) as u32;
         let dirty_w = (dirty.x1 - dirty.x0).max(1) as u32;
         let dirty_h = (dirty.y1 - dirty.y0).max(1) as u32;
-        let shift = shadow_raster_shift(sigma);
-        let dst_origin = (dirty.x0 - mask_rect.x0, dirty.y0 - mask_rect.y0);
+        let shift = mask.shift;
+        let dst_origin_i64 = (i64::from(dirty.x0) - mask.x0, i64::from(dirty.y0) - mask.y0);
 
         let t0 = now();
         let sub0 = self.active.as_ref().map_or(0.0, |a| a.submit_ms);
         let temp = self.acquire_temp(dirty_w, dirty_h)?;
         let res = (|| -> Result<()> {
             if shift == 0 {
+                let (mask_w, mask_h) = (mask.sw, mask.sh);
+                let dst_origin = (dst_origin_i64.0 as i32, dst_origin_i64.1 as i32);
                 let spec = BlurSpec {
                     sigma,
                     edge: EdgeMode::Zero,
@@ -9819,7 +10291,7 @@ impl Backend for Gpu {
                     self.ensure_scratch_blur(dirty_w, dirty_h)?;
                 }
                 self.mask_scene.reset_and_resize(mask_w as u16, mask_h as u16);
-                let base_shift = Affine::translate((-f64::from(mask_rect.x0), -f64::from(mask_rect.y0)));
+                let base_shift = Affine::translate((-(mask.x0 as f64), -(mask.y0 as f64)));
                 self.mask_scene.set_paint(AlphaColor::<Srgb>::new([1.0, 1.0, 1.0, 1.0]));
                 match cast {
                     ShadowCast::Fill { paths, even_odd, .. } => {
@@ -9920,10 +10392,9 @@ impl Backend for Gpu {
                 self.stash_encoder(encoder);
                 Ok(())
             } else {
-                let s = 1u32 << shift;
-                let sw = (mask_w / s).max(1);
-                let sh = (mask_h / s).max(1);
-                let (red_origin, (bd_w, bd_h)) = reduced_dirty_rect(mask_rect, dirty, shift);
+                let s = (1u64 << shift.min(30)) as f64;
+                let (sw, sh) = (mask.sw, mask.sh);
+                let (red_origin, (bd_w, bd_h)) = reduced_dirty_rect_i64((mask.x0, mask.y0), dirty, shift);
                 let spec = BlurSpec {
                     sigma: scaled_shadow_sigma(sigma, shift),
                     edge: EdgeMode::Zero,
@@ -9947,8 +10418,7 @@ impl Backend for Gpu {
                 self.ensure_scratch_mask(sw, sh)?;
                 self.ensure_scratch_blur(bd_w, bd_h)?;
                 self.mask_scene.reset_and_resize(sw as u16, sh as u16);
-                let red_tf = Affine::scale(1.0 / f64::from(s))
-                    * Affine::translate((-f64::from(mask_rect.x0), -f64::from(mask_rect.y0)));
+                let red_tf = Affine::scale(1.0 / s) * Affine::translate((-(mask.x0 as f64), -(mask.y0 as f64)));
                 self.mask_scene.set_paint(AlphaColor::<Srgb>::new([1.0, 1.0, 1.0, 1.0]));
                 match cast {
                     ShadowCast::Fill { paths, even_odd, .. } => {
@@ -10028,7 +10498,7 @@ impl Backend for Gpu {
                     red_origin,
                     &temp.view,
                     (dirty_w, dirty_h),
-                    dst_origin,
+                    dst_origin_i64,
                     shift,
                     invert,
                 );
@@ -10338,6 +10808,7 @@ impl Backend for Gpu {
             }
         });
 
+        let mut captured_in_tier = false;
         if let Some(tier) = capture_tier {
             let d = tier.render_divisor as f32;
             let lo_dev = plan.start_sigma.min(plan.end_sigma) * d;
@@ -10382,6 +10853,7 @@ impl Backend for Gpu {
             } else {
                 None
             };
+            captured_in_tier = capture_bounds.is_some();
             if !has_downstream {
                 let Some(bounds) = capture_bounds else {
                     return Ok(());
@@ -10396,12 +10868,10 @@ impl Backend for Gpu {
                 let mut encoder = self.take_encoder("progressive halo capture");
                 let cols = (stop_count as u32).clamp(1, 4);
                 let rows = (stop_count as u32).div_ceil(cols).max(1);
-                let tile_side = progressive_blur::PROGRESSIVE_TILE_MAX
-                    .min(self.max_texture_2d / 4)
-                    .max(1);
                 let width = (active_dirty.x1 - active_dirty.x0) as u32;
                 let height = (active_dirty.y1 - active_dirty.y0) as u32;
                 let budget = self.reader_budget_room();
+                let tile_side = self.progressive_tile_side(width, height, cols, rows, budget);
                 self.readers.ensure_blur_out_budgeted(
                     &self.device,
                     width.min(tile_side) * cols,
@@ -10512,7 +10982,8 @@ impl Backend for Gpu {
             return Err(EngineError::limit("a visible progressive blur has no coarse backdrop"));
         }
         let resident = halo_1.as_ref().map_or(plan.stops.len(), |halo| halo.first);
-        let fast_halo_only = capture_tier.is_none() && dirty_first >= resident;
+        let mid_tier_reuses_far = !captured_in_tier && capture_tier.is_some_and(|t| !t.is_far);
+        let fast_halo_only = (capture_tier.is_none() || mid_tier_reuses_far) && dirty_first >= resident;
         let max_resident_sigma = plan
             .stops
             .get(resident.min(dirty_end).saturating_sub(1))
@@ -10525,7 +10996,7 @@ impl Backend for Gpu {
         let (width, height) = draw.dirty_size();
 
         // Fast path: when every active stop in `dirty` is already provided by captured halo tiers,
-        // skip native blur passes, blur_out atlas allocation, and 256 px tiling completely.
+        // skip native blur passes, blur_out atlas allocation, and progressive tiling completely.
         if fast_halo_only {
             let chunk_side = if (width as usize).saturating_mul(height as usize) <= 6_000_000 {
                 width.max(height).max(1)
@@ -10575,10 +11046,8 @@ impl Backend for Gpu {
         let clip_info = draw.halo_clip_bounds(capture_tier, within, max_resident_blur_sigma);
         let cols = (resident as u32).clamp(1, 4);
         let rows = (resident as u32).div_ceil(cols).max(1);
-        let tile_side = progressive_blur::PROGRESSIVE_TILE_MAX
-            .min(self.max_texture_2d / 4)
-            .max(1);
         let budget = self.reader_budget_room();
+        let tile_side = self.progressive_tile_side(width, height, cols, rows, budget);
         self.readers.ensure_blur_out_budgeted(
             &self.device,
             width.min(tile_side) * cols,

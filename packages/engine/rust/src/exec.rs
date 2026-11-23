@@ -249,6 +249,31 @@ pub enum ShadowCast<'a> {
     },
 }
 
+/// Limits for drawing a layer blur at device resolution (`Backend::reduced_layer_blur_limits`).
+#[derive(Clone, Copy, Debug)]
+pub struct ReducedBlurLimits {
+    /// The reduced grid's longest side, in grid texels.
+    pub replay_side: u32,
+    /// The longest side of a device-resolution blur source.
+    pub native_side: u32,
+    /// The most pixels of a device-resolution blur source.
+    pub native_pixels: usize,
+}
+
+/// Where a reduced-grid layer blur comes from (`Backend::composite_reduced_post`).
+pub enum ReducedPost<'a> {
+    /// The far tier kept this scope's blurred picture (case L3).
+    Captured(u32),
+    /// The top offscreen target holds the scope drawn on a reduced grid: apply `steps` (through
+    /// the last layer blur) there, then upsample from grid spacing `divisor` whose texel (0, 0)
+    /// sits at device `origin` (case L2).
+    Top {
+        steps: &'a [PostStep],
+        origin: (f64, f64),
+        divisor: i32,
+    },
+}
+
 /// One resolved post-effect pass in device pixels, applied in order to an isolated target.
 #[derive(Clone, Copy, Debug)]
 pub enum PostStep {
@@ -448,6 +473,49 @@ pub trait Backend {
     fn pop_composited(&mut self, blend: u32, opacity: f32, mask_kind: Option<u32>, open: &[Open]) -> Result<()>;
     /// Discards the active offscreen target on error unwind without compositing.
     fn abort_isolated(&mut self);
+    /// Whether this backend draws view blurs of any sigma (the GPU view pyramid, layer blurs on a
+    /// reduced grid past the native limits). CPU and Worker exports keep the native limits.
+    const ALLOW_UNBOUNDED_VIEW_BLUR: bool = false;
+    /// Limits for a layer blur drawn at device resolution before it switches to a reduced grid.
+    fn reduced_layer_blur_limits(&self) -> ReducedBlurLimits {
+        ReducedBlurLimits {
+            replay_side: crate::halo::HALO_REPLAY_SIDE,
+            native_side: 8192,
+            native_pixels: usize::MAX,
+        }
+    }
+    /// In a far-tier capture pass, the tier's `(render_divisor, visible, frame_size)` when
+    /// `record_id` is a coarse post scope whose blurred output the tier keeps (case L3).
+    fn capturing_coarse_post_scope(&self, _record_id: u32) -> Option<(i32, IRect, (i32, i32))> {
+        None
+    }
+    /// Enters (`1`) or leaves (`-1`) a coarse post scope during capture: glass inside draws
+    /// straight into the scope's reduced picture.
+    fn set_inside_coarse_post_scope(&mut self, _delta: i32) {}
+    /// Keeps the top offscreen scope's blurred picture over `cap_area` for the native pass.
+    fn capture_post_scope(&mut self, _record_id: u32, _cap_area: IRect) -> Result<()> {
+        Ok(())
+    }
+    /// Whether the far tier kept `record_id`'s blurred picture for this native pass.
+    fn has_captured_post_scope(&self, _record_id: u32) -> bool {
+        false
+    }
+    /// Upsamples a reduced-grid layer blur to device pixels over `upsample_area`, applies the
+    /// device-resolution `tail_steps`, and composites it onto the parent with `blend`, `opacity`
+    /// and `open` clips.
+    #[allow(clippy::too_many_arguments)]
+    fn composite_reduced_post(
+        &mut self,
+        _source: ReducedPost<'_>,
+        _upsample_area: IRect,
+        _tail_steps: &[PostStep],
+        _isolation: Isolation,
+        _blend: u32,
+        _opacity: f32,
+        _open: &[Open],
+    ) -> Result<()> {
+        Ok(())
+    }
     /// Renders a Gaussian-blurred shadow mask over `dirty` (device pixels) and draws it into the
     /// active scene tinted with `color` (`SrcOver`, respecting open clips). When `canonical` is
     /// provided, backends may satisfy the shadow from their bounded `ShadowMaskCache`.
@@ -486,6 +554,8 @@ pub struct DrawStats {
     pub reads: u32,
     /// Records drawn by their coarse ops (unreadable text as bars, coarse glass): a stand-in, not exact.
     pub coarse: u32,
+    /// Layer blurs drawn on a reduced grid (past the native limits): not exact.
+    pub reduced: u32,
     /// Records skipped as specks (under half a device pixel): a stand-in, not exact.
     pub specks: u32,
     /// Path elements generated drawing the frame (held to `Limits::frame_verbs`).
@@ -548,6 +618,7 @@ impl DrawStats {
         self.glyphs_outlined += o.glyphs_outlined;
         self.reads += o.reads;
         self.coarse += o.coarse;
+        self.reduced += o.reduced;
         self.specks += o.specks;
         self.verbs += o.verbs;
         self.draws += o.draws;
@@ -555,7 +626,7 @@ impl DrawStats {
 
     /// Whether the frame drew every record exactly (no level-of-detail stand-ins).
     pub fn exact(&self) -> bool {
-        self.coarse == 0 && self.specks == 0
+        self.coarse == 0 && self.reduced == 0 && self.specks == 0
     }
 }
 
@@ -1065,15 +1136,16 @@ pub struct WalkCheckpoint {
     resume_path: Vec<(u32, usize, usize)>,
     reader_seq: usize,
     backdrop_live: bool,
-    total_coarse: u32,
-    total_specks: u32,
+    /// What the slices before this one drew, so the finished walk's exactness counts every
+    /// stand-in, speck and reduced effect across slices (`DrawStats::exact`).
+    so_far: DrawStats,
 }
 
 /// Result of one slice of a resumable tile walk.
 pub enum WalkOutcome {
-    /// The walk finished; `stats` is this slice's incremental counts and `exact` reflects the
-    /// complete walk across all slices.
-    Complete { stats: DrawStats, exact: bool },
+    /// The walk finished; `stats` is this slice's incremental counts and `total` the whole
+    /// walk's across all slices (its `exact()` says whether the tile is exact).
+    Complete { stats: DrawStats, total: DrawStats },
     /// The walk yielded cooperatively at a safe boundary; `stats` is this slice's incremental
     /// counts and `checkpoint` resumes the remainder.
     Paused {
@@ -1132,19 +1204,12 @@ pub fn draw_split_resumable<B: Backend>(
     let tiled = frame.area != full_frame;
     let full_viewport = Rect::new(-1.0, -1.0, f64::from(frame.width) + 1.0, f64::from(frame.height) + 1.0);
     let resuming = checkpoint.is_some();
-    let (plan, resume_path, reader_seq, backdrop_live, total_coarse, total_specks) = match checkpoint {
-        Some(cp) => (
-            cp.plan,
-            cp.resume_path,
-            cp.reader_seq,
-            cp.backdrop_live,
-            cp.total_coarse,
-            cp.total_specks,
-        ),
+    let (plan, resume_path, reader_seq, backdrop_live, so_far) = match checkpoint {
+        Some(cp) => (cp.plan, cp.resume_path, cp.reader_seq, cp.backdrop_live, cp.so_far),
         None => {
             let plan = plan_readers(store, frame);
             let has_ctx = plan.as_ref().is_some_and(|p| p.has_context);
-            (plan, Vec::new(), 0, has_ctx, 0, 0)
+            (plan, Vec::new(), 0, has_ctx, DrawStats::default())
         }
     };
     let (has_context, needs_backdrop, last_reader_seq, isolated_with_reader, subtree_readers) = match plan {
@@ -1204,6 +1269,7 @@ pub fn draw_split_resumable<B: Backend>(
         verbs_at_probe: 0,
         heavy_op_ran: false,
         made_progress: false,
+        skip_post_record: None,
     };
     if !store.nodes.contains_key(&crate::store::ROOT) {
         return Err(EngineError::malformed("no page"));
@@ -1238,15 +1304,19 @@ pub fn draw_split_resumable<B: Backend>(
                 resume_path: walk.paused_path,
                 reader_seq: walk.reader_seq,
                 backdrop_live: walk.backdrop_live,
-                total_coarse: total_coarse + walk.stats.coarse,
-                total_specks: total_specks + walk.stats.specks,
+                so_far: {
+                    let mut so_far = so_far;
+                    so_far.add(&walk.stats);
+                    so_far
+                },
             },
         });
     }
-    let exact = (total_coarse + walk.stats.coarse) == 0 && (total_specks + walk.stats.specks) == 0;
+    let mut total = so_far;
+    total.add(&walk.stats);
     Ok(WalkOutcome::Complete {
         stats: walk.stats,
-        exact,
+        total,
     })
 }
 
@@ -1288,6 +1358,7 @@ struct Walk<'a, B: Backend> {
     verbs_at_probe: u64,
     heavy_op_ran: bool,
     made_progress: bool,
+    skip_post_record: Option<u32>,
 }
 
 /// The linear part of a transform (its translation dropped).
@@ -1455,6 +1526,123 @@ fn align_area_checked(raw: IRect, step: i32, phase: (i32, i32), max_side: i32) -
     Ok(r)
 }
 
+/// Post steps through the last layer blur, moved onto a reduced grid of spacing `divisor` (grid
+/// texel (0, 0) at `grid_to_dev`). The grid adds variance once for the whole chain: box
+/// rasterisation plus the bilinear upsample back (`HALO_GRID_VARIANCE` texels squared). That is
+/// taken off the chain's layer blurs from the last backwards, so the chain's total variance
+/// matches device resolution even when the last blur alone is narrower than the grid's.
+fn posts_on_grid(posts: &[ActivePost], divisor: i32, grid_to_dev: Affine) -> Vec<ActivePost> {
+    let d = f64::from(divisor);
+    let mut out: Vec<ActivePost> = posts
+        .iter()
+        .map(|pe| match *pe {
+            ActivePost::LayerBlur { sigma } => ActivePost::LayerBlur {
+                sigma: (f64::from(sigma) / d) as f32,
+            },
+            ActivePost::Noise {
+                noise_type,
+                size,
+                density,
+                color,
+                secondary_color,
+                opacity,
+                dev_to_layer,
+            } => ActivePost::Noise {
+                noise_type,
+                size,
+                density,
+                color,
+                secondary_color,
+                opacity,
+                dev_to_layer: dev_to_layer * grid_to_dev,
+            },
+            ActivePost::Texture {
+                size,
+                radius_dev,
+                clip_to_shape,
+                dev_to_layer,
+            } => ActivePost::Texture {
+                size,
+                radius_dev: (f64::from(radius_dev) / d) as f32,
+                clip_to_shape,
+                dev_to_layer: dev_to_layer * grid_to_dev,
+            },
+        })
+        .collect();
+    take_grid_variance(
+        out.iter_mut().filter_map(|pe| match pe {
+            ActivePost::LayerBlur { sigma } => Some(sigma),
+            _ => None,
+        }),
+        divisor,
+    );
+    out
+}
+
+/// Takes a reduced grid's own variance (`HALO_GRID_VARIANCE` texels squared, none at divisor 1)
+/// off a chain of layer-blur sigmas in grid texels, from the last backwards.
+fn take_grid_variance<'a>(sigmas: impl DoubleEndedIterator<Item = &'a mut f32>, divisor: i32) {
+    let mut owed = if divisor > 1 {
+        f64::from(crate::halo::HALO_GRID_VARIANCE)
+    } else {
+        0.0
+    };
+    for sigma in sigmas.rev() {
+        if owed <= 0.0 {
+            break;
+        }
+        let var = f64::from(*sigma) * f64::from(*sigma);
+        let take = var.min(owed);
+        owed -= take;
+        *sigma = (var - take).sqrt() as f32;
+    }
+}
+
+/// The reduced grid for a layer blur past the native limits (case L2).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct ReducedGrid {
+    /// Device pixels per grid texel (a power of two, at least 2).
+    pub divisor: i32,
+    /// Grid texel (0, 0) in device pixels, on the view's grid phase.
+    pub origin: (i32, i32),
+    /// The grid's size in texels.
+    pub size: (u32, u32),
+    /// The texture cap pushed the divisor past a third of the blur's sigma (fewer than
+    /// `HALO_MIN_COARSE_SIGMA` grid texels), where the reduced blur visibly widens.
+    pub past_cutover: bool,
+}
+
+/// Chooses the reduced grid covering `raw_src` (device pixels) for a layer blur of `sigma`: the
+/// replay divisor for `replay_side`, capped at the largest power of two within a third of
+/// `sigma`, then doubled while the grid is wider than `tex_cap` texels.
+pub(crate) fn reduced_layer_blur_grid(
+    raw_src: IRect,
+    sigma: f32,
+    replay_side: u32,
+    tex_cap: u32,
+    view: Affine,
+) -> ReducedGrid {
+    let third = (sigma / crate::halo::HALO_MIN_COARSE_SIGMA).floor().max(2.0) as u32;
+    let max_valid = (1u32 << (31 - third.leading_zeros())) as i32;
+    let mut divisor = crate::halo::replay_divisor(raw_src, replay_side).min(max_valid).max(2);
+    loop {
+        let phase = view_grid_phase(view, divisor);
+        let x0 = (raw_src.x0 - phase.0).div_euclid(divisor) * divisor + phase.0;
+        let y0 = (raw_src.y0 - phase.1).div_euclid(divisor) * divisor + phase.1;
+        let w = ((raw_src.x1 - x0 + divisor - 1).div_euclid(divisor)).max(1) as u32;
+        let h = ((raw_src.y1 - y0 + divisor - 1).div_euclid(divisor)).max(1) as u32;
+        if (w <= tex_cap && h <= tex_cap) || divisor >= 1 << 20 {
+            return ReducedGrid {
+                divisor,
+                origin: (x0, y0),
+                size: (w, h),
+                past_cutover: divisor as f32 * crate::halo::HALO_MIN_COARSE_SIGMA > sigma,
+            };
+        }
+        divisor *= 2;
+    }
+}
+
 fn view_grid_phase(view: Affine, step: i32) -> (i32, i32) {
     let s = f64::from(step.max(1));
     let [.., e, f] = view.as_coeffs();
@@ -1484,17 +1672,29 @@ enum ActivePost {
 }
 
 impl ActivePost {
-    fn src_pad(&self) -> i32 {
+    fn src_pad(&self, unbounded: bool) -> i32 {
         match *self {
-            Self::LayerBlur { sigma } => crate::shadow::blur_support_pad(sigma),
+            Self::LayerBlur { sigma } => {
+                if unbounded {
+                    crate::shadow::blur_support_pad_view(sigma)
+                } else {
+                    crate::shadow::blur_support_pad(sigma)
+                }
+            }
             Self::Noise { .. } => 0,
             Self::Texture { radius_dev, .. } => (radius_dev.ceil() as i32).saturating_add(2),
         }
     }
 
-    fn grow_pad(&self) -> i32 {
+    fn grow_pad(&self, unbounded: bool) -> i32 {
         match *self {
-            Self::LayerBlur { sigma } => crate::shadow::blur_support_pad(sigma),
+            Self::LayerBlur { sigma } => {
+                if unbounded {
+                    crate::shadow::blur_support_pad_view(sigma)
+                } else {
+                    crate::shadow::blur_support_pad(sigma)
+                }
+            }
             Self::Noise { .. } => 0,
             Self::Texture {
                 radius_dev,
@@ -1644,6 +1844,7 @@ struct PostIsoState {
     max_step: i32,
     phase: (i32, i32),
     blend: u32,
+    capture_scope: Option<(u32, i32, IRect, (i32, i32))>,
 }
 
 fn paint_visible(paint: &Paint, alpha: f32) -> bool {
@@ -1835,7 +2036,7 @@ fn subtree_flushes_in_full_frame(
         };
         let content_bbox = device.transform_rect_bbox(bounds).inflate(inner_pad_dev, inner_pad_dev);
         let content_rect = IRect::around(content_bbox).inflate(2, 2);
-        let total_post_pad: i32 = active.iter().fold(0i32, |acc, p| acc.saturating_add(p.src_pad()));
+        let total_post_pad: i32 = active.iter().fold(0i32, |acc, p| acc.saturating_add(p.src_pad(false)));
         return !content_rect
             .intersect(full_out.inflate(total_post_pad, total_post_pad))
             .is_empty();
@@ -2006,6 +2207,190 @@ impl<B: Backend> Walk<'_, B> {
             self.phase = Phase::After;
         }
         Ok(())
+    }
+
+    /// Builds 1:1 device-space post steps (`Noise`, `Texture`) following an upsampled `LayerBlur`
+    /// together with the required upsample source area covering their spatial pad.
+    fn build_tail_post_steps(tail: &[ActivePost], out_area: IRect, max_side: i32) -> Result<(IRect, Vec<PostStep>)> {
+        if tail.is_empty() {
+            return Ok((out_area, Vec::new()));
+        }
+        let n = tail.len();
+        let mut rem_pads = vec![0i32; n];
+        let mut suffix = 0i32;
+        for i in (0..n).rev() {
+            rem_pads[i] = suffix;
+            suffix = suffix.saturating_add(tail[i].src_pad(true));
+        }
+        let upsample_area = if suffix == 0 {
+            out_area
+        } else {
+            align_area_checked(out_area.inflate(suffix, suffix), 4, (0, 0), max_side)?
+        };
+        let mut steps = Vec::with_capacity(n);
+        for (i, pe) in tail.iter().enumerate() {
+            let area = if i + 1 == n {
+                out_area
+            } else {
+                align_area_checked(out_area.inflate(rem_pads[i], rem_pads[i]), 4, (0, 0), max_side)?
+            };
+            steps.push(pe.clone().into_step(area));
+        }
+        Ok((upsample_area, steps))
+    }
+
+    /// Draws a reader-free GPU view layer blur whose padded source exceeds the native texture or
+    /// memory limits (case L2): the record's subtree on a reduced grid, its post steps through the
+    /// last layer blur there (sigma compensated for the grid), then upsampled to device pixels
+    /// where any later noise or texture runs. The frame counts it as reduced, never exact.
+    #[inline(never)]
+    #[allow(clippy::too_many_arguments)]
+    fn exec_reduced_layer_blur(
+        &mut self,
+        id: u32,
+        parent: Affine,
+        opacity: f32,
+        layer_blend: u32,
+        isolation: Isolation,
+        out_area: IRect,
+        raw_src: IRect,
+        active: &[ActivePost],
+        lb_idx: usize,
+        lb_sigma: f32,
+    ) -> Result<()> {
+        let max_side = self.store.limits.texture_side as i32;
+        let (upsample_area, tail_steps) = Self::build_tail_post_steps(&active[lb_idx + 1..], out_area, max_side)?;
+        let limits = self.backend.reduced_layer_blur_limits();
+        let grid = reduced_layer_blur_grid(
+            raw_src,
+            lb_sigma,
+            limits.replay_side,
+            (max_side as u32).min(u32::from(u16::MAX)),
+            self.frame.view,
+        );
+        self.stats.reduced += 1;
+        if grid.past_cutover {
+            // The texture cap pushed the grid past a third of the blur's sigma: the blur widens
+            // visibly, so count it as a level-of-detail stand-in as well.
+            self.stats.coarse += 1;
+        }
+        let d_render = grid.divisor;
+        let (red_x0, red_y0) = grid.origin;
+        let (red_w, red_h) = grid.size;
+        let rx0 = (upsample_area.x0 - red_x0).div_euclid(d_render) - 1;
+        let ry0 = (upsample_area.y0 - red_y0).div_euclid(d_render) - 1;
+        let rx1 = (upsample_area.x1 - red_x0 + d_render - 1).div_euclid(d_render) + 1;
+        let ry1 = (upsample_area.y1 - red_y0 + d_render - 1).div_euclid(d_render) + 1;
+        let red_blur_out = IRect {
+            x0: rx0,
+            y0: ry0,
+            x1: rx1.max(rx0 + 1),
+            y1: ry1.max(ry0 + 1),
+        };
+
+        let d_f = f64::from(d_render);
+        let red_to_dev = Affine::translate((f64::from(red_x0), f64::from(red_y0))) * Affine::scale(d_f);
+        let red_posts = posts_on_grid(&active[..=lb_idx], d_render, red_to_dev);
+        let n_pre = red_posts.len();
+        let mut rem_pads = vec![0i32; n_pre];
+        let mut suffix = 0i32;
+        for i in (0..n_pre).rev() {
+            rem_pads[i] = suffix;
+            suffix = suffix.saturating_add(red_posts[i].src_pad(true));
+        }
+        let red_content = IRect {
+            x0: 0,
+            y0: 0,
+            x1: red_w as i32,
+            y1: red_h as i32,
+        };
+        let mut reduced_steps = Vec::with_capacity(n_pre);
+        let mut grown = 0i32;
+        for (i, pe) in red_posts.into_iter().enumerate() {
+            grown = grown.saturating_add(pe.grow_pad(true));
+            let area = if i + 1 == n_pre {
+                red_blur_out
+            } else {
+                let raw = red_content
+                    .inflate(grown, grown)
+                    .intersect(red_blur_out.inflate(rem_pads[i], rem_pads[i]));
+                align_area_checked(raw, 4, (0, 0), max_side)?
+            };
+            reduced_steps.push(pe.into_step(area));
+        }
+
+        let red_frame = Frame {
+            width: red_w as u16,
+            height: red_h as u16,
+            view: Affine::scale(1.0 / d_f)
+                * Affine::translate((-f64::from(red_x0), -f64::from(red_y0)))
+                * self.frame.view,
+            detail: false,
+            area: red_content,
+        };
+        if !self
+            .backend
+            .push_isolated(red_content, false, None, isolation, &self.open)?
+        {
+            return Ok(());
+        }
+        let prev_frame = self.frame;
+        let prev_viewport = self.viewport;
+        let prev_full_frame = self.full_frame;
+        let prev_full_viewport = self.full_viewport;
+        let prev_tiled = self.tiled;
+        let prev_open = std::mem::take(&mut self.open);
+        let prev_ancestors = std::mem::take(&mut self.ancestor_clips);
+        self.frame = red_frame;
+        self.viewport = Rect::new(-1.0, -1.0, f64::from(red_w) + 1.0, f64::from(red_h) + 1.0);
+        self.full_frame = red_content;
+        self.full_viewport = self.viewport;
+        self.tiled = false;
+        self.skip_post_record = Some(id);
+        // The subtree is blurred and composited once below: a walk paused inside it would blur
+        // part of it now and the rest as a second blur on resume.
+        self.yield_safe_depth += 1;
+        let walk_res = self.node_inner(id, parent, 1.0, false);
+        self.yield_safe_depth -= 1;
+        self.skip_post_record = None;
+        while let Some(o) = self.open.pop() {
+            match o {
+                Open::Clip { active_on_scene, .. } => {
+                    if active_on_scene {
+                        self.backend.scene().pop_clip();
+                    }
+                }
+                Open::Layer => self.backend.scene().pop_layer(),
+            }
+        }
+        self.frame = prev_frame;
+        self.viewport = prev_viewport;
+        self.full_frame = prev_full_frame;
+        self.full_viewport = prev_full_viewport;
+        self.tiled = prev_tiled;
+        self.open = prev_open;
+        self.ancestor_clips = prev_ancestors;
+        if let Err(e) = walk_res {
+            self.backend.abort_isolated();
+            return Err(e);
+        }
+        let origin = (
+            f64::from(red_x0) + f64::from(red_blur_out.x0) * d_f,
+            f64::from(red_y0) + f64::from(red_blur_out.y0) * d_f,
+        );
+        self.backend.composite_reduced_post(
+            ReducedPost::Top {
+                steps: &reduced_steps,
+                origin,
+                divisor: d_render,
+            },
+            upsample_area,
+            &tail_steps,
+            isolation,
+            layer_blend,
+            opacity,
+            &self.open,
+        )
     }
 
     fn sync_targets(&mut self, is_context: bool) -> Result<()> {
@@ -2601,9 +2986,13 @@ impl<B: Backend> Walk<'_, B> {
             self.records_since_probe += 1;
             self.made_progress = true;
         }
+        let skipping_post = self.skip_post_record == Some(id);
+        if skipping_post {
+            self.skip_post_record = None;
+        }
         let is_context = r.context();
         let in_alpha = if parent_context && !is_context { 1.0 } else { alpha };
-        let opacity = in_alpha * r.opacity;
+        let opacity = if skipping_post { 1.0 } else { in_alpha * r.opacity };
         if opacity <= 0.0 {
             return Ok(());
         }
@@ -2614,10 +3003,18 @@ impl<B: Backend> Walk<'_, B> {
         };
         self.current_context = is_context;
         self.sync_targets(is_context)?;
-        let active = active_posts(r, device, view_scale);
+        let active = if skipping_post {
+            Vec::new()
+        } else {
+            active_posts(r, device, view_scale)
+        };
         let has_post = !active.is_empty();
-        let layer_blend = r.blend;
-        let isolate = has_post || layer_blend != 0 || (r.isolate() && r.opacity < 1.0);
+        let layer_blend = if skipping_post { 0 } else { r.blend };
+        let isolate = if skipping_post {
+            false
+        } else {
+            has_post || layer_blend != 0 || (r.isolate() && r.opacity < 1.0)
+        };
         let has_reader = self.subtree_readers.get(&id).is_some_and(|&(n, _)| n > 0);
         let reader_fade = self.isolated_with_reader.contains(&id);
         let crosses_context = is_context
@@ -2634,7 +3031,11 @@ impl<B: Backend> Walk<'_, B> {
             && r.isolate()
             && r.opacity < 1.0
             && (store.subtree_has_blend(id) || reader_fade || crosses_context);
-        let use_offscreen = has_post || layer_blend != 0 || through || (isolate && store.subtree_has_pass(id));
+        let use_offscreen = if skipping_post {
+            false
+        } else {
+            has_post || layer_blend != 0 || through || (isolate && store.subtree_has_pass(id))
+        };
         let mut isolation = self.isolation(has_reader, through);
         isolation.inherit_prefix = has_reader;
         if crosses_context {
@@ -2648,6 +3049,7 @@ impl<B: Backend> Walk<'_, B> {
         let mut post_state: Option<PostIsoState> = None;
         let saved_open = if has_post {
             self.scope()?;
+            let unbounded = B::ALLOW_UNBOUNDED_VIEW_BLUR;
             let parent_tb = self.backend.target_bounds();
             let raw_out = IRect::around(dev_bbox.inflate(1.0, 1.0));
             let padded_out = IRect {
@@ -2666,6 +3068,39 @@ impl<B: Backend> Walk<'_, B> {
             } else {
                 padded_out.intersect(parent_tb)
             };
+            let max_side = self.store.limits.texture_side as i32;
+            // Case L3 (native pass): upsample and composite the coarse post-effect scope already
+            // captured in the far reader-halo tier, skipping redundant re-execution of its subtree.
+            if unbounded && self.backend.has_captured_post_scope(id) {
+                if let Some(&(count, first_glass)) = self.subtree_readers.get(&id) {
+                    if first_glass && self.needs_backdrop && !self.backdrop_live {
+                        self.backend.snapshot_backdrop(&self.open)?;
+                        self.backdrop_live = true;
+                    }
+                    if !out_area.is_empty()
+                        && let Some(lb_idx) = active.iter().rposition(|p| matches!(p, ActivePost::LayerBlur { .. }))
+                    {
+                        let (upsample_area, tail_steps) =
+                            Self::build_tail_post_steps(&active[lb_idx + 1..], out_area, max_side)?;
+                        self.stats.reduced += 1;
+                        self.backend.composite_reduced_post(
+                            ReducedPost::Captured(id),
+                            upsample_area,
+                            &tail_steps,
+                            isolation,
+                            layer_blend,
+                            opacity,
+                            &self.open,
+                        )?;
+                    }
+                    self.reader_seq += count;
+                    self.sync_targets(is_context)?;
+                }
+                if suspended {
+                    self.resume_context_clips()?;
+                }
+                return Ok(());
+            }
             let inner_pad = (page_pad - r.post_pad()).max(0.0);
             let inner_pad_dev = if inner_pad > 0.0 {
                 inner_pad * view_scale + 2.0
@@ -2674,27 +3109,31 @@ impl<B: Backend> Walk<'_, B> {
             };
             let content_bbox = device.transform_rect_bbox(bounds).inflate(inner_pad_dev, inner_pad_dev);
             let content_rect = IRect::around(content_bbox).inflate(2, 2);
-            let max_side = self.store.limits.texture_side as i32;
             let mut total_post_pad = 0i32;
             let mut max_step = 4i32;
             for pe in &active {
                 match *pe {
                     ActivePost::LayerBlur { sigma } => {
                         if !out_area.is_empty() {
-                            crate::blur::validate_sigma(
-                                sigma,
-                                IRect {
-                                    x0: 0,
-                                    y0: 0,
-                                    x1: (out_area.x1 - out_area.x0).max(1),
-                                    y1: (out_area.y1 - out_area.y0).max(1),
-                                },
-                                crate::blur::EdgeMode::Zero,
-                            )?;
+                            let check_cb = IRect {
+                                x0: 0,
+                                y0: 0,
+                                x1: (out_area.x1 - out_area.x0).max(1),
+                                y1: (out_area.y1 - out_area.y0).max(1),
+                            };
+                            if unbounded {
+                                crate::blur::validate_view_sigma(sigma, check_cb, crate::blur::EdgeMode::Zero)?;
+                            } else {
+                                crate::blur::validate_sigma(sigma, check_cb, crate::blur::EdgeMode::Zero)?;
+                            }
                         }
                         if sigma > crate::blur::DIRECT_SIGMA_MAX {
-                            let (lvl, _) = crate::blur::choose_level(sigma, crate::blur::MAX_PYRAMID_LEVELS);
-                            max_step = max_step.max(1i32 << lvl.min(8));
+                            let (lvl, _) = if unbounded {
+                                crate::blur::choose_level_view(sigma)
+                            } else {
+                                crate::blur::choose_level(sigma, crate::blur::MAX_PYRAMID_LEVELS)
+                            };
+                            max_step = max_step.max(crate::blur::level_step(lvl));
                         }
                     }
                     ActivePost::Texture {
@@ -2719,7 +3158,7 @@ impl<B: Backend> Walk<'_, B> {
                         }
                     }
                 }
-                total_post_pad = total_post_pad.saturating_add(pe.src_pad());
+                total_post_pad = total_post_pad.saturating_add(pe.src_pad(unbounded));
             }
             let whole_out = padded_out.intersect(self.full_frame);
             let whole_raw_src = if whole_out.is_empty() {
@@ -2739,28 +3178,127 @@ impl<B: Backend> Walk<'_, B> {
                 }
                 return Ok(());
             }
-            let raw_src = content_rect.intersect(out_area.inflate(total_post_pad, total_post_pad));
+            let raw_src = if unbounded {
+                let out_f = Rect::new(
+                    f64::from(out_area.x0) - f64::from(total_post_pad),
+                    f64::from(out_area.y0) - f64::from(total_post_pad),
+                    f64::from(out_area.x1) + f64::from(total_post_pad),
+                    f64::from(out_area.y1) + f64::from(total_post_pad),
+                );
+                let src_f = content_bbox.inflate(2.0, 2.0).intersect(out_f);
+                if src_f.width() <= 0.0 || src_f.height() <= 0.0 {
+                    IRect {
+                        x0: 0,
+                        y0: 0,
+                        x1: 0,
+                        y1: 0,
+                    }
+                } else {
+                    IRect::around(src_f)
+                }
+            } else {
+                content_rect.intersect(out_area.inflate(total_post_pad, total_post_pad))
+            };
             if raw_src.is_empty() {
                 if self.tiled && whole_would_flush {
                     self.backend.flush_barrier(&self.open);
                 }
                 return Ok(());
             }
+            let capture_scope = if unbounded {
+                self.backend
+                    .capturing_coarse_post_scope(id)
+                    .map(|(div, vis, fs)| (id, div, vis, fs))
+            } else {
+                None
+            };
             let phase = view_grid_phase(self.frame.view, max_step);
-            let src_area = align_area_checked(raw_src, max_step, phase, max_side)?;
+            let last_blur = active.iter().enumerate().rev().find_map(|(idx, p)| match *p {
+                ActivePost::LayerBlur { sigma } => Some((idx, sigma)),
+                _ => None,
+            });
+            // Case L2: a reader-free GPU view layer blur whose padded source exceeds the native
+            // texture or memory limits draws on a reduced grid (`exec_reduced_layer_blur`).
+            let native_src_res = align_area_checked(raw_src, max_step, phase, max_side);
+            let try_reduced = unbounded
+                && !has_reader
+                && capture_scope.is_none()
+                && last_blur.is_some_and(|(_, lb_sig)| lb_sig >= 16.0);
+            let prefer_reduced = if try_reduced {
+                let limits = self.backend.reduced_layer_blur_limits();
+                let (native_side, native_px) = (limits.native_side, limits.native_pixels);
+                let rw = (raw_src.x1 - raw_src.x0).max(0) as u32;
+                let rh = (raw_src.y1 - raw_src.y0).max(0) as u32;
+                let big_over_cap = last_blur.is_some_and(|(_, lb_sig)| {
+                    lb_sig > crate::blur::MAX_BLUR_SIGMA && (rw > native_side / 2 || rh > native_side / 2)
+                });
+                native_src_res.is_err()
+                    || rw > native_side
+                    || rh > native_side
+                    || (rw as usize).saturating_mul(rh as usize) > native_px
+                    || big_over_cap
+            } else {
+                false
+            };
+            if prefer_reduced {
+                let (lb_idx, lb_sigma) = last_blur.expect("checked");
+                self.exec_reduced_layer_blur(
+                    id,
+                    parent,
+                    opacity,
+                    layer_blend,
+                    isolation,
+                    out_area,
+                    raw_src,
+                    &active,
+                    lb_idx,
+                    lb_sigma,
+                )?;
+                if suspended {
+                    self.resume_context_clips()?;
+                }
+                return Ok(());
+            }
+            let src_area = native_src_res?;
             let step = max_step.max(1);
             let scene_hint = (
                 ((content_rect.x0 - phase.0).div_euclid(step) * step + phase.0).div_euclid(4) * 4,
                 ((content_rect.y0 - phase.1).div_euclid(step) * step + phase.1).div_euclid(4) * 4,
             );
-            if !self
+            let pushed = match self
                 .backend
-                .push_isolated(src_area, false, Some(scene_hint), isolation, &self.open)?
+                .push_isolated(src_area, false, Some(scene_hint), isolation, &self.open)
             {
+                Ok(p) => p,
+                Err(e) if try_reduced && e.code == crate::error::ErrorCode::Limit => {
+                    let (lb_idx, lb_sigma) = last_blur.expect("checked");
+                    self.exec_reduced_layer_blur(
+                        id,
+                        parent,
+                        opacity,
+                        layer_blend,
+                        isolation,
+                        out_area,
+                        raw_src,
+                        &active,
+                        lb_idx,
+                        lb_sigma,
+                    )?;
+                    if suspended {
+                        self.resume_context_clips()?;
+                    }
+                    return Ok(());
+                }
+                Err(e) => return Err(e),
+            };
+            if !pushed {
                 if self.tiled && whole_would_flush {
                     self.backend.flush_barrier(&self.open);
                 }
                 return Ok(());
+            }
+            if capture_scope.is_some() {
+                self.backend.set_inside_coarse_post_scope(1);
             }
             let prev_viewport = self.viewport;
             let prev_full_frame = self.full_frame;
@@ -2796,6 +3334,7 @@ impl<B: Backend> Walk<'_, B> {
                 max_step,
                 phase,
                 blend: layer_blend,
+                capture_scope,
             });
             None
         } else if use_offscreen {
@@ -3237,6 +3776,9 @@ impl<B: Backend> Walk<'_, B> {
             return res;
         }
         if let Some(post) = post_state {
+            if post.capture_scope.is_some() {
+                self.backend.set_inside_coarse_post_scope(-1);
+            }
             self.ancestor_clips.truncate(previous_reader_clips);
             self.isolated_backdrop_depth -= usize::from(paired);
             self.viewport = post.prev_viewport;
@@ -3254,6 +3796,7 @@ impl<B: Backend> Walk<'_, B> {
             }
             self.open = post.prev_open;
             if res.is_ok() && !self.backend.stop_early() {
+                let unbounded = B::ALLOW_UNBOUNDED_VIEW_BLUR;
                 let max_side = self.store.limits.texture_side as i32;
                 let mut steps = Vec::with_capacity(post.posts.len());
                 let mut post_res = Ok(());
@@ -3263,10 +3806,10 @@ impl<B: Backend> Walk<'_, B> {
                 let mut suffix = 0i32;
                 for i in (0..total).rev() {
                     rem_pads[i] = suffix;
-                    suffix = suffix.saturating_add(post.posts[i].src_pad());
+                    suffix = suffix.saturating_add(post.posts[i].src_pad(unbounded));
                 }
                 for (idx, pe) in post.posts.into_iter().enumerate() {
-                    grown = grown.saturating_add(pe.grow_pad());
+                    grown = grown.saturating_add(pe.grow_pad(unbounded));
                     let step_out = if idx + 1 == total {
                         Ok(post.out_area)
                     } else {
@@ -3286,7 +3829,36 @@ impl<B: Backend> Walk<'_, B> {
                     }
                 }
                 if post_res.is_ok() {
-                    post_res = self.backend.apply_post_isolated(&steps);
+                    if let Some((scope_id, render_div, visible, frame_size)) = post.capture_scope
+                        && let Some(lb_idx) = steps.iter().rposition(|s| matches!(s, PostStep::LayerBlur { .. }))
+                    {
+                        let PostStep::LayerBlur {
+                            out_area: blur_out_area,
+                            ..
+                        } = steps[lb_idx]
+                        else {
+                            unreachable!("found by rposition");
+                        };
+                        take_grid_variance(
+                            steps[..=lb_idx].iter_mut().filter_map(|step| match step {
+                                PostStep::LayerBlur { sigma, .. } => Some(sigma),
+                                _ => None,
+                            }),
+                            render_div,
+                        );
+                        post_res = self.backend.apply_post_isolated(&steps[..=lb_idx]);
+                        if post_res.is_ok() {
+                            let cap_area = blur_out_area
+                                .intersect(visible.inflate(2, 2))
+                                .clamp(frame_size.0, frame_size.1);
+                            post_res = self.backend.capture_post_scope(scope_id, cap_area);
+                        }
+                        if post_res.is_ok() && lb_idx + 1 < steps.len() {
+                            post_res = self.backend.apply_post_isolated(&steps[lb_idx + 1..]);
+                        }
+                    } else {
+                        post_res = self.backend.apply_post_isolated(&steps);
+                    }
                 }
                 if let Err(e) = post_res {
                     self.backend.abort_isolated();
@@ -3977,7 +4549,12 @@ impl<B: Backend> Walk<'_, B> {
         // General reference Gaussian blur over the rasterised cast mask (with canonical caching).
         let margin_local = {
             let s = scale_of(device).max(1e-6);
-            (f64::from(crate::shadow::blur_support_pad(sigma_dev)) + 2.0) / s
+            let pad = if B::ALLOW_UNBOUNDED_VIEW_BLUR {
+                crate::shadow::blur_support_pad_view(sigma_dev)
+            } else {
+                crate::shadow::blur_support_pad(sigma_dev)
+            };
+            (f64::from(pad) + 2.0) / s
         };
         if let Some(st) = stroke_style {
             let stroke_grow = f64::from(st.width) * f64::from(st.miter.max(1.0)) + 1.0;
@@ -4591,13 +5168,38 @@ mod resumable_tests {
 
     /// Wraps `Cpu` and forces a cooperative yield on every probe check so we stress-test
     /// pause/resume across clips, nested frames, opacity layers, shadows, and readers.
-    struct AlwaysYieldCpu {
+    /// With `UNBOUNDED`, it also takes the GPU's reduced-grid layer blur path (case L2) past a
+    /// tiny native limit, counting the reduced composites.
+    struct AlwaysYieldCpu<const UNBOUNDED: bool> {
         inner: Cpu,
         probes: Cell<u32>,
+        reduced_composites: u32,
     }
 
-    impl Backend for AlwaysYieldCpu {
+    impl<const UNBOUNDED: bool> Backend for AlwaysYieldCpu<UNBOUNDED> {
         type Scene = <Cpu as Backend>::Scene;
+        const ALLOW_UNBOUNDED_VIEW_BLUR: bool = UNBOUNDED;
+        fn reduced_layer_blur_limits(&self) -> ReducedBlurLimits {
+            ReducedBlurLimits {
+                replay_side: crate::halo::HALO_REPLAY_SIDE,
+                native_side: if UNBOUNDED { 16 } else { 8192 },
+                native_pixels: if UNBOUNDED { 256 } else { usize::MAX },
+            }
+        }
+        fn composite_reduced_post(
+            &mut self,
+            _source: ReducedPost<'_>,
+            _upsample_area: IRect,
+            _tail_steps: &[PostStep],
+            _isolation: Isolation,
+            _blend: u32,
+            _opacity: f32,
+            _open: &[Open],
+        ) -> Result<()> {
+            self.reduced_composites += 1;
+            self.inner.abort_isolated();
+            Ok(())
+        }
         fn scene(&mut self) -> &mut Self::Scene {
             self.inner.scene()
         }
@@ -4857,9 +5459,10 @@ mod resumable_tests {
         let ref_px = ref_cpu.target.data_as_u8_slice().to_vec();
 
         // 2. Resumable render pausing/resuming across the same scene: must be 100% bitwise identical.
-        let mut ycpu_same = AlwaysYieldCpu {
+        let mut ycpu_same = AlwaysYieldCpu::<false> {
             inner: Cpu::new(limits.glyph_mask_bytes, limits.glyph_mask_side, 0),
             probes: Cell::new(0),
+            reduced_composites: 0,
         };
         ycpu_same.inner.begin(128, 128, frame.area, bg);
         let mut budget_same = limits.frame_verbs;
@@ -4914,9 +5517,10 @@ mod resumable_tests {
         // 3. Resumable render flushing between slices (simulating GPU per-slice submit):
         // under vello_cpu's f32_pipeline, flushing between overlapping translucent shapes adds at
         // most 1/255 quantization rounding; clip replay and reader sequencing stay exact.
-        let mut ycpu = AlwaysYieldCpu {
+        let mut ycpu = AlwaysYieldCpu::<false> {
             inner: Cpu::new(limits.glyph_mask_bytes, limits.glyph_mask_side, 0),
             probes: Cell::new(0),
+            reduced_composites: 0,
         };
         ycpu.inner.begin(128, 128, frame.area, bg);
         let mut budget = limits.frame_verbs;
@@ -4960,5 +5564,185 @@ mod resumable_tests {
             max_diff <= 1,
             "flushed resumable walk exceeded 1/255 rounding tolerance: slices={slices} max_diff={max_diff}"
         );
+    }
+
+    /// A layer blur past the native limits (case L2) blurs its whole subtree on a reduced grid
+    /// and composites it once. A walk that yields at every chance must not pause inside it.
+    #[test]
+    fn resumable_walk_never_pauses_inside_a_reduced_layer_blur() {
+        let limits = Limits::default();
+        let mut store = Store::new(limits);
+        let mut before = Record::empty();
+        before.size = [128.0, 128.0];
+        before.paths.push(rect_path(128.0, 128.0));
+        before.ops = vec![Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::Solid([1.0, 1.0, 1.0, 1.0]),
+            blend: 0,
+        }];
+        store.insert_for_test(1, ROOT, before);
+        let mut scope = Record::empty();
+        scope.transform = Affine::translate((8.0, 8.0));
+        scope.size = [112.0, 112.0];
+        scope.paths.push(rect_path(112.0, 112.0));
+        scope.ops = vec![Op::Children];
+        scope.post_effects = vec![PostEffect::LayerBlur { radius: 40.0 }];
+        store.insert_for_test(2, ROOT, scope);
+        // 48 children cross the 16-record yield probe several times inside the scope.
+        for i in 0..48u32 {
+            let mut r = Record::empty();
+            r.transform = Affine::translate(((i % 8) as f64 * 14.0, (i / 8) as f64 * 14.0));
+            r.size = [14.0, 14.0];
+            r.paths.push(rect_path(14.0, 14.0));
+            r.ops = vec![Op::Fill {
+                path: 0,
+                even_odd: false,
+                paint: Paint::Solid([(i % 4) as f32 * 0.25, 0.4, 0.8, 1.0]),
+                blend: 0,
+            }];
+            store.insert_for_test(100 + i, 2, r);
+        }
+        for i in 0..20u32 {
+            let mut r = Record::empty();
+            r.transform = Affine::translate((f64::from(i) * 6.0, 120.0));
+            r.size = [4.0, 4.0];
+            r.paths.push(rect_path(4.0, 4.0));
+            r.ops = vec![Op::Fill {
+                path: 0,
+                even_odd: false,
+                paint: Paint::Solid([0.0, 0.0, 0.0, 1.0]),
+                blend: 0,
+            }];
+            store.insert_for_test(200 + i, ROOT, r);
+        }
+        let area = IRect {
+            x0: 0,
+            y0: 0,
+            x1: 128,
+            y1: 128,
+        };
+        let frame = Frame {
+            width: 128,
+            height: 128,
+            view: Affine::IDENTITY,
+            detail: false,
+            area,
+        };
+        let mut ycpu = AlwaysYieldCpu::<true> {
+            inner: Cpu::new(limits.glyph_mask_bytes, limits.glyph_mask_side, 0),
+            probes: Cell::new(0),
+            reduced_composites: 0,
+        };
+        ycpu.inner.begin(128, 128, area, [255, 255, 255, 255]);
+        let mut budget = limits.frame_verbs;
+        let mut checkpoint = None;
+        let mut slices = 0u32;
+        let total = loop {
+            slices += 1;
+            match draw_split_resumable(
+                &store,
+                &mut ycpu,
+                &frame,
+                &limits,
+                &mut budget,
+                &Split::all(),
+                false,
+                checkpoint.take(),
+                true,
+            )
+            .expect("resumable slice")
+            {
+                WalkOutcome::Complete { total, .. } => break total,
+                WalkOutcome::Paused { checkpoint: cp, .. } => checkpoint = Some(cp),
+            }
+            assert!(slices < 100, "resumable walk failed to terminate");
+        };
+        assert!(
+            slices >= 2,
+            "expected the walk to yield outside the scope, got {slices} slices"
+        );
+        assert_eq!(
+            ycpu.reduced_composites, 1,
+            "the reduced layer blur was split across {slices} slices"
+        );
+        assert_eq!(total.reduced, 1);
+        assert!(!total.exact());
+    }
+}
+
+#[cfg(test)]
+mod reduced_layer_blur_tests {
+    use super::*;
+
+    fn blur_sigmas(posts: &[ActivePost]) -> Vec<f64> {
+        posts
+            .iter()
+            .filter_map(|p| match *p {
+                ActivePost::LayerBlur { sigma } => Some(f64::from(sigma)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn grid_variance_is_compensated_once_across_a_layer_blur_chain() {
+        let grid_var = f64::from(crate::halo::HALO_GRID_VARIANCE);
+        // Two wide blurs: the chain's total variance on the grid is the device variance over
+        // d^2 less the grid's own, and only the last blur gives any up.
+        let d = 64;
+        let chain = [
+            ActivePost::LayerBlur { sigma: 3000.0 },
+            ActivePost::LayerBlur { sigma: 2700.0 },
+        ];
+        let got = blur_sigmas(&posts_on_grid(&chain, d, Affine::IDENTITY));
+        let device: f64 = 3000.0f64.powi(2) + 2700.0f64.powi(2);
+        let total: f64 = got.iter().map(|s| s * s).sum();
+        assert!((total - (device / f64::from(d * d) - grid_var)).abs() < 1e-3, "{got:?}");
+        assert!((got[0] - 3000.0 / f64::from(d)).abs() < 1e-4, "{got:?}");
+        // A last blur narrower than the grid's variance: the rest comes off the one before.
+        let chain = [
+            ActivePost::LayerBlur { sigma: 3000.0 },
+            ActivePost::LayerBlur { sigma: 16.0 },
+        ];
+        let got = blur_sigmas(&posts_on_grid(&chain, d, Affine::IDENTITY));
+        let device: f64 = 3000.0f64.powi(2) + 16.0f64.powi(2);
+        let total: f64 = got.iter().map(|s| s * s).sum();
+        assert_eq!(got[1], 0.0, "{got:?}");
+        assert!((total - (device / f64::from(d * d) - grid_var)).abs() < 1e-3, "{got:?}");
+        // At device resolution nothing is compensated.
+        let got = blur_sigmas(&posts_on_grid(&chain, 1, Affine::IDENTITY));
+        assert_eq!(got, vec![3000.0, 16.0]);
+    }
+
+    #[test]
+    fn reduced_grid_flags_a_texture_cap_past_a_third_of_sigma() {
+        let view = Affine::IDENTITY;
+        // 40,000 px of source under sigma 2,700: the replay side picks the grid, well inside a
+        // third of sigma, and the texture holds it.
+        let src = IRect {
+            x0: -20_000,
+            y0: -20_000,
+            x1: 20_000,
+            y1: 20_000,
+        };
+        let g = reduced_layer_blur_grid(src, 2700.0, 1024, 8192, view);
+        assert_eq!(g.divisor, 64);
+        assert!(g.size.0 <= 8192 && g.size.1 <= 8192);
+        assert!(!g.past_cutover);
+        // The same source with a 16-texel cap: the divisor doubles past sigma / 3 and says so.
+        let g = reduced_layer_blur_grid(src, 2700.0, 1024, 16, view);
+        assert!(g.size.0 <= 16 && g.size.1 <= 16);
+        assert!(g.divisor as f32 * crate::halo::HALO_MIN_COARSE_SIGMA > 2700.0);
+        assert!(g.past_cutover);
+        // A narrow blur is capped at the largest power of two within a third of its sigma.
+        let g = reduced_layer_blur_grid(src, 100.0, 1024, 1 << 16, view);
+        assert_eq!(g.divisor, 32);
+        assert!(!g.past_cutover);
+        // The grid covers the source on the view's phase.
+        let g = reduced_layer_blur_grid(src, 2700.0, 1024, 8192, Affine::translate((3.0, 5.0)));
+        assert!(g.origin.0 <= src.x0 && g.origin.1 <= src.y0);
+        assert!(g.origin.0 + g.size.0 as i32 * g.divisor >= src.x1);
+        assert!(g.origin.1 + g.size.1 as i32 * g.divisor >= src.y1);
     }
 }

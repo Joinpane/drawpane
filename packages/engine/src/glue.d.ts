@@ -22,6 +22,7 @@ export class Outcome {
   readonly mask_bytes: number;
   readonly coarse: number;
   readonly specks: number;
+  readonly reduced: number;
   readonly presented: boolean;
   readonly standin: boolean;
   readonly plan: number;

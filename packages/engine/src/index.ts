@@ -66,6 +66,11 @@ export interface FrameStats {
   readonly coarse: number;
   readonly specks: number;
   /**
+   * Effects drawn on a reduced grid (a layer blur past the native limits), or visible tiles
+   * holding one: the frame isn't exact, and nothing more will make it so.
+   */
+  readonly reduced: number;
+  /**
    * Something on screen stands in for what isn't drawn yet (a stale tile, another level scaled,
    * the last frame moved, unreadable text as bars): not exact.
    */
@@ -220,6 +225,7 @@ function stats(o: Glue.Outcome, gpu = false): FrameStats {
     maskBytes: o.mask_bytes,
     coarse: o.coarse,
     specks: o.specks,
+    reduced: o.reduced,
     standin: o.standin,
     exact: gpu ? o.exact && !o.standin : !o.standin && o.coarse === 0 && o.specks === 0,
     presented: o.presented,

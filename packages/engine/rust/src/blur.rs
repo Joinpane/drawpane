@@ -62,6 +62,26 @@ pub const MAX_PYRAMID_LEVELS: usize = 8;
 /// than growing kernel radius past `MAX_KERNEL_RADIUS` or allocating unbounded scratch memory.
 pub const MAX_BLUR_SIGMA: f32 = DIRECT_SIGMA_MAX * (1u32 << MAX_PYRAMID_LEVELS) as f32;
 
+/// Extended pyramid depth for interactive GPU view rendering (`2^24 = 16,777,216x`, covering
+/// sigmas up to ~167M px without raising the per-level kernel radius above `MAX_KERNEL_RADIUS`).
+/// CPU/Worker exports retain `MAX_PYRAMID_LEVELS` / `MAX_BLUR_SIGMA` unchanged.
+pub const VIEW_MAX_PYRAMID_LEVELS: usize = 24;
+
+/// Largest standard deviation with unclipped level-space sigma in the GPU view pyramid.
+pub const VIEW_MAX_BLUR_SIGMA: f32 = DIRECT_SIGMA_MAX * (1u32 << VIEW_MAX_PYRAMID_LEVELS) as f32;
+
+/// Deepest pyramid level whose grid step aligns crops, padded outputs and shadow masks (`2^12`
+/// device px). Native levels (`<= MAX_PYRAMID_LEVELS`) always align to their own step; deeper view
+/// levels keep this one, far below their kernel support.
+pub const MAX_ALIGN_LEVEL: usize = 12;
+
+/// The grid step, in device pixels, that aligns work for pyramid level `level` (one place for the
+/// level clamp shared by layer blur, shadows and the reduced halo tiers).
+#[inline]
+pub fn level_step(level: usize) -> i32 {
+    1 << level.min(MAX_ALIGN_LEVEL)
+}
+
 /// Apron texels stored on each of the four sides of every downsampled pyramid level.
 /// The 4-tap `[1, 3, 3, 1]/8` downsample needs a 2-texel apron so edge clamping stays exact across
 /// arbitrary cascade depths and odd dimensions.
@@ -120,6 +140,14 @@ pub fn validate_sigma(sigma: f32, cb: IRect, edge: EdgeMode) -> Result<()> {
     Ok(())
 }
 
+/// Validates that `sigma` is finite and non-negative for unbounded GPU view rendering.
+pub fn validate_view_sigma(sigma: f32, _cb: IRect, _edge: EdgeMode) -> Result<()> {
+    if !sigma.is_finite() || sigma < 0.0 {
+        return Err(EngineError::malformed("blur sigma must be finite and non-negative"));
+    }
+    Ok(())
+}
+
 /// Maximum device-pixel reach from an output pixel needed so split tiles/bands produce
 /// bit-identical Gaussian blur output (kernel half-width, downsample cascade, and alignment slack).
 pub fn blur_reach(sigma: f32) -> f32 {
@@ -135,13 +163,40 @@ pub fn blur_reach(sigma: f32) -> f32 {
     }
 }
 
+/// Maximum device-pixel reach for an unbounded GPU view blur (using up to `VIEW_MAX_PYRAMID_LEVELS`).
+pub fn blur_reach_view(sigma: f32) -> f32 {
+    if !sigma.is_finite() || sigma < MIN_SIGMA {
+        return 0.0;
+    }
+    if sigma <= MAX_BLUR_SIGMA {
+        return blur_reach(sigma);
+    }
+    let (lvl, lvl_sigma) = choose_level_view(sigma);
+    let r = kernel_radius(lvl_sigma).min(MAX_KERNEL_RADIUS);
+    ((f64::from(r) + 4.0) * (1u64 << lvl) as f64) as f32
+}
+
 /// The viewport replay can draw radii above the native kernel limit by reducing its density.
+/// Export plans keep this reach (and the refusals it gives) unchanged.
 pub(crate) fn replay_reach(sigma: f32) -> f32 {
     if !sigma.is_finite() {
         return blur_reach(sigma);
     }
     let ratio = (sigma / MAX_BLUR_SIGMA).max(1.0);
     blur_reach(sigma / ratio) * ratio
+}
+
+/// A GPU view's reach for a backdrop blur of any sigma: the view pyramid's own reach.
+pub(crate) fn replay_reach_view(sigma: f32) -> f32 {
+    if !sigma.is_finite() || sigma <= MAX_BLUR_SIGMA {
+        return blur_reach(sigma);
+    }
+    if sigma <= VIEW_MAX_BLUR_SIGMA {
+        blur_reach_view(sigma)
+    } else {
+        let ratio = (sigma / VIEW_MAX_BLUR_SIGMA).max(1.0);
+        blur_reach_view(VIEW_MAX_BLUR_SIGMA) * ratio
+    }
 }
 
 /// Normalised 1D discrete Gaussian weights for integer taps `-r..=r`, where `r = kernel_radius(sigma)`.
@@ -165,17 +220,10 @@ pub fn gaussian_weights(sigma: f32) -> Vec<f32> {
     weights.into_iter().map(|w| (w / sum) as f32).collect()
 }
 
-/// Chooses the pyramid level `0..=max_level` and level-space sigma for a full-resolution `sigma`.
-///
-/// Level 0 runs directly for `sigma <= DIRECT_SIGMA_MAX`. Higher levels `L >= 1` halve resolution
-/// by `2^L` and compensate for the variance introduced by `L` separable `[1, 3, 3, 1]/8`
-/// downsamples `(4^L - 1) / 4` plus bilinear upsampling `4^L / 6` so the resulting impulse
-/// response matches `blur_reference`.
-pub fn choose_level(sigma: f32, max_level: usize) -> (usize, f32) {
+fn choose_level_capped(sigma: f32, cap: usize) -> (usize, f32) {
     if !sigma.is_finite() || sigma < MIN_SIGMA {
         return (0, 0.0);
     }
-    let cap = max_level.min(MAX_PYRAMID_LEVELS);
     if cap == 0 || sigma <= DIRECT_SIGMA_MAX {
         return (0, sigma);
     }
@@ -194,6 +242,21 @@ pub fn choose_level(sigma: f32, max_level: usize) -> (usize, f32) {
     let rem_var = (sig * sig - pyramid_var).max(0.0);
     let level_sigma = (rem_var.sqrt() / s) as f32;
     (level, level_sigma)
+}
+
+/// Chooses the pyramid level `0..=max_level` and level-space sigma for a full-resolution `sigma`.
+///
+/// Level 0 runs directly for `sigma <= DIRECT_SIGMA_MAX`. Higher levels `L >= 1` halve resolution
+/// by `2^L` and compensate for the variance introduced by `L` separable `[1, 3, 3, 1]/8`
+/// downsamples `(4^L - 1) / 4` plus bilinear upsampling `4^L / 6` so the resulting impulse
+/// response matches `blur_reference`.
+pub fn choose_level(sigma: f32, max_level: usize) -> (usize, f32) {
+    choose_level_capped(sigma, max_level.min(MAX_PYRAMID_LEVELS))
+}
+
+/// Chooses the GPU view pyramid level `0..=VIEW_MAX_PYRAMID_LEVELS` and level-space sigma.
+pub fn choose_level_view(sigma: f32) -> (usize, f32) {
+    choose_level_capped(sigma, VIEW_MAX_PYRAMID_LEVELS)
 }
 
 /// How many pyramid levels (`0..=L`) can be built for a region of size `width` x `height` up to `MAX_PYRAMID_LEVELS`.
@@ -1936,7 +1999,7 @@ pub mod gpu {
             }
             let cb_w = (cb.x1 - cb.x0) as u32;
             let cb_h = (cb.y1 - cb.y0) as u32;
-            let (level, level_sigma) = choose_level(spec.sigma, max_pyramid_level(cb_w, cb_h));
+            let (level, level_sigma) = choose_level_view(spec.sigma);
             if level == 0 {
                 let r = r.min(MAX_KERNEL_RADIUS);
                 let dw = (dirty.x1 - dirty.x0) as u32;
@@ -1995,9 +2058,16 @@ pub mod gpu {
             if cb.is_empty() || dirty.is_empty() || spec.sigma <= DIRECT_SIGMA_MAX {
                 return cb;
             }
-            let (level, _) = choose_level(spec.sigma.min(MAX_BLUR_SIGMA), MAX_PYRAMID_LEVELS);
-            let step = 1 << level;
-            let halo = blur_reach(spec.sigma) as i32;
+            let (level, _) = choose_level_view(spec.sigma);
+            if level >= 14 {
+                return cb;
+            }
+            let step = 1i32 << level;
+            let halo_f = blur_reach_view(spec.sigma).ceil();
+            if !halo_f.is_finite() || halo_f >= (cb.x1 - cb.x0).max(cb.y1 - cb.y0) as f32 {
+                return cb;
+            }
+            let halo = halo_f as i32;
             let axis = |from: i32, to: i32, lo: i32, hi: i32| {
                 let a = (from.clamp(lo, hi - 1) - halo - lo).max(0);
                 let b = (to.clamp(lo + 1, hi) + halo - lo).max(1);
@@ -2560,7 +2630,7 @@ pub mod gpu {
             let dirty = effective_dirty(spec.dirty, dst_size, dst_origin);
             let cb = Self::source_bounds(spec, src_size, dirty);
             let pyramid_key = pyramid_key.map(|key| PyramidKey::new(key.source_id, cb, spec.edge));
-            validate_sigma(spec.sigma, cb, spec.edge)?;
+            validate_view_sigma(spec.sigma, cb, spec.edge)?;
             if dirty.is_empty() {
                 return Ok(());
             }
@@ -2591,7 +2661,7 @@ pub mod gpu {
 
             let cb_w = (cb.x1 - cb.x0) as u32;
             let cb_h = (cb.y1 - cb.y0) as u32;
-            let (level, level_sigma) = choose_level(spec.sigma, max_pyramid_level(cb_w, cb_h));
+            let (level, level_sigma) = choose_level_view(spec.sigma);
             if level == 0 {
                 return self.encode_direct(
                     device, encoder, src_view, src_id, cb, spec.edge, spec.sigma, dst_view, dst_origin, dirty, max_tex,
@@ -2778,7 +2848,7 @@ pub mod gpu {
                     let sv = self.scratch_v.as_ref().expect("scratch_v");
                     (sv.width, sv.height, sv.view.clone(), sv.view_id)
                 };
-                let inv_scale = 1.0 / (1u32 << level) as f32;
+                let inv_scale = (1.0 / (1u64 << level) as f64) as f32;
                 let data_up = UniformData {
                     p0: [dst_origin.0 as f32, dst_origin.1 as f32, inv_scale, 0.0],
                     clamp_bounds: [cb.x0 as f32, cb.y0 as f32, blur_rect.x0 as f32, blur_rect.y0 as f32],
@@ -2812,6 +2882,69 @@ pub mod gpu {
                 self.invalidate_source_inner(u64::MAX, true);
             }
             Ok(())
+        }
+
+        /// Bilinearly upsamples a reduced-resolution blurred texture covering device origin
+        /// `src_dev_origin` at grid spacing `divisor` into full-resolution `dst_view` over
+        /// `(dst_dev_origin, dst_size)`. Reuses `fs_upsample` with `f64` origin subtraction so
+        /// extreme-zoom coordinates retain full `f32` precision.
+        #[allow(clippy::too_many_arguments)]
+        pub fn encode_upsample_rect(
+            &mut self,
+            device: &wgpu::Device,
+            encoder: &mut wgpu::CommandEncoder,
+            src_view: &wgpu::TextureView,
+            src_view_id: u64,
+            src_tex_size: (u32, u32),
+            src_active_size: (u32, u32),
+            src_dev_origin: (f64, f64),
+            divisor: i32,
+            dst_view: &wgpu::TextureView,
+            dst_dev_origin: (i32, i32),
+            dst_size: (u32, u32),
+        ) {
+            let (dw, dh) = dst_size;
+            if dw == 0 || dh == 0 {
+                return;
+            }
+            let rel_x = (f64::from(dst_dev_origin.0) - src_dev_origin.0) as f32;
+            let rel_y = (f64::from(dst_dev_origin.1) - src_dev_origin.1) as f32;
+            let inv_d = (1.0 / f64::from(divisor.max(1))) as f32;
+            let data_up = UniformData {
+                p0: [rel_x, rel_y, inv_d, 0.0],
+                clamp_bounds: [0.0, 0.0, 0.0, 0.0],
+                p2: [
+                    1.0 / src_tex_size.0.max(1) as f32,
+                    1.0 / src_tex_size.1.max(1) as f32,
+                    0.0,
+                    0.0,
+                ],
+                border: [
+                    src_active_size.0.max(1) as f32,
+                    src_active_size.1.max(1) as f32,
+                    0.0,
+                    0.0,
+                ],
+            };
+            let (slab_idx, offset) = self.push_uniform(device, data_up);
+            let group = self.make_bind_group(device, src_view, src_view_id, slab_idx);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("blur upsample rect"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: dst_view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                ..Default::default()
+            });
+            pass.set_scissor_rect(0, 0, dw, dh);
+            pass.set_pipeline(&self.upsample);
+            pass.set_bind_group(0, &group, &[offset]);
+            pass.draw(0..3, 0..1);
         }
 
         #[allow(clippy::too_many_arguments)]
@@ -3552,5 +3685,232 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(err.code, crate::error::ErrorCode::Limit);
+    }
+
+    /// The GPU view pyramid's 1D model: `[1, 3, 3, 1] / 8` downsamples to `level` with a two
+    /// texel apron and clamped edges, the level's Gaussian, then bilinear upsampling. Returns the
+    /// result at every `step`-th source pixel.
+    fn view_pyramid_1d(src: &[f64], sigma: f32, step: usize) -> Vec<(usize, f64)> {
+        let n = src.len();
+        let (lvl, lvl_sigma) = choose_level_view(sigma);
+        assert!(lvl >= 1);
+        let mut lw = n.div_ceil(2);
+        let mut cur = vec![0.0f64; lw + 4];
+        for (stored, slot) in cur.iter_mut().enumerate() {
+            let base = (stored as i32 - 2) * 2 - 1;
+            let sample = |idx: i32| src[idx.clamp(0, n as i32 - 1) as usize];
+            *slot = (sample(base) + 3.0 * sample(base + 1) + 3.0 * sample(base + 2) + sample(base + 3)) / 8.0;
+        }
+        for _ in 2..=lvl {
+            let prev = cur;
+            let prev_sw = prev.len() as i32;
+            lw = lw.div_ceil(2);
+            cur = vec![0.0f64; lw + 4];
+            for (stored, slot) in cur.iter_mut().enumerate() {
+                let base = (stored as i32 - 2) * 2 + 1;
+                let sample = |idx: i32| prev[idx.clamp(0, prev_sw - 1) as usize];
+                *slot = (sample(base) + 3.0 * sample(base + 1) + 3.0 * sample(base + 2) + sample(base + 3)) / 8.0;
+            }
+        }
+        let weights = gaussian_weights(lvl_sigma);
+        let r = (weights.len() / 2) as i32;
+        let sw = cur.len() as i32;
+        let blurred: Vec<f64> = (0..sw)
+            .map(|i| {
+                weights
+                    .iter()
+                    .enumerate()
+                    .map(|(wi, &w)| cur[(i + wi as i32 - r).clamp(0, sw - 1) as usize] * f64::from(w))
+                    .sum()
+            })
+            .collect();
+        let scale = (1u64 << lvl) as f64;
+        (0..n)
+            .step_by(step)
+            .map(|x| {
+                let pos = ((x as f64 + 0.5) / scale + 2.0 - 0.5).clamp(0.0, (sw - 1) as f64);
+                let i0 = pos.floor() as usize;
+                let i1 = (i0 + 1).min(sw as usize - 1);
+                let t = pos - i0 as f64;
+                (x, blurred[i0] * (1.0 - t) + blurred[i1] * t)
+            })
+            .collect()
+    }
+
+    fn erf(x: f64) -> f64 {
+        let t = 1.0 / (1.0 + 0.327_591_1 * x.abs());
+        let y = 1.0
+            - (((((1.061_405_429 * t - 1.453_152_027) * t) + 1.421_413_741) * t - 0.284_496_736) * t + 0.254_829_592)
+                * t
+                * (-x * x).exp();
+        y.copysign(x)
+    }
+
+    #[test]
+    fn view_pyramid_matches_the_gaussian_over_views_wider_than_sigma() {
+        // A bar one sigma wide in a view eight sigmas wide: both edges and the space between
+        // them fall inside the kernel, so every level and tap carries real content (a single
+        // edge in a narrow view only tests the clamped extension).
+        for &sigma in &[2700.0f32, 5400.0] {
+            let s = f64::from(sigma);
+            let n = (8.0 * s) as usize;
+            let (a, b) = (3.5 * s, 4.5 * s);
+            let src: Vec<f64> = (0..n)
+                .map(|x| {
+                    let x = x as f64 + 0.5;
+                    if (a..b).contains(&x) { 1.0 } else { 0.0 }
+                })
+                .collect();
+            let mut max_err = 0.0f64;
+            for (x, got) in view_pyramid_1d(&src, sigma, 13) {
+                let x = x as f64 + 0.5;
+                // Stay a kernel away from the clamped view edges, where the model extends zeros.
+                if x < 3.0 * s || x > n as f64 - 3.0 * s {
+                    continue;
+                }
+                let k = s * std::f64::consts::SQRT_2;
+                let expected = 0.5 * (erf((x - a) / k) - erf((x - b) / k));
+                max_err = max_err.max((got - expected).abs() * 255.0);
+            }
+            assert!(max_err <= 1.0, "sigma {sigma}: max error {max_err:.3}/255");
+        }
+    }
+
+    #[test]
+    fn view_pyramid_levels_extend_past_2560_and_match_erf_exactness() {
+        // Verify choose_level_view extends smoothly above MAX_BLUR_SIGMA (2560) with bounded
+        // level_sigma <= DIRECT_SIGMA_MAX (r <= 35) and exact reach scaling.
+        for &(sigma, expected_lvl) in &[(2560.0f32, 8usize), (2700.0, 9), (5400.0, 10), (10_000.0, 10)] {
+            let (lvl, lvl_sigma) = choose_level_view(sigma);
+            assert_eq!(lvl, expected_lvl, "sigma={sigma}");
+            assert!(
+                lvl_sigma > 4.9 && lvl_sigma <= DIRECT_SIGMA_MAX,
+                "sigma={sigma} lvl={lvl} lvl_sigma={lvl_sigma}"
+            );
+            assert!(kernel_radius(lvl_sigma) <= MAX_KERNEL_RADIUS);
+            assert!(
+                validate_view_sigma(
+                    sigma,
+                    IRect {
+                        x0: 0,
+                        y0: 0,
+                        x1: 64,
+                        y1: 64
+                    },
+                    EdgeMode::Zero
+                )
+                .is_ok()
+            );
+        }
+        assert!(
+            validate_view_sigma(
+                -1.0,
+                IRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: 4,
+                    y1: 4
+                },
+                EdgeMode::Zero
+            )
+            .is_err()
+        );
+        assert!(
+            validate_view_sigma(
+                f32::NAN,
+                IRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: 4,
+                    y1: 4
+                },
+                EdgeMode::Zero
+            )
+            .is_err()
+        );
+        assert!(
+            validate_view_sigma(
+                f32::INFINITY,
+                IRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: 4,
+                    y1: 4
+                },
+                EdgeMode::Zero
+            )
+            .is_err()
+        );
+
+        // Simulate the exact 1D GPU downsample cascade + level blur + bilinear upsample for a
+        // step edge at sigma = 2700 (lvl = 9) and sigma = 10000 (lvl = 10), checking against the
+        // closed-form continuous Gaussian CDF 0.5 * (1 + erf(x / (sqrt(2) * sigma))).
+        fn erf_approx(x: f64) -> f64 {
+            let s = x.signum();
+            let a = x.abs();
+            let t = 1.0 / (1.0 + 0.327_591_1 * a);
+            let y = 1.0
+                - (((((1.061_405_429 * t - 1.453_152_027) * t) + 1.421_413_741) * t - 0.284_496_736) * t
+                    + 0.254_829_592)
+                    * t
+                    * (-a * a).exp();
+            s * y
+        }
+        let n = 4096usize;
+        let split = 2048usize;
+        let src: Vec<f64> = (0..n).map(|x| if x < split { 0.0 } else { 1.0 }).collect();
+        for &sigma in &[2700.0f32, 5400.0, 10_000.0] {
+            let (lvl, lvl_sigma) = choose_level_view(sigma);
+            // Level 1 from level 0 with 2-texel apron and EdgeMode::Clamp.
+            let mut lw = n.div_ceil(2);
+            let mut cur = vec![0.0f64; lw + 4];
+            for (stored, slot) in cur.iter_mut().enumerate() {
+                let logical = stored as i32 - 2;
+                let base = logical * 2 - 1;
+                let sample = |idx: i32| src[idx.clamp(0, n as i32 - 1) as usize];
+                *slot = (sample(base) + 3.0 * sample(base + 1) + 3.0 * sample(base + 2) + sample(base + 3)) / 8.0;
+            }
+            for _ in 2..=lvl {
+                let prev = cur;
+                let prev_sw = prev.len() as i32;
+                lw = lw.div_ceil(2);
+                cur = vec![0.0f64; lw + 4];
+                for (stored, slot) in cur.iter_mut().enumerate() {
+                    let logical = stored as i32 - 2;
+                    let base = logical * 2 + 1;
+                    let sample = |idx: i32| prev[idx.clamp(0, prev_sw - 1) as usize];
+                    *slot = (sample(base) + 3.0 * sample(base + 1) + 3.0 * sample(base + 2) + sample(base + 3)) / 8.0;
+                }
+            }
+            // Blur at level `lvl` using exact normalized Gaussian weights.
+            let weights = gaussian_weights(lvl_sigma);
+            let r = (weights.len() / 2) as i32;
+            let sw = cur.len() as i32;
+            let blurred: Vec<f64> = (0..sw)
+                .map(|i| {
+                    let mut acc = 0.0;
+                    for (wi, &w) in weights.iter().enumerate() {
+                        let k = wi as i32 - r;
+                        acc += cur[(i + k).clamp(0, sw - 1) as usize] * f64::from(w);
+                    }
+                    acc
+                })
+                .collect();
+            let step = (1u64 << lvl) as f64;
+            let mut max_err = 0.0f64;
+            for x in (0..n).step_by(7) {
+                let l_coord = (x as f64 + 0.5) / step;
+                let stored_pos = (l_coord + 2.0 - 0.5).clamp(0.0, (sw - 1) as f64);
+                let i0 = stored_pos.floor() as usize;
+                let i1 = (i0 + 1).min(sw as usize - 1);
+                let t = stored_pos - i0 as f64;
+                let got = blurred[i0] * (1.0 - t) + blurred[i1] * t;
+                let expected = 0.5
+                    * (1.0
+                        + erf_approx((x as f64 + 0.5 - split as f64) / (f64::from(sigma) * std::f64::consts::SQRT_2)));
+                max_err = max_err.max((got - expected).abs() * 255.0);
+            }
+            assert!(max_err <= 1.0, "sigma={sigma} max_err={max_err:.3}/255");
+        }
     }
 }

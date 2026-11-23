@@ -147,6 +147,9 @@ pub struct TileEntry {
     pub full: bool,
     /// Something it shows changed since it was drawn: a stand-in until drawn again.
     pub stale: bool,
+    /// It holds an effect drawn on a reduced grid (a layer blur past the native limits): not
+    /// exact, and nothing to draw again for.
+    pub reduced: bool,
     /// The frame it was last shown or drawn in.
     pub used: u64,
 }
@@ -248,6 +251,8 @@ pub struct Composite {
     pub complete: bool,
     /// Tiles the frame shows that are stale or missing.
     pub pending: u32,
+    /// Tiles the frame shows that hold an effect drawn on a reduced grid.
+    pub reduced: u32,
 }
 
 /// The last frame, as a stand-in: the view it was drawn under and its size.
@@ -889,7 +894,7 @@ impl TileCache {
 
     /// Records a tile drawn into `slot`: `exact`, nothing stood in for any record in it; `full`,
     /// drawn without level of detail.
-    pub fn drawn(&mut self, key: TileKey, slot: u32, exact: bool, full: bool) {
+    pub fn drawn(&mut self, key: TileKey, slot: u32, exact: bool, full: bool, reduced: bool) {
         self.unpainted.remove(&key);
         self.free.retain(|s| *s != slot);
         self.tiles.insert(
@@ -899,6 +904,7 @@ impl TileCache {
                 exact: full && exact,
                 full,
                 stale: false,
+                reduced,
                 used: self.frame,
             },
         );
@@ -1363,6 +1369,9 @@ impl TileCache {
             if e.stale || !e.exact {
                 out.exact = false;
             }
+            if e.reduced && !e.stale {
+                out.reduced += 1;
+            }
             // Pending: more frames will draw it (not a provisional record's tile, drawn as well
             // as the list allows until the list changes).
             if !e.current() {
@@ -1497,7 +1506,7 @@ mod tests {
     fn draw_all(c: &mut TileCache, plan: &Plan) {
         for j in &plan.jobs {
             let s = c.slot_for(j.key).expect("slot");
-            c.drawn(j.key, s, !j.detail, !j.detail);
+            c.drawn(j.key, s, !j.detail, !j.detail, false);
         }
     }
 
@@ -1746,7 +1755,7 @@ mod tests {
                     extra -= 1;
                 }
                 let s = c.slot_for(j.key).expect("the plan counted a slot for it");
-                c.drawn(j.key, s, true, true);
+                c.drawn(j.key, s, true, true, false);
             }
             if c.compose(&b, None).exact {
                 return;
@@ -1826,7 +1835,7 @@ mod tests {
         let key = moving.jobs[0].key;
         let slot = c.slot_for(key).expect("slot");
         // A coarse pass can draw every record it visits without sampling the full halo.
-        c.drawn(key, slot, true, false);
+        c.drawn(key, slot, true, false, false);
         let shown = c.compose(&moving, None);
         assert!(!shown.exact);
         assert_eq!(shown.pending, 1);

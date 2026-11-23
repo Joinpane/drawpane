@@ -2792,5 +2792,805 @@ for (const build of ["browser", "webgl"] as const) {
         expect(r.p99, `${r.name} max=${r.max} p99=${r.p99} mean=${r.mean}`).toBeLessThanOrEqual(2);
       }
     });
+
+    test("budgeted moving frames that hit a limit present a warped stand-in (F4)", async ({
+      page,
+    }) => {
+      test.setTimeout(120_000);
+      await openEngine(page, build);
+      // A sparse blue square at the page origin and, 2,000 units to the right, 150 small squares
+      // (about 750 path verbs) under a wide background blur. With `frame_verbs` at 400 a tile
+      // there hits the verb limit.
+      const list = new ListWriter(0xffffffff, 1);
+      list.reset();
+      let nextId = 1;
+      const addRect = (x: number, y: number, w: number, h: number, ops: WireRecord["ops"]) => {
+        list.set(nextId++, ROOT, {
+          flags: 0,
+          transform: [1, 0, 0, 1, x, y],
+          opacity: 1,
+          width: w,
+          height: h,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [{ kind: "rect", w, h, radii: [0, 0, 0, 0], smoothing: 0 }],
+          ops,
+          coarse: [],
+        });
+      };
+      const solid = (c: readonly [number, number, number, number]): WireRecord["ops"] => [
+        { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: c } },
+      ];
+      addRect(0, 0, 400, 400, solid([0.2, 0.4, 0.8, 1]));
+      for (let i = 0; i < 150; i++) {
+        addRect(2000 + (i % 15) * 30, Math.floor(i / 15) * 30, 20, 20, solid([0.8, 0.2, 0.2, 1]));
+      }
+      addRect(2000, 0, 500, 400, [
+        { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 1800 },
+      ]);
+      const bytes = [...list.finish()];
+      const res = await page.evaluate(async (bytes) => {
+        const name = "/engine.js";
+        const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+        await glue.default({ module_or_path: "/engine_bg.wasm" });
+        const bg = new Float32Array([1, 1, 1, 1]);
+        const requireOk = (o: { ok: boolean; message: string; free(): void }) => {
+          const { ok, message } = o;
+          o.free();
+          if (!ok) throw new Error(message);
+        };
+        const dev = await glue.createGpu(null, 0);
+        if (!dev.ok) throw new Error(dev.message);
+        const gpu = new glue.Engine(0, 0);
+        try {
+          if (!gpu.attachGpu || !gpu.renderGpu || !gpu.gpuPixels)
+            throw new Error("missing GPU entry points");
+          requireOk(gpu.setLimit("frame_verbs", 400));
+          requireOk(gpu.attachGpu(dev));
+          dev.free();
+          requireOk(gpu.apply(new Uint8Array(bytes)));
+          const pixel = async (x: number, y: number) => {
+            const px = await gpu.gpuPixels?.();
+            if (!(px instanceof Uint8Array)) throw new Error(px?.message ?? "no pixels");
+            const i = (y * 512 + x) * 4;
+            return [px[i] ?? 0, px[i + 1] ?? 0, px[i + 2] ?? 0];
+          };
+          // A settled frame over the blue square.
+          requireOk(gpu.renderGpu(512, 320, 1, 0, 0, 1, bg, false, 0, true));
+          const before = await pixel(100, 100);
+          // Pan into the dense region while moving, on a 16.7 ms budget.
+          const verb = gpu.renderGpu(512, 320, 1, -1900, 0, 1, bg, true, 16.7, true);
+          const verbOut = {
+            ok: verb.ok,
+            plan: verb.plan,
+            standin: verb.standin,
+            exact: verb.exact,
+          };
+          verb.free();
+          // What a read-back shows: the stand-in for the new camera (the square moved out of
+          // view, so background), not the previous frame.
+          const after = await pixel(100, 100);
+          const far = gpu.renderGpu(512, 320, 1, -1e13, 0, 1, bg, true, 16.7, true);
+          const farOut = { ok: far.ok, plan: far.plan, standin: far.standin, exact: far.exact };
+          far.free();
+          return { before, verbOut, after, farOut };
+        } finally {
+          gpu.free();
+        }
+      }, bytes);
+      console.log(`[zoom-blur ${build}] f4 ${JSON.stringify(res)}`);
+      expect(res.before[2]).toBeGreaterThan(150);
+      expect(res.before[0]).toBeLessThan(100);
+      for (const r of [res.verbOut, res.farOut]) {
+        expect(r.ok).toBe(true);
+        expect(r.plan).toBe(1);
+        expect(r.standin).toBe(true);
+        expect(r.exact).toBe(false);
+      }
+      expect(Math.min(...res.after), `stand-in read back: ${res.after}`).toBeGreaterThan(240);
+    });
+
+    test(`view blurs past MAX_BLUR_SIGMA (sigma 2,700) stay within <=4/255 max, <=2/255 p99 (${build})`, async ({
+      page,
+      browserName,
+    }) => {
+      test.skip(browserName !== "chromium", "Requires Chromium GPU build.");
+      test.setTimeout(240_000);
+      await openEngine(page, build);
+      const expectedBackend = build === "browser" ? "webgpu" : "webgl2";
+
+      // Exact 2D Gaussian integral over disjoint opaque rects composited over white (with optional
+      // alpha-only mode for EdgeMode::Zero LayerBlur / DropShadow over white page).
+      const evalZeroLayerOverWhite = (
+        rects: readonly DisjointRect[],
+        px: number,
+        py: number,
+        sigmaPage: number,
+      ): [number, number, number] => {
+        const inv = 1 / (sigmaPage * Math.SQRT2);
+        let rPrem = 0;
+        let gPrem = 0;
+        let bPrem = 0;
+        let aSum = 0;
+        for (const rc of rects) {
+          const wx = 0.5 * (erf((rc.x1 - px) * inv) - erf((rc.x0 - px) * inv));
+          if (wx <= 0) continue;
+          const wy = 0.5 * (erf((rc.y1 - py) * inv) - erf((rc.y0 - py) * inv));
+          const w = wx * wy;
+          if (w <= 0) continue;
+          rPrem += w * rc.color[0];
+          gPrem += w * rc.color[1];
+          bPrem += w * rc.color[2];
+          aSum += w;
+        }
+        const rem = Math.max(0, 1 - aSum);
+        return [rPrem + rem * 255, gPrem + rem * 255, bPrem + rem * 255];
+      };
+
+      // A small view: each tile it covers repeats the sigma 2,700 work, which a software
+      // adapter (CI) does slowly.
+      const w = 256;
+      const h = 192;
+      const zoom = 100; // 10,000%
+      const dpr = 2;
+      const s = zoom * dpr; // 200 dev px / page unit
+      const radius = 30; // sigma = 0.45 * 30 * 200 = 2,700 px (> MAX_BLUR_SIGMA = 2,560)
+      const sigmaPage = 0.45 * radius; // 13.5 page units
+
+      const makeRecord = (
+        list: ListWriter,
+        id: number,
+        parent: number,
+        x: number,
+        y: number,
+        rw: number,
+        rh: number,
+        ops: WireRecord["ops"],
+        extra: Partial<WireRecord> = {},
+      ) => {
+        const autoFlags =
+          (extra.postEffects?.length ? FLAG.post : 0) |
+          (ops.some((o) => o.op === "children") ? FLAG.group : 0);
+        list.set(id, parent, {
+          transform: [1, 0, 0, 1, x, y],
+          opacity: 1,
+          width: rw,
+          height: rh,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [{ kind: "rect", w: rw, h: rh, radii: [0, 0, 0, 0], smoothing: 0 }],
+          ops,
+          coarse: [],
+          ...extra,
+          flags: autoFlags | (extra.flags ?? 0),
+        });
+      };
+      const solid = (c: [number, number, number], a = 1): WireRecord["ops"] => [
+        {
+          op: "fill",
+          path: 0,
+          evenOdd: false,
+          paint: { kind: "solid", color: [c[0] / 255, c[1] / 255, c[2] / 255, a] },
+        },
+      ];
+
+      // 1. BackgroundBlur at 10,000% with sigma = 2,700 (and 5,400) over disjoint backdrop.
+      const bg2700 = buildDisjointExtremeZoomScene({
+        zoom,
+        dpr,
+        radius,
+        uniform: true,
+        stripePeriodPx: 320,
+        centerPage: [50 + w / (2 * s), 50 + h / (2 * s)],
+        blurRect: [0, 0, 100, 100],
+      });
+
+      // 2. Standalone compact LayerBlur (Case L1, native fit): 5 x 5 page rect (1,000 x 1,000 dev px)
+      //    at 10,000% with sigma = 2,700 (> MAX_BLUR_SIGMA). High-contrast black/blue split ensures
+      //    both unblurred and all-white outputs fail the <= 4/255 gate.
+      const l1Rects: DisjointRect[] = [
+        { x0: 47.5, y0: 47.5, x1: 50, y1: 52.5, color: [0, 0, 0] },
+        { x0: 50, y0: 47.5, x1: 52.5, y1: 52.5, color: [24, 96, 216] },
+      ];
+      const l1List = new ListWriter(0xffffffff, 2);
+      l1List.reset();
+      makeRecord(l1List, 1, ROOT, -100, -100, 300, 300, solid([255, 255, 255]));
+      makeRecord(l1List, 2, ROOT, 47.5, 47.5, 5, 5, [{ op: "children" }], {
+        postEffects: [{ kind: "layerBlur", radius }],
+      });
+      makeRecord(l1List, 3, 2, 0, 0, 2.5, 5, solid([0, 0, 0]));
+      makeRecord(l1List, 4, 2, 2.5, 0, 2.5, 5, solid([24, 96, 216]));
+      const l1Bytes = [...l1List.finish()];
+
+      // 3. Standalone large LayerBlur (case L2, one reduced-grid pass): 120 x 120 page mosaic
+      //    (24,000 x 24,000 dev px) of abutting coloured tiles with sigma = 2,700.
+      const l2Rects: DisjointRect[] = [];
+      const l2List = new ListWriter(0xffffffff, 3);
+      l2List.reset();
+      makeRecord(l2List, 1, ROOT, -200, -200, 500, 500, solid([255, 255, 255]));
+      makeRecord(l2List, 2, ROOT, -10, -10, 120, 120, [{ op: "children" }], {
+        postEffects: [{ kind: "layerBlur", radius }],
+      });
+      let lid = 3;
+      const palette: [number, number, number][] = [
+        [220, 38, 38],
+        [37, 99, 235],
+        [22, 163, 74],
+        [234, 179, 8],
+      ];
+      for (let r = 0; r < 12; r++) {
+        for (let c = 0; c < 12; c++) {
+          const x = c * 10;
+          const y = r * 10;
+          const col = palette[(r * 3 + c) % palette.length] ?? [220, 38, 38];
+          makeRecord(l2List, lid++, 2, x, y, 10, 10, solid(col));
+          l2Rects.push({ x0: -10 + x, y0: -10 + y, x1: x, y1: y, color: col });
+        }
+      }
+      const l2Bytes = [...l2List.finish()];
+
+      // 4. LayerBlur scope over 2,560 wrapping a BackgroundBlur (Case L3): page striped backdrop
+      //    behind a LayerBlur(radius=30 -> sigma=2,700) frame containing a BackgroundBlur(radius=10
+      //    -> sigma=900) filling the frame. For a backdrop blurred by sigma_1=900 then LayerBlurred
+      //    by sigma_2=2700 inside the finite frame, compare directly against a full-resolution
+      //    scale-reduced GPU render (zoom=5 -> 1/20x exact scale, sigma_1=45, sigma_2=135) where
+      //    both blurs run natively below MAX_BLUR_SIGMA!
+      const l3List = new ListWriter(0xffffffff, 4);
+      l3List.reset();
+      makeRecord(l3List, 1, ROOT, -200, -200, 500, 500, solid([255, 255, 255]));
+      let l3id = 2;
+      for (let i = -20; i <= 20; i++) {
+        makeRecord(
+          l3List,
+          l3id++,
+          ROOT,
+          -100,
+          i * 6,
+          300,
+          3,
+          solid(i % 2 === 0 ? [20, 40, 180] : [200, 40, 30]),
+        );
+      }
+      const scopeId = l3id++;
+      makeRecord(l3List, scopeId, ROOT, 0, 0, 100, 100, [{ op: "children" }], {
+        postEffects: [{ kind: "layerBlur", radius }],
+      });
+      makeRecord(l3List, l3id++, scopeId, 0, 0, 100, 100, [
+        { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 10 },
+      ]);
+      const l3Bytes = [...l3List.finish()];
+
+      // 5. DropShadow at 10,000% with blur = 30 -> sigma = 2,700 (> MAX_BLUR_SIGMA).
+      const shRects: DisjointRect[] = [{ x0: 45, y0: 45, x1: 55, y1: 55, color: [30, 80, 210] }];
+      const shList = new ListWriter(0xffffffff, 5);
+      shList.reset();
+      makeRecord(shList, 1, ROOT, -100, -100, 300, 300, solid([255, 255, 255]));
+      makeRecord(
+        shList,
+        2,
+        ROOT,
+        45,
+        45,
+        10,
+        10,
+        [
+          {
+            op: "dropShadow",
+            paths: [0],
+            evenOdd: false,
+            dx: 0,
+            dy: 0,
+            blur: radius,
+            color: [30 / 255, 80 / 255, 210 / 255, 1],
+            blend: 0,
+          },
+        ],
+        { reach: 45 },
+      );
+      const shBytes = [...shList.finish()];
+
+      const gpuOut = await page.evaluate(
+        async ({
+          expectedBackend,
+          w,
+          h,
+          zoom,
+          dpr,
+          bg2700,
+          l1Bytes,
+          l2Bytes,
+          l3Bytes,
+          shBytes,
+        }) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          const bg = new Float32Array([1, 1, 1, 1]);
+          const requireOk = (o: { ok: boolean; message: string; free(): void }) => {
+            const { ok, message } = o;
+            o.free();
+            if (!ok) throw new Error(message);
+          };
+          const dev = await glue.createGpu(null, 0);
+          if (!dev.ok) throw new Error(dev.message);
+          if (dev.backend !== expectedBackend) throw new Error(`wrong backend ${dev.backend}`);
+          const engine = new glue.Engine(0, 0);
+          try {
+            if (!engine.attachGpu || !engine.renderGpu || !engine.gpuPixels) {
+              throw new Error("missing GPU entry points");
+            }
+            const gpuPixels = engine.gpuPixels.bind(engine);
+            requireOk(engine.attachGpu(dev));
+            dev.free();
+            const finished = async (label: string, target = engine) => {
+              const done = await target.gpuFinished?.();
+              if (done && !done.ok) throw new Error(`${label}: ${done.message}`);
+              done?.free();
+            };
+            // Settles a view the way the editor does: frames at `budget`, slices between them,
+            // and (unlike the editor) a GPU wait after each call, so no single wait holds a whole
+            // software-rendered frame of sigma 2,700 work. Counts the calls that said exact.
+            const settle = async (
+              label: string,
+              rw: number,
+              rh: number,
+              z: number,
+              ox: number,
+              oy: number,
+              editorViewport: boolean,
+              budget: number,
+              target = engine,
+            ) => {
+              let calls = 0;
+              let exactCalls = 0;
+              let last = {
+                ok: false,
+                plan: -1,
+                exact: false,
+                standin: true,
+                reduced: 0,
+                pending: -1,
+              };
+              while (calls < 400) {
+                calls++;
+                const r = target.renderGpu?.(
+                  rw,
+                  rh,
+                  z,
+                  -ox * z,
+                  -oy * z,
+                  dpr,
+                  bg,
+                  false,
+                  budget,
+                  editorViewport,
+                );
+                if (!r) throw new Error(`${label}: no GPU entry point`);
+                last = {
+                  ok: r.ok,
+                  plan: r.plan,
+                  exact: r.exact,
+                  standin: r.standin,
+                  reduced: r.reduced,
+                  pending: r.pending,
+                };
+                const inProgress = r.in_progress;
+                if (r.exact) exactCalls++;
+                requireOk(r);
+                await finished(label, target);
+                if (budget <= 0 || (last.pending === 0 && !inProgress)) break;
+                target.renderGpuAhead?.(bg, budget)?.free();
+                await finished(label, target);
+              }
+              return { ...last, calls, exactCalls };
+            };
+            const renderCase = async (
+              label: string,
+              bytes: number[] | null,
+              rw: number,
+              rh: number,
+              z: number,
+              ox: number,
+              oy: number,
+              editorViewport: boolean,
+            ) => {
+              if (bytes) requireOk(engine.apply(new Uint8Array(bytes)));
+              const meta = await settle(
+                label,
+                rw,
+                rh,
+                z,
+                ox,
+                oy,
+                editorViewport,
+                editorViewport ? 8 : 0,
+              );
+              const px = await gpuPixels();
+              if (!(px instanceof Uint8Array)) throw new Error(`${label}: ${px.message}`);
+              return { ...meta, pixels: Array.from(px) };
+            };
+
+            const bgRes = await renderCase("bg", bg2700, w, h, zoom, 50, 50, true);
+            const l1Res = await renderCase("L1", l1Bytes, w, h, zoom, 50, 50, true);
+            const l2Res = await renderCase("L2", l2Bytes, w, h, zoom, 50, 50, true);
+            const l3Res = await renderCase("L3", l3Bytes, w, h, zoom, 50, 50, true);
+            // Reference for Case L3: render a wide native view at zoom = 2 (50x smaller scale ->
+            // sigma_bg = 18, sigma_lb = 54, both well inside native limits) spanning 200 x 200 page
+            // units so the entire 100 x 100 scope and full BackgroundBlur reach fit without crop
+            // clamping, aligned to the exact page coordinate of pixel (floor(w/2), floor(h/2)).
+            const l3RefW = 800;
+            const l3RefH = 800;
+            const l3RefZoom = 2;
+            const l3RefS = l3RefZoom * dpr;
+            const cxPage = 50 + (Math.floor(w / 2) + 0.5) / (zoom * dpr);
+            const cyPage = 50 + (Math.floor(h / 2) + 0.5) / (zoom * dpr);
+            const l3RefOx = cxPage - (l3RefW / 2 + 0.5) / l3RefS;
+            const l3RefOy = cyPage - (l3RefH / 2 + 0.5) / l3RefS;
+            const l3Ref = await renderCase(
+              "L3-ref",
+              null,
+              l3RefW,
+              l3RefH,
+              l3RefZoom,
+              l3RefOx,
+              l3RefOy,
+              false,
+            );
+            const shRes = await renderCase("shadow", shBytes, w, h, zoom, 50, 50, true);
+            // Every reduced path stays not exact on the budgeted tile path too: from a cleared
+            // cache, over many small slices and over the editor's 8 ms ones. On a fresh engine,
+            // since revisions only move forward: the reduced halo (1), then L2 (3), then L3 (4).
+            const honesty = [];
+            const devH = await glue.createGpu(null, 0);
+            if (!devH.ok) throw new Error(devH.message);
+            const honest = new glue.Engine(0, 0);
+            try {
+              if (!honest.attachGpu) throw new Error("missing GPU entry points");
+              requireOk(honest.attachGpu(devH));
+              devH.free();
+              for (const [label, bytes] of [
+                ["reader halo", bg2700],
+                ["L2", l2Bytes],
+                ["L3", l3Bytes],
+              ] as const) {
+                requireOk(honest.apply(new Uint8Array(bytes)));
+                for (const budget of [1, 8]) {
+                  honest.clearTiles?.();
+                  const label2 = `${label} at ${budget} ms`;
+                  const r = await settle(label2, w, h, zoom, 50, 50, true, budget, honest);
+                  // The L2 bake over slices must also draw what one pass draws.
+                  let pixels: number[] = [];
+                  if (label === "L2") {
+                    const px = await honest.gpuPixels?.();
+                    if (!(px instanceof Uint8Array)) throw new Error(`${label2}: ${px?.message}`);
+                    pixels = Array.from(px);
+                  }
+                  honesty.push({ label, budget, ...r, pixels });
+                }
+              }
+            } finally {
+              honest.free();
+            }
+            return { bgRes, l1Res, l2Res, l3Res, l3Ref, shRes, honesty };
+          } finally {
+            engine.free();
+          }
+        },
+        {
+          expectedBackend,
+          w,
+          h,
+          zoom,
+          dpr,
+          bg2700: bg2700.bytes,
+          l1Bytes,
+          l2Bytes,
+          l3Bytes,
+          shBytes,
+        },
+      );
+
+      const scoreAgainstOracle = (
+        pixels: number[],
+        evalAt: (px: number, py: number) => [number, number, number],
+      ) => {
+        const diffs: number[] = [];
+        let max = 0;
+        let sum = 0;
+        for (let y = 0; y < h; y++) {
+          const py = 50 + (y + 0.5) / s;
+          for (let x = 0; x < w; x++) {
+            const px = 50 + (x + 0.5) / s;
+            const [er, eg, eb] = evalAt(px, py);
+            const o = (y * w + x) * 4;
+            const d = Math.max(
+              Math.abs((pixels[o] ?? 0) - Math.round(er)),
+              Math.abs((pixels[o + 1] ?? 0) - Math.round(eg)),
+              Math.abs((pixels[o + 2] ?? 0) - Math.round(eb)),
+            );
+            diffs.push(d);
+            if (d > max) max = d;
+            sum += d;
+          }
+        }
+        diffs.sort((a, b) => a - b);
+        return {
+          max,
+          p99: diffs[Math.floor((diffs.length - 1) * 0.99)] ?? 0,
+          mean: Math.round((sum / diffs.length) * 100) / 100,
+        };
+      };
+
+      const bgStats = scoreAgainstOracle(gpuOut.bgRes.pixels, (px, py) =>
+        evalDisjointBlurAt(bg2700.rects, bg2700.bg, px, py, sigmaPage),
+      );
+      const l1Stats = scoreAgainstOracle(gpuOut.l1Res.pixels, (px, py) =>
+        evalZeroLayerOverWhite(l1Rects, px, py, sigmaPage),
+      );
+      const l2Stats = scoreAgainstOracle(gpuOut.l2Res.pixels, (px, py) =>
+        evalZeroLayerOverWhite(l2Rects, px, py, sigmaPage),
+      );
+      const shStats = scoreAgainstOracle(gpuOut.shRes.pixels, (px, py) =>
+        evalZeroLayerOverWhite(shRects, px, py, sigmaPage),
+      );
+
+      // Compare every L3 pixel with the native zoom=2 reference at the same page coordinate,
+      // sampled bilinearly (the reference's 4 px per page unit resolve a field blurred by 57 of
+      // its pixels exactly enough).
+      const l3RefS = 2 * dpr;
+      const cxPage = 50 + (Math.floor(w / 2) + 0.5) / s;
+      const cyPage = 50 + (Math.floor(h / 2) + 0.5) / s;
+      const l3RefOx = cxPage - (800 / 2 + 0.5) / l3RefS;
+      const l3RefOy = cyPage - (800 / 2 + 0.5) / l3RefS;
+      const l3Stats = scoreAgainstOracle(gpuOut.l3Res.pixels, (px, py) => {
+        const fx = (px - l3RefOx) * l3RefS - 0.5;
+        const fy = (py - l3RefOy) * l3RefS - 0.5;
+        const x0 = Math.floor(fx);
+        const y0 = Math.floor(fy);
+        const tx = fx - x0;
+        const ty = fy - y0;
+        const at = (x: number, y: number, c: number) =>
+          gpuOut.l3Ref.pixels[(y * 800 + x) * 4 + c] ?? 0;
+        const lerp = (c: number) =>
+          (at(x0, y0, c) * (1 - tx) + at(x0 + 1, y0, c) * tx) * (1 - ty) +
+          (at(x0, y0 + 1, c) * (1 - tx) + at(x0 + 1, y0 + 1, c) * tx) * ty;
+        return [lerp(0), lerp(1), lerp(2)];
+      });
+
+      console.log(
+        `[zoom-blur ${build}] F6 sigma=2700: ` +
+          `bg(plan=${gpuOut.bgRes.plan},exact=${gpuOut.bgRes.exact},max=${bgStats.max},p99=${bgStats.p99}) ` +
+          `L1(exact=${gpuOut.l1Res.exact},max=${l1Stats.max},p99=${l1Stats.p99}) ` +
+          `L2-mosaic(exact=${gpuOut.l2Res.exact},max=${l2Stats.max},p99=${l2Stats.p99}) ` +
+          `L3-scope(plan=${gpuOut.l3Res.plan},exact=${gpuOut.l3Res.exact},max=${l3Stats.max},p99=${l3Stats.p99}) ` +
+          `shadow(exact=${gpuOut.shRes.exact},max=${shStats.max},p99=${shStats.p99})`,
+      );
+
+      // Accuracy holds for every case. Exact means nothing in the frame was reduced: the
+      // background blur and the L3 scope run in the reduced halo tiers and L2 on a reduced grid,
+      // so those frames are never exact; L1 and the shadow are device-resolution and are.
+      expect(gpuOut.bgRes.plan).toBe(4);
+      expect(gpuOut.bgRes.exact).toBe(false);
+      expect(bgStats.max).toBeLessThanOrEqual(4);
+      expect(bgStats.p99).toBeLessThanOrEqual(2);
+
+      expect(gpuOut.l1Res.exact).toBe(true);
+      expect(l1Stats.max).toBeLessThanOrEqual(4);
+      expect(l1Stats.p99).toBeLessThanOrEqual(2);
+
+      expect(gpuOut.l2Res.exact).toBe(false);
+      expect(l2Stats.max).toBeLessThanOrEqual(4);
+      expect(l2Stats.p99).toBeLessThanOrEqual(2);
+
+      expect(gpuOut.l3Res.plan).toBe(4);
+      expect(gpuOut.l3Res.exact).toBe(false);
+      expect(l3Stats.max).toBeLessThanOrEqual(4);
+      expect(l3Stats.p99).toBeLessThanOrEqual(2);
+
+      expect(gpuOut.shRes.exact).toBe(true);
+
+      for (const { pixels, ...r } of gpuOut.honesty) {
+        console.log(`[zoom-blur ${build}] F6 budgeted honesty: ${JSON.stringify(r)}`);
+        const what = `${r.label} at ${r.budget} ms`;
+        expect(r.exactCalls, `${what} never says exact`).toBe(0);
+        expect(r.exact, `${what} settles not exact`).toBe(false);
+        expect(r.pending, `${what} settles`).toBe(0);
+        if (r.label === "L2") {
+          expect(r.reduced, `${what} names its reduction`).toBeGreaterThan(0);
+          const stats = scoreAgainstOracle(pixels, (px, py) =>
+            evalZeroLayerOverWhite(l2Rects, px, py, sigmaPage),
+          );
+          expect(stats.max, `${what} max`).toBeLessThanOrEqual(4);
+          expect(stats.p99, `${what} p99`).toBeLessThanOrEqual(2);
+        } else {
+          expect(r.plan, `${what} uses the reduced halo tiers`).toBe(4);
+        }
+      }
+      const l2Slices = gpuOut.honesty.find((r) => r.label === "L2" && r.budget === 1)?.calls ?? 0;
+      expect(l2Slices, "L2 at 1 ms settles over several slices").toBeGreaterThan(1);
+      expect(shStats.max).toBeLessThanOrEqual(4);
+      expect(shStats.p99).toBeLessThanOrEqual(2);
+    });
+
+    test("settled 1,000% frames turn exact through apron tiles and match a native reference", async ({
+      page,
+    }) => {
+      test.setTimeout(240_000);
+      await openEngine(page, build);
+      // An abutting mosaic (the worst case for a reduced backdrop: every seam conflates) under a
+      // background blur whose reach (radius 30 at zoom 10: sigma 135 px, about 546 px of reach)
+      // is past the 512 px band halo, wide enough for the reduced halo tiers. The view's padded
+      // whole frame would fit one native pass, so `padded_view_pixels` is lowered to make the
+      // view settle through apron tiles.
+      const zoom = 10;
+      const dpr = 1;
+      const s = zoom * dpr;
+      const [tw, th] = [512, 320];
+      const view = { x: 40, y: 30 };
+      const margin = 60; // page units of reference margin (600 px, past the reach)
+      const list = new ListWriter(0xffffffff, 1);
+      list.reset();
+      let nextId = 1;
+      const add = (x: number, y: number, w: number, h: number, ops: WireRecord["ops"]) =>
+        list.set(nextId++, ROOT, {
+          flags: 0,
+          transform: [1, 0, 0, 1, x, y],
+          opacity: 1,
+          width: w,
+          height: h,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [{ kind: "rect", w, h, radii: [0, 0, 0, 0], smoothing: 0 }],
+          ops,
+          coarse: [],
+        });
+      const fill = (c: [number, number, number]): WireRecord["ops"] => [
+        { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [...c, 1] } },
+      ];
+      add(-200, -200, 600, 600, fill([1, 1, 1]));
+      const palette: [number, number, number][] = [
+        [0.86, 0.15, 0.15],
+        [0.15, 0.39, 0.92],
+        [0.09, 0.64, 0.29],
+        [0.08, 0.08, 0.08],
+      ];
+      for (let r = 0; r < 26; r++) {
+        for (let c = 0; c < 26; c++) {
+          add(
+            -90 + c * 10.3,
+            -90 + r * 10.3,
+            10.3,
+            10.3,
+            fill(palette[(r * 3 + c) % 4] ?? [0, 0, 0]),
+          );
+        }
+      }
+      // The blur covers the test view and a little more.
+      add(view.x - 5, view.y - 5, tw / s + 10, th / s + 10, [
+        { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 30 },
+      ]);
+      const bytes = [...list.finish()];
+      const res = await page.evaluate(
+        async ({ bytes, zoom, dpr, tw, th, view, margin, s }) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          const bg = new Float32Array([1, 1, 1, 1]);
+          const requireOk = (o: { ok: boolean; message: string; free(): void }) => {
+            const { ok, message } = o;
+            o.free();
+            if (!ok) throw new Error(message);
+          };
+          const open = async (aprons: boolean) => {
+            const dev = await glue.createGpu(null, 0);
+            if (!dev.ok) throw new Error(dev.message);
+            const engine = new glue.Engine(0, 0);
+            if (
+              !engine.attachGpu ||
+              !engine.renderGpu ||
+              !engine.gpuPixels ||
+              !engine.renderGpuAhead
+            )
+              throw new Error("missing GPU entry points");
+            requireOk(engine.attachGpu(dev));
+            dev.free();
+            if (aprons) requireOk(engine.setLimit("padded_view_pixels", 1));
+            requireOk(engine.apply(new Uint8Array(bytes)));
+            return engine;
+          };
+          // Native reference: a frame holding the whole reach (no reader halo).
+          const ref = await open(false);
+          let refPx: Uint8Array;
+          let refInfo: { plan: number; exact: boolean };
+          try {
+            const rw = tw + 2 * margin * s;
+            const rh = th + 2 * margin * s;
+            const r = ref.renderGpu?.(
+              rw,
+              rh,
+              zoom,
+              -(view.x - margin) * zoom,
+              -(view.y - margin) * zoom,
+              dpr,
+              bg,
+              false,
+              0,
+              true,
+            );
+            if (!r) throw new Error("no frame");
+            refInfo = { plan: r.plan, exact: r.exact };
+            requireOk(r);
+            const px = await ref.gpuPixels?.();
+            if (!(px instanceof Uint8Array)) throw new Error(px?.message ?? "no pixels");
+            refPx = new Uint8Array(tw * th * 4);
+            for (let y = 0; y < th; y++) {
+              const from = ((y + margin * s) * rw + margin * s) * 4;
+              refPx.set(px.subarray(from, from + tw * 4), y * tw * 4);
+            }
+          } finally {
+            ref.free();
+          }
+          // The view settles the way the editor does: frames at the rest budget, then slices
+          // between frames, until a frame says exact or it settles without being exact.
+          // Budget 0 is an unbounded draw: it must take the same exact route, not a whole pass
+          // that falls back to the reduced halo.
+          const settle = async (aprons: boolean, budget: number) => {
+            const engine = await open(aprons);
+            try {
+              const cam = [zoom, -view.x * zoom, -view.y * zoom, dpr] as const;
+              const moving = engine.renderGpu?.(tw, th, ...cam, bg, true, 4, true);
+              const movingExact = moving?.exact ?? true;
+              moving?.free();
+              const t0 = performance.now();
+              let frames = 0;
+              let last = { plan: -1, exact: false, standin: true, pending: -1 };
+              while (frames < 400) {
+                frames++;
+                const r = engine.renderGpu?.(tw, th, ...cam, bg, false, budget, true);
+                if (!r) throw new Error("no frame");
+                last = { plan: r.plan, exact: r.exact, standin: r.standin, pending: r.pending };
+                const inProgress = r.in_progress;
+                requireOk(r);
+                if (last.exact || (last.pending === 0 && !inProgress)) break;
+                if (budget > 0) engine.renderGpuAhead?.(bg, budget)?.free();
+              }
+              const ms = performance.now() - t0;
+              const px = await engine.gpuPixels?.();
+              if (!(px instanceof Uint8Array)) throw new Error(px?.message ?? "no pixels");
+              return { aprons, budget, movingExact, last, frames, ms, test: Array.from(px) };
+            } finally {
+              engine.free();
+            }
+          };
+          return {
+            refInfo,
+            ref: Array.from(refPx),
+            runs: [await settle(true, 8), await settle(false, 8), await settle(false, 0)],
+          };
+        },
+        { bytes, zoom, dpr, tw, th, view, margin, s },
+      );
+      expect(res.refInfo.exact, "the reference is a native frame").toBe(true);
+      for (const run of res.runs) {
+        const stats = diffRegions(run.test, res.ref, tw, th);
+        const route = `${run.aprons ? "forced aprons" : "default limits"}, budget ${run.budget}`;
+        console.log(
+          `[zoom-blur ${build}] apron settle (${route}): ref=${JSON.stringify(res.refInfo)} ` +
+            `moving exact=${run.movingExact} settled=${JSON.stringify(run.last)} after ${run.frames} ` +
+            `frames, ${Math.round(run.ms)} ms; max=${stats.max} p99=${stats.p99} mean=${stats.mean.toFixed(3)}`,
+        );
+        expect(run.movingExact, `${route}: a moving frame is a stand-in`).toBe(false);
+        // With default limits a software adapter refuses the padded view (about 2.3 M pixels);
+        // the view must still settle exact, through aprons, not on the reduced halo.
+        expect(run.last.exact, `${route}: the settled frame is exact`).toBe(true);
+        expect(run.last.plan, `${route}: not the reduced halo`).not.toBe(4);
+        if (run.aprons) expect(run.last.plan, "forced aprons settle on tiles").toBe(0);
+        expect(stats.max, `${route}: max=${stats.max} p99=${stats.p99}`).toBeLessThanOrEqual(2);
+        expect(stats.p99, `${route}: max=${stats.max} p99=${stats.p99}`).toBeLessThanOrEqual(1);
+      }
+    });
   });
 }

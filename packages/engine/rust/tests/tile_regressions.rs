@@ -246,7 +246,7 @@ fn prefetch_cannot_pin_the_slots_promised_to_a_missing_visible_tile() {
     for (i, j) in warm {
         let key = TileKey { level, i, j };
         let slot = cache.slot_for(key).unwrap();
-        cache.drawn(key, slot, true, true);
+        cache.drawn(key, slot, true, true, false);
     }
 
     // Seven visible tiles and nine neighbors are still held. A prior stand-in covered the view.
@@ -265,7 +265,7 @@ fn prefetch_cannot_pin_the_slots_promised_to_a_missing_visible_tile() {
             .unwrap();
         let slot = cache.slot_for(job.key);
         if let Some(slot) = slot {
-            cache.drawn(job.key, slot, true, true);
+            cache.drawn(job.key, slot, true, true, false);
             break;
         }
     }

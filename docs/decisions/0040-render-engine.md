@@ -1763,3 +1763,95 @@ limit continues to report that limit.
 
 Page-open latency remains a separate follow-up. A low-resolution overview immediately after
 sliced admission and fewer text-driven invalidations can shorten the first useful frame.
+
+## Amendment: exact settled frames at high zoom, and view blurs past the native sigma limit (2026-11-23)
+
+This amendment replaces the reviewed version of the backdrop blur follow-ups. It keeps three of
+its parts, drops two, and changes what an exact frame means for readers that sample beyond the
+viewport.
+
+### What exact means
+
+A frame is exact only when nothing in it is reduced. The reduced halo tiers, a layer blur drawn
+on a reduced grid, and a layer-blur scope blurred in the far tier are all reductions, so a frame
+that uses any of them is never exact, and the editor names the reduction. A tile remembers that
+it holds a reduced layer blur, and a resumable tile walk carries the count across its slices, so
+a frame built from such tiles, in any number of slices or from the cache, stays not exact and
+says why. The reviewed version had stamped settled reduced frames exact; that is reverted.
+
+Reduced frames are still useful. While the camera moves they are stand-ins, which may be soft,
+as Figma's are. At rest they are only a fallback for views whose readers reach further than a
+device-resolution tile can hold.
+
+### Settling exact: the native view, else apron tiles
+
+At rest, an editor view whose readers reach past the 512 px band halo is drawn exact one of two
+ways. Where the view padded with the readers' whole reach fits one device-resolution pass
+(`Limits::padded_view_pixels`, 16 million pixels by default, within the texture limit, the
+software raster budget and the GPU budget), that pass draws it, as before. The engine's planner
+and the renderer decide this with one check (`Gpu::padded_view`), so a view never settles on the
+reduced halo while an exact route fits. Otherwise its tiles bake with the readers' whole
+device-resolution apron, the way Figma bakes effects per tile. One padded tile must fit the halo
+render side: 4,096 px on hardware GPUs and 2,048 px on software adapters, so the apron is at most
+1,792 px or 768 px. The tiles bake under the 8 ms frame budget with resumable walks, in frames
+and in the slices between frames, so the view refines tile by tile after motion and becomes exact
+when the last visible tile lands. As for every tile, a paused apron tile owns the scratch target, its
+reader planes and the glass mask atlas until it completes. Tiles with a wide apron
+skip off-screen prefetch, since each one costs many tiles of drawing. If the apron tiles hit a
+GPU memory limit, the view keeps the reduced halo frame (not exact) until it changes. Exports
+keep the band halo and their refusals.
+
+The native pass comes first because it is cheaper where it fits: on the T4 the review's small
+probe views settle exact in 33 to 102 ms that way, against 49 to 483 ms through apron tiles.
+
+A wider apron is not admitted. A device-resolution backdrop for a sigma 3,240 px background blur
+at 10,000% spans about 700 million device pixels for one viewport, and each stacked reader needs
+its own. No GPU in the target set draws that within Figma's 2.1 s window, so we infer that
+Figma reduces there too. Making such views exact needs a different structure: each wide reader's backdrop drawn
+at device resolution in chunks, each chunk reduced through the blur's own pyramid, and the reduced
+levels shared by every tile. That is future work, not part of this change.
+
+### Dropped from the reviewed version
+
+The point-sampled strips, the seam detection and the dyadic merges are gone. Seam conflation only
+shows in reduced frames, which are now motion stand-ins or honestly not exact, so they bought
+nothing at rest and cost up to 260 ms of main-thread encoding per settled frame on a 2,400-tile
+page.
+
+### Kept from the reviewed version
+
+- WebGL2 cost at high zoom: a glass lens pulls an earlier blur into the mid tier only for stops
+  inside its visible read area, mid tiers reuse progressive stops captured in the far tier, hardware
+  GPUs use 512 px progressive tiles when the atlas fits, and mid-tier scratch stays resident.
+- A moving frame that hits a limit presents the last frame warped to the new camera. This is part
+  of the tile path's single motion policy, and a read-back shows the stand-in, not the stale frame.
+- GPU views draw blurs of any finite sigma: the view pyramid runs to 24 levels, shadow masks use
+  i64 bounds, and layer blurs past the native limits run at device resolution when they fit (L1),
+  on a reduced grid (L2) or in the far tier (L3). L2 and L3 are reductions. The reduced grid flags
+  when the texture limit pushes it past a third of sigma, and the grid's own variance comes off a
+  chain of layer blurs once.
+
+### Size and exports
+
+The WebGL2 build does not set `opt-level = "z"` on wgpu-hal and glow (the reviewed version did):
+it cost 0.5 to 2 ms per frame on the command path. It stays within its budget at 1,397 of
+1,400 KB gzipped. Export plans keep main's reader reach, and all 78 cases of the review's export
+comparison are byte-identical to main's Worker build, refusal messages included.
+
+### Measured on a T4 (two paired runs against main after #315)
+
+Time to exact is the first frame the engine stamps exact after the camera stops (median of
+three gestures, the slowest in brackets), on a 2,880 × 1,800 view.
+
+| Case | WebGL2, main | WebGL2, this change | WebGPU readback, main | WebGPU readback, this change |
+| --- | --- | --- | --- | --- |
+| One wide blur at 1,000%, continuous zoom | never exact | 95-102 ms (400-449 ms) | never exact | 57-62 ms (681-857 ms) |
+| One wide blur at 1,000%, jump | never exact | 342-389 ms (352-457 ms) | never exact | 632-727 ms (669-771 ms) |
+| Zoom-blur scene at 100% | 61-62 ms | 56 ms | 89-93 ms | 86-89 ms |
+| Zoom-blur scene at 1,000%, 2,500%, 10,000% | never exact | never exact | never exact | never exact |
+
+The zoom-blur scene stacks four readers, so its reach is past any apron at 1,000% and beyond.
+Main-thread encode of a settled frame on the review's 2,400-tile mosaic board stays at 3 to
+6.5 ms on both sides. WebGL2 forced redraws at 1,000% take 44 to 53 ms here against 72 to 108 ms
+on main. The review's probes settle exact on 53 of 53 hardware views, as on main, with at most
+2/255 against a native reference.
