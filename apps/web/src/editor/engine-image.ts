@@ -1,6 +1,7 @@
 import type { ImageCache, ImageDemand, Size } from "@drawpane/editor";
 import type { RenderEngine } from "@drawpane/engine";
 import { sniffImage } from "@drawpane/model";
+import type { DecodeReply, DecodeRequest } from "./image-decode.worker";
 
 const MIB = 1024 * 1024;
 const MAX_DECODES = 4;
@@ -116,6 +117,74 @@ function levelFor(pyramid: readonly Size[], span: Size, scale: number): number {
   );
 }
 
+type Decode = (blob: Blob, options: ImageBitmapOptions) => Promise<ImageBitmap>;
+
+/**
+ * A decoder that runs `createImageBitmap(blob, options)` in the worker `spawn` starts, or on this
+ * thread if none starts or it fails. Chrome finishes a decode's resize and premultiply on the
+ * calling thread (see image-decode.worker.ts), so on the main thread a large photo's decode is a
+ * long task.
+ */
+export function imageDecoder(spawn: () => Worker | null): Decode {
+  type Job = {
+    readonly blob: Blob;
+    readonly options: ImageBitmapOptions;
+    resolve(bitmap: ImageBitmap): void;
+    reject(error: unknown): void;
+  };
+  const jobs = new Map<number, Job>();
+  const here = (job: Job) =>
+    void createImageBitmap(job.blob, job.options).then(job.resolve, job.reject);
+  let worker: Worker | null | undefined;
+  let ticket = 0;
+  const start = (): Worker | null => {
+    try {
+      worker = spawn();
+    } catch {
+      worker = null;
+    }
+    if (!worker) return null;
+    const started = worker;
+    started.onmessage = ({ data }: MessageEvent<DecodeReply>) => {
+      const job = jobs.get(data.id);
+      if (!job) {
+        if ("bitmap" in data) data.bitmap.close();
+        return;
+      }
+      jobs.delete(data.id);
+      if ("bitmap" in data) job.resolve(data.bitmap);
+      else job.reject(new Error(data.error));
+    };
+    started.onerror = () => {
+      // It could not load (a strict CSP, say) or it died: decode here from now on.
+      started.terminate();
+      worker = null;
+      const stranded = [...jobs.values()];
+      jobs.clear();
+      for (const job of stranded) here(job);
+    };
+    return started;
+  };
+  return (blob, options) =>
+    new Promise<ImageBitmap>((resolve, reject) => {
+      const job = { blob, options, resolve, reject };
+      const target = worker === undefined ? start() : worker;
+      if (!target) {
+        here(job);
+        return;
+      }
+      const id = ++ticket;
+      jobs.set(id, job);
+      target.postMessage({ id, blob, options } satisfies DecodeRequest);
+    });
+}
+
+const decodeInWorker = imageDecoder(() =>
+  typeof Worker === "function"
+    ? new Worker(new URL("./image-decode.worker.ts", import.meta.url), { type: "module" })
+    : null,
+);
+
 /** Rejects abandoned work promptly and closes a bitmap that resolves after cancellation. */
 function untilAborted<T>(
   promise: Promise<T>,
@@ -194,6 +263,7 @@ export class ViewImages {
     private readonly cache: Pick<ImageCache, "encoded" | "encodedVersion">,
     private readonly metadataReady: (ref: string) => void,
     private readonly changed: () => void,
+    private readonly decode: Decode = decodeInWorker,
   ) {}
 
   info(ref: string): ImageInfo | null {
@@ -881,9 +951,7 @@ export class ViewImages {
         }
         // Bitmap decodes cannot be interrupted. Keep the slot until the native
         // work returns instead of starting a new decode on every camera tick.
-        bitmap = await untilAborted(createImageBitmap(input, resize(target)), timeout, (b) =>
-          b.close(),
-        );
+        bitmap = await untilAborted(this.decode(input, resize(target)), timeout, (b) => b.close());
         const decoded = bitmap;
         const upload = this.#uploadTail.then(() =>
           this.#commit(target, decoded, backend, abort.signal),

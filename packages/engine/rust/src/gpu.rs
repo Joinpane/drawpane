@@ -3530,7 +3530,7 @@ impl Gpu {
             "shadow reduced" => 9,
             _ => 10,
         };
-        self.counters.renders[kind] += 1;
+        self.counters.renders[kind] = self.counters.renders[kind].wrapping_add(1);
         Ok(())
     }
 
@@ -6420,7 +6420,7 @@ impl Gpu {
                     verbs,
                     backdrop_gen: self.backdrop_gen,
                 });
-                self.counters.pauses += 1;
+                self.counters.pauses = self.counters.pauses.wrapping_add(1);
                 Ok(TileStep::Paused)
             }
             exec::WalkOutcome::Complete {
@@ -6605,7 +6605,8 @@ impl Gpu {
         let dual = write_main && write_backdrop;
         let draw = scene_dirty && (write_main || write_backdrop);
         if draw {
-            self.counters.flushes[usize::from(why).min(14)] += 1;
+            let slot = &mut self.counters.flushes[usize::from(why).min(14)];
+            *slot = slot.wrapping_add(1);
         }
 
         // Vello defaults to clearing the attachment. Existing planes already hold their
@@ -9574,7 +9575,7 @@ impl Backend for Gpu {
         if area.is_empty() {
             return Ok(false);
         }
-        self.counters.scopes += 1;
+        self.counters.scopes = self.counters.scopes.wrapping_add(1);
         let area = if clip_to_parent {
             // Match the CPU scope's sampling extent and preserve frame-relative raster cells.
             IRect {
@@ -10007,7 +10008,7 @@ impl Backend for Gpu {
                     if let Some(a) = self.active.as_mut() {
                         a.shadow_hits += 1;
                     }
-                    self.counters.shadow_hits += 1;
+                    self.counters.shadow_hits = self.counters.shadow_hits.wrapping_add(1);
                     let (sox, soy) = self.scene_offset();
                     let px = f64::from(origin.0 - sox);
                     let py = f64::from(origin.1 - soy);
@@ -10044,7 +10045,7 @@ impl Backend for Gpu {
                 }
 
                 // Cache miss: rasterise + blur canonical mask once and cache it.
-                self.counters.shadow_misses += 1;
+                self.counters.shadow_misses = self.counters.shadow_misses.wrapping_add(1);
                 let t0 = now();
                 let sub0 = self.active.as_ref().map_or(0.0, |a| a.submit_ms);
                 let max_tex = self.device.limits().max_texture_dimension_2d;
