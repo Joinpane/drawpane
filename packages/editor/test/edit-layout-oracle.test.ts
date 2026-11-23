@@ -45,7 +45,7 @@ import {
 } from "@drawpane/model";
 import fc from "fast-check";
 import { describe, expect, it } from "vitest";
-import { canMoveInto, wouldCycle } from "../src/components";
+import { canMoveInto, propagationOps, wouldCycle } from "../src/components";
 import { Doc } from "../src/doc";
 import { Editor } from "../src/editor";
 import { layoutOps } from "../src/layout";
@@ -1412,11 +1412,19 @@ function check(
 }
 
 /**
- * What issue 294's fix will do, done here: lays the editor's document out where a rebase left it
- * stale (what a full layout changes, text measured, copies placed by `placedGeometry`), as the
- * editor's own unsent fix-up, outside its undo history.
+ * What issue 294's fix will do, done here: syncs the instances around what the collaborator's edit
+ * changed (the editor's unsent edits can have made copies of it, which the rebase replays as they
+ * were made: a fill the collaborator gave a layer in an instance the editor moved into a main,
+ * seed 601453470), then lays the editor's document out where the rebase left it stale (what a
+ * full layout changes, text measured, copies placed by `placedGeometry`), as the editor's own
+ * unsent fix-up, outside its undo history.
  */
-function layOutRebase(editor: Editor): void {
+function layOutRebase(editor: Editor, touched: readonly string[] = []): void {
+  const synced = propagationOps(
+    editor.doc,
+    touched.filter((id) => editor.doc.has(id)),
+  );
+  if (synced.length > 0) editor.sync.commit(synced);
   for (let round = 0; round < 4; round++) {
     const ops: Op[] = [];
     for (const entry of unsettled(editor.doc)) {
@@ -1478,6 +1486,8 @@ function connect(editor: Editor, nodes: readonly NodeRecord[], copies: "compact"
   editor.setPage("p");
   const other = makeEditor(nodes, copies);
   const remote: Op[][] = [];
+  /** What the collaborator's latest edit changed. */
+  let last: string[] = [];
   /** Layers the editor's edits changed, and the frames around them, all unsent until `settle`. */
   const ours = new Set<string>();
   /** Of those, the layers the editor's edits changed themselves (not the frames around them). */
@@ -1489,6 +1499,10 @@ function connect(editor: Editor, nodes: readonly NodeRecord[], copies: "compact"
    */
   const overlapped = new Set<string>();
   return {
+    /** The layers the collaborator's latest edit changed. */
+    touched(): string[] {
+      return last;
+    },
     /**
      * Copy and instance layers both sides changed concurrently, meeting in a rebase (issue 307's:
      * their override marks can collide).
@@ -1572,6 +1586,7 @@ function connect(editor: Editor, nodes: readonly NodeRecord[], copies: "compact"
         .filter((op) => op.op === "move" && editor.doc.has(op.id) && inComponent(op.id))
         .map((op) => op.id);
       remote.push(ops);
+      last = ops.map((op) => op.id);
       revn += 1;
       receive({ t: "txn", revn, ops });
       // What a rebase moved out of every component (issue 294's, above): the editor's copies of
@@ -1684,7 +1699,7 @@ describe("an edit leaves the document as a full layout would", () => {
                 // as an undo and redo do) over the collaborator's edit.
                 const rebasing = editor.sync.pendingCount > 0;
                 const serialSettled = room.remote(step);
-                if (rebasing && serialSettled) layOutRebase(editor);
+                if (rebasing && serialSettled) layOutRebase(editor, room.touched());
               }
             }
             if (room) room.settle(mirror, `after ${history.join(", ")}`);
@@ -2051,6 +2066,53 @@ describe("the oracle's checks and waivers", () => {
         want: 60,
       });
     });
+
+  it("syncs the copies an unsent edit made of what a collaborator changed, after a rebase (#294)", () => {
+    const editor = makeEditor(
+      [
+        { id: "p", type: "page", parent: ROOT_ID, key: "a0", props: {} },
+        {
+          id: "part",
+          type: "frame",
+          parent: "p",
+          key: "a0",
+          props: { width: 60, height: 20, isComponent: true },
+        },
+        { id: "r", type: "rect", parent: "part", key: "a0", props: { width: 40, height: 10 } },
+        {
+          id: "holder",
+          type: "frame",
+          parent: "p",
+          key: "a1",
+          props: { width: 160, height: 80, isComponent: true },
+        },
+        { id: "dark", type: "frame", parent: "p", key: "a2", props: { width: 160, height: 80 } },
+      ],
+      "materialized",
+    );
+    const inst = editor.insertInstance("part", { x: 400, y: 0 }) as string;
+    const instR = editor.doc.childIds(inst)[0] as string;
+    const held = editor.insertInstance("holder", { x: 400, y: 200 }) as string;
+    editor.sync.takeUnsent();
+    const room = connect(editor, editor.doc.stored(), "materialized");
+    // Unsent: the instance goes into a main, so the main's instance gets a copy of its layer.
+    expect(
+      editor.commit([{ op: "move", id: inst, parent: "holder", key: editor.topKey("holder") }]),
+    ).toBe(true);
+    const copyOf = (parent: string, source: string) =>
+      editor.doc
+        .childIds(parent)
+        .find((id) => getProp(editor.doc.get(id)?.props ?? {}, "mirrors") === source);
+    // Meanwhile the collaborator fills that layer (the only copy they have), arriving as a rebase.
+    room.remote(1);
+    const fills = getProp(editor.doc.get(instR)?.props ?? {}, "fills");
+    expect(fills).toEqual([{ type: "solid", color: "#336699" }]);
+    const copy = copyOf(copyOf(held, inst) as string, instR) as string;
+    // The rebase replays the move as it was made, so the copy shows the fill from before (#294).
+    expect(getProp(editor.doc.get(copy)?.props ?? {}, "fills")).not.toEqual(fills);
+    layOutRebase(editor, room.touched());
+    expect(getProp(editor.doc.get(copy)?.props ?? {}, "fills")).toEqual(fills);
+  });
 
   it("counts as concurrent (#307) only edits that met in a rebase", () => {
     const copies = "materialized";
