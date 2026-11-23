@@ -320,17 +320,22 @@ export function placedGeometry(
       (getProp(parentSource.props, "layoutMode") !== "none" ||
         getProp(parent.props, "overrides").includes("layoutMode")));
   // The flow it left: its frame's, or where the frame took its auto layout away, the main frame's
-  // kind of flow with the frame's own alignment (which it may have set itself).
-  const left: NodeRecord =
-    getProp(parent.props, "layoutMode") !== "none"
-      ? parent
-      : {
-          ...parent,
-          props: {
-            ...parent.props,
-            layoutMode: getProp(parentSource.props, "layoutMode"),
-          } as NodeRecord["props"],
-        };
+  // kind of flow with the frame's own alignment (which it may have set itself). Made only when
+  // it's asked about.
+  let left: NodeRecord | undefined;
+  const flowLeft = (): NodeRecord => {
+    left ??=
+      getProp(parent.props, "layoutMode") !== "none"
+        ? parent
+        : {
+            ...parent,
+            props: {
+              ...parent.props,
+              layoutMode: getProp(parentSource.props, "layoutMode"),
+            } as NodeRecord["props"],
+          };
+    return left;
+  };
   // A nested instance swapped for another component is that component's size.
   const shown = getProp(copy.props, "instanceOf");
   const swapped = !!shown && shown !== getProp(source.props, "instanceOf");
@@ -352,7 +357,7 @@ export function placedGeometry(
       unbound(axis.size) ||
       // The size that flow gave it stays, and so does one its main layer's flow gave the main
       // layer: that isn't a size of the main layer's own to take.
-      (ownPlace && (flowSized(copy, left, a) || flowSized(source, parentSource, a)))
+      (ownPlace && (flowSized(copy, flowLeft(), a) || flowSized(source, parentSource, a)))
     )
       kept[axis.size] = "own";
     else derived[axis.size] = constrained[axis.size] ?? getProp(source.props, axis.size);
