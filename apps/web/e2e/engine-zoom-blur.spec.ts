@@ -3294,5 +3294,175 @@ for (const build of ["browser", "webgl"] as const) {
       expect(shStats.max).toBeLessThanOrEqual(4);
       expect(shStats.p99).toBeLessThanOrEqual(2);
     });
+
+    test("settled 1,000% frames turn exact through apron tiles and match a native reference", async ({
+      page,
+    }) => {
+      test.setTimeout(240_000);
+      await openEngine(page, build);
+      // An abutting mosaic (the worst case for a reduced backdrop: every seam conflates) under a
+      // background blur whose reach (radius 30 at zoom 10: sigma 135 px, about 546 px of reach)
+      // is past the 512 px band halo, wide enough for the reduced halo tiers. The view's padded
+      // whole frame would fit one native pass, so `padded_view_pixels` is lowered to make the
+      // view settle through apron tiles.
+      const zoom = 10;
+      const dpr = 1;
+      const s = zoom * dpr;
+      const [tw, th] = [512, 320];
+      const view = { x: 40, y: 30 };
+      const margin = 60; // page units of reference margin (600 px, past the reach)
+      const list = new ListWriter(0xffffffff, 1);
+      list.reset();
+      let nextId = 1;
+      const add = (x: number, y: number, w: number, h: number, ops: WireRecord["ops"]) =>
+        list.set(nextId++, ROOT, {
+          flags: 0,
+          transform: [1, 0, 0, 1, x, y],
+          opacity: 1,
+          width: w,
+          height: h,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [{ kind: "rect", w, h, radii: [0, 0, 0, 0], smoothing: 0 }],
+          ops,
+          coarse: [],
+        });
+      const fill = (c: [number, number, number]): WireRecord["ops"] => [
+        { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [...c, 1] } },
+      ];
+      add(-200, -200, 600, 600, fill([1, 1, 1]));
+      const palette: [number, number, number][] = [
+        [0.86, 0.15, 0.15],
+        [0.15, 0.39, 0.92],
+        [0.09, 0.64, 0.29],
+        [0.08, 0.08, 0.08],
+      ];
+      for (let r = 0; r < 26; r++) {
+        for (let c = 0; c < 26; c++) {
+          add(
+            -90 + c * 10.3,
+            -90 + r * 10.3,
+            10.3,
+            10.3,
+            fill(palette[(r * 3 + c) % 4] ?? [0, 0, 0]),
+          );
+        }
+      }
+      // The blur covers the test view and a little more.
+      add(view.x - 5, view.y - 5, tw / s + 10, th / s + 10, [
+        { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 30 },
+      ]);
+      const bytes = [...list.finish()];
+      const res = await page.evaluate(
+        async ({ bytes, zoom, dpr, tw, th, view, margin, s }) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          const bg = new Float32Array([1, 1, 1, 1]);
+          const requireOk = (o: { ok: boolean; message: string; free(): void }) => {
+            const { ok, message } = o;
+            o.free();
+            if (!ok) throw new Error(message);
+          };
+          const open = async (aprons: boolean) => {
+            const dev = await glue.createGpu(null, 0);
+            if (!dev.ok) throw new Error(dev.message);
+            const engine = new glue.Engine(0, 0);
+            if (
+              !engine.attachGpu ||
+              !engine.renderGpu ||
+              !engine.gpuPixels ||
+              !engine.renderGpuAhead
+            )
+              throw new Error("missing GPU entry points");
+            requireOk(engine.attachGpu(dev));
+            dev.free();
+            if (aprons) requireOk(engine.setLimit("padded_view_pixels", 1));
+            requireOk(engine.apply(new Uint8Array(bytes)));
+            return engine;
+          };
+          // Native reference: a frame holding the whole reach (no reader halo).
+          const ref = await open(false);
+          let refPx: Uint8Array;
+          let refInfo: { plan: number; exact: boolean };
+          try {
+            const rw = tw + 2 * margin * s;
+            const rh = th + 2 * margin * s;
+            const r = ref.renderGpu?.(
+              rw,
+              rh,
+              zoom,
+              -(view.x - margin) * zoom,
+              -(view.y - margin) * zoom,
+              dpr,
+              bg,
+              false,
+              0,
+              true,
+            );
+            if (!r) throw new Error("no frame");
+            refInfo = { plan: r.plan, exact: r.exact };
+            requireOk(r);
+            const px = await ref.gpuPixels?.();
+            if (!(px instanceof Uint8Array)) throw new Error(px?.message ?? "no pixels");
+            refPx = new Uint8Array(tw * th * 4);
+            for (let y = 0; y < th; y++) {
+              const from = ((y + margin * s) * rw + margin * s) * 4;
+              refPx.set(px.subarray(from, from + tw * 4), y * tw * 4);
+            }
+          } finally {
+            ref.free();
+          }
+          // The view settles the way the editor does: frames at the rest budget, then slices
+          // between frames, until a frame says exact.
+          const engine = await open(true);
+          try {
+            const cam = [zoom, -view.x * zoom, -view.y * zoom, dpr] as const;
+            const moving = engine.renderGpu?.(tw, th, ...cam, bg, true, 4, true);
+            const movingExact = moving?.exact ?? true;
+            moving?.free();
+            const t0 = performance.now();
+            let frames = 0;
+            let last = { plan: -1, exact: false, standin: true };
+            for (; frames < 400 && !last.exact; frames++) {
+              const a = engine.renderGpuAhead?.(bg, 8);
+              a?.free();
+              const r = engine.renderGpu?.(tw, th, ...cam, bg, false, 8, true);
+              if (!r) throw new Error("no frame");
+              last = { plan: r.plan, exact: r.exact, standin: r.standin };
+              requireOk(r);
+            }
+            const ms = performance.now() - t0;
+            const px = await engine.gpuPixels?.();
+            if (!(px instanceof Uint8Array)) throw new Error(px?.message ?? "no pixels");
+            return {
+              refInfo,
+              movingExact,
+              last,
+              frames,
+              ms,
+              test: Array.from(px),
+              ref: Array.from(refPx),
+            };
+          } finally {
+            engine.free();
+          }
+        },
+        { bytes, zoom, dpr, tw, th, view, margin, s },
+      );
+      const stats = diffRegions(res.test, res.ref, tw, th);
+      console.log(
+        `[zoom-blur ${build}] apron settle: ref=${JSON.stringify(res.refInfo)} moving exact=${res.movingExact} ` +
+          `settled=${JSON.stringify(res.last)} after ${res.frames} frames, ${Math.round(res.ms)} ms; ` +
+          `max=${stats.max} p99=${stats.p99} mean=${stats.mean.toFixed(3)}`,
+      );
+      expect(res.refInfo.exact, "the reference is a native frame").toBe(true);
+      expect(res.movingExact, "a moving frame is a stand-in").toBe(false);
+      expect(res.last.exact, "the settled frame is exact").toBe(true);
+      expect(res.last.plan, "the settled frame is made of tiles, not the reduced halo").not.toBe(4);
+      expect(stats.max, `max=${stats.max} p99=${stats.p99}`).toBeLessThanOrEqual(2);
+      expect(stats.p99, `max=${stats.max} p99=${stats.p99}`).toBeLessThanOrEqual(1);
+    });
   });
 }

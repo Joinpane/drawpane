@@ -242,6 +242,9 @@ pub struct Engine {
     /// composite-only frames never re-walk all 900+ backdrop readers unchanged.
     #[cfg(feature = "gpu-common")]
     halo_cache: Option<HaloCache>,
+    /// The view whose apron tiles hit a GPU limit: it settles on the reduced halo frame instead.
+    #[cfg(feature = "gpu-common")]
+    apron_refused: Option<HaloCache>,
     /// The drag in progress, if the last messages only moved records.
     pub dragging: Option<Dragging>,
     drag_serial: u64,
@@ -261,6 +264,8 @@ impl Engine {
             cpu_tiles: None,
             #[cfg(feature = "gpu-common")]
             halo_cache: None,
+            #[cfg(feature = "gpu-common")]
+            apron_refused: None,
             dragging: None,
             drag_serial: 0,
         }
@@ -1411,7 +1416,20 @@ impl Engine {
             .gpu
             .as_mut()
             .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
-        gpu.ahead(&self.store, background, self.generation, halo, budget_ms)
+        match gpu.ahead(&self.store, background, self.generation, halo, budget_ms) {
+            // An apron tile too large for this GPU: the next frame settles without aprons.
+            Err(e) if e.code == ErrorCode::Limit && i64::from(halo) > i64::from(self.store.limits.halo) => {
+                self.apron_refused = Some(HaloCache {
+                    generation: self.generation,
+                    view_bits: last.view.as_coeffs().map(f64::to_bits),
+                    size: last.size,
+                    halo,
+                });
+                self.halo_cache = None;
+                Ok(DrawStats::default())
+            }
+            r => r,
+        }
     }
 
     /// Draws a frame on the GPU, made of tiles (into its canvas, when it has one).
@@ -1429,12 +1447,12 @@ impl Engine {
         self.check_size(width, height)?;
         camera.check()?;
         self.check_supported()?;
-        let (replay_limit, cached_gpu_halo) = {
+        let (replay_limit, cached_gpu_halo, max_apron) = {
             let gpu = self
                 .gpu
                 .as_ref()
                 .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
-            (gpu.halo_replay_limit(), gpu.tiles.halo())
+            (gpu.halo_replay_limit(), gpu.tiles.halo(), gpu.max_view_apron())
         };
         let view = camera.view();
         let frame_rect = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
@@ -1474,7 +1492,24 @@ impl Engine {
                 (Some(c.halo), None)
             } else {
                 let (reach, _, halo_plan) = self.reader_halo_plan(view, Some(frame_rect), plan_viewport, replay_limit);
-                let halo_opt = self.limit_halo(reach).ok();
+                // At rest, an editor view whose readers reach past the band halo bakes its tiles
+                // with their whole device-resolution apron when one padded tile fits the GPU, so
+                // the settled frame is exact (export bands keep `Limits::halo`).
+                let refused = self.apron_refused.is_some_and(|c| {
+                    c.generation == self.generation && c.view_bits == view_bits && c.size == (width, height)
+                });
+                // Where the whole padded view fits at device resolution, one native pass is exact
+                // and cheaper than apron tiles, so aprons are only for views it doesn't fit.
+                let whole_fits = halo_plan.as_ref().is_none_or(|p| {
+                    !p.use_coarse_halo
+                        || self.gpu.as_ref().is_some_and(|g| {
+                            g.padded_whole_fits(p, (width, height), self.store.limits.padded_view_pixels)
+                        })
+                });
+                let apron =
+                    (plan_viewport && !options.moving && !refused && !whole_fits && reach <= f64::from(max_apron))
+                        .then(|| reach.ceil() as i32);
+                let halo_opt = self.limit_halo(reach).ok().or(apron);
                 if let Some(halo) = halo_opt {
                     self.halo_cache = Some(HaloCache {
                         generation: self.generation,
@@ -1556,7 +1591,7 @@ impl Engine {
         let mut stats = if let Some(stats) = whole_stats {
             stats
         } else if let Some(halo) = halo_opt {
-            gpu.render(
+            match gpu.render(
                 &self.store,
                 &frame,
                 background,
@@ -1564,7 +1599,34 @@ impl Engine {
                 halo,
                 options,
                 drag.as_ref(),
-            )?
+            ) {
+                Ok(stats) => stats,
+                // Apron tiles too large for this GPU's memory: the view settles on the reduced
+                // halo frame (not exact) and stops trying aprons until it changes.
+                Err(e)
+                    if e.code == ErrorCode::Limit
+                        && i64::from(halo) > i64::from(self.store.limits.halo)
+                        && halo_plan.is_some() =>
+                {
+                    self.apron_refused = Some(HaloCache {
+                        generation: self.generation,
+                        view_bits: view.as_coeffs().map(f64::to_bits),
+                        size: (width, height),
+                        halo,
+                    });
+                    self.halo_cache = None;
+                    self.gpu.as_mut().expect("GPU attached").render_whole(
+                        &self.store,
+                        &frame,
+                        background,
+                        self.generation,
+                        options.moving,
+                        None,
+                        halo_plan.as_ref(),
+                    )?
+                }
+                Err(e) => return Err(e),
+            }
         } else if composite_only || (options.moving && options.budget_ms > 0.0) {
             // Moving and composite-only frames stay on coarse tiles within the frame budget. A
             // tile that hits a backend limit (an oversized glass chunk at 25,600%, say) makes

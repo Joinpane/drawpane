@@ -339,6 +339,7 @@ impl Engine {
             "band_bytes" => l.band_bytes = v.max(4),
             "frame_verbs" => l.frame_verbs = v,
             "stroke_bytes" => l.stroke_bytes = v,
+            "padded_view_pixels" => l.padded_view_pixels = v,
             "glyph_mask_bytes" => {
                 l.glyph_mask_bytes = v;
                 self.core.cpu.masks.set_budget(v);

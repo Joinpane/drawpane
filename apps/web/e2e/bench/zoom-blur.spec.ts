@@ -632,11 +632,117 @@ test.describe("High-zoom glass and progressive blur sweep", () => {
       return out;
     }, SETTLE_DEADLINE_MS);
 
+    // 4. The same settle on a single wide reader: a radius 36 background blur over the striped
+    //    page. At 1,000% its reach (about 1,410 px) is past what one padded native pass of the
+    //    2,880 x 1,800 view holds but fits apron tiles, so this measures the apron path.
+    await openFreshFile(page);
+    await page.evaluate(() => {
+      const e = (window as unknown as W).drawpane;
+      const pageId = e.s.pageId;
+      e.createLayer("rect", { x: 0, y: 0, width: 1200, height: 800 }, pageId, {
+        fills: [{ type: "solid", color: "#f4f1ea" }],
+      });
+      for (let y = 0; y < 800; y += 16)
+        e.createLayer("rect", { x: 0, y, width: 1200, height: 5 }, pageId, {
+          fills: [{ type: "solid", color: "#1c1b1ab0" }],
+        });
+      for (let x = 0; x < 1200; x += 24)
+        e.createLayer("rect", { x, y: 0, width: 4, height: 800 }, pageId, {
+          fills: [{ type: "solid", color: "#0b3d9190" }],
+        });
+      e.createLayer("rect", { x: 300, y: 200, width: 600, height: 400 }, pageId, {
+        cornerRadius: 28,
+        fills: [{ type: "solid", color: "#ffffff30" }],
+        effects: [{ type: "background-blur", radius: 36 }],
+      });
+      e.zoomToFit();
+    });
+    await waitForReady(page);
+    const singleBlur = await page.evaluate(async (deadlineMs) => {
+      const w = window as unknown as W;
+      const e = w.drawpane;
+      const view = w.drawpaneEngineView;
+      if (!view?.last.supported) throw new Error("engine lost before the single-blur settle");
+      const frame = () => new Promise<number>((r) => requestAnimationFrame(r));
+      const vp = e.s.viewport;
+      const centre = { x: vp.width / 2, y: vp.height / 2 };
+      const setZoom = (z: number) => {
+        const cam = e.s.camera;
+        const centered = cam.pan(
+          centre.x - 600 * cam.zoom - cam.x,
+          centre.y - 400 * cam.zoom - cam.y,
+        );
+        e.state.set({ camera: centered.zoomAt(centre, z) });
+      };
+      const out: Record<string, object> = {};
+      for (const kind of ["continuous", "jump"] as const) {
+        const runs = [];
+        for (let g = 0; g < 3; g++) {
+          const target = 10;
+          let stopAt = 0;
+          if (kind === "continuous") {
+            const start = target * (g % 2 === 0 ? 0.55 : 1.45);
+            setZoom(start);
+            await frame();
+            await frame();
+            for (let i = 0; i < 15; i++) {
+              setZoom(start * (target / start) ** ((i + 1) / 15));
+              stopAt = performance.now();
+              if (i === 14) view.stamps = {};
+              await frame();
+            }
+          } else {
+            setZoom(target * (g % 2 === 0 ? 0.25 : 4));
+            for (let i = 0; i < 30; i++) await frame();
+            view.stamps = {};
+            setZoom(target);
+            stopAt = performance.now();
+          }
+          let prev = performance.now();
+          let maxFrame = 0;
+          let lastShownN = view.shown.n;
+          let lastShownAt = stopAt;
+          while (performance.now() < stopAt + deadlineMs) {
+            const st = view.stamps;
+            if (st?.drawn && st.gpu && st.shown) break;
+            const t = await frame();
+            maxFrame = Math.max(maxFrame, t - prev);
+            prev = t;
+            if (view.shown.n !== lastShownN) {
+              lastShownN = view.shown.n;
+              lastShownAt = performance.now();
+            }
+          }
+          const st = view.stamps;
+          view.stamps = null;
+          const r = (x: number) => Math.round(x * 10) / 10;
+          runs.push({
+            exact:
+              st?.drawn && st.gpu && st.shown
+                ? {
+                    drawn: r(st.drawn.at - stopAt),
+                    gpu: r(st.gpu.at - stopAt),
+                    shown: r(st.shown.at - stopAt),
+                  }
+                : null,
+            lastShown: r(lastShownAt - stopAt),
+            maxFrame: r(maxFrame),
+            plan: view.last.plan,
+            exactFlag: view.last.exact,
+            limitReason: view.limitReason,
+          });
+        }
+        out[`1000% single blur ${kind}`] = runs;
+      }
+      return out;
+    }, SETTLE_DEADLINE_MS);
+
     console.log(
       `\nZoom-blur sweep (${ready.backend}, adapter=${ready.adapter}, readsBack=${ready.readsBack}):\n` +
         `  interactive 100%..25600%: interval p50/p95/p99 ${interactiveSweep.summary.interval.p50}/${interactiveSweep.summary.interval.p95}/${interactiveSweep.summary.interval.p99} ms · content p50/p95 ${interactiveSweep.summary.content.p50}/${interactiveSweep.summary.content.p95} ms · minCanvasW=${interactiveSweep.minCanvasWidth}/${interactiveSweep.expectedCanvasWidth} · plans=${JSON.stringify(interactiveSweep.plans)} · limits=${JSON.stringify(interactiveSweep.limitReasons)}\n` +
         `  exact zoom stops (${stopSweep.frame.width}x${stopSweep.frame.height}): ${JSON.stringify(stopSweep.stops)}\n` +
-        `  time-to-exact after zoom stop: ${JSON.stringify(settleStops)}\n`,
+        `  time-to-exact after zoom stop: ${JSON.stringify(settleStops)}\n` +
+        `  single blur settle: ${JSON.stringify(singleBlur)}\n`,
     );
     test.info().annotations.push({
       type: "bench",
@@ -653,6 +759,7 @@ test.describe("High-zoom glass and progressive blur sweep", () => {
         },
         "engine: exact zoom stops": stopSweep.stops,
         "engine: time-to-exact after zoom stop": settleStops,
+        "engine: single blur settle": singleBlur,
       }),
     });
     expect(interactiveSweep.fallback).toBeNull();

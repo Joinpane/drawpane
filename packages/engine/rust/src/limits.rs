@@ -77,6 +77,9 @@ pub struct Limits {
     /// the least recently drawn are dropped and expanded again when next drawn. The largest page
     /// of the kits measured holds 26 MiB at the base level.
     pub stroke_bytes: usize,
+    /// Pixels of a GPU view padded with its readers' whole reach that one device-resolution pass
+    /// may draw. A wider view at rest bakes apron tiles instead (decision 0040, 2026-11-23).
+    pub padded_view_pixels: usize,
 }
 
 impl Default for Limits {
@@ -107,6 +110,7 @@ impl Default for Limits {
             export_tile: 1024,
             halo: 512,
             stroke_bytes: 48 * 1024 * 1024,
+            padded_view_pixels: 16_000_000,
         }
     }
 }

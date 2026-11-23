@@ -3872,6 +3872,18 @@ impl Gpu {
         if atlas_bytes <= budget / 3 { hw } else { base }
     }
 
+    /// The widest reader apron a view tile may bake with at rest: the padded tile stays within
+    /// the halo render side (4,096 px on hardware GPUs, 2,048 on software adapters) and the
+    /// texture limit. Memory is checked when the tile's targets are made.
+    pub fn max_view_apron(&self) -> i32 {
+        let side = if self.fallback_adapter {
+            SOFTWARE_HALO_RENDER_MAX_SIDE
+        } else {
+            HARDWARE_HALO_RENDER_MAX_SIDE
+        };
+        (side.min(self.max_texture_2d).saturating_sub(TILE) / 2) as i32
+    }
+
     /// Logical coarse replay side cap used by `Engine::reader_halo_plan`.
     pub fn halo_replay_limit(&self) -> u32 {
         if self.fallback_adapter {
@@ -3879,6 +3891,37 @@ impl Gpu {
         } else {
             halo::HALO_REPLAY_SIDE
         }
+    }
+
+    /// Whether a frame needing `plan`'s coarse tiers can instead draw its whole padded view at
+    /// device resolution (exact): the padded view fits the texture limit, `max_pixels`
+    /// (`Limits::padded_view_pixels`) and the GPU budget, and no layer-blur scope needs the far
+    /// tier.
+    pub fn padded_whole_fits(&self, plan: &ViewportHaloPlan, size: (u32, u32), max_pixels: usize) -> bool {
+        if !plan.coarse_post_scopes.is_empty() {
+            return false;
+        }
+        let b = plan.samples;
+        let x = b.x0.unsigned_abs().next_multiple_of(4);
+        let y = b.y0.unsigned_abs().next_multiple_of(4);
+        let w = (b.x1 as u32).saturating_add(x);
+        let h = (b.y1 as u32).saturating_add(y);
+        let pixels = (w as usize).saturating_mul(h as usize);
+        let max_tex = self.max_texture_2d.min(u32::from(u16::MAX));
+        if w > max_tex || h > max_tex || pixels > max_pixels {
+            return false;
+        }
+        let scratch_bytes = self.scratches[1]
+            .as_ref()
+            .map_or(0, |s| s.width as usize * s.height as usize * 8);
+        self.check_frame(
+            self.next_frame(),
+            size.0,
+            size.1,
+            pixels.saturating_mul(24),
+            scratch_bytes.saturating_add(self.readers.bytes()),
+        )
+        .is_ok()
     }
 
     /// Draws an untiled frame when a reader exceeds the tile halo or a whole draw is cheaper.
@@ -3912,36 +3955,8 @@ impl Gpu {
             };
             return self.finish_frame(self.cur.expect("unchanged frame"), stats, now(), submits0, None);
         }
-        let skip_native_whole = halo_plan.is_some_and(|p| {
-            if !p.use_coarse_halo {
-                return false;
-            }
-            // A coarse post scope only exists in the halo tiers.
-            if !p.coarse_post_scopes.is_empty() {
-                return true;
-            }
-            let b = p.samples;
-            let x = b.x0.unsigned_abs().next_multiple_of(4);
-            let y = b.y0.unsigned_abs().next_multiple_of(4);
-            let w = (b.x1 as u32).saturating_add(x);
-            let h = (b.y1 as u32).saturating_add(y);
-            let pixels = (w as usize).saturating_mul(h as usize);
-            let max_tex = self.max_texture_2d.min(u32::from(u16::MAX));
-            if w > max_tex || h > max_tex || pixels > 16_000_000 {
-                return true;
-            }
-            let scratch_bytes = self.scratches[1]
-                .as_ref()
-                .map_or(0, |s| s.width as usize * s.height as usize * 8);
-            self.check_frame(
-                self.next_frame(),
-                size.0,
-                size.1,
-                pixels.saturating_mul(24),
-                scratch_bytes.saturating_add(self.readers.bytes()),
-            )
-            .is_err()
-        });
+        let skip_native_whole = halo_plan
+            .is_some_and(|p| p.use_coarse_halo && !self.padded_whole_fits(p, size, store.limits.padded_view_pixels));
         let result = if skip_native_whole {
             Err(EngineError::limit("padded reader view exceeds whole-frame budget"))
         } else {
@@ -5346,7 +5361,8 @@ impl Gpu {
             (w, h),
             zooming || opening,
             plan_last,
-            options.prefetch && !coarse_moving && !opening,
+            // No off-screen prefetch while tiles carry a wide apron: each costs many tiles.
+            options.prefetch && !coarse_moving && !opening && i64::from(halo) <= i64::from(store.limits.halo),
             coarse_moving,
         ) else {
             if standin_on_limit {
@@ -5734,10 +5750,14 @@ impl Gpu {
         let opening = self.opening_pending;
         self.tiles.opening = opening;
         let plan_last = if opening { None } else { Some(last) };
-        let Some(plan) = self
-            .tiles
-            .plan(last.view, last.size, opening, plan_last, !opening, false)
-        else {
+        let Some(plan) = self.tiles.plan(
+            last.view,
+            last.size,
+            opening,
+            plan_last,
+            !opening && i64::from(halo) <= i64::from(store.limits.halo),
+            false,
+        ) else {
             return Ok(stats);
         };
         let budgeted = budget_ms > 0.0;
