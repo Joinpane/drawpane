@@ -2171,25 +2171,16 @@ export class Editor {
     const bounds = this.scene.unionBounds(ids);
     const first = ids[0] && this.doc.get(ids[0]);
     if (!first || !bounds) return;
-    // A lone frame takes auto layout itself; an instance that can't (its component has none) is
-    // wrapped in a new auto layout frame instead, as Figma's ⇧A does.
-    if (
-      autoLayout &&
-      ids.length === 1 &&
-      first.type === "frame" &&
-      this.canToggleLayout(first.id, true)
-    ) {
-      if (getProp(first.props, "layoutMode") === "none")
-        this.commit(this.#flowOps(first), "Add auto layout");
+    // A lone frame takes auto layout itself. An instance that can't (its component has none), or
+    // that shows its component's, is wrapped in a new auto layout frame instead, as Figma's ⇧A
+    // does; a plain frame that has auto layout keeps it.
+    const lone = autoLayout && ids.length === 1 && first.type === "frame";
+    const flows = getProp(first.props, "layoutMode") !== "none";
+    if (lone && !flows && this.canToggleLayout(first.id, true)) {
+      this.commit(this.#flowOps(first), "Add auto layout");
       return;
     }
-    if (
-      autoLayout &&
-      ids.length === 1 &&
-      first.type === "frame" &&
-      getProp(first.props, "layoutMode") !== "none"
-    )
-      return;
+    if (lone && flows && !getProp(first.props, "instanceOf")) return;
     const slot = this.#wrapperSlot(ids);
     if (!slot) return;
     const { parent } = slot;

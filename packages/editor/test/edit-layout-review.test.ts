@@ -2273,4 +2273,24 @@ describe.each(["materialized", "compact"] as const)("re-check 8 with copies %s",
       expect(unsettled(editor)).toEqual([]);
     },
   );
+
+  it("wraps an instance that shows its component's auto layout in a new one (Shift+A, Figma)", () => {
+    const made = stretched();
+    const { editor, instance } = made;
+    const before = boxes(editor, instance);
+    const parent = editor.doc.get(instance)?.parent;
+    editor.select([instance]);
+    editor.frameSelection(true);
+    const wrapper = editor.doc.get(editor.doc.get(instance)?.parent ?? "");
+    expect(wrapper?.id).not.toBe(parent);
+    expect(getProp(wrapper?.props ?? {}, "layoutMode")).not.toBe("none");
+    expect(editor.s.selection).toEqual([wrapper?.id]);
+    // The instance keeps the row its component gives it, and its layers as they were.
+    expect(getProp(editor.doc.get(instance)?.props ?? {}, "layoutMode")).toBe("row");
+    expect(getProp(editor.doc.get(instance)?.props ?? {}, "overrides")).not.toContain("layoutMode");
+    expect(boxes(editor, instance)).toEqual(before);
+    expect(unsettled(editor)).toEqual([]);
+    editor.undo();
+    expect(editor.doc.get(instance)?.parent).toBe(parent);
+  });
 });
