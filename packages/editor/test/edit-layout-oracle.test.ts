@@ -33,6 +33,7 @@ import {
   branchChanges,
   getProp,
   hugsOn,
+  isPropName,
   keyBetween,
   measuresOn,
   mergeOps,
@@ -157,15 +158,6 @@ function modeless(doc: Doc): Doc {
  * rebase syncs nothing, so they stay as they were; only a copy still at exactly that is set aside.
  */
 const stranded = new WeakMap<Doc, Map<string, Record<"x" | "y" | "width" | "height", number>>>();
-
-/**
- * Layers of a frame whose removal of its auto layout arrived from a client before PR 286, without
- * marks, with the place and size each had then. The client receiving it lays nothing out
- * (decision 0034), so they stay as that flow left them, which the derivation can't tell from
- * stale; the first edit that changes them marks them first (`leftFlowKeepOps`). Only a layer
- * still at exactly that is set aside.
- */
-const arrived = new WeakMap<Doc, Map<string, Record<"x" | "y" | "width" | "height", number>>>();
 
 /**
  * Issue 323: once an instance holding a nested instance is detached, materialized copies of the
@@ -402,8 +394,6 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
       // Both are kept to two places: compare them there.
       if (Math.round(Math.abs(want - have) * 100) <= 1) continue;
       if (sameNumber(have, lightPlaced(prop))) continue;
-      const kept = arrived.get(doc)?.get(node.id);
-      if (kept && sameNumber(have, kept[prop])) continue;
       if (detachedLink(doc, node)) continue;
       out.push({ constrained: node.id, prop, have, want });
     }
@@ -467,8 +457,6 @@ function unsettled(doc: Doc, before?: ReadonlyMap<string, FrameState>): unknown[
       )
         continue;
       if (stale && sameNumber(have, stale[size])) continue;
-      const kept = arrived.get(doc)?.get(node.id);
-      if (kept && sameNumber(have, kept[size])) continue;
       if (detachedLink(doc, node)) continue;
       // Issue 306: a kept layer shown in another mode, at its main layer's size with no mode set.
       if (
@@ -1072,6 +1060,9 @@ function unexplained(before: Snapshot, after: Snapshot, doc: Doc): string[] {
     const was = before[id];
     const now = after[id];
     if (stable(was) === stable(now)) continue;
+    // The same values, one of them written out at its default (a compact swap's redo writes a
+    // copy's x as 0 where it read 0 before): nothing anyone sees, or the room stores, differs.
+    if (was && now && sameReading(was, now)) continue;
     const source = was && getProp(was.props, "mirrors");
     if (was && now && placedOnly(was, now) && inGroupedFlow(before, id)) continue;
     // Issue 310: a Fill layer directly in a grid has more than one settled layout.
@@ -1085,10 +1076,6 @@ function unexplained(before: Snapshot, after: Snapshot, doc: Doc): string[] {
       (getProp(was.props, "sizingH") === "fill" || getProp(was.props, "sizingV") === "fill")
     )
       continue;
-    // A layer of a frame that took its auto layout away, marked as the flow left it by the first
-    // edit after a removal that arrived without marks (`leftFlowKeepOps`): marks stay out of
-    // undo, and they change no value.
-    if (was && now && frozenOnly(was, now, after)) continue;
     const linked = source !== null || getProp(was?.props ?? {}, "instanceOf") !== null;
     if (was && now && linked && !doc.compactCopies && getProp(now.props, "mirrors") === source) {
       const same = (n: typeof was) => stable({ ...n, props: placeless(n.props) });
@@ -1099,34 +1086,14 @@ function unexplained(before: Snapshot, after: Snapshot, doc: Doc): string[] {
   return out;
 }
 
-/**
- * Whether a layer differs in nothing but its place, size or text mode written as it already read
- * (and marks for them), in a frame that shows no auto layout where its component has one, or that
- * took its own away: what
- * marking a flow that frame, or the layer it copies, took away as the flow left it writes.
- */
-function frozenOnly(a: Snapshot[string], b: Snapshot[string], snap: Snapshot): boolean {
-  const frame = snap[b.parent];
-  if (!frame || getProp(frame.props, "layoutMode") !== "none") return false;
-  const shown = snap[getProp(frame.props, "instanceOf") ?? getProp(frame.props, "mirrors") ?? ""];
-  if (
-    !getProp(frame.props, "overrides").includes("layoutMode") &&
-    (!shown || getProp(shown.props, "layoutMode") === "none")
-  )
-    return false;
-  const frozen = ["x", "y", "width", "height", "textAutoResize"] as const;
-  const was = getProp(a.props, "overrides");
-  const now = getProp(b.props, "overrides");
-  if (was.some((p) => !now.includes(p))) return false;
-  if (!now.every((p) => was.includes(p) || (frozen as readonly string[]).includes(p))) return false;
-  if (frozen.some((p) => getProp(a.props, p) !== getProp(b.props, p))) return false;
-  const rest = (n: Snapshot[string]) => {
-    const props = { ...n.props } as Record<string, unknown>;
-    delete props.overrides;
-    for (const p of frozen) delete props[p];
-    return stable({ ...n, props: props as Props });
-  };
-  return rest(a) === rest(b);
+/** Whether two states of a layer read the same, property by property, defaults included. */
+function sameReading(a: Snapshot[string], b: Snapshot[string]): boolean {
+  if (a.parent !== b.parent || a.key !== b.key || a.type !== b.type) return false;
+  for (const prop of new Set([...Object.keys(a.props), ...Object.keys(b.props)])) {
+    if (!isPropName(prop)) return false;
+    if (stable(getProp(a.props, prop)) !== stable(getProp(b.props, prop))) return false;
+  }
+  return true;
 }
 
 /** Whether two states of a layer differ in nothing but place and size. */
@@ -2337,8 +2304,9 @@ describe("the oracle's checks and waivers", () => {
 
 // An instance whose flow differs from its main's (its direction, alignment, its layers' sizing, a
 // nested instance swapped to another component), then auto layout added or taken away on either
-// side, by the editor (which follows Figma) or as an older client's edit (PR 286's seventh
-// re-check): every check above, and a removal keeps its layers' boxes.
+// side, by the editor (which follows Figma) or through its generic setters (PR 286's seventh and
+// eighth re-checks): every check above, a removal keeps its layers' boxes, and a later change to
+// the main's flow moves and resizes nothing a removal left.
 type FlowEdit =
   | { kind: "direction"; at: number; value: "row" | "column" }
   | { kind: "align"; at: number; value: "start" | "center" | "end" | "stretch" }
@@ -2347,7 +2315,6 @@ type FlowEdit =
   | { kind: "main-layout"; at: number; value: "none" | "row" | "column" }
   | { kind: "main-align"; at: number; value: "start" | "center" | "stretch" }
   | { kind: "older-remove"; at: number }
-  | { kind: "older-remove-received"; at: number }
   | { kind: "older-add"; at: number; value: "row" | "column" }
   | { kind: "toggle"; at: number; how: "remove" | "add" | "wrap" }
   | { kind: "swap"; at: number; to: number }
@@ -2389,7 +2356,6 @@ const flowEdit: fc.Arbitrary<FlowEdit> = fc.oneof(
     value: fc.constantFrom("start" as const, "center" as const, "stretch" as const),
   }),
   fc.record({ kind: fc.constant("older-remove" as const), at: flowAt }),
-  fc.record({ kind: fc.constant("older-remove-received" as const), at: flowAt }),
   fc.record({
     kind: fc.constant("older-add" as const),
     at: flowAt,
@@ -2412,7 +2378,6 @@ const FLOW_KINDS: readonly FlowEdit["kind"][] = [
   "main-layout",
   "main-align",
   "older-remove",
-  "older-remove-received",
   "older-add",
   "toggle",
   "swap",
@@ -2530,17 +2495,7 @@ function leftFlowBoxes(doc: Doc): [string, string, number[]][] {
   return out;
 }
 
-/**
- * How many of the editor's own edits undo would step back through, and where a removal from an
- * older client arrived among them, with the frames it changed.
- */
-interface FlowRun {
-  depth: number;
-  arrivedAt: number | null;
-  readonly arrivedIn: Set<string>;
-}
-
-function performFlow(editor: Editor, e: FlowEdit, mirror: Doc, run: FlowRun): void {
+function performFlow(editor: Editor, e: FlowEdit): void {
   const doc = editor.doc;
   if (e.kind === "undo") {
     editor.undo();
@@ -2550,24 +2505,7 @@ function performFlow(editor: Editor, e: FlowEdit, mirror: Doc, run: FlowRun): vo
     const before = snapshot(doc);
     editor.undo();
     editor.redo();
-    const after = snapshot(doc);
-    // An edit made before a collaborator's removal arrived, undone and redone after it: redoing it
-    // lays out a frame that has no flow any more (compact copies), or replays what it wrote
-    // (materialized). Its layers are set aside; everything else still round-trips.
-    const across = run.arrivedAt !== null && run.depth <= run.arrivedAt;
-    // The frame, a copy of it, or a layer in either.
-    const copiesArrived = (id: string) => {
-      for (let n = doc.get(id), depth = 0; n && depth < 32; depth++) {
-        if (run.arrivedIn.has(n.id)) return true;
-        n = doc.get(getProp(n.props, "mirrors") ?? "");
-      }
-      return false;
-    };
-    const inArrived = (id: string) => copiesArrived(id) || copiesArrived(after[id]?.parent ?? "");
-    expect(
-      unexplained(before, after, doc).filter((id) => !(across && inArrived(id))),
-      "undone and redone",
-    ).toEqual([]);
+    expect(unexplained(before, snapshot(doc), doc), "undone and redone").toEqual([]);
     return;
   }
   const all = layers(doc);
@@ -2676,57 +2614,14 @@ function performFlow(editor: Editor, e: FlowEdit, mirror: Doc, run: FlowRun): vo
       return;
     }
     case "older-remove": {
-      // What an older client could do: take an instance's auto layout away.
+      // What the editor's generic setters can still do (its layout commands refuse it), as could
+      // a file saved before: take an instance's auto layout away, marked as the flow left it in
+      // the same transaction. A client from before protocol 4 can't write (it's told to reload).
       const node = pick(instances.filter((n) => getProp(n.props, "layoutMode") !== "none"));
       if (node)
         removing(node.id, () =>
           editor.commit([{ op: "set", id: node.id, prop: "layoutMode", value: null }]),
         );
-      return;
-    }
-    case "older-remove-received": {
-      // The same, from a client before PR 286, arriving as a collaborator's edit: the frame's own
-      // stored operations only, without the marks this client adds, applied as the sync layer
-      // applies a received transaction (to the replay mirror too).
-      const node = pick(instances.filter((n) => getProp(n.props, "layoutMode") !== "none"));
-      if (!node) return;
-      const older = makeEditor(doc.stored(), doc.compactCopies ? "compact" : "materialized");
-      older.commit([{ op: "set", id: node.id, prop: "layoutMode", value: null }]);
-      // What it sent, less the marks this client adds to its layers (their override lists, and
-      // their place, size and text mode written as they already read).
-      const children = new Set(doc.childIds(node.id));
-      const marked = ["x", "y", "width", "height", "textAutoResize"];
-      const ops = older.sync.takeUnsent().filter((op) => {
-        if (op.op !== "set" || !children.has(op.id)) return true;
-        if (op.prop === "overrides") return false;
-        const was = doc.get(op.id)?.props ?? {};
-        return !marked.includes(op.prop) || getProp(was, op.prop as "x") !== op.value;
-      });
-      if (ops.length === 0) return;
-      removing(node.id, () => {
-        doc.applyStored(ops, { held: true });
-        mirror.applyStored(ops, { held: true });
-      });
-      run.arrivedAt = run.depth;
-      run.arrivedIn.add(node.id);
-      // What it left, in the frame and in the copies of it.
-      const copiesIt = (id: string) => {
-        for (let n = doc.get(id), depth = 0; n && depth < 32; depth++) {
-          if (n.id === node.id) return true;
-          n = doc.get(getProp(n.props, "mirrors") ?? "");
-        }
-        return false;
-      };
-      const kept = arrived.get(doc) ?? new Map();
-      for (const layer of layers(doc))
-        if (copiesIt(layer.parent))
-          kept.set(layer.id, {
-            x: getProp(layer.props, "x"),
-            y: getProp(layer.props, "y"),
-            width: getProp(layer.props, "width"),
-            height: getProp(layer.props, "height"),
-          });
-      arrived.set(doc, kept);
       return;
     }
     case "older-add": {
@@ -2767,17 +2662,12 @@ describe("an instance's own flow against its main's", () => {
           editor.sync.takeUnsent();
           check(editor, mirror, copies, "after making it");
           const history: string[] = [];
-          const run: FlowRun = { depth: 0, arrivedAt: null, arrivedIn: new Set() };
           for (const e of edits) {
             const undoing = e.kind === "undo" || e.kind === "undo-redo";
             const before = undoing ? undefined : frameStates(editor.doc);
             const version = editor.doc.version;
-            performFlow(editor, e, mirror, run);
-            if (editor.doc.version !== version) {
-              ran.set(e.kind, (ran.get(e.kind) ?? 0) + 1);
-              if (e.kind === "undo") run.depth = Math.max(0, run.depth - 1);
-              else if (e.kind !== "undo-redo" && e.kind !== "older-remove-received") run.depth += 1;
-            }
+            performFlow(editor, e);
+            if (editor.doc.version !== version) ran.set(e.kind, (ran.get(e.kind) ?? 0) + 1);
             history.push(JSON.stringify(e));
             check(editor, mirror, copies, `after ${history.join(", ")}`, before);
           }
