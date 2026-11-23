@@ -37,18 +37,21 @@ import {
   copyConstraintOps,
   detachOps,
   findVariant,
-  flowRemovalMarks,
+  frozenBefore,
   instanceRootOf,
   instantiateOps,
   isInsideInstance,
   isMainComponent,
   outermostInstanceOf,
   overrideOps,
+  overridesBefore,
   propagationOps,
+  refuseFrozenRemovals,
   relayoutTargets,
   resetAllOverridesOps,
   swapInstanceOps,
   syncInstanceOps,
+  unfreezeOps,
   variantProperties,
   variantsOf,
   wouldCycle,
@@ -684,6 +687,12 @@ export class Editor {
    */
   commit(ops: readonly Op[], label = "Edit", options: CommitOptions = {}): boolean {
     if (!this.canEdit || ops.length === 0) return false;
+    // Taking away the auto layout an instance shows is refused, through any setter (as Figma
+    // refuses it): no edit makes a frame frozen (`frozenFrame`, PR 286).
+    const allowed = refuseFrozenRemovals(this.doc, ops);
+    if (allowed.length < ops.length) this.notify(INSTANCE_LAYOUT_NOTICE);
+    if (allowed.length === 0) return false;
+    ops = allowed;
     if (!options.library && touchesLibraryCopies(this.doc, ops)) {
       this.notify("That's part of a team library. Change it in the library's file, then publish.");
       return false;
@@ -697,6 +706,7 @@ export class Editor {
         options.overrides ?? true,
         options.constraints ?? true,
         options.emptied,
+        true,
       );
     } catch (error) {
       if (error instanceof Error && error.name === "ModelError") {
@@ -714,8 +724,11 @@ export class Editor {
     recordOverrides = true,
     constrain = true,
     justEmptied: readonly string[] = [],
+    /** An edit of a person's or an agent's (not undo or redo): it leaves no frame frozen. */
+    edit = false,
   ): Op[] {
     return this.doc.batch(() => {
+      const wasFrozen = edit ? frozenBefore(this.doc, ops) : null;
       // A person's edit inside an instance records an override, and setting a
       // bound property by hand detaches its variable; both before the derived
       // writes below, so those leave the edited properties alone.
@@ -725,9 +738,6 @@ export class Editor {
             ...unbindOps(this.doc, ops),
             ...textStyleDetachOps(this.doc, ops),
             ...textRunOps(this.doc, ops),
-            // Taking a frame's auto layout away keeps what it decided for its layers, read
-            // before the edit (protocol 4).
-            ...flowRemovalMarks(this.doc, ops),
           ]
         : [];
       // Resizing a frame moves its children by their constraints; resizing a
@@ -742,16 +752,22 @@ export class Editor {
       const alreadyEmpty = new Set<string>();
       this.#collectEmptyTransitions(first, shrinkEmpty, alreadyEmpty);
       let inverse = this.sync.commit(first);
+      // A frame it made, swapped or gave its main's flow to while it set none as its own takes
+      // that flow (PR 286): only undo and redo go back to a frozen frame.
+      const thawed = wasFrozen ? unfreezeOps(this.doc, first, wasFrozen) : [];
+      if (thawed.length > 0) inverse = [...this.sync.commit(thawed), ...inverse];
       // A group whose last layer left (moved, deleted, cut) goes too, like Figma's.
       const emptied = this.#emptiedGroupOps(inverse);
       if (emptied.length > 0) inverse = [...this.sync.commit(emptied), ...inverse];
       // What the edit's constraints moved and sized too: copies of it, text in it.
-      let touched = this.#touchedBy([...ops, ...constrained, ...emptied], inverse);
+      let touched = this.#touchedBy([...ops, ...constrained, ...thawed, ...emptied], inverse);
       // Layers whose bound layout values now resolve differently (a padding variable, a mode
       // switch) are laid out here, by the client that made the change (decision 0034).
       const tokenLayout = this.doc.takeTokenLayout();
       for (const id of tokenLayout) touched.add(id);
-      let lastOps: readonly Op[] = first;
+      let lastOps: readonly Op[] = thawed.length > 0 ? [...first, ...thawed] : first;
+      // What undoes `lastOps`: where each layer's overrides were before it.
+      let lastInverse: readonly Op[] = inverse;
       // Text styles this deleted (their inverse makes them again): the only deletes whose
       // followers are looked for (an agent run's commit depends on what that reads).
       const deletedStyles = new Set(
@@ -775,7 +791,7 @@ export class Editor {
         if (synced.length > 0) this.#collectEmptyTransitions(synced, shrinkEmpty, alreadyEmpty);
         let roundInverse: Op[] = synced.length > 0 ? this.sync.commit(synced) : [];
         // Compact copies' layers placed by constraints in a resized copy follow their main layers.
-        const placed = copyConstraintOps(this.doc, lastOps);
+        const placed = copyConstraintOps(this.doc, lastOps, overridesBefore(lastInverse));
         if (swapping) for (const op of placed) placedCopies.add(op.id);
         if (placed.length > 0) {
           roundInverse = [...this.sync.commit(placed), ...roundInverse];
@@ -852,6 +868,7 @@ export class Editor {
         inverse = [...layoutInverse, ...roundInverse, ...inverse];
         touched = new Set([...afterSync, ...this.#touchedBy(layout, layoutInverse)]);
         lastOps = [...derived, ...layout];
+        lastInverse = [...layoutInverse, ...roundInverse];
       }
       return inverse;
     });

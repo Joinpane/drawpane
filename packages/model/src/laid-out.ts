@@ -254,8 +254,8 @@ type Box = "x" | "y" | "width" | "height";
  * measures itself, it's bound to a variable), or it's the copy's own
  * ("own": overridden, a swapped instance's size, a value it took off its
  * main layer's variable, the place of a layer made absolute, or not, unlike
- * its main layer, and the size the flow it left gave it with Fill or
- * Stretch). An own value still follows its
+ * its main layer, the size the flow it left gave it with Fill or Stretch,
+ * and the box of a layer in a frozen frame). An own value still follows its
  * constraints from where it is when its frame resizes; a laid-out one isn't
  * touched.
  */
@@ -265,6 +265,30 @@ export type Kept = "layout" | "own";
 export interface Placed {
   readonly derived: Partial<Record<Box, number>>;
   readonly kept: Partial<Record<Box, Kept>>;
+  /** In a frozen frame (`frozenFrame`): its text mode is its own too. */
+  readonly frozen?: boolean;
+}
+
+/**
+ * Whether a frame is frozen (PR 286): an instance root or a copy frame that
+ * took away, as its own, the auto layout the frame it shows has (its
+ * component through `instanceOf`, else its `mirrors` target). Only a file
+ * from before can hold one: the editor refuses that removal, as Figma does,
+ * and no edit makes a frame frozen. Its layers stay where that flow left
+ * them: the place, size and text mode of each layer the flow placed are its
+ * own, and nothing derived is written to them, though they still follow
+ * their constraints when the frame resizes.
+ */
+export function frozenFrame(frame: NodeRecord | undefined, shown: NodeRecord | undefined): boolean {
+  return (
+    !!frame &&
+    !!shown &&
+    frame.type === "frame" &&
+    (!!getProp(frame.props, "instanceOf") || !!getProp(frame.props, "mirrors")) &&
+    getProp(frame.props, "layoutMode") === "none" &&
+    getProp(frame.props, "overrides").includes("layoutMode") &&
+    getProp(shown.props, "layoutMode") !== "none"
+  );
 }
 
 /**
@@ -324,11 +348,10 @@ export function placedGeometry(
   const bound = getProp(copy.props, "bindings") as Record<string, unknown>;
   // Placed by its own choice: made absolute (or not) unlike its main layer. That's its place; its
   // size too only on an axis the flow it left sized (Fill, or Stretch alignment), since nothing
-  // sizes it now. A size of its own still comes from its main layer. A frame that took its auto
-  // layout away leaves its layers where the layout put them (Figma) by marking what that flow
-  // decided as theirs, as it takes it away (`flowRemovalMarks`): what isn't marked follows its main
-  // layer, as a layer swapped in, or one its main gained since, does.
+  // sizes it now. A size of its own still comes from its main layer.
   const ownPlace = getProp(copy.props, "positioning") !== getProp(source.props, "positioning");
+  // A layer the flow of a frozen frame placed: all of its box is its own.
+  const frozen = !absolute && getProp(copy.props, "visible") && frozenFrame(parent, parentSource);
   // The flow it left: its frame's, or where the frame took its auto layout away, the main frame's
   // kind of flow with the frame's own alignment (which it may have set itself). Made only when
   // it's asked about.
@@ -357,12 +380,14 @@ export function placedGeometry(
   for (const axis of AXES) {
     const a = axis.size === "width" ? "h" : "v";
     if (bound[axis.pos]) kept[axis.pos] = "layout";
-    else if (overrides.includes(axis.pos) || ownPlace || unbound(axis.pos)) kept[axis.pos] = "own";
+    else if (overrides.includes(axis.pos) || ownPlace || frozen || unbound(axis.pos))
+      kept[axis.pos] = "own";
     else derived[axis.pos] = constrained[axis.pos] ?? getProp(source.props, axis.pos);
     if (bound[axis.size] || hugsOn(copy, a) || measuresOn(copy, a)) kept[axis.size] = "layout";
     else if (
       overrides.includes(axis.size) ||
       overrides.includes(axis.sizing) ||
+      frozen ||
       swapped ||
       unbound(axis.size) ||
       // The size that flow gave it stays, and so does one its main layer's flow gave the main
@@ -372,7 +397,7 @@ export function placedGeometry(
       kept[axis.size] = "own";
     else derived[axis.size] = constrained[axis.size] ?? getProp(source.props, axis.size);
   }
-  return { derived, kept };
+  return frozen ? { derived, kept, frozen } : { derived, kept };
 }
 
 /**

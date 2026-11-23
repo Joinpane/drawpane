@@ -24,10 +24,10 @@ import type { CopiesFormat, Op } from "@drawpane/model";
  * `reset`, `strike` and a run's `late` answer: a runner of version 1
  * refuses a request of version 2 (and the main Worker ignores its `held`),
  * so a main Worker deployed before its runner fails cleanly. 3 (protocol 4,
- * PR 286): a run that takes an instance's auto layout away marks what that
- * flow left, which a runner from before doesn't, so the room refuses a
- * version 2 commit as out of step, and a runner from before refuses a
- * version 3 run.
+ * PR 286): a run refuses taking an instance's auto layout away and keeps
+ * frozen frames as they are, which a runner from before doesn't, so the room
+ * refuses a version 2 commit as out of step, and a runner from before
+ * refuses a version 3 run.
  */
 export const AGENT_RUNNER_V = 3;
 /**

@@ -24,17 +24,15 @@ import { type NodeRecord, type Op, OpsSchema } from "./ops";
  * a page saying so), and a socket welcomed before the release, whose
  * attachment says no protocol, has its edits refused and is told the same.
  *
- * 4: layers keep what an auto layout decided for them when that flow is
- * taken away (PR 286). The client taking it away marks, in the same
- * transaction, what the flow gave the layers it placed as their own, in the
- * frame and in the copies of it that lose the flow, so a later change to a
- * main can't take it. An older tab (3 or before) can take an instance's auto
- * layout away without those marks, and nothing marks them after: the client
- * that receives an edit lays nothing out. So it doesn't write, as for 3: it's
- * told to reload at hello, and one welcomed before the release has its edits
- * refused (agent runs from before too: `AGENT_RUNNER_V`). Old data needs
- * nothing: a removal saved before has no marks, and its layers follow their
- * main layers, as any layer nothing marks does.
+ * 4: an instance, or a layer in one, can't take away the auto layout the
+ * frame it shows has (PR 286, as Figma refuses it): every writer refuses that
+ * removal, and keeps a frame a file from before left that way frozen
+ * (`frozenFrame`: its layers stay where that flow left them, and nothing
+ * derived is written to them). An older tab (3 or before) takes it away, and
+ * writes derived values over frozen layers. So it doesn't write, as for 3:
+ * it's told to reload at hello, and one welcomed before the release has its
+ * edits refused (agent runs from before too: `AGENT_RUNNER_V`). Old data
+ * needs nothing: a frame a file from before left that way reads as frozen.
  */
 export const PROTOCOL_VERSION = 4;
 

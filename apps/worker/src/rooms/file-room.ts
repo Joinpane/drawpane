@@ -2451,8 +2451,8 @@ export class FileRoom extends DurableObject<Env> {
             : "Nothing to redo: undo something first.",
       };
     // A call from before protocol 4 (PR 286) replays operations an editor from before worked out:
-    // taking an instance's auto layout away without marking what the flow left, which no client
-    // may send now (decision 0034's gate). Its history is closed instead.
+    // taking an instance's auto layout away, which every writer refuses now (decision 0034's
+    // gate), or derived values over a frozen frame's layers. Its history is closed instead.
     if (target.revn <= Number(this.#meta("agent_history_from") ?? 0))
       return {
         ok: false,

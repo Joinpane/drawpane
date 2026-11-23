@@ -644,7 +644,14 @@ export class CompactCopies {
     }
     const record = this.view.record(slot);
     if (!own) {
-      if (record) this.#put(tx, { op: "delete", id });
+      // A record is never deleted for holding nothing of its own here (PR 286): only the fields
+      // it held go, so a field someone else set meanwhile, applied before this (a recolour, under
+      // a relayout worked out without it), stays. An empty record means nothing, as an absent
+      // one does, and a later write fills it again. Explicit removals (a layer's delete, a
+      // detach, a swap) still delete records.
+      if (record)
+        for (const prop of Object.keys(record.props))
+          if (prop !== "path") this.#put(tx, { op: "set", id, prop: prop as never, value: null });
       return;
     }
     if (!record) {

@@ -95,7 +95,14 @@ function copyIn(editor: Editor, root: string, mainId: string): NodeRecord | unde
   return undefined;
 }
 
-const records = (editor: Editor) => editor.doc.stored().filter((n) => n.type === "override");
+/**
+ * The override records that hold something: an empty one (`{ path }`, what a record is left as
+ * once it holds nothing of its own, PR 286) means nothing, as an absent one does.
+ */
+const records = (editor: Editor) =>
+  editor.doc
+    .stored()
+    .filter((n) => n.type === "override" && Object.keys(n.props).some((k) => k !== "path"));
 
 describe("compact copies in the editor", () => {
   it("stores an instance as its root alone, and presents its layers with derived ids", () => {

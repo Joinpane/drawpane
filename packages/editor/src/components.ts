@@ -22,16 +22,13 @@
  */
 import {
   boundaryDrivenProps,
-  constrainedValues,
   copyChildId,
   flowCopySizes,
-  flowSized,
+  frozenFrame,
   getProp,
-  hugsOn,
   isMainNode,
   isPropName,
   laidOutProps,
-  measuresOn,
   type NodeRecord,
   newId,
   type Op,
@@ -565,6 +562,8 @@ export function syncInstanceOps(
     const placed = derive && !isRoot ? placedGeometry(next, from, parent, parentSource) : undefined;
     const derived: Record<string, number> = { ...placed?.derived };
     for (const prop of Object.keys(placed?.kept ?? {})) overridden.add(prop);
+    // In a frozen frame, its text mode is its own too.
+    if (placed?.frozen) overridden.add("textAutoResize");
     for (const prop of laidOut) if (!(prop in derived)) overridden.add(prop);
     // Glyphs saved with a file were laid out for each copy (decision 0037); a stale set is
     // never drawn, so the copy's own is kept rather than replaced by its main's.
@@ -787,46 +786,129 @@ export function propagationOps(doc: Doc, ids: Iterable<string>): Op[] {
 const FRAME_PLACING: ReadonlySet<string> = new Set(["layoutMode", "alignItems", "justifyItems"]);
 
 /**
- * What an edit taking a frame's auto layout away marks (protocol 4: the client taking it away marks
- * them, in the same transaction, and clients from before don't write): what that flow decided for
- * the layers it placed, so they keep it, in the frame and in every copy of it the removal reaches.
- *
- * Only layers the flow placed: one out of it (absolute, or hidden) keeps following its main layer.
- * In every frame that loses the flow, a place, size or text mode the flow gave a layer that differs
- * from what its main layer and constraints give it is its own (an instance's Fill child keeps 42
- * where its main layer is 82, as in Figma). An instance, or a layer in one, taking away a flow its
- * main keeps marks more, since that main flow can change what its main layers show later: each
- * layer's place, and its size on an axis a flow sized (Fill, or Stretch alignment), its own or its
- * main layer's. A fixed size no flow decided isn't marked, so it follows its main layer.
+ * The overrides keys the derivation reads (`placedGeometry`, the frozen rule, a copy text's
+ * mode): a change of a layer's overrides places it again only where one of these comes or goes.
  */
-export function flowRemovalMarks(doc: Doc, ops: readonly Op[]): Op[] {
-  const out: Op[] = [];
-  const seen = new Set<string>();
-  for (const op of ops) {
+const PLACING_OVERRIDES = [
+  "x",
+  "y",
+  "width",
+  "height",
+  "sizingH",
+  "sizingV",
+  "textAutoResize",
+  "layoutMode",
+] as const;
+
+/**
+ * Each layer's overrides before the operations `inverse` undoes: the last set of them it holds
+ * (it undoes the first one made), or none for a layer or record they made.
+ */
+export function overridesBefore(inverse: readonly Op[]): Map<string, readonly string[]> {
+  const out = new Map<string, readonly string[]>();
+  for (const op of inverse) {
+    if (op.op === "set" && op.prop === "overrides")
+      out.set(op.id, Array.isArray(op.value) ? (op.value as string[]) : []);
+    else if (op.op === "delete") out.set(op.id, []);
+    else if (op.op === "create")
+      out.set(op.id, ((op.props as Record<string, unknown>).overrides as string[]) ?? []);
+  }
+  return out;
+}
+
+/** The frame a copy frame or instance root shows: its component, else its main layer. */
+function shownFrame(doc: Doc, frame: NodeRecord): NodeRecord | undefined {
+  const id = getProp(frame.props, "instanceOf") ?? getProp(frame.props, "mirrors");
+  return id ? doc.get(id) : undefined;
+}
+
+/**
+ * A person's or an agent's edit without the auto layout removals the editor refuses (PR 286, as
+ * Figma refuses them): taking away, from an instance or a layer in one, the auto layout the frame
+ * it shows has. `canToggleLayout` refuses it in the layout commands; this covers the generic
+ * setters and the agent's tools, so no edit makes a frame frozen (`frozenFrame`). Undo and redo
+ * aren't edits of this kind: they may go back to a frame a file from before left frozen.
+ */
+export function refuseFrozenRemovals(doc: Doc, ops: readonly Op[]): Op[] {
+  return ops.filter((op) => {
     if (op.op !== "set" || op.prop !== "layoutMode" || (op.value !== null && op.value !== "none"))
-      continue;
+      return true;
     const frame = doc.get(op.id);
-    if (frame?.type !== "frame" || seen.has(frame.id)) continue;
-    // Read before the edit: a frame with no flow has nothing taken away.
-    if (getProp(frame.props, "layoutMode") === "none") continue;
-    seen.add(frame.id);
-    const shownId = getProp(frame.props, "instanceOf") ?? getProp(frame.props, "mirrors");
-    const shown = shownId ? doc.get(shownId) : undefined;
-    if (shown) out.push(...removalMarks(doc, frame, getProp(shown.props, "layoutMode") !== "none"));
-    for (const copy of flowCopies(doc, frame.id)) out.push(...removalMarks(doc, copy, false));
+    if (frame?.type !== "frame") return true;
+    const shown = shownFrame(doc, frame);
+    return !shown || getProp(shown.props, "layoutMode") === "none";
+  });
+}
+
+/**
+ * The frames an edit left frozen that weren't (`frozenFrame`): what it made or swapped, and the
+ * copy frames and instances of a frame it gave auto layout to while they held a layout mode of
+ * none as their own (a file from before, or a person's no-op setting). Each gets its main's flow
+ * back, in the same transaction, so only undo and redo go back to a frozen frame.
+ */
+export function unfreezeOps(doc: Doc, ops: readonly Op[], wasFrozen: ReadonlySet<string>): Op[] {
+  const candidates = new Set<string>();
+  const gained: string[] = [];
+  for (const op of ops) {
+    if (op.op === "create") candidates.add(op.id);
+    else if (op.op === "set" && (op.prop === "instanceOf" || op.prop === "mirrors"))
+      candidates.add(op.id);
+    else if (
+      op.op === "set" &&
+      op.prop === "layoutMode" &&
+      op.value !== null &&
+      op.value !== "none"
+    )
+      gained.push(op.id);
+  }
+  for (const id of gained) for (const frame of framesShowing(doc, id)) candidates.add(frame);
+  const out: Op[] = [];
+  for (const id of candidates) {
+    if (wasFrozen.has(id)) continue;
+    const frame = doc.get(id);
+    if (!frame || !frozenFrame(frame, shownFrame(doc, frame))) continue;
+    const own = getProp(frame.props, "overrides").filter((prop) => prop !== "layoutMode");
+    out.push(
+      {
+        op: "set",
+        id,
+        prop: "layoutMode",
+        value: getProp(shownFrame(doc, frame)?.props ?? {}, "layoutMode"),
+      },
+      { op: "set", id, prop: "overrides", value: own.length > 0 ? own : null },
+    );
   }
   return out;
 }
 
 /**
- * The copy frames that take their flow from `frameId` (its instances, for a main, and copies of it,
- * through copies of copies), as they are before the edit: not one that sets its own layout mode.
+ * The frames already frozen, read before an edit, among the copies of a frame it changes the
+ * flow of (`unfreezeOps`): a main's direction changing leaves them as a file from before had them.
+ * A swapped frame isn't among them: a swap always takes its new component's flow.
  */
-function flowCopies(doc: Doc, frameId: string): NodeRecord[] {
+export function frozenBefore(doc: Doc, ops: readonly Op[]): Set<string> {
+  const out = new Set<string>();
+  for (const op of ops)
+    if (op.op === "set" && op.prop === "layoutMode" && op.value !== null && op.value !== "none")
+      for (const id of framesShowing(doc, op.id)) {
+        const frame = doc.get(id);
+        if (frame && frozenFrame(frame, shownFrame(doc, frame))) out.add(id);
+      }
+  return out;
+}
+
+/**
+ * The copy frames and instances that show `frameId` (its instances, for a main, and copies of it,
+ * through copies of copies) and set their own layout mode to none.
+ */
+function framesShowing(doc: Doc, frameId: string): string[] {
   const mains = affectedComponents(doc, [frameId]);
+  if (mains.size === 0) return [];
+  const roots = (main: string) =>
+    doc.compactCopies ? doc.instanceRoots(main) : instancesOf(doc, main);
   const queue = [...mains];
   for (let i = 0; i < queue.length; i++)
-    for (const root of instanceNodes(doc, queue[i] as string))
+    for (const root of roots(queue[i] as string))
       for (const outer of affectedComponents(doc, [root]))
         if (!mains.has(outer)) {
           mains.add(outer);
@@ -835,7 +917,7 @@ function flowCopies(doc: Doc, frameId: string): NodeRecord[] {
   const nodes: NodeRecord[] = [];
   const walked = new Set<string>();
   for (const main of mains)
-    for (const root of instanceNodes(doc, main)) {
+    for (const root of roots(main)) {
       const stack = [root];
       while (stack.length > 0) {
         const id = stack.pop() as string;
@@ -843,77 +925,27 @@ function flowCopies(doc: Doc, frameId: string): NodeRecord[] {
         walked.add(id);
         const node = doc.get(id);
         if (!node) continue;
-        nodes.push(node);
+        if (node.type === "frame") nodes.push(node);
         stack.push(...doc.childIds(id));
       }
     }
-  // Copies of copies take it through the copy they copy: until nothing more is found.
+  // Copies of copies take it through the copy they copy, unless that copy sets its own.
   const from = new Set([frameId]);
-  const out: NodeRecord[] = [];
+  const out: string[] = [];
   for (let grew = true; grew; ) {
     grew = false;
     for (const node of nodes) {
-      if (from.has(node.id) || node.type !== "frame") continue;
+      if (from.has(node.id) || out.includes(node.id)) continue;
       const mirrors = getProp(node.props, "mirrors");
       const shown = getProp(node.props, "instanceOf");
-      const copies =
-        (mirrors !== null && from.has(mirrors)) || (shown === frameId && mirrors === null);
-      if (!copies || getProp(node.props, "overrides").includes("layoutMode")) continue;
+      if (!((mirrors !== null && from.has(mirrors)) || shown === frameId)) continue;
+      if (getProp(node.props, "overrides").includes("layoutMode")) {
+        if (getProp(node.props, "layoutMode") === "none") out.push(node.id);
+        continue;
+      }
       from.add(node.id);
-      out.push(node);
       grew = true;
     }
-  }
-  return out;
-}
-
-/** Every instance of a main: the stored roots (compact copies), or every instance layer. */
-function instanceNodes(doc: Doc, main: string): readonly string[] {
-  return doc.compactCopies ? doc.instanceRoots(main) : instancesOf(doc, main);
-}
-
-/** The marks keeping what the flow of `frame` (read before the edit) gave its layers. */
-function removalMarks(doc: Doc, frame: NodeRecord, ownedFlow: boolean): Op[] {
-  const out: Op[] = [];
-  const plain = { ...frame, props: { ...frame.props, layoutMode: "none" } } as NodeRecord;
-  for (const child of doc.childIds(frame.id)) {
-    const copy = doc.get(child);
-    const source = copy ? doc.get(getProp(copy.props, "mirrors") ?? "") : undefined;
-    if (!copy || !source) continue;
-    // Where the flow put it: a layer out of the flow (absolute, or hidden) it didn't place.
-    if (getProp(copy.props, "positioning") === "absolute" || !getProp(copy.props, "visible"))
-      continue;
-    const own = getProp(copy.props, "overrides");
-    const bound = getProp(copy.props, "bindings") as Record<string, unknown>;
-    const sourceParent = doc.get(source.parent);
-    // What its main layer and its constraints give it with no flow.
-    const given = constrainedValues(copy, source, plain, sourceParent);
-    const differs = (prop: "x" | "y" | "width" | "height") =>
-      Math.abs(getProp(copy.props, prop) - (given[prop] ?? getProp(source.props, prop))) >
-      PLACE_EPSILON;
-    const sized = (axis: "h" | "v") =>
-      flowSized(copy, frame, axis) || (!!sourceParent && flowSized(source, sourceParent, axis));
-    const marks: PropName[] = [];
-    for (const prop of ["x", "y"] as const)
-      if (!own.includes(prop) && !bound[prop] && (ownedFlow || differs(prop))) marks.push(prop);
-    for (const prop of ["width", "height"] as const) {
-      const axis = prop === "width" ? "h" : "v";
-      if (own.includes(prop) || bound[prop] || hugsOn(copy, axis) || measuresOn(copy, axis))
-        continue;
-      if (differs(prop) || (ownedFlow && sized(axis))) marks.push(prop);
-    }
-    // A text keeps a mode the flow switched (decision 0043), or one its main's flow gave it.
-    if (
-      copy.type === "text" &&
-      !own.includes("textAutoResize") &&
-      (getProp(copy.props, "textAutoResize") !== getProp(source.props, "textAutoResize") ||
-        (ownedFlow && (sized("h") || sized("v"))))
-    )
-      marks.push("textAutoResize");
-    if (marks.length === 0) continue;
-    for (const prop of marks)
-      out.push({ op: "set", id: child, prop, value: getProp(copy.props, prop) } as Op);
-    out.push({ op: "set", id: child, prop: "overrides", value: [...own, ...marks] });
   }
   return out;
 }
@@ -926,11 +958,27 @@ function removalMarks(doc: Doc, frame: NodeRecord, ownedFlow: boolean): Op[] {
  * (`placedGeometry`), as materialized sync does. Only instances that
  * store a value a layout reads can differ in size, so only they're walked.
  */
-export function copyConstraintOps(doc: Doc, ops: readonly Op[]): Op[] {
-  // What changes where a copy is placed is what the derivation reads (`PLACED_INPUTS`).
-  const placing = (op: Op) =>
-    (op.op === "set" && PLACED_INPUTS.has(op.prop)) ||
-    (op.op === "create" && Object.keys(op.props).some((prop) => PLACED_INPUTS.has(prop)));
+export function copyConstraintOps(
+  doc: Doc,
+  ops: readonly Op[],
+  /** Each layer's overrides before `ops` (`overridesBefore`), where they're known. */
+  before?: ReadonlyMap<string, readonly string[]>,
+): Op[] {
+  // What changes where a copy is placed is what the derivation reads (`PLACED_INPUTS`). An
+  // overrides change does only where a key the derivation reads comes or goes: a recolour
+  // places nothing again.
+  const placing = (op: Op) => {
+    if (op.op === "set" && op.prop === "overrides") {
+      const was = before?.get(op.id);
+      if (!was) return true;
+      const now = Array.isArray(op.value) ? (op.value as string[]) : [];
+      return PLACING_OVERRIDES.some((key) => was.includes(key) !== now.includes(key));
+    }
+    return (
+      (op.op === "set" && PLACED_INPUTS.has(op.prop)) ||
+      (op.op === "create" && Object.keys(op.props).some((prop) => PLACED_INPUTS.has(prop)))
+    );
+  };
   // A copy layer that changed one itself, in either format: placed again, with what's in it.
   const repinned = ops
     .filter(placing)
@@ -1057,10 +1105,12 @@ function copyPlaceOps(doc: Doc, id: string, view: (id: string) => NodeRecord | u
     if (Math.abs(getProp(copy.props, prop) - want) > PLACE_EPSILON)
       out.push({ op: "set", id, prop, value: want });
   // Placed freely, a copy text keeps its main layer's auto-resize (decision 0043): constraints
-  // never switch it. In a flow, the flow's Fill and stretch decide it.
+  // never switch it. In a flow, the flow's Fill and stretch decide it. In a frozen frame it's
+  // its own.
   const own = getProp(source.props, "textAutoResize");
   if (
     placed &&
+    !placed.frozen &&
     copy.type === "text" &&
     !getProp(copy.props, "overrides").includes("textAutoResize") &&
     getProp(copy.props, "textAutoResize") !== own

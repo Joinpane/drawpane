@@ -1,11 +1,11 @@
 // biome-ignore-all lint/style/noNonNullAssertion: Complete fixtures in review reproductions.
 /**
- * Protocol 4 (PR 286): the client taking an instance's auto layout away marks what that flow left
- * as the layers' own, in the same transaction. A tab from before (3 or older) takes it away
- * without those marks, and the client that receives an edit lays nothing out, so nothing would
- * mark them after. It doesn't write: it's told to reload at hello, and a tab welcomed before the
- * release has its edits refused. So the removals PR 286's eighth and ninth re-checks sent from
- * such a tab, and every repro built on one, can't reach a room.
+ * Protocol 4 (PR 286): every writer refuses taking an instance's auto layout away (as Figma does),
+ * and keeps a frame a file from before left that way frozen. A tab from before (3 or older) takes
+ * it away, and writes derived values over frozen layers. It doesn't write: it's told to reload at
+ * hello, and a tab welcomed before the release has its edits refused. So the removals PR 286's
+ * eighth and ninth re-checks sent from such a tab, and every repro built on one, can't reach a
+ * room.
  */
 import { env, runInDurableObject } from "cloudflare:test";
 import { copyId, type NodeRecord, type Op, ROOT_ID } from "@drawpane/model";
@@ -68,7 +68,7 @@ function fixture(copies: "materialized" | "compact"): NodeRecord[] {
   return nodes;
 }
 
-/** Taking the instance's auto layout away as a client before protocol 4 sent it: no marks. */
+/** Taking the instance's auto layout away as a client before protocol 4 sent it. */
 const olderRemoval = (copies: "materialized" | "compact"): Op[] => [
   copies === "compact"
     ? { op: "set", id: "Inst", prop: "unset", value: ["layoutMode"] }
@@ -159,7 +159,9 @@ describe("protocol 4: a tab from before can't take an instance's auto layout awa
     expect(main.props.layoutMode).toBe("row");
   });
 
-  it("takes the same removal from a protocol 4 tab, with its marks", async () => {
+  // The room checks who writes, not what: a protocol 4 tab's editor never sends this (it refuses
+  // the removal), and the room takes what such a tab sends.
+  it("takes the same operations from a protocol 4 tab", async () => {
     const f = await file();
     const marks: Op[] =
       f.copies === "compact"
