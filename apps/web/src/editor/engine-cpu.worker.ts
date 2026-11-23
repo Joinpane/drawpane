@@ -367,7 +367,7 @@ async function pump(): Promise<void> {
           width,
           height,
           camera,
-          exact: lastStats.exact && limit === undefined,
+          exact: lastStats.exact && lastStats.tiles.pending === 0 && limit === undefined,
           ...(limit === undefined ? {} : { limit }),
           plan: lastStats.plan,
           tiles: {

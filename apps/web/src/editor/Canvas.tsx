@@ -565,7 +565,15 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       let drewEngine = false;
       let runCompositeOnly = compositeOnly;
       const gestureMoving = s.gesture && s.editingText === null;
-      if (contentDirty && s.pageId !== null && engine && engineMoved && !whole && !compositeOnly) {
+      if (
+        contentDirty &&
+        s.pageId !== null &&
+        engine &&
+        engine.backend !== "cpu-worker" &&
+        engineMoved &&
+        !whole &&
+        !compositeOnly
+      ) {
         engineMoved = false;
         if (!gestureMoving && engineCamera === s.camera && engineShowing && !changed) {
           // The camera came to rest where the last frame was drawn: run one ~8 ms refine slice
@@ -620,7 +628,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
                 : REST_BUDGET_MS,
         );
         engineCamera = s.camera;
-        engineMoved = r.drawn && moving && !r.exact && engine.backend !== "cpu-worker";
+        engineMoved = r.drawn && moving && !r.exact;
         if (r.awaitingPreview) {
           drewEngine = true;
           contentDirty = false;

@@ -1743,4 +1743,17 @@ Following the lead maintainer's decision to match Figma's measured interaction p
 | **WebGL2** `pan, 100%` interval p50 / p95 ; content p50 / p95 ; settle (ms) | `16.7 / 33.3` ; `14.1-15.1 / 16.3-16.6` ; `0` | `16.7 / 16.7-16.8` ; `3.0-3.5 / 3.4-3.9` ; `57` (`drawn 73`) |
 | **WebGL2** motion submits / draws (warm) | `2-4` (n/a) | `1` submit, `2-16` draws |
 
-Remaining follow-ups noted for future work: (1) `pan, whole` at non-integer Fit scale currently shifts sub-pixel tile phase and re-bakes all 24 Fit tiles (`4.3 s` WebGL2 / `5.2 s` WebGPU under 8 ms/rAF); quantizing or preserving Fit tile phase across pans will turn `pan, whole` into a warm-cache hit matching `pan, 50%` (`0-20 ms`) and `pan, 100%` (`57-73 ms`); (2) emitting a single low-resolution coarse overview pass right after `openSlice` finishes (`~1.7 s`) and batching text updates before exact tile bakes will bring headless WebGPU `open.useful` under `2 s` and `open.exact` closer to `3 s`.
+Fit-scale tile keys round device-pixel translation to the nearest `2^-20` pixel before
+splitting the integer origin from the fractional phase. Whole-device-pixel pans keep the
+previous phase even when floating-point additions change its least significant bits. A real
+change in phase or scale still needs its own full-quality tiles.
+
+A cached tile counts as exact only if it was baked at full detail with the required reader halo.
+Coarse tiles at the current level can cover motion but stay pending until a full bake replaces
+them. Composite-only presents preserve paused tile work. When an atlas slot is unavailable,
+the visible tile is drawn directly into the frame so it cannot wait indefinitely for a slot.
+CPU worker motion also schedules a still render on gesture end. A frame reduced by a raster
+limit continues to report that limit.
+
+Page-open latency remains a separate follow-up. A low-resolution overview immediately after
+sliced admission and fewer text-driven invalidations can shorten the first useful frame.

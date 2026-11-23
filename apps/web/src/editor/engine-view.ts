@@ -645,6 +645,7 @@ interface CpuJobMeta {
   readonly background: string;
   readonly exact: boolean;
   readonly imagesExact: boolean;
+  readonly fullResolution: boolean;
   readonly epoch: number;
   firstTile: boolean;
 }
@@ -1657,13 +1658,22 @@ export class EngineView {
             camera: msg.camera,
           };
         }
-        if (msg.limit) {
-          this.#cpuLimitKey = job.sceneKey;
-          this.#cpuLimitMessage = msg.limit;
-          this.#limitReason = msg.limit;
+        const limit =
+          msg.limit ?? (job.fullResolution ? null : "CPU viewport exceeds the raster budget");
+        if (limit) {
+          if (job.exact) {
+            this.#cpuLimitKey = job.sceneKey;
+            this.#cpuLimitMessage = limit;
+          }
+          this.#limitReason = limit;
         }
         const frameExact =
-          msg.exact && job.exact && job.imagesExact && this.#builder.pendingVisible === 0;
+          msg.exact &&
+          msg.tiles.pending === 0 &&
+          job.exact &&
+          job.imagesExact &&
+          job.fullResolution &&
+          this.#builder.pendingVisible === 0;
         const at = performance.now();
         this.#cpuHasPage = job.pageId;
         this.#cpuCompletedKey = job.sceneKey;
@@ -2576,6 +2586,7 @@ export class EngineView {
     // (fonts arrived) leaves the frame a stand-in, whatever the engine drew.
     const shownExact =
       f.exact &&
+      f.tiles.pending === 0 &&
       !computeBehind &&
       !opening &&
       imagesExact &&
@@ -2912,9 +2923,10 @@ export class EngineView {
     const bounded = boundCpuViewport(width, height, dpr);
     const renderW = bounded.width;
     const renderH = bounded.height;
+    const fullResolution = renderW === width && renderH === height;
     const cam: Camera = { zoom: camera.zoom, x: camera.x, y: camera.y, dpr: bounded.dpr };
     const imagesExact = this.#updateImages(cam, renderW, renderH);
-    const sceneKey = `${pageId}|${this.#cpuRevision}|${this.#imageVersion}|${renderW}x${renderH}|${cam.zoom}|${cam.x}|${cam.y}|${cam.dpr}|${background}`;
+    const sceneKey = `${pageId}|${this.#cpuRevision}|${this.#imageVersion}|${width}x${height}|${renderW}x${renderH}|${cam.zoom}|${cam.x}|${cam.y}|${cam.dpr}|${background}`;
     const hasPendingText = this.#builder.pending > 0;
     const textFirst = this.#builder.pendingVisible > 0;
 
@@ -2994,6 +3006,7 @@ export class EngineView {
       background,
       exact: exact && !textFirst,
       imagesExact,
+      fullResolution,
       epoch: this.#epoch,
       firstTile: true,
     };

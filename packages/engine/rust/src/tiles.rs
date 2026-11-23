@@ -74,6 +74,10 @@ impl Level {
         if !ok {
             return None;
         }
+        // Ignore the floating-point drift from adding whole pixels to a fraction.
+        const PHASE_STEPS: f64 = 1_048_576.0;
+        let e = (e * PHASE_STEPS).round() / PHASE_STEPS;
+        let f = (f * PHASE_STEPS).round() / PHASE_STEPS;
         let (nx, ny) = (e.floor(), f.floor());
         Some((
             Level {
@@ -148,9 +152,9 @@ pub struct TileEntry {
 }
 
 impl TileEntry {
-    /// Nothing to draw it again for: not stale, and exact or drawn at full detail.
+    /// Nothing to draw it again for: drawn at full detail and still current.
     pub fn current(&self) -> bool {
-        !self.stale && (self.exact || self.full)
+        !self.stale && self.full
     }
 }
 
@@ -881,7 +885,7 @@ impl TileCache {
             key,
             TileEntry {
                 slot,
-                exact,
+                exact: full && exact,
                 full,
                 stale: false,
                 used: self.frame,
@@ -1182,10 +1186,6 @@ impl TileCache {
             if room > 0 {
                 room -= 1;
                 optional.push(frame_job(n.key, false, false));
-                continue;
-            }
-            if n.deps.is_empty() {
-                // The last frame stands in for it: it waits for a slot.
                 continue;
             }
             // Drawn now: the tiles it counted on are free once nothing else counts on them.
@@ -1778,5 +1778,55 @@ mod tests {
         // Changing halo at the same 1x scale drops 1x tiles cleanly.
         c.begin_scaled([1.0; 4], 1.0, 9);
         assert!(c.is_empty(), "same-scale halo change drops that level's tiles");
+    }
+
+    #[test]
+    fn fit_scale_integer_pan_reuses_exact_tile() {
+        let mut c = TileCache::new(512, 64);
+        let scale = 0.1783;
+        c.begin_scaled([1.0; 4], scale, 4);
+        let (mut x, mut y) = (-114.6, -57.3);
+        let size = (32, 32);
+        let start = c
+            .plan(cam(scale, x, y), size, false, None, false, false)
+            .expect("start");
+        draw_all(&mut c, &start);
+
+        for _ in 0..60 {
+            x -= 6.0;
+            y -= 3.0;
+        }
+        c.begin_scaled([1.0; 4], scale, 4);
+        let panned = c.plan(cam(scale, x, y), size, false, None, false, false).expect("pan");
+
+        assert_eq!(panned.level, start.level);
+        assert_eq!(panned.origin, (start.origin.0 - 360, start.origin.1 - 180));
+        assert!(panned.jobs.is_empty(), "the pan only exposes pixels of the same tile");
+        assert!(c.compose(&panned, None).exact);
+    }
+
+    #[test]
+    fn reduced_reader_tile_at_the_current_scale_is_replaced_at_rest() {
+        let mut c = TileCache::new(64, 64);
+        let view = cam(1.0, 0.0, 0.0);
+        c.begin_scaled([1.0; 4], 1.0, 4);
+        let size = (32, 32);
+        let moving = c.plan(view, size, false, None, false, true).expect("motion");
+        let key = moving.jobs[0].key;
+        let slot = c.slot_for(key).expect("slot");
+        // A coarse pass can draw every record it visits without sampling the full halo.
+        c.drawn(key, slot, true, false);
+        let shown = c.compose(&moving, None);
+        assert!(!shown.exact);
+        assert_eq!(shown.pending, 1);
+        assert_eq!(shown.copies.len(), 1);
+
+        c.begin_scaled([1.0; 4], 1.0, 4);
+        let still = c.plan(view, size, false, None, false, false).expect("at rest");
+        assert_eq!(still.jobs.len(), 1);
+        draw_all(&mut c, &still);
+        let shown = c.compose(&still, None);
+        assert!(shown.exact);
+        assert_eq!(shown.pending, 0);
     }
 }

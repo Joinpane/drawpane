@@ -69,10 +69,10 @@ function solid(
   return [...list.finish()];
 }
 
-function directStripes(): number[] {
+function directStripes(count = 12): number[] {
   const list = new ListWriter(0xffffffff, 1);
   list.reset();
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < count; i++) {
     list.set(i + 1, ROOT, {
       flags: 0,
       transform: [1, 0, 0, 1, 20 + i * 6, 24],
@@ -405,6 +405,28 @@ for (const build of ["browser", "webgl"] as const) {
       expect(exact?.exact).toBe(true);
       expect(exact?.drawn).toBe(0);
       expect(exact?.pixel).toEqual(red);
+    });
+
+    test("a view without tile slots completes all direct tiles at rest", async ({ page }) => {
+      const frame = {
+        size: [1024, 64],
+        pixel: [560, 32],
+        camera: [1, 0, 0, 1],
+        moving: false,
+      } satisfies Omit<Frame, "budget">;
+      const results = await sample(
+        page,
+        directStripes(100),
+        [
+          { ...frame, budget: -1 },
+          { ...frame, budget: 1 },
+        ],
+        0,
+        build,
+      );
+      for (const result of results) {
+        expect(result).toMatchObject({ exact: true, pending: 0, drawn: 2, pixel: red });
+      }
     });
 
     test("a see-through glyph run covers its overlaps once, on the GPU, the CPU and in a PNG", async ({

@@ -1450,13 +1450,21 @@ impl Engine {
         // Interactive moving frames and composite-only presents stay on cached/coarse tiles
         // without baking exact haloed tiles: reuse the active tile cache halo in O(1) instead of
         // re-walking all backdrop readers on every motion frame.
+        let view_bits = view.as_coeffs().map(f64::to_bits);
+        let unverified_halo = (composite_only || reuse_moving_halo)
+            && !self.store.readers().is_empty()
+            && !self.halo_cache.is_some_and(|c| {
+                c.generation == self.generation
+                    && c.view_bits == view_bits
+                    && c.size == (width, height)
+                    && c.halo == cached_gpu_halo
+            });
         let (halo_opt, halo_plan) = if composite_only || reuse_moving_halo {
             (Some(cached_gpu_halo), None)
         } else {
             let plan_viewport = editor_viewport
                 && !self.store.has_context()
                 && !(options.moving && options.budget_ms > 0.0 && !simple_reader_drag);
-            let view_bits = view.as_coeffs().map(f64::to_bits);
             if !plan_viewport
                 && let Some(c) = self.halo_cache
                 && c.generation == self.generation
@@ -1606,6 +1614,13 @@ impl Engine {
                 halo_plan.as_ref(),
             )?
         };
+        // A cached halo may describe an earlier camera. Validate the current one before
+        // calling the frame exact, even if all its tiles are already at the current scale.
+        if unverified_halo {
+            stats.exact = false;
+            stats.standin = true;
+            stats.pending = stats.pending.max(1);
+        }
         // No frame is exact while text is still to come: it may paint past its box.
         if stats.exact && self.store.provisional_shown().is_some() {
             stats.exact = false;
@@ -3098,7 +3113,7 @@ impl Engine {
             let fs = self.cpu_draw_tile(job.view, tile, halo, job.detail, background)?;
             stats.draw.add(&fs.draw);
             stats.tiles_drawn += 1;
-            exact_direct &= fs.draw.exact();
+            exact_direct &= !job.detail && fs.draw.exact();
             take(self.cpu.target.data_as_u8_slice(), &mut scratch);
             let fx = i64::from(job.key.i) * i64::from(tile) + plan.origin.0;
             let fy = i64::from(job.key.j) * i64::from(tile) + plan.origin.1;

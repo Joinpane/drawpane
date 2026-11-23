@@ -5231,7 +5231,10 @@ impl Gpu {
             )
             .ok_or_else(|| EngineError::limit("a camera the tiles can't follow (too far out)"))?;
         let selection = self.tiles.drag_prepare(&mut plan, drag.map(DragFrame::input).as_ref());
-        if selection.is_some() || plan.direct || options.budget_ms <= 0.0 {
+        // A composite-only frame can present cached tiles; direct tiles and drag layers
+        // need an actual draw to produce pixels.
+        let composite_only = options.budget_ms < 0.0 && selection.is_none() && !plan.jobs.iter().any(|j| j.direct);
+        if !composite_only && (selection.is_some() || plan.direct || options.budget_ms <= 0.0) {
             self.abort_pending_tile();
         }
         let mut stats = DrawStats {
@@ -5240,6 +5243,7 @@ impl Gpu {
         };
         // Nothing to draw and the frame shown is this one, exact: it stays.
         let same = !opening
+            && self.pending_tile.is_none()
             && plan.jobs.is_empty()
             && selection.is_none()
             && last.is_some_and(|l| l.view == view && l.size == (w, h))
@@ -5262,7 +5266,6 @@ impl Gpu {
         let bake_t0 = now();
         let walk_budget = self.walk_budget_ms(options.budget_ms);
         let deadline = budgeted.then_some(bake_t0 + walk_budget);
-        let composite_only = options.budget_ms < 0.0;
         // Drop a paused tile only when it no longer matches any desired job for this camera/halo
         // (and never drop it during a composite-only present call).
         if !composite_only
@@ -5342,7 +5345,10 @@ impl Gpu {
                 // uncovered `must` tiles still draw. On real editor budgets (`>= 1 ms`), do not
                 // cut off uncovered `must` tiles before real scene work (`records >= 64`) so
                 // cold shader init on tiny scenes never leaves holes while heavy pages yield cleanly.
-                let enforce_must = budgeted && options.budget_ms >= 1.0 && stats.records >= 64;
+                // Direct tiles have no cache slot to carry progress to the next frame.
+                // At rest, finish them together so a low-memory view can settle.
+                let enforce_must =
+                    budgeted && options.budget_ms >= 1.0 && stats.records >= 64 && (options.moving || !job.direct);
                 let job_deadline = if job.must && !enforce_must { None } else { deadline };
                 let over_budget = if job.must {
                     enforce_must && (budget_hit || deadline.is_some_and(|d| now() >= d))
@@ -5373,7 +5379,7 @@ impl Gpu {
                         &mut stats,
                         &mut verbs,
                     )?;
-                    direct_exact &= exact;
+                    direct_exact &= !tile_detail && exact;
                     continue;
                 }
                 if job.direct {
@@ -5481,10 +5487,8 @@ impl Gpu {
                 }
             }
             let comp = self.tiles.compose(&plan, plan_last);
-            stats.exact = comp.exact && !self.opening_pending && !unfinished_must && self.pending_tile.is_none();
-            stats.pending = comp.pending.max(u32::from(
-                self.opening_pending || unfinished_must || self.pending_tile.is_some(),
-            ));
+            stats.exact = comp.exact;
+            stats.pending = comp.pending;
             stats.plan = if comp.complete && !self.opening_pending && !unfinished_must {
                 0
             } else {
@@ -5500,7 +5504,7 @@ impl Gpu {
             }
             for job in &late {
                 let tile_detail = job.detail || coarse_moving;
-                direct_exact &= self.draw_job(
+                let exact = self.draw_job(
                     store,
                     job,
                     tile_detail,
@@ -5512,6 +5516,7 @@ impl Gpu {
                     &mut stats,
                     &mut verbs,
                 )?;
+                direct_exact &= !tile_detail && exact;
             }
             if let (Some(now), Some(split)) = (selection, drag.and_then(|d| d.split.as_ref())) {
                 let dragged = self.drag_composite(store, &plan, now, split, halo, background, dst, &mut stats);
@@ -5521,8 +5526,10 @@ impl Gpu {
                 }
             }
         }
-        stats.exact =
-            (plan.direct || stats.exact) && direct_exact && !self.opening_pending && self.pending_tile.is_none();
+        stats.pending = stats.pending.max(u32::from(
+            self.opening_pending || unfinished_must || self.pending_tile.is_some(),
+        ));
+        stats.exact = (plan.direct || stats.exact) && direct_exact && stats.pending == 0;
         stats.direct = plan.direct || !late.is_empty();
         stats.standin = !stats.exact;
         stats.held = self.tiles.len() as u32;
