@@ -1228,9 +1228,15 @@ function perform(
         e.value === "none" && getProp(node.props, "layoutMode") !== "none"
           ? doc.childIds(id).map((c) => [c, boxOf(doc, c)] as const)
           : [];
+      const frameWas = boxOf(doc, id);
       if (e.value === "none") noteFlow(doc, id);
       editor.setLayoutMode([id], e.value);
-      if (getProp(doc.get(id)?.props ?? {}, "layoutMode") === "none")
+      // Where the frame keeps its own box: a flow around it can resize it too (a Fill frame whose
+      // content no longer sizes it), and then its constraints move what's in it (#321).
+      if (
+        getProp(doc.get(id)?.props ?? {}, "layoutMode") === "none" &&
+        JSON.stringify(boxOf(doc, id)) === JSON.stringify(frameWas)
+      )
         for (const [c, was] of boxes) expectKept(doc, id, c, was);
       break;
     }
@@ -2290,9 +2296,14 @@ function performFlow(editor: Editor, e: FlowEdit): void {
   const removing = (id: string, act: () => void) => {
     const was = getProp(doc.get(id)?.props ?? {}, "layoutMode");
     const boxes = doc.childIds(id).map((c) => [c, boxOf(doc, c)] as const);
+    const frameWas = boxOf(doc, id);
     noteFlow(doc, id);
     act();
-    if (was !== "none" && getProp(doc.get(id)?.props ?? {}, "layoutMode") === "none")
+    if (
+      was !== "none" &&
+      getProp(doc.get(id)?.props ?? {}, "layoutMode") === "none" &&
+      JSON.stringify(boxOf(doc, id)) === JSON.stringify(frameWas)
+    )
       for (const [c, box] of boxes) expectKept(doc, id, c, box);
   };
   switch (e.kind) {
