@@ -53,13 +53,16 @@ export function laidOutProps(
     getProp(parent.props, "layoutMode") !== "none" &&
     getProp(copy.props, "positioning") === "auto";
   if (inFlow) {
-    // Auto layout places its children, and sizes the ones that hug or fill.
+    // Auto layout places its children, and sizes the ones that hug or fill, or that its Stretch
+    // alignment stretches (a fixed size across): sync writing its main layer's there would only
+    // have layout write it back, moving what its constraints place in it each time.
     out.add("x");
     out.add("y");
     for (const axis of AXES)
       if (
         getProp(source.props, axis.sizing) !== "fixed" ||
-        getProp(copy.props, axis.sizing) !== "fixed"
+        getProp(copy.props, axis.sizing) !== "fixed" ||
+        flowSized(copy, parent, axis.size === "width" ? "h" : "v")
       )
         out.add(axis.size);
   }

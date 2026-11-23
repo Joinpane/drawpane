@@ -2293,4 +2293,37 @@ describe.each(["materialized", "compact"] as const)("re-check 8 with copies %s",
     editor.undo();
     expect(editor.doc.get(instance)?.parent).toBe(parent);
   });
+
+  it("keeps a layer's own place in a copy its frame's flow stretches through main edits (seed -215462325)", () => {
+    const editor = make(
+      [
+        page,
+        node("plain", "frame", "p", { isComponent: true, width: 160, height: 80 }),
+        node("b", "rect", "plain", { y: 20, width: 40, height: 20, constraintV: "scale" }),
+        node("outer", "frame", "p", { isComponent: true, y: 300, width: 400, height: 260 }, "a1"),
+      ],
+      copies,
+    );
+    const nested = editor.insertInstance("plain", { x: 5000, y: 5000 }) as string;
+    expect(editor.commit([{ op: "move", id: nested, parent: "outer", key: "a0" }])).toBe(true);
+    const outer = editor.insertInstance("outer", { x: 1000, y: 0 }) as string;
+    // A row of its own that stretches the copy of the nested instance (an older file's edit).
+    expect(
+      editor.commit([
+        { op: "set", id: outer, prop: "layoutMode", value: "row" },
+        { op: "set", id: outer, prop: "alignItems", value: "stretch" },
+      ]),
+    ).toBe(true);
+    const copy = editor.doc.childIds(outer)[0] as string;
+    expect(box(editor, copy)[3]).toBe(260);
+    const layer = editor.doc.childIds(copy)[0] as string;
+    editor.setProp([layer], "y", 50);
+    const at = box(editor, layer);
+    // Edits to its main reach the copy; its frame's size stays the flow's, so the layer stays put.
+    editor.setProp(["plain"], "opacity", 0.9);
+    editor.setProp(["b"], "opacity", 0.5);
+    expect(box(editor, layer)).toEqual(at);
+    expect(box(editor, copy)[3]).toBe(260);
+    expect(unsettled(editor)).toEqual([]);
+  });
 });
