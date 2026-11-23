@@ -933,8 +933,17 @@ export function copyConstraintOps(doc: Doc, ops: readonly Op[]): Op[] {
           Math.abs(getProp(copy.props, prop) - want) > PLACE_EPSILON
         );
       });
-      if (kept.length === 0) continue;
-      const value = [...own, ...kept];
+      // A text the flow put in another mode than its main's (Fill or Stretch across) keeps it.
+      const mode = getProp(copy.props, "textAutoResize");
+      const marks: PropName[] = [...kept];
+      if (
+        copy.type === "text" &&
+        !own.includes("textAutoResize") &&
+        mode !== getProp(source.props, "textAutoResize")
+      )
+        marks.push("textAutoResize");
+      if (marks.length === 0) continue;
+      const value = [...own, ...marks];
       out.push({ op: "set", id: child, prop: "overrides", value });
       pending.set(child, { ...pending.get(child), overrides: value });
     }
