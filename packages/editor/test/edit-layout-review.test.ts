@@ -1682,6 +1682,30 @@ describe.each(["materialized", "compact"] as const)("re-check 5 with copies %s",
     expect(unsettled(editor)).toEqual([]);
   });
 
+  it("gives a copy its own fixed size back when its instance takes auto layout (seed 1042694721)", () => {
+    const editor = make(
+      [
+        page,
+        node("main", "frame", "p", { isComponent: true, width: 160, height: 80 }),
+        node("bar", "rect", "main", {
+          x: 10,
+          y: 10,
+          width: 140,
+          height: 20,
+          constraintH: "stretch",
+        }),
+      ],
+      copies,
+    );
+    const instance = editor.insertInstance("main", { x: 0, y: 200 }) as string;
+    const bar = editor.doc.childIds(instance)[0] as string;
+    editor.resize([instance], "width", 20);
+    expect(width(editor, bar)).toBe(0);
+    editor.setLayoutMode([instance], "column");
+    expect(width(editor, bar)).toBe(140);
+    expect(unsettled(editor)).toEqual([]);
+  });
+
   it("keeps the size a flow stretched a copy to once its frame takes the flow away", () => {
     const editor = make(
       [

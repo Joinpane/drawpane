@@ -771,6 +771,9 @@ export function propagationOps(doc: Doc, ids: Iterable<string>): Op[] {
   return ops;
 }
 
+/** A frame's own fields its layers' places and sizes read (`placedGeometry`, `flowCopySizes`). */
+const FRAME_PLACING: ReadonlySet<string> = new Set(["layoutMode", "alignItems", "justifyItems"]);
+
 /**
  * With compact copies, the places constraints give copy layers after `ops`
  * moved, resized or re-pinned layers in mains (decision 0035, item 7): a
@@ -792,6 +795,20 @@ export function copyConstraintOps(doc: Doc, ops: readonly Op[]): Op[] {
   // Where to start, from every reason below; then each of them and what's in them is placed,
   // parents first, so a layer is placed in its frame as this pass leaves it.
   const starts = [...repinned];
+  // An instance whose own layout changed (given auto layout, say): its layers read it, so they're
+  // placed again (a fixed size a constraint shrank is its main layer's once a flow holds it).
+  for (const op of ops)
+    if (
+      op.op === "set" &&
+      (FRAME_PLACING.has(op.prop) ||
+        (op.prop === "unset" &&
+          Array.isArray(op.value) &&
+          op.value.some((prop) => FRAME_PLACING.has(String(prop)))))
+    ) {
+      const node = doc.get(op.id);
+      if (node && !getProp(node.props, "mirrors") && getProp(node.props, "instanceOf"))
+        starts.push(...doc.childIds(op.id));
+    }
   // A swapped instance shows another main's layers: placed for the size the instance has (nested
   // ones too, whose layout difference their outer instance holds).
   if (doc.compactCopies)
