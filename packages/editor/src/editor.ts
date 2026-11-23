@@ -41,6 +41,7 @@ import {
   instantiateOps,
   isInsideInstance,
   isMainComponent,
+  leftFlowKeepOps,
   outermostInstanceOf,
   overrideOps,
   propagationOps,
@@ -715,6 +716,14 @@ export class Editor {
     justEmptied: readonly string[] = [],
   ): Op[] {
     return this.doc.batch(() => {
+      // Frames of instances that took a flow away keep what it left, marked before this edit
+      // changes it or them, while it's still there to read (a removal an older client sent has
+      // no marks). The marks change no value, so they stay out of this edit's undo: undoing it
+      // goes back to the layers as the flow left them, marked. What the edit's constraints
+      // resize counts too, worked out again after the marks.
+      const resized = constrain ? constraintOps(this.doc, ops) : [];
+      const kept = leftFlowKeepOps(this.doc, [...ops, ...resized]);
+      if (kept.length > 0) this.sync.commit(kept);
       // A person's edit inside an instance records an override, and setting a
       // bound property by hand detaches its variable; both before the derived
       // writes below, so those leave the edited properties alone.
@@ -728,7 +737,7 @@ export class Editor {
         : [];
       // Resizing a frame moves its children by their constraints; resizing a
       // path (handles, inspector, constraints) scales its path data with its box.
-      const constrained = constrain ? constraintOps(this.doc, ops) : [];
+      const constrained = kept.length > 0 && constrain ? constraintOps(this.doc, ops) : resized;
       const pathOps = pathResizeOps(this.doc, [...ops, ...constrained]);
       const extra = [...marks, ...constrained, ...pathOps];
       const first = extra.length > 0 ? [...ops, ...extra] : ops;

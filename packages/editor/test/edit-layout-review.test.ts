@@ -3,7 +3,7 @@
  * independent review, F2 to F8): each ends where a full layout of the
  * document would, in both copy formats where both apply.
  */
-import { getProp, type NodeRecord, ROOT_ID } from "@drawpane/model";
+import { getProp, type NodeRecord, type Op, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
 import { canMoveInto } from "../src/components";
 import { Doc } from "../src/doc";
@@ -2179,4 +2179,98 @@ describe.each(["materialized", "compact"] as const)("re-check 7 with copies %s",
     const kept = editor.doc.childIds(instance)[0] as string;
     expect(editor.doc.childIds(kept)).toEqual([]);
   });
+});
+
+describe.each(["materialized", "compact"] as const)("re-check 8 with copies %s", (copies) => {
+  const box = (editor: Editor, id: string) =>
+    (["x", "y", "width", "height"] as const).map((prop) =>
+      getProp(editor.doc.get(id)?.props ?? {}, prop),
+    );
+  // A row component holding two fixed rects, and an instance of it whose own Stretch makes both
+  // 93 tall.
+  const stretched = () => {
+    const editor = make(
+      [
+        page,
+        node("main", "frame", "p", {
+          isComponent: true,
+          width: 160,
+          height: 80,
+          layoutMode: "row",
+          paddingTop: 7,
+          paddingLeft: 13,
+          gap: 5,
+        }),
+        node("r", "rect", "main", { width: 60, height: 20, constraintH: "stretch" }),
+        node("s", "rect", "main", { width: 12, height: 10 }, "a1"),
+      ],
+      copies,
+    );
+    editor.commit(layoutOps(editor.doc, ["main"]));
+    const instance = editor.insertInstance("main", { x: 500, y: 500 }) as string;
+    editor.resize([instance], "width", 120);
+    editor.resize([instance], "height", 100);
+    editor.setProp([instance], "alignItems", "stretch");
+    return { editor, instance };
+  };
+  const STRETCHED = [
+    [13, 7, 60, 93],
+    [78, 7, 12, 93],
+  ];
+  const boxes = (editor: Editor, instance: string) =>
+    editor.doc.childIds(instance).map((id) => box(editor, id));
+  // Taking the instance's auto layout away as a client before PR 286 sent it (57d6fff1): the
+  // instance's own stored operations, and no marks on its layers.
+  const olderRemoval = (instance: string, overrides: readonly string[]): Op[] => [
+    copies === "compact"
+      ? { op: "set", id: instance, prop: "unset", value: ["layoutMode"] }
+      : { op: "set", id: instance, prop: "layoutMode", value: null },
+    { op: "set", id: instance, prop: "overrides", value: [...overrides, "layoutMode"].sort() },
+  ];
+
+  it.each(["received", "made here"] as const)(
+    "keeps the layers an older client's removal left through the main's flow changing (%s)",
+    (how) => {
+      const made = stretched();
+      let editor = made.editor;
+      const { instance } = made;
+      expect(boxes(editor, instance)).toEqual(STRETCHED);
+      if (how === "received") {
+        const start = editor.doc.stored();
+        const overrides = getProp(editor.doc.get(instance)?.props ?? {}, "overrides");
+        editor = make(start, copies);
+        editor.sync.connected(() => {});
+        editor.sync.receive({
+          t: "welcome",
+          mode: "snapshot",
+          revn: 1,
+          sessionId: "room",
+          role: "editor",
+          peers: [],
+          lastSeq: 0,
+          copies,
+        } as never);
+        editor.sync.receive({ t: "snapshot", nodes: start, done: true } as never);
+        editor.setPage("p");
+        editor.sync.receive({ t: "txn", revn: 2, ops: olderRemoval(instance, overrides) } as never);
+      } else editor.commit([{ op: "set", id: instance, prop: "layoutMode", value: null }]);
+      expect(getProp(editor.doc.get(instance)?.props ?? {}, "layoutMode")).toBe("none");
+      expect(boxes(editor, instance)).toEqual(STRETCHED);
+      // The main turning to a column changes neither layer: their place and the size the
+      // instance's own flow gave them are theirs now.
+      editor.setLayoutMode(["main"], "column");
+      expect(boxes(editor, instance)).toEqual(STRETCHED);
+      expect(unsettled(editor)).toEqual([]);
+      // Nor does a later change of the main layer's own height.
+      editor.resize(["r"], "height", 45);
+      expect(boxes(editor, instance)).toEqual(STRETCHED);
+      editor.undo();
+      editor.undo();
+      expect(boxes(editor, instance)).toEqual(STRETCHED);
+      editor.redo();
+      editor.redo();
+      expect(boxes(editor, instance)).toEqual(STRETCHED);
+      expect(unsettled(editor)).toEqual([]);
+    },
+  );
 });

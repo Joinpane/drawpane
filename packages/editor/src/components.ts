@@ -25,6 +25,7 @@ import {
   constrainedValues,
   copyChildId,
   flowCopySizes,
+  flowSized,
   getProp,
   hugsOn,
   isMainNode,
@@ -785,6 +786,202 @@ export function propagationOps(doc: Doc, ids: Iterable<string>): Op[] {
 /** A frame's own fields its layers' places and sizes read (`placedGeometry`, `flowCopySizes`). */
 const FRAME_PLACING: ReadonlySet<string> = new Set(["layoutMode", "alignItems", "justifyItems"]);
 
+const NO_IDS: ReadonlySet<string> = new Set();
+
+/**
+ * What keeps a frame's layers as the auto layout it took away left them (a frame of an instance
+ * whose own layout mode was taken away: an older file's edit, or an older client's). Each layer
+ * the flow placed keeps its place, and a text its mode; a size that flow or its main layer's own
+ * flow decided (Fill or Stretch), or that differs from what its main layer and constraints give,
+ * is its own. Marked with their values, so compact copies store them, whatever the main's flow
+ * does later. Layers in `skip` are left out (the edit sets them itself). `later` reads a main's
+ * layer as an edit about to apply leaves it, so a size its flow decides only then is kept too.
+ */
+function leftFlowMarks(
+  doc: Doc,
+  frame: NodeRecord,
+  view: (id: string) => NodeRecord | undefined,
+  skip: ReadonlySet<string>,
+  later: (node: NodeRecord) => NodeRecord = (node) => node,
+): Op[] {
+  const out: Op[] = [];
+  const shown = doc.get(
+    getProp(frame.props, "instanceOf") ?? getProp(frame.props, "mirrors") ?? "",
+  );
+  // The flow it left: its main's kind of flow, with its own alignment (its main's, unless it
+  // overrides it), as it reads now and once the edit applies.
+  const flowLeft = (main: NodeRecord | undefined) => {
+    const mode = main ? getProp(main.props, "layoutMode") : "none";
+    if (getProp(frame.props, "layoutMode") !== "none" || mode === "none" || !main) return frame;
+    const alignItems = getProp(frame.props, "overrides").includes("alignItems")
+      ? getProp(frame.props, "alignItems")
+      : getProp(main.props, "alignItems");
+    return { ...frame, props: { ...frame.props, layoutMode: mode, alignItems } } as NodeRecord;
+  };
+  const left = flowLeft(shown);
+  const leftLater = flowLeft(shown && later(shown));
+  // A copy's sizing and alignment are its main layer's, unless it overrides them.
+  const SIZING = ["sizingH", "sizingV", "alignSelf", "rotation"] as const;
+  const copyLater = (copy: NodeRecord, source: NodeRecord) => {
+    const next = later(source);
+    if (next === source) return copy;
+    const own = getProp(copy.props, "overrides");
+    const props = { ...copy.props } as Record<string, unknown>;
+    for (const prop of SIZING) if (!own.includes(prop)) props[prop] = getProp(next.props, prop);
+    return { ...copy, props: props as Props } as NodeRecord;
+  };
+  for (const child of doc.childIds(frame.id)) {
+    if (skip.has(child)) continue;
+    const copy = view(child);
+    const source = copy ? doc.get(getProp(copy.props, "mirrors") ?? "") : undefined;
+    if (!copy || !source) continue;
+    const own = getProp(copy.props, "overrides");
+    const bound = getProp(copy.props, "bindings") as Record<string, unknown>;
+    // Where the flow put it: a layer out of the flow (absolute, or hidden) it didn't place.
+    const placed =
+      getProp(copy.props, "positioning") !== "absolute" && getProp(copy.props, "visible");
+    const marks: PropName[] = placed
+      ? (["x", "y"] as const).filter((prop) => !own.includes(prop) && !bound[prop])
+      : [];
+    // What its main layer and its constraints give it, with no flow: a size the flow gave it
+    // otherwise is kept, and so is one a flow decided, though it's its main layer's now (compact
+    // copies would show the main layer's once its own flow changes).
+    const sourceParent = doc.get(source.parent);
+    const plain = constrainedValues(copy, source, frame, sourceParent);
+    for (const prop of ["width", "height"] as const) {
+      const axis = prop === "width" ? "h" : "v";
+      const want = plain[prop] ?? getProp(source.props, prop);
+      if (
+        !own.includes(prop) &&
+        !bound[prop] &&
+        !hugsOn(copy, axis) &&
+        !measuresOn(copy, axis) &&
+        (flowSized(copy, left, axis) ||
+          flowSized(copyLater(copy, source), leftLater, axis) ||
+          (!!sourceParent &&
+            (flowSized(source, sourceParent, axis) ||
+              flowSized(later(source), later(sourceParent), axis))) ||
+          Math.abs(getProp(copy.props, prop) - want) > PLACE_EPSILON)
+      )
+        marks.push(prop);
+    }
+    // A text keeps the mode it has, the flow's or its main's (a main's flow can switch the main
+    // layer's later, decision 0043).
+    if (
+      copy.type === "text" &&
+      !own.includes("textAutoResize") &&
+      (placed || getProp(copy.props, "textAutoResize") !== getProp(source.props, "textAutoResize"))
+    )
+      marks.push("textAutoResize");
+    if (marks.length === 0) continue;
+    for (const prop of marks)
+      out.push({ op: "set", id: child, prop, value: getProp(copy.props, prop) } as Op);
+    out.push({ op: "set", id: child, prop: "overrides", value: [...own, ...marks] });
+  }
+  return out;
+}
+
+/** A frame of an instance that took its own auto layout away (its layout mode, an override). */
+function leftItsFlow(node: NodeRecord | undefined): boolean {
+  return (
+    node?.type === "frame" &&
+    getProp(node.props, "layoutMode") === "none" &&
+    getProp(node.props, "overrides").includes("layoutMode") &&
+    (!!getProp(node.props, "mirrors") || !!getProp(node.props, "instanceOf"))
+  );
+}
+
+const leftFlowCache = new WeakMap<Doc, { version: number; readonly frames: Set<string> }>();
+
+/**
+ * The frames that took their auto layout away (`leftItsFlow`), caught up with the document as
+ * the instances index is. Read whole from what's stored (compact copies' override records, not
+ * every copy built), then from the change log, which names every layer an edit set.
+ */
+function leftFlowFrames(doc: Doc): ReadonlySet<string> {
+  const cached = leftFlowCache.get(doc);
+  if (cached) {
+    if (cached.version === doc.version) return cached.frames;
+    const changes = doc.changesSince(cached.version);
+    if (changes && !changes.some((c) => c.reset)) {
+      for (const change of changes)
+        for (const id of change.ids) {
+          if (leftItsFlow(doc.getUnresolved(id))) cached.frames.add(id);
+          else cached.frames.delete(id);
+        }
+      cached.version = doc.version;
+      return cached.frames;
+    }
+  }
+  const frames = new Set<string>();
+  for (const record of doc.stored())
+    if (
+      getProp(record.props, "overrides").includes("layoutMode") &&
+      leftItsFlow(doc.getUnresolved(record.id))
+    )
+      frames.add(record.id);
+  leftFlowCache.set(doc, { version: doc.version, frames });
+  return frames;
+}
+
+/**
+ * Marks, made before an edit applies, for the frames that took the auto layout of a frame it
+ * changes (or of what's in it) away. A removal an older client made arrives without the marks
+ * `leftFlowMarks` gives (the client receiving it lays nothing out), so the edit that would change
+ * what that flow left, a change to the main's flow say, marks it while the flow it left is still
+ * there to read.
+ */
+export function leftFlowKeepOps(doc: Doc, ops: readonly Op[]): Op[] {
+  const left = leftFlowFrames(doc);
+  if (left.size === 0) return [];
+  // The frames the edit changes, or changes what's in.
+  const touched = new Set<string>();
+  for (const op of ops) {
+    if (op.op === "create") {
+      touched.add(op.parent);
+      continue;
+    }
+    touched.add(op.id);
+    const node = doc.getUnresolved(op.id);
+    if (node) touched.add(node.parent);
+    if (op.op === "move") touched.add(op.parent);
+  }
+  const skip = new Set(ops.map((op) => op.id));
+  // A layer as the edit leaves it (what it sets on it).
+  const sets = new Map<string, Record<string, unknown>>();
+  for (const op of ops)
+    if (op.op === "set") sets.set(op.id, { ...sets.get(op.id), [op.prop]: op.value });
+  const later = (node: NodeRecord): NodeRecord => {
+    const changed = sets.get(node.id);
+    if (!changed) return node;
+    const props = { ...node.props } as Record<string, unknown>;
+    for (const [prop, value] of Object.entries(changed))
+      if (value === null) delete props[prop];
+      else props[prop] = value;
+    return { ...node, props: props as Props };
+  };
+  const out: Op[] = [];
+  for (const id of left) {
+    const frame = doc.get(id);
+    if (!frame) continue;
+    // The frame itself or what's in it, or what it shows and what that copies in turn: a flow it
+    // left there, which the edit changes.
+    const shown = doc.get(
+      getProp(frame.props, "instanceOf") ?? getProp(frame.props, "mirrors") ?? "",
+    );
+    let reached = touched.has(id);
+    for (let node: NodeRecord | undefined = shown, depth = 0; node && depth < 32; depth++) {
+      if (touched.has(node.id)) {
+        reached = true;
+        break;
+      }
+      node = doc.get(getProp(node.props, "mirrors") ?? "");
+    }
+    if (reached) out.push(...leftFlowMarks(doc, frame, (c) => doc.get(c), skip, later));
+  }
+  return out;
+}
+
 /**
  * With compact copies, the places constraints give copy layers after `ops`
  * moved, resized or re-pinned layers in mains (decision 0035, item 7): a
@@ -896,8 +1093,7 @@ export function copyConstraintOps(doc: Doc, ops: readonly Op[]): Op[] {
     return props ? { ...node, props: { ...node.props, ...props } as Props } : node;
   };
   // A frame of an instance that takes its own auto layout away (an older file's edit, or an older
-  // client's) leaves its layers as the layout made them, as Figma does: a size the flow gave one,
-  // where it would now be another, is its own, whatever its main's flow does later.
+  // client's) leaves its layers as the layout made them, as Figma does (`leftFlowMarks`).
   for (const op of ops) {
     if (op.op !== "set" || op.prop !== "layoutMode" || (op.value !== null && op.value !== "none"))
       continue;
@@ -913,39 +1109,10 @@ export function copyConstraintOps(doc: Doc, ops: readonly Op[]): Op[] {
       !getProp(frame.props, "overrides").includes("layoutMode")
     )
       continue;
-    for (const child of doc.childIds(op.id)) {
-      const copy = doc.get(child);
-      const source = copy ? doc.get(getProp(copy.props, "mirrors") ?? "") : undefined;
-      if (!copy || !source) continue;
-      // What its main layer and its constraints give it, with no flow: a size the flow gave it
-      // otherwise is kept, as its own (so the main's own flow changing later can't take it).
-      const plain = constrainedValues(copy, source, frame, doc.get(source.parent));
-      const own = getProp(copy.props, "overrides");
-      const bound = getProp(copy.props, "bindings") as Record<string, unknown>;
-      const kept = (["width", "height"] as const).filter((prop) => {
-        const axis = prop === "width" ? "h" : "v";
-        const want = plain[prop] ?? getProp(source.props, prop);
-        return (
-          !own.includes(prop) &&
-          !bound[prop] &&
-          !hugsOn(copy, axis) &&
-          !measuresOn(copy, axis) &&
-          Math.abs(getProp(copy.props, prop) - want) > PLACE_EPSILON
-        );
-      });
-      // A text the flow put in another mode than its main's (Fill or Stretch across) keeps it.
-      const mode = getProp(copy.props, "textAutoResize");
-      const marks: PropName[] = [...kept];
-      if (
-        copy.type === "text" &&
-        !own.includes("textAutoResize") &&
-        mode !== getProp(source.props, "textAutoResize")
-      )
-        marks.push("textAutoResize");
-      if (marks.length === 0) continue;
-      const value = [...own, ...marks];
-      out.push({ op: "set", id: child, prop: "overrides", value });
-      pending.set(child, { ...pending.get(child), overrides: value });
+    for (const mark of leftFlowMarks(doc, frame, view, NO_IDS)) {
+      out.push(mark);
+      if (mark.op === "set")
+        pending.set(mark.id, { ...pending.get(mark.id), [mark.prop]: mark.value });
     }
   }
   for (const id of order)
