@@ -402,9 +402,11 @@ impl Health {
 struct Main {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+    tex_view_id: u64,
     #[cfg(feature = "compute")]
     view_id: u64,
     present_group: Option<wgpu::BindGroup>,
+    composite_group: Option<wgpu::BindGroup>,
     width: u32,
     height: u32,
 }
@@ -443,11 +445,9 @@ const READBACKS: u32 = 2;
 /// and the one being made.
 const FRAMES: usize = 2;
 
-/// Tile pages: textures of `PAGE` × `PAGE` pixels, each holding `PER_PAGE` tiles.
-const PAGE: u32 = 2048;
-const PER_ROW: u32 = PAGE / TILE;
-const PER_PAGE: u32 = PER_ROW * PER_ROW;
-const PAGE_BYTES: usize = (PAGE * PAGE * 4) as usize;
+/// Default tile page side when no pages are allocated yet; `fit_tiles` upgrades to 4096 when
+/// device limits and tile budget allow (64 tiles of 512x512 per atlas page).
+const DEFAULT_PAGE: u32 = 2048;
 /// Kept free under the budget for what a frame allocates on the way (read-backs, images).
 const HEADROOM: usize = 32 << 20;
 /// SwiftShader can exhaust its frame deadline before it exhausts the texture
@@ -495,17 +495,43 @@ struct V {
 struct Page {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+    composite_group: Option<wgpu::BindGroup>,
 }
 
 struct Compositor {
+    bgl: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
     /// The same quads laid over what's there (premultiplied source over): a drag's selection
     /// and the part above it.
     over: wgpu::RenderPipeline,
     sampler: wgpu::Sampler,
     uniforms: wgpu::Buffer,
+    uniform_size: (u32, u32),
     instances: wgpu::Buffer,
     capacity: usize,
+}
+
+impl Compositor {
+    fn create_bind_group(&self, device: &wgpu::Device, view: &wgpu::TextureView, label: &str) -> wgpu::BindGroup {
+        device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some(label),
+            layout: &self.bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&self.sampler),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.uniforms.as_entire_binding(),
+                },
+            ],
+        })
+    }
 }
 
 /// Where a tile is drawn: a slot in a page, the frame (a frame drawn direct), or only the
@@ -552,6 +578,7 @@ struct GpuCachedShadow {
 struct GpuTarget {
     tex: wgpu::Texture,
     view: wgpu::TextureView,
+    view_id: u64,
     depth: wgpu::TextureView,
     width: u32,
     height: u32,
@@ -593,6 +620,7 @@ struct GpuTempTex {
 struct GpuMaskScratch {
     tex: wgpu::Texture,
     view: wgpu::TextureView,
+    view_id: u64,
     depth: wgpu::TextureView,
     width: u32,
     height: u32,
@@ -603,6 +631,7 @@ struct GpuMaskScratch {
 struct GpuBlurScratch {
     tex: wgpu::Texture,
     view: wgpu::TextureView,
+    view_id: u64,
     width: u32,
     height: u32,
     bytes: usize,
@@ -612,6 +641,7 @@ struct GpuBlurScratch {
 struct ScratchTile {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+    view_id: u64,
     depth: wgpu::TextureView,
     width: u32,
     height: u32,
@@ -653,15 +683,13 @@ struct ActiveDraw {
     scene_dirty: bool,
     glass_masks: HashMap<(u32, usize), GlassMaskSlot>,
     before: Option<wgpu::CommandEncoder>,
-    /// True once `before` contains a `vello_hybrid::Renderer::render` call; a second `render`
-    /// must submit `before` first so `vello_hybrid`'s shared GPU staging buffers are not overwritten.
-    encoder_has_vello: bool,
     flush_ms: f64,
     prepare_masks_ms: f64,
     vello_render_ms: f64,
     reader_ms: f64,
     shadow_ms: f64,
     submit_ms: f64,
+    draws: u32,
     vello_renders: u32,
     glass_ops: u32,
     glass_batched: u32,
@@ -693,13 +721,13 @@ impl ActiveDraw {
             scene_dirty: false,
             glass_masks: HashMap::new(),
             before: None,
-            encoder_has_vello: false,
             flush_ms: 0.0,
             prepare_masks_ms: 0.0,
             vello_render_ms: 0.0,
             reader_ms: 0.0,
             shadow_ms: 0.0,
             submit_ms: 0.0,
+            draws: 0,
             vello_renders: 0,
             glass_ops: 0,
             glass_batched: 0,
@@ -715,6 +743,7 @@ impl ActiveDraw {
         stats.reader_ms += self.reader_ms;
         stats.shadow_ms += self.shadow_ms;
         stats.submit_ms += self.submit_ms;
+        stats.draws += self.draws;
         stats.vello_renders += self.vello_renders;
         stats.glass_ops += self.glass_ops;
         stats.glass_batched += self.glass_batched;
@@ -725,12 +754,59 @@ impl ActiveDraw {
         stats.render_ms += render_ms;
         stats.encode_ms += (total_ms - render_ms - self.submit_ms).max(0.0);
     }
+
+    /// Flushes this slice's counters into `stats` and zeroes them so a resumed `PendingTile`
+    /// never double-counts earlier slices.
+    fn record_and_reset_slice(&mut self, stats: &mut DrawStats, total_ms: f64) {
+        self.record_into(stats, total_ms);
+        self.flush_ms = 0.0;
+        self.prepare_masks_ms = 0.0;
+        self.vello_render_ms = 0.0;
+        self.reader_ms = 0.0;
+        self.shadow_ms = 0.0;
+        self.submit_ms = 0.0;
+        self.draws = 0;
+        self.vello_renders = 0;
+        self.glass_ops = 0;
+        self.glass_batched = 0;
+        self.bg_blur_ops = 0;
+        self.shadow_ops = 0;
+        self.shadow_hits = 0;
+    }
+}
+
+/// In-progress tile paused cooperatively mid-walk to honor the per-frame CPU budget.
+/// Its partially rendered main pixels live in `self.scratches[active_scratch]` and (when
+/// `active.backdrop_live`) its backdrop plane lives in `self.readers.backdrop_frame`.
+struct PendingTile {
+    key: TileKey,
+    view: Affine,
+    detail: bool,
+    coarse_readers: bool,
+    halo: i32,
+    tile_halo: i32,
+    side: u32,
+    background: [f32; 4],
+    bg_bits: [u32; 4],
+    generation: u64,
+    active_scratch: usize,
+    active: ActiveDraw,
+    checkpoint: exec::WalkCheckpoint,
+    verbs: usize,
+    backdrop_gen: u64,
+}
+
+enum TileStep {
+    Complete,
+    Paused,
+    NoSlot,
 }
 
 /// The glass-free prefix or blurred patch captured at a reader's paint position in a halo pass.
 struct HaloPatch {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+    view_id: u64,
     origin: (i32, i32),
     size: (u32, u32),
     divisor: i32,
@@ -931,6 +1007,7 @@ impl ReaderHalo {
 struct BlurReaderPlane {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
+    view_id: u64,
 }
 
 struct ReaderSource {
@@ -1109,6 +1186,12 @@ pub struct Gpu {
     readers: GpuReaders,
     reader_halo: Option<ReaderHalo>,
     active: Option<ActiveDraw>,
+    /// Hard wall-clock deadline (`now()` ms) checked cooperatively during budgeted tile walks.
+    deadline_ms: Option<f64>,
+    /// Tile cooperatively paused mid-walk so no single frame stalls past its CPU budget.
+    pending_tile: Option<PendingTile>,
+    /// True while a freshly opened page is still completing its coarse opening ladder tiles.
+    opening_pending: bool,
     backdrop_gen: u64,
     /// Frame textures: the one shown (`cur`) and the one being made.
     frames: Vec<Main>,
@@ -1119,6 +1202,8 @@ pub struct Gpu {
     /// The board textures (decision 0040, phase 2): which tiles are held, where, and how fresh.
     pub tiles: TileCache,
     pages: Vec<Page>,
+    /// Tile atlas page side in physical pixels (4096 when limits & tile budget allow, else 2048/1024/512).
+    page_side: u32,
     /// Scratch targets and their depth buffers: slot 0 caches the plain `TILE x TILE` target for
     /// non-reader and coarse tiles, slot 1 caches the haloed (`TILE + 2 * halo`) or whole-frame target,
     /// slots 2 and 3 cache the far and mid reader-halo replay targets separately to avoid thrashing,
@@ -1140,6 +1225,10 @@ pub struct Gpu {
     whole_reader_halo: bool,
     /// Milliseconds a tile has lately taken to draw (a running average).
     tile_ms: f64,
+    /// Running EWMA of `submit_ms / work_ms` for tile slices so backends with synchronous submit
+    /// flush costs (such as WebGL2 across Chrome, Safari, and Firefox) reserve headroom inside
+    /// each frame's time budget.
+    submit_ratio: f64,
     blit: Option<wgpu::RenderPipeline>,
     images: HashMap<u32, Vec<(TextureId, wgpu::Texture, u32, u32)>>,
     /// Per-draw temporary textures (e.g. diamond gradients), released right after submit.
@@ -1181,6 +1270,8 @@ pub struct Gpu {
     scratch_blur: Option<GpuBlurScratch>,
     /// Scratch backdrop copy texture for blend compositing.
     scratch_backdrop: Option<GpuBlurScratch>,
+    /// Replaced scratch textures still referenced by an unsubmitted encoder, destroyed after submit.
+    retired_textures: Vec<(wgpu::Texture, usize)>,
     next_temp_id: u64,
     /// Total GPU bytes held by offscreen/temp pools and shadow scratch textures.
     pool_bytes: usize,
@@ -1254,6 +1345,9 @@ impl Drop for Gpu {
         }
         for p in self.pages.drain(..) {
             p.texture.destroy();
+        }
+        for (tex, _) in self.retired_textures.drain(..) {
+            tex.destroy();
         }
         for scratch in self.scratches.iter_mut().filter_map(Option::take) {
             scratch.texture.destroy();
@@ -1753,6 +1847,9 @@ impl Gpu {
             readers,
             reader_halo: None,
             active: None,
+            deadline_ms: None,
+            pending_tile: None,
+            opening_pending: false,
             backdrop_gen: 0,
             frames: Vec::new(),
             #[cfg(feature = "compute")]
@@ -1761,6 +1858,7 @@ impl Gpu {
             surface_bytes: 0,
             tiles: TileCache::new(TILE, 0),
             pages: Vec::new(),
+            page_side: DEFAULT_PAGE.min(device_limits.max_texture_dimension_2d),
             scratches: [None, None, None, None, None],
             halo_reader_planes: [[None, None, None], [None, None, None]],
             halo_prefix_pool: Vec::new(),
@@ -1774,6 +1872,7 @@ impl Gpu {
             whole_samples: None,
             whole_reader_halo: false,
             tile_ms: 0.0,
+            submit_ratio: if IS_WEBGL { 1.0 } else { 0.0 },
             blit,
             images: HashMap::new(),
             temp_textures: Vec::new(),
@@ -1802,6 +1901,7 @@ impl Gpu {
             scratch_mask: None,
             scratch_blur: None,
             scratch_backdrop: None,
+            retired_textures: Vec::new(),
             next_temp_id: TEMP_TEX_BASE,
             pool_bytes: 0,
             in_use_bytes: 0,
@@ -2153,6 +2253,7 @@ impl Gpu {
         Ok(GpuTarget {
             tex,
             view,
+            view_id: crate::blend::gpu::next_view_id(),
             depth,
             width: need_w,
             height: need_h,
@@ -2220,15 +2321,21 @@ impl Gpu {
         if reuse {
             return Ok(());
         }
-        let freed = self.scratch_mask.as_ref().map_or(0, |s| s.bytes);
+        let recording = self.active.as_ref().is_some_and(|a| a.before.is_some());
+        let freed = if recording {
+            0
+        } else {
+            self.scratch_mask.as_ref().map_or(0, |s| s.bytes)
+        };
         let bytes = need_w as usize * need_h as usize * 8;
         self.reserve_or_trim(bytes, freed, "a shadow mask")?;
-        if self.scratch_mask.is_some() {
-            self.submit_active_encoder();
-        }
         if let Some(old) = self.scratch_mask.take() {
-            self.pool_bytes = self.pool_bytes.saturating_sub(old.bytes);
-            old.tex.destroy();
+            if recording {
+                self.retired_textures.push((old.tex, old.bytes));
+            } else {
+                self.pool_bytes = self.pool_bytes.saturating_sub(old.bytes);
+                old.tex.destroy();
+            }
         }
         let tex = texture(
             &self.device,
@@ -2246,6 +2353,7 @@ impl Gpu {
         self.scratch_mask = Some(GpuMaskScratch {
             tex,
             view,
+            view_id: crate::blend::gpu::next_view_id(),
             depth,
             width: need_w,
             height: need_h,
@@ -2269,15 +2377,21 @@ impl Gpu {
         if reuse {
             return Ok(());
         }
-        let freed = self.scratch_blur.as_ref().map_or(0, |s| s.bytes);
+        let recording = self.active.as_ref().is_some_and(|a| a.before.is_some());
+        let freed = if recording {
+            0
+        } else {
+            self.scratch_blur.as_ref().map_or(0, |s| s.bytes)
+        };
         let bytes = need_w as usize * need_h as usize * 4;
         self.reserve_or_trim(bytes, freed, "a shadow blur buffer")?;
-        if self.scratch_blur.is_some() {
-            self.submit_active_encoder();
-        }
         if let Some(old) = self.scratch_blur.take() {
-            self.pool_bytes = self.pool_bytes.saturating_sub(old.bytes);
-            old.tex.destroy();
+            if recording {
+                self.retired_textures.push((old.tex, old.bytes));
+            } else {
+                self.pool_bytes = self.pool_bytes.saturating_sub(old.bytes);
+                old.tex.destroy();
+            }
         }
         let tex = texture(
             &self.device,
@@ -2291,6 +2405,7 @@ impl Gpu {
         self.scratch_blur = Some(GpuBlurScratch {
             tex,
             view,
+            view_id: crate::blend::gpu::next_view_id(),
             width: need_w,
             height: need_h,
             bytes,
@@ -2315,15 +2430,21 @@ impl Gpu {
         if reuse {
             return Ok(());
         }
-        let freed = self.scratch_backdrop.as_ref().map_or(0, |s| s.bytes);
+        let recording = self.active.as_ref().is_some_and(|a| a.before.is_some());
+        let freed = if recording {
+            0
+        } else {
+            self.scratch_backdrop.as_ref().map_or(0, |s| s.bytes)
+        };
         let bytes = need_w as usize * need_h as usize * 4;
         self.reserve_or_trim(bytes, freed, "a blend backdrop buffer")?;
-        if self.scratch_backdrop.is_some() {
-            self.submit_active_encoder();
-        }
         if let Some(old) = self.scratch_backdrop.take() {
-            self.pool_bytes = self.pool_bytes.saturating_sub(old.bytes);
-            old.tex.destroy();
+            if recording {
+                self.retired_textures.push((old.tex, old.bytes));
+            } else {
+                self.pool_bytes = self.pool_bytes.saturating_sub(old.bytes);
+                old.tex.destroy();
+            }
         }
         let tex = texture(
             &self.device,
@@ -2337,6 +2458,7 @@ impl Gpu {
         self.scratch_backdrop = Some(GpuBlurScratch {
             tex,
             view,
+            view_id: crate::blend::gpu::next_view_id(),
             width: need_w,
             height: need_h,
             bytes,
@@ -2582,12 +2704,18 @@ impl Gpu {
                 }],
             })
         });
+        let composite_group = self
+            .compositor
+            .as_ref()
+            .map(|c| c.create_bind_group(&self.device, &view, "composite frame"));
         let frame = Main {
             view,
+            tex_view_id: crate::blend::gpu::next_view_id(),
             #[cfg(feature = "compute")]
             view_id,
             texture: tex,
             present_group,
+            composite_group,
             width,
             height,
         };
@@ -2662,8 +2790,19 @@ impl Gpu {
         }
     }
 
+    /// Discards any cooperatively paused mid-tile walk and releases its temporary reader state.
+    fn abort_pending_tile(&mut self) {
+        if self.pending_tile.take().is_some() {
+            self.readers.drop_glass_mask_atlas();
+            self.readers.flush_retired();
+            self.scene.reset();
+        }
+    }
+
     /// Forgets the frame shown as a stand-in (after a fresh list: it shows a page that's gone).
     pub fn forget_last(&mut self) {
+        self.abort_pending_tile();
+        self.opening_pending = false;
         self.last = None;
         self.last_scale = None;
         self.shown = None;
@@ -2683,6 +2822,8 @@ impl Gpu {
 
     /// Drops every tile (benches and tests time cold frames this way).
     pub fn clear_tiles(&mut self) {
+        self.abort_pending_tile();
+        self.opening_pending = false;
         self.tiles.clear();
         self.shown = None;
     }
@@ -2985,6 +3126,7 @@ impl Gpu {
             },
             t0,
             submits0,
+            None,
         )?;
         stats.submit_ms += c.submit_ms;
         stats.cpu_ms += c.cpu_ms;
@@ -3156,6 +3298,7 @@ impl Gpu {
             },
             t0,
             submits0,
+            None,
         )?;
         stats.submit_ms += c.submit_ms;
         stats.cpu_ms += c.cpu_ms;
@@ -3185,24 +3328,60 @@ impl Gpu {
         self.last_compute_used = false;
     }
 
+    fn per_row(&self) -> u32 {
+        (self.page_side / TILE).max(1)
+    }
+
+    fn per_page(&self) -> u32 {
+        let r = self.per_row();
+        r * r
+    }
+
+    fn page_bytes(&self) -> usize {
+        (self.page_side as usize) * (self.page_side as usize) * 4
+    }
+
+    fn choose_page_side(&self, limit: usize) -> u32 {
+        for side in [4096u32, 2048, 1024, TILE] {
+            if side <= self.max_texture_2d && (side as usize) * (side as usize) * 4 <= limit {
+                return side;
+            }
+        }
+        DEFAULT_PAGE.min(self.max_texture_2d).max(TILE)
+    }
+
     /// Bytes the engine holds on the GPU outside its tile pages.
     fn bytes_beside_tiles(&self) -> usize {
-        self.bytes().saturating_sub(self.pages.len() * PAGE_BYTES)
+        self.bytes().saturating_sub(self.pages.len() * self.page_bytes())
     }
 
     /// Fits the tiles kept to the budget: what's left of it beside everything else, at most
-    /// `tile_bytes`, in whole pages. Pages past it go, with their tiles.
+    /// `tile_bytes`, in whole pages. Pages past it go, with their tiles. When no pages are
+    /// allocated yet, picks 4096x4096 (64 tiles/page) if device limits and budget allow.
     fn fit_tiles(&mut self, tile_bytes: usize) {
         let beside = self.bytes_beside_tiles() + self.readbacks.bytes.get() + HEADROOM;
         let room = self.budget.saturating_sub(beside);
-        let pages = (tile_bytes.min(room) / PAGE_BYTES).min(1024);
+        let limit = tile_bytes.min(room);
+        if self.pages.is_empty() {
+            self.page_side = self.choose_page_side(limit);
+        }
+        let mut pbytes = self.page_bytes();
+        let mut pages = (limit / pbytes).min(1024);
         while self.pages.len() > pages {
             if let Some(p) = self.pages.pop() {
                 p.texture.destroy();
-                self.bytes -= PAGE_BYTES;
+                self.bytes -= pbytes;
             }
         }
-        self.tiles.set_max_slots(pages * PER_PAGE as usize);
+        if pages == 0 && self.pages.is_empty() {
+            let smaller = self.choose_page_side(limit);
+            if smaller != self.page_side {
+                self.page_side = smaller;
+                pbytes = self.page_bytes();
+                pages = (limit / pbytes).min(1024);
+            }
+        }
+        self.tiles.set_max_slots(pages * self.per_page() as usize);
     }
 
     /// Room remaining under `self.budget` for `self.readers` allocations.
@@ -3213,59 +3392,119 @@ impl Gpu {
 
     /// The page and position of a slot, making its page (within the budget `fit_tiles` set).
     fn slot_place(&mut self, slot: u32) -> Result<(usize, u32, u32)> {
-        let page = (slot / PER_PAGE) as usize;
-        let within = slot % PER_PAGE;
-        let (x, y) = ((within % PER_ROW) * TILE, (within / PER_ROW) * TILE);
+        let per_page = self.per_page();
+        let per_row = self.per_row();
+        let page = (slot / per_page) as usize;
+        let within = slot % per_page;
+        let (x, y) = ((within % per_row) * TILE, (within / per_row) * TILE);
+        let side = self.page_side;
+        let pbytes = self.page_bytes();
         while self.pages.len() <= page {
-            self.check_texture_size(PAGE, PAGE, "a page of tiles")?;
-            self.reserve(PAGE_BYTES, 0, "a page of tiles")?;
+            self.check_texture_size(side, side, "a page of tiles")?;
+            self.reserve(pbytes, 0, "a page of tiles")?;
             let tex = texture(
                 &self.device,
-                PAGE,
-                PAGE,
+                side,
+                side,
                 wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
                 "tiles",
             );
+            let view = tex.create_view(&Default::default());
+            let composite_group = self
+                .compositor
+                .as_ref()
+                .map(|c| c.create_bind_group(&self.device, &view, "composite page"));
             self.pages.push(Page {
-                view: tex.create_view(&Default::default()),
+                view,
                 texture: tex,
+                composite_group,
             });
-            self.bytes += PAGE_BYTES;
+            self.bytes += pbytes;
         }
         Ok((page, x, y))
     }
 
-    /// Takes the active tile's pending command encoder (or creates a new one). When `for_vello` is
-    /// true and the pending encoder already recorded a `vello_hybrid::Renderer::render` call, that
-    /// encoder is submitted first so `vello_hybrid`'s staging buffers are never overwritten in flight.
-    fn take_encoder(&mut self, for_vello: bool, label: &str) -> wgpu::CommandEncoder {
-        if for_vello && self.active.as_ref().is_some_and(|a| a.encoder_has_vello) {
-            self.submit_active_encoder();
+    fn flush_retired_textures(&mut self) {
+        for (tex, bytes) in self.retired_textures.drain(..) {
+            self.pool_bytes = self.pool_bytes.saturating_sub(bytes);
+            tex.destroy();
         }
-        if for_vello && let Some(a) = self.active.as_mut() {
-            a.encoder_has_vello = true;
-        }
+    }
+
+    /// Takes the active tile's pending command encoder (or creates a new one).
+    fn take_encoder(&mut self, label: &str) -> wgpu::CommandEncoder {
         self.active.as_mut().and_then(|a| a.before.take()).unwrap_or_else(|| {
             self.device
                 .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some(label) })
         })
     }
 
-    fn submit_active_encoder(&mut self) {
-        if let Some(active) = self.active.as_mut() {
-            if let Some(encoder) = active.before.take() {
-                let t0 = now();
-                self.readers.flush_uniforms(&self.queue);
-                self.blend.flush_uniforms(&self.queue);
-                self.queue.submit([encoder.finish()]);
-                self.blur.flush_retired();
-                self.readers.flush_retired();
-                self.submits += 1;
-                active.submit_ms += now() - t0;
-            }
-            active.encoder_has_vello = false;
+    /// Records a batched `vello_gpu` render into the active command encoder, automatically
+    /// flushing and starting a fresh encoder only if staged Vello buffers reach capacity.
+    fn vello_render(
+        &mut self,
+        use_mask_scene: bool,
+        view: &wgpu::TextureView,
+        depth: Option<&wgpu::TextureView>,
+        options: RenderOptions<'_>,
+        label: &str,
+    ) -> Result<()> {
+        if !use_mask_scene {
+            self.flush_masks();
         }
+        let target = RenderTarget {
+            view,
+            depth_view: depth,
+        };
+        let prepared = {
+            let scene = if use_mask_scene { &self.mask_scene } else { &self.scene };
+            self.renderer
+                .prepare_batch_render(scene, &self.resources, target, &self.bindings, options)
+                .map_err(vello_error)?
+        };
+        if prepared.needs_flush {
+            self.submit_active_encoder();
+        }
+        let mut encoder = self.take_encoder(label);
+        let draws = {
+            let scene = if use_mask_scene { &self.mask_scene } else { &self.scene };
+            self.renderer
+                .execute_batch_render(prepared, scene, &mut encoder, target, &self.bindings, options)
+                .map_err(vello_error)?
+        };
+        self.stash_encoder(encoder);
+        if let Some(a) = self.active.as_mut() {
+            a.vello_renders += 1;
+            a.draws += draws;
+        }
+        Ok(())
+    }
+
+    fn submit_active_encoder(&mut self) {
+        let mut can_recycle_scene = false;
+        if let Some(active) = self.active.as_mut()
+            && let Some(encoder) = active.before.take()
+        {
+            let t0 = now();
+            self.renderer.flush_uploads();
+            self.readers.flush_uniforms(&self.queue);
+            self.blend.flush_uniforms(&self.queue);
+            self.blur.flush_uniforms(&self.queue);
+            self.shadow.flush_uniforms(&self.queue);
+            active.draws += self.readers.take_draws() + self.blur.take_draws() + self.shadow.take_draws();
+            self.queue.submit([encoder.finish()]);
+            self.blur.flush_retired();
+            self.readers.flush_retired();
+            self.submits += 1;
+            active.submit_ms += now() - t0;
+            can_recycle_scene = !active.scene_dirty && self.atlas.pending.is_empty();
+        }
+        self.flush_retired_textures();
         self.offscreen_pool.append(&mut self.offscreen_in_use);
+        if can_recycle_scene {
+            self.recycle_scene_textures();
+            self.atlas.at = (0, 0, 0);
+        }
     }
 
     /// Enables or disables per-frame WebGPU timestamp queries (returns whether active).
@@ -3370,11 +3609,16 @@ impl Gpu {
         if let Some(a) = self.active.as_mut() {
             a.before = Some(encoder);
         } else {
+            self.renderer.flush_uploads();
             self.readers.flush_uniforms(&self.queue);
             self.blend.flush_uniforms(&self.queue);
+            self.blur.flush_uniforms(&self.queue);
+            self.shadow.flush_uniforms(&self.queue);
+            let _ = self.readers.take_draws() + self.blur.take_draws() + self.shadow.take_draws();
             self.queue.submit([encoder.finish()]);
             self.blur.flush_retired();
             self.readers.flush_retired();
+            self.flush_retired_textures();
             self.submits += 1;
         }
     }
@@ -3449,6 +3693,7 @@ impl Gpu {
         self.scratches[slot] = Some(ScratchTile {
             texture: tex,
             view,
+            view_id: crate::blend::gpu::next_view_id(),
             depth,
             width,
             height,
@@ -3517,12 +3762,12 @@ impl Gpu {
             stats.add(&s);
             self.flush_scene_gpu(true)?;
             self.scene.reset();
-            let mut encoder = self.take_encoder(false, "cache motion prefix");
+            let mut encoder = self.take_encoder("cache motion prefix");
             let cached = &self.motion_prefix.as_ref().expect("cached prefix").texture;
             copy_rect(&mut encoder, &target, cached, (0, 0), (0, 0), (width, height));
             self.stash_encoder(encoder);
         } else {
-            let mut encoder = self.take_encoder(false, "restore motion prefix");
+            let mut encoder = self.take_encoder("restore motion prefix");
             let cached = &self.motion_prefix.as_ref().expect("cached prefix").texture;
             copy_rect(&mut encoder, cached, &target, (0, 0), (0, 0), (width, height));
             self.stash_encoder(encoder);
@@ -3576,29 +3821,17 @@ impl Gpu {
                 (p.slot.region.2 as u16, p.slot.region.3 as u16),
             );
         }
-        let mut encoder = self.take_encoder(true, "glass mask batch");
         let mut options = RenderOptions::default();
         options.target_init = TargetInit::Clear(ClearSettings::Viewport {
             color: vello_common::color::AlphaColor::TRANSPARENT,
         });
-        let atlas = self.readers.glass_mask_atlas.as_ref().expect("glass mask atlas");
-        self.renderer
-            .render(
-                &self.mask_scene,
-                &mut self.resources,
-                &mut encoder,
-                RenderTarget {
-                    view: &atlas.view,
-                    depth_view: Some(&atlas.depth),
-                },
-                &self.bindings,
-                options,
-            )
-            .map_err(|e| EngineError::new(ErrorCode::Gpu, format!("{e:?}")))?;
-        self.stash_encoder(encoder);
+        let (atlas_view, atlas_depth) = {
+            let atlas = self.readers.glass_mask_atlas.as_ref().expect("glass mask atlas");
+            (atlas.view.clone(), atlas.depth.clone())
+        };
+        self.vello_render(true, &atlas_view, Some(&atlas_depth), options, "glass mask batch")?;
         self.mask_scene.reset();
         let active = self.active.as_mut().expect("active draw");
-        active.vello_renders += 1;
         active.glass_masks = plan.slots;
         let sub = active.submit_ms - sub0;
         active.prepare_masks_ms += (now() - t0 - sub).max(0.0);
@@ -3626,6 +3859,8 @@ impl Gpu {
         prefix: Option<(u64, usize)>,
         halo_plan: Option<&ViewportHaloPlan>,
     ) -> Result<DrawStats> {
+        self.abort_pending_tile();
+        self.opening_pending = false;
         let samples = halo_plan.map(|p| p.samples);
         let size = (u32::from(frame.width), u32::from(frame.height));
         if !moving
@@ -3641,7 +3876,7 @@ impl Gpu {
                 standin: true,
                 ..DrawStats::default()
             };
-            return self.finish_frame(self.cur.expect("unchanged frame"), stats, now(), submits0);
+            return self.finish_frame(self.cur.expect("unchanged frame"), stats, now(), submits0, None);
         }
         let skip_native_whole = halo_plan.is_some_and(|p| {
             if !p.use_coarse_halo {
@@ -4216,9 +4451,9 @@ impl Gpu {
                 let (width, height) = local.size();
                 self.readers.encode_composite(
                     &self.device,
-                    &self.queue,
                     encoder,
                     &paint.view,
+                    paint.view_id,
                     CompositeTarget::Over(view),
                     (paint.origin.0 - bounds.x0, paint.origin.1 - bounds.y0),
                     (local.x0 as u32, local.y0 as u32, width, height),
@@ -4245,10 +4480,10 @@ impl Gpu {
             .halo_prefix_pool
             .iter()
             .position(|prefix| prefix.texture.width() == width && prefix.texture.height() == height);
-        let (texture, view) = if let Some(at) = reusable {
+        let (texture, view, view_id) = if let Some(at) = reusable {
             let prefix = self.halo_prefix_pool.swap_remove(at);
             self.pool_bytes -= bytes;
-            (prefix.texture, prefix.view)
+            (prefix.texture, prefix.view, prefix.view_id)
         } else {
             self.reserve_or_trim(bytes, 0, "a coarse reader backdrop")?;
             let texture = texture(
@@ -4261,12 +4496,13 @@ impl Gpu {
                 "coarse reader backdrop",
             );
             let view = texture.create_view(&Default::default());
-            (texture, view)
+            (texture, view, crate::blend::gpu::next_view_id())
         };
         self.bytes += bytes;
         Ok(HaloPatch {
             texture,
             view,
+            view_id,
             origin,
             size,
             divisor,
@@ -4353,7 +4589,7 @@ impl Gpu {
             y1: size.1 as i32,
         };
         let patch = self.acquire_halo_patch((0, 0), size, 1, (0, 0), (size.0 as i32, size.1 as i32), None)?;
-        let mut encoder = self.take_encoder(false, "capture clamp edge strip");
+        let mut encoder = self.take_encoder("capture clamp edge strip");
         let overlap = source.bounds.intersect(strip_bounds);
         if overlap != strip_bounds {
             GpuReaders::encode_clear(&mut encoder, &patch.view, wgpu::Color::TRANSPARENT);
@@ -4398,7 +4634,7 @@ impl Gpu {
         let blur_sigma = tier.map_or(sigma, |t| halo::compensate_halo_sigma(sigma, t.render_divisor));
         let clip_info = draw.halo_clip_bounds(tier, within, blur_sigma);
         let sample = draw.source_rect(dirty);
-        let (src_view, src_size, crop_origin, clamp_bounds, edge, key) =
+        let (src_view, src_id, src_size, crop_origin, clamp_bounds, edge, key) =
             self.prefilter_halo_blur_source(encoder, reader, tier, draw, sample, blur_sigma, clip_info)?;
         let shifted_sample = sample.translate(-crop_origin.0, -crop_origin.1);
         let spec = BlurSpec {
@@ -4410,6 +4646,7 @@ impl Gpu {
         self.encode_blur_reader_slice(
             encoder,
             &src_view,
+            src_id,
             src_size,
             (shifted_sample.x0, shifted_sample.y0),
             &spec,
@@ -4458,6 +4695,7 @@ impl Gpu {
         tile: IRect,
         dirty_pad: f64,
         source: &wgpu::TextureView,
+        source_id: u64,
         src_size: (u32, u32),
         crop_origin: (i32, i32),
         clamp_bounds: IRect,
@@ -4493,6 +4731,7 @@ impl Gpu {
             self.encode_blur_reader_slice(
                 encoder,
                 source,
+                source_id,
                 src_size,
                 (shifted_sample.x0 - col * tw, shifted_sample.y0 - row * th),
                 &spec,
@@ -4514,7 +4753,7 @@ impl Gpu {
     /// Prefilters `draw.source` into crop-sized `halo_border_src` for fractional solid-fill
     /// (`EdgeMode::Border`) or unfilled edge-strip (`EdgeMode::Clamp`) clips in a reduced pass.
     /// `sample_dirty` is in `draw.source`-local coordinates.
-    /// Returns `(source_view, source_size, crop_origin, clamp_bounds, edge, pyramid_key)`.
+    /// Returns `(source_view, source_id, source_size, crop_origin, clamp_bounds, edge, pyramid_key)`.
     #[allow(clippy::too_many_arguments, clippy::type_complexity)]
     fn prefilter_halo_blur_source(
         &mut self,
@@ -4527,6 +4766,7 @@ impl Gpu {
         clip_info: halo::HaloClipBounds,
     ) -> Result<(
         wgpu::TextureView,
+        u64,
         (u32, u32),
         (i32, i32),
         IRect,
@@ -4540,9 +4780,9 @@ impl Gpu {
             let budget = self.reader_budget_room();
             let pf = self.readers.encode_halo_clip_border(
                 &self.device,
-                &self.queue,
                 encoder,
                 &draw.source.plane.view,
+                draw.source.plane.view_id,
                 src_size,
                 crop,
                 clip_rect,
@@ -4553,7 +4793,7 @@ impl Gpu {
                 .clamp_bounds
                 .translate(-pf.crop_origin.0, -pf.crop_origin.1)
                 .clamp(pf.size.0 as i32, pf.size.1 as i32);
-            return Ok((pf.view, pf.size, pf.crop_origin, cb, clip_info.edge, None));
+            return Ok((pf.view, pf.view_id, pf.size, pf.crop_origin, cb, clip_info.edge, None));
         }
         if clip_info.subtexel_clamp.is_some()
             && let Some(tier) = tier
@@ -4582,6 +4822,7 @@ impl Gpu {
                     };
                     HaloClampEdge {
                         view: &s.patch.view,
+                        view_id: s.patch.view_id,
                         straddle,
                         clamp_weight: s.clamp_weight,
                         size: s.patch.size,
@@ -4635,16 +4876,16 @@ impl Gpu {
                 {
                     let pf = self.readers.encode_halo_clip_clamp(
                         &self.device,
-                        &self.queue,
                         encoder,
                         &draw.source.plane.view,
+                        draw.source.plane.view_id,
                         src_size,
                         crop,
                         &edges,
                         budget,
                     )?;
                     let cb = cb_src.translate(-pf.crop_origin.0, -pf.crop_origin.1);
-                    return Ok((pf.view, pf.size, pf.crop_origin, cb, EdgeMode::Clamp, None));
+                    return Ok((pf.view, pf.view_id, pf.size, pf.crop_origin, cb, EdgeMode::Clamp, None));
                 }
             }
         }
@@ -4653,6 +4894,7 @@ impl Gpu {
             .then(|| blur::PyramidKey::new(self.backdrop_gen, clip_info.clamp_bounds, clip_info.edge));
         Ok((
             draw.source.plane.view.clone(),
+            draw.source.plane.view_id,
             src_size,
             (0, 0),
             clip_info.clamp_bounds,
@@ -4692,6 +4934,7 @@ impl Gpu {
         }
         Some(BlurHaloSample {
             view: patch.view.clone(),
+            view_id: patch.view_id,
             size: cell_size,
             inv,
             offset,
@@ -4743,7 +4986,7 @@ impl Gpu {
         {
             stats.exact = true;
             stats.plan = 3;
-            return self.finish_frame(self.cur.expect("unchanged frame"), stats, t0, submits0);
+            return self.finish_frame(self.cur.expect("unchanged frame"), stats, t0, submits0, None);
         }
         let dst = self.next_frame();
         let padded = if let Some(bounds) = samples {
@@ -4865,7 +5108,7 @@ impl Gpu {
             return Err(e);
         }
         if let Some((start, _)) = padded {
-            let mut encoder = self.take_encoder(false, "crop padded frame");
+            let mut encoder = self.take_encoder("crop padded frame");
             let source = &self.scratches[self.active_scratch]
                 .as_ref()
                 .expect("padded frame")
@@ -4896,7 +5139,7 @@ impl Gpu {
         }
         stats.held = self.tiles.len() as u32;
         stats.evicted = self.tiles.stats.evicted;
-        let stats = self.finish_frame(dst, stats, t0, submits0)?;
+        let stats = self.finish_frame(dst, stats, t0, submits0, None)?;
         self.cur = Some(dst);
         self.set_cur_page(true);
         self.last = Some(Last {
@@ -4934,9 +5177,11 @@ impl Gpu {
             self.gates_off_screen();
         }
         self.forget_motion_prefix();
-        self.readers.drop_glass_mask_atlas();
-        if store.readers().is_empty() && !store.has_context() && self.readers.bytes() > 0 {
-            self.readers.evict_frame_scratch();
+        if self.pending_tile.is_none() {
+            self.readers.drop_glass_mask_atlas();
+            if store.readers().is_empty() && !store.has_context() && self.readers.bytes() > 0 {
+                self.readers.evict_frame_scratch();
+            }
         }
         let (w, h) = (u32::from(frame.width), u32::from(frame.height));
         self.ensure_compositor();
@@ -4946,18 +5191,31 @@ impl Gpu {
         self.trim_pools(GPU_POOL_KEEP_BYTES);
         let t0 = now();
         let submits0 = self.submits;
-        self.tiles.begin(background, halo);
-        self.fit_tiles(store.limits.tile_bytes);
+        let bg_bits = background.map(f32::to_bits);
+        if self
+            .pending_tile
+            .as_ref()
+            .is_some_and(|pt| pt.generation != generation || pt.bg_bits != bg_bits)
+        {
+            self.abort_pending_tile();
+        }
         let view = frame.view;
         let scale = view.as_coeffs()[0];
+        self.tiles.begin_scaled(background, scale, halo);
+        self.fit_tiles(store.limits.tile_bytes);
         let zooming = options.moving && self.last_scale.is_some_and(|s| s != scale);
         // A page just shown (opened, switched to, its list made afresh): nothing to stand on.
-        // Under a budget its first frame is coarse tiles (a ladder level, level of detail on),
-        // quick to draw; the exact tiles follow a few a frame (decision 0040, phase 2: open time).
-        let opening = self.last.is_none() && self.tiles.is_empty() && options.budget_ms > 0.0;
+        // Under a budget its first frames draw coarse ladder tiles within the per-frame budget
+        // without blocking; exact tiles follow progressively (decision 0040, phase 2: open time).
+        if self.last.is_none() && self.tiles.is_empty() && options.budget_ms > 0.0 {
+            self.opening_pending = true;
+        } else if options.budget_ms <= 0.0 || zooming {
+            self.opening_pending = false;
+        }
+        let opening = self.opening_pending;
         let last = self.last;
+        let plan_last = if opening { None } else { last };
         let coarse_moving = options.moving && halo > 0;
-        let bg_bits = background.map(f32::to_bits);
         self.tiles.opening = opening;
         // During moving coarse reader frames, draw only visible tiles rather than spending frame
         // budget prefetching off-screen coarse stand-ins that must be redrawn exact at rest.
@@ -4967,95 +5225,251 @@ impl Gpu {
                 view,
                 (w, h),
                 zooming || opening,
-                last,
-                options.prefetch && !coarse_moving,
+                plan_last,
+                options.prefetch && !coarse_moving && !opening,
                 coarse_moving,
             )
             .ok_or_else(|| EngineError::limit("a camera the tiles can't follow (too far out)"))?;
         let selection = self.tiles.drag_prepare(&mut plan, drag.map(DragFrame::input).as_ref());
+        if selection.is_some() || plan.direct || options.budget_ms <= 0.0 {
+            self.abort_pending_tile();
+        }
         let mut stats = DrawStats {
             direct: plan.direct,
             ..DrawStats::default()
         };
         // Nothing to draw and the frame shown is this one, exact: it stays.
-        let same = plan.jobs.is_empty()
+        let same = !opening
+            && plan.jobs.is_empty()
             && selection.is_none()
             && last.is_some_and(|l| l.view == view && l.size == (w, h))
             && self.shown == Some((generation, bg_bits, true));
         if same {
             stats.exact = true;
             stats.plan = 3;
-            return self.finish_frame(self.cur.expect("unchanged frame"), stats, t0, submits0);
+            return self.finish_frame(self.cur.expect("unchanged frame"), stats, t0, submits0, None);
         }
         self.begin_frame_timestamp();
         let dst = self.next_frame();
         self.ensure_frame(dst, w, h)?;
         let mut verbs = store.limits.frame_verbs;
-        let mut drew_any = false;
         let mut direct_exact = true;
         // Moving coarse frames sample mipmaps inside `TILE` directly without growing a full halo.
         let frame_halo = if coarse_moving { 0 } else { halo };
         // Drawn straight into the frame after it's laid: what no slot could be kept for.
         let mut late: Vec<crate::tiles::Job> = Vec::new();
-        for job in &plan.jobs {
-            // Within the budget. Past it, what something stands in for waits for a later frame;
-            // what nothing stands in for is drawn regardless (the plan puts it first). At rest a
-            // frame always draws one tile, so it makes progress. While the camera moves a tile is
-            // drawn if one, at what tiles have lately cost, fits what's left; the frame's first
-            // may take up to three budgets, so a pan keeps up with ordinary tiles while a dense
-            // one (tens of ms) never makes a long moving frame.
-            let elapsed = now() - t0;
-            let over = options.budget_ms > 0.0
-                && if options.moving {
-                    let fits = elapsed + self.tile_ms <= options.budget_ms;
-                    let first = !drew_any && elapsed + self.tile_ms.max(1.0) <= options.budget_ms * 3.0;
-                    !(fits || first)
+        let budgeted = options.budget_ms > 0.0;
+        let bake_t0 = now();
+        let walk_budget = self.walk_budget_ms(options.budget_ms);
+        let deadline = budgeted.then_some(bake_t0 + walk_budget);
+        let composite_only = options.budget_ms < 0.0;
+        // Drop a paused tile only when it no longer matches any desired job for this camera/halo
+        // (and never drop it during a composite-only present call).
+        if !composite_only
+            && let Some(pt) = self.pending_tile.as_ref()
+            && (pt.halo != frame_halo
+                || !plan.jobs.iter().any(|j| {
+                    j.key == pt.key
+                        && j.detail == pt.detail
+                        && (j.detail || coarse_moving) == pt.coarse_readers
+                        && (!options.moving || j.must)
+                }))
+        {
+            self.abort_pending_tile();
+        }
+        let mut budget_hit = false;
+        let mut unfinished_must = false;
+        if !composite_only {
+            // If we have a paused tile matching a job in this plan, resume it first so earlier
+            // work completes cleanly before starting a new tile.
+            let mut resumed_key: Option<TileKey> = None;
+            if let Some(pt) = self.pending_tile.as_ref()
+                && plan.jobs.iter().any(|j| j.key == pt.key && (!options.moving || j.must))
+            {
+                let key = pt.key;
+                let pt_job = plan.jobs.iter().find(|j| j.key == key).copied();
+                let pt_must = pt_job.is_some_and(|j| j.must);
+                let pt_deadline = if pt_must && options.budget_ms < 1.0 {
+                    None
                 } else {
-                    drew_any && elapsed >= options.budget_ms
+                    deadline
                 };
-            if !job.must && over {
-                stats.queued += 1;
-                continue;
-            }
-            let target = if plan.direct {
-                TileTarget::Scratch
-            } else if job.direct {
-                late.push(*job);
-                continue;
-            } else {
-                match self.tiles.slot_for(job.key) {
-                    Some(s) => TileTarget::Slot(s),
-                    None => {
-                        if job.must {
-                            late.push(*job);
+                if pt_deadline.is_some_and(|d| now() >= d) {
+                    budget_hit = true;
+                    stats.in_progress = true;
+                    if pt_must {
+                        self.tiles.mark_unpainted(key);
+                        unfinished_must = true;
+                    }
+                } else {
+                    self.deadline_ms = pt_deadline;
+                    let step = self.resume_pending_tile(store, &mut stats);
+                    self.deadline_ms = None;
+                    match step? {
+                        TileStep::Complete => {
+                            resumed_key = Some(key);
                         }
-                        continue;
+                        TileStep::Paused => {
+                            budget_hit = true;
+                            stats.in_progress = true;
+                            if pt_must {
+                                self.tiles.mark_unpainted(key);
+                                unfinished_must = true;
+                            }
+                        }
+                        TileStep::NoSlot => {
+                            resumed_key = Some(key);
+                            if let Some(job) = pt_job
+                                && job.must
+                            {
+                                late.push(job);
+                            }
+                        }
                     }
                 }
-            };
-            let tile_detail = job.detail || coarse_moving;
-            let exact = self.draw_job(
-                store,
-                job,
-                tile_detail,
-                frame_halo,
-                background,
-                target,
-                &plan,
-                dst,
-                &mut stats,
-                &mut verbs,
-            )?;
-            drew_any = true;
-            // What a tile costs lately (a running average), for moving frames' budget.
-            let took = now() - t0 - elapsed;
-            self.tile_ms = self.tile_ms * 0.75 + took * 0.25;
-            match target {
-                TileTarget::Slot(s) => self.tiles.drawn(job.key, s, exact, !tile_detail),
-                TileTarget::Scratch | TileTarget::ScratchOnly => direct_exact &= exact,
+            }
+            for job in &plan.jobs {
+                if resumed_key == Some(job.key) {
+                    continue;
+                }
+                // Warm-cache fast path: during active budgeted motion, cached/stand-in tiles cover
+                // `!job.must` slots with zero tile bakes so pan/zoom stays locked at 60 fps.
+                if budgeted && options.moving && !job.must {
+                    stats.queued += 1;
+                    continue;
+                }
+                // Microscopic budgets (`0 < budget_ms < 1 ms`) test spent optional budgets where
+                // uncovered `must` tiles still draw. On real editor budgets (`>= 1 ms`), do not
+                // cut off uncovered `must` tiles before real scene work (`records >= 64`) so
+                // cold shader init on tiny scenes never leaves holes while heavy pages yield cleanly.
+                let enforce_must = budgeted && options.budget_ms >= 1.0 && stats.records >= 64;
+                let job_deadline = if job.must && !enforce_must { None } else { deadline };
+                let over_budget = if job.must {
+                    enforce_must && (budget_hit || deadline.is_some_and(|d| now() >= d))
+                } else {
+                    budget_hit || deadline.is_some_and(|d| now() >= d)
+                };
+                if over_budget {
+                    budget_hit = true;
+                    if job.must {
+                        self.tiles.mark_unpainted(job.key);
+                        unfinished_must = true;
+                    } else {
+                        stats.queued += 1;
+                    }
+                    continue;
+                }
+                let tile_detail = job.detail || coarse_moving;
+                if plan.direct {
+                    let exact = self.draw_job(
+                        store,
+                        job,
+                        tile_detail,
+                        frame_halo,
+                        background,
+                        TileTarget::Scratch,
+                        &plan,
+                        dst,
+                        &mut stats,
+                        &mut verbs,
+                    )?;
+                    direct_exact &= exact;
+                    continue;
+                }
+                if job.direct {
+                    late.push(*job);
+                    continue;
+                }
+                let elapsed = now() - t0;
+                if budgeted {
+                    // For a `must` job on a cold small scene, allow cooperative mid-tile yield
+                    // inside dense tiles (once `records >= 64`, `exec` checks `deadline_reached`
+                    // after every 64 nodes) while still starting small scenes cleanly.
+                    self.deadline_ms = if job.must && options.budget_ms < 1.0 {
+                        None
+                    } else {
+                        job_deadline.or(if job.must && options.budget_ms >= 1.0 {
+                            deadline
+                        } else {
+                            None
+                        })
+                    };
+                    let step = self.start_slot_tile(
+                        store,
+                        job,
+                        tile_detail,
+                        frame_halo,
+                        background,
+                        bg_bits,
+                        generation,
+                        &mut stats,
+                        &mut verbs,
+                    );
+                    self.deadline_ms = None;
+                    match step? {
+                        TileStep::Complete => {
+                            let took = now() - t0 - elapsed;
+                            self.tile_ms = self.tile_ms * 0.75 + took * 0.25;
+                        }
+                        TileStep::Paused => {
+                            budget_hit = true;
+                            stats.in_progress = true;
+                            if job.must {
+                                self.tiles.mark_unpainted(job.key);
+                                unfinished_must = true;
+                            }
+                        }
+                        TileStep::NoSlot => {
+                            if job.must {
+                                late.push(*job);
+                            }
+                        }
+                    }
+                } else {
+                    match self.tiles.slot_for(job.key) {
+                        Some(s) => {
+                            let exact = self.draw_job(
+                                store,
+                                job,
+                                tile_detail,
+                                frame_halo,
+                                background,
+                                TileTarget::Slot(s),
+                                &plan,
+                                dst,
+                                &mut stats,
+                                &mut verbs,
+                            )?;
+                            let took = now() - t0 - elapsed;
+                            self.tile_ms = self.tile_ms * 0.75 + took * 0.25;
+                            self.tiles.drawn(job.key, s, exact, !tile_detail);
+                        }
+                        None => {
+                            if job.must {
+                                late.push(*job);
+                            }
+                        }
+                    }
+                }
+            }
+        } else {
+            // Composite-only presentation: keep any paused tile intact and note remaining work.
+            if self.pending_tile.is_some() {
+                stats.in_progress = true;
+            }
+            for job in &plan.jobs {
+                if job.must {
+                    unfinished_must = true;
+                } else {
+                    stats.queued += 1;
+                }
             }
         }
+        if opening && !unfinished_must && self.pending_tile.is_none() {
+            self.opening_pending = false;
+        }
         let t1 = now();
+        let mut present_encoder = None;
         if plan.direct {
             stats.plan = 2;
         } else {
@@ -5066,12 +5480,24 @@ impl Gpu {
                     job.direct = true;
                 }
             }
-            let comp = self.tiles.compose(&plan, last);
-            stats.exact = comp.exact;
-            stats.pending = comp.pending;
-            stats.plan = if comp.complete { 0 } else { 1 };
-            self.composite(&comp, dst, background, w, h)?;
+            let comp = self.tiles.compose(&plan, plan_last);
+            stats.exact = comp.exact && !self.opening_pending && !unfinished_must && self.pending_tile.is_none();
+            stats.pending = comp.pending.max(u32::from(
+                self.opening_pending || unfinished_must || self.pending_tile.is_some(),
+            ));
+            stats.plan = if comp.complete && !self.opening_pending && !unfinished_must {
+                0
+            } else {
+                1
+            };
+            let fuse_present = late.is_empty() && selection.is_none();
+            present_encoder = self.composite(&comp, dst, background, w, h, !fuse_present, &mut stats)?;
             stats.render_ms += now() - t1;
+            if !late.is_empty() || selection.is_some() {
+                // Direct late tiles and drag composites write into the scratch pool, so drop any
+                // paused slot tile rather than letting its scratch contents be overwritten.
+                self.abort_pending_tile();
+            }
             for job in &late {
                 let tile_detail = job.detail || coarse_moving;
                 direct_exact &= self.draw_job(
@@ -5095,12 +5521,13 @@ impl Gpu {
                 }
             }
         }
-        stats.exact = (plan.direct || stats.exact) && direct_exact;
+        stats.exact =
+            (plan.direct || stats.exact) && direct_exact && !self.opening_pending && self.pending_tile.is_none();
         stats.direct = plan.direct || !late.is_empty();
         stats.standin = !stats.exact;
         stats.held = self.tiles.len() as u32;
         stats.evicted = self.tiles.stats.evicted;
-        let stats = self.finish_frame(dst, stats, t0, submits0)?;
+        let stats = self.finish_frame(dst, stats, t0, submits0, present_encoder)?;
         self.cur = Some(dst);
         self.set_cur_page(true);
         self.last = Some(Last { view, size: (w, h) });
@@ -5122,57 +5549,114 @@ impl Gpu {
 
     /// Draws tiles the next frame will want, for the frame last shown (its view and size): the
     /// ones it shows that aren't up to date (nearest the view's centre first), then those round
-    /// it, for at most `budget_ms` (at least one tile; zero or less: no limit), compositing and
-    /// presenting nothing. What a browser runs between frames at rest, so the exact frame comes
-    /// sooner without any one long frame. In the answer, `pending`: tiles the frame shows still
-    /// to draw; `queued`: tiles round it still to draw.
-    pub fn ahead(&mut self, store: &Store, background: [f32; 4], halo: i32, budget_ms: f64) -> Result<DrawStats> {
+    /// it, strictly bounded by `budget_ms` (cooperative mid-tile yielding ensures no slice stalls
+    /// past ~1 frame while still making strict forward progress). Compositing and presenting are
+    /// deferred to the caller.
+    pub fn ahead(
+        &mut self,
+        store: &Store,
+        background: [f32; 4],
+        generation: u64,
+        halo: i32,
+        budget_ms: f64,
+    ) -> Result<DrawStats> {
         self.check()?;
         let mut stats = DrawStats::default();
         let Some(last) = self.last else {
             return Ok(stats);
         };
-        self.readers.drop_glass_mask_atlas();
+        let bg_bits = background.map(f32::to_bits);
+        if self
+            .pending_tile
+            .as_ref()
+            .is_some_and(|pt| pt.generation != generation || pt.bg_bits != bg_bits || pt.halo != halo)
+        {
+            self.abort_pending_tile();
+        }
+        if self.pending_tile.is_none() {
+            self.readers.drop_glass_mask_atlas();
+        }
         let t0 = now();
+        let submits0 = self.submits;
         self.masks.begin_frame();
         self.blur.begin_frame();
-        self.tiles.begin(background, halo);
+        self.shadow.begin_frame();
+        self.tiles.begin_scaled(background, last.view.as_coeffs()[0], halo);
         self.fit_tiles(store.limits.tile_bytes);
-        let Some(plan) = self.tiles.plan(last.view, last.size, false, Some(last), true, false) else {
+        let opening = self.opening_pending;
+        self.tiles.opening = opening;
+        let plan_last = if opening { None } else { Some(last) };
+        let Some(plan) = self
+            .tiles
+            .plan(last.view, last.size, opening, plan_last, !opening, false)
+        else {
             return Ok(stats);
         };
-        let mut verbs = store.limits.frame_verbs;
-        let dst = self.cur.expect("previous frame");
-        for job in &plan.jobs {
-            // A tile with no slot to keep it in is drawn by the frame itself.
-            if plan.direct || job.direct {
-                continue;
-            }
-            if stats.tiles_drawn > 0 && budget_ms > 0.0 && now() - t0 >= budget_ms {
-                break;
-            }
-            let Some(slot) = self.tiles.slot_for(job.key) else {
-                continue;
-            };
-            let exact = self.draw_job(
-                store,
-                job,
-                job.detail,
-                halo,
-                background,
-                TileTarget::Slot(slot),
-                &plan,
-                dst,
-                &mut stats,
-                &mut verbs,
-            )?;
-            self.tiles.drawn(job.key, slot, exact, !job.detail);
+        let budgeted = budget_ms > 0.0;
+        let walk_budget = self.walk_budget_ms(budget_ms);
+        let deadline = budgeted.then_some(t0 + walk_budget);
+        if let Some(pt) = self.pending_tile.as_ref()
+            && !plan
+                .jobs
+                .iter()
+                .any(|j| !j.direct && j.key == pt.key && j.detail == pt.detail && j.detail == pt.coarse_readers)
+        {
+            self.abort_pending_tile();
         }
-        let (pending, queued) = self.tiles.left(&plan);
+        let mut verbs = store.limits.frame_verbs;
+        let mut resumed_key: Option<TileKey> = None;
+        let mut budget_hit = false;
+        if let Some(pt) = self.pending_tile.as_ref() {
+            let key = pt.key;
+            self.deadline_ms = deadline;
+            let step = self.resume_pending_tile(store, &mut stats);
+            self.deadline_ms = None;
+            match step? {
+                TileStep::Complete | TileStep::NoSlot => {
+                    resumed_key = Some(key);
+                }
+                TileStep::Paused => {
+                    budget_hit = true;
+                    stats.in_progress = true;
+                }
+            }
+        }
+        if !budget_hit && !plan.direct {
+            for job in &plan.jobs {
+                if job.direct || resumed_key == Some(job.key) {
+                    continue;
+                }
+                if deadline.is_some_and(|d| now() >= d) {
+                    break;
+                }
+                self.deadline_ms = deadline;
+                let step = self.start_slot_tile(
+                    store, job, job.detail, halo, background, bg_bits, generation, &mut stats, &mut verbs,
+                );
+                self.deadline_ms = None;
+                match step? {
+                    TileStep::Complete | TileStep::NoSlot => {}
+                    TileStep::Paused => {
+                        stats.in_progress = true;
+                        break;
+                    }
+                }
+            }
+        }
+        let (mut pending, queued) = self.tiles.left(&plan);
+        if opening && pending == 0 && self.pending_tile.is_none() {
+            // Coarse opening ladder tiles are complete; next slices refine exact tiles.
+            self.opening_pending = false;
+            pending = 1;
+        }
+        if self.pending_tile.is_some() {
+            pending = pending.max(1);
+        }
         stats.pending = pending;
         stats.queued = queued;
         stats.held = self.tiles.len() as u32;
         stats.evicted = self.tiles.stats.evicted;
+        stats.submits = self.submits.saturating_sub(submits0);
         stats.cpu_ms = now() - t0;
         self.scene.reset();
         self.check()?;
@@ -5180,13 +5664,26 @@ impl Gpu {
     }
 
     /// Presents the frame shown (with a canvas) and finishes the frame's numbers.
-    fn finish_frame(&mut self, frame: usize, mut stats: DrawStats, t0: f64, submits0: u32) -> Result<DrawStats> {
+    /// When `pending_encoder` is provided (from `composite`), the present blit is recorded into
+    /// the same command buffer so composite + present submit in a single `queue.submit`.
+    fn finish_frame(
+        &mut self,
+        frame: usize,
+        mut stats: DrawStats,
+        t0: f64,
+        submits0: u32,
+        pending_encoder: Option<wgpu::CommandEncoder>,
+    ) -> Result<DrawStats> {
         let t1 = now();
         self.check()?;
         self.configure_surface(frame)?;
         let acquired = match self.acquire() {
             Ok(t) => t,
             Err(e) => {
+                if let Some(encoder) = pending_encoder {
+                    self.queue.submit([encoder.finish()]);
+                    self.submits += 1;
+                }
                 self.scene.reset();
                 return Err(e);
             }
@@ -5195,9 +5692,10 @@ impl Gpu {
         stats.presented = self.surface.is_none() || acquired.is_some();
         if let (Some(t), Some(blit)) = (acquired, self.blit.as_ref()) {
             let main = &self.frames[frame];
-            let mut encoder = self
-                .device
-                .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("present") });
+            let mut encoder = pending_encoder.unwrap_or_else(|| {
+                self.device
+                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("present") })
+            });
             let view = t.texture.create_view(&Default::default());
             let fallback_group;
             let group = match main.present_group.as_ref() {
@@ -5232,9 +5730,13 @@ impl Gpu {
                 pass.set_bind_group(0, group, &[]);
                 pass.draw(0..3, 0..1);
             }
+            stats.draws += 1;
             self.queue.submit([encoder.finish()]);
             self.submits += 1;
             self.queue.present(t);
+        } else if let Some(encoder) = pending_encoder {
+            self.queue.submit([encoder.finish()]);
+            self.submits += 1;
         }
         stats.submit_ms += now() - t1;
         stats.submits = self.submits.saturating_sub(submits0);
@@ -5374,6 +5876,7 @@ impl Gpu {
         self.scene.reset_and_resize(side as u16, side as u16);
         self.readers.begin_frame();
         self.blur.begin_frame();
+        self.shadow.begin_frame();
         self.backdrop_gen += 1;
         self.active = Some(ActiveDraw::new(None, None, side, side, background, coarse_readers));
         let tile = Frame {
@@ -5388,6 +5891,13 @@ impl Gpu {
                 y1: side as i32,
             },
         };
+        if !coarse_readers
+            && tile_halo > 0
+            && let Err(e) = self.prepare_glass_masks(store, &tile)
+        {
+            self.discard_draw();
+            return Err(e);
+        }
         let limits = store.limits;
         let s = match exec::draw_split(store, self, &tile, &limits, verbs, split, coarse_readers) {
             Ok(s) => s,
@@ -5443,7 +5953,7 @@ impl Gpu {
             return Err(e);
         }
         if let Some((page, src_origin, dst_origin, size)) = copy_info {
-            let mut encoder = self.take_encoder(false, "tile copy");
+            let mut encoder = self.take_encoder("tile copy");
             let scratch = self.scratches[self.active_scratch].as_ref().expect("scratch");
             let destination = match page {
                 Some(page) => &self.pages[page].texture,
@@ -5467,17 +5977,312 @@ impl Gpu {
         Ok(exact)
     }
 
+    /// Computes the cooperative scene-walk budget for a slice, reserving headroom for
+    /// synchronous `queue.submit` translation on backends like WebGL2.
+    fn walk_budget_ms(&self, budget_ms: f64) -> f64 {
+        if budget_ms < 1.0 {
+            budget_ms
+        } else {
+            (budget_ms / (1.0 + self.submit_ratio)).clamp(1.0, budget_ms)
+        }
+    }
+
+    fn update_submit_ratio(&mut self, slice_total_ms: f64, slice_submit_ms: f64) {
+        if slice_submit_ms <= 0.0 || slice_total_ms <= 0.0 {
+            return;
+        }
+        let work_ms = (slice_total_ms - slice_submit_ms).max(0.5);
+        let ratio = (slice_submit_ms / work_ms).clamp(0.0, 6.0);
+        self.submit_ratio = self.submit_ratio * 0.75 + ratio * 0.25;
+    }
+
+    /// Starts a budgeted tile render for a cache slot with cooperative mid-tile yielding.
+    /// If the frame deadline expires mid-walk, flushes progress into scratch and stores a
+    /// `PendingTile` without claiming an atlas slot until completion.
+    #[allow(clippy::too_many_arguments)]
+    fn start_slot_tile(
+        &mut self,
+        store: &Store,
+        job: &crate::tiles::Job,
+        coarse_readers: bool,
+        halo: i32,
+        background: [f32; 4],
+        bg_bits: [u32; 4],
+        generation: u64,
+        stats: &mut DrawStats,
+        verbs: &mut usize,
+    ) -> Result<TileStep> {
+        let t0 = now();
+        *verbs = store.limits.frame_verbs;
+        let tile_halo = if halo <= 0
+            || (!store.has_context()
+                && !store.has_reader_in_rect(
+                    job.view,
+                    Rect::new(-2.0, -2.0, f64::from(TILE) + 2.0, f64::from(TILE) + 2.0),
+                )) {
+            0
+        } else {
+            halo
+        };
+        let h = tile_halo as u32;
+        let side = TILE + 2 * h;
+        self.ensure_scratch(side)?;
+        self.masks.begin_frame();
+        self.atlas.at = (0, 0, 0);
+        self.scene.reset_and_resize(side as u16, side as u16);
+        self.readers.begin_frame();
+        self.blur.begin_frame();
+        self.shadow.begin_frame();
+        self.backdrop_gen += 1;
+        self.active = Some(ActiveDraw::new(None, None, side, side, background, coarse_readers));
+        let tile = Frame {
+            width: side as u16,
+            height: side as u16,
+            view: Affine::translate((f64::from(h), f64::from(h))) * job.view,
+            detail: job.detail,
+            area: IRect {
+                x0: 0,
+                y0: 0,
+                x1: side as i32,
+                y1: side as i32,
+            },
+        };
+        if !coarse_readers
+            && tile_halo > 0
+            && let Err(e) = self.prepare_glass_masks(store, &tile)
+        {
+            self.discard_draw();
+            return Err(e);
+        }
+        let limits = store.limits;
+        let allow_yield = self.deadline_ms.is_some();
+        let outcome = match exec::draw_split_resumable(
+            store,
+            self,
+            &tile,
+            &limits,
+            verbs,
+            &Split::all(),
+            coarse_readers,
+            None,
+            allow_yield,
+        ) {
+            Ok(o) => o,
+            Err(e) => {
+                self.discard_draw();
+                return Err(e);
+            }
+        };
+        self.finish_slot_step(
+            outcome,
+            job.key,
+            job.view,
+            job.detail,
+            coarse_readers,
+            halo,
+            tile_halo,
+            side,
+            background,
+            bg_bits,
+            generation,
+            *verbs,
+            t0,
+            stats,
+        )
+    }
+
+    /// Resumes the paused `PendingTile` for one more budgeted slice.
+    fn resume_pending_tile(&mut self, store: &Store, stats: &mut DrawStats) -> Result<TileStep> {
+        let Some(mut pt) = self.pending_tile.take() else {
+            return Ok(TileStep::Complete);
+        };
+        let t0 = now();
+        self.active_scratch = pt.active_scratch;
+        self.backdrop_gen = pt.backdrop_gen;
+        self.active = Some(pt.active);
+        self.masks.begin_frame();
+        self.readers.begin_frame();
+        self.atlas.at = (0, 0, 0);
+        self.scene.reset_and_resize(pt.side as u16, pt.side as u16);
+        let h = pt.tile_halo as u32;
+        let tile = Frame {
+            width: pt.side as u16,
+            height: pt.side as u16,
+            view: Affine::translate((f64::from(h), f64::from(h))) * pt.view,
+            detail: pt.detail,
+            area: IRect {
+                x0: 0,
+                y0: 0,
+                x1: pt.side as i32,
+                y1: pt.side as i32,
+            },
+        };
+        let limits = store.limits;
+        let allow_yield = self.deadline_ms.is_some();
+        let outcome = match exec::draw_split_resumable(
+            store,
+            self,
+            &tile,
+            &limits,
+            &mut pt.verbs,
+            &Split::all(),
+            pt.coarse_readers,
+            Some(pt.checkpoint),
+            allow_yield,
+        ) {
+            Ok(o) => o,
+            Err(e) => {
+                self.discard_draw();
+                self.readers.drop_glass_mask_atlas();
+                return Err(e);
+            }
+        };
+        self.finish_slot_step(
+            outcome,
+            pt.key,
+            pt.view,
+            pt.detail,
+            pt.coarse_readers,
+            pt.halo,
+            pt.tile_halo,
+            pt.side,
+            pt.background,
+            pt.bg_bits,
+            pt.generation,
+            pt.verbs,
+            t0,
+            stats,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish_slot_step(
+        &mut self,
+        outcome: exec::WalkOutcome,
+        key: TileKey,
+        view: Affine,
+        detail: bool,
+        coarse_readers: bool,
+        halo: i32,
+        tile_halo: i32,
+        side: u32,
+        background: [f32; 4],
+        bg_bits: [u32; 4],
+        generation: u64,
+        verbs: usize,
+        t0: f64,
+        stats: &mut DrawStats,
+    ) -> Result<TileStep> {
+        match outcome {
+            exec::WalkOutcome::Paused {
+                stats: slice_stats,
+                checkpoint,
+            } => {
+                stats.add(&slice_stats);
+                let sub0 = stats.submit_ms;
+                if let Err(e) = self.flush_scene_gpu(true) {
+                    self.discard_draw();
+                    self.readers.drop_glass_mask_atlas();
+                    return Err(e);
+                }
+                self.submit_active_encoder();
+                let mut active = self.active.take().expect("active draw");
+                self.recycle_scene_textures();
+                self.scene.reset();
+                let slice_total = now() - t0;
+                active.record_and_reset_slice(stats, slice_total);
+                self.update_submit_ratio(slice_total, stats.submit_ms - sub0);
+                self.pending_tile = Some(PendingTile {
+                    key,
+                    view,
+                    detail,
+                    coarse_readers,
+                    halo,
+                    tile_halo,
+                    side,
+                    background,
+                    bg_bits,
+                    generation,
+                    active_scratch: self.active_scratch,
+                    active,
+                    checkpoint,
+                    verbs,
+                    backdrop_gen: self.backdrop_gen,
+                });
+                Ok(TileStep::Paused)
+            }
+            exec::WalkOutcome::Complete {
+                stats: slice_stats,
+                exact,
+            } => {
+                stats.add(&slice_stats);
+                let sub0 = stats.submit_ms;
+                let h = tile_halo as u32;
+                let slot = self.tiles.slot_for(key);
+                let place = match slot {
+                    Some(s) => match self.slot_place(s) {
+                        Ok(p) => Some((s, p)),
+                        Err(e) => {
+                            self.tiles.release(key, s);
+                            self.discard_draw();
+                            self.readers.drop_glass_mask_atlas();
+                            return Err(e);
+                        }
+                    },
+                    None => None,
+                };
+                if let Err(e) = self.flush_scene_gpu(true) {
+                    if let Some((s, _)) = place {
+                        self.tiles.release(key, s);
+                    }
+                    self.discard_draw();
+                    self.readers.drop_glass_mask_atlas();
+                    return Err(e);
+                }
+                if let Some((_, (page, x, y))) = place {
+                    let mut encoder = self.take_encoder("tile copy");
+                    let scratch = self.scratches[self.active_scratch].as_ref().expect("scratch");
+                    copy_rect(
+                        &mut encoder,
+                        &scratch.texture,
+                        &self.pages[page].texture,
+                        (h, h),
+                        (x, y),
+                        (TILE, TILE),
+                    );
+                    self.stash_encoder(encoder);
+                }
+                self.submit_active_encoder();
+                let active = self.active.take().expect("active draw");
+                self.recycle_scene_textures();
+                self.readers.drop_glass_mask_atlas();
+                self.readers.flush_retired();
+                self.trim_pools(GPU_POOL_KEEP_BYTES);
+                let slice_total = now() - t0;
+                active.record_into(stats, slice_total);
+                self.update_submit_ratio(slice_total, stats.submit_ms - sub0);
+                if let Some((s, _)) = place {
+                    self.tiles.drawn(key, s, exact, !coarse_readers);
+                    stats.tiles_drawn += 1;
+                    Ok(TileStep::Complete)
+                } else {
+                    Ok(TileStep::NoSlot)
+                }
+            }
+        }
+    }
+
     /// The active scope's planes never resolve past the top of the stack. A shared scope
     /// aliases both channels to its one source, even when only the backdrop channel is selected.
-    fn plane(&self, backdrop: bool) -> Result<(&wgpu::Texture, &wgpu::TextureView, &wgpu::TextureView)> {
+    fn plane(&self, backdrop: bool) -> Result<(&wgpu::Texture, &wgpu::TextureView, u64, &wgpu::TextureView)> {
         if let Some(scope) = self.offscreen_stack.last() {
             let target = scope.plane(backdrop);
-            return Ok((&target.tex, &target.view, &target.depth));
+            return Ok((&target.tex, &target.view, target.view_id, &target.depth));
         }
         self.root_plane(backdrop)
     }
 
-    fn root_plane(&self, backdrop: bool) -> Result<(&wgpu::Texture, &wgpu::TextureView, &wgpu::TextureView)> {
+    fn root_plane(&self, backdrop: bool) -> Result<(&wgpu::Texture, &wgpu::TextureView, u64, &wgpu::TextureView)> {
         let root = self.scratches[self.active_scratch]
             .as_ref()
             .ok_or_else(|| EngineError::new(ErrorCode::State, "no scratch tile"))?;
@@ -5487,13 +6292,13 @@ impl Gpu {
                 .backdrop_frame
                 .as_ref()
                 .ok_or_else(|| EngineError::new(ErrorCode::State, "no backdrop plane"))?;
-            return Ok((&back.texture, &back.view, &root.depth));
+            return Ok((&back.texture, &back.view, back.view_id, &root.depth));
         }
         if let Some(dst) = self.active.as_ref().and_then(|active| active.frame_dst) {
             let frame = &self.frames[dst];
-            return Ok((&frame.texture, &frame.view, &root.depth));
+            return Ok((&frame.texture, &frame.view, frame.tex_view_id, &root.depth));
         }
-        Ok((&root.texture, &root.view, &root.depth))
+        Ok((&root.texture, &root.view, root.view_id, &root.depth))
     }
 
     fn active_scene_size(&self) -> (u16, u16) {
@@ -5508,10 +6313,16 @@ impl Gpu {
 
     fn discard_draw(&mut self) {
         self.active = None;
+        self.renderer.discard_uploads();
         self.readers.discard_uniforms();
         self.blend.discard_uniforms();
+        self.blur.discard_uniforms();
+        self.shadow.discard_uniforms();
+        let _ = self.readers.take_draws() + self.blur.take_draws() + self.shadow.take_draws();
         self.blur.flush_retired();
         self.readers.flush_retired();
+        self.flush_retired_textures();
+        self.atlas.pending.clear();
         while let Some(scope) = self.offscreen_stack.pop() {
             self.offscreen_pool.push(scope.main);
             self.offscreen_pool.extend(scope.backdrop);
@@ -5519,6 +6330,7 @@ impl Gpu {
         self.offscreen_pool.append(&mut self.offscreen_in_use);
         self.scene.reset();
         self.recycle_scene_textures();
+        self.atlas.at = (0, 0, 0);
     }
 
     /// Called after submitting the scene that references these textures, or dropping that scene.
@@ -5576,10 +6388,6 @@ impl Gpu {
         };
         let dual = write_main && write_backdrop;
         let draw = scene_dirty && (write_main || write_backdrop);
-        let mut encoder = self.take_encoder(draw, "scene flush");
-        if draw {
-            self.flush_masks();
-        }
 
         // Vello defaults to clearing the attachment. Existing planes already hold their
         // prefix, including readers and composites from earlier segments.
@@ -5590,7 +6398,8 @@ impl Gpu {
                 color: AlphaColor::new([r, g, b, a]),
             });
         } else if needs_clear {
-            let (_, view, _) = self.plane(false)?;
+            let mut encoder = self.take_encoder("scene clear");
+            let (_, view, _, _) = self.plane(false)?;
             GpuReaders::encode_clear(
                 &mut encoder,
                 view,
@@ -5601,49 +6410,40 @@ impl Gpu {
                     a: f64::from(a),
                 },
             );
+            self.stash_encoder(encoder);
         }
 
         if draw {
-            let (target, color, depth) = self.plane(!write_main)?;
+            let (target, color, color_id, depth) = self.plane(!write_main)?;
             let depth = depth.clone();
             let (width, height) = (target.width(), target.height());
-            let color = if dual {
+            let (color, color_id) = if dual {
                 let max_bytes = self.reader_budget_room();
                 self.readers
                     .ensure_frame_tex_budgeted(false, &self.device, width, height, "scene delta", max_bytes)?;
                 options.target_init = TargetInit::Clear(ClearSettings::Viewport {
                     color: AlphaColor::TRANSPARENT,
                 });
-                self.readers.delta_frame.as_ref().expect("scene delta").view.clone()
+                let delta = self.readers.delta_frame.as_ref().expect("scene delta");
+                (delta.view.clone(), delta.view_id)
             } else {
-                color.clone()
+                (color.clone(), color_id)
             };
-            self.renderer
-                .render(
-                    &self.scene,
-                    &mut self.resources,
-                    &mut encoder,
-                    RenderTarget {
-                        view: &color,
-                        depth_view: Some(&depth),
-                    },
-                    &self.bindings,
-                    options,
-                )
-                .map_err(vello_error)?;
+            self.vello_render(false, &color, Some(&depth), options, "scene flush")?;
             if dual {
+                let mut encoder = self.take_encoder("scene dual composite");
                 let (w, h) = self.active_scene_size();
-                let (main_tex, main, _) = self.plane(false)?;
-                let (back_tex, backdrop, _) = self.plane(true)?;
+                let (main_tex, main, _, _) = self.plane(false)?;
+                let (back_tex, backdrop, _, _) = self.plane(true)?;
                 let same_size = (main_tex.width(), main_tex.height()) == (back_tex.width(), back_tex.height());
                 let (main, backdrop) = (main.clone(), backdrop.clone());
                 let scissor = (0, 0, u32::from(w), u32::from(h));
                 if same_size {
                     self.readers.encode_composite(
                         &self.device,
-                        &self.queue,
                         &mut encoder,
                         &color,
+                        color_id,
                         CompositeTarget::OverBoth(&main, &backdrop),
                         (0, 0),
                         scissor,
@@ -5655,9 +6455,9 @@ impl Gpu {
                     for view in [&main, &backdrop] {
                         self.readers.encode_composite(
                             &self.device,
-                            &self.queue,
                             &mut encoder,
                             &color,
+                            color_id,
                             CompositeTarget::Over(view),
                             (0, 0),
                             scissor,
@@ -5665,24 +6465,23 @@ impl Gpu {
                         );
                     }
                 }
+                self.stash_encoder(encoder);
             }
         }
         let active = self.active.as_mut().expect("active draw");
         active.needs_clear &= !needs_clear;
         active.scene_dirty = false;
-        if draw {
-            active.vello_renders += 1;
-        }
         let sub = active.submit_ms - sub0;
         active.vello_render_ms += (now() - t0 - sub).max(0.0);
         if needs_clear || (draw && (write_backdrop || (!active.backdrop_live && root))) {
             self.backdrop_gen += 1;
         }
-        self.stash_encoder(encoder);
-        if !self.temp_in_use.is_empty() || !self.temp_textures.is_empty() || !self.retired_shadows.is_empty() {
+        if self.in_use_bytes >= GPU_TEMP_FLUSH_BYTES
+            || !self.temp_textures.is_empty()
+            || self.retired_shadows.len() >= 16
+            || self.atlas.at.1 >= ATLAS_SIDE * 3 / 4
+        {
             self.submit_active_encoder();
-            self.recycle_scene_textures();
-            self.atlas.at = (0, 0, 0);
         }
         Ok(())
     }
@@ -5727,22 +6526,30 @@ impl Gpu {
     }
 
     fn reader_source(&self, base: Option<usize>, active: &ActiveDraw) -> Result<ReaderSource> {
-        let ((x, y), (width, height), texture, view) = if let Some(base) = base {
+        let ((x, y), (width, height), texture, view, view_id) = if let Some(base) = base {
             let plane = self.offscreen_stack[base].plane(true);
             (
                 plane.origin,
                 (i32::from(plane.active_size.0), i32::from(plane.active_size.1)),
                 &plane.tex,
                 &plane.view,
+                plane.view_id,
             )
         } else {
-            let (texture, view, _) = self.root_plane(active.backdrop_live)?;
-            ((0, 0), (active.width as i32, active.height as i32), texture, view)
+            let (texture, view, view_id, _) = self.root_plane(active.backdrop_live)?;
+            (
+                (0, 0),
+                (active.width as i32, active.height as i32),
+                texture,
+                view,
+                view_id,
+            )
         };
         Ok(ReaderSource {
             plane: BlurReaderPlane {
                 texture: texture.clone(),
                 view: view.clone(),
+                view_id,
             },
             bounds: IRect {
                 x0: x,
@@ -5764,10 +6571,11 @@ impl Gpu {
         let size = bounds.size();
         let budget = self.reader_budget_room();
         self.readers.ensure_blur_source_budgeted(&self.device, size, budget)?;
-        let mut encoder = self.take_encoder(false, "reader prefix snapshot");
+        let mut encoder = self.take_encoder("reader prefix snapshot");
         let snapshot = self.readers.blur_source.as_ref().expect("reader prefix snapshot");
         let texture = snapshot.texture.clone();
         let view = snapshot.view.clone();
+        let view_id = snapshot.view_id;
         let offset = (
             (bounds.x0 - source.bounds.x0) as u32,
             (bounds.y0 - source.bounds.y0) as u32,
@@ -5776,7 +6584,7 @@ impl Gpu {
         self.overlay_reader_interiors(&mut encoder, &view, bounds, interiors);
         self.stash_encoder(encoder);
         Ok(ReaderSource {
-            plane: BlurReaderPlane { texture, view },
+            plane: BlurReaderPlane { texture, view, view_id },
             bounds,
         })
     }
@@ -5837,10 +6645,11 @@ impl Gpu {
             return Ok(None);
         };
         let clone_plane = |backdrop| -> Result<BlurReaderPlane> {
-            let (texture, view, _) = self.plane(backdrop)?;
+            let (texture, view, view_id, _) = self.plane(backdrop)?;
             Ok(BlurReaderPlane {
                 texture: texture.clone(),
                 view: view.clone(),
+                view_id,
             })
         };
         let targets = [
@@ -5893,29 +6702,17 @@ impl Gpu {
             self.mask_scene.reset_and_resize(w as u16, h as u16);
             let shift = Affine::translate((-f64::from(draw.dirty.x0), -f64::from(draw.dirty.y0)));
             raster_clips(&mut self.mask_scene, open, shift, (w, h), true);
-            let mut encoder = self.take_encoder(true, "blur reader clip");
-            let clip = self.readers.clip_tex.as_ref().expect("blur reader clip");
+            let (clip_view, clip_depth) = {
+                let clip = self.readers.clip_tex.as_ref().expect("blur reader clip");
+                (clip.view.clone(), clip.depth.clone())
+            };
             let t_vr = now();
-            self.renderer
-                .render(
-                    &self.mask_scene,
-                    &mut self.resources,
-                    &mut encoder,
-                    RenderTarget {
-                        view: &clip.view,
-                        depth_view: Some(&clip.depth),
-                    },
-                    &self.bindings,
-                    options,
-                )
-                .map_err(vello_error)?;
+            let sub0 = self.active.as_ref().map_or(0.0, |a| a.submit_ms);
+            self.vello_render(true, &clip_view, Some(&clip_depth), options, "blur reader clip")?;
             if let Some(a) = self.active.as_mut() {
-                a.vello_render_ms += now() - t_vr;
-                a.vello_renders += 1;
+                a.vello_render_ms += (now() - t_vr - (a.submit_ms - sub0)).max(0.0);
             }
-            self.stash_encoder(encoder);
         }
-        let mut encoder = self.take_encoder(!analytic, "backdrop blur");
         if !analytic {
             let budget = self.reader_budget_room();
             self.readers.ensure_vello_tex_budgeted(
@@ -5937,27 +6734,19 @@ impl Gpu {
                     .set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
                 self.mask_scene.fill_path(path);
             }
-            let mask = self.readers.mask_tex.as_ref().expect("blur reader shape");
+            let (mask_view, mask_depth) = {
+                let mask = self.readers.mask_tex.as_ref().expect("blur reader shape");
+                (mask.view.clone(), mask.depth.clone())
+            };
             let t_vr = now();
-            self.renderer
-                .render(
-                    &self.mask_scene,
-                    &mut self.resources,
-                    &mut encoder,
-                    RenderTarget {
-                        view: &mask.view,
-                        depth_view: Some(&mask.depth),
-                    },
-                    &self.bindings,
-                    options,
-                )
-                .map_err(vello_error)?;
+            let sub0 = self.active.as_ref().map_or(0.0, |a| a.submit_ms);
+            self.vello_render(true, &mask_view, Some(&mask_depth), options, "backdrop blur")?;
             if let Some(a) = self.active.as_mut() {
-                a.vello_render_ms += now() - t_vr;
-                a.vello_renders += 1;
+                a.vello_render_ms += (now() - t_vr - (a.submit_ms - sub0)).max(0.0);
             }
         }
         self.mask_scene.reset();
+        let encoder = self.take_encoder("backdrop blur");
         Ok((encoder, clipped))
     }
 
@@ -5966,6 +6755,7 @@ impl Gpu {
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
         source: &wgpu::TextureView,
+        source_id: u64,
         source_size: (u32, u32),
         dst_origin: (i32, i32),
         spec: &BlurSpec,
@@ -5980,9 +6770,9 @@ impl Gpu {
         let out = self.readers.blur_out.as_ref().expect("blur reader output");
         self.blur.encode(
             &self.device,
-            &self.queue,
             encoder,
             source,
+            source_id,
             source_size,
             &out.view,
             out_size,
@@ -6060,36 +6850,28 @@ impl Gpu {
                 self.submit_active_encoder();
             }
         }
-        let mut encoder = self.take_encoder(clipped, "scope composite");
         if clipped {
             self.mask_scene.reset_and_resize(aw as u16, ah as u16);
             let shift = Affine::translate((-f64::from(dst_origin.0), -f64::from(dst_origin.1)));
             raster_clips(&mut self.mask_scene, open, shift, (aw, ah), false);
-            let mask = self.scratch_mask.as_ref().expect("composite clip mask");
+            let (mask_view, mask_depth) = {
+                let mask = self.scratch_mask.as_ref().expect("composite clip mask");
+                (mask.view.clone(), mask.depth.clone())
+            };
             let mut options = RenderOptions::default();
             options.target_init = TargetInit::Clear(ClearSettings::Viewport {
                 color: AlphaColor::TRANSPARENT,
             });
             let t_vr = now();
-            self.renderer
-                .render(
-                    &self.mask_scene,
-                    &mut self.resources,
-                    &mut encoder,
-                    RenderTarget {
-                        view: &mask.view,
-                        depth_view: Some(&mask.depth),
-                    },
-                    &self.bindings,
-                    options,
-                )
-                .map_err(vello_error)?;
+            let vr_sub0 = self.active.as_ref().map_or(0.0, |a| a.submit_ms);
+            self.vello_render(true, &mask_view, Some(&mask_depth), options, "scope composite")?;
             if let Some(a) = self.active.as_mut() {
-                a.vello_render_ms += now() - t_vr;
-                a.vello_renders += 1;
+                a.vello_render_ms += (now() - t_vr - (a.submit_ms - vr_sub0)).max(0.0);
             }
         }
+        let mut encoder = self.take_encoder("scope composite");
 
+        let mut blend_draws = 0u32;
         for backdrop in [false, true] {
             if (backdrop && !write_backdrop) || (!backdrop && !write_main) {
                 continue;
@@ -6100,18 +6882,24 @@ impl Gpu {
                 opacity
             };
             let src = content.plane(backdrop);
-            let (dst_tex, dst_view, _) = self.plane(backdrop)?;
+            let (dst_tex, dst_view, _, _) = self.plane(backdrop)?;
             let dst_view = dst_view.clone();
             if shader {
                 let prefix = self.scratch_backdrop.as_ref().expect("composite prefix");
-                let clip = clipped.then(|| &self.scratch_mask.as_ref().expect("composite clip mask").view);
-                let picture = picture.map(|(mask, kind)| (&mask.plane(backdrop).view, kind));
+                let clip = clipped.then(|| {
+                    let m = self.scratch_mask.as_ref().expect("composite clip mask");
+                    (&m.view, m.view_id)
+                });
+                let picture = picture.map(|(mask, kind)| {
+                    let p = mask.plane(backdrop);
+                    (&p.view, p.view_id, kind)
+                });
                 copy_rect(&mut encoder, dst_tex, &prefix.tex, dst_offset, src_offset, size);
-                self.blend.encode(
+                blend_draws += self.blend.encode(
                     &self.device,
                     &mut encoder,
-                    &src.view,
-                    &prefix.view,
+                    (&src.view, src.view_id),
+                    (&prefix.view, prefix.view_id),
                     clip,
                     picture,
                     &dst_view,
@@ -6123,9 +6911,9 @@ impl Gpu {
             } else {
                 self.readers.encode_composite(
                     &self.device,
-                    &self.queue,
                     &mut encoder,
                     &src.view,
+                    src.view_id,
                     if lerp {
                         CompositeTarget::Lerp(&dst_view)
                     } else {
@@ -6142,6 +6930,7 @@ impl Gpu {
             self.backdrop_gen += 1;
         }
         if let Some(a) = self.active.as_mut() {
+            a.draws += blend_draws;
             let sub = a.submit_ms - sub0;
             let vr = a.vello_render_ms - vr0;
             a.flush_ms += (now() - t0 - sub - vr).max(0.0);
@@ -6152,7 +6941,7 @@ impl Gpu {
     fn post_plane(&mut self, source: &GpuTarget, steps: &[PostStep]) -> Result<Option<GpuTarget>> {
         let t0 = now();
         let sub0 = self.active.as_ref().map_or(0.0, |a| a.submit_ms);
-        let mut encoder = self.take_encoder(false, "post effects");
+        let mut encoder = self.take_encoder("post effects");
         let mut outputs = Vec::with_capacity(steps.len());
         let result = (|| -> Result<bool> {
             for &step in steps {
@@ -6195,9 +6984,9 @@ impl Gpu {
                         let src = outputs.last().unwrap_or(source);
                         if let Err(e) = self.blur.encode(
                             &self.device,
-                            &self.queue,
                             &mut encoder,
                             &src.view,
+                            src.view_id,
                             (src.width, src.height),
                             &dst.view,
                             (out_w, out_h),
@@ -6464,12 +7253,15 @@ impl Gpu {
         if x1 <= x0 || y1 <= y0 {
             return Ok(());
         }
+        let per_page = self.per_page();
+        let per_row = self.per_row();
+        let page_side = self.page_side;
         let place = |slot: u32| {
-            let within = slot % PER_PAGE;
+            let within = slot % per_page;
             (
-                (slot / PER_PAGE) as usize,
-                (within % PER_ROW) * TILE,
-                (within / PER_ROW) * TILE,
+                (slot / per_page) as usize,
+                (within % per_row) * TILE,
+                (within / per_row) * TILE,
             )
         };
         let (bp, bx, by) = place(slots[0]);
@@ -6532,7 +7324,7 @@ impl Gpu {
             let h = side.saturating_sub(TILE) / 2;
             quads.push(quad(h, h, f64::from(side)));
         }
-        quads.push(quad(ax, ay, f64::from(PAGE)));
+        quads.push(quad(ax, ay, f64::from(page_side)));
         let c = self
             .compositor
             .as_ref()
@@ -6542,32 +7334,14 @@ impl Gpu {
             .flat_map(|q| q.iter().flat_map(|v| v.to_le_bytes()))
             .collect();
         self.queue.write_buffer(&c.instances, 0, &bytes);
-        let layout = c.over.get_bind_group_layout(0);
-        let group_for = |view: &wgpu::TextureView| {
-            self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("drag"),
-                layout: &layout,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Sampler(&c.sampler),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: c.uniforms.as_entire_binding(),
-                    },
-                ],
-            })
-        };
         let scratch_group = match (dt.selection, self.scratches[self.active_scratch].as_ref()) {
-            (true, Some(s)) => Some(group_for(&s.view)),
+            (true, Some(s)) => Some(c.create_bind_group(&self.device, &s.view, "drag")),
             _ => None,
         };
-        let above_group = group_for(&self.pages[ap].view);
+        let above_group = match self.pages[ap].composite_group.as_ref() {
+            Some(g) => g.clone(),
+            None => c.create_bind_group(&self.device, &self.pages[ap].view, "drag"),
+        };
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("drag"),
@@ -6600,8 +7374,22 @@ impl Gpu {
 
     /// Lays a frame into frame texture `dst`: under what the frame's own tiles don't cover, the
     /// background, the last frame moved and scaled, and other levels' tiles scaled; then the
-    /// frame's tiles, pixel for pixel.
-    fn composite(&mut self, comp: &Composite, dst: usize, background: [f32; 4], w: u32, h: u32) -> Result<()> {
+    /// frame's tiles, pixel for pixel. When `submit` is false, returns the open encoder so
+    /// `finish_frame` can record the present blit into the same submission.
+    #[allow(clippy::too_many_arguments)]
+    fn composite(
+        &mut self,
+        comp: &Composite,
+        dst: usize,
+        background: [f32; 4],
+        w: u32,
+        h: u32,
+        submit: bool,
+        stats: &mut DrawStats,
+    ) -> Result<Option<wgpu::CommandEncoder>> {
+        let per_page = self.per_page();
+        let per_row = self.per_row();
+        let page_side = self.page_side;
         let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("composite"),
         });
@@ -6635,16 +7423,16 @@ impl Gpu {
                 ));
             }
             for sc in &comp.scaled {
-                let page = (sc.slot / PER_PAGE) as usize;
+                let page = (sc.slot / per_page) as usize;
                 if page >= self.pages.len() {
                     continue;
                 }
-                let within = sc.slot % PER_PAGE;
+                let within = sc.slot % per_page;
                 let (x, y) = (
-                    f64::from((within % PER_ROW) * TILE),
-                    f64::from((within / PER_ROW) * TILE),
+                    f64::from((within % per_row) * TILE),
+                    f64::from((within / per_row) * TILE),
                 );
-                let (p, t) = (f64::from(PAGE), f64::from(TILE));
+                let (p, t) = (f64::from(page_side), f64::from(TILE));
                 let d = sc.dst;
                 quads.push((
                     Some(page),
@@ -6686,32 +7474,14 @@ impl Gpu {
             if !bytes.is_empty() {
                 self.queue.write_buffer(&c.instances, 0, &bytes);
             }
-            let size: [f32; 4] = [w as f32, h as f32, 0.0, 0.0];
-            let ub: Vec<u8> = size.iter().flat_map(|v| v.to_le_bytes()).collect();
-            self.queue.write_buffer(&c.uniforms, 0, &ub);
-            let layout = c.pipeline.get_bind_group_layout(0);
-            let group_for = |view: &wgpu::TextureView| {
-                self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: Some("composite"),
-                    layout: &layout,
-                    entries: &[
-                        wgpu::BindGroupEntry {
-                            binding: 0,
-                            resource: wgpu::BindingResource::TextureView(view),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 1,
-                            resource: wgpu::BindingResource::Sampler(&c.sampler),
-                        },
-                        wgpu::BindGroupEntry {
-                            binding: 2,
-                            resource: c.uniforms.as_entire_binding(),
-                        },
-                    ],
-                })
-            };
-            // Runs of quads sharing a source, each with its bind group.
-            let mut runs: Vec<(wgpu::BindGroup, u32, u32)> = Vec::new();
+            if c.uniform_size != (w, h) {
+                let size: [f32; 4] = [w as f32, h as f32, 0.0, 0.0];
+                let ub: Vec<u8> = size.iter().flat_map(|v| v.to_le_bytes()).collect();
+                self.queue.write_buffer(&c.uniforms, 0, &ub);
+                c.uniform_size = (w, h);
+            }
+            // Runs of quads sharing a source, reusing cached bind groups on frames and tile pages.
+            let mut runs: Vec<(Option<usize>, u32, u32)> = Vec::new();
             let mut i = 0;
             while i < quads.len() {
                 let src = quads[i].0;
@@ -6719,11 +7489,21 @@ impl Gpu {
                 while j < quads.len() && quads[j].0 == src {
                     j += 1;
                 }
-                let view = match src {
-                    None => &self.frames[self.cur.expect("stand-in frame")].view,
-                    Some(p) => &self.pages[p].view,
-                };
-                runs.push((group_for(view), i as u32, j as u32));
+                match src {
+                    None => {
+                        let frame = &mut self.frames[self.cur.expect("stand-in frame")];
+                        if frame.composite_group.is_none() {
+                            frame.composite_group = Some(c.create_bind_group(&self.device, &frame.view, "composite"));
+                        }
+                    }
+                    Some(p) => {
+                        let page = &mut self.pages[p];
+                        if page.composite_group.is_none() {
+                            page.composite_group = Some(c.create_bind_group(&self.device, &page.view, "composite"));
+                        }
+                    }
+                }
+                runs.push((src, i as u32, j as u32));
                 i = j;
             }
             let a = background[3];
@@ -6747,18 +7527,26 @@ impl Gpu {
             });
             pass.set_pipeline(&c.pipeline);
             pass.set_vertex_buffer(0, c.instances.slice(..));
-            for (group, from, to) in &runs {
+            for &(src, from, to) in &runs {
+                let group = match src {
+                    None => self.frames[self.cur.expect("stand-in frame")]
+                        .composite_group
+                        .as_ref()
+                        .expect("composite frame bg"),
+                    Some(p) => self.pages[p].composite_group.as_ref().expect("composite page bg"),
+                };
                 pass.set_bind_group(0, group, &[]);
-                pass.draw(0..4, *from..*to);
+                pass.draw(0..4, from..to);
             }
+            stats.draws += runs.len() as u32;
         }
         for cp in &comp.copies {
-            let page = (cp.slot / PER_PAGE) as usize;
+            let page = (cp.slot / per_page) as usize;
             let Some(pg) = self.pages.get(page) else {
                 continue;
             };
-            let within = cp.slot % PER_PAGE;
-            let (x, y) = ((within % PER_ROW) * TILE, (within / PER_ROW) * TILE);
+            let within = cp.slot % per_page;
+            let (x, y) = ((within % per_row) * TILE, (within / per_row) * TILE);
             encoder.copy_texture_to_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &pg.texture,
@@ -6787,9 +7575,13 @@ impl Gpu {
                 },
             );
         }
-        self.queue.submit([encoder.finish()]);
-        self.submits += 1;
-        Ok(())
+        if submit {
+            self.queue.submit([encoder.finish()]);
+            self.submits += 1;
+            Ok(None)
+        } else {
+            Ok(Some(encoder))
+        }
     }
 
     /// Makes the compositor's pipeline on first use.
@@ -6923,10 +7715,12 @@ impl Gpu {
             mapped_at_creation: false,
         });
         self.compositor = Some(Compositor {
+            bgl: groups,
             pipeline,
             over,
             sampler,
             uniforms,
+            uniform_size: (0, 0),
             instances,
             capacity,
         });
@@ -7145,9 +7939,9 @@ impl Gpu {
         });
         if let Err(e) = self.blur.encode(
             &self.device,
-            &self.queue,
             &mut encoder,
             &src_view,
+            0,
             src_size,
             &dst_view,
             dst_size,
@@ -7156,6 +7950,8 @@ impl Gpu {
             key,
         ) {
             drop(encoder);
+            self.blur.discard_uniforms();
+            let _ = self.blur.take_draws();
             self.blur.flush_retired();
             return Err(e);
         }
@@ -7186,6 +7982,8 @@ impl Gpu {
                 depth_or_array_layers: 1,
             },
         );
+        self.blur.flush_uniforms(&self.queue);
+        let _ = self.blur.take_draws();
         self.queue.submit([encoder.finish()]);
         self.submits += 1;
         self.blur.flush_retired();
@@ -7595,7 +8393,7 @@ impl Backend for Gpu {
             self.readers
                 .ensure_frame_tex_budgeted(true, &self.device, aw, ah, "backdrop tile", max_bytes)?;
             if has_context {
-                let mut encoder = self.take_encoder(false, "context init");
+                let mut encoder = self.take_encoder("context init");
                 let [r, g, b, a] = bg;
                 let bg_col = wgpu::Color {
                     r: f64::from(r * a),
@@ -7627,8 +8425,8 @@ impl Backend for Gpu {
         let max_bytes = self.reader_budget_room();
         self.readers
             .ensure_frame_tex_budgeted(true, &self.device, aw, ah, "backdrop tile", max_bytes)?;
-        let mut encoder = self.take_encoder(false, "backdrop snapshot");
-        let (source, _, _) = self.root_plane(false)?;
+        let mut encoder = self.take_encoder("backdrop snapshot");
+        let (source, _, _, _) = self.root_plane(false)?;
         encoder.copy_texture_to_texture(
             wgpu::TexelCopyTextureInfo {
                 texture: source,
@@ -7661,6 +8459,10 @@ impl Backend for Gpu {
             .as_ref()
             .and_then(|h| h.strip_capture.as_ref())
             .is_some_and(|s| s.captured.is_some())
+    }
+
+    fn deadline_reached(&self) -> bool {
+        self.deadline_ms.is_some_and(|d| now() >= d)
     }
 
     fn set_targets(&mut self, write_main: bool, write_backdrop: bool, open: &[Open]) -> Result<()> {
@@ -7876,7 +8678,7 @@ impl Backend for Gpu {
                     tier.frame_size,
                     within,
                 )?;
-                let mut encoder = self.take_encoder(false, "snapshot coarse reader backdrop");
+                let mut encoder = self.take_encoder("snapshot coarse reader backdrop");
                 let offset = (
                     (bounds.x0 - source.bounds.x0) as u32,
                     (bounds.y0 - source.bounds.y0) as u32,
@@ -7924,7 +8726,7 @@ impl Backend for Gpu {
                 let fx1 = ((source_size.0 as i32 - base_x).div_euclid(ratio)).min(far_size.0 as i32);
                 let fy1 = ((source_size.1 as i32 - base_y).div_euclid(ratio)).min(far_size.1 as i32);
                 if fx1 > fx0 && fy1 > fy0 {
-                    let (patch_view, patch_size, patch_base) = if !interiors.is_empty() {
+                    let (patch_view, patch_id, patch_size, patch_base) = if !interiors.is_empty() {
                         let reads = IRect {
                             x0: source_origin.0 + fx0 * ratio + base_x,
                             y0: source_origin.1 + fy0 * ratio + base_y,
@@ -7934,6 +8736,7 @@ impl Backend for Gpu {
                         let snap = self.snapshot_reader_prefix(&source, &interiors, reads)?;
                         (
                             snap.plane.view,
+                            snap.plane.view_id,
                             snap.bounds.size(),
                             (
                                 (far_origin.0 - far_offset.0) * ratio + tier.offset.0 - snap.bounds.x0,
@@ -7941,14 +8744,19 @@ impl Backend for Gpu {
                             ),
                         )
                     } else {
-                        (source.plane.view.clone(), source_size, (base_x, base_y))
+                        (
+                            source.plane.view.clone(),
+                            source.plane.view_id,
+                            source_size,
+                            (base_x, base_y),
+                        )
                     };
-                    let mut encoder = self.take_encoder(false, "patch far glass prefix from mid");
+                    let mut encoder = self.take_encoder("patch far glass prefix from mid");
                     self.readers.encode_downsample_rect(
                         &self.device,
-                        &self.queue,
                         &mut encoder,
                         &patch_view,
+                        patch_id,
                         patch_size,
                         &far_view,
                         (fx0 as u32, fy0 as u32, (fx1 - fx0) as u32, (fy1 - fy0) as u32),
@@ -8035,7 +8843,13 @@ impl Backend for Gpu {
                         opt_area,
                         g_div,
                         offset,
-                        Some((prefix.origin, prefix.size, prefix.view.clone(), prefix.within)),
+                        Some((
+                            prefix.origin,
+                            prefix.size,
+                            prefix.view.clone(),
+                            prefix.view_id,
+                            prefix.within,
+                        )),
                     )
                 } else {
                     // No captured prefix; fall back to checking whether the lens is visible on screen.
@@ -8095,7 +8909,7 @@ impl Backend for Gpu {
 
         // Compose inherited paint in scratch so it does not become part of the isolated picture.
         // The same scratch freezes an aliased prefix before any glass chunks write into it.
-        let (dst_tex, dst_view, _) = self.plane(false)?;
+        let (dst_tex, dst_view, _, _) = self.plane(false)?;
         let (dst_tex, dst_view) = (dst_tex.clone(), dst_view.clone());
         let needs_native_prefix = divisor == 1 || native_sampling;
         if needs_native_prefix
@@ -8139,6 +8953,7 @@ impl Backend for Gpu {
         let source_origin = (source.bounds.x0, source.bounds.y0);
         let source_size = source.bounds.size();
         let source_view = source.plane.view;
+        let source_view_id = source.plane.view_id;
 
         let any_clip = divisor > 1
             || open.iter().any(|o| {
@@ -8254,31 +9069,20 @@ impl Backend for Gpu {
                 } else {
                     raster_clips(&mut self.mask_scene, open, shift, (out_w, out_h), true);
                 }
-                let mut enc = self.take_encoder(true, "reader clip");
                 let mut options = RenderOptions::default();
                 options.target_init = TargetInit::Clear(ClearSettings::Viewport {
                     color: vello_common::color::AlphaColor::TRANSPARENT,
                 });
-                let clip_t = self.readers.clip_tex.as_ref().expect("clip");
+                let (clip_view, clip_depth) = {
+                    let clip_t = self.readers.clip_tex.as_ref().expect("clip");
+                    (clip_t.view.clone(), clip_t.depth.clone())
+                };
                 let t_vr = now();
-                self.renderer
-                    .render(
-                        &self.mask_scene,
-                        &mut self.resources,
-                        &mut enc,
-                        RenderTarget {
-                            view: &clip_t.view,
-                            depth_view: Some(&clip_t.depth),
-                        },
-                        &self.bindings,
-                        options,
-                    )
-                    .map_err(vello_error)?;
+                let vr_sub0 = self.active.as_ref().map_or(0.0, |a| a.submit_ms);
+                self.vello_render(true, &clip_view, Some(&clip_depth), options, "reader clip")?;
                 if let Some(a) = self.active.as_mut() {
-                    a.vello_render_ms += now() - t_vr;
-                    a.vello_renders += 1;
+                    a.vello_render_ms += (now() - t_vr - (a.submit_ms - vr_sub0)).max(0.0);
                 }
-                self.stash_encoder(enc);
                 self.mask_scene.reset();
             }
 
@@ -8323,7 +9127,6 @@ impl Backend for Gpu {
                 }
             }
             let render_mask = analytic_coarse.is_none() && mask_slot.is_none();
-            let mut encoder = self.take_encoder(render_mask, "reader glass");
 
             if render_mask {
                 let (mask_x, mask_y, mask_w, mask_h, mask_device) =
@@ -8355,30 +9158,19 @@ impl Backend for Gpu {
                         .set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
                     self.mask_scene.fill_path(p);
                 }
-                {
-                    let mut options = RenderOptions::default();
-                    options.target_init = TargetInit::Clear(ClearSettings::Viewport {
-                        color: vello_common::color::AlphaColor::TRANSPARENT,
-                    });
+                let mut options = RenderOptions::default();
+                options.target_init = TargetInit::Clear(ClearSettings::Viewport {
+                    color: vello_common::color::AlphaColor::TRANSPARENT,
+                });
+                let (mask_view, mask_depth) = {
                     let mask_t = self.readers.mask_tex.as_ref().expect("mask");
-                    let t_vr = now();
-                    self.renderer
-                        .render(
-                            &self.mask_scene,
-                            &mut self.resources,
-                            &mut encoder,
-                            RenderTarget {
-                                view: &mask_t.view,
-                                depth_view: Some(&mask_t.depth),
-                            },
-                            &self.bindings,
-                            options,
-                        )
-                        .map_err(vello_error)?;
-                    if let Some(a) = self.active.as_mut() {
-                        a.vello_render_ms += now() - t_vr;
-                        a.vello_renders += 1;
-                    }
+                    (mask_t.view.clone(), mask_t.depth.clone())
+                };
+                let t_vr = now();
+                let vr_sub0 = self.active.as_ref().map_or(0.0, |a| a.submit_ms);
+                self.vello_render(true, &mask_view, Some(&mask_depth), options, "reader glass")?;
+                if let Some(a) = self.active.as_mut() {
+                    a.vello_render_ms += (now() - t_vr - (a.submit_ms - vr_sub0)).max(0.0);
                 }
                 self.mask_scene.reset();
             }
@@ -8391,6 +9183,7 @@ impl Backend for Gpu {
                     (region.y0 * divisor - halo_offset.1 - origin.1) as f32,
                 ),
                 native: native_sampling.then_some(&source_view),
+                native_id: if native_sampling { source_view_id } else { 0 },
                 native_origin: (
                     (region.x0 * divisor - halo_offset.0 - source_origin.0) as f32,
                     (region.y0 * divisor - halo_offset.1 - source_origin.1) as f32,
@@ -8399,16 +9192,17 @@ impl Backend for Gpu {
                 native_clip: within,
                 source_origin,
             });
-            let (sample_origin, sample_size, sample_view, sample_clip) = match &low_prefix {
-                Some((origin, size, view, clip)) => (*origin, *size, view, *clip),
-                None => (source_origin, source_size, &source_view, within),
+            let (sample_origin, sample_size, sample_view, sample_view_id, sample_clip) = match &low_prefix {
+                Some((origin, size, view, view_id, clip)) => (*origin, *size, view, *view_id, *clip),
+                None => (source_origin, source_size, &source_view, source_view_id, within),
             };
 
+            let mut encoder = self.take_encoder("reader glass");
             self.readers.encode_glass(
                 &self.device,
-                &self.queue,
                 &mut encoder,
                 sample_view,
+                sample_view_id,
                 &dst_tex,
                 &dst_view,
                 sample_size,
@@ -8496,7 +9290,7 @@ impl Backend for Gpu {
                 }
             }
         }
-        let mut encoder = self.take_encoder(false, "isolation init");
+        let mut encoder = self.take_encoder("isolation init");
         let res = (|| {
             let overlap = area.intersect(parent_bounds);
             for (backdrop, target) in std::iter::once((!isolation.on_main && !isolation.separate, &scope.main))
@@ -8728,7 +9522,6 @@ impl Backend for Gpu {
                     let bind_view = tex.create_view(&Default::default());
                     let tid = self.alloc_temp_id();
 
-                    self.submit_active_encoder();
                     self.mask_scene.reset_and_resize(cw as u16, ch as u16);
                     self.mask_scene.set_transform(Affine::translate((
                         -f64::from(canon.mask_rect.x0),
@@ -8738,11 +9531,17 @@ impl Backend for Gpu {
                     self.mask_scene.set_fill_rule(Fill::NonZero);
                     self.mask_scene.fill_path(&canon.path);
 
-                    let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                        label: Some("shadow cache"),
-                    });
                     let res = (|| -> Result<()> {
-                        let mask_tex = self.scratch_mask.as_ref().expect("scratch_mask");
+                        let (mask_view, mask_id, mask_depth, mask_w_alloc, mask_h_alloc) = {
+                            let mask_tex = self.scratch_mask.as_ref().expect("scratch_mask");
+                            (
+                                mask_tex.view.clone(),
+                                mask_tex.view_id,
+                                mask_tex.depth.clone(),
+                                mask_tex.width,
+                                mask_tex.height,
+                            )
+                        };
                         let mask_clear = [RectU16 {
                             x0: 0,
                             y0: 0,
@@ -8754,65 +9553,64 @@ impl Backend for Gpu {
                             color: AlphaColor::TRANSPARENT,
                             rects: &mask_clear,
                         });
-                        self.renderer
-                            .render(
-                                &self.mask_scene,
-                                &mut self.resources,
-                                &mut encoder,
-                                RenderTarget {
-                                    view: &mask_tex.view,
-                                    depth_view: Some(&mask_tex.depth),
-                                },
-                                &self.bindings,
-                                options,
-                            )
-                            .map_err(vello_error)?;
-                        if !invert {
+                        self.vello_render(true, &mask_view, Some(&mask_depth), options, "shadow cache")?;
+                        let mut encoder = self.take_encoder("shadow cache");
+                        let blur_res = if !invert {
                             self.blur.encode(
                                 &self.device,
-                                &self.queue,
                                 &mut encoder,
-                                &mask_tex.view,
-                                (mask_tex.width, mask_tex.height),
+                                &mask_view,
+                                mask_id,
+                                (mask_w_alloc, mask_h_alloc),
                                 &view,
                                 (cw, ch),
                                 (0, 0),
                                 &spec,
                                 None,
-                            )?;
+                            )
                         } else {
-                            let blur_tex = self.scratch_blur.as_ref().expect("scratch_blur");
-                            self.blur.encode(
+                            let (blur_view, blur_id) = {
+                                let blur_tex = self.scratch_blur.as_ref().expect("scratch_blur");
+                                (blur_tex.view.clone(), blur_tex.view_id)
+                            };
+                            let r = self.blur.encode(
                                 &self.device,
-                                &self.queue,
                                 &mut encoder,
-                                &mask_tex.view,
-                                (mask_tex.width, mask_tex.height),
-                                &blur_tex.view,
+                                &mask_view,
+                                mask_id,
+                                (mask_w_alloc, mask_h_alloc),
+                                &blur_view,
                                 (cw, ch),
                                 (0, 0),
                                 &spec,
                                 None,
-                            )?;
-                            self.shadow
-                                .encode_invert_alpha(&self.device, &mut encoder, &blur_tex.view, &view, cw, ch);
+                            );
+                            if r.is_ok() {
+                                self.shadow.encode_invert_alpha(
+                                    &self.device,
+                                    &mut encoder,
+                                    &blur_view,
+                                    blur_id,
+                                    &view,
+                                    cw,
+                                    ch,
+                                );
+                            }
+                            r
+                        };
+                        if let Err(e) = blur_res {
+                            drop(encoder);
+                            return Err(e);
                         }
+                        self.stash_encoder(encoder);
                         Ok(())
                     })();
+                    self.mask_scene.reset();
                     if let Err(e) = res {
-                        drop(encoder);
-                        self.blur.flush_retired();
                         tex.destroy();
                         return Err(e);
                     }
-                    let t_sub = now();
-                    self.queue.submit([encoder.finish()]);
-                    self.submits += 1;
-                    self.blur.flush_retired();
-                    let sub_dt = now() - t_sub;
                     if let Some(root) = self.active.as_mut() {
-                        root.submit_ms += sub_dt;
-                        root.vello_renders += 1;
                         let total_sub = root.submit_ms - sub0;
                         root.shadow_ms += (now() - t0 - total_sub).max(0.0);
                     }
@@ -8904,9 +9702,8 @@ impl Backend for Gpu {
 
         let t0 = now();
         let sub0 = self.active.as_ref().map_or(0.0, |a| a.submit_ms);
-        self.submit_active_encoder();
         let temp = self.acquire_temp(dirty_w, dirty_h)?;
-        let res = (|| -> Result<wgpu::CommandEncoder> {
+        let res = (|| -> Result<()> {
             if shift == 0 {
                 let spec = BlurSpec {
                     sigma,
@@ -8961,10 +9758,16 @@ impl Backend for Gpu {
                         }
                     }
                 }
-                let mut encoder = self
-                    .device
-                    .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: Some("shadow") });
-                let mask_tex = self.scratch_mask.as_ref().expect("scratch_mask");
+                let (mask_view, mask_id, mask_depth, mask_w_alloc, mask_h_alloc) = {
+                    let mask_tex = self.scratch_mask.as_ref().expect("scratch_mask");
+                    (
+                        mask_tex.view.clone(),
+                        mask_tex.view_id,
+                        mask_tex.depth.clone(),
+                        mask_tex.width,
+                        mask_tex.height,
+                    )
+                };
                 let mask_clear = [RectU16 {
                     x0: 0,
                     y0: 0,
@@ -8976,56 +9779,57 @@ impl Backend for Gpu {
                     color: AlphaColor::TRANSPARENT,
                     rects: &mask_clear,
                 });
-                self.renderer
-                    .render(
-                        &self.mask_scene,
-                        &mut self.resources,
+                self.vello_render(true, &mask_view, Some(&mask_depth), options, "shadow")?;
+                let mut encoder = self.take_encoder("shadow");
+                let blur_res = if !invert {
+                    self.blur.encode(
+                        &self.device,
                         &mut encoder,
-                        RenderTarget {
-                            view: &mask_tex.view,
-                            depth_view: Some(&mask_tex.depth),
-                        },
-                        &self.bindings,
-                        options,
+                        &mask_view,
+                        mask_id,
+                        (mask_w_alloc, mask_h_alloc),
+                        &temp.view,
+                        (dirty_w, dirty_h),
+                        dst_origin,
+                        &spec,
+                        None,
                     )
-                    .map_err(vello_error)?;
-                if !invert {
-                    self.blur.encode(
-                        &self.device,
-                        &self.queue,
-                        &mut encoder,
-                        &mask_tex.view,
-                        (mask_tex.width, mask_tex.height),
-                        &temp.view,
-                        (dirty_w, dirty_h),
-                        dst_origin,
-                        &spec,
-                        None,
-                    )?;
                 } else {
-                    let blur_tex = self.scratch_blur.as_ref().expect("scratch_blur");
-                    self.blur.encode(
+                    let (blur_view, blur_id) = {
+                        let blur_tex = self.scratch_blur.as_ref().expect("scratch_blur");
+                        (blur_tex.view.clone(), blur_tex.view_id)
+                    };
+                    let r = self.blur.encode(
                         &self.device,
-                        &self.queue,
                         &mut encoder,
-                        &mask_tex.view,
-                        (mask_tex.width, mask_tex.height),
-                        &blur_tex.view,
+                        &mask_view,
+                        mask_id,
+                        (mask_w_alloc, mask_h_alloc),
+                        &blur_view,
                         (dirty_w, dirty_h),
                         dst_origin,
                         &spec,
                         None,
-                    )?;
-                    self.shadow.encode_invert_alpha(
-                        &self.device,
-                        &mut encoder,
-                        &blur_tex.view,
-                        &temp.view,
-                        dirty_w,
-                        dirty_h,
                     );
+                    if r.is_ok() {
+                        self.shadow.encode_invert_alpha(
+                            &self.device,
+                            &mut encoder,
+                            &blur_view,
+                            blur_id,
+                            &temp.view,
+                            dirty_w,
+                            dirty_h,
+                        );
+                    }
+                    r
+                };
+                if let Err(e) = blur_res {
+                    drop(encoder);
+                    return Err(e);
                 }
-                Ok(encoder)
+                self.stash_encoder(encoder);
+                Ok(())
             } else {
                 let s = 1u32 << shift;
                 let sw = (mask_w / s).max(1);
@@ -9083,11 +9887,20 @@ impl Backend for Gpu {
                         }
                     }
                 }
-                let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                    label: Some("shadow reduced"),
-                });
-                let mask_tex = self.scratch_mask.as_ref().expect("scratch_mask");
-                let blur_tex = self.scratch_blur.as_ref().expect("scratch_blur");
+                let (mask_view, mask_id, mask_depth, mask_w_alloc, mask_h_alloc) = {
+                    let mask_tex = self.scratch_mask.as_ref().expect("scratch_mask");
+                    (
+                        mask_tex.view.clone(),
+                        mask_tex.view_id,
+                        mask_tex.depth.clone(),
+                        mask_tex.width,
+                        mask_tex.height,
+                    )
+                };
+                let (blur_view, blur_id, blur_w_alloc, blur_h_alloc) = {
+                    let blur_tex = self.scratch_blur.as_ref().expect("scratch_blur");
+                    (blur_tex.view.clone(), blur_tex.view_id, blur_tex.width, blur_tex.height)
+                };
                 let mask_clear = [RectU16 {
                     x0: 0,
                     y0: 0,
@@ -9099,37 +9912,29 @@ impl Backend for Gpu {
                     color: AlphaColor::TRANSPARENT,
                     rects: &mask_clear,
                 });
-                self.renderer
-                    .render(
-                        &self.mask_scene,
-                        &mut self.resources,
-                        &mut encoder,
-                        RenderTarget {
-                            view: &mask_tex.view,
-                            depth_view: Some(&mask_tex.depth),
-                        },
-                        &self.bindings,
-                        options,
-                    )
-                    .map_err(vello_error)?;
-                self.blur.encode(
+                self.vello_render(true, &mask_view, Some(&mask_depth), options, "shadow reduced")?;
+                let mut encoder = self.take_encoder("shadow reduced");
+                if let Err(e) = self.blur.encode(
                     &self.device,
-                    &self.queue,
                     &mut encoder,
-                    &mask_tex.view,
-                    (mask_tex.width, mask_tex.height),
-                    &blur_tex.view,
+                    &mask_view,
+                    mask_id,
+                    (mask_w_alloc, mask_h_alloc),
+                    &blur_view,
                     (bd_w, bd_h),
                     red_origin,
                     &spec,
                     None,
-                )?;
+                ) {
+                    drop(encoder);
+                    return Err(e);
+                }
                 self.shadow.encode_upsample_mask(
                     &self.device,
-                    &self.queue,
                     &mut encoder,
-                    &blur_tex.view,
-                    (blur_tex.width, blur_tex.height),
+                    &blur_view,
+                    blur_id,
+                    (blur_w_alloc, blur_h_alloc),
                     (bd_w, bd_h),
                     red_origin,
                     &temp.view,
@@ -9138,25 +9943,16 @@ impl Backend for Gpu {
                     shift,
                     invert,
                 );
-                Ok(encoder)
+                self.stash_encoder(encoder);
+                Ok(())
             }
         })();
-        let encoder = match res {
-            Ok(enc) => enc,
-            Err(e) => {
-                self.blur.flush_retired();
-                self.temp_pool.push(temp);
-                return Err(e);
-            }
-        };
-        let t_sub = now();
-        self.queue.submit([encoder.finish()]);
-        self.submits += 1;
-        self.blur.flush_retired();
-        let sub_dt = now() - t_sub;
+        self.mask_scene.reset();
+        if let Err(e) = res {
+            self.temp_pool.push(temp);
+            return Err(e);
+        }
         if let Some(root) = self.active.as_mut() {
-            root.submit_ms += sub_dt;
-            root.vello_renders += 1;
             let total_sub = root.submit_ms - sub0;
             root.shadow_ms += (now() - t0 - total_sub).max(0.0);
         }
@@ -9272,7 +10068,7 @@ impl Backend for Gpu {
                 let blur_dirty = bounds.translate(-draw.origin.0, -draw.origin.1);
                 // Resolve inherited scope prefix (#274) before taking the blur encoder.
                 self.resolve_blur_source(&mut draw, sigma, Some(blur_dirty))?;
-                let mut encoder = self.take_encoder(false, "reader blur halo capture");
+                let mut encoder = self.take_encoder("reader blur halo capture");
                 self.encode_single_blur_into_out(&mut encoder, reader, Some(tier), &draw, blur_dirty, sigma, within)?;
                 let old = self.capture_blurred_halo_patch(&mut encoder, reader_key, bounds, (0, 0), tier)?;
                 if let Some(old) = old {
@@ -9318,9 +10114,9 @@ impl Backend for Gpu {
             let budget = self.reader_budget_room();
             self.readers.encode_coarse_blur(
                 &self.device,
-                &self.queue,
                 &mut encoder,
                 &draw.source.plane.view,
+                draw.source.plane.view_id,
                 draw.targets.iter().flatten().map(|t| (&t.texture, &t.view)),
                 draw.source.bounds.size(),
                 draw.frame_size,
@@ -9357,7 +10153,7 @@ impl Backend for Gpu {
                         self.stash_encoder(encoder);
                         self.submit_active_encoder();
                         self.recycle_halo_prefix(old);
-                        encoder = self.take_encoder(false, "reader blur composite");
+                        encoder = self.take_encoder("reader blur composite");
                     }
                 }
             }
@@ -9365,7 +10161,6 @@ impl Backend for Gpu {
             for target in draw.targets.iter().flatten() {
                 self.readers.encode_bg_blur_composite(
                     &self.device,
-                    &self.queue,
                     &mut encoder,
                     &target.texture,
                     &target.view,
@@ -9509,7 +10304,7 @@ impl Backend for Gpu {
                 self.resolve_blur_source(&mut draw, max_raw_stop_sigma, Some(active_dirty))?;
                 let max_stop_sigma = halo::compensate_halo_sigma(max_raw_stop_sigma, tier.render_divisor);
                 let clip_info = draw.halo_clip_bounds(Some(tier), within, max_stop_sigma);
-                let mut encoder = self.take_encoder(false, "progressive halo capture");
+                let mut encoder = self.take_encoder("progressive halo capture");
                 let cols = (stop_count as u32).clamp(1, 4);
                 let rows = (stop_count as u32).div_ceil(cols).max(1);
                 let tile_side = progressive_blur::PROGRESSIVE_TILE_MAX
@@ -9525,7 +10320,7 @@ impl Backend for Gpu {
                     budget,
                 )?;
                 let sample_dirty = draw.source_rect(active_dirty);
-                let (source, src_size, crop_origin, clamp_bounds, edge, pyramid_key) = self
+                let (source, source_id, src_size, crop_origin, clamp_bounds, edge, pyramid_key) = self
                     .prefilter_halo_blur_source(
                         &mut encoder,
                         Some(key),
@@ -9553,6 +10348,7 @@ impl Backend for Gpu {
                             tile,
                             2.0,
                             &source,
+                            source_id,
                             src_size,
                             crop_origin,
                             clamp_bounds,
@@ -9660,7 +10456,6 @@ impl Backend for Gpu {
                     for target in draw.targets.iter().flatten() {
                         self.readers.encode_progressive_composite(
                             &self.device,
-                            &self.queue,
                             &mut encoder,
                             &target.texture,
                             &target.view,
@@ -9704,7 +10499,7 @@ impl Backend for Gpu {
         // Each tile reads the same prefix. Keep a copy when a previous tile can have
         // replaced part of the source used by the next tile's Gaussian, or when a reduced pass
         // needs sub-texel clip border/clamp prefiltering.
-        let (source, src_size, crop_origin, clamp_bounds, edge, pyramid_key) = if resident > 0
+        let (source, source_id, src_size, crop_origin, clamp_bounds, edge, pyramid_key) = if resident > 0
             && (clip_info.subtexel_border.is_some()
                 || (clip_info.subtexel_clamp.is_some()
                     && self
@@ -9726,7 +10521,7 @@ impl Backend for Gpu {
                 .source_is_frame
                 .then(|| blur::PyramidKey::new(self.backdrop_gen, clip_info.clamp_bounds, clip_info.edge));
             let source_size = draw.source.bounds.size();
-            let view = if resident > 0 && draw.source_written && (width > tile_side || height > tile_side) {
+            let (view, view_id) = if resident > 0 && draw.source_written && (width > tile_side || height > tile_side) {
                 let budget = self.reader_budget_room();
                 self.readers
                     .ensure_blur_source_budgeted(&self.device, source_size, budget)?;
@@ -9739,12 +10534,13 @@ impl Backend for Gpu {
                     (0, 0),
                     source_size,
                 );
-                snapshot.view.clone()
+                (snapshot.view.clone(), snapshot.view_id)
             } else {
-                draw.source.plane.view.clone()
+                (draw.source.plane.view.clone(), draw.source.plane.view_id)
             };
             (
                 view,
+                view_id,
                 source_size,
                 (0, 0),
                 clip_info.clamp_bounds,
@@ -9771,6 +10567,7 @@ impl Backend for Gpu {
                     tile,
                     dirty_pad,
                     &source,
+                    source_id,
                     src_size,
                     crop_origin,
                     clamp_bounds,
@@ -9784,7 +10581,6 @@ impl Backend for Gpu {
                 for target in draw.targets.iter().flatten() {
                     self.readers.encode_progressive_composite(
                         &self.device,
-                        &self.queue,
                         &mut encoder,
                         &target.texture,
                         &target.view,

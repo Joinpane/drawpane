@@ -92,6 +92,7 @@ interface EngineFacts {
     gpuTimestampMs: { p50: number; p95: number; max: number } | null;
     counts: {
       submits: number;
+      draws: number;
       velloRenders: number;
       glassOps: number;
       glassBatched: number;
@@ -127,6 +128,7 @@ async function engineFacts(page: Page, frames: number): Promise<EngineFacts> {
     };
     type Counts = {
       submits: number;
+      draws: number;
       velloRenders: number;
       glassOps: number;
       glassBatched: number;
@@ -269,6 +271,7 @@ async function engineFacts(page: Page, frames: number): Promise<EngineFacts> {
               gpuTimestampMs: gpuTsAll.length > 0 ? quantiles(gpuTsAll) : null,
               counts: {
                 submits: p50(countsAll.map((c) => c.submits)),
+                draws: p50(countsAll.map((c) => c.draws ?? 0)),
                 velloRenders: p50(countsAll.map((c) => c.velloRenders)),
                 glassOps: p50(countsAll.map((c) => c.glassOps)),
                 glassBatched: p50(countsAll.map((c) => c.glassBatched)),
@@ -459,7 +462,7 @@ test.describe("A real file", () => {
                 `drawn by ${result.engine.renderer}${result.engine.renderer === "canvas" ? ` (${JSON.stringify(result.engine.unsupported)})` : ""} on ${result.engine.adapter}${result.engine.gpuMs ? `, GPU ${result.engine.gpuMs.p50} / ${result.engine.gpuMs.p95} ms per frame` : ""}${result.engine.gpuTimestampMs ? ` (timestamp ${result.engine.gpuTimestampMs.p50} / ${result.engine.gpuTimestampMs.p95} ms)` : ""}${result.engine.note ? ` (${result.engine.note})` : ""}`,
                 ...(result.engine.cpuGpuSplit
                   ? [
-                      `native split (p50, ${result.engine.cpuGpuSplit.frames} frames): CPU ${result.engine.cpuGpuSplit.cpuMs.p50} ms (patch ${result.engine.cpuGpuSplit.patchMs.p50}, encode ${result.engine.cpuGpuSplit.encodeMs.p50}, prepMasks ${result.engine.cpuGpuSplit.prepareMasksMs.p50}, vello ${result.engine.cpuGpuSplit.velloRenderMs.p50}, reader ${result.engine.cpuGpuSplit.readerMs.p50}, shadow ${result.engine.cpuGpuSplit.shadowMs.p50}, submit ${result.engine.cpuGpuSplit.submitMs.p50}) · GPU finished ${result.engine.cpuGpuSplit.gpuFinishedMs.p50} ms${result.engine.cpuGpuSplit.gpuTimestampMs ? ` · GPU ts ${result.engine.cpuGpuSplit.gpuTimestampMs.p50} ms` : " · GPU ts n/a"} · submits ${result.engine.cpuGpuSplit.counts.submits}, vello ${result.engine.cpuGpuSplit.counts.velloRenders}, glass ${result.engine.cpuGpuSplit.counts.glassBatched}/${result.engine.cpuGpuSplit.counts.glassOps}, blur ${result.engine.cpuGpuSplit.counts.bgBlurOps}, shadow ${result.engine.cpuGpuSplit.counts.shadowHits}/${result.engine.cpuGpuSplit.counts.shadowOps}`,
+                      `native split (p50, ${result.engine.cpuGpuSplit.frames} frames): CPU ${result.engine.cpuGpuSplit.cpuMs.p50} ms (patch ${result.engine.cpuGpuSplit.patchMs.p50}, encode ${result.engine.cpuGpuSplit.encodeMs.p50}, prepMasks ${result.engine.cpuGpuSplit.prepareMasksMs.p50}, vello ${result.engine.cpuGpuSplit.velloRenderMs.p50}, reader ${result.engine.cpuGpuSplit.readerMs.p50}, shadow ${result.engine.cpuGpuSplit.shadowMs.p50}, submit ${result.engine.cpuGpuSplit.submitMs.p50}) · GPU finished ${result.engine.cpuGpuSplit.gpuFinishedMs.p50} ms${result.engine.cpuGpuSplit.gpuTimestampMs ? ` · GPU ts ${result.engine.cpuGpuSplit.gpuTimestampMs.p50} ms` : " · GPU ts n/a"} · submits ${result.engine.cpuGpuSplit.counts.submits}, draws ${result.engine.cpuGpuSplit.counts.draws}, vello ${result.engine.cpuGpuSplit.counts.velloRenders}, glass ${result.engine.cpuGpuSplit.counts.glassBatched}/${result.engine.cpuGpuSplit.counts.glassOps}, blur ${result.engine.cpuGpuSplit.counts.bgBlurOps}, shadow ${result.engine.cpuGpuSplit.counts.shadowHits}/${result.engine.cpuGpuSplit.counts.shadowOps}`,
                     ]
                   : []),
               ]
@@ -502,7 +505,7 @@ test.describe("A real file", () => {
           const motion = summary.motion;
           expect.soft(motion, `${label} motion samples`).toBeDefined();
           if (!motion) continue;
-          if (!REPLAY) {
+          if (!REPLAY && process.env.BENCH_W4_NATIVE === "1") {
             expect.soft(motion.degradedConfirmed, `${label} degraded presentations`).toBe(0);
             expect.soft(motion.degradedSubmitted, `${label} degraded submissions`).toBe(0);
           }
@@ -522,6 +525,17 @@ test.describe("A real file", () => {
             expect
               .soft(summary.interval?.p99, `${label} frame interval p99`)
               .toBeLessThanOrEqual(20);
+            if (process.env.BENCH_W4_NATIVE !== "1") {
+              // Figma-consistent refinement bar: 0.1-0.5 s after continuous zoom/pan, 0.3-2.1 s
+              // after a full-page settle.
+              const settleLimitMs = gesture === "pan, whole" ? 2_100 : 500;
+              expect
+                .soft(
+                  summary.exactMs ?? Number.POSITIVE_INFINITY,
+                  `${label} time to exact after motion stops`,
+                )
+                .toBeLessThanOrEqual(settleLimitMs);
+            }
           }
         }
       }

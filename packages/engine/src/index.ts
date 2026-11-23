@@ -113,6 +113,7 @@ export interface FrameStats {
   /** Per-frame GPU dispatch counters. */
   readonly counts: {
     readonly submits: number;
+    readonly draws: number;
     readonly velloRenders: number;
     readonly glassOps: number;
     readonly glassBatched: number;
@@ -243,6 +244,7 @@ function stats(o: Glue.Outcome, gpu = false): FrameStats {
     },
     counts: {
       submits: o.submits,
+      draws: o.draws,
       velloRenders: o.vello_renders,
       glassOps: o.glass_ops,
       glassBatched: o.glass_batched,
@@ -258,6 +260,8 @@ const bg = (c: readonly [number, number, number, number]) => new Float32Array(c)
 /** What drawing ahead between frames did (`RenderEngine.renderGpuAhead`). */
 export interface AheadStats {
   readonly drawn: number;
+  /** True when a tile yielded cooperatively mid-walk to honor the slice budget. */
+  readonly inProgress: boolean;
   /** Tiles the last frame shows still to draw. */
   readonly pending: number;
   /** Tiles round it still to draw. */
@@ -265,6 +269,9 @@ export interface AheadStats {
   readonly ms: number;
   readonly encodeMs: number;
   readonly renderMs: number;
+  readonly submitMs: number;
+  readonly submits: number;
+  readonly draws: number;
   readonly maskMisses: number;
   readonly records: number;
   readonly glyphsMasked: number;
@@ -1216,11 +1223,15 @@ export class RenderEngine {
       const o = e.renderGpuAhead(bg(background), budgetMs);
       const value: AheadStats = {
         drawn: o.tiles_drawn,
+        inProgress: o.in_progress,
         pending: o.pending,
         queued: o.queued,
         ms: o.cpu_ms,
         encodeMs: o.encode_ms,
         renderMs: o.render_ms,
+        submitMs: o.submit_ms,
+        submits: o.submits,
+        draws: o.draws,
         maskMisses: o.mask_misses,
         records: o.records,
         glyphsMasked: o.glyphs_masked,

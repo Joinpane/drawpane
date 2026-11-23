@@ -204,6 +204,18 @@ impl Schedule {
     pub(crate) fn intermediate_texture_requirements(&self) -> IntermediateTextureRequirements {
         self.intermediate_textures
     }
+
+    pub(crate) fn round_count(&self) -> usize {
+        self.rounds.rounds.len()
+    }
+
+    pub(crate) fn total_clear_rects(&self) -> usize {
+        self.rounds
+            .rounds
+            .iter()
+            .map(|r| r.clear_passes().map(|c| c.rects.len()).sum::<usize>())
+            .sum()
+    }
 }
 
 /// Intermediate textures required to execute a [`Schedule`].

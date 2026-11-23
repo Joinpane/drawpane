@@ -345,9 +345,20 @@ pub(crate) fn composite_cpu(
 
 #[cfg(feature = "gpu-common")]
 pub mod gpu {
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
     const BLEND_WGSL: &str = include_str!(concat!(env!("OUT_DIR"), "/blend.wgsl"));
-    const SLAB_SLOTS: u32 = 256;
+    const SLAB_SLOTS: u32 = 1024;
     const UNIFORM_SIZE: usize = 32;
+    const BG_CACHE_CAP: usize = 256;
+
+    /// Returns a process-unique non-zero identity for a newly created `wgpu::TextureView`,
+    /// used as a cache key for persistent bind groups across batched GPU passes.
+    pub fn next_view_id() -> u64 {
+        static NEXT: AtomicU64 = AtomicU64::new(1);
+        NEXT.fetch_add(1, Ordering::Relaxed)
+    }
 
     /// GPU blend pass (`blend.wgsl`): composites a premultiplied source over a backdrop copy
     /// directly into the active target, optionally modulated by an anti-aliased clip mask.
@@ -360,6 +371,7 @@ pub mod gpu {
         slab_slot: u32,
         uniform_align: u32,
         uniform_bytes: Vec<u8>,
+        bg_cache: HashMap<(u64, u64, u64, u64), wgpu::BindGroup>,
         dummy_view: wgpu::TextureView,
         _dummy_tex: wgpu::Texture,
     }
@@ -465,6 +477,7 @@ pub mod gpu {
                 slab_slot: 0,
                 uniform_align,
                 uniform_bytes: Vec::new(),
+                bg_cache: HashMap::new(),
                 dummy_view,
                 _dummy_tex: dummy_tex,
             }
@@ -510,6 +523,9 @@ pub mod gpu {
         pub fn discard_uniforms(&mut self) {
             self.uniform_bytes.clear();
             self.slab_slot = 0;
+            if self.bg_cache.len() > BG_CACHE_CAP {
+                self.bg_cache.clear();
+            }
         }
 
         fn push_uniform(&mut self, bytes: &[u8; UNIFORM_SIZE]) -> u32 {
@@ -523,63 +539,84 @@ pub mod gpu {
 
         /// Encodes a single scissored fragment pass writing `blend(src * opacity * clip, backdrop)`
         /// into `dst_view` over the portion of the source within the parent target.
+        /// Returns the number of draw calls emitted (`0` or `1`).
         #[allow(clippy::too_many_arguments)]
         pub fn encode(
             &mut self,
             device: &wgpu::Device,
             encoder: &mut wgpu::CommandEncoder,
-            src_view: &wgpu::TextureView,
-            backdrop_view: &wgpu::TextureView,
-            clip_view: Option<&wgpu::TextureView>,
-            picture: Option<(&wgpu::TextureView, u32)>,
+            src: (&wgpu::TextureView, u64),
+            backdrop: (&wgpu::TextureView, u64),
+            clip: Option<(&wgpu::TextureView, u64)>,
+            picture: Option<(&wgpu::TextureView, u64, u32)>,
             dst_view: &wgpu::TextureView,
             dst_origin: (i32, i32),
             scissor: (u32, u32, u32, u32),
             mode: u32,
             opacity: f32,
-        ) {
+        ) -> u32 {
             if scissor.2 == 0 || scissor.3 == 0 {
-                return;
+                return 0;
             }
             let mut bytes = [0u8; UNIFORM_SIZE];
             bytes[0..4].copy_from_slice(&dst_origin.0.to_le_bytes());
             bytes[4..8].copy_from_slice(&dst_origin.1.to_le_bytes());
             bytes[8..12].copy_from_slice(&mode.to_le_bytes());
             bytes[12..16].copy_from_slice(&opacity.clamp(0.0, 1.0).to_le_bytes());
-            let mask_kind = picture.map_or(0, |(_, kind)| kind);
+            let mask_kind = picture.map_or(0, |(_, _, kind)| kind);
             bytes[16..20].copy_from_slice(&mask_kind.to_le_bytes());
             let offset = self.push_uniform(&bytes);
-            let picture_view = picture.map_or(&self.dummy_view, |(view, _)| view);
-            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("blend bg"),
-                layout: &self.bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(src_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::TextureView(backdrop_view),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::TextureView(clip_view.unwrap_or(&self.dummy_view)),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: self.slab.as_ref().expect("blend slab"),
-                            offset: 0,
-                            size: wgpu::BufferSize::new(UNIFORM_SIZE as u64),
-                        }),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: wgpu::BindingResource::TextureView(picture_view),
-                    },
-                ],
-            });
+            let key = (
+                src.1,
+                backdrop.1,
+                clip.map_or(0, |(_, id)| id),
+                picture.map_or(0, |(_, id, _)| id),
+            );
+            let make_bg = || {
+                let picture_view = picture.map_or(&self.dummy_view, |(view, _, _)| view);
+                let clip_view = clip.map_or(&self.dummy_view, |(view, _)| view);
+                device.create_bind_group(&wgpu::BindGroupDescriptor {
+                    label: Some("blend bg"),
+                    layout: &self.bgl,
+                    entries: &[
+                        wgpu::BindGroupEntry {
+                            binding: 0,
+                            resource: wgpu::BindingResource::TextureView(src.0),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 1,
+                            resource: wgpu::BindingResource::TextureView(backdrop.0),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 2,
+                            resource: wgpu::BindingResource::TextureView(clip_view),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 3,
+                            resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                                buffer: self.slab.as_ref().expect("blend slab"),
+                                offset: 0,
+                                size: wgpu::BufferSize::new(UNIFORM_SIZE as u64),
+                            }),
+                        },
+                        wgpu::BindGroupEntry {
+                            binding: 4,
+                            resource: wgpu::BindingResource::TextureView(picture_view),
+                        },
+                    ],
+                })
+            };
+            let bg = if src.1 != 0 && backdrop.1 != 0 {
+                if let Some(cached) = self.bg_cache.get(&key) {
+                    cached.clone()
+                } else {
+                    let created = make_bg();
+                    self.bg_cache.insert(key, created.clone());
+                    created
+                }
+            } else {
+                make_bg()
+            };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("blend"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -596,7 +633,7 @@ pub mod gpu {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
-            pass.set_pipeline(if clip_view.is_some() {
+            pass.set_pipeline(if clip.is_some() {
                 &self.pipe_clipped
             } else {
                 &self.pipe_plain
@@ -604,6 +641,7 @@ pub mod gpu {
             pass.set_bind_group(0, &bg, &[offset]);
             pass.set_scissor_rect(scissor.0, scissor.1, scissor.2, scissor.3);
             pass.draw(0..3, 0..1);
+            1
         }
     }
 }

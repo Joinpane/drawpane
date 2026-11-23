@@ -14,7 +14,7 @@ use crate::{
 };
 use wgpu::{
     BindGroup, BindGroupLayout, Device, RenderPassColorAttachment, RenderPassDescriptor,
-    RenderPipeline, TextureView, TextureViewDescriptor, util::DeviceExt,
+    RenderPipeline, TextureView, TextureViewDescriptor,
 };
 
 /// Bind group layout and pipeline of the blend pass.
@@ -163,10 +163,9 @@ impl RendererContext<'_> {
                 .blend_layer_bind_groups
                 .insert(bindings, bind_group);
         }
-        let blend_layer_bind_group = &self.resources.blend_layer_bind_groups[&bindings];
-
         self.scratch_buffers.blend_instances.clear();
 
+        let alpha_col_base = self.alpha_col_base;
         for blend in blends.iter() {
             if let Some(range) = &blend.clip_strips {
                 self.scratch_buffers.blend_instances.extend(
@@ -174,7 +173,13 @@ impl RendererContext<'_> {
                         ..usize::try_from(range.end).unwrap()]
                         .iter()
                         .copied()
-                        .map(|strip| GpuBlendInstance::new(blend, Some(strip), texture_size)),
+                        .map(|strip| {
+                            let mut inst = GpuBlendInstance::new(blend, Some(strip), texture_size);
+                            if alpha_col_base > 0 && (inst.blend_config & (1 << 26)) != 0 {
+                                inst.geometry_alpha_col_idx += alpha_col_base;
+                            }
+                            inst
+                        }),
                 );
             } else {
                 self.scratch_buffers
@@ -184,13 +189,11 @@ impl RendererContext<'_> {
         }
 
         let instance_count = u32::try_from(self.scratch_buffers.blend_instances.len()).unwrap();
-        let instance_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Blend Instances Buffer"),
-                contents: bytemuck::cast_slice(&self.scratch_buffers.blend_instances),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
+        // Drawpane: allocate blend instances from the batched vertex arena instead of create_buffer_init.
+        let instance_range = self
+            .resources
+            .upload_vertex_bytes(bytemuck::cast_slice(&self.scratch_buffers.blend_instances));
+        let blend_layer_bind_group = &self.resources.blend_layer_bind_groups[&bindings];
 
         {
             let mut render_pass = self.encoder.begin_render_pass(&RenderPassDescriptor {
@@ -211,8 +214,9 @@ impl RendererContext<'_> {
             });
             render_pass.set_pipeline(&self.programs.blend.pipeline);
             render_pass.set_bind_group(0, blend_layer_bind_group, &[]);
-            render_pass.set_vertex_buffer(0, instance_buffer.slice(..));
+            render_pass.set_vertex_buffer(0, self.resources.strips_arena.buffer.slice(instance_range));
             render_pass.draw(0..4, 0..instance_count);
+            self.draws += 1;
         }
 
         self.scratch_buffers.copy_instances.clear();
@@ -223,14 +227,17 @@ impl RendererContext<'_> {
                 .copied()
                 .map(GpuBlendInstance::copy_from_scratch),
         );
+        let source_bind_group = self.resources.scratch_copy_bind_group.clone();
+        let output_view = self.resources.layer_view(bindings.target()).clone();
         encode_copy_pass(
-            self.device,
             self.encoder,
+            self.resources,
             &self.programs.copy.pipeline,
             &self.scratch_buffers.copy_instances,
-            &self.resources.scratch_copy_bind_group,
-            self.resources.layer_view(bindings.target()),
+            &source_bind_group,
+            &output_view,
             "Copy Blend Scratch To Layer",
         );
+        self.draws += 1;
     }
 }

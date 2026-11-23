@@ -1582,6 +1582,7 @@ pub mod gpu {
     struct ScratchTex {
         _texture: wgpu::Texture,
         view: wgpu::TextureView,
+        view_id: u64,
         width: u32,
         height: u32,
         bpp: usize,
@@ -1599,6 +1600,7 @@ pub mod gpu {
         pub height: u32,
         pub texture: wgpu::Texture,
         pub view: wgpu::TextureView,
+        pub view_id: u64,
         bpp: usize,
         coverage: TileCoverage,
     }
@@ -1642,7 +1644,7 @@ pub mod gpu {
         h: u32,
         format: wgpu::TextureFormat,
         label: &str,
-    ) -> (wgpu::Texture, wgpu::TextureView) {
+    ) -> (wgpu::Texture, wgpu::TextureView, u64) {
         let texture = device.create_texture(&wgpu::TextureDescriptor {
             label: Some(label),
             size: wgpu::Extent3d {
@@ -1661,7 +1663,7 @@ pub mod gpu {
             view_formats: &[],
         });
         let view = texture.create_view(&Default::default());
-        (texture, view)
+        (texture, view, crate::blend::gpu::next_view_id())
     }
 
     fn make_pipeline(
@@ -1699,6 +1701,8 @@ pub mod gpu {
         })
     }
 
+    const BG_CACHE_CAP: usize = 256;
+
     /// Reusable GPU Gaussian blur pass with dynamic uniform batching and shareable blur pyramids.
     pub struct GpuBlur {
         layout: wgpu::BindGroupLayout,
@@ -1712,8 +1716,11 @@ pub mod gpu {
         linear_sampler: wgpu::Sampler,
         uniform_align: u32,
         uniform_slabs: Vec<wgpu::Buffer>,
+        uniform_bytes: Vec<Vec<u8>>,
         slab_idx: usize,
         slab_slot: u32,
+        bg_cache: HashMap<(u64, usize), wgpu::BindGroup>,
+        draws: u32,
         scratch_h: Option<ScratchTex>,
         scratch_v: Option<ScratchTex>,
         pyramids: HashMap<PyramidKey, GpuBlurPyramid>,
@@ -1836,8 +1843,11 @@ pub mod gpu {
                 linear_sampler,
                 uniform_align,
                 uniform_slabs: vec![slab],
+                uniform_bytes: vec![Vec::new()],
                 slab_idx: 0,
                 slab_slot: 0,
+                bg_cache: HashMap::new(),
+                draws: 0,
                 scratch_h: None,
                 scratch_v: None,
                 pyramids: HashMap::new(),
@@ -2018,10 +2028,42 @@ pub mod gpu {
         /// Starts a new frame: resets the uniform cursor and enforces the pyramid cache budget.
         pub fn begin_frame(&mut self) {
             self.frame += 1;
-            self.slab_idx = 0;
-            self.slab_slot = 0;
+            self.discard_uniforms();
             self.flush_retired();
             self.evict_for(0, None, false);
+        }
+
+        /// Uploads all staged blur uniform slabs in one `write_buffer` per active slab and resets
+        /// the slab cursor for the next submission.
+        pub fn flush_uniforms(&mut self, queue: &wgpu::Queue) {
+            for (slab, bytes) in self.uniform_slabs.iter().zip(self.uniform_bytes.iter_mut()) {
+                if !bytes.is_empty() {
+                    queue.write_buffer(slab, 0, bytes);
+                    bytes.clear();
+                }
+            }
+            self.slab_idx = 0;
+            self.slab_slot = 0;
+            if self.bg_cache.len() > BG_CACHE_CAP {
+                self.bg_cache.clear();
+            }
+        }
+
+        /// Discards staged uniform bytes and resets the slab cursor (for error recovery or new frames).
+        pub fn discard_uniforms(&mut self) {
+            for bytes in &mut self.uniform_bytes {
+                bytes.clear();
+            }
+            self.slab_idx = 0;
+            self.slab_slot = 0;
+            if self.bg_cache.len() > BG_CACHE_CAP {
+                self.bg_cache.clear();
+            }
+        }
+
+        /// Returns and resets the number of blur render-pass draw calls recorded since last call.
+        pub fn take_draws(&mut self) -> u32 {
+            std::mem::take(&mut self.draws)
         }
 
         /// Drops all cached pyramids derived from `source_id`.
@@ -2064,6 +2106,7 @@ pub mod gpu {
             if let Some(tex) = self.scratch_v.take() {
                 tex._texture.destroy();
             }
+            self.bg_cache.clear();
             self.flush_retired();
             self.sync_stats();
         }
@@ -2123,17 +2166,20 @@ pub mod gpu {
             self.stats.count = self.pyramids.len();
         }
 
-        fn push_uniform(&mut self, device: &wgpu::Device, queue: &wgpu::Queue, data: UniformData) -> (usize, u32) {
+        fn push_uniform(&mut self, device: &wgpu::Device, data: UniformData) -> (usize, u32) {
             if self.slab_slot >= SLAB_SLOTS {
                 self.slab_idx += 1;
                 self.slab_slot = 0;
                 if self.slab_idx >= self.uniform_slabs.len() {
                     self.uniform_slabs.push(Self::make_slab(device, self.uniform_align));
+                    self.uniform_bytes.push(Vec::new());
                 }
             }
             let offset = self.slab_slot * self.uniform_align;
             self.slab_slot += 1;
-            queue.write_buffer(&self.uniform_slabs[self.slab_idx], u64::from(offset), &data.to_bytes());
+            let buf = &mut self.uniform_bytes[self.slab_idx];
+            buf.resize(offset as usize, 0);
+            buf.extend_from_slice(&data.to_bytes());
             (self.slab_idx, offset)
         }
 
@@ -2159,10 +2205,11 @@ pub mod gpu {
             if !reuse {
                 // Keep any replaced scratch texture alive and accounted in `bytes()` until
                 // `flush_retired()` runs after `queue.submit`.
-                let (texture, view) = make_texture(device, need_w, need_h, format, label);
+                let (texture, view, view_id) = make_texture(device, need_w, need_h, format, label);
                 if let Some(old) = slot.replace(ScratchTex {
                     _texture: texture,
                     view,
+                    view_id,
                     width: need_w,
                     height: need_h,
                     bpp,
@@ -2174,12 +2221,19 @@ pub mod gpu {
         }
 
         fn make_bind_group(
-            &self,
+            &mut self,
             device: &wgpu::Device,
             src_view: &wgpu::TextureView,
+            src_id: u64,
             slab_idx: usize,
         ) -> wgpu::BindGroup {
-            device.create_bind_group(&wgpu::BindGroupDescriptor {
+            let key = (src_id, slab_idx);
+            if src_id != 0
+                && let Some(cached) = self.bg_cache.get(&key)
+            {
+                return cached.clone();
+            }
+            let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
                 label: None,
                 layout: &self.layout,
                 entries: &[
@@ -2200,16 +2254,20 @@ pub mod gpu {
                         }),
                     },
                 ],
-            })
+            });
+            if src_id != 0 {
+                self.bg_cache.insert(key, bg.clone());
+            }
+            bg
         }
 
         #[allow(clippy::too_many_arguments)]
         fn run_dst_blur_1d(
             &mut self,
             device: &wgpu::Device,
-            queue: &wgpu::Queue,
             encoder: &mut wgpu::CommandEncoder,
             src_view: &wgpu::TextureView,
+            src_id: u64,
             dst_view: &wgpu::TextureView,
             scissor: (u32, u32, u32, u32),
             data: UniformData,
@@ -2217,8 +2275,8 @@ pub mod gpu {
             if scissor.2 == 0 || scissor.3 == 0 {
                 return;
             }
-            let (slab_idx, offset) = self.push_uniform(device, queue, data);
-            let group = self.make_bind_group(device, src_view, slab_idx);
+            let (slab_idx, offset) = self.push_uniform(device, data);
+            let group = self.make_bind_group(device, src_view, src_id, slab_idx);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("blur pass dst"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2236,6 +2294,7 @@ pub mod gpu {
             pass.set_pipeline(&self.blur_1d_dst);
             pass.set_bind_group(0, &group, &[offset]);
             pass.draw(0..3, 0..1);
+            self.draws += 1;
         }
 
         /// Returns a cached pyramid level's texture view and stored size (`(w_L + 4, h_L + 4)`),
@@ -2252,10 +2311,10 @@ pub mod gpu {
         pub fn ensure_pyramid(
             &mut self,
             device: &wgpu::Device,
-            queue: &wgpu::Queue,
             encoder: &mut wgpu::CommandEncoder,
             key: PyramidKey,
             src_view: &wgpu::TextureView,
+            src_id: u64,
             src_size: (u32, u32),
             edge: EdgeMode,
             level: usize,
@@ -2263,10 +2322,10 @@ pub mod gpu {
         ) -> Result<()> {
             self.ensure_pyramid_inner(
                 device,
-                queue,
                 encoder,
                 key,
                 src_view,
+                src_id,
                 src_size,
                 edge,
                 level,
@@ -2279,10 +2338,10 @@ pub mod gpu {
         fn ensure_pyramid_inner(
             &mut self,
             device: &wgpu::Device,
-            queue: &wgpu::Queue,
             encoder: &mut wgpu::CommandEncoder,
             key: PyramidKey,
             src_view: &wgpu::TextureView,
+            src_id: u64,
             src_size: (u32, u32),
             edge: EdgeMode,
             level: usize,
@@ -2353,12 +2412,13 @@ pub mod gpu {
                 while pyr.levels.len() < level {
                     let k = pyr.levels.len() + 1;
                     let (lw, lh) = level_logical_size(cb_w, cb_h, k);
-                    let (texture, view) = make_texture(device, lw + ap2, lh + ap2, inter_fmt, "blur pyramid");
+                    let (texture, view, view_id) = make_texture(device, lw + ap2, lh + ap2, inter_fmt, "blur pyramid");
                     let lvl = GpuBlurLevel {
                         width: lw,
                         height: lh,
                         texture,
                         view,
+                        view_id,
                         bpp: inter_bpp,
                         coverage: TileCoverage::new(lw + ap2, lh + ap2),
                     };
@@ -2396,8 +2456,8 @@ pub mod gpu {
                     p2: [0.0, 0.0, edge.mode_code() as f32, 0.0],
                     border: edge.border_f32(),
                 };
-                let (slab_idx, offset) = self.push_uniform(device, queue, data);
-                let group = self.make_bind_group(device, src_view, slab_idx);
+                let (slab_idx, offset) = self.push_uniform(device, data);
+                let group = self.make_bind_group(device, src_view, src_id, slab_idx);
                 let pyr = self.pyramids.get_mut(&key).expect("present");
                 let lvl = &mut pyr.levels[0];
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2424,15 +2484,18 @@ pub mod gpu {
                 pass.draw(0..3, 0..1);
                 drop(pass);
                 lvl.coverage.mark_rect(rect);
+                self.draws += 1;
             }
 
             for k in 2..=level {
                 let Some(rect) = to_build[k - 1] else {
                     continue;
                 };
-                let (pw, ph) = {
+                let (pw, ph, prev_view, prev_id) = {
                     let pyr = self.pyramids.get(&key).expect("present");
-                    pyr.levels[k - 2].stored_size()
+                    let prev = &pyr.levels[k - 2];
+                    let (pw, ph) = prev.stored_size();
+                    (pw, ph, prev.view.clone(), prev.view_id)
                 };
                 let data = UniformData {
                     p0: [0.0; 4],
@@ -2440,11 +2503,8 @@ pub mod gpu {
                     p2: [0.0, 0.0, 1.0, 0.0],
                     border: [0.0; 4],
                 };
-                let (slab_idx, offset) = self.push_uniform(device, queue, data);
-                let group = {
-                    let pyr = self.pyramids.get(&key).expect("present");
-                    self.make_bind_group(device, &pyr.levels[k - 2].view, slab_idx)
-                };
+                let (slab_idx, offset) = self.push_uniform(device, data);
+                let group = self.make_bind_group(device, &prev_view, prev_id, slab_idx);
                 let pyr = self.pyramids.get_mut(&key).expect("present");
                 let lvl = &mut pyr.levels[k - 1];
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -2471,6 +2531,7 @@ pub mod gpu {
                 pass.draw(0..3, 0..1);
                 drop(pass);
                 lvl.coverage.mark_rect(rect);
+                self.draws += 1;
             }
 
             self.evict_for(0, Some(key), true);
@@ -2485,9 +2546,9 @@ pub mod gpu {
         pub fn encode(
             &mut self,
             device: &wgpu::Device,
-            queue: &wgpu::Queue,
             encoder: &mut wgpu::CommandEncoder,
             src_view: &wgpu::TextureView,
+            src_id: u64,
             src_size: (u32, u32),
             dst_view: &wgpu::TextureView,
             dst_size: (u32, u32),
@@ -2524,7 +2585,7 @@ pub mod gpu {
                     ],
                     border: spec.edge.border_f32(),
                 };
-                self.run_dst_blur_1d(device, queue, encoder, src_view, dst_view, dst_scissor, data);
+                self.run_dst_blur_1d(device, encoder, src_view, src_id, dst_view, dst_scissor, data);
                 return Ok(());
             }
 
@@ -2533,7 +2594,7 @@ pub mod gpu {
             let (level, level_sigma) = choose_level(spec.sigma, max_pyramid_level(cb_w, cb_h));
             if level == 0 {
                 return self.encode_direct(
-                    device, queue, encoder, src_view, cb, spec.edge, spec.sigma, dst_view, dst_origin, dirty, max_tex,
+                    device, encoder, src_view, src_id, cb, spec.edge, spec.sigma, dst_view, dst_origin, dirty, max_tex,
                 );
             }
 
@@ -2568,10 +2629,10 @@ pub mod gpu {
             };
             self.ensure_pyramid_inner(
                 device,
-                queue,
                 encoder,
                 use_key,
                 src_view,
+                src_id,
                 src_size,
                 spec.edge,
                 level,
@@ -2647,9 +2708,12 @@ pub mod gpu {
                     p2: [stored_dirty.x0 as f32, iy0 as f32, 1.0, 0.0],
                     border: [0.0; 4],
                 };
-                let (slab_idx, offset) = self.push_uniform(device, queue, data_h);
-                let lvl_view = &self.pyramids.get(&use_key).expect("present").levels[level - 1].view;
-                let group = self.make_bind_group(device, lvl_view, slab_idx);
+                let (slab_idx, offset) = self.push_uniform(device, data_h);
+                let (lvl_view, lvl_id) = {
+                    let lvl = &self.pyramids.get(&use_key).expect("present").levels[level - 1];
+                    (lvl.view.clone(), lvl.view_id)
+                };
+                let group = self.make_bind_group(device, &lvl_view, lvl_id, slab_idx);
                 let h_view = &self.scratch_h.as_ref().expect("scratch_h").view;
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("blur level h"),
@@ -2668,6 +2732,8 @@ pub mod gpu {
                 pass.set_pipeline(&self.blur_1d_inter);
                 pass.set_bind_group(0, &group, &[offset]);
                 pass.draw(0..3, 0..1);
+                drop(pass);
+                self.draws += 1;
             }
 
             // Pass 2 (V): scratch_h -> scratch_v
@@ -2678,9 +2744,12 @@ pub mod gpu {
                     p2: [0.0, (stored_dirty.y0 - iy0) as f32, 1.0, 0.0],
                     border: [0.0; 4],
                 };
-                let (slab_idx, offset) = self.push_uniform(device, queue, data_v);
-                let h_view = &self.scratch_h.as_ref().expect("scratch_h").view;
-                let group = self.make_bind_group(device, h_view, slab_idx);
+                let (slab_idx, offset) = self.push_uniform(device, data_v);
+                let (h_view, h_id) = {
+                    let sh = self.scratch_h.as_ref().expect("scratch_h");
+                    (sh.view.clone(), sh.view_id)
+                };
+                let group = self.make_bind_group(device, &h_view, h_id, slab_idx);
                 let v_view = &self.scratch_v.as_ref().expect("scratch_v").view;
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("blur level v"),
@@ -2699,21 +2768,25 @@ pub mod gpu {
                 pass.set_pipeline(&self.blur_1d_inter);
                 pass.set_bind_group(0, &group, &[offset]);
                 pass.draw(0..3, 0..1);
+                drop(pass);
+                self.draws += 1;
             }
 
             // Pass 3 (Upsample): scratch_v -> dst_view (scissored to dirty).
             {
-                let sv = self.scratch_v.as_ref().expect("scratch_v");
+                let (sv_w, sv_h, v_view, v_id) = {
+                    let sv = self.scratch_v.as_ref().expect("scratch_v");
+                    (sv.width, sv.height, sv.view.clone(), sv.view_id)
+                };
                 let inv_scale = 1.0 / (1u32 << level) as f32;
                 let data_up = UniformData {
                     p0: [dst_origin.0 as f32, dst_origin.1 as f32, inv_scale, 0.0],
                     clamp_bounds: [cb.x0 as f32, cb.y0 as f32, blur_rect.x0 as f32, blur_rect.y0 as f32],
-                    p2: [1.0 / sv.width as f32, 1.0 / sv.height as f32, 0.0, 0.0],
+                    p2: [1.0 / sv_w as f32, 1.0 / sv_h as f32, 0.0, 0.0],
                     border: [bw as f32, bh as f32, 0.0, 0.0],
                 };
-                let (slab_idx, offset) = self.push_uniform(device, queue, data_up);
-                let v_view = &self.scratch_v.as_ref().expect("scratch_v").view;
-                let group = self.make_bind_group(device, v_view, slab_idx);
+                let (slab_idx, offset) = self.push_uniform(device, data_up);
+                let group = self.make_bind_group(device, &v_view, v_id, slab_idx);
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("blur upsample"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2731,6 +2804,8 @@ pub mod gpu {
                 pass.set_pipeline(&self.upsample);
                 pass.set_bind_group(0, &group, &[offset]);
                 pass.draw(0..3, 0..1);
+                drop(pass);
+                self.draws += 1;
             }
 
             if ephemeral {
@@ -2743,9 +2818,9 @@ pub mod gpu {
         fn encode_direct(
             &mut self,
             device: &wgpu::Device,
-            queue: &wgpu::Queue,
             encoder: &mut wgpu::CommandEncoder,
             src_view: &wgpu::TextureView,
+            src_id: u64,
             cb: IRect,
             edge: EdgeMode,
             sigma: f32,
@@ -2778,7 +2853,7 @@ pub mod gpu {
                             p2: [0.0, 0.0, edge.mode_code() as f32, 0.0],
                             border: edge.border_f32(),
                         };
-                        self.run_dst_blur_1d(device, queue, encoder, src_view, dst_view, dst_scissor, data);
+                        self.run_dst_blur_1d(device, encoder, src_view, src_id, dst_view, dst_scissor, data);
                         return Ok(());
                     }
                     (lo, hi)
@@ -2811,8 +2886,8 @@ pub mod gpu {
                     p2: [dirty.x0 as f32, iy0 as f32, edge.mode_code() as f32, 0.0],
                     border: edge.border_f32(),
                 };
-                let (slab_idx, offset) = self.push_uniform(device, queue, data_h);
-                let group = self.make_bind_group(device, src_view, slab_idx);
+                let (slab_idx, offset) = self.push_uniform(device, data_h);
+                let group = self.make_bind_group(device, src_view, src_id, slab_idx);
                 let h_view = &self.scratch_h.as_ref().expect("scratch_h").view;
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("blur direct h"),
@@ -2831,6 +2906,8 @@ pub mod gpu {
                 pass.set_pipeline(&self.blur_1d_inter);
                 pass.set_bind_group(0, &group, &[offset]);
                 pass.draw(0..3, 0..1);
+                drop(pass);
+                self.draws += 1;
             }
 
             // Pass 2 (V): scratch_h -> dst_view (scissored to dirty).
@@ -2850,9 +2927,12 @@ pub mod gpu {
                     ],
                     border: edge.border_f32(),
                 };
-                let (slab_idx, offset) = self.push_uniform(device, queue, data_v);
-                let h_view = &self.scratch_h.as_ref().expect("scratch_h").view;
-                let group = self.make_bind_group(device, h_view, slab_idx);
+                let (slab_idx, offset) = self.push_uniform(device, data_v);
+                let (h_view, h_id) = {
+                    let sh = self.scratch_h.as_ref().expect("scratch_h");
+                    (sh.view.clone(), sh.view_id)
+                };
+                let group = self.make_bind_group(device, &h_view, h_id, slab_idx);
                 let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                     label: Some("blur direct v"),
                     color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -2870,6 +2950,8 @@ pub mod gpu {
                 pass.set_pipeline(&self.blur_1d_dst);
                 pass.set_bind_group(0, &group, &[offset]);
                 pass.draw(0..3, 0..1);
+                drop(pass);
+                self.draws += 1;
             }
             Ok(())
         }

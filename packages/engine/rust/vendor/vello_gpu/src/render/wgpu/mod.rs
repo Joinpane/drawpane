@@ -21,10 +21,11 @@ pub use bindings::{TextureBinding, TextureBindings};
 #[cfg(feature = "probe")]
 pub use probe::{WgpuPendingProbe, WgpuProbeError, WgpuProbeStatus};
 
-use crate::render::common::ScenePreparer;
+use crate::render::common::{GpuClearInstance, ScenePreparer};
 use crate::{
     ClearSettings, GpuStrip, RenderError, RenderSettings, RenderSize, Resources, TargetInit,
-    render::common::DeviceLimits, scene::Scene, schedule::IntermediateTextureAllocations,
+    blend::GpuBlendInstance, copy::GpuCopyInstance, render::common::DeviceLimits, scene::Scene,
+    schedule::{IntermediateTextureAllocations, Schedule},
     target::RootTarget,
 };
 use alloc::vec::Vec;
@@ -33,7 +34,6 @@ use atlas::write_pixmap_to_atlas;
 use core::fmt::Debug;
 #[cfg(feature = "text")]
 use glifo::PendingClearRect;
-use hashbrown::HashMap;
 use passes::{Programs, RendererContext};
 use resources::GpuResources;
 use vello_common::geometry::{RectU16, SizeU16};
@@ -44,6 +44,21 @@ use vello_common::pixmap::Pixmap;
 #[cfg(feature = "text")]
 use wgpu::Texture;
 use wgpu::{CommandEncoder, Device, Extent3d, Queue, TextureView, TextureViewDescriptor};
+
+/// Drawpane: prepared schedule for a batched [`Renderer::execute_batch_render`] call.
+///
+/// If `needs_flush` is `true`, the caller must call [`Renderer::flush_uploads`] and submit the
+/// active `CommandEncoder` before calling [`Renderer::execute_batch_render`].
+#[derive(Debug)]
+pub struct PreparedBatchRender {
+    schedule: Schedule,
+    render_size: RenderSize,
+    scene_offset: (i32, i32),
+    root_output_target: RootTarget,
+    needed_vertex_bytes: u64,
+    /// Whether the current batch cannot fit this render and must be flushed first.
+    pub needs_flush: bool,
+}
 
 /// Options for the renderer
 #[derive(Debug)]
@@ -181,11 +196,6 @@ impl Renderer {
             scene_preparer.layers_config,
             resource_texture_dimension_2d,
         );
-        let mut gpu_resources = gpu_resources;
-        // Drawpane: uploads through the queue on the web (see VENDORED.md).
-        if cfg!(target_arch = "wasm32") {
-            gpu_resources.staging_belt.queue = Some(queue.clone());
-        }
         let renderer = Self {
             device: device.clone(),
             queue: queue.clone(),
@@ -240,10 +250,6 @@ impl Renderer {
             self.scene_preparer.layers_config,
             self.resources.resource_texture_dimension_2d,
         );
-        // Drawpane: uploads through the queue on the web (see VENDORED.md).
-        if cfg!(target_arch = "wasm32") {
-            self.resources.staging_belt.queue = Some(self.queue.clone());
-        }
         #[cfg(feature = "text")]
         {
             self.atlas_clear_scratch = Vec::new();
@@ -398,8 +404,211 @@ impl Renderer {
         }
     }
 
+    /// Drawpane: prepare `scene` for batched recording into a shared `CommandEncoder`.
+    ///
+    /// If the returned [`PreparedBatchRender::needs_flush`] is `true`, call
+    /// [`Renderer::flush_uploads`] and submit the active command encoder before calling
+    /// [`Renderer::execute_batch_render`].
+    pub fn prepare_batch_render(
+        &mut self,
+        scene: &Scene,
+        resources: &Resources,
+        target: RenderTarget<'_>,
+        texture_bindings: &TextureBindings,
+        options: RenderOptions<'_>,
+    ) -> Result<PreparedBatchRender, RenderError> {
+        self.prepare_batch_inner(
+            scene,
+            &target.size(),
+            target.view,
+            target.depth_view.is_some(),
+            &resources.image_cache,
+            options.target_init,
+            RootTarget::UserSurface,
+            texture_bindings,
+            options.offset,
+        )
+    }
+
+    /// Drawpane: record a prepared batched render into `encoder` without flushing uploads yet.
+    ///
+    /// Returns the number of GPU draw calls recorded. Call [`Renderer::flush_uploads`] right
+    /// before submitting `encoder` to the queue.
+    pub fn execute_batch_render(
+        &mut self,
+        prepared: PreparedBatchRender,
+        scene: &Scene,
+        encoder: &mut CommandEncoder,
+        target: RenderTarget<'_>,
+        texture_bindings: &TextureBindings,
+        options: RenderOptions<'_>,
+    ) -> Result<u32, RenderError> {
+        self.execute_batch_inner(
+            prepared,
+            scene,
+            encoder,
+            target.view,
+            target.depth_view,
+            options.target_init,
+            texture_bindings,
+        )
+    }
+
+    /// Drawpane: upload all CPU-staged buffers and resource textures for the active batch.
+    ///
+    /// Must be called right before submitting the command encoder that received batched renders.
+    pub fn flush_uploads(&mut self) {
+        self.resources
+            .flush_uploads(&self.queue, &mut self.scene_preparer.gradient_cache);
+    }
+
+    /// Drawpane: discard staged uploads if the active command encoder is dropped unsubmitted.
+    pub fn discard_uploads(&mut self) {
+        self.resources.discard_uploads();
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "internal batch preparation")]
+    fn prepare_batch_inner(
+        &mut self,
+        scene: &Scene,
+        render_size: &RenderSize,
+        view: &TextureView,
+        use_depth_buffer: bool,
+        image_cache: &ImageCache,
+        target_init: TargetInit<'_>,
+        root_output_target: RootTarget,
+        texture_bindings: &TextureBindings,
+        scene_offset: (i32, i32),
+    ) -> Result<PreparedBatchRender, RenderError> {
+        // Keep the gradient cache append-only while a batch is open so earlier renders in the
+        // same CommandEncoder still read their ramp offsets after flush.
+        if !self.resources.batch_active {
+            self.scene_preparer.gradient_cache.maintain();
+        }
+        let current_allocations = self.current_allocations();
+        let schedule = self.scene_preparer.prepare(
+            scene,
+            image_cache,
+            root_output_target,
+            RectU16::visible_scene_bounds(
+                scene.recorder.scene_size,
+                SizeU16::from_wh(render_size.width, render_size.height),
+                scene_offset,
+            ),
+            use_depth_buffer,
+            self.resources.texture_size,
+            current_allocations,
+            |id, image, region| texture_bindings.encode_paint(id, image, region, view.texture()),
+        )?;
+
+        let buffers = &self.scene_preparer.schedule_storage.buffers;
+        let strip_count =
+            buffers.draw_buffers.opaque.strips().len() + buffers.draw_buffers.strips.len();
+        let rounds = schedule.round_count();
+        let strip_bytes = (strip_count * size_of::<GpuStrip>()) as u64 + (rounds as u64 * 3 + 2) * 16;
+        let blend_instances = buffers.blend_ops.len() + buffers.blend_strips.len();
+        let blend_bytes = (blend_instances * (size_of::<GpuBlendInstance>() + size_of::<GpuCopyInstance>()))
+            as u64
+            + (rounds as u64 * 2 + 1) * 32;
+        let filter_copy_bytes =
+            (buffers.filter_ops.len() * (size_of::<GpuCopyInstance>() + 16)) as u64;
+        let root_clear_rects = match target_init {
+            TargetInit::Clear(ClearSettings::Rects { rects, .. }) => rects.len(),
+            _ => 0,
+        };
+        let clear_bytes = ((schedule.total_clear_rects() + root_clear_rects)
+            * size_of::<GpuClearInstance>()) as u64
+            + (rounds as u64 * 2 + 2) * 16;
+        let needed_vertex_bytes = strip_bytes + blend_bytes + filter_copy_bytes + clear_bytes;
+
+        let alphas_len = scene.strip_storage.borrow().alphas.len();
+        let paint_texels = *self.scene_preparer.paint_idxs.last().unwrap_or(&0);
+        let fits = self.resources.can_fit_in_batch(
+            &schedule,
+            &self.scene_preparer.gradient_cache,
+            alphas_len,
+            paint_texels,
+            &self.scene_preparer.schedule_storage.filter_context,
+            *render_size,
+            scene_offset,
+            needed_vertex_bytes,
+        );
+
+        Ok(PreparedBatchRender {
+            schedule,
+            render_size: *render_size,
+            scene_offset,
+            root_output_target,
+            needed_vertex_bytes,
+            needs_flush: !fits,
+        })
+    }
+
+    #[expect(clippy::too_many_arguments, reason = "internal batch execution")]
+    fn execute_batch_inner(
+        &mut self,
+        prepared: PreparedBatchRender,
+        scene: &Scene,
+        encoder: &mut CommandEncoder,
+        view: &TextureView,
+        depth_view: Option<&TextureView>,
+        target_init: TargetInit<'_>,
+        texture_bindings: &TextureBindings,
+    ) -> Result<u32, RenderError> {
+        self.resources.depth_cleared_this_frame = false;
+        self.resources.prepare_intermediate_textures(
+            &self.device,
+            &self.programs,
+            &prepared.schedule,
+        );
+        let paint_texels = *self.scene_preparer.paint_idxs.last().unwrap_or(&0);
+        let (view_config_offset, alpha_col_base, paint_base_texel) =
+            self.resources.prepare_batch(
+                &self.device,
+                &self.programs,
+                &self.scene_preparer.gradient_cache,
+                &self.scene_preparer.encoded_paints,
+                &scene.strip_storage.borrow().alphas,
+                prepared.render_size,
+                prepared.scene_offset,
+                paint_texels,
+                &self.scene_preparer.schedule_storage.filter_context,
+                prepared.needed_vertex_bytes,
+            )?;
+
+        let mut ctx = RendererContext {
+            programs: &self.programs,
+            resources: &mut self.resources,
+            device: &self.device,
+            encoder,
+            view,
+            depth_view,
+            texture_bindings,
+            scratch_buffers: &mut self.scene_preparer.scratch_buffers,
+            root_load_op: wgpu::LoadOp::Load,
+            view_config_offset,
+            alpha_col_base,
+            paint_base_texel,
+            draws: 0,
+        };
+
+        ctx.init_root_clear(target_init, prepared.root_output_target);
+
+        crate::schedule::execute(
+            &mut ctx,
+            &mut self.scene_preparer.schedule_storage,
+            prepared.schedule,
+            prepared.root_output_target,
+        )
+        .unwrap_or_else(|error| match error {});
+
+        ctx.finish_root_clear();
+
+        Ok(ctx.draws)
+    }
+
     /// Shared render pipeline: prepares GPU resources, runs the scheduler against
-    /// the provided `view` at `render_size`, and maintains caches.
+    /// the provided `view` at `render_size`, and flushes uploads for immediate submit.
     fn render_scene(
         &mut self,
         scene: &Scene,
@@ -413,78 +622,27 @@ impl Renderer {
         texture_bindings: &TextureBindings,
         scene_offset: (i32, i32),
     ) -> Result<(), RenderError> {
-        self.resources.depth_cleared_this_frame = false;
-        self.scene_preparer.gradient_cache.maintain();
-        let current_allocations = self.current_allocations();
-        let schedule = self.scene_preparer.prepare(
+        let prepared = self.prepare_batch_inner(
             scene,
-            image_cache,
-            root_output_target,
-            RectU16::visible_scene_bounds(
-                scene.recorder.scene_size,
-                SizeU16::from_wh(render_size.width, render_size.height),
-                scene_offset,
-            ),
-            depth_view.is_some(),
-            self.resources.texture_size,
-            current_allocations,
-            |id, image, region| texture_bindings.encode_paint(id, image, region, view.texture()),
-        )?;
-        self.resources
-            .prepare_intermediate_textures(&self.device, &self.programs, &schedule);
-        // TODO: For the time being, we upload the entire alpha buffer as one big chunk. As a future
-        // refinement, we could have a bounded alpha buffer, and break draws when the alpha
-        // buffer fills.
-        let draw_buffers = &self.scene_preparer.schedule_storage.buffers.draw_buffers;
-        let strip_count = draw_buffers.opaque.strips().len() + draw_buffers.strips.len();
-        let strip_bytes = (strip_count * size_of::<GpuStrip>()) as u64;
-        self.resources.prepare(
-            &self.device,
-            &self.programs,
-            encoder,
-            &mut self.scene_preparer.gradient_cache,
-            &self.scene_preparer.encoded_paints,
-            &scene.strip_storage.borrow().alphas,
             render_size,
+            view,
+            depth_view.is_some(),
+            image_cache,
+            target_init,
+            root_output_target,
+            texture_bindings,
             scene_offset,
-            &self.scene_preparer.paint_idxs,
-            &self.scene_preparer.schedule_storage.filter_context,
         )?;
-
-        self.resources
-            .strips_arena
-            .begin_frame(&self.device, strip_bytes);
-
-        let mut ctx = RendererContext {
-            programs: &self.programs,
-            resources: &mut self.resources,
-            device: &self.device,
+        self.execute_batch_inner(
+            prepared,
+            scene,
             encoder,
             view,
             depth_view,
+            target_init,
             texture_bindings,
-            external_texture_bind_groups: HashMap::new(),
-            scratch_buffers: &mut self.scene_preparer.scratch_buffers,
-            root_load_op: wgpu::LoadOp::Load,
-        };
-
-        ctx.init_root_clear(target_init, root_output_target);
-
-        crate::schedule::execute(
-            &mut ctx,
-            &mut self.scene_preparer.schedule_storage,
-            schedule,
-            root_output_target,
-        )
-        .unwrap_or_else(|error| match error {});
-
-        ctx.finish_root_clear();
-
-        self.resources
-            .staging_belt
-            .belt
-            .finish_and_recall_on_submit(encoder);
-
+        )?;
+        self.flush_uploads();
         Ok(())
     }
 

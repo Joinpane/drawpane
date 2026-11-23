@@ -1678,3 +1678,69 @@ Rendering fine detail onto distinct pixels before `GpuBlur`'s 16-bit (`Rgba16Flo
 | **WebGPU** exact 4,300% / 10,000% / 25,600% p50 (ms) | `device lost` / `no GPU` / `no GPU` | `67.0` / `56.7` / `86.5` |
 
 - **WASM gzipped size budgets (on `origin/main` `ffd17b35`):** `worker` 372 / 400 KB, `browser` 659 / 1,000 KB, `compute` 909 / 1,000 KB, `webgl` 1,364 / 1,400 KB, `decoder` 161 / 200 KB (via `packages/engine/rust/build.rs` WGSL comment stripping into `OUT_DIR` and `[profile.release.package.naga] opt-level = "z"` for WebGL2 one-time shader translation).
+
+## Amendment: Figma-aligned motion policy, batched GPU encoding, and cooperative 8 ms tile budgeting (2026-11-22)
+
+Profiling the 17,922-layer `Examples` page of a large iOS UI kit (921 backdrop readers, 4,644 shadows) against Figma on a Tesla T4 showed two structural bottlenecks on `origin/main` (`06418488`):
+
+1. **Per-render GPU submission overhead ("tile render preparation").** Each Vello segment, glass lens, blur, blend, and shadow created its own command encoder, issued individual `queue.write_buffer`/`queue.write_texture` uploads, and called `queue.submit()`, totaling 14,587 to 14,588 submissions per exact whole-page draw (`2,633 to 2,699 ms` of Vello preparation and `378 to 392 ms` of submit CPU on WebGPU; `3,854 to 3,869 ms` of synchronous GL submit translation on WebGL2).
+2. **Unbudgeted whole-tile bakes and repeated per-tile/per-frame CPU walks.** `Gpu::ahead()` baked dense Fit tiles without yielding mid-tile (stalling the main thread for `1,949 to 2,312 ms` per idle slice and up to `10,288 ms` during load), `reader_halo_plan` and `plan_readers` walked all 17,922 layers per frame and per tile, `TileCache::begin` dropped all cached scales whenever reader halo changed across zoom levels, `Txn::before_structure` rebuilt preorder indices O(K * N) during sliced-open patches, and every opening slice blocked on a full-screen readback.
+
+### 1. Motion policy and cross-browser budgeting
+
+Following the lead maintainer's decision to match Figma's measured interaction policy across Chrome, Safari, and Firefox (WebGPU, WebGL2, and CPU-worker backends):
+
+- **Single motion-policy switch (`motionPolicy()` in `apps/web/src/editor/renderer-switch.ts`):** defaults to `"standin"` (matching Figma: present upscaled or downscaled cached tiles at 60 fps during pan and zoom, never blocking a frame to bake exact content), with `"exact"` selectable via `?motion=exact` or `drawpane:motion-policy`. The W4 "zero degraded frames" benchmark gate is replaced with Figma's bar (60 fps frame presentation plus settle-to-exact windows; `degraded === 0` applies only under `BENCH_W4_NATIVE=1`).
+- **Multi-render GPU batching and 4096 tile atlas packing (`vendor/vello_gpu`, `blend.rs`, `blur.rs`, `shadow.rs`, `gpu_readers.rs`, `gpu.rs`):**
+  - Vendored `vello_gpu` adds `prepare_batch_render`, `execute_batch_render -> Result<u32, RenderError>`, `flush_uploads`, and `discard_uploads`, replacing per-render queue writes with CPU-staged uploads flushed once per submit, a 256-slot dynamic-offset `view_config_buffer`, persistent versioned `external_texture_bind_groups`, and a GPU draw counter.
+  - All engine passes (`blend`, `blur`, `shadow` with a growable uniform slab, `gpu_readers`) stage uniforms on the CPU, cache bind groups by `view_id`, reuse batched `vello_render`, enable `prepare_glass_masks` on exact haloed tiles, and defer scratch texture destroys until after submission.
+  - Tile atlas pages dynamically pack 512 x 512 tiles into 4096 x 4096 pages (64 tiles/page) when adapter limits and tile budget allow (falling back to 2048/1024/512). Composite bind groups are cached per page, unchanged viewport uniform writes are skipped, and `composite()` + `finish_frame()` fuse into one `CommandEncoder` and one `queue.submit()`.
+- **Eliminated per-tile and per-frame CPU walks (`store.rs`, `engine.rs`, `exec.rs`, `tiles.rs`, `display-list.ts`, `engine-image.ts`):**
+  - Lazy per-revision `ReaderCache` on `Store` provides O(readers) `has_reader_in_rect` and `plan_readers`, and `Txn::before_structure` avoids O(K * N) preorder rebuilds during sliced-open patches (`tests/apply_cost.rs`).
+  - `reader_halo_plan` iterates `reader_cache().visible_readers` with O(1) bitsets, caches results in `HaloCache`, and reuses the active halo in O(1) on composite-only (`budget_ms < 0`) and budgeted moving frames.
+  - `TileCache::begin_scaled(background, scale, halo)` stores halo per zoom level so zooming across scales preserves cached tiles at other levels as stand-ins and instant cache hits.
+  - `DisplayListBuilder.imageDemands` caches per document version, and `ViewImages.update` caches mip pyramids per `maxSide`.
+- **Cooperative ~8 ms tile budgeting across WebGPU, WebGL2, and CPU-worker (`exec.rs`, `gpu.rs`, `engine-cpu.worker.ts`, `engine-view.ts`, `Canvas.tsx`):**
+  - `exec::draw_split_resumable` checkpoints mid-tile walks (`WalkCheckpoint`) when `Backend::deadline_reached()` fires and fast-forwards clip state on resume while keeping output bitwise identical to an unsplit draw (`resumable_walk_matches_unsplit_bitwise`).
+  - `Gpu` tracks an active `PendingTile` across rAF-paced `IDLE_SLICE_MS = 8` slices (`MOVING_BUDGET_MS = 4`, `REST_BUDGET_MS = 8`, `COMPOSITE_ONLY_MS = -1`), skips optional `!job.must` bakes during budgeted motion, and adapts the walk budget via a dynamic `submit_ratio` EWMA so backends with synchronous GL translation inside `queue.submit()` (WebGL2 on Chrome, Safari, Firefox) stay inside the frame budget without stalling.
+  - `engine-cpu.worker.ts` sets `MOVING_SLICE_TILES = 0` and uses `begin_scaled` so CPU-worker sessions composite cached stand-ins smoothly during motion and refine at rest.
+  - Opening gates only slice #1 on `#openingFrame` so first content presents immediately while remaining `openSlice` patches stream in 8 ms rAF slices without per-slice readbacks.
+
+### 2. Verification and paired Modal T4 measurements
+
+- **Correctness and sizes:** All 4 `cargo clippy -- -D warnings` targets (`host`, `gpu`, `compute`, `webgl`), 232 Rust unit/integration/fuzz tests across 12 test binaries, `pnpm lint`, `pnpm -r typecheck` (19/19), `@drawpane/engine` (45/45), `@drawpane/editor` (92/92 files, default and `DRAWPANE_COMPACT_COPIES=1`), `@drawpane/web` (369/369), and `@drawpane/engine-workerd` pass. WASM gzipped sizes stay within budgets: `worker` 377 / 400 KB, `browser` 675 / 1,000 KB, `compute` 925 / 1,000 KB, `webgl` 1,379 / 1,400 KB, `decoder` 161 / 200 KB.
+- **Hardware Tesla T4 parity and GPU E2E:** 30/30 full Figma parity suites (`apps/web/e2e/parity/engine.spec.ts`, CPU + hardware WebGPU + hardware WebGL2, 0 fallbacks) and 27/27 GPU tile/glass/idle/open E2E tests (`engine-tiles-gpu`, `engine-glass-atlas`, `engine-glass-zoom`, `engine-idle`, `engine-page-open`) passed on T4.
+- **Two paired Modal T4 runs (`bench/file.spec.ts`, `origin/main` `06418488` vs PR, `--modes webgpu,gpu`, `Examples` 17,922 layers, 60 frames, Run 1 / Run 2):**
+
+| Backend and metric | `origin/main` (`06418488`) Run 1 / Run 2 | PR Run 1 / Run 2 |
+| --- | --- | --- |
+| **WebGPU (hardware, headless readback)** `native split` CPU p50 (ms) | `4,082.2 / 3,971.0` | `896.2 / 892.3` (4.5x faster) |
+| **WebGPU** `native split` vello / submit CPU p50 (ms) | `2,699.4 / 2,633.3` ; `392.4 / 378.1` | `239.6 / 235.7` ; `8.1 / 7.4` |
+| **WebGPU** `native split` GPU timestamp p50 (ms) | `4,104.2 / 4,036.7` | `1,128.7 / 1,165.7` |
+| **WebGPU** `native split` submits / draws | `14,587 / 14,587` (`draws` n/a) | `27 / 27` (`40,185 / 40,181` draws) |
+| **WebGPU** `open` useful / exact shown (ms) | `21,452 / 24,140` ; `TIMED OUT (>60,000)` | `17,662 / 14,140` ; `19,384 / 19,877` |
+| **WebGPU** `open` max stall (`readback present` / `longTask`) (ms) | `10,288 / 7,101` (n/a) | `204 / 200` (`longTask 107 / 107`) |
+| **WebGPU** `pan, whole` content p50 / p95 (ms) | `15.2 / 21.7` ; `15.3 / 22.2` | `4.6 / 11.2` ; `4.6 / 11.3` |
+| **WebGPU** `pan, whole` max idle slice / settle exact (ms) | `2,041 / 1,949` ; `8,138 / 7,890` | `12.1 / 9.5` ; `5,158 / 5,150` |
+| **WebGPU** `zoom, whole` content p50 / p95 (ms) | `15.1 / 22.0` ; `15.1 / 22.2` | `4.7 / 11.5` ; `4.6 / 11.4` |
+| **WebGPU** `zoom, whole` max settle frame / settle exact (ms) | `1,272 / 1,630` ; `2,997 / 3,319` | `13 / 12` ; `2,422 / 2,286` |
+| **WebGPU** `pan, 50%` content p50 / p95 ; settle exact (ms) | `14.9 / 40.3` ; `14.5 / 29.7` ; `237 / 256` | `3.5 / 11.4` ; `3.5 / 10.1` ; `236 / 342` |
+| **WebGPU** `pan, 100%` content p50 / p95 ; settle exact (ms) | `12.8 / 18.7` ; `12.7 / 20.1` ; `174 / 104` | `3.5 / 10.1` ; `3.4 / 10.9` ; `157 / 151` |
+| **WebGPU** motion submits / draws (warm) | `1-2` (n/a) | `1` submit, `0-14` draws |
+| **WebGL2 (`gpu`, hardware onscreen)** `native split` CPU p50 (ms) | `5,124.3 / 5,153.5` | `1,888.8 / 1,875.4` (2.7x faster) |
+| **WebGL2** `native split` vello / submit CPU p50 (ms) | `606.8 / 610.3` ; `3,854.2 / 3,868.9` | `81.5 / 78.6` ; `1,422.4 / 1,420.8` |
+| **WebGL2** `native split` GPU finish tail p50 (ms) | `435.0 / 445.8` | `63.6 / 64.3` (6.9x faster) |
+| **WebGL2** `native split` submits / draws | `14,588 / 14,588` (n/a) | `30 / 30` (`40,183 / 40,183` draws) |
+| **WebGL2** `open` useful / exact shown (ms) | `132 / 138` ; `23,830 / 24,163` | `120 / 119` ; `13,935 / 13,550` |
+| **WebGL2** `open` `longTask` max / idle slice max (ms) | n/a | `84 / 128` ; `23.5 / 22.7` |
+| **WebGL2** `pan, whole` interval p50 / p95 / p99 (ms) | `16.7 / 33.4 / 116.6` ; `16.7 / 33.4 / 116.7` | `16.7 / 16.8 / 16.8` ; `16.7 / 16.7 / 16.7` |
+| **WebGL2** `pan, whole` content p50 / p95 / max (ms) | `14.7 / 18.2 / 1,260.9` ; `15.6 / 19.1 / 1,165.7` | `4.1 / 4.7 / 4.9` ; `4.1 / 4.6 / 4.8` |
+| **WebGL2** `pan, whole` max idle slice / drawn exact (ms) | `2,270 / 2,312` ; `7,859 / 7,966` | `16.8 / 17.2` ; `5,002 / 5,002` (`shown 4,330 / 4,313`) |
+| **WebGL2** `zoom, whole` interval p50 / p95 / p99 (ms) | `16.7 / 50.0 / 66.6` ; `16.7 / 50.0 / 66.6` | `16.7 / 16.8 / 49.9` ; `16.7 / 16.8 / 33.5` |
+| **WebGL2** `zoom, whole` content p50 / p95 / max (ms) | `14.7 / 17.7 / 21.3` ; `15.4 / 17.9 / 19.8` | `4.6 / 6.5 / 6.8` ; `4.7 / 6.2 / 6.6` |
+| **WebGL2** `zoom, whole` max idle / settle frame / drawn exact (ms) | `342 / 345` ; `541 / 540` ; `2,812 / 2,790` | `17.4 / 14.9` ; `4 / 4` ; `1,437 / 1,455` (`shown 1,407 / 1,392`) |
+| **WebGL2** `pan, 50%` interval p50 / p95 ; content p50 / p95 ; settle (ms) | `16.7 / 33.4` ; `13.6-14.2 / 27.2-28.4` ; `0` | `16.7 / 16.8` ; `3.0-3.1 / 7.5-8.0` ; `0` (`drawn 20`) |
+| **WebGL2** `pan, 100%` interval p50 / p95 ; content p50 / p95 ; settle (ms) | `16.7 / 33.3` ; `14.1-15.1 / 16.3-16.6` ; `0` | `16.7 / 16.7-16.8` ; `3.0-3.5 / 3.4-3.9` ; `57` (`drawn 73`) |
+| **WebGL2** motion submits / draws (warm) | `2-4` (n/a) | `1` submit, `2-16` draws |
+
+Remaining follow-ups noted for future work: (1) `pan, whole` at non-integer Fit scale currently shifts sub-pixel tile phase and re-bakes all 24 Fit tiles (`4.3 s` WebGL2 / `5.2 s` WebGPU under 8 ms/rAF); quantizing or preserving Fit tile phase across pans will turn `pan, whole` into a warm-cache hit matching `pan, 50%` (`0-20 ms`) and `pan, 100%` (`57-73 ms`); (2) emitting a single low-resolution coarse overview pass right after `openSlice` finishes (`~1.7 s`) and batching text updates before exact tile bakes will bring headless WebGPU `open.useful` under `2 s` and `open.exact` closer to `3 s`.

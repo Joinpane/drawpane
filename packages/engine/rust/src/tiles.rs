@@ -160,6 +160,8 @@ struct LevelEntry {
     level: Level,
     /// A ladder level: drawn with level of detail, only as a stand-in.
     ladder: bool,
+    /// The reader halo width this level's tiles were baked with.
+    halo: i32,
     used: u64,
 }
 
@@ -267,6 +269,9 @@ pub struct TileCache {
     /// Tiles an ended drag's selection was over, still stale: they show it where it was, so
     /// they're drawn again at once.
     ghosts: HashSet<TileKey>,
+    /// Tiles whose `must` draw yielded or deferred under a frame budget so `last_page` does not
+    /// mistakenly count their blank region as covered on the next frame.
+    unpainted: HashSet<TileKey>,
     pub stats: TileStats,
 }
 
@@ -341,6 +346,7 @@ impl TileCache {
             drag: DragTiles::default(),
             opening: false,
             ghosts: HashSet::new(),
+            unpainted: HashSet::new(),
             stats: TileStats::default(),
         }
     }
@@ -624,6 +630,7 @@ impl TileCache {
         self.focus = None;
         self.drag = DragTiles::default();
         self.ghosts.clear();
+        self.unpainted.clear();
     }
 
     /// Lowers or raises the slots kept; tiles in slots past a lower count are dropped.
@@ -645,6 +652,43 @@ impl TileCache {
             self.clear();
             self.background = Some(bg);
             self.halo = halo;
+        }
+        self.frame += 1;
+        self.stats.drawn = 0;
+        self.stats.evicted = 0;
+    }
+
+    /// Starts a frame at `scale` with reader reach `halo`: a background change still drops
+    /// everything, while a halo change only drops levels at `scale` so cached tiles from other
+    /// zoom scales stay resident as stand-ins and instant cache hits across zoom gestures.
+    pub fn begin_scaled(&mut self, background: [f32; 4], scale: f64, halo: i32) {
+        let bg = background.map(f32::to_bits);
+        if self.background != Some(bg) {
+            self.clear();
+            self.background = Some(bg);
+            self.halo = halo;
+        } else {
+            self.halo = halo;
+            let tol = scale.abs() * 1e-6;
+            let mut drop_levels: Vec<u32> = Vec::new();
+            for entry in &mut self.levels {
+                if !entry.ladder && (entry.level.scale - scale).abs() <= tol && entry.halo != halo {
+                    entry.halo = halo;
+                    drop_levels.push(entry.id);
+                }
+            }
+            if !drop_levels.is_empty() {
+                let free = &mut self.free;
+                self.tiles.retain(|k, t| {
+                    let keep = !drop_levels.contains(&k.level);
+                    if !keep {
+                        free.push(t.slot);
+                    }
+                    keep
+                });
+                self.unpainted.retain(|k| !drop_levels.contains(&k.level));
+                self.ghosts.retain(|k| !drop_levels.contains(&k.level));
+            }
         }
         self.frame += 1;
         self.stats.drawn = 0;
@@ -693,6 +737,7 @@ impl TileCache {
             id,
             level,
             ladder,
+            halo: self.halo,
             used: frame,
         });
         id
@@ -830,6 +875,7 @@ impl TileCache {
     /// Records a tile drawn into `slot`: `exact`, nothing stood in for any record in it; `full`,
     /// drawn without level of detail.
     pub fn drawn(&mut self, key: TileKey, slot: u32, exact: bool, full: bool) {
+        self.unpainted.remove(&key);
         self.free.retain(|s| *s != slot);
         self.tiles.insert(
             key,
@@ -842,6 +888,11 @@ impl TileCache {
             },
         );
         self.stats.drawn += 1;
+    }
+
+    /// Marks `key` as unpainted because its `must` draw was deferred by a frame budget.
+    pub fn mark_unpainted(&mut self, key: TileKey) {
+        self.unpainted.insert(key);
     }
 
     /// Gives back a slot handed out for a tile that wasn't drawn (its draw failed).
@@ -1027,7 +1078,7 @@ impl TileCache {
             let page = grid_inv.transform_rect_bbox(shown);
             let mut deps = Vec::new();
             let covered = held.is_some()
-                || last_page.is_some_and(|l| l.contains_rect(page))
+                || (!self.unpainted.contains(&key) && last_page.is_some_and(|l| l.contains_rect(page)))
                 || other_levels.iter().any(|o| match self.cover(*o, page) {
                     Some(keys) => {
                         deps = keys;
@@ -1709,5 +1760,23 @@ mod tests {
         draw_all(&mut c, &p);
         c.begin([0.5, 0.5, 0.5, 1.0], 3);
         assert!(c.is_empty());
+    }
+
+    #[test]
+    fn begin_scaled_keeps_other_zoom_levels_when_halo_changes() {
+        let mut c = TileCache::new(64, 64);
+        c.begin_scaled([1.0; 4], 1.0, 4);
+        let p1 = c
+            .plan(cam(1.0, 0.0, 0.0), (100, 80), false, None, false, false)
+            .expect("plan 1x");
+        draw_all(&mut c, &p1);
+        let n1 = c.len();
+        assert!(n1 > 0);
+        // Zooming to 2x increases the reader halo; 1x cached tiles must stay resident as stand-ins.
+        c.begin_scaled([1.0; 4], 2.0, 8);
+        assert_eq!(c.len(), n1, "1x tiles stay cached when 2x halo changes");
+        // Changing halo at the same 1x scale drops 1x tiles cleanly.
+        c.begin_scaled([1.0; 4], 1.0, 9);
+        assert!(c.is_empty(), "same-scale halo change drops that level's tiles");
     }
 }

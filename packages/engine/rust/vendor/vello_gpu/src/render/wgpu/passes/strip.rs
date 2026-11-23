@@ -7,7 +7,7 @@ use crate::draw::{EXTERNAL_TEXTURE_SLOT_COUNT, ExternalTextureBindings, External
 use crate::render::wgpu::RenderTargetConfig;
 use crate::render::wgpu::bindings::TextureBinding;
 use crate::render::wgpu::passes::{Programs, RendererContext};
-use crate::render::wgpu::resources::GpuResources;
+use crate::render::wgpu::resources::{GpuResources, SIZE_OF_CONFIG};
 use crate::util::RangedSlice;
 use crate::{
     GpuStrip,
@@ -15,10 +15,10 @@ use crate::{
     target::{DrawPassTarget, LayerTextureId, RootTarget},
 };
 use alloc::vec;
-use core::{fmt::Debug, num::NonZeroU64, ops::Range};
+use core::{fmt::Debug, ops::Range};
 use hashbrown::hash_map::Entry;
 use wgpu::{
-    BindGroup, BindGroupLayout, BlendState, Buffer, ColorTargetState, ColorWrites, CommandEncoder,
+    BindGroup, BindGroupLayout, BlendState, Buffer, ColorTargetState, ColorWrites,
     Device, PipelineCompilationOptions, RenderPassColorAttachment, RenderPassDescriptor,
     RenderPipeline, Sampler, TextureView, TextureViewDescriptor,
 };
@@ -69,8 +69,9 @@ impl StripPipelines {
                         visibility: wgpu::ShaderStages::VERTEX | wgpu::ShaderStages::FRAGMENT,
                         ty: wgpu::BindingType::Buffer {
                             ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
+                            // Drawpane: dynamic offset allows batching renders with distinct sizes/offsets.
+                            has_dynamic_offset: true,
+                            min_binding_size: Some(SIZE_OF_CONFIG),
                         },
                         count: None,
                     },
@@ -308,7 +309,11 @@ impl Programs {
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,
-                    resource: config_buffer.as_entire_binding(),
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: config_buffer,
+                        offset: 0,
+                        size: Some(SIZE_OF_CONFIG),
+                    }),
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
@@ -352,13 +357,17 @@ impl Programs {
 }
 
 impl GpuResources {
-    /// Uploads two strip slices (opaque then alpha) into the frame arena and
+    /// Uploads two strip slices (opaque then alpha) into the batched frame arena and
     /// returns the byte range of the uploaded data.
+    ///
+    /// Drawpane: stages strips into CPU memory (uploaded once before `queue.submit`) and
+    /// offsets strip alpha/paint indices for multi-render encoder batching.
     fn upload_strip_pair(
         &mut self,
-        encoder: &mut CommandEncoder,
         opaque_strips: &[GpuStrip],
         alpha_strips: RangedSlice<'_, GpuStrip>,
+        alpha_col_base: u32,
+        paint_base_texel: u32,
     ) -> Range<u64> {
         let opaque_len = size_of_val(opaque_strips) as u64;
         let alpha_len = (alpha_strips.len() * size_of::<GpuStrip>()) as u64;
@@ -367,21 +376,46 @@ impl GpuResources {
             return 0..0;
         }
 
-        let arena = &mut self.strips_arena;
-        let offset = arena.alloc(total_len);
-        let size = NonZeroU64::new(total_len).expect("total length is non-zero");
-        let mut view = self
-            .staging_belt
-            .write_buffer(encoder, &arena.buffer, offset, size);
-        if opaque_len > 0 {
-            view.slice(..opaque_len as usize)
-                .copy_from_slice(bytemuck::cast_slice(opaque_strips));
-        }
-        let mut pos = opaque_len as usize;
-        for strips in alpha_strips.slices() {
-            let bytes = bytemuck::cast_slice(strips);
-            view.slice(pos..pos + bytes.len()).copy_from_slice(bytes);
-            pos += bytes.len();
+        const RECT_STRIP_FLAG: u32 = 1 << 31;
+        let offset = self.strips_arena.alloc(total_len);
+        self.strips_staging.resize(offset as usize, 0);
+        if alpha_col_base == 0 && paint_base_texel == 0 {
+            if opaque_len > 0 {
+                self.strips_staging
+                    .extend_from_slice(bytemuck::cast_slice(opaque_strips));
+            }
+            for strips in alpha_strips.slices() {
+                self.strips_staging
+                    .extend_from_slice(bytemuck::cast_slice(strips));
+            }
+        } else {
+            let rebase = |mut s: GpuStrip| -> GpuStrip {
+                if alpha_col_base > 0
+                    && (s.paint_and_rect_flag & RECT_STRIP_FLAG) == 0
+                    && s.dense_width_or_rect_height != 0
+                {
+                    s.col_idx_or_rect_frac += alpha_col_base;
+                }
+                if paint_base_texel > 0
+                    && ((s.paint_and_rect_flag >> 29) & 0x3) == 0
+                    && ((s.paint_and_rect_flag >> 26) & 0x7) != 0
+                {
+                    s.paint_and_rect_flag += paint_base_texel;
+                }
+                s
+            };
+            for &strip in opaque_strips {
+                let rebased = rebase(strip);
+                self.strips_staging
+                    .extend_from_slice(bytemuck::bytes_of(&rebased));
+            }
+            for strips in alpha_strips.slices() {
+                for &strip in strips {
+                    let rebased = rebase(strip);
+                    self.strips_staging
+                        .extend_from_slice(bytemuck::bytes_of(&rebased));
+                }
+            }
         }
 
         offset..offset + total_len
@@ -389,46 +423,58 @@ impl GpuResources {
 }
 
 impl RendererContext<'_> {
-    fn external_texture_bind_group_for_textures(
-        &mut self,
+    fn external_texture_cache_key(
+        texture_bindings: &crate::render::wgpu::TextureBindings,
         bindings: ExternalTextureBindings,
-    ) -> &BindGroup {
-        let atlas_texture_views = &self.resources.atlas_texture_views;
-        let placeholder = &self.resources.placeholder_external_texture_view;
-        let texture_bindings = self.texture_bindings;
-        match self.external_texture_bind_groups.entry(bindings) {
-            Entry::Occupied(entry) => entry.into_mut(),
-            Entry::Vacant(entry) => {
-                let texture_sources = bindings.as_array();
-                let slot_bindings = core::array::from_fn(|slot| match texture_sources[slot] {
-                    Some(TextureSourceId::Atlas(atlas_id)) => TextureBinding::TextureView(
-                        atlas_texture_views[atlas_id.as_u32() as usize].clone(),
-                    ),
-                    Some(TextureSourceId::External(texture_id, _)) => texture_bindings
-                        .get(texture_id)
-                        .expect("external texture binding was validated during paint preparation")
-                        .clone(),
-                    None => TextureBinding::TextureView(placeholder.clone()),
-                });
-                let sampler_keys = texture_sources.map(|source| match source {
-                    Some(TextureSourceId::External(_, sampler)) => sampler,
-                    _ => ExternalSampler::DEFAULT,
-                });
-                let samplers = sampler_keys.map(|key| {
-                    self.resources
-                        .external_samplers
-                        .entry(key)
-                        .or_insert_with(|| GpuResources::create_external_sampler(self.device, key))
-                        .clone()
-                });
-                let bind_group = self.programs.create_run_external_texture_bind_group(
-                    self.device,
-                    placeholder,
-                    &slot_bindings,
-                    samplers.each_ref(),
-                );
-                entry.insert(bind_group)
-            }
+    ) -> (ExternalTextureBindings, [u64; EXTERNAL_TEXTURE_SLOT_COUNT]) {
+        let texture_sources = bindings.as_array();
+        let versions = core::array::from_fn(|slot| match texture_sources[slot] {
+            Some(TextureSourceId::External(texture_id, _)) => texture_bindings
+                .get_versioned(texture_id)
+                .expect("external texture binding was validated during paint preparation")
+                .1,
+            _ => 0,
+        });
+        (bindings, versions)
+    }
+
+    fn ensure_external_texture_bind_group(&mut self, bindings: ExternalTextureBindings) {
+        let key = Self::external_texture_cache_key(self.texture_bindings, bindings);
+        if self.resources.external_texture_bind_groups.contains_key(&key) {
+            return;
+        }
+        let texture_sources = bindings.as_array();
+        let placeholder = self.resources.placeholder_external_texture_view.clone();
+        let slot_bindings = core::array::from_fn(|slot| match texture_sources[slot] {
+            Some(TextureSourceId::Atlas(atlas_id)) => TextureBinding::TextureView(
+                self.resources.atlas_texture_views[atlas_id.as_u32() as usize].clone(),
+            ),
+            Some(TextureSourceId::External(texture_id, _)) => self
+                .texture_bindings
+                .get(texture_id)
+                .expect("external texture binding was validated during paint preparation")
+                .clone(),
+            None => TextureBinding::TextureView(placeholder.clone()),
+        });
+        let sampler_keys = texture_sources.map(|source| match source {
+            Some(TextureSourceId::External(_, sampler)) => sampler,
+            _ => ExternalSampler::DEFAULT,
+        });
+        let samplers = sampler_keys.map(|skey| {
+            self.resources
+                .external_samplers
+                .entry(skey)
+                .or_insert_with(|| GpuResources::create_external_sampler(self.device, skey))
+                .clone()
+        });
+        let bind_group = self.programs.create_run_external_texture_bind_group(
+            self.device,
+            &placeholder,
+            &slot_bindings,
+            samplers.each_ref(),
+        );
+        if let Entry::Vacant(entry) = self.resources.external_texture_bind_groups.entry(key) {
+            entry.insert(bind_group);
         }
     }
 
@@ -447,14 +493,17 @@ impl RendererContext<'_> {
         if opaque_count == 0 && alpha_count == 0 {
             return;
         }
-        // Create bind groups for all external textures used by this pass.
+        // Ensure cached bind groups exist for all external textures used by this pass.
         for run in external_texture_runs {
-            self.external_texture_bind_group_for_textures(run.bindings);
+            self.ensure_external_texture_bind_group(run.bindings);
         }
 
-        let strips_range =
-            self.resources
-                .upload_strip_pair(self.encoder, opaque_strips, alpha_strips);
+        let strips_range = self.resources.upload_strip_pair(
+            opaque_strips,
+            alpha_strips,
+            self.alpha_col_base,
+            self.paint_base_texel,
+        );
         let opaque_count = opaque_count as u32;
         let alpha_count = alpha_count as u32;
 
@@ -522,87 +571,98 @@ impl RendererContext<'_> {
                 .insert(bind_group_key, bind_group);
         }
 
+        let config_offset = match target {
+            DrawPassTarget::Root(_) => self.view_config_offset,
+            DrawPassTarget::Layer(_) => 0,
+        };
         let resources = &*self.resources;
+        let texture_bindings = self.texture_bindings;
         let view = match target {
             DrawPassTarget::Root(_) => self.view,
             DrawPassTarget::Layer(id) => resources.layer_view(id),
         };
         let bind_group = &resources.strip_layer_bind_groups[&bind_group_key];
+        let mut draws = 0u32;
 
-        let mut render_pass = self.encoder.begin_render_pass(&RenderPassDescriptor {
-            label: Some("Render to Texture Pass"),
-            color_attachments: &[Some(RenderPassColorAttachment {
-                view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: color_load_op,
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment,
-            occlusion_query_set: None,
-            timestamp_writes: None,
-            multiview_mask: None,
-        });
-        render_pass.set_bind_group(0, bind_group, &[]);
-        render_pass.set_bind_group(
-            2,
-            &resources.encoded_paints_texture.texture().bind_group,
-            &[],
-        );
-        render_pass.set_bind_group(3, &resources.gradient_texture.texture().bind_group, &[]);
-        render_pass.set_vertex_buffer(0, resources.strips_arena.buffer.slice(strips_range.clone()));
-
-        let draw_strip_runs = |render_pass: &mut wgpu::RenderPass<'_>, first_instance, count| {
-            if external_texture_runs.is_empty() {
-                render_pass.set_bind_group(1, &resources.empty_external_texture_bind_group, &[]);
-                render_pass.draw(0..4, first_instance..first_instance + count);
-
-                return;
-            }
-
-            // Each run is drawn with different external texture bindings. Runs go from
-            // `run.strips_start` to the next run's `strips_start`; the last run goes to the end of
-            // the strips buffer.
-            for (i, run) in external_texture_runs.iter().enumerate() {
-                let external_texture_bind_group = self
-                    .external_texture_bind_groups
-                    .get(&run.bindings)
-                    .unwrap();
-                render_pass.set_bind_group(1, external_texture_bind_group, &[]);
-                let start = u32::try_from(run.strips_start).unwrap();
-                let end = external_texture_runs
-                    .get(i + 1)
-                    .map_or(count, |next| u32::try_from(next.strips_start).unwrap());
-                render_pass.draw(0..4, first_instance + start..first_instance + end);
-            }
-        };
-
-        if opaque_count > 0 {
-            // Opaque pass
-            debug_assert!(
-                enable_opaque,
-                "opaque strips require the final view depth attachment"
+        {
+            let mut render_pass = self.encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("Render to Texture Pass"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: color_load_op,
+                        store: wgpu::StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment,
+                occlusion_query_set: None,
+                timestamp_writes: None,
+                multiview_mask: None,
+            });
+            render_pass.set_bind_group(0, bind_group, &[config_offset]);
+            render_pass.set_bind_group(
+                2,
+                &resources.encoded_paints_texture.texture().bind_group,
+                &[],
             );
-            render_pass.set_pipeline(&self.programs.strip.opaque);
-            draw_strip_runs(&mut render_pass, 0, opaque_count);
-        }
+            render_pass.set_bind_group(3, &resources.gradient_texture.texture().bind_group, &[]);
+            render_pass.set_vertex_buffer(0, resources.strips_arena.buffer.slice(strips_range.clone()));
 
-        if alpha_count > 0 {
-            // Alpha pass
-            if matches!(target, DrawPassTarget::Root(RootTarget::UserSurface)) {
-                let pipeline = if enable_opaque {
-                    &self.programs.strip.depth_alpha
-                } else {
-                    &self.programs.strip.alpha
-                };
-                render_pass.set_pipeline(pipeline);
-            } else {
-                render_pass.set_pipeline(&self.programs.strip.intermediate);
+            let mut draw_strip_runs = |render_pass: &mut wgpu::RenderPass<'_>, first_instance, count| {
+                if external_texture_runs.is_empty() {
+                    render_pass.set_bind_group(1, &resources.empty_external_texture_bind_group, &[]);
+                    render_pass.draw(0..4, first_instance..first_instance + count);
+                    draws += 1;
+                    return;
+                }
+
+                // Each run is drawn with different external texture bindings. Runs go from
+                // `run.strips_start` to the next run's `strips_start`; the last run goes to the end of
+                // the strips buffer.
+                for (i, run) in external_texture_runs.iter().enumerate() {
+                    let key = Self::external_texture_cache_key(texture_bindings, run.bindings);
+                    let external_texture_bind_group = resources
+                        .external_texture_bind_groups
+                        .get(&key)
+                        .unwrap();
+                    render_pass.set_bind_group(1, external_texture_bind_group, &[]);
+                    let start = u32::try_from(run.strips_start).unwrap();
+                    let end = external_texture_runs
+                        .get(i + 1)
+                        .map_or(count, |next| u32::try_from(next.strips_start).unwrap());
+                    render_pass.draw(0..4, first_instance + start..first_instance + end);
+                    draws += 1;
+                }
+            };
+
+            if opaque_count > 0 {
+                // Opaque pass
+                debug_assert!(
+                    enable_opaque,
+                    "opaque strips require the final view depth attachment"
+                );
+                render_pass.set_pipeline(&self.programs.strip.opaque);
+                draw_strip_runs(&mut render_pass, 0, opaque_count);
             }
 
-            draw_strip_runs(&mut render_pass, opaque_count, alpha_count);
+            if alpha_count > 0 {
+                // Alpha pass
+                if matches!(target, DrawPassTarget::Root(RootTarget::UserSurface)) {
+                    let pipeline = if enable_opaque {
+                        &self.programs.strip.depth_alpha
+                    } else {
+                        &self.programs.strip.alpha
+                    };
+                    render_pass.set_pipeline(pipeline);
+                } else {
+                    render_pass.set_pipeline(&self.programs.strip.intermediate);
+                }
+
+                draw_strip_runs(&mut render_pass, opaque_count, alpha_count);
+            }
         }
+        self.draws += draws;
     }
 }

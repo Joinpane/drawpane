@@ -335,9 +335,11 @@ export async function runGlassAtlasSuite(backend: "webgpu" | "webgl2") {
       batchedOps: batched.stats.counts.glassOps,
       batchedCount: batched.stats.counts.glassBatched,
       batchedSubmits: batched.stats.counts.submits,
+      batchedVelloRenders: batched.stats.counts.velloRenders,
       refusedOps: refused.stats.counts.glassOps,
       refusedCount: refused.stats.counts.glassBatched,
       refusedSubmits: refused.stats.counts.submits,
+      refusedVelloRenders: refused.stats.counts.velloRenders,
       diff: diffPixels(batched.pixels, refused.pixels),
     };
 

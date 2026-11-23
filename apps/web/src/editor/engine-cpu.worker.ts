@@ -30,7 +30,7 @@ const CPU_TILE_SLOTS = 128;
 const CPU_RASTER_FLOOR = 0.5;
 /** Tiles drawn per progressive slice at rest vs while moving. */
 const REST_SLICE_TILES = 4;
-const MOVING_SLICE_TILES = 2;
+const MOVING_SLICE_TILES = 0;
 
 export type CpuWorkerRequest =
   | { readonly type: "init" }

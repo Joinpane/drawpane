@@ -213,6 +213,15 @@ fn image_level_size(width: u32, height: u32, max_side: u32) -> Result<usize> {
         .ok_or_else(|| EngineError::limit("image exceeds the address space"))
 }
 
+#[cfg(feature = "gpu-common")]
+#[derive(Clone, Copy)]
+struct HaloCache {
+    generation: u64,
+    view_bits: [u64; 6],
+    size: (u32, u32),
+    halo: i32,
+}
+
 pub struct Engine {
     pub store: Store,
     /// Changes whenever what's drawn may have (a message applied, an image put or dropped): a
@@ -229,6 +238,10 @@ pub struct Engine {
     pub image_levels: std::collections::HashMap<u32, std::rc::Rc<Vec<images::Level>>>,
     /// Tiles on the CPU, once asked for (tests; a Worker's view mode).
     pub cpu_tiles: Option<CpuTiles>,
+    /// Cached viewport reader halo for `(generation, view_bits, size)` so idle slices and
+    /// composite-only frames never re-walk all 900+ backdrop readers unchanged.
+    #[cfg(feature = "gpu-common")]
+    halo_cache: Option<HaloCache>,
     /// The drag in progress, if the last messages only moved records.
     pub dragging: Option<Dragging>,
     drag_serial: u64,
@@ -246,6 +259,8 @@ impl Engine {
             #[cfg(feature = "gpu-common")]
             image_levels: std::collections::HashMap::new(),
             cpu_tiles: None,
+            #[cfg(feature = "gpu-common")]
+            halo_cache: None,
             dragging: None,
             drag_serial: 0,
         }
@@ -1353,6 +1368,27 @@ impl Engine {
         Ok(())
     }
 
+    #[cfg(feature = "gpu-common")]
+    fn cached_halo(&mut self, view: Affine, size: (u32, u32)) -> Result<i32> {
+        let view_bits = view.as_coeffs().map(f64::to_bits);
+        if let Some(c) = self.halo_cache
+            && c.generation == self.generation
+            && c.view_bits == view_bits
+            && c.size == size
+        {
+            return Ok(c.halo);
+        }
+        let rect = Rect::new(0.0, 0.0, f64::from(size.0), f64::from(size.1));
+        let halo = self.halo_for_rect(view, rect)?;
+        self.halo_cache = Some(HaloCache {
+            generation: self.generation,
+            view_bits,
+            size,
+            halo,
+        });
+        Ok(halo)
+    }
+
     /// Draws tiles on the GPU for the next frame of the view last drawn, for at most
     /// `budget_ms` (`Gpu::ahead`): what a browser runs between frames at rest.
     #[cfg(feature = "gpu-common")]
@@ -1366,8 +1402,7 @@ impl Engine {
         let Some(last) = gpu.last() else {
             return Ok(DrawStats::default());
         };
-        let rect = Rect::new(0.0, 0.0, f64::from(last.size.0), f64::from(last.size.1));
-        let halo = match self.halo_for_rect(last.view, rect) {
+        let halo = match self.cached_halo(last.view, last.size) {
             Ok(h) => h,
             Err(e) if e.code == ErrorCode::Limit => return Ok(DrawStats::default()),
             Err(e) => return Err(e),
@@ -1376,7 +1411,7 @@ impl Engine {
             .gpu
             .as_mut()
             .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
-        gpu.ahead(&self.store, background, halo, budget_ms)
+        gpu.ahead(&self.store, background, self.generation, halo, budget_ms)
     }
 
     /// Draws a frame on the GPU, made of tiles (into its canvas, when it has one).
@@ -1394,20 +1429,55 @@ impl Engine {
         self.check_size(width, height)?;
         camera.check()?;
         self.check_supported()?;
-        let replay_limit = self
-            .gpu
-            .as_ref()
-            .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?
-            .halo_replay_limit();
+        let (replay_limit, cached_gpu_halo) = {
+            let gpu = self
+                .gpu
+                .as_ref()
+                .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
+            (gpu.halo_replay_limit(), gpu.tiles.halo())
+        };
         let view = camera.view();
         let frame_rect = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
-        let (reach, _, halo_plan) = self.reader_halo_plan(
-            view,
-            Some(frame_rect),
-            editor_viewport && !self.store.has_context(),
-            replay_limit,
-        );
-        let halo_opt = self.limit_halo(reach).ok();
+        let drag = self.drag_frame();
+        let simple_reader_drag =
+            options.moving && drag.as_ref().is_some_and(|d| d.split.is_none()) && self.store.nodes.len() <= 512;
+        let composite_only = options.budget_ms < 0.0;
+        let reuse_moving_halo = options.moving
+            && options.budget_ms > 0.0
+            && !simple_reader_drag
+            && !self.store.readers().is_empty()
+            && cached_gpu_halo > 0;
+        // Interactive moving frames and composite-only presents stay on cached/coarse tiles
+        // without baking exact haloed tiles: reuse the active tile cache halo in O(1) instead of
+        // re-walking all backdrop readers on every motion frame.
+        let (halo_opt, halo_plan) = if composite_only || reuse_moving_halo {
+            (Some(cached_gpu_halo), None)
+        } else {
+            let plan_viewport = editor_viewport
+                && !self.store.has_context()
+                && !(options.moving && options.budget_ms > 0.0 && !simple_reader_drag);
+            let view_bits = view.as_coeffs().map(f64::to_bits);
+            if !plan_viewport
+                && let Some(c) = self.halo_cache
+                && c.generation == self.generation
+                && c.view_bits == view_bits
+                && c.size == (width, height)
+            {
+                (Some(c.halo), None)
+            } else {
+                let (reach, _, halo_plan) = self.reader_halo_plan(view, Some(frame_rect), plan_viewport, replay_limit);
+                let halo_opt = self.limit_halo(reach).ok();
+                if let Some(halo) = halo_opt {
+                    self.halo_cache = Some(HaloCache {
+                        generation: self.generation,
+                        view_bits,
+                        size: (width, height),
+                        halo,
+                    });
+                }
+                (halo_opt, halo_plan)
+            }
+        };
         let frame = Frame {
             width: width as u16,
             height: height as u16,
@@ -1420,9 +1490,6 @@ impl Engine {
                 y1: height as i32,
             },
         };
-        let drag = self.drag_frame();
-        let simple_reader_drag =
-            options.moving && drag.as_ref().is_some_and(|d| d.split.is_none()) && self.store.nodes.len() <= 512;
         let prefix = if simple_reader_drag && options.budget_ms > 0.0 {
             self.dragging.as_ref().and_then(|d| {
                 let kids = &self.store.nodes.get(&crate::store::ROOT)?.children;
@@ -1448,7 +1515,7 @@ impl Engine {
             .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
         // One pass avoids rasterizing the same reader and prefix in each touched tile. For
         // interactive drags bound the scene walk. Dense pages use their retained tiles.
-        let whole = halo_opt != Some(0) && (options.budget_ms <= 0.0 || simple_reader_drag);
+        let whole = !composite_only && halo_opt != Some(0) && (options.budget_ms == 0.0 || simple_reader_drag);
         let whole_stats = if whole {
             let mut result = gpu.render_whole(
                 &self.store,
@@ -1490,7 +1557,7 @@ impl Engine {
                 options,
                 drag.as_ref(),
             )?
-        } else if options.moving && options.budget_ms > 0.0 {
+        } else if composite_only || (options.moving && options.budget_ms > 0.0) {
             // Coarse tiles do not need an exact halo. If a high-zoom tile hits a backend limit
             // (for example an oversized glass chunk at 25,600% zoom), fall back to the device-res
             // reader-halo path rather than forcing whole-view canvas downscaling.
@@ -1504,16 +1571,28 @@ impl Engine {
                 drag.as_ref(),
             ) {
                 Ok(stats) => stats,
-                Err(e) if e.code == ErrorCode::Limit && halo_plan.as_ref().is_some_and(|p| p.use_coarse_halo) => gpu
-                    .render_whole(
-                        &self.store,
-                        &frame,
-                        background,
-                        self.generation,
-                        options.moving,
-                        None,
-                        halo_plan.as_ref(),
-                    )?,
+                Err(e) if e.code == ErrorCode::Limit => {
+                    let lazy_plan = if halo_plan.is_some() {
+                        halo_plan
+                    } else if editor_viewport && !self.store.has_context() {
+                        self.reader_halo_plan(view, Some(frame_rect), true, replay_limit).2
+                    } else {
+                        None
+                    };
+                    if lazy_plan.as_ref().is_some_and(|p| p.use_coarse_halo) {
+                        self.gpu.as_mut().expect("GPU attached").render_whole(
+                            &self.store,
+                            &frame,
+                            background,
+                            self.generation,
+                            options.moving,
+                            None,
+                            lazy_plan.as_ref(),
+                        )?
+                    } else {
+                        return Err(e);
+                    }
+                }
                 Err(e) => return Err(e),
             }
         } else {
@@ -1792,29 +1871,6 @@ impl Engine {
             }
             (feat > 0.0 && feat.is_finite()).then_some((dev_b, feat))
         }
-        type ClipFrameEntry = Option<(Rect, Option<[u8; 4]>)>;
-        #[inline(never)]
-        fn unfilled_clip_from_stack(stack: &[ClipFrameEntry]) -> Option<[f32; 4]> {
-            let mut bounds: Option<[f32; 4]> = None;
-            let mut inner_fill: Option<[u8; 4]> = None;
-            for item in stack.iter().rev() {
-                if let Some((b, fill)) = *item {
-                    bounds = Some(match bounds {
-                        Some([x0, y0, x1, y1]) => [
-                            x0.max(b.x0 as f32),
-                            y0.max(b.y0 as f32),
-                            x1.min(b.x1 as f32),
-                            y1.min(b.y1 as f32),
-                        ],
-                        None => {
-                            inner_fill = fill;
-                            [b.x0 as f32, b.y0 as f32, b.x1 as f32, b.y1 as f32]
-                        }
-                    });
-                }
-            }
-            bounds.filter(|[x0, y0, x1, y1]| inner_fill.is_none() && x1 > x0 && y1 > y0)
-        }
         /// Spatial post-effect reach (LayerBlur, Texture) for enclosing scopes.
         /// Noise is pointwise and adds zero reach. When `plan_viewport` is true, adds exec.rs's
         /// 4 px padded-output rounding and pyramid-alignment slack so coarse captures and native
@@ -1868,237 +1924,125 @@ impl Engine {
             }
             (reach, overflow)
         }
-        #[allow(clippy::too_many_arguments)]
-        fn collect(
-            store: &Store,
-            view: Affine,
-            view_scale: f64,
-            max_side: f64,
-            plan_viewport: bool,
-            id: u32,
-            parent: Affine,
-            alpha: f32,
-            parent_context: bool,
-            post_reach_px: f64,
-            spatial_post_overflow: bool,
-            order: &mut usize,
-            clip_stack: &mut Vec<ClipFrameEntry>,
-            features: &mut Vec<(Rect, f32, usize)>,
-            out: &mut Vec<ReaderNode>,
-        ) {
-            let Some(node) = store.nodes.get(&id) else {
-                return;
-            };
-            let r = &node.record;
-            if r.hidden() {
-                return;
-            }
-            let world = parent * r.transform;
-            let device = view * world;
+        let overlaps = |a: Rect, b: Rect| a.x0 <= b.x1 && b.x0 <= a.x1 && a.y0 <= b.y1 && b.y0 <= a.y1;
+        let cache = self.store.reader_cache();
+        let mut nodes = Vec::with_capacity(cache.visible_readers.len());
+        for (idx, cr) in cache.visible_readers.iter().enumerate() {
+            let device = view * cr.world;
             if !device.as_coeffs().iter().all(|v| v.is_finite()) {
-                return;
+                continue;
             }
-            let is_context = r.context();
-            let in_alpha = if parent_context && !is_context { 1.0 } else { alpha };
-            let opacity = in_alpha * r.opacity;
-            if opacity <= 0.0 {
-                return;
-            }
-            let inner = if r.isolate() && r.opacity < 1.0 { 1.0 } else { opacity };
-            let (own_post_reach, own_overflow) = if r.post_effects.iter().any(crate::record::PostEffect::is_spatial) {
-                post_effect_reach(r, view_scale, max_side, plan_viewport)
-            } else {
-                (0.0, false)
-            };
-            let post_reach_px = post_reach_px + own_post_reach;
-            let spatial_post_overflow = spatial_post_overflow || own_overflow;
-            let box_rect = Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1]));
-            let local = r
-                .content_bounds(&|g| store.glyphs.bounds(g))
-                .map_or(box_rect, |cb| cb.union(box_rect));
             let [a, b, c, d, _, _] = device.as_coeffs();
             let scale = (a.abs() + c.abs()).max(b.abs() + d.abs());
             let det_scale = device.determinant().abs().sqrt() as f32;
-            let clip_base = clip_stack.len();
-            for (at, op) in r.ops.iter().enumerate() {
-                match op {
-                    crate::record::Op::Clip { path, .. } if plan_viewport => {
-                        let entry = if exec::clip_wraps_children(&r.ops, at) {
-                            r.entry_bounds(*path, &|g| store.glyphs.bounds(g)).map(|lb| {
-                                (
-                                    device.transform_rect_bbox(lb),
-                                    exec::frame_solid_fill(&r.ops, at, inner),
-                                )
-                            })
-                        } else {
-                            None
-                        };
-                        clip_stack.push(entry);
-                    }
-                    crate::record::Op::Unclip if plan_viewport => {
-                        if clip_stack.len() > clip_base {
-                            clip_stack.pop();
-                        }
-                    }
-                    crate::record::Op::Fill { path, paint, .. } if plan_viewport && !is_context => {
-                        *order += 1;
-                        if paint_alpha_visible(paint, inner)
-                            && let Some((dev_b, feat)) =
-                                entry_feature_px(store, r, *path, paint, None, device, det_scale)
-                        {
-                            features.push((dev_b, feat, *order));
-                        }
-                    }
-                    crate::record::Op::Stroke { path, style, paint, .. } if plan_viewport && !is_context => {
-                        *order += 1;
-                        if paint_alpha_visible(paint, inner)
-                            && let Some((dev_b, feat)) =
-                                entry_feature_px(store, r, *path, paint, Some(style.width), device, det_scale)
-                        {
-                            features.push((dev_b, feat, *order));
-                        }
-                    }
-                    crate::record::Op::Children => {
-                        for &kid in &node.children {
-                            collect(
-                                store,
-                                view,
-                                view_scale,
-                                max_side,
-                                plan_viewport,
-                                kid,
-                                world,
-                                inner,
-                                is_context,
-                                post_reach_px,
-                                spatial_post_overflow,
-                                order,
-                                clip_stack,
-                                features,
-                                out,
-                            );
-                        }
-                    }
-                    crate::record::Op::Glass(g) if !is_context => {
-                        *order += 1;
-                        let reach_px = (f64::from(crate::glass::local_halo(g)) * scale).ceil() + 2.0;
-                        let paint = device.transform_rect_bbox(local);
-                        out.push(ReaderNode {
-                            key: (id, at),
-                            paint,
-                            read: paint.inflate(reach_px, reach_px),
-                            reach_px,
-                            post_reach_px,
-                            writes_backdrop: false,
-                            kind: ReaderKind::Glass,
-                            spatial_post_overflow,
-                            paint_order: *order,
-                            unfilled_clip: None,
-                        });
-                    }
-                    crate::record::Op::Read { halo, .. } => {
-                        *order += 1;
-                        let reach_px = (f64::from(*halo) * scale).ceil() + 2.0;
-                        let paint = device.transform_rect_bbox(local);
-                        out.push(ReaderNode {
-                            key: (id, at),
-                            paint,
-                            read: paint.inflate(reach_px, reach_px),
-                            reach_px,
-                            post_reach_px,
-                            writes_backdrop: true,
-                            kind: ReaderKind::Read,
-                            spatial_post_overflow,
-                            paint_order: *order,
-                            unfilled_clip: None,
-                        });
-                    }
-                    crate::record::Op::BackgroundBlur(b_op) => {
-                        *order += 1;
-                        let sigma_px = crate::blur::sigma_from_radius(b_op.radius) * scale as f32;
-                        let reach_px = f64::from(crate::blur::replay_reach(sigma_px)).ceil() + 2.0;
-                        let paint = device.transform_rect_bbox(local);
-                        let sigma_det = crate::blur::sigma_from_radius(b_op.radius) * det_scale;
-                        let unfilled_clip = if plan_viewport {
-                            unfilled_clip_from_stack(clip_stack)
-                        } else {
-                            None
-                        };
-                        out.push(ReaderNode {
-                            key: (id, at),
-                            paint,
-                            read: paint.inflate(reach_px, reach_px),
-                            reach_px,
-                            post_reach_px,
-                            writes_backdrop: true,
-                            kind: ReaderKind::UniformBlur { sigma: sigma_det },
-                            spatial_post_overflow,
-                            paint_order: *order,
-                            unfilled_clip,
-                        });
-                    }
-                    crate::record::Op::ProgressiveBlur(p_op) => {
-                        *order += 1;
-                        let max_r = p_op.start_radius.max(p_op.end_radius);
-                        let sigma_px = crate::blur::sigma_from_radius(max_r) * scale as f32;
-                        let reach_px = f64::from(crate::blur::replay_reach(sigma_px)).ceil() + 2.0;
-                        let paint = device.transform_rect_bbox(local);
-                        let s0 = crate::blur::sigma_from_radius(p_op.start_radius) * det_scale;
-                        let s1 = crate::blur::sigma_from_radius(p_op.end_radius) * det_scale;
-                        let plan = crate::progressive_blur::ProgressivePlan::new(p_op, device, r.size, det_scale);
-                        let unfilled_clip = if plan_viewport {
-                            unfilled_clip_from_stack(clip_stack)
-                        } else {
-                            None
-                        };
-                        out.push(ReaderNode {
-                            key: (id, at),
-                            paint,
-                            read: paint.inflate(reach_px, reach_px),
-                            reach_px,
-                            post_reach_px,
-                            writes_backdrop: true,
-                            kind: ReaderKind::ProgressiveBlur {
-                                lo: s0.min(s1),
-                                hi: s0.max(s1),
-                                plan,
-                            },
-                            spatial_post_overflow,
-                            paint_order: *order,
-                            unfilled_clip,
-                        });
-                    }
-                    _ => {}
+            let mut post_reach_px = 0.0f64;
+            let mut spatial_post_overflow = false;
+            for &pid in &cr.spatial_post_records {
+                if let Some(pnode) = self.store.nodes.get(&pid) {
+                    let (pr, ov) = post_effect_reach(&pnode.record, view_scale, max_side, plan_viewport);
+                    post_reach_px += pr;
+                    spatial_post_overflow |= ov;
                 }
             }
-            clip_stack.truncate(clip_base);
-        }
-        let mut nodes = Vec::new();
-        let mut features = Vec::new();
-        let mut clip_stack = Vec::new();
-        let mut order = 0usize;
-        if let Some(root) = self.store.nodes.get(&crate::store::ROOT) {
-            for &kid in &root.children {
-                collect(
-                    &self.store,
-                    view,
-                    view_scale,
-                    max_side,
-                    plan_viewport,
-                    kid,
-                    Affine::IDENTITY,
-                    1.0,
-                    false,
-                    0.0,
-                    false,
-                    &mut order,
-                    &mut clip_stack,
-                    &mut features,
-                    &mut nodes,
-                );
+            let paint = device.transform_rect_bbox(cr.local);
+            let unfilled_clip = if plan_viewport && !cr.unfilled_clips.is_empty() {
+                let mut bounds: Option<[f32; 4]> = None;
+                for &(cw, lb) in &cr.unfilled_clips {
+                    let b = (view * cw).transform_rect_bbox(lb);
+                    bounds = Some(match bounds {
+                        Some([x0, y0, x1, y1]) => [
+                            x0.max(b.x0 as f32),
+                            y0.max(b.y0 as f32),
+                            x1.min(b.x1 as f32),
+                            y1.min(b.y1 as f32),
+                        ],
+                        None => [b.x0 as f32, b.y0 as f32, b.x1 as f32, b.y1 as f32],
+                    });
+                }
+                bounds.filter(|[x0, y0, x1, y1]| x1 > x0 && y1 > y0)
+            } else {
+                None
+            };
+            match cr.kind {
+                crate::store::CachedReaderKind::Glass { local_halo } => {
+                    let reach_px = (f64::from(local_halo) * scale).ceil() + 2.0;
+                    nodes.push(ReaderNode {
+                        key: cr.key,
+                        paint,
+                        read: paint.inflate(reach_px, reach_px),
+                        reach_px,
+                        post_reach_px,
+                        writes_backdrop: false,
+                        kind: ReaderKind::Glass,
+                        spatial_post_overflow,
+                        paint_order: idx + 1,
+                        unfilled_clip: None,
+                    });
+                }
+                crate::store::CachedReaderKind::Read { halo } => {
+                    let reach_px = (f64::from(halo) * scale).ceil() + 2.0;
+                    nodes.push(ReaderNode {
+                        key: cr.key,
+                        paint,
+                        read: paint.inflate(reach_px, reach_px),
+                        reach_px,
+                        post_reach_px,
+                        writes_backdrop: true,
+                        kind: ReaderKind::Read,
+                        spatial_post_overflow,
+                        paint_order: idx + 1,
+                        unfilled_clip: None,
+                    });
+                }
+                crate::store::CachedReaderKind::BackgroundBlur { radius } => {
+                    let sigma_px = crate::blur::sigma_from_radius(radius) * scale as f32;
+                    let reach_px = f64::from(crate::blur::replay_reach(sigma_px)).ceil() + 2.0;
+                    let sigma_det = crate::blur::sigma_from_radius(radius) * det_scale;
+                    nodes.push(ReaderNode {
+                        key: cr.key,
+                        paint,
+                        read: paint.inflate(reach_px, reach_px),
+                        reach_px,
+                        post_reach_px,
+                        writes_backdrop: true,
+                        kind: ReaderKind::UniformBlur { sigma: sigma_det },
+                        spatial_post_overflow,
+                        paint_order: idx + 1,
+                        unfilled_clip,
+                    });
+                }
+                crate::store::CachedReaderKind::ProgressiveBlur => {
+                    let Some(crate::record::Op::ProgressiveBlur(p_op)) =
+                        self.store.nodes.get(&cr.key.0).and_then(|n| n.record.ops.get(cr.key.1))
+                    else {
+                        continue;
+                    };
+                    let max_r = p_op.start_radius.max(p_op.end_radius);
+                    let sigma_px = crate::blur::sigma_from_radius(max_r) * scale as f32;
+                    let reach_px = f64::from(crate::blur::replay_reach(sigma_px)).ceil() + 2.0;
+                    let s0 = crate::blur::sigma_from_radius(p_op.start_radius) * det_scale;
+                    let s1 = crate::blur::sigma_from_radius(p_op.end_radius) * det_scale;
+                    let plan = crate::progressive_blur::ProgressivePlan::new(p_op, device, cr.size, det_scale);
+                    nodes.push(ReaderNode {
+                        key: cr.key,
+                        paint,
+                        read: paint.inflate(reach_px, reach_px),
+                        reach_px,
+                        post_reach_px,
+                        writes_backdrop: true,
+                        kind: ReaderKind::ProgressiveBlur {
+                            lo: s0.min(s1),
+                            hi: s0.max(s1),
+                            plan,
+                        },
+                        spatial_post_overflow,
+                        paint_order: idx + 1,
+                        unfilled_clip,
+                    });
+                }
             }
         }
-        let overlaps = |a: Rect, b: Rect| a.x0 <= b.x1 && b.x0 <= a.x1 && a.y0 <= b.y1 && b.y0 <= a.y1;
+        type DownstreamWriters<'a> = (&'a mut Vec<(u32, usize)>, &'a mut [bool]);
         #[inline(never)]
         fn propagate_writers(
             writers: &[usize],
@@ -2107,7 +2051,7 @@ impl Engine {
             reach: f64,
             needed: &mut [f64],
             mut reader_only: Option<(&mut [f64], f64)>,
-            mut downstream: Option<&mut Vec<(u32, usize)>>,
+            mut downstream: Option<DownstreamWriters<'_>>,
         ) {
             let earlier = writers.partition_point(|&writer| writer < i);
             let read = nodes[i].read;
@@ -2120,9 +2064,10 @@ impl Engine {
                     if let Some((ro_needed, ro_reach)) = reader_only.as_mut() {
                         ro_needed[writer] = ro_needed[writer].max(*ro_reach);
                     }
-                    if let Some(ds) = downstream.as_deref_mut()
-                        && !ds.contains(&nodes[writer].key)
+                    if let Some((ds, seen)) = downstream.as_mut()
+                        && !seen[writer]
                     {
+                        seen[writer] = true;
                         ds.push(nodes[writer].key);
                     }
                 }
@@ -2157,6 +2102,7 @@ impl Engine {
         let mut reader_only_needed = vec![0.0f64; nodes.len()];
         let mut active_node = vec![false; nodes.len()];
         let mut downstream_readers: Vec<(u32, usize)> = Vec::new();
+        let mut downstream_seen = vec![false; nodes.len()];
         let mut samples = crop.unwrap_or(Rect::ZERO);
         let mut total = 0.0f64;
         let mut reader_only = 0.0f64;
@@ -2186,7 +2132,7 @@ impl Engine {
                 reach,
                 &mut needed_by_later,
                 Some((&mut reader_only_needed, reader_reach_only)),
-                Some(&mut downstream_readers),
+                Some((&mut downstream_readers, &mut downstream_seen)),
             );
         }
         let Some(crop) = crop.filter(|_| plan_viewport) else {
@@ -2210,10 +2156,13 @@ impl Engine {
         let mut any_mid = false;
         let mut mid_needed = vec![0.0f64; nodes.len()];
         let mut downstream_mid_readers: Vec<(u32, usize)> = Vec::new();
+        let mut downstream_mid_seen = vec![false; nodes.len()];
         let mut mid_samples_f = crop;
         let mut glass_mid_rects: Vec<Rect> = Vec::new();
         let mut max_far_blur_order = 0usize;
         let mut max_mid_blur_order = 0usize;
+        let mut max_far_blur_key: Option<(u32, usize)> = None;
+        let mut max_mid_blur_key: Option<(u32, usize)> = None;
         let mut node_uses_coarse_blur = vec![false; nodes.len()];
         for (i, node) in nodes.iter().enumerate().rev() {
             if !active_node[i] {
@@ -2269,7 +2218,8 @@ impl Engine {
                                 };
                                 if has_sub_far {
                                     feeds_sub_far_blur = true;
-                                    if !downstream_mid_readers.contains(&nodes[writer].key) {
+                                    if !downstream_mid_seen[writer] {
+                                        downstream_mid_seen[writer] = true;
                                         downstream_mid_readers.push(nodes[writer].key);
                                     }
                                     // Ensure the mid tier covers the visible glass lens (plus
@@ -2303,7 +2253,10 @@ impl Engine {
                             any_coarse = true;
                             far_has_blur = true;
                             node_uses_coarse_blur[i] = true;
-                            max_far_blur_order = max_far_blur_order.max(node.paint_order);
+                            if node.paint_order > max_far_blur_order {
+                                max_far_blur_order = node.paint_order;
+                                max_far_blur_key = Some(node.key);
+                            }
                             0.0
                         } else if far_divisor > crate::halo::MID_TIER_TRIGGER_DIVISOR
                             && sigma >= crate::blur::VIEWPORT_HALO_MIN_SIGMA
@@ -2311,7 +2264,10 @@ impl Engine {
                             any_coarse = true;
                             any_mid = true;
                             node_uses_coarse_blur[i] = true;
-                            max_mid_blur_order = max_mid_blur_order.max(node.paint_order);
+                            if node.paint_order > max_mid_blur_order {
+                                max_mid_blur_order = node.paint_order;
+                                max_mid_blur_key = Some(node.key);
+                            }
                             f64::from(crate::blur::blur_reach(sigma)).ceil() + 2.0
                         } else {
                             0.0
@@ -2332,12 +2288,18 @@ impl Engine {
                             node_uses_coarse_blur[i] = true;
                             if hi >= far_unif_cut && hi >= far_prog_cut {
                                 far_has_blur = true;
-                                max_far_blur_order = max_far_blur_order.max(node.paint_order);
+                                if node.paint_order > max_far_blur_order {
+                                    max_far_blur_order = node.paint_order;
+                                    max_far_blur_key = Some(node.key);
+                                }
                             }
                         }
                         if far_divisor > crate::halo::MID_TIER_TRIGGER_DIVISOR && split.mid_max_sigma > 0.0 {
                             any_mid = true;
-                            max_mid_blur_order = max_mid_blur_order.max(node.paint_order);
+                            if node.paint_order > max_mid_blur_order {
+                                max_mid_blur_order = node.paint_order;
+                                max_mid_blur_key = Some(node.key);
+                            }
                             f64::from(crate::blur::blur_reach(split.mid_max_sigma)).ceil() + 2.0
                         } else {
                             0.0
@@ -2359,7 +2321,7 @@ impl Engine {
                     mid_reach,
                     &mut mid_needed,
                     None,
-                    Some(&mut downstream_mid_readers),
+                    Some((&mut downstream_mid_readers, &mut downstream_mid_seen)),
                 );
             }
         }
@@ -2496,24 +2458,173 @@ impl Engine {
         let capture_bounds = IRect::around(capture_bounds_f);
         let samples_rect = IRect::around(samples_final_f);
 
-        // Compute finest backdrop feature size (device px) preceding active blurs in each tier.
-        let far_min_feature_px = if max_far_blur_order > 0 {
-            features
-                .iter()
-                .filter(|(b, _, ord)| *ord < max_far_blur_order && overlaps(*b, samples_final_f))
-                .map(|(_, f, _)| *f)
-                .fold(f32::INFINITY, f32::min)
+        // Compute finest backdrop feature size (device px) preceding active blurs in each tier,
+        // using a viewport-culled walk executed ONLY when coarse blurs actually need it.
+        let need_far_feat = max_far_blur_key.is_some();
+        let need_mid_feat = mid_samples.is_some() && max_mid_blur_key.is_some();
+        let (far_min_feature_px, mid_min_feature_px) = if need_far_feat || need_mid_feat {
+            struct FeatureWalk {
+                far_rect: Rect,
+                mid_rect: Option<Rect>,
+                cull_rect: Rect,
+                far_stop: Option<(u32, usize)>,
+                mid_stop: Option<(u32, usize)>,
+                before_far: bool,
+                before_mid: bool,
+                far_min: f32,
+                mid_min: f32,
+            }
+            #[allow(clippy::too_many_arguments)]
+            fn scan_features(
+                store: &Store,
+                view: Affine,
+                reader_ancestors: &std::collections::HashSet<u32>,
+                id: u32,
+                parent: Affine,
+                alpha: f32,
+                parent_context: bool,
+                w: &mut FeatureWalk,
+            ) {
+                if !w.before_far && !w.before_mid {
+                    return;
+                }
+                let Some(node) = store.nodes.get(&id) else {
+                    return;
+                };
+                let r = &node.record;
+                if r.hidden() {
+                    return;
+                }
+                let world = parent * r.transform;
+                let device = view * world;
+                if !device.as_coeffs().iter().all(|v| v.is_finite()) {
+                    return;
+                }
+                let is_context = r.context();
+                let in_alpha = if parent_context && !is_context { 1.0 } else { alpha };
+                let opacity = in_alpha * r.opacity;
+                if opacity <= 0.0 {
+                    return;
+                }
+                if !reader_ancestors.contains(&id) {
+                    let Some(bounds) = store.bounds(id) else {
+                        return;
+                    };
+                    let dev_b = device.transform_rect_bbox(bounds);
+                    if !(dev_b.x0 <= w.cull_rect.x1
+                        && w.cull_rect.x0 <= dev_b.x1
+                        && dev_b.y0 <= w.cull_rect.y1
+                        && w.cull_rect.y0 <= dev_b.y1)
+                    {
+                        return;
+                    }
+                }
+                let inner = if r.isolate() && r.opacity < 1.0 { 1.0 } else { opacity };
+                let det_scale = device.determinant().abs().sqrt() as f32;
+                for (at, op) in r.ops.iter().enumerate() {
+                    if !w.before_far && !w.before_mid {
+                        return;
+                    }
+                    match op {
+                        crate::record::Op::Fill { path, paint, .. } if !is_context => {
+                            if paint_alpha_visible(paint, inner)
+                                && let Some((dev_b, feat)) =
+                                    entry_feature_px(store, r, *path, paint, None, device, det_scale)
+                            {
+                                if w.before_far
+                                    && dev_b.x0 <= w.far_rect.x1
+                                    && w.far_rect.x0 <= dev_b.x1
+                                    && dev_b.y0 <= w.far_rect.y1
+                                    && w.far_rect.y0 <= dev_b.y1
+                                {
+                                    w.far_min = w.far_min.min(feat);
+                                }
+                                if w.before_mid
+                                    && let Some(mr) = w.mid_rect
+                                    && dev_b.x0 <= mr.x1
+                                    && mr.x0 <= dev_b.x1
+                                    && dev_b.y0 <= mr.y1
+                                    && mr.y0 <= dev_b.y1
+                                {
+                                    w.mid_min = w.mid_min.min(feat);
+                                }
+                            }
+                        }
+                        crate::record::Op::Stroke { path, style, paint, .. } if !is_context => {
+                            if paint_alpha_visible(paint, inner)
+                                && let Some((dev_b, feat)) =
+                                    entry_feature_px(store, r, *path, paint, Some(style.width), device, det_scale)
+                            {
+                                if w.before_far
+                                    && dev_b.x0 <= w.far_rect.x1
+                                    && w.far_rect.x0 <= dev_b.x1
+                                    && dev_b.y0 <= w.far_rect.y1
+                                    && w.far_rect.y0 <= dev_b.y1
+                                {
+                                    w.far_min = w.far_min.min(feat);
+                                }
+                                if w.before_mid
+                                    && let Some(mr) = w.mid_rect
+                                    && dev_b.x0 <= mr.x1
+                                    && mr.x0 <= dev_b.x1
+                                    && dev_b.y0 <= mr.y1
+                                    && mr.y0 <= dev_b.y1
+                                {
+                                    w.mid_min = w.mid_min.min(feat);
+                                }
+                            }
+                        }
+                        crate::record::Op::Children => {
+                            for &kid in &node.children {
+                                scan_features(store, view, reader_ancestors, kid, world, inner, is_context, w);
+                                if !w.before_far && !w.before_mid {
+                                    return;
+                                }
+                            }
+                        }
+                        crate::record::Op::BackgroundBlur(_) | crate::record::Op::ProgressiveBlur(_) => {
+                            let k = (id, at);
+                            if w.far_stop == Some(k) {
+                                w.before_far = false;
+                            }
+                            if w.mid_stop == Some(k) {
+                                w.before_mid = false;
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let mid_rect = need_mid_feat.then_some(mid_samples_f);
+            let cull_rect = mid_rect.map_or(samples_final_f, |mr| samples_final_f.union(mr));
+            let mut walk = FeatureWalk {
+                far_rect: samples_final_f,
+                mid_rect,
+                cull_rect,
+                far_stop: max_far_blur_key,
+                mid_stop: max_mid_blur_key,
+                before_far: need_far_feat,
+                before_mid: need_mid_feat,
+                far_min: f32::INFINITY,
+                mid_min: f32::INFINITY,
+            };
+            if let Some(root) = self.store.nodes.get(&crate::store::ROOT) {
+                for &kid in &root.children {
+                    scan_features(
+                        &self.store,
+                        view,
+                        &cache.reader_ancestors,
+                        kid,
+                        Affine::IDENTITY,
+                        1.0,
+                        false,
+                        &mut walk,
+                    );
+                }
+            }
+            (walk.far_min, walk.mid_min)
         } else {
-            f32::INFINITY
-        };
-        let mid_min_feature_px = if mid_samples.is_some() && max_mid_blur_order > 0 {
-            features
-                .iter()
-                .filter(|(b, _, ord)| *ord < max_mid_blur_order && overlaps(*b, mid_samples_f))
-                .map(|(_, f, _)| *f)
-                .fold(f32::INFINITY, f32::min)
-        } else {
-            f32::INFINITY
+            (f32::INFINITY, f32::INFINITY)
         };
 
         // Record unfilled `EdgeMode::Clamp` clip frames wrapping active coarse-tier blurs so the
@@ -2774,7 +2885,7 @@ impl Engine {
             let crop = Rect::new(0.0, 0.0, f64::from(last.size.0), f64::from(last.size.1));
             let tile = tiles.cache.tile;
             let halo = self.cpu_view_halo(last.view, crop, tile)?;
-            tiles.cache.begin(background, halo);
+            tiles.cache.begin_scaled(background, last.view.as_coeffs()[0], halo);
             let Some(plan) = tiles.cache.plan(last.view, last.size, false, Some(last), true, false) else {
                 return Ok(stats);
             };
@@ -2828,8 +2939,8 @@ impl Engine {
         options: TiledOptions,
     ) -> Result<TiledStats> {
         let tile = tiles.cache.tile;
-        tiles.cache.begin(background, halo);
         let scale = view.as_coeffs()[0];
+        tiles.cache.begin_scaled(background, scale, halo);
         let zooming = options.moving && tiles.last_scale.is_some_and(|s| s != scale);
         // A page just shown: under a budget, coarse tiles first (see `Gpu::render`).
         let opening = tiles.last.is_none() && tiles.cache.is_empty() && options.max_jobs != usize::MAX;

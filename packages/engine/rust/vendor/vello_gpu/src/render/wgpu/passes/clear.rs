@@ -10,7 +10,7 @@ use vello_common::color::{AlphaColor, Srgb};
 use vello_common::geometry::RectU16;
 use wgpu::{
     ColorTargetState, ColorWrites, CommandEncoder, Device, PipelineCompilationOptions,
-    RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, TextureView, util::DeviceExt,
+    RenderPassColorAttachment, RenderPassDescriptor, RenderPipeline, TextureView,
 };
 
 /// Pipelines for clearing rectangles of layer textures and the root target.
@@ -169,13 +169,14 @@ impl RendererContext<'_> {
             return;
         }
 
-        let clear_buffer = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("Clear Buffer"),
-                contents: bytemuck::cast_slice(&self.scratch_buffers.clear_instances),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
+        // Drawpane: allocate clear instances from the batched vertex arena instead of create_buffer_init.
+        let clear_range = self
+            .resources
+            .upload_vertex_bytes(bytemuck::cast_slice(&self.scratch_buffers.clear_instances));
+        let view = match target {
+            DrawPassTarget::Root(_) => self.view,
+            DrawPassTarget::Layer(target) => self.resources.layer_view(target),
+        };
         let mut render_pass = self.encoder.begin_render_pass(&RenderPassDescriptor {
             label: Some("Clear Rects"),
             color_attachments: &[Some(RenderPassColorAttachment {
@@ -193,11 +194,12 @@ impl RendererContext<'_> {
             multiview_mask: None,
         });
         render_pass.set_pipeline(pipeline);
-        render_pass.set_vertex_buffer(0, clear_buffer.slice(..));
+        render_pass.set_vertex_buffer(0, self.resources.strips_arena.buffer.slice(clear_range));
         render_pass.draw(
             0..4,
             0..u32::try_from(self.scratch_buffers.clear_instances.len()).unwrap(),
         );
+        self.draws += 1;
     }
 }
 pub(crate) fn clear_color(color: AlphaColor<Srgb>) -> wgpu::Color {

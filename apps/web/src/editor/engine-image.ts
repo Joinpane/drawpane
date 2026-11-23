@@ -46,6 +46,8 @@ interface Source {
   version: number;
   blob?: Blob;
   used: number;
+  pyramidMaxSide?: number;
+  pyramid?: { zoom: Size[]; rest: Size[] };
 }
 
 interface Target extends Size {
@@ -316,7 +318,13 @@ export class ViewImages {
       source.used = clock;
       let pyramid = pyramids.get(ref);
       if (!pyramid) {
-        pyramid = levels(source.info, maxSide);
+        if (source.pyramid && source.pyramidMaxSide === maxSide) {
+          pyramid = source.pyramid;
+        } else {
+          pyramid = levels(source.info, maxSide);
+          source.pyramid = pyramid;
+          source.pyramidMaxSide = maxSide;
+        }
         pyramids.set(ref, pyramid);
       }
       const sizing = zooming ? pyramid.zoom : pyramid.rest;

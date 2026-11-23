@@ -181,16 +181,12 @@ impl GpuResources {
         Ok(())
     }
 
-    pub(crate) fn upload_filter_texture(
-        &mut self,
-        encoder: &mut CommandEncoder,
-        filter_context: &FilterContext,
-    ) {
-        if filter_context.is_empty() {
-            return;
+    pub(crate) fn stage_filter_texture(&mut self, filter_context: &FilterContext) {
+        self.filter_data_staging.clear();
+        if !filter_context.is_empty() {
+            self.filter_data_staging
+                .extend_from_slice(filter_context.as_bytes());
         }
-        self.filter_data_texture
-            .upload(&mut self.staging_belt, encoder, filter_context.as_bytes());
     }
 }
 
@@ -233,20 +229,25 @@ impl RendererContext<'_> {
                 },
             );
         }
-        let resources = &*self.resources;
-        let filter_pair_bind_groups = &resources.filter_pair_bind_groups[&bindings];
-
         if let Some(copy_pass) = plan.copy_pass() {
+            let copy_source = self.resources.filter_pair_bind_groups[&bindings]
+                .copy_source
+                .clone();
+            let scratch_view = self.resources.scratch_view().clone();
             encode_copy_pass(
-                self.device,
                 self.encoder,
+                self.resources,
                 &self.programs.copy.pipeline,
                 copy_pass,
-                &filter_pair_bind_groups.copy_source,
-                resources.scratch_view(),
+                &copy_source,
+                &scratch_view,
                 "Filter Copy Pass",
             );
+            self.draws += 1;
         }
+
+        let resources = &*self.resources;
+        let filter_pair_bind_groups = &resources.filter_pair_bind_groups[&bindings];
 
         for (step_index, instances) in plan.steps().enumerate() {
             let input = bindings.input(step_index);
@@ -261,6 +262,7 @@ impl RendererContext<'_> {
                 &resources.filter_original_bind_group,
                 output,
             );
+            self.draws += 1;
         }
     }
 }

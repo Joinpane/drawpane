@@ -53,6 +53,8 @@ import type { CpuWorkerReply, CpuWorkerRequest } from "./engine-cpu.worker";
 import { CPU_IMAGE_BUDGET, CPU_IMAGE_SIDE, ViewImages } from "./engine-image";
 import { fitEngineRaster, MIN_RASTER_SCALE } from "./engine-raster";
 import {
+  type MotionPolicy,
+  motionPolicy,
   type PresentationMode,
   presentation,
   type RendererChoice,
@@ -62,6 +64,8 @@ import {
 } from "./renderer-switch";
 
 export {
+  type MotionPolicy,
+  motionPolicy,
   type PresentationMode,
   presentation,
   type RendererChoice,
@@ -588,8 +592,12 @@ const NOT_DRAWN: EngineDraw = {
 
 /** What drawing between frames did (`EngineView.ahead`). */
 export interface EngineAhead {
-  /** It drew a tile or sent text: another slice may do more. */
+  /** It drew a tile, made mid-tile progress, or sent text: another slice may do more. */
   readonly progressed: boolean;
+  /** Tiles completed during this slice. */
+  readonly drawn: number;
+  /** True when a tile yielded cooperatively mid-walk to honor the slice budget. */
+  readonly inProgress: boolean;
   /** Tiles the last frame shows still to draw (some, after text was sent). */
   readonly tiles: number;
   /** Tiles round the view still to draw. */
@@ -601,23 +609,20 @@ export interface EngineAhead {
 
 /**
  * Milliseconds a frame may spend drawing tiles beyond those nothing else can stand in for
- * (decision 0040, phase 2): little while the camera moves (tiles round the view are drawn
- * ahead), more once it rests, so the exact picture arrives within the 250 ms the freshness gate
- * allows without any one long frame.
+ * (decision 0040, phase 2): capped tightly while moving so warm-cache motion stays at 60 fps,
+ * and capped to ~8 ms at rest so cooperative mid-tile yielding never stalls the main thread
+ * past one frame.
  */
 export const MOVING_BUDGET_MS = 4;
-export const REST_BUDGET_MS = 12;
+export const REST_BUDGET_MS = 8;
 /**
- * Between frames at rest, the engine draws the tiles the next frame wants in slices this long
- * (`EngineView.ahead`): the time a page has between animation frames goes to the exact frame
- * too, not only each frame's budget. A frame's length at 60 Hz: the browser renders between
- * slices (on the T4 bench, ~8 ms each time), so fewer, longer slices settle sooner, and none
- * holds input back for more than a frame. Text sent whole after a page opens goes in slices of
- * the same length.
+ * Between frames at rest, the engine draws the tiles the next frame wants in rAF-paced slices
+ * capped to ~8 ms (`EngineView.ahead`), so input and compositing never block past one frame.
  */
-export const IDLE_SLICE_MS = 16;
-/** A moving frame's budget that fits no tile: only what nothing stands in for is drawn. */
-const NO_OPTIONAL_MS = 1e-6;
+export const IDLE_SLICE_MS = 8;
+/** A budget that composites cached tiles without starting new tile bakes. */
+/** Negative sentinel budget: composite and present cached tiles without baking new ones. */
+export const COMPOSITE_ONLY_MS = -1;
 
 interface CpuBackedFrame {
   readonly canvas: HTMLCanvasElement;
@@ -1086,7 +1091,7 @@ export class EngineView {
   #openingFrame: number | null = null;
   #openingPreviewTimer = 0;
   /** What drawing between frames did, summed (`ahead`), for the bench and the debug handle. */
-  idle = { slices: 0, tiles: 0, ms: 0 };
+  idle = { slices: 0, tiles: 0, ms: 0, maxSliceMs: 0 };
   /**
    * Set to an object by the bench: when the first exact frame since was drawn (submitted), when
    * the GPU finished it (no read-back involved), and when an exact frame was first shown (a
@@ -1163,6 +1168,7 @@ export class EngineView {
     },
     counts: {
       submits: 0,
+      draws: 0,
       velloRenders: 0,
       glassOps: 0,
       glassBatched: 0,
@@ -2070,7 +2076,7 @@ export class EngineView {
   opened: { pageId: string; buildMs: number; applyMs: number; records: number } | null = null;
 
   /** Applies the builder's next message to a GPU engine; false if it failed. */
-  #patchGpu(pageId: string, textMs?: number): boolean {
+  #patchGpu(pageId: string, textMs?: number, openMs?: number): boolean {
     const engine = this.#engine;
     if (!engine) return false;
     const version = this.#editor.doc.version;
@@ -2081,7 +2087,7 @@ export class EngineView {
     // the whole structure is in view. The first frame need not wait for the full list.
     let message =
       this.#builder.pageId !== pageId || this.#builder.opening
-        ? this.#builder.openSlice(pageId)
+        ? this.#builder.openSlice(pageId, openMs)
         : this.#builder.update(textMs, true);
     if (!message) return true;
     const t1 = performance.now();
@@ -2095,7 +2101,7 @@ export class EngineView {
       };
     this.#builder.acknowledge(r.ok, engine.revision);
     if (!r.ok && r.code === ErrorCode.Revision) {
-      message = this.#builder.openSlice(pageId);
+      message = this.#builder.openSlice(pageId, openMs);
       r = engine.apply(message);
       this.#builder.acknowledge(r.ok, engine.revision);
     }
@@ -2225,9 +2231,44 @@ export class EngineView {
       return null;
     }
     const b = this.#builder;
-    // Initial geometry advances with a new frame so each slice can be shown before the
-    // next one starts. Do not run an unbroken sequence of idle slices during open.
-    if (b.opening || this.#listLimit) return null;
+    if (this.#listLimit) return null;
+    // Wait for the first opening preview slice to land on screen before streaming the rest of
+    // the display list; once it has presented, stream remaining slices in bounded rAF slices
+    // without blocking each slice on a full-screen readback or redundant GPU redraw.
+    if (b.opening) {
+      if (this.#openingFrame !== null || this.#backend === "cpu-worker") return null;
+      const t = performance.now();
+      const ok = this.#patchGpu(pageId, undefined, budgetMs);
+      if (!ok) return null;
+      const elapsed = performance.now() - t;
+      this.idle = {
+        slices: this.idle.slices + 1,
+        tiles: this.idle.tiles,
+        ms: this.idle.ms + elapsed,
+        maxSliceMs: Math.max(this.idle.maxSliceMs, elapsed),
+      };
+      if (b.opening) {
+        return {
+          progressed: true,
+          drawn: 0,
+          inProgress: true,
+          tiles: 1,
+          queued: 0,
+          text: b.pending,
+          textVisible: 0,
+        };
+      }
+      // All layers are admitted: let the next frame draw the full-page coarse view and refine.
+      return {
+        progressed: false,
+        drawn: 0,
+        inProgress: false,
+        tiles: 1,
+        queued: 0,
+        text: b.pending,
+        textVisible: b.pendingVisible,
+      };
+    }
     try {
       const text = (): EngineAhead | null => {
         const t = performance.now();
@@ -2252,6 +2293,8 @@ export class EngineView {
         });
         return {
           progressed: true,
+          drawn: 0,
+          inProgress: false,
           tiles: this.#backend === "cpu-worker" ? 0 : 1,
           queued: 0,
           text: b.pending,
@@ -2261,7 +2304,15 @@ export class EngineView {
       if (b.pageId === pageId && b.pendingVisible > 0) return text();
       if (this.#backend === "cpu-worker") {
         if (b.pageId === pageId && b.pending > 0 && this.#cpuJob === null) return text();
-        return { progressed: false, tiles: 0, queued: 0, text: b.pending, textVisible: 0 };
+        return {
+          progressed: false,
+          drawn: 0,
+          inProgress: false,
+          tiles: 0,
+          queued: 0,
+          text: b.pending,
+          textVisible: 0,
+        };
       }
       const engine = this.#engine;
       if (!engine) return null;
@@ -2279,6 +2330,7 @@ export class EngineView {
         slices: this.idle.slices + 1,
         tiles: this.idle.tiles + r.value.drawn,
         ms: this.idle.ms + r.value.ms,
+        maxSliceMs: Math.max(this.idle.maxSliceMs, r.value.ms),
       };
       this.trace?.push({
         t: performance.now(),
@@ -2293,9 +2345,12 @@ export class EngineView {
         masked: r.value.glyphsMasked,
         outlined: r.value.glyphsOutlined,
       });
-      if (r.value.drawn === 0 && b.pageId === pageId && b.pending > 0) return text();
+      if (r.value.drawn === 0 && !r.value.inProgress && b.pageId === pageId && b.pending > 0)
+        return text();
       return {
-        progressed: r.value.drawn > 0,
+        progressed: r.value.drawn > 0 || r.value.inProgress,
+        drawn: r.value.drawn,
+        inProgress: r.value.inProgress,
         tiles: r.value.pending,
         queued: r.value.queued,
         text: b.pending,
@@ -2448,7 +2503,13 @@ export class EngineView {
           r.camera,
           bg,
           r.scale === 1 && (!exact || textFirst),
-          r.scale === 1 ? (textFirst ? NO_OPTIONAL_MS : budgetMs) : 0,
+          r.scale === 1
+            ? textFirst && budgetMs !== COMPOSITE_ONLY_MS
+              ? exact
+                ? REST_BUDGET_MS
+                : MOVING_BUDGET_MS
+              : budgetMs
+            : 0,
           true,
         ),
       initialScale,
@@ -2522,7 +2583,7 @@ export class EngineView {
       !this.#limitReason;
     this.#canvas.style.backgroundColor = "";
     const n = ++this.#frame;
-    if (opening) {
+    if (opening && this.#builder.stats.fresh) {
       this.#openingFrame = n;
       this.#openingPreviewTimer = window.setTimeout(() => {
         if (this.#openingFrame !== n) return;

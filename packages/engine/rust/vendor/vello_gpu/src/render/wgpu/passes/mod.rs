@@ -9,7 +9,7 @@ pub(crate) mod copy;
 pub(crate) mod filter;
 pub(crate) mod strip;
 
-use crate::draw::{ExternalTextureBindings, ExternalTextureRun};
+use crate::draw::ExternalTextureRun;
 use crate::render::wgpu::RenderTargetConfig;
 use crate::render::wgpu::bindings::TextureBindings;
 use crate::render::wgpu::passes::blend::BlendPipeline;
@@ -31,11 +31,10 @@ use crate::{
     },
 };
 use core::fmt::Debug;
-use hashbrown::HashMap;
 use vello_common::color::AlphaColor;
 use vello_common::geometry::{RectU16, SizeU16};
 use wgpu::{
-    BindGroup, BindGroupLayout, ColorTargetState, ColorWrites, CommandEncoder, Device,
+    BindGroupLayout, ColorTargetState, ColorWrites, CommandEncoder, Device,
     PipelineCompilationOptions, RenderPipeline, TextureView,
 };
 
@@ -168,9 +167,16 @@ pub(crate) struct RendererContext<'a> {
     pub(crate) view: &'a TextureView,
     pub(crate) depth_view: Option<&'a TextureView>,
     pub(crate) texture_bindings: &'a TextureBindings,
-    pub(crate) external_texture_bind_groups: HashMap<ExternalTextureBindings, BindGroup>,
     pub(crate) scratch_buffers: &'a mut ScratchBuffers,
     pub(crate) root_load_op: wgpu::LoadOp<wgpu::Color>,
+    /// Drawpane: dynamic uniform offset into `view_config_buffer` for this render in the batch.
+    pub(crate) view_config_offset: u32,
+    /// Drawpane: base alpha column index in `alphas_texture` for this render in the batch.
+    pub(crate) alpha_col_base: u32,
+    /// Drawpane: base texel index in `encoded_paints_texture` for this render in the batch.
+    pub(crate) paint_base_texel: u32,
+    /// Drawpane: GPU draw calls recorded during this render.
+    pub(crate) draws: u32,
 }
 
 impl RendererContext<'_> {

@@ -366,6 +366,11 @@ pub trait Backend {
     fn stop_early(&self) -> bool {
         false
     }
+    /// Whether the caller's per-frame CPU budget has expired and a resumable walk should yield
+    /// cooperatively at the next safe boundary (outside isolated and masked scopes).
+    fn deadline_reached(&self) -> bool {
+        false
+    }
     /// Switches which targets subsequent scene draws write into, flushing pending scene ops first.
     fn set_targets(&mut self, _write_main: bool, _write_backdrop: bool, _open: &[Open]) -> Result<()> {
         Ok(())
@@ -522,12 +527,15 @@ pub struct DrawStats {
     pub reader_ms: f64,
     pub shadow_ms: f64,
     pub submits: u32,
+    pub draws: u32,
     pub vello_renders: u32,
     pub glass_ops: u32,
     pub glass_batched: u32,
     pub bg_blur_ops: u32,
     pub shadow_ops: u32,
     pub shadow_hits: u32,
+    /// True when a tile slice yielded mid-tile to honor the frame CPU budget.
+    pub in_progress: bool,
 }
 
 impl DrawStats {
@@ -542,6 +550,7 @@ impl DrawStats {
         self.coarse += o.coarse;
         self.specks += o.specks;
         self.verbs += o.verbs;
+        self.draws += o.draws;
     }
 
     /// Whether the frame drew every record exactly (no level-of-detail stand-ins).
@@ -567,6 +576,10 @@ fn plan_readers(store: &Store, frame: &Frame) -> Option<ReaderPlan> {
     if store.readers().is_empty() && !store.has_context() {
         return None;
     }
+    let cache = store.reader_cache();
+    if !store.has_context() && cache.visible_readers.is_empty() {
+        return None;
+    }
     let root = store.nodes.get(&crate::store::ROOT)?;
     let full_viewport = Rect::new(-1.0, -1.0, f64::from(frame.width) + 1.0, f64::from(frame.height) + 1.0);
     let mut seq = 0usize;
@@ -576,37 +589,34 @@ fn plan_readers(store: &Store, frame: &Frame) -> Option<ReaderPlan> {
     let mut has_context = false;
     // Mark isolated ancestors from the full graph (independent of viewport culling), so
     // off-screen reader motion or tiled band rendering never flips an ancestor's compositing path.
-    let mut isolated_with_reader = HashSet::new();
+    let mut isolated_with_reader = cache.isolated_with_reader.clone();
     let mut subtree_readers: HashMap<u32, (usize, bool)> = HashMap::new();
-    let mut mark_isolated_ancestors = |start_id: u32| {
-        let mut chain = Vec::new();
-        let mut cur = start_id;
-        let mut child_of_cur = false;
-        while cur != crate::store::ROOT {
-            let Some(n) = store.nodes.get(&cur) else {
-                return;
-            };
-            if n.record.hidden() {
-                return;
-            }
-            // A child under a parent whose ops contain no `Op::Children` is never drawn.
-            if child_of_cur && !n.record.ops.iter().any(|op| matches!(op, Op::Children)) {
-                return;
-            }
-            chain.push((cur, n.record.isolate() && n.record.opacity < 1.0));
-            child_of_cur = true;
-            cur = n.parent;
-        }
-        for (id, iso) in chain {
-            if iso {
-                isolated_with_reader.insert(id);
-            }
-        }
-    };
-    for &rid in store.readers() {
-        mark_isolated_ancestors(rid);
-    }
     if store.has_context() {
+        let mut mark_isolated_ancestors = |start_id: u32| {
+            let mut chain = Vec::new();
+            let mut cur = start_id;
+            let mut child_of_cur = false;
+            while cur != crate::store::ROOT {
+                let Some(n) = store.nodes.get(&cur) else {
+                    return;
+                };
+                if n.record.hidden() {
+                    return;
+                }
+                // A child under a parent whose ops contain no `Op::Children` is never drawn.
+                if child_of_cur && !n.record.ops.iter().any(|op| matches!(op, Op::Children)) {
+                    return;
+                }
+                chain.push((cur, n.record.isolate() && n.record.opacity < 1.0));
+                child_of_cur = true;
+                cur = n.parent;
+            }
+            for (id, iso) in chain {
+                if iso {
+                    isolated_with_reader.insert(id);
+                }
+            }
+        };
         for (&nid, node) in &store.nodes {
             if nid != crate::store::ROOT && !node.record.context() && !node.record.hidden() {
                 let mut cur = node.parent;
@@ -627,6 +637,7 @@ fn plan_readers(store: &Store, frame: &Frame) -> Option<ReaderPlan> {
             }
         }
     }
+    let reader_ancestors = (!store.has_context()).then_some(&cache.reader_ancestors);
 
     #[allow(clippy::too_many_arguments)]
     fn visit(
@@ -637,6 +648,7 @@ fn plan_readers(store: &Store, frame: &Frame) -> Option<ReaderPlan> {
         parent: Affine,
         alpha: f32,
         parent_context: bool,
+        reader_ancestors: Option<&HashSet<u32>>,
         isolated_with_reader: &HashSet<u32>,
         seq: &mut usize,
         first_glass_seq: &mut Option<usize>,
@@ -645,6 +657,11 @@ fn plan_readers(store: &Store, frame: &Frame) -> Option<ReaderPlan> {
         has_context: &mut bool,
         subtree_readers: &mut HashMap<u32, (usize, bool)>,
     ) -> (usize, bool, bool) {
+        if let Some(anc) = reader_ancestors
+            && !anc.contains(&id)
+        {
+            return (0, false, false);
+        }
         let Some(node) = store.nodes.get(&id) else {
             return (0, false, false);
         };
@@ -698,6 +715,7 @@ fn plan_readers(store: &Store, frame: &Frame) -> Option<ReaderPlan> {
                             world,
                             inner,
                             r.context(),
+                            reader_ancestors,
                             isolated_with_reader,
                             seq,
                             first_glass_seq,
@@ -750,6 +768,7 @@ fn plan_readers(store: &Store, frame: &Frame) -> Option<ReaderPlan> {
             Affine::IDENTITY,
             1.0,
             false,
+            reader_ancestors,
             &isolated_with_reader,
             &mut seq,
             &mut first_glass_seq,
@@ -1038,6 +1057,31 @@ pub fn draw_budgeted<B: Backend>(
     draw_split(store, backend, frame, limits, budget, &Split::all(), frame.detail)
 }
 
+/// Saved state of a cooperatively yielded walk so the next frame slice resumes at the exact
+/// sibling where execution paused with identical pixels.
+pub struct WalkCheckpoint {
+    plan: Option<ReaderPlan>,
+    /// Path from `ROOT` down to the paused sibling: `(parent_id, children_op_idx, child_idx)`.
+    resume_path: Vec<(u32, usize, usize)>,
+    reader_seq: usize,
+    backdrop_live: bool,
+    total_coarse: u32,
+    total_specks: u32,
+}
+
+/// Result of one slice of a resumable tile walk.
+pub enum WalkOutcome {
+    /// The walk finished; `stats` is this slice's incremental counts and `exact` reflects the
+    /// complete walk across all slices.
+    Complete { stats: DrawStats, exact: bool },
+    /// The walk yielded cooperatively at a safe boundary; `stats` is this slice's incremental
+    /// counts and `checkpoint` resumes the remainder.
+    Paused {
+        stats: DrawStats,
+        checkpoint: WalkCheckpoint,
+    },
+}
+
 /// `draw_budgeted`, drawing only the part of the page `split` names.
 pub fn draw_split<B: Backend>(
     store: &Store,
@@ -1048,6 +1092,37 @@ pub fn draw_split<B: Backend>(
     split: &Split,
     coarse_readers: bool,
 ) -> Result<DrawStats> {
+    match draw_split_resumable(
+        store,
+        backend,
+        frame,
+        limits,
+        budget,
+        split,
+        coarse_readers,
+        None,
+        false,
+    )? {
+        WalkOutcome::Complete { stats, .. } => Ok(stats),
+        WalkOutcome::Paused { stats, .. } => Ok(stats),
+    }
+}
+
+/// `draw_split` with cooperative mid-tile yielding when `allow_yield` is true and
+/// `backend.deadline_reached()` triggers at a safe boundary (outside isolated and masked scopes).
+/// Pass `checkpoint` from `WalkOutcome::Paused` on the next slice to continue bit-identically.
+#[allow(clippy::too_many_arguments)]
+pub fn draw_split_resumable<B: Backend>(
+    store: &Store,
+    backend: &mut B,
+    frame: &Frame,
+    limits: &Limits,
+    budget: &mut usize,
+    split: &Split,
+    coarse_readers: bool,
+    checkpoint: Option<WalkCheckpoint>,
+    allow_yield: bool,
+) -> Result<WalkOutcome> {
     let full_frame = IRect {
         x0: 0,
         y0: 0,
@@ -1056,7 +1131,22 @@ pub fn draw_split<B: Backend>(
     };
     let tiled = frame.area != full_frame;
     let full_viewport = Rect::new(-1.0, -1.0, f64::from(frame.width) + 1.0, f64::from(frame.height) + 1.0);
-    let plan = plan_readers(store, frame);
+    let resuming = checkpoint.is_some();
+    let (plan, resume_path, reader_seq, backdrop_live, total_coarse, total_specks) = match checkpoint {
+        Some(cp) => (
+            cp.plan,
+            cp.resume_path,
+            cp.reader_seq,
+            cp.backdrop_live,
+            cp.total_coarse,
+            cp.total_specks,
+        ),
+        None => {
+            let plan = plan_readers(store, frame);
+            let has_ctx = plan.as_ref().is_some_and(|p| p.has_context);
+            (plan, Vec::new(), 0, has_ctx, 0, 0)
+        }
+    };
     let (has_context, needs_backdrop, last_reader_seq, isolated_with_reader, subtree_readers) = match plan {
         Some(p) => (
             p.has_context,
@@ -1068,9 +1158,10 @@ pub fn draw_split<B: Backend>(
         None => (false, false, 0, HashSet::new(), HashMap::new()),
     };
     let readers_active = has_context || last_reader_seq > 0;
-    if readers_active {
+    if !resuming && readers_active {
         backend.begin_readers(needs_backdrop, has_context)?;
     }
+    let can_yield = allow_yield && split.pass == Pass::All && !has_context;
     let mut walk = Walk {
         split,
         phase: Phase::Before,
@@ -1094,22 +1185,31 @@ pub fn draw_split<B: Backend>(
         open_scopes: limits.open_scopes,
         readers_active,
         needs_backdrop,
-        backdrop_live: has_context,
+        backdrop_live,
         last_reader_seq,
-        reader_seq: 0,
+        reader_seq,
         isolated_with_reader,
         subtree_readers,
         ancestor_clips: Vec::new(),
         current_context: false,
         context_clips_suspended: false,
         isolated_backdrop_depth: 0,
+        allow_yield: can_yield,
+        yield_safe_depth: 0,
+        paused: false,
+        paused_path: Vec::new(),
+        resume_path,
+        resume_depth: 0,
+        records_since_probe: 0,
+        heavy_op_ran: false,
+        made_progress: false,
     };
     if !store.nodes.contains_key(&crate::store::ROOT) {
         return Err(EngineError::malformed("no page"));
     }
-    let result = walk.draw_children(crate::store::ROOT, Affine::IDENTITY, 1.0, false);
+    let result = walk.draw_children(crate::store::ROOT, 0, Affine::IDENTITY, 1.0, false);
     *budget = walk.verbs_left;
-    // Whatever failed part way, close what's open so the scene stays usable.
+    // Whatever failed or yielded part way, close what's open so the scene stays usable.
     while let Some(o) = walk.open.pop() {
         match o {
             Open::Clip { active_on_scene, .. } => {
@@ -1120,7 +1220,33 @@ pub fn draw_split<B: Backend>(
             Open::Layer => walk.backend.scene().pop_layer(),
         }
     }
-    result.map(|()| walk.stats)
+    result?;
+    if walk.paused {
+        walk.paused_path.reverse();
+        let saved_plan = walk.readers_active.then_some(ReaderPlan {
+            has_context,
+            needs_backdrop: walk.needs_backdrop,
+            last_reader_seq: walk.last_reader_seq,
+            isolated_with_reader: walk.isolated_with_reader,
+            subtree_readers: walk.subtree_readers,
+        });
+        return Ok(WalkOutcome::Paused {
+            stats: walk.stats,
+            checkpoint: WalkCheckpoint {
+                plan: saved_plan,
+                resume_path: walk.paused_path,
+                reader_seq: walk.reader_seq,
+                backdrop_live: walk.backdrop_live,
+                total_coarse: total_coarse + walk.stats.coarse,
+                total_specks: total_specks + walk.stats.specks,
+            },
+        });
+    }
+    let exact = (total_coarse + walk.stats.coarse) == 0 && (total_specks + walk.stats.specks) == 0;
+    Ok(WalkOutcome::Complete {
+        stats: walk.stats,
+        exact,
+    })
 }
 
 struct Walk<'a, B: Backend> {
@@ -1151,6 +1277,15 @@ struct Walk<'a, B: Backend> {
     current_context: bool,
     context_clips_suspended: bool,
     isolated_backdrop_depth: usize,
+    allow_yield: bool,
+    yield_safe_depth: usize,
+    paused: bool,
+    paused_path: Vec<(u32, usize, usize)>,
+    resume_path: Vec<(u32, usize, usize)>,
+    resume_depth: usize,
+    records_since_probe: u32,
+    heavy_op_ran: bool,
+    made_progress: bool,
 }
 
 /// The linear part of a transform (its translation dropped).
@@ -1803,18 +1938,48 @@ impl<B: Backend> Walk<'_, B> {
         }
     }
 
+    #[inline]
+    fn should_yield(&mut self) -> bool {
+        if !self.allow_yield || self.yield_safe_depth != 0 || !self.made_progress {
+            return false;
+        }
+        if self.heavy_op_ran || self.records_since_probe >= 16 {
+            self.heavy_op_ran = false;
+            self.records_since_probe = 0;
+            return self.backend.deadline_reached();
+        }
+        false
+    }
+
     /// A parent's children in paint order, the split's selection marking where paint order
     /// passes it.
     fn children(
         &mut self,
         parent: u32,
+        op_idx: usize,
         children: &[u32],
         world: Affine,
         alpha: f32,
         parent_context: bool,
     ) -> Result<()> {
         let here = self.split.pass != Pass::All && self.split.parent == parent;
-        for (k, c) in children.iter().enumerate() {
+        let start_k = if self.resume_depth < self.resume_path.len() && self.resume_path[self.resume_depth].0 == parent {
+            let k = self.resume_path[self.resume_depth].2;
+            self.resume_depth += 1;
+            if self.resume_depth >= self.resume_path.len() {
+                self.resume_path.clear();
+                self.resume_depth = 0;
+            }
+            k
+        } else {
+            0
+        };
+        for (k, c) in children.iter().enumerate().skip(start_k) {
+            if self.resume_path.is_empty() && self.should_yield() {
+                self.paused = true;
+                self.paused_path.push((parent, op_idx, k));
+                return Ok(());
+            }
             if here {
                 self.phase = if k < self.split.first {
                     Phase::Before
@@ -1825,6 +1990,10 @@ impl<B: Backend> Walk<'_, B> {
                 };
             }
             self.node(*c, world, alpha, parent_context)?;
+            if self.paused {
+                self.paused_path.push((parent, op_idx, k));
+                return Ok(());
+            }
         }
         if here {
             self.phase = Phase::After;
@@ -2024,7 +2193,14 @@ impl<B: Backend> Walk<'_, B> {
             Affine::translate((-f64::from(sox), -f64::from(soy))) * device
         }
     }
-    fn draw_children(&mut self, parent_id: u32, world: Affine, inner: f32, parent_context: bool) -> Result<()> {
+    fn draw_children(
+        &mut self,
+        parent_id: u32,
+        op_idx: usize,
+        world: Affine,
+        inner: f32,
+        parent_context: bool,
+    ) -> Result<()> {
         let Some(parent_node) = self.store.nodes.get(&parent_id) else {
             return Ok(());
         };
@@ -2035,92 +2211,98 @@ impl<B: Backend> Walk<'_, B> {
                 .is_some_and(|n| !n.record.hidden() && n.record.is_mask())
         });
         if !has_mask {
-            return self.children(parent_id, &parent_node.children, world, inner, parent_context);
+            return self.children(parent_id, op_idx, &parent_node.children, world, inner, parent_context);
         }
-        let mut clipping = false;
-        let mut pic_scope: Option<(u32, u32, Vec<u32>)> = None;
-        for &cid in &parent_node.children {
-            let Some(cn) = self.store.nodes.get(&cid) else {
-                continue;
-            };
-            let cr = &cn.record;
-            if cr.hidden() {
-                continue;
-            }
-            if cr.is_mask() {
-                if let Some((mid, mkind, ids)) = pic_scope.take() {
-                    self.draw_picture_mask(mid, mkind, &ids, world, inner, parent_context)?;
+        self.yield_safe_depth += 1;
+        let res = (|| -> Result<()> {
+            let mut clipping = false;
+            let mut pic_scope: Option<(u32, u32, Vec<u32>)> = None;
+            for &cid in &parent_node.children {
+                let Some(cn) = self.store.nodes.get(&cid) else {
+                    continue;
+                };
+                let cr = &cn.record;
+                if cr.hidden() {
+                    continue;
                 }
-                if clipping {
-                    self.open.pop();
-                    self.backend.scene().pop_clip();
-                    clipping = false;
-                }
-                let refused = cr.refusing_bits();
-                if refused != 0 {
-                    return Err(EngineError::unsupported(format!(
-                        "record {cid} needs features {refused:#x}"
-                    )));
-                }
-                match cr.mask {
-                    crate::record::MASK_OUTLINE_NONZERO | crate::record::MASK_OUTLINE_EVENODD => {
-                        let mask_world = world * cr.transform;
-                        let mask_dev = self.frame.view * mask_world;
-                        if !finite(mask_dev) {
-                            return Err(EngineError::limit(format!(
-                                "record {cid}'s transform overflows on the device"
-                            )));
+                if cr.is_mask() {
+                    if let Some((mid, mkind, ids)) = pic_scope.take() {
+                        self.draw_picture_mask(mid, mkind, &ids, world, inner, parent_context)?;
+                    }
+                    if clipping {
+                        self.open.pop();
+                        self.backend.scene().pop_clip();
+                        clipping = false;
+                    }
+                    let refused = cr.refusing_bits();
+                    if refused != 0 {
+                        return Err(EngineError::unsupported(format!(
+                            "record {cid} needs features {refused:#x}"
+                        )));
+                    }
+                    match cr.mask {
+                        crate::record::MASK_OUTLINE_NONZERO | crate::record::MASK_OUTLINE_EVENODD => {
+                            let mask_world = world * cr.transform;
+                            let mask_dev = self.frame.view * mask_world;
+                            if !finite(mask_dev) {
+                                return Err(EngineError::limit(format!(
+                                    "record {cid}'s transform overflows on the device"
+                                )));
+                            }
+                            self.scope()?;
+                            let p = self.path(cr, 0, mask_dev, 0.0)?;
+                            let even_odd = cr.mask == crate::record::MASK_OUTLINE_EVENODD;
+                            let sd = self.scene_device(mask_dev);
+                            let scene = self.backend.scene();
+                            scene.set_transform(sd);
+                            scene.set_fill_rule(if even_odd { Fill::EvenOdd } else { Fill::NonZero });
+                            scene.push_clip_path(&p);
+                            self.open.push(Open::Clip {
+                                transform: sd,
+                                path: p,
+                                even_odd,
+                                frame_clip: None,
+                                context_only: parent_context,
+                                active_on_scene: true,
+                            });
+                            clipping = true;
                         }
-                        self.scope()?;
-                        let p = self.path(cr, 0, mask_dev, 0.0)?;
-                        let even_odd = cr.mask == crate::record::MASK_OUTLINE_EVENODD;
-                        let sd = self.scene_device(mask_dev);
-                        let scene = self.backend.scene();
-                        scene.set_transform(sd);
-                        scene.set_fill_rule(if even_odd { Fill::EvenOdd } else { Fill::NonZero });
-                        scene.push_clip_path(&p);
-                        self.open.push(Open::Clip {
-                            transform: sd,
-                            path: p,
-                            even_odd,
-                            frame_clip: None,
-                            context_only: parent_context,
-                            active_on_scene: true,
-                        });
-                        clipping = true;
+                        kind => {
+                            pic_scope = Some((cid, kind, Vec::new()));
+                        }
                     }
-                    kind => {
-                        pic_scope = Some((cid, kind, Vec::new()));
+                    continue;
+                }
+                if (clipping || pic_scope.is_some()) && cr.ends_mask() {
+                    if let Some((mid, mkind, ids)) = pic_scope.take() {
+                        self.draw_picture_mask(mid, mkind, &ids, world, inner, parent_context)?;
                     }
+                    if clipping {
+                        self.open.pop();
+                        self.backend.scene().pop_clip();
+                        clipping = false;
+                    }
+                    self.node(cid, world, inner, parent_context)?;
+                    continue;
                 }
-                continue;
-            }
-            if (clipping || pic_scope.is_some()) && cr.ends_mask() {
-                if let Some((mid, mkind, ids)) = pic_scope.take() {
-                    self.draw_picture_mask(mid, mkind, &ids, world, inner, parent_context)?;
+                if let Some((_, _, ref mut ids)) = pic_scope {
+                    ids.push(cid);
+                } else {
+                    self.node(cid, world, inner, parent_context)?;
                 }
-                if clipping {
-                    self.open.pop();
-                    self.backend.scene().pop_clip();
-                    clipping = false;
-                }
-                self.node(cid, world, inner, parent_context)?;
-                continue;
             }
-            if let Some((_, _, ref mut ids)) = pic_scope {
-                ids.push(cid);
-            } else {
-                self.node(cid, world, inner, parent_context)?;
+            if let Some((mid, mkind, ids)) = pic_scope.take() {
+                self.draw_picture_mask(mid, mkind, &ids, world, inner, parent_context)?;
             }
-        }
-        if let Some((mid, mkind, ids)) = pic_scope.take() {
-            self.draw_picture_mask(mid, mkind, &ids, world, inner, parent_context)?;
-        }
-        if clipping {
-            self.open.pop();
-            self.backend.scene().pop_clip();
-        }
-        Ok(())
+            if clipping {
+                self.open.pop();
+                self.backend.scene().pop_clip();
+            }
+            Ok(())
+        })();
+        self.yield_safe_depth -= 1;
+        self.heavy_op_ran = true;
+        res
     }
 
     fn draw_picture_mask(
@@ -2376,13 +2558,25 @@ impl<B: Backend> Walk<'_, B> {
                 self.backend.flush_barrier(&self.open);
             }
             self.stats.culled += 1;
+            self.records_since_probe += 1;
+            if self.stats.culled >= 256 {
+                self.made_progress = true;
+            }
             return Ok(());
         }
-        if self.frame.detail && !r.group() {
-            let b = device.transform_rect_bbox(Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1])));
-            if b.width() < 0.5 && b.height() < 0.5 {
+        if self.frame.detail {
+            if !r.group() {
+                let b = device.transform_rect_bbox(Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1])));
+                if b.width() < 0.5 && b.height() < 0.5 {
+                    self.stats.culled += 1;
+                    self.stats.specks += 1;
+                    self.records_since_probe += 1;
+                    return Ok(());
+                }
+            } else if dev_bbox.width() < 0.5 && dev_bbox.height() < 0.5 && !self.subtree_readers.contains_key(&id) {
                 self.stats.culled += 1;
                 self.stats.specks += 1;
+                self.records_since_probe += 1;
                 return Ok(());
             }
         }
@@ -2392,7 +2586,14 @@ impl<B: Backend> Walk<'_, B> {
                 "record {id} needs features {refused:#x}"
             )));
         }
-        self.stats.records += 1;
+        let resume_op: Option<usize> = (self.resume_depth < self.resume_path.len()
+            && self.resume_path[self.resume_depth].0 == id)
+            .then(|| self.resume_path[self.resume_depth].1);
+        if resume_op.is_none() {
+            self.stats.records += 1;
+            self.records_since_probe += 1;
+            self.made_progress = true;
+        }
         let is_context = r.context();
         let in_alpha = if parent_context && !is_context { 1.0 } else { alpha };
         let opacity = in_alpha * r.opacity;
@@ -2647,10 +2848,15 @@ impl<B: Backend> Walk<'_, B> {
         };
         let coarse = r.provisional()
             || self.frame.detail && r.coarse_below > 0.0 && scale_of(device) < f64::from(r.coarse_below);
-        if coarse {
+        if coarse && resume_op.is_none() {
             self.stats.coarse += 1;
         }
         let ops = if coarse { &r.coarse } else { &r.ops };
+        let entered_non_yieldable = has_post || use_offscreen || isolate;
+        if entered_non_yieldable {
+            self.yield_safe_depth += 1;
+        }
+        let saved_yield_depth = self.yield_safe_depth;
         // Evaluate only on records that actually draw a drop shadow.
         let mut layered_shadows = None;
         let depth = self.open.len();
@@ -2659,8 +2865,64 @@ impl<B: Backend> Walk<'_, B> {
         let mut mask_depth = 0usize;
         let res = (|| -> Result<()> {
             for (at, op) in ops.iter().enumerate() {
-                if self.backend.stop_early() {
+                if self.backend.stop_early() || self.paused {
                     break;
+                }
+                if let Some(target_op) = resume_op {
+                    if at < target_op {
+                        // Fast-forward along the resumed ancestor: replay only open/close clips
+                        // without re-charging verb budgets or re-executing already drawn ops.
+                        match op {
+                            Op::Clip { path, .. }
+                                if !is_context
+                                    && !has_reader
+                                    && self.clip_changes_nothing(id, r, &ops[at + 1..], *path, device) => {}
+                            Op::Clip { path, even_odd } => {
+                                self.scope()?;
+                                let saved_verbs = self.verbs_left;
+                                let saved_stat_verbs = self.stats.verbs;
+                                let p = self.path(r, *path, device, 0.0)?;
+                                self.verbs_left = saved_verbs;
+                                self.stats.verbs = saved_stat_verbs;
+                                let sd = self.scene_device(device);
+                                let scene = self.backend.scene();
+                                scene.set_transform(sd);
+                                scene.set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
+                                scene.push_clip_path(&p);
+                                self.open.push(Open::Clip {
+                                    transform: sd,
+                                    path: p,
+                                    even_odd: *even_odd,
+                                    frame_clip: clip_wraps_children(ops, at).then(|| FrameClip {
+                                        device_box: device.transform_rect_bbox(Rect::new(
+                                            0.0,
+                                            0.0,
+                                            f64::from(r.size[0]),
+                                            f64::from(r.size[1]),
+                                        )),
+                                        fill: frame_solid_fill(ops, at, active_alpha),
+                                    }),
+                                    context_only: is_context,
+                                    active_on_scene: true,
+                                });
+                            }
+                            Op::Unclip if self.open.len() > depth => {
+                                self.open.pop();
+                                self.backend.scene().pop_clip();
+                            }
+                            _ => {}
+                        }
+                        continue;
+                    }
+                    if at == target_op {
+                        if matches!(op, Op::Children) {
+                            self.draw_children(id, at, world, active_alpha, is_context)?;
+                            if !self.paused {
+                                self.sync_targets(is_context)?;
+                            }
+                        }
+                        continue;
+                    }
                 }
                 self.stats.ops += 1;
                 match op {
@@ -2751,6 +3013,7 @@ impl<B: Backend> Walk<'_, B> {
                         };
                         self.backend.scene().push_layer(vello_compose, layer_opacity);
                         self.open.push(Open::Layer);
+                        self.yield_safe_depth += 1;
                         layer_stack.push((active_alpha, is_mask));
                         // Inside an isolated SrcOver layer, opacity is applied once on pop; inside a
                         // DestOut/DestIn mask layer, the mask draws at full coverage regardless of opacity.
@@ -2763,6 +3026,7 @@ impl<B: Backend> Walk<'_, B> {
                         if self.open.len() > depth {
                             self.open.pop();
                             self.backend.scene().pop_layer();
+                            self.yield_safe_depth = self.yield_safe_depth.saturating_sub(1);
                             if let Some((prev_alpha, is_mask)) = layer_stack.pop() {
                                 active_alpha = prev_alpha;
                                 if is_mask {
@@ -2772,8 +3036,10 @@ impl<B: Backend> Walk<'_, B> {
                         }
                     }
                     Op::Children => {
-                        self.draw_children(id, world, active_alpha, is_context)?;
-                        self.sync_targets(is_context)?;
+                        self.draw_children(id, at, world, active_alpha, is_context)?;
+                        if !self.paused {
+                            self.sync_targets(is_context)?;
+                        }
                     }
                     Op::Read { kernel, halo } => {
                         self.stats.reads += 1;
@@ -2786,6 +3052,7 @@ impl<B: Backend> Walk<'_, B> {
                         let open = self.reader_open();
                         self.backend.read(*kernel, paints, reads, &open)?;
                         self.sync_targets(is_context)?;
+                        self.heavy_op_ran = true;
                     }
                     Op::Glass(g) => {
                         // A context record's glass writes neither to output nor to backdrop
@@ -2822,6 +3089,7 @@ impl<B: Backend> Walk<'_, B> {
                             &open,
                         )?;
                         self.sync_targets(is_context)?;
+                        self.heavy_op_ran = true;
                     }
                     Op::BackgroundBlur(bb) => {
                         self.stats.reads += 1;
@@ -2848,6 +3116,7 @@ impl<B: Backend> Walk<'_, B> {
                             &open,
                         )?;
                         self.sync_targets(is_context)?;
+                        self.heavy_op_ran = true;
                     }
                     Op::ProgressiveBlur(pb) => {
                         self.stats.reads += 1;
@@ -2874,6 +3143,7 @@ impl<B: Backend> Walk<'_, B> {
                             &open,
                         )?;
                         self.sync_targets(is_context)?;
+                        self.heavy_op_ran = true;
                     }
                     Op::DropShadow {
                         paths,
@@ -2907,6 +3177,7 @@ impl<B: Backend> Walk<'_, B> {
                             active_alpha,
                             layered,
                         )?;
+                        self.heavy_op_ran = true;
                     }
                     Op::InnerShadow {
                         shape,
@@ -2932,11 +3203,32 @@ impl<B: Backend> Walk<'_, B> {
                             device,
                             active_alpha,
                         )?;
+                        self.heavy_op_ran = true;
                     }
                 }
             }
             Ok(())
         })();
+        self.yield_safe_depth = saved_yield_depth;
+        if entered_non_yieldable {
+            self.yield_safe_depth -= 1;
+            self.heavy_op_ran = true;
+        }
+        if self.paused {
+            while self.open.len() > depth {
+                if let Some(o) = self.open.pop() {
+                    match o {
+                        Open::Clip { active_on_scene, .. } => {
+                            if active_on_scene {
+                                self.backend.scene().pop_clip();
+                            }
+                        }
+                        Open::Layer => self.backend.scene().pop_layer(),
+                    }
+                }
+            }
+            return res;
+        }
         if let Some(post) = post_state {
             self.ancestor_clips.truncate(previous_reader_clips);
             self.isolated_backdrop_depth -= usize::from(paired);
@@ -4280,4 +4572,386 @@ pub(crate) fn glyphs_non_overlapping(store: &Store, scale: f64, glyphs: &[crate:
 /// Normal blending, for the record of what the engine composites by itself.
 pub fn normal() -> BlendMode {
     BlendMode::new(Mix::Normal, Compose::SrcOver)
+}
+
+#[cfg(test)]
+mod resumable_tests {
+    use super::*;
+    use crate::cpu::Cpu;
+    use crate::record::{PathEntry, Record};
+    use crate::store::ROOT;
+    use std::cell::Cell;
+
+    /// Wraps `Cpu` and forces a cooperative yield on every probe check so we stress-test
+    /// pause/resume across clips, nested frames, opacity layers, shadows, and readers.
+    struct AlwaysYieldCpu {
+        inner: Cpu,
+        probes: Cell<u32>,
+    }
+
+    impl Backend for AlwaysYieldCpu {
+        type Scene = <Cpu as Backend>::Scene;
+        fn scene(&mut self) -> &mut Self::Scene {
+            self.inner.scene()
+        }
+        fn mark_dirty(&mut self) {
+            self.inner.mark_dirty();
+        }
+        fn flush_barrier(&mut self, open: &[Open]) {
+            self.inner.flush_barrier(open);
+        }
+        fn scene_offset(&self) -> (i32, i32) {
+            self.inner.scene_offset()
+        }
+        fn target_bounds(&self) -> IRect {
+            self.inner.target_bounds()
+        }
+        fn image(&mut self, id: u32, span: (f64, f64)) -> Option<ImageView> {
+            self.inner.image(id, span)
+        }
+        fn checker(&mut self) -> ImageSource {
+            self.inner.checker()
+        }
+        fn glyph_mask(
+            &mut self,
+            key: MaskKey,
+            path: &BezPath,
+            scale: (f64, f64),
+            phase: (f64, f64),
+        ) -> Option<GlyphMask> {
+            self.inner.glyph_mask(key, path, scale, phase)
+        }
+        fn run_image(&mut self, w: u16, h: u16, pixels: Vec<u8>) -> Option<ImageSource> {
+            self.inner.run_image(w, h, pixels)
+        }
+        fn whole_runs(&self) -> bool {
+            self.inner.whole_runs()
+        }
+        fn diamond_gradient(
+            &mut self,
+            area: IRect,
+            device_to_grad: Affine,
+            stops: &[(f32, Rgba)],
+            alpha: f32,
+        ) -> Result<Option<ImageSource>> {
+            self.inner.diamond_gradient(area, device_to_grad, stops, alpha)
+        }
+        fn begin_readers(&mut self, needs_backdrop: bool, has_context: bool) -> Result<()> {
+            self.inner.begin_readers(needs_backdrop, has_context)
+        }
+        fn snapshot_backdrop(&mut self, open: &[Open]) -> Result<()> {
+            self.inner.snapshot_backdrop(open)
+        }
+        fn stop_early(&self) -> bool {
+            self.inner.stop_early()
+        }
+        fn deadline_reached(&self) -> bool {
+            self.probes.set(self.probes.get() + 1);
+            true
+        }
+        fn set_targets(&mut self, write_main: bool, write_backdrop: bool, open: &[Open]) -> Result<()> {
+            self.inner.set_targets(write_main, write_backdrop, open)
+        }
+        fn read(&mut self, kernel: u32, paints: IRect, reads: IRect, open: &[Open]) -> Result<()> {
+            self.inner.read(kernel, paints, reads, open)
+        }
+        fn glass(
+            &mut self,
+            key: (u32, usize),
+            op: &GlassOp,
+            paths: &[(BezPath, bool)],
+            device: Affine,
+            size: [f32; 2],
+            alpha: f32,
+            coarse: bool,
+            read_parent: bool,
+            open: &[Open],
+        ) -> Result<()> {
+            self.inner
+                .glass(key, op, paths, device, size, alpha, coarse, read_parent, open)
+        }
+        fn background_blur(
+            &mut self,
+            key: Option<(u32, usize)>,
+            op: &BackgroundBlurOp,
+            paths: &[(BezPath, bool)],
+            device: Affine,
+            size: [f32; 2],
+            alpha: f32,
+            coarse: bool,
+            open: &[Open],
+        ) -> Result<()> {
+            self.inner
+                .background_blur(key, op, paths, device, size, alpha, coarse, open)
+        }
+        fn progressive_blur(
+            &mut self,
+            key: (u32, usize),
+            op: &ProgressiveBlurOp,
+            paths: &[(BezPath, bool)],
+            device: Affine,
+            size: [f32; 2],
+            alpha: f32,
+            coarse: bool,
+            open: &[Open],
+        ) -> Result<()> {
+            self.inner
+                .progressive_blur(key, op, paths, device, size, alpha, coarse, open)
+        }
+        fn push_isolated(
+            &mut self,
+            area: IRect,
+            clip_to_parent: bool,
+            scene_origin_hint: Option<(i32, i32)>,
+            isolation: Isolation,
+            open: &[Open],
+        ) -> Result<bool> {
+            self.inner
+                .push_isolated(area, clip_to_parent, scene_origin_hint, isolation, open)
+        }
+        fn apply_post_isolated(&mut self, steps: &[PostStep]) -> Result<()> {
+            self.inner.apply_post_isolated(steps)
+        }
+        fn pop_isolated(&mut self, opacity: f32, open: &[Open]) -> Result<()> {
+            self.inner.pop_isolated(opacity, open)
+        }
+        fn pop_composited(&mut self, blend: u32, opacity: f32, mask_kind: Option<u32>, open: &[Open]) -> Result<()> {
+            self.inner.pop_composited(blend, opacity, mask_kind, open)
+        }
+        fn abort_isolated(&mut self) {
+            self.inner.abort_isolated();
+        }
+        fn draw_blurred_shadow(
+            &mut self,
+            cast: &ShadowCast<'_>,
+            canonical: Option<&crate::shadow::CanonicalShadow>,
+            invert: bool,
+            dirty: IRect,
+            sigma: f32,
+            color: AlphaColor<Srgb>,
+            open: &[Open],
+        ) -> Result<()> {
+            self.inner
+                .draw_blurred_shadow(cast, canonical, invert, dirty, sigma, color, open)
+        }
+    }
+
+    fn rect_path(w: f32, h: f32) -> PathEntry {
+        use vello_common::kurbo::Shape;
+        let p = Rect::new(0.0, 0.0, f64::from(w), f64::from(h)).into_path(0.1);
+        PathEntry::Path(crate::record::CompactPath::from_bez(&p))
+    }
+
+    #[test]
+    fn resumable_walk_matches_unsplit_bitwise() {
+        let limits = Limits::default();
+        let mut store = Store::new(limits);
+        // Build a nested hierarchy with clipping frame, 40 child shapes (crossing the 16-record
+        // yield probe multiple times), a drop shadow, a background blur, and trailing foreground
+        // stroke after `Op::Children`.
+        let mut frame_rec = Record::empty();
+        frame_rec.transform = Affine::translate((12.0, 12.0));
+        frame_rec.size = [104.0, 104.0];
+        frame_rec.paths.push(rect_path(104.0, 104.0));
+        frame_rec.ops = vec![
+            Op::Fill {
+                path: 0,
+                even_odd: false,
+                paint: Paint::Solid([0.9, 0.92, 0.96, 1.0]),
+                blend: 0,
+            },
+            Op::Clip {
+                path: 0,
+                even_odd: false,
+            },
+            Op::Children,
+            Op::Unclip,
+            Op::Stroke {
+                path: 0,
+                style: Box::new(StrokeStyle {
+                    width: 2.0,
+                    cap: 0,
+                    join: 0,
+                    miter: 4.0,
+                    dashes: Vec::new(),
+                    dash_offset: 0.0,
+                }),
+                paint: Paint::Solid([0.1, 0.2, 0.4, 1.0]),
+                blend: 0,
+                cache: crate::stroke::StrokeCache::default(),
+            },
+        ];
+        store.insert_for_test(1, ROOT, frame_rec);
+        for i in 0..40u32 {
+            let id = 10 + i;
+            let mut r = Record::empty();
+            r.transform = Affine::translate(((i % 8) as f64 * 12.0 + 4.0, (i / 8) as f64 * 18.0 + 4.0));
+            r.size = [14.0, 14.0];
+            r.paths.push(rect_path(14.0, 14.0));
+            if i == 10 {
+                r.ops.push(Op::DropShadow {
+                    paths: vec![0],
+                    even_odd: false,
+                    dx: 2.0,
+                    dy: 3.0,
+                    blur: 4.0,
+                    color: [0.0, 0.0, 0.0, 0.35],
+                    blend: 0,
+                    stroke: None,
+                });
+            }
+            if i == 25 {
+                r.ops.push(Op::BackgroundBlur(Box::new(BackgroundBlurOp {
+                    paths: vec![0],
+                    even_odd: false,
+                    radius: 4.0,
+                })));
+            }
+            r.ops.push(Op::Fill {
+                path: 0,
+                even_odd: false,
+                paint: Paint::Solid([(i % 5) as f32 * 0.2, ((i / 5) % 5) as f32 * 0.2, 0.65, 0.85]),
+                blend: 0,
+            });
+            store.insert_for_test(id, 1, r);
+        }
+
+        let frame = Frame {
+            width: 128,
+            height: 128,
+            view: Affine::IDENTITY,
+            detail: false,
+            area: IRect {
+                x0: 0,
+                y0: 0,
+                x1: 128,
+                y1: 128,
+            },
+        };
+        let bg = [255u8, 255, 255, 255];
+
+        // 1. Reference unsplit render.
+        let mut ref_cpu = Cpu::new(limits.glyph_mask_bytes, limits.glyph_mask_side, 0);
+        ref_cpu.begin(128, 128, frame.area, bg);
+        let mut ref_budget = limits.frame_verbs;
+        let mut ref_stats = DrawStats::default();
+        let s = draw_split(
+            &store,
+            &mut ref_cpu,
+            &frame,
+            &limits,
+            &mut ref_budget,
+            &Split::all(),
+            false,
+        )
+        .expect("reference render");
+        ref_stats.add(&s);
+        ref_cpu.flush_slice_for_test();
+        let ref_px = ref_cpu.target.data_as_u8_slice().to_vec();
+
+        // 2. Resumable render pausing/resuming across the same scene: must be 100% bitwise identical.
+        let mut ycpu_same = AlwaysYieldCpu {
+            inner: Cpu::new(limits.glyph_mask_bytes, limits.glyph_mask_side, 0),
+            probes: Cell::new(0),
+        };
+        ycpu_same.inner.begin(128, 128, frame.area, bg);
+        let mut budget_same = limits.frame_verbs;
+        let mut checkpoint = None;
+        let mut slices_same = 0u32;
+        let mut out_stats = DrawStats::default();
+        loop {
+            slices_same += 1;
+            match draw_split_resumable(
+                &store,
+                &mut ycpu_same,
+                &frame,
+                &limits,
+                &mut budget_same,
+                &Split::all(),
+                false,
+                checkpoint.take(),
+                true,
+            )
+            .expect("resumable slice")
+            {
+                WalkOutcome::Complete { stats, .. } => {
+                    out_stats.add(&stats);
+                    ycpu_same.inner.flush_slice_for_test();
+                    break;
+                }
+                WalkOutcome::Paused { stats, checkpoint: cp } => {
+                    out_stats.add(&stats);
+                    checkpoint = Some(cp);
+                }
+            }
+            assert!(slices_same < 100, "resumable walk failed to terminate");
+        }
+        assert!(
+            slices_same >= 3,
+            "expected multiple cooperative slices, got {slices_same}"
+        );
+        assert_eq!(
+            ref_stats.records, out_stats.records,
+            "record count mismatch across {slices_same} slices"
+        );
+        assert_eq!(
+            ref_stats.ops, out_stats.ops,
+            "op count mismatch across {slices_same} slices"
+        );
+        assert_eq!(
+            ref_px,
+            ycpu_same.inner.target.data_as_u8_slice(),
+            "same-scene resumable walk differed from unsplit render"
+        );
+
+        // 3. Resumable render flushing between slices (simulating GPU per-slice submit):
+        // under vello_cpu's f32_pipeline, flushing between overlapping translucent shapes adds at
+        // most 1/255 quantization rounding; clip replay and reader sequencing stay exact.
+        let mut ycpu = AlwaysYieldCpu {
+            inner: Cpu::new(limits.glyph_mask_bytes, limits.glyph_mask_side, 0),
+            probes: Cell::new(0),
+        };
+        ycpu.inner.begin(128, 128, frame.area, bg);
+        let mut budget = limits.frame_verbs;
+        let mut checkpoint = None;
+        let mut slices = 0u32;
+        loop {
+            slices += 1;
+            match draw_split_resumable(
+                &store,
+                &mut ycpu,
+                &frame,
+                &limits,
+                &mut budget,
+                &Split::all(),
+                false,
+                checkpoint.take(),
+                true,
+            )
+            .expect("resumable slice")
+            {
+                WalkOutcome::Complete { .. } => {
+                    ycpu.inner.flush_slice_for_test();
+                    break;
+                }
+                WalkOutcome::Paused { checkpoint: cp, .. } => {
+                    ycpu.inner.flush_slice_for_test();
+                    checkpoint = Some(cp);
+                }
+            }
+            assert!(slices < 100, "resumable walk failed to terminate");
+        }
+        assert!(slices >= 3, "expected multiple cooperative slices, got {slices}");
+        let out_px = ycpu.inner.target.data_as_u8_slice().to_vec();
+        let max_diff = ref_px
+            .iter()
+            .zip(&out_px)
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_diff <= 1,
+            "flushed resumable walk exceeded 1/255 rounding tolerance: slices={slices} max_diff={max_diff}"
+        );
+    }
 }

@@ -100,12 +100,14 @@ pub struct Outcome {
     pub reader_ms: f64,
     pub shadow_ms: f64,
     pub submits: u32,
+    pub draws: u32,
     pub vello_renders: u32,
     pub glass_ops: u32,
     pub glass_batched: u32,
     pub bg_blur_ops: u32,
     pub shadow_ops: u32,
     pub shadow_hits: u32,
+    pub in_progress: bool,
 }
 
 #[wasm_bindgen]
@@ -157,12 +159,14 @@ impl Outcome {
             reader_ms: 0.0,
             shadow_ms: 0.0,
             submits: 0,
+            draws: 0,
             vello_renders: 0,
             glass_ops: 0,
             glass_batched: 0,
             bg_blur_ops: 0,
             shadow_ops: 0,
             shadow_hits: 0,
+            in_progress: false,
         }
     }
     fn err(e: EngineError) -> Self {
@@ -1072,12 +1076,14 @@ impl Engine {
                 o.reader_ms = draw.reader_ms;
                 o.shadow_ms = draw.shadow_ms;
                 o.submits = draw.submits;
+                o.draws = draw.draws;
                 o.vello_renders = draw.vello_renders;
                 o.glass_ops = draw.glass_ops;
                 o.glass_batched = draw.glass_batched;
                 o.bg_blur_ops = draw.bg_blur_ops;
                 o.shadow_ops = draw.shadow_ops;
                 o.shadow_hits = draw.shadow_hits;
+                o.in_progress = draw.in_progress;
                 o
             }
             Err(e) => Outcome::err(e),
@@ -1103,7 +1109,21 @@ impl Engine {
                 o.evicted = draw.evicted;
                 o.encode_ms = draw.encode_ms;
                 o.render_ms = draw.render_ms;
+                o.submit_ms = draw.submit_ms;
                 o.cpu_ms = draw.cpu_ms;
+                o.prepare_masks_ms = draw.prepare_masks_ms;
+                o.vello_render_ms = draw.vello_render_ms;
+                o.reader_ms = draw.reader_ms;
+                o.shadow_ms = draw.shadow_ms;
+                o.submits = draw.submits;
+                o.draws = draw.draws;
+                o.vello_renders = draw.vello_renders;
+                o.glass_ops = draw.glass_ops;
+                o.glass_batched = draw.glass_batched;
+                o.bg_blur_ops = draw.bg_blur_ops;
+                o.shadow_ops = draw.shadow_ops;
+                o.shadow_hits = draw.shadow_hits;
+                o.in_progress = draw.in_progress;
                 o
             }
             Err(e) => Outcome::err(e),

@@ -505,6 +505,12 @@ impl Cpu {
         self.temp_bytes = 0;
     }
 
+    #[cfg(test)]
+    pub(crate) fn flush_slice_for_test(&mut self) {
+        self.flush_current();
+        self.scene.reset();
+    }
+
     fn close_clips(&mut self, open: &[Open]) {
         for _ in open.iter().filter(|o| active_clip(o)) {
             self.scene.pop_clip();

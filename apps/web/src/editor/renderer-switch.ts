@@ -17,14 +17,22 @@
 
 export type RendererChoice = "canvas" | "engine" | "engine-compat" | "engine-webgl" | "engine-cpu";
 export type PresentationMode = "webgpu" | "readback";
+/**
+ * How interactive zoom/pan motion frames are rendered:
+ * - `"standin"` (default): 60 fps cached/scaled tiles during motion, progressive refinement on stop.
+ * - `"exact"`: synchronous exact frames during motion.
+ */
+export type MotionPolicy = "standin" | "exact";
 
 export interface EngineSearch {
   renderer?: RendererChoice;
   present?: PresentationMode;
+  motion?: MotionPolicy;
 }
 
 export const RENDERER_STORAGE_KEY = "drawpane:renderer";
 export const PRESENT_STORAGE_KEY = "drawpane:engine-present";
+export const MOTION_POLICY_STORAGE_KEY = "drawpane:motion-policy";
 export const SOFTWARE_STORAGE_KEY = "drawpane:engine-software";
 
 export function parseRenderer(value: unknown): RendererChoice | undefined {
@@ -41,13 +49,19 @@ export function parsePresent(value: unknown): PresentationMode | undefined {
   return value === "webgpu" || value === "readback" ? value : undefined;
 }
 
+export function parseMotionPolicy(value: unknown): MotionPolicy | undefined {
+  return value === "standin" || value === "exact" ? value : undefined;
+}
+
 /** Validated render engine switches for route `validateSearch` hooks. */
 export function engineSearch(search: Record<string, unknown>): EngineSearch {
   const renderer = parseRenderer(search.renderer);
   const present = parsePresent(search.present);
+  const motion = parseMotionPolicy(search.motion);
   return {
     ...(renderer ? { renderer } : {}),
     ...(present ? { present } : {}),
+    ...(motion ? { motion } : {}),
   };
 }
 
@@ -110,6 +124,22 @@ function rememberPresent(mode: PresentationMode): void {
   }
 }
 
+function rememberMotionPolicy(policy: MotionPolicy): void {
+  try {
+    if (policy === "standin") {
+      if (parseMotionPolicy(getLocal(MOTION_POLICY_STORAGE_KEY)) === "exact") {
+        sessionStorage.setItem(MOTION_POLICY_STORAGE_KEY, "standin");
+      } else {
+        sessionStorage.removeItem(MOTION_POLICY_STORAGE_KEY);
+      }
+      return;
+    }
+    sessionStorage.setItem(MOTION_POLICY_STORAGE_KEY, policy);
+  } catch {
+    // Storage blocked.
+  }
+}
+
 /**
  * Captures any render engine switches present in a URL query string into `sessionStorage`,
  * so subsequent navigations and login redirects keep them for the session.
@@ -121,6 +151,8 @@ export function rememberRendererSwitches(search: string | URLSearchParams): void
     if (renderer) rememberRenderer(renderer);
     const present = parsePresent(params.get("present"));
     if (present) rememberPresent(present);
+    const motion = parseMotionPolicy(params.get("motion"));
+    if (motion) rememberMotionPolicy(motion);
   } catch {
     // URL or storage unavailable.
   }
@@ -167,6 +199,26 @@ export function presentation(search?: string): PresentationMode {
   if (session) return session;
   const stored = parsePresent(getLocal(PRESENT_STORAGE_KEY));
   return stored ?? "webgpu";
+}
+
+/**
+ * Motion-frame policy: `"standin"` (default, 60 fps scaled cached tiles during pan/zoom with
+ * progressive refinement on stop) or `"exact"` (full exact frames during motion).
+ */
+export function motionPolicy(search?: string): MotionPolicy {
+  try {
+    const url = parseMotionPolicy(readParams(search).get("motion"));
+    if (url) {
+      rememberMotionPolicy(url);
+      return url;
+    }
+  } catch {
+    // URL unavailable.
+  }
+  const session = parseMotionPolicy(getSession(MOTION_POLICY_STORAGE_KEY));
+  if (session) return session;
+  const stored = parseMotionPolicy(getLocal(MOTION_POLICY_STORAGE_KEY));
+  return stored ?? "standin";
 }
 
 /**

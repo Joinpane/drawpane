@@ -30,7 +30,7 @@ import {
 import { getProp, type NodeRecord } from "@drawpane/model";
 import { boxOf, type Rect } from "../geometry";
 import { glassParams } from "../glass";
-import { imageDrawnSize, type Size } from "../images";
+import { type CropRect, imageDrawnSize, type ScaleMode, type Size } from "../images";
 import { endsMask, hasMask, isActiveMask } from "../masks";
 import { blurSigma } from "../post-effects";
 import { glyphTable } from "../saved-glyphs";
@@ -132,6 +132,25 @@ export class DisplayListBuilder {
   /** The image refs each layer's record paints. */
   readonly #imagesBy = new Map<string, readonly string[]>();
   readonly #imageReach = new Map<string, number>();
+  /** Cached per-version image demand descriptors to avoid per-frame bounds/matrix recomputation. */
+  #imageDemandCache: {
+    readonly version: number;
+    readonly hidden: ReadonlySet<string>;
+    readonly entries: readonly {
+      readonly x0: number;
+      readonly y0: number;
+      readonly x1: number;
+      readonly y1: number;
+      readonly reach: number;
+      readonly box: Size;
+      readonly scale: Size;
+      readonly fills: readonly {
+        readonly ref: string;
+        readonly scaleMode: ScaleMode;
+        readonly crop: CropRect | undefined;
+      }[];
+    }[];
+  } | null = null;
   readonly #texts = new Set<string>();
   /** Text using a fallback: a face that arrives late can replace it. */
   readonly #pendingText = new Set<string>();
@@ -457,6 +476,7 @@ export class DisplayListBuilder {
       this.#imagesBy.delete(id);
       this.#imageReach.delete(id);
     }
+    this.#imageDemandCache = null;
   }
 
   /** The image refs the page's records paint now: the engine may let the others go. */
@@ -470,38 +490,77 @@ export class DisplayListBuilder {
    */
   *imageDemands(view: Rect, margin: number): Iterable<ImageDemand> {
     const scene = this.#scene;
-    for (const [id, refs] of this.#imagesBy) {
-      if (this.#hidden.has(id) || !scene.isVisible(id)) continue;
-      const b = scene.bounds(id);
-      const layer = this.#nodes.get(id);
-      if (!b || !layer || layer.type === "page" || layer.type === "group") continue;
-      const reach = this.#imageReach.get(id) ?? 0;
+    const version = scene.doc.version;
+    let cache = this.#imageDemandCache;
+    if (!cache || cache.version !== version || cache.hidden !== this.#hidden) {
+      const entries: {
+        readonly x0: number;
+        readonly y0: number;
+        readonly x1: number;
+        readonly y1: number;
+        readonly reach: number;
+        readonly box: Size;
+        readonly scale: Size;
+        readonly fills: readonly {
+          readonly ref: string;
+          readonly scaleMode: ScaleMode;
+          readonly crop: CropRect | undefined;
+        }[];
+      }[] = [];
+      for (const [id, refs] of this.#imagesBy) {
+        if (this.#hidden.has(id) || !scene.isVisible(id)) continue;
+        const b = scene.bounds(id);
+        const layer = this.#nodes.get(id);
+        if (!b || !layer || layer.type === "page" || layer.type === "group") continue;
+        const fills: {
+          readonly ref: string;
+          readonly scaleMode: ScaleMode;
+          readonly crop: CropRect | undefined;
+        }[] = [];
+        for (const paint of getProp(layer.props, "fills")) {
+          if (
+            paint.type !== "image" ||
+            !refs.includes(paint.ref) ||
+            paint.visible === false ||
+            paint.opacity === 0
+          )
+            continue;
+          fills.push({ ref: paint.ref, scaleMode: paint.scaleMode, crop: paint.crop });
+        }
+        if (fills.length === 0) continue;
+        const matrix = scene.worldMatrix(id);
+        entries.push({
+          x0: b.x,
+          y0: b.y,
+          x1: b.x + b.width,
+          y1: b.y + b.height,
+          reach: this.#imageReach.get(id) ?? 0,
+          box: boxOf(layer),
+          scale: {
+            width: Math.hypot(matrix[0], matrix[1]),
+            height: Math.hypot(matrix[2], matrix[3]),
+          },
+          fills,
+        });
+      }
+      cache = { version, hidden: this.#hidden, entries };
+      this.#imageDemandCache = cache;
+    }
+    const vx0 = view.x;
+    const vy0 = view.y;
+    const vx1 = view.x + view.width;
+    const vy1 = view.y + view.height;
+    for (const entry of cache.entries) {
       const distance =
-        Math.max(
-          view.x - (b.x + b.width),
-          b.x - (view.x + view.width),
-          view.y - (b.y + b.height),
-          b.y - (view.y + view.height),
-        ) - reach;
+        Math.max(vx0 - entry.x1, entry.x0 - vx1, vy0 - entry.y1, entry.y0 - vy1) - entry.reach;
       if (distance > margin) continue;
       const visible = distance <= 0;
-      const box = boxOf(layer);
-      const matrix = scene.worldMatrix(id);
-      const scale = {
-        width: Math.hypot(matrix[0], matrix[1]),
-        height: Math.hypot(matrix[2], matrix[3]),
-      };
-      for (const paint of getProp(layer.props, "fills")) {
-        if (
-          paint.type !== "image" ||
-          !refs.includes(paint.ref) ||
-          paint.visible === false ||
-          paint.opacity === 0
-        )
-          continue;
-        const meta = this.#image(paint.ref);
-        const span = meta ? imageDrawnSize(paint.scaleMode, box, meta, scale, paint.crop) : null;
-        yield { ref: paint.ref, visible, span };
+      for (const fill of entry.fills) {
+        const meta = this.#image(fill.ref);
+        const span = meta
+          ? imageDrawnSize(fill.scaleMode, entry.box, meta, entry.scale, fill.crop)
+          : null;
+        yield { ref: fill.ref, visible, span };
       }
     }
   }
@@ -876,6 +935,7 @@ export class DisplayListBuilder {
     this.#imagesOf.clear();
     this.#imagesBy.clear();
     this.#imageReach.clear();
+    this.#imageDemandCache = null;
     this.#texts.clear();
     this.#pendingText.clear();
     this.#deferred.clear();
@@ -916,7 +976,7 @@ export class DisplayListBuilder {
    * Opens a live page a slice at a time. Each message is valid on its own. A page switch,
    * edit to the opening page or refusal starts a new generation rather than mixing two snapshots.
    */
-  openSlice(pageId: string): Uint8Array {
+  openSlice(pageId: string, budgetMs = OPEN_LIST_MS): Uint8Array {
     const t0 = performance.now();
     const doc = this.#scene.doc;
     const previous = this.#opening;
@@ -932,7 +992,7 @@ export class DisplayListBuilder {
     const w = new ListWriter(continuing ? this.#revision : ANY_REVISION, revision, 64 << 10);
     if (!continuing) w.reset();
     const ctx = this.#context(true);
-    const until = t0 + OPEN_LIST_MS;
+    const until = t0 + budgetMs;
     let records = 0;
     let glyphs = 0;
     while (stack.length > 0 && (records === 0 || performance.now() < until)) {

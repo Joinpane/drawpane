@@ -31,7 +31,8 @@ pub use webgl::{
 };
 #[cfg(feature = "wgpu")]
 pub use wgpu::{
-    RenderOptions, RenderTarget, RenderTargetConfig, Renderer, TextureBinding, TextureBindings,
+    PreparedBatchRender, RenderOptions, RenderTarget, RenderTargetConfig, Renderer, TextureBinding,
+    TextureBindings,
 };
 #[cfg(all(feature = "wgpu", feature = "probe"))]
 pub use wgpu::{WgpuPendingProbe, WgpuProbeError, WgpuProbeStatus};

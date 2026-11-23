@@ -3,7 +3,7 @@
 
 //! Creation and growth of the renderer's GPU resources.
 
-use crate::draw::EXTERNAL_TEXTURE_SLOT_COUNT;
+use crate::draw::{EXTERNAL_TEXTURE_SLOT_COUNT, ExternalTextureBindings};
 use crate::render::wgpu::passes::Programs;
 use crate::render::wgpu::passes::filter::{
     FilterPairBindGroups, create_filter_original_texture_bind_group,
@@ -23,182 +23,44 @@ use crate::{
 };
 use crate::{RenderError, ResourceTexture};
 use alloc::vec::Vec;
-use core::{borrow::Borrow, fmt::Debug, num::NonZeroU64};
+use core::{borrow::Borrow, fmt::Debug, num::NonZeroU64, ops::Range};
 use hashbrown::HashMap;
 use vello_common::image_cache::ImageCache;
 use vello_common::multi_atlas::AtlasConfig;
 use vello_common::{geometry::SizeU16, tile::Tile};
 use wgpu::{
-    BindGroup, BindGroupLayout, Buffer, BufferDescriptor, BufferViewMut, COPY_BUFFER_ALIGNMENT,
-    CommandEncoder, Device, Extent3d, Queue, QueueWriteBufferView, Sampler, Texture, TextureView,
-    TextureViewDescriptor, WriteOnly,
-    util::{DeviceExt, StagingBelt},
+    BindGroup, BindGroupLayout, Buffer, BufferDescriptor, COPY_BUFFER_ALIGNMENT, Device, Extent3d,
+    Queue, Sampler, Texture, TextureView, TextureViewDescriptor, util::DeviceExt,
 };
+
+/// Drawpane: number of distinct `(RenderSize, scene_offset)` uniform slots per batch.
+const CONFIG_SLOTS: u32 = 256;
+/// Drawpane: initial vertex arena size so small draws batch without immediate growth flushes.
+const INITIAL_STRIP_CAPACITY: u64 = 512 * 1024;
+/// Drawpane: automatic growth ceiling for multi-render vertex batching.
+const MAX_AUTO_GROW_STRIP_CAPACITY: u64 = 4 * 1024 * 1024;
+/// Drawpane: minimum initial alpha-texture rows allocated for batching.
+const MIN_BATCH_ALPHA_ROWS: u32 = 16;
+/// Drawpane: maximum alpha staging bytes per batch (2,097,152 columns << 2^24 exact f32 integer limit).
+const MAX_BATCH_ALPHA_BYTES: usize = 8 * 1024 * 1024;
+/// Drawpane: minimum initial encoded-paint rows allocated for batching.
+const MIN_BATCH_PAINT_ROWS: u32 = 4;
+/// Drawpane: maximum encoded-paint staging bytes per batch.
+const MAX_BATCH_PAINT_BYTES: usize = 2 * 1024 * 1024;
+/// Drawpane: cap on cached external-texture bind groups before eviction at batch flush.
+const MAX_EXTERNAL_BG_CACHE: usize = 512;
 
 #[derive(Debug)]
 pub(crate) struct StripBufferArena {
     pub(crate) buffer: Buffer,
-    capacity: u64,
-    cursor: u64,
-}
-
-#[derive(Debug)]
-pub(crate) struct UploadStagingBelt {
-    pub(crate) belt: StagingBelt,
-    capacity: u64,
-    frame_allocated: u64,
-    /// Drawpane: when set (on the web), uploads go through the queue, which the browser stages
-    /// itself. A staging belt's chunks come back only after an asynchronous map, so a burst of
-    /// renders would allocate new mapped buffers for every one (see VENDORED.md).
-    pub(crate) queue: Option<Queue>,
-}
-
-/// Drawpane: where a buffer upload is written, through the staging belt or the queue.
-pub(crate) enum UploadView {
-    Belt(BufferViewMut),
-    Queue(QueueWriteBufferView),
-}
-
-impl UploadView {
-    pub(crate) fn slice<'a, S: core::ops::RangeBounds<usize>>(&'a mut self, bounds: S) -> WriteOnly<'a, [u8]> {
-        match self {
-            Self::Belt(v) => v.slice(bounds),
-            Self::Queue(v) => v.slice(bounds),
-        }
-    }
-
-    pub(crate) fn copy_from_slice(&mut self, src: &[u8]) {
-        match self {
-            Self::Belt(v) => v.copy_from_slice(src),
-            Self::Queue(v) => v.copy_from_slice(src),
-        }
-    }
-}
-
-impl UploadStagingBelt {
-    pub(crate) fn new(device: &Device) -> Self {
-        Self {
-            belt: StagingBelt::new(device.clone(), COPY_BUFFER_ALIGNMENT),
-            capacity: COPY_BUFFER_ALIGNMENT,
-            frame_allocated: 0,
-            queue: None,
-        }
-    }
-
-    fn prepare(&mut self, device: &Device) {
-        let max_buffer_size = device.limits().max_buffer_size;
-        if self.frame_allocated > self.capacity && self.capacity < max_buffer_size {
-            self.capacity = (self.frame_allocated * 2).min(max_buffer_size);
-            self.belt = StagingBelt::new(device.clone(), self.capacity);
-        }
-        self.frame_allocated = 0;
-    }
-
-    pub(crate) fn write_buffer(
-        &mut self,
-        encoder: &mut CommandEncoder,
-        target: &Buffer,
-        offset: u64,
-        size: NonZeroU64,
-    ) -> UploadView {
-        if let Some(view) = self.queue.as_ref().and_then(|q| q.write_buffer_with(target, offset, size)) {
-            return UploadView::Queue(view);
-        }
-        self.frame_allocated += size.get();
-        UploadView::Belt(self.belt.write_buffer(encoder, target, offset, size))
-    }
-
-    pub(crate) fn upload_texture(
-        &mut self,
-        encoder: &mut CommandEncoder,
-        texture: &Texture,
-        data: &[u8],
-        bytes_per_texel: u32,
-    ) {
-        self.upload_texture_chunks(encoder, texture, data.len(), bytes_per_texel, [data]);
-    }
-
-    pub(crate) fn upload_texture_chunks<'a>(
-        &mut self,
-        encoder: &mut CommandEncoder,
-        texture: &Texture,
-        data_len: usize,
-        bytes_per_texel: u32,
-        chunks: impl IntoIterator<Item = &'a [u8]>,
-    ) {
-        if data_len == 0 {
-            return;
-        }
-
-        let bytes_per_row = texture.width() * bytes_per_texel;
-        let rows = data_len.div_ceil(bytes_per_row as usize) as u32;
-        let size = NonZeroU64::new(u64::from(rows) * u64::from(bytes_per_row)).unwrap();
-        if let Some(queue) = self.queue.as_ref() {
-            let mut data = Vec::with_capacity(size.get() as usize);
-            for chunk in chunks {
-                data.extend_from_slice(chunk);
-            }
-            data.resize(size.get() as usize, 0);
-            queue.write_texture(
-                texture.as_image_copy(),
-                &data,
-                wgpu::TexelCopyBufferLayout {
-                    offset: 0,
-                    bytes_per_row: Some(bytes_per_row),
-                    rows_per_image: None,
-                },
-                Extent3d {
-                    width: texture.width(),
-                    height: rows,
-                    depth_or_array_layers: 1,
-                },
-            );
-            return;
-        }
-        self.frame_allocated += size.get();
-        let slice = self
-            .belt
-            .allocate(size, NonZeroU64::new(u64::from(bytes_per_texel)).unwrap());
-        {
-            let mut view = slice
-                .get_mapped_range_mut()
-                .expect("staging buffer must be mapped");
-
-            let mut offset = 0;
-            for chunk in chunks {
-                view.slice(offset..offset + chunk.len())
-                    .copy_from_slice(chunk);
-                offset += chunk.len();
-            }
-            debug_assert_eq!(
-                offset, data_len,
-                "mismatched between uploaded chunks size vs provided len"
-            );
-        }
-
-        encoder.copy_buffer_to_texture(
-            wgpu::TexelCopyBufferInfo {
-                buffer: slice.buffer(),
-                layout: wgpu::TexelCopyBufferLayout {
-                    offset: slice.offset(),
-                    bytes_per_row: Some(bytes_per_row),
-                    rows_per_image: None,
-                },
-            },
-            texture.as_image_copy(),
-            Extent3d {
-                width: texture.width(),
-                height: rows,
-                depth_or_array_layers: 1,
-            },
-        );
-    }
+    pub(crate) capacity: u64,
+    pub(crate) cursor: u64,
 }
 
 pub(crate) fn create_arena_buffer(device: &Device, size: u64) -> Buffer {
     device.create_buffer(&BufferDescriptor {
         label: Some("Strips Arena"),
-        size,
+        size: size.max(16),
         usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
         mapped_at_creation: false,
     })
@@ -206,17 +68,18 @@ pub(crate) fn create_arena_buffer(device: &Device, size: u64) -> Buffer {
 
 impl StripBufferArena {
     pub(crate) fn new(device: &Device) -> Self {
+        let cap = INITIAL_STRIP_CAPACITY.min(device.limits().max_buffer_size);
         Self {
-            buffer: create_arena_buffer(device, 0),
-            capacity: 0,
+            buffer: create_arena_buffer(device, cap),
+            capacity: cap,
             cursor: 0,
         }
     }
 
-    pub(crate) fn begin_frame(&mut self, device: &Device, frame_size: u64) {
-        self.cursor = 0;
-        if frame_size > self.capacity {
-            let new_capacity = frame_size
+    pub(crate) fn ensure_capacity(&mut self, device: &Device, needed: u64) {
+        if needed > self.capacity {
+            let new_capacity = needed
+                .max(INITIAL_STRIP_CAPACITY)
                 .max(self.capacity * 2)
                 .min(device.limits().max_buffer_size);
             self.buffer = create_arena_buffer(device, new_capacity);
@@ -224,8 +87,12 @@ impl StripBufferArena {
         }
     }
 
+    pub(crate) fn reset_cursor(&mut self) {
+        self.cursor = 0;
+    }
+
     pub(crate) fn alloc(&mut self, len: u64) -> u64 {
-        let offset = self.cursor.next_multiple_of(COPY_BUFFER_ALIGNMENT);
+        let offset = self.cursor.next_multiple_of(16);
         self.cursor = offset + len;
         offset
     }
@@ -253,39 +120,34 @@ impl Borrow<Texture> for BoundTexture {
     }
 }
 
-impl<T: Borrow<Texture>> DataTexture<T> {
-    /// Upload `data` to the texture, starting at its first row.
-    pub(crate) fn upload(
-        &self,
-        staging_belt: &mut UploadStagingBelt,
-        encoder: &mut CommandEncoder,
-        data: &[u8],
-    ) {
-        staging_belt.upload_texture(
-            encoder,
-            self.texture().borrow(),
-            data,
-            self.format().bytes_per_texel(),
-        );
+fn write_data_texture_rows(
+    queue: &Queue,
+    texture: &Texture,
+    bytes_per_texel: u32,
+    staging: &mut Vec<u8>,
+) {
+    if staging.is_empty() {
+        return;
     }
-
-    /// `texels` must match the total size of `chunks`.
-    pub(crate) fn upload_chunks<'a>(
-        &self,
-        staging_belt: &mut UploadStagingBelt,
-        encoder: &mut CommandEncoder,
-        texels: u32,
-        chunks: impl IntoIterator<Item = &'a [u8]>,
-    ) {
-        let bytes_per_texel = self.format().bytes_per_texel();
-        staging_belt.upload_texture_chunks(
-            encoder,
-            self.texture().borrow(),
-            texels as usize * bytes_per_texel as usize,
-            bytes_per_texel,
-            chunks,
-        );
-    }
+    let width = texture.width();
+    let bytes_per_row = width * bytes_per_texel;
+    let rows = staging.len().div_ceil(bytes_per_row as usize) as u32;
+    let padded_len = rows as usize * bytes_per_row as usize;
+    staging.resize(padded_len, 0);
+    queue.write_texture(
+        texture.as_image_copy(),
+        staging,
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: Some(bytes_per_row),
+            rows_per_image: None,
+        },
+        Extent3d {
+            width,
+            height: rows,
+            depth_or_array_layers: 1,
+        },
+    );
 }
 
 /// Contains all GPU resources needed for rendering
@@ -313,8 +175,10 @@ pub(crate) struct GpuResources {
     pub(crate) filter_data_texture: DataTexture<BoundTexture>,
     /// Intermediate texture size.
     pub(crate) texture_size: SizeU16,
-    /// Root config buffer.
+    /// Root config buffer (slotted for dynamic offsets across batched renders).
     pub(crate) view_config_buffer: Buffer,
+    /// Alignment stride in bytes between slots in `view_config_buffer`.
+    pub(crate) config_align: u32,
     /// Layer config buffer.
     pub(crate) layer_config_buffer: Buffer,
 
@@ -335,15 +199,30 @@ pub(crate) struct GpuResources {
     pub(crate) blend_layer_bind_groups: HashMap<BlendPassBindings, BindGroup>,
     /// Filter bind group cache.
     pub(crate) filter_pair_bind_groups: HashMap<FilterPassBindings, FilterPairBindGroups>,
-    /// Arena holding all [`GpuStrip`](crate::GpuStrip) data.
+    /// Drawpane: persistent external-texture bind group cache keyed by bindings + version stamps.
+    pub(crate) external_texture_bind_groups:
+        HashMap<(ExternalTextureBindings, [u64; EXTERNAL_TEXTURE_SLOT_COUNT]), BindGroup>,
+    /// Arena holding all [`GpuStrip`](crate::GpuStrip), blend, clear, and copy vertex data.
     pub(crate) strips_arena: StripBufferArena,
-    /// Shared staging memory for buffer and texture uploads.
-    pub(crate) staging_belt: UploadStagingBelt,
-    /// Dimensions of the rendering target
+    /// Drawpane: CPU staging for batched uploads flushed once before `queue.submit`.
+    pub(crate) batch_active: bool,
+    pub(crate) batch_has_filter: bool,
+    pub(crate) batch_gradient_upload_len: usize,
+    pub(crate) batch_alpha_target_bytes: usize,
+    pub(crate) batch_paint_target_texels: u32,
+    pub(crate) batch_strip_target_bytes: u64,
+    pub(crate) alphas_staging: Vec<u8>,
+    pub(crate) paints_staging: Vec<u8>,
+    pub(crate) strips_staging: Vec<u8>,
+    pub(crate) config_staging: Vec<u8>,
+    pub(crate) filter_data_staging: Vec<u8>,
+    pub(crate) gradient_upload_scratch: Vec<u8>,
+    pub(crate) batch_configs: HashMap<(RenderSize, (i32, i32)), u32>,
+    /// Dimensions of the active rendering target.
     pub(crate) render_size: RenderSize,
-    /// Offset of the scene within the rendering target.
+    /// Offset of the scene within the active rendering target.
     pub(crate) scene_offset: (i32, i32),
-    /// Whether the depth buffer has been cleared this frame.
+    /// Whether the depth buffer has been cleared for the current render.
     pub(crate) depth_cleared_this_frame: bool,
 }
 
@@ -380,19 +259,30 @@ impl GpuResources {
             resource_texture_dimension_2d,
         );
 
-        let alphas_texture = Self::new_data_texture(
-            device,
-            "Alpha Texture",
+        let initial_alpha_rows = MIN_BATCH_ALPHA_ROWS.min(resource_texture_dimension_2d);
+        let alphas_texture = DataTexture::new(
+            Self::create_data_texture(
+                device,
+                "Alpha Texture",
+                DataTextureFormat::Rgba32Uint,
+                resource_texture_dimension_2d,
+                initial_alpha_rows,
+            ),
             ResourceTexture::Alphas,
             DataTextureFormat::Rgba32Uint,
             resource_texture_dimension_2d,
+            initial_alpha_rows,
         );
-        let view_config_buffer = Self::create_config_buffer(
-            device,
-            u32::from(render_size.width),
-            u32::from(render_size.height),
-            resource_texture_dimension_2d,
-        );
+        let config_align = device
+            .limits()
+            .min_uniform_buffer_offset_alignment
+            .max(SIZE_OF_CONFIG.get() as u32);
+        let view_config_buffer = device.create_buffer(&BufferDescriptor {
+            label: Some("View Config Batch Buffer"),
+            size: u64::from(config_align) * u64::from(CONFIG_SLOTS),
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let AtlasConfig {
             atlas_size: (atlas_width, atlas_height),
@@ -418,13 +308,20 @@ impl GpuResources {
                 ),
             );
 
-        let encoded_paints_texture = Self::new_bound_data_texture(
-            device,
-            "Encoded Paints",
-            &programs.encoded_paints_bind_group_layout,
+        let initial_paint_rows = MIN_BATCH_PAINT_ROWS.min(resource_texture_dimension_2d);
+        let encoded_paints_texture = DataTexture::new(
+            Self::create_bound_data_texture(
+                device,
+                "Encoded Paints",
+                &programs.encoded_paints_bind_group_layout,
+                DataTextureFormat::Rgba32Uint,
+                resource_texture_dimension_2d,
+                initial_paint_rows,
+            ),
             ResourceTexture::EncodedPaints,
             DataTextureFormat::Rgba32Uint,
             resource_texture_dimension_2d,
+            initial_paint_rows,
         );
         let gradient_texture = Self::new_bound_data_texture(
             device,
@@ -448,6 +345,11 @@ impl GpuResources {
             &placeholder_external_texture_view,
         );
 
+        let batch_alpha_target_bytes = alphas_texture.capacity_bytes();
+        let batch_paint_target_texels = encoded_paints_texture.capacity_texels();
+        let strips_arena = StripBufferArena::new(device);
+        let batch_strip_target_bytes = strips_arena.capacity;
+
         Self {
             layer_textures,
             scratch_texture,
@@ -466,16 +368,48 @@ impl GpuResources {
             filter_data_texture,
             texture_size,
             view_config_buffer,
+            config_align,
             external_samplers,
             strip_layer_bind_groups: HashMap::new(),
             blend_layer_bind_groups: HashMap::new(),
             filter_pair_bind_groups: HashMap::new(),
-            strips_arena: StripBufferArena::new(device),
-            staging_belt: UploadStagingBelt::new(device),
+            external_texture_bind_groups: HashMap::new(),
+            strips_arena,
+            batch_active: false,
+            batch_has_filter: false,
+            batch_gradient_upload_len: 0,
+            batch_alpha_target_bytes,
+            batch_paint_target_texels,
+            batch_strip_target_bytes,
+            alphas_staging: Vec::new(),
+            paints_staging: Vec::new(),
+            strips_staging: Vec::new(),
+            config_staging: Vec::new(),
+            filter_data_staging: Vec::new(),
+            gradient_upload_scratch: Vec::new(),
+            batch_configs: HashMap::new(),
             render_size,
             scene_offset: (0, 0),
             depth_cleared_this_frame: false,
         }
+    }
+
+    /// Drawpane: stage vertex bytes for blend/clear/copy passes in the shared vertex arena.
+    pub(crate) fn upload_vertex_bytes(&mut self, bytes: &[u8]) -> Range<u64> {
+        if bytes.is_empty() {
+            return 0..0;
+        }
+        let len = bytes.len() as u64;
+        let offset = self.strips_arena.alloc(len);
+        debug_assert!(
+            offset + len <= self.strips_arena.capacity,
+            "strips arena overflow: {} > {}",
+            offset + len,
+            self.strips_arena.capacity
+        );
+        self.strips_staging.resize(offset as usize, 0);
+        self.strips_staging.extend_from_slice(bytes);
+        offset..offset + len
     }
 
     pub(crate) fn layer_views(&self, layer_ids: [LayerTextureId; 2]) -> [&TextureView; 2] {
@@ -630,22 +564,6 @@ impl GpuResources {
         })
     }
 
-    fn new_data_texture(
-        device: &Device,
-        label: &'static str,
-        kind: ResourceTexture,
-        format: DataTextureFormat,
-        width: u32,
-    ) -> DataTexture<Texture> {
-        DataTexture::new(
-            Self::create_data_texture(device, label, format, width, 1),
-            kind,
-            format,
-            width,
-            1,
-        )
-    }
-
     fn new_bound_data_texture(
         device: &Device,
         label: &'static str,
@@ -770,48 +688,287 @@ impl GpuResources {
         })
     }
 
-    /// Prepare GPU buffers for rendering, given alphas.
+    /// Drawpane: check whether a prepared render fits into the active GPU batch without resizing
+    /// any resource bound by earlier passes in the same `CommandEncoder`.
+    #[expect(clippy::too_many_arguments, reason = "batch capacity check")]
+    pub(crate) fn can_fit_in_batch(
+        &mut self,
+        schedule: &Schedule,
+        gradient_cache: &GradientRampCache,
+        alphas_len: usize,
+        paint_texels: u32,
+        filter_context: &FilterContext,
+        render_size: RenderSize,
+        scene_offset: (i32, i32),
+        needed_vertex_bytes: u64,
+    ) -> bool {
+        if !self.batch_active {
+            return true;
+        }
+        let req = schedule.intermediate_texture_requirements();
+        if req.size != self.texture_size {
+            return false;
+        }
+        if req.allocations.scratch && self.scratch_texture.is_none() {
+            return false;
+        }
+        if !filter_context.is_empty() || self.batch_has_filter {
+            return false;
+        }
+        if gradient_cache.has_changed()
+            && gradient_cache.luts_size() > self.gradient_texture.capacity_bytes()
+        {
+            return false;
+        }
+
+        let max_tex_alpha_bytes = (self.resource_texture_dimension_2d as usize)
+            .saturating_mul(self.resource_texture_dimension_2d as usize)
+            .saturating_mul(16)
+            .min(MAX_BATCH_ALPHA_BYTES);
+        let alpha_pad = self.alphas_staging.len().next_multiple_of(16);
+        let alpha_end = alpha_pad.saturating_add(alphas_len);
+        if alpha_end > self.alphas_texture.capacity_bytes() || alpha_end > max_tex_alpha_bytes {
+            if alpha_end <= max_tex_alpha_bytes
+                && self.alphas_texture.capacity_bytes() < max_tex_alpha_bytes
+            {
+                self.batch_alpha_target_bytes =
+                    (self.alphas_texture.capacity_bytes() * 2).min(max_tex_alpha_bytes);
+            }
+            return false;
+        }
+
+        let max_tex_paint_texels = self
+            .resource_texture_dimension_2d
+            .saturating_mul(self.resource_texture_dimension_2d)
+            .min((MAX_BATCH_PAINT_BYTES / 16) as u32)
+            .min((1 << 24) - 1);
+        let paint_base_texel = (self.paints_staging.len() / 16) as u32;
+        let paint_end_texels = paint_base_texel.saturating_add(paint_texels);
+        if paint_end_texels > self.encoded_paints_texture.capacity_texels()
+            || paint_end_texels > max_tex_paint_texels
+        {
+            if paint_end_texels <= max_tex_paint_texels
+                && self.encoded_paints_texture.capacity_texels() < max_tex_paint_texels
+            {
+                self.batch_paint_target_texels =
+                    (self.encoded_paints_texture.capacity_texels() * 2).min(max_tex_paint_texels);
+            }
+            return false;
+        }
+
+        let vertex_end = self
+            .strips_arena
+            .cursor
+            .next_multiple_of(16)
+            .saturating_add(needed_vertex_bytes);
+        if vertex_end > self.strips_arena.capacity {
+            if self.strips_arena.capacity < MAX_AUTO_GROW_STRIP_CAPACITY {
+                self.batch_strip_target_bytes =
+                    (self.strips_arena.capacity * 2).min(MAX_AUTO_GROW_STRIP_CAPACITY);
+            }
+            return false;
+        }
+
+        let config_key = (render_size, scene_offset);
+        if !self.batch_configs.contains_key(&config_key)
+            && self.batch_configs.len() >= CONFIG_SLOTS as usize
+        {
+            return false;
+        }
+
+        true
+    }
+
+    /// Drawpane: allocate or reuse a dynamic-offset slot in `view_config_buffer` for this render.
+    fn alloc_config_slot(&mut self, render_size: RenderSize, scene_offset: (i32, i32)) -> u32 {
+        let key = (render_size, scene_offset);
+        if let Some(&offset) = self.batch_configs.get(&key) {
+            return offset;
+        }
+        let slot = self.batch_configs.len() as u32;
+        let offset = slot * self.config_align;
+        let config = Config {
+            width: u32::from(render_size.width),
+            height: u32::from(render_size.height),
+            strip_height: Tile::HEIGHT.into(),
+            alphas_tex_width_bits: self.resource_texture_dimension_2d.trailing_zeros(),
+            encoded_paints_tex_width_bits: self.resource_texture_dimension_2d.trailing_zeros(),
+            strip_offset_x: scene_offset.0,
+            strip_offset_y: scene_offset.1,
+            negate_ndc: 0,
+        };
+        let start = offset as usize;
+        let end = start + self.config_align as usize;
+        if self.config_staging.len() < end {
+            self.config_staging.resize(end, 0);
+        }
+        let bytes = bytemuck::bytes_of(&config);
+        self.config_staging[start..start + bytes.len()].copy_from_slice(bytes);
+        self.batch_configs.insert(key, offset);
+        offset
+    }
+
+    /// Drawpane: ensure GPU buffers/textures are sized (when starting a fresh batch) and stage
+    /// this render's alphas, encoded paints, filters, and view config into CPU batch buffers.
     ///
-    /// Specifically, updates the alpha texture with `alphas` and the config buffer when
-    /// the rendering size changes.
-    pub(crate) fn prepare(
+    /// Returns `(view_config_offset, alpha_col_base, paint_base_texel)`.
+    #[expect(clippy::too_many_arguments, reason = "batch resource preparation")]
+    pub(crate) fn prepare_batch(
         &mut self,
         device: &Device,
         programs: &Programs,
-        encoder: &mut CommandEncoder,
-        gradient_cache: &mut GradientRampCache,
+        gradient_cache: &GradientRampCache,
         encoded_paints: &[GpuEncodedPaint],
         alphas: &[u8],
-        new_render_size: &RenderSize,
+        new_render_size: RenderSize,
         scene_offset: (i32, i32),
-        paint_idxs: &[u32],
+        paint_texels: u32,
         filter_context: &FilterContext,
-    ) -> Result<(), RenderError> {
-        let resource_texture_dimension_2d = self.resource_texture_dimension_2d;
-        self.staging_belt.prepare(device);
-        self.maybe_resize_alphas_tex(device, alphas.len())?;
-        self.maybe_resize_encoded_paints_tex(device, programs, paint_idxs)?;
-        self.maybe_resize_filter_tex(device, programs, filter_context)?;
-        if gradient_cache.has_changed() {
-            self.maybe_resize_gradient_tex(device, programs, gradient_cache)?;
-        }
-        self.maybe_update_config_buffer(
-            encoder,
-            resource_texture_dimension_2d,
-            new_render_size,
-            scene_offset,
-        );
-
-        self.upload_alpha_texture(encoder, alphas);
-        self.upload_encoded_paints_texture(encoder, encoded_paints, paint_idxs);
-        self.upload_filter_texture(encoder, filter_context);
-
-        if gradient_cache.has_changed() {
-            self.upload_gradient_texture(encoder, gradient_cache);
-            gradient_cache.mark_synced();
+        needed_vertex_bytes: u64,
+    ) -> Result<(u32, u32, u32), RenderError> {
+        if !self.batch_active {
+            let alphas_need = alphas.len().max(self.batch_alpha_target_bytes);
+            self.maybe_resize_alphas_tex(device, alphas_need)?;
+            let paints_need = paint_texels.max(self.batch_paint_target_texels);
+            self.maybe_resize_encoded_paints_tex(device, programs, paints_need)?;
+            self.maybe_resize_filter_tex(device, programs, filter_context)?;
+            if gradient_cache.has_changed() {
+                self.maybe_resize_gradient_tex(device, programs, gradient_cache)?;
+            }
+            self.strips_arena
+                .ensure_capacity(device, needed_vertex_bytes.max(self.batch_strip_target_bytes));
+            self.batch_active = true;
         }
 
-        Ok(())
+        if !filter_context.is_empty() {
+            self.batch_has_filter = true;
+            self.stage_filter_texture(filter_context);
+        }
+        if gradient_cache.has_changed() {
+            self.batch_gradient_upload_len = gradient_cache.luts_size();
+        }
+
+        let alpha_col_base = if alphas.is_empty() {
+            0
+        } else {
+            let pad = self.alphas_staging.len().next_multiple_of(16);
+            self.alphas_staging.resize(pad, 0);
+            let base = (pad / 4) as u32;
+            self.alphas_staging.extend_from_slice(alphas);
+            base
+        };
+
+        let paint_base_texel = if encoded_paints.is_empty() {
+            0
+        } else {
+            let base = (self.paints_staging.len() / 16) as u32;
+            for paint in encoded_paints {
+                self.paints_staging.extend_from_slice(paint.as_bytes());
+            }
+            debug_assert_eq!(
+                (self.paints_staging.len() / 16) as u32 - base,
+                paint_texels
+            );
+            base
+        };
+
+        let view_config_offset = self.alloc_config_slot(new_render_size, scene_offset);
+        self.render_size = new_render_size;
+        self.scene_offset = scene_offset;
+
+        Ok((view_config_offset, alpha_col_base, paint_base_texel))
+    }
+
+    /// Drawpane: upload all CPU-staged buffers and data textures once before `queue.submit`.
+    pub(crate) fn flush_uploads(
+        &mut self,
+        queue: &Queue,
+        gradient_cache: &mut GradientRampCache,
+    ) {
+        if !self.batch_active {
+            return;
+        }
+        if !self.alphas_staging.is_empty() {
+            write_data_texture_rows(
+                queue,
+                self.alphas_texture.texture(),
+                self.alphas_texture.format().bytes_per_texel(),
+                &mut self.alphas_staging,
+            );
+            self.alphas_staging.clear();
+        }
+        if !self.paints_staging.is_empty() {
+            write_data_texture_rows(
+                queue,
+                &self.encoded_paints_texture.texture().texture,
+                self.encoded_paints_texture.format().bytes_per_texel(),
+                &mut self.paints_staging,
+            );
+            self.paints_staging.clear();
+        }
+        if !self.filter_data_staging.is_empty() {
+            write_data_texture_rows(
+                queue,
+                &self.filter_data_texture.texture().texture,
+                self.filter_data_texture.format().bytes_per_texel(),
+                &mut self.filter_data_staging,
+            );
+            self.filter_data_staging.clear();
+        }
+        if self.batch_gradient_upload_len > 0 {
+            let luts = gradient_cache.luts();
+            let upload_len = self.batch_gradient_upload_len.min(luts.len());
+            self.gradient_upload_scratch.clear();
+            self.gradient_upload_scratch
+                .extend_from_slice(&luts[..upload_len]);
+            write_data_texture_rows(
+                queue,
+                &self.gradient_texture.texture().texture,
+                self.gradient_texture.format().bytes_per_texel(),
+                &mut self.gradient_upload_scratch,
+            );
+            if upload_len == luts.len() {
+                gradient_cache.mark_synced();
+            }
+            self.batch_gradient_upload_len = 0;
+        }
+        if !self.config_staging.is_empty() {
+            queue.write_buffer(&self.view_config_buffer, 0, &self.config_staging);
+            self.config_staging.clear();
+            self.batch_configs.clear();
+        }
+        if !self.strips_staging.is_empty() {
+            let padded = self
+                .strips_staging
+                .len()
+                .next_multiple_of(COPY_BUFFER_ALIGNMENT as usize);
+            self.strips_staging.resize(padded, 0);
+            queue.write_buffer(&self.strips_arena.buffer, 0, &self.strips_staging);
+            self.strips_staging.clear();
+        }
+        self.strips_arena.reset_cursor();
+        if self.external_texture_bind_groups.len() > MAX_EXTERNAL_BG_CACHE {
+            self.external_texture_bind_groups.clear();
+        }
+        self.batch_active = false;
+        self.batch_has_filter = false;
+    }
+
+    /// Drawpane: discard staged batch data when an active `CommandEncoder` is dropped unsubmitted.
+    pub(crate) fn discard_uploads(&mut self) {
+        self.alphas_staging.clear();
+        self.paints_staging.clear();
+        self.strips_staging.clear();
+        self.config_staging.clear();
+        self.filter_data_staging.clear();
+        self.batch_configs.clear();
+        self.strips_arena.reset_cursor();
+        if self.external_texture_bind_groups.len() > MAX_EXTERNAL_BG_CACHE {
+            self.external_texture_bind_groups.clear();
+        }
+        self.batch_active = false;
+        self.batch_has_filter = false;
+        self.batch_gradient_upload_len = 0;
     }
 
     /// Update the alpha texture size if needed.
@@ -845,12 +1002,11 @@ impl GpuResources {
         &mut self,
         device: &Device,
         programs: &Programs,
-        paint_idxs: &[u32],
+        paint_texels: u32,
     ) -> Result<(), RenderError> {
         let layout = &programs.encoded_paints_bind_group_layout;
-        self.encoded_paints_texture.ensure_texels(
-            *paint_idxs.last().unwrap(),
-            |format, width, height| {
+        self.encoded_paints_texture
+            .ensure_texels(paint_texels, |format, width, height| {
                 Ok::<_, RenderError>(Self::create_bound_data_texture(
                     device,
                     "Encoded Paints",
@@ -859,8 +1015,7 @@ impl GpuResources {
                     width,
                     height,
                 ))
-            },
-        )?;
+            })?;
 
         Ok(())
     }
@@ -885,38 +1040,6 @@ impl GpuResources {
         Ok(())
     }
 
-    /// Update config buffer if dimensions or the scene offset changed.
-    fn maybe_update_config_buffer(
-        &mut self,
-        encoder: &mut CommandEncoder,
-        resource_texture_dimension_2d: u32,
-        new_render_size: &RenderSize,
-        scene_offset: (i32, i32),
-    ) {
-        if self.render_size != *new_render_size || self.scene_offset != scene_offset {
-            let config = Config {
-                width: u32::from(new_render_size.width),
-                height: u32::from(new_render_size.height),
-                strip_height: Tile::HEIGHT.into(),
-                alphas_tex_width_bits: resource_texture_dimension_2d.trailing_zeros(),
-                encoded_paints_tex_width_bits: resource_texture_dimension_2d.trailing_zeros(),
-                strip_offset_x: scene_offset.0,
-                strip_offset_y: scene_offset.1,
-                negate_ndc: 0,
-            };
-            let mut buffer = self.staging_belt.write_buffer(
-                encoder,
-                &self.view_config_buffer,
-                0,
-                SIZE_OF_CONFIG,
-            );
-            buffer.copy_from_slice(bytemuck::bytes_of(&config));
-
-            self.render_size = *new_render_size;
-            self.scene_offset = scene_offset;
-        }
-    }
-
     /// Create any newly allocated atlas textures.
     pub(crate) fn maybe_create_atlas_textures(
         &mut self,
@@ -930,48 +1053,5 @@ impl GpuResources {
             self.atlas_textures.push(texture);
             self.atlas_texture_views.push(texture_view);
         }
-    }
-
-    /// Upload alpha data to the texture.
-    fn upload_alpha_texture(&mut self, encoder: &mut CommandEncoder, alphas: &[u8]) {
-        if alphas.is_empty() {
-            return;
-        }
-
-        self.alphas_texture
-            .upload(&mut self.staging_belt, encoder, alphas);
-    }
-
-    /// Upload encoded paints to the texture.
-    fn upload_encoded_paints_texture(
-        &mut self,
-        encoder: &mut CommandEncoder,
-        encoded_paints: &[GpuEncodedPaint],
-        paint_idxs: &[u32],
-    ) {
-        if encoded_paints.is_empty() {
-            return;
-        }
-
-        self.encoded_paints_texture.upload_chunks(
-            &mut self.staging_belt,
-            encoder,
-            *paint_idxs.last().unwrap(),
-            encoded_paints.iter().map(GpuEncodedPaint::as_bytes),
-        );
-    }
-
-    /// Upload gradient data to the texture.
-    fn upload_gradient_texture(
-        &mut self,
-        encoder: &mut CommandEncoder,
-        gradient_cache: &mut GradientRampCache,
-    ) {
-        if gradient_cache.is_empty() {
-            return;
-        }
-
-        self.gradient_texture
-            .upload(&mut self.staging_belt, encoder, gradient_cache.luts());
     }
 }
