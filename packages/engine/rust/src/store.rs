@@ -1318,77 +1318,122 @@ impl Store {
     }
 
     /// Whether setting `old` to `new` only loads an image where its placeholder was (#352
-    /// re-check): each placeholder fill becomes the image filled inside a clip to the very same
-    /// path (same contents, even-odd rule), at the placeholder's opacity and blend, and nothing
-    /// else about the record changes. Its paths keep their contents at their places (more may
-    /// follow, for the images), and every other op is the same, in order. The caller checks the
-    /// parent.
+    /// re-check): a placeholder fill becomes the image, clipped to the very same shape (path
+    /// contents and even-odd rule) or filling it (tiled), at the placeholder's opacity and blend,
+    /// and nothing else about the record changes. Ops compare by what they draw: their paths'
+    /// contents, not indices (the image's placement adds a path), caches set aside. An image
+    /// already there stays exactly as it was. The caller checks the parent.
     fn fills_placeholder(old: &Record, new: &Record) -> bool {
         use crate::record::Paint;
-        // One op of each, in order: an image filled where its placeholder was, or anything else.
+        /// Where an image goes: its shape's contents, rule, opacity and blend.
         #[derive(PartialEq)]
-        enum Token {
-            Image {
-                clip: String,
-                even_odd: bool,
-                opacity: u32,
-                blend: u8,
-            },
-            Other(String),
+        struct Place(String, bool, u32, u8);
+        enum Unit {
+            Placeholder(Place),
+            /// An image fill (clipped, or tiled), and the ops it is, as drawn.
+            Image(Place, String),
+            Op(String),
         }
         let path = |r: &Record, i: u32| r.paths.get(i as usize).map(|p| format!("{p:?}"));
-        let old_tokens: Option<Vec<Token>> = old
-            .ops
-            .iter()
-            .map(|op| match op {
-                Op::Fill {
-                    path: p,
-                    even_odd,
-                    paint: Paint::Placeholder(opacity),
-                    blend,
-                } => Some(Token::Image {
-                    clip: path(old, *p)?,
-                    even_odd: *even_odd,
-                    opacity: opacity.to_bits(),
-                    blend: *blend,
-                }),
-                other => Some(Token::Other(format!("{other:?}"))),
-            })
-            .collect();
-        let mut new_tokens = Vec::with_capacity(new.ops.len());
-        let mut k = 0;
-        while k < new.ops.len() {
-            if let (
-                Some(Op::Clip { path: c, even_odd }),
-                Some(Op::Fill {
-                    paint: Paint::Image(image),
-                    blend,
-                    ..
-                }),
-                Some(Op::Unclip),
-            ) = (new.ops.get(k), new.ops.get(k + 1), new.ops.get(k + 2))
-            {
-                let Some(clip) = path(new, *c) else { return false };
-                new_tokens.push(Token::Image {
-                    clip,
-                    even_odd: *even_odd,
-                    opacity: image.opacity.to_bits(),
-                    blend: *blend,
-                });
-                k += 3;
-            } else {
-                new_tokens.push(Token::Other(format!("{:?}", new.ops[k])));
+        // An op as drawn: its paths' contents in place of their indices, caches set aside.
+        let drawn = |r: &Record, op: &Op| -> Option<String> {
+            let mut op = op.clone();
+            let mut at = Vec::new();
+            match &mut op {
+                Op::Fill { path, .. } | Op::Clip { path, .. } => at.push(std::mem::take(path)),
+                Op::Stroke { path, cache, .. } => {
+                    at.push(std::mem::take(path));
+                    *cache = Default::default();
+                }
+                Op::DropShadow { paths, .. } => at.append(paths),
+                Op::InnerShadow { shape, hole, .. } => {
+                    at.push(std::mem::take(shape));
+                    at.extend(hole.take());
+                }
+                Op::Glass(g) => {
+                    at.append(&mut g.paths);
+                    g.measured_inradius.set(-1.0);
+                }
+                Op::BackgroundBlur(b) => at.append(&mut b.paths),
+                Op::ProgressiveBlur(b) => at.append(&mut b.paths),
+                Op::Unclip | Op::Children | Op::Read { .. } | Op::Layer { .. } | Op::Unlayer => {}
+            }
+            let contents = at.iter().map(|&i| path(r, i)).collect::<Option<Vec<_>>>()?;
+            Some(format!("{op:?} {contents:?}"))
+        };
+        let units = |r: &Record, ops: &[Op]| -> Option<Vec<Unit>> {
+            let mut out = Vec::with_capacity(ops.len());
+            let mut k = 0;
+            while k < ops.len() {
+                let unit = match (&ops[k], ops.get(k + 1), ops.get(k + 2)) {
+                    (
+                        Op::Fill {
+                            path: p,
+                            even_odd,
+                            paint: Paint::Placeholder(opacity),
+                            blend,
+                        },
+                        ..,
+                    ) => Unit::Placeholder(Place(path(r, *p)?, *even_odd, opacity.to_bits(), *blend)),
+                    (
+                        Op::Clip { path: c, even_odd },
+                        Some(
+                            fill @ Op::Fill {
+                                paint: Paint::Image(image),
+                                blend,
+                                ..
+                            },
+                        ),
+                        Some(Op::Unclip),
+                    ) => {
+                        let ops = [drawn(r, &ops[k])?, drawn(r, fill)?, drawn(r, &Op::Unclip)?];
+                        k += 2;
+                        Unit::Image(
+                            Place(path(r, *c)?, *even_odd, image.opacity.to_bits(), *blend),
+                            ops.join(" "),
+                        )
+                    }
+                    (
+                        fill @ Op::Fill {
+                            path: p,
+                            even_odd,
+                            paint: Paint::Image(image),
+                            blend,
+                        },
+                        ..,
+                    ) => Unit::Image(
+                        Place(path(r, *p)?, *even_odd, image.opacity.to_bits(), *blend),
+                        drawn(r, fill)?,
+                    ),
+                    (op, ..) => Unit::Op(drawn(r, op)?),
+                };
+                out.push(unit);
                 k += 1;
             }
-        }
-        let Some(old_tokens) = old_tokens else { return false };
-        let paths_kept = new.paths.len() >= old.paths.len()
-            && old
-                .paths
-                .iter()
-                .zip(&new.paths)
-                .all(|(a, b)| format!("{a:?}") == format!("{b:?}"));
-        old.flags == new.flags
+            Some(out)
+        };
+        let same = |a: &[Op], b: &[Op]| {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b)
+                    .all(|(x, y)| drawn(old, x).is_some() && drawn(old, x) == drawn(new, y))
+        };
+        let (Some(was), Some(now)) = (units(old, &old.ops), units(new, &new.ops)) else {
+            return false;
+        };
+        let mut filled = false;
+        let units_match = was.len() == now.len()
+            && was.iter().zip(&now).all(|pair| match pair {
+                (Unit::Placeholder(a), Unit::Image(b, _)) => {
+                    filled = true;
+                    a == b
+                }
+                (Unit::Image(_, a), Unit::Image(_, b)) | (Unit::Op(a), Unit::Op(b)) => a == b,
+                _ => false,
+            });
+        units_match
+            && filled
+            && old.flags == new.flags
             && old.opacity == new.opacity
             && old.transform == new.transform
             && old.size == new.size
@@ -1398,10 +1443,7 @@ impl Store {
             && old.mask == new.mask
             && old.unsupported == new.unsupported
             && format!("{:?}", old.post_effects) == format!("{:?}", new.post_effects)
-            && format!("{:?}", old.coarse) == format!("{:?}", new.coarse)
-            && paths_kept
-            && old_tokens.iter().any(|t| matches!(t, Token::Image { .. }))
-            && old_tokens == new_tokens
+            && same(&old.coarse, &new.coarse)
     }
 
     /// Paint order: each record's preorder index and the last index in its subtree.

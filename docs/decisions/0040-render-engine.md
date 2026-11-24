@@ -2019,10 +2019,10 @@ GPU work a frame queued had no bound, and input waited behind it.
     size the image had is treated as other content.
   - So is an image loaded where its placeholder was: a record set again with only its
     placeholder fills become fills of the image, clipped to its shape (`Dirty::refine`,
-    `Store::fills_placeholder`). Its paths, parent and everything else stay as they were, the
-    image's opacity and blend are the placeholder's, and the clip around the image fill is the
-    placeholder's path. Anything else changing with it, another image, or another fill is an
-    edit. Zooming out brings boards into view whose images then load: each counted as an edit
+    `Store::fills_placeholder`). The image fills the placeholder's very shape (clipped to it, or
+    tiled over it) at its opacity and blend; every other op draws the same, its paths compared
+    by contents (the image's placement adds a path), and the parent and everything else stay as
+    they were. Anything else changing with it, another image, or another fill is an edit. Zooming out brings boards into view whose images then load: each counted as an edit
     staled the overview tile over its board (one covers about 23,000 page units on the iOS
     kit), and the pinch-out drew what it stood in for, 5 to 34 tiles a gesture.
   - A refined tile, of the frame's level too, never goes over anything drawn since: it's laid

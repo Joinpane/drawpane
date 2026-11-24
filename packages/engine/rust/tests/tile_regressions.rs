@@ -2204,7 +2204,9 @@ fn provisional_text_in_reader_halo_converges_to_exact() {
 /// arriving, not an edit: tiles drawn with the placeholder stand in until drawn again, never
 /// exact, and nothing is noted as changed. Anything else changing with it stays an edit: the
 /// record moved, a path changed (corner radius), the image's opacity, its content clip, its
-/// parent (#352 re-check), another image, or a fill that isn't the image.
+/// parent (#352 re-check), another image, an image already there swapped, or a fill that isn't
+/// the image. Ops compare by their paths' contents, caches set aside: a tiled image, a stroke
+/// drawn before, or the placement's path shifting another's index is still a fill-in.
 #[test]
 fn an_image_loaded_where_its_placeholder_was_refines_and_anything_else_is_an_edit() {
     fn shape(radius: f32, ops: Vec<Op>) -> Rec {
@@ -2244,6 +2246,54 @@ fn an_image_loaded_where_its_placeholder_was_refines_and_anything_else_is_an_edi
     fn loaded(id: u32) -> Rec {
         loaded_at(id, 1.0, 0.0)
     }
+    fn stroke() -> Op {
+        Op::Stroke {
+            path: 0,
+            width: 4.0,
+            join: 0,
+            cap: 0,
+            dashes: vec![],
+            offset: 0.0,
+            paint: Paint::Solid([0.0, 0.0, 0.0, 1.0]),
+        }
+    }
+    // A square inside the shape, its path after the shape's; loaded, the image's placement is a
+    // path between them, as the editor emits it.
+    fn inner(loaded: bool) -> Rec {
+        let mut r = shape(0.0, vec![]);
+        let square = Entry::Rect {
+            w: 32.0,
+            h: 32.0,
+            radii: [0.0; 4],
+        };
+        let solid = |path| Op::Fill {
+            path,
+            even_odd: false,
+            paint: Paint::Solid([0.0, 0.0, 1.0, 1.0]),
+        };
+        if loaded {
+            r.paths.push(Entry::Rect {
+                w: 64.0,
+                h: 64.0,
+                radii: [0.0; 4],
+            });
+            r.paths.push(square);
+            r.ops = vec![
+                clip(),
+                Op::Fill {
+                    path: 1,
+                    even_odd: false,
+                    paint: image(1, 1.0),
+                },
+                Op::Unclip,
+                solid(2),
+            ];
+        } else {
+            r.paths.push(square);
+            r.ops = vec![fill(Paint::PlaceholderAt(1.0)), solid(1)];
+        }
+        r
+    }
     let placeholder = shape(0.0, vec![fill(Paint::PlaceholderAt(1.0))]);
     // A frame clipping its content, a child poking out of it to the right and below.
     let framed = shape(
@@ -2262,6 +2312,96 @@ fn an_image_loaded_where_its_placeholder_was_refines_and_anything_else_is_an_edi
     type Edit = Box<dyn Fn(&mut W)>;
     type Case = (&'static str, Vec<(u32, u32, Rec)>, Edit, bool);
     let cases: Vec<Case> = vec![
+        (
+            "its image loaded tiled",
+            vec![(1, 0, placeholder.clone())],
+            Box::new(|w: &mut W| {
+                let tiled = Paint::Image {
+                    id: 1,
+                    m: [16.0, 0.0, 0.0, 16.0, 0.0, 0.0],
+                    tile: true,
+                    opacity: 1.0,
+                };
+                w.set(1, 0, &shape(0.0, vec![fill(tiled)]));
+            }),
+            false,
+        ),
+        (
+            "its image loaded under a stroke drawn before",
+            vec![(1, 0, shape(0.0, vec![fill(Paint::PlaceholderAt(1.0)), stroke()]))],
+            Box::new(|w: &mut W| {
+                w.set(
+                    1,
+                    0,
+                    &shape(0.0, vec![clip(), fill(image(1, 1.0)), Op::Unclip, stroke()]),
+                )
+            }),
+            false,
+        ),
+        (
+            "its image loaded beside one already there",
+            vec![(
+                1,
+                0,
+                shape(
+                    0.0,
+                    vec![clip(), fill(image(2, 1.0)), Op::Unclip, fill(Paint::PlaceholderAt(1.0))],
+                ),
+            )],
+            Box::new(|w: &mut W| {
+                w.set(
+                    1,
+                    0,
+                    &shape(
+                        0.0,
+                        vec![
+                            clip(),
+                            fill(image(2, 1.0)),
+                            Op::Unclip,
+                            clip(),
+                            fill(image(1, 1.0)),
+                            Op::Unclip,
+                        ],
+                    ),
+                )
+            }),
+            false,
+        ),
+        (
+            "its image loaded as the one already there was swapped",
+            vec![(
+                1,
+                0,
+                shape(
+                    0.0,
+                    vec![clip(), fill(image(2, 1.0)), Op::Unclip, fill(Paint::PlaceholderAt(1.0))],
+                ),
+            )],
+            Box::new(|w: &mut W| {
+                w.set(
+                    1,
+                    0,
+                    &shape(
+                        0.0,
+                        vec![
+                            clip(),
+                            fill(image(1, 1.0)),
+                            Op::Unclip,
+                            clip(),
+                            fill(image(1, 1.0)),
+                            Op::Unclip,
+                        ],
+                    ),
+                )
+            }),
+            true,
+        ),
+        (
+            "its image loaded, its placement a path before another",
+            vec![(1, 0, inner(false))],
+            Box::new(|w: &mut W| w.set(1, 0, &inner(true))),
+            false,
+        ),
         (
             "its image loaded",
             vec![(1, 0, placeholder.clone())],
