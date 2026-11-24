@@ -1358,6 +1358,12 @@ export class RenderEngine {
     return typeof r === "boolean" ? r : false;
   }
 
+  /** Enables or disables fixed-function hardware blending in the GPU strip pass. */
+  setGpuHwBlend(enabled: boolean): boolean {
+    const r = this.#call((e) => e.setGpuHwBlend?.(enabled) ?? false);
+    return typeof r === "boolean" ? r : false;
+  }
+
   /** Reads the last frame's GPU timestamp duration in ms (null if unsupported or disabled). */
   async gpuTimestampMs(): Promise<Result<number | null>> {
     const startEpoch = this.#epoch;

@@ -1184,6 +1184,13 @@ impl Engine {
         self.core.gpu.as_mut().is_some_and(|g| g.set_gpu_timestamps(enabled))
     }
 
+    /// Enables or disables fixed-function hardware blending in `vello_gpu`'s strip pass
+    /// (enabled by default; toggling clears cached tiles so tests can compare HW vs offscreen).
+    #[wasm_bindgen(js_name = setGpuHwBlend)]
+    pub fn set_gpu_hw_blend(&mut self, enabled: bool) -> bool {
+        self.core.gpu.as_mut().is_some_and(|g| g.set_hw_blend_enabled(enabled))
+    }
+
     /// Reads the last frame's GPU timestamp duration in milliseconds, or `undefined` when
     /// timestamp queries are unsupported or disabled, or an `Outcome` on error (never rejects).
     #[wasm_bindgen(js_name = gpuTimestampMs)]

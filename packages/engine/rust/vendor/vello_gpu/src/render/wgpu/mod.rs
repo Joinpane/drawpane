@@ -34,7 +34,7 @@ use atlas::write_pixmap_to_atlas;
 use core::fmt::Debug;
 #[cfg(feature = "text")]
 use glifo::PendingClearRect;
-use passes::{Programs, RendererContext};
+use passes::{Programs, RendererContext, SecondaryRootTarget};
 use resources::GpuResources;
 use vello_common::geometry::{RectU16, SizeU16};
 use vello_common::image_cache::ImageCache;
@@ -420,8 +420,36 @@ impl Renderer {
         self.prepare_batch_inner(
             scene,
             &target.size(),
+            None,
             target.view,
             target.depth_view.is_some(),
+            &resources.image_cache,
+            options.target_init,
+            RootTarget::UserSurface,
+            texture_bindings,
+            options.offset,
+        )
+    }
+
+    /// Drawpane: prepare `scene` for direct two-pass dual-plane batched recording into `primary`
+    /// and `secondary`, reusing uploaded strip and paint data across both passes.
+    pub fn prepare_batch_render_dual(
+        &mut self,
+        scene: &Scene,
+        resources: &Resources,
+        primary: RenderTarget<'_>,
+        secondary: RenderTarget<'_>,
+        texture_bindings: &TextureBindings,
+        options: RenderOptions<'_>,
+    ) -> Result<PreparedBatchRender, RenderError> {
+        let primary_size = primary.size();
+        let secondary_size = secondary.size();
+        self.prepare_batch_inner(
+            scene,
+            &primary_size,
+            Some(secondary_size),
+            primary.view,
+            primary.depth_view.is_some() && secondary.depth_view.is_some(),
             &resources.image_cache,
             options.target_init,
             RootTarget::UserSurface,
@@ -449,6 +477,33 @@ impl Renderer {
             encoder,
             target.view,
             target.depth_view,
+            None,
+            options.target_init,
+            texture_bindings,
+        )
+    }
+
+    /// Drawpane: record a prepared batched render directly into both `primary` and `secondary`
+    /// root targets inside `encoder`, uploading strips and paint data once and replaying root
+    /// strip passes on both planes.
+    #[expect(clippy::too_many_arguments, reason = "dual-plane batch execution")]
+    pub fn execute_batch_render_dual(
+        &mut self,
+        prepared: PreparedBatchRender,
+        scene: &Scene,
+        encoder: &mut CommandEncoder,
+        primary: RenderTarget<'_>,
+        secondary: RenderTarget<'_>,
+        texture_bindings: &TextureBindings,
+        options: RenderOptions<'_>,
+    ) -> Result<u32, RenderError> {
+        self.execute_batch_inner(
+            prepared,
+            scene,
+            encoder,
+            primary.view,
+            primary.depth_view,
+            Some((secondary.view, secondary.depth_view, secondary.size())),
             options.target_init,
             texture_bindings,
         )
@@ -472,6 +527,7 @@ impl Renderer {
         &mut self,
         scene: &Scene,
         render_size: &RenderSize,
+        secondary_render_size: Option<RenderSize>,
         view: &TextureView,
         use_depth_buffer: bool,
         image_cache: &ImageCache,
@@ -486,15 +542,18 @@ impl Renderer {
             self.scene_preparer.gradient_cache.maintain();
         }
         let current_allocations = self.current_allocations();
+        let visible_size = match secondary_render_size {
+            Some(sec) => SizeU16::from_wh(
+                render_size.width.min(sec.width),
+                render_size.height.min(sec.height),
+            ),
+            None => SizeU16::from_wh(render_size.width, render_size.height),
+        };
         let schedule = self.scene_preparer.prepare(
             scene,
             image_cache,
             root_output_target,
-            RectU16::visible_scene_bounds(
-                scene.recorder.scene_size,
-                SizeU16::from_wh(render_size.width, render_size.height),
-                scene_offset,
-            ),
+            RectU16::visible_scene_bounds(scene.recorder.scene_size, visible_size, scene_offset),
             use_depth_buffer,
             self.resources.texture_size,
             current_allocations,
@@ -530,6 +589,7 @@ impl Renderer {
             paint_texels,
             &self.scene_preparer.schedule_storage.filter_context,
             *render_size,
+            secondary_render_size,
             scene_offset,
             needed_vertex_bytes,
         );
@@ -552,10 +612,12 @@ impl Renderer {
         encoder: &mut CommandEncoder,
         view: &TextureView,
         depth_view: Option<&TextureView>,
+        secondary: Option<(&TextureView, Option<&TextureView>, RenderSize)>,
         target_init: TargetInit<'_>,
         texture_bindings: &TextureBindings,
     ) -> Result<u32, RenderError> {
         self.resources.depth_cleared_this_frame = false;
+        self.resources.secondary_depth_cleared_this_frame = false;
         self.resources.prepare_intermediate_textures(
             &self.device,
             &self.programs,
@@ -575,6 +637,17 @@ impl Renderer {
                 &self.scene_preparer.schedule_storage.filter_context,
                 prepared.needed_vertex_bytes,
             )?;
+        let secondary_target = secondary.map(|(sec_view, sec_depth, sec_size)| {
+            let sec_offset = self
+                .resources
+                .alloc_config_slot(sec_size, prepared.scene_offset);
+            SecondaryRootTarget {
+                view: sec_view,
+                depth_view: sec_depth,
+                view_config_offset: sec_offset,
+                load_op: wgpu::LoadOp::Load,
+            }
+        });
 
         let mut ctx = RendererContext {
             programs: &self.programs,
@@ -583,6 +656,7 @@ impl Renderer {
             encoder,
             view,
             depth_view,
+            secondary: secondary_target,
             texture_bindings,
             scratch_buffers: &mut self.scene_preparer.scratch_buffers,
             root_load_op: wgpu::LoadOp::Load,
@@ -625,6 +699,7 @@ impl Renderer {
         let prepared = self.prepare_batch_inner(
             scene,
             render_size,
+            None,
             view,
             depth_view.is_some(),
             image_cache,
@@ -639,6 +714,7 @@ impl Renderer {
             encoder,
             view,
             depth_view,
+            None,
             target_init,
             texture_bindings,
         )?;

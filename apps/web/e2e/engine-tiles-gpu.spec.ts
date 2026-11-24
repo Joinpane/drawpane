@@ -9,7 +9,17 @@
  */
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
-import { FLAG, ListWriter, PathData, ROOT, type WireRecord } from "@drawpane/engine/wire";
+import { GPU_FLUSH_CAUSES, GPU_RENDER_KINDS } from "@drawpane/engine";
+import {
+  BLEND,
+  CAP,
+  FLAG,
+  JOIN,
+  ListWriter,
+  PathData,
+  ROOT,
+  type WireRecord,
+} from "@drawpane/engine/wire";
 import { expect, type Page, test } from "@playwright/test";
 
 test.use({
@@ -1575,5 +1585,1138 @@ for (const build of ["browser", "webgl"] as const) {
         expect(row.maxDiff).toBeLessThanOrEqual(1);
       }
     }
+  });
+}
+
+const SCOPE_CLIP_COUNTER = GPU_RENDER_KINDS.indexOf("scopeClip");
+const SCOPES_COUNTER = GPU_RENDER_KINDS.length + GPU_FLUSH_CAUSES.length;
+
+function hwBlendWarmupLists(): number[][] {
+  const modes = [
+    BLEND.multiply,
+    BLEND.screen,
+    BLEND["linear-dodge"],
+    BLEND["linear-burn"],
+  ] as const;
+  return modes.map((blend, i) => {
+    const w = new ListWriter(0xffffffff, i + 1);
+    w.reset();
+    w.set(1, ROOT, {
+      flags: 0,
+      transform: [1, 0, 0, 1, 0, 0],
+      opacity: 1,
+      width: 16,
+      height: 16,
+      coarseBelow: 0,
+      reach: 0,
+      unsupported: 0,
+      paths: [{ kind: "rect", w: 16, h: 16, radii: [0, 0, 0, 0], smoothing: 0 }],
+      ops: [
+        {
+          op: "fill",
+          path: 0,
+          evenOdd: false,
+          paint: { kind: "solid", color: [0.5, 0.4, 0.3, 0.7], blend },
+        },
+      ],
+      coarse: [],
+    });
+    return [...w.finish()];
+  });
+}
+
+function hwBlendShowcaseScene(base = 0xffffffff, revision = 10, shiftX = 0): number[] {
+  const list = new ListWriter(base, revision);
+  if (base === 0xffffffff) list.reset();
+  let nextId = 1;
+  const rect = (
+    parent: number,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    ops: WireRecord["ops"],
+    opts?: {
+      flags?: number;
+      blend?: number;
+      opacity?: number;
+      radii?: readonly [number, number, number, number];
+      reach?: number;
+      id?: number;
+    },
+  ) => {
+    const id = opts?.id ?? nextId++;
+    list.set(id, parent, {
+      flags: opts?.flags ?? 0,
+      transform: [1, 0, 0, 1, x, y],
+      opacity: opts?.opacity ?? 1,
+      width: w,
+      height: h,
+      coarseBelow: 0,
+      reach: opts?.reach ?? 0,
+      unsupported: 0,
+      paths: [
+        {
+          kind: "rect",
+          w,
+          h,
+          radii: opts?.radii ?? [0, 0, 0, 0],
+          smoothing: 0,
+        },
+      ],
+      ops,
+      coarse: [],
+      ...(opts?.blend !== undefined ? { blend: opts.blend } : {}),
+    });
+    return id;
+  };
+
+  // Varied opaque backdrop stripes covering [384..640, 64..256] (straddling the x=512 tile seam).
+  const stripes: readonly [number, number, readonly [number, number, number, number]][] = [
+    [384, 64, [0.2, 0.4, 0.8, 1]],
+    [448, 64, [0.95, 128 / 255, 10 / 255, 1]],
+    [512, 64, [127 / 255, 64 / 255, 200 / 255, 1]],
+    [576, 64, [1, 0.5, 0, 1]],
+  ];
+  for (const [x, w, color] of stripes) {
+    rect(ROOT, x, 64, w, 192, [
+      { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color } },
+    ]);
+  }
+
+  // Row 1 (y=68..106): Direct blended fills across all 4 HW modes with full and partial alpha,
+  // spanning backdrop stripes and crossing the x=512 tile boundary.
+  const fourModes = [
+    BLEND.multiply,
+    BLEND.screen,
+    BLEND["linear-dodge"],
+    BLEND["linear-burn"],
+  ] as const;
+  const directAlphas = [1, 0.5, 0.37, 0.75] as const;
+  for (const [m, blend] of fourModes.entries()) {
+    const alpha = directAlphas[m] ?? 0.5;
+    rect(ROOT, 392 + m * 58, 68, 56, 38, [
+      {
+        op: "fill",
+        path: 0,
+        evenOdd: false,
+        paint: {
+          kind: "solid",
+          color: [(m * 53 + 47) / 255, (m * 71 + 61) / 255, (m * 43 + 31) / 255, alpha],
+          blend,
+        },
+      },
+    ]);
+  }
+
+  // Row 2 (y=112..152): Layer-blended leaves under AA-rect and rounded-rect clips. Each leaf
+  // overhangs its clip edges so offscreen isolation rasterizes `scopeClip` masks while the HW path
+  // clips inside Vello's strip pass with zero `scopeClip` renders.
+  const aaClip = rect(ROOT, 392, 112, 112, 40, [
+    { op: "clip", path: 0, evenOdd: false },
+    { op: "children" },
+    { op: "unclip" },
+  ]);
+  const roundClip = rect(
+    ROOT,
+    516,
+    112,
+    116,
+    40,
+    [{ op: "clip", path: 0, evenOdd: false }, { op: "children" }, { op: "unclip" }],
+    { radii: [14, 14, 14, 14] },
+  );
+  rect(
+    aaClip,
+    -8,
+    -8,
+    60,
+    56,
+    [
+      {
+        op: "fill",
+        path: 0,
+        evenOdd: false,
+        paint: { kind: "solid", color: [0.35, 0.75, 0.5, 0.65] },
+      },
+    ],
+    { flags: FLAG.blend, blend: BLEND.multiply },
+  );
+  rect(
+    aaClip,
+    60,
+    -8,
+    60,
+    56,
+    [
+      {
+        op: "fill",
+        path: 0,
+        evenOdd: false,
+        paint: { kind: "solid", color: [0.85, 0.45, 0.3, 0.75] },
+      },
+    ],
+    { flags: FLAG.blend, blend: BLEND.screen },
+  );
+  rect(
+    roundClip,
+    -10,
+    -10,
+    66,
+    60,
+    [
+      {
+        op: "fill",
+        path: 0,
+        evenOdd: false,
+        paint: { kind: "solid", color: [0.75, 0.3, 0.55, 0.8] },
+      },
+    ],
+    { flags: FLAG.blend, blend: BLEND["linear-dodge"] },
+  );
+  rect(
+    roundClip,
+    62,
+    -10,
+    66,
+    60,
+    [
+      {
+        op: "fill",
+        path: 0,
+        evenOdd: false,
+        paint: { kind: "solid", color: [0.4, 0.65, 0.8, 0.55] },
+      },
+    ],
+    { flags: FLAG.blend, blend: BLEND["linear-burn"] },
+  );
+
+  // Row 3 (straddling x=512): Disjoint-child blended frame moved by transform patch.
+  const disjointFrameId = 900;
+  const disjoint = rect(ROOT, 462 + shiftX, 158, 100, 36, [{ op: "children" }], {
+    id: disjointFrameId,
+    flags: FLAG.blend,
+    blend: BLEND["linear-burn"],
+  });
+  rect(disjoint, 2, 4, 42, 28, [
+    { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [0.6, 0.3, 0.2, 0.7] } },
+  ]);
+  rect(disjoint, 54, 4, 42, 28, [
+    { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [0.2, 0.5, 0.8, 0.85] } },
+  ]);
+
+  // Row 4 (y=200..248): Blended stroke, zero-blur drop/inner shadows, and an opaque normal
+  // occluder over a HW-blended rect (verifies painter's-order depth testing).
+  rect(
+    ROOT,
+    394,
+    202,
+    48,
+    40,
+    [
+      {
+        op: "stroke",
+        path: 0,
+        style: { width: 6, join: JOIN.round, cap: CAP.round, miter: 4, dashes: [], dashOffset: 0 },
+        paint: { kind: "solid", color: [0.8, 0.4, 0.2, 0.75], blend: BLEND["linear-dodge"] },
+      },
+    ],
+    { reach: 8 },
+  );
+  rect(
+    ROOT,
+    464,
+    202,
+    56,
+    36,
+    [
+      {
+        op: "dropShadow",
+        paths: [0],
+        evenOdd: false,
+        dx: 4,
+        dy: 4,
+        blur: 0,
+        color: [0, 0, 0, 0.5],
+        blend: BLEND["linear-burn"],
+      },
+      {
+        op: "innerShadow",
+        shape: 0,
+        hole: null,
+        evenOdd: false,
+        dx: 3,
+        dy: 3,
+        blur: 0,
+        color: [0.9, 0.85, 0.7, 0.5],
+        blend: BLEND["linear-dodge"],
+      },
+    ],
+    { reach: 12 },
+  );
+  rect(ROOT, 548, 200, 76, 44, [
+    {
+      op: "fill",
+      path: 0,
+      evenOdd: false,
+      paint: { kind: "solid", color: [0.8, 0.2, 0.1, 1], blend: BLEND.multiply },
+    },
+  ]);
+  rect(ROOT, 568, 210, 36, 24, [
+    { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [0.1, 0.85, 0.3, 1] } },
+  ]);
+
+  return [...list.finish()];
+}
+
+function hwBlendBlurredShadowsScene(revision = 20): number[] {
+  const list = new ListWriter(0xffffffff, revision);
+  list.reset();
+  let nextId = 1;
+  const rect = (
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    ops: WireRecord["ops"],
+    opts?: { radii?: readonly [number, number, number, number]; reach?: number },
+  ) => {
+    const id = nextId++;
+    list.set(id, ROOT, {
+      flags: 0,
+      transform: [1, 0, 0, 1, x, y],
+      opacity: 1,
+      width: w,
+      height: h,
+      coarseBelow: 0,
+      reach: opts?.reach ?? 0,
+      unsupported: 0,
+      paths: [
+        {
+          kind: "rect",
+          w,
+          h,
+          radii: opts?.radii ?? [0, 0, 0, 0],
+          smoothing: 0,
+        },
+      ],
+      ops,
+      coarse: [],
+    });
+  };
+  const stripes: readonly [number, number, readonly [number, number, number, number]][] = [
+    [384, 64, [0.2, 0.4, 0.8, 1]],
+    [448, 64, [0.95, 128 / 255, 10 / 255, 1]],
+    [512, 64, [127 / 255, 64 / 255, 200 / 255, 1]],
+    [576, 64, [1, 0.5, 0, 1]],
+  ];
+  for (const [x, w, color] of stripes) {
+    rect(x, 64, w, 192, [{ op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color } }]);
+  }
+  // Rounded-rect zero-blur linear-dodge inner shadow (exercises AA corner coverage).
+  rect(
+    396,
+    80,
+    56,
+    36,
+    [
+      {
+        op: "innerShadow",
+        shape: 0,
+        hole: null,
+        evenOdd: false,
+        dx: 3,
+        dy: 3,
+        blur: 0,
+        color: [0.9, 0.85, 0.7, 0.5],
+        blend: BLEND["linear-dodge"],
+      },
+    ],
+    { radii: [10, 10, 10, 10], reach: 12 },
+  );
+  // Blurred linear-burn drop shadow straddling the x=512 tile seam.
+  rect(
+    484,
+    80,
+    56,
+    36,
+    [
+      {
+        op: "dropShadow",
+        paths: [0],
+        evenOdd: false,
+        dx: 0,
+        dy: 6,
+        blur: 6,
+        color: [0, 0, 0, 0.45],
+        blend: BLEND["linear-burn"],
+      },
+    ],
+    { radii: [10, 10, 10, 10], reach: 24 },
+  );
+  // Blurred linear-burn inner shadow.
+  rect(
+    396,
+    152,
+    60,
+    40,
+    [
+      {
+        op: "innerShadow",
+        shape: 0,
+        hole: null,
+        evenOdd: false,
+        dx: -2,
+        dy: -2,
+        blur: 5,
+        color: [0, 0, 0, 0.4],
+        blend: BLEND["linear-burn"],
+      },
+    ],
+    { radii: [10, 10, 10, 10], reach: 16 },
+  );
+  // Blurred linear-dodge inner shadow.
+  rect(
+    480,
+    152,
+    60,
+    40,
+    [
+      {
+        op: "innerShadow",
+        shape: 0,
+        hole: null,
+        evenOdd: false,
+        dx: 2,
+        dy: 2,
+        blur: 4,
+        color: [0.9, 0.85, 0.7, 0.5],
+        blend: BLEND["linear-dodge"],
+      },
+    ],
+    { radii: [10, 10, 10, 10], reach: 16 },
+  );
+  // Boundary multiply case: s8=230 * b8=127 / 255 = 114.549 -> 115 on CPU and HW fixed-function
+  // BlendFactor::Dst (whereas unquantized blend.wgsl on 12-bit UNORM8 ROPs rounds to 114).
+  rect(556, 152, 56, 40, [
+    {
+      op: "fill",
+      path: 0,
+      evenOdd: false,
+      paint: { kind: "solid", color: [0.9, 0.2, 0.1, 1], blend: BLEND.multiply },
+    },
+  ]);
+  return [...list.finish()];
+}
+
+function hwBlendDualPlaneScene(includeBlends = true, revision = 1): number[] {
+  const list = new ListWriter(0xffffffff, revision);
+  list.reset();
+  let nextId = 1;
+  const setRect = (
+    parent: number,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    ops: WireRecord["ops"],
+    radii: readonly [number, number, number, number] = [0, 0, 0, 0],
+  ) => {
+    const id = nextId++;
+    list.set(id, parent, {
+      flags: 0,
+      transform: [1, 0, 0, 1, x, y],
+      opacity: 1,
+      width: w,
+      height: h,
+      coarseBelow: 0,
+      reach: 0,
+      unsupported: 0,
+      paths: [{ kind: "rect", w, h, radii, smoothing: 0 }],
+      ops,
+      coarse: [],
+    });
+    return id;
+  };
+  const glassOp = (): WireRecord["ops"] => [
+    {
+      op: "glass",
+      paths: [0],
+      evenOdd: false,
+      kind: 0,
+      inradius: 36,
+      angle: -45,
+      intensity: 60,
+      refraction: 50,
+      depth: 14,
+      dispersion: 20,
+      frost: 4,
+      splay: 0,
+      boxRadii: [14, 14, 14, 14],
+      boxSmoothing: [0, 0, 0, 0],
+    },
+  ];
+  // Opaque striped backdrop.
+  setRect(ROOT, 0, 0, 160, 256, [
+    { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [0.22, 0.44, 0.82, 1] } },
+  ]);
+  setRect(ROOT, 160, 0, 160, 256, [
+    { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [0.88, 0.56, 0.24, 1] } },
+  ]);
+  // Lens 1 enables dual-plane tracking (main + backdrop) on the tile.
+  setRect(ROOT, 12, 16, 100, 80, glassOp(), [14, 14, 14, 14]);
+  if (includeBlends) {
+    // 4 HW-blended rects drawn while dual-plane is active, positioned under Lens 2.
+    const modes = [
+      BLEND.multiply,
+      BLEND.screen,
+      BLEND["linear-dodge"],
+      BLEND["linear-burn"],
+    ] as const;
+    for (const [i, blend] of modes.entries()) {
+      setRect(ROOT, 120 + (i % 2) * 86, 20 + Math.floor(i / 2) * 96, 80, 88, [
+        {
+          op: "fill",
+          path: 0,
+          evenOdd: false,
+          paint: {
+            kind: "solid",
+            color: [0.35 + i * 0.15, 0.8 - i * 0.15, 0.45, 0.7],
+            blend,
+          },
+        },
+      ]);
+    }
+  }
+  // Lens 2 samples the backdrop written by the dual-plane replay of the 4 HW-blended rects.
+  setRect(ROOT, 136, 44, 148, 168, glassOp(), [14, 14, 14, 14]);
+  return [...list.finish()];
+}
+
+function hwBlendFallbackScenes(): Record<
+  "overlappingSiblings" | "partialLayerOpacity" | "nonHwMode" | "nonOpaqueTarget",
+  { list: number[]; size: [number, number]; bg: [number, number, number, number] }
+> {
+  let nextRev = 1;
+  const make = (
+    buildList: (w: ListWriter) => void,
+    size: [number, number],
+    bg: [number, number, number, number],
+  ) => {
+    const w = new ListWriter(0xffffffff, nextRev++);
+    w.reset();
+    buildList(w);
+    return { list: [...w.finish()], size, bg };
+  };
+  const rect = (
+    w: ListWriter,
+    id: number,
+    parent: number,
+    x: number,
+    y: number,
+    width: number,
+    height: number,
+    ops: WireRecord["ops"],
+    opts?: { flags?: number; blend?: number; opacity?: number },
+  ) => {
+    w.set(id, parent, {
+      flags: opts?.flags ?? 0,
+      transform: [1, 0, 0, 1, x, y],
+      opacity: opts?.opacity ?? 1,
+      width,
+      height,
+      coarseBelow: 0,
+      reach: 0,
+      unsupported: 0,
+      paths: [{ kind: "rect", w: width, h: height, radii: [0, 0, 0, 0], smoothing: 0 }],
+      ops,
+      coarse: [],
+      ...(opts?.blend !== undefined ? { blend: opts.blend } : {}),
+    });
+  };
+  return {
+    overlappingSiblings: make(
+      (w) => {
+        rect(w, 1, ROOT, 0, 0, 640, 256, [
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: { kind: "solid", color: [0.7, 0.55, 0.4, 1] },
+          },
+        ]);
+        // Overlapping siblings straddling the x=512 tile seam under linear-burn.
+        rect(w, 2, ROOT, 460, 40, 120, 160, [{ op: "children" }], {
+          flags: FLAG.blend,
+          blend: BLEND["linear-burn"],
+        });
+        rect(w, 3, 2, 0, 0, 80, 120, [
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: { kind: "solid", color: [0.8, 0.2, 0.3, 0.6] },
+          },
+        ]);
+        rect(w, 4, 2, 30, 30, 80, 120, [
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: { kind: "solid", color: [0.2, 0.4, 0.9, 0.6] },
+          },
+        ]);
+      },
+      [640, 256],
+      [0.2, 0.3, 0.4, 1],
+    ),
+    partialLayerOpacity: make(
+      (w) => {
+        rect(w, 1, ROOT, 0, 0, 160, 160, [
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: { kind: "solid", color: [0.6, 0.7, 0.8, 1] },
+          },
+        ]);
+        rect(
+          w,
+          2,
+          ROOT,
+          20,
+          20,
+          120,
+          120,
+          [
+            {
+              op: "fill",
+              path: 0,
+              evenOdd: false,
+              paint: { kind: "solid", color: [0.9, 0.3, 0.2, 0.8] },
+            },
+          ],
+          { flags: FLAG.blend, blend: BLEND.multiply, opacity: 0.5 },
+        );
+      },
+      [160, 160],
+      [0.1, 0.2, 0.3, 1],
+    ),
+    nonHwMode: make(
+      (w) => {
+        rect(w, 1, ROOT, 0, 0, 160, 160, [
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: { kind: "solid", color: [0.3, 0.6, 0.9, 1] },
+          },
+        ]);
+        rect(w, 2, ROOT, 20, 20, 120, 120, [
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: { kind: "solid", color: [0.85, 0.4, 0.15, 0.7], blend: BLEND.luminosity },
+          },
+        ]);
+      },
+      [160, 160],
+      [0.1, 0.2, 0.3, 1],
+    ),
+    nonOpaqueTarget: make(
+      (w) => {
+        rect(w, 1, ROOT, 10, 10, 140, 140, [
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: { kind: "solid", color: [0.4, 0.6, 0.8, 0.6] },
+          },
+        ]);
+        const modes = [
+          BLEND.multiply,
+          BLEND.screen,
+          BLEND["linear-dodge"],
+          BLEND["linear-burn"],
+        ] as const;
+        for (const [i, blend] of modes.entries()) {
+          rect(w, 2 + i, ROOT, 20 + (i % 2) * 56, 20 + Math.floor(i / 2) * 56, 48, 48, [
+            {
+              op: "fill",
+              path: 0,
+              evenOdd: false,
+              paint: { kind: "solid", color: [0.8, 0.3, 0.5, 0.7], blend },
+            },
+          ]);
+        }
+      },
+      [160, 160],
+      [0.2, 0.4, 0.6, 0.5],
+    ),
+  };
+}
+
+for (const build of ["browser", "webgl"] as const) {
+  test.describe(`fixed-function hardware blending (${build})`, () => {
+    test("matches offscreen isolation byte-for-byte across all 4 modes, clips, strokes, zero-blur shadows, tile seams and patches", async ({
+      page,
+    }) => {
+      test.setTimeout(180_000);
+      await openEngine(page, build);
+      const patch = new ListWriter(10, 11);
+      patch.transform(900, [1, 0, 0, 1, 482, 158]);
+      const result = await page.evaluate(
+        async ({
+          warmups,
+          initial,
+          patchBytes,
+          fresh,
+          expectedBackend,
+          scopeClipIdx,
+          scopesIdx,
+        }) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          const check = (out: { ok: boolean; message: string; free(): void }) => {
+            const { ok, message } = out;
+            out.free();
+            if (!ok) throw new Error(message);
+          };
+          const diffStats = (a: Uint8Array, b: Uint8Array) => {
+            let bytes = Math.abs(a.length - b.length);
+            let maxDelta = 0;
+            let firstDiff: { px: number; a: number[]; b: number[] } | null = null;
+            const n = Math.min(a.length, b.length);
+            for (let i = 0; i < n; i++) {
+              const d = Math.abs((a[i] ?? 0) - (b[i] ?? 0));
+              if (d !== 0) {
+                bytes++;
+                if (d > maxDelta) maxDelta = d;
+                if (!firstDiff) {
+                  const p = Math.floor(i / 4) * 4;
+                  firstDiff = {
+                    px: p / 4,
+                    a: [a[p] ?? 0, a[p + 1] ?? 0, a[p + 2] ?? 0, a[p + 3] ?? 0],
+                    b: [b[p] ?? 0, b[p + 1] ?? 0, b[p + 2] ?? 0, b[p + 3] ?? 0],
+                  };
+                }
+              }
+            }
+            return { bytes, maxDelta, firstDiff };
+          };
+          const open = async () => {
+            let device = await glue.createGpu(null, 0);
+            for (let attempt = 0; attempt < 3 && !device.ok; attempt++) {
+              device.free();
+              await new Promise((r) => setTimeout(r, 300));
+              device = await glue.createGpu(null, 0);
+            }
+            if (!device.ok || device.backend !== expectedBackend)
+              throw new Error(device.message || `expected ${expectedBackend}`);
+            const engine = new glue.Engine(0, 0);
+            try {
+              if (
+                !engine.attachGpu ||
+                !engine.renderGpu ||
+                !engine.gpuPixels ||
+                !engine.gpuCounters ||
+                !engine.setGpuHwBlend
+              )
+                throw new Error("missing GPU entry points");
+              check(engine.attachGpu(device));
+              // Warm each HW-blend pipeline separately so SwiftShader JIT does not pile four
+              // first-time shader compiles into a single 12 s readback window.
+              const warmBg = new Float32Array([0.5, 0.5, 0.5, 1]);
+              for (const list of warmups) {
+                check(engine.apply(new Uint8Array(list)));
+                check(engine.renderGpu(16, 16, 1, 0, 0, 1, warmBg, false, 0, true));
+                const px = await engine.gpuPixels();
+                if (!(px instanceof Uint8Array)) throw new Error(px.message);
+              }
+              engine.clearTiles?.();
+              return { engine, device };
+            } catch (err) {
+              engine.free();
+              device.free();
+              throw err;
+            }
+          };
+          const draw = async (
+            engine: InstanceType<typeof glue.Engine>,
+            list: number[] | null,
+            hwBlend: boolean,
+            editorViewport: boolean,
+            clearTiles = true,
+          ) => {
+            if (!engine.renderGpu || !engine.gpuPixels || !engine.gpuCounters)
+              throw new Error("missing GPU entry points");
+            engine.setGpuHwBlend?.(hwBlend);
+            if (clearTiles) engine.clearTiles?.();
+            if (list) check(engine.apply(new Uint8Array(list)));
+            const before = engine.gpuCounters();
+            const bg = new Float32Array([0.15, 0.25, 0.35, 1]);
+            check(engine.renderGpu(256, 192, 1, -384, -64, 1, bg, false, 0, editorViewport));
+            const pixels = await engine.gpuPixels();
+            if (!(pixels instanceof Uint8Array)) throw new Error(pixels.message);
+            const after = engine.gpuCounters();
+            return {
+              pixels: new Uint8Array(pixels),
+              scopes: (after[scopesIdx] ?? 0) - (before[scopesIdx] ?? 0),
+              scopeClip: (after[scopeClipIdx] ?? 0) - (before[scopeClipIdx] ?? 0),
+            };
+          };
+
+          const primary = await open();
+          let hwTiled: Awaited<ReturnType<typeof draw>>;
+          let offscreenTiled: Awaited<ReturnType<typeof draw>>;
+          let hwWhole: Awaited<ReturnType<typeof draw>>;
+          let hwPatched: Awaited<ReturnType<typeof draw>>;
+          try {
+            hwTiled = await draw(primary.engine, initial, true, true);
+            offscreenTiled = await draw(primary.engine, null, false, true);
+            hwWhole = await draw(primary.engine, null, true, false);
+            // Warm tiled state at revision 1, then apply the transform patch (revision 2).
+            await draw(primary.engine, null, true, true);
+            hwPatched = await draw(primary.engine, patchBytes, true, true, false);
+          } finally {
+            primary.engine.free();
+            primary.device.free();
+          }
+          const secondary = await open();
+          let hwFresh: Awaited<ReturnType<typeof draw>>;
+          try {
+            hwFresh = await draw(secondary.engine, fresh, true, true);
+          } finally {
+            secondary.engine.free();
+            secondary.device.free();
+          }
+          return {
+            hwTiled: { scopes: hwTiled.scopes, scopeClip: hwTiled.scopeClip },
+            offscreenTiled: { scopes: offscreenTiled.scopes, scopeClip: offscreenTiled.scopeClip },
+            hwVsOffscreen: diffStats(hwTiled.pixels, offscreenTiled.pixels),
+            tiledVsWhole: diffStats(hwTiled.pixels, hwWhole.pixels),
+            patchedVsFresh: diffStats(hwPatched.pixels, hwFresh.pixels),
+          };
+        },
+        {
+          warmups: hwBlendWarmupLists(),
+          initial: hwBlendShowcaseScene(0xffffffff, 10, 0),
+          patchBytes: [...patch.finish()],
+          fresh: hwBlendShowcaseScene(0xffffffff, 11, 20),
+          expectedBackend: build === "webgl" ? "webgl2" : "webgpu",
+          scopeClipIdx: SCOPE_CLIP_COUNTER,
+          scopesIdx: SCOPES_COUNTER,
+        },
+      );
+
+      expect(result.hwTiled.scopes).toBe(0);
+      expect(result.hwTiled.scopeClip).toBe(0);
+      expect(result.offscreenTiled.scopes).toBeGreaterThan(0);
+      expect(result.offscreenTiled.scopeClip).toBeGreaterThan(0);
+      expect(result.hwVsOffscreen.bytes, JSON.stringify(result.hwVsOffscreen)).toBe(0);
+      expect(result.tiledVsWhole.bytes, JSON.stringify(result.tiledVsWhole)).toBe(0);
+      expect(result.patchedVsFresh.bytes, JSON.stringify(result.patchedVsFresh)).toBe(0);
+    });
+
+    test("blurred blended shadows and boundary multiply match CPU exactness with zero scopes and tile consistency", async ({
+      page,
+    }) => {
+      test.setTimeout(180_000);
+      await openEngine(page, build);
+      const result = await page.evaluate(
+        async ({ warmups, list, expectedBackend, scopesIdx }) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          const check = (out: { ok: boolean; message: string; free(): void }) => {
+            const { ok, message } = out;
+            out.free();
+            if (!ok) throw new Error(message);
+          };
+          let device = await glue.createGpu(null, 0);
+          for (let attempt = 0; attempt < 3 && !device.ok; attempt++) {
+            device.free();
+            await new Promise((r) => setTimeout(r, 300));
+            device = await glue.createGpu(null, 0);
+          }
+          if (!device.ok || device.backend !== expectedBackend)
+            throw new Error(device.message || `expected ${expectedBackend}`);
+          const engine = new glue.Engine(0, 0);
+          try {
+            if (
+              !engine.attachGpu ||
+              !engine.renderGpu ||
+              !engine.gpuPixels ||
+              !engine.gpuCounters ||
+              !engine.setGpuHwBlend
+            )
+              throw new Error("missing GPU entry points");
+            check(engine.attachGpu(device));
+            const warmBg = new Float32Array([0.5, 0.5, 0.5, 1]);
+            for (const warmup of warmups) {
+              check(engine.apply(new Uint8Array(warmup)));
+              check(engine.renderGpu(16, 16, 1, 0, 0, 1, warmBg, false, 0, true));
+              const px = await engine.gpuPixels();
+              if (!(px instanceof Uint8Array)) throw new Error(px.message);
+            }
+            const bg = new Float32Array([0.15, 0.25, 0.35, 1]);
+            check(engine.apply(new Uint8Array(list)));
+            const drawGpu = async (hwBlend: boolean, editorViewport: boolean) => {
+              if (!engine.renderGpu || !engine.gpuPixels || !engine.gpuCounters)
+                throw new Error("missing GPU entry points");
+              engine.setGpuHwBlend?.(hwBlend);
+              engine.clearTiles?.();
+              const before = engine.gpuCounters()[scopesIdx] ?? 0;
+              check(engine.renderGpu(256, 192, 1, -384, -64, 1, bg, false, 0, editorViewport));
+              const pixels = await engine.gpuPixels();
+              if (!(pixels instanceof Uint8Array)) throw new Error(pixels.message);
+              const after = engine.gpuCounters()[scopesIdx] ?? 0;
+              return { pixels: new Uint8Array(pixels), scopes: after - before };
+            };
+            const hwTiled = await drawGpu(true, true);
+            const offscreenTiled = await drawGpu(false, true);
+            const hwWhole = await drawGpu(true, false);
+            check(engine.renderCpu(256, 192, 1, -384, -64, 1, bg, true));
+            const cpuPixels = new Uint8Array(engine.pixels());
+
+            let tiledDiffBytes = 0;
+            let offMaxDelta = 0;
+            let offSumDelta = 0;
+            for (let i = 0; i < hwTiled.pixels.length; i++) {
+              if (hwTiled.pixels[i] !== hwWhole.pixels[i]) tiledDiffBytes++;
+              const d = Math.abs((hwTiled.pixels[i] ?? 0) - (offscreenTiled.pixels[i] ?? 0));
+              if (d > offMaxDelta) offMaxDelta = d;
+              offSumDelta += d;
+            }
+            // Sample inside the boundary multiply rect (x=564, y=160 -> local x=180, y=96).
+            const sampleOff = (96 * 256 + 180) * 4;
+            const pick = (buf: Uint8Array) => [
+              buf[sampleOff] ?? 0,
+              buf[sampleOff + 1] ?? 0,
+              buf[sampleOff + 2] ?? 0,
+              buf[sampleOff + 3] ?? 0,
+            ];
+            return {
+              hwScopes: hwTiled.scopes,
+              offScopes: offscreenTiled.scopes,
+              tiledDiffBytes,
+              offMaxDelta,
+              offMeanDelta: offSumDelta / hwTiled.pixels.length,
+              hwMultiplyPixel: pick(hwTiled.pixels),
+              cpuMultiplyPixel: pick(cpuPixels),
+            };
+          } finally {
+            engine.free();
+            device.free();
+          }
+        },
+        {
+          warmups: hwBlendWarmupLists(),
+          list: hwBlendBlurredShadowsScene(20),
+          expectedBackend: build === "webgl" ? "webgl2" : "webgpu",
+          scopesIdx: SCOPES_COUNTER,
+        },
+      );
+
+      expect(result.hwScopes).toBe(0);
+      expect(result.offScopes).toBeGreaterThanOrEqual(5);
+      expect(result.tiledDiffBytes).toBe(0);
+      expect(result.hwMultiplyPixel).toEqual(result.cpuMultiplyPixel);
+      expect(result.hwMultiplyPixel).toEqual([115, 13, 20, 255]);
+      // On GPUs with 12-bit FP32->UNORM8 ROP conversion (such as NVIDIA Turing), offscreen
+      // intermediate src_tex writes and unquantized blend.wgsl outputs can drift by 1 LSB from
+      // direct HW quantization/blending; HW matches CPU and SwiftShader directly.
+      expect(result.offMaxDelta).toBeLessThanOrEqual(1);
+      expect(result.offMeanDelta).toBeLessThan(0.01);
+    });
+
+    test("dual-plane tiles replay hardware-blended strips onto main and backdrop identically", async ({
+      page,
+    }) => {
+      test.setTimeout(180_000);
+      await openEngine(page, build);
+      const result = await page.evaluate(
+        async ({ warmups, withBlends, withoutBlends, expectedBackend, scopesIdx }) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          const check = (out: { ok: boolean; message: string; free(): void }) => {
+            const { ok, message } = out;
+            out.free();
+            if (!ok) throw new Error(message);
+          };
+          let device = await glue.createGpu(null, 0);
+          for (let attempt = 0; attempt < 3 && !device.ok; attempt++) {
+            device.free();
+            await new Promise((r) => setTimeout(r, 300));
+            device = await glue.createGpu(null, 0);
+          }
+          if (!device.ok || device.backend !== expectedBackend)
+            throw new Error(device.message || `expected ${expectedBackend}`);
+          const engine = new glue.Engine(0, 0);
+          try {
+            if (!engine.attachGpu || !engine.renderGpu || !engine.gpuPixels || !engine.gpuCounters)
+              throw new Error("missing GPU entry points");
+            check(engine.attachGpu(device));
+            const warmBg = new Float32Array([0.5, 0.5, 0.5, 1]);
+            for (const list of warmups) {
+              check(engine.apply(new Uint8Array(list)));
+              check(engine.renderGpu(16, 16, 1, 0, 0, 1, warmBg, false, 0, true));
+              const px = await engine.gpuPixels();
+              if (!(px instanceof Uint8Array)) throw new Error(px.message);
+            }
+            const render = async (list: number[] | null, hwBlend: boolean) => {
+              if (!engine.renderGpu || !engine.gpuPixels || !engine.gpuCounters)
+                throw new Error("missing GPU entry points");
+              engine.setGpuHwBlend?.(hwBlend);
+              engine.clearTiles?.();
+              if (list) check(engine.apply(new Uint8Array(list)));
+              const before = engine.gpuCounters()[scopesIdx] ?? 0;
+              const bg = new Float32Array([0.18, 0.36, 0.72, 1]);
+              check(engine.renderGpu(320, 256, 1, 0, 0, 1, bg, false, 0, true));
+              const pixels = await engine.gpuPixels();
+              if (!(pixels instanceof Uint8Array)) throw new Error(pixels.message);
+              const after = engine.gpuCounters()[scopesIdx] ?? 0;
+              return { pixels: new Uint8Array(pixels), scopes: after - before };
+            };
+            const hw = await render(withBlends, true);
+            const off = await render(null, false);
+            const base = await render(withoutBlends, true);
+            let diffBytes = 0;
+            let lensChangedBytes = 0;
+            for (let i = 0; i < hw.pixels.length; i++) {
+              if (hw.pixels[i] !== off.pixels[i]) diffBytes++;
+              if (hw.pixels[i] !== base.pixels[i]) lensChangedBytes++;
+            }
+            return {
+              hwScopes: hw.scopes,
+              offScopes: off.scopes,
+              diffBytes,
+              lensChangedBytes,
+            };
+          } finally {
+            engine.free();
+            device.free();
+          }
+        },
+        {
+          warmups: hwBlendWarmupLists(),
+          withBlends: hwBlendDualPlaneScene(true, 10),
+          withoutBlends: hwBlendDualPlaneScene(false, 11),
+          expectedBackend: build === "webgl" ? "webgl2" : "webgpu",
+          scopesIdx: SCOPES_COUNTER,
+        },
+      );
+
+      expect(result.hwScopes).toBe(0);
+      expect(result.offScopes).toBeGreaterThanOrEqual(4);
+      expect(result.diffBytes).toBe(0);
+      expect(result.lensChangedBytes).toBeGreaterThan(0);
+    });
+
+    test("overlapping siblings, partial layer opacity, non-HW modes and translucent targets fall back cleanly", async ({
+      page,
+    }) => {
+      test.setTimeout(180_000);
+      await openEngine(page, build);
+      const scenes = hwBlendFallbackScenes();
+      const result = await page.evaluate(
+        async ({ scenes, expectedBackend, scopesIdx }) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          const check = (out: { ok: boolean; message: string; free(): void }) => {
+            const { ok, message } = out;
+            out.free();
+            if (!ok) throw new Error(message);
+          };
+          let device = await glue.createGpu(null, 0);
+          for (let attempt = 0; attempt < 3 && !device.ok; attempt++) {
+            device.free();
+            await new Promise((r) => setTimeout(r, 300));
+            device = await glue.createGpu(null, 0);
+          }
+          if (!device.ok || device.backend !== expectedBackend)
+            throw new Error(device.message || `expected ${expectedBackend}`);
+          const engine = new glue.Engine(0, 0);
+          try {
+            if (!engine.attachGpu || !engine.renderGpu || !engine.gpuPixels || !engine.gpuCounters)
+              throw new Error("missing GPU entry points");
+            check(engine.attachGpu(device));
+            const run = async (
+              list: number[] | null,
+              size: [number, number],
+              bg: [number, number, number, number],
+              hwBlend: boolean,
+              editorViewport: boolean,
+            ) => {
+              if (!engine.renderGpu || !engine.gpuPixels || !engine.gpuCounters)
+                throw new Error("missing GPU entry points");
+              engine.setGpuHwBlend?.(hwBlend);
+              engine.clearTiles?.();
+              if (list) check(engine.apply(new Uint8Array(list)));
+              const before = engine.gpuCounters()[scopesIdx] ?? 0;
+              check(
+                engine.renderGpu(
+                  size[0],
+                  size[1],
+                  1,
+                  0,
+                  0,
+                  1,
+                  new Float32Array(bg),
+                  false,
+                  0,
+                  editorViewport,
+                ),
+              );
+              const pixels = await engine.gpuPixels();
+              if (!(pixels instanceof Uint8Array)) throw new Error(pixels.message);
+              const after = engine.gpuCounters()[scopesIdx] ?? 0;
+              return { pixels: new Uint8Array(pixels), scopes: after - before };
+            };
+            const out: Record<
+              string,
+              { hwScopes: number; offScopes: number; diffBytes: number; tiledVsWholeBytes: number }
+            > = {};
+            for (const [key, scene] of Object.entries(scenes)) {
+              const hw = await run(scene.list, scene.size, scene.bg, true, true);
+              const off = await run(null, scene.size, scene.bg, false, true);
+              const whole = await run(null, scene.size, scene.bg, true, false);
+              let diffBytes = 0;
+              let tiledVsWholeBytes = 0;
+              for (let i = 0; i < hw.pixels.length; i++) {
+                if (hw.pixels[i] !== off.pixels[i]) diffBytes++;
+                if (hw.pixels[i] !== whole.pixels[i]) tiledVsWholeBytes++;
+              }
+              out[key] = {
+                hwScopes: hw.scopes,
+                offScopes: off.scopes,
+                diffBytes,
+                tiledVsWholeBytes,
+              };
+            }
+            return out;
+          } finally {
+            engine.free();
+            device.free();
+          }
+        },
+        {
+          scenes,
+          expectedBackend: build === "webgl" ? "webgl2" : "webgpu",
+          scopesIdx: SCOPES_COUNTER,
+        },
+      );
+
+      for (const [key, entry] of Object.entries(result)) {
+        expect(entry.hwScopes, key).toBeGreaterThan(0);
+        expect(entry.hwScopes, key).toBe(entry.offScopes);
+        expect(entry.diffBytes, key).toBe(0);
+        expect(entry.tiledVsWholeBytes, key).toBe(0);
+      }
+    });
   });
 }

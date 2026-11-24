@@ -9,7 +9,7 @@ pub(crate) mod copy;
 pub(crate) mod filter;
 pub(crate) mod strip;
 
-use crate::draw::ExternalTextureRun;
+use crate::draw::{BlendRun, ExternalTextureRun};
 use crate::render::webgl::bindings::WebGlTextureBindings;
 use crate::render::webgl::gl::resource::Program;
 use crate::render::webgl::init::ShaderCompilationStats;
@@ -142,6 +142,7 @@ impl Backend for WebGlRendererContext<'_> {
         &mut self,
         strips: RangedSlice<'_, GpuStrip>,
         external_texture_runs: &[ExternalTextureRun],
+        _blend_runs: &[BlendRun],
         bindings: DrawPassBindings,
     ) -> Result<(), Self::Error> {
         self.strip_pass_inner(

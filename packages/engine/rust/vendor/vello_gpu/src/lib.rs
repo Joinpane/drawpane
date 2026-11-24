@@ -143,7 +143,7 @@ pub use render::{WebGlPendingProbe, WebGlProbeError, WebGlProbeOperation, WebGlP
 #[cfg(all(feature = "wgpu", feature = "probe"))]
 pub use render::{WgpuPendingProbe, WgpuProbeError, WgpuProbeStatus};
 pub use resources::Resources;
-pub use scene::{LayersConfig, MemorySettings, RenderSettings, Scene};
+pub use scene::{HwBlendMode, LayersConfig, MemorySettings, RenderSettings, Scene};
 #[cfg(feature = "text")]
 pub use text::{GlyphRunBuilder, GpuGlyphRunBackend};
 pub use util::DimensionConstraints;

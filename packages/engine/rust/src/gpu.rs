@@ -28,8 +28,8 @@ use crate::blur::{self, BlurSpec, EdgeMode, validate_view_sigma};
 use crate::engine::{DragFrame, TiledOptions};
 use crate::error::{EngineError, ErrorCode, Result};
 use crate::exec::{
-    self, Backend, DrawStats, Frame, GlyphMask, IRect, ImageView, Isolation, Open, Pass, PostStep, ReducedBlurLimits,
-    ReducedPost, ShadowCast, Split, impl_draw, resolve_inradius,
+    self, Backend, DrawStats, Frame, GlyphMask, HwBlend, IRect, ImageView, Isolation, Open, Pass, PostStep,
+    ReducedBlurLimits, ReducedPost, ShadowCast, Split, impl_draw, resolve_inradius,
 };
 use crate::glass::{self, GlassMaskSlot};
 use crate::gpu_readers::{
@@ -228,7 +228,16 @@ fn format_details(
     )
 }
 
-impl_draw!(Scene);
+impl_draw!(Scene, hw_blend: |scene: &mut Scene, mode: HwBlend| {
+    let hw_mode = match mode {
+        HwBlend::Normal => vello_gpu::HwBlendMode::Normal,
+        HwBlend::Multiply => vello_gpu::HwBlendMode::Multiply,
+        HwBlend::Screen => vello_gpu::HwBlendMode::Screen,
+        HwBlend::LinearDodge => vello_gpu::HwBlendMode::LinearDodge,
+        HwBlend::LinearBurn => vello_gpu::HwBlendMode::LinearBurn,
+    };
+    scene.set_hw_blend(hw_mode);
+});
 
 const FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const ATLAS_SIDE: u32 = 2048;
@@ -586,6 +595,9 @@ struct GpuTarget {
     active_size: (u16, u16),
     bytes: usize,
     needs_clear: bool,
+    /// True iff every pixel of this target is guaranteed to have alpha == 1.0 (copied full-area
+    /// from an opaque parent and never modified by destructive root compositing).
+    opaque: bool,
 }
 
 /// A bounded isolated source, with a second plane when the channels can differ.
@@ -690,6 +702,8 @@ struct ActiveDraw {
     has_context: bool,
     write_main: bool,
     write_backdrop: bool,
+    main_opaque: bool,
+    backdrop_opaque: bool,
     scene_dirty: bool,
     glass_masks: HashMap<(u32, usize), GlassMaskSlot>,
     before: Option<wgpu::CommandEncoder>,
@@ -729,6 +743,8 @@ impl ActiveDraw {
             has_context: false,
             write_main: true,
             write_backdrop: false,
+            main_opaque: background[3] >= 1.0,
+            backdrop_opaque: background[3] >= 1.0,
             scene_dirty: false,
             glass_masks: HashMap::new(),
             before: None,
@@ -1457,6 +1473,8 @@ pub struct Gpu {
     readbacks: Rc<Flights>,
     /// Optional WebGPU GPU timestamp query state for frame-level GPU timing.
     timestamps: Option<GpuTimestampQuery>,
+    /// Whether fixed-function hardware blending in Vello's strip pass is enabled.
+    hw_blend_enabled: bool,
     /// Whether the WebGPU device has hardware timestamp queries enabled.
     #[cfg(feature = "compute")]
     timestamp_query: bool,
@@ -2081,6 +2099,7 @@ impl Gpu {
             max_buffer_size: device_limits.max_buffer_size,
             readbacks: Rc::new(Flights::default()),
             timestamps,
+            hw_blend_enabled: true,
             #[cfg(feature = "compute")]
             timestamp_query,
             #[cfg(feature = "compute")]
@@ -2402,6 +2421,7 @@ impl Gpu {
             t.origin = origin;
             t.active_size = (w as u16, h as u16);
             t.needs_clear = false;
+            t.opaque = false;
             return Ok(t);
         }
         let bytes = need_w as usize * need_h as usize * 8; // RGBA8 + depth
@@ -2433,6 +2453,7 @@ impl Gpu {
             active_size: (w as u16, h as u16),
             bytes,
             needs_clear: false,
+            opaque: false,
         })
     }
 
@@ -3734,6 +3755,63 @@ impl Gpu {
         Ok(())
     }
 
+    /// Records a direct two-pass dual-plane `vello_gpu` strip replay into both `primary` and
+    /// `secondary` root targets, uploading strips/paints once and skipping `delta_frame` + `OverBoth`.
+    #[allow(clippy::too_many_arguments)]
+    fn vello_render_dual(
+        &mut self,
+        primary_view: &wgpu::TextureView,
+        primary_depth: Option<&wgpu::TextureView>,
+        secondary_view: &wgpu::TextureView,
+        secondary_depth: Option<&wgpu::TextureView>,
+        options: RenderOptions<'_>,
+        label: &str,
+    ) -> Result<()> {
+        self.flush_masks();
+        let primary = RenderTarget {
+            view: primary_view,
+            depth_view: primary_depth,
+        };
+        let secondary = RenderTarget {
+            view: secondary_view,
+            depth_view: secondary_depth,
+        };
+        let prepared = self
+            .renderer
+            .prepare_batch_render_dual(
+                &self.scene,
+                &self.resources,
+                primary,
+                secondary,
+                &self.bindings,
+                options,
+            )
+            .map_err(vello_error)?;
+        if prepared.needs_flush {
+            self.submit_active_encoder();
+        }
+        let mut encoder = self.take_encoder(label);
+        let draws = self
+            .renderer
+            .execute_batch_render_dual(
+                prepared,
+                &self.scene,
+                &mut encoder,
+                primary,
+                secondary,
+                &self.bindings,
+                options,
+            )
+            .map_err(vello_error)?;
+        self.stash_encoder(encoder);
+        if let Some(a) = self.active.as_mut() {
+            a.vello_renders += 1;
+            a.draws += draws;
+        }
+        self.counters.renders[0] = self.counters.renders[0].wrapping_add(1);
+        Ok(())
+    }
+
     fn submit_active_encoder(&mut self) {
         let mut can_recycle_scene = false;
         if let Some(active) = self.active.as_mut()
@@ -3771,6 +3849,69 @@ impl Gpu {
             ts.enabled
         } else {
             false
+        }
+    }
+
+    /// Enables or disables fixed-function hardware blending in Vello's strip pass.
+    pub fn set_hw_blend_enabled(&mut self, enabled: bool) -> bool {
+        if self.hw_blend_enabled != enabled {
+            self.hw_blend_enabled = enabled;
+            self.clear_tiles();
+        }
+        self.hw_blend_enabled
+    }
+
+    /// True iff every destination plane that the current scene will flush onto is guaranteed
+    /// to have alpha == 1.0 across its active area, and the scene has not promoted root to an
+    /// intermediate blend layer.
+    fn target_is_opaque(&self) -> bool {
+        let Some(active) = self.active.as_ref() else {
+            return false;
+        };
+        if self.scene.root_is_blend_target() {
+            return false;
+        }
+        if let Some(scope) = self.offscreen_stack.last() {
+            let shared = scope.backdrop.is_none();
+            let (wm, wb) = if shared {
+                (active.write_main || active.write_backdrop, false)
+            } else {
+                (active.write_main, active.write_backdrop)
+            };
+            (wm || wb) && (!wm || scope.main.opaque) && (!wb || scope.backdrop.as_ref().is_some_and(|b| b.opaque))
+        } else {
+            let wm = active.write_main;
+            let wb = active.write_backdrop && !(active.detail && wm);
+            (wm || wb) && (!wm || active.main_opaque) && (!wb || active.backdrop_opaque)
+        }
+    }
+
+    /// Marks the currently active destination plane(s) non-opaque (called before a destructive
+    /// root-level `DestOut`/`DestIn` layer).
+    fn invalidate_active_opacity(&mut self) {
+        let Some(active) = self.active.as_mut() else {
+            return;
+        };
+        if let Some(scope) = self.offscreen_stack.last_mut() {
+            if scope.backdrop.is_none() {
+                scope.main.opaque = false;
+            } else {
+                if active.write_main {
+                    scope.main.opaque = false;
+                }
+                if active.write_backdrop
+                    && let Some(back) = scope.backdrop.as_mut()
+                {
+                    back.opaque = false;
+                }
+            }
+        } else {
+            if active.write_main {
+                active.main_opaque = false;
+            }
+            if active.write_backdrop {
+                active.backdrop_opaque = false;
+            }
         }
     }
 
@@ -7455,73 +7596,114 @@ impl Gpu {
         }
 
         if draw {
-            let (target, color, color_id, depth) = self.plane(!write_main)?;
-            let depth = depth.clone();
-            let (width, height) = (target.width(), target.height());
-            let (color, color_id) = if dual {
-                let max_bytes = self.reader_budget_room();
-                self.readers
-                    .ensure_frame_tex_budgeted(false, &self.device, width, height, "scene delta", max_bytes)?;
-                options.target_init = TargetInit::Clear(ClearSettings::Viewport {
-                    color: AlphaColor::TRANSPARENT,
-                });
-                let delta = self.readers.delta_frame.as_ref().expect("scene delta");
-                (delta.view.clone(), delta.view_id)
-            } else {
-                (color.clone(), color_id)
-            };
-            self.vello_render(false, &color, Some(&depth), options, "scene flush")?;
-            if !dual && (scope_clear_main || scope_clear_back) {
-                self.offscreen_stack
-                    .last_mut()
-                    .expect("offscreen scope")
-                    .plane_mut(!write_main)
-                    .needs_clear = false;
-            }
-            if dual {
-                let mut encoder = self.take_encoder("scene dual composite");
-                let (w, h) = self.active_scene_size();
-                let (main_tex, main, _, _) = self.plane(false)?;
-                let (back_tex, backdrop, _, _) = self.plane(true)?;
-                let same_size = (main_tex.width(), main_tex.height()) == (back_tex.width(), back_tex.height());
-                let (main, backdrop) = (main.clone(), backdrop.clone());
-                let scissor = (0, 0, u32::from(w), u32::from(h));
-                if same_size {
-                    self.readers.encode_composite(
-                        &self.device,
-                        &mut encoder,
-                        &color,
-                        color_id,
-                        CompositeTarget::OverBoth(&main, &backdrop),
-                        (scope_clear_main, scope_clear_back),
-                        (0, 0),
-                        scissor,
-                        1.0,
-                    );
-                } else {
-                    // Reused offscreen planes can have different allocation sizes even
-                    // though they share an active viewport. A pass requires matching extents.
-                    for (view, clear) in [(&main, scope_clear_main), (&backdrop, scope_clear_back)] {
-                        self.readers.encode_composite(
-                            &self.device,
-                            &mut encoder,
-                            &color,
-                            color_id,
-                            CompositeTarget::Over(view),
-                            (clear, false),
-                            (0, 0),
-                            scissor,
-                            1.0,
-                        );
+            if dual && self.scene.has_hw_blend() {
+                // Direct two-pass strip replay on dual-plane tiles: hardware-blended strips must
+                // blend against the real opaque main and backdrop pixels (not a transparent delta).
+                if !root && (scope_clear_main || scope_clear_back) {
+                    if scope_clear_main && scope_clear_back {
+                        options.target_init = TargetInit::Clear(ClearSettings::Viewport {
+                            color: AlphaColor::TRANSPARENT,
+                        });
+                    } else if let Some(top) = self.offscreen_stack.len().checked_sub(1) {
+                        self.ensure_scope_cleared(top, scope_clear_main, scope_clear_back);
                     }
                 }
-                self.stash_encoder(encoder);
-                if let Some(scope) = self.offscreen_stack.last_mut() {
+                let (_, main_view, _, main_depth) = self.plane(false)?;
+                let (main_view, main_depth) = (main_view.clone(), main_depth.clone());
+                let (_, back_view, _, back_depth) = self.plane(true)?;
+                let (back_view, back_depth) = (back_view.clone(), back_depth.clone());
+                self.vello_render_dual(
+                    &main_view,
+                    Some(&main_depth),
+                    &back_view,
+                    Some(&back_depth),
+                    options,
+                    "scene flush",
+                )?;
+                if !root && (scope_clear_main || scope_clear_back) {
+                    let scope = self.offscreen_stack.last_mut().expect("offscreen scope");
                     if scope_clear_main {
                         scope.main.needs_clear = false;
                     }
                     if scope_clear_back && let Some(back) = scope.backdrop.as_mut() {
                         back.needs_clear = false;
+                    }
+                }
+            } else {
+                let (target, color, color_id, depth) = self.plane(!write_main)?;
+                let depth = depth.clone();
+                let (width, height) = (target.width(), target.height());
+                let (color, color_id) = if dual {
+                    let max_bytes = self.reader_budget_room();
+                    self.readers.ensure_frame_tex_budgeted(
+                        false,
+                        &self.device,
+                        width,
+                        height,
+                        "scene delta",
+                        max_bytes,
+                    )?;
+                    options.target_init = TargetInit::Clear(ClearSettings::Viewport {
+                        color: AlphaColor::TRANSPARENT,
+                    });
+                    let delta = self.readers.delta_frame.as_ref().expect("scene delta");
+                    (delta.view.clone(), delta.view_id)
+                } else {
+                    (color.clone(), color_id)
+                };
+                self.vello_render(false, &color, Some(&depth), options, "scene flush")?;
+                if !dual && (scope_clear_main || scope_clear_back) {
+                    self.offscreen_stack
+                        .last_mut()
+                        .expect("offscreen scope")
+                        .plane_mut(!write_main)
+                        .needs_clear = false;
+                }
+                if dual {
+                    let mut encoder = self.take_encoder("scene dual composite");
+                    let (w, h) = self.active_scene_size();
+                    let (main_tex, main, _, _) = self.plane(false)?;
+                    let (back_tex, backdrop, _, _) = self.plane(true)?;
+                    let same_size = (main_tex.width(), main_tex.height()) == (back_tex.width(), back_tex.height());
+                    let (main, backdrop) = (main.clone(), backdrop.clone());
+                    let scissor = (0, 0, u32::from(w), u32::from(h));
+                    if same_size {
+                        self.readers.encode_composite(
+                            &self.device,
+                            &mut encoder,
+                            &color,
+                            color_id,
+                            CompositeTarget::OverBoth(&main, &backdrop),
+                            (scope_clear_main, scope_clear_back),
+                            (0, 0),
+                            scissor,
+                            1.0,
+                        );
+                    } else {
+                        // Reused offscreen planes can have different allocation sizes even
+                        // though they share an active viewport. A pass requires matching extents.
+                        for (view, clear) in [(&main, scope_clear_main), (&backdrop, scope_clear_back)] {
+                            self.readers.encode_composite(
+                                &self.device,
+                                &mut encoder,
+                                &color,
+                                color_id,
+                                CompositeTarget::Over(view),
+                                (clear, false),
+                                (0, 0),
+                                scissor,
+                                1.0,
+                            );
+                        }
+                    }
+                    self.stash_encoder(encoder);
+                    if let Some(scope) = self.offscreen_stack.last_mut() {
+                        if scope_clear_main {
+                            scope.main.needs_clear = false;
+                        }
+                        if scope_clear_back && let Some(back) = scope.backdrop.as_mut() {
+                            back.needs_clear = false;
+                        }
                     }
                 }
             }
@@ -7567,8 +7749,10 @@ impl Gpu {
                 self.scene.pop_clip();
             }
         }
+        let hw_blend = self.scene.hw_blend();
         let result = self.flush_scene_gpu(force_clear);
         self.scene.reset();
+        self.scene.set_hw_blend(hw_blend);
         self.reopen_clips(open);
         result
     }
@@ -9567,6 +9751,18 @@ impl Backend for Gpu {
         }
     }
 
+    fn can_hw_blend(&self) -> bool {
+        self.hw_blend_enabled && self.target_is_opaque()
+    }
+
+    fn before_destructive_root_layer(&mut self, open: &[Open]) -> Result<()> {
+        if self.scene.has_hw_blend() {
+            self.flush_preserving_clips(open, false)?;
+        }
+        self.invalidate_active_opacity();
+        Ok(())
+    }
+
     fn begin_readers(&mut self, needs_backdrop: bool, has_context: bool) -> Result<()> {
         let Some(active) = self.active.as_ref() else {
             return Ok(());
@@ -9596,6 +9792,7 @@ impl Backend for Gpu {
                     act.needs_clear = false;
                     act.backdrop_live = true;
                     act.has_context = true;
+                    act.backdrop_opaque = false;
                 }
             }
         }
@@ -9640,6 +9837,7 @@ impl Backend for Gpu {
         self.backdrop_gen += 1;
         if let Some(a) = self.active.as_mut() {
             a.backdrop_live = true;
+            a.backdrop_opaque = a.main_opaque;
         }
         Ok(())
     }
@@ -10484,6 +10682,18 @@ impl Backend for Gpu {
         let active = self.active.as_ref().expect("active draw");
         let previous_targets = (active.write_main, active.write_backdrop);
         let parent_backdrop_live = !self.offscreen_stack.is_empty() || active.backdrop_live;
+        let (parent_main_opaque, parent_backdrop_opaque) = if let Some(parent) = self.offscreen_stack.last() {
+            (parent.main.opaque, parent.plane(true).opaque)
+        } else {
+            (
+                active.main_opaque,
+                if active.backdrop_live {
+                    active.backdrop_opaque
+                } else {
+                    active.main_opaque
+                },
+            )
+        };
         let (w, h) = ((area.x1 - area.x0) as u32, (area.y1 - area.y0) as u32);
         let origin = (area.x0, area.y0);
         if self.offscreen_in_use.iter().map(|target| target.bytes).sum::<usize>() >= GPU_TEMP_FLUSH_BYTES {
@@ -10507,18 +10717,29 @@ impl Backend for Gpu {
         }
         if isolation.copy_parent {
             let overlap = area.intersect(parent_bounds);
+            let full_copy = overlap == area;
+            let main_from_backdrop = !isolation.on_main && !isolation.separate;
+            scope.main.opaque = full_copy
+                && if main_from_backdrop {
+                    parent_backdrop_opaque
+                } else {
+                    parent_main_opaque
+                };
+            if let Some(back) = scope.backdrop.as_mut() {
+                back.opaque = full_copy && parent_backdrop_opaque;
+            }
             if !overlap.is_empty()
                 && let Some(parent_idx) = self.offscreen_stack.len().checked_sub(1)
             {
-                let main_reads_back = (!isolation.on_main && !isolation.separate) && parent_backdrop_live;
+                let main_reads_back = main_from_backdrop && parent_backdrop_live;
                 let reads_main = !main_reads_back;
                 let reads_back = main_reads_back || (scope.backdrop.is_some() && parent_backdrop_live);
                 self.ensure_scope_cleared(parent_idx, reads_main, reads_back);
             }
             let mut encoder = self.take_encoder("isolation init");
             let res = (|| {
-                for (backdrop, target) in std::iter::once((!isolation.on_main && !isolation.separate, &scope.main))
-                    .chain(scope.backdrop.iter().map(|t| (true, t)))
+                for (backdrop, target) in
+                    std::iter::once((main_from_backdrop, &scope.main)).chain(scope.backdrop.iter().map(|t| (true, t)))
                 {
                     if overlap != area {
                         GpuReaders::encode_clear(&mut encoder, &target.view, wgpu::Color::TRANSPARENT);
@@ -10625,6 +10846,31 @@ impl Backend for Gpu {
         self.reopen_clips(open);
         let result = flushed
             .and_then(|()| self.composite_scope(&content, picture.as_ref().zip(mask_kind), blend, opacity, open));
+        if result.is_ok() && blend == crate::blend::BLEND_LERP {
+            let main_lost = content.isolation.on_main && !content.main.opaque;
+            let back_lost = content.isolation.on_backdrop && !content.plane(true).opaque;
+            if main_lost || back_lost {
+                if let Some(parent) = self.offscreen_stack.last_mut() {
+                    if parent.backdrop.is_none() {
+                        parent.main.opaque = false;
+                    } else {
+                        if main_lost {
+                            parent.main.opaque = false;
+                        }
+                        if back_lost && let Some(back) = parent.backdrop.as_mut() {
+                            back.opaque = false;
+                        }
+                    }
+                } else if let Some(active) = self.active.as_mut() {
+                    if main_lost {
+                        active.main_opaque = false;
+                    }
+                    if back_lost {
+                        active.backdrop_opaque = false;
+                    }
+                }
+            }
+        }
         self.retire_scope(content);
         if let Some(picture) = picture {
             self.retire_scope(picture);

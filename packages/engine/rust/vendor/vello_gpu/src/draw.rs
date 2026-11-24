@@ -9,7 +9,7 @@ use crate::paint::{
     TextureSourceId,
 };
 use crate::rect::{RectPart, split_rect};
-use crate::scene::{RecordedDraw, RecordedPath};
+use crate::scene::{HwBlendMode, RecordedDraw, RecordedPath};
 use crate::target::{DrawTarget, LayerTextureRegion};
 use crate::util::{Ranges, VecExt, pack_opacity, pack_u16_pair};
 use alloc::vec::Vec;
@@ -22,6 +22,16 @@ use vello_common::strip_generator::StripStorage;
 use vello_common::tile::Tile;
 use vello_common::util::Clear;
 
+/// Drawpane: contiguous run of alpha-pass strips sharing one fixed-function hardware blend mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct BlendRun {
+    /// Hardware blend mode applied to the strips in this run.
+    pub(crate) mode: HwBlendMode,
+    /// Start index within the draw's alpha strips. The end is implicitly the next run's start or
+    /// the total number of alpha strips in the pass.
+    pub(crate) strips_start: usize,
+}
+
 /// Strip ranges and texture-binding state for one scheduled draw pass.
 #[derive(Debug, Default, Clone)]
 pub(crate) struct Draw {
@@ -29,6 +39,8 @@ pub(crate) struct Draw {
     pub(crate) strip_ranges: Ranges,
     /// Runs that require external texture bindings.
     pub(crate) external_texture_runs: Vec<ExternalTextureRun>,
+    /// Drawpane: runs grouped by fixed-function hardware blend mode (empty means all Normal).
+    pub(crate) blend_runs: Vec<BlendRun>,
     /// Whether any strip in this draw samples a child layer.
     pub(crate) has_child_layer: bool,
 }
@@ -40,14 +52,15 @@ impl Draw {
         strips: &mut Vec<GpuStrip>,
         mut gpu_strip: GpuStrip,
         texture_source: Option<TextureSourceId>,
+        hw_blend: HwBlendMode,
     ) {
-        if let Some(slot) = assign_external_texture_slot(
-            &mut self.external_texture_runs,
-            self.strip_ranges.len(),
-            texture_source,
-        ) {
+        let strip_idx = self.strip_ranges.len();
+        if let Some(slot) =
+            assign_external_texture_slot(&mut self.external_texture_runs, strip_idx, texture_source)
+        {
             gpu_strip.paint_and_rect_flag |= u32::from(slot) << EXTERNAL_TEXTURE_SLOT_SHIFT;
         }
+        assign_blend_run(&mut self.blend_runs, strip_idx, hw_blend);
 
         strips.push_ranged(&mut self.strip_ranges, gpu_strip);
     }
@@ -57,6 +70,7 @@ impl Clear for Draw {
     fn clear(&mut self) {
         self.strip_ranges.clear();
         self.external_texture_runs.clear();
+        self.blend_runs.clear();
         self.has_child_layer = false;
     }
 }
@@ -151,7 +165,7 @@ impl<'a, T: DrawTarget> DrawBuilder<'a, T> {
         match draw {
             RecordedDraw::Path(path) => self.push_path(path, strip_storage, paint_resolver),
             RecordedDraw::Rect(rect) => {
-                self.push_rect(&rect.rect, &rect.paint, paint_resolver);
+                self.push_rect(&rect.rect, &rect.paint, rect.hw_blend, paint_resolver);
             }
         }
     }
@@ -172,12 +186,15 @@ impl<'a, T: DrawTarget> DrawBuilder<'a, T> {
         paint_resolver: PaintResolver<'_>,
     ) {
         let strips = &strip_storage.strips[path.strips.clone()];
-
+        let hw_blend = path.hw_blend;
         let paint = paint_resolver.pack(&path.paint);
+        // Drawpane: hardware-blended strips depend on destination pixels, so they must never
+        // enter the front-to-back opaque depth-writing pass.
+        let is_opaque = paint.opaque && hw_blend == HwBlendMode::Normal;
         // Note: This will also advance the depth index for layer root draws even though
         // those _currently_ never use the depth buffer, but it's better to keep the
         // condition simple, and it's not incorrect to do so.
-        let depth_index = self.state.depth_counter.next(paint.opaque);
+        let depth_index = self.state.depth_counter.next(is_opaque);
         let tile_bounds = self.state.target_bbox.to_tile_bounds();
         let geometry_shift = self.state.target.geometry_shift();
 
@@ -202,7 +219,7 @@ impl<'a, T: DrawTarget> DrawBuilder<'a, T> {
 
                 builder
                     .draw
-                    .push(builder.strips, strip, paint.texture_source);
+                    .push(builder.strips, strip, paint.texture_source, hw_blend);
             },
             |builder, segment| {
                 let shifted = segment.shift(geometry_shift);
@@ -216,16 +233,22 @@ impl<'a, T: DrawTarget> DrawBuilder<'a, T> {
                     depth_index,
                 );
 
-                if !paint.opaque || !builder.push_opaque(strip, paint.texture_source) {
+                if !is_opaque || !builder.push_opaque(strip, paint.texture_source) {
                     builder
                         .draw
-                        .push(builder.strips, strip, paint.texture_source);
+                        .push(builder.strips, strip, paint.texture_source, hw_blend);
                 }
             },
         );
     }
 
-    fn push_rect(&mut self, rect: &Rect, paint: &Paint, paint_resolver: PaintResolver<'_>) {
+    fn push_rect(
+        &mut self,
+        rect: &Rect,
+        paint: &Paint,
+        hw_blend: HwBlendMode,
+        paint_resolver: PaintResolver<'_>,
+    ) {
         // Recordings might contain geometry that exceeds the actual layer
         // bounding box. This can happen when a clip path is associated with the layer.
         // Recordings will not cull those for us, so we need to do this manually here.
@@ -237,7 +260,8 @@ impl<'a, T: DrawTarget> DrawBuilder<'a, T> {
         }
 
         let paint = paint_resolver.pack(paint);
-        let depth_index = self.state.depth_counter.next(paint.opaque);
+        let is_opaque = paint.opaque && hw_blend == HwBlendMode::Normal;
+        let depth_index = self.state.depth_counter.next(is_opaque);
 
         let split = split_rect(&clipped_rect);
 
@@ -261,8 +285,9 @@ impl<'a, T: DrawTarget> DrawBuilder<'a, T> {
                 depth_index,
             );
 
-            if !(paint.opaque && part.frac == 0 && self.push_opaque(strip, paint.texture_source)) {
-                self.draw.push(self.strips, strip, paint.texture_source);
+            if !(is_opaque && part.frac == 0 && self.push_opaque(strip, paint.texture_source)) {
+                self.draw
+                    .push(self.strips, strip, paint.texture_source, hw_blend);
             }
         }
     }
@@ -327,6 +352,7 @@ impl<'a, T: DrawTarget> DrawBuilder<'a, T> {
                     depth_index,
                 ),
                 None,
+                HwBlendMode::Normal,
             );
         }
     }
@@ -345,7 +371,8 @@ impl<'a, T: DrawTarget> DrawBuilder<'a, T> {
         let shifted = segment.shift(self.state.target.geometry_shift());
         let strip = GpuStrip::from_fill_segment(shifted, col_idx, payload, paint, depth_index);
 
-        self.draw.push(self.strips, strip, None);
+        self.draw
+            .push(self.strips, strip, None, HwBlendMode::Normal);
     }
 }
 
@@ -523,6 +550,31 @@ fn assign_external_texture_slot(
     Some(slot)
 }
 
+/// Drawpane: records a hardware blend mode transition into `runs` while keeping `runs` empty
+/// when every strip in the pass uses [`HwBlendMode::Normal`].
+#[inline]
+fn assign_blend_run(runs: &mut Vec<BlendRun>, strips_len: usize, mode: HwBlendMode) {
+    if let Some(last) = runs.last() {
+        if last.mode != mode {
+            runs.push(BlendRun {
+                mode,
+                strips_start: strips_len,
+            });
+        }
+    } else if mode != HwBlendMode::Normal {
+        if strips_len > 0 {
+            runs.push(BlendRun {
+                mode: HwBlendMode::Normal,
+                strips_start: 0,
+            });
+        }
+        runs.push(BlendRun {
+            mode,
+            strips_start: strips_len,
+        });
+    }
+}
+
 /// Assigns monotonically increasing depth values to opaque strips.
 #[derive(Debug, Default, Clone, Copy)]
 pub(crate) struct DepthCounter {
@@ -627,7 +679,22 @@ mod tests {
             paint: Paint,
             paint_resolver: PaintResolver<'_>,
         ) {
-            let recorded = RecordedDraw::Rect(RecordedRect { rect, paint });
+            self.rect_blended(draw, rect, paint, crate::scene::HwBlendMode::Normal, paint_resolver);
+        }
+
+        fn rect_blended(
+            &mut self,
+            draw: &mut Draw,
+            rect: Rect,
+            paint: Paint,
+            hw_blend: crate::scene::HwBlendMode,
+            paint_resolver: PaintResolver<'_>,
+        ) {
+            let recorded = RecordedDraw::Rect(RecordedRect {
+                rect,
+                paint,
+                hw_blend,
+            });
             DrawBuilder::new(draw, &mut self.buffers, &mut self.state).push_draw(
                 &recorded,
                 &self.strip_storage,
@@ -1118,5 +1185,72 @@ mod tests {
                 .collect::<Vec<_>>(),
             [1, 2]
         );
+    }
+
+    #[test]
+    fn hw_blend_routes_to_alpha_with_exact_depth_and_blend_runs() {
+        use crate::scene::HwBlendMode;
+
+        let mut case = DrawCase::new(RootTarget::UserSurface, RectU16::new(0, 0, 64, 8));
+        let mut draw = Draw::default();
+
+        // 0: opaque Normal -> opaque pass, depth 1
+        case.rect_blended(&mut draw, rect(0.0), solid(1.0), HwBlendMode::Normal, no_paints());
+        // 1: alpha Normal -> alpha pass, depth 1
+        case.rect_blended(&mut draw, rect(8.0), solid(0.5), HwBlendMode::Normal, no_paints());
+        // 2: opaque LinearBurn -> MUST go to alpha pass (not opaque!), depth 1
+        case.rect_blended(&mut draw, rect(16.0), solid(1.0), HwBlendMode::LinearBurn, no_paints());
+        // 3: translucent LinearBurn -> merges into same LinearBurn run, depth 1
+        case.rect_blended(&mut draw, rect(24.0), solid(0.5), HwBlendMode::LinearBurn, no_paints());
+        // 4: opaque Multiply -> alpha pass, depth 1
+        case.rect_blended(&mut draw, rect(32.0), solid(1.0), HwBlendMode::Multiply, no_paints());
+        // 5: opaque Normal -> opaque pass, depth 2 (occludes earlier HW-blended strips)
+        case.rect_blended(&mut draw, rect(40.0), solid(1.0), HwBlendMode::Normal, no_paints());
+        // 6: opaque Screen after opaque Normal -> alpha pass, depth 2
+        case.rect_blended(&mut draw, rect(48.0), solid(1.0), HwBlendMode::Screen, no_paints());
+
+        assert_eq!(case.buffers.opaque.strips().len(), 2);
+        assert_eq!(
+            case.buffers
+                .opaque
+                .strips()
+                .iter()
+                .map(|strip| strip.depth_index)
+                .collect::<Vec<_>>(),
+            [1, 2]
+        );
+        assert_eq!(
+            case.buffers
+                .strips
+                .ranged(&draw.strip_ranges)
+                .iter()
+                .map(|strip| strip.depth_index)
+                .collect::<Vec<_>>(),
+            [1, 1, 1, 1, 2]
+        );
+        assert_eq!(
+            draw.blend_runs,
+            [
+                super::BlendRun {
+                    mode: HwBlendMode::Normal,
+                    strips_start: 0,
+                },
+                super::BlendRun {
+                    mode: HwBlendMode::LinearBurn,
+                    strips_start: 1,
+                },
+                super::BlendRun {
+                    mode: HwBlendMode::Multiply,
+                    strips_start: 3,
+                },
+                super::BlendRun {
+                    mode: HwBlendMode::Screen,
+                    strips_start: 4,
+                },
+            ]
+        );
+
+        draw.clear();
+        assert!(draw.blend_runs.is_empty());
     }
 }

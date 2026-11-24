@@ -9,7 +9,7 @@ pub(crate) mod copy;
 pub(crate) mod filter;
 pub(crate) mod strip;
 
-use crate::draw::ExternalTextureRun;
+use crate::draw::{BlendRun, ExternalTextureRun};
 use crate::render::wgpu::RenderTargetConfig;
 use crate::render::wgpu::bindings::TextureBindings;
 use crate::render::wgpu::passes::blend::BlendPipeline;
@@ -157,6 +157,14 @@ fn create_texture_op_pipeline(
     })
 }
 
+/// Drawpane: secondary root target for direct dual-plane strip replay (reusing uploaded strips).
+pub(crate) struct SecondaryRootTarget<'a> {
+    pub(crate) view: &'a TextureView,
+    pub(crate) depth_view: Option<&'a TextureView>,
+    pub(crate) view_config_offset: u32,
+    pub(crate) load_op: wgpu::LoadOp<wgpu::Color>,
+}
+
 /// A struct containing references to the many objects needed to get work
 /// scheduled onto the GPU.
 pub(crate) struct RendererContext<'a> {
@@ -166,6 +174,8 @@ pub(crate) struct RendererContext<'a> {
     pub(crate) encoder: &'a mut CommandEncoder,
     pub(crate) view: &'a TextureView,
     pub(crate) depth_view: Option<&'a TextureView>,
+    /// Drawpane: optional second root target for direct two-pass dual-plane strip replay.
+    pub(crate) secondary: Option<SecondaryRootTarget<'a>>,
     pub(crate) texture_bindings: &'a TextureBindings,
     pub(crate) scratch_buffers: &'a mut ScratchBuffers,
     pub(crate) root_load_op: wgpu::LoadOp<wgpu::Color>,
@@ -184,9 +194,17 @@ impl RendererContext<'_> {
         self.root_load_op = match target_init {
             TargetInit::SrcOver => wgpu::LoadOp::Load,
             TargetInit::Clear(ClearSettings::Viewport { color }) => {
-                wgpu::LoadOp::Clear(clear_color(color))
+                let clear = wgpu::LoadOp::Clear(clear_color(color));
+                if let Some(sec) = self.secondary.as_mut() {
+                    sec.load_op = clear;
+                }
+                clear
             }
             TargetInit::Clear(clear @ ClearSettings::Rects { .. }) => {
+                debug_assert!(
+                    self.secondary.is_none(),
+                    "dual-plane strip replay does not support root ClearSettings::Rects"
+                );
                 self.clear_pass_inner(DrawPassTarget::Root(root_target), clear);
 
                 wgpu::LoadOp::Load
@@ -199,6 +217,12 @@ impl RendererContext<'_> {
         // emitted, we still need to start a pass to clear the output.
         if let wgpu::LoadOp::Clear(color) = self.take_root_load_op() {
             Self::clear_full_target(self.encoder, self.view, color);
+        }
+        if let Some(sec) = self.secondary.as_mut()
+            && let wgpu::LoadOp::Clear(color) =
+                core::mem::replace(&mut sec.load_op, wgpu::LoadOp::Load)
+        {
+            Self::clear_full_target(self.encoder, sec.view, color);
         }
     }
 
@@ -223,6 +247,7 @@ impl Backend for RendererContext<'_> {
             strips,
             RangedSlice::empty(),
             external_texture_runs,
+            &[],
             DrawPassTarget::Root(RootTarget::UserSurface),
             None,
         );
@@ -234,12 +259,14 @@ impl Backend for RendererContext<'_> {
         &mut self,
         strips: RangedSlice<'_, GpuStrip>,
         external_texture_runs: &[ExternalTextureRun],
+        blend_runs: &[BlendRun],
         bindings: DrawPassBindings,
     ) -> Result<(), Self::Error> {
         self.strip_pass_inner(
             &[],
             strips,
             external_texture_runs,
+            blend_runs,
             bindings.target,
             bindings.child,
         );

@@ -9,6 +9,7 @@ use crate::render::wgpu::passes::filter::{
     FilterPairBindGroups, create_filter_original_texture_bind_group,
 };
 use crate::render::wgpu::passes::strip::StripTargetKind;
+use crate::scene::HwBlendMode;
 use crate::{
     LayersConfig, RenderSize,
     filter::FilterContext,
@@ -30,7 +31,7 @@ use vello_common::multi_atlas::AtlasConfig;
 use vello_common::{geometry::SizeU16, tile::Tile};
 use wgpu::{
     BindGroup, BindGroupLayout, Buffer, BufferDescriptor, COPY_BUFFER_ALIGNMENT, Device, Extent3d,
-    Queue, Sampler, Texture, TextureView, TextureViewDescriptor, util::DeviceExt,
+    Queue, RenderPipeline, Sampler, Texture, TextureView, TextureViewDescriptor, util::DeviceExt,
 };
 
 /// Drawpane: number of distinct `(RenderSize, scene_offset)` uniform slots per batch.
@@ -224,6 +225,12 @@ pub(crate) struct GpuResources {
     pub(crate) scene_offset: (i32, i32),
     /// Whether the depth buffer has been cleared for the current render.
     pub(crate) depth_cleared_this_frame: bool,
+    /// Drawpane: whether the secondary root target's depth buffer has been cleared in a dual replay.
+    pub(crate) secondary_depth_cleared_this_frame: bool,
+    /// Drawpane: lazily created root alpha-strip fixed-function HW blend pipelines (no depth test).
+    pub(crate) alpha_hw_blend_pipelines: [Option<RenderPipeline>; HwBlendMode::NON_NORMAL_COUNT],
+    /// Drawpane: lazily created root alpha-strip fixed-function HW blend pipelines (with depth test).
+    pub(crate) depth_hw_blend_pipelines: [Option<RenderPipeline>; HwBlendMode::NON_NORMAL_COUNT],
 }
 
 impl GpuResources {
@@ -391,6 +398,9 @@ impl GpuResources {
             render_size,
             scene_offset: (0, 0),
             depth_cleared_this_frame: false,
+            secondary_depth_cleared_this_frame: false,
+            alpha_hw_blend_pipelines: [const { None }; HwBlendMode::NON_NORMAL_COUNT],
+            depth_hw_blend_pipelines: [const { None }; HwBlendMode::NON_NORMAL_COUNT],
         }
     }
 
@@ -699,6 +709,7 @@ impl GpuResources {
         paint_texels: u32,
         filter_context: &FilterContext,
         render_size: RenderSize,
+        secondary_render_size: Option<RenderSize>,
         scene_offset: (i32, i32),
         needed_vertex_bytes: u64,
     ) -> bool {
@@ -770,9 +781,14 @@ impl GpuResources {
         }
 
         let config_key = (render_size, scene_offset);
-        if !self.batch_configs.contains_key(&config_key)
-            && self.batch_configs.len() >= CONFIG_SLOTS as usize
+        let mut extra_configs = usize::from(!self.batch_configs.contains_key(&config_key));
+        if let Some(sec_size) = secondary_render_size
+            && sec_size != render_size
+            && !self.batch_configs.contains_key(&(sec_size, scene_offset))
         {
+            extra_configs += 1;
+        }
+        if self.batch_configs.len() + extra_configs > CONFIG_SLOTS as usize {
             return false;
         }
 
@@ -780,7 +796,11 @@ impl GpuResources {
     }
 
     /// Drawpane: allocate or reuse a dynamic-offset slot in `view_config_buffer` for this render.
-    fn alloc_config_slot(&mut self, render_size: RenderSize, scene_offset: (i32, i32)) -> u32 {
+    pub(crate) fn alloc_config_slot(
+        &mut self,
+        render_size: RenderSize,
+        scene_offset: (i32, i32),
+    ) -> u32 {
         let key = (render_size, scene_offset);
         if let Some(&offset) = self.batch_configs.get(&key) {
             return offset;
