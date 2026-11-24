@@ -823,28 +823,35 @@ function shownFrame(doc: Doc, frame: NodeRecord): NodeRecord | undefined {
 }
 
 /**
- * A person's or an agent's edit without the auto layout removals the editor refuses (PR 286, as
- * Figma refuses them): taking away, from an instance or a layer in one, the auto layout the frame
- * it shows has. `canToggleLayout` refuses it in the layout commands; this covers the generic
- * setters and the agent's tools, so no edit makes a frame frozen (`frozenFrame`). Undo and redo
- * aren't edits of this kind: they may go back to a frame a file from before left frozen.
+ * A person's or an agent's edit without the auto layout changes the editor refuses (PR 286, as
+ * Figma refuses them) on an instance or a layer in one: taking away the auto layout the frame it
+ * shows has, or giving one with none auto layout that frame lacks (Shift+A and the grid action
+ * wrap it instead). `canToggleLayout` refuses both in the layout commands; this covers the generic setters
+ * and the agent's tools. So no edit makes a frame frozen (`frozenFrame`), and none races a main
+ * gaining a flow with a flow of its own. Undo and redo aren't edits of this kind: they may go back
+ * to a frame a file from before left frozen.
  */
 export function refuseFrozenRemovals(doc: Doc, ops: readonly Op[]): Op[] {
   return ops.filter((op) => {
-    if (op.op !== "set" || op.prop !== "layoutMode" || (op.value !== null && op.value !== "none"))
-      return true;
+    if (op.op !== "set" || op.prop !== "layoutMode") return true;
     const frame = doc.get(op.id);
     if (frame?.type !== "frame") return true;
     const shown = shownFrame(doc, frame);
-    return !shown || getProp(shown.props, "layoutMode") === "none";
+    if (!shown) return true;
+    const flows = getProp(shown.props, "layoutMode") !== "none";
+    if (op.value === null || op.value === "none") return !flows;
+    // A flow a file from before gave it stays its own to turn (`canToggleLayout`).
+    return flows || getProp(frame.props, "layoutMode") !== "none";
   });
 }
 
 /**
  * The frames an edit left frozen that weren't (`frozenFrame`): what it made or swapped, and the
  * copy frames and instances of a frame it gave auto layout to while they held a layout mode of
- * none as their own (a file from before, or a person's no-op setting). Each gets its main's flow
- * back, in the same transaction, so only undo and redo go back to a frozen frame.
+ * none as their own (a file from before, or a person's no-op setting). Each takes the flow of the
+ * frame it shows, in the same transaction, so only undo and redo go back to a frozen frame. Only
+ * its layout mode is written, as its own: the overrides list stays as it was, so a collaborator's
+ * concurrent mark on the same frame (a recolour) isn't taken by a stale list.
  */
 export function unfreezeOps(doc: Doc, ops: readonly Op[], wasFrozen: ReadonlySet<string>): Op[] {
   const candidates = new Set<string>();
@@ -867,16 +874,12 @@ export function unfreezeOps(doc: Doc, ops: readonly Op[], wasFrozen: ReadonlySet
     if (wasFrozen.has(id)) continue;
     const frame = doc.get(id);
     if (!frame || !frozenFrame(frame, shownFrame(doc, frame))) continue;
-    const own = getProp(frame.props, "overrides").filter((prop) => prop !== "layoutMode");
-    out.push(
-      {
-        op: "set",
-        id,
-        prop: "layoutMode",
-        value: getProp(shownFrame(doc, frame)?.props ?? {}, "layoutMode"),
-      },
-      { op: "set", id, prop: "overrides", value: own.length > 0 ? own : null },
-    );
+    out.push({
+      op: "set",
+      id,
+      prop: "layoutMode",
+      value: getProp(shownFrame(doc, frame)?.props ?? {}, "layoutMode"),
+    });
   }
   return out;
 }

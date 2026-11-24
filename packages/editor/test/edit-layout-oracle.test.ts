@@ -2822,8 +2822,17 @@ function performFlow(editor: Editor, e: FlowEdit): void {
       return;
     }
     case "older-add": {
+      // Refused where the frame the instance shows has no flow (PR 286, as Figma does; Shift+A
+      // wraps it instead), through the generic setter and the agent's tools too.
       const node = pick(instances.filter((n) => getProp(n.props, "layoutMode") === "none"));
-      if (node) editor.commit([{ op: "set", id: node.id, prop: "layoutMode", value: e.value }]);
+      if (!node) return;
+      const shownId = getProp(node.props, "instanceOf") ?? getProp(node.props, "mirrors");
+      const plain = getProp(doc.get(shownId ?? "")?.props ?? {}, "layoutMode") === "none";
+      editor.commit([{ op: "set", id: node.id, prop: "layoutMode", value: e.value }]);
+      if (plain) {
+        expect(getProp(doc.get(node.id)?.props ?? {}, "layoutMode"), "refused").toBe("none");
+        refusedFlow.set(editor, (refusedFlow.get(editor) ?? 0) + 1);
+      }
       return;
     }
     case "toggle": {

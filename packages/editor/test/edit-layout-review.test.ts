@@ -40,6 +40,26 @@ function fromBefore(editor: Editor, id: string, copies: "compact" | "materialize
   editor.setPage("p");
 }
 
+/**
+ * Gives an instance or a copy frame auto layout its main layer lacks, as a file from before PR 286
+ * can hold it: the editor refuses that now (as Figma does; Shift+A wraps it instead), so the props
+ * are written as its own past the refusal, then laid out as the editor lays out any edit.
+ */
+function gainedBefore(editor: Editor, id: string, props: Record<string, unknown>): void {
+  const overrides = getProp(editor.doc.get(id)?.props ?? {}, "overrides");
+  editor.sync.commit([
+    ...Object.entries(props).map(([prop, value]) => ({ op: "set", id, prop, value }) as Op),
+    {
+      op: "set",
+      id,
+      prop: "overrides",
+      value: [...new Set([...overrides, ...Object.keys(props)])],
+    },
+  ]);
+  const laid = layoutOps(editor.doc, [id]);
+  if (laid.length > 0) editor.commit(laid, "Layout", { overrides: false });
+}
+
 const node = (
   id: string,
   type: NodeRecord["type"],
@@ -627,10 +647,7 @@ describe("with copies compact", () => {
     const inner = editor.doc.childIds(instance)[0] as string;
     // Auto layout its main layer doesn't have: the editor refuses it now (as Figma does), but a
     // file saved before can hold it.
-    editor.commit([
-      { op: "set", id: inner, prop: "layoutMode", value: "row" },
-      { op: "set", id: inner, prop: "gap", value: 30 },
-    ]);
+    gainedBefore(editor, inner, { layoutMode: "row", gap: 30 });
     const b = editor.doc.childIds(inner)[1] as string;
     // The row reads its gap from where the layers sat: 30.
     expect(num(editor, b, "x")).toBe(50);
@@ -934,7 +951,7 @@ describe.each(["materialized", "compact"] as const)("deriving copies with copies
     );
     // Auto layout its main doesn't have: the editor refuses it now (as Figma does), but a file
     // saved before can hold it.
-    editor.commit([{ op: "set", id: instance, prop: "layoutMode", value: "row" }]);
+    gainedBefore(editor, instance, { layoutMode: "row" });
     expect(getProp(editor.doc.get(instance)?.props ?? {}, "layoutMode")).toBe("row");
     expect([num(editor, copy, "x"), getProp(editor.doc.get(copy)?.props ?? {}, "y")]).not.toEqual([
       50, 20,
@@ -1159,7 +1176,7 @@ describe.each(["materialized", "compact"] as const)(
       const instance = editor.insertInstance("main", { x: 0, y: 300 }) as string;
       // Auto layout its main doesn't have: refused by the editor now (as in Figma), but a file
       // saved before can hold it.
-      editor.commit([{ op: "set", id: instance, prop: "layoutMode", value: "row" }]);
+      gainedBefore(editor, instance, { layoutMode: "row" });
       const box = editor.doc.childIds(instance)[1] as string;
       // The row lays them side by side.
       expect(num(editor, box, "x")).not.toBe(10);
@@ -1393,7 +1410,8 @@ describe.each(["materialized", "compact"] as const)("re-check 3 with copies %s",
       copies,
     );
     const instance = editor.insertInstance("main", { x: 0, y: 300 }) as string;
-    editor.setProp([instance], "layoutMode", "row");
+    // Auto layout its main doesn't have, from a file saved before (the editor refuses it now).
+    gainedBefore(editor, instance, { layoutMode: "row" });
     const grp = editor.doc.childIds(instance)[0] as string;
     const [a, b] = editor.doc.childIds(grp) as [string, string];
     expect(num(editor, a, "x")).not.toBe(80);
@@ -2055,7 +2073,7 @@ describe.each(["materialized", "compact"] as const)("re-check 7 with copies %s",
     const outer = editor.insertInstance("outer", { x: 1000, y: 0 }) as string;
     const copy = editor.doc.childIds(outer)[0] as string;
     // A row its component lacks, from a file saved before (the editor refuses it now).
-    editor.commit([{ op: "set", id: copy, prop: "layoutMode", value: "row" }]);
+    gainedBefore(editor, copy, { layoutMode: "row" });
     editor.setProp([nested], "alignItems", "stretch");
     expect(size(editor, editor.doc.childIds(copy)[0] as string)).toEqual([60, 80]);
     expect(unsettled(editor)).toEqual([]);
@@ -2340,12 +2358,7 @@ describe.each(["materialized", "compact"] as const)("re-check 8 with copies %s",
     expect(editor.commit([{ op: "move", id: nested, parent: "outer", key: "a0" }])).toBe(true);
     const outer = editor.insertInstance("outer", { x: 1000, y: 0 }) as string;
     // A row of its own that stretches the copy of the nested instance (an older file's edit).
-    expect(
-      editor.commit([
-        { op: "set", id: outer, prop: "layoutMode", value: "row" },
-        { op: "set", id: outer, prop: "alignItems", value: "stretch" },
-      ]),
-    ).toBe(true);
+    gainedBefore(editor, outer, { layoutMode: "row", alignItems: "stretch" });
     const copy = editor.doc.childIds(outer)[0] as string;
     expect(box(editor, copy)[3]).toBe(260);
     const layer = editor.doc.childIds(copy)[0] as string;
@@ -2780,6 +2793,56 @@ describe.each(["materialized", "compact"] as const)(
       const sorted = (records: readonly NodeRecord[]) =>
         [...records].sort((x, y) => x.id.localeCompare(y.id));
       expect(sorted(editor.doc.stored())).toEqual(sorted(was));
+    });
+
+    // The final re-check: giving an instance (or a copy frame) a flow its component lacks is
+    // refused the same way, so no edit races a main gaining a flow (worker test `unfreeze-race`).
+    // Shift+A and the grid action wrap it instead, and a flow a file from before gave it stays its
+    // own to turn.
+    it("refuses giving an instance or a copy frame a flow its component lacks", async () => {
+      const editor = make(
+        [
+          page,
+          node("main", "frame", "p", { isComponent: true, width: 120, height: 90 }),
+          node("inner", "frame", "main", { width: 100, height: 40 }),
+          node("r", "rect", "inner", { width: 20, height: 10 }),
+        ],
+        copies,
+      );
+      const instance = editor.insertInstance("main", { x: 300, y: 0 }) as string;
+      const inner = editor.doc.childIds(instance)[0] as string;
+      const sorted = (records: readonly NodeRecord[]) =>
+        [...records].sort((x, y) => x.id.localeCompare(y.id));
+      const layout = (id: string) => getProp(editor.doc.get(id)?.props ?? {}, "layoutMode");
+      for (const target of [instance, inner]) {
+        const was = sorted(editor.doc.stored());
+        // The generic setter, the layout command, and an agent's tool.
+        expect(
+          editor.commit([{ op: "set", id: target, prop: "layoutMode", value: "column" }]),
+        ).toBe(false);
+        editor.setLayoutMode([target], "row");
+        editor.setLayoutMode([target], "grid");
+        await runTool(editor, "set_props", {
+          changes: [{ id: target, props: { layoutMode: "row" } }],
+        });
+        expect(layout(target)).toBe("none");
+        expect(sorted(editor.doc.stored())).toEqual(was);
+      }
+      // Shift+A wraps the instance in a new auto layout frame.
+      editor.select([instance]);
+      editor.frameSelection(true);
+      expect(layout(instance)).toBe("none");
+      const wrapper = editor.doc.get(instance)?.parent as string;
+      expect(wrapper).not.toBe("p");
+      expect(layout(wrapper)).not.toBe("none");
+      // A row a file from before gave it turns to a column, and goes.
+      gainedBefore(editor, instance, { layoutMode: "row" });
+      expect(
+        editor.commit([{ op: "set", id: instance, prop: "layoutMode", value: "column" }]),
+      ).toBe(true);
+      expect(layout(instance)).toBe("column");
+      editor.setLayoutMode([instance], "none");
+      expect(layout(instance)).toBe("none");
     });
 
     // Option 1: a record that comes to hold nothing stays, empty, and is filled again by the next

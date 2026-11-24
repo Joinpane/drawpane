@@ -687,8 +687,9 @@ export class Editor {
    */
   commit(ops: readonly Op[], label = "Edit", options: CommitOptions = {}): boolean {
     if (!this.canEdit || ops.length === 0) return false;
-    // Taking away the auto layout an instance shows is refused, through any setter (as Figma
-    // refuses it): no edit makes a frame frozen (`frozenFrame`, PR 286).
+    // Taking away the auto layout an instance shows, or giving it one its component lacks, is
+    // refused through any setter (as Figma refuses them): no edit makes a frame frozen
+    // (`frozenFrame`, PR 286), and none races a main gaining a flow.
     const allowed = refuseFrozenRemovals(this.doc, ops);
     if (allowed.length < ops.length) this.notify(INSTANCE_LAYOUT_NOTICE);
     if (allowed.length === 0) return false;
