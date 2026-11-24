@@ -531,8 +531,30 @@ impl Engine {
                 old != new || replaced.is_some_and(|size| new == Some(size))
             })
         };
+        // A level no sampler picks at any scale drawn or being drawn (one warmed ahead of a
+        // zoom, say) changes nothing drawn: work in progress keeps going instead of starting over.
+        if self.view_scales().is_some_and(|scales| !scales.into_iter().any(at)) {
+            return;
+        }
         self.generation += 1;
         self.invalidate_tiles_at(&users, false, true, Some(&at));
+    }
+
+    /// The scales at which a view draws or keeps anything (tiles' levels, the frame shown), when
+    /// it's made of tiles; None for frames drawn afresh, which any change may concern.
+    fn view_scales(&self) -> Option<Vec<f64>> {
+        let mut scales = Vec::new();
+        let mut tiled = false;
+        if let Some(t) = self.cpu_tiles.as_ref() {
+            scales.extend(t.cache.levels().iter().map(|(_, l)| l.scale));
+            tiled = true;
+        }
+        #[cfg(feature = "gpu-common")]
+        if let Some(g) = self.gpu.as_ref() {
+            scales.extend(g.scales_in_use());
+            tiled = true;
+        }
+        tiled.then_some(scales)
     }
 
     pub fn put_cpu_image_level(&mut self, id: u32, width: u32, height: u32, rgba: &[u8]) -> Result<()> {

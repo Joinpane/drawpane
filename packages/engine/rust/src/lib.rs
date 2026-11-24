@@ -1156,19 +1156,20 @@ impl Engine {
     /// What made the GPU's Vello renders and scene flushes since it started (`GpuCounters`), for
     /// profiling: the renders by purpose (11), the flushes by cause (15), then isolation scopes,
     /// shadow mask misses and hits, tile pauses, then tiles nothing stood in for started while
-    /// moving, moving frames held back for the GPU, and overview tiles drawn. Empty without a
-    /// GPU.
+    /// moving, moving frames held back for the GPU, and overview tiles drawn and dropped. Empty
+    /// without a GPU.
     #[wasm_bindgen(js_name = gpuCounters)]
     pub fn gpu_counters(&self) -> Vec<u32> {
         let Some(g) = self.core.gpu.as_ref() else {
             return Vec::new();
         };
         let c = g.counters;
-        let mut v = Vec::with_capacity(33);
+        let mut v = Vec::with_capacity(34);
         v.extend_from_slice(&c.renders);
         v.extend_from_slice(&c.flushes);
         v.extend_from_slice(&[c.scopes, c.shadow_misses, c.shadow_hits, c.pauses]);
         v.extend_from_slice(&[c.motion_must, c.motion_backoff, c.overview]);
+        v.push(g.tiles.overview_lost);
         v
     }
 

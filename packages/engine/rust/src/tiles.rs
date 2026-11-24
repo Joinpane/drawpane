@@ -170,6 +170,8 @@ struct LevelEntry {
     /// The reader halo width this level's tiles were baked with.
     halo: i32,
     used: u64,
+    /// The overview's level (`set_overview`): its own entry, never a frame's or a stand-in's.
+    overview: bool,
 }
 
 /// A tile to draw this frame.
@@ -185,6 +187,9 @@ pub struct Job {
     /// No slot can be kept for it this frame (the budget): drawn straight into the frame, over
     /// what the frame composites, and kept nowhere. Always `must`, never `detail`.
     pub direct: bool,
+    /// A rough stand-in (an overview tile, `exec::Backend::rough`): never exact, and never
+    /// drawn for a frame's own level.
+    pub rough: bool,
 }
 
 /// How a frame is made.
@@ -306,6 +311,8 @@ pub struct TileCache {
     pub bake_overview: bool,
     /// An overview tile failed to draw (past a limit, say): none is kept until the cache clears.
     overview_refused: bool,
+    /// Overview tiles dropped (a cleared cache, a refused or moved overview): diagnostics.
+    pub overview_lost: u32,
     pub stats: TileStats,
 }
 
@@ -316,11 +323,36 @@ struct Overview {
     span: (i32, i32, i32, i32),
 }
 
+impl Overview {
+    /// Its tiles across and down.
+    fn grid(&self) -> (u32, u32) {
+        (
+            (self.span.2 - self.span.0 + 1) as u32,
+            (self.span.3 - self.span.1 + 1) as u32,
+        )
+    }
+}
+
+/// Overview tiles live in slots from here on, kept apart from the frames' (the backend gives them
+/// their own storage, `slot - OVERVIEW_SLOT` in rows of `overview_grid().0`): no frame's tile
+/// takes their place, and a cache cut to fit memory keeps them.
+pub const OVERVIEW_SLOT: u32 = 1 << 31;
+
+/// The overview's tiles at most, across and down (its storage is one texture).
+const OVERVIEW_GRID: u32 = 8;
+
 /// The whole page fits the overview in this many device pixels a side (at most 9 tiles at 512).
 pub const OVERVIEW_SIDE: f64 = 1024.0;
 
 /// Levels kept at once: more are dropped least recently used first.
 const LEVELS: usize = 8;
+
+/// Gives a dropped tile's slot back for another, unless it's the overview's own (`OVERVIEW_SLOT`).
+fn give_back(free: &mut Vec<u32>, slot: u32) {
+    if slot < OVERVIEW_SLOT {
+        free.push(slot);
+    }
+}
 
 /// Whether tiles of a level at scale `other` may stand in for a frame at `scale`: within 4× either
 /// way. One rule for the plan (what it counts on) and the composite (what it lays).
@@ -394,6 +426,7 @@ impl TileCache {
             overview: None,
             moving: false,
             bake_overview: false,
+            overview_lost: 0,
             overview_refused: false,
             stats: TileStats::default(),
         }
@@ -404,21 +437,67 @@ impl TileCache {
     /// device pixels a side. None (no content, or out of range) drops it.
     pub fn set_overview(&mut self, page: Option<Rect>) {
         let page = page.filter(|r| !self.overview_refused && r.is_finite() && r.width() > 0.0 && r.height() > 0.0);
-        self.overview = page.and_then(|page| {
+        let wanted = page.and_then(|page| {
             let scale = OVERVIEW_SIDE / page.width().max(page.height());
             if !(scale.is_finite() && scale > 0.0) {
                 return None;
             }
             let level = Level::ladder(scale);
             let span = self.span(level.grid().transform_rect_bbox(page))?;
-            let count = (i64::from(span.2) - i64::from(span.0) + 1) * (i64::from(span.3) - i64::from(span.1) + 1);
-            // At most an eighth of the slots: the frame's own tiles come first.
-            if count > 64 || count as usize > self.max_slots / 8 {
+            let (cols, rows) = (
+                i64::from(span.2) - i64::from(span.0) + 1,
+                i64::from(span.3) - i64::from(span.1) + 1,
+            );
+            if cols > i64::from(OVERVIEW_GRID) || rows > i64::from(OVERVIEW_GRID) {
                 return None;
             }
-            let id = self.level_id(level, true);
-            Some(Overview { id, span })
+            Some((level, span))
         });
+        let id = wanted.map(|(level, _)| self.overview_level_id(level));
+        let next = wanted.zip(id).map(|((_, span), id)| Overview { id, span });
+        if let Some(old) = self.overview
+            && next != Some(old)
+        {
+            // Moved (the page's content grew or shrank) or gone: its tiles sit where the new
+            // one's would, so they go with it, and so does its level when that changed.
+            self.drop_overview_tiles(old.id);
+            if next.is_none_or(|n| n.id != old.id) {
+                self.levels.retain(|e| e.id != old.id);
+            }
+        }
+        self.overview = next;
+    }
+
+    /// The overview level's id, its own entry made if it's new.
+    fn overview_level_id(&mut self, level: Level) -> u32 {
+        let frame = self.frame;
+        if let Some(e) = self.levels.iter_mut().find(|e| e.overview && e.level == level) {
+            e.used = frame;
+            return e.id;
+        }
+        self.new_level(level, true, true)
+    }
+
+    /// Drops the overview level's tiles (their storage is the backend's to free).
+    fn drop_overview_tiles(&mut self, id: u32) {
+        let before = self.tiles.len();
+        self.tiles.retain(|k, _| k.level != id);
+        self.overview_lost = self.overview_lost.wrapping_add((before - self.tiles.len()) as u32);
+    }
+
+    /// The overview's tiles across and down, when there is one: the backend's storage for them.
+    pub fn overview_grid(&self) -> Option<(u32, u32)> {
+        self.overview.map(|o| o.grid())
+    }
+
+    /// Where an overview tile lives (`OVERVIEW_SLOT` on), when `key` is one.
+    fn overview_slot(&self, key: &TileKey) -> Option<u32> {
+        let o = self.overview.filter(|o| o.id == key.level)?;
+        if key.i < o.span.0 || key.i > o.span.2 || key.j < o.span.1 || key.j > o.span.3 {
+            return None;
+        }
+        let (cols, _) = o.grid();
+        Some(OVERVIEW_SLOT + (key.j - o.span.1) as u32 * cols + (key.i - o.span.0) as u32)
     }
 
     /// The overview, when it's coarser than anything that stands in for a frame at `scale`.
@@ -449,6 +528,7 @@ impl TileCache {
                     detail: true,
                     must: false,
                     direct: false,
+                    rough: true,
                 });
             }
         }
@@ -475,19 +555,12 @@ impl TileCache {
     }
 
     /// The overview's tiles to draw between frames for a view at `scale` (none when it isn't 4×
-    /// coarser than the view), pinning the overview's held tiles.
-    pub fn overview_ahead(&mut self, scale: f64) -> Vec<Job> {
-        let Some(o) = self.coarse_overview(scale) else {
+    /// coarser than the view).
+    pub fn overview_ahead(&self, scale: f64) -> Vec<Job> {
+        if self.coarse_overview(scale).is_none() {
             return Vec::new();
-        };
-        let jobs = self.overview_jobs();
-        let mut room = self.max_slots.saturating_sub(self.pinned());
-        for j in o.span.1..=o.span.3 {
-            for i in o.span.0..=o.span.2 {
-                self.pin_spare(&TileKey { level: o.id, i, j }, &mut room);
-            }
         }
-        jobs
+        self.overview_jobs()
     }
 
     /// The overview's tiles still to draw between frames for a view at `scale`.
@@ -507,14 +580,8 @@ impl TileCache {
     /// list, another background), so the time between frames never fails on it.
     pub fn refuse_overview(&mut self) {
         if let Some(o) = self.overview.take() {
-            let free = &mut self.free;
-            self.tiles.retain(|k, t| {
-                let keep = k.level != o.id;
-                if !keep {
-                    free.push(t.slot);
-                }
-                keep
-            });
+            self.drop_overview_tiles(o.id);
+            self.levels.retain(|e| e.id != o.id);
         }
         self.overview_refused = true;
     }
@@ -796,12 +863,35 @@ impl TileCache {
 
     /// Drops every tile and level (their slots stay, free, for reuse).
     pub fn clear(&mut self) {
+        if let Some(o) = self.overview {
+            self.drop_overview_tiles(o.id);
+        }
         for (_, t) in self.tiles.drain() {
-            self.free.push(t.slot);
+            give_back(&mut self.free, t.slot);
         }
         self.levels.clear();
         self.overview = None;
         self.overview_refused = false;
+        self.focus = None;
+        self.drag = DragTiles::default();
+        self.ghosts.clear();
+        self.unpainted.clear();
+    }
+
+    /// Drops every tile but the overview's, which keeps its own storage: memory runs short (a
+    /// frame drawn at once needs what the tiles held), but what a zoom out stands on stays. A
+    /// changed list or background still clears it (`clear`, `invalidate`).
+    pub fn clear_keeping_overview(&mut self) {
+        let keep = self.overview.map(|o| o.id);
+        let free = &mut self.free;
+        self.tiles.retain(|k, t| {
+            let kept = Some(k.level) == keep;
+            if !kept {
+                give_back(free, t.slot);
+            }
+            kept
+        });
+        self.levels.retain(|e| Some(e.id) == keep);
         self.focus = None;
         self.drag = DragTiles::default();
         self.ghosts.clear();
@@ -813,7 +903,7 @@ impl TileCache {
         self.max_slots = n;
         if (self.slots as usize) > n {
             let cut = n as u32;
-            self.tiles.retain(|_, t| t.slot < cut);
+            self.tiles.retain(|_, t| t.slot < cut || t.slot >= OVERVIEW_SLOT);
             self.free.retain(|s| *s < cut);
             self.slots = cut;
         }
@@ -847,7 +937,7 @@ impl TileCache {
             let tol = scale.abs() * 1e-6;
             let mut drop_levels: Vec<u32> = Vec::new();
             for entry in &mut self.levels {
-                if !entry.ladder && (entry.level.scale - scale).abs() <= tol && entry.halo != halo {
+                if !entry.ladder && !entry.overview && (entry.level.scale - scale).abs() <= tol && entry.halo != halo {
                     entry.halo = halo;
                     drop_levels.push(entry.id);
                 }
@@ -857,7 +947,7 @@ impl TileCache {
                 self.tiles.retain(|k, t| {
                     let keep = !drop_levels.contains(&k.level);
                     if !keep {
-                        free.push(t.slot);
+                        give_back(free, t.slot);
                     }
                     keep
                 });
@@ -878,17 +968,23 @@ impl TileCache {
     /// A level's id, made if it's new.
     pub fn level_id(&mut self, level: Level, ladder: bool) -> u32 {
         let frame = self.frame;
-        if let Some(e) = self.levels.iter_mut().find(|e| e.level == level) {
+        if let Some(e) = self.levels.iter_mut().find(|e| !e.overview && e.level == level) {
             e.used = frame;
             e.ladder &= ladder;
             return e.id;
         }
+        self.new_level(level, ladder, false)
+    }
+
+    fn new_level(&mut self, level: Level, ladder: bool, overview: bool) -> u32 {
+        let frame = self.frame;
         if self.levels.len() >= LEVELS {
             // A level with no tiles goes first (a zoom passes through a scale a frame, drawing
             // none), else the least recently used, with its tiles.
-            // Never one this frame uses (the frame's own level, made a moment before its ladder).
+            // Never one this frame uses (the frame's own level, made a moment before its ladder),
+            // nor the overview's.
             let empty = |id: u32| !self.tiles.keys().any(|k| k.level == id);
-            let old = |i: &usize| self.levels[*i].used < frame;
+            let old = |i: &usize| self.levels[*i].used < frame && !self.levels[*i].overview;
             let victim = (0..self.levels.len())
                 .filter(old)
                 .filter(|i| empty(self.levels[*i].id))
@@ -900,7 +996,7 @@ impl TileCache {
                 self.tiles.retain(|k, t| {
                     let keep = k.level != gone;
                     if !keep {
-                        free.push(t.slot);
+                        give_back(free, t.slot);
                     }
                     keep
                 });
@@ -914,6 +1010,7 @@ impl TileCache {
             ladder,
             halo: self.halo,
             used: frame,
+            overview,
         });
         id
     }
@@ -1002,6 +1099,9 @@ impl TileCache {
     /// A slot for drawing `key` into: its own if it's held, else a free one, a new one under
     /// `max_slots`, or the slot of the tile least worth keeping that this frame doesn't show.
     pub fn slot_for(&mut self, key: TileKey) -> Option<u32> {
+        if self.is_overview(&key) {
+            return self.overview_slot(&key);
+        }
         if let Some(e) = self.tiles.get(&key) {
             return Some(e.slot);
         }
@@ -1024,13 +1124,8 @@ impl TileCache {
     fn victim(&self) -> Option<TileKey> {
         let t = f64::from(self.tile);
         let focus = self.focus;
-        let overview = self.overview.map(|o| o.id);
         let score = |k: &TileKey, e: &TileEntry| -> (u8, i64, u64) {
             let level = self.levels.iter().find(|l| l.id == k.level);
-            if overview == Some(k.level) {
-                // The overview stands in for every view: kept while anything else can go.
-                return (0, 0, u64::MAX - e.used);
-            }
             match focus {
                 Some((fl, cx, cy)) if fl == k.level => {
                     let (x, y) = ((f64::from(k.i) + 0.5) * t, (f64::from(k.j) + 0.5) * t);
@@ -1047,7 +1142,7 @@ impl TileCache {
         };
         self.tiles
             .iter()
-            .filter(|(_, e)| e.used < self.frame)
+            .filter(|(_, e)| e.used < self.frame && e.slot < OVERVIEW_SLOT)
             .max_by_key(|(k, e)| score(k, e))
             .map(|(k, _)| *k)
     }
@@ -1082,7 +1177,7 @@ impl TileCache {
             self.tiles.remove(&key);
         }
         if !self.free.contains(&slot) && !self.tiles.values().any(|e| e.slot == slot) {
-            self.free.push(slot);
+            give_back(&mut self.free, slot);
         }
     }
 
@@ -1115,7 +1210,10 @@ impl TileCache {
 
     /// Tiles pinned for the frame: shown, drawn or counted on by it, so never evicted by it.
     fn pinned(&self) -> usize {
-        self.tiles.values().filter(|e| e.used == self.frame).count()
+        self.tiles
+            .values()
+            .filter(|e| e.used == self.frame && e.slot < OVERVIEW_SLOT)
+            .count()
     }
 
     /// Pins a held tile, taking it from the frame's `room` if it wasn't pinned yet.
@@ -1203,6 +1301,7 @@ impl TileCache {
                     detail: false,
                     must: true,
                     direct: true,
+                    rough: false,
                 })
                 .collect();
             return Some(plan);
@@ -1230,11 +1329,11 @@ impl TileCache {
         // While the camera moves, the overview stands in for any scale, where nothing nearer does
         // (when it's coarser than what stands in anyway).
         let coarse = self.coarse_overview(level.scale);
-        let overview = coarse.filter(|o| self.moving && o.id != id);
+        let overview = coarse.filter(|_| self.moving);
         let other_levels: Vec<u32> = self
             .levels
             .iter()
-            .filter(|e| e.id != id && stands_in(level.scale, e.level.scale) && Some(e.id) != overview.map(|o| o.id))
+            .filter(|e| e.id != id && !e.overview && stands_in(level.scale, e.level.scale))
             .map(|e| e.id)
             .collect();
         // What stands in for each visible tile not up to date, over the part of it on screen:
@@ -1317,6 +1416,7 @@ impl TileCache {
             detail: false,
             must,
             direct,
+            rough: false,
         };
         let mut ladder_keys: Vec<TileKey> = Vec::new();
         for n in needs {
@@ -1403,29 +1503,16 @@ impl TileCache {
                     detail: true,
                     must: true,
                     direct: false,
+                    rough: false,
                 });
             }
         }
         plan.jobs.extend(optional);
         // The overview, between frames, once the frame's own tiles are planned: what a zoom out
         // stands on.
+        // Its tiles have their own storage: they take no room from the frame's.
         if self.bake_overview && !self.moving && !zooming && coarse.is_some() {
-            for job in self.overview_jobs() {
-                if self.tiles.contains_key(&job.key) {
-                    self.pin_spare(&job.key, &mut room);
-                    plan.jobs.push(job);
-                } else if room > 0 {
-                    room -= 1;
-                    plan.jobs.push(job);
-                }
-            }
-            if let Some(o) = self.overview {
-                for j in o.span.1..=o.span.3 {
-                    for i in o.span.0..=o.span.2 {
-                        self.pin_spare(&TileKey { level: o.id, i, j }, &mut room);
-                    }
-                }
-            }
+            plan.jobs.extend(self.overview_jobs());
         }
         // Not zooming: tiles round the view, for the pan to come, while slots allow.
         if prefetch && !zooming && visible.len() * 2 <= self.max_slots {
@@ -1479,6 +1566,7 @@ impl TileCache {
                                         detail: true,
                                         must: false,
                                         direct: false,
+                                        rough: false,
                                     });
                                 }
                                 None if room > 0 => {
@@ -1489,6 +1577,7 @@ impl TileCache {
                                         detail: true,
                                         must: false,
                                         direct: false,
+                                        rough: false,
                                     });
                                 }
                                 None => {}
@@ -1616,7 +1705,7 @@ impl TileCache {
             .levels
             .iter()
             .filter(|e| e.id != plan.level)
-            .filter(|e| stands_in(level.scale, e.level.scale) || Some(e.id) == overview)
+            .filter(|e| (!e.overview && stands_in(level.scale, e.level.scale)) || Some(e.id) == overview)
             .map(|e| {
                 // The overview lies beneath every other stand-in.
                 let far = if Some(e.id) == overview {
@@ -1776,6 +1865,75 @@ mod tests {
             .plan(cam(8.0, 0.0, 0.0), (1024, 768), false, None, false, false)
             .expect("plan");
         assert!(in_frame.jobs.iter().all(|j| j.key.level != id));
+    }
+
+    /// The overview's tiles live apart from the frames' (`OVERVIEW_SLOT`): no frame's tile takes
+    /// their place, a cache cut to fit memory keeps them, and a frame at the overview's own scale
+    /// draws its tiles in ordinary slots, exactly. A changed background still drops them.
+    #[test]
+    fn the_overview_keeps_its_own_slots_through_memory_cuts() {
+        let page = Rect::new(0.0, 0.0, 4000.0, 2000.0);
+        let mut c = TileCache::new(512, 8);
+        let frame = |c: &mut TileCache, bg: f32, idle: bool| {
+            c.begin([bg; 4], 0);
+            c.set_overview(Some(page));
+            c.moving = false;
+            c.bake_overview = idle;
+        };
+        frame(&mut c, 1.0, true);
+        let rest = c
+            .plan(cam(8.0, 0.0, 0.0), (1024, 512), false, None, false, false)
+            .expect("plan");
+        draw_all(&mut c, &rest);
+        assert!(c.overview_ready());
+        let id = c.overview.map(|o| o.id).expect("overview");
+        let own = |c: &TileCache| {
+            c.tiles
+                .iter()
+                .filter(|(k, _)| k.level == id)
+                .map(|(_, e)| e.slot)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(own(&c).len(), 2);
+        assert!(own(&c).iter().all(|&s| s >= OVERVIEW_SLOT));
+        assert_eq!(c.overview_grid(), Some((2, 1)));
+        // Slots past the frame's go to other tiles, never the overview's.
+        for x in 1..6 {
+            frame(&mut c, 1.0, false);
+            let p = c
+                .plan(
+                    cam(8.0, -2048.0 * f64::from(x), 0.0),
+                    (1024, 512),
+                    false,
+                    None,
+                    false,
+                    false,
+                )
+                .expect("plan");
+            draw_all(&mut c, &p);
+            assert!(c.overview_ready(), "pan {x}");
+        }
+        // Memory runs short: the frames' slots go, the overview's stay.
+        c.set_max_slots(0);
+        assert!(c.overview_ready());
+        c.clear_keeping_overview();
+        assert!(c.overview_ready());
+        assert_eq!(c.tiles.len(), 2);
+        // A frame at the overview's own scale (0.25) has its own level and ordinary slots.
+        c.set_max_slots(8);
+        frame(&mut c, 1.0, false);
+        let at = c
+            .plan(cam(0.25, 0.0, 0.0), (1024, 512), false, None, false, false)
+            .expect("plan");
+        assert_ne!(at.level, id);
+        assert!(!at.jobs.is_empty() && at.jobs.iter().all(|j| j.key.level == at.level && !j.rough));
+        for j in &at.jobs {
+            assert!(c.slot_for(j.key).is_some_and(|s| s < OVERVIEW_SLOT));
+        }
+        // Another background: everything goes.
+        frame(&mut c, 0.5, false);
+        assert!(!c.overview_ready());
+        assert_eq!(c.tiles.keys().filter(|k| k.level == id).count(), 0);
     }
 
     #[test]

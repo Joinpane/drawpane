@@ -433,6 +433,59 @@ fn an_image_change_redraws_what_shows_it() {
     assert!(diff(b, &fresh(&model, 1, 99, c)).is_none());
 }
 
+/// A level no sampler picks at any scale drawn (a finer one warmed ahead of a zoom) changes
+/// nothing drawn: the generation stays, so work in progress isn't started over, and the next
+/// frame draws nothing. A level that is picked redraws what shows it.
+#[test]
+fn an_image_level_nothing_picks_changes_nothing() {
+    let mut r = Rng(0x1a6f);
+    let mut model = Model::new(&mut r, 1, false);
+    let mut rec = Rec::new([1.0, 0.0, 0.0, 1.0, 10.0, 10.0], [120.0, 90.0]);
+    rec.paths.push(Entry::Rect {
+        w: 120.0,
+        h: 90.0,
+        radii: [0.0; 4],
+    });
+    rec.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Image {
+            id: IMAGE,
+            m: [120.0, 0.0, 0.0, 90.0, 0.0, 0.0],
+            tile: false,
+            opacity: 1.0,
+        },
+    });
+    model.nodes.insert(model.next, (0, rec));
+    model.children.entry(0).or_default().push(model.next);
+    model.next += 1;
+    let mut e = engine(0, 64);
+    e.apply(&model.fresh(1)).expect("fresh");
+    let level = |w: u32, h: u32, v: u8| vec![v; (w * h * 4) as usize];
+    e.put_cpu_image_level(IMAGE, 128, 96, &level(128, 96, 200))
+        .expect("level");
+    let c = cam(1.0, 0.0, 0.0);
+    let (a, s) = e.render_cpu_tiled(W, H, c, BG, TiledOptions::default()).expect("frame");
+    assert!(s.exact);
+    let a = a.to_vec();
+    let generation = e.generation;
+    // Finer than the 120 px the frame needs, and coarser than what's picked: neither is drawn.
+    e.put_cpu_image_level(IMAGE, 512, 384, &level(512, 384, 30))
+        .expect("finer");
+    e.put_cpu_image_level(IMAGE, 32, 24, &level(32, 24, 90))
+        .expect("coarser");
+    assert_eq!(e.generation, generation, "nothing drawn picks either level");
+    let (b, s) = e.render_cpu_tiled(W, H, c, BG, TiledOptions::default()).expect("frame");
+    assert!(s.exact && s.tiles_drawn == 0, "{s:?}");
+    assert_eq!(a, b.to_vec());
+    // The picked level goes: the finer one is drawn instead.
+    e.drop_image_level(IMAGE, 128);
+    assert_ne!(e.generation, generation);
+    let (c2, s) = e.render_cpu_tiled(W, H, c, BG, TiledOptions::default()).expect("frame");
+    assert!(s.exact && s.tiles_drawn > 0, "{s:?}");
+    assert_ne!(a, c2.to_vec(), "the finer level shows");
+}
+
 #[test]
 fn a_page_switch_leaves_no_stale_tile() {
     let mut r = Rng(0x9a6e);

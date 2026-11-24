@@ -49,6 +49,13 @@ import { VectorHints } from "./VectorHints";
 /** How long a zoom rests before its stand-in frames give way to an exact one. */
 const SETTLE_MS = 120;
 /**
+ * Wheel input after a pause this long is a notch (a mouse wheel, or a step of Cmd+scroll), not a
+ * trackpad's stream: more notches usually follow, so the view isn't at rest until `SETTLE_MS`
+ * passes without one. Refining between notches would only be thrown away at the next one, and
+ * the GPU work it queues would hold that notch's frame back.
+ */
+const NOTCH_GAP_MS = 40;
+/**
  * Milliseconds a frame may spend drawing the design. A frame that would take
  * longer (a large page, whole) is drawn a few tiles a frame instead, its
  * stand-in showing meanwhile (decision 0028); the overlay has the rest of
@@ -116,6 +123,8 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
   if (rendererRef.current.editor !== editor || rendererRef.current.measurer !== measurer) {
     rendererRef.current = { editor, measurer, instance: null };
   }
+  /** Until when (`performance.now()`) the camera counts as moving after a wheel notch. */
+  const notchSettle = useRef({ until: 0, last: Number.NEGATIVE_INFINITY });
 
   // Render loop: repaint content when the document, page or camera changes;
   // repaint the overlay on any state change. Never more than once per frame.
@@ -566,7 +575,10 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       // redraw never hides the engine's frame, and a read-back frame shows once it lands.
       let drewEngine = false;
       let runCompositeOnly = compositeOnly;
-      const gestureMoving = s.gesture && s.editingText === null;
+      // Between wheel notches the camera isn't at rest: frames stay stand-ins until they stop.
+      const notchUntil = notchSettle.current.until;
+      const settling = performance.now() < notchUntil;
+      const gestureMoving = (s.gesture || settling) && s.editingText === null;
       if (
         contentDirty &&
         s.pageId !== null &&
@@ -1110,6 +1122,10 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     };
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
+      const now = performance.now();
+      const notch = notchSettle.current;
+      notch.until = now - notch.last > NOTCH_GAP_MS ? now + SETTLE_MS : 0;
+      notch.last = now;
       const rect = el.getBoundingClientRect();
       // Normalize line and page deltas to pixels.
       const scale = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? rect.height : 1;

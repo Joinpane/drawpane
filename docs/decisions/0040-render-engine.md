@@ -1959,8 +1959,8 @@ Center, a 901 × 900 canvas, 15% to 254% in 14 steps four frames apart.
 ## Amendment: zooming out on stand-ins, with GPU work held per frame (2026-11-24)
 
 The real-input gate showed zooming out on a board as the editor's worst lag. On the iOS kit's
-Control Center, pinch-out ran at 29 to 40 fps with 34 to 51% of frames dropped, 0.6 to 1.3 s
-p95 input-to-frame lag and up to 1.35 s of backlog, against Figma's 60 fps and about 55 ms. The
+Control Center, pinch-out ran at 27 to 45 fps with 26 to 55% of frames dropped, 0.3 to 1.6 s
+p95 input-to-frame lag and up to 1.6 s of backlog, against Figma's 60 fps and about 55 ms. The
 view drew newly exposed areas in full detail while the gesture went on (the ladder level's tiles,
 with their glass, blend scopes and shadows). The frame budget bounded main-thread time only, so the
 GPU work a frame queued had no bound, and input waited behind it.
@@ -1968,51 +1968,79 @@ GPU work a frame queued had no bound, and input waited behind it.
 ### What changes
 
 - **An overview level.** The tile cache keeps the page's content at one coarse scale: the √2
-  ladder level that fits it in 1,024 device pixels a side, at most 64 tiles and an eighth of the
-  slots (`TileCache::set_overview`). Its tiles have level of detail. They're drawn at rest, in
-  frames with a budget and between frames, after the frame's own tiles; never in a frame drawn at
-  once, nor in one while the camera moves. They're evicted last. An overview tile that fails to
-  draw (past a limit) drops the overview until the cache clears, so the time between frames never
-  fails on it.
+  ladder level that fits it in 1,024 device pixels a side, at most 8 tiles across and down
+  (`TileCache::set_overview`). Its level is its own entry, never a frame's or a stand-in's. Its
+  tiles live apart from the frames': in slots from `OVERVIEW_SLOT` on, which the GPU backend keeps
+  in one texture of their own (6 MiB for Control Center's page). No frame's tile takes their
+  place, a cache cut to fit memory keeps them, and so does the clear after a whole frame meets a
+  memory limit (`clear_keeping_overview`). A new list or background still drops them.
+- **Rough tiles.** Overview tiles are stand-ins only, so they're drawn rough
+  (`exec::Backend::rough`): no readers (glass, background blurs, reads), no shadows, no layer
+  effects or blend modes (a layer draws its content plainly, group opacity unisolated), and
+  nothing under a device pixel. The walk still yields as usual, and a rough tile is never exact.
+  On Control Center a tile takes tens of milliseconds instead of seconds, and leaves the shadow
+  cache alone.
+- **Drawn early.** They're drawn at rest, in frames with a budget and between frames, after the
+  frame's own tiles; never in a frame drawn at once, nor while the camera moves. A composite-only
+  frame at rest reports what's left of them as queued, so the editor's time between frames keeps
+  going until they're drawn (before, it stopped once the view's own tiles were, and the overview
+  waited for the next view). A view drawn as whole frames draws them once its whole frame shows
+  (`Gpu::ahead_overview`). A tile that fails drops the overview until the cache clears.
 - **It stands in while moving.** In a frame while the camera moves, the overview covers what
   nothing nearer does, at any scale it's at least 4× coarser than (nearer levels keep the 4× rule
   of `stands_in`). A zoom out then has nothing it must draw. The composite lays the overview
   beneath the last frame (`Composite::under`). At rest nothing changes: what nothing nearer
-  stands in for is drawn. A view drawn as whole frames (readers reaching past a tile's halo) has
-  no tiles of its own to draw between frames; once its whole frame shows, that time draws the
-  overview instead (`Gpu::ahead_overview`), reported as work in progress, not as tiles to show.
+  stands in for is drawn.
 - **GPU work per moving frame is held.** A frame while moving starts at most 48 GPU passes of
   tile work (`MOVING_PASSES`: Vello renders and isolation scopes; Figma caps a frame at about 255
   framebuffer binds, about 55 of ours). Past them, a walk pauses as at its deadline and further
   tiles wait, except one tile a frame that nothing stands in for, so it fills in.
 - **Back-pressure.** Each frame and idle slice asks the GPU when its submitted work is done
   (`on_submitted_work_done`; WebGL2 polls in `check`). A frame while moving starts no tile work
-  while the last frame's isn't done. An idle slice waits while two are still in flight, so the CPU
-  and GPU still overlap. This holds only at real budgets (1 ms and up): frames drawn at once and
-  tests' microscopic budgets are unchanged, and the GPU's silence is ignored after 250 ms (a lost
-  device never answers).
-- **Counters.** `gpuCounters()` adds the tiles nothing stood in for started while moving, the
-  moving frames held back for the GPU, and the overview tiles drawn.
+  while the last frame's isn't done. Between frames, work off screen (tiles round the view, the
+  overview) waits while two slices are in flight; what the view shows is never held back. This
+  holds only at real budgets (1 ms and up), and the GPU's silence is ignored after 250 ms.
+- **Wheel notches** (editor). Wheel input after a 40 ms pause is a notch (a mouse wheel, a step of
+  Cmd+scroll), not a trackpad's stream; the camera counts as moving until 120 ms pass without
+  another. Nothing is refined between notches only to be thrown away at the next one, and no
+  refinement's GPU work holds the next notch's frame.
+- **An image level nothing picks changes nothing.** A level that no sampler picks at any scale
+  drawn or being drawn (one warmed ahead of a zoom, say) no longer changes the engine's
+  generation, so a tile or whole frame drawn over slices keeps going instead of starting over.
+- **Counters.** `gpuCounters()` adds the tiles nothing stood in for started while moving
+  (`motionMust`), the moving frames held back for the GPU (`motionBackoff`), the overview tiles
+  drawn (`overview`) and dropped (`overviewLost`).
 
 ### Measured on a T4 (real-input gate, hardware WebGL2)
 
-Pinch-out on Control Center (300% to 38%). Main: six gate runs. This change: its final version on
-the gate twice, and once in the lag audit's harness, which leaves the overview time to be drawn
-before the pinch-out.
+Main: seven gate runs (four on 8229cdfd, three on a42337d2, run beside this change in the same
+containers). This change: seven runs of its final version, six of them beside another build in
+the same container. The gate's budgets: lag p95 ≤ 100 ms, dropped frames ≤ 5%, backlog ≤ 100 ms.
 
-| Pinch-out | Main (six runs) | This change, gate | This change, overview ready |
-| --- | --- | --- | --- |
-| fps | 27.1-39.5 | 36.5 / 47.3 | 56.2 |
-| Dropped frames | 34-55% | 39.2% / 21.1% | 6.3% |
-| Lag p95 | 641-1,588 ms | 825 / 268 ms | 64 ms |
-| Backlog | 691-1,591 ms | 872 / 285 ms | 10 ms |
+| | Main (7 runs) | This change (7 runs) |
+| --- | --- | --- |
+| Pinch-out: runs within budget | 0 of 7 | 3 of 7 |
+| Pinch-out fps | 27-45 (median 36) | 49-58 (median 56) |
+| Pinch-out dropped frames | 26-55% (median 40%) | 2.6-18.4% (median 6.2%) |
+| Pinch-out lag p95 | 302-1,588 ms (median 825) | 62-209 ms (median 105) |
+| Pinch-out backlog | 406-1,591 ms (median 872) | 72-244 ms (median 104) |
+| Cmd+scroll out: runs within budget | 1 of 7 | 5 of 7 |
+| Cmd+scroll out dropped frames | 3.6-59.6% (median 17.9%) | 0-14.8% (median 0%) |
+| Time to exact after Cmd+scroll out | 1.20-1.99 s (median 1.56) | 1.31-1.87 s (median 1.53) |
+| 100% pan lag p95 | 54-405 ms (median 123) | 36-220 ms (median 99) |
+| Cmd+scroll in dropped frames | 11-57% (median 44%) | 0-33% (median 3.7%) |
+| Time to exact: Shift+2, Shift+0, pinch from fit | 0.78, 0.31, 0.19 s (medians) | 0.79, 0.33, 0.18 s |
 
-- What decides a run is whether the overview is drawn when the pinch-out starts. The gate opens
-  the board, rests 250 ms, pinches in, and rests 4 s; on Control Center that time first finishes
-  the view's whole frame, then the overview, whose tiles hold thousands of layers each. When
-  it's drawn, the pinch-out draws no tile that nothing stands in for (counter `motionMust` 0) and
-  meets the gate's budgets; when it isn't, back-pressure keeps the lag below main's but not
-  below them. Drawing the overview sooner is the next step.
-- Elsewhere: the 100% pan and both Cmd+scroll directions vary as much on main as here; Shift+2's
-  time to exact stays at 0.8-0.9 s (main 0.77-0.82 s); time to exact after Cmd+scroll out is
-  slower, 1.7-2.5 s against main's 1.4-1.6 s (fewer idle slices in flight).
+- In the lag audit's probes with the gate's timing, the overview is now drawn before the
+  pinch-out and kept through it (counters `overview` and `overviewLost`), and the pinch-out draws
+  no tile that nothing stands in for (`motionMust` 0). Before, the editor's time between frames
+  stopped once the view's own tiles were drawn, and a whole frame's memory-limit fallback dropped
+  the overview with every other tile.
+- What still fails a run is a few long frames, not the zoom-out's own work. In traces they're
+  image uploads on the main thread (`texSubImage2D` of a decoded level, 17 to 40 ms each),
+  display-list patches for text coming into view (5 to 17 ms a frame), and single GPU tasks of
+  50 to 170 ms from the 300% view's refinement, which takes longer than the gate's 4 s rest and
+  is still running when the pinch-out starts. The pass budget plan addresses the last.
+- Tried and left out: holding image decodes and uploads while moving (fewer long frames while
+  moving, but the levels then arrive during refinement, and time to exact after Cmd+scroll out
+  went to 1.9-2.7 s), and less text per moving frame (no difference in three paired runs).

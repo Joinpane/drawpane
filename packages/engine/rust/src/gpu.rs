@@ -46,7 +46,7 @@ use crate::shadow::{
     scaled_shadow_sigma,
 };
 use crate::store::Store;
-use crate::tiles::{Composite, Last, Scaled, TILE, TileCache, TileKey};
+use crate::tiles::{Composite, Last, TILE, TileCache, TileKey};
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::future::Future;
@@ -519,6 +519,17 @@ struct Page {
     composite_group: Option<wgpu::BindGroup>,
 }
 
+/// The overview's tiles (`tiles::OVERVIEW_SLOT` on), in one texture of their own, `grid` tiles
+/// across and down: apart from the pages, so a cache cut to fit memory keeps them.
+struct OverviewPage {
+    page: Page,
+    grid: (u32, u32),
+    bytes: usize,
+}
+
+/// `slot_place`'s page for an overview tile (`OverviewPage`).
+const OVERVIEW_PAGE: usize = usize::MAX;
+
 struct Compositor {
     bgl: wgpu::BindGroupLayout,
     pipeline: wgpu::RenderPipeline,
@@ -821,6 +832,7 @@ struct PendingTile {
     key: TileKey,
     view: Affine,
     detail: bool,
+    rough: bool,
     coarse_readers: bool,
     halo: i32,
     tile_halo: i32,
@@ -1387,6 +1399,9 @@ pub struct Gpu {
     gpu_seq: u64,
     gpu_done: Arc<AtomicU64>,
     gpu_seq_at: f64,
+    /// The walk drawing now draws a rough stand-in (an overview tile, `exec::Backend::rough`).
+    rough: bool,
+    overview_page: Option<OverviewPage>,
     /// Tile cooperatively paused mid-walk so no single frame stalls past its CPU budget.
     pending_tile: Option<PendingTile>,
     pending_whole: Option<PendingWhole>,
@@ -2064,6 +2079,8 @@ impl Gpu {
             gpu_seq: 0,
             gpu_done: Arc::new(AtomicU64::new(0)),
             gpu_seq_at: 0.0,
+            rough: false,
+            overview_page: None,
             pending_tile: None,
             pending_whole: None,
             sliced_frame: None,
@@ -3145,11 +3162,17 @@ impl Gpu {
         self.abort_pending_tile();
         self.opening_pending = false;
         self.tiles.clear();
+        self.drop_overview_page();
         self.shown = None;
     }
 
     pub fn clear_view_caches(&mut self) {
-        self.clear_tiles();
+        // Every tile goes but the overview's, a few MiB that a zoom out stands on.
+        self.abort_pending_whole();
+        self.abort_pending_tile();
+        self.opening_pending = false;
+        self.tiles.clear_keeping_overview();
+        self.shown = None;
         self.fit_tiles(0);
         // `forget_last` also forgets that `frames[cur]` was this page's.
         self.forget_last();
@@ -3712,6 +3735,9 @@ impl Gpu {
 
     /// The page and position of a slot, making its page (within the budget `fit_tiles` set).
     fn slot_place(&mut self, slot: u32) -> Result<(usize, u32, u32)> {
+        if slot >= crate::tiles::OVERVIEW_SLOT {
+            return self.overview_place(slot - crate::tiles::OVERVIEW_SLOT);
+        }
         let per_page = self.per_page();
         let per_row = self.per_row();
         let page = (slot / per_page) as usize;
@@ -3742,6 +3768,76 @@ impl Gpu {
             self.bytes += pbytes;
         }
         Ok((page, x, y))
+    }
+
+    /// Where overview tile `index` lives, its texture made (for the overview's grid) if needed.
+    fn overview_place(&mut self, index: u32) -> Result<(usize, u32, u32)> {
+        let grid = self
+            .tiles
+            .overview_grid()
+            .ok_or_else(|| EngineError::new(ErrorCode::State, "no overview"))?;
+        if self.overview_page.as_ref().is_some_and(|o| o.grid != grid) {
+            self.drop_overview_page();
+        }
+        if self.overview_page.is_none() {
+            let (w, h) = (grid.0 * TILE, grid.1 * TILE);
+            self.check_texture_size(w, h, "the overview")?;
+            let bytes = w as usize * h as usize * 4;
+            self.reserve(bytes, 0, "the overview")?;
+            let tex = texture(
+                &self.device,
+                w,
+                h,
+                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+                "overview",
+            );
+            let view = tex.create_view(&Default::default());
+            let composite_group = self
+                .compositor
+                .as_ref()
+                .map(|c| c.create_bind_group(&self.device, &view, "composite overview"));
+            self.overview_page = Some(OverviewPage {
+                page: Page {
+                    texture: tex,
+                    view,
+                    composite_group,
+                },
+                grid,
+                bytes,
+            });
+            self.bytes += bytes;
+        }
+        Ok((OVERVIEW_PAGE, (index % grid.0) * TILE, (index / grid.0) * TILE))
+    }
+
+    /// Frees the overview's texture.
+    fn drop_overview_page(&mut self) {
+        if let Some(o) = self.overview_page.take() {
+            o.page.texture.destroy();
+            self.bytes -= o.bytes;
+        }
+    }
+
+    /// Sets the overview for the page in `store` (`TileCache::set_overview`), freeing its texture
+    /// when it's gone or moved.
+    fn set_overview(&mut self, store: &Store) {
+        self.tiles.set_overview(Self::page_bounds(store));
+        if self
+            .overview_page
+            .as_ref()
+            .is_some_and(|o| Some(o.grid) != self.tiles.overview_grid())
+        {
+            self.drop_overview_page();
+        }
+    }
+
+    /// A page of tiles (`slot_place`'s), or the overview's.
+    fn page(&self, page: usize) -> &Page {
+        if page == OVERVIEW_PAGE {
+            &self.overview_page.as_ref().expect("overview page").page
+        } else {
+            &self.pages[page]
+        }
     }
 
     fn flush_retired_textures(&mut self) {
@@ -4464,6 +4560,16 @@ impl Gpu {
         self.pending_whole.is_some()
     }
 
+    /// The scales at which something is drawn or being drawn (the tiles' levels, the frame shown,
+    /// a whole frame over slices): an image level no sampler picks at any of them changes nothing.
+    pub fn scales_in_use(&self) -> Vec<f64> {
+        let mut scales: Vec<f64> = self.tiles.levels().iter().map(|(_, l)| l.scale).collect();
+        scales.extend(self.last.map(|l| l.view.as_coeffs()[0]));
+        scales.extend(self.pending_whole.as_ref().map(|p| f64::from_bits(p.view_bits[0])));
+        scales.extend(self.sliced_frame.map(|f| f64::from_bits(f.view_bits[0])));
+        scales
+    }
+
     /// The time between frames for a view drawn as whole frames (its readers reach past a tile's
     /// halo, so it has no tiles to draw ahead): the overview's tiles, coarse and without an apron,
     /// within `budget_ms`, so a zoom out from it has its stand-in. A tile that fails drops the
@@ -4505,7 +4611,7 @@ impl Gpu {
         self.blur.begin_frame();
         self.shadow.begin_frame();
         self.tiles.begin_scaled(background, scale, self.tiles.halo());
-        self.tiles.set_overview(Self::page_bounds(store));
+        self.set_overview(store);
         self.fit_tiles(store.limits.tile_bytes);
         let jobs = self.tiles.overview_ahead(scale);
         let deadline = (budget_ms > 0.0).then_some(t0 + self.walk_budget_ms(budget_ms));
@@ -4581,15 +4687,6 @@ impl Gpu {
         let inputs = Self::inputs(store, generation, background);
         if self.pending_whole.as_ref().is_some_and(|p| p.inputs != inputs) {
             self.abort_pending_whole();
-        }
-        // As for tiles: between frames a slice or two may be in flight, no more.
-        if budget_ms >= 1.0 && self.pending_whole.is_some() && self.gpu_behind(IDLE_IN_FLIGHT) {
-            return Ok(DrawStats {
-                pending: 1,
-                in_progress: true,
-                cpu_ms: now() - t0,
-                ..DrawStats::default()
-            });
         }
         let mut stats = match self.advance_pending_whole(store, budget_ms)? {
             Some(mut stats) => {
@@ -6488,7 +6585,7 @@ impl Gpu {
         let view = frame.view;
         let scale = view.as_coeffs()[0];
         self.tiles.begin_scaled(background, scale, halo);
-        self.tiles.set_overview(Self::page_bounds(store));
+        self.set_overview(store);
         self.tiles.moving = options.moving;
         self.tiles.bake_overview = !options.moving && options.budget_ms > 0.0;
         self.fit_tiles(store.limits.tile_bytes);
@@ -6559,6 +6656,9 @@ impl Gpu {
         if same {
             stats.exact = true;
             stats.plan = 3;
+            if !options.moving && options.budget_ms < 0.0 {
+                stats.queued = self.tiles.overview_left(scale);
+            }
             return self.finish_frame(self.cur.expect("unchanged frame"), stats, t0, submits0, None);
         }
         self.begin_frame_timestamp();
@@ -6629,8 +6729,17 @@ impl Gpu {
                 } else {
                     self.deadline_ms = pt_deadline;
                     must_drawn += u32::from(pt_must);
+                    let rough = pt_job.is_some_and(|j| j.rough);
                     let step = self.resume_pending_tile(store, &mut stats);
                     self.deadline_ms = None;
+                    // An overview tile that can't be drawn drops the overview, never the frame.
+                    let step = match step {
+                        Err(e) if rough && e.code != ErrorCode::DeviceLost => {
+                            self.tiles.refuse_overview();
+                            Ok(TileStep::Complete)
+                        }
+                        step => step,
+                    };
                     match or_standin!(step) {
                         TileStep::Complete => {}
                         TileStep::Paused => {
@@ -6764,6 +6873,14 @@ impl Gpu {
                         &mut verbs,
                     );
                     self.deadline_ms = None;
+                    // An overview tile that can't be drawn drops the overview, never the frame.
+                    let step = match step {
+                        Err(e) if job.rough && e.code != ErrorCode::DeviceLost => {
+                            self.tiles.refuse_overview();
+                            continue;
+                        }
+                        step => step,
+                    };
                     match or_standin!(step) {
                         TileStep::Complete => {
                             let took = now() - t0 - elapsed;
@@ -6885,6 +7002,12 @@ impl Gpu {
                 }
             }
         }
+        // A composite-only frame at rest (the time between frames drew what it shows) plans no
+        // overview: what's left of it is still the time between frames' to draw, so the caller
+        // keeps that going. A frame drawn at once (no budget) waits for nothing.
+        if !options.moving && options.budget_ms < 0.0 {
+            stats.queued += self.tiles.overview_left(scale);
+        }
         stats.pending = stats.pending.max(u32::from(self.opening_pending || unfinished_must));
         stats.exact = (plan.direct || stats.exact) && direct_exact && stats.pending == 0;
         stats.direct = plan.direct || !late.is_empty();
@@ -6931,14 +7054,6 @@ impl Gpu {
         let Some(last) = self.last else {
             return Ok(stats);
         };
-        // The GPU hasn't finished the last frame's or slice's work: more would only queue behind
-        // it (and the next input behind that). Come back next frame.
-        // Between frames a slice or two may be in flight, so the CPU and GPU still overlap.
-        if budget_ms >= 1.0 && self.gpu_behind(IDLE_IN_FLIGHT) {
-            stats.pending = 1;
-            stats.in_progress = true;
-            return Ok(stats);
-        }
         let inputs = Self::inputs(store, generation, background);
         if self
             .pending_tile
@@ -6956,7 +7071,7 @@ impl Gpu {
         self.blur.begin_frame();
         self.shadow.begin_frame();
         self.tiles.begin_scaled(background, last.view.as_coeffs()[0], halo);
-        self.tiles.set_overview(Self::page_bounds(store));
+        self.set_overview(store);
         self.tiles.moving = false;
         self.tiles.bake_overview = true;
         self.fit_tiles(store.limits.tile_bytes);
@@ -6973,6 +7088,15 @@ impl Gpu {
         ) else {
             return Ok(stats);
         };
+        // Off-screen work (tiles round the view, the overview) waits while the GPU hasn't
+        // finished the last slices: more would only queue behind them, and the next input behind
+        // that. Between frames a slice or two may be in flight, so the CPU and GPU still overlap.
+        // What the view shows is never held back.
+        if budget_ms >= 1.0 && !plan.jobs.iter().any(|j| plan.needs_on_screen(j)) && self.gpu_behind(IDLE_IN_FLIGHT) {
+            stats.pending = self.tiles.left(&plan).0.max(1);
+            stats.in_progress = true;
+            return Ok(stats);
+        }
         let budgeted = budget_ms > 0.0;
         let walk_budget = self.walk_budget_ms(budget_ms);
         let deadline = budgeted.then_some(t0 + walk_budget);
@@ -7371,7 +7495,7 @@ impl Gpu {
             let mut encoder = self.take_encoder("tile copy");
             let scratch = self.scratches[self.active_scratch].as_ref().expect("scratch");
             let destination = match page {
-                Some(page) => &self.pages[page].texture,
+                Some(page) => &self.page(page).texture,
                 None => &self.frames[dst].texture,
             };
             copy_rect(
@@ -7429,7 +7553,9 @@ impl Gpu {
         debug_assert!(self.pending_tile.is_none(), "paused tile still owns scratch");
         let t0 = now();
         *verbs = store.limits.frame_verbs;
+        // A rough stand-in reads nothing, so it needs no apron.
         let tile_halo = if halo <= 0
+            || job.rough
             || (!store.has_context()
                 && !store.has_reader_in_rect(
                     job.view,
@@ -7471,7 +7597,8 @@ impl Gpu {
         }
         let limits = store.limits;
         let allow_yield = self.deadline_ms.is_some();
-        let outcome = match exec::draw_split_resumable(
+        self.rough = job.rough;
+        let outcome = exec::draw_split_resumable(
             store,
             self,
             &tile,
@@ -7481,7 +7608,9 @@ impl Gpu {
             coarse_readers,
             None,
             allow_yield,
-        ) {
+        );
+        self.rough = false;
+        let outcome = match outcome {
             Ok(o) => o,
             Err(e) => {
                 self.discard_draw();
@@ -7493,6 +7622,7 @@ impl Gpu {
             job.key,
             job.view,
             job.detail,
+            job.rough,
             coarse_readers,
             halo,
             tile_halo,
@@ -7527,7 +7657,8 @@ impl Gpu {
         };
         let limits = store.limits;
         let allow_yield = self.deadline_ms.is_some();
-        let outcome = match exec::draw_split_resumable(
+        self.rough = pt.rough;
+        let outcome = exec::draw_split_resumable(
             store,
             self,
             &tile,
@@ -7537,7 +7668,9 @@ impl Gpu {
             pt.coarse_readers,
             checkpoint,
             allow_yield,
-        ) {
+        );
+        self.rough = false;
+        let outcome = match outcome {
             Ok(o) => o,
             Err(e) => {
                 self.discard_draw();
@@ -7550,6 +7683,7 @@ impl Gpu {
             pt.key,
             pt.view,
             pt.detail,
+            pt.rough,
             pt.coarse_readers,
             pt.halo,
             pt.tile_halo,
@@ -7569,6 +7703,7 @@ impl Gpu {
         key: TileKey,
         view: Affine,
         detail: bool,
+        rough: bool,
         coarse_readers: bool,
         halo: i32,
         tile_halo: i32,
@@ -7590,6 +7725,7 @@ impl Gpu {
                     key,
                     view,
                     detail,
+                    rough,
                     coarse_readers,
                     halo,
                     tile_halo,
@@ -7638,7 +7774,7 @@ impl Gpu {
                     copy_rect(
                         &mut encoder,
                         &scratch.texture,
-                        &self.pages[page].texture,
+                        &self.page(page).texture,
                         (h, h),
                         (x, y),
                         (TILE, TILE),
@@ -9033,38 +9169,35 @@ impl Gpu {
             // Quads by source texture: the overview beneath, the last frame, then pages, in the
             // order given.
             let mut quads: Vec<(Option<usize>, [f32; 12])> = Vec::new();
-            let page_quad = |sc: &Scaled| -> Option<(Option<usize>, [f32; 12])> {
-                let page = (sc.slot / per_page) as usize;
-                let within = sc.slot % per_page;
-                let (x, y) = (
-                    f64::from((within % per_row) * TILE),
-                    f64::from((within / per_row) * TILE),
-                );
-                let (p, t) = (f64::from(page_side), f64::from(TILE));
-                let d = sc.dst;
-                Some((
-                    Some(page),
-                    [
-                        d.x0 as f32,
-                        d.y0 as f32,
-                        d.x1 as f32,
-                        d.y1 as f32,
-                        (x / p) as f32,
-                        (y / p) as f32,
-                        ((x + t) / p) as f32,
-                        ((y + t) / p) as f32,
-                        ((x + 0.5) / p) as f32,
-                        ((y + 0.5) / p) as f32,
-                        ((x + t - 0.5) / p) as f32,
-                        ((y + t - 0.5) / p) as f32,
-                    ],
-                ))
-            };
-            for sc in &comp.under {
-                if ((sc.slot / per_page) as usize) < self.pages.len()
-                    && let Some(q) = page_quad(sc)
-                {
-                    quads.push(q);
+            // The overview's tiles, from its own texture.
+            if let Some(grid) = self.overview_page.as_ref().map(|o| o.grid) {
+                let (pw, ph, t) = (f64::from(grid.0 * TILE), f64::from(grid.1 * TILE), f64::from(TILE));
+                for sc in &comp.under {
+                    let Some(index) = sc.slot.checked_sub(crate::tiles::OVERVIEW_SLOT) else {
+                        continue;
+                    };
+                    if index >= grid.0 * grid.1 {
+                        continue;
+                    }
+                    let (x, y) = (f64::from((index % grid.0) * TILE), f64::from((index / grid.0) * TILE));
+                    let d = sc.dst;
+                    quads.push((
+                        Some(OVERVIEW_PAGE),
+                        [
+                            d.x0 as f32,
+                            d.y0 as f32,
+                            d.x1 as f32,
+                            d.y1 as f32,
+                            (x / pw) as f32,
+                            (y / ph) as f32,
+                            ((x + t) / pw) as f32,
+                            ((y + t) / ph) as f32,
+                            ((x + 0.5) / pw) as f32,
+                            ((y + 0.5) / ph) as f32,
+                            ((x + t - 0.5) / pw) as f32,
+                            ((y + t - 0.5) / ph) as f32,
+                        ],
+                    ));
                 }
             }
             if let Some(m) = comp.base
@@ -9168,7 +9301,11 @@ impl Gpu {
                         }
                     }
                     Some(p) => {
-                        let page = &mut self.pages[p];
+                        let page = if p == OVERVIEW_PAGE {
+                            &mut self.overview_page.as_mut().expect("overview page").page
+                        } else {
+                            &mut self.pages[p]
+                        };
                         if page.composite_group.is_none() {
                             page.composite_group = Some(c.create_bind_group(&self.device, &page.view, "composite"));
                         }
@@ -9204,7 +9341,7 @@ impl Gpu {
                         .composite_group
                         .as_ref()
                         .expect("composite frame bg"),
-                    Some(p) => self.pages[p].composite_group.as_ref().expect("composite page bg"),
+                    Some(p) => self.page(p).composite_group.as_ref().expect("composite page bg"),
                 };
                 pass.set_bind_group(0, group, &[]);
                 pass.draw(0..4, from..to);
@@ -10145,6 +10282,10 @@ impl Backend for Gpu {
             a.backdrop_opaque = a.main_opaque;
         }
         Ok(())
+    }
+
+    fn rough(&self) -> bool {
+        self.rough
     }
 
     fn stop_early(&self) -> bool {
