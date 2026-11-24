@@ -533,34 +533,142 @@ for (const build of ["browser", "webgl"] as const) {
       expect(exact?.pixel).toEqual(red);
     });
 
-    test("a view without tile slots never shows an older frame's pixels while moving", async ({
-      page,
-    }) => {
-      // No slot holds a tile, so every frame is drawn straight into a frame texture. Frames take
-      // turns in those textures: a moving frame that drew some of its tiles and not others would
-      // show what an older frame left there (red, from the first view). While moving it shows the
-      // last frame moved instead (the empty view), and after a while it draws anyway.
-      const at = (x: number, moving: boolean, budget: number, repeat?: number): Frame => ({
-        size: [1024, 64],
-        pixel: [560, 32],
+    test("an edit never shows through a moving frame without tile slots", async ({ page }) => {
+      // No slot holds a tile, so every frame is drawn straight into a frame texture. The fill
+      // turns from red to green, then the camera moves: no moving frame may show the old red
+      // (the last frame moved, or an older frame's pixels), only green or a stand-in, and at
+      // rest the frame is exact green (re-check of #345).
+      const at = (x: number, px: number, moving: boolean, patch?: number[]): Frame => ({
+        size: [1024, 512],
+        pixel: [px, 128],
         camera: [1, x, 0, 1],
         moving,
-        budget,
-        ...(repeat ? { repeatUntilExact: repeat } : {}),
+        budget: moving ? 4 : 0,
+        ...(patch ? { patch } : {}),
       });
-      const [first, empty, moving, fills] = await sample(
+      const green = [0, 255, 0, 255];
+      const frames = await sample(
         page,
-        directStripes(100),
-        [at(0, false, 1), at(-8000, false, 1), at(0, true, 4), at(0, true, 4, 400)],
+        solid(6000),
+        [
+          at(0, 128, false),
+          at(-16, 128, true, solid(6000, [0, 1, 0, 1], 1)),
+          at(-32, 768, true),
+          at(-48, 128, true),
+          at(-48, 768, false),
+        ],
         0,
         build,
       );
-      expect(first).toMatchObject({ exact: true, pixel: red });
-      expect(empty).toMatchObject({ exact: true, pixel: [0, 0, 0, 0] });
-      expect(moving).toMatchObject({ exact: false, pixel: [0, 0, 0, 0] });
-      // Starved of tile work, motion still draws: the frame fills in.
-      expect(fills).toMatchObject({ exact: true, pixel: red });
-      expect(fills?.attempts).toBeGreaterThan(1);
+      expect(frames[0]).toMatchObject({ exact: true, pixel: red });
+      for (const moving of frames.slice(1, 4)) {
+        expect(moving?.exact).toBe(false);
+        expect(moving?.pixel, "a moving frame showed the fill from before the edit").not.toEqual(
+          red,
+        );
+      }
+      // Moving frames still draw (rough, the nearest the middle first): green shows before rest.
+      expect(frames.slice(1, 4).some((f) => f?.pixel.join() === green.join())).toBe(true);
+      expect(frames[4]).toMatchObject({ exact: true, pending: 0, pixel: green });
+    });
+
+    test("a whole frame done in its first call reports the overview still to draw", async ({
+      page,
+    }) => {
+      // A wide backdrop blur makes the view a whole frame; a long budget finishes it in its
+      // first call. That first presentation must report the overview's tiles as queued, or the
+      // editor's time between frames never wakes to draw them (re-check of #345).
+      await openEngine(page, build);
+      const list = new ListWriter(0xffffffff, 1);
+      list.reset();
+      for (const [id, size, blur] of [
+        [1, 6000, false],
+        [2, 240, true],
+      ] as const) {
+        list.set(id, ROOT, {
+          flags: 0,
+          transform: [1, 0, 0, 1, 0, 0],
+          opacity: 1,
+          width: size,
+          height: size,
+          coarseBelow: 0,
+          reach: blur ? 320 : 0,
+          unsupported: 0,
+          paths: [{ kind: "rect", w: size, h: size, radii: [0, 0, 0, 0], smoothing: 0 }],
+          ops: blur
+            ? [{ op: "backgroundBlur", paths: [0], evenOdd: false, radius: 160 }]
+            : [
+                {
+                  op: "fill",
+                  path: 0,
+                  evenOdd: false,
+                  paint: { kind: "solid", color: [1, 0, 0, 1] },
+                },
+              ],
+          coarse: [],
+        });
+      }
+      const rows = await page.evaluate(
+        async (bytes) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          const engine = new glue.Engine(0, 0);
+          const read = (out: {
+            ok: boolean;
+            message: string;
+            in_progress: boolean;
+            pending: number;
+            queued: number;
+            free(): void;
+          }) => {
+            const row = {
+              ok: out.ok,
+              message: out.message,
+              inProgress: out.in_progress,
+              pending: out.pending,
+              queued: out.queued,
+            };
+            out.free();
+            if (!row.ok) throw new Error(row.message);
+            return row;
+          };
+          try {
+            const gpu = await glue.createGpu(null, 0);
+            const attached = engine.attachGpu?.(gpu);
+            gpu.free();
+            if (!attached) throw new Error("no GPU entry points");
+            attached.free();
+            const applied = engine.apply(new Uint8Array(bytes));
+            applied.free();
+            const frame = (budget: number) => {
+              const out = engine.renderGpu?.(
+                256,
+                256,
+                2,
+                0,
+                0,
+                1,
+                new Float32Array([0, 0, 0, 1]),
+                false,
+                budget,
+              );
+              if (!out) throw new Error("no renderGpu");
+              return read(out as never);
+            };
+            return { first: frame(10_000), again: frame(-1) };
+          } finally {
+            engine.free();
+          }
+        },
+        [...list.finish()],
+      );
+      expect(rows.first).toMatchObject({ inProgress: false, pending: 0 });
+      expect(rows.again.queued).toBeGreaterThan(0);
+      expect(
+        rows.first.queued,
+        "the first presentation must wake the time between frames",
+      ).toBeGreaterThan(0);
     });
 
     test("a view without tile slots completes all direct tiles at rest", async ({ page }) => {

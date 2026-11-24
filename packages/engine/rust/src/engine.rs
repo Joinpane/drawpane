@@ -368,6 +368,14 @@ impl Engine {
         drag_parts: bool,
         at: Option<&dyn Fn(f64) -> bool>,
     ) {
+        // What changed, in page units, for the last frame shown: while moving it isn't laid there
+        // (`TileCache::note_changed`), whatever levels the cache holds. An image change counts at
+        // the scale the last frame was drawn at only if the level drawn there changed.
+        let changed = if full || changes.is_empty() {
+            Vec::new()
+        } else {
+            self.store.dirty(changes, Affine::IDENTITY, 1.5)
+        };
         let store = &mut self.store;
         let mut each = |cache: &mut TileCache| {
             if full {
@@ -392,10 +400,13 @@ impl Engine {
                 cache.invalidate_inexact_full();
             }
         };
+
         if let Some(t) = self.cpu_tiles.as_mut() {
             each(&mut t.cache);
             if full {
                 t.forget();
+            } else if at.is_none() {
+                t.cache.note_changed(&changed);
             }
         }
         #[cfg(feature = "gpu-common")]
@@ -403,6 +414,10 @@ impl Engine {
             each(&mut g.tiles);
             if full {
                 g.forget_last();
+            } else if let Some(last) = g.last()
+                && at.is_none_or(|select| select(last.view.as_coeffs()[0]))
+            {
+                g.tiles.note_changed(&changed);
             }
             if full
                 || drag_parts && at.is_none_or(|select| g.last().is_some_and(|last| select(last.view.as_coeffs()[0])))
@@ -3318,10 +3333,13 @@ impl Engine {
                 }
             }
             let comp = tiles.cache.compose(&plan, last);
+            tiles.cache.frame_shown(comp.exact);
             comp_exact = comp.exact;
             stats.pending = comp.pending;
             if !comp.complete {
-                if let (Some(m), Some(l)) = (comp.base, last) {
+                // Where something changed since, the last frame's pixels are old: then it isn't
+                // laid at all here (the GPU lays it round what changed).
+                if let (Some(m), Some(l), true) = (comp.base, last, comp.holes.is_empty()) {
                     // The last frame, moved and scaled (nearest pixel: a stand-in).
                     let prev = tiles.frame_last.clone();
                     let inv = m.inverse();

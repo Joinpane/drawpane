@@ -17,6 +17,9 @@ pub const STARVE_MS: f64 = 100.0;
 pub struct InFlight {
     seq: u64,
     sent: VecDeque<(u64, f64)>,
+    /// When the last submission known done was made: past `KEEP` the times of some unfinished
+    /// ones are let go, and the oldest of those is no younger than this.
+    done_at: Option<f64>,
 }
 
 impl InFlight {
@@ -34,11 +37,21 @@ impl InFlight {
     /// Whether more than `in_flight` submissions aren't done (`done`, the highest sequence
     /// reported done) at `at`, unless the oldest of them is `GIVE_UP_MS` old.
     pub fn behind(&mut self, done: u64, in_flight: u64, at: f64) -> bool {
-        while self.sent.front().is_some_and(|(seq, _)| *seq <= done) {
+        while let Some(&(seq, sent)) = self.sent.front()
+            && seq <= done
+        {
+            self.done_at = Some(sent);
             self.sent.pop_front();
         }
-        let Some(&(_, oldest)) = self.sent.front() else {
+        let Some(&(seq, sent)) = self.sent.front() else {
             return false;
+        };
+        // The oldest unfinished submission is the one after the last done. When its time was let
+        // go, the last done one's is older still: the wait gives up no later than it should.
+        let oldest = if seq == done + 1 {
+            sent
+        } else {
+            self.done_at.unwrap_or(sent)
         };
         done + in_flight < self.seq && at - oldest < GIVE_UP_MS
     }
@@ -94,6 +107,29 @@ mod tests {
         // Two in flight are allowed between frames.
         let next = f.submitted(at + 2.0);
         assert!(!f.behind(next - 2, 2, at + 3.0));
+    }
+
+    /// Past the history kept, a partial completion never brings back a wait the real oldest
+    /// unfinished submission has outlived (re-check of #345).
+    #[test]
+    fn partial_progress_keeps_the_age_of_the_oldest_unfinished_submission() {
+        let mut f = InFlight::default();
+        for i in 0..100 {
+            f.submitted(f64::from(i) * 3.0);
+        }
+        assert!(!f.behind(0, 0, 300.0));
+        // Only the first is done: the second, sent at 3 ms, is 297 ms old.
+        assert!(!f.behind(1, 0, 300.0));
+        assert!(!f.behind(1, 0, 301.0));
+    }
+
+    #[test]
+    fn signals_after_a_pause_never_renew_the_wait() {
+        let mut f = InFlight::default();
+        f.submitted(0.0);
+        assert!(f.behind(0, 0, 50.0));
+        f.submitted(1500.0);
+        assert!(!f.behind(0, 0, 1501.0));
     }
 
     #[test]

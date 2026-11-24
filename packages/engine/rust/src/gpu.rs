@@ -260,6 +260,8 @@ const MOVING_PASSES: u32 = 48;
 /// Idle slices (between frames, at rest) the GPU may still be working on when the next starts:
 /// enough that the CPU and GPU overlap, few enough that the next input waits on little.
 const IDLE_IN_FLIGHT: u64 = 2;
+/// Tiles of a frame no slot can hold (`Plan::direct`) drawn, rough, in one moving frame.
+const DIRECT_MOVING_TILES: usize = 2;
 
 /// Budget for the GPU canonical shadow mask cache (strictly enforced LRU).
 const GPU_SHADOW_CACHE_BYTES: usize = 16 << 20;
@@ -1401,6 +1403,9 @@ pub struct Gpu {
     motion_starved: crate::pacing::Starvation,
     /// The walk drawing now draws a rough stand-in (an overview tile, `exec::Backend::rough`).
     rough: bool,
+    /// The frame being made laid the last frame round what changed since (`Composite::holes`):
+    /// nothing old shows in it.
+    holes_laid: bool,
     overview_page: Option<OverviewPage>,
     /// Tile cooperatively paused mid-walk so no single frame stalls past its CPU budget.
     pending_tile: Option<PendingTile>,
@@ -2080,6 +2085,7 @@ impl Gpu {
             gpu_done: Arc::new(AtomicU64::new(0)),
             motion_starved: crate::pacing::Starvation::default(),
             rough: false,
+            holes_laid: false,
             overview_page: None,
             pending_tile: None,
             pending_whole: None,
@@ -4848,9 +4854,14 @@ impl Gpu {
             exact: stats.exact,
             plan: stats.plan,
         });
-        // The overview, for a view that never had tiles: `present_finished_whole` reports what's
-        // left of it, so the time between frames goes on to draw it.
+        // The overview, for a view that never had tiles, and what's left of it reported from this
+        // first presentation on (`present_finished_whole` after), so the time between frames
+        // wakes to draw it.
         self.set_overview(store);
+        let mut stats = stats;
+        stats.queued = stats
+            .queued
+            .max(self.tiles.overview_left(f64::from_bits(pending.view_bits[0])));
         Ok(Some(stats))
     }
 
@@ -6548,6 +6559,8 @@ impl Gpu {
             && l.view.determinant().abs() > 0.0
         {
             comp.base = Some(view * l.view.inverse());
+            comp.holes = self.tiles.holes(view, (w, h));
+            self.holes_laid = self.tiles.moving;
         }
         let mut stats = DrawStats {
             standin: true,
@@ -6740,13 +6753,11 @@ impl Gpu {
         if gpu_behind {
             self.counters.motion_backoff = self.counters.motion_backoff.wrapping_add(1);
         }
-        // A frame no slot can hold (`Plan::direct`) draws every tile straight into the frame, at
-        // once: none can pause at the pass cap, and one left out would leave an older frame's
-        // pixels. While moving it shows the last frame moved instead, until starved.
-        if plan.direct && motion_capped && !starved && !composite_only && selection.is_none() {
-            self.motion_starved.hungry(now());
-            return self.present_motion_standin(view, background, w, h, t0, submits0, true);
-        }
+        // A frame no slot can hold (`Plan::direct`) draws its tiles straight into the frame, and
+        // they can't pause. While moving it's laid as stand-ins (the last frame moved, round what
+        // changed, over the overview), with a few of its tiles drawn rough over them, the nearest
+        // the middle first: bounded, soft, never an older frame's pixels.
+        let direct_moving = plan.direct && motion_capped && !composite_only && selection.is_none();
         self.pass_budget = motion_capped.then_some(MOVING_PASSES);
         self.passes_at = self.passes;
         let mut budget_hit = false;
@@ -6811,7 +6822,7 @@ impl Gpu {
                 }
             }
             for job in &plan.jobs {
-                if resumed_key == Some(job.key) {
+                if resumed_key == Some(job.key) || direct_moving {
                     continue;
                 }
                 // The overview went with a tile that failed: its other jobs go too.
@@ -7012,9 +7023,36 @@ impl Gpu {
         if opening && !unfinished_must && self.pending_tile.is_none() {
             self.opening_pending = false;
         }
+        if direct_moving {
+            // The nearest the middle first, as many as a moving frame may: none while the GPU is
+            // behind, unless starved.
+            if !gpu_behind || starved {
+                let (cx, cy) = (f64::from(w) / 2.0, f64::from(h) / 2.0);
+                let t = f64::from(TILE);
+                let away = |j: &crate::tiles::Job| {
+                    let x = f64::from(j.key.i) * t + plan.origin.0 as f64 + t / 2.0 - cx;
+                    let y = f64::from(j.key.j) * t + plan.origin.1 as f64 + t / 2.0 - cy;
+                    x.hypot(y)
+                };
+                // Rough (`exec::Backend::rough`): no readers, isolated scopes or shadows, so
+                // they're cheap and pause nowhere. Soft, never old, and drawn exactly at rest.
+                let mut nearest: Vec<crate::tiles::Job> = plan.jobs.clone();
+                nearest.sort_by(|a, b| away(a).total_cmp(&away(b)));
+                late.extend(nearest.into_iter().take(DIRECT_MOVING_TILES).map(|mut j| {
+                    j.rough = true;
+                    j.detail = true;
+                    j
+                }));
+            }
+            if late.is_empty() {
+                self.motion_starved.hungry(now());
+            } else {
+                self.motion_starved.fed();
+            }
+        }
         let t1 = now();
         let mut present_encoder = None;
-        if plan.direct {
+        if plan.direct && !direct_moving {
             stats.plan = 2;
         } else {
             // What's drawn straight into the frame after it covers its tile there: the composite
@@ -7029,6 +7067,7 @@ impl Gpu {
                 job.direct = late.iter().any(|l| l.key == job.key);
             }
             let comp = self.tiles.compose(&plan, plan_last);
+            self.holes_laid = self.tiles.moving;
             stats.exact = comp.exact;
             stats.pending = comp.pending;
             // A frame shows a reduced effect when a visible tile holds one, whenever it was drawn.
@@ -7041,21 +7080,30 @@ impl Gpu {
             let fuse_present = late.is_empty() && selection.is_none();
             present_encoder = self.composite(&comp, dst, background, w, h, !fuse_present, &mut stats)?;
             stats.render_ms += now() - t1;
-            for job in &late {
+            for (n, job) in late.iter().enumerate() {
+                // A moving frame's rough tiles stop at the pass cap (the first always goes).
+                if job.rough && n > 0 && self.passes.wrapping_sub(self.passes_at) >= MOVING_PASSES {
+                    stats.pending += 1;
+                    direct_exact = false;
+                    continue;
+                }
                 let tile_detail = job.detail || coarse_moving;
-                let exact = or_standin!(self.draw_job(
+                self.rough = job.rough;
+                let drawn = self.draw_job(
                     store,
                     job,
                     tile_detail,
-                    frame_halo,
+                    if job.rough { 0 } else { frame_halo },
                     background,
                     TileTarget::Scratch,
                     &plan,
                     dst,
                     &mut stats,
                     &mut verbs,
-                ));
-                direct_exact &= !tile_detail && exact;
+                );
+                self.rough = false;
+                let exact = or_standin!(drawn);
+                direct_exact &= !tile_detail && !job.rough && exact;
             }
             if let (Some(now), Some(split)) = (selection, drag.and_then(|d| d.split.as_ref())) {
                 let dragged = self.drag_composite(store, &plan, now, split, halo, background, dst, &mut stats);
@@ -7282,6 +7330,10 @@ impl Gpu {
         pending_encoder: Option<wgpu::CommandEncoder>,
     ) -> Result<DrawStats> {
         let t1 = now();
+        // What changed before this frame no longer shows once it's in (`TileCache::frame_shown`):
+        // it's exact, or it left what changed out.
+        let laid = std::mem::take(&mut self.holes_laid);
+        self.tiles.frame_shown(stats.exact || laid);
         self.check()?;
         self.standin_frame = None;
         self.configure_surface(frame)?;
@@ -9285,23 +9337,38 @@ impl Gpu {
             {
                 let (lw, lh) = (f64::from(l.size.0), f64::from(l.size.1));
                 let d = m.transform_rect_bbox(Rect::new(0.0, 0.0, lw, lh));
-                quads.push((
-                    None,
-                    [
-                        d.x0 as f32,
-                        d.y0 as f32,
-                        d.x1 as f32,
-                        d.y1 as f32,
-                        0.0,
-                        0.0,
-                        1.0,
-                        1.0,
-                        (0.5 / lw) as f32,
-                        (0.5 / lh) as f32,
-                        (1.0 - 0.5 / lw) as f32,
-                        (1.0 - 0.5 / lh) as f32,
-                    ],
-                ));
+                // Laid round what changed since it was drawn (`Composite::holes`): its pixels
+                // there are old. The mapping only scales and moves, so each part maps back to a
+                // part of the last frame.
+                let [sx, b, c, sy, ..] = m.as_coeffs();
+                let parts = if comp.holes.is_empty() {
+                    vec![d]
+                } else if b == 0.0 && c == 0.0 && sx > 0.0 && sy > 0.0 {
+                    crate::tiles::rect_minus(d, &comp.holes)
+                } else {
+                    Vec::new()
+                };
+                let back = m.inverse();
+                for p in parts {
+                    let s = back.transform_rect_bbox(p);
+                    quads.push((
+                        None,
+                        [
+                            p.x0 as f32,
+                            p.y0 as f32,
+                            p.x1 as f32,
+                            p.y1 as f32,
+                            (s.x0 / lw) as f32,
+                            (s.y0 / lh) as f32,
+                            (s.x1 / lw) as f32,
+                            (s.y1 / lh) as f32,
+                            (0.5 / lw) as f32,
+                            (0.5 / lh) as f32,
+                            (1.0 - 0.5 / lw) as f32,
+                            (1.0 - 0.5 / lh) as f32,
+                        ],
+                    ));
+                }
             }
             for sc in &comp.scaled {
                 let page = (sc.slot / per_page) as usize;

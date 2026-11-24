@@ -1985,34 +1985,44 @@ GPU work a frame queued had no bound, and input waited behind it.
   cache alone.
 - **Drawn early.** They're drawn at rest, in frames with a budget and between frames, after the
   frame's own tiles; never in a frame drawn at once, nor while the camera moves. A composite-only
-  frame at rest reports what's left of them as queued, so the editor's time between frames keeps
-  going until they're drawn (before, it stopped once the view's own tiles were, and the overview
+  frame at rest reports what's left of them as queued, and so does a whole frame from its first
+  presentation on, so the editor's time between frames keeps going until they're drawn (before, it stopped once the view's own tiles were, and the overview
   waited for the next view). A view drawn as whole frames draws them once its whole frame shows
   (`Gpu::ahead_overview`), the overview set up then even for a view that never had tiles.
 - **It stands in while moving.** In a frame while the camera moves, the overview covers what
   nothing nearer does, at any scale it's at least 4× coarser than (nearer levels keep the 4× rule
   of `stands_in`). A zoom out then has nothing it must draw. The composite lays the overview
-  beneath the last frame (`Composite::under`). A stale overview tile (an edit, an image changed)
-  never stands in nor is laid: what it covered is drawn instead, until it's drawn again. At rest
-  nothing changes: what nothing nearer stands in for is drawn.
+  beneath the last frame (`Composite::under`). A stale tile (an edit, an image changed) never
+  stands in nor is laid while moving: what it covered is drawn instead, until it's drawn again.
+  At rest nothing changes: what nothing nearer stands in for is drawn.
+- **Nothing old shows while moving.** The cache keeps the page regions an edit changed since the
+  last frame drawn exact (`TileCache::note_changed`). While moving, the composite lays the last
+  frame round them (`Composite::holes`), and the plan treats them as uncovered, so they show only
+  what's drawn since: a tile drawn in this frame or an earlier one, or the overview redrawn. Until
+  then they show the background, never old content.
 - **GPU work per moving frame is held.** A frame while moving starts at most 48 GPU passes of
   tile work (`MOVING_PASSES`: Vello renders, isolation scopes, and an estimate of the kernel
   passes each reader and blurred shadow runs; Figma caps a frame at about 255 framebuffer binds,
   about 55 of ours). Past them, a walk pauses at its next safe point (never inside an isolated
   scope) and further tiles wait, except one tile a frame that nothing stands in for, so it fills
-  in. A tile no slot can hold is drawn at once and can't pause: while moving it isn't drawn, and
-  a frame made only of such tiles (`Plan::direct`) shows the last frame moved instead, so nothing
-  of an older frame ever shows.
+  in. A walk can't pause inside an isolated scope, so a tile's one scope can still finish past
+  the cap; the walk pauses right after it. A tile no slot can hold is drawn straight into the
+  frame and can't pause. While moving, a frame made only of such tiles (`Plan::direct`) draws at
+  most two of them a frame (`DIRECT_MOVING_TILES`), nearest the middle first, the second only
+  under the pass cap. They're drawn rough (no readers, isolated scopes or shadows), so each is
+  cheap, over the last frame moved (round what changed) and the overview; they're drawn exactly
+  at rest.
 - **Forward progress.** A moving frame that has started no tile work for 100 ms while some was
   wanted (`pacing::Starvation`) starts one unit anyway, whatever back-pressure says: one tile
-  walk, paused at the cap, or a direct frame's tiles, all of them.
+  walk, paused at the cap, or a direct frame's bounded few rough tiles.
 - **Back-pressure.** Each frame and idle slice asks the GPU when its submitted work is done
   (`on_submitted_work_done`; WebGL2 polls in `check`). A frame while moving starts no tile work
   while the last frame's isn't done. Between frames, work off screen (tiles round the view, the
   overview) waits while two slices are in flight; what the view shows is never held back. This
   holds only at real budgets (1 ms and up), and back-pressure gives up once the oldest submission
   not known done is 250 ms old (`pacing::InFlight`): a stand-in submitted every frame never
-  renews the wait.
+  renews the wait, and once the kept history (64 submissions) is trimmed, the age is taken from
+  the last one known done, which is never newer than the oldest unfinished.
 - **Wheel notches** (editor). A wheel step of at least 40 whole pixels, or a line or page, is a
   notch (a mouse wheel, a step of Cmd+scroll); a trackpad sends small fractional deltas. The
   camera counts as moving until 120 ms after the last notch, by the event's own time, so notches
@@ -2048,6 +2058,11 @@ the same container. The gate's budgets: lag p95 ≤ 100 ms, dropped frames ≤ 5
 | Cmd+scroll in dropped frames | 11-57% (median 44%) | 0-33% (median 3.7%) |
 | Time to exact: Shift+2, Shift+0, pinch from fit | 0.78, 0.31, 0.19 s (medians) | 0.79, 0.33, 0.18 s |
 
+- After the re-check fixes, rebased onto fixed-function blending (#351), a run paired with main
+  met every gated budget: pinch-out at 58 fps with 2.6% dropped and 62 ms p95 lag, against main's
+  43 fps, 28% and 248 ms. At a 4 MiB tile budget (most frames direct), every moving call stayed a
+  bounded stand-in, the slowest 30 ms (1.2 s before the re-check). Exact direct frames at rest
+  still draw every tile at once (0.9 to 1.2 s each there), as on main.
 - In the lag audit's probes with the gate's timing, the overview is now drawn before the
   pinch-out and kept through it (counters `overview` and `overviewLost`), and the pinch-out draws
   no tile that nothing stands in for (`motionMust` 0). Before, the editor's time between frames
