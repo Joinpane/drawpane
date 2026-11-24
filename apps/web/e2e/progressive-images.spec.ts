@@ -504,6 +504,18 @@ test.describe
     });
 
     test("exports always fetch the full-resolution original without ?w=", async () => {
+      // Refresh the file's dashboard thumbnail after Test 4's edit so useThumbnailPublisher does
+      // not run a background `detail: true` thumbnail snapshot (?w=256) mid-export.
+      const onePxPng = Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+        "base64",
+      );
+      const seedThumb = await instance.page.request.put(`/api/files/${fileId}/thumbnail`, {
+        headers: { "content-type": "image/png" },
+        data: onePxPng,
+      });
+      expect(seedThumb.ok()).toBe(true);
+
       const tab = await openEngineTab(instance);
       const exportRequests: Array<{ url: string; type: string | null }> = [];
       tab.on("response", (res) => {

@@ -13,6 +13,12 @@ const MAX_DECODES = 4;
 const MAX_FETCHES = 6;
 /** Dedicated fetch slots reserved for urgent direct-full / upgrade fetches. */
 const URGENT_FETCH_SLOTS = 2;
+/** Dedicated fetch slots reserved strictly for visible previews (`?w=256` / `?w=1024`). */
+const PREVIEW_FETCH_SLOTS = 4;
+/** Concurrent visible original-refinement slots shared alongside active preview fetches. */
+const REFINE_CONCURRENT_SLOTS = 2;
+/** Cap on decoded full-original bitmaps staged for batched GPU upload after initial preview paint. */
+const STAGED_UPLOAD_BYTES = 16 * MIB;
 const PREFETCH_RATIOS = [2, 4];
 const DECODE_BYTES = 64 * MIB;
 const ZOOM_SAMPLE_MS = 100;
@@ -20,6 +26,8 @@ const ZOOM_LOOKAHEAD_MS = 180;
 const MAX_ZOOM_LOOKAHEAD = 8;
 const UPLOAD_SLICE_BYTES = 12 * MIB;
 const REQUEST_TIMEOUT_MS = 8000;
+/** Full originals (up to 20 MB) need a wider timeout than small previews on slow links (e.g. 10 Mbps). */
+const FULL_FETCH_TIMEOUT_MS = 30_000;
 const SOURCE_BUDGET = 64 * MIB;
 const MAX_BITMAP_SIDE = 4096;
 const LARGEST_PREVIEW_TIER = MEDIA_PREVIEW_SIZES[MEDIA_PREVIEW_SIZES.length - 1] ?? 1024;
@@ -109,6 +117,7 @@ interface Source {
 interface MetaDemand {
   visible: boolean;
   demandedPx: number;
+  centerDistance: number;
 }
 
 interface Target extends Size {
@@ -118,10 +127,28 @@ interface Target extends Size {
   readonly tier: ImageTier;
   /** Preview tier that suffices for immediate display (may be smaller than `tier: "full"`). */
   readonly previewTier?: ImageTier;
-  /** Largest demanded pixel edge on screen, used to order urgent fetches and refinements. */
+  /** Largest demanded pixel edge on screen, used to order fetches and refinements. */
   readonly demandedPx?: number;
+  /** Nearest layer bounds distance to the viewport centre, used as visual-importance tie-breaker. */
+  readonly centerDistance?: number;
   readonly forecast?: boolean;
   readonly standIn?: boolean;
+}
+
+interface StagedUpload {
+  readonly target: Target;
+  readonly bitmap: ImageBitmap;
+  readonly bytes: number;
+}
+
+/** Visual importance ordering: largest on-screen span first, nearest the viewport centre first. */
+function compareImportance(
+  a: { readonly demandedPx?: number; readonly centerDistance?: number },
+  b: { readonly demandedPx?: number; readonly centerDistance?: number },
+): number {
+  const spanDiff = Math.round(b.demandedPx ?? 0) - Math.round(a.demandedPx ?? 0);
+  if (spanDiff !== 0) return spanDiff;
+  return (a.centerDistance ?? Infinity) - (b.centerDistance ?? Infinity);
 }
 
 interface Resident extends Target {
@@ -363,6 +390,8 @@ export class ViewImages {
   readonly #failed = new Map<string, number>();
   /** Refs whose `?w=` preview failed decoding and must bypass previews for the full original. */
   readonly #previewBroken = new Set<string>();
+  /** Decoded full-original replacement bitmaps staged until initial preview paint presents. */
+  readonly #staged = new Map<string, StagedUpload>();
   readonly #protected = new Set<string>();
   #fallbacks = new Map<string, Target>();
   #primary = new Map<string, Target>();
@@ -379,6 +408,8 @@ export class ViewImages {
   #uploadedThisFrame = 0;
   #uploadFrame: Promise<void> | undefined;
   #inflightBytes = 0;
+  #stagedBytes = 0;
+  #flushingStaged = false;
   #uploadTail = Promise.resolve();
   #residentBytes = 0;
   #clock = 0;
@@ -394,6 +425,7 @@ export class ViewImages {
     private readonly changed: () => void,
     private readonly decode: Decode = decodeInWorker,
     private readonly onPreviewMissing?: (ref: string, blob: Blob) => void,
+    private readonly onAllVisibleFullReady?: () => void,
   ) {}
 
   info(ref: string): ImageInfo | null {
@@ -417,11 +449,36 @@ export class ViewImages {
     return this.#allVisibleHaveResident();
   }
 
-  /** Controls whether Lane C exactness refinement is deferred (for example until the initial preview frame presents). */
+  /** True when every visible primary image is either resident at `"full"` or decoded and staged at `"full"`. */
+  get allVisibleFullReady(): boolean {
+    for (const demand of this.#metadata.values()) {
+      if (demand.visible) return false;
+    }
+    let count = 0;
+    for (const target of this.#primary.values()) {
+      count++;
+      if (this.#hasSatisfyingResident(target)) continue;
+      const staged = this.#staged.get(levelKey(target));
+      if (staged && satisfies(staged.target, target)) continue;
+      return false;
+    }
+    return count > 0;
+  }
+
+  /** Controls whether full-original GPU replacement uploads stage for batch flush after initial preview paint. */
   setDeferRefine(defer: boolean): void {
     if (this.#deferRefine === defer) return;
     this.#deferRefine = defer;
-    if (!defer) this.#pump();
+    if (!defer) {
+      this.#flushStaged();
+      this.#pump();
+    }
+  }
+
+  #clearStaged(): void {
+    for (const entry of this.#staged.values()) entry.bitmap.close();
+    this.#staged.clear();
+    this.#stagedBytes = 0;
   }
 
   setBackend(backend: ImageBackend | null): void {
@@ -434,6 +491,7 @@ export class ViewImages {
   evict(keepVisible = false): void {
     for (const { abort } of this.#decodeJobs.values()) abort.abort();
     for (const { abort } of this.#fetchJobs.values()) abort.abort();
+    this.#clearStaged();
     this.#hidden = keepVisible;
     const keep = keepVisible ? this.#closestVisible() : new Map<string, Resident>();
     for (const [key, level] of this.#residents) {
@@ -466,6 +524,13 @@ export class ViewImages {
   retain(used: ReadonlySet<string>): void {
     for (const { ref, abort } of this.#decodeJobs.values()) if (!used.has(ref)) abort.abort();
     for (const { ref, abort } of this.#fetchJobs.values()) if (!used.has(ref)) abort.abort();
+    for (const [key, entry] of this.#staged) {
+      if (!used.has(entry.target.ref)) {
+        entry.bitmap.close();
+        this.#stagedBytes -= entry.bytes;
+        this.#staged.delete(key);
+      }
+    }
     for (const ref of this.#sources.keys()) if (!used.has(ref)) this.#sources.delete(ref);
     for (const ref of this.#metadata.keys()) if (!used.has(ref)) this.#metadata.delete(ref);
     for (const ref of this.#previewBroken) if (!used.has(ref)) this.#previewBroken.delete(ref);
@@ -513,9 +578,9 @@ export class ViewImages {
     const previewNeed = target.previewTier ?? "full";
     if (previewNeed === "full") return "full";
     if (cachedBlobFor(source, previewNeed)) return "full";
-    // While actively zooming or waiting for the initial preview frame, fetch intermediate preview
-    // tiers first; at rest after settle, go straight to full if a smaller preview is already resident.
-    if (!this.#zooming && !this.#deferRefine && largestCachedBlob(source)) return "full";
+    // While actively zooming, fetch intermediate preview tiers first; at rest, go straight to full
+    // if a smaller preview is already cached locally.
+    if (!this.#zooming && largestCachedBlob(source)) return "full";
     return previewNeed;
   }
 
@@ -564,7 +629,7 @@ export class ViewImages {
     this.#deferRefine = deferRefine;
     this.#opening = opening;
 
-    for (const { ref, visible: onScreen, span, hint } of demands) {
+    for (const { ref, visible: onScreen, span, hint, centerDistance } of demands) {
       if (onScreen) visible.add(ref);
       const source = this.#sources.get(ref);
       const version = this.cache.encodedVersion(ref);
@@ -582,10 +647,12 @@ export class ViewImages {
       if (!source) {
         const estSpan = span ?? hint;
         const estPx = estSpan ? Math.max(estSpan.width, estSpan.height) * scale : 0;
+        const dist = centerDistance ?? Infinity;
         const prev = metadata.get(ref);
         metadata.set(ref, {
           visible: onScreen || Boolean(prev?.visible),
           demandedPx: Math.max(prev?.demandedPx ?? 0, onScreen ? estPx : 0),
+          centerDistance: Math.min(prev?.centerDistance ?? Infinity, onScreen ? dist : Infinity),
         });
         if (onScreen && this.#retryAt.has(metaKey(ref))) reduced.add(ref);
         continue;
@@ -623,6 +690,7 @@ export class ViewImages {
         }
         tier = source.fullOnly || this.#previewBroken.has(ref) ? "full" : maxOffscreen;
       }
+      const dist = centerDistance ?? Infinity;
       const wanted: Target = {
         ...size,
         ref,
@@ -631,6 +699,7 @@ export class ViewImages {
         tier,
         previewTier,
         demandedPx: demanded,
+        centerDistance: dist,
       };
       if (onScreen) ideal.set(jobKey(wanted), wanted);
       const start = onScreen
@@ -683,17 +752,25 @@ export class ViewImages {
           tier: availableTier,
           previewTier: onScreen ? this.#previewTierOf(source, ref, availableSize, demanded) : tier,
           demandedPx: demanded,
+          centerDistance: dist,
         };
         const key = jobKey(target);
         const previous = candidates.get(key);
         if (!previous || target.priority < previous.priority) {
           candidates.set(key, target);
-        } else if (
-          previous &&
-          target.priority === previous.priority &&
-          (target.demandedPx ?? 0) > (previous.demandedPx ?? 0)
-        ) {
-          candidates.set(key, target);
+        } else if (previous && target.priority === previous.priority) {
+          const bestDemanded = Math.max(previous.demandedPx ?? 0, target.demandedPx ?? 0);
+          const bestDist = Math.min(
+            previous.centerDistance ?? Infinity,
+            target.centerDistance ?? Infinity,
+          );
+          if (bestDemanded !== previous.demandedPx || bestDist !== previous.centerDistance) {
+            candidates.set(key, {
+              ...previous,
+              demandedPx: bestDemanded,
+              centerDistance: bestDist,
+            });
+          }
         }
       }
       if (onScreen) {
@@ -934,12 +1011,20 @@ export class ViewImages {
         neededFetches.add(fetchKey(target.ref, "full"));
       }
     }
+    for (const [key, entry] of this.#staged) {
+      if (!targets.has(jobKey(entry.target)) || this.#hasSatisfyingResident(entry.target)) {
+        entry.bitmap.close();
+        this.#stagedBytes -= entry.bytes;
+        this.#staged.delete(key);
+      }
+    }
     for (const [key, { abort }] of this.#decodeJobs) {
       if (!targets.has(key)) abort.abort();
     }
     for (const [key, { abort }] of this.#fetchJobs) {
       if (!neededFetches.has(key)) abort.abort();
     }
+    if (!deferRefine && this.#staged.size > 0) this.#flushStaged();
     this.#pump();
 
     // Strict exactness rule: previews are NEVER exact. Any visible image still downloading,
@@ -1199,9 +1284,11 @@ export class ViewImages {
     const dKey = jobKey(target);
     const lKey = levelKey(target);
     const existing = this.#residents.get(lKey);
+    const staged = this.#staged.get(lKey);
     if (
       !backend ||
       (existing && tierCovers(existing.tier, target.tier)) ||
+      (staged && tierCovers(staged.target.tier, target.tier)) ||
       this.#decodeJobs.has(dKey) ||
       this.#denied.has(lKey) ||
       this.#failed.get(target.ref) === this.cache.encodedVersion(target.ref)
@@ -1211,6 +1298,8 @@ export class ViewImages {
     if (!source) return;
     const cached = cachedBlobFor(source, target.tier);
     if (!cached) return;
+    if (this.#shouldStageUpload(target) && this.#stagedBytes + bytes(target) > STAGED_UPLOAD_BYTES)
+      return;
     if (this.#inflightBytes > 0 && this.#inflightBytes + bytes(target) > DECODE_BYTES) return;
     // A finer bitmap already resident (still wanted in the plan, or for any background target)
     // can serve this level as well without evicting itself.
@@ -1256,7 +1345,8 @@ export class ViewImages {
     void (async () => {
       const version = this.cache.encodedVersion(target.ref);
       try {
-        const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]);
+        const timeoutMs = tier === "full" ? FULL_FETCH_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+        const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(timeoutMs)]);
         const opts = tier === "full" ? undefined : { preview: tier };
         const res = await untilAborted(this.cache.encoded(target.ref, signal, opts), signal);
         if (abort.signal.aborted) return;
@@ -1328,7 +1418,7 @@ export class ViewImages {
         continue;
       }
       const source = this.#sources.get(target.ref);
-      if (!source || cachedBlobFor(source, "full")) continue;
+      if (!source || this.#hasSatisfyingResident(target)) continue;
       if (Math.max(source.info.width, source.info.height) > MEDIA_PREVIEW_SIZES[0]) {
         return false;
       }
@@ -1337,10 +1427,22 @@ export class ViewImages {
     return smallRefines > 0 && urgentFull >= smallRefines;
   }
 
-  #canRefineVisible(): boolean {
-    if (this.#zooming) return false;
-    if (this.#deferRefine && !this.#canRefineDuringDefer()) return false;
-    return this.#allVisibleHaveResident();
+  /**
+   * True when uploading a `"full"` replacement right now would invalidate tiles mid-initial-paint
+   * for an image that already has a visible preview resident. Network download and worker decode
+   * still overlap immediately; only the GPU replacement upload stages for one batched flush.
+   */
+  #shouldStageUpload(target: Target): boolean {
+    return (
+      this.#deferRefine &&
+      !this.#opening &&
+      !target.standIn &&
+      target.priority === 0 &&
+      target.tier === "full" &&
+      target.previewTier !== "full" &&
+      !this.#canRefineDuringDefer() &&
+      this.#hasAnyResident(target.ref)
+    );
   }
 
   #pump(): void {
@@ -1350,7 +1452,7 @@ export class ViewImages {
       (a, b) =>
         a.priority - b.priority ||
         (a.standIn ? 0 : 1) - (b.standIn ? 0 : 1) ||
-        (b.demandedPx ?? 0) - (a.demandedPx ?? 0),
+        compareImportance(a, b),
     );
 
     // 1. Decode cached blobs first: stand-ins land on screen immediately, then sharp primaries.
@@ -1370,17 +1472,21 @@ export class ViewImages {
     }
 
     // 2. Network fetches across decoupled lanes:
-    //    - Lane A (urgent): visible direct-full (`demanded > 1024` / `natural <= demanded`) and
-    //      visible upgrades missing their preview tier. Guaranteed `URGENT_FETCH_SLOTS` slots so
-    //      they never serialize behind `?w=256` bursts, expanding to all 6 when Lane B is idle.
-    //    - Lane B (preview): visible `?w=256` / `?w=1024` initial previews.
-    //    - Lane C (refine): upgrades preview-backed visible images to `"full"` across all 6 slots
-    //      once visible previews are resident and opening/zooming settle.
+    //    - Lane A (urgent): visible direct-full (`demanded > 1024`, `natural <= demanded`, or
+    //      `target >= natural`) and visible upgrades missing their preview tier. Guaranteed
+    //      `URGENT_FETCH_SLOTS` slots, expanding to `MAX_FETCHES` when idle.
+    //    - Lane B (preview): visible `?w=256` / `?w=1024` initial previews, strictly prioritized
+    //      in `PREVIEW_FETCH_SLOTS` dedicated slots (bursting to `MAX_FETCHES` before originals
+    //      are ready to refine), ordered by visual importance (largest span, nearest centre).
+    //    - Lane C (refine): visible `"full"` originals start immediately alongside previews in
+    //      shared bandwidth (`REFINE_CONCURRENT_SLOTS` while previews are pending, expanding to
+    //      `MAX_FETCHES` once previews are issued), ordered largest span first, nearest centre.
     //    - Background: zoom forecasts and off-screen ring `?w=256` warmers.
     if (this.#fetchJobs.size < MAX_FETCHES) {
+      const now = Date.now();
       const visibleMeta = [...this.#metadata.entries()]
         .filter(([, demand]) => demand.visible)
-        .sort((a, b) => b[1].demandedPx - a[1].demandedPx);
+        .sort((a, b) => compareImportance(a[1], b[1]));
 
       const urgentMeta: Array<[string, MetaDemand]> = [];
       const previewMeta: Array<[string, MetaDemand]> = [];
@@ -1407,27 +1513,65 @@ export class ViewImages {
         }
       };
 
+      const fillPreview = (cap: number) => {
+        for (const [ref, demand] of previewMeta) {
+          if (this.#fetchJobs.size >= MAX_FETCHES || countLane("preview") >= cap) return;
+          this.#requestMetadata(ref, demand, "preview");
+        }
+      };
+
       // Step 2a: Reserve dedicated slots for urgent direct-full & upgrade fetches first.
       fillUrgent(URGENT_FETCH_SLOTS);
 
-      // Step 2b: Fill visible `?w=256` / `?w=1024` preview fetches in parallel.
-      for (const [ref, demand] of previewMeta) {
-        if (this.#fetchJobs.size >= MAX_FETCHES) break;
-        this.#requestMetadata(ref, demand, "preview");
-      }
+      // Step 2b: Strictly prioritize visible previews in their own dedicated slots.
+      fillPreview(PREVIEW_FETCH_SLOTS);
 
-      // Step 2c: Let urgent fetches expand into any remaining slots up to MAX_FETCHES.
+      // Step 2c: Let urgent fetches expand into remaining slots when previews aren't using them.
       if (this.#fetchJobs.size < MAX_FETCHES) fillUrgent(MAX_FETCHES);
 
-      // Step 2d: Lane C exactness refinement to original pixels at rest.
-      if (this.#fetchJobs.size < MAX_FETCHES && this.#canRefineVisible()) {
+      // Step 2d: Start visible `"full"` original fetches immediately after visible previews are
+      // issued, sharing bandwidth in visual-importance order while keeping preview slots protected.
+      if (this.#fetchJobs.size < MAX_FETCHES && !this.#zooming) {
+        let unissuedPreviews = 0;
+        for (const [ref] of previewMeta) {
+          const key = metaKey(ref);
+          if (!this.#fetchJobs.has(key) && (this.#retryAt.get(key)?.at ?? 0) <= now) {
+            unissuedPreviews++;
+          }
+        }
+        const activePreviews = countLane("preview");
+        const refineCap =
+          unissuedPreviews > 0 || activePreviews > 0
+            ? Math.max(
+                REFINE_CONCURRENT_SLOTS,
+                MAX_FETCHES - Math.min(PREVIEW_FETCH_SLOTS, unissuedPreviews + activePreviews),
+              )
+            : MAX_FETCHES;
         for (const target of ordered) {
-          if (this.#fetchJobs.size >= MAX_FETCHES) break;
-          if (target.priority === 0 && !target.standIn) this.#scheduleTierFetch(target, "refine");
+          if (this.#fetchJobs.size >= MAX_FETCHES || countLane("refine") >= refineCap) break;
+          if (target.priority === 0 && !target.standIn && !this.#isUrgentTarget(target)) {
+            this.#scheduleTierFetch(target, "refine");
+          }
         }
       }
 
-      // Step 2e: Forecasts and off-screen ring (`?w=256` only).
+      // Step 2e: Only let previews burst past PREVIEW_FETCH_SLOTS before any visible image has
+      // landed its preview and is ready to start `"full"` refinement in the shared refine slots.
+      if (this.#fetchJobs.size < MAX_FETCHES) {
+        let hasRefineSource = false;
+        if (!this.#zooming) {
+          for (const ref of this.#visible) {
+            const source = this.#sources.get(ref);
+            if (source && !cachedBlobFor(source, "full")) {
+              hasRefineSource = true;
+              break;
+            }
+          }
+        }
+        if (!hasRefineSource) fillPreview(MAX_FETCHES);
+      }
+
+      // Step 2f: Forecasts and off-screen ring (`?w=256` only).
       for (const target of ordered) {
         if (this.#fetchJobs.size >= MAX_FETCHES - 1) break;
         if (target.forecast) this.#scheduleTierFetch(target, "background");
@@ -1474,7 +1618,8 @@ export class ViewImages {
     void (async () => {
       const version = this.cache.encodedVersion(ref);
       try {
-        const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]);
+        const timeoutMs = requestedTier === "full" ? FULL_FETCH_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+        const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(timeoutMs)]);
         const opts = requestedTier === "full" ? undefined : { preview: requestedTier };
         const { blob, size, preview, previewMissing } = await untilAborted(
           this.cache.encoded(ref, signal, opts),
@@ -1525,16 +1670,47 @@ export class ViewImages {
     })();
   }
 
+  #flushStaged(): void {
+    const backend = this.#backend;
+    if (!backend || this.#staged.size === 0 || this.#flushingStaged) return;
+    const batch = [...this.#staged.values()];
+    this.#staged.clear();
+    this.#stagedBytes = 0;
+    this.#flushingStaged = true;
+    const upload = this.#uploadTail.then(async () => {
+      let didChange = false;
+      const signal = new AbortController().signal;
+      try {
+        for (const entry of batch) {
+          try {
+            if (backend !== this.#backend || !this.#visible.has(entry.target.ref)) continue;
+            const uploaded = await this.#commit(entry.target, entry.bitmap, backend, signal, false);
+            if (uploaded) didChange = true;
+          } finally {
+            entry.bitmap.close();
+          }
+        }
+      } finally {
+        this.#flushingStaged = false;
+        if (didChange && backend === this.#backend) this.changed();
+        if (!this.#deferRefine && this.#staged.size > 0) this.#flushStaged();
+        this.#pump();
+      }
+    });
+    this.#uploadTail = upload.catch(() => {});
+  }
+
   async #uploadLevel(
     target: Target,
     bitmap: ImageBitmap,
     backend: ImageBackend,
     signal: AbortSignal,
-  ): Promise<void> {
+    notify = true,
+  ): Promise<boolean> {
     const lKey = levelKey(target);
     const current = this.#residents.get(lKey);
     // Never overwrite a same-width resident that already has an equal or finer tier.
-    if (current && tierCovers(current.tier, target.tier)) return;
+    if (current && tierCovers(current.tier, target.tier)) return false;
     let uploaded = await backend.upload(target.handle, bitmap);
     if (!uploaded && !signal.aborted && backend === this.#backend) {
       const reclaimed = this.releasePressure();
@@ -1545,7 +1721,7 @@ export class ViewImages {
     }
     if (signal.aborted || backend !== this.#backend) {
       if (uploaded) backend.drop(target.handle, target.width);
-      return;
+      return false;
     }
     if (uploaded) {
       const replaced = this.#residents.get(lKey);
@@ -1555,7 +1731,8 @@ export class ViewImages {
     } else {
       this.#denied.add(lKey);
     }
-    this.changed();
+    if (notify) this.changed();
+    return true;
   }
 
   async #commit(
@@ -1563,8 +1740,10 @@ export class ViewImages {
     bitmap: ImageBitmap,
     backend: ImageBackend,
     signal: AbortSignal,
-  ): Promise<void> {
-    if (signal.aborted) return;
+    notify = true,
+  ): Promise<boolean> {
+    if (signal.aborted) return false;
+    let didChange = false;
     const fallback = this.#missingFallback(target);
     if (fallback) {
       // Reuse the decoded pixels. Restoring a tab needs no second full decode.
@@ -1576,12 +1755,12 @@ export class ViewImages {
         await this.#paceUpload(bytes(fallback), signal);
         this.#refreshProtection();
         const room = this.#room(target, fallback);
-        if (!room || signal.aborted) return;
+        if (!room || signal.aborted) return didChange;
         for (const level of room) {
           if (this.#residentBytes + bytes(fallback) <= this.#budget) break;
           this.#drop(levelKey(level));
         }
-        await this.#uploadLevel(fallback, thumbnail, backend, signal);
+        if (await this.#uploadLevel(fallback, thumbnail, backend, signal, notify)) didChange = true;
       } catch {
         // The optional copy must not mark otherwise usable source bytes corrupt.
         if (!signal.aborted) this.#denied.add(levelKey(fallback));
@@ -1590,12 +1769,13 @@ export class ViewImages {
       }
     }
     await this.#paceUpload(bytes(target), signal);
-    if (signal.aborted) return;
+    if (signal.aborted) return didChange;
     this.#refreshProtection();
     const room = this.#room(target);
-    if (!room) return;
+    if (!room) return didChange;
     for (const level of room) this.#drop(levelKey(level));
-    await this.#uploadLevel(target, bitmap, backend, signal);
+    if (await this.#uploadLevel(target, bitmap, backend, signal, notify)) didChange = true;
+    return didChange;
   }
 
   #requestDecode(
@@ -1618,9 +1798,27 @@ export class ViewImages {
         // work returns instead of starting a new decode on every camera tick.
         bitmap = await untilAborted(this.decode(input, resize(target)), timeout, (b) => b.close());
         const decoded = bitmap;
-        const upload = this.#uploadTail.then(() =>
-          this.#commit(target, decoded, backend, abort.signal),
-        );
+        const upload = this.#uploadTail.then(async () => {
+          if (
+            !abort.signal.aborted &&
+            backend === this.#backend &&
+            this.#shouldStageUpload(target) &&
+            this.#stagedBytes + need <= STAGED_UPLOAD_BYTES
+          ) {
+            const lKey = levelKey(target);
+            const prev = this.#staged.get(lKey);
+            if (prev) {
+              prev.bitmap.close();
+              this.#stagedBytes -= prev.bytes;
+            }
+            this.#staged.set(lKey, { target, bitmap: decoded, bytes: need });
+            this.#stagedBytes += need;
+            bitmap = undefined;
+            if (this.allVisibleFullReady) this.onAllVisibleFullReady?.();
+            return;
+          }
+          await this.#commit(target, decoded, backend, abort.signal);
+        });
         this.#uploadTail = upload.catch(() => {});
         await upload;
       } catch {

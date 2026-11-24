@@ -1303,7 +1303,7 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
     }
   });
 
-  it("defers Lane C full refinement on initial page open until visible tiles finish and present", async () => {
+  it("downloads full originals in parallel while staging GPU replacement uploads until initial preview tiles nearly finish", async () => {
     vi.stubGlobal("navigator", {
       gpu: { requestAdapter: async () => ({ info: { description: "NVIDIA T4" } }) },
     });
@@ -1319,7 +1319,9 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
       close() {},
     }));
     state.readbackError = false;
-    state.framePending = 2;
+    state.framePending = 4;
+    let holdFull = true;
+    const fullResolvers: Array<() => void> = [];
     const encodedCalls: Array<256 | 1024 | "full"> = [];
     const editor = { scene: {}, doc: { version: 1 } } as never;
     const images = {
@@ -1330,6 +1332,9 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
       encoded: async (_ref: string, _signal: AbortSignal, opts?: { preview?: 256 | 1024 }) => {
         const tier = opts?.preview ?? "full";
         encodedCalls.push(tier);
+        if (tier === "full" && holdFull) {
+          await new Promise<void>((resolve) => fullResolvers.push(resolve));
+        }
         return {
           blob: new Blob([String(tier)]),
           size: { width: 3093, height: 2247 },
@@ -1353,23 +1358,33 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
       });
 
     try {
-      // While tiles are still baking (framePending > 0), only ?w=256 downloads; full stays deferred.
+      // Preview uploads immediately while full starts downloading in parallel (held).
       await vi.waitFor(() => {
         draw();
-        expect(state.uploadedWidths).toContain(193);
+        expect(encodedCalls).toEqual([256, "full"]);
+        expect(state.uploadedWidths.filter((w) => w === 193)).toHaveLength(1);
       });
-      await new Promise((r) => setTimeout(r, 20));
-      expect(encodedCalls).toEqual([256]);
 
-      // Once visible tiles finish (framePending = 0) and present, Lane C launches full and settles exact.
+      // Releasing full while tiles are still baking (framePending = 4 > 2): full decodes in
+      // parallel into the staged batch without issuing a second GPU upload that invalidates tiles.
+      holdFull = false;
+      for (const done of fullResolvers.splice(0)) done();
+      await new Promise((r) => setTimeout(r, 30));
+      draw();
+      expect(state.uploadedWidths.filter((w) => w === 193)).toHaveLength(1);
+
+      // Once initial preview tiles finish (framePending = 0) and present on this 1-tile viewport,
+      // the staged full bitmap flushes immediately and settles exact.
       state.framePending = 0;
       await vi.waitFor(() => {
         const res = draw();
-        expect(encodedCalls).toEqual([256, "full"]);
+        expect(state.uploadedWidths.filter((w) => w === 193)).toHaveLength(2);
         expect(res?.exact).toBe(true);
       });
       expect(view?.reducedImages).toBe(0);
     } finally {
+      holdFull = false;
+      for (const done of fullResolvers.splice(0)) done();
       state.framePending = 0;
       state.imageDemands = [];
       view?.dispose();

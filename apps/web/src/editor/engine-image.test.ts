@@ -624,7 +624,7 @@ describe("progressive image tiers", () => {
     expect(tierForTarget(icon, { width: 256, height: 256 }, 300)).toBe("full");
   });
 
-  it("never marks previews exact: Fit view shows w=256 during openingVisible, then refines visible images to full while keeping off-screen on w=256", async () => {
+  it("never marks previews exact: Fit view shows w=256 while full is held, then refines visible images to full while keeping off-screen on w=256", async () => {
     const r = progressiveRig({
       size: { width: 3093, height: 2247 },
       holdTiers: new Set<ImageTier>(["full"]),
@@ -634,26 +634,19 @@ describe("progressive image tiers", () => {
       ...demand(["off1"], 1500, 1100, false),
     ];
     try {
-      // While openingVisible=true, Fit view fetches ONLY ?w=256 previews and never triggers full.
+      // Visible previews show immediately while original refinement starts in parallel (held).
       await eventually(() => {
         expect(r.images.update(demands, 1, limit(64), 0, true)).toBe(false);
         expect(r.held("vis1")?.has(193)).toBe(true);
         expect(r.held("vis2")?.has(193)).toBe(true);
         expect(r.held("off1")?.has(193)).toBe(true);
-      });
-      await tick();
-      expect(r.fetched.every((f) => f.tier === 256)).toBe(true);
-
-      // Once openingVisible ends, visible images start refining to full while still provisional.
-      await eventually(() => {
-        expect(r.images.update(demands, 1, limit(64), 16, false)).toBe(false);
         expect(r.fetched.some((f) => f.ref === "vis1" && f.tier === "full")).toBe(true);
         expect(r.fetched.some((f) => f.ref === "vis2" && f.tier === "full")).toBe(true);
       });
       // Off-screen ring never fetches full over the network.
       expect(r.fetched.some((f) => f.ref === "off1" && f.tier === "full")).toBe(false);
 
-      // Releasing full settles exact with reduced=0.
+      // Releasing full and deferRefine settles exact with reduced=0.
       r.releaseTier("full");
       await eventually(() => {
         expect(r.images.update(demands, 1, limit(64), 32, false)).toBe(true);
@@ -854,32 +847,145 @@ describe("progressive image tiers", () => {
     }
   });
 
-  it("defers Lane C refinement until setDeferRefine(false) is called after all previews are resident", async () => {
+  it("downloads and decodes full originals in parallel while staging GPU replacement uploads until setDeferRefine(false)", async () => {
     const r = progressiveRig({
       size: { width: 3093, height: 2247 },
-      holdTiers: new Set<ImageTier>(["full"]),
     });
     const demands = demand(["a", "b"], 100, 75, true);
     try {
+      // With deferRefine=true and opening=false: previews upload immediately, full originals
+      // download and decode in parallel into the staged batch without double-uploading to GPU.
       await eventually(() => {
         expect(r.images.update(demands, 1, limit(64), 0, true, false)).toBe(false);
         expect(r.images.allVisiblePreviewResident).toBe(true);
+        expect(r.images.allVisibleFullReady).toBe(true);
       });
-      expect(r.fetched.every((f) => f.tier === 256)).toBe(true);
+      expect(r.fetched.some((f) => f.ref === "a" && f.tier === "full")).toBe(true);
+      expect(r.fetched.some((f) => f.ref === "b" && f.tier === "full")).toBe(true);
+      // Only the initial preview stand-ins have been uploaded to GPU so far.
+      expect(r.uploads.filter((u) => u.width === 193)).toHaveLength(2);
 
-      // Releasing deferRefine immediately starts Lane C without waiting for another update().
+      // Releasing deferRefine flushes all staged full bitmaps in one batch and settles exact.
       r.images.setDeferRefine(false);
-      await eventually(() => {
-        expect(r.fetched.some((f) => f.ref === "a" && f.tier === "full")).toBe(true);
-        expect(r.fetched.some((f) => f.ref === "b" && f.tier === "full")).toBe(true);
-      });
-
-      r.releaseTier("full");
       await eventually(() => {
         expect(r.images.update(demands, 1, limit(64), 16, false, false)).toBe(true);
       });
+      expect(r.uploads.filter((u) => u.width === 193)).toHaveLength(4);
       expect(r.images.reduced).toBe(0);
     } finally {
+      r.images.setBackend(null);
+    }
+  });
+
+  it("keeps preview slots strictly ahead of originals and orders both by largest span then nearest centre", async () => {
+    // 8 visible images: previews for the first 2 resolve immediately while the remaining 6 stall,
+    // verifying 4 preview slots stay dedicated while 2 refine slots start immediately in importance order.
+    const slowRefs = new Set([
+      "small-far",
+      "small-near",
+      "med-far",
+      "med-near",
+      "big-far",
+      "big-edge",
+    ]);
+    const r = progressiveRig({
+      size: { width: 3093, height: 2247 },
+      holdRefs: slowRefs,
+      holdTiers: new Set<ImageTier>(["full"]),
+    });
+    const demands: ImageDemand[] = [
+      {
+        ref: "small-far",
+        visible: true,
+        span: null,
+        hint: { width: 60, height: 60 },
+        centerDistance: 900,
+      },
+      {
+        ref: "small-near",
+        visible: true,
+        span: null,
+        hint: { width: 60, height: 60 },
+        centerDistance: 10,
+      },
+      {
+        ref: "med-far",
+        visible: true,
+        span: null,
+        hint: { width: 120, height: 120 },
+        centerDistance: 800,
+      },
+      {
+        ref: "med-near",
+        visible: true,
+        span: null,
+        hint: { width: 120, height: 120 },
+        centerDistance: 20,
+      },
+      {
+        ref: "big-far",
+        visible: true,
+        span: null,
+        hint: { width: 220, height: 220 },
+        centerDistance: 500,
+      },
+      {
+        ref: "big-edge",
+        visible: true,
+        span: null,
+        hint: { width: 220, height: 220 },
+        centerDistance: 300,
+      },
+      {
+        ref: "hero-side",
+        visible: true,
+        span: null,
+        hint: { width: 240, height: 240 },
+        centerDistance: 200,
+      },
+      {
+        ref: "hero-center",
+        visible: true,
+        span: null,
+        hint: { width: 240, height: 240 },
+        centerDistance: 5,
+      },
+    ];
+    try {
+      // Initial burst fills all 6 slots with previews in visual-importance order (largest span, nearest centre).
+      r.images.update(demands, 1, limit(64), 0, true, true);
+      await eventually(() => {
+        expect(r.fetched.filter((f) => f.tier === 256).length).toBeGreaterThanOrEqual(6);
+      });
+      expect(r.fetched.slice(0, 6).map((f) => f.ref)).toEqual([
+        "hero-center",
+        "hero-side",
+        "big-edge",
+        "big-far",
+        "med-near",
+        "med-far",
+      ]);
+
+      // Once hero-center and hero-side previews finish, 4 preview slots remain active AND the 2 freed
+      // slots launch hero-center then hero-side full originals immediately alongside the 4 stalled previews.
+      await eventually(() => {
+        r.images.update(
+          demands.map((d) =>
+            d.ref === "hero-center" || d.ref === "hero-side" ? { ...d, span: d.hint ?? null } : d,
+          ),
+          1,
+          limit(64),
+          16,
+          true,
+          true,
+        );
+        expect(r.fetched.filter((f) => f.tier === "full").map((f) => f.ref)).toEqual([
+          "hero-center",
+          "hero-side",
+        ]);
+      });
+    } finally {
+      for (const ref of [...slowRefs]) r.releaseRef(ref);
       r.releaseTier("full");
       r.images.setBackend(null);
     }

@@ -52,6 +52,8 @@ export interface ImageDemand {
   readonly span: Size | null;
   /** Estimated drawn span in page units before natural image dimensions are known. */
   readonly hint?: Size;
+  /** Distance from the layer's bounds centre to the viewport centre, in page units. */
+  readonly centerDistance?: number;
 }
 
 export interface DisplayListOptions {
@@ -564,18 +566,24 @@ export class DisplayListBuilder {
     const vy0 = view.y;
     const vx1 = view.x + view.width;
     const vy1 = view.y + view.height;
+    const vcx = (vx0 + vx1) * 0.5;
+    const vcy = (vy0 + vy1) * 0.5;
     for (const entry of cache.entries) {
       const distance =
         Math.max(vx0 - entry.x1, entry.x0 - vx1, vy0 - entry.y1, entry.y0 - vy1) - entry.reach;
       if (distance > margin) continue;
       const visible = distance <= 0;
+      const centerDistance = Math.hypot(
+        (entry.x0 + entry.x1) * 0.5 - vcx,
+        (entry.y0 + entry.y1) * 0.5 - vcy,
+      );
       for (const fill of entry.fills) {
         const meta = this.#image(fill.ref);
         const span = meta
           ? imageDrawnSize(fill.scaleMode, entry.box, meta, entry.scale, fill.crop)
           : null;
         if (span) {
-          yield { ref: fill.ref, visible, span, hint: span };
+          yield { ref: fill.ref, visible, span, hint: span, centerDistance };
         } else {
           const cropW = fill.crop ? Math.max(0.05, fill.crop.width) : 1;
           const cropH = fill.crop ? Math.max(0.05, fill.crop.height) : 1;
@@ -587,6 +595,7 @@ export class DisplayListBuilder {
               width: (entry.box.width * entry.scale.width) / cropW,
               height: (entry.box.height * entry.scale.height) / cropH,
             },
+            centerDistance,
           };
         }
       }

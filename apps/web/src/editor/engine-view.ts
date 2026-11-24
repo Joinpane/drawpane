@@ -1029,12 +1029,19 @@ export class EngineView {
     height: number;
     exact: boolean;
     previewReady: boolean;
+    previewNearlyReady: boolean;
     epoch: number;
     key: string;
     scale: number;
   } | null = null;
-  /** Page whose initial preview-backed frame has painted/presented so Lane C refinement can run. */
+  /** Page whose initial preview-backed frame has painted/presented so staged full uploads can flush. */
   #previewSettledPage: string | null = null;
+  /** Page where >=85% of initial preview tiles have presented, ready to flush once all originals decode. */
+  #previewNearlySettledPage: string | null = null;
+  /** Last GPU camera/viewport passed to `#updateImages`, used to refresh images silently during `opening`. */
+  #lastCamera: { camera: Camera; width: number; height: number } | null = null;
+  /** True when images updated silently while streaming display-list `opening` slices. */
+  #openingImageDirty = false;
   #gpuRaster: {
     viewport: string;
     revision: number;
@@ -1271,16 +1278,42 @@ export class EngineView {
       images,
       (ref) => {
         this.#builder.imageReady(ref);
+        // While streaming display-list `opening` slices, refresh image demands directly without
+        // cancelling `ahead()` or triggering a full-screen GPU readback for each arriving preview.
+        if (
+          this.#builder.opening &&
+          this.#lastCamera &&
+          this.#presenting?.pageId === this.#builder.pageId
+        ) {
+          this.#openingImageDirty = true;
+          this.#updateImages(
+            this.#presenting.pageId,
+            this.#lastCamera.camera,
+            this.#lastCamera.width,
+            this.#lastCamera.height,
+          );
+          return;
+        }
         this.onChange();
       },
       () => {
         this.#imageVersion++;
+        if (this.#builder.opening && this.#presenting?.pageId === this.#builder.pageId) {
+          this.#openingImageDirty = true;
+          return;
+        }
         this.onChange();
       },
       undefined,
       (ref, blob) => {
         if (this.#editor.canEdit && images.encodedUrl?.(ref)?.startsWith("/api/media/")) {
           backfillMediaPreviews(ref, blob);
+        }
+      },
+      () => {
+        const pageId = this.#presenting?.pageId;
+        if (pageId && this.#previewNearlySettledPage === pageId) {
+          this.#releasePreviewRefine(pageId);
         }
       },
     );
@@ -2111,6 +2144,7 @@ export class EngineView {
   #releasePreviewRefine(pageId: string): void {
     if (this.#previewSettledPage === pageId) return;
     this.#previewSettledPage = pageId;
+    this.#previewNearlySettledPage = pageId;
     this.#images.setDeferRefine(false);
   }
 
@@ -2160,6 +2194,7 @@ export class EngineView {
     let r = engine.apply(message);
     if (this.#builder.stats.fresh) {
       this.#previewSettledPage = null;
+      this.#previewNearlySettledPage = null;
       this.opened = {
         pageId,
         buildMs: t1 - t0,
@@ -2225,6 +2260,7 @@ export class EngineView {
     ]);
     if (this.#builder.stats.fresh) {
       this.#previewSettledPage = null;
+      this.#previewNearlySettledPage = null;
       this.opened = {
         pageId,
         buildMs: t1 - t0,
@@ -2273,7 +2309,12 @@ export class EngineView {
     if (this.#dead || this.#recovering) return NOT_DRAWN;
     const at = this.#presenting;
     if (!at || at.pageId !== pageId || at.width !== width || at.height !== height) {
-      if (!at || at.pageId !== pageId) this.#previewSettledPage = null;
+      if (!at || at.pageId !== pageId) {
+        this.#previewSettledPage = null;
+        this.#previewNearlySettledPage = null;
+        this.#lastCamera = null;
+        this.#openingImageDirty = false;
+      }
       this.#supersede();
       this.#presenting = { pageId, width, height };
     }
@@ -2319,7 +2360,14 @@ export class EngineView {
         maxSliceMs: Math.max(this.idle.maxSliceMs, elapsed),
       };
       if (b.opening) {
-        if (!b.openingVisible) this.#images.setDeferRefine(false);
+        if (this.#lastCamera) {
+          this.#updateImages(
+            pageId,
+            this.#lastCamera.camera,
+            this.#lastCamera.width,
+            this.#lastCamera.height,
+          );
+        }
         return {
           progressed: true,
           drawn: 0,
@@ -2331,6 +2379,10 @@ export class EngineView {
         };
       }
       // All layers are admitted: let the next frame draw the full-page coarse view and refine.
+      if (this.#openingImageDirty) {
+        this.#openingImageDirty = false;
+        this.onChange();
+      }
       return {
         progressed: false,
         drawn: 0,
@@ -2516,6 +2568,7 @@ export class EngineView {
       return NOT_DRAWN;
     }
     const cam: Camera = { zoom: camera.zoom, x: camera.x, y: camera.y, dpr };
+    this.#lastCamera = { camera: cam, width, height };
     const imagesSettled = this.#updateImages(pageId, cam, width, height);
     const imagesExact = imagesSettled && this.#images.reduced === 0;
     // While text in view is still to be sent whole, a frame draws only what nothing stands in
@@ -2670,12 +2723,19 @@ export class EngineView {
       imagesExact &&
       this.#builder.pendingVisible === 0 &&
       !this.#limitReason;
-    const previewFrameReady =
+    const visibleTiles = Math.max(
+      1,
+      Math.ceil(raster.width / 512) * Math.ceil(raster.height / 512),
+    );
+    const maxEarlyFlushPending = Math.floor(visibleTiles * 0.15);
+    const previewNearlyReady =
       !opening &&
       !computeBehind &&
-      f.tiles.pending === 0 &&
+      f.tiles.pending <= maxEarlyFlushPending &&
       this.#builder.pendingVisible === 0 &&
       this.#images.allVisiblePreviewResident;
+    const previewFrameReady =
+      previewNearlyReady && (f.tiles.pending === 0 || this.#images.allVisibleFullReady);
     this.#canvas.style.backgroundColor = "";
     const n = ++this.#frame;
     if (opening && this.#builder.stats.fresh) {
@@ -2762,13 +2822,17 @@ export class EngineView {
         height: raster.height,
         exact: shownExact,
         previewReady: previewFrameReady,
+        previewNearlyReady,
         epoch: this.#epoch,
         key: frameKey,
         scale: raster.scale,
       };
       this.#readNext();
-    } else if (previewFrameReady) {
-      this.#releasePreviewRefine(pageId);
+    } else {
+      if (previewNearlyReady) this.#previewNearlySettledPage = pageId;
+      if (previewFrameReady || (previewNearlyReady && this.#images.allVisibleFullReady)) {
+        this.#releasePreviewRefine(pageId);
+      }
     }
     this.last = {
       pageId,
@@ -3338,7 +3402,10 @@ export class EngineView {
       this.readbackDiag.presented++;
       this.#diagEvent("present", want.n, { ms: Math.round(performance.now() - t) });
       this.onPresented(want.exact && want.n === this.#frame, want.n);
-      if (want.previewReady) this.#releasePreviewRefine(want.pageId);
+      if (want.previewNearlyReady) this.#previewNearlySettledPage = want.pageId;
+      if (want.previewReady || (want.previewNearlyReady && this.#images.allVisibleFullReady)) {
+        this.#releasePreviewRefine(want.pageId);
+      }
       this.#completeOpeningFrame(want.n);
       this.#readNext();
     });
