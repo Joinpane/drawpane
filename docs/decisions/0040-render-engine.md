@@ -2061,9 +2061,13 @@ the same container. The gate's budgets: lag p95 ≤ 100 ms, dropped frames ≤ 5
 | Cmd+scroll in dropped frames | 11-57% (median 44%) | 0-33% (median 3.7%) |
 | Time to exact: Shift+2, Shift+0, pinch from fit | 0.78, 0.31, 0.19 s (medians) | 0.79, 0.33, 0.18 s |
 
-- After the re-check fixes, rebased onto fixed-function blending (#351), a run paired with main
-  met every gated budget: pinch-out at 58 fps with 2.6% dropped and 62 ms p95 lag, against main's
-  43 fps, 28% and 248 ms. At a 4 MiB tile budget (most frames direct), every moving call stayed a
+- After the re-check fixes, rebased onto fixed-function blending (#351), four runs paired with
+  main: this change met every gated budget in two (pinch-out at 58 to 60 fps, 0 to 2.6% dropped,
+  45 to 62 ms p95 lag, against main's 39 to 43 fps, 28 to 35% and 248 to 720 ms). In the other
+  two, pinch-out missed (6.4% dropped in one; 42 fps, 30% and 346 ms in the other, still ahead
+  of main's 39 fps, 35% and 522 ms). That's a GPU backlog, not main-thread time: the pinch-out
+  still starts some tiles nothing stands in for (9 to 29 a gesture in lag-audit probes). Pan lag
+  and Cmd+scroll in swing as widely on main across the same runs. At a 4 MiB tile budget (most frames direct), every moving call stayed a
   bounded stand-in, the slowest 30 ms (1.2 s before the re-check). Exact direct frames at rest
   still draw every tile at once (0.9 to 1.2 s each there), as on main.
 - In the lag audit's probes with the gate's timing, the overview is now drawn before the
