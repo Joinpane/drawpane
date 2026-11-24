@@ -1915,6 +1915,13 @@ impl Store {
         out
     }
 
+    /// Drops the readers' page boxes kept for this revision (`dirty_readers`), as an edit does:
+    /// for tests that compare against a store that keeps them.
+    #[doc(hidden)]
+    pub fn forget_dirty_readers(&self) {
+        self.dirty_readers.borrow_mut().take();
+    }
+
     /// The shown readers in page units (`DirtyReader`), worked out once a revision.
     fn dirty_readers(&mut self) -> std::rc::Rc<Vec<DirtyReader>> {
         if let Some(cached) = self.dirty_readers.borrow().as_ref() {
