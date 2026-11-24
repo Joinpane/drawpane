@@ -2083,6 +2083,11 @@ export class EngineView {
           if (!result.ok && result.code === ErrorCode.Trap) this.#handleGpuFailure(result, false);
           return result.ok;
         },
+        uploadRows: (handle, bitmap, y, rows) => {
+          const result = engine.putGpuImageRows(handle, bitmap, y, rows);
+          if (!result.ok && result.code === ErrorCode.Trap) this.#handleGpuFailure(result, false);
+          return result.ok;
+        },
         drop: (handle, width) => {
           engine.dropImageLevel(handle, width);
         },

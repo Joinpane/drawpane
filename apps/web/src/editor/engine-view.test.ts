@@ -187,6 +187,11 @@ vi.mock("@drawpane/engine", () => ({
       state.uploadedWidths.push(bitmap.width);
       return { ok: true };
     }
+    putGpuImageRows(_handle: number, bitmap: ImageBitmap, y: number, rows: number) {
+      // Resident once its last rows are in.
+      if (y + rows >= (bitmap.height || 1)) state.uploadedWidths.push(bitmap.width);
+      return { ok: true };
+    }
     dropImageLevel(_handle: number, width: number) {
       state.uploadedWidths = state.uploadedWidths.filter((held) => held !== width);
     }

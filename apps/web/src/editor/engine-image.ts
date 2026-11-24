@@ -26,6 +26,13 @@ const ZOOM_SAMPLE_MS = 100;
 const ZOOM_LOOKAHEAD_MS = 180;
 const MAX_ZOOM_LOOKAHEAD = 8;
 const UPLOAD_SLICE_BYTES = 12 * MIB;
+/**
+ * A backend that uploads in row strips (`ImageBackend.uploadRows`) gets at most this much a frame,
+ * in strips of at most `UPLOAD_STRIP_BYTES`: on a T4 a 1 MiB strip of an ImageBitmap holds the
+ * main thread 1.5-2 ms, a whole 12 MiB level 20-55 ms.
+ */
+const UPLOAD_FRAME_BYTES = 2 * MIB;
+const UPLOAD_STRIP_BYTES = 1 * MIB;
 const REQUEST_TIMEOUT_MS = 8000;
 /** Full originals (up to 20 MB) need a wider timeout than small previews on slow links (e.g. 10 Mbps). */
 const FULL_FETCH_TIMEOUT_MS = 30_000;
@@ -161,6 +168,11 @@ interface Resident extends Target {
 interface ImageBackend {
   readonly retryUpload?: boolean;
   upload(handle: number, bitmap: ImageBitmap): boolean | Promise<boolean>;
+  /**
+   * Uploads rows `y` to `y + rows` of a level, in order from 0 (the level is drawn once its last
+   * rows are in), so a large one spreads over frames. `drop` lets go of one left part done.
+   */
+  uploadRows?(handle: number, bitmap: ImageBitmap, y: number, rows: number): boolean;
   drop(handle: number, width: number): void;
 }
 
@@ -451,7 +463,17 @@ export class ViewImages {
   #inflightBytes = 0;
   #stagedBytes = 0;
   #flushingStaged = false;
-  #uploadTail = Promise.resolve();
+  /** Decoded levels waiting their turn to upload, one at a time, what the view shows first. */
+  #commits: {
+    key: string;
+    priority: number;
+    seq: number;
+    run(): Promise<void>;
+    resolve(): void;
+    reject(error: unknown): void;
+  }[] = [];
+  #commitSeq = 0;
+  #committing = false;
   #residentBytes = 0;
   #clock = 0;
   #nextHandle = 1;
@@ -1277,7 +1299,8 @@ export class ViewImages {
       }
       // The largest allowed single bitmap is 64 MiB. Give an upload over the
       // slice budget its own frame so it can keep its required resolution.
-      if (this.#uploadedThisFrame === 0 || this.#uploadedThisFrame + need <= UPLOAD_SLICE_BYTES) {
+      const slice = this.#backend?.uploadRows ? UPLOAD_FRAME_BYTES : UPLOAD_SLICE_BYTES;
+      if (this.#uploadedThisFrame === 0 || this.#uploadedThisFrame + need <= slice) {
         this.#uploadedThisFrame += need;
         return;
       }
@@ -1768,7 +1791,8 @@ export class ViewImages {
     this.#staged.clear();
     this.#stagedBytes = 0;
     this.#flushingStaged = true;
-    const upload = this.#uploadTail.then(async () => {
+    const first = batch.reduce((best, entry) => Math.min(best, entry.target.priority), Infinity);
+    const upload = this.#queueCommit("staged", first, async () => {
       let didChange = false;
       const signal = new AbortController().signal;
       try {
@@ -1788,7 +1812,7 @@ export class ViewImages {
         this.#pump();
       }
     });
-    this.#uploadTail = upload.catch(() => {});
+    void upload.catch(() => {});
   }
 
   async #uploadLevel(
@@ -1802,12 +1826,12 @@ export class ViewImages {
     const current = this.#residents.get(lKey);
     // Never overwrite a same-width resident that already has an equal or finer tier.
     if (current && tierCovers(current.tier, target.tier)) return false;
-    let uploaded = await backend.upload(target.handle, bitmap);
+    let uploaded = await this.#upload(target, bitmap, backend, signal);
     if (!uploaded && !signal.aborted && backend === this.#backend) {
       const reclaimed = this.releasePressure();
       if (reclaimed && backend.retryUpload) {
-        await this.#paceUpload(bytes(target), signal);
-        if (!signal.aborted) uploaded = await backend.upload(target.handle, bitmap);
+        await this.#paceUpload(this.#firstUpload(target), signal);
+        if (!signal.aborted) uploaded = await this.#upload(target, bitmap, backend, signal);
       }
     }
     if (signal.aborted || backend !== this.#backend) {
@@ -1824,6 +1848,81 @@ export class ViewImages {
     }
     if (notify) this.changed();
     return true;
+  }
+
+  /**
+   * Uploads a level whole, or in row strips paced over frames (the caller paced the first). A
+   * level left part done (dropped, or a strip refused) is let go.
+   */
+  async #upload(
+    target: Target,
+    bitmap: ImageBitmap,
+    backend: ImageBackend,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    if (!backend.uploadRows) return backend.upload(target.handle, bitmap);
+    const { width, height } = bitmap;
+    const strip = Math.max(1, Math.floor(UPLOAD_STRIP_BYTES / (width * 4)));
+    for (let y = 0; y < height; y += strip) {
+      const rows = Math.min(strip, height - y);
+      if (y > 0) {
+        try {
+          await this.#paceUpload(rows * width * 4, signal);
+        } catch {
+          // Dropped: nothing more of it comes.
+        }
+      }
+      if (
+        signal.aborted ||
+        backend !== this.#backend ||
+        !backend.uploadRows(target.handle, bitmap, y, rows)
+      ) {
+        if (y > 0) backend.drop(target.handle, width);
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** What a level's upload takes from its first frame: all of it, or its first strip. */
+  #firstUpload(target: Target): number {
+    if (!this.#backend?.uploadRows) return bytes(target);
+    const strip = Math.max(1, Math.floor(UPLOAD_STRIP_BYTES / (target.width * 4)));
+    return Math.min(target.height, strip) * target.width * 4;
+  }
+
+  /**
+   * Runs a decoded level's commit when its turn comes: one at a time (each makes room against
+   * what's resident), the most wanted first (what the view shows), in order of arrival among
+   * equals. A level arriving mid-upload waits for that one's last strips.
+   */
+  #queueCommit(key: string, priority: number, run: () => Promise<void>): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      this.#commits.push({ key, priority, seq: ++this.#commitSeq, run, resolve, reject });
+      void this.#nextCommits();
+    });
+  }
+
+  async #nextCommits(): Promise<void> {
+    if (this.#committing) return;
+    this.#committing = true;
+    try {
+      const want = (c: { key: string; priority: number }) =>
+        this.#targets.get(c.key)?.priority ?? c.priority;
+      for (;;) {
+        this.#commits.sort((a, b) => want(a) - want(b) || a.seq - b.seq);
+        const next = this.#commits.shift();
+        if (!next) break;
+        try {
+          await next.run();
+          next.resolve();
+        } catch (error) {
+          next.reject(error);
+        }
+      }
+    } finally {
+      this.#committing = false;
+    }
   }
 
   async #commit(
@@ -1843,7 +1942,7 @@ export class ViewImages {
         thumbnail = await untilAborted(createImageBitmap(bitmap, resize(fallback)), signal, (b) =>
           b.close(),
         );
-        await this.#paceUpload(bytes(fallback), signal);
+        await this.#paceUpload(this.#firstUpload(fallback), signal);
         this.#refreshProtection();
         const room = this.#room(target, fallback);
         if (!room || signal.aborted) return didChange;
@@ -1859,7 +1958,7 @@ export class ViewImages {
         thumbnail?.close();
       }
     }
-    await this.#paceUpload(bytes(target), signal);
+    await this.#paceUpload(this.#firstUpload(target), signal);
     if (signal.aborted) return didChange;
     this.#refreshProtection();
     const room = this.#room(target);
@@ -1889,7 +1988,7 @@ export class ViewImages {
         // work returns instead of starting a new decode on every camera tick.
         bitmap = await untilAborted(this.decode(input, resize(target)), timeout, (b) => b.close());
         const decoded = bitmap;
-        const upload = this.#uploadTail.then(async () => {
+        const upload = this.#queueCommit(jobKey(target), target.priority, async () => {
           if (
             !abort.signal.aborted &&
             backend === this.#backend &&
@@ -1910,7 +2009,6 @@ export class ViewImages {
           }
           await this.#commit(target, decoded, backend, abort.signal);
         });
-        this.#uploadTail = upload.catch(() => {});
         await upload;
       } catch {
         if (!abort.signal.aborted) {

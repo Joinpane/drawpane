@@ -846,6 +846,18 @@ export class RenderEngine {
     ) as Result;
   }
 
+  /**
+   * `putGpuImageLevel` in row strips over frames, so no frame spends long uploading: rows `y` to
+   * `y + rows` of the level, in order from 0. The level is drawn once its last rows are in.
+   */
+  putGpuImageRows(id: number, bitmap: ImageBitmap, y: number, rows: number): Result {
+    return this.#call((e) =>
+      e.putGpuImageRows
+        ? outcome(e.putGpuImageRows(id, bitmap, y, rows))
+        : fail(ErrorCode.NotAvailable, "no GPU image upload"),
+    ) as Result;
+  }
+
   dropImageLevel(id: number, width: number): Result {
     return this.#call((e) => outcome(e.dropImageLevel(id, width))) as Result;
   }

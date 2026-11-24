@@ -1095,7 +1095,9 @@ impl Queue {
 
         let mut needs_flag = false;
         needs_flag |= matches!(source.source, wgt::ExternalImageSource::OffscreenCanvas(_));
-        needs_flag |= source.origin != wgt::Origin2d::ZERO;
+        // Drawpane: the vendored GL backend selects a source origin with WebGL2's UNPACK_SKIP_PIXELS
+        // and UNPACK_SKIP_ROWS (a sub-rectangle of the image), so it needs no downlevel flag there.
+        needs_flag |= source.origin != wgt::Origin2d::ZERO && self.device.backend() != wgt::Backend::Gl;
         needs_flag |= destination.color_space != wgt::PredefinedColorSpace::Srgb;
         #[allow(clippy::bool_comparison)]
         if matches!(source.source, wgt::ExternalImageSource::ImageBitmap(_)) {

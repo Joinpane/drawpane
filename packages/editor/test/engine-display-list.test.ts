@@ -10,7 +10,7 @@ import { type EngineModule, RenderEngine, unsupportedNames } from "@drawpane/eng
 import { built, loadNodeEngine } from "@drawpane/engine/node";
 import { keyBetween, type NodeRecord, type Op, type PropName, ROOT_ID } from "@drawpane/model";
 import fc from "fast-check";
-import { beforeAll, describe, expect, it } from "vitest";
+import { beforeAll, describe, expect, it, vi } from "vitest";
 import { Doc } from "../src/doc";
 import { DisplayListBuilder } from "../src/engine/display-list";
 import { Scene } from "../src/scene";
@@ -825,6 +825,38 @@ describe("thumbnail LOD speck culling", () => {
 });
 
 describe("image demand from painted geometry", () => {
+  it("keeps image demands cached across frames that hide the same layers", () => {
+    const doc = new Doc();
+    const rect = create("rect", "p1", "a0", {
+      width: 100,
+      height: 100,
+      fills: [{ type: "image", ref: "b".repeat(64), scaleMode: "fill" }],
+    });
+    doc.apply([
+      { op: "create", id: "p1", type: "page", parent: ROOT_ID, key: "a0", props: {} },
+      rect,
+    ]);
+    const scene = new Scene(doc);
+    const builder = new DisplayListBuilder(scene, measurer, {
+      image: () => ({ handle: 1, width: 400, height: 400 }),
+    });
+    builder.build("p1");
+    const view = { x: -1000, y: -1000, width: 2000, height: 2000 };
+    const visible = vi.spyOn(scene, "isVisible");
+    // The editor sends its state every frame, each time a set of its own.
+    builder.setEditorState({ hidden: new Set() });
+    expect([...builder.imageDemands(view, 0)]).toHaveLength(1);
+    const scans = visible.mock.calls.length;
+    for (let frame = 0; frame < 3; frame++) {
+      builder.setEditorState({ hidden: new Set() });
+      expect([...builder.imageDemands(view, 0)]).toHaveLength(1);
+    }
+    expect(visible.mock.calls.length).toBe(scans);
+    // Hiding the layer is a change: its demand goes.
+    builder.setEditorState({ hidden: new Set([(rect as { id: string }).id]) });
+    expect([...builder.imageDemands(view, 0)]).toHaveLength(0);
+  });
+
   it.each([
     { mode: "fill", w: 150, h: 70, rotation: 0, zoom: 1, dpr: 1, expected: [150, 75] },
     { mode: "fit", w: 150, h: 70, rotation: Math.PI / 3, zoom: 2, dpr: 2, expected: [560, 280] },

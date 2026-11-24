@@ -613,6 +613,29 @@ impl Engine {
         Ok(())
     }
 
+    /// `put_gpu_image_level` in row strips over frames (`Gpu::put_image_bitmap_rows`): the level
+    /// changes what's drawn once its last rows are in.
+    #[cfg(all(target_arch = "wasm32", feature = "gpu-common"))]
+    pub fn put_gpu_image_rows(&mut self, id: u32, bitmap: &web_sys::ImageBitmap, y: u32, rows: u32) -> Result<()> {
+        let gpu = self
+            .gpu
+            .as_mut()
+            .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
+        image_level_size(bitmap.width(), bitmap.height(), self.store.limits.texture_side)?;
+        let size = (bitmap.width(), bitmap.height());
+        let before = gpu.image_sizes(id);
+        if gpu.put_image_bitmap_rows(id, bitmap, y, rows, self.store.limits.image_bytes)? {
+            let after = gpu.image_sizes(id);
+            let replaced = before.contains(&size).then_some(size);
+            self.image_levels_changed(id, &before, &after, replaced);
+        } else if y == 0 && before.contains(&size) {
+            // The level it replaces went with the first rows: drawn with the others meanwhile.
+            let after = gpu.image_sizes(id);
+            self.image_levels_changed(id, &before, &after, None);
+        }
+        Ok(())
+    }
+
     #[cfg(all(target_arch = "wasm32", feature = "gpu-common"))]
     pub fn put_gpu_image_level(&mut self, id: u32, bitmap: &web_sys::ImageBitmap) -> Result<()> {
         let gpu = self

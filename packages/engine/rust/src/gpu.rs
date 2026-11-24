@@ -572,6 +572,14 @@ struct V {
 ";
 
 /// A page of tiles.
+/// An image level part uploaded (`Gpu::put_image_bitmap_rows`): its texture, its height, and the
+/// next row to upload.
+struct PendingImage {
+    tex: wgpu::Texture,
+    height: u32,
+    next: u32,
+}
+
 struct Page {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
@@ -1555,6 +1563,9 @@ pub struct Gpu {
     submit_ratio: f64,
     blit: Option<wgpu::RenderPipeline>,
     images: HashMap<u32, Vec<(TextureId, wgpu::Texture, u32, u32)>>,
+    /// Image levels being uploaded in row strips (`put_image_bitmap_rows`), by image and width:
+    /// counted in the budget, resident once their last rows are in.
+    pending_images: HashMap<(u32, u32), PendingImage>,
     /// Per-draw temporary textures (e.g. diamond gradients), released right after submit.
     temp_textures: Vec<(TextureId, wgpu::Texture)>,
     temp_bytes: usize,
@@ -2440,6 +2451,7 @@ impl Gpu {
             submit_ratio: if IS_WEBGL { 1.0 } else { 0.0 },
             blit,
             images: HashMap::new(),
+            pending_images: HashMap::new(),
             temp_textures: Vec::new(),
             temp_bytes: 0,
             image_bytes: 0,
@@ -3457,6 +3469,107 @@ impl Gpu {
         Ok(())
     }
 
+    /// Uploads rows `y..y + rows` of `bitmap`, an image level, so a large one spreads over
+    /// frames: the first rows (`y` 0) make its texture, within `budget` as `put_image_bitmap`
+    /// does, and rows must follow in order. Once its last rows are in, the level is resident
+    /// (true); until then it's drawn with the levels there were.
+    #[cfg(target_arch = "wasm32")]
+    pub fn put_image_bitmap_rows(
+        &mut self,
+        id: u32,
+        bitmap: &web_sys::ImageBitmap,
+        y: u32,
+        rows: u32,
+        budget: usize,
+    ) -> Result<bool> {
+        let (width, height) = (bitmap.width(), bitmap.height());
+        if y == 0 {
+            self.drop_pending_image(id, width);
+            self.check_texture_size(width, height, "an image")?;
+            let bytes = width as usize * height as usize * 4;
+            let freed = self
+                .images
+                .get(&id)
+                .and_then(|levels| levels.iter().find(|(_, _, w, _)| *w == width))
+                .map_or(0, |(_, _, w, h)| (*w * *h * 4) as usize);
+            if self.image_bytes - freed + bytes > budget {
+                return Err(EngineError::limit("images over their budget"));
+            }
+            self.reserve_or_trim(bytes, freed, "an image")?;
+            self.drop_image_level(id, width);
+            let tex = texture(
+                &self.device,
+                width,
+                height,
+                wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                "resident image",
+            );
+            self.image_bytes += bytes;
+            self.bytes += bytes;
+            self.pending_images
+                .insert((id, width), PendingImage { tex, height, next: 0 });
+        }
+        let Some(pending) = self.pending_images.get_mut(&(id, width)) else {
+            return Err(EngineError::new(
+                ErrorCode::State,
+                "image rows before the level's first",
+            ));
+        };
+        if pending.height != height || y != pending.next || rows == 0 || rows > height - y {
+            return Err(EngineError::new(ErrorCode::State, "image rows out of order"));
+        }
+        let webgl = self.backend == "webgl2";
+        self.queue.copy_external_image_to_texture(
+            &wgpu::CopyExternalImageSourceInfo {
+                source: wgpu::ExternalImageSource::ImageBitmap(bitmap.clone()),
+                origin: wgpu::Origin2d { x: 0, y },
+                flip_y: false,
+            },
+            wgpu::CopyExternalImageDestInfo {
+                texture: &pending.tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: 0, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+                color_space: wgpu::PredefinedColorSpace::Srgb,
+                premultiplied_alpha: !webgl,
+            },
+            wgpu::Extent3d {
+                width,
+                height: rows,
+                depth_or_array_layers: 1,
+            },
+        );
+        if webgl {
+            // Executed before the caller closes its source bitmap (see `put_image_bitmap`).
+            self.queue.submit([]);
+        }
+        pending.next += rows;
+        if pending.next < height {
+            return Ok(false);
+        }
+        let Some(done) = self.pending_images.remove(&(id, width)) else {
+            return Ok(false);
+        };
+        let tid = TextureId((1 << 50) | (u64::from(id) << 16) | u64::from(width));
+        self.bindings.insert(tid, done.tex.create_view(&Default::default()));
+        let levels = self.images.entry(id).or_default();
+        let at = levels.partition_point(|(_, _, w, _)| *w > width);
+        levels.insert(at, (tid, done.tex, width, height));
+        Ok(true)
+    }
+
+    /// Drops a level being uploaded in strips, with its budget.
+    fn drop_pending_image(&mut self, id: u32, width: u32) {
+        if let Some(p) = self.pending_images.remove(&(id, width)) {
+            let bytes = width as usize * p.height as usize * 4;
+            self.image_bytes -= bytes;
+            self.bytes -= bytes;
+            p.tex.destroy();
+        }
+    }
+
     pub fn image_sizes(&self, id: u32) -> Vec<(u32, u32)> {
         self.images
             .get(&id)
@@ -3467,6 +3580,7 @@ impl Gpu {
     }
 
     pub fn drop_image_level(&mut self, id: u32, width: u32) {
+        self.drop_pending_image(id, width);
         if let Some(levels) = self.images.get_mut(&id) {
             if let Some(at) = levels.iter().position(|(_, _, w, _)| *w == width) {
                 let (tid, tex, w, h) = levels.remove(at);
@@ -3483,6 +3597,15 @@ impl Gpu {
     }
 
     pub fn drop_image(&mut self, id: u32) {
+        let pending: Vec<u32> = self
+            .pending_images
+            .keys()
+            .filter(|(i, _)| *i == id)
+            .map(|(_, w)| *w)
+            .collect();
+        for width in pending {
+            self.drop_pending_image(id, width);
+        }
         if let Some(levels) = self.images.remove(&id) {
             for (tid, tex, w, h) in levels {
                 self.bindings.remove(tid);

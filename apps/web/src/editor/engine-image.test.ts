@@ -29,6 +29,11 @@ function photoRig(
     missing?: Set<string>;
     slow?: boolean;
     size?: { width: number; height: number };
+    /** Uploads in row strips (`ImageBackend.uploadRows`), noting each strip and its frame. */
+    strips?: {
+      frame: () => number;
+      log: { frame: number; width: number; y: number; rows: number }[];
+    };
   } = {},
 ) {
   const decodes = new Map<string, number>();
@@ -81,6 +86,21 @@ function photoRig(
       total -= levels?.get(width) ?? 0;
       levels?.delete(width);
     },
+    ...(opts.strips
+      ? {
+          uploadRows(handle: number, bitmap: ImageBitmap, y: number, rows: number) {
+            opts.strips?.log.push({ frame: opts.strips.frame(), width: bitmap.width, y, rows });
+            if (y + rows < bitmap.height) return true;
+            const levels = held.get(handle) ?? new Map();
+            const size = bitmap.width * bitmap.height * 4;
+            levels.set(bitmap.width, size);
+            held.set(handle, levels);
+            total += size;
+            peak = Math.max(peak, total);
+            return true;
+          },
+        }
+      : {}),
   });
   return {
     images,
@@ -106,6 +126,40 @@ const tick = () => new Promise((done) => setTimeout(done, 0));
 const eventually = (check: () => void) => vi.waitFor(check, { timeout: 3500, interval: 5 });
 
 describe("image residency", () => {
+  it("uploads a large level in row strips, at most 2 MiB a frame", async () => {
+    let frame = 0;
+    vi.stubGlobal("requestAnimationFrame", (callback: () => void) =>
+      setTimeout(() => {
+        frame++;
+        callback();
+      }, 1),
+    );
+    const log: { frame: number; width: number; y: number; rows: number }[] = [];
+    const r = photoRig({ strips: { frame: () => frame, log } });
+    try {
+      const images = demand(["photo"], 1500, 2000);
+      await eventually(() => {
+        expect(r.images.update(images, 1, limit(256))).toBe(true);
+      });
+      const widest = Math.max(...(r.held("photo")?.keys() ?? []));
+      const strips = log.filter((s) => s.width === widest);
+      expect(strips.length).toBeGreaterThan(4);
+      // In order, end to end.
+      let next = 0;
+      for (const s of strips) {
+        expect(s.y).toBe(next);
+        next += s.rows;
+      }
+      // No frame took more than 2 MiB of strips.
+      const perFrame = new Map<number, number>();
+      for (const s of log)
+        perFrame.set(s.frame, (perFrame.get(s.frame) ?? 0) + s.width * s.rows * 4);
+      expect(Math.max(...perFrame.values())).toBeLessThanOrEqual(2 << 20);
+    } finally {
+      r.images.setBackend(null);
+    }
+  });
+
   it("settles a 40-photo page through slow and corrupt decodes, then rebuilds under budget", async () => {
     const refs = Array.from({ length: 39 }, (_, i) => String(i));
     const photos = demand([...refs, "bad"]);

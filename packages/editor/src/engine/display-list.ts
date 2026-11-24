@@ -288,9 +288,20 @@ export class DisplayListBuilder {
   /** Layers hidden while dragged, and the text being edited: their records change with these. */
   setEditorState(state: { hidden?: ReadonlySet<string>; whole?: string | null }): void {
     if (state.hidden) {
-      for (const id of this.#hidden) if (!state.hidden.has(id)) this.#extra.add(id);
-      for (const id of state.hidden) if (!this.#hidden.has(id)) this.#extra.add(id);
-      this.#hidden = new Set(state.hidden);
+      let changed = state.hidden.size !== this.#hidden.size;
+      for (const id of this.#hidden) {
+        if (state.hidden.has(id)) continue;
+        this.#extra.add(id);
+        changed = true;
+      }
+      for (const id of state.hidden) {
+        if (this.#hidden.has(id)) continue;
+        this.#extra.add(id);
+        changed = true;
+      }
+      // Kept when the same layers are hidden: what's cached against it (`imageDemands`) stays.
+      // The editor sends this every frame, so a new set each time would rebuild that per frame.
+      if (changed) this.#hidden = new Set(state.hidden);
     }
     if (state.whole !== undefined && state.whole !== this.#whole) {
       if (this.#whole) this.#extra.add(this.#whole);

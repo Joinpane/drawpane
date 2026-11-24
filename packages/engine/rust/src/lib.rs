@@ -491,6 +491,17 @@ impl Engine {
         outcome(self.core.put_gpu_image_level(id, bitmap))
     }
 
+    /// `putGpuImageLevel` in row strips (`y`, `rows`) over frames, so no frame spends long
+    /// uploading: rows follow in order from 0, and the level is resident once the last are in.
+    #[cfg(all(target_arch = "wasm32", feature = "gpu-common"))]
+    #[wasm_bindgen(js_name = putGpuImageRows)]
+    pub fn put_gpu_image_rows(&mut self, id: u32, bitmap: &web_sys::ImageBitmap, y: u32, rows: u32) -> Outcome {
+        if let Some(o) = self.exporting() {
+            return o;
+        }
+        outcome(self.core.put_gpu_image_rows(id, bitmap, y, rows))
+    }
+
     #[wasm_bindgen(js_name = dropImageLevel)]
     pub fn drop_image_level(&mut self, id: u32, width: u32) -> Outcome {
         if let Some(o) = self.exporting() {

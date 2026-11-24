@@ -37,6 +37,10 @@ Drawpane modifications (marked `Drawpane:` in the code, per Apache-2.0 section 4
   - Evict and delete cached FBOs referencing a texture or renderbuffer before deleting it
     (`invalidate_texture` / `invalidate_renderbuffer`) to prevent WebGL2 VRAM retention and
     native handle reuse collisions.
+- `src/gles/queue.rs` (WebGL2 external image copies): honor the source origin by setting
+  `UNPACK_SKIP_PIXELS` / `UNPACK_SKIP_ROWS` around `texSubImage{2,3}D` from a `TexImageSource`
+  (WebGL2 applies the unpack skips to it, a sub-rectangle of the image), and reset them after, so
+  an image level can be uploaded in row strips over several frames.
 - `src/gles/command.rs`:
   - Skip re-zeroing the ~2 KB encoder `State` in `CommandEncoder::begin_encoding` when the
     previous command buffer never mutated pass state.
