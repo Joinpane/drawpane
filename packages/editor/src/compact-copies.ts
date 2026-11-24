@@ -28,8 +28,10 @@ import {
   type ApplyOptions,
   applyOp,
   type BuildBudget,
+  bindsLayout,
   CopyView,
   collectSubtree,
+  getProp,
   isMainNode,
   isPropName,
   MemoryStore,
@@ -114,6 +116,13 @@ function isFrameWithInstanceOf(node: NodeRecord | undefined): boolean {
   return node?.type === "frame" && !!node.props.instanceOf;
 }
 
+/** A stretch of deletes and sets in one apply (`#deleteStretch`). */
+interface DeleteStretch {
+  readonly deletes: ReadonlyMap<string, number>;
+  readonly sets: ReadonlyMap<string, number>;
+  readonly end: number;
+}
+
 export class CompactCopies {
   readonly store: MemoryStore;
   readonly view: CopyView;
@@ -183,8 +192,17 @@ export class CompactCopies {
   apply(ops: readonly Op[], { held = false }: ApplyOptions = {}): CompactApplied {
     const tx = this.#tx(held);
     let index = 0;
+    // The stretch of deletes and sets `index` is in (issue 280, below).
+    let stretch: DeleteStretch = { deletes: new Map(), sets: new Map(), end: 0 };
     try {
-      for (; index < ops.length; index++) this.#op(tx, ops[index] as Op);
+      for (; index < ops.length; index++) {
+        const op = ops[index] as Op;
+        if (op.op === "delete") {
+          if (index >= stretch.end) stretch = this.#deleteStretch(tx, ops, index);
+          if (this.#deletedLater(tx, op.id, index, stretch)) continue;
+        }
+        this.#op(tx, op);
+      }
       for (const root of tx.absorbLater) if (this.#hasLayers(root)) this.#absorb(tx, root);
     } catch (error) {
       this.#rollback(tx);
@@ -286,6 +304,51 @@ export class CompactCopies {
     return tx.alias.has(id) ? (tx.alias.get(id) as string | null) : id;
   }
 
+  /**
+   * The stretch of deletes and sets from `start`, up to the first create or
+   * move: each delete's target by its last place in it, and each layer by the
+   * last place a set reaches it or anything in it. Nothing in such a stretch
+   * makes an alias or moves a layer, so it resolves once for all of it.
+   */
+  #deleteStretch(tx: Tx, ops: readonly Op[], start: number): DeleteStretch {
+    const deletes = new Map<string, number>();
+    const sets = new Map<string, number>();
+    let end = start;
+    for (; end < ops.length; end++) {
+      const op = ops[end] as Op;
+      if (op.op !== "delete" && op.op !== "set") break;
+      const target = this.#resolve(tx, op.id);
+      if (target === null) continue;
+      if (op.op === "delete") deletes.set(target, end);
+      else
+        for (let id: string | undefined = target; id; id = this.view.get(id)?.parent)
+          sets.set(id, end);
+    }
+    return { deletes, sets, end };
+  }
+
+  /**
+   * Whether the delete at `index` is of a stored layer that a later delete in
+   * the same stretch removes with its ancestor anyway, with nothing set in it
+   * between. An undone create deletes each layer it made, children first (as
+   * redoing a main's delete does), and a selection's delete can delete a layer
+   * and its frame. Left to the ancestor's delete, the main's instances
+   * elsewhere keep all it held, as they did when it was deleted at once
+   * (issue 280), and an undo that brings it all back finds them matching. It
+   * walks up from the layer once, so a stretch costs its length times the
+   * layers' depth.
+   */
+  #deletedLater(tx: Tx, opId: string, index: number, stretch: DeleteStretch): boolean {
+    const id = this.#resolve(tx, opId);
+    if (id === null) return false;
+    if ((stretch.sets.get(id) ?? -1) > index) return false;
+    for (let n = this.store.get(id); n && n.type !== "override"; n = this.store.get(n.parent)) {
+      const at = stretch.deletes.get(n.parent);
+      if (at !== undefined && at > index) return true;
+    }
+    return false;
+  }
+
   #op(tx: Tx, op: Op): void {
     const id = this.#resolve(tx, op.id);
     if (id === null) return; // Inside a layer that was dropped: nothing to do.
@@ -294,7 +357,12 @@ export class CompactCopies {
     else {
       const parent = this.#resolve(tx, op.parent);
       if (op.op === "create") {
-        if (parent === null) tx.alias.set(op.id, null);
+        // A layer kept from a main (it names its main layer in `mirrors`) whose main layer a
+        // collaborator deleted meanwhile isn't made again, nor what's in it: a redo of the main's
+        // delete keeps what the main holds now, as materialized copies do.
+        const mirrors = (op.props as Record<string, unknown>).mirrors;
+        const lost = typeof mirrors === "string" && !this.view.get(mirrors);
+        if (parent === null || lost) tx.alias.set(op.id, null);
         else this.#create(tx, { ...op, parent });
       } else {
         if (parent === null)
@@ -464,7 +532,10 @@ export class CompactCopies {
       return;
     }
     const reads = (prop: string) => !LAYOUT_NEUTRAL.has(prop) && !RECORD_BOOKKEEPING.has(prop);
-    const listsRead = (props: Props) => (props.unset ?? []).some(reads);
+    // A binding is neutral only by its own value: binding a layout value, or unbinding the
+    // main's, can resolve to another size than the main's though nothing else differs.
+    const listsRead = (props: Props) =>
+      (props.unset ?? []).some((p) => reads(p) || p === "bindings") || bindsLayout(props);
     let differs =
       Object.keys(root.props).some((p) => !ROOT_LOCAL_PROPS.has(p) && reads(p)) ||
       listsRead(root.props);
@@ -573,7 +644,14 @@ export class CompactCopies {
     }
     const record = this.view.record(slot);
     if (!own) {
-      if (record) this.#put(tx, { op: "delete", id });
+      // A record is never deleted for holding nothing of its own here (PR 286): only the fields
+      // it held go, so a field someone else set meanwhile, applied before this (a recolour, under
+      // a relayout worked out without it), stays. An empty record means nothing, as an absent
+      // one does, and a later write fills it again. Explicit removals (a layer's delete, a
+      // detach, a swap) still delete records.
+      if (record)
+        for (const prop of Object.keys(record.props))
+          if (prop !== "path") this.#put(tx, { op: "set", id, prop: prop as never, value: null });
       return;
     }
     if (!record) {
@@ -731,12 +809,27 @@ export class CompactCopies {
           const id = after[i];
           const layer = byId.get(old) as NodeRecord;
           if (!id || this.view.get(id)?.type !== layer.type) return;
-          this.#writeOwn(tx, id, layer.props);
+          this.#writeOwn(tx, id, this.#keptPlace(id, layer.props));
           pair(old, id);
         });
       };
       pair(top, top);
     }
+  }
+
+  /**
+   * A kept copy layer's look, with the place and size it differs in from its
+   * new main layer marked as its own: they came from the main that's gone,
+   * and nothing derives them now (`placedGeometry` keeps what's marked).
+   */
+  #keptPlace(id: string, props: Props): Props {
+    const base = this.view.base(id);
+    if (!base) return props;
+    const marks = new Set<string>(getProp(props, "overrides"));
+    const count = marks.size;
+    for (const prop of ["x", "y", "width", "height"] as const)
+      if (!sameValue(getProp(base.props as Props, prop), getProp(props, prop))) marks.add(prop);
+    return marks.size === count ? props : ({ ...props, overrides: [...marks] } as Props);
   }
 
   /**

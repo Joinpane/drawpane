@@ -279,11 +279,15 @@ for (const compact of [false, true])
       // Moving the main layer moves it by as much.
       editor.setProp(["c"], "x", 60);
       expect(getProp(editor.doc.get(child)?.props ?? {}, "x")).toBe(160);
-      // Reset all puts it where the constraint says, too.
+      // Reset all puts it where the constraint says, too. It resets the instance's size with the
+      // rest (as Figma's does), so the copy is its main's size again and the child sits where its
+      // main layer does, inside the frame (not at 160, past its 100 px edge).
       editor.setProp([child], "x", 10);
       editor.select(["i"]);
       editor.resetInstances();
-      expect(getProp(editor.doc.get(child)?.props ?? {}, "x")).toBe(160);
+      expect(getProp(editor.doc.get("i")?.props ?? {}, "width")).toBe(100);
+      expect(getProp(editor.doc.get(child)?.props ?? {}, "x")).toBe(60);
+      expect(getProp(editor.doc.get(child)?.props ?? {}, "overrides")).not.toContain("x");
     });
 
     it("stretches and centres children of a resized copy from their main layers", () => {

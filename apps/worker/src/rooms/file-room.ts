@@ -536,6 +536,10 @@ export class FileRoom extends DurableObject<Env> {
         this.#seed();
       } else if (copies === null) this.#setMeta("copies", "materialized");
       this.#copies = this.#meta("copies") === "compact" ? "compact" : "materialized";
+      // Agent calls recorded before this release are history from before protocol 4: noted once,
+      // as the revision the room first loads at with it (`stepAgentCall`).
+      if (this.#meta("agent_history_from") === null)
+        this.#setMeta("agent_history_from", String(this.#revn));
       // Tabs welcomed by an older release, kept across its update (hibernation): they reload
       // now, before they can write (decision 0034). A viewer of the reload page stays one.
       for (const ws of this.ctx.getWebSockets()) {
@@ -2446,6 +2450,14 @@ export class FileRoom extends DurableObject<Env> {
             ? "Nothing to undo: this session has no changes left to take back."
             : "Nothing to redo: undo something first.",
       };
+    // A call from before protocol 4 (PR 286) replays operations an editor from before worked out:
+    // taking an instance's auto layout away, which every writer refuses now (decision 0034's
+    // gate), or derived values over a frozen frame's layers. Its history is closed instead.
+    if (target.revn <= Number(this.#meta("agent_history_from") ?? 0))
+      return {
+        ok: false,
+        message: `Can't ${direction} “${target.label}”: it was made before Drawpane was updated, and changes from before can't be undone or redone. Change the layers back with the tools instead.`,
+      };
     const since = direction === "undo" ? target.revn : (target.undoneRevn ?? target.revn);
     const blocked = this.#editedSince(since, session.id, changedIds(target.ops, target.inverse));
     if (blocked)
@@ -2770,10 +2782,12 @@ export class FileRoom extends DurableObject<Env> {
     protocol: number,
     tickets: DocumentTickets | null,
   ): void {
-    // A tab from before variables and styles (decision 0034) would strip the bindings it doesn't
-    // know from what it rewrites, and read opacity variables the old way. One from before compact
-    // copies (1) reconnects on any close but a few, so it's shown a page saying to reload, as a
-    // viewer, never the file; a later one (2) is told to reload, which it does.
+    // A tab from before the current protocol can't keep what it doesn't know: one from before
+    // variables and styles (decision 0034) would strip the bindings it doesn't know from what it
+    // rewrites, and one from before 4 can take an instance's auto layout away without marking
+    // what that flow left (PR 286). One from before compact copies (1) reconnects on any close
+    // but a few, so it's shown a page saying to reload, as a viewer, never the file; a later one
+    // (2 or 3) is told to reload, which it does.
     if (protocol === 1) {
       this.#helloToPlaceholder(ws, me, clientId, ["materialized"], protocol);
       return;
@@ -3072,8 +3086,9 @@ export class FileRoom extends DurableObject<Env> {
       this.#reject(ws, seq, ops, "format", RELOAD_TO_EDIT);
       return;
     }
-    // A tab welcomed before variables and styles (no protocol recorded, or an older one): it would
-    // strip the bindings and links it doesn't know from what it rewrites (decision 0034).
+    // A tab welcomed before the current protocol (no protocol recorded, or an older one): it would
+    // strip the bindings and links it doesn't know from what it rewrites (decision 0034), or take
+    // an instance's auto layout away without the marks protocol 4 makes (PR 286).
     if ((me.protocol ?? 0) < PROTOCOL_VERSION) {
       this.#reject(ws, seq, ops, "format", RELOAD_TO_EDIT);
       this.#reloadOld(ws);

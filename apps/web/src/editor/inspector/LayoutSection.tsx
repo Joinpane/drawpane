@@ -136,6 +136,8 @@ export function AutoLayoutSection({ editor, nodes }: { editor: Editor; nodes: No
             icon={on ? "minus" : "plus"}
             label={on ? "Remove auto layout" : "Add auto layout"}
             shortcut={shortcutFor("layer.autoLayout")}
+            // An instance takes auto layout, or its removal, from its component (as in Figma).
+            disabled={!ids.some((id) => editor.canToggleLayout(id, !on))}
             onClick={() => editor.setLayoutMode(ids, on ? "none" : "row")}
           />
         </>

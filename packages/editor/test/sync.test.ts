@@ -26,7 +26,7 @@ const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 /** How a room stores copies in this run (the tests' second run turns compact copies on). */
 const roomForm = (): CopiesFormat => (compactCopiesDefault() ? "compact" : "materialized");
 /** What a client says it reads in its hello (protocol 3). */
-const HELLO = { t: "hello", protocol: 3, copies: ["materialized", "compact"] } as const;
+const HELLO = { t: "hello", protocol: 4, copies: ["materialized", "compact"] } as const;
 
 /** A FileRoom stand-in with the same ordering, dedupe, catch-up and download rules. */
 class FakeRoom {
@@ -539,6 +539,21 @@ describe("compactOps", () => {
     ];
     expect(compactOps(ops)).toEqual([ops[1], ops[2], ops[3], ops[4]]);
   });
+
+  it("keeps a set that what's made or moved under the node needs", () => {
+    // An instance detached, the detach undone (its override record comes back, which needs
+    // the instance) and redone, all unsent: the middle `instanceOf` has to stay.
+    const ops: Op[] = [
+      { op: "set", id: "i", prop: "instanceOf", value: "main" },
+      { op: "create", id: "r", type: "override", parent: "i", key: "a0", props: { path: ["d"] } },
+      { op: "delete", id: "r" },
+      { op: "set", id: "i", prop: "instanceOf", value: null },
+      { op: "set", id: "f", prop: "x", value: 1 },
+      { op: "move", id: "g", parent: "f", key: "a0" },
+      { op: "set", id: "f", prop: "x", value: 2 },
+    ];
+    expect(compactOps(ops)).toEqual(ops);
+  });
 });
 
 describe("SyncEngine.takeUnsent", () => {
@@ -796,7 +811,7 @@ describe("SyncEngine room requests", () => {
     expect(sent).toEqual([
       {
         t: "hello",
-        protocol: 3,
+        protocol: 4,
         clientId: "c1",
         revn: null,
         copies: ["materialized", "compact"],

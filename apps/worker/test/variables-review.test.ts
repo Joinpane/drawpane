@@ -43,7 +43,7 @@ async function newFile() {
   const socket = await openSocket(owner.browser, file.id);
   socket.send({
     t: "hello",
-    protocol: 3,
+    protocol: 4,
     clientId: `c-${file.id}`,
     revn: null,
     copies: ["materialized", "compact"],
@@ -61,7 +61,7 @@ describe("a file stored before variables and styles (F9)", { timeout: 60_000 }, 
     const socket = await openSocket(browser, fileId);
     socket.send({
       t: "hello",
-      protocol: 3,
+      protocol: 4,
       clientId: "reader",
       revn: null,
       copies: ["materialized", "compact"],
@@ -94,6 +94,11 @@ describe("tabs from before (protocol gate)", { timeout: 60_000 }, () => {
     const socket = await openSocket(browser, fileId);
     socket.send({ t: "hello", protocol: 2, clientId: "old-2", revn: null, copies: ["compact"] });
     expect((await socket.next<{ code: string }>("error")).code).toBe("reload");
+    // So is one from before protocol 4 (PR 286), which could take an instance's auto layout away
+    // without marking what that flow left.
+    const three = await openSocket(browser, fileId);
+    three.send({ t: "hello", protocol: 3, clientId: "old-3", revn: null, copies: ["compact"] });
+    expect((await three.next<{ code: string }>("error")).code).toBe("reload");
     // One from before compact copies is shown a page saying so, never the file.
     const older = await openSocket(browser, fileId);
     older.send({ t: "hello", protocol: 1, clientId: "old-1", revn: null });

@@ -23,8 +23,18 @@ import { type NodeRecord, type Op, OpsSchema } from "./ops";
  * says hello is told to reload (1, which reconnects on most closes, is shown
  * a page saying so), and a socket welcomed before the release, whose
  * attachment says no protocol, has its edits refused and is told the same.
+ *
+ * 4: an instance, or a layer in one, can't take away the auto layout the
+ * frame it shows has (PR 286, as Figma refuses it): every writer refuses that
+ * removal, and keeps a frame a file from before left that way frozen
+ * (`frozenFrame`: its layers stay where that flow left them, and nothing
+ * derived is written to them). An older tab (3 or before) takes it away, and
+ * writes derived values over frozen layers. So it doesn't write, as for 3:
+ * it's told to reload at hello, and one welcomed before the release has its
+ * edits refused (agent runs from before too: `AGENT_RUNNER_V`). Old data
+ * needs nothing: a frame a file from before left that way reads as frozen.
  */
-export const PROTOCOL_VERSION = 3;
+export const PROTOCOL_VERSION = 4;
 
 /** The close code that tells a client the room needs a newer one: reload the page. */
 export const RELOAD_CLOSE_CODE = 4426;
@@ -73,8 +83,11 @@ export function latencyBucket(ms: number): number {
 export const ClientMessage = z.discriminatedUnion("t", [
   z.object({
     t: z.literal("hello"),
-    /** Older clients (1: before compact copies, 2: before variables and styles) are told to reload. */
-    protocol: z.union([z.literal(1), z.literal(2), z.literal(PROTOCOL_VERSION)]),
+    /**
+     * Older clients (1: before compact copies, 2: before variables and styles, 3: before marking
+     * what an instance's own flow left) are told to reload.
+     */
+    protocol: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(PROTOCOL_VERSION)]),
     /** Stable per browser tab; used to make resent transactions idempotent. */
     clientId: Id,
     /** Last revision this client has fully applied, or null for a fresh load. */

@@ -63,7 +63,7 @@ async function editor(browser: Browser, fileId: string) {
   const socket = await openSocket(browser, fileId);
   socket.send({
     t: "hello",
-    protocol: 3,
+    protocol: 4,
     clientId: "c-editor",
     revn: null,
     copies: ["materialized", "compact"],
@@ -99,7 +99,7 @@ describe("importing into a new file", () => {
     const socket = await openSocket(browser, fileId);
     socket.send({
       t: "hello",
-      protocol: 3,
+      protocol: 4,
       clientId: "c1",
       revn: null,
       copies: ["materialized", "compact"],
@@ -160,7 +160,7 @@ describe("importing into a new file", () => {
 
     // Over the socket, a record is checked too.
     const socket = await openSocket(browser, fileId);
-    socket.send({ t: "hello", protocol: 3, clientId: "c1", revn: null, copies: ["compact"] });
+    socket.send({ t: "hello", protocol: 4, clientId: "c1", revn: null, copies: ["compact"] });
     expect((await socket.next<{ copies: string }>("welcome")).copies).toBe("compact");
     socket.send({ t: "txn", seq: 1, ops: [{ op: "create", ...wrong }] });
     expect((await socket.next<{ code: string }>("reject")).code).toBe("invalid_id");
@@ -180,7 +180,7 @@ describe("importing into a new file", () => {
     const socket = await openSocket(browser, fileId);
     socket.send({
       t: "hello",
-      protocol: 3,
+      protocol: 4,
       clientId: "c1",
       revn: null,
       copies: ["materialized", "compact"],
@@ -231,7 +231,7 @@ describe("importing into a new file", () => {
     const socket = await openSocket(browser, fileId);
     socket.send({
       t: "hello",
-      protocol: 3,
+      protocol: 4,
       clientId: "c1",
       revn: 1,
       copies: ["materialized", "compact"],
@@ -386,7 +386,7 @@ describe("importing into a new file", () => {
     const behind = await openSocket(browser, fileId);
     behind.send({
       t: "hello",
-      protocol: 3,
+      protocol: 4,
       clientId: "c2",
       revn: revn - 1,
       copies: ["materialized", "compact"],

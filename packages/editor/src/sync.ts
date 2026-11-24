@@ -650,9 +650,11 @@ export class SyncEngine {
    * Re-apply pending edits oldest first. An edit already sent is applied as
    * it was sent (`stored`), exactly as the room will apply it: once sent, its
    * operations are fixed, so what this client shows for it is what the room
-   * stores. An edit not sent yet is stored again against the document as it
-   * is now (with compact copies, a copy's value equal to its main's again
-   * is no longer stored as an override). Edits that no longer apply stay
+   * stores. An edit not sent yet is applied as stored too, while that still
+   * applies, so it stores what it did before; when a collaborator's edit made
+   * its stored form stale (an override record it makes was made meanwhile,
+   * or one it changes was reset), it's stored again from what it did as
+   * presented, against the document as it is now. Edits that no longer apply stay
    * queued; the room will reject them too. When the file has changed form
    * (`reformed`), they can't be sent as they were: the layer ids they hold
    * are found in the new form first, and those that don't apply, or hold an
@@ -665,6 +667,42 @@ export class SyncEngine {
    * translated the same way, and left unapplied, for the room to refuse,
    * when it can't be.
    */
+  /**
+   * Applies an unsent edit's stored operations as they are, when they still
+   * apply: false (nothing applied) when a collaborator's edit made them stale
+   * (an override record they make or change was made, reset or removed
+   * meanwhile, or a layer they copy was deleted), to be stored again from what
+   * it did as presented.
+   */
+  #replayStored(txn: PendingTxn): boolean {
+    // A copy it makes of a layer a collaborator deleted meanwhile goes, with what's in it: a main's
+    // delete keeps its instances' layers as they are, and that layer isn't one any more (as
+    // materialized copies have it, where the collaborator's edit deleted the copies).
+    const made = new Set<string>();
+    const gone = new Set<string>();
+    const stored = txn.stored.filter((op) => {
+      if (op.op !== "create") return !gone.has(op.id);
+      const mirrors = (op.props as Record<string, unknown>).mirrors;
+      if (
+        gone.has(op.parent) ||
+        (typeof mirrors === "string" && !made.has(mirrors) && !this.#doc.has(mirrors))
+      ) {
+        gone.add(op.id);
+        return false;
+      }
+      made.add(op.id);
+      return true;
+    });
+    try {
+      this.#doc.applyStored(stored);
+      txn.stored = stored;
+      return true;
+    } catch (error) {
+      if (!(error instanceof ModelError)) throw error;
+      return false;
+    }
+  }
+
   #redoPending(reformed: FormChange | null = null): number {
     let dropped = 0;
     const kept: PendingTxn[] = [];
@@ -675,6 +713,9 @@ export class SyncEngine {
           if (!stored) throw new ModelError("not_found", "it names layers the file no longer has");
           txn.stored = stored;
           this.#doc.applyStored(stored);
+        } else if (!reformed && this.#replayStored(txn)) {
+          // Stored as it was: replaying what it did as presented can store otherwise on a
+          // changed document (a copy layer's value set as its main's was, or not).
         } else {
           const ops = reformed ? reformed.remap(this.#doc, txn.ops) : txn.ops;
           if (!ops) throw new ModelError("not_found", "it names layers the file no longer has");
@@ -721,21 +762,26 @@ export class SyncEngine {
 
 /**
  * Drops `set` operations that a later `set` of the same property overrides,
- * unless a create, delete or move of that node sits between them.
+ * unless a create, delete or move sits between them. Whether one of those
+ * applies can hang on values set before it, of any node and at any depth
+ * (an override record goes only under an instance, a layer only outside
+ * one), so none is compacted across: detaching, editing inside, undoing and
+ * moving, all unsent, must replay as it applied, through a rebase too. A
+ * gesture's stream of sets (a drag, typing) still compacts to its last.
  */
+/** Sets that change what a node's copy layers are (a swap, a detach): as structural as a move. */
+const LINKS: ReadonlySet<string> = new Set(["instanceOf", "unset", "mirrors", "path"]);
+
 export function compactOps(ops: readonly Op[]): Op[] {
   const keep = new Array<boolean>(ops.length).fill(true);
   const seen = new Set<string>();
   for (let i = ops.length - 1; i >= 0; i--) {
     const op = ops[i] as Op;
-    if (op.op === "set") {
+    if (op.op === "set" && !LINKS.has(op.prop)) {
       const key = `${op.id}\u0000${op.prop}`;
       if (seen.has(key)) keep[i] = false;
       else seen.add(key);
-    } else {
-      // A structural op on a node ends any run of sets that could be merged across it.
-      for (const key of seen) if (key.startsWith(`${op.id}\u0000`)) seen.delete(key);
-    }
+    } else seen.clear();
   }
   return ops.filter((_, i) => keep[i]);
 }

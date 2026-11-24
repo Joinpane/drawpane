@@ -17,7 +17,13 @@
  * same transaction. Every peer then sees identical positions without running
  * layout itself, and files stay plain data.
  */
-import { type GridTrack, getProp, type NodeRecord, type Op } from "@drawpane/model";
+import {
+  type GridTrack,
+  getProp,
+  type NodeRecord,
+  type Op,
+  textResizeWhenSized,
+} from "@drawpane/model";
 import type { Doc } from "./doc";
 import { round2 } from "./geometry";
 import { strokeWidths } from "./stroke-sides";
@@ -1338,12 +1344,7 @@ export class LayoutEngine {
       const node = this.#doc.get(id);
       if (!node) continue;
       const mode = getProp(node.props, "textAutoResize");
-      const next =
-        axes.has("v") && mode !== "none"
-          ? "none"
-          : axes.has("h") && mode === "width"
-            ? "height"
-            : mode;
+      const next = textResizeWhenSized(mode, axes);
       if (next !== mode) ops.push({ op: "set", id, prop: "textAutoResize", value: next });
     }
     for (const [id, at] of moved) {
@@ -1455,12 +1456,19 @@ function layoutClosure(
     const top = walk(id);
     if (top) roots.add(top);
   }
-  // Everything under these is new (a swapped instance's layers): every layout frame in it.
+  // Everything under these is new (a swapped instance's layers): every layout frame in it,
+  // each from its own outermost layout frame, since a plain frame (the instance's root, or
+  // one between two auto layout frames) stops a run from reaching what's inside it.
   for (const id of whole) {
-    walk(id);
-    const stack = [id];
+    const top = walk(id);
+    if (top) roots.add(top);
+    const stack = [...doc.childIds(id)];
     for (let at = stack.pop(); at !== undefined; at = stack.pop()) {
-      if (isLayoutFrame(doc.get(at))) dirty.add(at);
+      const node = doc.get(at);
+      if (isLayoutFrame(node) && !dirty.has(at)) {
+        const top = walk(at);
+        if (top) roots.add(top);
+      }
       for (const child of doc.childIds(at)) stack.push(child);
     }
   }

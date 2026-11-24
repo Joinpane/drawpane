@@ -7,8 +7,26 @@
  * absolutely positioned children of one with it. The fix-up runs inside the
  * commit, so resizing by handle, inspector, command bar or a preset all
  * follow it, and undo restores children with their frame in one step.
+ *
+ * A text layer a constraint resizes stops sizing itself on that axis, as in
+ * Figma (decision 0043): auto width becomes auto height, wrapping at the
+ * width it's given, and a height it's given makes it fixed. A copy text in
+ * an instance doesn't: it keeps sizing itself where it does, and its mode.
+ * A frame whose auto layout hugs on an axis keeps its size there, placed as
+ * Figma places it (`constrainHugged`).
  */
-import { constrainSpan, getProp, type NodeRecord, type Op } from "@drawpane/model";
+import {
+  constrainHugged,
+  constrainSpan,
+  getProp,
+  hugsOn,
+  measuresOn,
+  type NodeRecord,
+  type Op,
+  type Placed,
+  placedGeometry,
+  textResizeWhenSized,
+} from "@drawpane/model";
 import type { Doc } from "./doc";
 import { round2 } from "./geometry";
 
@@ -25,6 +43,14 @@ const AXIS = {
   h: { pos: "x", size: "width", constraint: "constraintH" },
   v: { pos: "y", size: "height", constraint: "constraintV" },
 } as const;
+
+/**
+ * Whether a copy text sizes itself on an axis: in an instance, constraints place such text but
+ * never size it there, and never switch its mode, as in Figma (decision 0043).
+ */
+function copyMeasures(node: NodeRecord, axis: Axis): boolean {
+  return !!getProp(node.props, "mirrors") && measuresOn(node, axis);
+}
 
 /** Whether the frame places this child itself (auto layout) rather than leaving it where it is. */
 function placedByLayout(frame: NodeRecord, child: NodeRecord): boolean {
@@ -73,10 +99,40 @@ export function constraintOps(doc: Doc, ops: readonly Op[]): Op[] {
   const next = new Map<string, Map<"x" | "y" | "width" | "height", number>>();
   const read = (node: NodeRecord, prop: "x" | "y" | "width" | "height"): number =>
     next.get(node.id)?.get(prop) ?? getProp(node.props, prop);
+  /** Text layers resized, on each axis. */
+  const sizedText = new Map<string, Set<Axis>>();
   const write = (node: NodeRecord, prop: "x" | "y" | "width" | "height", value: number) => {
     const props = next.get(node.id) ?? new Map<"x" | "y" | "width" | "height", number>();
     next.set(node.id, props);
+    if (
+      node.type === "text" &&
+      (prop === "width" || prop === "height") &&
+      round2(value) !== round2(read(node, prop))
+    ) {
+      const axes = sizedText.get(node.id) ?? new Set<Axis>();
+      axes.add(prop === "width" ? "h" : "v");
+      sizedText.set(node.id, axes);
+    }
     props.set(prop, round2(value));
+  };
+  /**
+   * A copy layer's placed geometry in its frame at size `to`, from its main layer
+   * (`placedGeometry`, the derivation both formats use): undefined for a layer that isn't a copy,
+   * or whose main layer's frame resizes in this same pass (the main layer moves by its
+   * constraints too, and the copy follows it the same way, from where it is).
+   */
+  const fromMain = (
+    child: NodeRecord,
+    to: { readonly width: number; readonly height: number },
+  ): Placed | undefined => {
+    const sourceId = getProp(child.props, "mirrors");
+    const source = sourceId ? doc.get(sourceId) : undefined;
+    const frame = doc.get(child.parent);
+    const frameSource = source ? doc.get(source.parent) : undefined;
+    if (!source || !frame || !frameSource) return undefined;
+    if (sizes.has(frameSource.id) || explicit.has(source.id)) return undefined;
+    const sized = { ...frame, props: { ...frame.props, width: to.width, height: to.height } };
+    return placedGeometry(child, source, sized as NodeRecord, frameSource);
   };
   const keeps = (id: string, axis: Axis) => {
     const props = explicit.get(id);
@@ -98,12 +154,25 @@ export function constraintOps(doc: Doc, ops: readonly Op[]): Op[] {
         if (from === to || keeps(childId, axis)) continue;
         const c = getProp(child.props, constraint);
         if (c === "start") continue;
-        if (child.type === "group") constrainGroup(doc, child, axis, c, from, to, read, write);
-        else {
-          const span = constrainSpan(c, read(child, pos), read(child, size), from, to);
-          write(child, pos, span.pos);
-          write(child, size, span.size);
+        if (child.type === "group") {
+          constrainGroup(doc, child, axis, c, from, to, read, write);
+          continue;
         }
+        // A copy takes what the derivation gives it, exactly; what it keeps as its own follows
+        // its constraints from where it is, and what its own layout decides isn't touched.
+        const placed = fromMain(child, resize.to);
+        if (hugsOn(child, axis)) {
+          // Its auto layout keeps its size; Figma places it (it never passes a resize on).
+          const at = constrainHugged(c, read(child, pos), read(child, size), from, to);
+          write(child, pos, placed?.derived[pos] ?? at);
+          continue;
+        }
+        const span = constrainSpan(c, read(child, pos), read(child, size), from, to);
+        write(child, pos, placed?.derived[pos] ?? span.pos);
+        const derivedSize = placed?.derived[size];
+        if (derivedSize !== undefined) write(child, size, derivedSize);
+        else if (placed?.kept[size] !== "layout" && !copyMeasures(child, axis))
+          write(child, size, span.size);
       }
       // A nested frame that changed size passes the change on to its own children.
       if (child.type === "frame") {
@@ -121,6 +190,13 @@ export function constraintOps(doc: Doc, ops: readonly Op[]): Op[] {
     for (const [prop, value] of props) {
       if (value !== round2(getProp(node.props, prop))) out.push({ op: "set", id, prop, value });
     }
+  }
+  for (const [id, axes] of sizedText) {
+    const node = doc.get(id);
+    if (!node || explicit.get(id)?.has("textAutoResize")) continue;
+    const mode = getProp(node.props, "textAutoResize");
+    const now = textResizeWhenSized(mode, axes);
+    if (now !== mode) out.push({ op: "set", id, prop: "textAutoResize", value: now });
   }
   return out;
 }
@@ -167,6 +243,6 @@ function constrainGroup(
   const k = end - start > 0 ? span.size / (end - start) : 1;
   for (const m of members) {
     write(m, pos, span.pos + (read(m, pos) - start) * k);
-    if (k !== 1) write(m, size, read(m, size) * k);
+    if (k !== 1 && !hugsOn(m, axis) && !copyMeasures(m, axis)) write(m, size, read(m, size) * k);
   }
 }

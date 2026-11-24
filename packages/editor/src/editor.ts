@@ -25,6 +25,7 @@ import {
   propAllowed,
   ROOT_ID,
   type RulerGuide,
+  sameValue,
   type VariableValue,
 } from "@drawpane/model";
 import { MIN_TAP_TARGET } from "./accessibility";
@@ -36,17 +37,21 @@ import {
   copyConstraintOps,
   detachOps,
   findVariant,
+  frozenBefore,
   instanceRootOf,
   instantiateOps,
   isInsideInstance,
   isMainComponent,
   outermostInstanceOf,
   overrideOps,
+  overridesBefore,
   propagationOps,
+  refuseFrozenRemovals,
   relayoutTargets,
   resetAllOverridesOps,
   swapInstanceOps,
   syncInstanceOps,
+  unfreezeOps,
   variantProperties,
   variantsOf,
   wouldCycle,
@@ -287,6 +292,12 @@ export interface CommitOptions {
    */
   readonly constraints?: boolean;
   /**
+   * Frames this edit counts as just emptied, though an earlier commit of the
+   * same gesture emptied them: a Hug one with nothing in its flow shrinks to
+   * its padding as it is now (a swap's sync gives the new component's).
+   */
+  readonly emptied?: readonly string[];
+  /**
    * A team library's own write (decision 0010): copying, updating, using or
    * no longer using one. Anything else that would write a library's copies
    * is refused: they're the library's, read-only here.
@@ -437,6 +448,19 @@ function layoutChanges(
   return { moved, neutral };
 }
 
+/** What a text layer's size is measured from. */
+const TEXT_MEASURED = [
+  "characters",
+  "fontSize",
+  "fontFamily",
+  "fontStyle",
+  "fontWeight",
+  "lineHeight",
+  "letterSpacing",
+  "paragraphSpacing",
+  "textRuns",
+] as const;
+
 const ALIGN_EDGES = ["left", "center", "right", "top", "middle", "bottom"] as const;
 export type AlignEdge = (typeof ALIGN_EDGES)[number];
 
@@ -467,6 +491,10 @@ interface ListItem {
   readonly listType: ListType;
   readonly listLevel: number;
 }
+/** Why an instance wasn't given auto layout. */
+const INSTANCE_LAYOUT_NOTICE =
+  "An instance takes its auto layout from its main component. Add or remove it there, or detach the instance.";
+
 export class Editor {
   readonly doc = new Doc();
   readonly scene = new Scene(this.doc);
@@ -659,6 +687,13 @@ export class Editor {
    */
   commit(ops: readonly Op[], label = "Edit", options: CommitOptions = {}): boolean {
     if (!this.canEdit || ops.length === 0) return false;
+    // Taking away the auto layout an instance shows, or giving it one its component lacks, is
+    // refused through any setter (as Figma refuses them): no edit makes a frame frozen
+    // (`frozenFrame`, PR 286), and none races a main gaining a flow.
+    const allowed = refuseFrozenRemovals(this.doc, ops);
+    if (allowed.length < ops.length) this.notify(INSTANCE_LAYOUT_NOTICE);
+    if (allowed.length === 0) return false;
+    ops = allowed;
     if (!options.library && touchesLibraryCopies(this.doc, ops)) {
       this.notify("That's part of a team library. Change it in the library's file, then publish.");
       return false;
@@ -667,7 +702,13 @@ export class Editor {
     if (this.s.following) this.state.set({ following: null });
     let inverse: Op[];
     try {
-      inverse = this.#commitWithFixups(ops, options.overrides ?? true, options.constraints ?? true);
+      inverse = this.#commitWithFixups(
+        ops,
+        options.overrides ?? true,
+        options.constraints ?? true,
+        options.emptied,
+        true,
+      );
     } catch (error) {
       if (error instanceof Error && error.name === "ModelError") {
         this.notify(error.message);
@@ -679,8 +720,16 @@ export class Editor {
     return true;
   }
 
-  #commitWithFixups(ops: readonly Op[], recordOverrides = true, constrain = true): Op[] {
+  #commitWithFixups(
+    ops: readonly Op[],
+    recordOverrides = true,
+    constrain = true,
+    justEmptied: readonly string[] = [],
+    /** An edit of a person's or an agent's (not undo or redo): it leaves no frame frozen. */
+    edit = false,
+  ): Op[] {
     return this.doc.batch(() => {
+      const wasFrozen = edit ? frozenBefore(this.doc, ops) : null;
       // A person's edit inside an instance records an override, and setting a
       // bound property by hand detaches its variable; both before the derived
       // writes below, so those leave the edited properties alone.
@@ -700,19 +749,26 @@ export class Editor {
       const first = extra.length > 0 ? [...ops, ...extra] : ops;
       // What changes to variables, styles and modes lay out again is this edit's, not a collaborator's.
       this.doc.takeTokenLayout();
-      const shrinkEmpty = new Set<string>();
+      const shrinkEmpty = new Set<string>(justEmptied);
       const alreadyEmpty = new Set<string>();
       this.#collectEmptyTransitions(first, shrinkEmpty, alreadyEmpty);
       let inverse = this.sync.commit(first);
+      // A frame it made, swapped or gave its main's flow to while it set none as its own takes
+      // that flow (PR 286): only undo and redo go back to a frozen frame.
+      const thawed = wasFrozen ? unfreezeOps(this.doc, first, wasFrozen) : [];
+      if (thawed.length > 0) inverse = [...this.sync.commit(thawed), ...inverse];
       // A group whose last layer left (moved, deleted, cut) goes too, like Figma's.
       const emptied = this.#emptiedGroupOps(inverse);
       if (emptied.length > 0) inverse = [...this.sync.commit(emptied), ...inverse];
-      let touched = this.#touchedBy([...ops, ...emptied], inverse);
+      // What the edit's constraints moved and sized too: copies of it, text in it.
+      let touched = this.#touchedBy([...ops, ...constrained, ...thawed, ...emptied], inverse);
       // Layers whose bound layout values now resolve differently (a padding variable, a mode
       // switch) are laid out here, by the client that made the change (decision 0034).
       const tokenLayout = this.doc.takeTokenLayout();
       for (const id of tokenLayout) touched.add(id);
-      let lastOps: readonly Op[] = first;
+      let lastOps: readonly Op[] = thawed.length > 0 ? [...first, ...thawed] : first;
+      // What undoes `lastOps`: where each layer's overrides were before it.
+      let lastInverse: readonly Op[] = inverse;
       // Text styles this deleted (their inverse makes them again): the only deletes whose
       // followers are looked for (an agent run's commit depends on what that reads).
       const deletedStyles = new Set(
@@ -721,6 +777,13 @@ export class Editor {
       // Derived writes until nothing changes: instances follow their main
       // component, bound properties follow their variables, text sizes to its
       // content, auto layout places children. Each can feed the next.
+      /**
+       * Copies the copy pass placed in a swap (its own commit, or the sync after it): they sit in a
+       * frame of another size, or mode, than their insides were laid out in.
+       */
+      const placedCopies = new Set<string>();
+      const swapping =
+        justEmptied.length > 0 || ops.some((op) => op.op === "set" && op.prop === "instanceOf");
       for (let round = 0; round < MAX_FIXUP_ROUNDS && touched.size > 0; round++) {
         const live = [...touched].filter((id) => this.doc.has(id));
         // Compact copies follow their mains unwritten; the ones laid out differently go again.
@@ -729,7 +792,8 @@ export class Editor {
         if (synced.length > 0) this.#collectEmptyTransitions(synced, shrinkEmpty, alreadyEmpty);
         let roundInverse: Op[] = synced.length > 0 ? this.sync.commit(synced) : [];
         // Compact copies' layers placed by constraints in a resized copy follow their main layers.
-        const placed = copyConstraintOps(this.doc, lastOps);
+        const placed = copyConstraintOps(this.doc, lastOps, overridesBefore(lastInverse));
+        if (swapping) for (const op of placed) placedCopies.add(op.id);
         if (placed.length > 0) {
           roundInverse = [...this.sync.commit(placed), ...roundInverse];
           synced = [...synced, ...placed];
@@ -742,22 +806,46 @@ export class Editor {
         );
         if (styled.length > 0) roundInverse = [...this.sync.commit(styled), ...roundInverse];
         const derivedSoFar = [...synced, ...styled];
+        // Layers this round's own writes made resolve otherwise (a main's mode or binding
+        // written to its materialized copies): measured and laid out, as the edit's are.
+        const resolvedAgain = [...this.doc.takeTokenLayout()].filter((id) => this.doc.has(id));
+        // A swapped (or unlinked) instance presents other layers, in its copies too: laid out
+        // whole, since none of them was laid out where it now is, and its text measured where it
+        // shows other words or sizes than its main's (a string bound in another mode).
+        const whole = this.doc.tokens
+          .source()
+          .builtFrom(
+            [...lastOps, ...derivedSoFar].flatMap((op) =>
+              (op.op === "set" && op.prop === "instanceOf") ||
+              (op.op === "create" && op.props.instanceOf !== undefined)
+                ? [op.id]
+                : [],
+            ),
+          );
         const text = this.#textFixups([
           ...live,
           ...derivedSoFar.map((o) => o.id),
           ...relayout.text,
+          ...resolvedAgain,
+          ...this.#textShownOtherwise(whole),
         ]);
         if (text.length > 0) roundInverse = [...this.sync.commit(text), ...roundInverse];
         const derived = [...derivedSoFar, ...text];
         const afterSync =
           derived.length > 0 ? this.#touchedBy(derived, roundInverse) : new Set<string>();
-        const layoutTargets = new Set([...live, ...afterSync, ...relayout.layout]);
+        const layoutTargets = new Set([
+          ...live,
+          ...afterSync,
+          ...relayout.layout,
+          ...resolvedAgain,
+        ]);
         // Laid out inside: whatever this round's operations changed (constraints and fix-ups
         // included), except layers they only moved, whose insides stay laid out as they are,
         // and layers they changed only in ways no layout reads (a fill), laid out not at all.
         const roundOps = [...lastOps, ...derived];
         const { moved, neutral } = layoutChanges(roundOps, [...inverse, ...roundInverse]);
-        for (const id of relayout.layout) {
+        // A copy a swap's copy pass placed is laid out inside too, not only moved.
+        for (const id of [...relayout.layout, ...resolvedAgain, ...placedCopies]) {
           moved.delete(id);
           neutral.delete(id);
         }
@@ -771,18 +859,6 @@ export class Editor {
           layoutTargets.delete(id);
           changed.delete(id);
         }
-        // A swapped (or unlinked) instance presents other layers, in its copies too: laid out
-        // whole, since none of them was laid out where it now is.
-        const whole = this.doc.tokens
-          .source()
-          .builtFrom(
-            roundOps.flatMap((op) =>
-              (op.op === "set" && op.prop === "instanceOf") ||
-              (op.op === "create" && op.props.instanceOf !== undefined)
-                ? [op.id]
-                : [],
-            ),
-          );
         const layout = layoutOps(this.doc, layoutTargets, {
           ...(shrinkEmpty.size > 0 ? { shrinkEmpty, keepEmpty: alreadyEmpty } : {}),
           ...(this.#relayoutSubtree ? {} : { changes: { moved, changed, whole } }),
@@ -793,6 +869,7 @@ export class Editor {
         inverse = [...layoutInverse, ...roundInverse, ...inverse];
         touched = new Set([...afterSync, ...this.#touchedBy(layout, layoutInverse)]);
         lastOps = [...derived, ...layout];
+        lastInverse = [...layoutInverse, ...roundInverse];
       }
       return inverse;
     });
@@ -808,10 +885,12 @@ export class Editor {
     shrinkEmpty: Set<string>,
     alreadyEmpty: Set<string>,
   ): void {
+    // Any frame, auto layout or not yet: an edit can give one auto layout (a swap to a component
+    // that has it), and whether it had anything in its flow before decides whether it shrinks.
     const inspect = (frameId: string) => {
       if (shrinkEmpty.has(frameId) || alreadyEmpty.has(frameId)) return;
       const frame = this.doc.get(frameId);
-      if (frame?.type !== "frame" || getProp(frame.props, "layoutMode") === "none") return;
+      if (frame?.type !== "frame") return;
       if (flowChildren(this.doc, frameId).length > 0) shrinkEmpty.add(frameId);
       else alreadyEmpty.add(frameId);
     };
@@ -826,8 +905,7 @@ export class Editor {
     const markAncestors = (id: string) => {
       for (const presented of this.doc.tokens.source().builtFrom([id])) {
         let node = this.doc.get(presented);
-        if (node?.type === "frame" && getProp(node.props, "layoutMode") !== "none")
-          inspect(node.id);
+        if (node?.type === "frame") inspect(node.id);
         while (node) {
           let parent = this.doc.get(node.parent);
           while (parent?.type === "group") parent = this.doc.get(parent.parent);
@@ -945,6 +1023,27 @@ export class Editor {
     // Removed or moved nodes leave a gap in their old parent's layout.
     for (const op of inverse) if (op.op === "create" || op.op === "move") touched.add(op.parent);
     return touched;
+  }
+
+  /**
+   * The copy text layers under `roots` that show other text than the main
+   * layers they copy (a bound string or size resolving in another mode):
+   * what a new copy has to measure for itself. Others are the size their
+   * main was measured at, or was saved at, and keep it.
+   */
+  #textShownOtherwise(roots: Iterable<string>): string[] {
+    const out: string[] = [];
+    const stack = [...roots];
+    for (let id = stack.pop(); id !== undefined; id = stack.pop()) {
+      stack.push(...this.doc.childIds(id));
+      const node = this.doc.get(id);
+      if (node?.type !== "text") continue;
+      const sourceId = getProp(node.props, "mirrors");
+      const source = sourceId ? this.doc.get(sourceId) : undefined;
+      if (source && TEXT_MEASURED.some((p) => !sameValue(node.props[p], source.props[p])))
+        out.push(id);
+    }
+    return out;
   }
 
   #textFixups(ids: Iterable<string>): Op[] {
@@ -2060,14 +2159,15 @@ export class Editor {
       if (group?.type !== "group" && !(group?.type === "frame" && this.doc.childIds(id).length > 0))
         continue;
       if (!group) continue;
+      // Its layers take its place: between it and the next sibling whose key is after its own (two
+      // clients inserting at once can give siblings the same key).
       const siblings = this.doc.childIds(group.parent);
-      const next = siblings[siblings.indexOf(id) + 1];
+      const after = siblings
+        .slice(siblings.indexOf(id) + 1)
+        .map((sibling) => this.doc.get(sibling)?.key)
+        .find((key): key is string => !!key && key > group.key);
       const children = this.doc.childIds(id);
-      const keys = keysBetween(
-        group.key,
-        next ? (this.doc.get(next)?.key ?? null) : null,
-        children.length,
-      );
+      const keys = keysBetween(group.key, after ?? null, children.length);
       children.forEach((child, i) => {
         ops.push(...this.reparentOps(child, group.parent, keys[i] as string));
         released.push(child);
@@ -2084,11 +2184,16 @@ export class Editor {
     const bounds = this.scene.unionBounds(ids);
     const first = ids[0] && this.doc.get(ids[0]);
     if (!first || !bounds) return;
-    if (autoLayout && ids.length === 1 && first.type === "frame") {
-      if (getProp(first.props, "layoutMode") === "none")
-        this.commit(this.#flowOps(first), "Add auto layout");
+    // A lone frame takes auto layout itself. An instance that can't (its component has none), or
+    // that shows its component's, is wrapped in a new auto layout frame instead, as Figma's ⇧A
+    // does; a plain frame that has auto layout keeps it.
+    const lone = autoLayout && ids.length === 1 && first.type === "frame";
+    const flows = getProp(first.props, "layoutMode") !== "none";
+    if (lone && !flows && this.canToggleLayout(first.id, true)) {
+      this.commit(this.#flowOps(first), "Add auto layout");
       return;
     }
+    if (lone && flows && !getProp(first.props, "instanceOf")) return;
     const slot = this.#wrapperSlot(ids);
     if (!slot) return;
     const { parent } = slot;
@@ -2153,11 +2258,17 @@ export class Editor {
    */
   setLayoutMode(ids: readonly string[], mode: "none" | "row" | "column" | "grid"): void {
     const ops: Op[] = [];
+    let refused = false;
     for (const id of ids) {
       const frame = this.doc.get(id);
       if (frame?.type !== "frame") continue;
       const from = getProp(frame.props, "layoutMode");
       if (from === mode) continue;
+      // Turning auto layout on or off (not changing its direction) follows what an instance shows.
+      if ((from === "none") !== (mode === "none") && !this.canToggleLayout(id, mode !== "none")) {
+        refused = true;
+        continue;
+      }
       if (mode !== "grid") {
         // From none, read gap, padding and order from how the layers sit.
         if (from === "none" && mode !== "none") ops.push(...this.#flowOps(frame, mode));
@@ -2208,6 +2319,7 @@ export class Editor {
         ),
       });
     }
+    if (refused) this.notify(INSTANCE_LAYOUT_NOTICE);
     if (ops.length > 0)
       this.commit(
         ops,
@@ -2215,12 +2327,36 @@ export class Editor {
       );
   }
 
+  /**
+   * Whether a frame's auto layout can be turned on (`on`) or off. An instance,
+   * or a layer in one, takes that from what it shows now: an instance from the
+   * component it points at (after a swap, the swapped-in one), another layer
+   * from its main layer. As in Figma, adding auto layout to one whose
+   * component has none, or removing it from one whose component has it,
+   * leaves it as it was; only a turn back to its component's is allowed (a
+   * file saved before can hold another). Its flow's own settings (direction,
+   * alignment, gaps) stay its own to change.
+   */
+  canToggleLayout(id: string, on: boolean): boolean {
+    const frame = this.doc.get(id);
+    if (frame?.type !== "frame") return false;
+    const instanceOf = getProp(frame.props, "instanceOf");
+    const mirrors = getProp(frame.props, "mirrors");
+    if (!instanceOf && !mirrors) return true;
+    const shown = instanceOf ? this.doc.get(instanceOf) : this.doc.get(mirrors as string);
+    return !!shown && (getProp(shown.props, "layoutMode") !== "none") === on;
+  }
+
   /** Puts the selection in a grid: a frame becomes one, other layers are framed first. */
   addGridLayout(): void {
     if (this.#refuseInsideInstance()) return;
     const ids = this.#topmost(this.s.selection);
     const only = ids.length === 1 ? this.doc.get(ids[0] as string) : undefined;
-    if (only?.type === "frame") {
+    // As with ⇧A, an instance that can't take a flow (its component has none) is wrapped instead.
+    if (
+      only?.type === "frame" &&
+      (getProp(only.props, "layoutMode") !== "none" || this.canToggleLayout(only.id, true))
+    ) {
       this.setLayoutMode([only.id], "grid");
       return;
     }
@@ -2667,6 +2803,15 @@ export class Editor {
    * swaps in one transaction, then the sync that fills them in.
    */
   #swapInstances(instanceIds: readonly string[], componentId: string, label: string): void {
+    // The swap menu offers no swap that would show a component in itself; asked anyway, none.
+    const cyclic = instanceIds.some((id) => {
+      const instance = this.doc.getUnresolved(id);
+      return !!instance && wouldCycle(this.doc, componentId, instance.parent);
+    });
+    if (cyclic) {
+      this.notify("A component can't contain an instance of itself.");
+      return;
+    }
     const ops = instanceIds.flatMap((id) => swapInstanceOps(this.doc, id, componentId));
     if (ops.length === 0) return;
     this.beginGesture(label);
@@ -2675,7 +2820,9 @@ export class Editor {
     // Synced through the outermost instance: a nested one's layers copy the instance it's in.
     const outer = new Set(instanceIds.map((id) => outermostInstanceOf(this.doc, id)?.id ?? id));
     const sync = [...outer].flatMap((id) => syncInstanceOps(this.doc, id));
-    if (sync.length > 0) this.commit(sync, label, { overrides: false });
+    // The swap emptied what it swapped (its old layers went); the sync gives it the new main's
+    // padding, which an empty Hug instance shrinks to.
+    if (sync.length > 0) this.commit(sync, label, { overrides: false, emptied: instanceIds });
     this.endGesture();
   }
 
@@ -2724,8 +2871,31 @@ export class Editor {
     const rebuilt = new Set(
       [...reset].filter(([, props]) => props.has("instanceOf")).map(([id]) => id),
     );
+    const swappedBack = [...rebuilt];
     const inside = (id: string) =>
       rebuilt.has(id) || this.doc.ancestors(id).some((a) => rebuilt.has(a.id));
+    // A reset of how layers are placed or sized (auto layout, positioning, constraints, sizing)
+    // places them again:
+    // the layer's own place, size and text mode, and its layers', as sync derives them.
+    const PLACING = [
+      "layoutMode",
+      "positioning",
+      "constraintH",
+      "constraintV",
+      "sizingH",
+      "sizingV",
+    ];
+    const PLACED = new Set(["x", "y", "width", "height", "textAutoResize"]);
+    const placing = (id: string | undefined) =>
+      !!id && PLACING.some((prop) => reset.get(id)?.has(prop));
+    // The frame that places a layer: its parent, or the one above the groups it's in.
+    const placedBy = (id: string) => {
+      let at = this.doc.get(this.doc.get(id)?.parent ?? "");
+      while (at?.type === "group") at = this.doc.get(at.parent);
+      return at?.id;
+    };
+    const replaced = (id: string, prop: string) =>
+      PLACED.has(prop) && (placing(id) || placing(placedBy(id)));
     const sync = [...outer]
       .flatMap((id) => syncInstanceOps(this.doc, id))
       .filter((op) => {
@@ -2734,11 +2904,13 @@ export class Editor {
           rebuilt.add(op.id);
           return true;
         }
-        if (op.op === "set") return !!reset.get(op.id)?.has(op.prop) || inside(op.id);
+        if (op.op === "set")
+          return !!reset.get(op.id)?.has(op.prop) || inside(op.id) || replaced(op.id, op.prop);
         if (op.op === "move") return inside(op.id) || rebuilt.has(op.parent);
         return inside(op.id);
       });
-    if (sync.length > 0) this.commit(sync, "Reset override", { overrides: false });
+    if (sync.length > 0)
+      this.commit(sync, "Reset override", { overrides: false, emptied: swappedBack });
     this.endGesture();
   }
 

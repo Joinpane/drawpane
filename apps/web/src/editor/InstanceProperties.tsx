@@ -1,5 +1,6 @@
 import {
   componentSetOf,
+  cycleForbidden,
   instanceProperties,
   layerName,
   type OverrideGroup,
@@ -241,6 +242,8 @@ function SwapPicker({ instanceId, row }: { instanceId: string; row: Row }) {
   const items = (): MenuItem[] => {
     const out: MenuItem[] = [];
     const seen = new Set<string>();
+    const placed = target ? editor.doc.getUnresolved(target) : undefined;
+    const forbidden = placed ? cycleForbidden(editor.doc, placed.parent) : null;
     const preferred = (row.preferred ?? [])
       .map((id) => {
         // A preferred set offers its first variant.
@@ -248,7 +251,9 @@ function SwapPicker({ instanceId, row }: { instanceId: string; row: Row }) {
         if (node && getProp(node.props, "isComponentSet")) return editor.doc.childIds(id)[0];
         return id;
       })
-      .filter((id): id is string => !!id && !!editor.doc.get(id));
+      .filter((id): id is string => !!id && !!editor.doc.get(id))
+      // None that would put a component inside itself, as the full list leaves out.
+      .filter((id) => !forbidden?.has(id));
     if (preferred.length > 0) {
       out.push({ id: "preferred", heading: "Preferred" });
       for (const id of preferred) {

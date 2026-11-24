@@ -50,7 +50,7 @@ async function open(browser: Browser, fileId: string) {
   const socket = await openSocket(browser, fileId);
   socket.send({
     t: "hello",
-    protocol: 3,
+    protocol: 4,
     clientId: `client-${fileId}`,
     revn: null,
     copies: ["materialized", "compact"],
