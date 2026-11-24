@@ -50,6 +50,28 @@ describe("the copy pass's fast path", () => {
     expect(editor.doc.storedReader().get(stale)?.props.x).toBeUndefined();
   });
 
+  it("reads an unset overrides list as none, like the copy view", () => {
+    const instance = "i";
+    const stale = copyId(instance, ["r"]);
+    const editor = make([
+      n("p", "page", ROOT_ID),
+      n("main", "frame", "p", { isComponent: true, width: 100, height: 100 }),
+      n("r", "rect", "main", { x: 10, y: 10, width: 20, height: 20 }),
+      n("s", "rect", "main", { x: 60, y: 10, width: 20, height: 20 }, "a1"),
+      n(instance, "frame", "p", { instanceOf: "main", x: 300, width: 100, height: 100 }, "a1"),
+      // A record that lists x as its own but unsets that list: the copy view presents no
+      // overrides, so its stored x is stale and the next pass repairs it.
+      n(stale, "override", instance, {
+        path: ["r"],
+        x: 50,
+        overrides: ["x"],
+        unset: ["overrides"],
+      }),
+    ]);
+    editor.setProp(["s"], "x", 70);
+    expect(num(editor, stale, "x")).toBe(10);
+  });
+
   it("places the layers of a nested instance resized on its own", () => {
     const editor = make([
       n("p", "page", ROOT_ID),

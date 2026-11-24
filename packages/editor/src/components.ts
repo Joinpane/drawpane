@@ -1106,8 +1106,8 @@ const PLACE_PROPS = ["x", "y", "textAutoResize"] as const;
 
 /**
  * The copy pass's fast path (compact copies): whether placing a copy layer would write nothing,
- * known from where it sits and what its record stores, without presenting it or deriving its
- * geometry. Most copies of an instance are such copies:
+ * known from where it sits and what its record stores, without resolving its tokens or deriving
+ * its geometry. Most copies of an instance are such copies:
  *
  * - One its frame's flow places (or a group holds, or that is a group), whose record stores no
  *   size and swaps nothing: only a size could be written there (`flowCopySizes`), and it shows
@@ -1165,7 +1165,10 @@ function inheritsPlace(
       const stored = (prop: string) => props[prop] !== undefined || unset.includes(prop);
       if (stored("instanceOf") || SIZE_PROPS.some(stored)) return false;
       // A place or text mode it overrides is its own (`placedGeometry` keeps it): never written.
-      const own = (props.overrides as readonly string[] | undefined) ?? [];
+      // An unset overrides list presents as none (`CopyView` merge), so read it the same way.
+      const own = unset.includes("overrides")
+        ? []
+        : ((props.overrides as readonly string[] | undefined) ?? []);
       placeStored = PLACE_PROPS.some((prop) => stored(prop) && !own.includes(prop));
     } else if (record) return false;
     const sourceParent = doc.copySlot(slot.source)?.parent ?? store.get(slot.source)?.parent;
