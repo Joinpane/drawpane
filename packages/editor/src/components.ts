@@ -1056,10 +1056,28 @@ export function copyConstraintOps(
       }
     }
   if (starts.length === 0) return [];
+  const out: Op[] = [];
+  const pending = new Map<string, Record<string, unknown>>();
+  const view = (id: string): NodeRecord | undefined => {
+    const node = doc.get(id);
+    const props = node && pending.get(id);
+    return props ? { ...node, props: { ...node.props, ...props } as Props } : node;
+  };
+  // The fast path (compact copies): a copy known to be written nothing isn't placed.
+  const inherits = doc.compactCopies ? inheritsPlace(doc, view, pending) : undefined;
   // Starts shallowest first (a start inside another comes with it), each walked parents first.
-  const unique = [...new Set(starts)].filter((id) => doc.has(id));
-  const depth = new Map(unique.map((id) => [id, doc.ancestors(id).length]));
-  unique.sort((a, b) => (depth.get(a) ?? 0) - (depth.get(b) ?? 0));
+  // Depth is read off stored and presented parents, without presenting anything.
+  const depths = new Map<string, number>();
+  const depthOf = (id: string): number => {
+    let depth = depths.get(id);
+    if (depth !== undefined) return depth;
+    const parent = doc.getUnresolved(id)?.parent;
+    depth = parent ? depthOf(parent) + 1 : 0;
+    depths.set(id, depth);
+    return depth;
+  };
+  const unique = [...new Set(starts)].filter((id) => doc.getUnresolved(id) !== undefined);
+  unique.sort((a, b) => depthOf(a) - depthOf(b));
   const order: string[] = [];
   const seen = new Set<string>();
   for (const start of unique) {
@@ -1072,19 +1090,98 @@ export function copyConstraintOps(
       stack.push(...doc.childIds(id));
     }
   }
-  const out: Op[] = [];
-  const pending = new Map<string, Record<string, unknown>>();
-  const view = (id: string): NodeRecord | undefined => {
-    const node = doc.get(id);
-    const props = node && pending.get(id);
-    return props ? { ...node, props: { ...node.props, ...props } as Props } : node;
-  };
-  for (const id of order)
+  for (const id of order) {
+    if (inherits?.(id)) continue;
     for (const op of copyPlaceOps(doc, id, view)) {
       out.push(op);
       if (op.op === "set") pending.set(op.id, { ...pending.get(op.id), [op.prop]: op.value });
     }
+  }
   return out;
+}
+
+/** What a compact copy's record can store that `copyPlaceOps` writes: its size, place and text mode. */
+const SIZE_PROPS = ["width", "height"] as const;
+const PLACE_PROPS = ["x", "y", "textAutoResize"] as const;
+
+/**
+ * The copy pass's fast path (compact copies): whether placing a copy layer would write nothing,
+ * known from where it sits and what its record stores, without presenting it or deriving its
+ * geometry. Most copies of an instance are such copies:
+ *
+ * - One its frame's flow places (or a group holds, or that is a group), whose record stores no
+ *   size and swaps nothing: only a size could be written there (`flowCopySizes`), and it shows
+ *   its main layer's.
+ * - One placed freely in a frame the size of its main layer's frame on both axes, whose record
+ *   stores none of its size, and none of its place or text mode but what it overrides: it shows
+ *   its main layer's for each of the rest, which is what `placedGeometry` derives there (its
+ *   constraints move nothing in a frame of the same size), and what it keeps isn't written.
+ *
+ * Values count as stored when set or unset. A copy storing any value that could be written is
+ * placed in full, so a stale one is still repaired, and the copies under a skipped one are still
+ * visited (one may be resized on its own). Frames are read once per frame and main frame, as
+ * placed so far in this pass (`view`), and only after they're placed (parents first).
+ */
+function inheritsPlace(
+  doc: Doc,
+  view: (id: string) => NodeRecord | undefined,
+  pending: ReadonlyMap<string, unknown>,
+): (id: string) => boolean {
+  const store = doc.storedReader();
+  /** Per frame and main frame: whether it's a frame, whether it places by a flow, same size. */
+  const frames = new Map<string, Map<string, { frame: boolean; flow: boolean; same: boolean }>>();
+  const frameOf = (parent: string, sourceParent: string) => {
+    let bySource = frames.get(parent);
+    let known = bySource?.get(sourceParent);
+    if (known) return known;
+    const frame = view(parent);
+    const main = doc.get(sourceParent);
+    known = {
+      frame: frame?.type === "frame" && !!main,
+      flow: !!frame && getProp(frame.props, "layoutMode") !== "none",
+      same:
+        !!frame &&
+        !!main &&
+        getProp(frame.props, "width") === getProp(main.props, "width") &&
+        getProp(frame.props, "height") === getProp(main.props, "height"),
+    };
+    if (!bySource) {
+      bySource = new Map();
+      frames.set(parent, bySource);
+    }
+    bySource.set(sourceParent, known);
+    return known;
+  };
+  return (id) => {
+    if (pending.has(id)) return false;
+    // Read from where it sits (its slot) and what's stored, so nothing is presented for it.
+    const slot = doc.copySlot(id);
+    if (!slot) return false;
+    const record = store.get(id);
+    let placeStored = false;
+    if (record?.type === "override") {
+      const props = record.props as Record<string, unknown>;
+      const unset = (props.unset as readonly string[] | undefined) ?? [];
+      const stored = (prop: string) => props[prop] !== undefined || unset.includes(prop);
+      if (stored("instanceOf") || SIZE_PROPS.some(stored)) return false;
+      // A place or text mode it overrides is its own (`placedGeometry` keeps it): never written.
+      const own = (props.overrides as readonly string[] | undefined) ?? [];
+      placeStored = PLACE_PROPS.some((prop) => stored(prop) && !own.includes(prop));
+    } else if (record) return false;
+    const sourceParent = doc.copySlot(slot.source)?.parent ?? store.get(slot.source)?.parent;
+    if (!sourceParent) return false;
+    const frame = frameOf(slot.parent, sourceParent);
+    const copy = doc.getUnresolved(id);
+    if (!copy) return false;
+    // Not placed by `placedGeometry` (a flow places it, or a group is or holds it): only a size.
+    if (
+      !frame.frame ||
+      copy.type === "group" ||
+      (frame.flow && getProp(copy.props, "positioning") !== "absolute")
+    )
+      return true;
+    return !placeStored && frame.same;
+  };
 }
 
 /** The writes that put a copy layer where `placedGeometry` places it, and give it its main's text mode. */
@@ -1198,6 +1295,7 @@ export function relayoutTargets(
   const inner = new Set<string>();
   /** Mains whose root changed in a way its instances' parents read. */
   const sized = new Set<string>();
+  const byLayer = new Map<string, { around: Set<string>; isRoot: boolean; inside: boolean }>();
   for (const op of changes) {
     const node = op.op === "delete" ? undefined : doc.getUnresolved(op.id);
     if (!node) {
@@ -1207,13 +1305,28 @@ export function relayoutTargets(
     }
     // Moved: the component it left changed too (a frame there lost a layer).
     if (op.op === "move") for (const id of affectedComponents(doc, ids)) inner.add(id);
-    const around = affectedComponents(doc, [node.id]);
-    if (around.size === 0) continue;
-    const isRoot = isMainComponent(node);
-    if (isRoot && op.op === "set" && ROOT_LOCAL_PROPS.has(op.prop)) continue;
-    if (isRoot) sized.add(node.id);
-    if (isRoot || node.type === "text" || isLayout(node) || inLayout(node) || layoutInCopy(node))
-      for (const id of around) inner.add(id);
+    // Worked out once per layer (an edit sets several of its properties).
+    let decided = byLayer.get(node.id);
+    if (!decided) {
+      const around = affectedComponents(doc, [node.id]);
+      const isRoot = isMainComponent(node);
+      decided = {
+        around,
+        isRoot,
+        inside:
+          around.size > 0 &&
+          (isRoot ||
+            node.type === "text" ||
+            isLayout(node) ||
+            inLayout(node) ||
+            layoutInCopy(node)),
+      };
+      byLayer.set(node.id, decided);
+    }
+    if (decided.around.size === 0) continue;
+    if (decided.isRoot && op.op === "set" && ROOT_LOCAL_PROPS.has(op.prop)) continue;
+    if (decided.isRoot) sized.add(node.id);
+    if (decided.inside) for (const id of decided.around) inner.add(id);
   }
   /** What changed in the mains: the layers their copies are laid out again around. */
   const seeds = new Set(ids);
