@@ -7132,14 +7132,13 @@ impl Gpu {
         Ok(stats)
     }
 
-    /// Records the frame shown (`last`, set first) as made at `generation` over `background`.
-    /// An exact one forgets what changed within it (`TileCache::shown_exact`): the frames after
-    /// it hold nothing old there.
+    /// Records the frame shown (`last`, set first), drawn at `generation` over `background`: the
+    /// one the next is laid on. Drawn from what's current, it forgets what changed before it
+    /// (`TileCache::frame_drawn`). A stand-in after a limit isn't recorded: it keeps the frame
+    /// it was warped from, and what changed since.
     fn set_shown(&mut self, generation: u64, background: [u32; 4], exact: bool) {
         self.shown = Some((generation, background, exact));
-        if exact && let Some(l) = self.last {
-            self.tiles.shown_exact(l.view, l.size);
-        }
+        self.tiles.frame_drawn();
     }
 
     /// The frame last shown: the view it was drawn under and its size.

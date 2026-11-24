@@ -1992,17 +1992,24 @@ GPU work a frame queued had no bound, and input waited behind it.
 - **It stands in while moving.** In a frame while the camera moves, the overview covers what
   nothing nearer does, at any scale it's at least 4× coarser than (nearer levels keep the 4× rule
   of `stands_in`). A zoom out then has nothing it must draw. The composite lays the overview
-  beneath the last frame (`Composite::under`). A stale tile (an edit, an image changed) never
-  stands in nor is laid while moving: what it covered is drawn instead, until it's drawn again.
-  At rest nothing changes: what nothing nearer stands in for is drawn.
-- **Nothing old shows while moving.** The cache keeps the page regions an edit changed since an
-  exact frame last showed them (`TileCache::note_changed`). While moving, the composite lays the
-  last frame round them (`Composite::holes`), and the plan treats them as uncovered, so they show
-  only what's drawn since: a tile drawn in this frame or an earlier one, or the overview redrawn.
-  Until then they show the background, never old content. Only an exact frame forgets them, and
-  only what it covers (`TileCache::shown_exact`): any other frame may still hold old pixels there
-  (a stand-in after a limit warps the older frame it keeps, a frame laid at rest from stale
-  tiles), and the next moving frame may warp it.
+  beneath the last frame (`Composite::under`). At rest, what nothing nearer stands in for is
+  drawn, as before.
+- **Nothing older than a change shows where it changed, moving or at rest.** No pixel shown
+  after an edit (or an image level changed) comes from a render older than it, where it touched:
+  - A stale tile, of any level or the overview, never stands in nor is laid, not even for itself:
+    it's drawn again first, as what nothing stands in for.
+  - The cache keeps the page regions changed since the frame the next is laid on was drawn
+    (`TileCache::note_changed`). That frame is laid round them (`Composite::holes`), and the
+    plan treats them as uncovered there, so they show only what's drawn since, or the
+    background until then.
+  - So every frame drawn holds nothing older than a change where it was, and becomes the frame
+    the next is laid on with nothing kept (`TileCache::frame_drawn`). A stand-in after a limit
+    isn't one: it keeps the older frame it warped, and what changed since that.
+
+  At rest this shows the background where a change was until its tiles are drawn again (within
+  the frame's budget), where it showed the old pixels before. A single set forgotten by exact
+  frames wasn't enough: a frame at rest laid from stale tiles of another level put old pixels
+  back after an exact frame at another scale had covered one change (final re-check of #345).
 - **GPU work per moving frame is held.** A frame while moving starts at most 48 GPU passes of
   tile work (`MOVING_PASSES`: Vello renders, isolation scopes, and an estimate of the kernel
   passes each reader and blurred shadow runs; Figma caps a frame at about 255 framebuffer binds,
@@ -2061,13 +2068,13 @@ the same container. The gate's budgets: lag p95 ≤ 100 ms, dropped frames ≤ 5
 | Cmd+scroll in dropped frames | 11-57% (median 44%) | 0-33% (median 3.7%) |
 | Time to exact: Shift+2, Shift+0, pinch from fit | 0.78, 0.31, 0.19 s (medians) | 0.79, 0.33, 0.18 s |
 
-- After the re-check fixes, rebased onto fixed-function blending (#351), four runs paired with
+- After the re-check fixes, rebased onto fixed-function blending (#351), six runs paired with
   main: this change met every gated budget in two (pinch-out at 58 to 60 fps, 0 to 2.6% dropped,
-  45 to 62 ms p95 lag, against main's 39 to 43 fps, 28 to 35% and 248 to 720 ms). In the other
-  two, pinch-out missed (6.4% dropped in one; 42 fps, 30% and 346 ms in the other, still ahead
-  of main's 39 fps, 35% and 522 ms). That's a GPU backlog, not main-thread time: the pinch-out
-  still starts some tiles nothing stands in for (9 to 29 a gesture in lag-audit probes). Pan lag
-  and Cmd+scroll in swing as widely on main across the same runs. At a 4 MiB tile budget (most frames direct), every moving call stayed a
+  45 to 62 ms p95 lag). Pinch-out missed in the other four: 6.4% and 8.5% dropped in two, and
+  41 to 42 fps with 30 to 32% dropped in two. Main never met it (35 to 43 fps, 28 to 42% dropped,
+  248 to 740 ms p95). The misses are a GPU backlog, not main-thread time: the pinch-out still
+  starts some tiles nothing stands in for (5 to 29 a gesture in lag-audit probes, with or without
+  the stale-pixel fixes). Pan lag and Cmd+scroll swing as widely on main across the same runs. At a 4 MiB tile budget (most frames direct), every moving call stayed a
   bounded stand-in, the slowest 30 ms (1.2 s before the re-check). Exact direct frames at rest
   still draw every tile at once (0.9 to 1.2 s each there), as on main.
 - In the lag audit's probes with the gate's timing, the overview is now drawn before the

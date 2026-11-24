@@ -3487,10 +3487,8 @@ impl Engine {
             size: (width, height),
         });
         tiles.last_scale = Some(scale);
-        // An exact frame forgets what changed within it (`TileCache::shown_exact`).
-        if stats.exact {
-            tiles.cache.shown_exact(view, (width, height));
-        }
+        // The frame the next is laid on: drawn from what's current (`TileCache::frame_drawn`).
+        tiles.cache.frame_drawn();
         Ok(stats)
     }
 

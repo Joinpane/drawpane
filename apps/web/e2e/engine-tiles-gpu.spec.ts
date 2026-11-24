@@ -102,6 +102,153 @@ function denseGreen(base: number): number[] {
   return [...list.finish()];
 }
 
+/** Two 128 x 32 rects at x 16 and 640, y 16, in `color`: a fresh list, or a patch on `base`. */
+function spacedFills(
+  color: readonly [number, number, number, number],
+  base = 0xffffffff,
+): number[] {
+  const list = new ListWriter(base, base === 0xffffffff ? 1 : base + 1);
+  if (base === 0xffffffff) list.reset();
+  for (const [i, x] of [16, 640].entries()) {
+    list.set(i + 1, ROOT, {
+      flags: 0,
+      transform: [1, 0, 0, 1, x, 16],
+      opacity: 1,
+      width: 128,
+      height: 32,
+      coarseBelow: 0,
+      reach: 0,
+      unsupported: 0,
+      paths: [{ kind: "rect", w: 128, h: 32, radii: [0, 0, 0, 0], smoothing: 0 }],
+      ops: [{ op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color } }],
+      coarse: [],
+    });
+  }
+  return [...list.finish()];
+}
+
+type HeldFrame = {
+  name: string;
+  size: [number, number];
+  scale: number;
+  moving: boolean;
+  budget: number;
+  /** Device pixels sampled once the frame is drawn. */
+  samples: [number, number][];
+};
+
+/**
+ * Draws `frames` in turn with GPU completions held back (nothing is drawn while moving), the
+ * list edited by `patch` before the second. Each frame's pixels are read in an engine of its own
+ * that drew the frames before it the same way (a read-back waits for the GPU).
+ */
+async function heldFrames(
+  page: Page,
+  build: GpuBuild,
+  before: number[],
+  patch: number[],
+  frames: HeldFrame[],
+) {
+  await openEngine(page, build);
+  return page.evaluate(
+    async ({ build, before, patch, frames }) => {
+      const name = "/engine.js";
+      const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+      await glue.default({ module_or_path: "/engine_bg.wasm" });
+      let hold = false;
+      if (build === "browser") {
+        const proto = (window as unknown as { GPUQueue: { prototype: GPUQueue } }).GPUQueue
+          .prototype;
+        const done = proto.onSubmittedWorkDone;
+        proto.onSubmittedWorkDone = function (this: GPUQueue) {
+          return hold ? new Promise<undefined>(() => {}) : done.call(this);
+        };
+      } else {
+        const proto = WebGL2RenderingContext.prototype;
+        const status = proto.getSyncParameter;
+        const wait = proto.clientWaitSync;
+        proto.getSyncParameter = function (
+          this: WebGL2RenderingContext,
+          sync: WebGLSync,
+          pname: GLenum,
+        ) {
+          return hold && pname === this.SYNC_STATUS
+            ? this.UNSIGNALED
+            : status.call(this, sync, pname);
+        };
+        proto.clientWaitSync = function (
+          this: WebGL2RenderingContext,
+          sync: WebGLSync,
+          flags: GLbitfield,
+          timeout: GLuint64,
+        ) {
+          return hold ? this.TIMEOUT_EXPIRED : wait.call(this, sync, flags, timeout);
+        };
+      }
+      const bg = new Float32Array([0, 0, 0, 1]);
+      const rows = [];
+      for (let through = 0; through < frames.length; through++) {
+        const engine = new glue.Engine(0, 0);
+        const requireOk = (out: { ok: boolean; message: string; free(): void }) => {
+          const { ok, message } = out;
+          out.free();
+          if (!ok) throw new Error(message);
+        };
+        try {
+          const gpu = await glue.createGpu(null, 0);
+          const attached = engine.attachGpu?.(gpu);
+          gpu.free();
+          if (!attached) throw new Error("no GPU entry points");
+          requireOk(attached);
+          requireOk(engine.apply(new Uint8Array(before)));
+          hold = true;
+          let last = { exact: false, pending: 0, drawn: 0 };
+          for (const [i, f] of frames.slice(0, through + 1).entries()) {
+            if (i === 1) requireOk(engine.apply(new Uint8Array(patch)));
+            const out = engine.renderGpu?.(
+              f.size[0],
+              f.size[1],
+              f.scale,
+              0,
+              0,
+              1,
+              bg,
+              f.moving,
+              f.budget,
+            );
+            if (!out) throw new Error("no renderGpu");
+            const row = {
+              ok: out.ok,
+              message: out.message,
+              exact: out.exact,
+              pending: out.pending,
+              drawn: out.tiles_drawn,
+            };
+            out.free();
+            if (!row.ok) throw new Error(row.message);
+            last = { exact: row.exact, pending: row.pending, drawn: row.drawn };
+          }
+          hold = false;
+          const f = frames[through];
+          if (!f) throw new Error("no frame");
+          const pixels = await engine.gpuPixels?.();
+          if (!(pixels instanceof Uint8Array)) throw new Error("no read-back");
+          const samples = f.samples.map(([x, y]) => {
+            const at = (y * f.size[0] + x) * 4;
+            return [...pixels.subarray(at, at + 4)];
+          });
+          rows.push({ name: f.name, ...last, samples });
+        } finally {
+          hold = false;
+          engine.free();
+        }
+      }
+      return rows;
+    },
+    { build, before, patch, frames },
+  );
+}
+
 function directStripes(count = 12): number[] {
   const list = new ListWriter(0xffffffff, 1);
   list.reset();
@@ -794,6 +941,84 @@ for (const build of ["browser", "webgl"] as const) {
       expect(rows.exact).toMatchObject({ exact: true, pending: 0 });
       expect(rows.final).toEqual([0, 255, 0, 255]);
     });
+
+    for (const [label, exactLeft] of [
+      // Finer than the frame that follows, as in the final re-check of #345.
+      ["finer", { size: [2048, 640], scale: 12, samples: [[1140, 384]] }],
+      // Coarser: what the stale tiles (scale 1) would stand in for is laid at a lower scale.
+      ["coarser", { size: [160, 40], scale: 0.5, samples: [[40, 16]] }],
+    ] as const) {
+      test(`an exact frame (${label}) over one of two changes never brings back the other's old fill`, async ({
+        page,
+      }) => {
+        // Two red rects turn green. An exact frame at another scale covers only the left one;
+        // then a frame at rest at scale 1 (composite-only, so laid from what's kept), and the
+        // pinch again. No pixel may come from before the edit where it was: not the scale 1
+        // tiles drawn before it, nor the frame laid from them (final re-check of #345).
+        const wide: [number, number][] = [
+          [95, 32],
+          [715, 32],
+        ];
+        const rows = await heldFrames(
+          page,
+          build,
+          spacedFills([1, 0, 0, 1]),
+          spacedFills([0, 1, 0, 1], 1),
+          [
+            {
+              name: "initial",
+              size: [1024, 256],
+              scale: 1,
+              moving: false,
+              budget: 0,
+              samples: wide,
+            },
+            {
+              name: "exactLeft",
+              size: [exactLeft.size[0], exactLeft.size[1]],
+              scale: exactLeft.scale,
+              moving: false,
+              budget: 0,
+              samples: exactLeft.samples.map(([x, y]) => [x, y] as [number, number]),
+            },
+            {
+              name: "atRest",
+              size: [1024, 256],
+              scale: 1,
+              moving: false,
+              budget: -1,
+              samples: wide,
+            },
+            {
+              name: "restart",
+              size: [1024, 256],
+              scale: 0.98,
+              moving: true,
+              budget: 4,
+              samples: wide,
+            },
+            {
+              name: "exact",
+              size: [1024, 256],
+              scale: 0.98,
+              moving: false,
+              budget: 0,
+              samples: wide,
+            },
+          ],
+        );
+        const green = [0, 255, 0, 255];
+        expect(rows[0]).toMatchObject({ exact: true, samples: [red, red] });
+        expect(rows[1]).toMatchObject({ exact: true, samples: [green] });
+        for (const row of [rows[2], rows[3]]) {
+          expect(row?.exact).toBe(false);
+          for (const sample of row?.samples ?? []) {
+            expect(sample, `${row?.name} showed the fill from before the edit`).not.toEqual(red);
+          }
+        }
+        expect(rows[4]).toMatchObject({ exact: true, pending: 0, samples: [green, green] });
+      });
+    }
 
     test("a whole frame done in its first call reports the overview still to draw", async ({
       page,
