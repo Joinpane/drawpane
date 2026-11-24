@@ -1471,6 +1471,12 @@ export class RenderEngine {
     return typeof r === "boolean" ? r : false;
   }
 
+  /** Enables or disables the GPU clip-chain mask cache and AA-rect scissor fast path. */
+  setGpuClipFastPath(enabled: boolean): boolean {
+    const r = this.#call((e) => e.setGpuClipFastPath?.(enabled) ?? false);
+    return typeof r === "boolean" ? r : false;
+  }
+
   /** Reads the last frame's GPU timestamp duration in ms (null if unsupported or disabled). */
   async gpuTimestampMs(): Promise<Result<number | null>> {
     const startEpoch = this.#epoch;

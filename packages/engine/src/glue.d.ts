@@ -229,6 +229,7 @@ export class Engine {
   gpuDestroy?(): void;
   setGpuTimestamps?(enabled: boolean): boolean;
   setGpuHwBlend?(enabled: boolean): boolean;
+  setGpuClipFastPath?(enabled: boolean): boolean;
   warmGpuHwBlendPipeline?(slot: number): boolean;
   gpuWebgpuHwBlendWarmup?(): [unknown, string, boolean] | undefined;
   gpuTimestampMs?(): Promise<number | Outcome | undefined>;

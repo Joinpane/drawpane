@@ -1196,6 +1196,17 @@ impl Engine {
         self.core.gpu.as_mut().is_some_and(|g| g.set_hw_blend_enabled(enabled))
     }
 
+    /// Enables or disables the tile-local clip-chain mask cache and integer AA-rect scissor fast
+    /// path (enabled by default; toggling clears cached tiles so tests can compare against
+    /// uncached mask rasterization).
+    #[wasm_bindgen(js_name = setGpuClipFastPath)]
+    pub fn set_gpu_clip_fast_path(&mut self, enabled: bool) -> bool {
+        self.core
+            .gpu
+            .as_mut()
+            .is_some_and(|g| g.set_clip_fast_path_enabled(enabled))
+    }
+
     /// Warms one HW-blend strip pipeline slot (`0..4` depth, `4..8` non-depth) in idle time.
     /// Returns `true` when additional slots remain.
     #[wasm_bindgen(js_name = warmGpuHwBlendPipeline)]

@@ -57,7 +57,7 @@ use std::sync::{Arc, Mutex};
 use vello_common::TextureId;
 use vello_common::color::{AlphaColor, Srgb};
 use vello_common::geometry::RectU16;
-use vello_common::kurbo::{Affine, BezPath, PathEl, Rect};
+use vello_common::kurbo::{Affine, BezPath, PathEl, Rect, Shape};
 use vello_common::paint::{Image, ImageSource, TextureRegion, Tint, TintMode};
 use vello_common::peniko::{Extend, Fill, ImageQuality, ImageSampler};
 use vello_gpu::{
@@ -249,8 +249,8 @@ const TEMP_TEX_BASE: u64 = 1 << 49;
 /// Byte cap on transient offscreen textures referenced by the active GPU scene before an
 /// automatic flush recycles them into the pool.
 const GPU_TEMP_FLUSH_BYTES: usize = 16 << 20;
-/// Soft cap on pooled offscreen/temp GPU textures kept warm between frames.
-const GPU_POOL_KEEP_BYTES: usize = 32 << 20;
+/// Soft cap on pooled offscreen/temp/clip GPU textures kept warm between frames.
+const GPU_POOL_KEEP_BYTES: usize = 48 << 20;
 
 /// GPU passes (Vello renders and isolation scopes) a frame may start while the camera moves.
 /// The main-thread budget can't bound GPU work (a 4 ms walk can queue tens of passes of blend
@@ -262,9 +262,16 @@ const MOVING_PASSES: u32 = 48;
 const IDLE_IN_FLIGHT: u64 = 2;
 /// Tiles of a frame no slot can hold (`Plan::direct`) drawn, rough, in one moving frame.
 const DIRECT_MOVING_TILES: usize = 2;
-
 /// Budget for the GPU canonical shadow mask cache (strictly enforced LRU).
 const GPU_SHADOW_CACHE_BYTES: usize = 16 << 20;
+/// Maximum number of tile-local cached clip-chain masks kept during one draw.
+const CLIP_CACHE_MAX_ENTRIES: usize = 8;
+/// Byte budget for tile-local cached clip-chain masks (color-only RGBA8 textures).
+const CLIP_CACHE_MAX_BYTES: usize = 24 << 20;
+/// Largest single clip-chain mask texture eligible for tile-local caching.
+const CLIP_CACHE_ENTRY_MAX_BYTES: usize = 16 << 20;
+/// Maximum reusable Vello depth views kept for clip-mask rasterization.
+const CLIP_DEPTH_POOL_MAX: usize = 6;
 
 const BLIT: &str = r"
 @group(0) @binding(0) var frame: texture_2d<f32>;
@@ -681,6 +688,51 @@ struct GpuBlurScratch {
     bytes: usize,
 }
 
+/// Identifies one non-scissor clip step in an active clip chain.
+/// Equal keys guarantee identical path geometry, fill rule, and target-local transform.
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct ClipStepKey {
+    node_id: u32,
+    path_idx: u32,
+    even_odd: bool,
+    transform: [u64; 6],
+}
+
+/// Color-only RGBA8 texture holding one rasterized clip-chain mask (pooled across draws).
+struct GpuClipTex {
+    tex: wgpu::Texture,
+    view: wgpu::TextureView,
+    view_id: u64,
+    width: u32,
+    height: u32,
+    bytes: usize,
+}
+
+/// One cached clip-chain mask valid for the current tile/frame draw (`clip_cache_draw_id`).
+struct CachedClipMask {
+    key_hash: u64,
+    key: Vec<ClipStepKey>,
+    bounds: IRect,
+    tex: GpuClipTex,
+    last_used: u32,
+}
+
+/// Ready-to-bind clip mask texture view and its target-local `(x0, y0)` origin.
+struct ClipMaskBinding {
+    view: wgpu::TextureView,
+    view_id: u64,
+    origin: (i32, i32),
+}
+
+/// Result of analyzing the active `Open::Clip` stack for one clipped draw.
+struct ClipAnalysis<'a> {
+    any_clip: bool,
+    clipped_rect: IRect,
+    mask_clips: Vec<(&'a BezPath, Affine, bool)>,
+    cache_key: Option<(u64, Vec<ClipStepKey>)>,
+    mask_bounds: IRect,
+}
+
 /// The scratch target and its depth buffer (`TILE + 2 * halo` square for tiles, or `w x h` whole).
 struct ScratchTile {
     texture: wgpu::Texture,
@@ -712,6 +764,8 @@ struct GpuTimestampQuery {
 
 /// State for the active `draw_tile` or `render_whole` pass while `exec::draw_split` walks the scene.
 struct ActiveDraw {
+    /// Monotonic id identifying this tile/frame draw for the tile-local clip-mask cache.
+    draw_id: u64,
     /// A whole frame writes straight to its destination; tiles use scratch color.
     frame_dst: Option<usize>,
     /// The part of a padded viewport that is actually presented.
@@ -747,6 +801,7 @@ struct ActiveDraw {
 
 impl ActiveDraw {
     fn new(
+        draw_id: u64,
         frame_dst: Option<usize>,
         display_area: Option<IRect>,
         width: u32,
@@ -755,6 +810,7 @@ impl ActiveDraw {
         detail: bool,
     ) -> Self {
         Self {
+            draw_id,
             frame_dst,
             display_area,
             width,
@@ -1491,6 +1547,21 @@ pub struct Gpu {
     scratch_blur: Option<GpuBlurScratch>,
     /// Scratch backdrop copy texture for blend compositing.
     scratch_backdrop: Option<GpuBlurScratch>,
+    /// Tile-local LRU cache of rasterized clip-chain masks for the active draw.
+    clip_mask_cache: Vec<CachedClipMask>,
+    clip_mask_cache_bytes: usize,
+    clip_mask_tick: u32,
+    clip_cache_draw_id: u64,
+    next_draw_id: u64,
+    /// Clip-chain hashes already observed in the current moving draw (2-hit admission).
+    clip_seen_hashes: [u64; 16],
+    clip_seen_len: u8,
+    /// Warm reusable color-only clip mask textures.
+    clip_mask_pool: Vec<GpuClipTex>,
+    /// Evicted clip mask textures still referenced by the unsubmitted active encoder.
+    clip_mask_in_use: Vec<GpuClipTex>,
+    /// Shared Vello depth views reused across clip-mask rasterization passes.
+    clip_depth_pool: Vec<(u32, u32, wgpu::TextureView, usize)>,
     /// Replaced scratch textures still referenced by an unsubmitted encoder, destroyed after submit.
     retired_textures: Vec<(wgpu::Texture, usize)>,
     next_temp_id: u64,
@@ -1521,6 +1592,8 @@ pub struct Gpu {
     timestamps: Option<GpuTimestampQuery>,
     /// Whether fixed-function hardware blending in Vello's strip pass is enabled.
     hw_blend_enabled: bool,
+    /// Whether tile-local clip-chain mask caching and integer AA-rect scissor folding are enabled.
+    clip_fast_path_enabled: bool,
     /// Whether the WebGPU device has hardware timestamp queries enabled.
     #[cfg(feature = "compute")]
     timestamp_query: bool,
@@ -1576,6 +1649,16 @@ impl Drop for Gpu {
         for (tex, _) in self.retired_textures.drain(..) {
             tex.destroy();
         }
+        for entry in self.clip_mask_cache.drain(..) {
+            entry.tex.tex.destroy();
+        }
+        for t in self.clip_mask_pool.drain(..) {
+            t.tex.destroy();
+        }
+        for t in self.clip_mask_in_use.drain(..) {
+            t.tex.destroy();
+        }
+        self.clip_depth_pool.clear();
         for scratch in self.scratches.iter_mut().filter_map(Option::take) {
             scratch.texture.destroy();
         }
@@ -1605,39 +1688,215 @@ impl Drop for Gpu {
     }
 }
 
-fn active_clips(open: &[Open], skip_context: bool) -> impl Iterator<Item = (&BezPath, Affine, bool)> {
-    open.iter().filter_map(move |o| match o {
-        Open::Clip {
-            transform,
-            path,
-            even_odd,
-            active_on_scene: true,
-            context_only,
-            ..
-        } if !skip_context || !*context_only => Some((path, *transform, *even_odd)),
-        _ => None,
-    })
+#[inline]
+fn f64_canonical_bits(v: f64) -> u64 {
+    if v == 0.0 { 0.0f64.to_bits() } else { v.to_bits() }
 }
 
-fn open_clips_need_mask(open: &[Open], rect: IRect, skip_context: bool) -> bool {
-    active_clips(open, skip_context)
-        .any(|(path, transform, even_odd)| !crate::geometry::path_covers_rect(path, transform, even_odd, rect))
+fn hash_clip_chain(key: &[ClipStepKey]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    let mix = |h: &mut u64, v: u64| {
+        *h ^= v;
+        *h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    };
+    mix(&mut h, key.len() as u64);
+    for step in key {
+        mix(&mut h, (u64::from(step.node_id) << 32) | u64::from(step.path_idx));
+        mix(&mut h, u64::from(step.even_odd));
+        for c in step.transform {
+            mix(&mut h, c);
+        }
+    }
+    h
 }
 
-fn raster_clips(scene: &mut Scene, open: &[Open], shift: Affine, size: (u32, u32), skip_context: bool) {
-    let mut pushed = 0;
-    for (path, transform, even_odd) in active_clips(open, skip_context) {
+fn clip_bucket(n: u32, max_tex: u32) -> u32 {
+    let b = match n {
+        0..=128 => 128,
+        129..=256 => 256,
+        257..=512 => 512,
+        513..=1024 => 1024,
+        1025..=1536 => 1536,
+        1537..=2048 => 2048,
+        _ => n.next_multiple_of(512),
+    };
+    b.min(max_tex)
+}
+
+fn align4_rect(r: IRect, target: IRect) -> IRect {
+    IRect {
+        x0: (r.x0.div_euclid(4) * 4).max(target.x0),
+        y0: (r.y0.div_euclid(4) * 4).max(target.y0),
+        x1: ((r.x1 + 3).div_euclid(4) * 4).min(target.x1),
+        y1: ((r.y1 + 3).div_euclid(4) * 4).min(target.y1),
+    }
+}
+
+fn raster_clip_list(scene: &mut Scene, clips: &[(&BezPath, Affine, bool)], shift: Affine, size: (u32, u32)) {
+    for &(path, transform, even_odd) in clips {
         scene.set_transform(shift * transform);
         scene.set_fill_rule(if even_odd { Fill::EvenOdd } else { Fill::NonZero });
         scene.push_clip_path(path);
-        pushed += 1;
     }
     scene.set_transform(Affine::IDENTITY);
     scene.set_fill_rule(Fill::NonZero);
     scene.set_paint(vello_common::color::palette::css::WHITE);
     scene.fill_rect(&Rect::new(0.0, 0.0, f64::from(size.0), f64::from(size.1)));
-    for _ in 0..pushed {
+    for _ in 0..clips.len() {
         scene.pop_clip();
+    }
+}
+
+fn analyze_open_clips_inner(
+    open: &[Open],
+    rect: IRect,
+    target_rect: IRect,
+    skip_context: bool,
+    allow_scissor_shrink: bool,
+    fast_path: bool,
+    max_tex: u32,
+) -> ClipAnalysis<'_> {
+    if !fast_path {
+        let mut any_clip = false;
+        let mut clips = Vec::new();
+        for o in open {
+            if let Open::Clip {
+                transform,
+                path,
+                even_odd,
+                active_on_scene: true,
+                context_only,
+                ..
+            } = o
+                && (!skip_context || !*context_only)
+            {
+                any_clip = true;
+                clips.push((path, *transform, *even_odd));
+            }
+        }
+        let needs_mask = clips
+            .iter()
+            .any(|&(path, transform, even_odd)| !crate::geometry::path_covers_rect(path, transform, even_odd, rect));
+        return ClipAnalysis {
+            any_clip,
+            clipped_rect: rect,
+            mask_clips: if needs_mask { clips } else { Vec::new() },
+            cache_key: None,
+            mask_bounds: rect,
+        };
+    }
+
+    let mut any_clip = false;
+    let mut clipped_rect = rect;
+    let mut chain_bbox = target_rect;
+    let mut non_aa = Vec::new();
+    for o in open {
+        let Open::Clip {
+            transform,
+            path,
+            even_odd,
+            active_on_scene: true,
+            context_only,
+            source,
+            ..
+        } = o
+        else {
+            continue;
+        };
+        if skip_context && *context_only {
+            continue;
+        }
+        any_clip = true;
+        if allow_scissor_shrink && let Some(aa_rect) = crate::geometry::path_as_integer_aa_rect(path, *transform) {
+            clipped_rect = clipped_rect.intersect(aa_rect);
+            if clipped_rect.is_empty() {
+                return ClipAnalysis {
+                    any_clip,
+                    clipped_rect,
+                    mask_clips: Vec::new(),
+                    cache_key: None,
+                    mask_bounds: clipped_rect,
+                };
+            }
+            continue;
+        }
+        let bbox = transform.transform_rect_bbox(path.bounding_box());
+        let step_rect = if bbox.x0.is_finite() && bbox.y0.is_finite() && bbox.x1.is_finite() && bbox.y1.is_finite() {
+            IRect::around(bbox.inflate(1.0, 1.0))
+        } else {
+            target_rect
+        };
+        chain_bbox = chain_bbox.intersect(step_rect);
+        non_aa.push((path, *transform, *even_odd, *source));
+    }
+
+    if allow_scissor_shrink {
+        clipped_rect = clipped_rect.intersect(chain_bbox);
+        if clipped_rect.is_empty() {
+            return ClipAnalysis {
+                any_clip,
+                clipped_rect,
+                mask_clips: Vec::new(),
+                cache_key: None,
+                mask_bounds: clipped_rect,
+            };
+        }
+    }
+
+    let needs_mask = non_aa.iter().any(|&(path, transform, even_odd, _)| {
+        !crate::geometry::path_covers_rect(path, transform, even_odd, clipped_rect)
+    });
+    if !needs_mask {
+        return ClipAnalysis {
+            any_clip,
+            clipped_rect,
+            mask_clips: Vec::new(),
+            cache_key: None,
+            mask_bounds: clipped_rect,
+        };
+    }
+
+    let aligned_chain = align4_rect(chain_bbox, target_rect);
+    let chain_w = (aligned_chain.x1 - aligned_chain.x0).max(0) as u32;
+    let chain_h = (aligned_chain.y1 - aligned_chain.y0).max(0) as u32;
+    let alloc_w = clip_bucket(chain_w, max_tex);
+    let alloc_h = clip_bucket(chain_h, max_tex);
+    let alloc_bytes = (alloc_w as usize).saturating_mul(alloc_h as usize).saturating_mul(4);
+    let all_sourced = non_aa.iter().all(|c| c.3.is_some());
+    let can_cache = all_sourced
+        && chain_w > 0
+        && chain_h > 0
+        && chain_w <= max_tex
+        && chain_h <= max_tex
+        && alloc_bytes <= CLIP_CACHE_ENTRY_MAX_BYTES
+        && aligned_chain.contains_rect(clipped_rect);
+
+    let (cache_key, mask_bounds) = if can_cache {
+        let key: Vec<ClipStepKey> = non_aa
+            .iter()
+            .map(|&(_, tf, even_odd, source)| {
+                let (node_id, path_idx) = source.expect("checked sourced");
+                ClipStepKey {
+                    node_id,
+                    path_idx,
+                    even_odd,
+                    transform: tf.as_coeffs().map(f64_canonical_bits),
+                }
+            })
+            .collect();
+        let hash = hash_clip_chain(&key);
+        (Some((hash, key)), aligned_chain)
+    } else {
+        (None, align4_rect(clipped_rect, target_rect))
+    };
+
+    let mask_clips = non_aa.into_iter().map(|(p, tf, eo, _)| (p, tf, eo)).collect();
+    ClipAnalysis {
+        any_clip,
+        clipped_rect,
+        mask_clips,
+        cache_key,
+        mask_bounds,
     }
 }
 
@@ -2139,6 +2398,16 @@ impl Gpu {
             scratch_mask: None,
             scratch_blur: None,
             scratch_backdrop: None,
+            clip_mask_cache: Vec::new(),
+            clip_mask_cache_bytes: 0,
+            clip_mask_tick: 0,
+            clip_cache_draw_id: 0,
+            next_draw_id: 0,
+            clip_seen_hashes: [0; 16],
+            clip_seen_len: 0,
+            clip_mask_pool: Vec::new(),
+            clip_mask_in_use: Vec::new(),
+            clip_depth_pool: Vec::new(),
             retired_textures: Vec::new(),
             next_temp_id: TEMP_TEX_BASE,
             pool_bytes: 0,
@@ -2154,6 +2423,7 @@ impl Gpu {
             readbacks: Rc::new(Flights::default()),
             timestamps,
             hw_blend_enabled: true,
+            clip_fast_path_enabled: true,
             #[cfg(feature = "compute")]
             timestamp_query,
             #[cfg(feature = "compute")]
@@ -2420,15 +2690,19 @@ impl Gpu {
                 }
                 self.blur.clear();
                 self.noise.clear();
-                // A paused walk's lenses still read their masks there.
+                // A paused walk's lenses and clip masks still read their caches there.
                 if !self.walk_paused() {
                     self.readers.drop_glass_mask_atlas();
+                    self.clear_clip_mask_cache();
                 }
                 self.readers.flush_retired();
             }
         }
         while self.pool_bytes > keep_bytes {
-            if let Some(t) = self.temp_pool.pop() {
+            if let Some(t) = self.clip_mask_pool.pop() {
+                self.pool_bytes = self.pool_bytes.saturating_sub(t.bytes);
+                t.tex.destroy();
+            } else if let Some(t) = self.temp_pool.pop() {
                 self.bindings.remove(t.tid);
                 self.pool_bytes = self.pool_bytes.saturating_sub(t.bytes);
                 t.tex.destroy();
@@ -2441,6 +2715,14 @@ impl Gpu {
             } else if self.active.is_some() {
                 // Keep scratch reservations valid while allocating the rest of a pass.
                 break;
+            } else if let Some((_, _, _, bytes)) = self.clip_depth_pool.pop() {
+                self.pool_bytes = self.pool_bytes.saturating_sub(bytes);
+            } else if !self.walk_paused()
+                && let Some(entry) = self.clip_mask_cache.pop()
+            {
+                self.clip_mask_cache_bytes = self.clip_mask_cache_bytes.saturating_sub(entry.tex.bytes);
+                self.pool_bytes = self.pool_bytes.saturating_sub(entry.tex.bytes);
+                entry.tex.tex.destroy();
             } else if let Some(s) = self.scratch_backdrop.take() {
                 self.pool_bytes = self.pool_bytes.saturating_sub(s.bytes);
                 s.tex.destroy();
@@ -2454,6 +2736,304 @@ impl Gpu {
                 break;
             }
         }
+    }
+
+    fn begin_active(
+        &mut self,
+        frame_dst: Option<usize>,
+        display_area: Option<IRect>,
+        width: u32,
+        height: u32,
+        background: [f32; 4],
+        detail: bool,
+    ) {
+        self.clear_clip_mask_cache();
+        self.next_draw_id = self.next_draw_id.wrapping_add(1);
+        if self.next_draw_id == 0 {
+            self.next_draw_id = 1;
+        }
+        self.clip_cache_draw_id = self.next_draw_id;
+        self.active = Some(ActiveDraw::new(
+            self.next_draw_id,
+            frame_dst,
+            display_area,
+            width,
+            height,
+            background,
+            detail,
+        ));
+    }
+
+    fn clear_clip_mask_cache(&mut self) {
+        let recording = self.active.as_ref().is_some_and(|a| a.before.is_some());
+        let dst = if recording {
+            &mut self.clip_mask_in_use
+        } else {
+            &mut self.clip_mask_pool
+        };
+        for entry in self.clip_mask_cache.drain(..) {
+            dst.push(entry.tex);
+        }
+        self.clip_mask_cache_bytes = 0;
+        self.clip_seen_len = 0;
+    }
+
+    fn record_clip_seen(&mut self, hash: u64) -> bool {
+        let n = usize::from(self.clip_seen_len);
+        if self.clip_seen_hashes[..n].contains(&hash) {
+            return true;
+        }
+        if n < self.clip_seen_hashes.len() {
+            self.clip_seen_hashes[n] = hash;
+            self.clip_seen_len += 1;
+        } else {
+            self.clip_seen_hashes[(hash as usize) & 15] = hash;
+        }
+        false
+    }
+
+    fn retire_or_pool_clip_tex(&mut self, tex: GpuClipTex) {
+        if self.active.as_ref().is_some_and(|a| a.before.is_some()) {
+            self.clip_mask_in_use.push(tex);
+        } else {
+            self.clip_mask_pool.push(tex);
+        }
+    }
+
+    fn evict_clip_cache_to_fit(&mut self, hash: u64, key: &[ClipStepKey], need_bytes: usize) {
+        if let Some(idx) = self
+            .clip_mask_cache
+            .iter()
+            .position(|e| e.key_hash == hash && e.key.as_slice() == key)
+        {
+            let old = self.clip_mask_cache.swap_remove(idx);
+            self.clip_mask_cache_bytes = self.clip_mask_cache_bytes.saturating_sub(old.tex.bytes);
+            self.retire_or_pool_clip_tex(old.tex);
+        }
+        while self.clip_mask_cache.len() >= CLIP_CACHE_MAX_ENTRIES
+            || (self.clip_mask_cache_bytes + need_bytes > CLIP_CACHE_MAX_BYTES && !self.clip_mask_cache.is_empty())
+        {
+            let Some((idx, _)) = self.clip_mask_cache.iter().enumerate().min_by_key(|(_, e)| e.last_used) else {
+                break;
+            };
+            let old = self.clip_mask_cache.swap_remove(idx);
+            self.clip_mask_cache_bytes = self.clip_mask_cache_bytes.saturating_sub(old.tex.bytes);
+            self.retire_or_pool_clip_tex(old.tex);
+        }
+    }
+
+    fn acquire_clip_tex(&mut self, w: u32, h: u32) -> Result<GpuClipTex> {
+        let max_tex = self.max_texture_2d.min(u32::from(u16::MAX));
+        if w > max_tex || h > max_tex {
+            return Err(EngineError::limit("clip mask exceeds GPU texture limit"));
+        }
+        let need_w = clip_bucket(w, max_tex);
+        let need_h = clip_bucket(h, max_tex);
+        if let Some(idx) = self
+            .clip_mask_pool
+            .iter()
+            .position(|t| t.width == need_w && t.height == need_h)
+        {
+            return Ok(self.clip_mask_pool.swap_remove(idx));
+        }
+        let max_area = (need_w as usize * need_h as usize * 2).max(512 * 512);
+        if let Some((idx, _)) = self
+            .clip_mask_pool
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.width >= w && t.height >= h && (t.width as usize * t.height as usize) <= max_area)
+            .min_by_key(|(_, t)| t.width as usize * t.height as usize)
+        {
+            return Ok(self.clip_mask_pool.swap_remove(idx));
+        }
+        let bytes = need_w as usize * need_h as usize * 4;
+        self.reserve_or_trim(bytes, 0, "a clip mask")?;
+        let tex = texture(
+            &self.device,
+            need_w,
+            need_h,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+            "clip mask cache",
+        );
+        let view = tex.create_view(&Default::default());
+        self.pool_bytes += bytes;
+        Ok(GpuClipTex {
+            tex,
+            view,
+            view_id: crate::blend::gpu::next_view_id(),
+            width: need_w,
+            height: need_h,
+            bytes,
+        })
+    }
+
+    fn ensure_clip_depth(&mut self, w: u32, h: u32) -> Result<wgpu::TextureView> {
+        if let Some((_, _, view, _)) = self.clip_depth_pool.iter().find(|(dw, dh, _, _)| *dw == w && *dh == h) {
+            return Ok(view.clone());
+        }
+        let bytes = w as usize * h as usize * 4;
+        self.reserve_or_trim(bytes, 0, "a clip mask depth buffer")?;
+        let depth = self.renderer.create_depth_texture_view(&RenderSize {
+            width: w as u16,
+            height: h as u16,
+        });
+        if self.clip_depth_pool.len() >= CLIP_DEPTH_POOL_MAX && self.active.as_ref().is_none_or(|a| a.before.is_none())
+        {
+            let (_, _, _, old_bytes) = self.clip_depth_pool.remove(0);
+            self.pool_bytes = self.pool_bytes.saturating_sub(old_bytes);
+        }
+        self.pool_bytes += bytes;
+        self.clip_depth_pool.push((w, h, depth.clone(), bytes));
+        Ok(depth)
+    }
+
+    fn analyze_open_clips<'a>(
+        &self,
+        open: &'a [Open],
+        rect: IRect,
+        target_rect: IRect,
+        skip_context: bool,
+        allow_scissor_shrink: bool,
+    ) -> ClipAnalysis<'a> {
+        let max_tex = self.max_texture_2d.min(u32::from(u16::MAX));
+        analyze_open_clips_inner(
+            open,
+            rect,
+            target_rect,
+            skip_context,
+            allow_scissor_shrink,
+            self.clip_fast_path_enabled,
+            max_tex,
+        )
+    }
+
+    fn prepare_clip_mask(&mut self, analysis: &ClipAnalysis<'_>, label: &str) -> Result<Option<ClipMaskBinding>> {
+        if analysis.mask_clips.is_empty() {
+            return Ok(None);
+        }
+        let draw_id = self.active.as_ref().expect("active draw").draw_id;
+        if self.clip_cache_draw_id != draw_id {
+            self.clear_clip_mask_cache();
+            self.clip_cache_draw_id = draw_id;
+        }
+        if let Some((hash, ref key)) = analysis.cache_key
+            && let Some(entry) = self.clip_mask_cache.iter_mut().find(|e| {
+                e.key_hash == hash
+                    && e.key.as_slice() == key.as_slice()
+                    && e.bounds.contains_rect(analysis.clipped_rect)
+            })
+        {
+            self.clip_mask_tick = self.clip_mask_tick.wrapping_add(1);
+            entry.last_used = self.clip_mask_tick;
+            return Ok(Some(ClipMaskBinding {
+                view: entry.tex.view.clone(),
+                view_id: entry.tex.view_id,
+                origin: (entry.bounds.x0, entry.bounds.y0),
+            }));
+        }
+
+        let bounds = analysis.mask_bounds;
+        let w = (bounds.x1 - bounds.x0).max(0) as u32;
+        let h = (bounds.y1 - bounds.y0).max(0) as u32;
+        if w == 0 || h == 0 {
+            return Ok(None);
+        }
+        let mut options = RenderOptions::default();
+        options.target_init = TargetInit::Clear(ClearSettings::Viewport {
+            color: AlphaColor::TRANSPARENT,
+        });
+
+        if let Some((hash, ref key)) = analysis.cache_key {
+            let max_tex = self.max_texture_2d.min(u32::from(u16::MAX));
+            let need_w = clip_bucket(w, max_tex);
+            let need_h = clip_bucket(h, max_tex);
+            let est_bytes = need_w as usize * need_h as usize * 4;
+            let (moving, recording) = self
+                .active
+                .as_ref()
+                .map_or((false, false), |a| (a.detail, a.before.is_some()));
+            let admit_by_hits = if moving { self.record_clip_seen(hash) } else { true };
+            let in_use_bytes: usize = self.clip_mask_in_use.iter().map(|t| t.bytes).sum();
+            let live_count = self.clip_mask_cache.len() + self.clip_mask_in_use.len();
+            let can_admit = admit_by_hits
+                && (!recording
+                    || (live_count < CLIP_CACHE_MAX_ENTRIES
+                        && self.clip_mask_cache_bytes + in_use_bytes + est_bytes <= CLIP_CACHE_MAX_BYTES));
+            if can_admit {
+                self.evict_clip_cache_to_fit(hash, key, est_bytes);
+                let shift = Affine::translate((-f64::from(bounds.x0), -f64::from(bounds.y0)));
+                let tex = self.acquire_clip_tex(w, h)?;
+                let depth = match self.ensure_clip_depth(tex.width, tex.height) {
+                    Ok(d) => d,
+                    Err(e) => {
+                        self.retire_or_pool_clip_tex(tex);
+                        return Err(e);
+                    }
+                };
+                self.mask_scene.reset_and_resize(w as u16, h as u16);
+                raster_clip_list(&mut self.mask_scene, &analysis.mask_clips, shift, (w, h));
+                let t_vr = now();
+                let vr_sub0 = self.active.as_ref().map_or(0.0, |a| a.submit_ms);
+                let res = self.vello_render(true, &tex.view, Some(&depth), options, label);
+                if let Some(a) = self.active.as_mut() {
+                    a.vello_render_ms += (now() - t_vr - (a.submit_ms - vr_sub0)).max(0.0);
+                }
+                self.mask_scene.reset();
+                if let Err(e) = res {
+                    self.retire_or_pool_clip_tex(tex);
+                    return Err(e);
+                }
+                self.clip_mask_tick = self.clip_mask_tick.wrapping_add(1);
+                let binding = ClipMaskBinding {
+                    view: tex.view.clone(),
+                    view_id: tex.view_id,
+                    origin: (bounds.x0, bounds.y0),
+                };
+                self.clip_mask_cache_bytes += tex.bytes;
+                self.clip_mask_cache.push(CachedClipMask {
+                    key_hash: hash,
+                    key: key.clone(),
+                    bounds,
+                    tex,
+                    last_used: self.clip_mask_tick,
+                });
+                return Ok(Some(binding));
+            }
+        }
+
+        // Uncached fallback (non-cacheable clip, 1st sight while moving, recording cap reached,
+        // oversized bounds, or fast path disabled). Rasterize only the caller's tight rect.
+        let fb = if analysis.cache_key.is_some() {
+            align4_rect(analysis.clipped_rect, bounds)
+        } else {
+            bounds
+        };
+        let fw = (fb.x1 - fb.x0).max(0) as u32;
+        let fh = (fb.y1 - fb.y0).max(0) as u32;
+        if fw == 0 || fh == 0 {
+            return Ok(None);
+        }
+        let shift = Affine::translate((-f64::from(fb.x0), -f64::from(fb.y0)));
+        self.ensure_scratch_mask(fw, fh)?;
+        self.mask_scene.reset_and_resize(fw as u16, fh as u16);
+        raster_clip_list(&mut self.mask_scene, &analysis.mask_clips, shift, (fw, fh));
+        let (mask_view, mask_view_id, mask_depth) = {
+            let mask = self.scratch_mask.as_ref().expect("clip mask scratch");
+            (mask.view.clone(), mask.view_id, mask.depth.clone())
+        };
+        let t_vr = now();
+        let vr_sub0 = self.active.as_ref().map_or(0.0, |a| a.submit_ms);
+        let res = self.vello_render(true, &mask_view, Some(&mask_depth), options, label);
+        if let Some(a) = self.active.as_mut() {
+            a.vello_render_ms += (now() - t_vr - (a.submit_ms - vr_sub0)).max(0.0);
+        }
+        self.mask_scene.reset();
+        res?;
+        Ok(Some(ClipMaskBinding {
+            view: mask_view,
+            view_id: mask_view_id,
+            origin: (fb.x0, fb.y0),
+        }))
     }
 
     fn acquire_offscreen(&mut self, w: u32, h: u32, origin: (i32, i32)) -> Result<GpuTarget> {
@@ -3105,8 +3685,9 @@ impl Gpu {
         paused.checkpoint
     }
 
-    /// Drops what a paused walk held (its target went with it): its glass masks and scene.
+    /// Drops what a paused walk held (its target went with it): its glass masks, clip masks and scene.
     fn drop_walk(&mut self) {
+        self.clear_clip_mask_cache();
         self.readers.drop_glass_mask_atlas();
         self.readers.flush_retired();
         self.scene.reset();
@@ -3170,6 +3751,7 @@ impl Gpu {
     pub fn clear_tiles(&mut self) {
         self.abort_pending_whole();
         self.abort_pending_tile();
+        self.clear_clip_mask_cache();
         self.opening_pending = false;
         self.tiles.clear();
         self.drop_overview_page();
@@ -4006,6 +4588,7 @@ impl Gpu {
         }
         self.flush_retired_textures();
         self.offscreen_pool.append(&mut self.offscreen_in_use);
+        self.clip_mask_pool.append(&mut self.clip_mask_in_use);
         if can_recycle_scene {
             self.recycle_scene_textures();
             self.atlas.at = (0, 0, 0);
@@ -4032,6 +4615,15 @@ impl Gpu {
             self.clear_tiles();
         }
         self.hw_blend_enabled
+    }
+
+    /// Enables or disables the tile-local clip-chain mask cache and AA-rect scissor fast path.
+    pub fn set_clip_fast_path_enabled(&mut self, enabled: bool) -> bool {
+        if self.clip_fast_path_enabled != enabled {
+            self.clip_fast_path_enabled = enabled;
+            self.clear_tiles();
+        }
+        self.clip_fast_path_enabled
     }
 
     /// Warms one HW-blend strip pipeline slot (`0..4` depth, `4..8` non-depth) in idle time.
@@ -6345,7 +6937,7 @@ impl Gpu {
         if !capturing {
             self.begin_frame_timestamp();
         }
-        self.active = Some(ActiveDraw::new(
+        self.begin_active(
             (padded.is_none() && !capturing).then_some(dst),
             padded.map(|((x, y), _)| IRect {
                 x0: x as i32,
@@ -6357,7 +6949,7 @@ impl Gpu {
             h,
             background,
             moving,
-        ));
+        );
         let limits = store.limits;
         let mut verbs = limits.frame_verbs;
         let split = match prefix {
@@ -6494,6 +7086,7 @@ impl Gpu {
         }
         self.submit_active_encoder();
         let active = self.active.take().expect("active draw");
+        self.clear_clip_mask_cache();
         self.recycle_scene_textures();
         active.record_into(&mut stats, now() - t0);
         if capturing {
@@ -7542,7 +8135,7 @@ impl Gpu {
         self.blur.begin_frame();
         self.shadow.begin_frame();
         self.backdrop_gen += 1;
-        self.active = Some(ActiveDraw::new(None, None, side, side, background, coarse_readers));
+        self.begin_active(None, None, side, side, background, coarse_readers);
         let tile = Frame {
             width: side as u16,
             height: side as u16,
@@ -7636,6 +8229,7 @@ impl Gpu {
         }
         self.submit_active_encoder();
         let active = self.active.take().expect("active draw");
+        self.clear_clip_mask_cache();
         self.recycle_scene_textures();
         self.trim_pools(GPU_POOL_KEEP_BYTES);
         active.record_into(stats, now() - t0);
@@ -7701,7 +8295,7 @@ impl Gpu {
         self.blur.begin_frame();
         self.shadow.begin_frame();
         self.backdrop_gen += 1;
-        self.active = Some(ActiveDraw::new(None, None, side, side, background, coarse_readers));
+        self.begin_active(None, None, side, side, background, coarse_readers);
         let tile = Frame {
             width: side as u16,
             height: side as u16,
@@ -7915,6 +8509,7 @@ impl Gpu {
                 }
                 self.submit_active_encoder();
                 let active = self.active.take().expect("active draw");
+                self.clear_clip_mask_cache();
                 self.recycle_scene_textures();
                 self.readers.drop_glass_mask_atlas();
                 self.readers.flush_retired();
@@ -7992,6 +8587,8 @@ impl Gpu {
             self.offscreen_pool.extend(scope.backdrop);
         }
         self.offscreen_pool.append(&mut self.offscreen_in_use);
+        self.clear_clip_mask_cache();
+        self.clip_mask_pool.append(&mut self.clip_mask_in_use);
         self.scene.reset();
         self.recycle_scene_textures();
         self.atlas.at = (0, 0, 0);
@@ -8469,39 +9066,14 @@ impl Gpu {
         paths: &[(BezPath, bool)],
         device: Affine,
         analytic: bool,
-        open: &[Open],
-    ) -> Result<(wgpu::CommandEncoder, bool)> {
+        clip: &ClipAnalysis<'_>,
+    ) -> Result<(wgpu::CommandEncoder, Option<ClipMaskBinding>)> {
         let (w, h) = draw.dirty_size();
         let mut options = RenderOptions::default();
         options.target_init = TargetInit::Clear(ClearSettings::Viewport {
             color: AlphaColor::TRANSPARENT,
         });
-        let clipped = open_clips_need_mask(open, draw.dirty, true);
-        if clipped {
-            let budget = self.reader_budget_room();
-            self.readers.ensure_vello_tex_budgeted(
-                true,
-                &self.device,
-                &self.renderer,
-                w,
-                h,
-                "blur reader clip",
-                budget,
-            )?;
-            self.mask_scene.reset_and_resize(w as u16, h as u16);
-            let shift = Affine::translate((-f64::from(draw.dirty.x0), -f64::from(draw.dirty.y0)));
-            raster_clips(&mut self.mask_scene, open, shift, (w, h), true);
-            let (clip_view, clip_depth) = {
-                let clip = self.readers.clip_tex.as_ref().expect("blur reader clip");
-                (clip.view.clone(), clip.depth.clone())
-            };
-            let t_vr = now();
-            let sub0 = self.active.as_ref().map_or(0.0, |a| a.submit_ms);
-            self.vello_render(true, &clip_view, Some(&clip_depth), options, "blur reader clip")?;
-            if let Some(a) = self.active.as_mut() {
-                a.vello_render_ms += (now() - t_vr - (a.submit_ms - sub0)).max(0.0);
-            }
-        }
+        let clip_mask = self.prepare_clip_mask(clip, "blur reader clip")?;
         if !analytic {
             let budget = self.reader_budget_room();
             self.readers.ensure_vello_tex_budgeted(
@@ -8536,7 +9108,7 @@ impl Gpu {
         }
         self.mask_scene.reset();
         let encoder = self.take_encoder("backdrop blur");
-        Ok((encoder, clipped))
+        Ok((encoder, clip_mask))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -8622,29 +9194,38 @@ impl Gpu {
             .as_ref()
             .map_or((0.0, 0.0), |a| (a.submit_ms, a.vello_render_ms));
         let dst_origin = (sx - parent.x0, sy - parent.y0);
-        let src_offset = ((visible.x0 - sx) as u32, (visible.y0 - sy) as u32);
-        let dst_offset = ((visible.x0 - parent.x0) as u32, (visible.y0 - parent.y0) as u32);
-        let size = ((visible.x1 - visible.x0) as u32, (visible.y1 - visible.y0) as u32);
+        let visible_in_parent = IRect {
+            x0: visible.x0 - parent.x0,
+            y0: visible.y0 - parent.y0,
+            x1: visible.x1 - parent.x0,
+            y1: visible.y1 - parent.y0,
+        };
+        let target_rect = IRect {
+            x0: 0,
+            y0: 0,
+            x1: parent.x1 - parent.x0,
+            y1: parent.y1 - parent.y0,
+        };
+        let clip = self.analyze_open_clips(open, visible_in_parent, target_rect, false, true);
+        if clip.clipped_rect.is_empty() {
+            return Ok(());
+        }
+        let dst_offset = (clip.clipped_rect.x0 as u32, clip.clipped_rect.y0 as u32);
+        let src_offset = (
+            (clip.clipped_rect.x0 - dst_origin.0) as u32,
+            (clip.clipped_rect.y0 - dst_origin.1) as u32,
+        );
+        let size = (
+            (clip.clipped_rect.x1 - clip.clipped_rect.x0) as u32,
+            (clip.clipped_rect.y1 - clip.clipped_rect.y0) as u32,
+        );
         let scissor = (dst_offset.0, dst_offset.1, size.0, size.1);
-        let mut clips = active_clips(open, false).peekable();
         // Keep the same compositing arithmetic when a clip is present, including
         // UNORM rounding for normal and lerp modes. Only skip rasterizing its mask.
-        let shader = clips.peek().is_some() || picture.is_some() || (blend != 0 && !lerp);
-        let visible_in_parent = IRect {
-            x0: dst_offset.0 as i32,
-            y0: dst_offset.1 as i32,
-            x1: (dst_offset.0 + size.0) as i32,
-            y1: (dst_offset.1 + size.1) as i32,
-        };
-        let clipped = clips.any(|(path, transform, even_odd)| {
-            !crate::geometry::path_covers_rect(path, transform, even_odd, visible_in_parent)
-        });
+        let shader = clip.any_clip || picture.is_some() || (blend != 0 && !lerp);
         let (aw, ah) = (u32::from(src.active_size.0), u32::from(src.active_size.1));
         if shader {
             self.ensure_scratch_backdrop(aw, ah)?;
-            if clipped {
-                self.ensure_scratch_mask(aw, ah)?;
-            }
             let bytes = self.blend.pending_allocation();
             if bytes > 0 {
                 self.reserve_or_trim(bytes, 0, "blend uniforms")?;
@@ -8654,25 +9235,7 @@ impl Gpu {
                 self.submit_active_encoder();
             }
         }
-        if clipped {
-            self.mask_scene.reset_and_resize(aw as u16, ah as u16);
-            let shift = Affine::translate((-f64::from(dst_origin.0), -f64::from(dst_origin.1)));
-            raster_clips(&mut self.mask_scene, open, shift, (aw, ah), false);
-            let (mask_view, mask_depth) = {
-                let mask = self.scratch_mask.as_ref().expect("composite clip mask");
-                (mask.view.clone(), mask.depth.clone())
-            };
-            let mut options = RenderOptions::default();
-            options.target_init = TargetInit::Clear(ClearSettings::Viewport {
-                color: AlphaColor::TRANSPARENT,
-            });
-            let t_vr = now();
-            let vr_sub0 = self.active.as_ref().map_or(0.0, |a| a.submit_ms);
-            self.vello_render(true, &mask_view, Some(&mask_depth), options, "scope composite")?;
-            if let Some(a) = self.active.as_mut() {
-                a.vello_render_ms += (now() - t_vr - (a.submit_ms - vr_sub0)).max(0.0);
-            }
-        }
+        let clip_mask = self.prepare_clip_mask(&clip, "scope composite")?;
         if shader && let Some(top) = self.offscreen_stack.len().checked_sub(1) {
             self.ensure_scope_cleared(top, write_main, write_backdrop);
         }
@@ -8693,10 +9256,7 @@ impl Gpu {
             let dst_view = dst_view.clone();
             if shader {
                 let prefix = self.scratch_backdrop.as_ref().expect("composite prefix");
-                let clip = clipped.then(|| {
-                    let m = self.scratch_mask.as_ref().expect("composite clip mask");
-                    (&m.view, m.view_id)
-                });
+                let clip_arg = clip_mask.as_ref().map(|m| (&m.view, m.view_id, m.origin));
                 let picture = picture.map(|(mask, kind)| {
                     let p = mask.plane(backdrop);
                     (&p.view, p.view_id, kind)
@@ -8707,7 +9267,7 @@ impl Gpu {
                     &mut encoder,
                     (&src.view, src.view_id),
                     (&prefix.view, prefix.view_id),
-                    clip,
+                    clip_arg,
                     picture,
                     &dst_view,
                     dst_origin,
@@ -10963,17 +11523,13 @@ impl Backend for Gpu {
         let source_view = source.plane.view;
         let source_view_id = source.plane.view_id;
 
-        let any_clip = divisor > 1
-            || open.iter().any(|o| {
-                matches!(
-                    o,
-                    Open::Clip {
-                        active_on_scene: true,
-                        context_only: false,
-                        ..
-                    }
-                )
-            });
+        let (target_w, target_h) = self.active_scene_size();
+        let target_rect = IRect {
+            x0: 0,
+            y0: 0,
+            x1: i32::from(target_w),
+            y1: i32::from(target_h),
+        };
         let [da, db, dc, dd, de, df] = device.as_coeffs();
         let det = da * dd - db * dc;
         let inv_device = (size[0] > 0.0 && size[1] > 0.0 && det.abs() > 1e-12).then(|| {
@@ -10989,23 +11545,12 @@ impl Backend for Gpu {
         });
 
         for region in &regions {
+            let mut region = *region;
             let out_w = (region.out_x1 - region.out_x0) as u32;
             let out_h = (region.out_y1 - region.out_y0) as u32;
             if out_w == 0 || out_h == 0 {
                 continue;
             }
-            let has_clip_mask = divisor > 1
-                || (any_clip
-                    && open_clips_need_mask(
-                        open,
-                        IRect {
-                            x0: region.out_x0,
-                            y0: region.out_y0,
-                            x1: region.out_x1,
-                            y1: region.out_y1,
-                        },
-                        true,
-                    ));
             let (rx, ry) = (region.x0 * divisor - halo_offset.0, region.y0 * divisor - halo_offset.1);
             let rim = native_sampling.then(|| {
                 let k = glass::height_scale(native_params.sigma) as i32;
@@ -11027,10 +11572,13 @@ impl Backend for Gpu {
                     params: native_params,
                 }
             });
-            let max_bytes = self.reader_budget_room();
 
-            // 1. Optional open non-context clip mask (rasterized with vello_gpu into `clip_tex`).
-            if has_clip_mask {
+            // 1. Optional open non-context clip mask.
+            // Reduced-halo glass (`divisor > 1`) rasterizes the full-res lens paths clipped by
+            // `open` into `readers.clip_tex`; native glass (`divisor == 1`) folds integer AA-rect
+            // clips into the output scissor and shares tile-local cached clip-chain masks.
+            let clip_mask = if divisor > 1 {
+                let max_bytes = self.reader_budget_room();
                 self.readers.ensure_vello_tex_budgeted(
                     true,
                     &self.device,
@@ -11041,49 +11589,43 @@ impl Backend for Gpu {
                     max_bytes,
                 )?;
                 self.mask_scene.reset_and_resize(out_w as u16, out_h as u16);
-                // Open scene transforms and the output rectangle are both scope-local.
                 let shift = Affine::translate((-f64::from(region.out_x0), -f64::from(region.out_y0)));
-                if divisor > 1 {
-                    let mut depth = 0;
-                    for o in open {
-                        if let Open::Clip {
-                            transform,
-                            path,
-                            even_odd,
-                            active_on_scene: true,
-                            context_only: false,
-                            ..
-                        } = o
-                        {
-                            self.mask_scene.set_transform(shift * *transform);
-                            self.mask_scene
-                                .set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
-                            self.mask_scene.push_clip_path(path);
-                            depth += 1;
-                        }
-                    }
-                    self.mask_scene.set_transform(
-                        shift * Affine::translate((-f64::from(origin.0), -f64::from(origin.1))) * device,
-                    );
-                    self.mask_scene.set_paint(vello_common::color::palette::css::WHITE);
-                    for (p, even_odd) in paths {
+                let mut depth = 0;
+                for o in open {
+                    if let Open::Clip {
+                        transform,
+                        path,
+                        even_odd,
+                        active_on_scene: true,
+                        context_only: false,
+                        ..
+                    } = o
+                    {
+                        self.mask_scene.set_transform(shift * *transform);
                         self.mask_scene
                             .set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
-                        self.mask_scene.fill_path(p);
+                        self.mask_scene.push_clip_path(path);
+                        depth += 1;
                     }
-                    for _ in 0..depth {
-                        self.mask_scene.pop_clip();
-                    }
-                } else {
-                    raster_clips(&mut self.mask_scene, open, shift, (out_w, out_h), true);
+                }
+                self.mask_scene
+                    .set_transform(shift * Affine::translate((-f64::from(origin.0), -f64::from(origin.1))) * device);
+                self.mask_scene.set_paint(vello_common::color::palette::css::WHITE);
+                for (p, even_odd) in paths {
+                    self.mask_scene
+                        .set_fill_rule(if *even_odd { Fill::EvenOdd } else { Fill::NonZero });
+                    self.mask_scene.fill_path(p);
+                }
+                for _ in 0..depth {
+                    self.mask_scene.pop_clip();
                 }
                 let mut options = RenderOptions::default();
                 options.target_init = TargetInit::Clear(ClearSettings::Viewport {
                     color: vello_common::color::AlphaColor::TRANSPARENT,
                 });
-                let (clip_view, clip_depth) = {
+                let (clip_view, clip_view_id, clip_depth) = {
                     let clip_t = self.readers.clip_tex.as_ref().expect("clip");
-                    (clip_t.view.clone(), clip_t.depth.clone())
+                    (clip_t.view.clone(), clip_t.view_id, clip_t.depth.clone())
                 };
                 let t_vr = now();
                 let vr_sub0 = self.active.as_ref().map_or(0.0, |a| a.submit_ms);
@@ -11092,7 +11634,29 @@ impl Backend for Gpu {
                     a.vello_render_ms += (now() - t_vr - (a.submit_ms - vr_sub0)).max(0.0);
                 }
                 self.mask_scene.reset();
-            }
+                Some(ClipMaskBinding {
+                    view: clip_view,
+                    view_id: clip_view_id,
+                    origin: (region.out_x0, region.out_y0),
+                })
+            } else {
+                let region_out = IRect {
+                    x0: region.out_x0,
+                    y0: region.out_y0,
+                    x1: region.out_x1,
+                    y1: region.out_y1,
+                };
+                let clip = self.analyze_open_clips(open, region_out, target_rect, true, true);
+                if clip.clipped_rect.is_empty() {
+                    continue;
+                }
+                region.out_x0 = clip.clipped_rect.x0;
+                region.out_y0 = clip.clipped_rect.y0;
+                region.out_x1 = clip.clipped_rect.x1;
+                region.out_y1 = clip.clipped_rect.y1;
+                self.prepare_clip_mask(&clip, "reader clip")?
+            };
+            let max_bytes = self.reader_budget_room();
 
             // 2. Analytic coarse coverage for box/ellipse (skips vello_gpu mask pass + submit!),
             //    or shape mask rasterized with vello_gpu into `mask_tex`.
@@ -11208,6 +11772,7 @@ impl Backend for Gpu {
             let opaque_target =
                 self.reader_target_opaque(within) && sample_clip.is_none_or(|w| w.fill.is_none_or(|c| c[3] == 255));
             let mut encoder = self.take_encoder("reader glass");
+            let clip_arg = clip_mask.as_ref().map(|m| (&m.view, m.view_id, m.origin));
             self.readers.encode_glass(
                 &self.device,
                 &mut encoder,
@@ -11222,13 +11787,13 @@ impl Backend for Gpu {
                 self.backdrop_gen,
                 low_prefix.is_none() && backdrop_is_frame,
                 &params,
-                region,
+                &region,
                 sample_clip,
                 alpha,
                 coarse && divisor == 1,
                 analytic_coarse,
                 mask_slot,
-                has_clip_mask,
+                clip_arg,
                 opaque_target,
                 resolve,
                 max_bytes,
@@ -12319,6 +12884,23 @@ impl Backend for Gpu {
                 return Ok(());
             }
         }
+        let (target_w, target_h) = self.active_scene_size();
+        let target_rect = IRect {
+            x0: 0,
+            y0: 0,
+            x1: i32::from(target_w),
+            y1: i32::from(target_h),
+        };
+        let coarse_shared = draw.source_is_frame
+            && within.is_none()
+            && draw.source.bounds.x0 == 0
+            && draw.source.bounds.y0 == 0
+            && draw.source.bounds.size() == (draw.frame_size.0 as u32, draw.frame_size.1 as u32);
+        let allow_shrink = capture_tier.is_none() && (!coarse || coarse_shared);
+        let clip = self.analyze_open_clips(open, draw.dirty, target_rect, true, allow_shrink);
+        if clip.clipped_rect.is_empty() {
+            return Ok(());
+        }
         let halo_sample = if coarse {
             None
         } else {
@@ -12337,12 +12919,17 @@ impl Backend for Gpu {
             }
             self.resolve_blur_source(&mut draw, sigma, None)?;
         }
+        if allow_shrink {
+            draw.dirty = clip.clipped_rect;
+        }
         let analytic = if coarse {
             analytic_box_from_paths(paths, device, size, draw.frame_dirty_origin())
         } else {
             None
         };
-        let (mut encoder, clipped) = self.encode_blur_reader_masks(&draw, paths, device, analytic.is_some(), open)?;
+        let (mut encoder, clip_mask) =
+            self.encode_blur_reader_masks(&draw, paths, device, analytic.is_some(), &clip)?;
+        let clip_arg = clip_mask.as_ref().map(|m| (&m.view, m.view_id, m.origin));
         if coarse {
             let opaque_target = self.reader_target_opaque(within);
             let budget = self.reader_budget_room();
@@ -12363,7 +12950,7 @@ impl Backend for Gpu {
                 within,
                 alpha,
                 analytic,
-                clipped,
+                clip_arg,
                 opaque_target,
                 budget,
             )?;
@@ -12405,7 +12992,7 @@ impl Backend for Gpu {
                     &target.view,
                     draw.dirty,
                     alpha,
-                    clipped,
+                    clip_arg,
                     opaque_target,
                     halo_sample.as_ref(),
                     budget,
@@ -12607,6 +13194,19 @@ impl Backend for Gpu {
             }
         }
 
+        let (target_w, target_h) = self.active_scene_size();
+        let target_rect = IRect {
+            x0: 0,
+            y0: 0,
+            x1: i32::from(target_w),
+            y1: i32::from(target_h),
+        };
+        let allow_shrink = capture_tier.is_none();
+        let clip = self.analyze_open_clips(open, draw.dirty, target_rect, true, allow_shrink);
+        if clip.clipped_rect.is_empty() {
+            return Ok(());
+        }
+
         // Resolve captured progressive halo stops: in the device pass up to two tiers (mid + far),
         // and in a mid capture pass any already-captured far stops for downstream readers.
         let sample_prog = |patch: &ProgressiveHaloPatch| -> Option<ProgressiveHaloSample> {
@@ -12646,12 +13246,12 @@ impl Backend for Gpu {
                 }
             }
         };
-        let dirty = draw.dirty;
+        let orig_dirty = draw.dirty;
         let dirty_frame = Rect::new(
-            f64::from(draw.origin.0 + dirty.x0),
-            f64::from(draw.origin.1 + dirty.y0),
-            f64::from(draw.origin.0 + dirty.x1),
-            f64::from(draw.origin.1 + dirty.y1),
+            f64::from(draw.origin.0 + orig_dirty.x0),
+            f64::from(draw.origin.1 + orig_dirty.y0),
+            f64::from(draw.origin.0 + orig_dirty.x1),
+            f64::from(draw.origin.1 + orig_dirty.y1),
         );
         let dirty_pad = if capture_tier.is_some() { 2.0 } else { 0.0 };
         let (dirty_first, dirty_end) = plan.active_stop_range(dirty_frame.inflate(dirty_pad, dirty_pad));
@@ -12675,7 +13275,12 @@ impl Backend for Gpu {
         if !fast_halo_only && resident > 0 {
             self.resolve_blur_source(&mut draw, max_resident_sigma, None)?;
         }
-        let (mut encoder, clipped) = self.encode_blur_reader_masks(&draw, paths, device, false, open)?;
+        if allow_shrink {
+            draw.dirty = clip.clipped_rect;
+        }
+        let dirty = draw.dirty;
+        let (mut encoder, clip_mask) = self.encode_blur_reader_masks(&draw, paths, device, false, &clip)?;
+        let clip_arg = clip_mask.as_ref().map(|m| (&m.view, m.view_id, m.origin));
         let (width, height) = draw.dirty_size();
 
         // Fast path: when every active stop in `dirty` is already provided by captured halo tiers,
@@ -12711,7 +13316,7 @@ impl Backend for Gpu {
                             &plan,
                             1,
                             alpha,
-                            clipped,
+                            clip_arg,
                             opaque_target,
                             halo_1.as_ref(),
                             halo_2.as_ref(),
@@ -12837,7 +13442,7 @@ impl Backend for Gpu {
                         &plan,
                         cols,
                         alpha,
-                        clipped,
+                        clip_arg,
                         opaque_target,
                         halo_1.as_ref(),
                         halo_2.as_ref(),

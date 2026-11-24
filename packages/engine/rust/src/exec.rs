@@ -173,6 +173,16 @@ pub struct FrameClip {
     pub fill: Option<[u8; 4]>,
 }
 
+/// Stable geometry identity for `Open::Clip` within one `Store` generation.
+/// Viewport-dependent `PathEntry` variants (`Glyphs`, `Outside`) return `None`.
+#[inline]
+fn clip_source(id: u32, r: &Record, path_idx: u32) -> Option<(u32, u32)> {
+    match r.paths.get(path_idx as usize) {
+        Some(PathEntry::Glyphs { .. } | PathEntry::Outside(_)) | None => None,
+        Some(_) => Some((id, path_idx)),
+    }
+}
+
 /// Something open in the scene where a backdrop reader runs, so a backend that renders what's
 /// drawn so far can reopen it after.
 #[derive(Clone)]
@@ -182,6 +192,9 @@ pub enum Open {
         path: BezPath,
         even_odd: bool,
         frame_clip: Option<FrameClip>,
+        /// Stable geometry identity `(record_id, path_idx)` within one `Store` generation for
+        /// viewport-independent `PathEntry` variants (`None` for `Glyphs` / `Outside` / synthetic).
+        source: Option<(u32, u32)>,
         /// True for clips belonging to an export-context ancestor (`FLAG_CONTEXT`): clips context
         /// drawing and bounds `clip_within`, never clips exported non-context output.
         context_only: bool,
@@ -228,6 +241,10 @@ impl IRect {
             x1: self.x1.min(o.x1),
             y1: self.y1.min(o.y1),
         }
+    }
+    #[cfg(feature = "gpu-common")]
+    pub(crate) fn contains_rect(self, o: Self) -> bool {
+        self.x0 <= o.x0 && self.y0 <= o.y0 && self.x1 >= o.x1 && self.y1 >= o.y1
     }
     pub(crate) fn translate(self, x: i32, y: i32) -> Self {
         Self {
@@ -3006,6 +3023,7 @@ impl<B: Backend> Walk<'_, B> {
                                 path: p,
                                 even_odd,
                                 frame_clip: None,
+                                source: clip_source(cid, cr, 0),
                                 context_only: parent_context,
                                 active_on_scene: true,
                             });
@@ -3824,6 +3842,7 @@ impl<B: Backend> Walk<'_, B> {
                                         )),
                                         fill: frame_solid_fill(ops, at, active_alpha),
                                     }),
+                                    source: clip_source(id, r, *path),
                                     context_only: is_context,
                                     active_on_scene: true,
                                 });
@@ -3922,6 +3941,7 @@ impl<B: Backend> Walk<'_, B> {
                                 )),
                                 fill: frame_solid_fill(ops, at, active_alpha),
                             }),
+                            source: clip_source(id, r, *path),
                             context_only: is_context,
                             active_on_scene: true,
                         });
@@ -5227,6 +5247,7 @@ impl<B: Backend> Walk<'_, B> {
             path: shape_local,
             even_odd,
             frame_clip: None,
+            source: None,
             context_only: self.current_context,
             active_on_scene: true,
         });

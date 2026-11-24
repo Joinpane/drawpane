@@ -306,13 +306,13 @@ struct GlassU {
     box_radii: vec4<f32>,
     // (s_tl, s_tr, s_br, s_bl)
     box_smoothing: vec4<f32>,
-    // (profile, falloff, hairline_px, has_clip_mask)
+    // (profile, falloff, hairline_px, clip_origin_x)
     tune_a: vec4<f32>,
     // (front, front_start, back, back_start)
     tune_b: vec4<f32>,
     // (shade, shade_reach, valid_lw, valid_lh)
     tune_c: vec4<f32>,
-    // (flags: bit0=height_packed bit1=quad_phase_x bit2=quad_phase_y bit3=opaque_blend, mask_x, mask_y, device px per optical px)
+    // (flags: bit0=height_packed bit1=quad_phase_x bit2=quad_phase_y bit3=opaque_blend bit4=has_clip_mask, packed_mask_origin, clip_origin_y, device px per optical px)
     tune_d: vec4<f32>,
     // (native coordinate at the optical origin, native sampling enabled, backdrop divisor)
     native_map: vec4<f32>,
@@ -547,17 +547,19 @@ fn fs_glass(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let blue = glass_color(uv_b, dx_b, dy_b);
 
     let opaque_blend = (tune_flags & 8) != 0;
+    let has_clip_mask = (tune_flags & 16) != 0;
     let dst_coord = vec2<i32>(floor(pos.xy - gu.origin.zw));
 
     let mask_coord = vec2<i32>(floor(p));
     let in_mask = mask_coord.x >= 0 && mask_coord.y >= 0 && mask_coord.x < i32(rw) && mask_coord.y < i32(rh);
     var a = select(0.0, 1.0, gu.native_map.w > 1.0);
     if (gu.native_map.w == 1.0 && in_mask) {
-        a = textureLoad(g_mask, mask_coord + vec2<i32>(gu.tune_d.yz), 0).a;
+        a = textureLoad(g_mask, mask_coord + mask_atlas_origin(gu.tune_d.y), 0).a;
     }
     var clip_cov = 1.0;
-    if (gu.tune_a.w > 0.5) {
-        clip_cov = textureLoad(g_clip, dst_coord, 0).a;
+    if (has_clip_mask) {
+        let clip_coord = vec2<i32>(floor(pos.xy - vec2<f32>(gu.tune_a.w, gu.tune_d.z)));
+        clip_cov = textureLoad(g_clip, clip_coord, 0).a;
     }
     let a_eff = clamp(a * clip_cov * gu.light_box.w, 0.0, 1.0);
     if (a_eff <= 0.0) {
@@ -610,6 +612,8 @@ struct CoarseU {
     box_radii: vec4<f32>,
     // (s_tl, s_tr, s_br, s_bl)
     box_smoothing: vec4<f32>,
+    // (clip_origin_x, clip_origin_y, 0, 0)
+    clip_origin: vec4<f32>,
 };
 
 @group(0) @binding(0) var c_backdrop: texture_2d<f32>;
@@ -654,7 +658,8 @@ fn fs_glass_coarse(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> 
     }
     var clip_cov = 1.0;
     if (cu.flags.x > 0.5) {
-        clip_cov = textureLoad(c_clip, dst_coord, 0).a;
+        let clip_coord = vec2<i32>(floor(pos.xy - cu.clip_origin.xy));
+        clip_cov = textureLoad(c_clip, clip_coord, 0).a;
     }
     let a_eff = clamp(a * clip_cov * cu.a.w, 0.0, 1.0);
     if (a_eff <= 0.0) {
@@ -728,7 +733,8 @@ fn fs_bg_blur_composite(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<
     let m = textureLoad(bg_mask, local, 0).a;
     var clip_cov = 1.0;
     if (bgu.a.w > 0.5) {
-        clip_cov = textureLoad(bg_clip, local, 0).a;
+        let clip_coord = vec2<i32>(floor(pos.xy - bgu.size.zw));
+        clip_cov = textureLoad(bg_clip, clip_coord, 0).a;
     }
     let a_eff = clamp(m * clip_cov * bgu.a.z, 0.0, 1.0);
     if (a_eff <= 0.0) {
@@ -773,11 +779,11 @@ struct ProgBlurU {
     stops0: vec4<f32>,
     stops1: vec4<f32>,
     stops2: vec4<f32>,
-    // (frame_x_of_target, frame_y_of_target, opaque_blend, unused)
+    // (frame_x_of_target, frame_y_of_target, opaque_blend, clip_origin_x)
     frame_origin: vec4<f32>,
     // Tier 1 coarse patch: (offset x/y, inverse divisor, first stop)
     halo_map: vec4<f32>,
-    // Tier 1 atlas: (stop cell width and height, atlas columns, unused)
+    // Tier 1 atlas: (stop cell width and height, atlas columns, clip_origin_y)
     halo_atlas: vec4<f32>,
     // Tier 2 (farther) coarse patch: (offset x/y, inverse divisor, first stop)
     halo2_map: vec4<f32>,
@@ -989,7 +995,8 @@ fn fs_progressive_blur(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f
     let m = textureLoad(pb_mask, mask_coord, 0).a;
     var clip_cov = 1.0;
     if (pbu.mask_info.w > 0.5) {
-        clip_cov = textureLoad(pb_clip, mask_coord, 0).a;
+        let clip_coord = vec2<i32>(floor(pos.xy - vec2<f32>(pbu.frame_origin.w, pbu.halo_atlas.w)));
+        clip_cov = textureLoad(pb_clip, clip_coord, 0).a;
     }
     let a_eff = clamp(m * clip_cov * pbu.mask_info.z, 0.0, 1.0);
     if (a_eff <= 0.0) {
