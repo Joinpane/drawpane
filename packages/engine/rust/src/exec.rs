@@ -35,6 +35,31 @@ use vello_common::peniko::{
     InterpolationAlphaSpace, Mix,
 };
 
+/// Fixed-function hardware blend modes supported directly inside `vello_gpu`'s strip pass
+/// over an opaque target (backdrop alpha == 1).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum HwBlend {
+    #[default]
+    Normal,
+    Multiply,
+    Screen,
+    LinearDodge,
+    LinearBurn,
+}
+
+/// Maps a wire blend mode (`1..=17`, matching `BLEND` in `wire.ts` and `blend.rs`) to its
+/// fixed-function hardware blend mode, if one exists.
+#[inline]
+pub const fn hw_blend_mode(blend: u32) -> Option<HwBlend> {
+    match blend {
+        1 => Some(HwBlend::Multiply),
+        2 => Some(HwBlend::Screen),
+        16 => Some(HwBlend::LinearDodge),
+        17 => Some(HwBlend::LinearBurn),
+        _ => None,
+    }
+}
+
 /// What Vello's two scene types share, as the executor uses it.
 pub trait Draw {
     fn set_transform(&mut self, t: Affine);
@@ -44,6 +69,7 @@ pub trait Draw {
     fn set_tint(&mut self, t: Option<Tint>);
     fn set_fill_rule(&mut self, rule: Fill);
     fn set_stroke(&mut self, s: Stroke);
+    fn set_hw_blend(&mut self, _mode: HwBlend) {}
     fn fill_path(&mut self, p: &BezPath);
     fn fill_rect(&mut self, r: &Rect);
     fn fill_blurred_rounded_rect_in(&mut self, p: &BezPath, r: &Rect, radius: f32, std_dev: f32, invert: bool);
@@ -56,7 +82,7 @@ pub trait Draw {
 }
 
 macro_rules! impl_draw {
-    ($t:ty) => {
+    ($t:ty $(, hw_blend: $hw:expr)?) => {
         impl crate::exec::Draw for $t {
             fn set_transform(&mut self, t: vello_common::kurbo::Affine) {
                 <$t>::set_transform(self, t);
@@ -79,6 +105,11 @@ macro_rules! impl_draw {
             fn set_stroke(&mut self, s: vello_common::kurbo::Stroke) {
                 <$t>::set_stroke(self, s);
             }
+            $(
+                fn set_hw_blend(&mut self, mode: crate::exec::HwBlend) {
+                    ($hw)(self, mode);
+                }
+            )?
             fn fill_path(&mut self, p: &vello_common::kurbo::BezPath) {
                 <$t>::fill_path(self, p);
             }
@@ -347,6 +378,18 @@ pub trait Backend {
     type Scene: Draw;
     fn scene(&mut self) -> &mut Self::Scene;
     fn mark_dirty(&mut self) {}
+    /// Whether this backend can execute fixed-function hardware blending directly inside the
+    /// active strip pass on the current target (true only on GPU when enabled and every active
+    /// destination plane is guaranteed opaque). CPU and Worker export backends return false.
+    fn can_hw_blend(&self) -> bool {
+        false
+    }
+    /// Called before a root-level destructive `Op::Layer` (`DestOut` / `DestIn` with no enclosing
+    /// `SrcOver` layer) so GPU backends flush pending HW-blended strips before `vello_gpu`
+    /// promotes the root command stream to a blend target and mark the active target non-opaque.
+    fn before_destructive_root_layer(&mut self, _open: &[Open]) -> Result<()> {
+        Ok(())
+    }
     /// Flushes pending scene draws on tiled CPU renders when a culled subtree would have flushed
     /// on the whole frame, preserving `f32 -> u8` flush boundaries under `vello_cpu`'s
     /// `f32_pipeline`.
@@ -1272,6 +1315,7 @@ pub fn draw_split_resumable<B: Backend>(
         heavy_op_ran: false,
         made_progress: false,
         skip_post_record: None,
+        active_hw_blend: HwBlend::Normal,
     };
     if !store.nodes.contains_key(&crate::store::ROOT) {
         return Err(EngineError::malformed("no page"));
@@ -1361,6 +1405,7 @@ struct Walk<'a, B: Backend> {
     heavy_op_ran: bool,
     made_progress: bool,
     skip_post_record: Option<u32>,
+    active_hw_blend: HwBlend,
 }
 
 /// The linear part of a transform (its translation dropped).
@@ -2132,7 +2177,294 @@ fn subtree_flushes_in_full_frame(
     false
 }
 
+/// Maximum atomic draws inspected when proving a blended layer subtree has no self-overlap.
+const MAX_HW_BLEND_DRAWS: usize = 16;
+/// Maximum recursion depth when inspecting a blended layer subtree.
+const MAX_HW_BLEND_DEPTH: usize = 8;
+
 impl<B: Backend> Walk<'_, B> {
+    /// Explicit fixed-function hardware blend precondition shared by every op and layer gate:
+    /// the mode is one of `{Multiply, Screen, LinearDodge, LinearBurn}`, we are not already inside
+    /// a HW-blended unit or an open Vello opacity/compose layer, and the backend confirms the
+    /// active target planes are opaque (and HW blending is enabled).
+    #[inline]
+    fn can_hw_blend_now(&self, blend: u32) -> Option<HwBlend> {
+        let mode = hw_blend_mode(blend)?;
+        if self.active_hw_blend != HwBlend::Normal
+            || self.open.iter().any(|o| matches!(o, Open::Layer))
+            || !self.backend.can_hw_blend()
+        {
+            return None;
+        }
+        Some(mode)
+    }
+
+    /// Runs `f` with fixed-function hardware blending active on the scene, preventing cooperative
+    /// yields inside the blended unit and always restoring the previous blend state on exit.
+    fn with_hw_blend<R>(&mut self, mode: HwBlend, f: impl FnOnce(&mut Self) -> Result<R>) -> Result<R> {
+        let prev = self.active_hw_blend;
+        self.active_hw_blend = mode;
+        self.yield_safe_depth += 1;
+        self.backend.scene().set_hw_blend(mode);
+        let res = f(self);
+        self.backend.scene().set_hw_blend(prev);
+        self.yield_safe_depth -= 1;
+        self.active_hw_blend = prev;
+        res
+    }
+
+    /// Whether a single `Op::Fill` with non-normal `blend` can execute via fixed-function HW blend.
+    /// Non-glyph paths rasterize in one strip pass with zero self-overlap; glyph runs additionally
+    /// require pairwise non-overlapping glyph ink boxes (`glyphs_non_overlapping`), checked
+    /// independent of tile viewport so tiled and whole-frame renders decide identically.
+    fn can_hw_blend_fill(&self, r: &Record, path_idx: u32, blend: u32) -> Option<HwBlend> {
+        let mode = self.can_hw_blend_now(blend)?;
+        if let Some(PathEntry::Glyphs { scale, glyphs }) = r.paths.get(path_idx as usize)
+            && !glyphs_non_overlapping(self.store, f64::from(*scale), glyphs)
+        {
+            return None;
+        }
+        Some(mode)
+    }
+
+    /// Proves that executing blended layer `id` (at `opacity == 1.0`, no active post-effects,
+    /// no readers) directly with fixed-function HW blending produces the exact same pixels as
+    /// offscreen isolation: every visible draw in the subtree is a single self-overlap-free op,
+    /// no descendant introduces a reader, mask, post-effect, `Op::Layer`, inner blend, isolated
+    /// opacity, or context switch, and when more than one draw exists their device-space bounds
+    /// (computed under translation-invariant `linear(frame.view)` so tiled == whole) are pairwise
+    /// separated by at least 2 device pixels (1 px AA clearance on each side).
+    fn can_hw_blend_layer(&self, id: u32, world: Affine, root_context: bool) -> bool {
+        if self.split.pass != Pass::All {
+            return false;
+        }
+        let view_lin = linear(self.frame.view);
+        let view_scale = scale_of(self.frame.view);
+        let mut draws: Vec<Option<Rect>> = Vec::new();
+        if !self.collect_hw_blend_draws(id, world, 1.0, root_context, true, 0, view_lin, view_scale, &mut draws) {
+            return false;
+        }
+        if draws.len() <= 1 {
+            return true;
+        }
+        for i in 0..draws.len() {
+            let Some(a) = draws[i] else {
+                return false;
+            };
+            for b in &draws[i + 1..] {
+                let Some(b) = *b else {
+                    return false;
+                };
+                let disjoint = a.x1 + 2.0 <= b.x0 || b.x1 + 2.0 <= a.x0 || a.y1 + 2.0 <= b.y0 || b.y1 + 2.0 <= a.y0;
+                if !disjoint {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn collect_hw_blend_draws(
+        &self,
+        id: u32,
+        world: Affine,
+        alpha: f32,
+        root_context: bool,
+        is_root: bool,
+        depth: usize,
+        view_lin: Affine,
+        view_scale: f64,
+        draws: &mut Vec<Option<Rect>>,
+    ) -> bool {
+        if depth > MAX_HW_BLEND_DEPTH {
+            return false;
+        }
+        let Some(node) = self.store.nodes.get(&id) else {
+            return true;
+        };
+        let r = &node.record;
+        if r.hidden() {
+            return true;
+        }
+        if r.refusing_bits() != 0 || r.context() != root_context || (!is_root && r.is_mask()) {
+            return false;
+        }
+        let dev_lin = view_lin * world;
+        if !finite(dev_lin) {
+            return false;
+        }
+        if self.frame.detail {
+            if !r.group() {
+                let b = dev_lin.transform_rect_bbox(Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1])));
+                if b.width() < 0.5 && b.height() < 0.5 {
+                    return true;
+                }
+            } else if let (Some(bounds), page_pad) = self.store.bounds_and_pad(id) {
+                let pad_dev = if page_pad > 0.0 {
+                    page_pad * view_scale + 2.0
+                } else {
+                    0.0
+                };
+                let b = dev_lin.transform_rect_bbox(bounds).inflate(pad_dev, pad_dev);
+                if b.width() < 0.5 && b.height() < 0.5 && !self.subtree_readers.contains_key(&id) {
+                    return true;
+                }
+            }
+        }
+        let opacity = if is_root { alpha } else { alpha * r.opacity };
+        if opacity <= 0.0 {
+            return true;
+        }
+        if !is_root
+            && (!active_posts(r, dev_lin, view_scale).is_empty() || r.blend != 0 || (r.isolate() && r.opacity < 1.0))
+        {
+            return false;
+        }
+        let coarse = r.provisional()
+            || self.frame.detail && r.coarse_below > 0.0 && scale_of(dev_lin) < f64::from(r.coarse_below);
+        let ops = if coarse { &r.coarse } else { &r.ops };
+        for op in ops {
+            match op {
+                Op::Clip { .. } | Op::Unclip => {}
+                Op::Layer { .. }
+                | Op::Unlayer
+                | Op::Read { .. }
+                | Op::Glass(_)
+                | Op::BackgroundBlur(_)
+                | Op::ProgressiveBlur(_) => return false,
+                Op::Fill { path, paint, blend, .. } => {
+                    if !paint_visible(paint, opacity) {
+                        continue;
+                    }
+                    if *blend != 0 {
+                        return false;
+                    }
+                    if let Some(PathEntry::Glyphs { scale, glyphs }) = r.paths.get(*path as usize)
+                        && !glyphs_non_overlapping(self.store, f64::from(*scale), glyphs)
+                    {
+                        return false;
+                    }
+                    if draws.len() >= MAX_HW_BLEND_DRAWS {
+                        return false;
+                    }
+                    let bbox = r
+                        .entry_bounds(*path, &|g| self.store.glyphs.bounds(g))
+                        .map(|b| dev_lin.transform_rect_bbox(b));
+                    draws.push(bbox);
+                }
+                Op::Stroke {
+                    path,
+                    style,
+                    paint,
+                    blend,
+                    ..
+                } => {
+                    if style.width <= 0.0 || !paint_visible(paint, opacity) {
+                        continue;
+                    }
+                    if *blend != 0 {
+                        return false;
+                    }
+                    if draws.len() >= MAX_HW_BLEND_DRAWS {
+                        return false;
+                    }
+                    let grow =
+                        f64::from(style.width) * f64::from(style.miter.max(1.0)) * 0.5 + f64::from(style.width) + 1.0;
+                    let bbox = r
+                        .entry_bounds(*path, &|g| self.store.glyphs.bounds(g))
+                        .map(|b| dev_lin.transform_rect_bbox(b.inflate(grow, grow)));
+                    draws.push(bbox);
+                }
+                Op::DropShadow {
+                    paths,
+                    dx,
+                    dy,
+                    blur,
+                    color: c,
+                    blend,
+                    stroke,
+                    ..
+                } => {
+                    if c[3] * opacity <= 0.0 || paths.is_empty() || stroke.as_ref().is_some_and(|st| st.width <= 0.0) {
+                        continue;
+                    }
+                    if *blend != 0 {
+                        return false;
+                    }
+                    if draws.len() >= MAX_HW_BLEND_DRAWS {
+                        return false;
+                    }
+                    let shifted =
+                        Affine::translate((f64::from(*dx) * view_scale, f64::from(*dy) * view_scale)) * dev_lin;
+                    let sigma_dev = crate::blur::sigma_from_radius(*blur) * view_scale as f32;
+                    let stroke_grow = stroke.as_deref().map_or(0.0, |st| {
+                        f64::from(st.width) * f64::from(st.miter.max(1.0)) * 0.5 + f64::from(st.width) + 1.0
+                    });
+                    let reach = f64::from(crate::blur::kernel_radius(sigma_dev)) + 2.0;
+                    let mut bbox: Option<Rect> = None;
+                    for &pi in paths {
+                        if let Some(b) = r.entry_bounds(pi, &|g| self.store.glyphs.bounds(g)) {
+                            let lb = if stroke_grow > 0.0 {
+                                b.inflate(stroke_grow, stroke_grow)
+                            } else {
+                                b
+                            };
+                            let db = shifted.transform_rect_bbox(lb).inflate(reach, reach);
+                            bbox = Some(bbox.map_or(db, |o| o.union(db)));
+                        }
+                    }
+                    draws.push(bbox);
+                }
+                Op::InnerShadow {
+                    shape, color: c, blend, ..
+                } => {
+                    if c[3] * opacity <= 0.0 {
+                        continue;
+                    }
+                    if *blend != 0 {
+                        return false;
+                    }
+                    if draws.len() >= MAX_HW_BLEND_DRAWS {
+                        return false;
+                    }
+                    let bbox = r
+                        .entry_bounds(*shape, &|g| self.store.glyphs.bounds(g))
+                        .map(|b| dev_lin.transform_rect_bbox(b));
+                    draws.push(bbox);
+                }
+                Op::Children => {
+                    for &cid in &node.children {
+                        let Some(cn) = self.store.nodes.get(&cid) else {
+                            continue;
+                        };
+                        if cn.record.hidden() {
+                            continue;
+                        }
+                        if cn.record.is_mask() {
+                            return false;
+                        }
+                        let child_world = world * cn.record.transform;
+                        if !self.collect_hw_blend_draws(
+                            cid,
+                            child_world,
+                            opacity,
+                            root_context,
+                            false,
+                            depth + 1,
+                            view_lin,
+                            view_scale,
+                            draws,
+                        ) {
+                            return false;
+                        }
+                    }
+                }
+            }
+        }
+        true
+    }
+
     /// Whether paint now belongs to the part being drawn.
     fn paints(&self) -> bool {
         match self.split.pass {
@@ -3012,15 +3344,10 @@ impl<B: Backend> Walk<'_, B> {
         };
         let has_post = !active.is_empty();
         let layer_blend = if skipping_post { 0 } else { r.blend };
-        let isolate = if skipping_post {
-            false
-        } else {
-            has_post || layer_blend != 0 || (r.isolate() && r.opacity < 1.0)
-        };
         let has_reader = self.subtree_readers.get(&id).is_some_and(|&(n, _)| n > 0);
         let reader_fade = self.isolated_with_reader.contains(&id);
         let crosses_context = is_context
-            && isolate
+            && (has_post || layer_blend != 0 || (r.isolate() && r.opacity < 1.0))
             && r.ops.iter().any(|op| matches!(op, Op::Children))
             && node.children.iter().any(|&child| self.has_exported_subtree(child));
         if crosses_context && (has_post || layer_blend != 0) {
@@ -3028,12 +3355,26 @@ impl<B: Backend> Walk<'_, B> {
                 "an export selection crossing a backdrop effect or blend",
             ));
         }
+        // Route eligible layer blends directly to fixed-function hardware blending in Vello's
+        // strip pass, bypassing offscreen isolation and scopeClip rasterization.
+        let hw_layer_blend =
+            (!has_post && layer_blend != 0 && opacity >= 1.0 && !has_reader && !reader_fade && !crosses_context)
+                .then(|| {
+                    self.can_hw_blend_now(layer_blend)
+                        .filter(|_| self.can_hw_blend_layer(id, world, is_context))
+                })
+                .flatten();
+        let isolate = if skipping_post || hw_layer_blend.is_some() {
+            false
+        } else {
+            has_post || layer_blend != 0 || (r.isolate() && r.opacity < 1.0)
+        };
         let through = !has_post
             && layer_blend == 0
             && r.isolate()
             && r.opacity < 1.0
             && (store.subtree_has_blend(id) || reader_fade || crosses_context);
-        let use_offscreen = if skipping_post {
+        let use_offscreen = if skipping_post || hw_layer_blend.is_some() {
             false
         } else {
             has_post || layer_blend != 0 || through || (isolate && store.subtree_has_pass(id))
@@ -3400,10 +3741,16 @@ impl<B: Backend> Walk<'_, B> {
             self.stats.coarse += 1;
         }
         let ops = if coarse { &r.coarse } else { &r.ops };
-        let entered_non_yieldable = has_post || use_offscreen || isolate;
+        let entered_non_yieldable = has_post || use_offscreen || isolate || hw_layer_blend.is_some();
         if entered_non_yieldable {
             self.yield_safe_depth += 1;
         }
+        let prev_hw_blend = hw_layer_blend.map(|hw_mode| {
+            let prev = self.active_hw_blend;
+            self.active_hw_blend = hw_mode;
+            self.backend.scene().set_hw_blend(hw_mode);
+            prev
+        });
         let saved_yield_depth = self.yield_safe_depth;
         // Evaluate only on records that actually draw a drop shadow.
         let mut layered_shadows = None;
@@ -3551,6 +3898,10 @@ impl<B: Backend> Walk<'_, B> {
                         }
                     }
                     Op::Layer { compose } => {
+                        let is_destructive = matches!(compose, ComposeMode::DestOut | ComposeMode::DestIn);
+                        if is_destructive && !self.open.iter().any(|o| matches!(o, Open::Layer)) {
+                            self.backend.before_destructive_root_layer(&self.open)?;
+                        }
                         self.scope()?;
                         let (vello_compose, is_mask, layer_opacity) = match compose {
                             ComposeMode::SrcOver => {
@@ -3758,6 +4109,10 @@ impl<B: Backend> Walk<'_, B> {
             Ok(())
         })();
         self.yield_safe_depth = saved_yield_depth;
+        if let Some(prev_hw) = prev_hw_blend {
+            self.backend.scene().set_hw_blend(prev_hw);
+            self.active_hw_blend = prev_hw;
+        }
         if entered_non_yieldable {
             self.yield_safe_depth -= 1;
             self.heavy_op_ran = true;
@@ -4228,6 +4583,11 @@ impl<B: Backend> Walk<'_, B> {
             if !paint_visible(paint, alpha) {
                 return Ok(());
             }
+            if let Some(hw_mode) = self.can_hw_blend_fill(r, i, u32::from(blend)) {
+                return self.with_hw_blend(hw_mode, |walk| {
+                    walk.fill(r, i, device, even_odd, paint, 0, alpha, allow_glyph_masks)
+                });
+            }
             let Some(local_b) = r.entry_bounds(i, &|g| self.store.glyphs.bounds(g)) else {
                 return Ok(());
             };
@@ -4291,6 +4651,9 @@ impl<B: Backend> Walk<'_, B> {
         if blend != 0 {
             if !paint_visible(paint, alpha) {
                 return Ok(());
+            }
+            if let Some(hw_mode) = self.can_hw_blend_now(u32::from(blend)) {
+                return self.with_hw_blend(hw_mode, |walk| walk.stroke(r, i, device, style, paint, 0, alpha, cache));
             }
             let Some(local_b) = r.entry_bounds(i, &|g| self.store.glyphs.bounds(g)) else {
                 return Ok(());
@@ -4413,6 +4776,24 @@ impl<B: Backend> Walk<'_, B> {
         let sigma_dev = crate::blur::sigma_from_radius(blur) * view_scale as f32;
         let shifted_device = Affine::translate((dx_dev, dy_dev)) * device;
         if blend != 0 {
+            if let Some(hw_mode) = self.can_hw_blend_now(blend) {
+                return self.with_hw_blend(hw_mode, |walk| {
+                    walk.drop_shadow(
+                        r,
+                        paths,
+                        even_odd,
+                        dx,
+                        dy,
+                        blur,
+                        shadow_color,
+                        0,
+                        stroke_style,
+                        device,
+                        alpha,
+                        layered,
+                    )
+                });
+            }
             let stroke_grow = stroke_style.map_or(0.0, |st| {
                 f64::from(st.width) * f64::from(st.miter.max(1.0)) * 0.5 + f64::from(st.width) + 1.0
             });
@@ -4519,6 +4900,7 @@ impl<B: Backend> Walk<'_, B> {
                 scene.set_fill_rule(if even_odd { Fill::EvenOdd } else { Fill::NonZero });
                 scene.fill_path(&combined);
             }
+            self.backend.mark_dirty();
             return Ok(());
         }
 
@@ -4544,6 +4926,7 @@ impl<B: Backend> Walk<'_, B> {
                 scene.set_transform(sd);
                 scene.set_fill_rule(Fill::NonZero);
                 scene.fill_blurred_rounded_rect_in(&outer, &rect, radius, std_dev, false);
+                self.backend.mark_dirty();
                 return Ok(());
             }
         }
@@ -4667,6 +5050,11 @@ impl<B: Backend> Walk<'_, B> {
             return Ok(());
         }
         if blend != 0 {
+            if let Some(hw_mode) = self.can_hw_blend_now(blend) {
+                return self.with_hw_blend(hw_mode, |walk| {
+                    walk.inner_shadow(r, shape, hole, even_odd, dx, dy, blur, shadow_color, 0, device, alpha)
+                });
+            }
             let Some(local_b) = r.entry_bounds(shape, &|g| self.store.glyphs.bounds(g)) else {
                 return Ok(());
             };
@@ -4715,6 +5103,7 @@ impl<B: Backend> Walk<'_, B> {
             scene.set_transform(sd);
             scene.set_fill_rule(if even_odd { Fill::EvenOdd } else { Fill::NonZero });
             scene.fill_path(&shape_local);
+            self.backend.mark_dirty();
             return Ok(());
         };
 
@@ -4750,6 +5139,7 @@ impl<B: Backend> Walk<'_, B> {
             scene.set_fill_rule(Fill::EvenOdd);
             scene.fill_path(&ring_dev);
             scene.pop_clip();
+            self.backend.mark_dirty();
             return Ok(());
         }
 
@@ -4771,6 +5161,7 @@ impl<B: Backend> Walk<'_, B> {
                 scene.set_transform(sd);
                 scene.set_fill_rule(if even_odd { Fill::EvenOdd } else { Fill::NonZero });
                 scene.fill_blurred_rounded_rect_in(&shape_in_shifted, &hole_rect, hole_radius, std_dev, true);
+                self.backend.mark_dirty();
                 return Ok(());
             }
         }
@@ -4848,11 +5239,45 @@ impl<B: Backend> Walk<'_, B> {
         // An outline fill is one path, so glyphs that overlap (including across lines) aren't laid
         // over each other; masks are. Opaque, that's the same picture. See-through, a run whose
         // glyphs touch fills its outlines.
-        let masks = c[3] * alpha >= 1.0 || glyphs_non_overlapping(self.store, s, glyphs);
+        let mut masks = c[3] * alpha >= 1.0 || glyphs_non_overlapping(self.store, s, glyphs);
         // The run's place on the device is the same for every glyph but its offset: whether masks
         // can be used at all, and their scale, are the run's.
         let [a, b, cc, d, _, _] = (device * Affine::new([s, 0.0, 0.0, -s, 0.0, 0.0])).as_coeffs();
         let axis_aligned = b.abs() <= 1e-9 * (a.abs() + d.abs()) && cc.abs() <= 1e-9 * (a.abs() + d.abs());
+        if self.active_hw_blend != HwBlend::Normal && masks && axis_aligned {
+            // Under fixed-function HW blending, decide mask-vs-outline from the entire glyph run
+            // (independent of the current tile viewport). Otherwise a run mixing maskable and
+            // oversize glyphs would render masks on one tile and outlines on the next, leaving a
+            // seam at the tile edge.
+            let max_side = self.glyph_mask_side as u32;
+            for g in glyphs {
+                let Some(glyph) = self.store.glyphs.get(g.glyph) else {
+                    return Err(EngineError::unknown(format!("glyph {}", g.glyph)));
+                };
+                let Some(gb) = glyph.bounds else { continue };
+                let m = device * Affine::new([s, 0.0, 0.0, -s, f64::from(g.x), f64::from(g.y)]);
+                let [_, _, _, _, e, f] = m.as_coeffs();
+                let small =
+                    gb.width() * a.abs() <= self.glyph_mask_side && gb.height() * d.abs() <= self.glyph_mask_side;
+                if !(small && e.abs() < 1.0e7 && f.abs() < 1.0e7) {
+                    masks = false;
+                    break;
+                }
+                let (ix, iy) = (e.floor(), f.floor());
+                let mut px = ((e - ix) * PHASES).round();
+                let mut py = ((f - iy) * PHASES).round();
+                if px >= PHASES {
+                    px = 0.0;
+                }
+                if py >= PHASES {
+                    py = 0.0;
+                }
+                if !crate::masks::fits_bounds(gb, a, d, (px / PHASES, py / PHASES), max_side) {
+                    masks = false;
+                    break;
+                }
+            }
+        }
         let (sx, sy) = ((a as f32).to_bits(), (d as f32).to_bits());
         // Masks placed, each at its device pixel, with the glyph it's of: laid into one image of
         // the run and drawn once (`masks::compose_run`), so a run's overlaps are covered once, as
@@ -4909,8 +5334,12 @@ impl<B: Backend> Walk<'_, B> {
                 self.outline(g, s, &mut outlines)?;
             }
         }
-        if !placed.is_empty() && !self.draw_run(&placed, tint) {
-            // No room for the run's image: its glyphs fill their outlines.
+        // Under fixed-function HW blending, never split one glyph run into two overlapping draws
+        // (`draw_run` + `outlines`); if any glyph fell back to outlines, render the entire run
+        // as one unified outline fill.
+        let use_masks_run = !placed.is_empty() && (self.active_hw_blend == HwBlend::Normal || outlines.is_empty());
+        if !placed.is_empty() && (!use_masks_run || !self.draw_run(&placed, tint)) {
+            // No room for the run's image (or mixed run under HW blend): fill glyphs as outlines.
             for &n in &of {
                 self.outline(&glyphs[n], s, &mut outlines)?;
             }
@@ -5816,5 +6245,712 @@ mod reduced_layer_blur_tests {
         assert!(g.origin.0 <= src.x0 && g.origin.1 <= src.y0);
         assert!(g.origin.0 + g.size.0 as i32 * g.divisor >= src.x1);
         assert!(g.origin.1 + g.size.1 as i32 * g.divisor >= src.y1);
+    }
+}
+
+#[cfg(test)]
+mod hw_blend_gate_tests {
+    use super::*;
+    use crate::cpu::Cpu;
+    use crate::record::{
+        BackgroundBlurOp, CompactPath, ComposeMode, GlyphInstance, MASK_ALPHA, PathEntry, Record, StrokeStyle,
+    };
+    use crate::store::ROOT;
+
+    /// Recording `Draw` wrapper that logs every `HwBlend` transition and draw call's active mode.
+    struct SpyScene {
+        inner: vello_cpu::RenderContext,
+        current: HwBlend,
+        draw_modes: Vec<HwBlend>,
+    }
+
+    impl Draw for SpyScene {
+        fn set_transform(&mut self, t: Affine) {
+            self.inner.set_transform(t);
+        }
+        fn set_paint(&mut self, p: PaintType) {
+            self.inner.set_paint(p);
+        }
+        fn set_paint_transform(&mut self, t: Affine) {
+            self.inner.set_paint_transform(t);
+        }
+        fn reset_paint_transform(&mut self) {
+            self.inner.reset_paint_transform();
+        }
+        fn set_tint(&mut self, t: Option<Tint>) {
+            self.inner.set_tint(t);
+        }
+        fn set_fill_rule(&mut self, rule: Fill) {
+            self.inner.set_fill_rule(rule);
+        }
+        fn set_stroke(&mut self, s: Stroke) {
+            self.inner.set_stroke(s);
+        }
+        fn set_hw_blend(&mut self, mode: HwBlend) {
+            self.current = mode;
+        }
+        fn fill_path(&mut self, p: &BezPath) {
+            self.draw_modes.push(self.current);
+            self.inner.fill_path(p);
+        }
+        fn fill_rect(&mut self, r: &Rect) {
+            self.draw_modes.push(self.current);
+            self.inner.fill_rect(r);
+        }
+        fn fill_blurred_rounded_rect_in(&mut self, p: &BezPath, r: &Rect, radius: f32, std_dev: f32, invert: bool) {
+            self.draw_modes.push(self.current);
+            self.inner.fill_blurred_rounded_rect_in(p, r, radius, std_dev, invert);
+        }
+        fn stroke_path(&mut self, p: &BezPath) {
+            self.draw_modes.push(self.current);
+            self.inner.stroke_path(p);
+        }
+        fn push_clip_path(&mut self, p: &BezPath) {
+            self.inner.push_clip_path(p);
+        }
+        fn pop_clip(&mut self) {
+            self.inner.pop_clip();
+        }
+        fn push_opacity(&mut self, opacity: f32) {
+            self.inner.push_opacity(opacity);
+        }
+        fn push_layer(&mut self, compose: Compose, opacity: Option<f32>) {
+            Draw::push_layer(&mut self.inner, compose, opacity);
+        }
+        fn pop_layer(&mut self) {
+            self.inner.pop_layer();
+        }
+    }
+
+    struct SpyBackend {
+        scene: SpyScene,
+        area: IRect,
+        opaque_target: bool,
+        scopes_pushed: u32,
+        dirty_marks: u32,
+        destructive_root_calls: u32,
+        mask_support: Option<(
+            crate::masks::Rasterizer,
+            crate::masks::MaskCache<std::sync::Arc<vello_cpu::Pixmap>>,
+        )>,
+    }
+
+    impl SpyBackend {
+        fn new(w: u16, h: u16, opaque_target: bool) -> Self {
+            Self {
+                scene: SpyScene {
+                    inner: vello_cpu::RenderContext::new(w, h),
+                    current: HwBlend::Normal,
+                    draw_modes: Vec::new(),
+                },
+                area: IRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: i32::from(w),
+                    y1: i32::from(h),
+                },
+                opaque_target,
+                scopes_pushed: 0,
+                dirty_marks: 0,
+                destructive_root_calls: 0,
+                mask_support: None,
+            }
+        }
+    }
+
+    impl Backend for SpyBackend {
+        type Scene = SpyScene;
+        fn scene(&mut self) -> &mut Self::Scene {
+            &mut self.scene
+        }
+        fn mark_dirty(&mut self) {
+            self.dirty_marks += 1;
+        }
+        fn can_hw_blend(&self) -> bool {
+            self.opaque_target
+        }
+        fn before_destructive_root_layer(&mut self, _open: &[Open]) -> Result<()> {
+            self.destructive_root_calls += 1;
+            self.opaque_target = false;
+            Ok(())
+        }
+        fn scene_offset(&self) -> (i32, i32) {
+            (0, 0)
+        }
+        fn target_bounds(&self) -> IRect {
+            self.area
+        }
+        fn image(&mut self, _id: u32, _span: (f64, f64)) -> Option<ImageView> {
+            None
+        }
+        fn checker(&mut self) -> ImageSource {
+            unimplemented!()
+        }
+        fn glyph_mask(&mut self, key: MaskKey, path: &BezPath, s: (f64, f64), p: (f64, f64)) -> Option<GlyphMask> {
+            let (raster, cache) = self.mask_support.as_mut()?;
+            crate::masks::coverage(cache, raster, key, path, s, p, 160)
+        }
+        fn run_image(&mut self, w: u16, h: u16, pixels: Vec<u8>) -> Option<ImageSource> {
+            self.mask_support.as_ref()?;
+            let data = vello_common::peniko::ImageData {
+                data: pixels.into(),
+                format: vello_common::peniko::ImageFormat::Rgba8,
+                alpha_type: vello_common::peniko::ImageAlphaType::AlphaPremultiplied,
+                width: u32::from(w),
+                height: u32::from(h),
+            };
+            Some(ImageSource::from_peniko_image_data(&data))
+        }
+        fn whole_runs(&self) -> bool {
+            false
+        }
+        fn diamond_gradient(&mut self, _: IRect, _: Affine, _: &[(f32, Rgba)], _: f32) -> Result<Option<ImageSource>> {
+            Ok(None)
+        }
+        fn read(&mut self, _: u32, _: IRect, _: IRect, _: &[Open]) -> Result<()> {
+            Ok(())
+        }
+        fn glass(
+            &mut self,
+            _: (u32, usize),
+            _: &GlassOp,
+            _: &[(BezPath, bool)],
+            _: Affine,
+            _: [f32; 2],
+            _: f32,
+            _: bool,
+            _: bool,
+            _: &[Open],
+        ) -> Result<()> {
+            Ok(())
+        }
+        fn background_blur(
+            &mut self,
+            _: Option<(u32, usize)>,
+            _: &BackgroundBlurOp,
+            _: &[(BezPath, bool)],
+            _: Affine,
+            _: [f32; 2],
+            _: f32,
+            _: bool,
+            _: &[Open],
+        ) -> Result<()> {
+            Ok(())
+        }
+        fn progressive_blur(
+            &mut self,
+            _: (u32, usize),
+            _: &ProgressiveBlurOp,
+            _: &[(BezPath, bool)],
+            _: Affine,
+            _: [f32; 2],
+            _: f32,
+            _: bool,
+            _: &[Open],
+        ) -> Result<()> {
+            Ok(())
+        }
+        fn push_isolated(
+            &mut self,
+            area: IRect,
+            _: bool,
+            _: Option<(i32, i32)>,
+            _: Isolation,
+            _: &[Open],
+        ) -> Result<bool> {
+            if area.is_empty() {
+                return Ok(false);
+            }
+            self.scopes_pushed += 1;
+            Ok(true)
+        }
+        fn apply_post_isolated(&mut self, _: &[PostStep]) -> Result<()> {
+            Ok(())
+        }
+        fn pop_isolated(&mut self, _: f32, _: &[Open]) -> Result<()> {
+            Ok(())
+        }
+        fn pop_composited(&mut self, _: u32, _: f32, _: Option<u32>, _: &[Open]) -> Result<()> {
+            Ok(())
+        }
+        fn abort_isolated(&mut self, _: &[Open]) {}
+        fn draw_blurred_shadow(
+            &mut self,
+            _: &ShadowCast<'_>,
+            _: Option<&crate::shadow::CanonicalShadow>,
+            _: bool,
+            _: IRect,
+            _: f32,
+            _: AlphaColor<Srgb>,
+            _: &[Open],
+        ) -> Result<()> {
+            self.scene.draw_modes.push(self.scene.current);
+            self.dirty_marks += 1;
+            Ok(())
+        }
+    }
+
+    fn rect_entry(w: f32, h: f32) -> PathEntry {
+        PathEntry::Rect {
+            w,
+            h,
+            radii: [0.0; 4],
+            smoothing: 0.0,
+        }
+    }
+
+    fn solid_leaf(x: f64, y: f64, w: f32, h: f32, layer_blend: u32, fill_blend: u8) -> Record {
+        let mut r = Record::empty();
+        r.flags = 0;
+        r.transform = Affine::translate((x, y));
+        r.size = [w, h];
+        r.blend = layer_blend;
+        r.paths.push(rect_entry(w, h));
+        r.ops = vec![Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::Solid([0.4, 0.5, 0.6, 0.8]),
+            blend: fill_blend,
+        }];
+        r
+    }
+
+    fn run_spy(store: &Store, area: IRect, opaque_target: bool) -> SpyBackend {
+        let limits = Limits::default();
+        let frame = Frame {
+            width: 128,
+            height: 128,
+            view: Affine::IDENTITY,
+            detail: false,
+            area,
+        };
+        let mut spy = SpyBackend::new(128, 128, opaque_target);
+        let mut budget = limits.frame_verbs;
+        draw_split(store, &mut spy, &frame, &limits, &mut budget, &Split::all(), false).unwrap();
+        assert_eq!(spy.scene.current, HwBlend::Normal, "hw_blend must reset to Normal");
+        spy
+    }
+
+    #[test]
+    fn cpu_backend_never_enables_hw_blend() {
+        let cpu = Cpu::new(1 << 20, 128, 0);
+        assert!(!cpu.can_hw_blend());
+    }
+
+    #[test]
+    fn mode_and_target_opacity_gate_all_four_modes_and_fallbacks() {
+        let full = IRect {
+            x0: 0,
+            y0: 0,
+            x1: 128,
+            y1: 128,
+        };
+        for (mode, expected) in [
+            (1u32, HwBlend::Multiply),
+            (2u32, HwBlend::Screen),
+            (16u32, HwBlend::LinearDodge),
+            (17u32, HwBlend::LinearBurn),
+        ] {
+            let mut store = Store::new(Limits::default());
+            store.insert_for_test(1, ROOT, solid_leaf(10.0, 10.0, 40.0, 40.0, mode, 0));
+
+            let spy_opaque = run_spy(&store, full, true);
+            assert_eq!(spy_opaque.scopes_pushed, 0, "mode {mode} should use HW blend");
+            assert_eq!(spy_opaque.scene.draw_modes, vec![expected]);
+
+            let spy_translucent = run_spy(&store, full, false);
+            assert_eq!(
+                spy_translucent.scopes_pushed, 1,
+                "mode {mode} must fall back when non-opaque"
+            );
+            assert_eq!(spy_translucent.scene.draw_modes, vec![HwBlend::Normal]);
+        }
+
+        // Unsupported modes (overlay=3, color-dodge=6, luminosity=15) always fall back.
+        for mode in [3u32, 6, 15] {
+            let mut store = Store::new(Limits::default());
+            store.insert_for_test(1, ROOT, solid_leaf(10.0, 10.0, 40.0, 40.0, mode, 0));
+            let spy = run_spy(&store, full, true);
+            assert_eq!(spy.scopes_pushed, 1, "mode {mode} must isolate");
+            assert_eq!(spy.scene.draw_modes, vec![HwBlend::Normal]);
+        }
+    }
+
+    #[test]
+    fn fill_stroke_and_shadows_use_hw_blend_and_mark_dirty() {
+        let full = IRect {
+            x0: 0,
+            y0: 0,
+            x1: 128,
+            y1: 128,
+        };
+        let mut store = Store::new(Limits::default());
+        let mut r = Record::empty();
+        r.flags = 0;
+        r.transform = Affine::translate((10.0, 10.0));
+        r.size = [60.0, 60.0];
+        r.paths.push(rect_entry(60.0, 60.0));
+        r.ops = vec![
+            Op::DropShadow {
+                paths: vec![0],
+                even_odd: false,
+                dx: 2.0,
+                dy: 2.0,
+                blur: 0.0,
+                color: [0.0, 0.0, 0.0, 0.5],
+                blend: 17,
+                stroke: None,
+            },
+            Op::Fill {
+                path: 0,
+                even_odd: false,
+                paint: Paint::Solid([0.8, 0.2, 0.1, 1.0]),
+                blend: 16,
+            },
+            Op::Stroke {
+                path: 0,
+                style: Box::new(StrokeStyle {
+                    width: 2.0,
+                    join: 0,
+                    cap: 0,
+                    miter: 4.0,
+                    dashes: Vec::new(),
+                    dash_offset: 0.0,
+                }),
+                paint: Paint::Solid([0.2, 0.4, 0.8, 1.0]),
+                blend: 1,
+                cache: Default::default(),
+            },
+            Op::InnerShadow {
+                shape: 0,
+                hole: None,
+                even_odd: false,
+                dx: 0.0,
+                dy: 0.0,
+                blur: 0.0,
+                color: [0.2, 0.2, 0.2, 0.5],
+                blend: 2,
+            },
+        ];
+        store.insert_for_test(1, ROOT, r);
+        let spy = run_spy(&store, full, true);
+        assert_eq!(spy.scopes_pushed, 0);
+        assert_eq!(spy.dirty_marks, 4);
+        assert_eq!(
+            spy.scene.draw_modes,
+            vec![
+                HwBlend::LinearBurn,
+                HwBlend::LinearDodge,
+                HwBlend::Multiply,
+                HwBlend::Screen,
+            ]
+        );
+    }
+
+    #[test]
+    fn disjoint_siblings_use_hw_blend_while_overlapping_siblings_fall_back_tile_invariantly() {
+        let full = IRect {
+            x0: 0,
+            y0: 0,
+            x1: 128,
+            y1: 128,
+        };
+        let left_tile = IRect {
+            x0: 0,
+            y0: 0,
+            x1: 64,
+            y1: 128,
+        };
+        let right_tile = IRect {
+            x0: 64,
+            y0: 0,
+            x1: 128,
+            y1: 128,
+        };
+
+        // 1. Disjoint siblings (> 2 px gap) take HW blend.
+        let mut disjoint_store = Store::new(Limits::default());
+        let mut parent = Record::empty();
+        parent.size = [120.0, 40.0];
+        parent.blend = 17;
+        parent.ops = vec![Op::Children];
+        disjoint_store.insert_for_test(1, ROOT, parent.clone());
+        disjoint_store.insert_for_test(2, 1, solid_leaf(10.0, 10.0, 20.0, 20.0, 0, 0));
+        disjoint_store.insert_for_test(3, 1, solid_leaf(40.0, 10.0, 20.0, 20.0, 0, 0));
+        let spy = run_spy(&disjoint_store, full, true);
+        assert_eq!(spy.scopes_pushed, 0);
+        assert_eq!(spy.scene.draw_modes, vec![HwBlend::LinearBurn, HwBlend::LinearBurn]);
+
+        // 2. Overlapping siblings spanning across x=64 MUST fall back on BOTH tiles and whole frame.
+        let mut overlap_store = Store::new(Limits::default());
+        overlap_store.insert_for_test(1, ROOT, parent);
+        overlap_store.insert_for_test(2, 1, solid_leaf(40.0, 10.0, 30.0, 20.0, 0, 0));
+        overlap_store.insert_for_test(3, 1, solid_leaf(60.0, 10.0, 30.0, 20.0, 0, 0));
+        for area in [full, left_tile, right_tile] {
+            let spy = run_spy(&overlap_store, area, true);
+            assert_eq!(spy.scopes_pushed, 1, "overlapping siblings must fall back on {area:?}");
+            assert!(spy.scene.draw_modes.iter().all(|m| *m == HwBlend::Normal));
+        }
+    }
+
+    #[test]
+    fn layer_gate_rejects_partial_opacity_readers_masks_posts_layers_and_overlapping_glyphs() {
+        let full = IRect {
+            x0: 0,
+            y0: 0,
+            x1: 128,
+            y1: 128,
+        };
+
+        // Partial opacity on blended layer must isolate (preserves half-byte tie rounding).
+        let mut s = Store::new(Limits::default());
+        let mut r = solid_leaf(10.0, 10.0, 40.0, 40.0, 17, 0);
+        r.opacity = 0.5;
+        s.insert_for_test(1, ROOT, r);
+        assert_eq!(run_spy(&s, full, true).scopes_pushed, 1);
+
+        // Inner reader must isolate.
+        let mut s = Store::new(Limits::default());
+        let mut p = Record::empty();
+        p.size = [80.0, 80.0];
+        p.blend = 16;
+        p.ops = vec![Op::Children];
+        s.insert_for_test(1, ROOT, p.clone());
+        let mut reader = Record::empty();
+        reader.flags = 0;
+        reader.size = [40.0, 40.0];
+        reader.paths.push(rect_entry(40.0, 40.0));
+        reader.ops = vec![Op::BackgroundBlur(Box::new(BackgroundBlurOp {
+            paths: vec![0],
+            even_odd: false,
+            radius: 4.0,
+        }))];
+        s.insert_for_test(2, 1, reader);
+        assert_eq!(run_spy(&s, full, true).scopes_pushed, 1);
+
+        // Inner mask child must isolate.
+        let mut s = Store::new(Limits::default());
+        s.insert_for_test(1, ROOT, p.clone());
+        let mut mask = solid_leaf(10.0, 10.0, 30.0, 30.0, 0, 0);
+        mask.mask = MASK_ALPHA;
+        s.insert_for_test(2, 1, mask);
+        s.insert_for_test(3, 1, solid_leaf(10.0, 10.0, 30.0, 30.0, 0, 0));
+        assert!(run_spy(&s, full, true).scopes_pushed >= 1);
+
+        // Inner post effect must isolate.
+        let mut s = Store::new(Limits::default());
+        s.insert_for_test(1, ROOT, p.clone());
+        let mut blurred = solid_leaf(10.0, 10.0, 30.0, 30.0, 0, 0);
+        blurred.post_effects.push(PostEffect::LayerBlur { radius: 4.0 });
+        s.insert_for_test(2, 1, blurred);
+        assert!(run_spy(&s, full, true).scopes_pushed >= 1);
+
+        // Inner Op::Layer must isolate.
+        let mut s = Store::new(Limits::default());
+        let mut with_layer = Record::empty();
+        with_layer.flags = 0;
+        with_layer.size = [40.0, 40.0];
+        with_layer.blend = 1;
+        with_layer.paths.push(rect_entry(40.0, 40.0));
+        with_layer.ops = vec![
+            Op::Layer {
+                compose: ComposeMode::SrcOver,
+            },
+            Op::Fill {
+                path: 0,
+                even_odd: false,
+                paint: Paint::Solid([0.5, 0.5, 0.5, 1.0]),
+                blend: 0,
+            },
+            Op::Unlayer,
+        ];
+        s.insert_for_test(1, ROOT, with_layer);
+        assert_eq!(run_spy(&s, full, true).scopes_pushed, 1);
+
+        // Glyph run: non-overlapping uses HW blend; overlapping falls back.
+        let mut sq = BezPath::new();
+        sq.move_to((0.0, 0.0));
+        sq.line_to((10.0, 0.0));
+        sq.line_to((10.0, 10.0));
+        sq.line_to((0.0, 10.0));
+        sq.close_path();
+        let make_glyph_store = |dx: f32| {
+            let limits = Limits::default();
+            let mut st = Store::new(limits);
+            st.glyphs.define(1, sq.clone(), &limits).unwrap();
+            let mut rec = Record::empty();
+            rec.flags = 0;
+            rec.size = [60.0, 30.0];
+            rec.paths.push(PathEntry::Glyphs {
+                scale: 1.0,
+                glyphs: vec![
+                    GlyphInstance {
+                        glyph: 1,
+                        x: 10.0,
+                        y: 20.0,
+                    },
+                    GlyphInstance {
+                        glyph: 1,
+                        x: 10.0 + dx,
+                        y: 20.0,
+                    },
+                ],
+            });
+            rec.ops = vec![Op::Fill {
+                path: 0,
+                even_odd: false,
+                paint: Paint::Solid([0.3, 0.3, 0.3, 1.0]),
+                blend: 17,
+            }];
+            st.insert_for_test(1, ROOT, rec);
+            st
+        };
+        let spy_disjoint = run_spy(&make_glyph_store(15.0), full, true);
+        assert_eq!(spy_disjoint.scopes_pushed, 0);
+        assert_eq!(spy_disjoint.scene.draw_modes, vec![HwBlend::LinearBurn]);
+        let spy_overlap = run_spy(&make_glyph_store(5.0), full, true);
+        assert_eq!(spy_overlap.scopes_pushed, 1);
+        assert_eq!(spy_overlap.scene.draw_modes, vec![HwBlend::Normal]);
+
+        // Destructive root Op::Layer invalidates target opacity for subsequent blended layers.
+        let mut s = Store::new(Limits::default());
+        let mut dest = Record::empty();
+        dest.flags = 0;
+        dest.size = [40.0, 40.0];
+        dest.paths.push(PathEntry::Path(CompactPath::from_bez(&sq)));
+        dest.ops = vec![
+            Op::Layer {
+                compose: ComposeMode::DestOut,
+            },
+            Op::Fill {
+                path: 0,
+                even_odd: false,
+                paint: Paint::Solid([1.0, 1.0, 1.0, 1.0]),
+                blend: 0,
+            },
+            Op::Unlayer,
+        ];
+        s.insert_for_test(1, ROOT, dest);
+        s.insert_for_test(2, ROOT, solid_leaf(50.0, 10.0, 30.0, 30.0, 17, 0));
+        let spy = run_spy(&s, full, true);
+        assert_eq!(spy.destructive_root_calls, 1);
+        assert_eq!(spy.scopes_pushed, 1);
+    }
+
+    #[test]
+    fn hw_blended_glyph_run_decides_masks_vs_outlines_consistently_across_tiles() {
+        let box_path = |w: f64, h: f64| {
+            let mut p = BezPath::new();
+            p.move_to((0.0, 0.0));
+            p.line_to((w, 0.0));
+            p.line_to((w, h));
+            p.line_to((0.0, h));
+            p.close_path();
+            p
+        };
+        let run_tile = |store: &Store, area: IRect| {
+            let limits = Limits::default();
+            let frame = Frame {
+                width: 1024,
+                height: 512,
+                view: Affine::IDENTITY,
+                detail: false,
+                area,
+            };
+            let mut backend = SpyBackend::new(1024, 512, true);
+            backend.area = area;
+            backend.mask_support = Some((
+                crate::masks::Rasterizer::default(),
+                crate::masks::MaskCache::new(1 << 20),
+            ));
+            let mut budget = limits.frame_verbs;
+            let stats = draw_split(store, &mut backend, &frame, &limits, &mut budget, &Split::all(), false).unwrap();
+            (backend.scopes_pushed, stats.glyphs_masked, stats.glyphs_outlined)
+        };
+        let left_tile = IRect {
+            x0: 0,
+            y0: 0,
+            x1: 512,
+            y1: 512,
+        };
+        let right_tile = IRect {
+            x0: 512,
+            y0: 0,
+            x1: 1024,
+            y1: 512,
+        };
+
+        // Mixed run: small glyph straddling x=512 plus tall (> 160 px) glyph strictly on the right
+        // tile. Both tiles must choose outlines (0 masked, >= 1 outlined, 0 scopes).
+        let limits = Limits::default();
+        let mut mixed = Store::new(limits);
+        mixed.glyphs.define(1, box_path(24.0, 30.0), &limits).unwrap();
+        mixed.glyphs.define(2, box_path(24.0, 204.0), &limits).unwrap();
+        let mut rec = Record::empty();
+        rec.flags = 0;
+        rec.size = [700.0, 300.0];
+        rec.paths.push(PathEntry::Glyphs {
+            scale: 1.0,
+            glyphs: vec![
+                GlyphInstance {
+                    glyph: 1,
+                    x: 500.0,
+                    y: 260.0,
+                },
+                GlyphInstance {
+                    glyph: 2,
+                    x: 560.0,
+                    y: 260.0,
+                },
+            ],
+        });
+        rec.ops = vec![Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::Solid([0.3, 0.3, 0.3, 0.8]),
+            blend: 17,
+        }];
+        mixed.insert_for_test(1, ROOT, rec);
+        for area in [left_tile, right_tile] {
+            let (scopes, masked, outlined) = run_tile(&mixed, area);
+            assert_eq!(scopes, 0, "mixed run stays HW-blended on {area:?}");
+            assert_eq!(masked, 0, "mixed run must not use masks on {area:?}");
+            assert!(outlined > 0, "mixed run must outline visible glyphs on {area:?}");
+        }
+
+        // Uniform small run straddling x=512: both tiles keep full mask-cache speed (0 scopes).
+        let mut uniform = Store::new(limits);
+        uniform.glyphs.define(1, box_path(24.0, 30.0), &limits).unwrap();
+        let mut rec = Record::empty();
+        rec.flags = 0;
+        rec.size = [700.0, 100.0];
+        rec.paths.push(PathEntry::Glyphs {
+            scale: 1.0,
+            glyphs: vec![
+                GlyphInstance {
+                    glyph: 1,
+                    x: 500.0,
+                    y: 80.0,
+                },
+                GlyphInstance {
+                    glyph: 1,
+                    x: 540.0,
+                    y: 80.0,
+                },
+            ],
+        });
+        rec.ops = vec![Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::Solid([0.3, 0.3, 0.3, 0.8]),
+            blend: 17,
+        }];
+        uniform.insert_for_test(1, ROOT, rec);
+        for area in [left_tile, right_tile] {
+            let (scopes, masked, outlined) = run_tile(&uniform, area);
+            assert_eq!(scopes, 0, "uniform run stays HW-blended on {area:?}");
+            assert!(masked > 0, "uniform run keeps mask cache on {area:?}");
+            assert_eq!(outlined, 0, "uniform run should not outline on {area:?}");
+        }
     }
 }

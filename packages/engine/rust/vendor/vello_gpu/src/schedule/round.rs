@@ -25,7 +25,7 @@
 //! conflict and the later operation is placed in a subsequent compatible round.
 
 use super::ScheduleBuffers;
-use crate::draw::{Draw, ExternalTextureRun};
+use crate::draw::{BlendRun, Draw, ExternalTextureRun};
 use crate::filter::GpuFilterData;
 use crate::target::{
     BlendPassBindings, DrawPassBindings, DrawPassTarget, FilterPassBindings, LayerTextureId,
@@ -163,6 +163,7 @@ impl Round {
                 let draw = (pass.draw.strip_ranges.len() != 0).then(|| DrawPass {
                     strips: buffers.draw_buffers.strips.ranged(&pass.draw.strip_ranges),
                     external_texture_runs: &pass.draw.external_texture_runs,
+                    blend_runs: &pass.draw.blend_runs,
                     bindings: DrawPassBindings::new(
                         DrawPassTarget::Layer(target.unwrap()),
                         pass.draw.has_child_layer.then(|| opposite.unwrap()),
@@ -209,6 +210,7 @@ impl Round {
                 .strips
                 .ranged(&self.root_draw.strip_ranges),
             external_texture_runs: &self.root_draw.external_texture_runs,
+            blend_runs: &self.root_draw.blend_runs,
             bindings: DrawPassBindings::new(DrawPassTarget::Root(target), child),
         })
     }
@@ -445,6 +447,7 @@ pub(super) struct LayerTexturePass {
 pub(super) struct DrawPass<'a> {
     pub(super) strips: RangedSlice<'a, GpuStrip>,
     pub(super) external_texture_runs: &'a [ExternalTextureRun],
+    pub(super) blend_runs: &'a [BlendRun],
     pub(super) bindings: DrawPassBindings,
 }
 

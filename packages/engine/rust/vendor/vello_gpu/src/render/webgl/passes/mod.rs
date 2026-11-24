@@ -9,7 +9,7 @@ pub(crate) mod copy;
 pub(crate) mod filter;
 pub(crate) mod strip;
 
-use crate::draw::ExternalTextureRun;
+use crate::draw::{BlendRun, ExternalTextureRun};
 use crate::render::webgl::bindings::WebGlTextureBindings;
 use crate::render::webgl::gl::resource::Program;
 use crate::render::webgl::init::ShaderCompilationStats;
@@ -142,8 +142,21 @@ impl Backend for WebGlRendererContext<'_> {
         &mut self,
         strips: RangedSlice<'_, GpuStrip>,
         external_texture_runs: &[ExternalTextureRun],
+        blend_runs: &[BlendRun],
         bindings: DrawPassBindings,
     ) -> Result<(), Self::Error> {
+        // Drawpane: guard against silently dropping fixed-function hardware blend runs on the
+        // native WebGL backend (Drawpane's WebGL2 target uses wgpu's GLES backend instead).
+        if !blend_runs.is_empty() {
+            return Err(WebGlError::OperationFailed {
+                operation: crate::render::webgl::WebGlOperation::Context(
+                    crate::render::webgl::WebGlContextOperation::Configure,
+                ),
+                message: Some(alloc::string::String::from(
+                    "hardware blend runs are not supported on the native WebGL backend",
+                )),
+            });
+        }
         self.strip_pass_inner(
             &[],
             strips,

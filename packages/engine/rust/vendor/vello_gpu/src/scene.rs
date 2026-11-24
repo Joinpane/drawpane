@@ -37,6 +37,42 @@ use vello_common::viewport::ViewportState;
 /// Default tolerance for curve flattening
 pub(crate) const DEFAULT_TOLERANCE: f64 = 0.1;
 
+/// Drawpane: fixed-function hardware blend modes executed directly inside the root strip pass
+/// over an opaque target (backdrop alpha == 1).
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum HwBlendMode {
+    /// Standard premultiplied source-over blending.
+    #[default]
+    Normal,
+    /// Multiply over an opaque backdrop (`Dst * Src + Dst * (1 - SrcAlpha)`).
+    Multiply,
+    /// Screen over an opaque backdrop (`Src + Dst * (1 - Src)`).
+    Screen,
+    /// Linear dodge over an opaque backdrop (`floor(s * 255 + 0.5) / 255 + Dst`).
+    LinearDodge,
+    /// Linear burn over an opaque backdrop (`Dst - ceil((a - s) * 255 - 0.5001) / 255`).
+    LinearBurn,
+}
+
+impl HwBlendMode {
+    /// Drawpane: number of non-normal hardware blend pipeline variants.
+    #[cfg(feature = "wgpu")]
+    pub(crate) const NON_NORMAL_COUNT: usize = 4;
+
+    /// Drawpane: dense index into the non-normal hardware blend pipeline tables.
+    #[cfg(feature = "wgpu")]
+    #[inline]
+    pub(crate) const fn non_normal_index(self) -> Option<usize> {
+        match self {
+            Self::Normal => None,
+            Self::Multiply => Some(0),
+            Self::Screen => Some(1),
+            Self::LinearDodge => Some(2),
+            Self::LinearBurn => Some(3),
+        }
+    }
+}
+
 /// Path or rectangle draw retained by the scene recorder.
 #[derive(Debug)]
 pub(crate) enum RecordedDraw {
@@ -53,6 +89,8 @@ pub(crate) struct RecordedPath {
     pub(crate) strips: Range<usize>,
     /// Paint applied to the path.
     pub(crate) paint: Paint,
+    /// Drawpane: fixed-function hardware blend mode for this draw.
+    pub(crate) hw_blend: HwBlendMode,
 }
 
 /// Recorded rectangle and its paint.
@@ -62,15 +100,25 @@ pub(crate) struct RecordedRect {
     pub(crate) rect: Rect,
     /// Paint applied to the rectangle.
     pub(crate) paint: Paint,
+    /// Drawpane: fixed-function hardware blend mode for this draw.
+    pub(crate) hw_blend: HwBlendMode,
 }
 
 impl RecordedDraw {
-    fn new_path(strips: Range<usize>, paint: Paint) -> Self {
-        Self::Path(RecordedPath { strips, paint })
+    fn new_path(strips: Range<usize>, paint: Paint, hw_blend: HwBlendMode) -> Self {
+        Self::Path(RecordedPath {
+            strips,
+            paint,
+            hw_blend,
+        })
     }
 
-    fn new_rect(rect: Rect, paint: Paint) -> Self {
-        Self::Rect(RecordedRect { rect, paint })
+    fn new_rect(rect: Rect, paint: Paint, hw_blend: HwBlendMode) -> Self {
+        Self::Rect(RecordedRect {
+            rect,
+            paint,
+            hw_blend,
+        })
     }
 }
 
@@ -266,6 +314,10 @@ pub struct Scene {
     level: Level,
     /// Drawpane: reusable strip generator for isolated tile-aligned atlas slots.
     slot_generator: Option<StripGenerator>,
+    /// Drawpane: fixed-function hardware blend mode applied to subsequent recorded draws.
+    hw_blend: HwBlendMode,
+    /// Drawpane: whether any draw recorded since the last reset uses a non-normal hardware blend.
+    has_hw_blend: bool,
 }
 
 impl Scene {
@@ -293,7 +345,30 @@ impl Scene {
             recorder: CommandRecorder::new(width, height),
             level,
             slot_generator: None,
+            hw_blend: HwBlendMode::Normal,
+            has_hw_blend: false,
         }
+    }
+
+    /// Drawpane: set the fixed-function hardware blend mode for subsequent draws.
+    pub fn set_hw_blend(&mut self, hw_blend: HwBlendMode) {
+        self.hw_blend = hw_blend;
+    }
+
+    /// Drawpane: return the active fixed-function hardware blend mode.
+    pub fn hw_blend(&self) -> HwBlendMode {
+        self.hw_blend
+    }
+
+    /// Drawpane: whether any draw recorded since the last reset uses a non-normal hardware blend.
+    pub fn has_hw_blend(&self) -> bool {
+        self.has_hw_blend
+    }
+
+    /// Drawpane: whether the recorded root command stream has been promoted to an intermediate
+    /// blend target (for example by a root-level non-SrcOver Vello layer).
+    pub fn root_is_blend_target(&self) -> bool {
+        self.recorder.root_is_blend_target
     }
 
     fn active_rect(&self) -> Rect {
@@ -451,7 +526,10 @@ impl Scene {
             return;
         }
 
-        let draw = RecordedDraw::new_path(strips.clone(), paint);
+        let draw = RecordedDraw::new_path(strips.clone(), paint, self.hw_blend);
+        if self.hw_blend != HwBlendMode::Normal {
+            self.has_hw_blend = true;
+        }
         let strip_storage = self.strip_storage.borrow();
         self.recorder.push_draw(draw, &strip_storage.strips[strips]);
     }
@@ -577,8 +655,11 @@ impl Scene {
             };
 
             if let Some(bounds) = ctx.fast_rect_bounds(rect) {
+                if ctx.hw_blend != HwBlendMode::Normal {
+                    ctx.has_hw_blend = true;
+                }
                 ctx.recorder
-                    .push_draw(RecordedDraw::new_rect(bounds, paint), &[]);
+                    .push_draw(RecordedDraw::new_rect(bounds, paint, ctx.hw_blend), &[]);
 
                 return;
             }
@@ -625,7 +706,10 @@ impl Scene {
             return;
         }
 
-        let draw = RecordedDraw::new_path(strips.clone(), paint);
+        let draw = RecordedDraw::new_path(strips.clone(), paint, self.hw_blend);
+        if self.hw_blend != HwBlendMode::Normal {
+            self.has_hw_blend = true;
+        }
         let strip_storage = self.strip_storage.borrow();
         self.recorder.push_draw(draw, &strip_storage.strips[strips]);
     }
@@ -682,8 +766,11 @@ impl Scene {
             let inflated_rect = rect.inflate(f64::from(kernel_size), f64::from(kernel_size));
 
             if let Some(bounds) = ctx.fast_rect_bounds(&inflated_rect) {
+                if ctx.hw_blend != HwBlendMode::Normal {
+                    ctx.has_hw_blend = true;
+                }
                 ctx.recorder
-                    .push_draw(RecordedDraw::new_rect(bounds, paint), &[]);
+                    .push_draw(RecordedDraw::new_rect(bounds, paint, ctx.hw_blend), &[]);
                 return;
             }
 
@@ -1060,6 +1147,8 @@ impl Scene {
         self.aliasing_threshold = None;
         self.recorder.reset(self.width, self.height);
         self.filter = None;
+        self.hw_blend = HwBlendMode::Normal;
+        self.has_hw_blend = false;
     }
 
     /// Reset the scene and free the memory it grew for earlier contents.
@@ -1160,7 +1249,7 @@ fn assert_paint_supported(paint: &PaintType, tint: Option<Tint>) {
 
 #[cfg(test)]
 mod tests {
-    use super::{RecordedDraw, Scene};
+    use super::{HwBlendMode, RecordedDraw, Scene};
     #[cfg(all(feature = "text", feature = "full_image_support"))]
     use crate::resources::Resources;
     #[cfg(all(feature = "text", feature = "full_image_support"))]
@@ -1182,6 +1271,7 @@ mod tests {
         let draw = RecordedDraw::new_rect(
             Rect::new(0.0, 0.0, 4.5, 4.5),
             Paint::Solid(PremulColor::from_alpha_color(BLUE)),
+            HwBlendMode::Normal,
         );
 
         assert_eq!(draw.bbox(&[]), Some(RectU16::new(0, 0, 8, 8)));

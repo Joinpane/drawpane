@@ -228,6 +228,9 @@ export class Engine {
   gpuCheck?(): Outcome;
   gpuDestroy?(): void;
   setGpuTimestamps?(enabled: boolean): boolean;
+  setGpuHwBlend?(enabled: boolean): boolean;
+  warmGpuHwBlendPipeline?(slot: number): boolean;
+  gpuWebgpuHwBlendWarmup?(): [unknown, string, boolean] | undefined;
   gpuTimestampMs?(): Promise<number | Outcome | undefined>;
   gpuFinished?(): Promise<Outcome | undefined>;
   /** Resolves to the pixels, or to an `Outcome` saying why not; never rejects. */

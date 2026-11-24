@@ -202,14 +202,17 @@ impl<T> MaskCache<T> {
     }
 }
 
-/// Where a glyph's mask lies (top left from the whole-pixel anchor) and its size, before it's
-/// rasterised: None for a glyph with no outline or one too large.
-fn extent(path: &BezPath, sx: f64, sy: f64, phase: (f64, f64), max_side: u32) -> Option<(i64, i64, u16, u16)> {
-    if path.is_empty() {
-        return None;
-    }
+/// Where a glyph's mask lies (top left from the whole-pixel anchor) and its size from its
+/// precomputed outline bounds: None for an empty outline or one too large.
+fn extent_bounds(
+    bounds: vello_common::kurbo::Rect,
+    sx: f64,
+    sy: f64,
+    phase: (f64, f64),
+    max_side: u32,
+) -> Option<(i64, i64, u16, u16)> {
     let t = Affine::new([sx, 0.0, 0.0, sy, phase.0, phase.1]);
-    let b = t.transform_rect_bbox(path.bounding_box());
+    let b = t.transform_rect_bbox(bounds);
     let x0 = b.x0.floor() as i64 - 1;
     let y0 = b.y0.floor() as i64 - 1;
     let x1 = b.x1.ceil() as i64 + 1;
@@ -219,6 +222,21 @@ fn extent(path: &BezPath, sx: f64, sy: f64, phase: (f64, f64), max_side: u32) ->
         return None;
     }
     Some((x0, y0, w as u16, h as u16))
+}
+
+/// Whether a glyph with precomputed outline `bounds` fits within the rasterised mask size limit
+/// at device scale (`sx`, `sy`) and subpixel `phase`.
+pub fn fits_bounds(bounds: vello_common::kurbo::Rect, sx: f64, sy: f64, phase: (f64, f64), max_side: u32) -> bool {
+    extent_bounds(bounds, sx, sy, phase, max_side).is_some()
+}
+
+/// Where a glyph's mask lies (top left from the whole-pixel anchor) and its size, before it's
+/// rasterised: None for a glyph with no outline or one too large.
+fn extent(path: &BezPath, sx: f64, sy: f64, phase: (f64, f64), max_side: u32) -> Option<(i64, i64, u16, u16)> {
+    if path.is_empty() {
+        return None;
+    }
+    extent_bounds(path.bounding_box(), sx, sy, phase, max_side)
 }
 
 /// The size of a glyph's mask (as `rasterise` makes it), so a full cache or atlas refuses it

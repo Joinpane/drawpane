@@ -1184,6 +1184,34 @@ impl Engine {
         self.core.gpu.as_mut().is_some_and(|g| g.set_gpu_timestamps(enabled))
     }
 
+    /// Enables or disables fixed-function hardware blending in `vello_gpu`'s strip pass
+    /// (enabled by default; toggling clears cached tiles so tests can compare HW vs offscreen).
+    #[wasm_bindgen(js_name = setGpuHwBlend)]
+    pub fn set_gpu_hw_blend(&mut self, enabled: bool) -> bool {
+        self.core.gpu.as_mut().is_some_and(|g| g.set_hw_blend_enabled(enabled))
+    }
+
+    /// Warms one HW-blend strip pipeline slot (`0..4` depth, `4..8` non-depth) in idle time.
+    /// Returns `true` when additional slots remain.
+    #[wasm_bindgen(js_name = warmGpuHwBlendPipeline)]
+    pub fn warm_gpu_hw_blend_pipeline(&mut self, slot: u32) -> bool {
+        self.core
+            .gpu
+            .as_mut()
+            .is_some_and(|g| g.warm_hw_blend_pipeline(slot as usize))
+    }
+
+    /// On WebGPU builds, returns `[GPUDevice, stripWgsl, externalTextures]` for idle
+    /// `createRenderPipelineAsync` precompilation; returns `undefined` on WebGL2 or without GPU.
+    #[wasm_bindgen(js_name = gpuWebgpuHwBlendWarmup)]
+    pub fn gpu_webgpu_hw_blend_warmup(&self) -> JsValue {
+        #[cfg(all(target_arch = "wasm32", feature = "gpu"))]
+        if let Some((dev, wgsl, ext)) = self.core.gpu.as_ref().and_then(|g| g.webgpu_hw_blend_warmup()) {
+            return js_sys::Array::of3(&dev, &JsValue::from_str(&wgsl), &JsValue::from_bool(ext)).into();
+        }
+        JsValue::UNDEFINED
+    }
+
     /// Reads the last frame's GPU timestamp duration in milliseconds, or `undefined` when
     /// timestamp queries are unsupported or disabled, or an `Outcome` on error (never rejects).
     #[wasm_bindgen(js_name = gpuTimestampMs)]
