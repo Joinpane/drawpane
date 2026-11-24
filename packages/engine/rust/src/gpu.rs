@@ -52,7 +52,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::rc::Rc;
-use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use vello_common::TextureId;
 use vello_common::color::{AlphaColor, Srgb};
@@ -251,6 +251,18 @@ const TEMP_TEX_BASE: u64 = 1 << 49;
 const GPU_TEMP_FLUSH_BYTES: usize = 16 << 20;
 /// Soft cap on pooled offscreen/temp GPU textures kept warm between frames.
 const GPU_POOL_KEEP_BYTES: usize = 32 << 20;
+
+/// GPU passes (Vello renders and isolation scopes) a frame may start while the camera moves.
+/// The main-thread budget can't bound GPU work (a 4 ms walk can queue tens of passes of blend
+/// scopes and glass); Figma caps a frame at about 255 framebuffer binds, about 55 of ours.
+const MOVING_PASSES: u32 = 48;
+
+/// Idle slices (between frames, at rest) the GPU may still be working on when the next starts:
+/// enough that the CPU and GPU overlap, few enough that the next input waits on little.
+const IDLE_IN_FLIGHT: u64 = 2;
+/// Tiles of a frame no slot can hold (`Plan::direct`) drawn, rough, in one moving frame.
+const DIRECT_MOVING_TILES: usize = 2;
+
 /// Budget for the GPU canonical shadow mask cache (strictly enforced LRU).
 const GPU_SHADOW_CACHE_BYTES: usize = 16 << 20;
 
@@ -506,6 +518,17 @@ struct Page {
     view: wgpu::TextureView,
     composite_group: Option<wgpu::BindGroup>,
 }
+
+/// The overview's tiles (`tiles::OVERVIEW_SLOT` on), in one texture of their own, `grid` tiles
+/// across and down: apart from the pages, so a cache cut to fit memory keeps them.
+struct OverviewPage {
+    page: Page,
+    grid: (u32, u32),
+    bytes: usize,
+}
+
+/// `slot_place`'s page for an overview tile (`OverviewPage`).
+const OVERVIEW_PAGE: usize = usize::MAX;
 
 struct Compositor {
     bgl: wgpu::BindGroupLayout,
@@ -809,6 +832,7 @@ struct PendingTile {
     key: TileKey,
     view: Affine,
     detail: bool,
+    rough: bool,
     coarse_readers: bool,
     halo: i32,
     tile_halo: i32,
@@ -1332,6 +1356,12 @@ pub struct GpuCounters {
     pub shadow_hits: u32,
     /// Tile walks paused to keep a slice within its budget.
     pub pauses: u32,
+    /// Tiles nothing stood in for, started in frames while the camera moved.
+    pub motion_must: u32,
+    /// Frames while the camera moved that started no tile work: the GPU was behind.
+    pub motion_backoff: u32,
+    /// Overview tiles drawn.
+    pub overview: u32,
 }
 
 pub struct Gpu {
@@ -1358,6 +1388,22 @@ pub struct Gpu {
     active: Option<ActiveDraw>,
     /// Hard wall-clock deadline (`now()` ms) checked cooperatively during budgeted tile walks.
     deadline_ms: Option<f64>,
+    /// GPU passes (Vello renders and isolation scopes) a moving frame may start
+    /// (`MOVING_PASSES`): past it, `deadline_reached` pauses the walk as a deadline does.
+    pass_budget: Option<u32>,
+    /// GPU passes started so far, and where the frame with a pass budget began counting.
+    passes: u32,
+    passes_at: u32,
+    /// Frames (and idle slices) whose GPU work was submitted, the last of them the GPU finished
+    /// (`queue.on_submitted_work_done`), and when the last was submitted: back-pressure.
+    /// Submissions not known done (`gpu_done`, the highest sequence the GPU reported done).
+    gpu_sent: crate::pacing::InFlight,
+    gpu_done: Arc<AtomicU64>,
+    /// Moving frames that started no tile work while some was wanted.
+    motion_starved: crate::pacing::Starvation,
+    /// The walk drawing now draws a rough stand-in (an overview tile, `exec::Backend::rough`).
+    rough: bool,
+    overview_page: Option<OverviewPage>,
     /// Tile cooperatively paused mid-walk so no single frame stalls past its CPU budget.
     pending_tile: Option<PendingTile>,
     pending_whole: Option<PendingWhole>,
@@ -2029,6 +2075,14 @@ impl Gpu {
             reader_halo: None,
             active: None,
             deadline_ms: None,
+            pass_budget: None,
+            passes: 0,
+            passes_at: 0,
+            gpu_sent: crate::pacing::InFlight::default(),
+            gpu_done: Arc::new(AtomicU64::new(0)),
+            motion_starved: crate::pacing::Starvation::default(),
+            rough: false,
+            overview_page: None,
             pending_tile: None,
             pending_whole: None,
             sliced_frame: None,
@@ -3058,6 +3112,38 @@ impl Gpu {
         self.scene.reset();
     }
 
+    /// Notes that GPU work was submitted for a frame or an idle slice: the GPU says when it has
+    /// finished it (`gpu_behind`).
+    fn note_submitted(&mut self) {
+        let seq = self.gpu_sent.submitted(now());
+        let done = self.gpu_done.clone();
+        self.queue.on_submitted_work_done(move || {
+            done.fetch_max(seq, Ordering::SeqCst);
+        });
+    }
+
+    /// Whether the GPU still has more than `in_flight` of the last frames' (or idle slices')
+    /// work to finish: new tile work would only queue behind it, and input behind that. On
+    /// WebGL2 `check` polls first.
+    /// Back-pressure gives up when the oldest submission not known done is `pacing::GIVE_UP_MS`
+    /// old: newer submissions (a stand-in presented each frame) never renew it, so silence from
+    /// the GPU can't hold tile work back for a whole gesture.
+    fn gpu_behind(&mut self, in_flight: u64) -> bool {
+        let done = self.gpu_done.load(Ordering::SeqCst);
+        self.gpu_sent.behind(done, in_flight, now())
+    }
+
+    /// Counts GPU passes an op runs beside its Vello renders (kernel passes), toward the
+    /// moving pass cap (`MOVING_PASSES`).
+    fn note_passes(&mut self, n: u32) {
+        self.passes = self.passes.wrapping_add(n);
+    }
+
+    /// The page's shown content (page units), for the overview.
+    fn page_bounds(store: &Store) -> Option<Rect> {
+        store.bounds(crate::store::ROOT)
+    }
+
     /// Forgets the frame shown as a stand-in (after a fresh list: it shows a page that's gone).
     pub fn forget_last(&mut self) {
         self.abort_pending_tile();
@@ -3086,11 +3172,17 @@ impl Gpu {
         self.abort_pending_tile();
         self.opening_pending = false;
         self.tiles.clear();
+        self.drop_overview_page();
         self.shown = None;
     }
 
     pub fn clear_view_caches(&mut self) {
-        self.clear_tiles();
+        // Every tile goes but the overview's, a few MiB that a zoom out stands on.
+        self.abort_pending_whole();
+        self.abort_pending_tile();
+        self.opening_pending = false;
+        self.tiles.clear_keeping_overview();
+        self.shown = None;
         self.fit_tiles(0);
         // `forget_last` also forgets that `frames[cur]` was this page's.
         self.forget_last();
@@ -3488,11 +3580,11 @@ impl Gpu {
                     self.gate_overflows = 0;
                 }
                 if gated.on_screen {
-                    if gated.generation == generation {
-                        self.shown = Some((gated.generation, gated.background, true));
-                    }
                     self.last_scale = Some(gated.last.view.as_coeffs()[0]);
                     self.last = Some(gated.last);
+                    if gated.generation == generation {
+                        self.set_shown(gated.generation, gated.background, true);
+                    }
                     verdict = GateFinish::Verified;
                 }
             }
@@ -3568,7 +3660,7 @@ impl Gpu {
             self.cur_page = true;
             self.last_scale = Some(staged.last.view.as_coeffs()[0]);
             self.last = Some(staged.last);
-            self.shown = Some((staged.generation, staged.background, true));
+            self.set_shown(staged.generation, staged.background, true);
             self.last_compute_used = true;
         }
         Ok(ComputeFinish::Frame(stats))
@@ -3653,6 +3745,9 @@ impl Gpu {
 
     /// The page and position of a slot, making its page (within the budget `fit_tiles` set).
     fn slot_place(&mut self, slot: u32) -> Result<(usize, u32, u32)> {
+        if slot >= crate::tiles::OVERVIEW_SLOT {
+            return self.overview_place(slot - crate::tiles::OVERVIEW_SLOT);
+        }
         let per_page = self.per_page();
         let per_row = self.per_row();
         let page = (slot / per_page) as usize;
@@ -3683,6 +3778,83 @@ impl Gpu {
             self.bytes += pbytes;
         }
         Ok((page, x, y))
+    }
+
+    /// Where overview tile `index` lives, its texture made (for the overview's grid) if needed.
+    fn overview_place(&mut self, index: u32) -> Result<(usize, u32, u32)> {
+        let grid = self
+            .tiles
+            .overview_grid()
+            .ok_or_else(|| EngineError::new(ErrorCode::State, "no overview"))?;
+        if self.overview_page.as_ref().is_some_and(|o| o.grid != grid) {
+            self.drop_overview_page();
+        }
+        if self.overview_page.is_none() {
+            let (w, h) = (grid.0 * TILE, grid.1 * TILE);
+            self.check_texture_size(w, h, "the overview")?;
+            let bytes = w as usize * h as usize * 4;
+            self.reserve(bytes, 0, "the overview")?;
+            let tex = texture(
+                &self.device,
+                w,
+                h,
+                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC | wgpu::TextureUsages::COPY_DST,
+                "overview",
+            );
+            let view = tex.create_view(&Default::default());
+            let composite_group = self
+                .compositor
+                .as_ref()
+                .map(|c| c.create_bind_group(&self.device, &view, "composite overview"));
+            self.overview_page = Some(OverviewPage {
+                page: Page {
+                    texture: tex,
+                    view,
+                    composite_group,
+                },
+                grid,
+                bytes,
+            });
+            self.bytes += bytes;
+        }
+        Ok((OVERVIEW_PAGE, (index % grid.0) * TILE, (index / grid.0) * TILE))
+    }
+
+    /// An overview tile couldn't be drawn: the overview goes, its texture with it, until the cache
+    /// clears (`TileCache::refuse_overview`).
+    fn refuse_overview(&mut self) {
+        self.tiles.refuse_overview();
+        self.drop_overview_page();
+    }
+
+    /// Frees the overview's texture.
+    fn drop_overview_page(&mut self) {
+        if let Some(o) = self.overview_page.take() {
+            o.page.texture.destroy();
+            self.bytes -= o.bytes;
+        }
+    }
+
+    /// Sets the overview for the page in `store` (`TileCache::set_overview`), freeing its texture
+    /// when it's gone or moved.
+    fn set_overview(&mut self, store: &Store) {
+        self.tiles.set_overview(Self::page_bounds(store));
+        if self
+            .overview_page
+            .as_ref()
+            .is_some_and(|o| Some(o.grid) != self.tiles.overview_grid())
+        {
+            self.drop_overview_page();
+        }
+    }
+
+    /// A page of tiles (`slot_place`'s), or the overview's.
+    fn page(&self, page: usize) -> &Page {
+        if page == OVERVIEW_PAGE {
+            &self.overview_page.as_ref().expect("overview page").page
+        } else {
+            &self.pages[page]
+        }
     }
 
     fn flush_retired_textures(&mut self) {
@@ -3752,6 +3924,7 @@ impl Gpu {
             _ => 10,
         };
         self.counters.renders[kind] = self.counters.renders[kind].wrapping_add(1);
+        self.passes = self.passes.wrapping_add(1);
         Ok(())
     }
 
@@ -4404,6 +4577,117 @@ impl Gpu {
         self.pending_whole.is_some()
     }
 
+    /// The scales at which something is drawn or being drawn (the tiles' levels, the frame shown):
+    /// an image level no sampler picks at any of them changes nothing. None while a whole frame is
+    /// shown or drawn: its readers' reduced captures sample images at scales of their own.
+    pub fn scales_in_use(&self) -> Option<Vec<f64>> {
+        if self.whole_reader_halo || self.pending_whole.is_some() || self.sliced_frame.is_some() {
+            return None;
+        }
+        let mut scales: Vec<f64> = self.tiles.levels().iter().map(|(_, l)| l.scale).collect();
+        scales.extend(self.last.map(|l| l.view.as_coeffs()[0]));
+        Some(scales)
+    }
+
+    /// The time between frames for a view drawn as whole frames (its readers reach past a tile's
+    /// halo, so it has no tiles to draw ahead): the overview's tiles, coarse and without an apron,
+    /// within `budget_ms`, so a zoom out from it has its stand-in. A tile that fails drops the
+    /// overview, never the slice.
+    pub fn ahead_overview(
+        &mut self,
+        store: &Store,
+        background: [f32; 4],
+        generation: u64,
+        budget_ms: f64,
+    ) -> Result<DrawStats> {
+        self.check()?;
+        self.pass_budget = None;
+        let mut stats = DrawStats::default();
+        let Some(last) = self.last else {
+            return Ok(stats);
+        };
+        // Only once the view's own whole frame is shown: until then nothing here, so the caller
+        // draws that frame.
+        let inputs = Self::inputs(store, generation, background);
+        if !self.sliced_frame.is_some_and(|f| f.inputs == inputs) {
+            return Ok(stats);
+        }
+        if budget_ms >= 1.0 && self.gpu_behind(IDLE_IN_FLIGHT) {
+            stats.in_progress = true;
+            return Ok(stats);
+        }
+        if self
+            .pending_tile
+            .as_ref()
+            .is_some_and(|pt| pt.inputs != inputs || !self.tiles.is_overview(&pt.key))
+        {
+            self.abort_pending_tile();
+        }
+        let t0 = now();
+        let submits0 = self.submits;
+        let scale = last.view.as_coeffs()[0];
+        self.masks.begin_frame();
+        self.blur.begin_frame();
+        self.shadow.begin_frame();
+        self.tiles.begin_scaled(background, scale, self.tiles.halo());
+        self.set_overview(store);
+        self.fit_tiles(store.limits.tile_bytes);
+        let jobs = self.tiles.overview_ahead(scale);
+        let deadline = (budget_ms > 0.0).then_some(t0 + self.walk_budget_ms(budget_ms));
+        let mut verbs = store.limits.frame_verbs;
+        let mut paused = false;
+        if self.pending_tile.is_some() {
+            self.deadline_ms = deadline;
+            let step = self.resume_pending_tile(store, &mut stats);
+            self.deadline_ms = None;
+            match step {
+                Ok(TileStep::Paused) => paused = true,
+                Ok(_) => {}
+                Err(e) if e.code == ErrorCode::DeviceLost => return Err(e),
+                Err(_) => self.refuse_overview(),
+            }
+        }
+        if !paused {
+            for job in &jobs {
+                // Drawn by the resume above, or the overview went with a failed one.
+                if !self.tiles.is_overview(&job.key) || self.tiles.get(&job.key).is_some_and(|e| !e.stale) {
+                    continue;
+                }
+                if deadline.is_some_and(|d| now() >= d) {
+                    break;
+                }
+                self.deadline_ms = deadline;
+                let step = self.start_slot_tile(store, job, true, 0, background, inputs, &mut stats, &mut verbs);
+                self.deadline_ms = None;
+                match step {
+                    Ok(TileStep::Paused) => {
+                        paused = true;
+                        break;
+                    }
+                    Ok(_) => {}
+                    Err(e) if e.code == ErrorCode::DeviceLost => return Err(e),
+                    Err(_) => {
+                        self.refuse_overview();
+                        break;
+                    }
+                }
+            }
+        }
+        // Nothing the view shows changed: no tile drawn to present, only work going on.
+        stats.tiles_drawn = 0;
+        stats.in_progress = paused || !self.tiles.overview_ahead(scale).is_empty();
+        stats.held = self.tiles.len() as u32;
+        stats.evicted = self.tiles.stats.evicted;
+        stats.submits = self.submits.saturating_sub(submits0);
+        if stats.submits > 0 {
+            self.note_submitted();
+        }
+        stats.cpu_ms = now() - t0;
+        self.scene.reset();
+        self.check()?;
+        Ok(stats)
+    }
+
     /// Runs a slice of the pending whole frame between frames, at most `budget_ms`: what `ahead`
     /// does for tiles. Once it finishes (and shows) it counts as one tile drawn with none pending,
     /// so the caller presents it. A frame asked for with other inputs (an edit, another
@@ -4429,11 +4713,17 @@ impl Gpu {
                 stats.pending = 0;
                 stats
             }
-            None => DrawStats {
-                pending: u32::from(self.pending_whole.is_some()),
-                in_progress: self.pending_whole.is_some(),
-                ..DrawStats::default()
-            },
+            None => {
+                // A paused slice's work, submitted without a frame.
+                if self.submits > submits0 {
+                    self.note_submitted();
+                }
+                DrawStats {
+                    pending: u32::from(self.pending_whole.is_some()),
+                    in_progress: self.pending_whole.is_some(),
+                    ..DrawStats::default()
+                }
+            }
         };
         stats.submits = self.submits.saturating_sub(submits0);
         stats.cpu_ms = now() - t0;
@@ -4485,11 +4775,14 @@ impl Gpu {
         let matches = key.view_bits == view_bits && key.size == size && key.inputs == inputs;
         let cur = self.cur.filter(|_| matches)?;
         let (t0, submits0) = (now(), self.submits);
+        let scale = f64::from_bits(view_bits[0]);
         let stats = DrawStats {
             direct: true,
             plan: key.plan,
             exact: key.exact,
             standin: !key.exact,
+            // The time between frames still has the overview to draw (`ahead_overview`).
+            queued: self.tiles.overview_left(scale),
             ..DrawStats::default()
         };
         Some(self.finish_frame(cur, stats, t0, submits0, None))
@@ -4520,9 +4813,11 @@ impl Gpu {
                 }
                 // What the slices held (the stand-in, scratch, tiles and caches) goes, so the
                 // frame drawn at once gets the memory a frame drawn at once from the start had.
+                // The overview stays (a zoom out stands on it), unless the frame still doesn't
+                // fit: then it goes too, and the frame is drawn once more.
                 self.clear_view_caches();
                 self.release_spare_frames();
-                self.render_whole(
+                let drawn = self.render_whole(
                     store,
                     &pending.frame,
                     pending.background,
@@ -4530,7 +4825,22 @@ impl Gpu {
                     false,
                     None,
                     pending.plan.as_ref(),
-                )?
+                );
+                match drawn {
+                    Err(e) if e.code == ErrorCode::Limit && self.overview_page.is_some() => {
+                        self.clear_tiles();
+                        self.render_whole(
+                            store,
+                            &pending.frame,
+                            pending.background,
+                            pending.inputs.generation,
+                            false,
+                            None,
+                            pending.plan.as_ref(),
+                        )?
+                    }
+                    drawn => drawn?,
+                }
             }
         };
         self.sliced_frame = Some(SlicedFrame {
@@ -4540,6 +4850,14 @@ impl Gpu {
             exact: stats.exact,
             plan: stats.plan,
         });
+        // The overview, for a view that never had tiles, and what's left of it reported from this
+        // first presentation on (`present_finished_whole` after), so the time between frames
+        // wakes to draw it.
+        self.set_overview(store);
+        let mut stats = stats;
+        stats.queued = stats
+            .queued
+            .max(self.tiles.overview_left(f64::from_bits(pending.view_bits[0])));
         Ok(Some(stats))
     }
 
@@ -4695,6 +5013,7 @@ impl Gpu {
     ) -> Result<DrawStats> {
         self.abort_pending_tile();
         self.abort_pending_whole();
+        self.pass_budget = None;
         self.opening_pending = false;
         let samples = halo_plan.map(|p| p.samples);
         let size = (u32::from(frame.width), u32::from(frame.height));
@@ -6199,7 +6518,7 @@ impl Gpu {
         self.last_scale = Some(view.as_coeffs()[0]);
         self.whole_samples = (padded.is_some() == samples.is_some()).then_some(samples);
         self.whole_reader_halo = self.reader_halo.is_some() && !moving;
-        self.shown = Some((generation, bg_bits, stats.exact));
+        self.set_shown(generation, bg_bits, stats.exact);
         Ok(stats)
     }
 
@@ -6236,6 +6555,8 @@ impl Gpu {
             && l.view.determinant().abs() > 0.0
         {
             comp.base = Some(view * l.view.inverse());
+            self.tiles.base_kept = self.standin_frame.is_some();
+            comp.holes = self.tiles.holes(view, (w, h));
         }
         let mut stats = DrawStats {
             standin: true,
@@ -6280,6 +6601,7 @@ impl Gpu {
         // What this shows is made of tiles, not a whole frame (`present_sliced_frame` and
         // `render_whole` show one again only while it's shown).
         self.whole_reader_halo = false;
+        self.pass_budget = None;
         #[cfg(feature = "compute")]
         {
             self.pending_compute = None;
@@ -6309,6 +6631,12 @@ impl Gpu {
         let view = frame.view;
         let scale = view.as_coeffs()[0];
         self.tiles.begin_scaled(background, scale, halo);
+        self.set_overview(store);
+        self.tiles.moving = options.moving;
+        // A stand-in after a limit was shown since the frame this one is laid on: that frame is
+        // older than the screen where something changed since (`TileCache::base_kept`).
+        self.tiles.base_kept = self.standin_frame.is_some();
+        self.tiles.bake_overview = !options.moving && options.budget_ms > 0.0;
         self.fit_tiles(store.limits.tile_bytes);
         let zooming = options.moving && self.last_scale.is_some_and(|s| s != scale);
         // A page just shown (opened, switched to, its list made afresh): nothing to stand on.
@@ -6377,6 +6705,9 @@ impl Gpu {
         if same {
             stats.exact = true;
             stats.plan = 3;
+            if !options.moving && options.budget_ms < 0.0 {
+                stats.queued = self.tiles.overview_left(scale);
+            }
             return self.finish_frame(self.cur.expect("unchanged frame"), stats, t0, submits0, None);
         }
         self.begin_frame_timestamp();
@@ -6407,8 +6738,31 @@ impl Gpu {
         {
             self.abort_pending_tile();
         }
+        // While the camera moves, a frame starts at most `MOVING_PASSES` GPU passes of tile work,
+        // and none while the GPU hasn't finished the last frame's: what isn't drawn shows its
+        // stand-in (the overview at worst), and input never queues behind GPU work.
+        let motion_capped = options.moving && options.budget_ms >= 1.0;
+        if !motion_capped {
+            self.motion_starved.fed();
+        }
+        // Moving frames that started no tile work for `pacing::STARVE_MS`, while some was wanted:
+        // this one starts one bounded unit whatever the GPU says, so tiles always fill in.
+        let starved = motion_capped && self.motion_starved.starved(now());
+        let gpu_behind = motion_capped && !starved && self.gpu_behind(0);
+        if gpu_behind {
+            self.counters.motion_backoff = self.counters.motion_backoff.wrapping_add(1);
+        }
+        // A frame no slot can hold (`Plan::direct`) draws its tiles straight into the frame, and
+        // they can't pause. While moving it's laid as stand-ins (the last frame moved, round what
+        // changed, over the overview), with a few of its tiles drawn rough over them, the nearest
+        // the middle first: bounded, soft, never an older frame's pixels.
+        let direct_moving = plan.direct && motion_capped && !composite_only && selection.is_none();
+        self.pass_budget = motion_capped.then_some(MOVING_PASSES);
+        self.passes_at = self.passes;
         let mut budget_hit = false;
         let mut unfinished_must = false;
+        // Tiles nothing stands in for drawn this frame (moving frames draw one past their passes).
+        let mut must_drawn = 0u32;
         if !composite_only {
             // If we have a paused tile matching a job in this plan, resume it first so earlier
             // work completes cleanly before starting a new tile.
@@ -6425,7 +6779,7 @@ impl Gpu {
                 } else {
                     deadline
                 };
-                if pt_deadline.is_some_and(|d| now() >= d) {
+                if gpu_behind || pt_deadline.is_some_and(|d| now() >= d) {
                     budget_hit = true;
                     stats.in_progress = true;
                     if pt_must {
@@ -6434,8 +6788,18 @@ impl Gpu {
                     }
                 } else {
                     self.deadline_ms = pt_deadline;
+                    must_drawn += u32::from(pt_must);
+                    let rough = pt_job.is_some_and(|j| j.rough);
                     let step = self.resume_pending_tile(store, &mut stats);
                     self.deadline_ms = None;
+                    // An overview tile that can't be drawn drops the overview, never the frame.
+                    let step = match step {
+                        Err(e) if rough && e.code != ErrorCode::DeviceLost => {
+                            self.refuse_overview();
+                            Ok(TileStep::Complete)
+                        }
+                        step => step,
+                    };
                     match or_standin!(step) {
                         TileStep::Complete => {}
                         TileStep::Paused => {
@@ -6457,7 +6821,11 @@ impl Gpu {
                 }
             }
             for job in &plan.jobs {
-                if resumed_key == Some(job.key) {
+                if resumed_key == Some(job.key) || direct_moving {
+                    continue;
+                }
+                // The overview went with a tile that failed: its other jobs go too.
+                if job.rough && !self.tiles.is_overview(&job.key) {
                     continue;
                 }
                 // Warm-cache fast path: during active budgeted motion, cached/stand-in tiles cover
@@ -6490,12 +6858,22 @@ impl Gpu {
                 // At rest, finish them together so a low-memory view can settle.
                 let enforce_must =
                     budgeted && options.budget_ms >= 1.0 && stats.records >= 64 && (options.moving || !job.direct);
+                // Moving: behind the GPU, tile work waits; past the frame's GPU passes too, but of
+                // what nothing stands in for one tile a frame is still drawn, so it fills in.
+                let passes_spent = motion_capped
+                    && (gpu_behind
+                        || ((!job.must || must_drawn > 0)
+                            && self.passes.wrapping_sub(self.passes_at) >= MOVING_PASSES));
                 let job_deadline = if job.must && !enforce_must { None } else { deadline };
-                let over_budget = if job.must {
-                    enforce_must && (budget_hit || deadline.is_some_and(|d| now() >= d))
-                } else {
-                    budget_hit || deadline.is_some_and(|d| now() >= d)
-                };
+                // A frame no slot can hold draws all its tiles or none (it shows the stand-in while
+                // moving until starved): one left out would leave an older frame's pixels.
+                let over_budget = !plan.direct
+                    && (passes_spent
+                        || if job.must {
+                            enforce_must && (budget_hit || deadline.is_some_and(|d| now() >= d))
+                        } else {
+                            budget_hit || deadline.is_some_and(|d| now() >= d)
+                        });
                 if over_budget {
                     budget_hit = true;
                     if job.must {
@@ -6521,13 +6899,26 @@ impl Gpu {
                         &mut verbs,
                     ));
                     direct_exact &= !tile_detail && exact;
+                    must_drawn += 1;
                     continue;
                 }
                 if job.direct {
+                    // Drawn straight into the frame, at once (it can't pause at the pass cap):
+                    // while moving, only as a starved frame's one unit.
+                    if motion_capped && (!starved || must_drawn > 0) {
+                        self.tiles.mark_unpainted(job.key);
+                        unfinished_must = true;
+                        continue;
+                    }
                     late.push(*job);
+                    must_drawn += 1;
                     continue;
                 }
                 let elapsed = now() - t0;
+                must_drawn += u32::from(job.must);
+                if job.must && options.moving {
+                    self.counters.motion_must = self.counters.motion_must.wrapping_add(1);
+                }
                 if budgeted {
                     // A drag composite also writes scratch this frame. Complete any tile
                     // started for it in one walk.
@@ -6551,6 +6942,14 @@ impl Gpu {
                         &mut verbs,
                     );
                     self.deadline_ms = None;
+                    // An overview tile that can't be drawn drops the overview, never the frame.
+                    let step = match step {
+                        Err(e) if job.rough && e.code != ErrorCode::DeviceLost => {
+                            self.refuse_overview();
+                            continue;
+                        }
+                        step => step,
+                    };
                     match or_standin!(step) {
                         TileStep::Complete => {
                             let took = now() - t0 - elapsed;
@@ -6599,6 +6998,14 @@ impl Gpu {
                     }
                 }
             }
+            self.pass_budget = None;
+            if motion_capped {
+                if must_drawn > 0 {
+                    self.motion_starved.fed();
+                } else if unfinished_must {
+                    self.motion_starved.hungry(now());
+                }
+            }
         } else {
             // Composite-only presentation: keep any paused tile intact and note remaining work.
             if self.pending_tile.is_some() {
@@ -6615,9 +7022,36 @@ impl Gpu {
         if opening && !unfinished_must && self.pending_tile.is_none() {
             self.opening_pending = false;
         }
+        if direct_moving {
+            // The nearest the middle first, as many as a moving frame may: none while the GPU is
+            // behind, unless starved.
+            if !gpu_behind || starved {
+                let (cx, cy) = (f64::from(w) / 2.0, f64::from(h) / 2.0);
+                let t = f64::from(TILE);
+                let away = |j: &crate::tiles::Job| {
+                    let x = f64::from(j.key.i) * t + plan.origin.0 as f64 + t / 2.0 - cx;
+                    let y = f64::from(j.key.j) * t + plan.origin.1 as f64 + t / 2.0 - cy;
+                    x.hypot(y)
+                };
+                // Rough (`exec::Backend::rough`): no readers, isolated scopes or shadows, so
+                // they're cheap and pause nowhere. Soft, never old, and drawn exactly at rest.
+                let mut nearest: Vec<crate::tiles::Job> = plan.jobs.clone();
+                nearest.sort_by(|a, b| away(a).total_cmp(&away(b)));
+                late.extend(nearest.into_iter().take(DIRECT_MOVING_TILES).map(|mut j| {
+                    j.rough = true;
+                    j.detail = true;
+                    j
+                }));
+            }
+            if late.is_empty() {
+                self.motion_starved.hungry(now());
+            } else {
+                self.motion_starved.fed();
+            }
+        }
         let t1 = now();
         let mut present_encoder = None;
-        if plan.direct {
+        if plan.direct && !direct_moving {
             stats.plan = 2;
         } else {
             // What's drawn straight into the frame after it covers its tile there: the composite
@@ -6644,21 +7078,30 @@ impl Gpu {
             let fuse_present = late.is_empty() && selection.is_none();
             present_encoder = self.composite(&comp, dst, background, w, h, !fuse_present, &mut stats)?;
             stats.render_ms += now() - t1;
-            for job in &late {
+            for (n, job) in late.iter().enumerate() {
+                // A moving frame's rough tiles stop at the pass cap (the first always goes).
+                if job.rough && n > 0 && self.passes.wrapping_sub(self.passes_at) >= MOVING_PASSES {
+                    stats.pending += 1;
+                    direct_exact = false;
+                    continue;
+                }
                 let tile_detail = job.detail || coarse_moving;
-                let exact = or_standin!(self.draw_job(
+                self.rough = job.rough;
+                let drawn = self.draw_job(
                     store,
                     job,
                     tile_detail,
-                    frame_halo,
+                    if job.rough { 0 } else { frame_halo },
                     background,
                     TileTarget::Scratch,
                     &plan,
                     dst,
                     &mut stats,
                     &mut verbs,
-                ));
-                direct_exact &= !tile_detail && exact;
+                );
+                self.rough = false;
+                let exact = or_standin!(drawn);
+                direct_exact &= !tile_detail && !job.rough && exact;
             }
             if let (Some(now), Some(split)) = (selection, drag.and_then(|d| d.split.as_ref())) {
                 let dragged = self.drag_composite(store, &plan, now, split, halo, background, dst, &mut stats);
@@ -6670,6 +7113,12 @@ impl Gpu {
                     return Err(e);
                 }
             }
+        }
+        // A composite-only frame at rest (the time between frames drew what it shows) plans no
+        // overview: what's left of it is still the time between frames' to draw, so the caller
+        // keeps that going. A frame drawn at once (no budget) waits for nothing.
+        if !options.moving && options.budget_ms < 0.0 {
+            stats.queued += self.tiles.overview_left(scale);
         }
         stats.pending = stats.pending.max(u32::from(self.opening_pending || unfinished_must));
         stats.exact = (plan.direct || stats.exact) && direct_exact && stats.pending == 0;
@@ -6683,8 +7132,17 @@ impl Gpu {
         self.last = Some(Last { view, size: (w, h) });
         self.last_scale = Some(scale);
         self.whole_samples = None;
-        self.shown = Some((generation, bg_bits, stats.exact));
+        self.set_shown(generation, bg_bits, stats.exact);
         Ok(stats)
+    }
+
+    /// Records the frame shown (`last`, set first), drawn at `generation` over `background`: the
+    /// one the next is laid on. Drawn from what's current, it forgets what changed before it
+    /// (`TileCache::frame_drawn`). A stand-in after a limit isn't recorded: it keeps the frame
+    /// it was warped from, and what changed since.
+    fn set_shown(&mut self, generation: u64, background: [u32; 4], exact: bool) {
+        self.shown = Some((generation, background, exact));
+        self.tiles.frame_drawn();
     }
 
     /// The frame last shown: the view it was drawn under and its size.
@@ -6712,6 +7170,7 @@ impl Gpu {
     ) -> Result<DrawStats> {
         self.check()?;
         self.abort_pending_whole();
+        self.pass_budget = None;
         let mut stats = DrawStats::default();
         let Some(last) = self.last else {
             return Ok(stats);
@@ -6733,6 +7192,9 @@ impl Gpu {
         self.blur.begin_frame();
         self.shadow.begin_frame();
         self.tiles.begin_scaled(background, last.view.as_coeffs()[0], halo);
+        self.set_overview(store);
+        self.tiles.moving = false;
+        self.tiles.bake_overview = true;
         self.fit_tiles(store.limits.tile_bytes);
         let opening = self.opening_pending;
         self.tiles.opening = opening;
@@ -6747,6 +7209,15 @@ impl Gpu {
         ) else {
             return Ok(stats);
         };
+        // Off-screen work (tiles round the view, the overview) waits while the GPU hasn't
+        // finished the last slices: more would only queue behind them, and the next input behind
+        // that. Between frames a slice or two may be in flight, so the CPU and GPU still overlap.
+        // What the view shows is never held back.
+        if budget_ms >= 1.0 && !plan.jobs.iter().any(|j| plan.needs_on_screen(j)) && self.gpu_behind(IDLE_IN_FLIGHT) {
+            stats.pending = self.tiles.left(&plan).0.max(1);
+            stats.in_progress = true;
+            return Ok(stats);
+        }
         let budgeted = budget_ms > 0.0;
         let walk_budget = self.walk_budget_ms(budget_ms);
         let deadline = budgeted.then_some(t0 + walk_budget);
@@ -6769,9 +7240,18 @@ impl Gpu {
         let mut budget_hit = false;
         if let Some(pt) = self.pending_tile.as_ref() {
             let key = pt.key;
+            let rough = pt.rough;
             self.deadline_ms = deadline;
             let step = self.resume_pending_tile(store, &mut stats);
             self.deadline_ms = None;
+            // An overview tile that can't be drawn drops the overview, never the slice.
+            let step = match step {
+                Err(e) if e.code != ErrorCode::DeviceLost && rough => {
+                    self.refuse_overview();
+                    Ok(TileStep::Complete)
+                }
+                step => step,
+            };
             match step? {
                 TileStep::Complete => resumed_key = Some(key),
                 TileStep::NoSlot => {
@@ -6789,6 +7269,10 @@ impl Gpu {
                 if job.direct || resumed_key == Some(job.key) || (needs_direct && !plan.needs_on_screen(job)) {
                     continue;
                 }
+                // The overview went with a tile that failed: its other jobs go too.
+                if job.rough && !self.tiles.is_overview(&job.key) {
+                    continue;
+                }
                 if deadline.is_some_and(|d| now() >= d) {
                     break;
                 }
@@ -6804,6 +7288,13 @@ impl Gpu {
                     &mut verbs,
                 );
                 self.deadline_ms = None;
+                let step = match step {
+                    Err(e) if e.code != ErrorCode::DeviceLost && job.rough => {
+                        self.refuse_overview();
+                        continue;
+                    }
+                    step => step,
+                };
                 match step? {
                     TileStep::Complete => {}
                     TileStep::NoSlot => needs_direct |= plan.needs_on_screen(job),
@@ -6825,6 +7316,9 @@ impl Gpu {
         stats.held = self.tiles.len() as u32;
         stats.evicted = self.tiles.stats.evicted;
         stats.submits = self.submits.saturating_sub(submits0);
+        if stats.submits > 0 {
+            self.note_submitted();
+        }
         stats.cpu_ms = now() - t0;
         self.scene.reset();
         self.check()?;
@@ -6909,6 +7403,7 @@ impl Gpu {
         }
         stats.submit_ms += now() - t1;
         stats.submits = self.submits.saturating_sub(submits0);
+        self.note_submitted();
         self.end_frame_timestamp();
         stats.cpu_ms = now() - t0;
         self.scene.reset();
@@ -7126,7 +7621,7 @@ impl Gpu {
             let mut encoder = self.take_encoder("tile copy");
             let scratch = self.scratches[self.active_scratch].as_ref().expect("scratch");
             let destination = match page {
-                Some(page) => &self.pages[page].texture,
+                Some(page) => &self.page(page).texture,
                 None => &self.frames[dst].texture,
             };
             copy_rect(
@@ -7184,7 +7679,9 @@ impl Gpu {
         debug_assert!(self.pending_tile.is_none(), "paused tile still owns scratch");
         let t0 = now();
         *verbs = store.limits.frame_verbs;
+        // A rough stand-in reads nothing, so it needs no apron.
         let tile_halo = if halo <= 0
+            || job.rough
             || (!store.has_context()
                 && !store.has_reader_in_rect(
                     job.view,
@@ -7226,7 +7723,8 @@ impl Gpu {
         }
         let limits = store.limits;
         let allow_yield = self.deadline_ms.is_some();
-        let outcome = match exec::draw_split_resumable(
+        self.rough = job.rough;
+        let outcome = exec::draw_split_resumable(
             store,
             self,
             &tile,
@@ -7236,7 +7734,9 @@ impl Gpu {
             coarse_readers,
             None,
             allow_yield,
-        ) {
+        );
+        self.rough = false;
+        let outcome = match outcome {
             Ok(o) => o,
             Err(e) => {
                 self.discard_draw();
@@ -7248,6 +7748,7 @@ impl Gpu {
             job.key,
             job.view,
             job.detail,
+            job.rough,
             coarse_readers,
             halo,
             tile_halo,
@@ -7282,7 +7783,8 @@ impl Gpu {
         };
         let limits = store.limits;
         let allow_yield = self.deadline_ms.is_some();
-        let outcome = match exec::draw_split_resumable(
+        self.rough = pt.rough;
+        let outcome = exec::draw_split_resumable(
             store,
             self,
             &tile,
@@ -7292,7 +7794,9 @@ impl Gpu {
             pt.coarse_readers,
             checkpoint,
             allow_yield,
-        ) {
+        );
+        self.rough = false;
+        let outcome = match outcome {
             Ok(o) => o,
             Err(e) => {
                 self.discard_draw();
@@ -7305,6 +7809,7 @@ impl Gpu {
             pt.key,
             pt.view,
             pt.detail,
+            pt.rough,
             pt.coarse_readers,
             pt.halo,
             pt.tile_halo,
@@ -7324,6 +7829,7 @@ impl Gpu {
         key: TileKey,
         view: Affine,
         detail: bool,
+        rough: bool,
         coarse_readers: bool,
         halo: i32,
         tile_halo: i32,
@@ -7345,6 +7851,7 @@ impl Gpu {
                     key,
                     view,
                     detail,
+                    rough,
                     coarse_readers,
                     halo,
                     tile_halo,
@@ -7365,7 +7872,13 @@ impl Gpu {
                 stats.add(&slice_stats);
                 let sub0 = stats.submit_ms;
                 let h = tile_halo as u32;
-                let slot = self.tiles.slot_for(key);
+                // A rough tile is only ever the overview's: once that's gone it's kept nowhere,
+                // never in a frame's slot.
+                let slot = if rough && !self.tiles.is_overview(&key) {
+                    None
+                } else {
+                    self.tiles.slot_for(key)
+                };
                 let place = match slot {
                     Some(s) => match self.slot_place(s) {
                         Ok(p) => Some((s, p)),
@@ -7393,7 +7906,7 @@ impl Gpu {
                     copy_rect(
                         &mut encoder,
                         &scratch.texture,
-                        &self.pages[page].texture,
+                        &self.page(page).texture,
                         (h, h),
                         (x, y),
                         (TILE, TILE),
@@ -7410,6 +7923,9 @@ impl Gpu {
                 active.record_into(stats, slice_total);
                 self.update_submit_ratio(slice_total, stats.submit_ms - sub0);
                 if let Some((s, _)) = place {
+                    if self.tiles.is_overview(&key) {
+                        self.counters.overview = self.counters.overview.wrapping_add(1);
+                    }
                     self.tiles.drawn(key, s, exact, !coarse_readers, reduced);
                     stats.tiles_drawn += 1;
                     Ok(TileStep::Complete)
@@ -8782,8 +9298,40 @@ impl Gpu {
             label: Some("composite"),
         });
         if !comp.complete {
-            // Quads by source texture: the last frame first, then pages, in the order given.
+            // Quads by source texture: the overview beneath, the last frame, then pages, in the
+            // order given.
             let mut quads: Vec<(Option<usize>, [f32; 12])> = Vec::new();
+            // The overview's tiles, from its own texture.
+            if let Some(grid) = self.overview_page.as_ref().map(|o| o.grid) {
+                let (pw, ph, t) = (f64::from(grid.0 * TILE), f64::from(grid.1 * TILE), f64::from(TILE));
+                for sc in &comp.under {
+                    let Some(index) = sc.slot.checked_sub(crate::tiles::OVERVIEW_SLOT) else {
+                        continue;
+                    };
+                    if index >= grid.0 * grid.1 {
+                        continue;
+                    }
+                    let (x, y) = (f64::from((index % grid.0) * TILE), f64::from((index / grid.0) * TILE));
+                    let d = sc.dst;
+                    quads.push((
+                        Some(OVERVIEW_PAGE),
+                        [
+                            d.x0 as f32,
+                            d.y0 as f32,
+                            d.x1 as f32,
+                            d.y1 as f32,
+                            (x / pw) as f32,
+                            (y / ph) as f32,
+                            ((x + t) / pw) as f32,
+                            ((y + t) / ph) as f32,
+                            ((x + 0.5) / pw) as f32,
+                            ((y + 0.5) / ph) as f32,
+                            ((x + t - 0.5) / pw) as f32,
+                            ((y + t - 0.5) / ph) as f32,
+                        ],
+                    ));
+                }
+            }
             if let Some(m) = comp.base
                 && let Some(l) = self.last
                 && self
@@ -8792,23 +9340,38 @@ impl Gpu {
             {
                 let (lw, lh) = (f64::from(l.size.0), f64::from(l.size.1));
                 let d = m.transform_rect_bbox(Rect::new(0.0, 0.0, lw, lh));
-                quads.push((
-                    None,
-                    [
-                        d.x0 as f32,
-                        d.y0 as f32,
-                        d.x1 as f32,
-                        d.y1 as f32,
-                        0.0,
-                        0.0,
-                        1.0,
-                        1.0,
-                        (0.5 / lw) as f32,
-                        (0.5 / lh) as f32,
-                        (1.0 - 0.5 / lw) as f32,
-                        (1.0 - 0.5 / lh) as f32,
-                    ],
-                ));
+                // Laid round what changed since it was drawn (`Composite::holes`): its pixels
+                // there are old. The mapping only scales and moves, so each part maps back to a
+                // part of the last frame.
+                let [sx, b, c, sy, ..] = m.as_coeffs();
+                let parts = if comp.holes.is_empty() {
+                    vec![d]
+                } else if b == 0.0 && c == 0.0 && sx > 0.0 && sy > 0.0 {
+                    crate::tiles::rect_minus(d, &comp.holes)
+                } else {
+                    Vec::new()
+                };
+                let back = m.inverse();
+                for p in parts {
+                    let s = back.transform_rect_bbox(p);
+                    quads.push((
+                        None,
+                        [
+                            p.x0 as f32,
+                            p.y0 as f32,
+                            p.x1 as f32,
+                            p.y1 as f32,
+                            (s.x0 / lw) as f32,
+                            (s.y0 / lh) as f32,
+                            (s.x1 / lw) as f32,
+                            (s.y1 / lh) as f32,
+                            (0.5 / lw) as f32,
+                            (0.5 / lh) as f32,
+                            (1.0 - 0.5 / lw) as f32,
+                            (1.0 - 0.5 / lh) as f32,
+                        ],
+                    ));
+                }
             }
             for sc in &comp.scaled {
                 let page = (sc.slot / per_page) as usize;
@@ -8885,7 +9448,11 @@ impl Gpu {
                         }
                     }
                     Some(p) => {
-                        let page = &mut self.pages[p];
+                        let page = if p == OVERVIEW_PAGE {
+                            &mut self.overview_page.as_mut().expect("overview page").page
+                        } else {
+                            &mut self.pages[p]
+                        };
                         if page.composite_group.is_none() {
                             page.composite_group = Some(c.create_bind_group(&self.device, &page.view, "composite"));
                         }
@@ -8921,7 +9488,7 @@ impl Gpu {
                         .composite_group
                         .as_ref()
                         .expect("composite frame bg"),
-                    Some(p) => self.pages[p].composite_group.as_ref().expect("composite page bg"),
+                    Some(p) => self.page(p).composite_group.as_ref().expect("composite page bg"),
                 };
                 pass.set_bind_group(0, group, &[]);
                 pass.draw(0..4, from..to);
@@ -9864,6 +10431,10 @@ impl Backend for Gpu {
         Ok(())
     }
 
+    fn rough(&self) -> bool {
+        self.rough
+    }
+
     fn stop_early(&self) -> bool {
         self.reader_halo
             .as_ref()
@@ -9873,6 +10444,9 @@ impl Backend for Gpu {
 
     fn deadline_reached(&self) -> bool {
         self.deadline_ms.is_some_and(|d| now() >= d)
+            || self
+                .pass_budget
+                .is_some_and(|b| self.passes.wrapping_sub(self.passes_at) >= b)
     }
 
     fn set_targets(&mut self, write_main: bool, write_backdrop: bool, open: &[Open]) -> Result<()> {
@@ -10000,6 +10574,8 @@ impl Backend for Gpu {
     }
 
     fn read(&mut self, kernel: u32, _paints: IRect, _reads: IRect, _open: &[Open]) -> Result<()> {
+        // A kernel read: a capture and a pass back, toward the moving pass cap.
+        self.note_passes(2);
         Err(EngineError::unsupported(format!(
             "backdrop reader {kernel} on the GPU (test kernel)"
         )))
@@ -10017,6 +10593,8 @@ impl Backend for Gpu {
         read_parent: bool,
         open: &[Open],
     ) -> Result<()> {
+        // Glass: its backdrop capture, blur and refraction passes, toward the moving pass cap.
+        self.note_passes(4);
         if open.iter().any(|o| matches!(o, Open::Layer)) {
             return Err(EngineError::unsupported(
                 "a backdrop reader inside a layer that fades as one",
@@ -10679,6 +11257,7 @@ impl Backend for Gpu {
             return Ok(false);
         }
         self.counters.scopes = self.counters.scopes.wrapping_add(1);
+        self.passes = self.passes.wrapping_add(1);
         let area = if clip_to_parent {
             // Match the CPU scope's sampling extent and preserve frame-relative raster cells.
             IRect {
@@ -11155,6 +11734,8 @@ impl Backend for Gpu {
         color: AlphaColor<Srgb>,
         open: &[Open],
     ) -> Result<()> {
+        // A shadow's blur passes, toward the moving pass cap.
+        self.note_passes(2);
         if dirty.is_empty() {
             return Ok(());
         }
@@ -11655,6 +12236,8 @@ impl Backend for Gpu {
         coarse: bool,
         open: &[Open],
     ) -> Result<()> {
+        // A blur's capture, downsample, blur and composite passes, toward the moving pass cap.
+        self.note_passes(4);
         if open.iter().any(|o| matches!(o, Open::Layer)) {
             return Err(EngineError::unsupported(
                 "a backdrop reader inside a layer that fades as one",
@@ -11852,6 +12435,8 @@ impl Backend for Gpu {
         coarse: bool,
         open: &[Open],
     ) -> Result<()> {
+        // A progressive blur's capture, levels and composite, toward the moving pass cap.
+        self.note_passes(6);
         if open.iter().any(|o| matches!(o, Open::Layer)) {
             return Err(EngineError::unsupported(
                 "a backdrop reader inside a layer that fades as one",

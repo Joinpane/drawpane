@@ -434,6 +434,12 @@ pub trait Backend {
     fn stop_early(&self) -> bool {
         false
     }
+    /// Whether the walk draws a rough stand-in (an overview tile, never shown at rest): no
+    /// readers, shadows, layer effects or blend modes, group opacity unisolated, and anything
+    /// under `ROUGH_SPECK` device pixels skipped. It is never exact.
+    fn rough(&self) -> bool {
+        false
+    }
     /// Whether the caller's per-frame CPU budget has expired and a resumable walk should yield
     /// cooperatively at the next safe boundary (outside isolated and masked scopes).
     fn deadline_reached(&self) -> bool {
@@ -576,6 +582,9 @@ pub trait Backend {
         open: &[Open],
     ) -> Result<()>;
 }
+
+/// Records under this many device pixels each way are left out of a rough stand-in.
+pub const ROUGH_SPECK: f64 = 1.0;
 
 /// The frame being drawn: its size, the page-to-device transform, and whether screen-only
 /// levels of detail apply (specks skipped, unreadable text as bars; never for exports).
@@ -1249,14 +1258,20 @@ pub fn draw_split_resumable<B: Backend>(
     let tiled = frame.area != full_frame;
     let full_viewport = Rect::new(-1.0, -1.0, f64::from(frame.width) + 1.0, f64::from(frame.height) + 1.0);
     let resuming = checkpoint.is_some();
-    let (plan, resume_path, reader_seq, backdrop_live, so_far) = match checkpoint {
+    let rough = backend.rough();
+    let (plan, resume_path, reader_seq, backdrop_live, mut so_far) = match checkpoint {
         Some(cp) => (cp.plan, cp.resume_path, cp.reader_seq, cp.backdrop_live, cp.so_far),
         None => {
-            let plan = plan_readers(store, frame);
+            // A rough stand-in reads nothing: what readers see isn't drawn.
+            let plan = if rough { None } else { plan_readers(store, frame) };
             let has_ctx = plan.as_ref().is_some_and(|p| p.has_context);
             (plan, Vec::new(), 0, has_ctx, DrawStats::default())
         }
     };
+    if rough && !resuming {
+        // Never exact, whatever it held.
+        so_far.coarse += 1;
+    }
     let (has_context, needs_backdrop, last_reader_seq, isolated_with_reader, subtree_readers) = match plan {
         Some(p) => (
             p.has_context,
@@ -1279,6 +1294,7 @@ pub fn draw_split_resumable<B: Backend>(
         backend,
         frame: *frame,
         coarse_readers,
+        rough,
         viewport: Rect::new(
             f64::from(frame.area.x0) - 1.0,
             f64::from(frame.area.y0) - 1.0,
@@ -1373,6 +1389,8 @@ struct Walk<'a, B: Backend> {
     backend: &'a mut B,
     frame: Frame,
     coarse_readers: bool,
+    /// A rough stand-in (`Backend::rough`).
+    rough: bool,
     viewport: Rect,
     tiled: bool,
     full_frame: IRect,
@@ -3290,16 +3308,17 @@ impl<B: Backend> Walk<'_, B> {
             }
             return Ok(());
         }
-        if self.frame.detail {
+        if self.frame.detail || self.rough {
+            let speck = if self.rough { ROUGH_SPECK } else { 0.5 };
             if !r.group() {
                 let b = device.transform_rect_bbox(Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1])));
-                if b.width() < 0.5 && b.height() < 0.5 {
+                if b.width() < speck && b.height() < speck {
                     self.stats.culled += 1;
                     self.stats.specks += 1;
                     self.records_since_probe += 1;
                     return Ok(());
                 }
-            } else if dev_bbox.width() < 0.5 && dev_bbox.height() < 0.5 && !self.subtree_readers.contains_key(&id) {
+            } else if dev_bbox.width() < speck && dev_bbox.height() < speck && !self.subtree_readers.contains_key(&id) {
                 self.stats.culled += 1;
                 self.stats.specks += 1;
                 self.records_since_probe += 1;
@@ -3325,6 +3344,10 @@ impl<B: Backend> Walk<'_, B> {
             self.skip_post_record = None;
         }
         let is_context = r.context();
+        if self.rough && is_context {
+            // Export context only feeds readers, and a rough stand-in has none.
+            return Ok(());
+        }
         let in_alpha = if parent_context && !is_context { 1.0 } else { alpha };
         let opacity = if skipping_post { 1.0 } else { in_alpha * r.opacity };
         if opacity <= 0.0 {
@@ -3337,13 +3360,15 @@ impl<B: Backend> Walk<'_, B> {
         };
         self.current_context = is_context;
         self.sync_targets(is_context)?;
-        let active = if skipping_post {
+        // A rough stand-in draws a layer's content plainly: no effects, blend or isolation.
+        let plain = skipping_post || self.rough;
+        let active = if plain {
             Vec::new()
         } else {
             active_posts(r, device, view_scale)
         };
         let has_post = !active.is_empty();
-        let layer_blend = if skipping_post { 0 } else { r.blend };
+        let layer_blend = if plain { 0 } else { r.blend };
         let has_reader = self.subtree_readers.get(&id).is_some_and(|&(n, _)| n > 0);
         let reader_fade = self.isolated_with_reader.contains(&id);
         let crosses_context = is_context
@@ -3356,7 +3381,8 @@ impl<B: Backend> Walk<'_, B> {
             ));
         }
         // Route eligible layer blends directly to fixed-function hardware blending in Vello's
-        // strip pass, bypassing offscreen isolation and scopeClip rasterization.
+        // strip pass, bypassing offscreen isolation and scopeClip rasterization. A rough stand-in
+        // has no blend (`plain`), so none is routed.
         let hw_layer_blend =
             (!has_post && layer_blend != 0 && opacity >= 1.0 && !has_reader && !reader_fade && !crosses_context)
                 .then(|| {
@@ -3364,17 +3390,18 @@ impl<B: Backend> Walk<'_, B> {
                         .filter(|_| self.can_hw_blend_layer(id, world, is_context))
                 })
                 .flatten();
-        let isolate = if skipping_post || hw_layer_blend.is_some() {
+        let isolate = if plain || hw_layer_blend.is_some() {
             false
         } else {
             has_post || layer_blend != 0 || (r.isolate() && r.opacity < 1.0)
         };
-        let through = !has_post
+        let through = !plain
+            && !has_post
             && layer_blend == 0
             && r.isolate()
             && r.opacity < 1.0
             && (store.subtree_has_blend(id) || reader_fade || crosses_context);
-        let use_offscreen = if skipping_post || hw_layer_blend.is_some() {
+        let use_offscreen = if plain || hw_layer_blend.is_some() {
             false
         } else {
             has_post || layer_blend != 0 || through || (isolate && store.subtree_has_pass(id))
@@ -3830,6 +3857,13 @@ impl<B: Backend> Walk<'_, B> {
                     | Op::DropShadow { .. }
                     | Op::InnerShadow { .. }
                         if !self.paints() => {}
+                    Op::Read { .. }
+                    | Op::Glass(_)
+                    | Op::BackgroundBlur(_)
+                    | Op::ProgressiveBlur(_)
+                    | Op::DropShadow { .. }
+                    | Op::InnerShadow { .. }
+                        if self.rough => {}
                     Op::Fill {
                         path,
                         even_odd,
@@ -3843,7 +3877,7 @@ impl<B: Backend> Walk<'_, B> {
                             device,
                             *even_odd,
                             paint,
-                            *blend,
+                            if self.rough { 0 } else { *blend },
                             active_alpha,
                             mask_depth == 0,
                         )?;
@@ -3856,7 +3890,8 @@ impl<B: Backend> Walk<'_, B> {
                         cache,
                     } => {
                         self.sync_targets(is_context)?;
-                        self.stroke(r, *path, device, style, paint, *blend, active_alpha, cache)?;
+                        let blend = if self.rough { 0 } else { *blend };
+                        self.stroke(r, *path, device, style, paint, blend, active_alpha, cache)?;
                     }
                     Op::Clip { path, .. }
                         if !is_context
@@ -5609,6 +5644,8 @@ mod resumable_tests {
         /// meets its reader inside one.
         stop_in_scope: bool,
         stopping: bool,
+        /// Draws a rough stand-in (`Backend::rough`).
+        rough: bool,
     }
 
     impl<const UNBOUNDED: bool> Backend for AlwaysYieldCpu<UNBOUNDED> {
@@ -5692,6 +5729,9 @@ mod resumable_tests {
         fn deadline_reached(&self) -> bool {
             self.probes.set(self.probes.get() + 1);
             true
+        }
+        fn rough(&self) -> bool {
+            self.rough
         }
         fn set_targets(&mut self, write_main: bool, write_backdrop: bool, open: &[Open]) -> Result<()> {
             self.inner.set_targets(write_main, write_backdrop, open)
@@ -5838,6 +5878,7 @@ mod resumable_tests {
             reduced_composites: 0,
             stop_in_scope: true,
             stopping: false,
+            rough: false,
         };
         cpu.inner.begin(64, 64, area, [255, 255, 255, 255]);
         let mut budget = limits.frame_verbs;
@@ -5960,6 +6001,7 @@ mod resumable_tests {
             reduced_composites: 0,
             stop_in_scope: false,
             stopping: false,
+            rough: false,
         };
         ycpu_same.inner.begin(128, 128, frame.area, bg);
         let mut budget_same = limits.frame_verbs;
@@ -6020,6 +6062,7 @@ mod resumable_tests {
             reduced_composites: 0,
             stop_in_scope: false,
             stopping: false,
+            rough: false,
         };
         ycpu.inner.begin(128, 128, frame.area, bg);
         let mut budget = limits.frame_verbs;
@@ -6062,6 +6105,160 @@ mod resumable_tests {
         assert!(
             max_diff <= 1,
             "flushed resumable walk exceeded 1/255 rounding tolerance: slices={slices} max_diff={max_diff}"
+        );
+    }
+
+    /// A rough stand-in (an overview tile) draws each layer's content plainly: no shadows,
+    /// readers, layer blurs or blend modes, nothing under `ROUGH_SPECK`, and it yields as
+    /// usual. It is the same picture as the page without those, and never exact.
+    #[test]
+    fn a_rough_walk_draws_content_plainly_and_is_never_exact() {
+        let limits = Limits::default();
+        let page = |effects: bool| {
+            let mut store = Store::new(limits);
+            let mut frame_rec = Record::empty();
+            frame_rec.size = [128.0, 128.0];
+            frame_rec.paths.push(rect_path(128.0, 128.0));
+            frame_rec.ops = vec![
+                Op::Fill {
+                    path: 0,
+                    even_odd: false,
+                    paint: Paint::Solid([0.9, 0.92, 0.96, 1.0]),
+                    blend: 0,
+                },
+                Op::Children,
+            ];
+            store.insert_for_test(1, ROOT, frame_rec);
+            for i in 0..40u32 {
+                let mut r = Record::empty();
+                r.transform = Affine::translate(((i % 8) as f64 * 14.0 + 4.0, (i / 8) as f64 * 20.0 + 4.0));
+                r.size = [12.0, 12.0];
+                r.paths.push(rect_path(12.0, 12.0));
+                if effects && i == 3 {
+                    r.ops.push(Op::DropShadow {
+                        paths: vec![0],
+                        even_odd: false,
+                        dx: 2.0,
+                        dy: 3.0,
+                        blur: 4.0,
+                        color: [0.0, 0.0, 0.0, 0.35],
+                        blend: 0,
+                        stroke: None,
+                    });
+                }
+                if effects && i == 12 {
+                    r.ops.push(Op::BackgroundBlur(Box::new(BackgroundBlurOp {
+                        paths: vec![0],
+                        even_odd: false,
+                        radius: 4.0,
+                    })));
+                }
+                if effects && i == 20 {
+                    r.blend = 1;
+                }
+                if effects && i == 28 {
+                    r.post_effects = vec![PostEffect::LayerBlur { radius: 6.0 }];
+                }
+                r.ops.push(Op::Fill {
+                    path: 0,
+                    even_odd: false,
+                    paint: Paint::Solid([(i % 5) as f32 * 0.2, ((i / 5) % 5) as f32 * 0.2, 0.65, 0.85]),
+                    blend: if effects && i == 33 { 2 } else { 0 },
+                });
+                store.insert_for_test(10 + i, 1, r);
+            }
+            if effects {
+                // Under a device pixel each way, over half of one: left out of a rough walk only.
+                let mut speck = Record::empty();
+                speck.transform = Affine::translate((120.0, 120.0));
+                speck.size = [0.8, 0.8];
+                speck.paths.push(rect_path(0.8, 0.8));
+                speck.ops = vec![Op::Fill {
+                    path: 0,
+                    even_odd: false,
+                    paint: Paint::Solid([0.0, 0.0, 0.0, 1.0]),
+                    blend: 0,
+                }];
+                store.insert_for_test(90, 1, speck);
+            }
+            store
+        };
+        let frame = Frame {
+            width: 128,
+            height: 128,
+            view: Affine::IDENTITY,
+            detail: false,
+            area: IRect {
+                x0: 0,
+                y0: 0,
+                x1: 128,
+                y1: 128,
+            },
+        };
+        let bg = [255u8, 255, 255, 255];
+
+        let plain = page(false);
+        let mut ref_cpu = Cpu::new(limits.glyph_mask_bytes, limits.glyph_mask_side, 0);
+        ref_cpu.begin(128, 128, frame.area, bg);
+        let mut ref_budget = limits.frame_verbs;
+        let s = draw_split(
+            &plain,
+            &mut ref_cpu,
+            &frame,
+            &limits,
+            &mut ref_budget,
+            &Split::all(),
+            false,
+        )
+        .expect("plain page");
+        assert!(s.exact(), "the plain page is drawn exactly");
+        ref_cpu.flush_slice_for_test();
+        let ref_px = ref_cpu.target.data_as_u8_slice().to_vec();
+
+        let rich = page(true);
+        let mut rough = AlwaysYieldCpu::<false> {
+            inner: Cpu::new(limits.glyph_mask_bytes, limits.glyph_mask_side, 0),
+            probes: Cell::new(0),
+            reduced_composites: 0,
+            stop_in_scope: false,
+            stopping: false,
+            rough: true,
+        };
+        rough.inner.begin(128, 128, frame.area, bg);
+        let mut budget = limits.frame_verbs;
+        let mut checkpoint = None;
+        let mut slices = 0u32;
+        let total = loop {
+            slices += 1;
+            match draw_split_resumable(
+                &rich,
+                &mut rough,
+                &frame,
+                &limits,
+                &mut budget,
+                &Split::all(),
+                true,
+                checkpoint.take(),
+                true,
+            )
+            .expect("rough slice")
+            {
+                WalkOutcome::Complete { total, .. } => {
+                    rough.inner.flush_slice_for_test();
+                    break total;
+                }
+                WalkOutcome::Paused { checkpoint: cp, .. } => checkpoint = Some(cp),
+            }
+            assert!(slices < 100, "rough walk failed to terminate");
+        };
+        assert!(slices >= 3, "a rough walk yields as usual, got {slices} slices");
+        assert!(!total.exact(), "a rough stand-in is never exact: {total:?}");
+        assert_eq!(total.reads, 0, "a rough stand-in reads nothing");
+        assert_eq!(total.specks, 1, "the speck under a device pixel is left out");
+        assert_eq!(
+            ref_px,
+            rough.inner.target.data_as_u8_slice(),
+            "a rough walk draws the page as if it had no effects, blends or specks"
         );
     }
 
@@ -6134,6 +6331,7 @@ mod resumable_tests {
             reduced_composites: 0,
             stop_in_scope: false,
             stopping: false,
+            rough: false,
         };
         ycpu.inner.begin(128, 128, area, [255, 255, 255, 255]);
         let mut budget = limits.frame_verbs;

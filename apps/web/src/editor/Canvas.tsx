@@ -45,6 +45,7 @@ import { shaper } from "./shaping";
 import { TextEditor } from "./TextEditor";
 import { openMenu } from "./ui-state";
 import { VectorHints } from "./VectorHints";
+import { settleAfterNotch } from "./wheel-notch";
 
 /** How long a zoom rests before its stand-in frames give way to an exact one. */
 const SETTLE_MS = 120;
@@ -116,6 +117,8 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
   if (rendererRef.current.editor !== editor || rendererRef.current.measurer !== measurer) {
     rendererRef.current = { editor, measurer, instance: null };
   }
+  /** Until when (`performance.now()`) the camera counts as moving after a wheel notch. */
+  const notchSettle = useRef({ until: 0 });
 
   // Render loop: repaint content when the document, page or camera changes;
   // repaint the overlay on any state change. Never more than once per frame.
@@ -566,7 +569,10 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       // redraw never hides the engine's frame, and a read-back frame shows once it lands.
       let drewEngine = false;
       let runCompositeOnly = compositeOnly;
-      const gestureMoving = s.gesture && s.editingText === null;
+      // Between wheel notches the camera isn't at rest: frames stay stand-ins until they stop.
+      const notchUntil = notchSettle.current.until;
+      const settling = performance.now() < notchUntil;
+      const gestureMoving = (s.gesture || settling) && s.editingText === null;
       if (
         contentDirty &&
         s.pageId !== null &&
@@ -1110,6 +1116,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     };
     const onWheel = (e: WheelEvent) => {
       e.preventDefault();
+      notchSettle.current.until = settleAfterNotch(notchSettle.current.until, e, SETTLE_MS);
       const rect = el.getBoundingClientRect();
       // Normalize line and page deltas to pixels.
       const scale = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? rect.height : 1;

@@ -358,16 +358,28 @@ impl Engine {
     /// every reader they reach, transitively (`Store::dirty`). A fresh list drops them all, and
     /// the last frame with them: it shows a page that's gone.
     fn invalidate_tiles(&mut self, changes: &[Dirty], full: bool, drag_parts: bool) {
-        self.invalidate_tiles_at(changes, full, drag_parts, None);
+        self.invalidate_tiles_at(changes, full, drag_parts, None, false);
     }
 
+    /// `refine`: an image has another resolution now, not other content (a sharper level
+    /// arrived, or one was dropped): tiles drawn with it still stand in, never exact
+    /// (`TileCache::refine`), and nothing is noted as changed.
     fn invalidate_tiles_at(
         &mut self,
         changes: &[Dirty],
         full: bool,
         drag_parts: bool,
         at: Option<&dyn Fn(f64) -> bool>,
+        refine: bool,
     ) {
+        // What changed, in page units, for the last frame shown (`TileCache::note_changed`),
+        // whatever levels the cache holds. An image change counts at the scale the last frame was
+        // drawn at only if the level drawn there changed.
+        let changed = if full || changes.is_empty() || refine {
+            Vec::new()
+        } else {
+            self.store.dirty(changes, Affine::IDENTITY, 1.5)
+        };
         let store = &mut self.store;
         let mut each = |cache: &mut TileCache| {
             if full {
@@ -382,7 +394,11 @@ impl Engine {
                     continue;
                 }
                 let rects: Vec<Rect> = store.dirty(changes, level.grid(), 1.5);
-                cache.invalidate(id, &rects);
+                if refine {
+                    cache.refine(id, &rects);
+                } else {
+                    cache.invalidate(id, &rects);
+                }
                 // An edit beside a drag: its parts around the selection are drawn again there.
                 if drag_parts {
                     cache.drag_invalidate(id, &rects);
@@ -392,10 +408,13 @@ impl Engine {
                 cache.invalidate_inexact_full();
             }
         };
+
         if let Some(t) = self.cpu_tiles.as_mut() {
             each(&mut t.cache);
             if full {
                 t.forget();
+            } else if at.is_none() {
+                t.cache.note_changed(&changed);
             }
         }
         #[cfg(feature = "gpu-common")]
@@ -403,6 +422,10 @@ impl Engine {
             each(&mut g.tiles);
             if full {
                 g.forget_last();
+            } else if let Some(last) = g.last()
+                && at.is_none_or(|select| select(last.view.as_coeffs()[0]))
+            {
+                g.tiles.note_changed(&changed);
             }
             if full
                 || drag_parts && at.is_none_or(|select| g.last().is_some_and(|last| select(last.view.as_coeffs()[0])))
@@ -531,8 +554,32 @@ impl Engine {
                 old != new || replaced.is_some_and(|size| new == Some(size))
             })
         };
+        // A level no sampler picks at any scale drawn or being drawn (one warmed ahead of a
+        // zoom, say) changes nothing drawn: work in progress keeps going instead of starting over.
+        if self.view_scales().is_some_and(|scales| !scales.into_iter().any(at)) {
+            return;
+        }
         self.generation += 1;
-        self.invalidate_tiles_at(&users, false, true, Some(&at));
+        // A level of a size the image didn't have (or one dropped) is the same picture at another
+        // resolution; one replaced at a size it had may be other content.
+        self.invalidate_tiles_at(&users, false, true, Some(&at), replaced.is_none());
+    }
+
+    /// The scales at which a view draws or keeps anything (tiles' levels, the frame shown), when
+    /// it's made of tiles; None for frames drawn afresh, which any change may concern.
+    fn view_scales(&self) -> Option<Vec<f64>> {
+        let mut scales = Vec::new();
+        let mut tiled = false;
+        if let Some(t) = self.cpu_tiles.as_ref() {
+            scales.extend(t.cache.levels().iter().map(|(_, l)| l.scale));
+            tiled = true;
+        }
+        #[cfg(feature = "gpu-common")]
+        if let Some(g) = self.gpu.as_ref() {
+            scales.extend(g.scales_in_use()?);
+            tiled = true;
+        }
+        tiled.then_some(scales)
     }
 
     pub fn put_cpu_image_level(&mut self, id: u32, width: u32, height: u32, rgba: &[u8]) -> Result<()> {
@@ -1413,7 +1460,14 @@ impl Engine {
         };
         let halo = match self.cached_halo(last.view, last.size) {
             Ok(h) => h,
-            Err(e) if e.code == ErrorCode::Limit => return Ok(DrawStats::default()),
+            // A view drawn as whole frames: no tiles of its own to draw ahead, only the overview.
+            Err(e) if e.code == ErrorCode::Limit => {
+                let gpu = self
+                    .gpu
+                    .as_mut()
+                    .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
+                return gpu.ahead_overview(&self.store, background, self.generation, budget_ms);
+            }
             Err(e) => return Err(e),
         };
         let gpu = self
@@ -3292,7 +3346,9 @@ impl Engine {
             comp_exact = comp.exact;
             stats.pending = comp.pending;
             if !comp.complete {
-                if let (Some(m), Some(l)) = (comp.base, last) {
+                // Where something changed since, the last frame's pixels are old: then it isn't
+                // laid at all here (the GPU lays it round what changed).
+                if let (Some(m), Some(l), true) = (comp.base, last, comp.holes.is_empty()) {
                     // The last frame, moved and scaled (nearest pixel: a stand-in).
                     let prev = tiles.frame_last.clone();
                     let inv = m.inverse();
@@ -3441,6 +3497,8 @@ impl Engine {
             size: (width, height),
         });
         tiles.last_scale = Some(scale);
+        // The frame the next is laid on: drawn from what's current (`TileCache::frame_drawn`).
+        tiles.cache.frame_drawn();
         Ok(stats)
     }
 

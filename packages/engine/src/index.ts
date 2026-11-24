@@ -305,6 +305,14 @@ export interface GpuCounters {
   readonly shadowMisses: number;
   readonly shadowHits: number;
   readonly pauses: number;
+  /** Tiles nothing stood in for, started in frames while the camera moved. */
+  readonly motionMust: number;
+  /** Frames while the camera moved that started no tile work because the GPU was behind. */
+  readonly motionBackoff: number;
+  /** Overview tiles drawn (the whole page at one coarse scale, a stand-in while moving). */
+  readonly overview: number;
+  /** Overview tiles dropped: a list or background changed, the overview moved, or one failed to draw. */
+  readonly overviewLost: number;
 }
 
 /** What drawing ahead between frames did (`RenderEngine.renderGpuAhead`). */
@@ -1432,6 +1440,10 @@ export class RenderEngine {
       shadowMisses: v[rest + 1] ?? 0,
       shadowHits: v[rest + 2] ?? 0,
       pauses: v[rest + 3] ?? 0,
+      motionMust: v[rest + 4] ?? 0,
+      motionBackoff: v[rest + 5] ?? 0,
+      overview: v[rest + 6] ?? 0,
+      overviewLost: v[rest + 7] ?? 0,
     };
   }
 

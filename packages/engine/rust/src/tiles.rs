@@ -145,8 +145,12 @@ pub struct TileEntry {
     /// when it isn't exact (a provisional record in it, display list 1.1: what the list holds
     /// now, drawn as well as it can be).
     pub full: bool,
-    /// Something it shows changed since it was drawn: a stand-in until drawn again.
+    /// Something it shows changed since it was drawn (an edit, an image replaced): it shows what's
+    /// gone, so it stands in for nothing, not even itself, until drawn again.
     pub stale: bool,
+    /// An image in it has another resolution now (a sharper level arrived, or one was dropped):
+    /// the same picture, so it stands in, but it's never exact until drawn again.
+    pub refine: bool,
     /// It holds an effect drawn on a reduced grid (a layer blur past the native limits): not
     /// exact, and nothing to draw again for.
     pub reduced: bool,
@@ -157,7 +161,7 @@ pub struct TileEntry {
 impl TileEntry {
     /// Nothing to draw it again for: drawn at full detail and still current.
     pub fn current(&self) -> bool {
-        !self.stale && self.full
+        !self.stale && !self.refine && self.full
     }
 }
 
@@ -170,6 +174,8 @@ struct LevelEntry {
     /// The reader halo width this level's tiles were baked with.
     halo: i32,
     used: u64,
+    /// The overview's level (`set_overview`): its own entry, never a frame's or a stand-in's.
+    overview: bool,
 }
 
 /// A tile to draw this frame.
@@ -185,6 +191,9 @@ pub struct Job {
     /// No slot can be kept for it this frame (the budget): drawn straight into the frame, over
     /// what the frame composites, and kept nowhere. Always `must`, never `detail`.
     pub direct: bool,
+    /// A rough stand-in (an overview tile, `exec::Backend::rough`): never exact, and never
+    /// drawn for a frame's own level.
+    pub rough: bool,
 }
 
 /// How a frame is made.
@@ -241,6 +250,11 @@ pub struct Composite {
     /// The last frame, mapped into this one (its device pixels to this frame's): a stand-in
     /// under whatever the tiles don't cover.
     pub base: Option<Affine>,
+    /// Where the last frame's pixels are old (this frame's pixels): what changed since it was
+    /// drawn, while moving. The last frame isn't laid there; the overview or the background shows.
+    pub holes: Vec<Rect>,
+    /// The overview's tiles, scaled, beneath the last frame: what shows where nothing else does.
+    pub under: Vec<Scaled>,
     pub scaled: Vec<Scaled>,
     pub copies: Vec<Copy>,
     /// Every visible tile of the frame's level is there, up to date and drawn exactly: the
@@ -292,11 +306,96 @@ pub struct TileCache {
     /// Tiles whose `must` draw yielded or deferred under a frame budget so `last_page` does not
     /// mistakenly count their blank region as covered on the next frame.
     unpainted: HashSet<TileKey>,
+    /// The whole page at one coarse scale (`set_overview`): drawn at rest after the frame's own
+    /// tiles and kept, it stands in for any scale while the camera moves, so a zoom out shows
+    /// it where nothing else covers instead of drawing full detail mid-gesture.
+    overview: Option<Overview>,
+    /// The next plan is for a frame while the camera moves (set by the backend): the overview
+    /// stands in there.
+    pub moving: bool,
+    /// The frame the next is laid on (the last frame drawn) isn't the one on screen: a stand-in
+    /// after a limit was shown since (set by the backend). Where something changed since that
+    /// frame was drawn, it would show older pixels than the screen did, so it's laid round them
+    /// (`holes`). Otherwise it's what's on screen, laid as it is until what changed is drawn.
+    pub base_kept: bool,
+    /// The next plan may draw the overview's tiles (set by the backend: frames at rest with a
+    /// budget, and the time between frames; never a frame drawn at once, nor one in motion).
+    pub bake_overview: bool,
+    /// What changed (page units) since the frame the next is laid on (the last frame drawn) was
+    /// drawn (`note_changed`). That frame shows older pixels there than the current version: if
+    /// it's still the one on screen, it may be laid as it is until they're drawn (display never
+    /// goes back); if a stand-in was shown since (`base_kept`), it's laid round them (`holes`).
+    /// A frame drawn forgets them (`frame_drawn`): no stale tile is ever laid in one.
+    changed: Vec<Rect>,
+    /// An overview tile failed to draw (past a limit, say): none is kept until the cache clears.
+    overview_refused: bool,
+    /// Overview tiles dropped (a cleared cache, a refused or moved overview): diagnostics.
+    pub overview_lost: u32,
     pub stats: TileStats,
 }
 
+/// The overview's level and the tiles of it the page covers.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Overview {
+    id: u32,
+    span: (i32, i32, i32, i32),
+}
+
+impl Overview {
+    /// Its tiles across and down.
+    fn grid(&self) -> (u32, u32) {
+        (
+            (self.span.2 - self.span.0 + 1) as u32,
+            (self.span.3 - self.span.1 + 1) as u32,
+        )
+    }
+}
+
+/// Overview tiles live in slots from here on, kept apart from the frames' (the backend gives them
+/// their own storage, `slot - OVERVIEW_SLOT` in rows of `overview_grid().0`): no frame's tile
+/// takes their place, and a cache cut to fit memory keeps them.
+pub const OVERVIEW_SLOT: u32 = 1 << 31;
+
+/// The overview's tiles at most, across and down (its storage is one texture).
+const OVERVIEW_GRID: u32 = 8;
+
+/// The whole page fits the overview in this many device pixels a side (at most 9 tiles at 512).
+pub const OVERVIEW_SIDE: f64 = 1024.0;
+
 /// Levels kept at once: more are dropped least recently used first.
 const LEVELS: usize = 8;
+
+/// `r` less `holes`, as rectangles that don't overlap (each cut leaves at most four).
+pub fn rect_minus(r: Rect, holes: &[Rect]) -> Vec<Rect> {
+    let mut parts = vec![r];
+    for h in holes {
+        let mut next = Vec::with_capacity(parts.len() + 3);
+        for p in parts {
+            let cut = p.intersect(*h);
+            if cut.width() <= 0.0 || cut.height() <= 0.0 {
+                next.push(p);
+                continue;
+            }
+            // Above, below, then left and right of the cut.
+            next.push(Rect::new(p.x0, p.y0, p.x1, cut.y0));
+            next.push(Rect::new(p.x0, cut.y1, p.x1, p.y1));
+            next.push(Rect::new(p.x0, cut.y0, cut.x0, cut.y1));
+            next.push(Rect::new(cut.x1, cut.y0, p.x1, cut.y1));
+        }
+        parts = next
+            .into_iter()
+            .filter(|q| q.width() > 0.0 && q.height() > 0.0)
+            .collect();
+    }
+    parts
+}
+
+/// Gives a dropped tile's slot back for another, unless it's the overview's own (`OVERVIEW_SLOT`).
+fn give_back(free: &mut Vec<u32>, slot: u32) {
+    if slot < OVERVIEW_SLOT {
+        free.push(slot);
+    }
+}
 
 /// Whether tiles of a level at scale `other` may stand in for a frame at `scale`: within 4× either
 /// way. One rule for the plan (what it counts on) and the composite (what it lays).
@@ -367,8 +466,175 @@ impl TileCache {
             opening: false,
             ghosts: HashSet::new(),
             unpainted: HashSet::new(),
+            overview: None,
+            moving: false,
+            base_kept: false,
+            bake_overview: false,
+            changed: Vec::new(),
+            overview_lost: 0,
+            overview_refused: false,
             stats: TileStats::default(),
         }
+    }
+
+    /// Sets the overview for a page whose shown content lies in `page` (page units), each frame
+    /// (it keeps its level in use): the ladder level that fits the page in `OVERVIEW_SIDE`
+    /// device pixels a side. None (no content, or out of range) drops it.
+    pub fn set_overview(&mut self, page: Option<Rect>) {
+        let page = page.filter(|r| !self.overview_refused && r.is_finite() && r.width() > 0.0 && r.height() > 0.0);
+        let wanted = page.and_then(|page| {
+            let scale = OVERVIEW_SIDE / page.width().max(page.height());
+            if !(scale.is_finite() && scale > 0.0) {
+                return None;
+            }
+            let level = Level::ladder(scale);
+            let span = self.span(level.grid().transform_rect_bbox(page))?;
+            let (cols, rows) = (
+                i64::from(span.2) - i64::from(span.0) + 1,
+                i64::from(span.3) - i64::from(span.1) + 1,
+            );
+            if cols > i64::from(OVERVIEW_GRID) || rows > i64::from(OVERVIEW_GRID) {
+                return None;
+            }
+            Some((level, span))
+        });
+        let id = wanted.map(|(level, _)| self.overview_level_id(level));
+        let next = wanted.zip(id).map(|((_, span), id)| Overview { id, span });
+        if let Some(old) = self.overview
+            && next != Some(old)
+        {
+            // Moved (the page's content grew or shrank) or gone: its tiles sit where the new
+            // one's would, so they go with it, and so does its level when that changed.
+            self.drop_overview_tiles(old.id);
+            if next.is_none_or(|n| n.id != old.id) {
+                self.levels.retain(|e| e.id != old.id);
+            }
+        }
+        self.overview = next;
+    }
+
+    /// The overview level's id, its own entry made if it's new.
+    fn overview_level_id(&mut self, level: Level) -> u32 {
+        let frame = self.frame;
+        if let Some(e) = self.levels.iter_mut().find(|e| e.overview && e.level == level) {
+            e.used = frame;
+            return e.id;
+        }
+        self.new_level(level, true, true)
+    }
+
+    /// Drops the overview level's tiles (their storage is the backend's to free).
+    fn drop_overview_tiles(&mut self, id: u32) {
+        let before = self.tiles.len();
+        self.tiles.retain(|k, _| k.level != id);
+        self.overview_lost = self.overview_lost.wrapping_add((before - self.tiles.len()) as u32);
+    }
+
+    /// The overview's tiles across and down, when there is one: the backend's storage for them.
+    pub fn overview_grid(&self) -> Option<(u32, u32)> {
+        self.overview.map(|o| o.grid())
+    }
+
+    /// Where an overview tile lives (`OVERVIEW_SLOT` on), when `key` is one.
+    fn overview_slot(&self, key: &TileKey) -> Option<u32> {
+        let o = self.overview.filter(|o| o.id == key.level)?;
+        if key.i < o.span.0 || key.i > o.span.2 || key.j < o.span.1 || key.j > o.span.3 {
+            return None;
+        }
+        let (cols, _) = o.grid();
+        Some(OVERVIEW_SLOT + (key.j - o.span.1) as u32 * cols + (key.i - o.span.0) as u32)
+    }
+
+    /// The overview, when it's coarser than anything that stands in for a frame at `scale`.
+    fn coarse_overview(&self, scale: f64) -> Option<Overview> {
+        let o = self.overview?;
+        let l = self.level(o.id)?;
+        (l.scale * 4.0 < scale).then_some(o)
+    }
+
+    /// The overview's tiles not up to date, as jobs (with level of detail, never `must`).
+    fn overview_jobs(&self) -> Vec<Job> {
+        let Some(o) = self.overview else {
+            return Vec::new();
+        };
+        let Some(level) = self.level(o.id) else {
+            return Vec::new();
+        };
+        let mut jobs = Vec::new();
+        for j in o.span.1..=o.span.3 {
+            for i in o.span.0..=o.span.2 {
+                let key = TileKey { level: o.id, i, j };
+                if self.tiles.get(&key).is_some_and(|e| !e.stale) {
+                    continue;
+                }
+                jobs.push(Job {
+                    key,
+                    view: level.tile_view(i, j, self.tile),
+                    detail: true,
+                    must: false,
+                    direct: false,
+                    rough: true,
+                });
+            }
+        }
+        jobs
+    }
+
+    /// The overview's tiles under `page` (page units), when all are held and up to date: past
+    /// the page's content there are none to hold, and the background is what shows there. A
+    /// stale one (an edit, an image changed) never stands in: it would show what's gone.
+    fn cover_overview(&self, o: Overview, page: Rect) -> Option<Vec<TileKey>> {
+        let level = self.level(o.id)?;
+        let (i0, j0, i1, j1) = self.span(level.grid().transform_rect_bbox(page))?;
+        let (i0, j0, i1, j1) = (i0.max(o.span.0), j0.max(o.span.1), i1.min(o.span.2), j1.min(o.span.3));
+        let mut keys = Vec::new();
+        for j in j0..=j1 {
+            for i in i0..=i1 {
+                let key = TileKey { level: o.id, i, j };
+                if !self.tiles.get(&key).is_some_and(|e| !e.stale) {
+                    return None;
+                }
+                keys.push(key);
+            }
+        }
+        Some(keys)
+    }
+
+    /// The overview's tiles to draw between frames for a view at `scale` (none when it isn't 4×
+    /// coarser than the view).
+    pub fn overview_ahead(&self, scale: f64) -> Vec<Job> {
+        if self.coarse_overview(scale).is_none() {
+            return Vec::new();
+        }
+        self.overview_jobs()
+    }
+
+    /// The overview's tiles still to draw between frames for a view at `scale`.
+    pub fn overview_left(&self, scale: f64) -> u32 {
+        if self.coarse_overview(scale).is_none() {
+            return 0;
+        }
+        self.overview_jobs().len() as u32
+    }
+
+    /// Whether `key` is one of the overview's tiles.
+    pub fn is_overview(&self, key: &TileKey) -> bool {
+        self.overview.is_some_and(|o| o.id == key.level)
+    }
+
+    /// An overview tile couldn't be drawn: drops the overview until the cache clears (a fresh
+    /// list, another background), so the time between frames never fails on it.
+    pub fn refuse_overview(&mut self) {
+        if let Some(o) = self.overview.take() {
+            self.drop_overview_tiles(o.id);
+            self.levels.retain(|e| e.id != o.id);
+        }
+        self.overview_refused = true;
+    }
+
+    /// Whether the overview is drawn (every tile of it held, none stale).
+    pub fn overview_ready(&self) -> bool {
+        self.overview.is_some() && self.overview_jobs().is_empty()
     }
 
     /// A frame's drag bookkeeping, shared by both backends: follows drag `d` (or ends the one
@@ -643,10 +909,35 @@ impl TileCache {
 
     /// Drops every tile and level (their slots stay, free, for reuse).
     pub fn clear(&mut self) {
+        if let Some(o) = self.overview {
+            self.drop_overview_tiles(o.id);
+        }
         for (_, t) in self.tiles.drain() {
-            self.free.push(t.slot);
+            give_back(&mut self.free, t.slot);
         }
         self.levels.clear();
+        self.overview = None;
+        self.overview_refused = false;
+        self.focus = None;
+        self.drag = DragTiles::default();
+        self.ghosts.clear();
+        self.unpainted.clear();
+    }
+
+    /// Drops every tile but the overview's, which keeps its own storage: memory runs short (a
+    /// frame drawn at once needs what the tiles held), but what a zoom out stands on stays. A
+    /// changed list or background still clears it (`clear`, `invalidate`).
+    pub fn clear_keeping_overview(&mut self) {
+        let keep = self.overview.map(|o| o.id);
+        let free = &mut self.free;
+        self.tiles.retain(|k, t| {
+            let kept = Some(k.level) == keep;
+            if !kept {
+                give_back(free, t.slot);
+            }
+            kept
+        });
+        self.levels.retain(|e| Some(e.id) == keep);
         self.focus = None;
         self.drag = DragTiles::default();
         self.ghosts.clear();
@@ -658,7 +949,7 @@ impl TileCache {
         self.max_slots = n;
         if (self.slots as usize) > n {
             let cut = n as u32;
-            self.tiles.retain(|_, t| t.slot < cut);
+            self.tiles.retain(|_, t| t.slot < cut || t.slot >= OVERVIEW_SLOT);
             self.free.retain(|s| *s < cut);
             self.slots = cut;
         }
@@ -692,7 +983,7 @@ impl TileCache {
             let tol = scale.abs() * 1e-6;
             let mut drop_levels: Vec<u32> = Vec::new();
             for entry in &mut self.levels {
-                if !entry.ladder && (entry.level.scale - scale).abs() <= tol && entry.halo != halo {
+                if !entry.ladder && !entry.overview && (entry.level.scale - scale).abs() <= tol && entry.halo != halo {
                     entry.halo = halo;
                     drop_levels.push(entry.id);
                 }
@@ -702,7 +993,7 @@ impl TileCache {
                 self.tiles.retain(|k, t| {
                     let keep = !drop_levels.contains(&k.level);
                     if !keep {
-                        free.push(t.slot);
+                        give_back(free, t.slot);
                     }
                     keep
                 });
@@ -723,17 +1014,23 @@ impl TileCache {
     /// A level's id, made if it's new.
     pub fn level_id(&mut self, level: Level, ladder: bool) -> u32 {
         let frame = self.frame;
-        if let Some(e) = self.levels.iter_mut().find(|e| e.level == level) {
+        if let Some(e) = self.levels.iter_mut().find(|e| !e.overview && e.level == level) {
             e.used = frame;
             e.ladder &= ladder;
             return e.id;
         }
+        self.new_level(level, ladder, false)
+    }
+
+    fn new_level(&mut self, level: Level, ladder: bool, overview: bool) -> u32 {
+        let frame = self.frame;
         if self.levels.len() >= LEVELS {
             // A level with no tiles goes first (a zoom passes through a scale a frame, drawing
             // none), else the least recently used, with its tiles.
-            // Never one this frame uses (the frame's own level, made a moment before its ladder).
+            // Never one this frame uses (the frame's own level, made a moment before its ladder),
+            // nor the overview's.
             let empty = |id: u32| !self.tiles.keys().any(|k| k.level == id);
-            let old = |i: &usize| self.levels[*i].used < frame;
+            let old = |i: &usize| self.levels[*i].used < frame && !self.levels[*i].overview;
             let victim = (0..self.levels.len())
                 .filter(old)
                 .filter(|i| empty(self.levels[*i].id))
@@ -745,7 +1042,7 @@ impl TileCache {
                 self.tiles.retain(|k, t| {
                     let keep = k.level != gone;
                     if !keep {
-                        free.push(t.slot);
+                        give_back(free, t.slot);
                     }
                     keep
                 });
@@ -759,6 +1056,7 @@ impl TileCache {
             ladder,
             halo: self.halo,
             used: frame,
+            overview,
         });
         id
     }
@@ -809,6 +1107,11 @@ impl TileCache {
     /// Marks stale every tile of level `id` that rectangles of its grid pixels touch (pixels
     /// that may have changed, already grown for anti-aliasing and readers).
     pub fn invalidate(&mut self, id: u32, rects: &[Rect]) {
+        if let Some(level) = self.level(id) {
+            let page = level.grid().inverse();
+            let changed: Vec<Rect> = rects.iter().map(|r| page.transform_rect_bbox(*r)).collect();
+            self.note_changed(&changed);
+        }
         let t = f64::from(self.tile);
         for (k, e) in self.tiles.iter_mut() {
             if k.level != id || e.stale {
@@ -826,7 +1129,74 @@ impl TileCache {
         }
     }
 
-    /// Marks every tile stale (they stay as stand-ins until drawn again).
+    /// Marks the tiles of level `id` that rectangles of its grid pixels touch as drawn with
+    /// another resolution of an image than the one picked now (`TileEntry::refine`): they stand
+    /// in, never exact, until drawn again. Not a change: nothing is noted (`note_changed`).
+    pub fn refine(&mut self, id: u32, rects: &[Rect]) {
+        let t = f64::from(self.tile);
+        for (k, e) in self.tiles.iter_mut() {
+            if k.level != id || e.stale || e.refine {
+                continue;
+            }
+            let b = Rect::new(
+                f64::from(k.i) * t,
+                f64::from(k.j) * t,
+                f64::from(k.i + 1) * t,
+                f64::from(k.j + 1) * t,
+            );
+            if rects.iter().any(|r| overlaps(*r, b)) {
+                e.refine = true;
+            }
+        }
+    }
+
+    /// What changed (page units) since the last frame was drawn (`changed`).
+    pub fn note_changed(&mut self, page: &[Rect]) {
+        for r in page {
+            if r.is_finite() && !self.changed.iter().any(|c| c.contains_rect(*r)) {
+                self.changed.push(*r);
+            }
+        }
+        if self.changed.len() > 64 {
+            let all = self.changed.iter().copied().reduce(|a, b| a.union(b));
+            self.changed = all.into_iter().collect();
+        }
+    }
+
+    /// A frame was drawn and is the one the next is laid on: it holds nothing older than any
+    /// change where the change was (`changed`), so what changed before it no longer matters.
+    /// Not for a stand-in that keeps the frame it was warped from.
+    pub fn frame_drawn(&mut self) {
+        self.changed.clear();
+    }
+
+    /// What changed since the last frame was drawn (`note_changed`), in page units.
+    #[doc(hidden)]
+    pub fn changed(&self) -> &[Rect] {
+        &self.changed
+    }
+
+    /// Whether anything changed in `page` (page units) since the last frame was drawn.
+    fn changed_in(&self, page: Rect) -> bool {
+        self.changed.iter().any(|c| overlaps(*c, page))
+    }
+
+    /// Where the last frame's pixels are older than the screen showed under `view` (page units to
+    /// this frame's pixels), within `size`: what changed since it was drawn, when a stand-in was
+    /// shown since (`base_kept`). None while it's the frame on screen.
+    pub fn holes(&self, view: Affine, size: (u32, u32)) -> Vec<Rect> {
+        if !self.base_kept {
+            return Vec::new();
+        }
+        let frame = Rect::new(0.0, 0.0, f64::from(size.0), f64::from(size.1));
+        self.changed
+            .iter()
+            .map(|c| view.transform_rect_bbox(*c).inflate(1.0, 1.0).intersect(frame))
+            .filter(|r| r.width() > 0.0 && r.height() > 0.0)
+            .collect()
+    }
+
+    /// Marks every tile stale (none stands in until drawn again).
     pub fn invalidate_all(&mut self) {
         for e in self.tiles.values_mut() {
             e.stale = true;
@@ -847,6 +1217,9 @@ impl TileCache {
     /// A slot for drawing `key` into: its own if it's held, else a free one, a new one under
     /// `max_slots`, or the slot of the tile least worth keeping that this frame doesn't show.
     pub fn slot_for(&mut self, key: TileKey) -> Option<u32> {
+        if self.is_overview(&key) {
+            return self.overview_slot(&key);
+        }
         if let Some(e) = self.tiles.get(&key) {
             return Some(e.slot);
         }
@@ -887,7 +1260,7 @@ impl TileCache {
         };
         self.tiles
             .iter()
-            .filter(|(_, e)| e.used < self.frame)
+            .filter(|(_, e)| e.used < self.frame && e.slot < OVERVIEW_SLOT)
             .max_by_key(|(k, e)| score(k, e))
             .map(|(k, _)| *k)
     }
@@ -904,6 +1277,7 @@ impl TileCache {
                 exact: full && exact,
                 full,
                 stale: false,
+                refine: false,
                 reduced,
                 used: self.frame,
             },
@@ -922,7 +1296,7 @@ impl TileCache {
             self.tiles.remove(&key);
         }
         if !self.free.contains(&slot) && !self.tiles.values().any(|e| e.slot == slot) {
-            self.free.push(slot);
+            give_back(&mut self.free, slot);
         }
     }
 
@@ -944,7 +1318,8 @@ impl TileCache {
         for j in j0..=j1 {
             for i in i0..=i1 {
                 let key = TileKey { level: id, i, j };
-                if !self.tiles.contains_key(&key) {
+                // A stale tile shows what's gone: it stands in for nothing.
+                if !self.tiles.get(&key).is_some_and(|e| !e.stale) {
                     return None;
                 }
                 keys.push(key);
@@ -955,7 +1330,10 @@ impl TileCache {
 
     /// Tiles pinned for the frame: shown, drawn or counted on by it, so never evicted by it.
     fn pinned(&self) -> usize {
-        self.tiles.values().filter(|e| e.used == self.frame).count()
+        self.tiles
+            .values()
+            .filter(|e| e.used == self.frame && e.slot < OVERVIEW_SLOT)
+            .count()
     }
 
     /// Pins a held tile, taking it from the frame's `room` if it wasn't pinned yet.
@@ -965,7 +1343,10 @@ impl TileCache {
             && e.used != frame
         {
             e.used = frame;
-            *room = room.saturating_sub(1);
+            // The overview's tiles have their own storage: they take no room from the frame's.
+            if e.slot < OVERVIEW_SLOT {
+                *room = room.saturating_sub(1);
+            }
         }
     }
 
@@ -1043,6 +1424,7 @@ impl TileCache {
                     detail: false,
                     must: true,
                     direct: true,
+                    rough: false,
                 })
                 .collect();
             return Some(plan);
@@ -1067,10 +1449,14 @@ impl TileCache {
             Level::ladder(level.scale)
         };
         let ladder = zooming.then(|| self.level_id(ladder_level, true));
+        // While the camera moves, the overview stands in for any scale, where nothing nearer does
+        // (when it's coarser than what stands in anyway).
+        let coarse = self.coarse_overview(level.scale);
+        let overview = coarse.filter(|_| self.moving);
         let other_levels: Vec<u32> = self
             .levels
             .iter()
-            .filter(|e| e.id != id && stands_in(level.scale, e.level.scale))
+            .filter(|e| e.id != id && !e.overview && stands_in(level.scale, e.level.scale))
             .map(|e| e.id)
             .collect();
         // What stands in for each visible tile not up to date, over the part of it on screen:
@@ -1098,9 +1484,21 @@ impl TileCache {
             .intersect(frame_grid);
             let page = grid_inv.transform_rect_bbox(shown);
             let mut deps = Vec::new();
-            let covered = held.is_some()
-                || (!self.unpainted.contains(&key) && last_page.is_some_and(|l| l.contains_rect(page)))
+            // Nothing older than the screen showed stands in, moving or not: never a stale tile,
+            // and not the last frame where something changed since it was drawn, once a stand-in
+            // was shown since (`base_kept`, `Composite::holes`).
+            let stands = held.is_some_and(|e| !e.stale);
+            let old = self.base_kept && self.changed_in(page);
+            let covered = stands
+                || (!old && !self.unpainted.contains(&key) && last_page.is_some_and(|l| l.contains_rect(page)))
                 || other_levels.iter().any(|o| match self.cover(*o, page) {
+                    Some(keys) => {
+                        deps = keys;
+                        true
+                    }
+                    None => false,
+                })
+                || overview.is_some_and(|o| match self.cover_overview(o, page) {
                     Some(keys) => {
                         deps = keys;
                         true
@@ -1146,6 +1544,7 @@ impl TileCache {
             detail: false,
             must,
             direct,
+            rough: false,
         };
         let mut ladder_keys: Vec<TileKey> = Vec::new();
         for n in needs {
@@ -1189,8 +1588,13 @@ impl TileCache {
                 continue;
             }
             if n.held {
-                // A stale tile stands in for itself and is drawn again in its own slot.
-                optional.push(frame_job(n.key, false, false));
+                // Drawn again in its own slot (pinned with what the frame shows). A stale tile
+                // stands in for nothing, not even itself: where nothing else covers it, first.
+                if n.covered {
+                    optional.push(frame_job(n.key, false, false));
+                } else {
+                    must.push(frame_job(n.key, true, false));
+                }
             } else if !n.covered {
                 let direct = room == 0;
                 room = room.saturating_sub(1);
@@ -1213,7 +1617,10 @@ impl TileCache {
                         && let Some(e) = self.tiles.get_mut(k)
                     {
                         e.used = *used;
-                        room += 1;
+                        // The overview's tiles took no room when pinned: none comes back.
+                        if e.slot < OVERVIEW_SLOT {
+                            room += 1;
+                        }
                     }
                 }
             }
@@ -1232,10 +1639,17 @@ impl TileCache {
                     detail: true,
                     must: true,
                     direct: false,
+                    rough: false,
                 });
             }
         }
         plan.jobs.extend(optional);
+        // The overview, between frames, once the frame's own tiles are planned: what a zoom out
+        // stands on.
+        // Its tiles have their own storage: they take no room from the frame's.
+        if self.bake_overview && !self.moving && !zooming && coarse.is_some() {
+            plan.jobs.extend(self.overview_jobs());
+        }
         // Not zooming: tiles round the view, for the pan to come, while slots allow.
         if prefetch && !zooming && visible.len() * 2 <= self.max_slots {
             let mut ring = Vec::new();
@@ -1288,6 +1702,7 @@ impl TileCache {
                                         detail: true,
                                         must: false,
                                         direct: false,
+                                        rough: false,
                                     });
                                 }
                                 None if room > 0 => {
@@ -1298,6 +1713,7 @@ impl TileCache {
                                         detail: true,
                                         must: false,
                                         direct: false,
+                                        rough: false,
                                     });
                                 }
                                 None => {}
@@ -1366,8 +1782,14 @@ impl TileCache {
                 }
                 continue;
             };
-            if e.stale || !e.exact {
+            if e.stale || e.refine || !e.exact {
                 out.exact = false;
+            }
+            // A stale tile shows what's gone: what's beneath shows instead.
+            if e.stale {
+                out.complete = false;
+                out.pending += 1;
+                continue;
             }
             if e.reduced && !e.stale {
                 out.reduced += 1;
@@ -1416,16 +1838,26 @@ impl TileCache {
             && l.view.determinant().abs() > 0.0
         {
             out.base = Some(view * l.view.inverse());
+            out.holes = self.holes(view, plan.size);
         }
         let frame_page = view
             .inverse()
             .transform_rect_bbox(Rect::new(0.0, 0.0, f64::from(w), f64::from(h)));
+        let overview = self.coarse_overview(level.scale).map(|o| o.id);
         let mut others: Vec<(f64, u32, Level)> = self
             .levels
             .iter()
             .filter(|e| e.id != plan.level)
-            .filter(|e| stands_in(level.scale, e.level.scale))
-            .map(|e| ((e.level.scale / level.scale).log2().abs(), e.id, e.level))
+            .filter(|e| (!e.overview && stands_in(level.scale, e.level.scale)) || Some(e.id) == overview)
+            .map(|e| {
+                // The overview lies beneath every other stand-in.
+                let far = if Some(e.id) == overview {
+                    f64::INFINITY
+                } else {
+                    (e.level.scale / level.scale).log2().abs()
+                };
+                (far, e.id, e.level)
+            })
             .collect();
         others.sort_by(|a, b| b.0.total_cmp(&a.0));
         let tf = f64::from(self.tile);
@@ -1443,13 +1875,22 @@ impl TileCache {
                     let Some(e) = self.tiles.get(&key).copied() else {
                         continue;
                     };
+                    // A stale tile shows what's gone: never laid.
+                    if e.stale {
+                        continue;
+                    }
                     let r = Rect::new(
                         f64::from(i) * tf,
                         f64::from(j) * tf,
                         f64::from(i + 1) * tf,
                         f64::from(j + 1) * tf,
                     );
-                    out.scaled.push(Scaled {
+                    let layer = if Some(id) == overview {
+                        &mut out.under
+                    } else {
+                        &mut out.scaled
+                    };
+                    layer.push(Scaled {
                         slot: e.slot,
                         dst: to_frame.transform_rect_bbox(r),
                     });
@@ -1511,6 +1952,431 @@ mod tests {
     }
 
     #[test]
+    fn the_overview_is_drawn_between_frames_and_stands_in_while_zooming_out() {
+        // A 4,000 × 2,000 unit page: its overview is the ladder level at 0.25 (1,000 × 500 px).
+        let page = Rect::new(0.0, 0.0, 4000.0, 2000.0);
+        let mut c = TileCache::new(512, 256);
+        let frame = |c: &mut TileCache, moving: bool, idle: bool| {
+            c.begin([1.0; 4], 0);
+            c.set_overview(Some(page));
+            c.moving = moving;
+            c.bake_overview = idle;
+        };
+        let overview = |c: &TileCache| c.overview.map(|o| o.id).expect("overview");
+        // Between frames: the frame's own tiles first, then the overview's, with level of detail.
+        frame(&mut c, false, true);
+        let rest = c
+            .plan(cam(8.0, 0.0, 0.0), (1024, 768), false, None, false, false)
+            .expect("plan");
+        let first = rest
+            .jobs
+            .iter()
+            .position(|j| j.key.level != rest.level)
+            .expect("overview jobs");
+        assert!(rest.jobs[..first].iter().all(|j| j.key.level == rest.level && j.must));
+        assert!(rest.jobs[first..].iter().all(|j| j.detail && !j.must));
+        assert_eq!(rest.jobs.len() - first, 2, "{:?}", rest.jobs);
+        assert!(!c.overview_ready());
+        draw_all(&mut c, &rest);
+        assert!(c.overview_ready());
+        // Zooming out to 3 while moving: what's newly in view is the overview's (12× coarser),
+        // nothing must be drawn, and the overview lies under the last frame.
+        frame(&mut c, true, false);
+        let last = Last {
+            view: cam(8.0, 0.0, 0.0),
+            size: (1024, 768),
+        };
+        let at = cam(3.0, 300.0, 200.0);
+        let out = c.plan(at, (1024, 768), true, Some(last), false, false).expect("plan");
+        assert!(out.jobs.iter().all(|j| !j.must), "{:?}", out.jobs);
+        let comp = c.compose(&out, Some(last));
+        assert!(!comp.under.is_empty());
+        assert!(comp.base.is_some());
+        // The same view at rest draws its own tiles: the overview stands in only while moving.
+        frame(&mut c, false, false);
+        let settled = c.plan(at, (1024, 768), false, Some(last), false, false).expect("plan");
+        assert!(settled.jobs.iter().any(|j| j.must && j.key.level == settled.level));
+        // It's kept while anything else can go.
+        let id = overview(&c);
+        assert_eq!(c.tiles.keys().filter(|k| k.level == id).count(), 2);
+        // A view it isn't 4× coarser than plans none of it (it stands in as any level does).
+        frame(&mut c, false, true);
+        let near = c
+            .plan(cam(1.0, 0.0, 0.0), (1024, 768), false, None, false, false)
+            .expect("plan");
+        assert!(near.jobs.iter().all(|j| j.key.level != id));
+        // A frame never draws it, even stale: only the time between frames does.
+        frame(&mut c, false, false);
+        c.invalidate(id, &[Rect::new(0.0, 0.0, 10.0, 10.0)]);
+        let in_frame = c
+            .plan(cam(8.0, 0.0, 0.0), (1024, 768), false, None, false, false)
+            .expect("plan");
+        assert!(in_frame.jobs.iter().all(|j| j.key.level != id));
+    }
+
+    /// An edited overview tile (stale) shows what's gone: it never counts as coverage nor is it
+    /// laid under a frame, so what it stood for is drawn instead (review of #345).
+    #[test]
+    fn an_edited_overview_tile_never_stands_in() {
+        let page = Rect::new(0.0, 0.0, 4000.0, 2000.0);
+        let mut c = TileCache::new(512, 8);
+        c.begin([1.0; 4], 0);
+        c.set_overview(Some(page));
+        for job in c.overview_ahead(8.0) {
+            let slot = c.slot_for(job.key).expect("slot");
+            c.drawn(job.key, slot, false, false, false);
+        }
+        let id = c.overview.map(|o| o.id).expect("overview");
+        let key = TileKey { level: id, i: 0, j: 0 };
+        let grid = c.level(id).expect("level").grid();
+        c.invalidate(id, &[grid.transform_rect_bbox(Rect::new(50.0, 50.0, 70.0, 70.0))]);
+        let entry = *c.get(&key).expect("held");
+        assert!(entry.stale);
+        c.begin([1.0; 4], 0);
+        c.set_overview(Some(page));
+        c.moving = true;
+        let plan = c
+            .plan(Affine::scale(8.0), (512, 512), true, None, false, false)
+            .expect("plan");
+        let comp = c.compose(&plan, None);
+        assert!(!comp.exact && comp.pending > 0);
+        assert!(
+            plan.jobs.iter().any(|j| j.must),
+            "a stale overview covered: {:?}",
+            plan.jobs
+        );
+        assert!(
+            comp.under.iter().all(|q| q.slot != entry.slot),
+            "a stale overview tile was laid"
+        );
+    }
+
+    /// Standing in on the overview takes none of the frame's slots: a tile it covers isn't made
+    /// one nothing stands in for at the atlas limit (review of #345).
+    #[test]
+    fn the_overview_standing_in_takes_no_atlas_room() {
+        let page = Rect::new(0.0, 0.0, 4000.0, 2000.0);
+        let mut c = TileCache::new(512, 2);
+        c.begin([1.0; 4], 0);
+        c.set_overview(Some(page));
+        let job = c.overview_ahead(8.0)[0];
+        let slot = c.slot_for(job.key).expect("slot");
+        c.drawn(job.key, slot, false, false, false);
+        c.begin([1.0; 4], 0);
+        c.set_overview(Some(page));
+        c.moving = true;
+        let view = Affine::new([8.0, 0.0, 0.0, 8.0, -15872.0, 0.0]);
+        let plan = c.plan(view, (1024, 512), false, None, false, false).expect("plan");
+        assert!(!plan.direct);
+        assert_eq!(plan.jobs.len(), 2);
+        let covered = plan.jobs.iter().find(|j| j.key.i == 31).expect("covered tile");
+        assert!(
+            !covered.must,
+            "covered tile made one nothing stands in for: {covered:?}"
+        );
+    }
+
+    fn bake_overview_for_test(c: &mut TileCache) {
+        c.set_overview(Some(Rect::new(0.0, 0.0, 4000.0, 2000.0)));
+        for job in c.overview_ahead(8.0) {
+            let slot = c.slot_for(job.key).expect("slot");
+            c.drawn(job.key, slot, false, false, false);
+        }
+    }
+
+    /// Letting go of an overview tile a frame counted on gives back no room: it never took any.
+    /// Every job planned for a slot gets one (re-check of #345: a phantom slot).
+    #[test]
+    fn dropping_an_overview_dependency_makes_no_atlas_slot() {
+        let mut c = TileCache::new(512, 3);
+        c.begin([1.0; 4], 0);
+        bake_overview_for_test(&mut c);
+        let (phase, _) = Level::of(Affine::new([8.0, 0.0, 0.0, 8.0, 0.5, 0.0])).expect("level");
+        let mut hold = |level, indices: &[i32]| {
+            let id = c.level_id(level, false);
+            for &i in indices {
+                let key = TileKey { level: id, i, j: 0 };
+                let slot = c.slot_for(key).expect("slot");
+                c.drawn(key, slot, true, true, false);
+            }
+        };
+        hold(phase, &[0, 1]);
+        hold(Level::of(Affine::scale(4.0)).expect("level").0, &[1]);
+        c.begin([1.0; 4], 0);
+        c.moving = true;
+        let plan = c
+            .plan(Affine::scale(8.0), (1536, 512), false, None, false, false)
+            .expect("plan");
+        assert_eq!(plan.jobs.len(), 3);
+        for j in plan.jobs.iter().filter(|j| !j.direct) {
+            let slot = c
+                .slot_for(j.key)
+                .unwrap_or_else(|| panic!("planned for a slot it can't have: {j:?} of {:?}", plan.jobs));
+            c.drawn(j.key, slot, true, true, false);
+        }
+    }
+
+    /// An edit under what the last frame showed (the overview, here), with a stand-in shown since
+    /// that frame: while moving, the last frame isn't laid there and what's there is drawn
+    /// (re-check of #345).
+    #[test]
+    fn what_changed_never_shows_through_the_last_frame_while_moving() {
+        let mut c = TileCache::new(512, 8);
+        c.begin([1.0; 4], 0);
+        bake_overview_for_test(&mut c);
+        c.moving = true;
+        let last = Last {
+            view: Affine::scale(8.0),
+            size: (512, 512),
+        };
+        let plan = c.plan(last.view, last.size, true, None, false, false).expect("plan");
+        let comp = c.compose(&plan, None);
+        assert!(!comp.under.is_empty(), "the last frame showed the overview");
+        let o = c.overview.map(|o| o.id).expect("overview");
+        let grid = c.level(o).expect("level").grid();
+        c.invalidate(o, &[grid.transform_rect_bbox(Rect::new(25.0, 25.0, 40.0, 40.0))]);
+        c.begin([1.0; 4], 0);
+        c.moving = true;
+        // A stand-in after a limit was shown since the last frame was drawn.
+        c.base_kept = true;
+        let next = c
+            .plan(Affine::scale(9.0), (512, 512), true, Some(last), false, false)
+            .expect("plan");
+        let comp = c.compose(&next, Some(last));
+        assert!(comp.under.is_empty() && !comp.exact && comp.pending > 0);
+        assert!(
+            next.jobs.iter().any(|j| j.must),
+            "nothing drawn where it changed: {:?}",
+            next.jobs
+        );
+        // The last frame is laid only round what changed (in this frame's pixels, 25-40 at 9).
+        let hole = comp.holes.iter().copied().reduce(|a, b| a.union(b)).expect("a hole");
+        assert!(hole.contains_rect(Rect::new(225.0, 225.0, 360.0, 360.0)), "{hole:?}");
+        // Once a frame is drawn (laid round it), the change is forgotten.
+        c.frame_drawn();
+        let next = c
+            .plan(Affine::scale(9.0), (512, 512), true, Some(last), false, false)
+            .expect("plan");
+        assert!(c.compose(&next, Some(last)).holes.is_empty());
+    }
+
+    /// Display never goes back where something changed, at rest or moving: a stale tile is never
+    /// laid nor stands in, not even for itself (any level). The last frame drawn, while it's the
+    /// one on screen, is laid as it is until what changed is drawn (no hole); once a stand-in was
+    /// shown since (`base_kept`), it's laid round what changed and that is drawn first (final
+    /// re-checks of #345).
+    #[test]
+    fn a_stale_tile_never_shows_and_only_an_older_kept_frame_is_cut() {
+        let mut c = TileCache::new(512, 32);
+        c.begin([1.0; 4], 0);
+        let view = Affine::IDENTITY;
+        let size = (1024, 256);
+        let plan = c.plan(view, size, false, None, false, false).expect("plan");
+        for j in &plan.jobs {
+            let slot = c.slot_for(j.key).expect("slot");
+            c.drawn(j.key, slot, true, true, false);
+        }
+        let last = Last { view, size };
+        c.frame_drawn();
+        let id = plan.level;
+        let changed = Rect::new(16.0, 16.0, 144.0, 48.0);
+        let grid = c.level(id).expect("level").grid();
+        c.invalidate(id, &[grid.transform_rect_bbox(changed)]);
+        let stale = TileKey { level: id, i: 0, j: 0 };
+        for (moving, kept) in [(false, false), (true, false), (false, true), (true, true)] {
+            c.begin([1.0; 4], 0);
+            c.moving = moving;
+            c.base_kept = kept;
+            let next = c.plan(view, size, false, Some(last), false, false).expect("plan");
+            let job = next.jobs.iter().find(|j| j.key == stale);
+            assert!(
+                job.is_some(),
+                "moving {moving} kept {kept}: drawn again, {:?}",
+                next.jobs
+            );
+            // Under the frame on screen it waits its turn; under an older kept frame it's first.
+            assert_eq!(job.is_some_and(|j| j.must), kept, "moving {moving} kept {kept}");
+            let comp = c.compose(&next, Some(last));
+            assert!(
+                !comp.copies.iter().any(|cp| cp.dst == (0, 0)),
+                "moving {moving} kept {kept}: a stale tile was laid"
+            );
+            assert!(comp.base.is_some() && !comp.exact && comp.pending > 0);
+            assert_eq!(
+                comp.holes.iter().any(|h| h.contains_rect(changed)),
+                kept,
+                "moving {moving} kept {kept}: {:?}",
+                comp.holes
+            );
+        }
+        // A frame drawn since holds nothing old: the change is forgotten.
+        c.frame_drawn();
+        c.begin([1.0; 4], 0);
+        c.base_kept = true;
+        let next = c.plan(view, size, false, Some(last), false, false).expect("plan");
+        assert!(c.compose(&next, Some(last)).holes.is_empty());
+    }
+
+    /// A stale tile keeps its slot: with every slot taken by what the frame shows, it's drawn
+    /// again there (not straight into the frame, which would leave it stale), so the frame gets
+    /// exact (CI on 574048a7: CPU tiles never exact at rest after an edit).
+    #[test]
+    fn a_stale_tile_is_drawn_again_in_its_own_slot_when_no_room_is_left() {
+        let mut c = TileCache::new(64, 4);
+        c.begin([1.0; 4], 0);
+        let view = Affine::IDENTITY;
+        let size = (128, 128);
+        let plan = c.plan(view, size, false, None, false, false).expect("plan");
+        assert_eq!(plan.visible.len(), 4);
+        for j in &plan.jobs {
+            let slot = c.slot_for(j.key).expect("slot");
+            c.drawn(j.key, slot, true, true, false);
+        }
+        let last = Last { view, size };
+        c.frame_drawn();
+        c.invalidate(plan.level, &[Rect::new(5.0, 5.0, 6.0, 6.0)]);
+        for moving in [false, true] {
+            c.begin([1.0; 4], 0);
+            c.moving = moving;
+            let next = c.plan(view, size, false, Some(last), false, false).expect("plan");
+            assert_eq!(next.jobs.len(), 1, "moving {moving}: {:?}", next.jobs);
+            assert!(!next.jobs[0].direct, "moving {moving}: drawn in its own slot");
+        }
+        c.begin([1.0; 4], 0);
+        let next = c.plan(view, size, false, Some(last), false, false).expect("plan");
+        let key = next.jobs[0].key;
+        let slot = c.slot_for(key).expect("its own slot");
+        c.drawn(key, slot, true, true, false);
+        c.begin([1.0; 4], 0);
+        let again = c.plan(view, size, false, Some(last), false, false).expect("plan");
+        assert!(again.jobs.is_empty());
+        assert!(c.compose(&again, Some(last)).exact);
+    }
+
+    /// Another resolution of an image (a sharper level, or one dropped) isn't a change: tiles
+    /// drawn with the old one stand in for themselves, never exact, and are drawn again.
+    #[test]
+    fn another_resolution_of_an_image_stands_in_until_drawn_again() {
+        let mut c = TileCache::new(512, 32);
+        c.begin([1.0; 4], 0);
+        let view = Affine::IDENTITY;
+        let size = (1024, 256);
+        let plan = c.plan(view, size, false, None, false, false).expect("plan");
+        for j in &plan.jobs {
+            let slot = c.slot_for(j.key).expect("slot");
+            c.drawn(j.key, slot, true, true, false);
+        }
+        c.frame_drawn();
+        let id = plan.level;
+        c.refine(id, &[Rect::new(16.0, 16.0, 144.0, 48.0)]);
+        assert!(c.changed().is_empty(), "nothing noted as changed");
+        let key = TileKey { level: id, i: 0, j: 0 };
+        c.begin([1.0; 4], 0);
+        let next = c.plan(view, size, false, None, false, false).expect("plan");
+        let job = next.jobs.iter().find(|j| j.key == key).expect("drawn again");
+        assert!(!job.must, "it stands in for itself");
+        let comp = c.compose(&next, None);
+        assert!(comp.copies.iter().any(|cp| cp.dst == (0, 0)), "it's laid");
+        assert!(!comp.exact && comp.pending == 1);
+        let slot = c.slot_for(key).expect("its slot");
+        c.drawn(key, slot, true, true, false);
+        c.begin([1.0; 4], 0);
+        let next = c.plan(view, size, false, None, false, false).expect("plan");
+        assert!(c.compose(&next, None).exact);
+    }
+
+    /// The overview's tiles live apart from the frames' (`OVERVIEW_SLOT`): no frame's tile takes
+    /// their place, a cache cut to fit memory keeps them, and a frame at the overview's own scale
+    /// draws its tiles in ordinary slots, exactly. A changed background still drops them.
+    #[test]
+    fn the_overview_keeps_its_own_slots_through_memory_cuts() {
+        let page = Rect::new(0.0, 0.0, 4000.0, 2000.0);
+        let mut c = TileCache::new(512, 8);
+        let frame = |c: &mut TileCache, bg: f32, idle: bool| {
+            c.begin([bg; 4], 0);
+            c.set_overview(Some(page));
+            c.moving = false;
+            c.bake_overview = idle;
+        };
+        frame(&mut c, 1.0, true);
+        let rest = c
+            .plan(cam(8.0, 0.0, 0.0), (1024, 512), false, None, false, false)
+            .expect("plan");
+        draw_all(&mut c, &rest);
+        assert!(c.overview_ready());
+        let id = c.overview.map(|o| o.id).expect("overview");
+        let own = |c: &TileCache| {
+            c.tiles
+                .iter()
+                .filter(|(k, _)| k.level == id)
+                .map(|(_, e)| e.slot)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(own(&c).len(), 2);
+        assert!(own(&c).iter().all(|&s| s >= OVERVIEW_SLOT));
+        assert_eq!(c.overview_grid(), Some((2, 1)));
+        // Slots past the frame's go to other tiles, never the overview's.
+        for x in 1..6 {
+            frame(&mut c, 1.0, false);
+            let p = c
+                .plan(
+                    cam(8.0, -2048.0 * f64::from(x), 0.0),
+                    (1024, 512),
+                    false,
+                    None,
+                    false,
+                    false,
+                )
+                .expect("plan");
+            draw_all(&mut c, &p);
+            assert!(c.overview_ready(), "pan {x}");
+        }
+        // Memory runs short: the frames' slots go, the overview's stay.
+        c.set_max_slots(0);
+        assert!(c.overview_ready());
+        c.clear_keeping_overview();
+        assert!(c.overview_ready());
+        assert_eq!(c.tiles.len(), 2);
+        // A frame at the overview's own scale (0.25) has its own level and ordinary slots.
+        c.set_max_slots(8);
+        frame(&mut c, 1.0, false);
+        let at = c
+            .plan(cam(0.25, 0.0, 0.0), (1024, 512), false, None, false, false)
+            .expect("plan");
+        assert_ne!(at.level, id);
+        assert!(!at.jobs.is_empty() && at.jobs.iter().all(|j| j.key.level == at.level && !j.rough));
+        for j in &at.jobs {
+            assert!(c.slot_for(j.key).is_some_and(|s| s < OVERVIEW_SLOT));
+        }
+        // Another background: everything goes.
+        frame(&mut c, 0.5, false);
+        assert!(!c.overview_ready());
+        assert_eq!(c.tiles.keys().filter(|k| k.level == id).count(), 0);
+    }
+
+    #[test]
+    fn a_rect_less_holes_covers_exactly_the_rest() {
+        let r = Rect::new(0.0, 0.0, 100.0, 50.0);
+        let holes = [Rect::new(10.0, 10.0, 30.0, 20.0), Rect::new(25.0, 15.0, 60.0, 70.0)];
+        let parts = rect_minus(r, &holes);
+        let area: f64 = parts.iter().map(|p| p.area()).sum();
+        // 5,000 less the holes' union inside it: 200 + 35 × 35 - 5 × 5 overlap.
+        assert!((area - (5000.0 - 200.0 - 1225.0 + 25.0)).abs() < 1e-9, "{area}");
+        for (i, p) in parts.iter().enumerate() {
+            assert!(
+                holes
+                    .iter()
+                    .all(|h| p.intersect(*h).area() <= 0.0 || p.intersect(*h).width() <= 0.0)
+            );
+            for q in &parts[i + 1..] {
+                let o = p.intersect(*q);
+                assert!(o.width() <= 0.0 || o.height() <= 0.0, "{p:?} overlaps {q:?}");
+            }
+        }
+        assert_eq!(rect_minus(r, &[]), vec![r]);
+    }
+
+    #[test]
     fn an_exact_frame_is_copies_of_up_to_date_tiles() {
         let mut c = TileCache::new(64, 64);
         c.begin([1.0; 4], 0);
@@ -1529,17 +2395,19 @@ mod tests {
             .map(|cp| (cp.src.x1 - cp.src.x0) * (cp.src.y1 - cp.src.y0))
             .sum();
         assert_eq!(area, 100 * 80);
-        // A stale tile makes the frame a stand-in until it's drawn again.
+        // A stale tile shows what's gone: it stands in for nothing, not even itself, so it's
+        // drawn before anything else and the frame is incomplete until it is.
         c.begin([1.0; 4], 0);
         c.invalidate(plan.level, &[Rect::new(5.0, 5.0, 6.0, 6.0)]);
         let again = c
             .plan(cam(1.0, 10.0, 20.0), (100, 80), false, None, false, false)
             .expect("plan");
         assert_eq!(again.jobs.len(), 1);
-        assert!(!again.jobs[0].must, "a stale tile stands in for itself");
+        assert!(again.jobs[0].must, "a stale tile stands in for nothing");
         let comp = c.compose(&again, None);
-        assert!(!comp.exact && comp.complete);
+        assert!(!comp.exact && !comp.complete);
         assert_eq!(comp.pending, 1);
+        assert_eq!(comp.copies.len(), 5, "the stale tile was laid");
         draw_all(&mut c, &again);
         assert!(c.compose(&again, None).exact);
     }
