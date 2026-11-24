@@ -511,6 +511,38 @@ function directStripes(count = 12): number[] {
   return [...list.finish()];
 }
 
+/** A grid of small squares every 8 px over `width` x `height`: tiles that take a while each. */
+function denseSquares(width: number, height: number): number[] {
+  const list = new ListWriter(0xffffffff, 1);
+  list.reset();
+  let id = 1;
+  for (let y = 0; y < height; y += 8) {
+    for (let x = 0; x < width; x += 8) {
+      list.set(id++, ROOT, {
+        flags: 0,
+        transform: [1, 0, 0, 1, x + 1, y + 1],
+        opacity: 1,
+        width: 5,
+        height: 5,
+        coarseBelow: 0,
+        reach: 0,
+        unsupported: 0,
+        paths: [{ kind: "rect", w: 5, h: 5, radii: [0, 0, 0, 0], smoothing: 0 }],
+        ops: [
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: { kind: "solid", color: [((x / 8) % 5) / 4, ((y / 8) % 3) / 2, 0.5, 1] },
+          },
+        ],
+        coarse: [],
+      });
+    }
+  }
+  return [...list.finish()];
+}
+
 function checkpointScene(neighbour: "green" | "empty" | "none" | "clipped"): number[] {
   const list = new ListWriter(0xffffffff, 1);
   list.reset();
@@ -1530,26 +1562,115 @@ for (const build of ["browser", "webgl"] as const) {
       ).toBeGreaterThan(0);
     });
 
-    test("a view without tile slots completes all direct tiles at rest", async ({ page }) => {
+    test("a view without tile slots settles at rest, the same as drawn at once", async ({
+      page,
+    }) => {
+      // No slot holds a tile, so the frame is drawn straight into a frame texture. Under a
+      // budget at rest (or composite-only) it's drawn over as many frames as it takes, each
+      // laying the last unchanged beneath it; once settled it's exactly what one drawn at once
+      // (no budget, a fresh engine) shows.
       const frame = {
         size: [1024, 64],
         pixel: [560, 32],
         camera: [1, 0, 0, 1],
         moving: false,
       } satisfies Omit<Frame, "budget">;
+      for (const budget of [-1, 1, 8]) {
+        const results = await sample(
+          page,
+          directStripes(100),
+          [
+            { ...frame, budget, repeatUntilExact: 40 },
+            // At rest and exact: shown again as it is, nothing drawn.
+            { ...frame, budget },
+            { ...frame, budget: 0, freshReference: true },
+          ],
+          0,
+          build,
+        );
+        expect(results[0]).toMatchObject({ exact: true, pending: 0, pixel: red });
+        expect(results[1]).toMatchObject({ exact: true, pending: 0, drawn: 0, pixel: red });
+        expect(results[2]).toMatchObject({ exact: true, differingBytes: 0 });
+      }
+    });
+
+    test("an exact frame no slot can hold is drawn over several frames at rest", async ({
+      page,
+    }) => {
+      // 32,768 squares over a 2,048 x 1,024 view: eight direct tiles that take more than the
+      // 1 ms budget each. The view settles over several calls, never one stall, inexact until
+      // the last tile is in, and then matches a frame drawn at once byte for byte.
+      const frame = {
+        size: [2048, 1024],
+        pixel: [1, 1],
+        camera: [1, 0, 0, 1],
+        moving: false,
+      } satisfies Omit<Frame, "budget">;
       const results = await sample(
         page,
-        directStripes(100),
+        denseSquares(2048, 1024),
         [
-          { ...frame, budget: -1 },
           { ...frame, budget: 1 },
+          { ...frame, budget: 1, repeatUntilExact: 40 },
+          { ...frame, budget: 0, freshReference: true },
         ],
         0,
         build,
       );
-      for (const result of results) {
-        expect(result).toMatchObject({ exact: true, pending: 0, drawn: 2, pixel: red });
+      expect(results[0]?.exact, "the first slice can't hold every tile").toBe(false);
+      expect(results[0]?.pending).toBeGreaterThan(0);
+      expect(results[0]?.drawn).toBeLessThan(8);
+      expect(results[1]).toMatchObject({ exact: true, pending: 0 });
+      expect(results[1]?.attempts).toBeGreaterThan(1);
+      expect(results[2]).toMatchObject({ exact: true, differingBytes: 0 });
+    });
+
+    test("an edit while a frame no slot can hold is drawn at rest never goes back", async ({
+      page,
+    }) => {
+      // The fill turns from red to green between slices of a frame no slot can hold: each frame
+      // shows the frame on screen (red) or the new fill, never the background, and once green
+      // shows somewhere, never red there again; the view settles exact green.
+      const green = [0, 255, 0, 255];
+      const rest = (name: string, budget: number): Step => ({
+        name,
+        size: [1536, 512],
+        scale: 1,
+        moving: false,
+        budget,
+        samples: [
+          [100, 256],
+          [800, 256],
+          [1400, 256],
+        ],
+      });
+      const rows = await presented(
+        page,
+        build,
+        solid(6000),
+        [
+          rest("initial", 0),
+          { apply: solid(6000, [0, 1, 0, 1], 1) },
+          ...Array.from({ length: 12 }, (_, i) => rest(`slice ${i}`, 1)),
+          rest("exact", 0),
+        ],
+        { tileBytes: 0 },
+      );
+      expect(rows[0]).toMatchObject({ exact: true, samples: [red, red, red] });
+      for (const row of rows) {
+        for (const sample of row.samples)
+          expect(
+            [red.join(), green.join()],
+            `${row.name} showed neither the old fill nor the new`,
+          ).toContain(sample.join());
       }
+      neverBack(rows, red, green);
+      expect(rows.at(-2)).toMatchObject({
+        exact: true,
+        pending: 0,
+        samples: [green, green, green],
+      });
+      expect(rows.at(-1)).toMatchObject({ exact: true, samples: [green, green, green] });
     });
 
     for (const neighbour of ["green", "empty", "none", "clipped"] as const) {

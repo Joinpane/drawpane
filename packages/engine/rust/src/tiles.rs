@@ -1188,6 +1188,12 @@ impl TileCache {
         if !self.base_kept {
             return Vec::new();
         }
+        self.changed_on(view, size)
+    }
+
+    /// What changed since the last frame was drawn (`note_changed`), on a frame of `size` under
+    /// `view`, grown a pixel: moving or not.
+    pub fn changed_on(&self, view: Affine, size: (u32, u32)) -> Vec<Rect> {
         let frame = Rect::new(0.0, 0.0, f64::from(size.0), f64::from(size.1));
         self.changed
             .iter()
