@@ -585,6 +585,7 @@ struct GpuTarget {
     origin: (i32, i32),
     active_size: (u16, u16),
     bytes: usize,
+    needs_clear: bool,
 }
 
 /// A bounded isolated source, with a second plane when the channels can differ.
@@ -601,6 +602,14 @@ impl GpuIsolation {
             self.backdrop.as_ref().unwrap_or(&self.main)
         } else {
             &self.main
+        }
+    }
+
+    fn plane_mut(&mut self, backdrop: bool) -> &mut GpuTarget {
+        if backdrop {
+            self.backdrop.as_mut().unwrap_or(&mut self.main)
+        } else {
+            &mut self.main
         }
     }
 }
@@ -2390,6 +2399,7 @@ impl Gpu {
             let mut t = self.offscreen_pool.swap_remove(idx);
             t.origin = origin;
             t.active_size = (w as u16, h as u16);
+            t.needs_clear = false;
             return Ok(t);
         }
         let bytes = need_w as usize * need_h as usize * 8; // RGBA8 + depth
@@ -2420,6 +2430,7 @@ impl Gpu {
             origin,
             active_size: (w as u16, h as u16),
             bytes,
+            needs_clear: false,
         })
     }
 
@@ -5224,6 +5235,9 @@ impl Gpu {
     ) {
         for &layer in interiors {
             let paint = self.offscreen_stack[layer].plane(true);
+            if paint.needs_clear {
+                continue;
+            }
             let visible = IRect {
                 x0: paint.origin.0,
                 y0: paint.origin.1,
@@ -5240,6 +5254,7 @@ impl Gpu {
                     &paint.view,
                     paint.view_id,
                     CompositeTarget::Over(view),
+                    (false, false),
                     (paint.origin.0 - bounds.x0, paint.origin.1 - bounds.y0),
                     (local.x0 as u32, local.y0 as u32, width, height),
                     1.0,
@@ -5363,10 +5378,14 @@ impl Gpu {
         }
         self.flush_why = 2;
         self.flush_preserving_clips(open, true)?;
-        let Some(active) = self.active.as_ref() else {
+        if self.active.is_none() {
             return Ok(true);
-        };
+        }
         let (base, interiors) = exec::reader_backdrop_layers(&self.offscreen_stack, false, |scope| scope.isolation);
+        if let Some(base) = base {
+            self.ensure_scope_cleared(base, false, true);
+        }
+        let active = self.active.as_ref().expect("active draw");
         let source = self.reader_source(base, active)?;
         let strip_bounds = IRect {
             x0: 0,
@@ -7327,6 +7346,35 @@ impl Gpu {
         }
     }
 
+    fn ensure_scope_cleared(&mut self, scope_idx: usize, main: bool, backdrop: bool) {
+        let shared = self.offscreen_stack[scope_idx].backdrop.is_none();
+        let clear_main = (main || (shared && backdrop)) && self.offscreen_stack[scope_idx].main.needs_clear;
+        let clear_back = !shared
+            && backdrop
+            && self.offscreen_stack[scope_idx]
+                .backdrop
+                .as_ref()
+                .is_some_and(|b| b.needs_clear);
+        if !clear_main && !clear_back {
+            return;
+        }
+        let mut encoder = self.take_encoder("isolation lazy clear");
+        if clear_main {
+            let target = &mut self.offscreen_stack[scope_idx].main;
+            GpuReaders::encode_clear(&mut encoder, &target.view, wgpu::Color::TRANSPARENT);
+            target.needs_clear = false;
+        }
+        if clear_back {
+            let target = self.offscreen_stack[scope_idx]
+                .backdrop
+                .as_mut()
+                .expect("scope backdrop");
+            GpuReaders::encode_clear(&mut encoder, &target.view, wgpu::Color::TRANSPARENT);
+            target.needs_clear = false;
+        }
+        self.stash_encoder(encoder);
+    }
+
     /// Flushes the scene into the active scope, rasterizing a segment once when both planes
     /// need it. The delta and both depth targets match the local scope's allocation.
     fn flush_scene_gpu(&mut self, force_clear: bool) -> Result<()> {
@@ -7353,6 +7401,15 @@ impl Gpu {
         };
         let dual = write_main && write_backdrop;
         let draw = scene_dirty && (write_main || write_backdrop);
+        let (scope_clear_main, scope_clear_back) = if !root && draw {
+            let scope = self.offscreen_stack.last().expect("offscreen scope");
+            (
+                write_main && scope.main.needs_clear,
+                write_backdrop && scope.backdrop.as_ref().is_some_and(|b| b.needs_clear),
+            )
+        } else {
+            (false, false)
+        };
         if draw {
             let slot = &mut self.counters.flushes[usize::from(why).min(14)];
             *slot = slot.wrapping_add(1);
@@ -7380,6 +7437,10 @@ impl Gpu {
                 },
             );
             self.stash_encoder(encoder);
+        } else if !dual && (scope_clear_main || scope_clear_back) {
+            options.target_init = TargetInit::Clear(ClearSettings::Viewport {
+                color: AlphaColor::TRANSPARENT,
+            });
         }
 
         if draw {
@@ -7399,6 +7460,13 @@ impl Gpu {
                 (color.clone(), color_id)
             };
             self.vello_render(false, &color, Some(&depth), options, "scene flush")?;
+            if !dual && (scope_clear_main || scope_clear_back) {
+                self.offscreen_stack
+                    .last_mut()
+                    .expect("offscreen scope")
+                    .plane_mut(!write_main)
+                    .needs_clear = false;
+            }
             if dual {
                 let mut encoder = self.take_encoder("scene dual composite");
                 let (w, h) = self.active_scene_size();
@@ -7414,6 +7482,7 @@ impl Gpu {
                         &color,
                         color_id,
                         CompositeTarget::OverBoth(&main, &backdrop),
+                        (scope_clear_main, scope_clear_back),
                         (0, 0),
                         scissor,
                         1.0,
@@ -7421,13 +7490,14 @@ impl Gpu {
                 } else {
                     // Reused offscreen planes can have different allocation sizes even
                     // though they share an active viewport. A pass requires matching extents.
-                    for view in [&main, &backdrop] {
+                    for (view, clear) in [(&main, scope_clear_main), (&backdrop, scope_clear_back)] {
                         self.readers.encode_composite(
                             &self.device,
                             &mut encoder,
                             &color,
                             color_id,
                             CompositeTarget::Over(view),
+                            (clear, false),
                             (0, 0),
                             scissor,
                             1.0,
@@ -7435,6 +7505,14 @@ impl Gpu {
                     }
                 }
                 self.stash_encoder(encoder);
+                if let Some(scope) = self.offscreen_stack.last_mut() {
+                    if scope_clear_main {
+                        scope.main.needs_clear = false;
+                    }
+                    if scope_clear_back && let Some(back) = scope.backdrop.as_mut() {
+                        back.needs_clear = false;
+                    }
+                }
             }
         }
         let active = self.active.as_mut().expect("active draw");
@@ -7615,6 +7693,13 @@ impl Gpu {
         ) else {
             return Ok(None);
         };
+        let (base, interiors) = exec::reader_backdrop_layers(&self.offscreen_stack, false, |scope| scope.isolation);
+        if let Some(top) = self.offscreen_stack.len().checked_sub(1) {
+            self.ensure_scope_cleared(top, write_main, write_backdrop);
+        }
+        if let Some(base) = base {
+            self.ensure_scope_cleared(base, false, true);
+        }
         let clone_plane = |backdrop| -> Result<BlurReaderPlane> {
             let (texture, view, view_id, _) = self.plane(backdrop)?;
             Ok(BlurReaderPlane {
@@ -7627,7 +7712,7 @@ impl Gpu {
             write_main.then(|| clone_plane(false)).transpose()?,
             write_backdrop.then(|| clone_plane(true)).transpose()?,
         ];
-        let (base, interiors) = exec::reader_backdrop_layers(&self.offscreen_stack, false, |scope| scope.isolation);
+        let active = self.active.as_ref().expect("active draw");
         let source = self.reader_source(base, active)?;
         let source_written = targets
             .iter()
@@ -7776,9 +7861,25 @@ impl Gpu {
         let root = self.offscreen_stack.is_empty();
         let active = self.active.as_ref().expect("active draw");
         let shared_parent = self.offscreen_stack.last().is_some_and(|s| s.backdrop.is_none());
-        let write_main = content.isolation.on_main;
-        let write_backdrop =
-            content.isolation.on_backdrop && (!root || active.backdrop_live) && !(write_main && shared_parent);
+        let lerp = blend == crate::blend::BLEND_LERP;
+        let plane_active = |backdrop: bool| -> bool {
+            if !lerp {
+                if content.plane(backdrop).needs_clear {
+                    return false;
+                }
+                if let Some((mask, _)) = picture
+                    && mask.plane(backdrop).needs_clear
+                {
+                    return false;
+                }
+            }
+            true
+        };
+        let write_main = content.isolation.on_main && plane_active(false);
+        let write_backdrop = content.isolation.on_backdrop
+            && (!root || active.backdrop_live)
+            && !(write_main && shared_parent)
+            && plane_active(true);
         if !write_main && !write_backdrop {
             return Ok(());
         }
@@ -7793,7 +7894,6 @@ impl Gpu {
         let size = ((visible.x1 - visible.x0) as u32, (visible.y1 - visible.y0) as u32);
         let scissor = (dst_offset.0, dst_offset.1, size.0, size.1);
         let mut clips = active_clips(open, false).peekable();
-        let lerp = blend == crate::blend::BLEND_LERP;
         // Keep the same compositing arithmetic when a clip is present, including
         // UNORM rounding for normal and lerp modes. Only skip rasterizing its mask.
         let shader = clips.peek().is_some() || picture.is_some() || (blend != 0 && !lerp);
@@ -7840,6 +7940,9 @@ impl Gpu {
                 a.vello_render_ms += (now() - t_vr - (a.submit_ms - vr_sub0)).max(0.0);
             }
         }
+        if shader && let Some(top) = self.offscreen_stack.len().checked_sub(1) {
+            self.ensure_scope_cleared(top, write_main, write_backdrop);
+        }
         let mut encoder = self.take_encoder("scope composite");
 
         let mut blend_draws = 0u32;
@@ -7880,6 +7983,10 @@ impl Gpu {
                     opacity,
                 );
             } else {
+                let clear_dst = self.offscreen_stack.last_mut().is_some_and(|scope| {
+                    let target = scope.plane_mut(backdrop);
+                    std::mem::replace(&mut target.needs_clear, false)
+                });
                 self.readers.encode_composite(
                     &self.device,
                     &mut encoder,
@@ -7890,6 +7997,7 @@ impl Gpu {
                     } else {
                         CompositeTarget::Over(&dst_view)
                     },
+                    (clear_dst, false),
                     dst_origin,
                     scissor,
                     opacity,
@@ -9685,18 +9793,23 @@ impl Backend for Gpu {
         }
         self.flush_why = 10;
         self.flush_preserving_clips(open, true)?;
-        let Some(active) = self.active.as_ref() else {
+        if self.active.is_none() {
             return Ok(());
-        };
+        }
         let t_reader = now();
-        let sub0 = active.submit_ms;
-        let vr0 = active.vello_render_ms;
-        let (aw, ah) = (active.width, active.height);
+        let (sub0, vr0, aw, ah) = {
+            let active = self.active.as_ref().expect("active draw");
+            (active.submit_ms, active.vello_render_ms, active.width, active.height)
+        };
         let frame_size = (aw as i32, ah as i32);
         // A lens on an explicitly blended layer reads from its parent. A child lens
         // inherits that prefix with any preceding glass-free paint from the blend scope.
         let (base, interiors) =
             exec::reader_backdrop_layers(&self.offscreen_stack, read_parent, |scope| scope.isolation);
+        if let Some(base) = base {
+            self.ensure_scope_cleared(base, false, true);
+        }
+        let active = self.active.as_ref().expect("active draw");
         let mut backdrop_is_frame = base.is_none() && interiors.is_empty();
         let mut source = self.reader_source(base, active)?;
         let within = glass::clip_within_from_open(open);
@@ -9988,6 +10101,9 @@ impl Backend for Gpu {
 
         // Compose inherited paint in scratch so it does not become part of the isolated picture.
         // The same scratch freezes an aliased prefix before any glass chunks write into it.
+        if let Some(top) = self.offscreen_stack.len().checked_sub(1) {
+            self.ensure_scope_cleared(top, true, false);
+        }
         let (dst_tex, dst_view, _, _) = self.plane(false)?;
         let (dst_tex, dst_view) = (dst_tex.clone(), dst_view.clone());
         let needs_native_prefix = divisor == 1 || native_sampling;
@@ -10371,36 +10487,52 @@ impl Backend for Gpu {
                 }
             }
         }
-        let mut encoder = self.take_encoder("isolation init");
-        let res = (|| {
+        if isolation.copy_parent {
             let overlap = area.intersect(parent_bounds);
-            for (backdrop, target) in std::iter::once((!isolation.on_main && !isolation.separate, &scope.main))
-                .chain(scope.backdrop.iter().map(|t| (true, t)))
+            if !overlap.is_empty()
+                && let Some(parent_idx) = self.offscreen_stack.len().checked_sub(1)
             {
-                if !isolation.copy_parent || overlap != area {
-                    GpuReaders::encode_clear(&mut encoder, &target.view, wgpu::Color::TRANSPARENT);
-                }
-                if isolation.copy_parent && !overlap.is_empty() {
-                    let parent = self.plane(backdrop && parent_backdrop_live)?.0;
-                    copy_rect(
-                        &mut encoder,
-                        parent,
-                        &target.tex,
-                        (
-                            (overlap.x0 - parent_bounds.x0) as u32,
-                            (overlap.y0 - parent_bounds.y0) as u32,
-                        ),
-                        ((overlap.x0 - area.x0) as u32, (overlap.y0 - area.y0) as u32),
-                        ((overlap.x1 - overlap.x0) as u32, (overlap.y1 - overlap.y0) as u32),
-                    );
-                }
+                let main_reads_back = (!isolation.on_main && !isolation.separate) && parent_backdrop_live;
+                let reads_main = !main_reads_back;
+                let reads_back = main_reads_back || (scope.backdrop.is_some() && parent_backdrop_live);
+                self.ensure_scope_cleared(parent_idx, reads_main, reads_back);
             }
-            Ok(())
-        })();
-        self.stash_encoder(encoder);
-        if let Err(e) = res {
-            self.retire_scope(scope);
-            return Err(e);
+            let mut encoder = self.take_encoder("isolation init");
+            let res = (|| {
+                for (backdrop, target) in std::iter::once((!isolation.on_main && !isolation.separate, &scope.main))
+                    .chain(scope.backdrop.iter().map(|t| (true, t)))
+                {
+                    if overlap != area {
+                        GpuReaders::encode_clear(&mut encoder, &target.view, wgpu::Color::TRANSPARENT);
+                    }
+                    if !overlap.is_empty() {
+                        let parent = self.plane(backdrop && parent_backdrop_live)?.0;
+                        copy_rect(
+                            &mut encoder,
+                            parent,
+                            &target.tex,
+                            (
+                                (overlap.x0 - parent_bounds.x0) as u32,
+                                (overlap.y0 - parent_bounds.y0) as u32,
+                            ),
+                            ((overlap.x0 - area.x0) as u32, (overlap.y0 - area.y0) as u32),
+                            ((overlap.x1 - overlap.x0) as u32, (overlap.y1 - overlap.y0) as u32),
+                        );
+                    }
+                }
+                Ok(())
+            })();
+            self.stash_encoder(encoder);
+            if let Err(e) = res {
+                self.retire_scope(scope);
+                return Err(e);
+            }
+        } else {
+            // Defer clearing until the first draw/read into each plane; Vello folds it into LoadOp::Clear.
+            scope.main.needs_clear = true;
+            if let Some(back) = scope.backdrop.as_mut() {
+                back.needs_clear = true;
+            }
         }
         self.offscreen_stack.push(scope);
         let active = self.active.as_mut().expect("active draw");
@@ -10416,6 +10548,8 @@ impl Backend for Gpu {
         }
         self.flush_why = 12;
         self.flush_scene_gpu(false)?;
+        let top = self.offscreen_stack.len() - 1;
+        self.ensure_scope_cleared(top, true, true);
         let mut scope = self.offscreen_stack.pop().expect("post scope");
         let result = (|| {
             let main = self.post_plane(&scope.main, steps)?;
@@ -10531,9 +10665,11 @@ impl Backend for Gpu {
         let Some(tier) = self.reader_halo.as_ref().and_then(|h| h.capture) else {
             return Ok(());
         };
-        let Some(scope) = self.offscreen_stack.last() else {
+        let Some(top) = self.offscreen_stack.len().checked_sub(1) else {
             return Ok(());
         };
+        self.ensure_scope_cleared(top, true, true);
+        let scope = &self.offscreen_stack[top];
         let bounds = |t: &GpuTarget| IRect {
             x0: t.origin.0,
             y0: t.origin.1,
@@ -10679,6 +10815,11 @@ impl Backend for Gpu {
             }
             ReducedPost::Top { steps, origin, divisor } => {
                 let stepped = self.apply_post_isolated(steps);
+                if stepped.is_ok()
+                    && let Some(top) = self.offscreen_stack.len().checked_sub(1)
+                {
+                    self.ensure_scope_cleared(top, true, true);
+                }
                 let Some(scope) = self.offscreen_stack.pop() else {
                     return stepped;
                 };

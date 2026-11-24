@@ -1353,6 +1353,7 @@ impl GpuReaders {
         src_view: &wgpu::TextureView,
         src_id: u64,
         destination: CompositeTarget<'_>,
+        clear: (bool, bool),
         dst_origin: (i32, i32),
         scissor: (u32, u32, u32, u32),
         opacity: f32,
@@ -1371,18 +1372,25 @@ impl GpuReaders {
             CompositeTarget::OverBoth(main, backdrop) => (&self.comp_dual_pipe, main, Some(backdrop)),
             CompositeTarget::Lerp(view) => (&self.lerp_pipe, view, None),
         };
-        fn attachment(view: &wgpu::TextureView) -> wgpu::RenderPassColorAttachment<'_> {
+        fn attachment(view: &wgpu::TextureView, clear: bool) -> wgpu::RenderPassColorAttachment<'_> {
             wgpu::RenderPassColorAttachment {
                 view,
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
+                    load: if clear {
+                        wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                    } else {
+                        wgpu::LoadOp::Load
+                    },
                     store: wgpu::StoreOp::Store,
                 },
             }
         }
-        let attachments = [Some(attachment(first)), second.map(attachment)];
+        let attachments = [
+            Some(attachment(first, clear.0)),
+            second.map(|view| attachment(view, clear.1)),
+        ];
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("scope composite"),
             color_attachments: &attachments[..1 + usize::from(second.is_some())],
