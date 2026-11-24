@@ -687,6 +687,7 @@ struct ActiveDraw {
     detail: bool,
     needs_clear: bool,
     backdrop_live: bool,
+    has_context: bool,
     write_main: bool,
     write_backdrop: bool,
     scene_dirty: bool,
@@ -725,6 +726,7 @@ impl ActiveDraw {
             detail,
             needs_clear: true,
             backdrop_live: false,
+            has_context: false,
             write_main: true,
             write_backdrop: false,
             scene_dirty: false,
@@ -7346,6 +7348,15 @@ impl Gpu {
         }
     }
 
+    fn reader_target_opaque(&self, within: Option<glass::ClipWithin>) -> bool {
+        self.offscreen_stack.is_empty()
+            && self
+                .active
+                .as_ref()
+                .is_some_and(|a| a.background[3] >= 1.0 && !a.has_context)
+            && within.is_none_or(|w| w.fill.is_none_or(|c| c[3] == 255))
+    }
+
     fn ensure_scope_cleared(&mut self, scope_idx: usize, main: bool, backdrop: bool) {
         let shared = self.offscreen_stack[scope_idx].backdrop.is_none();
         let clear_main = (main || (shared && backdrop)) && self.offscreen_stack[scope_idx].main.needs_clear;
@@ -9584,8 +9595,12 @@ impl Backend for Gpu {
                 if let Some(act) = self.active.as_mut() {
                     act.needs_clear = false;
                     act.backdrop_live = true;
+                    act.has_context = true;
                 }
             }
+        }
+        if has_context && let Some(act) = self.active.as_mut() {
+            act.has_context = true;
         }
         Ok(())
     }
@@ -10392,6 +10407,8 @@ impl Backend for Gpu {
                 None => (source_origin, source_size, &source_view, source_view_id, within),
             };
 
+            let opaque_target =
+                self.reader_target_opaque(within) && sample_clip.is_none_or(|w| w.fill.is_none_or(|c| c[3] == 255));
             let mut encoder = self.take_encoder("reader glass");
             self.readers.encode_glass(
                 &self.device,
@@ -10414,6 +10431,7 @@ impl Backend for Gpu {
                 analytic_coarse,
                 mask_slot,
                 has_clip_mask,
+                opaque_target,
                 resolve,
                 max_bytes,
             )?;
@@ -11475,6 +11493,7 @@ impl Backend for Gpu {
         };
         let (mut encoder, clipped) = self.encode_blur_reader_masks(&draw, paths, device, analytic.is_some(), open)?;
         if coarse {
+            let opaque_target = self.reader_target_opaque(within);
             let budget = self.reader_budget_room();
             self.readers.encode_coarse_blur(
                 &self.device,
@@ -11494,6 +11513,7 @@ impl Backend for Gpu {
                 alpha,
                 analytic,
                 clipped,
+                opaque_target,
                 budget,
             )?;
         } else {
@@ -11521,6 +11541,10 @@ impl Backend for Gpu {
                     }
                 }
             }
+            let opaque_target = self.reader_target_opaque(within)
+                && (halo_sample.is_some()
+                    || !draw.bounds_and_edge(within, sigma).0.is_empty()
+                    || within.is_some_and(|w| w.fill.is_some_and(|c| c[3] == 255)));
             let budget = self.reader_budget_room();
             for target in draw.targets.iter().flatten() {
                 self.readers.encode_bg_blur_composite(
@@ -11531,6 +11555,7 @@ impl Backend for Gpu {
                     draw.dirty,
                     alpha,
                     clipped,
+                    opaque_target,
                     halo_sample.as_ref(),
                     budget,
                 )?;
@@ -11803,6 +11828,9 @@ impl Backend for Gpu {
         // Fast path: when every active stop in `dirty` is already provided by captured halo tiers,
         // skip native blur passes, blur_out atlas allocation, and progressive tiling completely.
         if fast_halo_only {
+            let opaque_target = self.reader_target_opaque(within)
+                && (!draw.bounds_and_edge(within, max_sigma).0.is_empty()
+                    || within.is_some_and(|w| w.fill.is_some_and(|c| c[3] == 255)));
             let chunk_side = if (width as usize).saturating_mul(height as usize) <= 6_000_000 {
                 width.max(height).max(1)
             } else {
@@ -11831,6 +11859,7 @@ impl Backend for Gpu {
                             1,
                             alpha,
                             clipped,
+                            opaque_target,
                             halo_1.as_ref(),
                             halo_2.as_ref(),
                             budget,
@@ -11940,6 +11969,8 @@ impl Backend for Gpu {
                     resident.min(plan.stops.len()),
                     cols,
                 )?;
+                let opaque_target = self.reader_target_opaque(within)
+                    && (!clamp_bounds.is_empty() || within.is_some_and(|w| w.fill.is_some_and(|c| c[3] == 255)));
                 let budget = self.reader_budget_room();
                 for target in draw.targets.iter().flatten() {
                     self.readers.encode_progressive_composite(
@@ -11954,6 +11985,7 @@ impl Backend for Gpu {
                         cols,
                         alpha,
                         clipped,
+                        opaque_target,
                         halo_1.as_ref(),
                         halo_2.as_ref(),
                         budget,

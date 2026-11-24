@@ -329,12 +329,16 @@ pub struct GpuReaders {
     blur_y_pipe: wgpu::RenderPipeline,
     frost_pipe: wgpu::RenderPipeline,
     glass_pipe: wgpu::RenderPipeline,
+    glass_opaque_pipe: wgpu::RenderPipeline,
     coarse_pipe: wgpu::RenderPipeline,
+    coarse_opaque_pipe: wgpu::RenderPipeline,
     comp_pipe: wgpu::RenderPipeline,
     comp_dual_pipe: wgpu::RenderPipeline,
     lerp_pipe: wgpu::RenderPipeline,
     bg_blur_pipe: wgpu::RenderPipeline,
+    bg_blur_opaque_pipe: wgpu::RenderPipeline,
     prog_blur_pipe: wgpu::RenderPipeline,
+    prog_blur_opaque_pipe: wgpu::RenderPipeline,
     halo_clip_border_pipe: wgpu::RenderPipeline,
     halo_clip_clamp_pipe: wgpu::RenderPipeline,
     downsample_rect_pipe: wgpu::RenderPipeline,
@@ -659,6 +663,15 @@ impl GpuReaders {
         );
         let frost_pipe = make_pipeline(device, &frost_bgl, &module, "fs_frost", RGBA8, None, "reader frost");
         let glass_pipe = make_pipeline(device, &glass_bgl, &module, "fs_glass", RGBA8, None, "reader glass");
+        let glass_opaque_pipe = make_pipeline(
+            device,
+            &glass_bgl,
+            &module,
+            "fs_glass",
+            RGBA8,
+            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+            "reader glass opaque",
+        );
         let coarse_pipe = make_pipeline(
             device,
             &coarse_bgl,
@@ -667,6 +680,15 @@ impl GpuReaders {
             RGBA8,
             None,
             "reader glass_coarse",
+        );
+        let coarse_opaque_pipe = make_pipeline(
+            device,
+            &coarse_bgl,
+            &module,
+            "fs_glass_coarse",
+            RGBA8,
+            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+            "reader glass_coarse opaque",
         );
         let comp_pipe = make_pipeline(
             device,
@@ -717,6 +739,15 @@ impl GpuReaders {
             None,
             "reader bg_blur_comp",
         );
+        let bg_blur_opaque_pipe = make_pipeline(
+            device,
+            &bg_blur_bgl,
+            &module,
+            "fs_bg_blur_composite",
+            RGBA8,
+            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+            "reader bg_blur_comp opaque",
+        );
         let prog_blur_pipe = make_pipeline(
             device,
             &prog_blur_bgl,
@@ -725,6 +756,15 @@ impl GpuReaders {
             RGBA8,
             None,
             "reader prog_blur",
+        );
+        let prog_blur_opaque_pipe = make_pipeline(
+            device,
+            &prog_blur_bgl,
+            &module,
+            "fs_progressive_blur",
+            RGBA8,
+            Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+            "reader prog_blur opaque",
         );
         let halo_clip_border_pipe = make_pipeline(
             device,
@@ -824,12 +864,16 @@ impl GpuReaders {
             blur_y_pipe,
             frost_pipe,
             glass_pipe,
+            glass_opaque_pipe,
             coarse_pipe,
+            coarse_opaque_pipe,
             comp_pipe,
             comp_dual_pipe,
             lerp_pipe,
             bg_blur_pipe,
+            bg_blur_opaque_pipe,
             prog_blur_pipe,
+            prog_blur_opaque_pipe,
             halo_clip_border_pipe,
             halo_clip_clamp_pipe,
             downsample_rect_pipe,
@@ -1533,6 +1577,7 @@ impl GpuReaders {
     }
 
     /// Encodes `copy_extended` + mipmaps into a pooled `MipTex` of size `(region.rw, region.rh)`.
+    /// Also returns whether every output texel came from the source or an opaque clip fill.
     #[allow(clippy::too_many_arguments)]
     fn encode_copy_extended_and_mips(
         &mut self,
@@ -1547,7 +1592,7 @@ impl GpuReaders {
         within: Option<ClipWithin>,
         max_mips: u32,
         max_bytes: usize,
-    ) -> Result<usize> {
+    ) -> Result<(usize, bool)> {
         let idx = self.acquire_mip_tex(
             device,
             (region.rw, region.rh),
@@ -1585,6 +1630,8 @@ impl GpuReaders {
         let sx1 = bx1.clamp(0, tex_size.0);
         let sy1 = by1.clamp(0, tex_size.1);
         let is_empty = sx1 <= sx0 || sy1 <= sy0;
+        let fill_opaque = fill_info.is_none_or(|(_, _, _, _, c)| c[3] == 255);
+        let source_opaque = (!is_empty && fill_opaque) || fill_info.is_some_and(|(_, _, _, _, c)| c[3] == 255);
         let (has_fill, fx0, fy0, fx1, fy1, fill_rgba) = match fill_info {
             Some((x0, y0, x1, y1, c)) => (
                 1.0f32,
@@ -1633,7 +1680,7 @@ impl GpuReaders {
             Some(u_off),
         );
         Self::encode_build_mipmaps(encoder, &self.mip_pipe, &self.mip_pool[idx], &mut self.draws);
-        Ok(idx)
+        Ok((idx, source_opaque))
     }
 
     /// Encodes all GPU passes for one glass chunk (after `mask_tex` and optional `clip_tex` are
@@ -1662,6 +1709,7 @@ impl GpuReaders {
         analytic_coarse: Option<CoarseAnalytic>,
         mask_slot: Option<(u32, u32)>,
         has_clip_mask: bool,
+        opaque_target: bool,
         resolve: Option<GlassResolve<'_>>,
         max_bytes: usize,
     ) -> Result<()> {
@@ -1675,38 +1723,6 @@ impl GpuReaders {
             return Ok(());
         }
 
-        // Snapshot current dst pixels under the glass rect for exact premultiplied replace.
-        let dst_nw = out_w.max(1).next_multiple_of(64);
-        let dst_nh = out_h.max(1).next_multiple_of(64);
-        let dst_reuse = self.dst_copy.as_ref().is_some_and(|t| {
-            t.width >= out_w
-                && t.height >= out_h
-                && (t.width as usize * t.height as usize) <= (dst_nw as usize * dst_nh as usize * 4).max(1_048_576)
-        });
-        if !dst_reuse {
-            let freed = self.dst_copy.as_ref().map_or(0, PlainTex::bytes);
-            self.reserve_bytes(
-                dst_nw as usize * dst_nh as usize * 4,
-                freed,
-                "reader dst_copy",
-                max_bytes,
-            )?;
-            if let Some(old) = self.dst_copy.take() {
-                self.retired.push(old.texture);
-            }
-            Self::ensure_growable_plain(
-                &mut self.dst_copy,
-                device,
-                out_w,
-                out_h,
-                RGBA8,
-                4,
-                wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-                "reader dst_copy",
-            );
-        }
-        self.copy_to_dst_copy(encoder, dst_tex, out_x0, out_y0, out_w, out_h);
-
         let mask_x0 = (region.x0 + dst_offset.0) as f32;
         let mask_y0 = (region.y0 + dst_offset.1) as f32;
 
@@ -1714,7 +1730,7 @@ impl GpuReaders {
             // Fast interactive coarse stand-in: share one tile/frame mipmap (<= 5 levels) across
             // all unclipped glass cards on the same backdrop generation (zero per-card copy_extended/mipmaps).
             let use_shared = backdrop_is_frame && within.is_none() && source_offset == (0, 0);
-            let (uv_ox, uv_oy, inv_bw, inv_bh, max_mip, region_idx) = if use_shared {
+            let (uv_ox, uv_oy, inv_bw, inv_bh, max_mip, region_idx, copy_opaque) = if use_shared {
                 self.ensure_shared_coarse_mips(
                     device,
                     encoder,
@@ -1732,9 +1748,10 @@ impl GpuReaders {
                     1.0 / (tex_size.1 as f32),
                     (mips.mip_views.len() - 1) as f32,
                     None,
+                    true,
                 )
             } else {
-                let idx = self.encode_copy_extended_and_mips(
+                let (idx, source_opaque) = self.encode_copy_extended_and_mips(
                     device,
                     encoder,
                     backdrop_view,
@@ -1755,8 +1772,14 @@ impl GpuReaders {
                     1.0 / (m.height as f32),
                     (m.mip_views.len() - 1) as f32,
                     Some(idx),
+                    source_opaque,
                 )
             };
+            let use_hw_blend = opaque_target && copy_opaque;
+            if !use_hw_blend {
+                self.ensure_dst_copy_budgeted(device, out_w, out_h, max_bytes)?;
+                self.copy_to_dst_copy(encoder, dst_tex, out_x0, out_y0, out_w, out_h);
+            }
             let sigma = params.frost.max(3.0 * params.unit_px);
             let base_lod = if use_shared { 1.0 } else { 0.0 };
             let lod = ((sigma * 1.5).max(1.0).log2() - base_lod).clamp(0.0, max_mip);
@@ -1783,7 +1806,7 @@ impl GpuReaders {
                 if has_clip_mask { 1.0 } else { 0.0 },
                 mask_mode,
                 unit_px,
-                0.0,
+                if use_hw_blend { 1.0 } else { 0.0 },
                 uv_ox,
                 uv_oy,
                 inv_bw,
@@ -1816,7 +1839,11 @@ impl GpuReaders {
                 } else {
                     self.mask_tex.as_ref().expect("mask").view_id
                 };
-                let dst_copy_id = self.dst_copy.as_ref().expect("dst_copy").view_id;
+                let dst_copy_id = if use_hw_blend {
+                    self.white_1x1.view_id
+                } else {
+                    self.dst_copy.as_ref().expect("dst_copy").view_id
+                };
                 let clip_id = if has_clip_mask {
                     self.clip_tex.as_ref().expect("clip").view_id
                 } else {
@@ -1843,7 +1870,11 @@ impl GpuReaders {
                 } else {
                     &self.mask_tex.as_ref().expect("mask").view
                 };
-                let dst_copy_view = &self.dst_copy.as_ref().expect("dst_copy").view;
+                let dst_copy_view = if use_hw_blend {
+                    &self.white_1x1.view
+                } else {
+                    &self.dst_copy.as_ref().expect("dst_copy").view
+                };
                 let clip_view = if has_clip_mask {
                     &self.clip_tex.as_ref().expect("clip").view
                 } else {
@@ -1892,7 +1923,11 @@ impl GpuReaders {
                 "reader glass_coarse",
                 dst_view,
                 (out_x0, out_y0, out_w, out_h),
-                &self.coarse_pipe,
+                if use_hw_blend {
+                    &self.coarse_opaque_pipe
+                } else {
+                    &self.coarse_pipe
+                },
                 &group,
                 u_off,
             );
@@ -1910,7 +1945,7 @@ impl GpuReaders {
             )
         });
         // 1. Copy extended backdrop and build the sampled mip levels.
-        let base_mip_idx = self.encode_copy_extended_and_mips(
+        let (base_mip_idx, copy_opaque) = self.encode_copy_extended_and_mips(
             device,
             encoder,
             backdrop_view,
@@ -1923,6 +1958,11 @@ impl GpuReaders {
             frost.map_or(u32::MAX, |f| f.level + 1),
             max_bytes,
         )?;
+        let use_hw_blend = opaque_target && copy_opaque;
+        if !use_hw_blend {
+            self.ensure_dst_copy_budgeted(device, out_w, out_h, max_bytes)?;
+            self.copy_to_dst_copy(encoder, dst_tex, out_x0, out_y0, out_w, out_h);
+        }
 
         // 2. Optional mip-assisted frost pass (exact port of glass.ts / frost_cpu).
         let sampled_mip_idx = if let Some(fp) = frost {
@@ -2250,9 +2290,11 @@ impl GpuReaders {
             tune.shade_reach,
             lw as f32,
             lh as f32,
-            // Packed height/quad-phase flags, atlas mask origin, and device-per-optical scale.
-            (u32::from(self.height_packed) | (((dst_offset.0 & 1) as u32) << 1) | (((dst_offset.1 & 1) as u32) << 2))
-                as f32,
+            // Packed height/quad-phase/opaque-blend flags, atlas mask origin, and device-per-optical scale.
+            (u32::from(self.height_packed)
+                | (((dst_offset.0 & 1) as u32) << 1)
+                | (((dst_offset.1 & 1) as u32) << 2)
+                | (u32::from(use_hw_blend) << 3)) as f32,
             mask_x as f32,
             mask_y as f32,
             divisor / rim_scale,
@@ -2270,11 +2312,16 @@ impl GpuReaders {
             .as_ref()
             .filter(|r| r.native.is_some())
             .map_or(self.white_1x1.view_id, |r| r.native_id);
+        let dst_copy_id = if use_hw_blend {
+            self.white_1x1.view_id
+        } else {
+            self.dst_copy.as_ref().expect("dst_copy").view_id
+        };
         let bg_key = BgKey::Glass {
             sampled: self.mip_pool[sampled_mip_idx].full_view_id,
             mask: self.glass_mask_view(mask_slot.is_some()).1,
             low0: self.low_0.as_ref().expect("low_0").view_id,
-            dst_copy: self.dst_copy.as_ref().expect("dst_copy").view_id,
+            dst_copy: dst_copy_id,
             clip: if has_clip_mask {
                 self.clip_tex.as_ref().expect("clip").view_id
             } else {
@@ -2288,6 +2335,11 @@ impl GpuReaders {
         {
             cached.clone()
         } else {
+            let dst_copy_view = if use_hw_blend {
+                &self.white_1x1.view
+            } else {
+                &self.dst_copy.as_ref().expect("dst_copy").view
+            };
             let clip_view = if has_clip_mask {
                 &self.clip_tex.as_ref().expect("clip").view
             } else {
@@ -2315,7 +2367,7 @@ impl GpuReaders {
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
-                        resource: wgpu::BindingResource::TextureView(&self.dst_copy.as_ref().expect("dst_copy").view),
+                        resource: wgpu::BindingResource::TextureView(dst_copy_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 5,
@@ -2352,7 +2404,11 @@ impl GpuReaders {
             "reader glass",
             dst_view,
             (out_x0, out_y0, out_w, out_h),
-            &self.glass_pipe,
+            if use_hw_blend {
+                &self.glass_opaque_pipe
+            } else {
+                &self.glass_pipe
+            },
             &group_glass,
             sg_off,
         );
@@ -2547,6 +2603,7 @@ impl GpuReaders {
         dirty: IRect,
         alpha: f32,
         has_clip_mask: bool,
+        opaque_target: bool,
         halo: Option<&BlurHaloSample>,
         max_bytes: usize,
     ) -> Result<()> {
@@ -2557,15 +2614,18 @@ impl GpuReaders {
         }
         let x0 = dirty.x0 as u32;
         let y0 = dirty.y0 as u32;
-        self.ensure_dst_copy_budgeted(device, bw, bh, max_bytes)?;
-        self.copy_to_dst_copy(encoder, dst_tex, x0, y0, bw, bh);
+        if !opaque_target {
+            self.ensure_dst_copy_budgeted(device, bw, bh, max_bytes)?;
+            self.copy_to_dst_copy(encoder, dst_tex, x0, y0, bw, bh);
+        }
+        let opaque_f = if opaque_target { 1.0 } else { 0.0 };
         let (map, bound) = if let Some(halo) = halo {
             (
-                [halo.offset.0, halo.offset.1, halo.inv, 0.0],
+                [halo.offset.0, halo.offset.1, halo.inv, opaque_f],
                 [halo.size.0 as f32, halo.size.1 as f32, 0.0, 0.0],
             )
         } else {
-            ([0.0; 4], [0.0; 4])
+            ([0.0, 0.0, 0.0, opaque_f], [0.0; 4])
         };
         let u_bytes = &[
             x0 as f32,
@@ -2583,10 +2643,15 @@ impl GpuReaders {
         ];
         let (slab_idx, u_off) = self.push_uniform(device, u_bytes);
         let blurred_id = halo.map_or_else(|| self.blur_out.as_ref().expect("blur_out").view_id, |h| h.view_id);
+        let dst_copy_id = if opaque_target {
+            self.white_1x1.view_id
+        } else {
+            self.dst_copy.as_ref().expect("dst_copy").view_id
+        };
         let bg_key = BgKey::BgBlur {
             blurred: blurred_id,
             mask: self.mask_tex.as_ref().expect("mask").view_id,
-            dst_copy: self.dst_copy.as_ref().expect("dst_copy").view_id,
+            dst_copy: dst_copy_id,
             clip: if has_clip_mask {
                 self.clip_tex.as_ref().expect("clip").view_id
             } else {
@@ -2600,6 +2665,11 @@ impl GpuReaders {
             cached.clone()
         } else {
             let blurred = halo.map_or_else(|| &self.blur_out.as_ref().expect("blur_out").view, |halo| &halo.view);
+            let dst_copy_view = if opaque_target {
+                &self.white_1x1.view
+            } else {
+                &self.dst_copy.as_ref().expect("dst_copy").view
+            };
             let clip_view = if has_clip_mask {
                 &self.clip_tex.as_ref().expect("clip").view
             } else {
@@ -2619,7 +2689,7 @@ impl GpuReaders {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&self.dst_copy.as_ref().expect("dst_copy").view),
+                        resource: wgpu::BindingResource::TextureView(dst_copy_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
@@ -2646,7 +2716,11 @@ impl GpuReaders {
             "reader bg_blur_comp",
             dst_view,
             (x0, y0, bw, bh),
-            &self.bg_blur_pipe,
+            if opaque_target {
+                &self.bg_blur_opaque_pipe
+            } else {
+                &self.bg_blur_pipe
+            },
             &group,
             u_off,
         );
@@ -3076,6 +3150,7 @@ impl GpuReaders {
         atlas_cols: u32,
         alpha: f32,
         has_clip_mask: bool,
+        opaque_target: bool,
         halo: Option<&ProgressiveHaloSample>,
         halo_far: Option<&ProgressiveHaloSample>,
         max_bytes: usize,
@@ -3087,8 +3162,10 @@ impl GpuReaders {
         }
         let x0 = tile.x0 as u32;
         let y0 = tile.y0 as u32;
-        self.ensure_dst_copy_budgeted(device, tw, th, max_bytes)?;
-        self.copy_to_dst_copy(encoder, dst_tex, x0, y0, tw, th);
+        if !opaque_target {
+            self.ensure_dst_copy_budgeted(device, tw, th, max_bytes)?;
+            self.copy_to_dst_copy(encoder, dst_tex, x0, y0, tw, th);
+        }
         let stops = plan.padded_stops();
         let pack_halo = |h: Option<&ProgressiveHaloSample>| {
             h.map_or(([0.0; 4], [0.0; 4]), |halo| {
@@ -3141,7 +3218,7 @@ impl GpuReaders {
             stops[11],
             frame_origin.0 as f32,
             frame_origin.1 as f32,
-            0.0,
+            if opaque_target { 1.0 } else { 0.0 },
             0.0,
             halo_map[0],
             halo_map[1],
@@ -3161,10 +3238,15 @@ impl GpuReaders {
             halo2_atlas[3],
         ];
         let (slab_idx, u_off) = self.push_uniform(device, u_bytes);
+        let dst_copy_id = if opaque_target {
+            self.white_1x1.view_id
+        } else {
+            self.dst_copy.as_ref().expect("dst_copy").view_id
+        };
         let bg_key = BgKey::ProgBlur {
             blur_out: self.blur_out.as_ref().map_or(self.white_1x1.view_id, |b| b.view_id),
             mask: self.mask_tex.as_ref().expect("mask").view_id,
-            dst_copy: self.dst_copy.as_ref().expect("dst_copy").view_id,
+            dst_copy: dst_copy_id,
             clip: if has_clip_mask {
                 self.clip_tex.as_ref().expect("clip").view_id
             } else {
@@ -3177,6 +3259,11 @@ impl GpuReaders {
         let group = if let Some(cached) = self.bg_cache.get(&bg_key) {
             cached.clone()
         } else {
+            let dst_copy_view = if opaque_target {
+                &self.white_1x1.view
+            } else {
+                &self.dst_copy.as_ref().expect("dst_copy").view
+            };
             let clip_view = if has_clip_mask {
                 &self.clip_tex.as_ref().expect("clip").view
             } else {
@@ -3198,7 +3285,7 @@ impl GpuReaders {
                     },
                     wgpu::BindGroupEntry {
                         binding: 2,
-                        resource: wgpu::BindingResource::TextureView(&self.dst_copy.as_ref().expect("dst_copy").view),
+                        resource: wgpu::BindingResource::TextureView(dst_copy_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
@@ -3235,7 +3322,11 @@ impl GpuReaders {
             "reader prog_blur",
             dst_view,
             (x0, y0, tw, th),
-            &self.prog_blur_pipe,
+            if opaque_target {
+                &self.prog_blur_opaque_pipe
+            } else {
+                &self.prog_blur_pipe
+            },
             &group,
             u_off,
         );
@@ -3264,6 +3355,7 @@ impl GpuReaders {
         alpha: f32,
         analytic_coarse: Option<CoarseAnalytic>,
         has_clip_mask: bool,
+        opaque_target: bool,
         max_bytes: usize,
     ) -> Result<()> {
         let bw = (dirty.x1 - dirty.x0) as u32;
@@ -3273,13 +3365,12 @@ impl GpuReaders {
         }
         let x0 = dirty.x0 as u32;
         let y0 = dirty.y0 as u32;
-        self.ensure_dst_copy_budgeted(device, bw, bh, max_bytes)?;
         let use_shared = backdrop_is_frame
             && within.is_none()
             && offset == (0, 0)
             && tex_size.0 as i32 == frame_size.0
             && tex_size.1 as i32 == frame_size.1;
-        let (uv_ox, uv_oy, inv_bw, inv_bh, max_mip, region_idx) = if use_shared {
+        let (uv_ox, uv_oy, inv_bw, inv_bh, max_mip, region_idx, copy_opaque) = if use_shared {
             self.ensure_shared_coarse_mips(
                 device,
                 encoder,
@@ -3297,6 +3388,7 @@ impl GpuReaders {
                 1.0 / (tex_size.1 as f32),
                 (mips.mip_views.len() - 1) as f32,
                 None,
+                true,
             )
         } else {
             let region = GlassRegion {
@@ -3312,7 +3404,7 @@ impl GpuReaders {
                 half_size: [1.0, 1.0],
                 box_geom: None,
             };
-            let idx = self.encode_copy_extended_and_mips(
+            let (idx, source_opaque) = self.encode_copy_extended_and_mips(
                 device,
                 encoder,
                 backdrop_view,
@@ -3333,8 +3425,13 @@ impl GpuReaders {
                 1.0 / (m.height as f32),
                 (m.mip_views.len() - 1) as f32,
                 Some(idx),
+                source_opaque,
             )
         };
+        let use_hw_blend = opaque_target && copy_opaque;
+        if !use_hw_blend {
+            self.ensure_dst_copy_budgeted(device, bw, bh, max_bytes)?;
+        }
         let base_lod = if use_shared { 1.0 } else { 0.0 };
         let lod = ((sigma * 1.5).max(1.0).log2() - base_lod).clamp(0.0, max_mip);
         let (mask_mode, unit_px, to_box_x, to_box_y, radii, smoothing) = match analytic_coarse {
@@ -3361,7 +3458,7 @@ impl GpuReaders {
             if has_clip_mask { 1.0 } else { 0.0 },
             mask_mode,
             unit_px,
-            0.0,
+            if use_hw_blend { 1.0 } else { 0.0 },
             uv_ox,
             uv_oy,
             inv_bw,
@@ -3384,6 +3481,11 @@ impl GpuReaders {
             smoothing[3],
         ];
         let (slab_idx, u_off) = self.push_uniform(device, u_bytes);
+        let dst_copy_id = if use_hw_blend {
+            self.white_1x1.view_id
+        } else {
+            self.dst_copy.as_ref().expect("dst_copy").view_id
+        };
         let bg_key = BgKey::Coarse {
             b: match region_idx {
                 Some(i) => self.mip_pool[i].full_view_id,
@@ -3394,7 +3496,7 @@ impl GpuReaders {
             } else {
                 self.mask_tex.as_ref().expect("mask").view_id
             },
-            dst_copy: self.dst_copy.as_ref().expect("dst_copy").view_id,
+            dst_copy: dst_copy_id,
             clip: if has_clip_mask {
                 self.clip_tex.as_ref().expect("clip").view_id
             } else {
@@ -3413,6 +3515,11 @@ impl GpuReaders {
                 &self.white_1x1.view
             } else {
                 &self.mask_tex.as_ref().expect("mask").view
+            };
+            let dst_copy_view = if use_hw_blend {
+                &self.white_1x1.view
+            } else {
+                &self.dst_copy.as_ref().expect("dst_copy").view
             };
             let clip_view = if has_clip_mask {
                 &self.clip_tex.as_ref().expect("clip").view
@@ -3437,7 +3544,7 @@ impl GpuReaders {
                     },
                     wgpu::BindGroupEntry {
                         binding: 3,
-                        resource: wgpu::BindingResource::TextureView(&self.dst_copy.as_ref().expect("dst_copy").view),
+                        resource: wgpu::BindingResource::TextureView(dst_copy_view),
                     },
                     wgpu::BindGroupEntry {
                         binding: 4,
@@ -3456,15 +3563,22 @@ impl GpuReaders {
             self.bg_cache.insert(bg_key, created.clone());
             created
         };
+        let pipe = if use_hw_blend {
+            &self.coarse_opaque_pipe
+        } else {
+            &self.coarse_pipe
+        };
         for (dst_tex, dst_view) in targets {
-            self.copy_to_dst_copy(encoder, dst_tex, x0, y0, bw, bh);
+            if !use_hw_blend {
+                self.copy_to_dst_copy(encoder, dst_tex, x0, y0, bw, bh);
+            }
             Self::encode_scissored_pass(
                 encoder,
                 &mut self.draws,
                 "reader coarse_blur",
                 dst_view,
                 (x0, y0, bw, bh),
-                &self.coarse_pipe,
+                pipe,
                 &group,
                 u_off,
             );

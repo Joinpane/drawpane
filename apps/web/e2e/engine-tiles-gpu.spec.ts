@@ -777,7 +777,7 @@ for (const build of ["browser", "webgl"] as const) {
                   },
                 ]
               : kind === "uniform"
-                ? [{ op: "backgroundBlur", paths: [0], evenOdd: false, radius: 24 }]
+                ? [{ op: "backgroundBlur", paths: [0], evenOdd: false, radius: 160 }]
                 : [
                     {
                       op: "progressiveBlur",
@@ -856,14 +856,17 @@ for (const build of ["browser", "webgl"] as const) {
         };
         const budgets = {
           plain: await measure(withoutGlass, 21),
+          plainDpr2: await measure(withoutGlass, 21, 2),
           // Thick frost at DPR 4 exceeds the tile halo. The whole-frame target
           // fits at 21 MiB, leaving the glass mask itself to exercise admission.
           glassLimited: await measure(deepFrost, 21, 4),
           glassFits: await measure(deepFrost, 128, 4),
-          // A first draw holds one frame texture, leaving one MiB more for
-          // the Gaussian working set than the old eager two-frame setup.
-          uniformLimited: await measure(uniform, 21),
-          uniformFits: await measure(uniform, 24),
+          // Radius 160 at DPR 2 exceeds the tile halo so whole-frame reader
+          // admission is observed directly instead of retrying on tiles. Both
+          // the frame target (plainDpr2) and shape mask fit at 21 MiB, leaving
+          // `reader blur_out` to refuse admission.
+          uniformLimited: await measure(uniform, 21, 2),
+          uniformFits: await measure(uniform, 24, 2),
           progressiveLimited: await measure(progressive, 22),
           progressiveFits: await measure(progressive, 28),
         };
@@ -950,10 +953,12 @@ for (const build of ["browser", "webgl"] as const) {
     );
 
     expect(res.budgets.plain.ok).toBe(true);
+    expect(res.budgets.plainDpr2.ok).toBe(true);
     expect(res.budgets.glassLimited).toMatchObject({ ok: false, code: 4 });
     expect(res.budgets.glassLimited.message).toContain("reader mask");
     expect(res.budgets.glassFits.ok).toBe(true);
     expect(res.budgets.uniformLimited).toMatchObject({ ok: false, code: 4 });
+    expect(res.budgets.uniformLimited.message).toContain("reader blur_out");
     expect(res.budgets.uniformFits.ok).toBe(true);
     expect(res.budgets.progressiveLimited).toMatchObject({ ok: false, code: 4 });
     expect(res.budgets.progressiveLimited.message).toContain("reader blur_out");
