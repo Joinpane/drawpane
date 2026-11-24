@@ -37,7 +37,12 @@ import {
   type TextMeasurer,
 } from "@drawpane/editor";
 import { type Camera, ErrorCode, MAX_SIDE, refusingBits, unsupportedNames } from "@drawpane/engine";
-import { type NodeRecord, sniffImage } from "@drawpane/model";
+import {
+  MEDIA_PREVIEW_SIZES,
+  type MediaPreviewSize,
+  type NodeRecord,
+  sniffImage,
+} from "@drawpane/model";
 import { fonts } from "../fonts/fonts";
 import { deviceImageBudget } from "./engine-image";
 import type {
@@ -972,11 +977,35 @@ export async function prepareSnapshotJob(
       [...usesByRef.entries()].map(async ([ref, uses]) => {
         const timeout = withTimeoutSignal(signal, IMAGE_TIMEOUT_MS);
         try {
-          const { blob, size } = await cache.encoded(ref, timeout.signal);
+          let preview: MediaPreviewSize | undefined;
+          if (options.detail) {
+            // Dashboard thumbnails and LOD previews use fixed-size previews instead of pulling
+            // full-resolution originals; exports never set `detail` and always fetch originals.
+            let maxNeeded = 0;
+            for (const use of uses) {
+              const crop = use.paint.crop;
+              const cx = crop ? Math.max(0.05, crop.width) : 1;
+              const cy = crop ? Math.max(0.05, crop.height) : 1;
+              maxNeeded = Math.max(
+                maxNeeded,
+                (use.box.width * use.scale.width) / cx,
+                (use.box.height * use.scale.height) / cy,
+              );
+            }
+            preview = MEDIA_PREVIEW_SIZES.find((s) => s >= maxNeeded);
+          }
+          let encoded = await cache.encoded(ref, timeout.signal, preview ? { preview } : undefined);
           if (signal?.aborted) throw abortError();
-          const natural = size ?? cache.natural(ref) ?? (await measureBlobSize(blob, signal));
+          let natural =
+            encoded.size ?? cache.natural(ref) ?? (await measureBlobSize(encoded.blob, signal));
+          if ((!natural || natural.width <= 0 || natural.height <= 0) && preview) {
+            encoded = await cache.encoded(ref, timeout.signal);
+            if (signal?.aborted) throw abortError();
+            natural =
+              encoded.size ?? cache.natural(ref) ?? (await measureBlobSize(encoded.blob, signal));
+          }
           if (!natural || natural.width <= 0 || natural.height <= 0) return;
-          loaded.push({ ref, blob, natural, uses });
+          loaded.push({ ref, blob: encoded.blob, natural, uses });
         } catch (err) {
           if (isAbortError(err)) throw err;
           // Unavailable image: omitted in display list rather than crashing the snapshot.

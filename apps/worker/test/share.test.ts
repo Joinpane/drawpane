@@ -1,7 +1,12 @@
 import { env } from "cloudflare:test";
-import type { NodeRecord, Op } from "@drawpane/model";
+import { mediaPreviewKey, type NodeRecord, type Op, sniffImage } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
+import phoneJpegUrl from "./fixtures/progressive-4032.jpg?inline";
 import { Browser, openSocket, openSocketAt, signedInUser } from "./helpers";
+
+const PHONE_JPEG = Uint8Array.from(atob(phoneJpegUrl.slice(phoneJpegUrl.indexOf(",") + 1)), (c) =>
+  c.charCodeAt(0),
+);
 
 async function sharedFile() {
   const owner = await signedInUser("Ana");
@@ -181,5 +186,59 @@ describe("prototype links", () => {
     expect(new Uint8Array(await image.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
     expect((await guest.fetch(`/api/share/${token}/media/${theirs}`)).status).toBe(404);
     expect((await guest.fetch(`/api/share/${token}/media/nope`)).status).toBe(404);
+
+    // Previews work through share links too: missing previews fall back to streaming the original,
+    // stored previews stream with X-Image-Preview, and invalid sizes return 400.
+    const big = "c".repeat(64);
+    await env.DB.prepare(
+      "INSERT INTO media (sha, team_id, mime, width, height, bytes, created_at) VALUES (?, ?, 'image/jpeg', 4032, 3024, ?, ?)",
+    )
+      .bind(big, teamId, PHONE_JPEG.byteLength, now)
+      .run();
+    await env.FILES.put(`media/${big}`, PHONE_JPEG);
+
+    const missing = await guest.fetch(`/api/share/${token}/media/${big}?w=256`);
+    expect(missing.status).toBe(200);
+    expect(missing.headers.get("content-type")).toBe("image/jpeg");
+    expect(missing.headers.get("x-image-preview")).toBeNull();
+    expect(missing.headers.get("x-image-preview-missing")).toBe("1");
+
+    const previewBytes = new Uint8Array(256);
+    previewBytes.set([
+      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44,
+      0x52,
+    ]);
+    const dv = new DataView(previewBytes.buffer);
+    dv.setUint32(16, 256);
+    dv.setUint32(20, 192);
+
+    // Another team's preview for the same sha must never be served through this team's share link.
+    const otherPreview = new Uint8Array(previewBytes);
+    otherPreview.fill(0xee, 32);
+    await env.FILES.put(mediaPreviewKey(other.teamId, big, 256), otherPreview, {
+      httpMetadata: { contentType: "image/png" },
+      customMetadata: { naturalWidth: "4032", naturalHeight: "3024" },
+    });
+    const stillMissing = await guest.fetch(`/api/share/${token}/media/${big}?w=256`);
+    expect(stillMissing.status).toBe(200);
+    expect(stillMissing.headers.get("x-image-preview")).toBeNull();
+    expect(stillMissing.headers.get("x-image-preview-missing")).toBe("1");
+
+    await env.FILES.put(mediaPreviewKey(teamId, big, 256), previewBytes, {
+      httpMetadata: { contentType: "image/png" },
+      customMetadata: { naturalWidth: "4032", naturalHeight: "3024" },
+    });
+
+    const preview = await guest.fetch(`/api/share/${token}/media/${big}?w=256`);
+    expect(preview.status).toBe(200);
+    expect(preview.headers.get("content-type")).toBe("image/png");
+    expect(preview.headers.get("x-image-preview")).toBe("256");
+    expect(new Uint8Array(await preview.arrayBuffer())).toEqual(previewBytes);
+    expect(sniffImage(previewBytes)).toEqual({
+      mime: "image/png",
+      width: 256,
+      height: 192,
+    });
+    expect((await guest.fetch(`/api/share/${token}/media/${big}?w=500`)).status).toBe(400);
   });
 });

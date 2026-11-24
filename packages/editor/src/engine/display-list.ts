@@ -50,6 +50,10 @@ export interface ImageDemand {
   readonly visible: boolean;
   /** Projected dimensions in page units, before camera zoom and device pixel ratio. */
   readonly span: Size | null;
+  /** Estimated drawn span in page units before natural image dimensions are known. */
+  readonly hint?: Size;
+  /** Distance from the layer's bounds centre to the viewport centre, in page units. */
+  readonly centerDistance?: number;
 }
 
 export interface DisplayListOptions {
@@ -225,6 +229,18 @@ export class DisplayListBuilder {
 
   get opening(): boolean {
     return this.#opening !== null;
+  }
+
+  /** True while `openSlice` still has unvisited subtrees intersecting the current view. */
+  get openingVisible(): boolean {
+    const stack = this.#opening;
+    if (!stack || stack.length === 0) return false;
+    for (let i = 0; i < stack.length; i++) {
+      const level = stack[i] as OpeningLevel;
+      if (level.next < level.ids.length || level.nextBranch < level.nearby.length) return true;
+      if (level.nextBranch > level.nearby.length) return false;
+    }
+    return false;
   }
 
   /** The revision the engine holds once it has applied every message written so far. */
@@ -550,17 +566,38 @@ export class DisplayListBuilder {
     const vy0 = view.y;
     const vx1 = view.x + view.width;
     const vy1 = view.y + view.height;
+    const vcx = (vx0 + vx1) * 0.5;
+    const vcy = (vy0 + vy1) * 0.5;
     for (const entry of cache.entries) {
       const distance =
         Math.max(vx0 - entry.x1, entry.x0 - vx1, vy0 - entry.y1, entry.y0 - vy1) - entry.reach;
       if (distance > margin) continue;
       const visible = distance <= 0;
+      const centerDistance = Math.hypot(
+        (entry.x0 + entry.x1) * 0.5 - vcx,
+        (entry.y0 + entry.y1) * 0.5 - vcy,
+      );
       for (const fill of entry.fills) {
         const meta = this.#image(fill.ref);
         const span = meta
           ? imageDrawnSize(fill.scaleMode, entry.box, meta, entry.scale, fill.crop)
           : null;
-        yield { ref: fill.ref, visible, span };
+        if (span) {
+          yield { ref: fill.ref, visible, span, hint: span, centerDistance };
+        } else {
+          const cropW = fill.crop ? Math.max(0.05, fill.crop.width) : 1;
+          const cropH = fill.crop ? Math.max(0.05, fill.crop.height) : 1;
+          yield {
+            ref: fill.ref,
+            visible,
+            span: null,
+            hint: {
+              width: (entry.box.width * entry.scale.width) / cropW,
+              height: (entry.box.height * entry.scale.height) / cropH,
+            },
+            centerDistance,
+          };
+        }
       }
     }
   }

@@ -1,5 +1,11 @@
-import { describe, expect, it, vi } from "vitest";
-import { ImageCache, imagePlacement, type LoadedImage, layoutImageRow } from "../src/images";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  ImageCache,
+  imagePlacement,
+  type LoadedImage,
+  layoutImageRow,
+  mediaUrl,
+} from "../src/images";
 
 describe("imagePlacement", () => {
   const box = { width: 200, height: 100 };
@@ -269,4 +275,91 @@ describe("ImageCache", () => {
     await ready;
     expect(done).toBe(true);
   });
+
+  it("passes ?w= only when preview is requested and always uses originals for default loads and exports", async () => {
+    const requested: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL) => {
+        const url = String(input);
+        requested.push(url);
+        const w = new URL(url, "https://drawpane.test").searchParams.get("w");
+        return new Response(new Uint8Array([1, 2, 3]), {
+          status: 200,
+          headers: {
+            "content-type": w ? "image/webp" : "image/png",
+            "x-image-width": "3000",
+            "x-image-height": "2000",
+            ...(w ? { "x-image-preview": w } : {}),
+          },
+        });
+      }),
+    );
+    vi.stubGlobal("createImageBitmap", async () => bitmap(3000, 2000));
+    try {
+      expect(mediaUrl("abc")).toBe("/api/media/abc");
+      expect(mediaUrl("abc", 256)).toBe("/api/media/abc?w=256");
+      expect(mediaUrl("abc", 1024)).toBe("/api/media/abc?w=1024");
+
+      const cache = new ImageCache();
+      const signal = new AbortController().signal;
+      const small = await cache.encoded("abc", signal, { preview: 256 });
+      expect(small.preview).toBe(256);
+      expect(small.size).toEqual({ width: 3000, height: 2000 });
+
+      // Export path calls encoded(sha, signal) with no preview option -> full original.
+      const original = await cache.encoded("abc", signal);
+      expect(original.preview).toBeUndefined();
+      expect(original.size).toEqual({ width: 3000, height: 2000 });
+
+      // Default canvas/export loader (get / ready) also fetches the bare original URL.
+      await cache.ready(["abc"]);
+      expect(requested).toEqual(["/api/media/abc?w=256", "/api/media/abc", "/api/media/abc"]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("falls back to the bare original URL whenever a ?w= preview request fails or 404s", async () => {
+    const requested: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL) => {
+        const url = String(input);
+        requested.push(url);
+        const w = new URL(url, "https://drawpane.test").searchParams.get("w");
+        if (w === "256") return new Response("not found", { status: 404 });
+        if (w === "1024") throw new TypeError("network failed");
+        return new Response(new Uint8Array([9, 8, 7]), {
+          status: 200,
+          headers: { "content-type": "image/png", "x-image-width": "800", "x-image-height": "600" },
+        });
+      }),
+    );
+    try {
+      const cache = new ImageCache();
+      const from404 = await cache.encoded("sha1", new AbortController().signal, { preview: 256 });
+      expect(from404.preview).toBeUndefined();
+      expect(from404.size).toEqual({ width: 800, height: 600 });
+      expect(new Uint8Array(await from404.blob.arrayBuffer())).toEqual(new Uint8Array([9, 8, 7]));
+
+      const fromNetErr = await cache.encoded("sha2", new AbortController().signal, {
+        preview: 1024,
+      });
+      expect(fromNetErr.preview).toBeUndefined();
+      expect(fromNetErr.size).toEqual({ width: 800, height: 600 });
+      expect(requested).toEqual([
+        "/api/media/sha1?w=256",
+        "/api/media/sha1",
+        "/api/media/sha2?w=1024",
+        "/api/media/sha2",
+      ]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });

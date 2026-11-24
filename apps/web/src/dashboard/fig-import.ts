@@ -18,6 +18,7 @@
 import type { FigPage, ImportErrorCode, ReadProgress } from "@drawpane/fig";
 import type { NodeRecord } from "@drawpane/model";
 import { api, type FileMeta } from "../api/client";
+import { enqueueMediaPreviews } from "../editor/image-preview";
 import { ImportTooLarge, saveImport } from "./import-save";
 import { detachedNote, type FileImport } from "./penpot-import";
 
@@ -72,7 +73,9 @@ async function upload(fileId: string, bytes: Uint8Array, mime: string): Promise<
   });
   if (response.status === 413 || response.status === 415 || response.status === 400) return null;
   if (!response.ok) throw new Error("Couldn't upload the file's images. Try again.");
-  return ((await response.json()) as { sha: string }).sha;
+  const { sha } = (await response.json()) as { sha: string };
+  enqueueMediaPreviews(sha, new Blob([bytes as Uint8Array<ArrayBuffer>], { type: mime }));
+  return sha;
 }
 
 /** One request to the worker, and its answer; progress on the way goes to `onProgress`. */

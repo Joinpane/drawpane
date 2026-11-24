@@ -1,10 +1,11 @@
-import { Editor, type TextMeasurer } from "@drawpane/editor";
+import { Editor, ImageCache, type TextMeasurer } from "@drawpane/editor";
 import { ErrorCode, MAX_SIDE } from "@drawpane/engine";
 import { type Op, ROOT_ID } from "@drawpane/model";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   EngineSnapshotService,
   isAbortError,
+  prepareSnapshotJob,
   renderEngineRasterExport,
   type SnapshotJobPayload,
   type SnapshotWorkerPort,
@@ -601,5 +602,52 @@ describe("renderEngineRasterExport", () => {
     expect((await jpegPromise).type).toBe("image/jpeg");
 
     service.dispose();
+  });
+
+  it("uses stored previews for detail thumbnails but always fetches full originals for exports", async () => {
+    const ref = "a".repeat(64);
+    const editor = makeEditor([
+      {
+        op: "create",
+        id: "photo",
+        type: "rect",
+        parent: "p",
+        key: "a0",
+        props: {
+          x: 0,
+          y: 0,
+          width: 2000,
+          height: 1500,
+          fills: [{ type: "image", ref, scaleMode: "fill" }],
+        },
+      },
+    ]);
+    const cache = new ImageCache();
+    const encoded = vi.spyOn(cache, "encoded").mockResolvedValue({
+      blob: new Blob([new Uint8Array([1, 2, 3])], { type: "image/webp" }),
+      size: { width: 2000, height: 1500 },
+      preview: 256,
+    });
+
+    await prepareSnapshotJob(editor, {
+      ids: ["photo"],
+      rect: { x: 0, y: 0, width: 2000, height: 1500 },
+      width: 200,
+      height: 150,
+      scale: 0.1,
+      detail: true,
+      images: cache,
+    });
+    expect(encoded).toHaveBeenLastCalledWith(ref, expect.any(AbortSignal), { preview: 256 });
+
+    await prepareSnapshotJob(editor, {
+      ids: ["photo"],
+      rect: { x: 0, y: 0, width: 2000, height: 1500 },
+      width: 200,
+      height: 150,
+      scale: 0.1,
+      images: cache,
+    });
+    expect(encoded).toHaveBeenLastCalledWith(ref, expect.any(AbortSignal), undefined);
   });
 });

@@ -92,6 +92,7 @@ vi.mock("@drawpane/editor", () => ({
     revision = 1;
     stats = { fresh: true, records: 1 };
     opening = false;
+    openingVisible = false;
     setEditorState() {}
     setView() {}
     openSlice(id: string) {
@@ -1210,6 +1211,183 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
       state.gpuFinishedFixture = null;
       (globalThis as unknown as { requestAnimationFrame: typeof origRaf }).requestAnimationFrame =
         origRaf;
+    }
+  });
+
+  it("never reports exact while showing a preview stand-in or after an upgrade fails", async () => {
+    vi.stubGlobal("navigator", {
+      gpu: { requestAdapter: async () => ({ info: { description: "NVIDIA T4" } }) },
+    });
+    vi.stubGlobal("createImageBitmap", async (_blob: Blob, o: ImageBitmapOptions) => ({
+      width: o.resizeWidth ?? 3093,
+      height: o.resizeHeight ?? 2247,
+      close() {},
+    }));
+    let holdFull = true;
+    let failFull = false;
+    const fullResolvers: Array<() => void> = [];
+    const encodedCalls: Array<256 | 1024 | "full"> = [];
+    let version = 0;
+    const editor = { scene: {}, doc: { version: 1 } } as never;
+    const images = {
+      subscribe: () => () => {},
+      natural: () => null,
+      get: () => null,
+      encodedVersion: () => version,
+      encoded: async (_ref: string, _signal: AbortSignal, opts?: { preview?: 256 | 1024 }) => {
+        const tier = opts?.preview ?? "full";
+        encodedCalls.push(tier);
+        if (tier === "full" && holdFull) {
+          await new Promise<void>((resolve) => fullResolvers.push(resolve));
+        }
+        if (tier === "full" && failFull) throw new Error("network down");
+        return {
+          blob: new Blob([String(tier)]),
+          size: { width: 3093, height: 2247 },
+          ...(opts?.preview ? { preview: opts.preview } : {}),
+        };
+      },
+    } as never;
+
+    state.imageDemands = [{ ref: "hero", visible: true, span: { width: 100, height: 75 } }];
+    const view = await EngineView.create(
+      new FakeCanvas(true) as unknown as HTMLCanvasElement,
+      editor,
+      {} as never,
+      images,
+      "engine",
+    );
+    const draw = () =>
+      view?.draw("page", { zoom: 1, x: 0, y: 0 }, 800, 600, 1, "#ffffff", {
+        hidden: new Set(),
+        whole: null,
+      });
+
+    try {
+      // Even at Fit scale (100x75), preview stand-in is never exact while full is in flight.
+      expect(draw()?.exact).toBe(false);
+      await vi.waitFor(() => {
+        const res = draw();
+        expect(encodedCalls).toContain(256);
+        expect(encodedCalls).toContain("full");
+        expect(res?.exact).toBe(false);
+      });
+      expect(view?.last.exact).toBe(false);
+
+      // If full upgrade fails, frame settles with preview visible, reducedImages === 1, exact === false.
+      failFull = true;
+      holdFull = false;
+      for (const done of fullResolvers.splice(0)) done();
+      await vi.waitFor(() => {
+        const res = draw();
+        expect(res?.settled).toBe(true);
+        expect(view?.reducedImages).toBe(1);
+        expect(res?.exact).toBe(false);
+        expect(view?.last.exact).toBe(false);
+      });
+
+      // When a new version arrives and full succeeds, frame transitions to exact === true.
+      failFull = false;
+      version = 1;
+      await vi.waitFor(() => {
+        const res = draw();
+        expect(view?.reducedImages).toBe(0);
+        expect(res?.exact).toBe(true);
+        expect(view?.last.exact).toBe(true);
+      });
+    } finally {
+      holdFull = false;
+      for (const done of fullResolvers.splice(0)) done();
+      state.imageDemands = [];
+      view?.dispose();
+    }
+  });
+
+  it("downloads full originals in parallel while staging GPU replacement uploads until initial preview tiles nearly finish", async () => {
+    vi.stubGlobal("navigator", {
+      gpu: { requestAdapter: async () => ({ info: { description: "NVIDIA T4" } }) },
+    });
+    vi.stubGlobal(
+      "ImageData",
+      class {
+        constructor(readonly data: Uint8ClampedArray) {}
+      },
+    );
+    vi.stubGlobal("createImageBitmap", async (_blob: Blob, o: ImageBitmapOptions) => ({
+      width: o.resizeWidth ?? 3093,
+      height: o.resizeHeight ?? 2247,
+      close() {},
+    }));
+    state.readbackError = false;
+    state.framePending = 4;
+    let holdFull = true;
+    const fullResolvers: Array<() => void> = [];
+    const encodedCalls: Array<256 | 1024 | "full"> = [];
+    const editor = { scene: {}, doc: { version: 1 } } as never;
+    const images = {
+      subscribe: () => () => {},
+      natural: () => null,
+      get: () => null,
+      encodedVersion: () => 0,
+      encoded: async (_ref: string, _signal: AbortSignal, opts?: { preview?: 256 | 1024 }) => {
+        const tier = opts?.preview ?? "full";
+        encodedCalls.push(tier);
+        if (tier === "full" && holdFull) {
+          await new Promise<void>((resolve) => fullResolvers.push(resolve));
+        }
+        return {
+          blob: new Blob([String(tier)]),
+          size: { width: 3093, height: 2247 },
+          ...(opts?.preview ? { preview: opts.preview } : {}),
+        };
+      },
+    } as never;
+
+    state.imageDemands = [{ ref: "hero", visible: true, span: { width: 100, height: 75 } }];
+    const view = await EngineView.create(
+      new FakeCanvas(true) as unknown as HTMLCanvasElement,
+      editor,
+      {} as never,
+      images,
+      "engine",
+    );
+    const draw = () =>
+      view?.draw("fit-page", { zoom: 1, x: 0, y: 0 }, 65, 17, 1, "#ffffff", {
+        hidden: new Set(),
+        whole: null,
+      });
+
+    try {
+      // Preview uploads immediately while full starts downloading in parallel (held).
+      await vi.waitFor(() => {
+        draw();
+        expect(encodedCalls).toEqual([256, "full"]);
+        expect(state.uploadedWidths.filter((w) => w === 193)).toHaveLength(1);
+      });
+
+      // Releasing full while tiles are still baking (framePending = 4 > 2): full decodes in
+      // parallel into the staged batch without issuing a second GPU upload that invalidates tiles.
+      holdFull = false;
+      for (const done of fullResolvers.splice(0)) done();
+      await new Promise((r) => setTimeout(r, 30));
+      draw();
+      expect(state.uploadedWidths.filter((w) => w === 193)).toHaveLength(1);
+
+      // Once initial preview tiles finish (framePending = 0) and present on this 1-tile viewport,
+      // the staged full bitmap flushes immediately and settles exact.
+      state.framePending = 0;
+      await vi.waitFor(() => {
+        const res = draw();
+        expect(state.uploadedWidths.filter((w) => w === 193)).toHaveLength(2);
+        expect(res?.exact).toBe(true);
+      });
+      expect(view?.reducedImages).toBe(0);
+    } finally {
+      holdFull = false;
+      for (const done of fullResolvers.splice(0)) done();
+      state.framePending = 0;
+      state.imageDemands = [];
+      view?.dispose();
     }
   });
 });

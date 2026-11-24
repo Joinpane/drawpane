@@ -52,6 +52,7 @@ import { loadBrowserEngine, loadComputeEngine, loadWebglEngine } from "@drawpane
 import type { CpuWorkerReply, CpuWorkerRequest } from "./engine-cpu.worker";
 import { CPU_IMAGE_BUDGET, CPU_IMAGE_SIDE, ViewImages } from "./engine-image";
 import { fitEngineRaster, MIN_RASTER_SCALE } from "./engine-raster";
+import { backfillMediaPreviews } from "./image-preview";
 import {
   type MotionPolicy,
   motionPolicy,
@@ -1023,13 +1024,24 @@ export class EngineView {
   #consecutiveTimeouts = 0;
   #want: {
     n: number;
+    pageId: string;
     width: number;
     height: number;
     exact: boolean;
+    previewReady: boolean;
+    previewNearlyReady: boolean;
     epoch: number;
     key: string;
     scale: number;
   } | null = null;
+  /** Page whose initial preview-backed frame has painted/presented so staged full uploads can flush. */
+  #previewSettledPage: string | null = null;
+  /** Page where >=85% of initial preview tiles have presented, ready to flush once all originals decode. */
+  #previewNearlySettledPage: string | null = null;
+  /** Last GPU camera/viewport passed to `#updateImages`, used to refresh images silently during `opening`. */
+  #lastCamera: { camera: Camera; width: number; height: number } | null = null;
+  /** True when images updated silently while streaming display-list `opening` slices. */
+  #openingImageDirty = false;
   #gpuRaster: {
     viewport: string;
     revision: number;
@@ -1266,11 +1278,43 @@ export class EngineView {
       images,
       (ref) => {
         this.#builder.imageReady(ref);
+        // While streaming display-list `opening` slices, refresh image demands directly without
+        // cancelling `ahead()` or triggering a full-screen GPU readback for each arriving preview.
+        if (
+          this.#builder.opening &&
+          this.#lastCamera &&
+          this.#presenting?.pageId === this.#builder.pageId
+        ) {
+          this.#openingImageDirty = true;
+          this.#updateImages(
+            this.#presenting.pageId,
+            this.#lastCamera.camera,
+            this.#lastCamera.width,
+            this.#lastCamera.height,
+          );
+          return;
+        }
         this.onChange();
       },
       () => {
         this.#imageVersion++;
+        if (this.#builder.opening && this.#presenting?.pageId === this.#builder.pageId) {
+          this.#openingImageDirty = true;
+          return;
+        }
         this.onChange();
+      },
+      undefined,
+      (ref, blob) => {
+        if (this.#editor.canEdit && images.encodedUrl?.(ref)?.startsWith("/api/media/")) {
+          backfillMediaPreviews(ref, blob);
+        }
+      },
+      () => {
+        const pageId = this.#presenting?.pageId;
+        if (pageId && this.#previewNearlySettledPage === pageId) {
+          this.#releasePreviewRefine(pageId);
+        }
       },
     );
     this.#choice = choice;
@@ -1723,6 +1767,13 @@ export class EngineView {
           breakdown: { ...this.last.breakdown, render: msg.ms },
         };
         this.onPresented(frameExact && msg.jobId === this.#cpuJobId, job.frame);
+        if (
+          msg.tiles.pending === 0 &&
+          this.#builder.pendingVisible === 0 &&
+          this.#images.allVisiblePreviewResident
+        ) {
+          this.#releasePreviewRefine(job.pageId);
+        }
         // Once the visible frame is exact, let the idle loop finish shaping any offscreen text.
         if (frameExact && this.#builder.pending > 0) this.onChange();
       }
@@ -1740,6 +1791,7 @@ export class EngineView {
     this.#reading = false;
     this.#shownWaiting = false;
     this.#want = null;
+    this.#previewSettledPage = null;
     this.#consecutiveTimeouts = 0;
     this.#gpuRaster = null;
     this.#pendingRasterLimit = null;
@@ -2071,6 +2123,7 @@ export class EngineView {
 
   #evictImages = (): void => {
     this.#images.evict(true);
+    this.#previewSettledPage = null;
     this.#engine?.clearViewCaches();
     this.#cpuWorker?.postMessage({ type: "clear-view-caches" } satisfies CpuWorkerRequest);
     this.#imageVersion++;
@@ -2088,7 +2141,14 @@ export class EngineView {
     }
   };
 
-  #updateImages(camera: Camera, width: number, height: number): boolean {
+  #releasePreviewRefine(pageId: string): void {
+    if (this.#previewSettledPage === pageId) return;
+    this.#previewSettledPage = pageId;
+    this.#previewNearlySettledPage = pageId;
+    this.#images.setDeferRefine(false);
+  }
+
+  #updateImages(pageId: string, camera: Camera, width: number, height: number): boolean {
     if (document.visibilityState === "hidden") return false;
     const scale = camera.zoom * camera.dpr;
     const region = {
@@ -2099,7 +2159,13 @@ export class EngineView {
     };
     // The image cache covers the visible tiles plus the neighbouring tile ring.
     const demands = this.#builder.imageDemands(region, 1024 / scale);
-    return this.#images.update(demands, scale, this.#imageLimits);
+    const opening = this.#builder.opening;
+    // Defer Lane C exactness refinement while visible layers are still being discovered or while
+    // the initial preview frame is shaping visible text / baking its first visible tiles.
+    const deferRefine =
+      Boolean(this.#builder.openingVisible) ||
+      (!opening && (this.#builder.pendingVisible > 0 || this.#previewSettledPage !== pageId));
+    return this.#images.update(demands, scale, this.#imageLimits, undefined, deferRefine, opening);
   }
 
   get reducedImages(): number {
@@ -2126,13 +2192,16 @@ export class EngineView {
     if (!message) return true;
     const t1 = performance.now();
     let r = engine.apply(message);
-    if (this.#builder.stats.fresh)
+    if (this.#builder.stats.fresh) {
+      this.#previewSettledPage = null;
+      this.#previewNearlySettledPage = null;
       this.opened = {
         pageId,
         buildMs: t1 - t0,
         applyMs: performance.now() - t1,
         records: this.#builder.stats.records,
       };
+    }
     this.#builder.acknowledge(r.ok, engine.revision);
     if (!r.ok && r.code === ErrorCode.Revision) {
       message = this.#builder.openSlice(pageId, openMs);
@@ -2189,13 +2258,16 @@ export class EngineView {
     worker.postMessage({ type: "apply", bytes: copy.buffer, attempt } satisfies CpuWorkerRequest, [
       copy.buffer,
     ]);
-    if (this.#builder.stats.fresh)
+    if (this.#builder.stats.fresh) {
+      this.#previewSettledPage = null;
+      this.#previewNearlySettledPage = null;
       this.opened = {
         pageId,
         buildMs: t1 - t0,
         applyMs: performance.now() - t1,
         records: this.#builder.stats.records,
       };
+    }
     this.#images.retain(this.#builder.imagesInUse());
     return true;
   }
@@ -2237,6 +2309,12 @@ export class EngineView {
     if (this.#dead || this.#recovering) return NOT_DRAWN;
     const at = this.#presenting;
     if (!at || at.pageId !== pageId || at.width !== width || at.height !== height) {
+      if (!at || at.pageId !== pageId) {
+        this.#previewSettledPage = null;
+        this.#previewNearlySettledPage = null;
+        this.#lastCamera = null;
+        this.#openingImageDirty = false;
+      }
       this.#supersede();
       this.#presenting = { pageId, width, height };
     }
@@ -2282,6 +2360,14 @@ export class EngineView {
         maxSliceMs: Math.max(this.idle.maxSliceMs, elapsed),
       };
       if (b.opening) {
+        if (this.#lastCamera) {
+          this.#updateImages(
+            pageId,
+            this.#lastCamera.camera,
+            this.#lastCamera.width,
+            this.#lastCamera.height,
+          );
+        }
         return {
           progressed: true,
           drawn: 0,
@@ -2293,6 +2379,10 @@ export class EngineView {
         };
       }
       // All layers are admitted: let the next frame draw the full-page coarse view and refine.
+      if (this.#openingImageDirty) {
+        this.#openingImageDirty = false;
+        this.onChange();
+      }
       return {
         progressed: false,
         drawn: 0,
@@ -2478,7 +2568,9 @@ export class EngineView {
       return NOT_DRAWN;
     }
     const cam: Camera = { zoom: camera.zoom, x: camera.x, y: camera.y, dpr };
-    const imagesExact = this.#updateImages(cam, width, height);
+    this.#lastCamera = { camera: cam, width, height };
+    const imagesSettled = this.#updateImages(pageId, cam, width, height);
+    const imagesExact = imagesSettled && this.#images.reduced === 0;
     // While text in view is still to be sent whole, a frame draws only what nothing stands in
     // for (as while moving): a tile drawn now would be stale again when the text arrives, and the
     // time between frames sends the text first.
@@ -2631,6 +2723,19 @@ export class EngineView {
       imagesExact &&
       this.#builder.pendingVisible === 0 &&
       !this.#limitReason;
+    const visibleTiles = Math.max(
+      1,
+      Math.ceil(raster.width / 512) * Math.ceil(raster.height / 512),
+    );
+    const maxEarlyFlushPending = Math.floor(visibleTiles * 0.15);
+    const previewNearlyReady =
+      !opening &&
+      !computeBehind &&
+      f.tiles.pending <= maxEarlyFlushPending &&
+      this.#builder.pendingVisible === 0 &&
+      this.#images.allVisiblePreviewResident;
+    const previewFrameReady =
+      previewNearlyReady && (f.tiles.pending === 0 || this.#images.allVisibleFullReady);
     this.#canvas.style.backgroundColor = "";
     const n = ++this.#frame;
     if (opening && this.#builder.stats.fresh) {
@@ -2712,14 +2817,22 @@ export class EngineView {
     if (this.#readback) {
       this.#want = {
         n,
+        pageId,
         width: raster.width,
         height: raster.height,
         exact: shownExact,
+        previewReady: previewFrameReady,
+        previewNearlyReady,
         epoch: this.#epoch,
         key: frameKey,
         scale: raster.scale,
       };
       this.#readNext();
+    } else {
+      if (previewNearlyReady) this.#previewNearlySettledPage = pageId;
+      if (previewFrameReady || (previewNearlyReady && this.#images.allVisibleFullReady)) {
+        this.#releasePreviewRefine(pageId);
+      }
     }
     this.last = {
       pageId,
@@ -2966,7 +3079,8 @@ export class EngineView {
     const renderH = bounded.height;
     const fullResolution = renderW === width && renderH === height;
     const cam: Camera = { zoom: camera.zoom, x: camera.x, y: camera.y, dpr: bounded.dpr };
-    const imagesExact = this.#updateImages(cam, renderW, renderH);
+    const imagesSettled = this.#updateImages(pageId, cam, renderW, renderH);
+    const imagesExact = imagesSettled && this.#images.reduced === 0;
     const sceneKey = `${pageId}|${this.#cpuRevision}|${this.#imageVersion}|${width}x${height}|${renderW}x${renderH}|${cam.zoom}|${cam.x}|${cam.y}|${cam.dpr}|${background}`;
     const hasPendingText = this.#builder.pending > 0;
     const textFirst = this.#builder.pendingVisible > 0;
@@ -3147,6 +3261,7 @@ export class EngineView {
         return;
       }
       if (!px.ok) {
+        if (want.previewReady) this.#releasePreviewRefine(want.pageId);
         // Keep the existing timeout backoff in charge of waking the next opening slice.
         if (this.#openingFrame === want.n) this.#clearOpeningFrame();
         if (px.code === ErrorCode.Limit) {
@@ -3287,6 +3402,10 @@ export class EngineView {
       this.readbackDiag.presented++;
       this.#diagEvent("present", want.n, { ms: Math.round(performance.now() - t) });
       this.onPresented(want.exact && want.n === this.#frame, want.n);
+      if (want.previewNearlyReady) this.#previewNearlySettledPage = want.pageId;
+      if (want.previewReady || (want.previewNearlyReady && this.#images.allVisibleFullReady)) {
+        this.#releasePreviewRefine(want.pageId);
+      }
       this.#completeOpeningFrame(want.n);
       this.#readNext();
     });

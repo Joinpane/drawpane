@@ -8,6 +8,7 @@
  * downscaled copy (made once, also off the main thread), which is both
  * sharper and cheaper than shrinking a full-size bitmap every frame.
  */
+import { type MediaPreviewSize, parseMediaPreviewSize } from "@drawpane/model";
 import type { Point, Rect } from "./geometry";
 
 export type ScaleMode = "fill" | "fit" | "tile" | "stretch" | "crop";
@@ -177,8 +178,22 @@ async function defaultResize(bitmap: ImageBitmap, width: number, height: number)
   });
 }
 
-export function mediaUrl(sha: string): string {
-  return `/api/media/${sha}`;
+export interface EncodedImage {
+  readonly blob: Blob;
+  readonly size?: Size;
+  /** Preview long-side size served by the Worker, or undefined when full original bytes were returned. */
+  readonly preview?: MediaPreviewSize;
+  /** True when a `?w=` preview was requested but none is stored yet (server streamed the original). */
+  readonly previewMissing?: boolean;
+}
+
+export interface EncodedImageOptions {
+  /** Request a fixed stored preview tier instead of the full original. */
+  readonly preview?: MediaPreviewSize;
+}
+
+export function mediaUrl(sha: string, preview?: MediaPreviewSize): string {
+  return preview ? `/api/media/${sha}?w=${preview}` : `/api/media/${sha}`;
 }
 
 function defaultLoader(
@@ -307,13 +322,50 @@ export class ImageCache {
     return this.#encodedVersions.get(sha) ?? 0;
   }
 
+  /** Base URL used to fetch `sha` (defaults to `/api/media/<sha>`). */
+  encodedUrl(sha: string): string {
+    return this.#url(sha);
+  }
+
   /** Reads stored media without populating the canvas renderer's decoded cache. */
-  async encoded(sha: string, signal: AbortSignal): Promise<{ blob: Blob; size?: Size }> {
+  async encoded(
+    sha: string,
+    signal: AbortSignal,
+    options?: EncodedImageOptions,
+  ): Promise<EncodedImage> {
     const local = this.#localSources.get(sha);
     if (local) return local;
-    const response = await fetch(this.#url(sha), { credentials: "same-origin", signal });
+    const base = this.#url(sha);
+    const readResponse = async (response: Response): Promise<EncodedImage> => {
+      const headerW = Number(response.headers.get("x-image-width"));
+      const headerH = Number(response.headers.get("x-image-height"));
+      const size =
+        Number.isFinite(headerW) && headerW > 0 && Number.isFinite(headerH) && headerH > 0
+          ? { width: headerW, height: headerH }
+          : undefined;
+      const preview = parseMediaPreviewSize(response.headers.get("x-image-preview"));
+      const previewMissing = response.headers.get("x-image-preview-missing") === "1";
+      return {
+        blob: await response.blob(),
+        ...(size ? { size } : {}),
+        ...(preview ? { preview } : {}),
+        ...(previewMissing ? { previewMissing: true } : {}),
+      };
+    };
+    if (options?.preview) {
+      const previewUrl = `${base}${base.includes("?") ? "&" : "?"}w=${options.preview}`;
+      try {
+        const response = await fetch(previewUrl, { credentials: "same-origin", signal });
+        if (response.ok) return await readResponse(response);
+        await response.body?.cancel().catch(() => {});
+      } catch (err) {
+        if (signal.aborted) throw err;
+        // Fall through to the original URL whenever a preview fetch errors.
+      }
+    }
+    const response = await fetch(base, { credentials: "same-origin", signal });
     if (!response.ok) throw new Error(`Image ${sha} answered ${response.status}`);
-    return { blob: await response.blob() };
+    return readResponse(response);
   }
 
   /** Adds an image decoded elsewhere (a file just dropped), so it draws before its upload ends. */

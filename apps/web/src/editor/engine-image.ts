@@ -1,10 +1,25 @@
 import type { ImageCache, ImageDemand, Size } from "@drawpane/editor";
 import type { RenderEngine } from "@drawpane/engine";
-import { sniffImage } from "@drawpane/model";
+import {
+  exifOrientationComplete,
+  MEDIA_PREVIEW_SIZES,
+  type MediaPreviewSize,
+  mediaPreviewDimensions,
+  sniffImage,
+} from "@drawpane/model";
 import type { DecodeReply, DecodeRequest } from "./image-decode.worker";
 
 const MIB = 1024 * 1024;
 const MAX_DECODES = 4;
+const MAX_FETCHES = 6;
+/** Dedicated fetch slots reserved for urgent direct-full / upgrade fetches. */
+const URGENT_FETCH_SLOTS = 2;
+/** Dedicated fetch slots reserved strictly for visible previews (`?w=256` / `?w=1024`). */
+const PREVIEW_FETCH_SLOTS = 4;
+/** Concurrent visible original-refinement slots shared alongside active preview fetches. */
+const REFINE_CONCURRENT_SLOTS = 2;
+/** Cap on decoded full-original bitmaps staged for batched GPU upload after initial preview paint. */
+const STAGED_UPLOAD_BYTES = 16 * MIB;
 const PREFETCH_RATIOS = [2, 4];
 const DECODE_BYTES = 64 * MIB;
 const ZOOM_SAMPLE_MS = 100;
@@ -12,10 +27,57 @@ const ZOOM_LOOKAHEAD_MS = 180;
 const MAX_ZOOM_LOOKAHEAD = 8;
 const UPLOAD_SLICE_BYTES = 12 * MIB;
 const REQUEST_TIMEOUT_MS = 8000;
+/** Full originals (up to 20 MB) need a wider timeout than small previews on slow links (e.g. 10 Mbps). */
+const FULL_FETCH_TIMEOUT_MS = 30_000;
 const SOURCE_BUDGET = 64 * MIB;
 const MAX_BITMAP_SIDE = 4096;
+const LARGEST_PREVIEW_TIER = MEDIA_PREVIEW_SIZES[MEDIA_PREVIEW_SIZES.length - 1] ?? 1024;
 export const CPU_IMAGE_BUDGET = 64 * MIB;
 export const CPU_IMAGE_SIDE = MAX_BITMAP_SIDE;
+
+export type ImageTier = MediaPreviewSize | "full";
+type FetchLane = "urgent" | "preview" | "refine" | "background";
+
+function tierRank(tier: ImageTier): number {
+  return tier === "full" ? Number.POSITIVE_INFINITY : tier;
+}
+
+/** True when a decoded/cached `have` tier satisfies a demand for `need`. */
+export function tierCovers(have: ImageTier, need: ImageTier): boolean {
+  return tierRank(have) >= tierRank(need);
+}
+
+/**
+ * Smallest server tier that supplies enough pixels for an immediate preview of `target` on an
+ * image of `natural` size. When the view demands `> 1024` pixels, or the chosen mip level already
+ * requires full natural resolution (`natural <= demanded` or `target >= natural`), returns `"full"`
+ * so upgrades fetch directly in Lane A without sitting behind `?w=256` bursts.
+ * Previews are never considered exact: visible images always refine to `"full"` at rest.
+ */
+export function tierForTarget(natural: Size, target: Size, demanded?: number): ImageTier {
+  const naturalLong = Math.max(natural.width, natural.height);
+  const targetLong = Math.max(target.width, target.height);
+  if (demanded !== undefined && (demanded > LARGEST_PREVIEW_TIER || naturalLong <= demanded)) {
+    return "full";
+  }
+  if (target.width >= natural.width && target.height >= natural.height) {
+    return "full";
+  }
+  for (const size of MEDIA_PREVIEW_SIZES) {
+    if (targetLong <= size) return size;
+  }
+  return "full";
+}
+
+/** Initial network tier chosen before natural dimensions are known, using the layout box hint. */
+export function initialTierForDemand(visible: boolean, demandedPx: number): ImageTier {
+  if (!visible) return MEDIA_PREVIEW_SIZES[0];
+  if (demandedPx > LARGEST_PREVIEW_TIER) return "full";
+  for (const size of MEDIA_PREVIEW_SIZES) {
+    if (demandedPx <= size) return size;
+  }
+  return "full";
+}
 
 export function deviceImageBudget(max: number): number {
   const navigator = globalThis.navigator as (Navigator & { deviceMemory?: number }) | undefined;
@@ -43,19 +105,53 @@ interface ImageInfo extends Size {
 }
 
 interface Source {
-  readonly info: ImageInfo;
+  info: ImageInfo;
   version: number;
-  blob?: Blob;
+  readonly blobs: Map<ImageTier, Blob>;
+  /** True when the server streamed the original (no previews exist) or a preview failed decode. */
+  fullOnly: boolean;
+  /** True once `info` has been verified against the original image bytes (not just preview headers). */
+  naturalVerified: boolean;
   used: number;
   pyramidMaxSide?: number;
   pyramid?: { zoom: Size[]; rest: Size[] };
+}
+
+interface MetaDemand {
+  visible: boolean;
+  demandedPx: number;
+  centerDistance: number;
 }
 
 interface Target extends Size {
   readonly ref: string;
   readonly handle: number;
   readonly priority: number;
+  readonly tier: ImageTier;
+  /** Preview tier that suffices for immediate display (may be smaller than `tier: "full"`). */
+  readonly previewTier?: ImageTier;
+  /** Largest demanded pixel edge on screen, used to order fetches and refinements. */
+  readonly demandedPx?: number;
+  /** Nearest layer bounds distance to the viewport centre, used as visual-importance tie-breaker. */
+  readonly centerDistance?: number;
   readonly forecast?: boolean;
+  readonly standIn?: boolean;
+}
+
+interface StagedUpload {
+  readonly target: Target;
+  readonly bitmap: ImageBitmap;
+  readonly bytes: number;
+}
+
+/** Visual importance ordering: largest on-screen span first, nearest the viewport centre first. */
+function compareImportance(
+  a: { readonly demandedPx?: number; readonly centerDistance?: number },
+  b: { readonly demandedPx?: number; readonly centerDistance?: number },
+): number {
+  const spanDiff = Math.round(b.demandedPx ?? 0) - Math.round(a.demandedPx ?? 0);
+  if (spanDiff !== 0) return spanDiff;
+  return (a.centerDistance ?? Infinity) - (b.centerDistance ?? Infinity);
 }
 
 interface Resident extends Target {
@@ -69,7 +165,11 @@ interface ImageBackend {
 }
 
 const bytes = ({ width, height }: Size) => width * height * 4;
-const keyOf = ({ handle, width }: Target) => `${handle}/${width}`;
+const levelKey = ({ handle, width }: { handle: number; width: number }) => `${handle}/${width}`;
+const jobKey = ({ handle, width, tier }: { handle: number; width: number; tier: ImageTier }) =>
+  `${handle}/${width}/${tier}`;
+const fetchKey = (ref: string, tier: ImageTier) => `fetch:${ref}/${tier}`;
+const metaKey = (ref: string) => `meta:${ref}`;
 const resize = ({ width, height }: Size): ImageBitmapOptions => ({
   resizeWidth: width,
   resizeHeight: height,
@@ -79,6 +179,52 @@ const resize = ({ width, height }: Size): ImageBitmapOptions => ({
 
 function fits(level: Size, needed: Size): boolean {
   return level.width >= needed.width && level.height >= needed.height;
+}
+
+function satisfies(
+  level: { readonly width: number; readonly height: number; readonly tier: ImageTier },
+  needed: { readonly width: number; readonly height: number; readonly tier: ImageTier },
+): boolean {
+  return fits(level, needed) && tierCovers(level.tier, needed.tier);
+}
+
+function cachedBlobFor(
+  source: Source,
+  need: ImageTier,
+): { readonly tier: ImageTier; readonly blob: Blob } | undefined {
+  let bestTier: ImageTier | undefined;
+  let bestBlob: Blob | undefined;
+  for (const [tier, blob] of source.blobs) {
+    if (!tierCovers(tier, need)) continue;
+    if (!bestTier || tierRank(tier) < tierRank(bestTier)) {
+      bestTier = tier;
+      bestBlob = blob;
+    }
+  }
+  return bestTier && bestBlob ? { tier: bestTier, blob: bestBlob } : undefined;
+}
+
+function largestCachedBlob(
+  source: Source,
+): { readonly tier: ImageTier; readonly blob: Blob } | undefined {
+  let bestTier: ImageTier | undefined;
+  let bestBlob: Blob | undefined;
+  for (const [tier, blob] of source.blobs) {
+    if (!bestTier || tierRank(tier) > tierRank(bestTier)) {
+      bestTier = tier;
+      bestBlob = blob;
+    }
+  }
+  return bestTier && bestBlob ? { tier: bestTier, blob: bestBlob } : undefined;
+}
+
+function storeBlob(source: Source, tier: ImageTier, blob: Blob): void {
+  source.blobs.set(tier, blob);
+  // Once a finer tier is cached, smaller preview blobs are redundant because local decoding can
+  // downscale from the finer blob directly.
+  for (const existing of [...source.blobs.keys()]) {
+    if (tierRank(existing) < tierRank(tier)) source.blobs.delete(existing);
+  }
 }
 
 function levels(size: Size, maxSide: number): { zoom: Size[]; rest: Size[] } {
@@ -230,32 +376,87 @@ async function naturalSize(blob: Blob, signal: AbortSignal): Promise<Size> {
   return size;
 }
 
+const EXIF_HEAD_BYTES = 65_536;
+
+/**
+ * Determines the authoritative display-oriented natural size of a full original blob.
+ * Reads PNG/GIF and standard JPEG/WebP headers in O(1) without an extra full decode, and falls
+ * back to `createImageBitmap(blob)` whenever EXIF may lie past 64 KB or headers are absent.
+ */
+async function originalNaturalSize(
+  blob: Blob,
+  signal: AbortSignal,
+  fallbackSize?: Size,
+): Promise<Size | null> {
+  const head = new Uint8Array(await blob.slice(0, EXIF_HEAD_BYTES).arrayBuffer());
+  const sniffed = sniffImage(head);
+  if (sniffed) {
+    if (sniffed.mime === "image/png" || sniffed.mime === "image/gif") {
+      return { width: sniffed.width, height: sniffed.height };
+    }
+    const orientation = exifOrientationComplete(head);
+    if (orientation !== null) {
+      return orientation >= 5 && orientation <= 8
+        ? { width: sniffed.height, height: sniffed.width }
+        : { width: sniffed.width, height: sniffed.height };
+    }
+    try {
+      return await naturalSize(blob, signal);
+    } catch {
+      return null;
+    }
+  }
+  if (fallbackSize) return fallbackSize;
+  try {
+    return await naturalSize(blob, signal);
+  } catch {
+    return null;
+  }
+}
+
 /** One view's bounded set of image levels. The sources can be decoded again after eviction. */
 export class ViewImages {
   readonly #sources = new Map<string, Source>();
+  /** Resident GPU/CPU textures keyed by `levelKey(handle, width)` (matches Rust engine). */
   readonly #residents = new Map<string, Resident>();
-  readonly #jobs = new Map<string, { ref: string; abort: AbortController; target?: Target }>();
+  /** Active worker decode/upload jobs keyed by `jobKey(handle, width, tier)`. */
+  readonly #decodeJobs = new Map<string, { ref: string; abort: AbortController; target: Target }>();
+  /** Active network fetches keyed by `metaKey(ref)` or `fetchKey(ref, tier)`. */
+  readonly #fetchJobs = new Map<
+    string,
+    { ref: string; abort: AbortController; tier: ImageTier; lane: FetchLane }
+  >();
   readonly #retryAt = new Map<string, { at: number; attempts: number; version: number }>();
   readonly #denied = new Set<string>();
   readonly #failed = new Map<string, number>();
+  /** Refs whose `?w=` preview failed decoding and must bypass previews for the full original. */
+  readonly #previewBroken = new Set<string>();
+  /** Decoded full-original replacement bitmaps staged until initial preview paint presents. */
+  readonly #staged = new Map<string, StagedUpload>();
   readonly #protected = new Set<string>();
   #fallbacks = new Map<string, Target>();
   #primary = new Map<string, Target>();
   #visible = new Set<string>();
   #targets = new Map<string, Target>();
-  #metadata = new Map<string, boolean>();
+  #metadata = new Map<string, MetaDemand>();
   #backend: ImageBackend | null = null;
   #budget = 0;
   #hidden = false;
+  #zooming = false;
+  #deferRefine = false;
+  #opening = false;
   #reduced = 0;
   #uploadedThisFrame = 0;
   #uploadFrame: Promise<void> | undefined;
   #inflightBytes = 0;
+  #stagedBytes = 0;
+  #flushingStaged = false;
   #uploadTail = Promise.resolve();
   #residentBytes = 0;
   #clock = 0;
   #nextHandle = 1;
   #retryTimer: ReturnType<typeof setTimeout> | undefined;
+  #refineTimer: ReturnType<typeof setTimeout> | undefined;
   #zoomSample: { scale: number; at: number } | undefined;
   #forecastScale = 0;
 
@@ -264,6 +465,8 @@ export class ViewImages {
     private readonly metadataReady: (ref: string) => void,
     private readonly changed: () => void,
     private readonly decode: Decode = decodeInWorker,
+    private readonly onPreviewMissing?: (ref: string, blob: Blob) => void,
+    private readonly onAllVisibleFullReady?: () => void,
   ) {}
 
   info(ref: string): ImageInfo | null {
@@ -282,6 +485,43 @@ export class ViewImages {
     return this.#reduced;
   }
 
+  /** True when every visible image has a resident texture (or cannot load) and no urgent/preview fetch is running. */
+  get allVisiblePreviewResident(): boolean {
+    return this.#allVisibleHaveResident();
+  }
+
+  /** True when every visible primary image is either resident at `"full"` or decoded and staged at `"full"`. */
+  get allVisibleFullReady(): boolean {
+    for (const demand of this.#metadata.values()) {
+      if (demand.visible) return false;
+    }
+    let count = 0;
+    for (const target of this.#primary.values()) {
+      count++;
+      if (this.#hasSatisfyingResident(target)) continue;
+      const staged = this.#staged.get(levelKey(target));
+      if (staged && satisfies(staged.target, target)) continue;
+      return false;
+    }
+    return count > 0;
+  }
+
+  /** Controls whether full-original GPU replacement uploads stage for batch flush after initial preview paint. */
+  setDeferRefine(defer: boolean): void {
+    if (this.#deferRefine === defer) return;
+    this.#deferRefine = defer;
+    if (!defer) {
+      this.#flushStaged();
+      this.#pump();
+    }
+  }
+
+  #clearStaged(): void {
+    for (const entry of this.#staged.values()) entry.bitmap.close();
+    this.#staged.clear();
+    this.#stagedBytes = 0;
+  }
+
   setBackend(backend: ImageBackend | null): void {
     this.evict();
     this.#denied.clear();
@@ -290,12 +530,17 @@ export class ViewImages {
 
   /** Releases pixel memory and cancels work which could bring it back while hidden. */
   evict(keepVisible = false): void {
-    for (const { abort } of this.#jobs.values()) abort.abort();
+    for (const { abort } of this.#decodeJobs.values()) abort.abort();
+    for (const { abort } of this.#fetchJobs.values()) abort.abort();
+    this.#clearStaged();
     this.#hidden = keepVisible;
     const keep = keepVisible ? this.#closestVisible() : new Map<string, Resident>();
     for (const [key, level] of this.#residents) {
       const thumbnail = this.#fallbacks.get(level.ref);
-      if (keep.get(level.ref) !== level && (!keepVisible || !thumbnail || keyOf(thumbnail) !== key))
+      if (
+        keep.get(level.ref) !== level &&
+        (!keepVisible || !thumbnail || levelKey(thumbnail) !== key)
+      )
         this.#drop(key);
     }
     this.#targets.clear();
@@ -308,14 +553,28 @@ export class ViewImages {
     this.#protected.clear();
     this.#zoomSample = undefined;
     this.#forecastScale = 0;
+    this.#zooming = false;
+    this.#deferRefine = false;
+    this.#opening = false;
     clearTimeout(this.#retryTimer);
     this.#retryTimer = undefined;
+    clearTimeout(this.#refineTimer);
+    this.#refineTimer = undefined;
   }
 
   retain(used: ReadonlySet<string>): void {
-    for (const { ref, abort } of this.#jobs.values()) if (!used.has(ref)) abort.abort();
+    for (const { ref, abort } of this.#decodeJobs.values()) if (!used.has(ref)) abort.abort();
+    for (const { ref, abort } of this.#fetchJobs.values()) if (!used.has(ref)) abort.abort();
+    for (const [key, entry] of this.#staged) {
+      if (!used.has(entry.target.ref)) {
+        entry.bitmap.close();
+        this.#stagedBytes -= entry.bytes;
+        this.#staged.delete(key);
+      }
+    }
     for (const ref of this.#sources.keys()) if (!used.has(ref)) this.#sources.delete(ref);
     for (const ref of this.#metadata.keys()) if (!used.has(ref)) this.#metadata.delete(ref);
+    for (const ref of this.#previewBroken) if (!used.has(ref)) this.#previewBroken.delete(ref);
     for (const [key, target] of this.#targets) if (!used.has(target.ref)) this.#targets.delete(key);
     for (const [key, level] of this.#residents) if (!used.has(level.ref)) this.#drop(key);
   }
@@ -335,19 +594,62 @@ export class ViewImages {
     return this.#forecastScale;
   }
 
+  #clearRetries(ref: string, version: number): void {
+    for (const [key, retry] of this.#retryAt) {
+      if (retry.version !== version && (key === metaKey(ref) || key.startsWith(`fetch:${ref}/`))) {
+        this.#retryAt.delete(key);
+      }
+    }
+  }
+
+  #previewTierOf(source: Source, ref: string, size: Size, demanded?: number): ImageTier {
+    if (source.fullOnly || this.#previewBroken.has(ref)) return "full";
+    return tierForTarget(source.info, size, demanded);
+  }
+
+  #initialTierOf(ref: string, demand: MetaDemand): ImageTier {
+    if (this.#previewBroken.has(ref)) return "full";
+    return initialTierForDemand(demand.visible, demand.demandedPx);
+  }
+
+  #fetchTierForTarget(target: Target): ImageTier {
+    if (target.priority > 0) return target.tier;
+    const source = this.#sources.get(target.ref);
+    if (!source || source.fullOnly || this.#previewBroken.has(target.ref)) return "full";
+    const previewNeed = target.previewTier ?? "full";
+    if (previewNeed === "full") return "full";
+    if (cachedBlobFor(source, previewNeed)) return "full";
+    // While actively zooming, fetch intermediate preview tiers first; at rest, go straight to full
+    // if a smaller preview is already cached locally.
+    if (!this.#zooming && largestCachedBlob(source)) return "full";
+    return previewNeed;
+  }
+
+  #isUrgentTarget(target: Target): boolean {
+    if (target.priority !== 0 || target.standIn) return false;
+    const source = this.#sources.get(target.ref);
+    if (!source) return false;
+    const previewNeed = target.previewTier ?? "full";
+    return !cachedBlobFor(source, previewNeed);
+  }
+
   update(
     demands: Iterable<ImageDemand>,
     scale: number,
     limits: { side: number; bytes: number },
     now = performance.now(),
+    deferRefine = false,
+    opening = false,
   ): boolean {
     if (!this.#backend) return true;
     this.#hidden = false;
+    clearTimeout(this.#refineTimer);
+    this.#refineTimer = undefined;
     const budget = deviceImageBudget(limits.bytes);
     if (budget !== this.#budget) this.#denied.clear();
     const maxSide = Math.min(MAX_BITMAP_SIDE, limits.side);
     const candidates = new Map<string, Target>();
-    const metadata = new Map<string, boolean>();
+    const metadata = new Map<string, MetaDemand>();
     const ideal = new Map<string, Target>();
     const forecasts = new Map<string, Target>();
     const fallbacks = new Map<string, Target>();
@@ -364,24 +666,37 @@ export class ViewImages {
     const scaleChanged = this.#zoomSample !== undefined && this.#zoomSample.scale !== scale;
     const forecastScale = this.#predictScale(scale, now);
     const zooming = scaleChanged || forecastScale > scale;
+    this.#zooming = zooming;
+    this.#deferRefine = deferRefine;
+    this.#opening = opening;
 
-    for (const { ref, visible: onScreen, span } of demands) {
+    for (const { ref, visible: onScreen, span, hint, centerDistance } of demands) {
       if (onScreen) visible.add(ref);
       const source = this.#sources.get(ref);
       const version = this.cache.encodedVersion(ref);
-      const retry = this.#retryAt.get(ref);
-      if (retry && retry.version !== version) this.#retryAt.delete(ref);
+      this.#clearRetries(ref, version);
       if (source && source.version !== version) {
         source.version = version;
-        delete source.blob;
+        source.blobs.clear();
+        source.fullOnly = false;
+        source.naturalVerified = false;
+        this.#previewBroken.delete(ref);
       }
       if (this.#failed.get(ref) === version) {
         if (onScreen) reduced.add(ref);
         continue;
       }
       if (!source) {
-        metadata.set(ref, onScreen || Boolean(metadata.get(ref)));
-        if (onScreen && this.#retryAt.has(ref)) reduced.add(ref);
+        const estSpan = span ?? hint;
+        const estPx = estSpan ? Math.max(estSpan.width, estSpan.height) * scale : 0;
+        const dist = centerDistance ?? Infinity;
+        const prev = metadata.get(ref);
+        metadata.set(ref, {
+          visible: onScreen || Boolean(prev?.visible),
+          demandedPx: Math.max(prev?.demandedPx ?? 0, onScreen ? estPx : 0),
+          centerDistance: Math.min(prev?.centerDistance ?? Infinity, onScreen ? dist : Infinity),
+        });
+        if (onScreen && this.#retryAt.has(metaKey(ref))) reduced.add(ref);
         continue;
       }
       if (!span) continue;
@@ -399,77 +714,170 @@ export class ViewImages {
       }
       const sizing = zooming ? pyramid.zoom : pyramid.rest;
       const handle = source.info.handle;
-      const size = pyramid.rest[levelFor(pyramid.rest, span, scale)];
+      const demanded = Math.max(span.width, span.height) * scale;
+      let size = pyramid.rest[levelFor(pyramid.rest, span, scale)];
       if (!size) continue;
-      const wanted = { ...size, ref, handle, priority: onScreen ? 0 : 3 };
-      if (onScreen) ideal.set(keyOf(wanted), wanted);
-      let available = sizing
-        .slice(levelFor(sizing, span, scale))
-        .find((level) => !this.#denied.has(keyOf({ ...wanted, ...level })));
-      if (onScreen && available) {
-        // A prefetched level can satisfy the current view. Charge its real
-        // size to the plan so it still gives way under budget pressure.
+
+      // Strict exactness rule: visible images always require original-backed pixels (`"full"`).
+      // Off-screen neighbouring ring stays capped to the smallest preview over the network.
+      let tier: ImageTier = "full";
+      const previewTier = this.#previewTierOf(source, ref, size, demanded);
+      if (!onScreen && !cachedBlobFor(source, "full")) {
+        const maxOffscreen = MEDIA_PREVIEW_SIZES[0];
+        const capped =
+          pyramid.zoom.find((l) => Math.max(l.width, l.height) <= maxOffscreen) ??
+          pyramid.zoom.at(-1);
+        if (capped && capped.width < size.width) {
+          size = capped;
+        }
+        tier = source.fullOnly || this.#previewBroken.has(ref) ? "full" : maxOffscreen;
+      }
+      const dist = centerDistance ?? Infinity;
+      const wanted: Target = {
+        ...size,
+        ref,
+        handle,
+        priority: onScreen ? 0 : 3,
+        tier,
+        previewTier,
+        demandedPx: demanded,
+        centerDistance: dist,
+      };
+      if (onScreen) ideal.set(jobKey(wanted), wanted);
+      const start = onScreen
+        ? levelFor(sizing, span, scale)
+        : Math.max(
+            0,
+            sizing.findIndex((level) => level.width <= size.width),
+          );
+      let availableSize: Size | undefined = sizing
+        .slice(start)
+        .find((level) => !this.#denied.has(levelKey({ handle, width: level.width })));
+      let availableTier: ImageTier | undefined = availableSize
+        ? onScreen
+          ? "full"
+          : tier
+        : undefined;
+      if (onScreen && availableSize && availableTier) {
+        // A prefetched original-backed level can satisfy the current view. Charge its real size
+        // to the plan so it still gives way under budget pressure.
         let held: Resident | undefined;
         for (const level of heldByHandle.get(handle) ?? []) {
-          if (fits(level, size) && (!held || level.width < held.width)) held = level;
+          if (satisfies(level, wanted) && (!held || level.width < held.width)) held = level;
         }
         if (held) {
-          available = held;
+          availableSize = held;
+          availableTier = held.tier;
         } else {
           // A zoom level can still finish after the camera stops moving.
-          for (const job of this.#jobs.values()) {
+          for (const job of this.#decodeJobs.values()) {
             const pending = job.target;
             if (
-              pending?.handle === handle &&
+              pending.handle === handle &&
               pending.priority === 0 &&
+              !pending.standIn &&
               !job.abort.signal.aborted &&
-              fits(pending, size)
+              satisfies(pending, wanted)
             ) {
-              available = pending;
+              availableSize = pending;
+              availableTier = pending.tier;
               break;
             }
           }
         }
       }
-      if (available) {
-        const target = { ...wanted, ...available };
-        const key = keyOf(target);
+      if (availableSize && availableTier) {
+        const target: Target = {
+          ...wanted,
+          width: availableSize.width,
+          height: availableSize.height,
+          tier: availableTier,
+          previewTier: onScreen ? this.#previewTierOf(source, ref, availableSize, demanded) : tier,
+          demandedPx: demanded,
+          centerDistance: dist,
+        };
+        const key = jobKey(target);
         const previous = candidates.get(key);
-        if (!previous || target.priority < previous.priority) candidates.set(key, target);
+        if (!previous || target.priority < previous.priority) {
+          candidates.set(key, target);
+        } else if (previous && target.priority === previous.priority) {
+          const bestDemanded = Math.max(previous.demandedPx ?? 0, target.demandedPx ?? 0);
+          const bestDist = Math.min(
+            previous.centerDistance ?? Infinity,
+            target.centerDistance ?? Infinity,
+          );
+          if (bestDemanded !== previous.demandedPx || bestDist !== previous.centerDistance) {
+            candidates.set(key, {
+              ...previous,
+              demandedPx: bestDemanded,
+              centerDistance: bestDist,
+            });
+          }
+        }
       }
       if (onScreen) {
         const coarse = pyramid.zoom.at(-1);
-        if (coarse) fallbacks.set(ref, { ...coarse, ref, handle, priority: 0 });
+        if (coarse) {
+          fallbacks.set(ref, {
+            ...coarse,
+            ref,
+            handle,
+            priority: 0,
+            tier: this.#previewTierOf(source, ref, coarse, 0),
+          });
+        }
         const projected = pyramid.zoom[levelFor(pyramid.zoom, span, forecastScale)];
         if (
           forecastScale > scale &&
           projected &&
-          projected.width > (available?.width ?? size.width)
+          projected.width > (availableSize?.width ?? size.width)
         ) {
-          const forecast = { ...projected, ref, handle, priority: 1, forecast: true };
+          const forecastDemanded = Math.max(span.width, span.height) * forecastScale;
+          const forecast: Target = {
+            ...projected,
+            ref,
+            handle,
+            priority: 1,
+            tier: this.#previewTierOf(source, ref, projected, forecastDemanded),
+            demandedPx: forecastDemanded,
+            forecast: true,
+          };
           const previous = forecasts.get(ref);
-          if ((!previous || forecast.width > previous.width) && !this.#denied.has(keyOf(forecast)))
+          if (
+            (!previous || forecast.width > previous.width) &&
+            !this.#denied.has(levelKey(forecast))
+          )
             forecasts.set(ref, forecast);
         }
         for (const [index, ratio] of PREFETCH_RATIOS.entries()) {
           const finer = pyramid.zoom[levelFor(pyramid.zoom, span, scale * ratio)];
-          if (!finer || finer.width <= (available?.width ?? size.width)) continue;
-          const target = { ...finer, ref, handle, priority: 4 + index };
-          const key = keyOf(target);
-          if (!candidates.has(key) && !this.#denied.has(key)) candidates.set(key, target);
+          if (!finer || finer.width <= (availableSize?.width ?? size.width)) continue;
+          // Speculative zoom-ahead prefetch never triggers network fetches; it only decodes
+          // finer original-backed mip levels from a full blob already cached locally.
+          if (!cachedBlobFor(source, "full")) continue;
+          const target: Target = {
+            ...finer,
+            ref,
+            handle,
+            priority: 4 + index,
+            tier: "full",
+          };
+          const key = jobKey(target);
+          if (!candidates.has(key) && !this.#denied.has(levelKey(target)))
+            candidates.set(key, target);
         }
       }
     }
 
-    for (const [key, { target, abort }] of this.#jobs) {
-      if (!target?.forecast || abort.signal.aborted || candidates.get(key)?.priority === 0)
-        continue;
+    for (const { target, abort } of this.#decodeJobs.values()) {
+      const key = jobKey(target);
+      if (!target.forecast || abort.signal.aborted || candidates.get(key)?.priority === 0) continue;
       const useful = [...candidates.values()].some(
         (level) =>
           level.priority === 0 &&
           level.ref === target.ref &&
-          fits(target, level) &&
-          !this.#residents.has(keyOf(level)),
+          satisfies(target, level) &&
+          !this.#hasSatisfyingResident(level),
       );
       if (forecasts.has(target.ref) || useful) {
         forecasts.set(target.ref, target);
@@ -489,22 +897,30 @@ export class ViewImages {
       let replacement: Target | undefined;
       for (const [i, target] of primary.entries()) {
         if (bytes(target) <= largestBytes) continue;
+        const source = this.#sources.get(target.ref);
         const smaller = pyramids
           .get(target.ref)
           ?.rest.find(
             (level) =>
-              level.width < target.width && !this.#denied.has(keyOf({ ...target, ...level })),
+              level.width < target.width &&
+              !this.#denied.has(levelKey({ handle: target.handle, width: level.width })),
           );
-        if (!smaller) continue;
+        if (!smaller || !source) continue;
         largest = i;
         largestBytes = bytes(target);
-        replacement = { ...target, ...smaller };
+        replacement = {
+          ...target,
+          width: smaller.width,
+          height: smaller.height,
+          tier: "full",
+          previewTier: this.#previewTierOf(source, target.ref, smaller, target.demandedPx),
+        };
       }
       if (largest < 0 || !replacement) break;
       const removed = primary[largest];
       if (!removed) break;
       planned -= plannedBytes(removed);
-      if (primary.some((other, i) => i !== largest && keyOf(other) === keyOf(replacement))) {
+      if (primary.some((other, i) => i !== largest && jobKey(other) === jobKey(replacement))) {
         primary.splice(largest, 1);
       } else {
         planned += plannedBytes(replacement);
@@ -526,34 +942,95 @@ export class ViewImages {
       const credit = target.forecast && current ? plannedBytes(current) : 0;
       if (planned + plannedBytes(target) - credit > budget) {
         if (!target.forecast || !current) continue;
-        const affordable = pyramids.get(target.ref)?.zoom.find((level) => {
-          const choice = { ...target, ...level };
-          return (
-            level.width <= target.width &&
-            level.width > current.width &&
-            planned + plannedBytes(choice) - credit <= budget &&
-            !this.#denied.has(keyOf(choice))
-          );
-        });
-        if (!affordable) continue;
-        target = { ...target, ...affordable };
+        const source = this.#sources.get(target.ref);
+        const affordable = source
+          ? pyramids.get(target.ref)?.zoom.find((level) => {
+              const choice: Target = {
+                ...target,
+                width: level.width,
+                height: level.height,
+                tier: this.#previewTierOf(source, target.ref, level),
+              };
+              return (
+                level.width <= target.width &&
+                level.width > current.width &&
+                planned + plannedBytes(choice) - credit <= budget &&
+                !this.#denied.has(levelKey(choice))
+              );
+            })
+          : undefined;
+        if (!affordable || !source) continue;
+        target = {
+          ...target,
+          width: affordable.width,
+          height: affordable.height,
+          tier: this.#previewTierOf(source, target.ref, affordable),
+        };
       }
-      const key = keyOf(target);
+      const key = jobKey(target);
       if (targets.has(key)) continue;
       targets.set(key, target);
       planned += plannedBytes(target) - credit;
       if (target.priority === 0 && (!current || target.width > current.width))
         primaryByRef.set(target.ref, target);
-      const resident = this.#residents.get(key);
-      if (resident) resident.used = clock;
+      const resident = this.#residents.get(levelKey(target));
+      if (resident && tierCovers(resident.tier, target.tier)) resident.used = clock;
     }
+
+    // Progressive stand-in: when a visible primary target still needs `"full"` to download,
+    // immediately decode and upload the largest already-cached preview so the user sees the
+    // image right away while the original downloads or waits for opening/zoom settle.
+    // While the display list is still streaming (`opening`), skip decoding a throwaway
+    // same-resolution stand-in for tiny assets (`<= 256` px) whose urgent `"full"` original is
+    // already targeted in Lane A, avoiding a duplicate decode, GPU upload, and tile invalidation.
+    for (const [ref, primaryTarget] of primaryByRef) {
+      if (this.#hasSatisfyingResident(primaryTarget)) continue;
+      const source = this.#sources.get(ref);
+      if (!source || cachedBlobFor(source, primaryTarget.tier)) continue;
+      const preview = largestCachedBlob(source);
+      if (!preview || preview.tier === "full") continue;
+      if (
+        this.#opening &&
+        primaryTarget.previewTier === "full" &&
+        Math.max(source.info.width, source.info.height) <= MEDIA_PREVIEW_SIZES[0] &&
+        !this.#retryAt.has(fetchKey(ref, "full")) &&
+        this.#failed.get(ref) !== source.version
+      ) {
+        continue;
+      }
+      const dims = mediaPreviewDimensions(source.info, preview.tier);
+      const fit = Math.min(1, primaryTarget.width / dims.width, primaryTarget.height / dims.height);
+      const standInSize = {
+        width: Math.max(1, Math.round(dims.width * fit)),
+        height: Math.max(1, Math.round(dims.height * fit)),
+      };
+      const standIn: Target = {
+        ...standInSize,
+        ref,
+        handle: source.info.handle,
+        priority: 0,
+        tier: preview.tier,
+        standIn: true,
+      };
+      if (
+        !this.#hasSatisfyingResident(standIn) &&
+        !this.#denied.has(levelKey(standIn)) &&
+        bytes(standIn) <= budget
+      ) {
+        targets.set(jobKey(standIn), standIn);
+      }
+    }
+
     // A photo decoded in the neighbouring ring can already be sharp when it
     // enters the view. Give it a thumbnail without waiting for another zoom.
     for (const [ref, fallback] of fallbacks) {
-      const primary = primaryByRef.get(ref);
-      const key = keyOf(fallback);
-      if (primary && this.#residents.has(keyOf(primary)) && !this.#residents.has(key))
-        targets.set(key, { ...fallback, priority: 2 });
+      const primaryTarget = primaryByRef.get(ref);
+      if (
+        primaryTarget &&
+        this.#hasSatisfyingResident(primaryTarget) &&
+        !this.#residents.has(levelKey(fallback))
+      )
+        targets.set(jobKey(fallback), { ...fallback, priority: 2 });
     }
 
     this.#budget = budget;
@@ -562,36 +1039,104 @@ export class ViewImages {
     this.#fallbacks = fallbacks;
     this.#metadata = metadata;
     this.#visible = visible;
-    for (const [key, { ref, abort, target }] of this.#jobs) {
-      if (target ? !targets.has(key) : !metadata.has(ref)) abort.abort();
+
+    const neededFetches = new Set<string>();
+    for (const ref of metadata.keys()) neededFetches.add(metaKey(ref));
+    for (const target of targets.values()) {
+      if (target.standIn) continue;
+      const source = this.#sources.get(target.ref);
+      if (!source || cachedBlobFor(source, target.tier)) continue;
+      const fTier = this.#fetchTierForTarget(target);
+      neededFetches.add(fetchKey(target.ref, fTier));
+      // Keep an already-running `"full"` refinement alive if the target still needs `"full"`.
+      if (target.tier === "full" && fTier !== "full") {
+        neededFetches.add(fetchKey(target.ref, "full"));
+      }
     }
+    for (const [key, entry] of this.#staged) {
+      if (!targets.has(jobKey(entry.target)) || this.#hasSatisfyingResident(entry.target)) {
+        entry.bitmap.close();
+        this.#stagedBytes -= entry.bytes;
+        this.#staged.delete(key);
+      }
+    }
+    for (const [key, { abort }] of this.#decodeJobs) {
+      if (!targets.has(key)) abort.abort();
+    }
+    for (const [key, { abort }] of this.#fetchJobs) {
+      if (!neededFetches.has(key)) abort.abort();
+    }
+    if (!deferRefine && this.#staged.size > 0) this.#flushStaged();
     this.#pump();
 
-    // An in-flight improvement makes a frame provisional. Failed or unaffordable
-    // detail is a settled reduction at the current budget, even with a placeholder.
+    // Strict exactness rule: previews are NEVER exact. Any visible image still downloading,
+    // decoding, or queued to refine to original pixels (`tier: "full"`) keeps the frame
+    // provisional (`false`). Any settled visible image whose resident does not cover its ideal
+    // pixels AND original tier (due to budget, decode failure, or failed `"full"` fetch) is
+    // counted in `reduced` so `EngineView` never reports `exact: true` while showing a preview.
     const pending = new Set<string>();
-    for (const [ref, onScreen] of metadata) {
-      if (onScreen && !this.#retryAt.has(ref)) pending.add(ref);
-    }
-    const sharp = new Map<string, Resident>();
-    for (const resident of this.#residents.values()) {
-      const previous = sharp.get(resident.ref);
-      if (!previous || previous.width < resident.width) sharp.set(resident.ref, resident);
+    let waitingOnZoomForRefine = false;
+    for (const [ref, demand] of metadata) {
+      if (demand.visible && !this.#retryAt.has(metaKey(ref))) pending.add(ref);
     }
     for (const target of targets.values()) {
-      if (target.priority !== 0) continue;
-      const resident = sharp.get(target.ref);
-      if (resident && fits(resident, target)) continue;
-      if (this.#jobs.has(keyOf(target)) || this.#room(target, this.#missingFallback(target)))
+      if (target.priority !== 0 || target.standIn) continue;
+      if (this.#hasSatisfyingResident(target)) continue;
+      const source = this.#sources.get(target.ref);
+      const hasBlob = source ? Boolean(cachedBlobFor(source, target.tier)) : false;
+      const fTier = this.#fetchTierForTarget(target);
+      const fKey = fetchKey(target.ref, fTier);
+      const fullKey = fetchKey(target.ref, "full");
+      const dKey = jobKey(target);
+      const hasRoom = this.#room(target, this.#missingFallback(target)) !== null;
+      const backedOff =
+        this.#retryAt.has(fKey) || (target.tier === "full" && this.#retryAt.has(fullKey));
+      if (
+        this.#fetchJobs.has(fKey) ||
+        this.#fetchJobs.has(fullKey) ||
+        this.#decodeJobs.has(dKey) ||
+        (!hasBlob && !backedOff && hasRoom) ||
+        (hasBlob && hasRoom)
+      ) {
         pending.add(target.ref);
+        if (!hasBlob && !backedOff && !this.#isUrgentTarget(target) && zooming) {
+          waitingOnZoomForRefine = true;
+        }
+      }
+    }
+    if (waitingOnZoomForRefine) {
+      const delay = Math.max(0, ZOOM_SAMPLE_MS - (now - (this.#zoomSample?.at ?? now))) + 1;
+      this.#refineTimer = setTimeout(() => {
+        this.#refineTimer = undefined;
+        this.changed();
+      }, delay);
     }
     for (const target of ideal.values()) {
-      const resident = sharp.get(target.ref);
-      if (!pending.has(target.ref) && (!resident || !fits(resident, target)))
+      if (!pending.has(target.ref) && !this.#hasSatisfyingResident(target)) {
         reduced.add(target.ref);
+      }
     }
     this.#reduced = reduced.size;
     return pending.size === 0;
+  }
+
+  #hasSatisfyingResident(target: {
+    readonly handle: number;
+    readonly width: number;
+    readonly height: number;
+    readonly tier: ImageTier;
+  }): boolean {
+    for (const resident of this.#residents.values()) {
+      if (resident.handle === target.handle && satisfies(resident, target)) return true;
+    }
+    return false;
+  }
+
+  #hasAnyResident(ref: string): boolean {
+    for (const resident of this.#residents.values()) {
+      if (resident.ref === ref) return true;
+    }
+    return false;
   }
 
   #closestVisible(): Map<string, Resident> {
@@ -600,13 +1145,21 @@ export class ViewImages {
       if (!this.#visible.has(resident.ref)) continue;
       const wanted = this.#primary.get(resident.ref);
       const previous = nearest.get(resident.ref);
-      if (
-        !previous ||
-        (wanted && fits(previous, wanted)
-          ? fits(resident, wanted) && resident.width < previous.width
-          : resident.width > previous.width)
-      )
+      if (!previous) {
         nearest.set(resident.ref, resident);
+        continue;
+      }
+      const prevSatisfies = wanted ? satisfies(previous, wanted) : false;
+      const currSatisfies = wanted ? satisfies(resident, wanted) : false;
+      if (
+        prevSatisfies
+          ? currSatisfies && resident.width < previous.width
+          : currSatisfies ||
+            resident.width > previous.width ||
+            (resident.width === previous.width && tierRank(resident.tier) > tierRank(previous.tier))
+      ) {
+        nearest.set(resident.ref, resident);
+      }
     }
     return nearest;
   }
@@ -615,52 +1168,54 @@ export class ViewImages {
     this.#protected.clear();
     for (const [key, resident] of this.#residents) {
       if (!this.#visible.has(resident.ref)) continue;
+      const target = this.#targets.get(jobKey(resident));
       if (
-        this.#targets.get(key)?.priority === 0 ||
+        (target?.priority === 0 && !target.standIn) ||
         this.#fallbacks.get(resident.ref)?.width === resident.width
       )
         this.#protected.add(key);
     }
-    for (const resident of this.#closestVisible().values()) this.#protected.add(keyOf(resident));
+    for (const resident of this.#closestVisible().values()) this.#protected.add(levelKey(resident));
   }
 
   #missingFallback(target: Target): Target | undefined {
-    if (target.priority !== 0 && !target.forecast) return;
+    if ((target.priority !== 0 && !target.forecast) || target.standIn) return;
     const fallback = this.#fallbacks.get(target.ref);
     if (
       fallback &&
       fallback.width < target.width &&
-      !this.#residents.has(keyOf(fallback)) &&
-      !this.#denied.has(keyOf(fallback))
+      !this.#residents.has(levelKey(fallback)) &&
+      !this.#denied.has(levelKey(fallback))
     )
       return fallback;
   }
 
   #room(target: Target, missingFallback?: Target): Resident[] | null {
+    const existing = this.#residents.get(levelKey(target));
+    const delta = existing ? Math.max(0, bytes(target) - bytes(existing)) : bytes(target);
     const available = this.#budget - this.#residentBytes;
     const extra = missingFallback ? bytes(missingFallback) : 0;
-    const need = bytes(target) + extra - available;
+    const need = delta + extra - available;
     if (need <= 0) return [];
     const optional: Resident[] = [];
     const replaceable: Resident[] = [];
     const fallback = this.#fallbacks.get(target.ref);
     const mayReplace = Boolean(
-      (target.priority === 0 || target.forecast) &&
+      ((target.priority === 0 && !target.standIn) || target.forecast) &&
         fallback &&
-        (missingFallback || this.#residents.has(keyOf(fallback))),
+        (missingFallback || this.#residents.has(levelKey(fallback))),
     );
     for (const [key, resident] of this.#residents) {
-      if (
-        !this.#protected.has(key) &&
-        (this.#targets.get(key)?.priority ?? Infinity) > target.priority
-      ) {
+      if (key === levelKey(target)) continue;
+      const targetPriority = this.#targets.get(jobKey(resident))?.priority ?? Infinity;
+      if (!this.#protected.has(key) && targetPriority > target.priority) {
         optional.push(resident);
       } else if (
         mayReplace &&
         resident.ref === target.ref &&
         resident.width !== fallback?.width &&
-        (fits(target, resident) ||
-          (target.priority === 0 && this.#targets.get(key)?.priority !== 0))
+        (satisfies(target, resident) ||
+          (target.priority === 0 && !target.standIn && targetPriority !== 0))
       ) {
         replaceable.push(resident);
       }
@@ -694,8 +1249,8 @@ export class ViewImages {
       const canKeepThumbnail =
         this.#hidden &&
         thumbnail &&
-        keyOf(thumbnail) !== key &&
-        this.#residents.has(keyOf(thumbnail));
+        levelKey(thumbnail) !== key &&
+        this.#residents.has(levelKey(thumbnail));
       if (this.#protected.has(key) && !canKeepThumbnail) continue;
       this.#drop(key);
       freed = true;
@@ -731,131 +1286,509 @@ export class ViewImages {
   }
 
   #trimSources(): void {
-    const sources = [...this.#sources.values()]
-      .filter((s) => s.blob)
-      .sort((a, b) => a.used - b.used);
-    let held = sources.reduce((total, source) => total + (source.blob?.size ?? 0), 0);
-    for (const source of sources) {
+    const entries: Array<{ source: Source; tier: ImageTier; size: number }> = [];
+    let held = 0;
+    for (const source of this.#sources.values()) {
+      for (const [tier, blob] of source.blobs) {
+        entries.push({ source, tier, size: blob.size });
+        held += blob.size;
+      }
+    }
+    if (held <= SOURCE_BUDGET) return;
+    // Evict least recently used sources first, dropping larger full/1024 blobs before small previews.
+    entries.sort((a, b) => a.source.used - b.source.used || tierRank(b.tier) - tierRank(a.tier));
+    for (const entry of entries) {
       if (held <= SOURCE_BUDGET) break;
-      held -= source.blob?.size ?? 0;
-      delete source.blob;
+      entry.source.blobs.delete(entry.tier);
+      held -= entry.size;
     }
   }
 
-  #scheduleLevel(target: Target): void {
+  #markPreviewBroken(ref: string): void {
+    this.#previewBroken.add(ref);
+    const source = this.#sources.get(ref);
+    if (source) {
+      source.fullOnly = true;
+      for (const tier of [...source.blobs.keys()]) {
+        if (tier !== "full") source.blobs.delete(tier);
+      }
+    }
+    for (const key of [...this.#retryAt.keys()]) {
+      if (key === metaKey(ref) || (key.startsWith(`fetch:${ref}/`) && !key.endsWith("/full"))) {
+        this.#retryAt.delete(key);
+      }
+    }
+    this.changed();
+  }
+
+  #scheduleDecode(target: Target): void {
     const backend = this.#backend;
-    const key = keyOf(target);
+    const dKey = jobKey(target);
+    const lKey = levelKey(target);
+    const existing = this.#residents.get(lKey);
+    const staged = this.#staged.get(lKey);
     if (
       !backend ||
-      this.#residents.has(key) ||
-      this.#jobs.has(key) ||
-      this.#denied.has(key) ||
+      (existing && tierCovers(existing.tier, target.tier)) ||
+      (staged && tierCovers(staged.target.tier, target.tier)) ||
+      this.#decodeJobs.has(dKey) ||
+      this.#denied.has(lKey) ||
       this.#failed.get(target.ref) === this.cache.encodedVersion(target.ref)
     )
       return;
+    const source = this.#sources.get(target.ref);
+    if (!source) return;
+    const cached = cachedBlobFor(source, target.tier);
+    if (!cached) return;
+    if (this.#shouldStageUpload(target) && this.#stagedBytes + bytes(target) > STAGED_UPLOAD_BYTES)
+      return;
     if (this.#inflightBytes > 0 && this.#inflightBytes + bytes(target) > DECODE_BYTES) return;
-    // A finer bitmap already in flight or resident can serve this level as well.
-    if (target.priority > 0 && target.width !== this.#fallbacks.get(target.ref)?.width) {
+    // A finer bitmap already resident (still wanted in the plan, or for any background target)
+    // can serve this level as well without evicting itself.
+    if (target.width !== this.#fallbacks.get(target.ref)?.width) {
       for (const resident of this.#residents.values()) {
-        if (resident.ref === target.ref && fits(resident, target)) return;
+        if (
+          resident.handle === target.handle &&
+          satisfies(resident, target) &&
+          (target.priority > 0 || this.#targets.has(jobKey(resident)))
+        )
+          return;
       }
     }
-    for (const { target: pending, abort } of this.#jobs.values()) {
+    for (const { target: pending, abort } of this.#decodeJobs.values()) {
       if (
-        pending?.ref === target.ref &&
+        pending.ref === target.ref &&
         !abort.signal.aborted &&
-        fits(pending, target) &&
+        satisfies(pending, target) &&
         (pending.forecast ||
           (target.priority > 0 && target.width !== this.#fallbacks.get(target.ref)?.width))
       )
         return;
     }
-    if (this.#room(target, this.#missingFallback(target))) this.#requestLevel(key, target, backend);
+    if (this.#room(target, this.#missingFallback(target))) {
+      this.#requestDecode(dKey, target, cached.blob, cached.tier, backend);
+    }
+  }
+
+  #applyNaturalSize(ref: string, source: Source, size: Size): void {
+    source.info = { width: size.width, height: size.height, handle: source.info.handle };
+    delete source.pyramid;
+    delete source.pyramidMaxSide;
+    for (const [rKey, resident] of this.#residents) {
+      if (resident.handle === source.info.handle) this.#drop(rKey);
+    }
+    for (const job of this.#decodeJobs.values()) {
+      if (job.ref === ref) job.abort.abort();
+    }
+    for (const [sKey, entry] of this.#staged) {
+      if (entry.target.ref === ref) {
+        entry.bitmap.close();
+        this.#stagedBytes -= entry.bytes;
+        this.#staged.delete(sKey);
+      }
+    }
+    const prefix = `${source.info.handle}/`;
+    for (const deniedKey of [...this.#denied]) {
+      if (deniedKey.startsWith(prefix)) this.#denied.delete(deniedKey);
+    }
+    for (const [tKey, t] of this.#targets) {
+      if (t.ref === ref) this.#targets.delete(tKey);
+    }
+    this.#primary.delete(ref);
+    this.#fallbacks.delete(ref);
+  }
+
+  #scheduleTierFetch(target: Target, lane: FetchLane): boolean {
+    if (target.standIn) return false;
+    const source = this.#sources.get(target.ref);
+    if (!source) return false;
+    const tier = this.#fetchTierForTarget(target);
+    if (cachedBlobFor(source, tier)) return false;
+    if (this.#hasSatisfyingResident(target)) return false;
+    if (this.#failed.get(target.ref) === this.cache.encodedVersion(target.ref)) return false;
+    if (this.#denied.has(levelKey(target))) return false;
+    if (!this.#room(target, this.#missingFallback(target))) return false;
+    const key = fetchKey(target.ref, tier);
+    if (this.#fetchJobs.has(key) || (this.#retryAt.get(key)?.at ?? 0) > Date.now()) return false;
+    const abort = new AbortController();
+    this.#fetchJobs.set(key, { ref: target.ref, abort, tier, lane });
+    void (async () => {
+      const version = this.cache.encodedVersion(target.ref);
+      try {
+        const timeoutMs = tier === "full" ? FULL_FETCH_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+        const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(timeoutMs)]);
+        const opts = tier === "full" ? undefined : { preview: tier };
+        const res = await untilAborted(this.cache.encoded(target.ref, signal, opts), signal);
+        if (abort.signal.aborted) return;
+        let sizeChanged = false;
+        const current = this.#sources.get(target.ref);
+        if (current && current.version === version) {
+          const receivedTier: ImageTier = res.preview ?? "full";
+          if (!res.preview) {
+            current.fullOnly = true;
+            if (!current.naturalVerified) {
+              const actual = await originalNaturalSize(res.blob, signal, res.size);
+              if (abort.signal.aborted) return;
+              if (this.#sources.get(target.ref) !== current || current.version !== version) return;
+              if (actual) {
+                current.naturalVerified = true;
+                if (actual.width !== current.info.width || actual.height !== current.info.height) {
+                  this.#applyNaturalSize(target.ref, current, actual);
+                  sizeChanged = true;
+                }
+              }
+            }
+          }
+          storeBlob(current, receivedTier, res.blob);
+          this.#trimSources();
+        }
+        if (res.previewMissing) this.onPreviewMissing?.(target.ref, res.blob);
+        this.#retryAt.delete(key);
+        if (sizeChanged) {
+          this.metadataReady(target.ref);
+        } else if (
+          res.preview !== undefined ||
+          !this.#room(target, this.#missingFallback(target))
+        ) {
+          // Full blobs decode immediately from `this.#pump()` in `finally` and trigger `changed()`
+          // once uploaded to the backend; avoid forcing a redundant redraw before pixels change.
+          this.changed();
+        }
+      } catch {
+        if (!abort.signal.aborted) {
+          const attempts = (this.#retryAt.get(key)?.attempts ?? 0) + 1;
+          const delay = attempts < 8 ? Math.min(60_000, 2000 * 2 ** (attempts - 1)) : Infinity;
+          this.#retryAt.set(key, { at: Date.now() + delay, attempts, version });
+          this.changed();
+        }
+      } finally {
+        this.#fetchJobs.delete(key);
+        this.#pump();
+      }
+    })();
+    return true;
+  }
+
+  #allVisibleHaveResident(): boolean {
+    const now = Date.now();
+    for (const [ref, demand] of this.#metadata) {
+      if (!demand.visible) continue;
+      const key = metaKey(ref);
+      if (this.#fetchJobs.has(key) || (this.#retryAt.get(key)?.at ?? 0) <= now) return false;
+    }
+    for (const job of this.#fetchJobs.values()) {
+      if (job.lane === "urgent" || job.lane === "preview") return false;
+    }
+    // Wait until every visible image that can display a preview or original has at least one
+    // resident texture uploaded to the GPU so first-useful happens before background refinement.
+    for (const [ref, primary] of this.#primary) {
+      if (this.#hasAnyResident(ref)) continue;
+      if (this.#failed.get(ref) === this.cache.encodedVersion(ref)) continue;
+      if (this.#denied.has(levelKey(primary))) continue;
+      const fKey = fetchKey(ref, this.#fetchTierForTarget(primary));
+      if ((this.#retryAt.get(fKey)?.at ?? 0) > now) continue;
+      if (this.#room(primary, this.#missingFallback(primary)) === null) continue;
+      return false;
+    }
+    return true;
+  }
+
+  /**
+   * True when deferring Lane C refinement until after the preview frame presents would stall
+   * `exact` behind a redundant tile re-bake for just a handful of tiny (`<= 256` px) assets on
+   * a view that is already fetching `"full"` originals for most visible images.
+   */
+  #canRefineDuringDefer(): boolean {
+    if (this.#opening || this.#zooming) return false;
+    let urgentFull = 0;
+    let smallRefines = 0;
+    for (const target of this.#primary.values()) {
+      if (target.previewTier === "full") {
+        urgentFull++;
+        continue;
+      }
+      const source = this.#sources.get(target.ref);
+      if (!source || this.#hasSatisfyingResident(target)) continue;
+      if (Math.max(source.info.width, source.info.height) > MEDIA_PREVIEW_SIZES[0]) {
+        return false;
+      }
+      smallRefines++;
+    }
+    return smallRefines > 0 && urgentFull >= smallRefines;
+  }
+
+  /**
+   * True when uploading a `"full"` replacement right now would invalidate tiles mid-initial-paint
+   * for an image that already has a visible preview resident. Network download and worker decode
+   * still overlap immediately; only the GPU replacement upload stages for one batched flush.
+   */
+  #shouldStageUpload(target: Target): boolean {
+    return (
+      this.#deferRefine &&
+      !this.#opening &&
+      !target.standIn &&
+      target.priority === 0 &&
+      target.tier === "full" &&
+      target.previewTier !== "full" &&
+      !this.#canRefineDuringDefer() &&
+      this.#hasAnyResident(target.ref)
+    );
   }
 
   #pump(): void {
     if (!this.#backend) return;
     this.#refreshProtection();
-    if (this.#jobs.size >= MAX_DECODES) return;
-    const ordered = [...this.#targets.values()].sort((a, b) => a.priority - b.priority);
-    for (const target of ordered) {
-      if (target.priority === 0) this.#scheduleLevel(target);
-      if (this.#jobs.size >= MAX_DECODES) return;
+    const ordered = [...this.#targets.values()].sort(
+      (a, b) =>
+        a.priority - b.priority ||
+        (a.standIn ? 0 : 1) - (b.standIn ? 0 : 1) ||
+        compareImportance(a, b),
+    );
+
+    // 1. Decode cached blobs first: stand-ins land on screen immediately, then sharp primaries.
+    if (this.#decodeJobs.size < MAX_DECODES) {
+      for (const target of ordered) {
+        if (target.priority === 0) this.#scheduleDecode(target);
+        if (this.#decodeJobs.size >= MAX_DECODES) break;
+      }
+      for (const target of ordered) {
+        if (this.#decodeJobs.size >= MAX_DECODES - 1) break;
+        if (target.forecast) this.#scheduleDecode(target);
+      }
+      for (const target of ordered) {
+        if (this.#decodeJobs.size >= MAX_DECODES - 1) break;
+        if (target.priority > 0 && !target.forecast) this.#scheduleDecode(target);
+      }
     }
-    for (const target of ordered) {
-      if (this.#jobs.size >= MAX_DECODES - 1) break;
-      if (target.forecast) this.#scheduleLevel(target);
+
+    // 2. Network fetches across decoupled lanes:
+    //    - Lane A (urgent): visible direct-full (`demanded > 1024`, `natural <= demanded`, or
+    //      `target >= natural`) and visible upgrades missing their preview tier. Guaranteed
+    //      `URGENT_FETCH_SLOTS` slots, expanding to `MAX_FETCHES` when idle.
+    //    - Lane B (preview): visible `?w=256` / `?w=1024` initial previews, strictly prioritized
+    //      in `PREVIEW_FETCH_SLOTS` dedicated slots (bursting to `MAX_FETCHES` before originals
+    //      are ready to refine), ordered by visual importance (largest span, nearest centre).
+    //    - Lane C (refine): visible `"full"` originals start immediately alongside previews in
+    //      shared bandwidth (`REFINE_CONCURRENT_SLOTS` while previews are pending, expanding to
+    //      `MAX_FETCHES` once previews are issued), ordered largest span first, nearest centre.
+    //    - Background: zoom forecasts and off-screen ring `?w=256` warmers.
+    if (this.#fetchJobs.size < MAX_FETCHES) {
+      const now = Date.now();
+      const visibleMeta = [...this.#metadata.entries()]
+        .filter(([, demand]) => demand.visible)
+        .sort((a, b) => compareImportance(a[1], b[1]));
+
+      const urgentMeta: Array<[string, MetaDemand]> = [];
+      const previewMeta: Array<[string, MetaDemand]> = [];
+      for (const entry of visibleMeta) {
+        if (this.#initialTierOf(entry[0], entry[1]) === "full") urgentMeta.push(entry);
+        else previewMeta.push(entry);
+      }
+      const urgentTargets = ordered.filter((t) => this.#isUrgentTarget(t));
+
+      const countLane = (lane: FetchLane) => {
+        let n = 0;
+        for (const job of this.#fetchJobs.values()) if (job.lane === lane) n++;
+        return n;
+      };
+
+      const fillUrgent = (cap: number) => {
+        for (const [ref, demand] of urgentMeta) {
+          if (this.#fetchJobs.size >= MAX_FETCHES || countLane("urgent") >= cap) return;
+          this.#requestMetadata(ref, demand, "urgent");
+        }
+        for (const target of urgentTargets) {
+          if (this.#fetchJobs.size >= MAX_FETCHES || countLane("urgent") >= cap) return;
+          this.#scheduleTierFetch(target, "urgent");
+        }
+      };
+
+      const fillPreview = (cap: number) => {
+        for (const [ref, demand] of previewMeta) {
+          if (this.#fetchJobs.size >= MAX_FETCHES || countLane("preview") >= cap) return;
+          this.#requestMetadata(ref, demand, "preview");
+        }
+      };
+
+      // Step 2a: Reserve dedicated slots for urgent direct-full & upgrade fetches first.
+      fillUrgent(URGENT_FETCH_SLOTS);
+
+      // Step 2b: Strictly prioritize visible previews in their own dedicated slots.
+      fillPreview(PREVIEW_FETCH_SLOTS);
+
+      // Step 2c: Let urgent fetches expand into remaining slots when previews aren't using them.
+      if (this.#fetchJobs.size < MAX_FETCHES) fillUrgent(MAX_FETCHES);
+
+      // Step 2d: Start visible `"full"` original fetches immediately after visible previews are
+      // issued, sharing bandwidth in visual-importance order while keeping preview slots protected.
+      if (this.#fetchJobs.size < MAX_FETCHES && !this.#zooming) {
+        let unissuedPreviews = 0;
+        for (const [ref] of previewMeta) {
+          const key = metaKey(ref);
+          if (!this.#fetchJobs.has(key) && (this.#retryAt.get(key)?.at ?? 0) <= now) {
+            unissuedPreviews++;
+          }
+        }
+        const activePreviews = countLane("preview");
+        const refineCap =
+          unissuedPreviews > 0 || activePreviews > 0
+            ? Math.max(
+                REFINE_CONCURRENT_SLOTS,
+                MAX_FETCHES - Math.min(PREVIEW_FETCH_SLOTS, unissuedPreviews + activePreviews),
+              )
+            : MAX_FETCHES;
+        for (const target of ordered) {
+          if (this.#fetchJobs.size >= MAX_FETCHES || countLane("refine") >= refineCap) break;
+          if (target.priority === 0 && !target.standIn && !this.#isUrgentTarget(target)) {
+            this.#scheduleTierFetch(target, "refine");
+          }
+        }
+      }
+
+      // Step 2e: Only let previews burst past PREVIEW_FETCH_SLOTS before any visible image has
+      // landed its preview and is ready to start `"full"` refinement in the shared refine slots.
+      if (this.#fetchJobs.size < MAX_FETCHES) {
+        let hasRefineSource = false;
+        if (!this.#zooming) {
+          for (const ref of this.#visible) {
+            const source = this.#sources.get(ref);
+            if (source && !cachedBlobFor(source, "full")) {
+              hasRefineSource = true;
+              break;
+            }
+          }
+        }
+        if (!hasRefineSource) fillPreview(MAX_FETCHES);
+      }
+
+      // Step 2f: Forecasts and off-screen ring (`?w=256` only).
+      for (const target of ordered) {
+        if (this.#fetchJobs.size >= MAX_FETCHES - 1) break;
+        if (target.forecast) this.#scheduleTierFetch(target, "background");
+      }
+      for (const [ref, demand] of this.#metadata) {
+        if (this.#fetchJobs.size >= MAX_FETCHES - 1) break;
+        if (!demand.visible) this.#requestMetadata(ref, demand, "background");
+      }
+      for (const target of ordered) {
+        if (this.#fetchJobs.size >= MAX_FETCHES - 1) break;
+        if (target.priority > 0 && !target.forecast) this.#scheduleTierFetch(target, "background");
+      }
     }
-    for (const [ref, visible] of this.#metadata) {
-      if (visible) this.#requestMetadata(ref);
-      if (this.#jobs.size >= MAX_DECODES) return;
-    }
-    for (const target of ordered) {
-      if (this.#jobs.size >= MAX_DECODES - 1) break;
-      if (target.priority > 0 && !target.forecast) this.#scheduleLevel(target);
-    }
-    for (const [ref, visible] of this.#metadata) {
-      if (!visible) this.#requestMetadata(ref);
-      if (this.#jobs.size >= MAX_DECODES) return;
-    }
+
     clearTimeout(this.#retryTimer);
     this.#retryTimer = undefined;
     let next = Infinity;
     for (const ref of this.#metadata.keys()) {
-      const retry = this.#retryAt.get(ref);
-      if (retry && !this.#jobs.has(`source:${ref}`)) next = Math.min(next, retry.at);
+      const key = metaKey(ref);
+      const retry = this.#retryAt.get(key);
+      if (retry && !this.#fetchJobs.has(key)) next = Math.min(next, retry.at);
+    }
+    for (const target of this.#targets.values()) {
+      if (target.standIn) continue;
+      const key = fetchKey(target.ref, this.#fetchTierForTarget(target));
+      const retry = this.#retryAt.get(key);
+      if (retry && !this.#fetchJobs.has(key)) next = Math.min(next, retry.at);
     }
     if (Number.isFinite(next))
       this.#retryTimer = setTimeout(() => this.#pump(), Math.max(0, next - Date.now()));
   }
 
-  #requestMetadata(ref: string): void {
-    const key = `source:${ref}`;
+  #requestMetadata(ref: string, demand: MetaDemand, lane: FetchLane): void {
+    const key = metaKey(ref);
     if (
       this.#sources.has(ref) ||
-      this.#jobs.has(key) ||
-      (this.#retryAt.get(ref)?.at ?? 0) > Date.now()
+      this.#fetchJobs.has(key) ||
+      (this.#retryAt.get(key)?.at ?? 0) > Date.now()
     )
       return;
+    const requestedTier = this.#initialTierOf(ref, demand);
     const abort = new AbortController();
-    this.#jobs.set(key, { ref, abort });
+    this.#fetchJobs.set(key, { ref, abort, tier: requestedTier, lane });
     void (async () => {
       const version = this.cache.encodedVersion(ref);
       try {
-        const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(REQUEST_TIMEOUT_MS)]);
-        const { blob, size } = await untilAborted(this.cache.encoded(ref, signal), signal);
+        const timeoutMs = requestedTier === "full" ? FULL_FETCH_TIMEOUT_MS : REQUEST_TIMEOUT_MS;
+        const signal = AbortSignal.any([abort.signal, AbortSignal.timeout(timeoutMs)]);
+        const opts = requestedTier === "full" ? undefined : { preview: requestedTier };
+        const { blob, size, preview, previewMissing } = await untilAborted(
+          this.cache.encoded(ref, signal, opts),
+          signal,
+        );
         let dimensions: Size;
         try {
           dimensions = size ?? (await naturalSize(blob, signal));
         } catch {
           if (!abort.signal.aborted) {
-            this.#failed.set(ref, version);
-            this.changed();
+            if (preview !== undefined) {
+              // Corrupt preview bytes: bypass previews and fall back to the full original.
+              this.#markPreviewBroken(ref);
+            } else {
+              this.#failed.set(ref, version);
+              this.changed();
+            }
           }
           return;
         }
         if (abort.signal.aborted) return;
+        const blobs = new Map<ImageTier, Blob>();
+        const receivedTier: ImageTier = preview ?? "full";
+        blobs.set(receivedTier, blob);
+        const fullOnly = !preview && (requestedTier !== "full" || previewMissing === true);
         this.#sources.set(ref, {
           info: { ...dimensions, handle: this.#nextHandle++ },
           version,
-          blob,
+          blobs,
+          fullOnly,
+          naturalVerified: preview === undefined,
           used: this.#clock,
         });
         this.#trimSources();
-        this.#retryAt.delete(ref);
+        if (previewMissing) this.onPreviewMissing?.(ref, blob);
+        this.#retryAt.delete(key);
         this.metadataReady(ref);
       } catch {
         if (!abort.signal.aborted) {
-          const attempts = (this.#retryAt.get(ref)?.attempts ?? 0) + 1;
+          const attempts = (this.#retryAt.get(key)?.attempts ?? 0) + 1;
           const delay = attempts < 8 ? Math.min(60_000, 2000 * 2 ** (attempts - 1)) : Infinity;
-          this.#retryAt.set(ref, { at: Date.now() + delay, attempts, version });
+          this.#retryAt.set(key, { at: Date.now() + delay, attempts, version });
           this.changed();
         }
       } finally {
-        this.#jobs.delete(key);
+        this.#fetchJobs.delete(key);
         this.#pump();
       }
     })();
+  }
+
+  #flushStaged(): void {
+    const backend = this.#backend;
+    if (!backend || this.#staged.size === 0 || this.#flushingStaged) return;
+    const batch = [...this.#staged.values()];
+    this.#staged.clear();
+    this.#stagedBytes = 0;
+    this.#flushingStaged = true;
+    const upload = this.#uploadTail.then(async () => {
+      let didChange = false;
+      const signal = new AbortController().signal;
+      try {
+        for (const entry of batch) {
+          try {
+            if (backend !== this.#backend || !this.#visible.has(entry.target.ref)) continue;
+            const uploaded = await this.#commit(entry.target, entry.bitmap, backend, signal, false);
+            if (uploaded) didChange = true;
+          } finally {
+            entry.bitmap.close();
+          }
+        }
+      } finally {
+        this.#flushingStaged = false;
+        if (didChange && backend === this.#backend) this.changed();
+        if (!this.#deferRefine && this.#staged.size > 0) this.#flushStaged();
+        this.#pump();
+      }
+    });
+    this.#uploadTail = upload.catch(() => {});
   }
 
   async #uploadLevel(
@@ -863,7 +1796,12 @@ export class ViewImages {
     bitmap: ImageBitmap,
     backend: ImageBackend,
     signal: AbortSignal,
-  ): Promise<void> {
+    notify = true,
+  ): Promise<boolean> {
+    const lKey = levelKey(target);
+    const current = this.#residents.get(lKey);
+    // Never overwrite a same-width resident that already has an equal or finer tier.
+    if (current && tierCovers(current.tier, target.tier)) return false;
     let uploaded = await backend.upload(target.handle, bitmap);
     if (!uploaded && !signal.aborted && backend === this.#backend) {
       const reclaimed = this.releasePressure();
@@ -874,16 +1812,18 @@ export class ViewImages {
     }
     if (signal.aborted || backend !== this.#backend) {
       if (uploaded) backend.drop(target.handle, target.width);
-      return;
+      return false;
     }
-    const key = keyOf(target);
     if (uploaded) {
-      this.#residents.set(key, { ...target, used: this.#clock });
+      const replaced = this.#residents.get(lKey);
+      if (replaced) this.#residentBytes -= bytes(replaced);
+      this.#residents.set(lKey, { ...target, used: this.#clock });
       this.#residentBytes += bytes(target);
     } else {
-      this.#denied.add(key);
+      this.#denied.add(lKey);
     }
-    this.changed();
+    if (notify) this.changed();
+    return true;
   }
 
   async #commit(
@@ -891,8 +1831,10 @@ export class ViewImages {
     bitmap: ImageBitmap,
     backend: ImageBackend,
     signal: AbortSignal,
-  ): Promise<void> {
-    if (signal.aborted) return;
+    notify = true,
+  ): Promise<boolean> {
+    if (signal.aborted) return false;
+    let didChange = false;
     const fallback = this.#missingFallback(target);
     if (fallback) {
       // Reuse the decoded pixels. Restoring a tab needs no second full decode.
@@ -904,69 +1846,86 @@ export class ViewImages {
         await this.#paceUpload(bytes(fallback), signal);
         this.#refreshProtection();
         const room = this.#room(target, fallback);
-        if (!room || signal.aborted) return;
+        if (!room || signal.aborted) return didChange;
         for (const level of room) {
           if (this.#residentBytes + bytes(fallback) <= this.#budget) break;
-          this.#drop(keyOf(level));
+          this.#drop(levelKey(level));
         }
-        await this.#uploadLevel(fallback, thumbnail, backend, signal);
+        if (await this.#uploadLevel(fallback, thumbnail, backend, signal, notify)) didChange = true;
       } catch {
         // The optional copy must not mark otherwise usable source bytes corrupt.
-        if (!signal.aborted) this.#denied.add(keyOf(fallback));
+        if (!signal.aborted) this.#denied.add(levelKey(fallback));
       } finally {
         thumbnail?.close();
       }
     }
     await this.#paceUpload(bytes(target), signal);
-    if (signal.aborted) return;
+    if (signal.aborted) return didChange;
     this.#refreshProtection();
     const room = this.#room(target);
-    if (!room) return;
-    for (const level of room) this.#drop(keyOf(level));
-    await this.#uploadLevel(target, bitmap, backend, signal);
+    if (!room) return didChange;
+    for (const level of room) this.#drop(levelKey(level));
+    if (await this.#uploadLevel(target, bitmap, backend, signal, notify)) didChange = true;
+    return didChange;
   }
 
-  #requestLevel(key: string, target: Target, backend: ImageBackend): void {
+  #requestDecode(
+    key: string,
+    target: Target,
+    input: Blob,
+    inputTier: ImageTier,
+    backend: ImageBackend,
+  ): void {
     const abort = new AbortController();
-    this.#jobs.set(key, { ref: target.ref, abort, target });
+    this.#decodeJobs.set(key, { ref: target.ref, abort, target });
     const need = bytes(target);
     this.#inflightBytes += need;
     void (async () => {
       let bitmap: ImageBitmap | undefined;
       const version = this.cache.encodedVersion(target.ref);
       try {
-        const source = this.#sources.get(target.ref);
-        if (!source) return;
         const timeout = AbortSignal.timeout(REQUEST_TIMEOUT_MS);
-        const signal = AbortSignal.any([abort.signal, timeout]);
-        const input =
-          source.blob ?? (await untilAborted(this.cache.encoded(target.ref, signal), signal)).blob;
-        source.blob = input;
-        this.#trimSources();
-        if (abort.signal.aborted) return;
-        if (!input) {
-          this.#failed.set(target.ref, version);
-          this.changed();
-          return;
-        }
         // Bitmap decodes cannot be interrupted. Keep the slot until the native
         // work returns instead of starting a new decode on every camera tick.
         bitmap = await untilAborted(this.decode(input, resize(target)), timeout, (b) => b.close());
         const decoded = bitmap;
-        const upload = this.#uploadTail.then(() =>
-          this.#commit(target, decoded, backend, abort.signal),
-        );
+        const upload = this.#uploadTail.then(async () => {
+          if (
+            !abort.signal.aborted &&
+            backend === this.#backend &&
+            this.#shouldStageUpload(target) &&
+            this.#stagedBytes + need <= STAGED_UPLOAD_BYTES
+          ) {
+            const lKey = levelKey(target);
+            const prev = this.#staged.get(lKey);
+            if (prev) {
+              prev.bitmap.close();
+              this.#stagedBytes -= prev.bytes;
+            }
+            this.#staged.set(lKey, { target, bitmap: decoded, bytes: need });
+            this.#stagedBytes += need;
+            bitmap = undefined;
+            if (this.allVisibleFullReady) this.onAllVisibleFullReady?.();
+            return;
+          }
+          await this.#commit(target, decoded, backend, abort.signal);
+        });
         this.#uploadTail = upload.catch(() => {});
         await upload;
       } catch {
         if (!abort.signal.aborted) {
-          this.#failed.set(target.ref, version);
-          this.changed();
+          if (inputTier !== "full") {
+            // Corrupt preview bytes: drop the preview and fall back to the full original.
+            this.#markPreviewBroken(target.ref);
+          } else {
+            this.#failed.set(target.ref, version);
+            this.changed();
+          }
         }
       } finally {
         bitmap?.close();
         this.#inflightBytes -= need;
-        this.#jobs.delete(key);
+        this.#decodeJobs.delete(key);
         this.#pump();
       }
     })();

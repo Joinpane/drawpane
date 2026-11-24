@@ -1,5 +1,21 @@
 import { describe, expect, it } from "vitest";
-import { MEDIA_MAX_BYTES, mediaProblem, sniffImage } from "../src/media";
+import {
+  exifOrientation,
+  exifOrientationComplete,
+  MEDIA_MAX_BYTES,
+  MEDIA_PREVIEW_SIZES,
+  MEDIA_PREVIEW_VERSION,
+  mediaPreviewBucketFor,
+  mediaPreviewDimensions,
+  mediaPreviewKey,
+  mediaPreviewMatchesOriginal,
+  mediaPreviewMaxBytes,
+  mediaPreviewTiersFor,
+  mediaProblem,
+  orientedSize,
+  parseMediaPreviewSize,
+  sniffImage,
+} from "../src/media";
 
 // Node, browsers and Workers all have atob; the model compiles without DOM or Node types.
 declare global {
@@ -54,5 +70,77 @@ describe("sniffImage", () => {
     expect(mediaProblem(MEDIA_MAX_BYTES + 1, png)).toMatch(/up to 20 MB/);
     expect(mediaProblem(100, null)).toMatch(/PNG, JPEG, WebP and GIF/);
     expect(mediaProblem(100, { mime: "image/png", width: 20_000, height: 10 })).toMatch(/16,384/);
+  });
+
+  it("parses preview sizes and calculates preview dimensions without upscaling", () => {
+    expect(MEDIA_PREVIEW_SIZES).toEqual([256, 1024]);
+    expect(parseMediaPreviewSize("256")).toBe(256);
+    expect(parseMediaPreviewSize("1024")).toBe(1024);
+    expect(parseMediaPreviewSize("512")).toBeNull();
+    expect(parseMediaPreviewSize("256px")).toBeNull();
+    expect(parseMediaPreviewSize("")).toBeNull();
+    expect(parseMediaPreviewSize(null)).toBeNull();
+
+    expect(mediaPreviewDimensions({ width: 1206, height: 2622 }, 256)).toEqual({
+      width: 118,
+      height: 256,
+    });
+    expect(mediaPreviewDimensions({ width: 1206, height: 2622 }, 1024)).toEqual({
+      width: 471,
+      height: 1024,
+    });
+    expect(mediaPreviewDimensions({ width: 200, height: 100 }, 256)).toEqual({
+      width: 200,
+      height: 100,
+    });
+    expect(mediaPreviewKey("team-1", "a".repeat(64), 256)).toBe(
+      `media/previews/v${MEDIA_PREVIEW_VERSION}/team-1/${"a".repeat(64)}/256`,
+    );
+    expect(mediaPreviewTiersFor(200, 100)).toEqual([256]);
+    expect(mediaPreviewTiersFor(1200, 800)).toEqual([256, 1024]);
+    expect(mediaPreviewBucketFor(200, 100, 1024)).toBe(256);
+    expect(mediaPreviewBucketFor(1200, 800, 1024)).toBe(1024);
+    expect(mediaPreviewMaxBytes(256)).toBe(256 * 1024);
+    expect(mediaPreviewMaxBytes(1024)).toBe(1024 * 1024);
+    expect(
+      mediaPreviewMatchesOriginal({ width: 4032, height: 3024 }, { width: 256, height: 192 }, 256),
+    ).toEqual({ ok: true, swapped: false });
+    // Swapped orientation is refused unless allowSwap is explicitly enabled (EXIF 5..8 only).
+    expect(
+      mediaPreviewMatchesOriginal({ width: 4032, height: 3024 }, { width: 192, height: 256 }, 256),
+    ).toEqual({ ok: false });
+    expect(
+      mediaPreviewMatchesOriginal({ width: 4032, height: 3024 }, { width: 192, height: 256 }, 256, {
+        allowSwap: true,
+      }),
+    ).toEqual({ ok: true, swapped: true });
+    expect(
+      mediaPreviewMatchesOriginal({ width: 4032, height: 3024 }, { width: 300, height: 225 }, 256),
+    ).toEqual({ ok: false });
+    expect(
+      mediaPreviewMatchesOriginal({ width: 4032, height: 3024 }, { width: 256, height: 10 }, 256),
+    ).toEqual({ ok: false });
+  });
+
+  it("reads EXIF orientation for rotated JPEGs and detects incomplete prefixes", () => {
+    const jpeg = new Uint8Array([
+      0xff, 0xd8, 0xff, 0xe1, 0x00, 0x22,
+      // "Exif\0\0"
+      0x45, 0x78, 0x69, 0x66, 0x00, 0x00,
+      // "II", 42, IFD offset = 8
+      0x49, 0x49, 0x2a, 0x00, 0x08, 0x00, 0x00, 0x00,
+      // 1 entry: tag 0x0112, type SHORT (3), count 1, value 6
+      0x01, 0x00, 0x12, 0x01, 0x03, 0x00, 0x01, 0x00, 0x00, 0x00, 0x06, 0x00, 0x00, 0x00,
+      // next IFD = 0, EOI
+      0x00, 0x00, 0x00, 0x00, 0xff, 0xd9,
+    ]);
+    expect(exifOrientation(jpeg)).toBe(6);
+    expect(exifOrientationComplete(jpeg)).toBe(6);
+    expect(exifOrientationComplete(jpeg.subarray(0, 12))).toBeNull();
+    expect(orientedSize({ width: 400, height: 300 }, jpeg)).toEqual({ width: 300, height: 400 });
+    expect(exifOrientation(b64(FIXTURES.png))).toBe(1);
+    expect(exifOrientationComplete(b64(FIXTURES.png))).toBe(1);
+    expect(exifOrientationComplete(b64(FIXTURES.jpeg))).toBe(1);
+    expect(exifOrientationComplete(b64(FIXTURES.webpLossy))).toBe(1);
   });
 });
