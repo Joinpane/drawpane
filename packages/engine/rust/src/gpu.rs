@@ -1442,8 +1442,9 @@ pub struct Gpu {
     whole_samples: Option<Option<IRect>>,
     whole_reader_halo: bool,
     /// The frame a limited moving frame presented (`present_motion_standin`), while `cur` keeps
-    /// the sharp frame it was warped from: what a read-back shows until the next frame.
-    standin_frame: Option<usize>,
+    /// the sharp frame it was warped from: what a read-back shows until a frame replaces it on
+    /// screen (`pacing::Screen`).
+    screen: crate::pacing::Screen,
     /// Milliseconds a tile has lately taken to draw (a running average).
     tile_ms: f64,
     /// Running EWMA of `submit_ms / work_ms` for tile slices so backends with synchronous submit
@@ -2108,7 +2109,7 @@ impl Gpu {
             shown: None,
             whole_samples: None,
             whole_reader_halo: false,
-            standin_frame: None,
+            screen: crate::pacing::Screen::default(),
             tile_ms: 0.0,
             submit_ratio: if IS_WEBGL { 1.0 } else { 0.0 },
             blit,
@@ -4988,7 +4989,7 @@ impl Gpu {
             self.bytes -= Self::frame_bytes(old.width, old.height);
             old.texture.destroy();
         }
-        self.standin_frame = None;
+        self.screen = crate::pacing::Screen::default();
     }
 
     /// Drops the whole frame being drawn over slices, if any, and forgets the one shown.
@@ -6525,7 +6526,7 @@ impl Gpu {
     /// Presents the last frame warped to `view` (or the background) when a budgeted moving frame
     /// hits a limit: a composite of one quad, never a whole-view replay. `cur` and `last` keep the
     /// sharp frame it was warped from, so the next frame warps from that again; a read-back shows
-    /// this one (`standin_frame`).
+    /// this one (`pacing::Screen`).
     #[allow(clippy::too_many_arguments)]
     fn present_motion_standin(
         &mut self,
@@ -6555,7 +6556,7 @@ impl Gpu {
             && l.view.determinant().abs() > 0.0
         {
             comp.base = Some(view * l.view.inverse());
-            self.tiles.base_kept = self.standin_frame.is_some();
+            self.tiles.base_kept = self.screen.standin.is_some();
             comp.holes = self.tiles.holes(view, (w, h));
         }
         let mut stats = DrawStats {
@@ -6574,7 +6575,7 @@ impl Gpu {
             self.cur = Some(dst);
             self.set_cur_page(true);
         } else {
-            self.standin_frame = Some(dst);
+            self.screen.standin = Some(dst);
         }
         self.shown = None;
         Ok(stats)
@@ -6635,7 +6636,7 @@ impl Gpu {
         self.tiles.moving = options.moving;
         // A stand-in after a limit was shown since the frame this one is laid on: that frame is
         // older than the screen where something changed since (`TileCache::base_kept`).
-        self.tiles.base_kept = self.standin_frame.is_some();
+        self.tiles.base_kept = self.screen.standin.is_some();
         self.tiles.bake_overview = !options.moving && options.budget_ms > 0.0;
         self.fit_tiles(store.limits.tile_bytes);
         let zooming = options.moving && self.last_scale.is_some_and(|s| s != scale);
@@ -7338,9 +7339,11 @@ impl Gpu {
     ) -> Result<DrawStats> {
         let t1 = now();
         self.check()?;
-        self.standin_frame = None;
         self.configure_surface(frame)?;
-        let acquired = match self.acquire() {
+        // What was shown stays recorded until this frame replaces it (issue #355).
+        let acquired = self.acquire();
+        stats.presented = self.screen.acquired(self.surface.is_some(), &acquired);
+        let acquired = match acquired {
             Ok(t) => t,
             Err(e) => {
                 if let Some(encoder) = pending_encoder {
@@ -7351,8 +7354,6 @@ impl Gpu {
                 return Err(e);
             }
         };
-        // A frame read back (no canvas) needs no presenting.
-        stats.presented = self.surface.is_none() || acquired.is_some();
         if let (Some(t), Some(blit)) = (acquired, self.blit.as_ref()) {
             let main = &self.frames[frame];
             let mut encoder = pending_encoder.unwrap_or_else(|| {
@@ -9749,7 +9750,7 @@ impl Gpu {
     /// `read_back_straight` (which takes the in-flight count it answers). At most `READBACKS` at once.
     pub fn read_back_start(&self) -> Result<ReadBack> {
         self.check()?;
-        let main = match self.standin_frame {
+        let main = match self.screen.standin {
             Some(frame) => &self.frames[frame],
             None => self.current()?,
         };

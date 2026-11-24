@@ -80,9 +80,55 @@ impl Starvation {
     }
 }
 
+/// What the canvas shows of the frames kept: the frame a render-limit stand-in was shown from
+/// (`Gpu::present_motion_standin`), while the frame it was warped from stays the one the next is
+/// laid on. Older than the screen where something changed since, that frame is then laid round
+/// it (`TileCache::base_kept`).
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Screen {
+    /// The frame (`frames` index) holding the stand-in shown, if one is.
+    pub standin: Option<usize>,
+}
+
+impl Screen {
+    /// A frame went for the canvas (`Gpu::acquire`'s answer, `canvas` false when frames are read
+    /// back instead). Whether it's shown now: only a frame the canvas took, or one read back,
+    /// replaces what's on screen. When the canvas fails, or can't take a frame now, what was
+    /// shown stays, and so does the record of it.
+    pub fn acquired<T, E>(&mut self, canvas: bool, acquired: &Result<Option<T>, E>) -> bool {
+        let shown = match acquired {
+            Ok(Some(_)) => true,
+            Ok(None) => !canvas,
+            Err(_) => false,
+        };
+        if shown {
+            self.standin = None;
+        }
+        shown
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A stand-in on screen stays recorded until a frame actually replaces it: not when the
+    /// canvas fails to give a texture, nor when it can't take one now (issue #355: the engine
+    /// then thought the older kept frame was on screen, and laid it uncut).
+    #[test]
+    fn a_stand_in_stays_recorded_until_a_frame_is_shown() {
+        let mut screen = Screen { standin: Some(1) };
+        assert!(!screen.acquired::<(), &str>(true, &Err("the canvas's surface was lost")));
+        assert_eq!(screen.standin, Some(1), "an acquire that failed showed nothing");
+        assert!(!screen.acquired::<(), &str>(true, &Ok(None)));
+        assert_eq!(screen.standin, Some(1), "a canvas that took nothing showed nothing");
+        assert!(screen.acquired::<(), &str>(true, &Ok(Some(()))));
+        assert_eq!(screen.standin, None, "a frame shown replaces the stand-in");
+        // No canvas: frames are read back, so each one drawn is what's shown.
+        let mut read_back = Screen { standin: Some(0) };
+        assert!(read_back.acquired::<(), &str>(false, &Ok(None)));
+        assert_eq!(read_back.standin, None);
+    }
 
     /// A stand-in presented every frame never renews the wait: the oldest unfinished submission
     /// decides, so a silent GPU holds tile work back for `GIVE_UP_MS` at most (review of #345).
