@@ -145,8 +145,12 @@ pub struct TileEntry {
     /// when it isn't exact (a provisional record in it, display list 1.1: what the list holds
     /// now, drawn as well as it can be).
     pub full: bool,
-    /// Something it shows changed since it was drawn: a stand-in until drawn again.
+    /// Something it shows changed since it was drawn (an edit, an image replaced): it shows what's
+    /// gone, so it stands in for nothing, not even itself, until drawn again.
     pub stale: bool,
+    /// An image in it has another resolution now (a sharper level arrived, or one was dropped):
+    /// the same picture, so it stands in, but it's never exact until drawn again.
+    pub refine: bool,
     /// It holds an effect drawn on a reduced grid (a layer blur past the native limits): not
     /// exact, and nothing to draw again for.
     pub reduced: bool,
@@ -157,7 +161,7 @@ pub struct TileEntry {
 impl TileEntry {
     /// Nothing to draw it again for: drawn at full detail and still current.
     pub fn current(&self) -> bool {
-        !self.stale && self.full
+        !self.stale && !self.refine && self.full
     }
 }
 
@@ -309,14 +313,19 @@ pub struct TileCache {
     /// The next plan is for a frame while the camera moves (set by the backend): the overview
     /// stands in there.
     pub moving: bool,
+    /// The frame the next is laid on (the last frame drawn) isn't the one on screen: a stand-in
+    /// after a limit was shown since (set by the backend). Where something changed since that
+    /// frame was drawn, it would show older pixels than the screen did, so it's laid round them
+    /// (`holes`). Otherwise it's what's on screen, laid as it is until what changed is drawn.
+    pub base_kept: bool,
     /// The next plan may draw the overview's tiles (set by the backend: frames at rest with a
     /// budget, and the time between frames; never a frame drawn at once, nor one in motion).
     pub bake_overview: bool,
-    /// What changed (page units) since the frame the next is laid on (the last frame drawn, which
-    /// a stand-in after a limit keeps) was drawn (`note_changed`): its pixels there are old, so
-    /// it's laid round them (`holes`), moving or not. Every frame drawn lays nothing older than
-    /// a change where the change was (no stale tile shows, at any level, and the last frame is
-    /// laid round what changed since it), so a frame drawn forgets them all (`frame_drawn`).
+    /// What changed (page units) since the frame the next is laid on (the last frame drawn) was
+    /// drawn (`note_changed`). That frame shows older pixels there than the current version: if
+    /// it's still the one on screen, it may be laid as it is until they're drawn (display never
+    /// goes back); if a stand-in was shown since (`base_kept`), it's laid round them (`holes`).
+    /// A frame drawn forgets them (`frame_drawn`): no stale tile is ever laid in one.
     changed: Vec<Rect>,
     /// An overview tile failed to draw (past a limit, say): none is kept until the cache clears.
     overview_refused: bool,
@@ -459,6 +468,7 @@ impl TileCache {
             unpainted: HashSet::new(),
             overview: None,
             moving: false,
+            base_kept: false,
             bake_overview: false,
             changed: Vec::new(),
             overview_lost: 0,
@@ -1119,8 +1129,28 @@ impl TileCache {
         }
     }
 
-    /// What changed (page units) since the last frame was drawn: while moving, neither it nor a
-    /// stale tile stands in there (`Composite::holes`).
+    /// Marks the tiles of level `id` that rectangles of its grid pixels touch as drawn with
+    /// another resolution of an image than the one picked now (`TileEntry::refine`): they stand
+    /// in, never exact, until drawn again. Not a change: nothing is noted (`note_changed`).
+    pub fn refine(&mut self, id: u32, rects: &[Rect]) {
+        let t = f64::from(self.tile);
+        for (k, e) in self.tiles.iter_mut() {
+            if k.level != id || e.stale || e.refine {
+                continue;
+            }
+            let b = Rect::new(
+                f64::from(k.i) * t,
+                f64::from(k.j) * t,
+                f64::from(k.i + 1) * t,
+                f64::from(k.j + 1) * t,
+            );
+            if rects.iter().any(|r| overlaps(*r, b)) {
+                e.refine = true;
+            }
+        }
+    }
+
+    /// What changed (page units) since the last frame was drawn (`changed`).
     pub fn note_changed(&mut self, page: &[Rect]) {
         for r in page {
             if r.is_finite() && !self.changed.iter().any(|c| c.contains_rect(*r)) {
@@ -1151,9 +1181,13 @@ impl TileCache {
         self.changed.iter().any(|c| overlaps(*c, page))
     }
 
-    /// Where the last frame's pixels are old under `view` (page units to this frame's pixels),
-    /// within `size`: what changed since it was drawn, moving or not.
+    /// Where the last frame's pixels are older than the screen showed under `view` (page units to
+    /// this frame's pixels), within `size`: what changed since it was drawn, when a stand-in was
+    /// shown since (`base_kept`). None while it's the frame on screen.
     pub fn holes(&self, view: Affine, size: (u32, u32)) -> Vec<Rect> {
+        if !self.base_kept {
+            return Vec::new();
+        }
         let frame = Rect::new(0.0, 0.0, f64::from(size.0), f64::from(size.1));
         self.changed
             .iter()
@@ -1243,6 +1277,7 @@ impl TileCache {
                 exact: full && exact,
                 full,
                 stale: false,
+                refine: false,
                 reduced,
                 used: self.frame,
             },
@@ -1449,10 +1484,11 @@ impl TileCache {
             .intersect(frame_grid);
             let page = grid_inv.transform_rect_bbox(shown);
             let mut deps = Vec::new();
-            // Nothing old stands in, moving or not: not a stale tile, and not the last frame
-            // where something changed since it was drawn (`Composite::holes`).
+            // Nothing older than the screen showed stands in, moving or not: never a stale tile,
+            // and not the last frame where something changed since it was drawn, once a stand-in
+            // was shown since (`base_kept`, `Composite::holes`).
             let stands = held.is_some_and(|e| !e.stale);
-            let old = self.changed_in(page);
+            let old = self.base_kept && self.changed_in(page);
             let covered = stands
                 || (!old && !self.unpainted.contains(&key) && last_page.is_some_and(|l| l.contains_rect(page)))
                 || other_levels.iter().any(|o| match self.cover(*o, page) {
@@ -1471,7 +1507,7 @@ impl TileCache {
                 });
             needs.push(Need {
                 key,
-                held: stands,
+                held: held.is_some(),
                 covered,
                 page,
                 deps,
@@ -1552,8 +1588,13 @@ impl TileCache {
                 continue;
             }
             if n.held {
-                // A stale tile stands in for itself and is drawn again in its own slot.
-                optional.push(frame_job(n.key, false, false));
+                // Drawn again in its own slot (pinned with what the frame shows). A stale tile
+                // stands in for nothing, not even itself: where nothing else covers it, first.
+                if n.covered {
+                    optional.push(frame_job(n.key, false, false));
+                } else {
+                    must.push(frame_job(n.key, true, false));
+                }
             } else if !n.covered {
                 let direct = room == 0;
                 room = room.saturating_sub(1);
@@ -1741,7 +1782,7 @@ impl TileCache {
                 }
                 continue;
             };
-            if e.stale || !e.exact {
+            if e.stale || e.refine || !e.exact {
                 out.exact = false;
             }
             // A stale tile shows what's gone: what's beneath shows instead.
@@ -2075,8 +2116,9 @@ mod tests {
         }
     }
 
-    /// An edit under what the last frame showed (the overview, here): while moving, the last
-    /// frame isn't laid there and what's there is drawn (re-check of #345).
+    /// An edit under what the last frame showed (the overview, here), with a stand-in shown since
+    /// that frame: while moving, the last frame isn't laid there and what's there is drawn
+    /// (re-check of #345).
     #[test]
     fn what_changed_never_shows_through_the_last_frame_while_moving() {
         let mut c = TileCache::new(512, 8);
@@ -2095,6 +2137,8 @@ mod tests {
         c.invalidate(o, &[grid.transform_rect_bbox(Rect::new(25.0, 25.0, 40.0, 40.0))]);
         c.begin([1.0; 4], 0);
         c.moving = true;
+        // A stand-in after a limit was shown since the last frame was drawn.
+        c.base_kept = true;
         let next = c
             .plan(Affine::scale(9.0), (512, 512), true, Some(last), false, false)
             .expect("plan");
@@ -2116,13 +2160,13 @@ mod tests {
         assert!(c.compose(&next, Some(last)).holes.is_empty());
     }
 
-    /// Nothing older than a change shows where it was, at rest or moving: no stale tile is laid
-    /// or stands in, and the last frame is laid round what changed since it was drawn, until a
-    /// frame is drawn (final re-checks of #345: a frame laid at rest from stale tiles, after an
-    /// exact frame at another scale covered only one of two changes, brought the old fill back
-    /// to the next moving frame).
+    /// Display never goes back where something changed, at rest or moving: a stale tile is never
+    /// laid nor stands in, not even for itself (any level). The last frame drawn, while it's the
+    /// one on screen, is laid as it is until what changed is drawn (no hole); once a stand-in was
+    /// shown since (`base_kept`), it's laid round what changed and that is drawn first (final
+    /// re-checks of #345).
     #[test]
-    fn nothing_older_than_a_change_shows_at_rest_or_moving() {
+    fn a_stale_tile_never_shows_and_only_an_older_kept_frame_is_cut() {
         let mut c = TileCache::new(512, 32);
         c.begin([1.0; 4], 0);
         let view = Affine::IDENTITY;
@@ -2139,32 +2183,106 @@ mod tests {
         let grid = c.level(id).expect("level").grid();
         c.invalidate(id, &[grid.transform_rect_bbox(changed)]);
         let stale = TileKey { level: id, i: 0, j: 0 };
-        for moving in [false, true, false] {
+        for (moving, kept) in [(false, false), (true, false), (false, true), (true, true)] {
             c.begin([1.0; 4], 0);
             c.moving = moving;
+            c.base_kept = kept;
             let next = c.plan(view, size, false, Some(last), false, false).expect("plan");
+            let job = next.jobs.iter().find(|j| j.key == stale);
             assert!(
-                next.jobs.iter().any(|j| j.key == stale && j.must),
-                "moving {moving}: what changed must be drawn, {:?}",
+                job.is_some(),
+                "moving {moving} kept {kept}: drawn again, {:?}",
                 next.jobs
             );
+            // Under the frame on screen it waits its turn; under an older kept frame it's first.
+            assert_eq!(job.is_some_and(|j| j.must), kept, "moving {moving} kept {kept}");
             let comp = c.compose(&next, Some(last));
             assert!(
                 !comp.copies.iter().any(|cp| cp.dst == (0, 0)),
-                "moving {moving}: a stale tile was laid"
+                "moving {moving} kept {kept}: a stale tile was laid"
             );
-            assert!(comp.base.is_some() && !comp.exact);
-            assert!(
+            assert!(comp.base.is_some() && !comp.exact && comp.pending > 0);
+            assert_eq!(
                 comp.holes.iter().any(|h| h.contains_rect(changed)),
-                "moving {moving}: the last frame laid over what changed, {:?}",
+                kept,
+                "moving {moving} kept {kept}: {:?}",
                 comp.holes
             );
         }
-        // A frame drawn since (laid round it) holds nothing old: the change is forgotten.
+        // A frame drawn since holds nothing old: the change is forgotten.
         c.frame_drawn();
         c.begin([1.0; 4], 0);
+        c.base_kept = true;
         let next = c.plan(view, size, false, Some(last), false, false).expect("plan");
         assert!(c.compose(&next, Some(last)).holes.is_empty());
+    }
+
+    /// A stale tile keeps its slot: with every slot taken by what the frame shows, it's drawn
+    /// again there (not straight into the frame, which would leave it stale), so the frame gets
+    /// exact (CI on 574048a7: CPU tiles never exact at rest after an edit).
+    #[test]
+    fn a_stale_tile_is_drawn_again_in_its_own_slot_when_no_room_is_left() {
+        let mut c = TileCache::new(64, 4);
+        c.begin([1.0; 4], 0);
+        let view = Affine::IDENTITY;
+        let size = (128, 128);
+        let plan = c.plan(view, size, false, None, false, false).expect("plan");
+        assert_eq!(plan.visible.len(), 4);
+        for j in &plan.jobs {
+            let slot = c.slot_for(j.key).expect("slot");
+            c.drawn(j.key, slot, true, true, false);
+        }
+        let last = Last { view, size };
+        c.frame_drawn();
+        c.invalidate(plan.level, &[Rect::new(5.0, 5.0, 6.0, 6.0)]);
+        for moving in [false, true] {
+            c.begin([1.0; 4], 0);
+            c.moving = moving;
+            let next = c.plan(view, size, false, Some(last), false, false).expect("plan");
+            assert_eq!(next.jobs.len(), 1, "moving {moving}: {:?}", next.jobs);
+            assert!(!next.jobs[0].direct, "moving {moving}: drawn in its own slot");
+        }
+        c.begin([1.0; 4], 0);
+        let next = c.plan(view, size, false, Some(last), false, false).expect("plan");
+        let key = next.jobs[0].key;
+        let slot = c.slot_for(key).expect("its own slot");
+        c.drawn(key, slot, true, true, false);
+        c.begin([1.0; 4], 0);
+        let again = c.plan(view, size, false, Some(last), false, false).expect("plan");
+        assert!(again.jobs.is_empty());
+        assert!(c.compose(&again, Some(last)).exact);
+    }
+
+    /// Another resolution of an image (a sharper level, or one dropped) isn't a change: tiles
+    /// drawn with the old one stand in for themselves, never exact, and are drawn again.
+    #[test]
+    fn another_resolution_of_an_image_stands_in_until_drawn_again() {
+        let mut c = TileCache::new(512, 32);
+        c.begin([1.0; 4], 0);
+        let view = Affine::IDENTITY;
+        let size = (1024, 256);
+        let plan = c.plan(view, size, false, None, false, false).expect("plan");
+        for j in &plan.jobs {
+            let slot = c.slot_for(j.key).expect("slot");
+            c.drawn(j.key, slot, true, true, false);
+        }
+        c.frame_drawn();
+        let id = plan.level;
+        c.refine(id, &[Rect::new(16.0, 16.0, 144.0, 48.0)]);
+        assert!(c.changed().is_empty(), "nothing noted as changed");
+        let key = TileKey { level: id, i: 0, j: 0 };
+        c.begin([1.0; 4], 0);
+        let next = c.plan(view, size, false, None, false, false).expect("plan");
+        let job = next.jobs.iter().find(|j| j.key == key).expect("drawn again");
+        assert!(!job.must, "it stands in for itself");
+        let comp = c.compose(&next, None);
+        assert!(comp.copies.iter().any(|cp| cp.dst == (0, 0)), "it's laid");
+        assert!(!comp.exact && comp.pending == 1);
+        let slot = c.slot_for(key).expect("its slot");
+        c.drawn(key, slot, true, true, false);
+        c.begin([1.0; 4], 0);
+        let next = c.plan(view, size, false, None, false, false).expect("plan");
+        assert!(c.compose(&next, None).exact);
     }
 
     /// The overview's tiles live apart from the frames' (`OVERVIEW_SLOT`): no frame's tile takes

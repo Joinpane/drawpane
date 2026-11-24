@@ -358,20 +358,24 @@ impl Engine {
     /// every reader they reach, transitively (`Store::dirty`). A fresh list drops them all, and
     /// the last frame with them: it shows a page that's gone.
     fn invalidate_tiles(&mut self, changes: &[Dirty], full: bool, drag_parts: bool) {
-        self.invalidate_tiles_at(changes, full, drag_parts, None);
+        self.invalidate_tiles_at(changes, full, drag_parts, None, false);
     }
 
+    /// `refine`: an image has another resolution now, not other content (a sharper level
+    /// arrived, or one was dropped): tiles drawn with it still stand in, never exact
+    /// (`TileCache::refine`), and nothing is noted as changed.
     fn invalidate_tiles_at(
         &mut self,
         changes: &[Dirty],
         full: bool,
         drag_parts: bool,
         at: Option<&dyn Fn(f64) -> bool>,
+        refine: bool,
     ) {
-        // What changed, in page units, for the last frame shown: while moving it isn't laid there
-        // (`TileCache::note_changed`), whatever levels the cache holds. An image change counts at
-        // the scale the last frame was drawn at only if the level drawn there changed.
-        let changed = if full || changes.is_empty() {
+        // What changed, in page units, for the last frame shown (`TileCache::note_changed`),
+        // whatever levels the cache holds. An image change counts at the scale the last frame was
+        // drawn at only if the level drawn there changed.
+        let changed = if full || changes.is_empty() || refine {
             Vec::new()
         } else {
             self.store.dirty(changes, Affine::IDENTITY, 1.5)
@@ -390,7 +394,11 @@ impl Engine {
                     continue;
                 }
                 let rects: Vec<Rect> = store.dirty(changes, level.grid(), 1.5);
-                cache.invalidate(id, &rects);
+                if refine {
+                    cache.refine(id, &rects);
+                } else {
+                    cache.invalidate(id, &rects);
+                }
                 // An edit beside a drag: its parts around the selection are drawn again there.
                 if drag_parts {
                     cache.drag_invalidate(id, &rects);
@@ -552,7 +560,9 @@ impl Engine {
             return;
         }
         self.generation += 1;
-        self.invalidate_tiles_at(&users, false, true, Some(&at));
+        // A level of a size the image didn't have (or one dropped) is the same picture at another
+        // resolution; one replaced at a size it had may be other content.
+        self.invalidate_tiles_at(&users, false, true, Some(&at), replaced.is_none());
     }
 
     /// The scales at which a view draws or keeps anything (tiles' levels, the frame shown), when

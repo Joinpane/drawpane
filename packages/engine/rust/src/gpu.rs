@@ -6555,6 +6555,7 @@ impl Gpu {
             && l.view.determinant().abs() > 0.0
         {
             comp.base = Some(view * l.view.inverse());
+            self.tiles.base_kept = self.standin_frame.is_some();
             comp.holes = self.tiles.holes(view, (w, h));
         }
         let mut stats = DrawStats {
@@ -6632,6 +6633,9 @@ impl Gpu {
         self.tiles.begin_scaled(background, scale, halo);
         self.set_overview(store);
         self.tiles.moving = options.moving;
+        // A stand-in after a limit was shown since the frame this one is laid on: that frame is
+        // older than the screen where something changed since (`TileCache::base_kept`).
+        self.tiles.base_kept = self.standin_frame.is_some();
         self.tiles.bake_overview = !options.moving && options.budget_ms > 0.0;
         self.fit_tiles(store.limits.tile_bytes);
         let zooming = options.moving && self.last_scale.is_some_and(|s| s != scale);

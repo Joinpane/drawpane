@@ -127,6 +127,247 @@ function spacedFills(
   return [...list.finish()];
 }
 
+/**
+ * A 1,600 x 512 layer over the page: a red fill (`red`), a green one as a patch (`green`), red
+ * again as the patch after that (`undo`), an image fill (`image`), provisional text with red bars
+ * (`provisional`), or green glyphs replacing it (`glyph`).
+ */
+function wideLayer(
+  kind: "red" | "green" | "undo" | "image" | "provisional" | "glyph",
+  base = 0xffffffff,
+): number[] {
+  const list = new ListWriter(base, base === 0xffffffff ? 1 : base + 1);
+  if (base === 0xffffffff) list.reset();
+  if (kind === "glyph")
+    list.glyph(
+      1,
+      new PathData().moveTo(0, 0).lineTo(1600, 0).lineTo(1600, 512).lineTo(0, 512).close(),
+    );
+  const color: [number, number, number, number] =
+    kind === "green" || kind === "glyph" ? [0, 1, 0, 1] : [1, 0, 0, 1];
+  const fill: WireRecord["ops"][number] =
+    kind === "image"
+      ? {
+          op: "fill",
+          path: 0,
+          evenOdd: false,
+          paint: {
+            kind: "image",
+            image: 1,
+            matrix: [1600, 0, 0, 512, 0, 0],
+            tile: false,
+            opacity: 1,
+          },
+        }
+      : { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color } };
+  list.set(1, ROOT, {
+    flags: kind === "provisional" ? FLAG.provisional : 0,
+    transform: [1, 0, 0, 1, 0, 0],
+    opacity: 1,
+    width: 1600,
+    height: 512,
+    coarseBelow: 0,
+    reach: 0,
+    unsupported: 0,
+    paths:
+      kind === "glyph"
+        ? [{ kind: "glyphs", scale: 1, glyphs: [1, 0, 512] }]
+        : [{ kind: "rect", w: 1600, h: 512, radii: [0, 0, 0, 0], smoothing: 0 }],
+    ops: kind === "provisional" ? [] : [fill],
+    coarse: kind === "provisional" ? [fill] : [],
+  });
+  return [...list.finish()];
+}
+
+/** A step of `presented`: an edit, an image level, or a frame drawn and read back. */
+type Step =
+  | { apply: number[] }
+  | { image: { id: number; side: number; color: string } }
+  | {
+      name: string;
+      size: [number, number];
+      scale: number;
+      x?: number;
+      moving: boolean;
+      budget: number;
+      /** Device pixels read once the frame is drawn. */
+      samples: [number, number][];
+    };
+
+/**
+ * Runs `steps` on one GPU engine given `list` and reads every frame back: what each presented,
+ * in order, to check that what's shown never goes back to something older.
+ */
+async function presented(
+  page: Page,
+  build: GpuBuild,
+  list: number[],
+  steps: Step[],
+  options: { tileBytes?: number; viewImages?: boolean } = {},
+) {
+  await openEngine(page, build);
+  return page.evaluate(
+    async ({ list, steps, options }) => {
+      const name = "/engine.js";
+      const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+      await glue.default({ module_or_path: "/engine_bg.wasm" });
+      const engine = new glue.Engine(0, 0);
+      const requireOk = (out: { ok: boolean; message: string; free(): void }) => {
+        const { ok, message } = out;
+        out.free();
+        if (!ok) throw new Error(message);
+      };
+      try {
+        if (options.tileBytes !== undefined)
+          requireOk(engine.setLimit("tile_bytes", options.tileBytes));
+        const gpu = await glue.createGpu(null, 0);
+        const attached = engine.attachGpu?.(gpu);
+        gpu.free();
+        if (!attached) throw new Error("no GPU entry points");
+        requireOk(attached);
+        if (options.viewImages) engine.enableViewImages();
+        requireOk(engine.apply(new Uint8Array(list)));
+        const bg = new Float32Array([0, 0, 0, 1]);
+        const rows = [];
+        for (const step of steps) {
+          if ("apply" in step) {
+            requireOk(engine.apply(new Uint8Array(step.apply)));
+            continue;
+          }
+          if ("image" in step) {
+            const canvas = new OffscreenCanvas(step.image.side, step.image.side);
+            const ctx = canvas.getContext("2d");
+            if (!ctx) throw new Error("no 2D context");
+            ctx.fillStyle = step.image.color;
+            ctx.fillRect(0, 0, step.image.side, step.image.side);
+            const bitmap = await createImageBitmap(canvas);
+            try {
+              const put = engine.putGpuImageLevel?.(step.image.id, bitmap);
+              if (!put) throw new Error("no putGpuImageLevel");
+              requireOk(put);
+            } finally {
+              bitmap.close();
+            }
+            continue;
+          }
+          const out = engine.renderGpu?.(
+            step.size[0],
+            step.size[1],
+            step.scale,
+            step.x ?? 0,
+            0,
+            1,
+            bg,
+            step.moving,
+            step.budget,
+          );
+          if (!out) throw new Error("no renderGpu");
+          const row = {
+            ok: out.ok,
+            message: out.message,
+            exact: out.exact,
+            pending: out.pending,
+            drawn: out.tiles_drawn,
+          };
+          out.free();
+          if (!row.ok) throw new Error(row.message);
+          const pixels = await engine.gpuPixels?.();
+          if (!(pixels instanceof Uint8Array))
+            throw new Error(
+              `no read-back after ${step.name}: ${pixels?.message ?? "no entry point"}`,
+            );
+          const samples = step.samples.map(([x, y]) => {
+            const at = (y * step.size[0] + x) * 4;
+            return [...pixels.subarray(at, at + 4)];
+          });
+          rows.push({
+            name: step.name,
+            exact: row.exact,
+            pending: row.pending,
+            drawn: row.drawn,
+            samples,
+          });
+        }
+        return rows;
+      } finally {
+        engine.free();
+      }
+    },
+    { list, steps, options },
+  );
+}
+
+/**
+ * Display never goes back: at each sample (one region of the page across `rows`), once `fresh`
+ * was shown, `old` never is again.
+ */
+function neverBack(rows: { name: string; samples: number[][] }[], old: number[], fresh: number[]) {
+  const count = Math.max(...rows.map((r) => r.samples.length));
+  for (let k = 0; k < count; k++) {
+    let seen = false;
+    for (const row of rows) {
+      const sample = row.samples[k];
+      if (!sample) continue;
+      if (seen)
+        expect(sample, `${row.name} sample ${k} went back to what was shown before`).not.toEqual(
+          old,
+        );
+      if (sample.join() === fresh.join()) seen = true;
+    }
+  }
+}
+
+/**
+ * A `color` board of 1,024 x 256 under a dark square every 8 px (4,096 of them, so a tile takes
+ * longer than a 1 ms slice): a fresh list, or (with `base`) a patch recolouring the board only.
+ */
+function slowBoard(
+  color: readonly [number, number, number, number] | "image",
+  base = 0xffffffff,
+): number[] {
+  const list = new ListWriter(base, base === 0xffffffff ? 1 : base + 1);
+  if (base === 0xffffffff) list.reset();
+  const rect = (
+    id: number,
+    x: number,
+    y: number,
+    w: number,
+    h: number,
+    c: readonly number[] | "image",
+  ) =>
+    list.set(id, ROOT, {
+      flags: 0,
+      transform: [1, 0, 0, 1, x, y],
+      opacity: 1,
+      width: w,
+      height: h,
+      coarseBelow: 0,
+      reach: 0,
+      unsupported: 0,
+      paths: [{ kind: "rect", w, h, radii: [0, 0, 0, 0], smoothing: 0 }],
+      ops: [
+        {
+          op: "fill",
+          path: 0,
+          evenOdd: false,
+          paint:
+            c === "image"
+              ? { kind: "image", image: 1, matrix: [w, 0, 0, h, 0, 0], tile: false, opacity: 1 }
+              : { kind: "solid", color: c as [number, number, number, number] },
+        },
+      ],
+      coarse: [],
+    });
+  rect(1, 0, 0, 1024, 256, color);
+  if (base === 0xffffffff) {
+    let id = 2;
+    for (let y = 0; y < 256; y += 8) {
+      for (let x = 0; x < 1024; x += 8) rect(id++, x + 1, y + 1, 5, 5, [0.2, 0.2, 0.2, 1]);
+    }
+  }
+  return [...list.finish()];
+}
+
 type HeldFrame = {
   name: string;
   size: [number, number];
@@ -701,52 +942,60 @@ for (const build of ["browser", "webgl"] as const) {
       expect(exact?.pixel).toEqual(red);
     });
 
-    test("an edit never shows through a moving frame without tile slots", async ({ page }) => {
+    test("an edit on a view without tile slots never goes back while moving", async ({ page }) => {
       // No slot holds a tile, so every frame is drawn straight into a frame texture. The fill
-      // turns from red to green, then the camera moves: no moving frame may show the old red
-      // (the last frame moved, or an older frame's pixels), only green or a stand-in, and at
-      // rest the frame is exact green (re-check of #345).
-      const at = (x: number, px: number, moving: boolean, patch?: number[]): Frame => ({
+      // turns from red to green, then the camera moves: a moving frame shows what's on screen
+      // (red) or the new fill, never the background where the screen showed content, and once
+      // green is shown somewhere, never red there again; at rest it's exact green.
+      const green = [0, 255, 0, 255];
+      const at = (name: string, x: number, moving: boolean): Step => ({
+        name,
         size: [1024, 512],
-        pixel: [px, 128],
-        camera: [1, x, 0, 1],
+        scale: 1,
+        x,
         moving,
         budget: moving ? 4 : 0,
-        ...(patch ? { patch } : {}),
+        // Two places on the page, at 128 and 800 page units.
+        samples: [
+          [128 + x, 128],
+          [800 + x, 128],
+        ],
       });
-      const green = [0, 255, 0, 255];
-      const frames = await sample(
+      const rows = await presented(
         page,
+        build,
         solid(6000),
         [
-          at(0, 128, false),
-          at(-16, 128, true, solid(6000, [0, 1, 0, 1], 1)),
-          at(-32, 768, true),
-          at(-48, 128, true),
-          at(-48, 768, false),
+          at("initial", 0, false),
+          { apply: solid(6000, [0, 1, 0, 1], 1) },
+          at("moving 1", -16, true),
+          at("moving 2", -32, true),
+          at("moving 3", -48, true),
+          at("rest", -48, false),
         ],
-        0,
-        build,
+        { tileBytes: 0 },
       );
-      expect(frames[0]).toMatchObject({ exact: true, pixel: red });
-      for (const moving of frames.slice(1, 4)) {
-        expect(moving?.exact).toBe(false);
-        expect(moving?.pixel, "a moving frame showed the fill from before the edit").not.toEqual(
-          red,
-        );
+      expect(rows[0]).toMatchObject({ exact: true, samples: [red, red] });
+      for (const moving of rows.slice(1, 4)) {
+        expect(moving.exact).toBe(false);
+        for (const sample of moving.samples)
+          expect([red.join(), green.join()]).toContain(sample.join());
       }
       // Moving frames still draw (rough, the nearest the middle first): green shows before rest.
-      expect(frames.slice(1, 4).some((f) => f?.pixel.join() === green.join())).toBe(true);
-      expect(frames[4]).toMatchObject({ exact: true, pending: 0, pixel: green });
+      expect(rows.slice(1, 4).some((f) => f.samples.some((p) => p.join() === green.join()))).toBe(
+        true,
+      );
+      neverBack(rows, red, green);
+      expect(rows[4]).toMatchObject({ exact: true, pending: 0, samples: [green, green] });
     });
 
-    test("a second limited moving frame after an edit still leaves the old fill out", async ({
+    test("a second limited moving frame after an edit leaves the older frame out", async ({
       page,
     }) => {
       // No tile slots and a 6-verb limit: after the edit (150 verbs) every moving frame hits the
-      // limit and shows the last frame warped, round what changed. The frame it warps from is
-      // still the red one, so the second such frame must leave it out as the first did (final
-      // re-check of #345: it brought the red back).
+      // limit and shows a frame warped. The first warps the frame on screen. The next ones keep
+      // warping that same frame, which by then is older than the screen (a stand-in was shown
+      // since), so where it changed since, they leave it out (re-checks of #345).
       await openEngine(page, build);
       const rows = await page.evaluate(
         async ({ before, patch }) => {
@@ -819,7 +1068,11 @@ for (const build of ["browser", "webgl"] as const) {
         { before: solid(6000), patch: denseGreen(1) },
       );
       expect(rows.initial).toMatchObject({ exact: true, pixel: red });
-      for (const moving of [rows.first, rows.second, rows.third]) {
+      // The first warps the frame on screen: what the screen shows (red) may show again.
+      expect(rows.first).toMatchObject({ exact: false, standin: true, drawn: 0, pixel: red });
+      // The next ones warp that same older frame, not what's on screen (the first stand-in):
+      // where it changed since, it's left out.
+      for (const moving of [rows.second, rows.third]) {
         expect(moving).toMatchObject({ exact: false, standin: true, drawn: 0 });
         expect(
           moving.pixel,
@@ -828,13 +1081,11 @@ for (const build of ["browser", "webgl"] as const) {
       }
     });
 
-    test("a pinch restarted after an inexact frame at rest never shows the old fill", async ({
-      page,
-    }) => {
+    test("a pinch restarted after an inexact frame at rest never goes back", async ({ page }) => {
       // GPU completions held back, so nothing is drawn while moving. After the edit: a pinch
-      // frame, a composite-only frame at rest (laid from the stale red tile, inexact), then the
-      // pinch again. What changed must stay left out of the frame it warps from until an exact
-      // frame shows it (final re-check of #345: the restart showed the red).
+      // frame, a composite-only frame at rest, then the pinch again. Green is never shown before
+      // the exact frame, so each shows what's on screen (red): never the stale red tile, never
+      // the background (re-checks of #345).
       await openEngine(page, build);
       const rows = await page.evaluate(
         async ({ before, patch, build }) => {
@@ -935,9 +1186,10 @@ for (const build of ["browser", "webgl"] as const) {
       for (const frame of [rows.pinch, rows.settle, rows.restart, rows.again]) {
         expect(frame).toMatchObject({ exact: false, drawn: 0 });
       }
-      expect(rows.restarted, "a restarted pinch showed the fill from before the edit").not.toEqual(
-        red,
-      );
+      expect(
+        [red.join(), [0, 255, 0, 255].join()],
+        "a restarted pinch showed neither the screen nor the new fill",
+      ).toContain(rows.restarted.join());
       expect(rows.exact).toMatchObject({ exact: true, pending: 0 });
       expect(rows.final).toEqual([0, 255, 0, 255]);
     });
@@ -948,13 +1200,14 @@ for (const build of ["browser", "webgl"] as const) {
       // Coarser: what the stale tiles (scale 1) would stand in for is laid at a lower scale.
       ["coarser", { size: [160, 40], scale: 0.5, samples: [[40, 16]] }],
     ] as const) {
-      test(`an exact frame (${label}) over one of two changes never brings back the other's old fill`, async ({
+      test(`an exact frame (${label}) over one of two changes is never undone at another zoom`, async ({
         page,
       }) => {
         // Two red rects turn green. An exact frame at another scale covers only the left one;
         // then a frame at rest at scale 1 (composite-only, so laid from what's kept), and the
-        // pinch again. No pixel may come from before the edit where it was: not the scale 1
-        // tiles drawn before it, nor the frame laid from them (final re-check of #345).
+        // pinch again. Once green was shown on the left, red never comes back there: not from
+        // the stale scale 1 tiles drawn before the edit, nor from a frame laid from them (final
+        // re-checks of #345).
         const wide: [number, number][] = [
           [95, 32],
           [715, 32],
@@ -1010,13 +1263,171 @@ for (const build of ["browser", "webgl"] as const) {
         const green = [0, 255, 0, 255];
         expect(rows[0]).toMatchObject({ exact: true, samples: [red, red] });
         expect(rows[1]).toMatchObject({ exact: true, samples: [green] });
-        for (const row of [rows[2], rows[3]]) {
-          expect(row?.exact).toBe(false);
-          for (const sample of row?.samples ?? []) {
-            expect(sample, `${row?.name} showed the fill from before the edit`).not.toEqual(red);
-          }
-        }
+        for (const row of [rows[2], rows[3]]) expect(row?.exact).toBe(false);
+        // The left rect was shown green (the exact frame): never red there again, whatever the
+        // zoom. The right one was never shown green before the end.
+        neverBack(rows, red, green);
+        expect(rows[2]?.samples[0], "the frame at rest went back to the old fill").toEqual(green);
         expect(rows[4]).toMatchObject({ exact: true, pending: 0, samples: [green, green] });
+      });
+    }
+
+    test("an edit at rest on tiles slower than a slice shows the old fill, then the new, never a hole", async ({
+      page,
+    }) => {
+      // The board under 4,096 squares turns from red to green at rest, drawn under a 1 ms budget
+      // a frame: its tiles take several frames. Until they're in, the frame on screen (red)
+      // stays where they are, never the background; then green, never red again.
+      const green = [0, 255, 0, 255];
+      const rest = (name: string, budget: number): Step => ({
+        name,
+        size: [1024, 256],
+        scale: 1,
+        moving: false,
+        budget,
+        // Between squares, on the board.
+        samples: [
+          [87, 47],
+          [607, 199],
+        ],
+      });
+      const rows = await presented(page, build, slowBoard([1, 0, 0, 1]), [
+        rest("initial", 0),
+        { apply: slowBoard([0, 1, 0, 1], 1) },
+        ...Array.from({ length: 30 }, (_, i) => rest(`slice ${i}`, 1)),
+        rest("exact", 0),
+      ]);
+      expect(rows[0]).toMatchObject({ exact: true, samples: [red, red] });
+      expect(
+        rows.slice(1, -1).some((r) => !r.exact),
+        "the redraw took more than one frame",
+      ).toBe(true);
+      for (const row of rows) {
+        for (const sample of row.samples)
+          expect(
+            [red.join(), green.join()],
+            `${row.name} showed neither the old fill nor the new`,
+          ).toContain(sample.join());
+      }
+      neverBack(rows, red, green);
+      expect(rows.at(-1)).toMatchObject({ exact: true, pending: 0, samples: [green, green] });
+    });
+
+    test("a sharper image level arriving at rest never shows a hole", async ({ page }) => {
+      // A red image at 16 px under 4,096 squares, then a 64 px level of the same image: the same
+      // picture at another resolution, not an edit. Its tiles take several 1 ms frames to draw
+      // again; meanwhile they stand in, so no frame shows the background where the image was,
+      // and the view gets exact.
+      const rest = (name: string, budget: number): Step => ({
+        name,
+        size: [1024, 256],
+        scale: 1,
+        moving: false,
+        budget,
+        samples: [
+          [87, 47],
+          [607, 199],
+        ],
+      });
+      const rows = await presented(
+        page,
+        build,
+        slowBoard("image"),
+        [
+          { image: { id: 1, side: 16, color: "#ff0000" } },
+          rest("initial", 0),
+          { image: { id: 1, side: 64, color: "#ff0000" } },
+          ...Array.from({ length: 30 }, (_, i) => rest(`slice ${i}`, 1)),
+          rest("exact", 0),
+        ],
+        { viewImages: true },
+      );
+      expect(rows[0]).toMatchObject({ exact: true });
+      expect(
+        rows.slice(1, -1).some((r) => !r.exact),
+        "the refinement took more than one frame",
+      ).toBe(true);
+      for (const row of rows) {
+        expect(row.samples, `${row.name} showed a hole where the image was`).toEqual([red, red]);
+      }
+      expect(rows.at(-1)).toMatchObject({ exact: true, pending: 0 });
+    });
+
+    for (const kind of ["edit", "image", "glyph"] as const) {
+      test(`content arriving while pinching (${kind}) never goes back`, async ({ page }) => {
+        // A remote fill edit (then its undo), an image replaced at the size it had, or shaped
+        // text replacing provisional bars, while pinching with no tile slots. Each frame shows
+        // what's on screen or the new content: once the new content was shown somewhere, the
+        // old never is there again (before an undo makes it current again), and the view
+        // settles exact (re-checks of #345).
+        const green = [0, 255, 0, 255];
+        const frame = (
+          name: string,
+          scale: number,
+          moving: boolean,
+          budget = moving ? 4 : 0,
+        ): Step => ({
+          name,
+          size: [1280, 256],
+          scale,
+          x: -12,
+          moving,
+          budget,
+          samples: [
+            [120, 128],
+            [600, 128],
+            [1120, 128],
+          ],
+        });
+        const list =
+          kind === "edit"
+            ? wideLayer("red")
+            : kind === "image"
+              ? wideLayer("image")
+              : wideLayer("provisional");
+        const change: Step =
+          kind === "edit"
+            ? { apply: wideLayer("green", 1) }
+            : kind === "image"
+              ? { image: { id: 1, side: 16, color: "#00ff00" } }
+              : { apply: wideLayer("glyph", 1) };
+        const steps: Step[] = [
+          ...(kind === "image" ? [{ image: { id: 1, side: 16, color: "#ff0000" } }] : []),
+          frame("initial", 1, false),
+          frame("pinch", 0.99, true),
+          change,
+          frame("updated", 0.98, true),
+          frame("next", 0.97, true),
+          ...(kind === "edit" ? [{ apply: wideLayer("undo", 2) }, frame("undo", 0.96, true)] : []),
+          frame("settled", 0.96, false, 4),
+          frame("exact", 0.96, false),
+        ];
+        const rows = await presented(page, build, list, steps, {
+          tileBytes: 0,
+          viewImages: kind === "image",
+        });
+        expect(rows[0]?.samples).toEqual([red, red, red]);
+        // Moving after the change: inexact.
+        for (const row of rows.filter((r) => ["updated", "next", "undo"].includes(r.name)))
+          expect(row.exact).toBe(false);
+        // Before an undo makes red current again.
+        neverBack(
+          rows.filter((r) => r.name !== "undo" && r.name !== "settled" && r.name !== "exact"),
+          red,
+          green,
+        );
+        if (kind !== "edit") neverBack(rows, red, green);
+        const settled = rows.find((r) => r.name === "settled");
+        for (const sample of settled?.samples ?? [])
+          expect([red.join(), green.join()], "the frame at rest showed a hole").toContain(
+            sample.join(),
+          );
+        const color = kind === "edit" ? red : green;
+        expect(rows.at(-1)).toMatchObject({
+          exact: true,
+          pending: 0,
+          samples: [color, color, color],
+        });
       });
     }
 

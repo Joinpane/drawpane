@@ -1994,22 +1994,28 @@ GPU work a frame queued had no bound, and input waited behind it.
   of `stands_in`). A zoom out then has nothing it must draw. The composite lays the overview
   beneath the last frame (`Composite::under`). At rest, what nothing nearer stands in for is
   drawn, as before.
-- **Nothing older than a change shows where it changed, moving or at rest.** No pixel shown
-  after an edit (or an image level changed) comes from a render older than it, where it touched:
-  - A stale tile, of any level or the overview, never stands in nor is laid, not even for itself:
-    it's drawn again first, as what nothing stands in for.
-  - The cache keeps the page regions changed since the frame the next is laid on was drawn
-    (`TileCache::note_changed`). That frame is laid round them (`Composite::holes`), and the
-    plan treats them as uncovered there, so they show only what's drawn since, or the
-    background until then.
-  - So every frame drawn holds nothing older than a change where it was, and becomes the frame
-    the next is laid on with nothing kept (`TileCache::frame_drawn`). A stand-in after a limit
-    isn't one: it keeps the older frame it warped, and what changed since that.
-
-  At rest this shows the background where a change was until its tiles are drawn again (within
-  the frame's budget), where it showed the old pixels before. A single set forgotten by exact
-  frames wasn't enough: a frame at rest laid from stale tiles of another level put old pixels
-  back after an exact frame at another scale had covered one change (final re-check of #345).
+- **Display never goes back where something changed, moving or at rest.** Where a region changed,
+  a frame shows pixels at least as new as its current version, or exactly the frame on screen;
+  never anything older than what was last shown there. Nothing is exact until it's drawn again.
+  - A stale tile (an edit, an image replaced at a size it had), of any level or the overview,
+    never stands in nor is laid, not even for itself. It's drawn again in its own slot: first
+    where nothing else covers it.
+  - The last frame drawn, while it's the one on screen, is laid (or warped while moving) as it
+    is, old pixels and all, until what changed is drawn: no hole, at rest or moving. After an
+    edit at rest on a slow tile, the old pixels show until the new ones land.
+  - A stand-in after a limit keeps warping the frame it was warped from, older than the screen
+    by then. The cache keeps the page regions changed since that frame was drawn
+    (`TileCache::note_changed`); once a stand-in was shown (`base_kept`), that frame is laid
+    round them (`Composite::holes`) and they're drawn first. A frame drawn forgets them
+    (`TileCache::frame_drawn`).
+  - Another resolution of the same image (a sharper level arriving, or one dropped) isn't a
+    change: tiles drawn with the old one stand in, never exact, and are drawn again
+    (`TileEntry::refine`). A level replaced at a size the image had is treated as other content.
+  - Why the first two rules: one set of changes forgotten by exact frames wasn't enough. A frame
+    at rest laid stale tiles of another scale and put old pixels back after an exact frame at
+    another scale had covered one of two changes. Laying holes at rest instead showed the
+    background for a slow tile's redraw, or a sharper image level, which Figma never does
+    (final re-checks of #345).
 - **GPU work per moving frame is held.** A frame while moving starts at most 48 GPU passes of
   tile work (`MOVING_PASSES`: Vello renders, isolation scopes, and an estimate of the kernel
   passes each reader and blurred shadow runs; Figma caps a frame at about 255 framebuffer binds,
