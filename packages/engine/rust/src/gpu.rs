@@ -249,8 +249,8 @@ const TEMP_TEX_BASE: u64 = 1 << 49;
 /// Byte cap on transient offscreen textures referenced by the active GPU scene before an
 /// automatic flush recycles them into the pool.
 const GPU_TEMP_FLUSH_BYTES: usize = 16 << 20;
-/// Soft cap on pooled offscreen/temp/clip GPU textures kept warm between frames.
-const GPU_POOL_KEEP_BYTES: usize = 48 << 20;
+/// Soft cap on pooled offscreen/temp GPU textures kept warm between frames.
+const GPU_POOL_KEEP_BYTES: usize = 32 << 20;
 
 /// GPU passes (Vello renders and isolation scopes) a frame may start while the camera moves.
 /// The main-thread budget can't bound GPU work (a 4 ms walk can queue tens of passes of blend
@@ -262,16 +262,11 @@ const MOVING_PASSES: u32 = 48;
 const IDLE_IN_FLIGHT: u64 = 2;
 /// Tiles of a frame no slot can hold (`Plan::direct`) drawn, rough, in one moving frame.
 const DIRECT_MOVING_TILES: usize = 2;
+
 /// Budget for the GPU canonical shadow mask cache (strictly enforced LRU).
 const GPU_SHADOW_CACHE_BYTES: usize = 16 << 20;
-/// Maximum number of tile-local cached clip-chain masks kept during one draw.
-const CLIP_CACHE_MAX_ENTRIES: usize = 8;
-/// Byte budget for tile-local cached clip-chain masks (color-only RGBA8 textures).
-const CLIP_CACHE_MAX_BYTES: usize = 24 << 20;
-/// Largest single clip-chain mask texture eligible for tile-local caching.
-const CLIP_CACHE_ENTRY_MAX_BYTES: usize = 16 << 20;
-/// Maximum reusable Vello depth views kept for clip-mask rasterization.
-const CLIP_DEPTH_POOL_MAX: usize = 6;
+/// Side length of the single persistent tile-local clip-mask atlas texture (RGBA8, no depth).
+const CLIP_ATLAS_SIDE: u32 = 1024;
 
 const BLIT: &str = r"
 @group(0) @binding(0) var frame: texture_2d<f32>;
@@ -698,23 +693,13 @@ struct ClipStepKey {
     transform: [u64; 6],
 }
 
-/// Color-only RGBA8 texture holding one rasterized clip-chain mask (pooled across draws).
-struct GpuClipTex {
-    tex: wgpu::Texture,
-    view: wgpu::TextureView,
-    view_id: u64,
-    width: u32,
-    height: u32,
-    bytes: usize,
-}
-
-/// One cached clip-chain mask valid for the current tile/frame draw (`clip_cache_draw_id`).
+/// One cached clip-chain mask packed inside `Gpu::clip_atlas` for the active draw (`clip_cache_draw_id`).
 struct CachedClipMask {
     key_hash: u64,
     key: Vec<ClipStepKey>,
     bounds: IRect,
-    tex: GpuClipTex,
-    last_used: u32,
+    /// Target-space origin `(bounds.x0 - slot_x, bounds.y0 - slot_y)` for `textureLoad`.
+    origin: (i32, i32),
 }
 
 /// Ready-to-bind clip mask texture view and its target-local `(x0, y0)` origin.
@@ -1547,21 +1532,17 @@ pub struct Gpu {
     scratch_blur: Option<GpuBlurScratch>,
     /// Scratch backdrop copy texture for blend compositing.
     scratch_backdrop: Option<GpuBlurScratch>,
-    /// Tile-local LRU cache of rasterized clip-chain masks for the active draw.
+    /// Persistent single-FBO shelf-packed RGBA8 atlas for tile-local cached clip-chain masks.
+    clip_atlas: Option<GpuBlurScratch>,
+    clip_atlas_at: (u32, u32, u32),
+    clip_atlas_cleared: bool,
+    /// Entries currently packed in `clip_atlas` for the active draw (`clip_cache_draw_id`).
     clip_mask_cache: Vec<CachedClipMask>,
-    clip_mask_cache_bytes: usize,
-    clip_mask_tick: u32,
     clip_cache_draw_id: u64,
     next_draw_id: u64,
-    /// Clip-chain hashes already observed in the current moving draw (2-hit admission).
-    clip_seen_hashes: [u64; 16],
+    /// Clip-chain hashes already observed in the current draw (2-hit admission).
+    clip_seen_hashes: [u64; 32],
     clip_seen_len: u8,
-    /// Warm reusable color-only clip mask textures.
-    clip_mask_pool: Vec<GpuClipTex>,
-    /// Evicted clip mask textures still referenced by the unsubmitted active encoder.
-    clip_mask_in_use: Vec<GpuClipTex>,
-    /// Shared Vello depth views reused across clip-mask rasterization passes.
-    clip_depth_pool: Vec<(u32, u32, wgpu::TextureView, usize)>,
     /// Replaced scratch textures still referenced by an unsubmitted encoder, destroyed after submit.
     retired_textures: Vec<(wgpu::Texture, usize)>,
     next_temp_id: u64,
@@ -1649,16 +1630,10 @@ impl Drop for Gpu {
         for (tex, _) in self.retired_textures.drain(..) {
             tex.destroy();
         }
-        for entry in self.clip_mask_cache.drain(..) {
-            entry.tex.tex.destroy();
+        self.clip_mask_cache.clear();
+        if let Some(a) = self.clip_atlas.take() {
+            a.tex.destroy();
         }
-        for t in self.clip_mask_pool.drain(..) {
-            t.tex.destroy();
-        }
-        for t in self.clip_mask_in_use.drain(..) {
-            t.tex.destroy();
-        }
-        self.clip_depth_pool.clear();
         for scratch in self.scratches.iter_mut().filter_map(Option::take) {
             scratch.texture.destroy();
         }
@@ -1710,17 +1685,32 @@ fn hash_clip_chain(key: &[ClipStepKey]) -> u64 {
     h
 }
 
-fn clip_bucket(n: u32, max_tex: u32) -> u32 {
-    let b = match n {
-        0..=128 => 128,
-        129..=256 => 256,
-        257..=512 => 512,
-        513..=1024 => 1024,
-        1025..=1536 => 1536,
-        1537..=2048 => 2048,
-        _ => n.next_multiple_of(512),
-    };
-    b.min(max_tex)
+struct ClipAtlasSlot {
+    x: u32,
+    y: u32,
+    next_at: (u32, u32, u32),
+}
+
+fn alloc_clip_slot(at: (u32, u32, u32), side: u32, w: u32, h: u32) -> Option<ClipAtlasSlot> {
+    let aw = w.next_multiple_of(4);
+    let ah = h.next_multiple_of(4);
+    if aw > side || ah > side {
+        return None;
+    }
+    let (mut x, mut y, mut row) = at;
+    if x + aw > side {
+        x = 0;
+        y += row;
+        row = 0;
+    }
+    if y + ah > side {
+        return None;
+    }
+    Some(ClipAtlasSlot {
+        x,
+        y,
+        next_at: (x + aw, y, row.max(ah)),
+    })
 }
 
 fn align4_rect(r: IRect, target: IRect) -> IRect {
@@ -1859,16 +1849,13 @@ fn analyze_open_clips_inner(
     let aligned_chain = align4_rect(chain_bbox, target_rect);
     let chain_w = (aligned_chain.x1 - aligned_chain.x0).max(0) as u32;
     let chain_h = (aligned_chain.y1 - aligned_chain.y0).max(0) as u32;
-    let alloc_w = clip_bucket(chain_w, max_tex);
-    let alloc_h = clip_bucket(chain_h, max_tex);
-    let alloc_bytes = (alloc_w as usize).saturating_mul(alloc_h as usize).saturating_mul(4);
+    let max_side = CLIP_ATLAS_SIDE.min(max_tex);
     let all_sourced = non_aa.iter().all(|c| c.3.is_some());
     let can_cache = all_sourced
         && chain_w > 0
         && chain_h > 0
-        && chain_w <= max_tex
-        && chain_h <= max_tex
-        && alloc_bytes <= CLIP_CACHE_ENTRY_MAX_BYTES
+        && chain_w.next_multiple_of(4) <= max_side
+        && chain_h.next_multiple_of(4) <= max_side
         && aligned_chain.contains_rect(clipped_rect);
 
     let (cache_key, mask_bounds) = if can_cache {
@@ -2398,16 +2385,14 @@ impl Gpu {
             scratch_mask: None,
             scratch_blur: None,
             scratch_backdrop: None,
+            clip_atlas: None,
+            clip_atlas_at: (0, 0, 0),
+            clip_atlas_cleared: false,
             clip_mask_cache: Vec::new(),
-            clip_mask_cache_bytes: 0,
-            clip_mask_tick: 0,
             clip_cache_draw_id: 0,
             next_draw_id: 0,
-            clip_seen_hashes: [0; 16],
+            clip_seen_hashes: [0; 32],
             clip_seen_len: 0,
-            clip_mask_pool: Vec::new(),
-            clip_mask_in_use: Vec::new(),
-            clip_depth_pool: Vec::new(),
             retired_textures: Vec::new(),
             next_temp_id: TEMP_TEX_BASE,
             pool_bytes: 0,
@@ -2699,10 +2684,7 @@ impl Gpu {
             }
         }
         while self.pool_bytes > keep_bytes {
-            if let Some(t) = self.clip_mask_pool.pop() {
-                self.pool_bytes = self.pool_bytes.saturating_sub(t.bytes);
-                t.tex.destroy();
-            } else if let Some(t) = self.temp_pool.pop() {
+            if let Some(t) = self.temp_pool.pop() {
                 self.bindings.remove(t.tid);
                 self.pool_bytes = self.pool_bytes.saturating_sub(t.bytes);
                 t.tex.destroy();
@@ -2713,16 +2695,17 @@ impl Gpu {
                 self.pool_bytes -= Self::frame_bytes(prefix.texture.width(), prefix.texture.height());
                 prefix.texture.destroy();
             } else if self.active.is_some() {
-                // Keep scratch reservations valid while allocating the rest of a pass.
+                // Keep scratch and clip-atlas reservations valid while allocating the rest of a pass.
                 break;
-            } else if let Some((_, _, _, bytes)) = self.clip_depth_pool.pop() {
-                self.pool_bytes = self.pool_bytes.saturating_sub(bytes);
             } else if !self.walk_paused()
-                && let Some(entry) = self.clip_mask_cache.pop()
+                && let Some(a) = self.clip_atlas.take()
             {
-                self.clip_mask_cache_bytes = self.clip_mask_cache_bytes.saturating_sub(entry.tex.bytes);
-                self.pool_bytes = self.pool_bytes.saturating_sub(entry.tex.bytes);
-                entry.tex.tex.destroy();
+                self.clip_mask_cache.clear();
+                self.clip_atlas_at = (0, 0, 0);
+                self.clip_atlas_cleared = false;
+                self.clip_seen_len = 0;
+                self.pool_bytes = self.pool_bytes.saturating_sub(a.bytes);
+                a.tex.destroy();
             } else if let Some(s) = self.scratch_backdrop.take() {
                 self.pool_bytes = self.pool_bytes.saturating_sub(s.bytes);
                 s.tex.destroy();
@@ -2765,16 +2748,9 @@ impl Gpu {
     }
 
     fn clear_clip_mask_cache(&mut self) {
-        let recording = self.active.as_ref().is_some_and(|a| a.before.is_some());
-        let dst = if recording {
-            &mut self.clip_mask_in_use
-        } else {
-            &mut self.clip_mask_pool
-        };
-        for entry in self.clip_mask_cache.drain(..) {
-            dst.push(entry.tex);
-        }
-        self.clip_mask_cache_bytes = 0;
+        self.clip_mask_cache.clear();
+        self.clip_atlas_at = (0, 0, 0);
+        self.clip_atlas_cleared = false;
         self.clip_seen_len = 0;
     }
 
@@ -2787,104 +2763,49 @@ impl Gpu {
             self.clip_seen_hashes[n] = hash;
             self.clip_seen_len += 1;
         } else {
-            self.clip_seen_hashes[(hash as usize) & 15] = hash;
+            self.clip_seen_hashes[(hash as usize) & 31] = hash;
         }
         false
     }
 
-    fn retire_or_pool_clip_tex(&mut self, tex: GpuClipTex) {
-        if self.active.as_ref().is_some_and(|a| a.before.is_some()) {
-            self.clip_mask_in_use.push(tex);
-        } else {
-            self.clip_mask_pool.push(tex);
+    /// Lazily allocates the single persistent RGBA8 clip-mask atlas without stealing GPU
+    /// headroom or triggering pool trimming. Returns `false` if the budget is tight so
+    /// callers silently fall back to `scratch_mask`.
+    fn ensure_clip_atlas(&mut self) -> bool {
+        if self.clip_atlas.is_some() {
+            return true;
         }
-    }
-
-    fn evict_clip_cache_to_fit(&mut self, hash: u64, key: &[ClipStepKey], need_bytes: usize) {
-        if let Some(idx) = self
-            .clip_mask_cache
-            .iter()
-            .position(|e| e.key_hash == hash && e.key.as_slice() == key)
+        let side = CLIP_ATLAS_SIDE.min(self.max_texture_2d).min(u32::from(u16::MAX));
+        if side < 4 {
+            return false;
+        }
+        let bytes = side as usize * side as usize * 4;
+        if self
+            .reserve(bytes.saturating_add(HEADROOM), 0, "a clip mask atlas")
+            .is_err()
         {
-            let old = self.clip_mask_cache.swap_remove(idx);
-            self.clip_mask_cache_bytes = self.clip_mask_cache_bytes.saturating_sub(old.tex.bytes);
-            self.retire_or_pool_clip_tex(old.tex);
+            return false;
         }
-        while self.clip_mask_cache.len() >= CLIP_CACHE_MAX_ENTRIES
-            || (self.clip_mask_cache_bytes + need_bytes > CLIP_CACHE_MAX_BYTES && !self.clip_mask_cache.is_empty())
-        {
-            let Some((idx, _)) = self.clip_mask_cache.iter().enumerate().min_by_key(|(_, e)| e.last_used) else {
-                break;
-            };
-            let old = self.clip_mask_cache.swap_remove(idx);
-            self.clip_mask_cache_bytes = self.clip_mask_cache_bytes.saturating_sub(old.tex.bytes);
-            self.retire_or_pool_clip_tex(old.tex);
-        }
-    }
-
-    fn acquire_clip_tex(&mut self, w: u32, h: u32) -> Result<GpuClipTex> {
-        let max_tex = self.max_texture_2d.min(u32::from(u16::MAX));
-        if w > max_tex || h > max_tex {
-            return Err(EngineError::limit("clip mask exceeds GPU texture limit"));
-        }
-        let need_w = clip_bucket(w, max_tex);
-        let need_h = clip_bucket(h, max_tex);
-        if let Some(idx) = self
-            .clip_mask_pool
-            .iter()
-            .position(|t| t.width == need_w && t.height == need_h)
-        {
-            return Ok(self.clip_mask_pool.swap_remove(idx));
-        }
-        let max_area = (need_w as usize * need_h as usize * 2).max(512 * 512);
-        if let Some((idx, _)) = self
-            .clip_mask_pool
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| t.width >= w && t.height >= h && (t.width as usize * t.height as usize) <= max_area)
-            .min_by_key(|(_, t)| t.width as usize * t.height as usize)
-        {
-            return Ok(self.clip_mask_pool.swap_remove(idx));
-        }
-        let bytes = need_w as usize * need_h as usize * 4;
-        self.reserve_or_trim(bytes, 0, "a clip mask")?;
         let tex = texture(
             &self.device,
-            need_w,
-            need_h,
+            side,
+            side,
             wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
-            "clip mask cache",
+            "clip mask atlas",
         );
         let view = tex.create_view(&Default::default());
         self.pool_bytes += bytes;
-        Ok(GpuClipTex {
+        self.clip_atlas = Some(GpuBlurScratch {
             tex,
             view,
             view_id: crate::blend::gpu::next_view_id(),
-            width: need_w,
-            height: need_h,
+            width: side,
+            height: side,
             bytes,
-        })
-    }
-
-    fn ensure_clip_depth(&mut self, w: u32, h: u32) -> Result<wgpu::TextureView> {
-        if let Some((_, _, view, _)) = self.clip_depth_pool.iter().find(|(dw, dh, _, _)| *dw == w && *dh == h) {
-            return Ok(view.clone());
-        }
-        let bytes = w as usize * h as usize * 4;
-        self.reserve_or_trim(bytes, 0, "a clip mask depth buffer")?;
-        let depth = self.renderer.create_depth_texture_view(&RenderSize {
-            width: w as u16,
-            height: h as u16,
         });
-        if self.clip_depth_pool.len() >= CLIP_DEPTH_POOL_MAX && self.active.as_ref().is_none_or(|a| a.before.is_none())
-        {
-            let (_, _, _, old_bytes) = self.clip_depth_pool.remove(0);
-            self.pool_bytes = self.pool_bytes.saturating_sub(old_bytes);
-        }
-        self.pool_bytes += bytes;
-        self.clip_depth_pool.push((w, h, depth.clone(), bytes));
-        Ok(depth)
+        self.clip_atlas_at = (0, 0, 0);
+        self.clip_atlas_cleared = false;
+        true
     }
 
     fn analyze_open_clips<'a>(
@@ -2917,18 +2838,17 @@ impl Gpu {
             self.clip_cache_draw_id = draw_id;
         }
         if let Some((hash, ref key)) = analysis.cache_key
-            && let Some(entry) = self.clip_mask_cache.iter_mut().find(|e| {
+            && let Some(atlas) = self.clip_atlas.as_ref()
+            && let Some(entry) = self.clip_mask_cache.iter().find(|e| {
                 e.key_hash == hash
                     && e.key.as_slice() == key.as_slice()
                     && e.bounds.contains_rect(analysis.clipped_rect)
             })
         {
-            self.clip_mask_tick = self.clip_mask_tick.wrapping_add(1);
-            entry.last_used = self.clip_mask_tick;
             return Ok(Some(ClipMaskBinding {
-                view: entry.tex.view.clone(),
-                view_id: entry.tex.view_id,
-                origin: (entry.bounds.x0, entry.bounds.y0),
+                view: atlas.view.clone(),
+                view_id: atlas.view_id,
+                origin: entry.origin,
             }));
         }
 
@@ -2938,71 +2858,87 @@ impl Gpu {
         if w == 0 || h == 0 {
             return Ok(None);
         }
-        let mut options = RenderOptions::default();
-        options.target_init = TargetInit::Clear(ClearSettings::Viewport {
-            color: AlphaColor::TRANSPARENT,
-        });
 
         if let Some((hash, ref key)) = analysis.cache_key {
-            let max_tex = self.max_texture_2d.min(u32::from(u16::MAX));
-            let need_w = clip_bucket(w, max_tex);
-            let need_h = clip_bucket(h, max_tex);
-            let est_bytes = need_w as usize * need_h as usize * 4;
             let (moving, recording) = self
                 .active
                 .as_ref()
                 .map_or((false, false), |a| (a.detail, a.before.is_some()));
-            let admit_by_hits = if moving { self.record_clip_seen(hash) } else { true };
-            let in_use_bytes: usize = self.clip_mask_in_use.iter().map(|t| t.bytes).sum();
-            let live_count = self.clip_mask_cache.len() + self.clip_mask_in_use.len();
-            let can_admit = admit_by_hits
-                && (!recording
-                    || (live_count < CLIP_CACHE_MAX_ENTRIES
-                        && self.clip_mask_cache_bytes + in_use_bytes + est_bytes <= CLIP_CACHE_MAX_BYTES));
-            if can_admit {
-                self.evict_clip_cache_to_fit(hash, key, est_bytes);
-                let shift = Affine::translate((-f64::from(bounds.x0), -f64::from(bounds.y0)));
-                let tex = self.acquire_clip_tex(w, h)?;
-                let depth = match self.ensure_clip_depth(tex.width, tex.height) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        self.retire_or_pool_clip_tex(tex);
-                        return Err(e);
+            let clipped = analysis.clipped_rect;
+            let use_area =
+                ((clipped.x1 - clipped.x0).max(0) as usize).saturating_mul((clipped.y1 - clipped.y0).max(0) as usize);
+            let chain_area = (w as usize).saturating_mul(h as usize);
+            let oversized_first = chain_area > 128 * 128 && chain_area > use_area.saturating_mul(8);
+            // Avoid rasterizing a large chain bbox for a single small use or a transient moving
+            // frame: require a second sight first, and skip huge ratios on moving coarse tiles.
+            let admit_by_hits = if moving {
+                !oversized_first && self.record_clip_seen(hash)
+            } else if oversized_first {
+                self.record_clip_seen(hash)
+            } else {
+                true
+            };
+            if admit_by_hits && self.ensure_clip_atlas() {
+                let side = self.clip_atlas.as_ref().expect("clip atlas").width;
+                let mut slot = alloc_clip_slot(self.clip_atlas_at, side, w, h);
+                if slot.is_none() && !recording {
+                    self.clip_mask_cache.clear();
+                    self.clip_atlas_at = (0, 0, 0);
+                    self.clip_atlas_cleared = false;
+                    slot = alloc_clip_slot(self.clip_atlas_at, side, w, h);
+                }
+                if let Some(ClipAtlasSlot {
+                    x: slot_x,
+                    y: slot_y,
+                    next_at,
+                }) = slot
+                {
+                    let (atlas_view, atlas_view_id) = {
+                        let atlas = self.clip_atlas.as_ref().expect("clip atlas");
+                        (atlas.view.clone(), atlas.view_id)
+                    };
+                    let mut atlas_opts = RenderOptions::default();
+                    atlas_opts.target_init = if self.clip_atlas_cleared {
+                        TargetInit::SrcOver
+                    } else {
+                        TargetInit::Clear(ClearSettings::Viewport {
+                            color: AlphaColor::TRANSPARENT,
+                        })
+                    };
+                    atlas_opts.offset = (slot_x as i32, slot_y as i32);
+                    let shift = Affine::translate((-f64::from(bounds.x0), -f64::from(bounds.y0)));
+                    self.mask_scene.reset_and_resize(w as u16, h as u16);
+                    raster_clip_list(&mut self.mask_scene, &analysis.mask_clips, shift, (w, h));
+                    let t_vr = now();
+                    let vr_sub0 = self.active.as_ref().map_or(0.0, |a| a.submit_ms);
+                    // Single white fill_rect has no overlapping opaque geometry, so depth is
+                    // unnecessary: this saves 4 MiB, eliminates depth clears, and uses one strip draw.
+                    let res = self.vello_render(true, &atlas_view, None, atlas_opts, label);
+                    if let Some(a) = self.active.as_mut() {
+                        a.vello_render_ms += (now() - t_vr - (a.submit_ms - vr_sub0)).max(0.0);
                     }
-                };
-                self.mask_scene.reset_and_resize(w as u16, h as u16);
-                raster_clip_list(&mut self.mask_scene, &analysis.mask_clips, shift, (w, h));
-                let t_vr = now();
-                let vr_sub0 = self.active.as_ref().map_or(0.0, |a| a.submit_ms);
-                let res = self.vello_render(true, &tex.view, Some(&depth), options, label);
-                if let Some(a) = self.active.as_mut() {
-                    a.vello_render_ms += (now() - t_vr - (a.submit_ms - vr_sub0)).max(0.0);
+                    self.mask_scene.reset();
+                    res?;
+                    self.clip_atlas_at = next_at;
+                    self.clip_atlas_cleared = true;
+                    let origin = (bounds.x0 - slot_x as i32, bounds.y0 - slot_y as i32);
+                    self.clip_mask_cache.push(CachedClipMask {
+                        key_hash: hash,
+                        key: key.clone(),
+                        bounds,
+                        origin,
+                    });
+                    return Ok(Some(ClipMaskBinding {
+                        view: atlas_view,
+                        view_id: atlas_view_id,
+                        origin,
+                    }));
                 }
-                self.mask_scene.reset();
-                if let Err(e) = res {
-                    self.retire_or_pool_clip_tex(tex);
-                    return Err(e);
-                }
-                self.clip_mask_tick = self.clip_mask_tick.wrapping_add(1);
-                let binding = ClipMaskBinding {
-                    view: tex.view.clone(),
-                    view_id: tex.view_id,
-                    origin: (bounds.x0, bounds.y0),
-                };
-                self.clip_mask_cache_bytes += tex.bytes;
-                self.clip_mask_cache.push(CachedClipMask {
-                    key_hash: hash,
-                    key: key.clone(),
-                    bounds,
-                    tex,
-                    last_used: self.clip_mask_tick,
-                });
-                return Ok(Some(binding));
             }
         }
 
-        // Uncached fallback (non-cacheable clip, 1st sight while moving, recording cap reached,
-        // oversized bounds, or fast path disabled). Rasterize only the caller's tight rect.
+        // Uncached fallback (non-cacheable clip, 1st sight while moving, atlas full while
+        // recording, oversized bounds, or fast path disabled). Rasterize only the caller's tight rect.
         let fb = if analysis.cache_key.is_some() {
             align4_rect(analysis.clipped_rect, bounds)
         } else {
@@ -3013,6 +2949,10 @@ impl Gpu {
         if fw == 0 || fh == 0 {
             return Ok(None);
         }
+        let mut options = RenderOptions::default();
+        options.target_init = TargetInit::Clear(ClearSettings::Viewport {
+            color: AlphaColor::TRANSPARENT,
+        });
         let shift = Affine::translate((-f64::from(fb.x0), -f64::from(fb.y0)));
         self.ensure_scratch_mask(fw, fh)?;
         self.mask_scene.reset_and_resize(fw as u16, fh as u16);
@@ -4588,7 +4528,6 @@ impl Gpu {
         }
         self.flush_retired_textures();
         self.offscreen_pool.append(&mut self.offscreen_in_use);
-        self.clip_mask_pool.append(&mut self.clip_mask_in_use);
         if can_recycle_scene {
             self.recycle_scene_textures();
             self.atlas.at = (0, 0, 0);
@@ -8588,7 +8527,6 @@ impl Gpu {
         }
         self.offscreen_pool.append(&mut self.offscreen_in_use);
         self.clear_clip_mask_cache();
-        self.clip_mask_pool.append(&mut self.clip_mask_in_use);
         self.scene.reset();
         self.recycle_scene_textures();
         self.atlas.at = (0, 0, 0);
