@@ -150,10 +150,10 @@ export const share = new Hono<AppContext>()
     const sha = c.req.param("sha");
     if (!shared || !SHA.test(sha)) throw notFound();
     const row = await c.env.DB.prepare(
-      "SELECT sha, mime, width, height FROM media WHERE sha = ? AND team_id = ? LIMIT 1",
+      "SELECT team_id, sha, mime, width, height FROM media WHERE sha = ? AND team_id = ? LIMIT 1",
     )
       .bind(sha, shared.file.team_id)
-      .first<{ sha: string; mime: string; width: number; height: number }>();
+      .first<{ team_id: string; sha: string; mime: string; width: number; height: number }>();
     if (!row) throw notFound();
     // Short-lived: turning the link off should stop images loading soon after.
     return serveMedia(c.req.raw, c.env.FILES, row, c.req.query("w"), {

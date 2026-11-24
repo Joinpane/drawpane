@@ -1,6 +1,7 @@
 import type { ImageCache, ImageDemand, Size } from "@drawpane/editor";
 import type { RenderEngine } from "@drawpane/engine";
 import {
+  exifOrientationComplete,
   MEDIA_PREVIEW_SIZES,
   type MediaPreviewSize,
   mediaPreviewDimensions,
@@ -104,11 +105,13 @@ interface ImageInfo extends Size {
 }
 
 interface Source {
-  readonly info: ImageInfo;
+  info: ImageInfo;
   version: number;
   readonly blobs: Map<ImageTier, Blob>;
   /** True when the server streamed the original (no previews exist) or a preview failed decode. */
   fullOnly: boolean;
+  /** True once `info` has been verified against the original image bytes (not just preview headers). */
+  naturalVerified: boolean;
   used: number;
   pyramidMaxSide?: number;
   pyramid?: { zoom: Size[]; rest: Size[] };
@@ -371,6 +374,44 @@ async function naturalSize(blob: Blob, signal: AbortSignal): Promise<Size> {
   const size = { width: bitmap.width, height: bitmap.height };
   bitmap.close();
   return size;
+}
+
+const EXIF_HEAD_BYTES = 65_536;
+
+/**
+ * Determines the authoritative display-oriented natural size of a full original blob.
+ * Reads PNG/GIF and standard JPEG/WebP headers in O(1) without an extra full decode, and falls
+ * back to `createImageBitmap(blob)` whenever EXIF may lie past 64 KB or headers are absent.
+ */
+async function originalNaturalSize(
+  blob: Blob,
+  signal: AbortSignal,
+  fallbackSize?: Size,
+): Promise<Size | null> {
+  const head = new Uint8Array(await blob.slice(0, EXIF_HEAD_BYTES).arrayBuffer());
+  const sniffed = sniffImage(head);
+  if (sniffed) {
+    if (sniffed.mime === "image/png" || sniffed.mime === "image/gif") {
+      return { width: sniffed.width, height: sniffed.height };
+    }
+    const orientation = exifOrientationComplete(head);
+    if (orientation !== null) {
+      return orientation >= 5 && orientation <= 8
+        ? { width: sniffed.height, height: sniffed.width }
+        : { width: sniffed.width, height: sniffed.height };
+    }
+    try {
+      return await naturalSize(blob, signal);
+    } catch {
+      return null;
+    }
+  }
+  if (fallbackSize) return fallbackSize;
+  try {
+    return await naturalSize(blob, signal);
+  } catch {
+    return null;
+  }
 }
 
 /** One view's bounded set of image levels. The sources can be decoded again after eviction. */
@@ -638,6 +679,7 @@ export class ViewImages {
         source.version = version;
         source.blobs.clear();
         source.fullOnly = false;
+        source.naturalVerified = false;
         this.#previewBroken.delete(ref);
       }
       if (this.#failed.get(ref) === version) {
@@ -1328,6 +1370,34 @@ export class ViewImages {
     }
   }
 
+  #applyNaturalSize(ref: string, source: Source, size: Size): void {
+    source.info = { width: size.width, height: size.height, handle: source.info.handle };
+    delete source.pyramid;
+    delete source.pyramidMaxSide;
+    for (const [rKey, resident] of this.#residents) {
+      if (resident.handle === source.info.handle) this.#drop(rKey);
+    }
+    for (const job of this.#decodeJobs.values()) {
+      if (job.ref === ref) job.abort.abort();
+    }
+    for (const [sKey, entry] of this.#staged) {
+      if (entry.target.ref === ref) {
+        entry.bitmap.close();
+        this.#stagedBytes -= entry.bytes;
+        this.#staged.delete(sKey);
+      }
+    }
+    const prefix = `${source.info.handle}/`;
+    for (const deniedKey of [...this.#denied]) {
+      if (deniedKey.startsWith(prefix)) this.#denied.delete(deniedKey);
+    }
+    for (const [tKey, t] of this.#targets) {
+      if (t.ref === ref) this.#targets.delete(tKey);
+    }
+    this.#primary.delete(ref);
+    this.#fallbacks.delete(ref);
+  }
+
   #scheduleTierFetch(target: Target, lane: FetchLane): boolean {
     if (target.standIn) return false;
     const source = this.#sources.get(target.ref);
@@ -1350,18 +1420,38 @@ export class ViewImages {
         const opts = tier === "full" ? undefined : { preview: tier };
         const res = await untilAborted(this.cache.encoded(target.ref, signal, opts), signal);
         if (abort.signal.aborted) return;
+        let sizeChanged = false;
         const current = this.#sources.get(target.ref);
         if (current && current.version === version) {
           const receivedTier: ImageTier = res.preview ?? "full";
-          if (!res.preview) current.fullOnly = true;
+          if (!res.preview) {
+            current.fullOnly = true;
+            if (!current.naturalVerified) {
+              const actual = await originalNaturalSize(res.blob, signal, res.size);
+              if (abort.signal.aborted) return;
+              if (this.#sources.get(target.ref) !== current || current.version !== version) return;
+              if (actual) {
+                current.naturalVerified = true;
+                if (actual.width !== current.info.width || actual.height !== current.info.height) {
+                  this.#applyNaturalSize(target.ref, current, actual);
+                  sizeChanged = true;
+                }
+              }
+            }
+          }
           storeBlob(current, receivedTier, res.blob);
           this.#trimSources();
         }
         if (res.previewMissing) this.onPreviewMissing?.(target.ref, res.blob);
         this.#retryAt.delete(key);
-        // Full blobs decode immediately from `this.#pump()` in `finally` and trigger `changed()`
-        // once uploaded to the backend; avoid forcing a redundant redraw before pixels change.
-        if (res.preview !== undefined || !this.#room(target, this.#missingFallback(target))) {
+        if (sizeChanged) {
+          this.metadataReady(target.ref);
+        } else if (
+          res.preview !== undefined ||
+          !this.#room(target, this.#missingFallback(target))
+        ) {
+          // Full blobs decode immediately from `this.#pump()` in `finally` and trigger `changed()`
+          // once uploaded to the backend; avoid forcing a redundant redraw before pixels change.
           this.changed();
         }
       } catch {
@@ -1650,6 +1740,7 @@ export class ViewImages {
           version,
           blobs,
           fullOnly,
+          naturalVerified: preview === undefined,
           used: this.#clock,
         });
         this.#trimSources();

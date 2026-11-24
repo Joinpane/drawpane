@@ -237,16 +237,44 @@ export async function generatePreviews(request: PreviewWorkerRequest): Promise<P
   }
 }
 
+/** Maximum number of full-image preview decodes/encodes run concurrently inside the worker. */
+export const MAX_PREVIEW_WORKER_CONCURRENCY = 2;
+
+/** Bounds concurrent preview generation jobs so multi-image drops never decode every photo at once. */
+export function createPreviewWorkerQueue(
+  run: (request: PreviewWorkerRequest) => Promise<PreviewWorkerReply>,
+  post: (reply: PreviewWorkerReply) => void,
+  maxConcurrency = MAX_PREVIEW_WORKER_CONCURRENCY,
+): (request: PreviewWorkerRequest) => void {
+  const queue: PreviewWorkerRequest[] = [];
+  let active = 0;
+  const drain = () => {
+    while (active < maxConcurrency && queue.length > 0) {
+      const next = queue.shift();
+      if (!next) break;
+      active++;
+      void run(next)
+        .then(
+          (reply) => post(reply),
+          (error: unknown) => post({ id: next.id, error: String(error) }),
+        )
+        .finally(() => {
+          active--;
+          drain();
+        });
+    }
+  };
+  return (request) => {
+    queue.push(request);
+    drain();
+  };
+}
+
 if (typeof self !== "undefined") {
   const scope = self as unknown as {
     onmessage: ((event: MessageEvent<PreviewWorkerRequest>) => void) | null;
     postMessage(message: PreviewWorkerReply): void;
   };
-
-  scope.onmessage = ({ data }) => {
-    void generatePreviews(data).then(
-      (reply) => scope.postMessage(reply),
-      (error: unknown) => scope.postMessage({ id: data.id, error: String(error) }),
-    );
-  };
+  const enqueue = createPreviewWorkerQueue(generatePreviews, (reply) => scope.postMessage(reply));
+  scope.onmessage = ({ data }) => enqueue(data);
 }

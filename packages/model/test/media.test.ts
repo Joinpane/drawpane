@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   exifOrientation,
+  exifOrientationComplete,
   MEDIA_MAX_BYTES,
   MEDIA_PREVIEW_SIZES,
   MEDIA_PREVIEW_VERSION,
@@ -92,8 +93,8 @@ describe("sniffImage", () => {
       width: 200,
       height: 100,
     });
-    expect(mediaPreviewKey("a".repeat(64), 256)).toBe(
-      `media/previews/v${MEDIA_PREVIEW_VERSION}/${"a".repeat(64)}/256`,
+    expect(mediaPreviewKey("team-1", "a".repeat(64), 256)).toBe(
+      `media/previews/v${MEDIA_PREVIEW_VERSION}/team-1/${"a".repeat(64)}/256`,
     );
     expect(mediaPreviewTiersFor(200, 100)).toEqual([256]);
     expect(mediaPreviewTiersFor(1200, 800)).toEqual([256, 1024]);
@@ -104,8 +105,14 @@ describe("sniffImage", () => {
     expect(
       mediaPreviewMatchesOriginal({ width: 4032, height: 3024 }, { width: 256, height: 192 }, 256),
     ).toEqual({ ok: true, swapped: false });
+    // Swapped orientation is refused unless allowSwap is explicitly enabled (EXIF 5..8 only).
     expect(
       mediaPreviewMatchesOriginal({ width: 4032, height: 3024 }, { width: 192, height: 256 }, 256),
+    ).toEqual({ ok: false });
+    expect(
+      mediaPreviewMatchesOriginal({ width: 4032, height: 3024 }, { width: 192, height: 256 }, 256, {
+        allowSwap: true,
+      }),
     ).toEqual({ ok: true, swapped: true });
     expect(
       mediaPreviewMatchesOriginal({ width: 4032, height: 3024 }, { width: 300, height: 225 }, 256),
@@ -115,7 +122,7 @@ describe("sniffImage", () => {
     ).toEqual({ ok: false });
   });
 
-  it("reads EXIF orientation for rotated JPEGs", () => {
+  it("reads EXIF orientation for rotated JPEGs and detects incomplete prefixes", () => {
     const jpeg = new Uint8Array([
       0xff, 0xd8, 0xff, 0xe1, 0x00, 0x22,
       // "Exif\0\0"
@@ -128,7 +135,12 @@ describe("sniffImage", () => {
       0x00, 0x00, 0x00, 0x00, 0xff, 0xd9,
     ]);
     expect(exifOrientation(jpeg)).toBe(6);
+    expect(exifOrientationComplete(jpeg)).toBe(6);
+    expect(exifOrientationComplete(jpeg.subarray(0, 12))).toBeNull();
     expect(orientedSize({ width: 400, height: 300 }, jpeg)).toEqual({ width: 300, height: 400 });
     expect(exifOrientation(b64(FIXTURES.png))).toBe(1);
+    expect(exifOrientationComplete(b64(FIXTURES.png))).toBe(1);
+    expect(exifOrientationComplete(b64(FIXTURES.jpeg))).toBe(1);
+    expect(exifOrientationComplete(b64(FIXTURES.webpLossy))).toBe(1);
   });
 });

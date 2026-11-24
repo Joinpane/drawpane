@@ -12,7 +12,7 @@
  */
 import { MAX_IMPORT_NODES } from "@drawpane/model";
 import { api, type FileMeta } from "../api/client";
-import { uploadMediaPreviews } from "../editor/image-preview";
+import { enqueueMediaPreviews } from "../editor/image-preview";
 import { figmaError, figmaJson, readFigmaFile } from "./figma-read";
 import { ImportTooLarge, saveImport } from "./import-save";
 import { detachedNote, type FileImport } from "./penpot-import";
@@ -55,7 +55,7 @@ async function upload(fileId: string, bytes: Blob): Promise<string | null> {
   if (response.status === 413 || response.status === 415 || response.status === 400) return null;
   if (!response.ok) throw new Error("Couldn't upload the file's images. Try again.");
   const { sha } = (await response.json()) as { sha: string };
-  await uploadMediaPreviews(sha, bytes);
+  enqueueMediaPreviews(sha, bytes);
   return sha;
 }
 

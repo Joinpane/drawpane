@@ -505,12 +505,12 @@ describe("progressive image tiers", () => {
 
     vi.stubGlobal(
       "createImageBitmap",
-      async (blob: Blob & { corrupt?: boolean; ref?: string }, o: ImageBitmapOptions) => {
+      async (blob: Blob & { corrupt?: boolean; ref?: string }, o?: ImageBitmapOptions) => {
         if (blob.corrupt) throw new Error("corrupt preview");
         const s = blob.ref ? sizeOf(blob.ref) : defaultSize;
         return {
-          width: o.resizeWidth ?? s.width,
-          height: o.resizeHeight ?? s.height,
+          width: o?.resizeWidth ?? s.width,
+          height: o?.resizeHeight ?? s.height,
           close() {},
         };
       },
@@ -1049,6 +1049,125 @@ describe("progressive image tiers", () => {
       expect(r.images.reduced).toBe(0);
     } finally {
       r.images.setBackend(null);
+    }
+  });
+
+  it("corrects swapped natural size when the original arrives and decodes (header sniff and bitmap decode)", async () => {
+    const fakePng = (width: number, height: number): Blob => {
+      const buf = new Uint8Array(64);
+      buf.set([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a], 0);
+      buf.set([0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52], 8);
+      const view = new DataView(buf.buffer);
+      view.setUint32(16, width);
+      view.setUint32(20, height);
+      return new Blob([buf], { type: "image/png" });
+    };
+
+    let releaseFull: (() => void) | undefined;
+    const fullGate = new Promise<void>((resolve) => {
+      releaseFull = resolve;
+    });
+    const metadataCalls: string[] = [];
+    const uploadedLevels: Array<{ handle: number; width: number; height: number }> = [];
+    const held = new Map<number, Map<number, { width: number; height: number }>>();
+
+    vi.stubGlobal(
+      "createImageBitmap",
+      async (
+        blob: Blob & { trueSize?: { width: number; height: number } },
+        o?: ImageBitmapOptions,
+      ) => {
+        const s = blob.trueSize ?? { width: 4032, height: 3024 };
+        return {
+          width: o?.resizeWidth ?? s.width,
+          height: o?.resizeHeight ?? s.height,
+          close() {},
+        };
+      },
+    );
+
+    const cache = {
+      encoded: async (ref: string, _signal: AbortSignal, options?: { preview?: 256 | 1024 }) => {
+        if (options?.preview) {
+          // Preview response falsely reports swapped portrait 3024x4032 dimensions.
+          return {
+            blob: fakePng(192, 256),
+            size: { width: 3024, height: 4032 },
+            preview: options.preview,
+          };
+        }
+        await fullGate;
+        if (ref === "png-orig") {
+          // Real PNG header with true landscape 4032x3024 dimensions (no response size header).
+          return { blob: fakePng(4032, 3024) };
+        }
+        // Non-sniffable blob with no response size header -> decoded via createImageBitmap(blob).
+        return {
+          blob: Object.assign(new Blob(["opaque-jpeg"]), {
+            trueSize: { width: 4032, height: 3024 },
+          }),
+        };
+      },
+      encodedVersion: () => 0,
+    } satisfies Pick<ImageCache, "encoded" | "encodedVersion">;
+
+    const images = new ViewImages(
+      cache,
+      (ref) => metadataCalls.push(ref),
+      () => {},
+    );
+    images.setBackend({
+      upload(handle, bitmap) {
+        uploadedLevels.push({ handle, width: bitmap.width, height: bitmap.height });
+        const map = held.get(handle) ?? new Map<number, { width: number; height: number }>();
+        map.set(bitmap.width, { width: bitmap.width, height: bitmap.height });
+        held.set(handle, map);
+        return true;
+      },
+      drop(handle, width) {
+        held.get(handle)?.delete(width);
+      },
+    });
+
+    const demands = demand(["png-orig", "decode-orig"], 100, 75, true);
+    try {
+      // Initially both images take the swapped 3024x4032 size from the preview response.
+      await eventually(() => {
+        expect(images.update(demands, 1, limit(64), 0, true, false)).toBe(false);
+        expect(images.info("png-orig")).toMatchObject({ width: 3024, height: 4032 });
+        expect(images.info("decode-orig")).toMatchObject({ width: 3024, height: 4032 });
+        expect(images.allVisiblePreviewResident).toBe(true);
+      });
+      const pngHandle = images.info("png-orig")?.handle ?? -1;
+      const decodeHandle = images.info("decode-orig")?.handle ?? -1;
+      expect(pngHandle).toBeGreaterThan(0);
+      expect(decodeHandle).toBeGreaterThan(0);
+      expect(held.get(pngHandle)?.size).toBeGreaterThan(0);
+
+      // Once full originals arrive, natural sizes are corrected to 4032x3024, metadataReady fires
+      // again, wrong portrait residents are dropped, and exact landscape levels settle.
+      releaseFull?.();
+      await eventually(() => {
+        expect(images.update(demands, 1, limit(64), 32, false, false)).toBe(true);
+      });
+      expect(images.info("png-orig")).toEqual({ width: 4032, height: 3024, handle: pngHandle });
+      expect(images.info("decode-orig")).toEqual({
+        width: 4032,
+        height: 3024,
+        handle: decodeHandle,
+      });
+      expect(metadataCalls.filter((r) => r === "png-orig").length).toBeGreaterThanOrEqual(2);
+      expect(metadataCalls.filter((r) => r === "decode-orig").length).toBeGreaterThanOrEqual(2);
+      // Every resident remaining for both handles must have landscape aspect (width > height).
+      for (const h of [pngHandle, decodeHandle]) {
+        const levels = [...(held.get(h)?.values() ?? [])];
+        expect(levels.length).toBeGreaterThan(0);
+        for (const l of levels) expect(l.width).toBeGreaterThan(l.height);
+      }
+      expect(images.reduced).toBe(0);
+    } finally {
+      releaseFull?.();
+      images.setBackend(null);
     }
   });
 });

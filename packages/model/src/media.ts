@@ -40,9 +40,9 @@ export function mediaPreviewMaxBytes(size: MediaPreviewSize): number {
   return size === 256 ? 256 * 1024 : 1024 * 1024;
 }
 
-/** Versioned, content-addressed R2 key for a preview of `sha` at `size`. */
-export function mediaPreviewKey(sha: string, size: MediaPreviewSize): string {
-  return `media/previews/v${MEDIA_PREVIEW_VERSION}/${sha}/${size}`;
+/** Versioned, team-scoped R2 key for a preview of `sha` at `size`. */
+export function mediaPreviewKey(teamId: string, sha: string, size: MediaPreviewSize): string {
+  return `media/previews/v${MEDIA_PREVIEW_VERSION}/${teamId}/${sha}/${size}`;
 }
 
 /** Preview tiers worth generating for an image of `width` x `height` (never upscaled tiers). */
@@ -90,13 +90,15 @@ export function mediaPreviewDimensions(
 }
 
 /**
- * Validates that a preview's dimensions fit within `tier` and match `original` (either upright
- * or 90/270-degree EXIF-swapped) within rounding tolerance.
+ * Validates that a preview's dimensions fit within `tier` and match `original` within rounding
+ * tolerance. Set `allowSwap: true` only when the original is a JPEG/WebP whose EXIF orientation
+ * is 5..8 (90/270-degree rotation).
  */
 export function mediaPreviewMatchesOriginal(
   original: { readonly width: number; readonly height: number },
   preview: { readonly width: number; readonly height: number },
   tier: MediaPreviewSize,
+  options?: { readonly allowSwap?: boolean },
 ): { readonly ok: true; readonly swapped: boolean } | { readonly ok: false } {
   if (
     preview.width < 1 ||
@@ -111,10 +113,15 @@ export function mediaPreviewMatchesOriginal(
     a: { readonly width: number; readonly height: number },
     b: { readonly width: number; readonly height: number },
   ) => Math.abs(a.width - b.width) <= 2 && Math.abs(a.height - b.height) <= 2;
+  if (options?.allowSwap) {
+    const swapped = mediaPreviewDimensions(
+      { width: original.height, height: original.width },
+      tier,
+    );
+    if (within(preview, swapped)) return { ok: true, swapped: true };
+  }
   const normal = mediaPreviewDimensions(original, tier);
   if (within(preview, normal)) return { ok: true, swapped: false };
-  const swapped = mediaPreviewDimensions({ width: original.height, height: original.width }, tier);
-  if (within(preview, swapped)) return { ok: true, swapped: true };
   return { ok: false };
 }
 
@@ -144,42 +151,58 @@ function tiffOrientation(b: Uint8Array, start: number, end: number): number | nu
   return null;
 }
 
-/** Extracts EXIF orientation (1..8) from JPEG APP1 or WebP EXIF chunks. Defaults to 1. */
-export function exifOrientation(b: Uint8Array): number {
+/**
+ * Extracts EXIF orientation (1..8) from a JPEG APP1 or WebP EXIF chunk, returning null when the
+ * supplied prefix stops before reaching EXIF or image scan data (so a caller can decode the full
+ * blob to confirm orientation).
+ */
+export function exifOrientationComplete(b: Uint8Array): number | null {
   if (startsWith(b, [0xff, 0xd8])) {
     let i = 2;
-    while (i + 4 <= b.length) {
-      if (b[i] !== 0xff) break;
+    while (i + 2 <= b.length) {
+      if (b[i] !== 0xff) return 1;
       while (b[i] === 0xff && i < b.length) i++;
+      if (i >= b.length) return null;
       const marker = b[i] ?? 0;
       i++;
       if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) continue;
-      if (marker === 0xd9 || marker === 0xda) break;
+      if (marker === 0xd9 || marker === 0xda) return 1;
+      if (i + 2 > b.length) return null;
       const length = u16be(b, i);
-      if (length < 2 || i + length > b.length) break;
+      if (length < 2) return 1;
+      if (i + length > b.length) return null;
       if (marker === 0xe1 && ascii(b, i + 2, "Exif\0\0")) {
         const found = tiffOrientation(b, i + 8, i + length);
         if (found !== null) return found;
       }
       i += length;
     }
-    return 1;
+    return null;
   }
   if (b.length >= 12 && ascii(b, 0, "RIFF") && ascii(b, 8, "WEBP")) {
+    if (b.length >= 16 && (ascii(b, 12, "VP8 ") || ascii(b, 12, "VP8L"))) return 1;
+    if (b.length >= 21 && ascii(b, 12, "VP8X") && ((b[20] ?? 0) & 0x08) === 0) return 1;
+    const riffEnd = 8 + u16le(b, 4) + u16le(b, 6) * 65536;
     let i = 12;
     while (i + 8 <= b.length) {
       const len = u16le(b, i + 4) + u16le(b, i + 6) * 65536;
       const start = i + 8;
       const end = start + len;
-      if (end > b.length) break;
+      if (end > b.length) return null;
       if (ascii(b, i, "EXIF")) {
         const tiffStart = ascii(b, start, "Exif\0\0") ? start + 6 : start;
         return tiffOrientation(b, tiffStart, end) ?? 1;
       }
       i = end + (len & 1);
     }
+    return i < riffEnd ? null : 1;
   }
   return 1;
+}
+
+/** Extracts EXIF orientation (1..8) from JPEG APP1 or WebP EXIF chunks. Defaults to 1. */
+export function exifOrientation(b: Uint8Array): number {
+  return exifOrientationComplete(b) ?? 1;
 }
 
 /** Dimensions after applying EXIF orientation (swaps width and height for orientations 5..8). */

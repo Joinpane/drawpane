@@ -211,7 +211,20 @@ describe("prototype links", () => {
     const dv = new DataView(previewBytes.buffer);
     dv.setUint32(16, 256);
     dv.setUint32(20, 192);
-    await env.FILES.put(mediaPreviewKey(big, 256), previewBytes, {
+
+    // Another team's preview for the same sha must never be served through this team's share link.
+    const otherPreview = new Uint8Array(previewBytes);
+    otherPreview.fill(0xee, 32);
+    await env.FILES.put(mediaPreviewKey(other.teamId, big, 256), otherPreview, {
+      httpMetadata: { contentType: "image/png" },
+      customMetadata: { naturalWidth: "4032", naturalHeight: "3024" },
+    });
+    const stillMissing = await guest.fetch(`/api/share/${token}/media/${big}?w=256`);
+    expect(stillMissing.status).toBe(200);
+    expect(stillMissing.headers.get("x-image-preview")).toBeNull();
+    expect(stillMissing.headers.get("x-image-preview-missing")).toBe("1");
+
+    await env.FILES.put(mediaPreviewKey(teamId, big, 256), previewBytes, {
       httpMetadata: { contentType: "image/png" },
       customMetadata: { naturalWidth: "4032", naturalHeight: "3024" },
     });
@@ -220,7 +233,8 @@ describe("prototype links", () => {
     expect(preview.status).toBe(200);
     expect(preview.headers.get("content-type")).toBe("image/png");
     expect(preview.headers.get("x-image-preview")).toBe("256");
-    expect(sniffImage(new Uint8Array(await preview.arrayBuffer()))).toEqual({
+    expect(new Uint8Array(await preview.arrayBuffer())).toEqual(previewBytes);
+    expect(sniffImage(previewBytes)).toEqual({
       mime: "image/png",
       width: 256,
       height: 192,

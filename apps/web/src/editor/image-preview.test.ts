@@ -1,6 +1,19 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { resetPreviewUploadsForTest, uploadMediaPreviews } from "./image-preview";
-import { generatePreviews, resetWebpEncodeCacheForTest } from "./image-preview.worker";
+import {
+  enqueueMediaPreviews,
+  generateClientPreviews,
+  MAX_CONCURRENT_PREVIEW_JOBS,
+  resetPreviewUploadsForTest,
+  uploadMediaPreviews,
+} from "./image-preview";
+import {
+  createPreviewWorkerQueue,
+  generatePreviews,
+  MAX_PREVIEW_WORKER_CONCURRENCY,
+  type PreviewWorkerReply,
+  type PreviewWorkerRequest,
+  resetWebpEncodeCacheForTest,
+} from "./image-preview.worker";
 import { UploadQueue } from "./media";
 
 function fakePngHeader(width: number, height: number, totalBytes = 8192): Blob {
@@ -202,5 +215,200 @@ describe("client preview generation", () => {
     const info = await queue.add("file-1", "photo.png", fakePngHeader(2000, 1500, 16_384), sha);
     expect(info.sha).toBe(sha);
     expect(queue.items[0]?.status).toBe("done");
+  });
+
+  it("aborts stalled preview PUTs after putTimeoutMs without hanging", async () => {
+    const signals: AbortSignal[] = [];
+    const generate = vi.fn(async () => ({
+      naturalWidth: 2000,
+      naturalHeight: 1500,
+      encodeMs: 2,
+      previews: [
+        {
+          size: 256 as const,
+          width: 256,
+          height: 192,
+          blob: new Blob([new Uint8Array(100)], { type: "image/jpeg" }),
+        },
+        {
+          size: 1024 as const,
+          width: 1024,
+          height: 768,
+          blob: new Blob([new Uint8Array(200)], { type: "image/jpeg" }),
+        },
+      ],
+    }));
+    const fetcher = vi.fn((_input: RequestInfo | URL, init?: RequestInit) => {
+      if (init?.signal) signals.push(init.signal);
+      // Stall forever until aborted.
+      return new Promise<Response>(() => {});
+    }) as unknown as typeof fetch;
+
+    const sha = "c".repeat(64);
+    const res = await uploadMediaPreviews(sha, new Blob(["orig"]), {
+      generate,
+      fetcher,
+      putTimeoutMs: 25,
+    });
+    expect(res.generated).toBe(2);
+    expect(res.uploaded).toBe(0);
+    expect(signals).toHaveLength(2);
+    expect(signals.every((s) => s.aborted)).toBe(true);
+  });
+
+  it("caps worker dispatch concurrency, times out a hung worker, and recovers for queued jobs", async () => {
+    let createdWorkers = 0;
+    let terminatedWorkers = 0;
+    let activeInWorker = 0;
+    let peakInWorker = 0;
+    const inflight: Array<{
+      worker: FakeWorker;
+      req: PreviewWorkerRequest;
+      hang: boolean;
+    }> = [];
+
+    class FakeWorker {
+      onmessage: ((event: MessageEvent<PreviewWorkerReply>) => void) | null = null;
+      onerror: ((event: ErrorEvent) => void) | null = null;
+      onmessageerror: (() => void) | null = null;
+      terminated = false;
+      constructor() {
+        createdWorkers++;
+      }
+      postMessage(req: PreviewWorkerRequest) {
+        activeInWorker++;
+        peakInWorker = Math.max(peakInWorker, activeInWorker);
+        const hang = req.blob.size === 99;
+        inflight.push({ worker: this, req, hang });
+        if (!hang) {
+          setTimeout(() => {
+            if (this.terminated) return;
+            activeInWorker--;
+            this.onmessage?.({
+              data: {
+                id: req.id,
+                naturalWidth: 1000,
+                naturalHeight: 750,
+                previews: [],
+                encodeMs: 1,
+              },
+            } as unknown as MessageEvent<PreviewWorkerReply>);
+          }, 10);
+        }
+      }
+      terminate() {
+        if (!this.terminated) {
+          this.terminated = true;
+          terminatedWorkers++;
+          activeInWorker = 0;
+        }
+      }
+    }
+
+    vi.stubGlobal("Worker", FakeWorker);
+    vi.stubGlobal("OffscreenCanvas", class {});
+
+    // 1. Dispatch 8 concurrent jobs -> worker never receives more than MAX_CONCURRENT_PREVIEW_JOBS at once.
+    const batch = Array.from({ length: 8 }, () =>
+      generateClientPreviews(new Blob([new Uint8Array(10)]), { timeoutMs: 200 }),
+    );
+    const settled = await Promise.all(batch);
+    expect(settled.every((r) => r !== null && r.naturalWidth === 1000)).toBe(true);
+    expect(peakInWorker).toBeLessThanOrEqual(MAX_CONCURRENT_PREVIEW_JOBS);
+    expect(peakInWorker).toBe(MAX_CONCURRENT_PREVIEW_JOBS);
+
+    // 2. A hung job times out, terminates the hung worker, and a queued job succeeds on a fresh worker.
+    const hung = generateClientPreviews(new Blob([new Uint8Array(99)]), { timeoutMs: 30 });
+    const hung2 = generateClientPreviews(new Blob([new Uint8Array(99)]), { timeoutMs: 30 });
+    const queued = generateClientPreviews(new Blob([new Uint8Array(10)]), { timeoutMs: 200 });
+    await expect(hung).rejects.toThrow(/timed out/i);
+    await expect(hung2).rejects.toThrow(/timed out/i);
+    const recovered = await queued;
+    expect(recovered?.naturalWidth).toBe(1000);
+    expect(terminatedWorkers).toBeGreaterThanOrEqual(1);
+    expect(createdWorkers).toBeGreaterThanOrEqual(2);
+  });
+
+  it("createPreviewWorkerQueue caps concurrent full-image decodes inside the worker", async () => {
+    let active = 0;
+    let peak = 0;
+    const gates: Array<() => void> = [];
+    const replies: PreviewWorkerReply[] = [];
+
+    const enqueue = createPreviewWorkerQueue(
+      async (req) => {
+        active++;
+        peak = Math.max(peak, active);
+        await new Promise<void>((resolve) => gates.push(resolve));
+        active--;
+        return {
+          id: req.id,
+          naturalWidth: 2000,
+          naturalHeight: 1500,
+          previews: [],
+          encodeMs: 1,
+        };
+      },
+      (reply) => replies.push(reply),
+    );
+
+    // Drop 10 jobs at once onto the worker queue.
+    for (let i = 1; i <= 10; i++) {
+      enqueue({ id: i, blob: new Blob(["x"]) });
+    }
+    expect(active).toBe(MAX_PREVIEW_WORKER_CONCURRENCY);
+    expect(peak).toBe(MAX_PREVIEW_WORKER_CONCURRENCY);
+
+    // Release jobs one by one and confirm concurrency never exceeds the cap.
+    while (replies.length < 10) {
+      const next = gates.shift();
+      if (next) next();
+      await new Promise((r) => setTimeout(r, 0));
+      expect(peak).toBeLessThanOrEqual(MAX_PREVIEW_WORKER_CONCURRENCY);
+    }
+    expect(replies).toHaveLength(10);
+  });
+
+  it("enqueueMediaPreviews runs in the background without blocking and bounds concurrency", async () => {
+    let active = 0;
+    let peak = 0;
+    const completed: string[] = [];
+    const gates: Array<() => void> = [];
+
+    const generate = vi.fn(async () => {
+      active++;
+      peak = Math.max(peak, active);
+      await new Promise<void>((resolve) => gates.push(resolve));
+      active--;
+      return {
+        naturalWidth: 1000,
+        naturalHeight: 750,
+        encodeMs: 1,
+        previews: [],
+      };
+    });
+
+    for (let i = 0; i < 6; i++) {
+      const sha = String(i).repeat(64);
+      enqueueMediaPreviews(sha, new Blob(["img"]), {
+        generate: async () => {
+          const out = await generate();
+          completed.push(sha);
+          return out;
+        },
+      });
+    }
+
+    // Duplicate sha is skipped cleanly.
+    enqueueMediaPreviews("0".repeat(64), new Blob(["img"]), { generate });
+
+    expect(active).toBe(MAX_CONCURRENT_PREVIEW_JOBS);
+    expect(peak).toBe(MAX_CONCURRENT_PREVIEW_JOBS);
+    while (completed.length < 6) {
+      gates.shift()?.();
+      await new Promise((r) => setTimeout(r, 0));
+      expect(peak).toBeLessThanOrEqual(MAX_CONCURRENT_PREVIEW_JOBS);
+    }
+    expect(generate).toHaveBeenCalledTimes(6);
   });
 });
