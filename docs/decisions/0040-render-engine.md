@@ -2074,13 +2074,14 @@ the same container. The gate's budgets: lag p95 ≤ 100 ms, dropped frames ≤ 5
 | Cmd+scroll in dropped frames | 11-57% (median 44%) | 0-33% (median 3.7%) |
 | Time to exact: Shift+2, Shift+0, pinch from fit | 0.78, 0.31, 0.19 s (medians) | 0.79, 0.33, 0.18 s |
 
-- After the re-check fixes, rebased onto fixed-function blending (#351), six runs paired with
-  main: this change met every gated budget in two (pinch-out at 58 to 60 fps, 0 to 2.6% dropped,
-  45 to 62 ms p95 lag). Pinch-out missed in the other four: 6.4% and 8.5% dropped in two, and
-  41 to 42 fps with 30 to 32% dropped in two. Main never met it (35 to 43 fps, 28 to 42% dropped,
-  248 to 740 ms p95). The misses are a GPU backlog, not main-thread time: the pinch-out still
-  starts some tiles nothing stands in for (5 to 29 a gesture in lag-audit probes, with or without
-  the stale-pixel fixes). Pan lag and Cmd+scroll swing as widely on main across the same runs. At a 4 MiB tile budget (most frames direct), every moving call stayed a
+- After the re-check fixes, rebased onto fixed-function blending (#351), eight runs paired with
+  main: this change met every gated budget in three (pinch-out at 58 to 60 fps, 0 to 2.6%
+  dropped, 45 to 68 ms p95 lag). Pinch-out missed in the other five: 6.4% and 8.5% dropped in
+  two, and 35 to 42 fps with 30 to 42% dropped in three. Main never met it (35 to 43 fps, 28 to
+  42% dropped, 248 to 740 ms p95). The misses are a GPU backlog, not main-thread time: the
+  pinch-out still starts some tiles nothing stands in for (5 to 34 a gesture in lag-audit
+  probes, whatever the stale-pixel rules; letting a sharper image level stand in didn't change
+  that). Pan lag and Cmd+scroll swing as widely on main across the same runs. At a 4 MiB tile budget (most frames direct), every moving call stayed a
   bounded stand-in, the slowest 30 ms (1.2 s before the re-check). Exact direct frames at rest
   still draw every tile at once (0.9 to 1.2 s each there), as on main.
 - In the lag audit's probes with the gate's timing, the overview is now drawn before the
