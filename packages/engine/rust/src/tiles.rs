@@ -535,8 +535,9 @@ impl TileCache {
         jobs
     }
 
-    /// The overview's tiles under `page` (page units), when all are held: past the page's
-    /// content there are none to hold, and the background is what shows there.
+    /// The overview's tiles under `page` (page units), when all are held and up to date: past
+    /// the page's content there are none to hold, and the background is what shows there. A
+    /// stale one (an edit, an image changed) never stands in: it would show what's gone.
     fn cover_overview(&self, o: Overview, page: Rect) -> Option<Vec<TileKey>> {
         let level = self.level(o.id)?;
         let (i0, j0, i1, j1) = self.span(level.grid().transform_rect_bbox(page))?;
@@ -545,7 +546,7 @@ impl TileCache {
         for j in j0..=j1 {
             for i in i0..=i1 {
                 let key = TileKey { level: o.id, i, j };
-                if !self.tiles.contains_key(&key) {
+                if !self.tiles.get(&key).is_some_and(|e| !e.stale) {
                     return None;
                 }
                 keys.push(key);
@@ -1223,7 +1224,10 @@ impl TileCache {
             && e.used != frame
         {
             e.used = frame;
-            *room = room.saturating_sub(1);
+            // The overview's tiles have their own storage: they take no room from the frame's.
+            if e.slot < OVERVIEW_SLOT {
+                *room = room.saturating_sub(1);
+            }
         }
     }
 
@@ -1732,6 +1736,10 @@ impl TileCache {
                     let Some(e) = self.tiles.get(&key).copied() else {
                         continue;
                     };
+                    // A stale overview tile shows what's gone: never laid.
+                    if Some(id) == overview && e.stale {
+                        continue;
+                    }
                     let r = Rect::new(
                         f64::from(i) * tf,
                         f64::from(j) * tf,
@@ -1865,6 +1873,68 @@ mod tests {
             .plan(cam(8.0, 0.0, 0.0), (1024, 768), false, None, false, false)
             .expect("plan");
         assert!(in_frame.jobs.iter().all(|j| j.key.level != id));
+    }
+
+    /// An edited overview tile (stale) shows what's gone: it never counts as coverage nor is it
+    /// laid under a frame, so what it stood for is drawn instead (review of #345).
+    #[test]
+    fn an_edited_overview_tile_never_stands_in() {
+        let page = Rect::new(0.0, 0.0, 4000.0, 2000.0);
+        let mut c = TileCache::new(512, 8);
+        c.begin([1.0; 4], 0);
+        c.set_overview(Some(page));
+        for job in c.overview_ahead(8.0) {
+            let slot = c.slot_for(job.key).expect("slot");
+            c.drawn(job.key, slot, false, false, false);
+        }
+        let id = c.overview.map(|o| o.id).expect("overview");
+        let key = TileKey { level: id, i: 0, j: 0 };
+        let grid = c.level(id).expect("level").grid();
+        c.invalidate(id, &[grid.transform_rect_bbox(Rect::new(50.0, 50.0, 70.0, 70.0))]);
+        let entry = *c.get(&key).expect("held");
+        assert!(entry.stale);
+        c.begin([1.0; 4], 0);
+        c.set_overview(Some(page));
+        c.moving = true;
+        let plan = c
+            .plan(Affine::scale(8.0), (512, 512), true, None, false, false)
+            .expect("plan");
+        let comp = c.compose(&plan, None);
+        assert!(!comp.exact && comp.pending > 0);
+        assert!(
+            plan.jobs.iter().any(|j| j.must),
+            "a stale overview covered: {:?}",
+            plan.jobs
+        );
+        assert!(
+            comp.under.iter().all(|q| q.slot != entry.slot),
+            "a stale overview tile was laid"
+        );
+    }
+
+    /// Standing in on the overview takes none of the frame's slots: a tile it covers isn't made
+    /// one nothing stands in for at the atlas limit (review of #345).
+    #[test]
+    fn the_overview_standing_in_takes_no_atlas_room() {
+        let page = Rect::new(0.0, 0.0, 4000.0, 2000.0);
+        let mut c = TileCache::new(512, 2);
+        c.begin([1.0; 4], 0);
+        c.set_overview(Some(page));
+        let job = c.overview_ahead(8.0)[0];
+        let slot = c.slot_for(job.key).expect("slot");
+        c.drawn(job.key, slot, false, false, false);
+        c.begin([1.0; 4], 0);
+        c.set_overview(Some(page));
+        c.moving = true;
+        let view = Affine::new([8.0, 0.0, 0.0, 8.0, -15872.0, 0.0]);
+        let plan = c.plan(view, (1024, 512), false, None, false, false).expect("plan");
+        assert!(!plan.direct);
+        assert_eq!(plan.jobs.len(), 2);
+        let covered = plan.jobs.iter().find(|j| j.key.i == 31).expect("covered tile");
+        assert!(
+            !covered.must,
+            "covered tile made one nothing stands in for: {covered:?}"
+        );
     }
 
     /// The overview's tiles live apart from the frames' (`OVERVIEW_SLOT`): no frame's tile takes

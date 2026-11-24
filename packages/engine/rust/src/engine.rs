@@ -551,7 +551,7 @@ impl Engine {
         }
         #[cfg(feature = "gpu-common")]
         if let Some(g) = self.gpu.as_ref() {
-            scales.extend(g.scales_in_use());
+            scales.extend(g.scales_in_use()?);
             tiled = true;
         }
         tiled.then_some(scales)

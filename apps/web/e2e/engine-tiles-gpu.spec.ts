@@ -533,6 +533,36 @@ for (const build of ["browser", "webgl"] as const) {
       expect(exact?.pixel).toEqual(red);
     });
 
+    test("a view without tile slots never shows an older frame's pixels while moving", async ({
+      page,
+    }) => {
+      // No slot holds a tile, so every frame is drawn straight into a frame texture. Frames take
+      // turns in those textures: a moving frame that drew some of its tiles and not others would
+      // show what an older frame left there (red, from the first view). While moving it shows the
+      // last frame moved instead (the empty view), and after a while it draws anyway.
+      const at = (x: number, moving: boolean, budget: number, repeat?: number): Frame => ({
+        size: [1024, 64],
+        pixel: [560, 32],
+        camera: [1, x, 0, 1],
+        moving,
+        budget,
+        ...(repeat ? { repeatUntilExact: repeat } : {}),
+      });
+      const [first, empty, moving, fills] = await sample(
+        page,
+        directStripes(100),
+        [at(0, false, 1), at(-8000, false, 1), at(0, true, 4), at(0, true, 4, 400)],
+        0,
+        build,
+      );
+      expect(first).toMatchObject({ exact: true, pixel: red });
+      expect(empty).toMatchObject({ exact: true, pixel: [0, 0, 0, 0] });
+      expect(moving).toMatchObject({ exact: false, pixel: [0, 0, 0, 0] });
+      // Starved of tile work, motion still draws: the frame fills in.
+      expect(fills).toMatchObject({ exact: true, pixel: red });
+      expect(fills?.attempts).toBeGreaterThan(1);
+    });
+
     test("a view without tile slots completes all direct tiles at rest", async ({ page }) => {
       const frame = {
         size: [1024, 64],

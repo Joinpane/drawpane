@@ -1972,8 +1972,11 @@ GPU work a frame queued had no bound, and input waited behind it.
   (`TileCache::set_overview`). Its level is its own entry, never a frame's or a stand-in's. Its
   tiles live apart from the frames': in slots from `OVERVIEW_SLOT` on, which the GPU backend keeps
   in one texture of their own (6 MiB for Control Center's page). No frame's tile takes their
-  place, a cache cut to fit memory keeps them, and so does the clear after a whole frame meets a
-  memory limit (`clear_keeping_overview`). A new list or background still drops them.
+  place, and standing in on them takes no room from the frame's slots. A cache cut to fit memory
+  keeps them, and so does the clear after a whole frame meets a memory limit
+  (`clear_keeping_overview`), unless the frame still doesn't fit: then they go too and it's drawn
+  once more. A new list or background drops them, and a failed tile drops the overview and its
+  texture; its other jobs never take a frame's slot.
 - **Rough tiles.** Overview tiles are stand-ins only, so they're drawn rough
   (`exec::Backend::rough`): no readers (glass, background blurs, reads), no shadows, no layer
   effects or blend modes (a layer draws its content plainly, group opacity unisolated), and
@@ -1985,28 +1988,42 @@ GPU work a frame queued had no bound, and input waited behind it.
   frame at rest reports what's left of them as queued, so the editor's time between frames keeps
   going until they're drawn (before, it stopped once the view's own tiles were, and the overview
   waited for the next view). A view drawn as whole frames draws them once its whole frame shows
-  (`Gpu::ahead_overview`). A tile that fails drops the overview until the cache clears.
+  (`Gpu::ahead_overview`), the overview set up then even for a view that never had tiles.
 - **It stands in while moving.** In a frame while the camera moves, the overview covers what
   nothing nearer does, at any scale it's at least 4× coarser than (nearer levels keep the 4× rule
   of `stands_in`). A zoom out then has nothing it must draw. The composite lays the overview
-  beneath the last frame (`Composite::under`). At rest nothing changes: what nothing nearer
-  stands in for is drawn.
+  beneath the last frame (`Composite::under`). A stale overview tile (an edit, an image changed)
+  never stands in nor is laid: what it covered is drawn instead, until it's drawn again. At rest
+  nothing changes: what nothing nearer stands in for is drawn.
 - **GPU work per moving frame is held.** A frame while moving starts at most 48 GPU passes of
-  tile work (`MOVING_PASSES`: Vello renders and isolation scopes; Figma caps a frame at about 255
-  framebuffer binds, about 55 of ours). Past them, a walk pauses as at its deadline and further
-  tiles wait, except one tile a frame that nothing stands in for, so it fills in.
+  tile work (`MOVING_PASSES`: Vello renders, isolation scopes, and an estimate of the kernel
+  passes each reader and blurred shadow runs; Figma caps a frame at about 255 framebuffer binds,
+  about 55 of ours). Past them, a walk pauses at its next safe point (never inside an isolated
+  scope) and further tiles wait, except one tile a frame that nothing stands in for, so it fills
+  in. A tile no slot can hold is drawn at once and can't pause: while moving it isn't drawn, and
+  a frame made only of such tiles (`Plan::direct`) shows the last frame moved instead, so nothing
+  of an older frame ever shows.
+- **Forward progress.** A moving frame that has started no tile work for 100 ms while some was
+  wanted (`pacing::Starvation`) starts one unit anyway, whatever back-pressure says: one tile
+  walk, paused at the cap, or a direct frame's tiles, all of them.
 - **Back-pressure.** Each frame and idle slice asks the GPU when its submitted work is done
   (`on_submitted_work_done`; WebGL2 polls in `check`). A frame while moving starts no tile work
   while the last frame's isn't done. Between frames, work off screen (tiles round the view, the
   overview) waits while two slices are in flight; what the view shows is never held back. This
-  holds only at real budgets (1 ms and up), and the GPU's silence is ignored after 250 ms.
-- **Wheel notches** (editor). Wheel input after a 40 ms pause is a notch (a mouse wheel, a step of
-  Cmd+scroll), not a trackpad's stream; the camera counts as moving until 120 ms pass without
-  another. Nothing is refined between notches only to be thrown away at the next one, and no
-  refinement's GPU work holds the next notch's frame.
+  holds only at real budgets (1 ms and up), and back-pressure gives up once the oldest submission
+  not known done is 250 ms old (`pacing::InFlight`): a stand-in submitted every frame never
+  renews the wait.
+- **Wheel notches** (editor). A wheel step of at least 40 whole pixels, or a line or page, is a
+  notch (a mouse wheel, a step of Cmd+scroll); a trackpad sends small fractional deltas. The
+  camera counts as moving until 120 ms after the last notch, by the event's own time, so notches
+  handled together after a stall still wait; the wait only ever grows. Nothing is refined between
+  notches only to be thrown away at the next one, and no refinement's GPU work holds the next
+  notch's frame.
 - **An image level nothing picks changes nothing.** A level that no sampler picks at any scale
   drawn or being drawn (one warmed ahead of a zoom, say) no longer changes the engine's
-  generation, so a tile or whole frame drawn over slices keeps going instead of starting over.
+  generation, so a tile drawn over slices keeps going instead of starting over. While a whole
+  frame is shown or drawn, any level still changes it: its readers' reduced captures sample at
+  scales of their own.
 - **Counters.** `gpuCounters()` adds the tiles nothing stood in for started while moving
   (`motionMust`), the moving frames held back for the GPU (`motionBackoff`), the overview tiles
   drawn (`overview`) and dropped (`overviewLost`).

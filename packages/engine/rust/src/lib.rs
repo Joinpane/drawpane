@@ -33,6 +33,7 @@ pub mod mask;
 pub mod masks;
 pub mod noise;
 pub mod ordinary;
+pub mod pacing;
 pub mod png;
 pub mod progressive_blur;
 pub mod record;
