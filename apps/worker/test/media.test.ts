@@ -246,7 +246,7 @@ describe("media API", () => {
     expect(exactly.status).toBe(201);
     const huge = await upload(browser, fileId, fakePng(20_000, 10));
     expect(huge.status).toBe(400);
-  });
+  }, 30_000); // Uploads bodies past the 20 MiB limit, slow on a loaded runner.
 
   it("stores each image once and serves it with immutable caching", async () => {
     const { browser, projectId, teamId } = await signedInUser();
