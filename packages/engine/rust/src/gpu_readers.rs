@@ -17,6 +17,7 @@ const RGBA8: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
 const SLAB_SLOTS: u32 = 256;
 const MIP_POOL_CAP: usize = 6;
 const COARSE_MAX_MIPS: u32 = 5;
+const FROSTED_MAX_MIPS: u32 = 4;
 const BG_CACHE_CAP: usize = 256;
 
 const BG_TAG_COMP: u8 = 0;
@@ -1935,7 +1936,7 @@ impl GpuReaders {
         }
 
         // Frost reads one integer LOD of the backdrop. Refraction samples the separate
-        // frosted texture, so only that texture needs to retain its complete chain.
+        // frosted texture, whose low-pass mip chain is capped at `FROSTED_MAX_MIPS` levels.
         let frost = (params.frost > 0.4).then(|| {
             glass::frost_params(
                 params.frost,
@@ -1990,7 +1991,7 @@ impl GpuReaders {
             let frosted_idx = self.acquire_mip_tex(
                 device,
                 (fp.fw, fp.fh),
-                u32::MAX,
+                FROSTED_MAX_MIPS,
                 Some(base_mip_idx),
                 "reader frosted",
                 max_bytes,
