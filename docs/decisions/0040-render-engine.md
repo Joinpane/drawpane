@@ -2016,6 +2016,12 @@ GPU work a frame queued had no bound, and input waited behind it.
   - Another resolution of the same image (a sharper level arriving, or one dropped) isn't a
     change: tiles drawn with the old one stand in, never exact, and are drawn again
     (`TileEntry::refine`). A level replaced at a size the image had is treated as other content.
+  - So is an image loaded where its placeholder was: a record set again with only its
+    placeholder fills become fills of the image, clipped to its shape (`Dirty::refine`,
+    `Store::fills_placeholder`). Anything else changing with it, another image, or another fill
+    is an edit. Zooming out brings boards into view whose images then load: each counted as an
+    edit staled the overview tile over its board (one covers about 23,000 page units on the iOS
+    kit), and the pinch-out drew what it stood in for, 5 to 34 tiles a gesture.
   - Why the first two rules: one set of changes forgotten by exact frames wasn't enough. A frame
     at rest laid stale tiles of another scale and put old pixels back after an exact frame at
     another scale had covered one of two changes. Laying holes at rest instead showed the

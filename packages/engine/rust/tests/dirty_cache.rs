@@ -42,6 +42,7 @@ fn changes(r: &mut Rng) -> Vec<Dirty> {
                 order: 0,
                 end: 0,
                 stale: true,
+                refine: false,
             }
         })
         .collect()

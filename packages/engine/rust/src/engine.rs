@@ -372,13 +372,20 @@ impl Engine {
         at: Option<&dyn Fn(f64) -> bool>,
         refine: bool,
     ) {
+        // Another resolution of an image, or an image loaded where its placeholder was
+        // (`Dirty::refine`), isn't a change: what was drawn before stands in (`TileCache::refine`).
+        let (soft, strict): (Vec<Dirty>, Vec<Dirty>) = if refine {
+            (changes.to_vec(), Vec::new())
+        } else {
+            changes.iter().copied().partition(|d| d.refine)
+        };
         // What changed, in page units, for the last frame shown (`TileCache::note_changed`),
         // whatever levels the cache holds. An image change counts at the scale the last frame was
         // drawn at only if the level drawn there changed.
-        let changed = if full || changes.is_empty() || refine {
+        let changed = if full || strict.is_empty() {
             Vec::new()
         } else {
-            self.store.dirty(changes, Affine::IDENTITY, 1.5)
+            self.store.dirty(&strict, Affine::IDENTITY, 1.5)
         };
         let store = &mut self.store;
         let mut each = |cache: &mut TileCache| {
@@ -393,15 +400,21 @@ impl Engine {
                 if at.is_some_and(|select| !select(level.scale)) {
                     continue;
                 }
-                let rects: Vec<Rect> = store.dirty(changes, level.grid(), 1.5);
-                if refine {
-                    cache.refine(id, &rects);
-                } else {
-                    cache.invalidate(id, &rects);
-                }
-                // An edit beside a drag: its parts around the selection are drawn again there.
-                if drag_parts {
-                    cache.drag_invalidate(id, &rects);
+                // Soft first: a tile both reach is stale.
+                for (set, stale) in [(&soft, false), (&strict, true)] {
+                    if set.is_empty() {
+                        continue;
+                    }
+                    let rects: Vec<Rect> = store.dirty(set, level.grid(), 1.5);
+                    if stale {
+                        cache.invalidate(id, &rects);
+                    } else {
+                        cache.refine(id, &rects);
+                    }
+                    // An edit beside a drag: its parts around the selection are drawn again there.
+                    if drag_parts {
+                        cache.drag_invalidate(id, &rects);
+                    }
                 }
             }
             if at.is_none() && store.provisional_shown().is_none() {

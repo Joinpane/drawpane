@@ -301,6 +301,7 @@ fn a_reader_chain_against_preorder_checks_each_change_once() {
             order: 0,
             end: 0,
             stale: true,
+            refine: false,
         };
         UNRELATED
     ];
@@ -310,6 +311,7 @@ fn a_reader_chain_against_preorder_checks_each_change_once() {
         order: 0,
         end: 0,
         stale: true,
+        refine: false,
     });
     let result = engine.store.dirty(&dirty, Affine::IDENTITY, 1.5);
     assert_eq!(result.len(), dirty.len() + NESTED as usize);
@@ -2195,4 +2197,107 @@ fn provisional_text_in_reader_halo_converges_to_exact() {
         s2.exact,
         "tile that saw provisional record only in its reader halo must converge to exact: {s2:?}"
     );
+}
+
+/// An image loaded where its placeholder was (a record set again with only its placeholder fills
+/// become image fills) is the same picture arriving, not an edit: tiles drawn with the
+/// placeholder stand in until drawn again, never exact, and nothing is noted as changed, so a
+/// moving frame lays what's on screen and needn't draw it at once. Anything else about the
+/// record changing with it, another image, or a fill that isn't the image, stays an edit.
+#[test]
+fn an_image_loaded_where_its_placeholder_was_refines_and_anything_else_is_an_edit() {
+    fn shape(ops: Vec<Op>) -> Rec {
+        let mut r = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [64.0, 64.0]);
+        r.paths.push(Entry::Rect {
+            w: 64.0,
+            h: 64.0,
+            radii: [0.0; 4],
+        });
+        r.ops = ops;
+        r
+    }
+    fn fill(paint: Paint) -> Op {
+        Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint,
+        }
+    }
+    fn loaded(id: u32) -> Rec {
+        let image = Paint::Image {
+            id,
+            m: [64.0, 0.0, 0.0, 64.0, 0.0, 0.0],
+            tile: false,
+            opacity: 1.0,
+        };
+        shape(vec![
+            Op::Clip {
+                path: 0,
+                even_odd: false,
+            },
+            fill(image),
+            Op::Unclip,
+        ])
+    }
+    let placeholder = shape(vec![fill(Paint::PlaceholderAt(1.0))]);
+    type Edit = Box<dyn Fn(&mut W)>;
+    let cases: Vec<(&str, Rec, Edit, bool)> = vec![
+        (
+            "its image loaded",
+            placeholder.clone(),
+            Box::new(|w: &mut W| w.set(1, 0, &loaded(1))),
+            false,
+        ),
+        (
+            "its image loaded as it moved",
+            placeholder.clone(),
+            Box::new(|w: &mut W| {
+                w.set(1, 0, &loaded(1));
+                w.transform(1, [1.0, 0.0, 0.0, 1.0, 2.0, 0.0]);
+            }),
+            true,
+        ),
+        (
+            "another image",
+            loaded(1),
+            Box::new(|w: &mut W| w.set(1, 0, &loaded(2))),
+            true,
+        ),
+        (
+            "a solid fill for its placeholder",
+            placeholder,
+            Box::new(|w: &mut W| w.set(1, 0, &shape(vec![fill(Paint::Solid([0.0, 1.0, 0.0, 1.0]))]))),
+            true,
+        ),
+    ];
+    for (label, before, edit, strict) in cases {
+        let mut engine = Engine::new(Limits::default());
+        let mut w = W::new(ANY, 1);
+        w.reset();
+        w.set(1, 0, &before);
+        engine.apply(&w.finish()).expect("list");
+        for (id, c) in [(1, 200u8), (2, 40u8)] {
+            engine.put_image(id, 2, 2, &[c; 16], false).expect("image");
+        }
+        engine.use_cpu_tiles(64, 16);
+        engine
+            .render_cpu_tiled(64, 64, camera(1.0, 0.0, 0.0), [1.0; 4], TiledOptions::default())
+            .expect("frame");
+        let mut w = W::new(1, 2);
+        edit(&mut w);
+        engine.apply(&w.finish()).expect("patch");
+        let cache = &engine.cpu_tiles.as_ref().expect("cpu tiles").cache;
+        let entries: Vec<_> = cache
+            .levels()
+            .into_iter()
+            .filter_map(|(id, _)| cache.get(&TileKey { level: id, i: 0, j: 0 }).copied())
+            .collect();
+        assert!(!entries.is_empty(), "{label}: a tile was drawn");
+        for e in &entries {
+            assert_eq!(e.stale, strict, "{label}: stale");
+            assert_eq!(e.refine, !strict, "{label}: refine");
+            assert!(!e.current(), "{label}: drawn again");
+        }
+        assert_eq!(cache.changed().is_empty(), !strict, "{label}: noted as changed");
+    }
 }

@@ -199,6 +199,10 @@ pub struct Dirty {
     /// moved or reordered later in the same message): not comparable with the graph's order now,
     /// so it counts as beneath every reader.
     pub stale: bool,
+    /// A record's image arrived where it drew its placeholder, and nothing else about it changed
+    /// (`Store::fills_placeholder`): the same picture, loaded. What was drawn with the placeholder
+    /// still stands in, never exact (`TileCache::refine`), as for a sharper image level.
+    pub refine: bool,
 }
 
 #[derive(Default, Debug)]
@@ -290,6 +294,13 @@ struct Txn {
     iso_replay: HashSet<u32>,
     page_scope: Option<PageScope>,
     full: bool,
+    /// The record whose `Set` is noting it now fills its image placeholder (`fills_placeholder`).
+    filling: Option<u32>,
+    /// Records set only to fill their image placeholder, and those changed any other way.
+    filled: HashSet<u32>,
+    changed_otherwise: HashSet<u32>,
+    /// Where each record's entry from before is in `before`.
+    before_at: HashMap<u32, usize>,
 }
 
 impl Txn {
@@ -307,8 +318,13 @@ impl Txn {
             iso_replay: HashSet::new(),
             page_scope: None,
             full: false,
+            filling: None,
+            filled: HashSet::new(),
+            changed_otherwise: HashSet::new(),
+            before_at: HashMap::new(),
         }
     }
+
     fn push(&mut self, u: Undo) {
         if self.track {
             self.undo.push(u);
@@ -502,6 +518,7 @@ impl Store {
                         order,
                         end,
                         stale: false,
+                        refine: false,
                     });
                 }
                 txn.touched.push(a);
@@ -513,7 +530,16 @@ impl Store {
             }
         }
         let touched = txn.touched.clone();
-        let mut changes = self.changes(std::mem::take(&mut txn.before), &txn.touched);
+        // Records whose only change in the message filled their image placeholder.
+        let refined: HashSet<u32> = txn.filled.difference(&txn.changed_otherwise).copied().collect();
+        for id in &refined {
+            if let Some(&at) = txn.before_at.get(id)
+                && let Some(d) = txn.before.get_mut(at)
+            {
+                d.refine = true;
+            }
+        }
+        let mut changes = self.changes(std::mem::take(&mut txn.before), &txn.touched, &refined);
         if let Some(PageScope {
             before_rect,
             replay: true,
@@ -534,6 +560,7 @@ impl Store {
                     order: 0,
                     end: u32::MAX,
                     stale: true,
+                    refine: false,
                 });
             }
         }
@@ -826,7 +853,13 @@ impl Store {
                 let new_mask = record.is_mask();
                 let new_ends = record.ends_mask();
                 if txn.track {
+                    txn.filling = self
+                        .nodes
+                        .get(&id)
+                        .is_some_and(|n| Self::fills_placeholder(&n.record, &record))
+                        .then_some(id);
                     self.note_before(id, txn);
+                    txn.filling = None;
                     let draws_children = record.ops.iter().any(|op| matches!(op, Op::Children));
                     let may_flush = !record.hidden()
                         && (self.parent_has_mask(parent)
@@ -1251,6 +1284,11 @@ impl Store {
     /// Notes where `id`'s subtree paints now, before a command changes it (at most once per
     /// transaction so batch patches never build duplicate dirty rectangles).
     fn note_before(&mut self, id: u32, txn: &mut Txn) {
+        if txn.filling == Some(id) {
+            txn.filled.insert(id);
+        } else {
+            txn.changed_otherwise.insert(id);
+        }
         if !txn.before_seen.insert(id) {
             return;
         }
@@ -1268,13 +1306,70 @@ impl Store {
             (0, u32::MAX)
         };
         if let Some(rect) = self.dirty_extent(id) {
+            txn.before_at.insert(id, txn.before.len());
             txn.before.push(Dirty {
                 rect,
                 order,
                 end,
                 stale: false,
+                refine: false,
             });
         }
+    }
+
+    /// Whether setting `old` to `new` only fills an image placeholder: the placeholder fills
+    /// become fills of the image (clipped to the shape), and nothing else about the record changes.
+    fn fills_placeholder(old: &Record, new: &Record) -> bool {
+        use crate::record::Paint;
+        let placeholder = |op: &Op| {
+            matches!(
+                op,
+                Op::Fill {
+                    paint: Paint::Placeholder(_),
+                    ..
+                }
+            )
+        };
+        let image = |op: &Op| {
+            matches!(
+                op,
+                Op::Fill {
+                    paint: Paint::Image(_),
+                    ..
+                }
+            )
+        };
+        // Everything but the fills, and the clip round the image, that loading it swaps, in order.
+        let rest = |ops: &[Op]| -> Vec<String> {
+            ops.iter()
+                .filter(|op| {
+                    !matches!(
+                        op,
+                        Op::Fill {
+                            paint: Paint::Placeholder(_) | Paint::Image(_),
+                            ..
+                        } | Op::Clip { .. }
+                            | Op::Unclip
+                    )
+                })
+                .map(|op| format!("{op:?}"))
+                .collect()
+        };
+        old.flags == new.flags
+            && old.opacity == new.opacity
+            && old.transform == new.transform
+            && old.size == new.size
+            && old.coarse_below == new.coarse_below
+            && old.reach == new.reach
+            && old.blend == new.blend
+            && old.mask == new.mask
+            && old.unsupported == new.unsupported
+            && old.ops.iter().any(placeholder)
+            && !new.ops.iter().any(placeholder)
+            && new.ops.iter().any(image)
+            && format!("{:?}", old.post_effects) == format!("{:?}", new.post_effects)
+            && format!("{:?}", old.coarse) == format!("{:?}", new.coarse)
+            && rest(&old.ops) == rest(&new.ops)
     }
 
     /// Paint order: each record's preorder index and the last index in its subtree.
@@ -1775,7 +1870,7 @@ impl Store {
     }
 
     /// Where the touched records paint now, added to where they painted before.
-    fn changes(&mut self, before: Vec<Dirty>, touched: &[u32]) -> Vec<Dirty> {
+    fn changes(&mut self, before: Vec<Dirty>, touched: &[u32], refined: &HashSet<u32>) -> Vec<Dirty> {
         let mut items = before;
         let mut seen = std::collections::HashSet::new();
         for id in touched {
@@ -1789,6 +1884,7 @@ impl Store {
                     order,
                     end,
                     stale: false,
+                    refine: refined.contains(id),
                 });
             }
         }
@@ -1898,6 +1994,7 @@ impl Store {
                                 order: r.order,
                                 end: r.order,
                                 stale: false,
+                                refine: false,
                             });
                         } else {
                             output_only.push(r.paints);
@@ -2061,6 +2158,7 @@ impl Store {
                     order,
                     end,
                     stale: false,
+                    refine: false,
                 });
             }
         }
@@ -2282,12 +2380,14 @@ mod dirty_tests {
                 order: 0,
                 end: 0,
                 stale: true,
+                refine: false,
             },
             Dirty {
                 rect: Rect::new(280.0, 60.0, 330.0, 200.0),
                 order: 0,
                 end: 0,
                 stale: true,
+                refine: false,
             },
         ];
         for view in [
