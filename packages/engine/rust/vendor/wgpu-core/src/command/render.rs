@@ -2741,6 +2741,9 @@ pub(super) fn encode_render_pass(
         let needs_barriers = if device.backend() == wgt::Backend::Gl {
             // In wgpu-hal GLES, `transition_buffers` and `transition_textures` only emit
             // `glMemoryBarrier` when transitioning from shader storage writes.
+            // Drawpane: this mirrors the vendored hal's `transition_*` exactly. If a hal upgrade
+            // makes those emit barriers for other transitions, this check must change with it,
+            // or the pre-pass would be skipped and those barriers silently lost.
             buffer_barriers
                 .iter()
                 .any(|b| b.usage.from.contains(wgt::BufferUses::STORAGE_READ_WRITE))

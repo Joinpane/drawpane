@@ -715,21 +715,17 @@ impl super::Queue {
                 "GL shadow mismatch: FRONT_FACE"
             );
         }
-        if let Some(expected) = st.program {
+        // Drawpane: glow on the web panics when getParameter returns null (no program bound, or
+        // the default framebuffer), so only a bound program and a cached framebuffer are checked.
+        if let Some(Some(expected)) = st.program {
             debug_assert_eq!(
                 unsafe { gl.get_parameter_program(glow::CURRENT_PROGRAM) },
-                expected,
+                Some(expected),
                 "GL shadow mismatch: CURRENT_PROGRAM"
             );
         }
         match st.draw_fbo {
-            DrawFboBinding::Default => {
-                debug_assert_eq!(
-                    unsafe { gl.get_parameter_framebuffer(glow::DRAW_FRAMEBUFFER_BINDING) },
-                    None,
-                    "GL shadow mismatch: DRAW_FRAMEBUFFER (default)"
-                );
-            }
+            DrawFboBinding::Default => {}
             DrawFboBinding::Cached(fbo) => {
                 debug_assert_eq!(
                     unsafe { gl.get_parameter_framebuffer(glow::DRAW_FRAMEBUFFER_BINDING) },
