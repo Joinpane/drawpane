@@ -231,6 +231,10 @@ pub(crate) struct GpuResources {
     pub(crate) alpha_hw_blend_pipelines: [Option<RenderPipeline>; HwBlendMode::NON_NORMAL_COUNT],
     /// Drawpane: lazily created root alpha-strip fixed-function HW blend pipelines (with depth test).
     pub(crate) depth_hw_blend_pipelines: [Option<RenderPipeline>; HwBlendMode::NON_NORMAL_COUNT],
+    /// Drawpane: lazily created intermediate layer HW blend pipelines (Rgba8Unorm, no depth test)
+    /// used as a safe fallback if a HW blend run ever lands on a non-root layer pass in release.
+    pub(crate) intermediate_hw_blend_pipelines:
+        [Option<RenderPipeline>; HwBlendMode::NON_NORMAL_COUNT],
 }
 
 impl GpuResources {
@@ -401,6 +405,7 @@ impl GpuResources {
             secondary_depth_cleared_this_frame: false,
             alpha_hw_blend_pipelines: [const { None }; HwBlendMode::NON_NORMAL_COUNT],
             depth_hw_blend_pipelines: [const { None }; HwBlendMode::NON_NORMAL_COUNT],
+            intermediate_hw_blend_pipelines: [const { None }; HwBlendMode::NON_NORMAL_COUNT],
         }
     }
 

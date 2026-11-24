@@ -561,6 +561,10 @@ export class RenderEngine {
   #epoch: number;
   /** The CPU's tiles were set up (`renderCpuTiled`). */
   #cpuTiles = false;
+  /** Incremented whenever GPU warmup is cancelled (detach, dispose, re-attach). */
+  #warmupGen = 0;
+  /** Cancels any pending idle callback for background HW-blend pipeline warmup. */
+  #warmupCancel: (() => void) | null = null;
 
   /**
    * An engine on `module`. If an engine on it trapped, a fresh isolated Wasm instance is created
@@ -1217,12 +1221,103 @@ export class RenderEngine {
     }
     if (!attached.ok) return attached;
     this.#gpu = info;
+    if (!info.fallback) {
+      this.#scheduleHwBlendWarmup(info.backend);
+    }
     return { ok: true, value: info };
   }
 
   detachGpu(): void {
+    this.#cancelHwBlendWarmup();
     this.#gpu = null;
     this.#call((e) => e.detachGpu?.());
+  }
+
+  #cancelHwBlendWarmup(): void {
+    this.#warmupGen++;
+    if (this.#warmupCancel) {
+      const cancel = this.#warmupCancel;
+      this.#warmupCancel = null;
+      cancel();
+    }
+  }
+
+  #scheduleHwBlendWarmup(backend: "webgpu" | "webgl2"): void {
+    this.#cancelHwBlendWarmup();
+    const gen = this.#warmupGen;
+    const isAlive = () =>
+      this.#warmupGen === gen && this.#gpu !== null && !this.#dead && this.#live() !== null;
+    const scheduleStep = (fn: () => void) => {
+      this.#warmupCancel = scheduleIdleTask(() => {
+        this.#warmupCancel = null;
+        if (!isAlive()) return;
+        fn();
+      });
+    };
+
+    const warmSlotInIdle = (slots: readonly number[], index = 0) => {
+      if (index >= slots.length || !isAlive()) return;
+      scheduleStep(() => {
+        const slot = slots[index];
+        if (slot === undefined) return;
+        this.#call((e) => e.warmGpuHwBlendPipeline?.(slot));
+        warmSlotInIdle(slots, index + 1);
+      });
+    };
+
+    if (backend === "webgpu") {
+      scheduleStep(() => {
+        const info = this.#call((e) => e.gpuWebgpuHwBlendWarmup?.());
+        if (!Array.isArray(info) || info.length < 3) {
+          warmSlotInIdle([0, 1, 2, 3, 4, 5, 6, 7]);
+          return;
+        }
+        const [rawDevice, wgsl, externalTextures] = info as [
+          WebGpuWarmupDevice | null,
+          string,
+          boolean,
+        ];
+        if (!rawDevice || typeof rawDevice.createRenderPipelineAsync !== "function") {
+          warmSlotInIdle([0, 1, 2, 3, 4, 5, 6, 7]);
+          return;
+        }
+        // Precompile depth HW-blend pipelines first off the main thread via
+        // `createRenderPipelineAsync`, then materialize each `wgpu::RenderPipeline` from Dawn's
+        // hot cache in its own idle slice (followed by the non-depth variants).
+        void precompileWebGpuHwBlendPipelines(rawDevice, wgsl, externalTextures, true)
+          .then(() => {
+            if (!isAlive()) return;
+            warmSlotInIdle([0, 1, 2, 3]);
+            return precompileWebGpuHwBlendPipelines(rawDevice, wgsl, externalTextures, false).then(
+              () => {
+                if (!isAlive()) return;
+                // Wait until depth slots finish before queuing non-depth slots if still idle.
+                const queueAlpha = () => {
+                  if (!isAlive()) return;
+                  if (this.#warmupCancel !== null) {
+                    const retry = scheduleIdleTask(queueAlpha);
+                    const prev = this.#warmupCancel;
+                    this.#warmupCancel = () => {
+                      prev();
+                      retry();
+                    };
+                    return;
+                  }
+                  warmSlotInIdle([4, 5, 6, 7]);
+                };
+                queueAlpha();
+              },
+            );
+          })
+          .catch(() => {
+            // Never surface background warmup failures; lazy creation on first use stays intact.
+          });
+      });
+      return;
+    }
+
+    // Hardware WebGL2: stagger one pipeline per idle slice so startup and active frames never stall.
+    warmSlotInIdle([0, 1, 2, 3, 4, 5, 6, 7]);
   }
 
   /**
@@ -1783,6 +1878,7 @@ export class RenderEngine {
 
   /** Frees the engine's memory (nothing, if its instance is gone). */
   dispose(): void {
+    this.#cancelHwBlendWarmup();
     const e = this.#live();
     try {
       e?.free();
@@ -1792,6 +1888,224 @@ export class RenderEngine {
     this.#engine = null;
     this.#dead ??= fail(ErrorCode.State, "the engine was disposed");
   }
+}
+
+interface WebGpuWarmupDevice {
+  createBindGroupLayout(descriptor: Record<string, unknown>): unknown;
+  createPipelineLayout(descriptor: Record<string, unknown>): unknown;
+  createShaderModule(descriptor: Record<string, unknown>): unknown;
+  createRenderPipelineAsync(descriptor: Record<string, unknown>): Promise<unknown>;
+  pushErrorScope?(filter: string): void;
+  popErrorScope?(): Promise<unknown>;
+}
+
+const GPU_STAGE_VERTEX = 0x1;
+const GPU_STAGE_FRAGMENT = 0x2;
+const GPU_COLOR_WRITE_ALL = 0xf;
+const STRIP_CONFIG_MIN_BINDING_SIZE = 32;
+const STRIP_VERTEX_STRIDE = 24;
+
+const HW_BLEND_WARMUP_SPECS = [
+  {
+    label: "Multiply",
+    entryPoint: "fs_main",
+    color: { srcFactor: "dst", dstFactor: "one-minus-src-alpha", operation: "add" },
+  },
+  {
+    label: "Screen",
+    entryPoint: "fs_main",
+    color: { srcFactor: "one", dstFactor: "one-minus-src", operation: "add" },
+  },
+  {
+    label: "LinearDodge",
+    entryPoint: "fs_main_linear_dodge",
+    color: { srcFactor: "one", dstFactor: "one", operation: "add" },
+  },
+  {
+    label: "LinearBurn",
+    entryPoint: "fs_main_linear_burn",
+    color: { srcFactor: "one", dstFactor: "one", operation: "reverse-subtract" },
+  },
+] as const;
+
+const HW_BLEND_ALPHA_SRC_OVER = {
+  srcFactor: "one",
+  dstFactor: "one-minus-src-alpha",
+  operation: "add",
+} as const;
+
+/**
+ * Schedules a low-priority idle callback, preferring `requestIdleCallback` with a bounded timeout
+ * and falling back to `setTimeout(..., 0)` in workers/tests. Returns a cancellation function.
+ */
+function scheduleIdleTask(fn: () => void): () => void {
+  const g = globalThis as typeof globalThis & {
+    requestIdleCallback?: (cb: () => void, opts?: { timeout?: number }) => number;
+    cancelIdleCallback?: (id: number) => void;
+  };
+  if (typeof g.requestIdleCallback === "function") {
+    const id = g.requestIdleCallback(fn, { timeout: 250 });
+    return () => {
+      g.cancelIdleCallback?.(id);
+    };
+  }
+  const id = setTimeout(fn, 0);
+  return () => {
+    clearTimeout(id);
+  };
+}
+
+/**
+ * Precompiles the 4 fixed-function HW-blend strip pipelines asynchronously on Dawn's background
+ * thread pool via `GPUDevice.createRenderPipelineAsync` using the exact same WGSL, pipeline
+ * layout, vertex state, depth state, and blend states as `vello_gpu`'s `StripPipelines`, warming
+ * the browser's shader/pipeline cache so materializing `wgpu::RenderPipeline` later never stalls.
+ */
+export async function precompileWebGpuHwBlendPipelines(
+  device: WebGpuWarmupDevice,
+  wgsl: string,
+  externalTextures: boolean,
+  withDepth: boolean,
+): Promise<boolean> {
+  const hasScopes =
+    typeof device.pushErrorScope === "function" && typeof device.popErrorScope === "function";
+  if (hasScopes) device.pushErrorScope?.("validation");
+  let pending: Promise<unknown>[] = [];
+  try {
+    const stripBgl = device.createBindGroupLayout({
+      label: "Strip Bind Group Layout (Warmup)",
+      entries: [
+        {
+          binding: 0,
+          visibility: GPU_STAGE_FRAGMENT,
+          texture: { sampleType: "uint", viewDimension: "2d", multisampled: false },
+        },
+        {
+          binding: 1,
+          visibility: GPU_STAGE_VERTEX | GPU_STAGE_FRAGMENT,
+          buffer: {
+            type: "uniform",
+            hasDynamicOffset: true,
+            minBindingSize: STRIP_CONFIG_MIN_BINDING_SIZE,
+          },
+        },
+        {
+          binding: 2,
+          visibility: GPU_STAGE_FRAGMENT,
+          texture: { sampleType: "unfilterable-float", viewDimension: "2d", multisampled: false },
+        },
+      ],
+    });
+    const externalEntries: Record<string, unknown>[] = [
+      {
+        binding: 0,
+        visibility: GPU_STAGE_FRAGMENT,
+        texture: { sampleType: "float", viewDimension: "2d", multisampled: false },
+      },
+      {
+        binding: 1,
+        visibility: GPU_STAGE_FRAGMENT,
+        sampler: { type: "filtering" },
+      },
+    ];
+    if (externalTextures) {
+      externalEntries.push({
+        binding: 2,
+        visibility: GPU_STAGE_FRAGMENT,
+        externalTexture: {},
+      });
+    }
+    const externalBgl = device.createBindGroupLayout({
+      label: "External Texture Bind Group Layout (Warmup)",
+      entries: externalEntries,
+    });
+    const encodedPaintsBgl = device.createBindGroupLayout({
+      label: "Encoded Paints Bind Group Layout (Warmup)",
+      entries: [
+        {
+          binding: 0,
+          visibility: GPU_STAGE_VERTEX | GPU_STAGE_FRAGMENT,
+          texture: { sampleType: "uint", viewDimension: "2d", multisampled: false },
+        },
+      ],
+    });
+    const gradientBgl = device.createBindGroupLayout({
+      label: "Gradient Bind Group Layout (Warmup)",
+      entries: [
+        {
+          binding: 0,
+          visibility: GPU_STAGE_FRAGMENT,
+          texture: { sampleType: "float", viewDimension: "2d", multisampled: false },
+        },
+      ],
+    });
+    const layout = device.createPipelineLayout({
+      label: "Strip Pipeline Layout (Warmup)",
+      bindGroupLayouts: [stripBgl, externalBgl, encodedPaintsBgl, gradientBgl],
+    });
+    const module = device.createShaderModule({
+      label: "Strip Shader (Warmup)",
+      code: wgsl,
+    });
+    const vertexBuffers = [
+      {
+        arrayStride: STRIP_VERTEX_STRIDE,
+        stepMode: "instance",
+        attributes: [
+          { format: "uint32", offset: 0, shaderLocation: 0 },
+          { format: "uint32", offset: 4, shaderLocation: 1 },
+          { format: "uint32", offset: 8, shaderLocation: 2 },
+          { format: "uint32", offset: 12, shaderLocation: 3 },
+          { format: "uint32", offset: 16, shaderLocation: 4 },
+          { format: "uint32", offset: 20, shaderLocation: 5 },
+        ],
+      },
+    ];
+    const depthStencil = withDepth
+      ? {
+          format: "depth24plus",
+          depthWriteEnabled: false,
+          depthCompare: "less-equal",
+        }
+      : undefined;
+
+    pending = HW_BLEND_WARMUP_SPECS.map((spec) =>
+      device.createRenderPipelineAsync({
+        label: withDepth
+          ? `Strip Depth Alpha ${spec.label} Pipeline (Warmup)`
+          : `Strip Alpha ${spec.label} Pipeline (Warmup)`,
+        layout,
+        vertex: {
+          module,
+          entryPoint: "vs_main",
+          buffers: vertexBuffers,
+        },
+        fragment: {
+          module,
+          entryPoint: spec.entryPoint,
+          targets: [
+            {
+              format: "rgba8unorm",
+              blend: { color: spec.color, alpha: HW_BLEND_ALPHA_SRC_OVER },
+              writeMask: GPU_COLOR_WRITE_ALL,
+            },
+          ],
+        },
+        primitive: { topology: "triangle-strip" },
+        ...(depthStencil ? { depthStencil } : {}),
+        multisample: { count: 1 },
+      }),
+    );
+  } catch {
+    if (hasScopes) {
+      await device.popErrorScope?.().catch(() => null);
+    }
+    return false;
+  }
+
+  const results = await Promise.allSettled(pending);
+  const scopeError = hasScopes ? await device.popErrorScope?.().catch(() => null) : null;
+  return scopeError === null && results.every((r) => r.status === "fulfilled");
 }
 
 function blurArgs(o: BlurProbeOptions) {

@@ -210,6 +210,46 @@ impl Renderer {
         (renderer, resources)
     }
 
+    /// Drawpane: warms one root fixed-function HW-blend strip pipeline slot (`0..4` depth-tested,
+    /// `4..8` non-depth) in idle time so the first blended draw never stalls mid-frame.
+    /// Returns `true` when additional slots remain (`slot + 1 < 8`).
+    pub fn warm_hw_blend_pipeline(&mut self, slot: usize) -> bool {
+        const MODES: [crate::scene::HwBlendMode; crate::scene::HwBlendMode::NON_NORMAL_COUNT] = [
+            crate::scene::HwBlendMode::Multiply,
+            crate::scene::HwBlendMode::Screen,
+            crate::scene::HwBlendMode::LinearDodge,
+            crate::scene::HwBlendMode::LinearBurn,
+        ];
+        const TOTAL: usize = crate::scene::HwBlendMode::NON_NORMAL_COUNT * 2;
+        if slot >= TOTAL {
+            return false;
+        }
+        let with_depth = slot < crate::scene::HwBlendMode::NON_NORMAL_COUNT;
+        let idx = slot % crate::scene::HwBlendMode::NON_NORMAL_COUNT;
+        let mode = MODES[idx];
+        let target_slot = if with_depth {
+            &mut self.resources.depth_hw_blend_pipelines[idx]
+        } else {
+            &mut self.resources.alpha_hw_blend_pipelines[idx]
+        };
+        if target_slot.is_none() {
+            *target_slot = Some(self.programs.strip.create_root_hw_blend_pipeline(
+                &self.device,
+                mode,
+                with_depth,
+            ));
+        }
+        slot + 1 < TOTAL
+    }
+
+    /// Drawpane: returns the patched WGSL source and external-texture layout flag used by
+    /// `StripPipelines` so WebGPU callers can precompile HW-blend pipelines asynchronously via
+    /// `GPUDevice.createRenderPipelineAsync`.
+    pub fn hw_blend_strip_shader_wgsl(&self) -> (alloc::string::String, bool) {
+        let ext = self.programs.strip.wgpu_external_textures;
+        (passes::strip::strip_shader_wgsl(ext), ext)
+    }
+
     /// Creates a depth texture view compatible with [`render`](Self::render).
     ///
     /// The returned view has the same dimensions as `render_size`, uses

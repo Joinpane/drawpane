@@ -26,87 +26,413 @@ use wgpu::{
     RenderPassDescriptor, RenderPipeline, Sampler, TextureView, TextureViewDescriptor,
 };
 
+/// Drawpane: byte ranges locating `@fragment fn fs_main(...) -> @location(0) vec4<f32> { ... }`
+/// inside `vello_gpu_shaders`'s WGSL strip shader.
+#[derive(Debug, Clone, Copy)]
+struct FsMainSpan {
+    attr_start: usize,
+    params_start: usize,
+    params_end: usize,
+    body_start: usize,
+}
+
+const fn is_ident_start(b: u8) -> bool {
+    b.is_ascii_alphabetic() || b == b'_'
+}
+
+const fn is_ident_continue(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b == b'_'
+}
+
+/// Skips WGSL whitespace, `// ...` line comments, and nested `/* ... */` block comments.
+const fn skip_wgsl_trivia(bytes: &[u8], mut i: usize) -> Option<usize> {
+    let n = bytes.len();
+    while i < n {
+        let b = bytes[i];
+        if b.is_ascii_whitespace() {
+            i += 1;
+        } else if b == b'/' && i + 1 < n && bytes[i + 1] == b'/' {
+            i += 2;
+            while i < n && bytes[i] != b'\n' {
+                i += 1;
+            }
+        } else if b == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
+            i += 2;
+            let mut depth = 1usize;
+            while i < n && depth > 0 {
+                if bytes[i] == b'/' && i + 1 < n && bytes[i + 1] == b'*' {
+                    depth += 1;
+                    i += 2;
+                } else if bytes[i] == b'*' && i + 1 < n && bytes[i + 1] == b'/' {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            if depth != 0 {
+                return None;
+            }
+        } else {
+            break;
+        }
+    }
+    Some(i)
+}
+
+const fn eat_keyword(bytes: &[u8], pos: usize, kw: &[u8]) -> Option<usize> {
+    let i = match skip_wgsl_trivia(bytes, pos) {
+        Some(p) => p,
+        None => return None,
+    };
+    if i + kw.len() > bytes.len() {
+        return None;
+    }
+    let mut k = 0;
+    while k < kw.len() {
+        if bytes[i + k] != kw[k] {
+            return None;
+        }
+        k += 1;
+    }
+    let end = i + kw.len();
+    if end < bytes.len() && is_ident_continue(bytes[end]) {
+        return None;
+    }
+    Some(end)
+}
+
+const fn eat_punct(bytes: &[u8], pos: usize, punct: &[u8]) -> Option<usize> {
+    let i = match skip_wgsl_trivia(bytes, pos) {
+        Some(p) => p,
+        None => return None,
+    };
+    if i + punct.len() > bytes.len() {
+        return None;
+    }
+    let mut k = 0;
+    while k < punct.len() {
+        if bytes[i + k] != punct[k] {
+            return None;
+        }
+        k += 1;
+    }
+    Some(i + punct.len())
+}
+
+const fn find_matching_delim(bytes: &[u8], open_pos: usize, open: u8, close: u8) -> Option<usize> {
+    let n = bytes.len();
+    let mut i = open_pos + 1;
+    let mut depth = 1usize;
+    while i < n {
+        if bytes[i] == b'/' && i + 1 < n && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            i = match skip_wgsl_trivia(bytes, i) {
+                Some(p) => p,
+                None => return None,
+            };
+            continue;
+        }
+        if bytes[i] == open {
+            depth += 1;
+        } else if bytes[i] == close {
+            depth -= 1;
+            if depth == 0 {
+                return Some(i);
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Validates a single WGSL parameter segment (`[@attr(...)]* ident : type`) and returns the
+/// `(ident_start, ident_end, colon_pos)` byte offsets relative to `bytes`.
+const fn parse_param_segment(bytes: &[u8], start: usize, end: usize) -> Option<(usize, usize, usize)> {
+    let mut i = match skip_wgsl_trivia(bytes, start) {
+        Some(p) => p,
+        None => return None,
+    };
+    if i >= end {
+        return None;
+    }
+    let mut colon = None;
+    let mut pdepth = 0usize;
+    let mut scan = i;
+    while scan < end {
+        if bytes[scan] == b'/' && scan + 1 < end && (bytes[scan + 1] == b'/' || bytes[scan + 1] == b'*') {
+            scan = match skip_wgsl_trivia(bytes, scan) {
+                Some(p) => p,
+                None => return None,
+            };
+            continue;
+        }
+        if bytes[scan] == b'(' {
+            pdepth += 1;
+        } else if bytes[scan] == b')' {
+            if pdepth == 0 {
+                return None;
+            }
+            pdepth -= 1;
+        } else if bytes[scan] == b':' && pdepth == 0 {
+            colon = Some(scan);
+            break;
+        }
+        scan += 1;
+    }
+    let colon = match colon {
+        Some(c) => c,
+        None => return None,
+    };
+    while i < colon {
+        i = match skip_wgsl_trivia(bytes, i) {
+            Some(p) => p,
+            None => return None,
+        };
+        if i >= colon {
+            return None;
+        }
+        if bytes[i] == b'@' {
+            i += 1;
+            i = match skip_wgsl_trivia(bytes, i) {
+                Some(p) => p,
+                None => return None,
+            };
+            if i >= colon || !is_ident_start(bytes[i]) {
+                return None;
+            }
+            while i < colon && is_ident_continue(bytes[i]) {
+                i += 1;
+            }
+            let after_name = match skip_wgsl_trivia(bytes, i) {
+                Some(p) => p,
+                None => return None,
+            };
+            if after_name < colon && bytes[after_name] == b'(' {
+                let close = match find_matching_delim(bytes, after_name, b'(', b')') {
+                    Some(c) if c < colon => c,
+                    _ => return None,
+                };
+                i = close + 1;
+            } else {
+                i = after_name;
+            }
+        } else {
+            break;
+        }
+    }
+    if i >= colon || !is_ident_start(bytes[i]) {
+        return None;
+    }
+    let ident_start = i;
+    while i < colon && is_ident_continue(bytes[i]) {
+        i += 1;
+    }
+    let ident_end = i;
+    let after_ident = match skip_wgsl_trivia(bytes, ident_end) {
+        Some(p) => p,
+        None => return None,
+    };
+    if after_ident != colon {
+        return None;
+    }
+    let ty_start = match skip_wgsl_trivia(bytes, colon + 1) {
+        Some(p) => p,
+        None => return None,
+    };
+    if ty_start >= end {
+        return None;
+    }
+    Some((ident_start, ident_end, colon))
+}
+
+/// Validates every comma-separated parameter in `bytes[params_start..params_end]`.
+const fn validate_params(bytes: &[u8], params_start: usize, params_end: usize) -> bool {
+    let mut seg_start = params_start;
+    let mut i = params_start;
+    let mut pdepth = 0usize;
+    while i < params_end {
+        if bytes[i] == b'/' && i + 1 < params_end && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            i = match skip_wgsl_trivia(bytes, i) {
+                Some(p) => p,
+                None => return false,
+            };
+            continue;
+        }
+        if bytes[i] == b'(' {
+            pdepth += 1;
+        } else if bytes[i] == b')' {
+            if pdepth == 0 {
+                return false;
+            }
+            pdepth -= 1;
+        } else if bytes[i] == b',' && pdepth == 0 {
+            if parse_param_segment(bytes, seg_start, i).is_none() {
+                return false;
+            }
+            seg_start = i + 1;
+        }
+        i += 1;
+    }
+    if pdepth != 0 {
+        return false;
+    }
+    let trailing = match skip_wgsl_trivia(bytes, seg_start) {
+        Some(p) => p,
+        None => return false,
+    };
+    if trailing < params_end {
+        parse_param_segment(bytes, seg_start, params_end).is_some()
+    } else {
+        true
+    }
+}
+
+/// Drawpane: token-aware `const fn` parser that locates and structurally validates
+/// `@fragment fn fs_main(...) -> @location(0) vec4<f32> { ... }` in `vello_gpu_shaders`.
+/// Run both at compile time (via `const _: () = ...`) and at shader build time.
+const fn parse_fs_main(source: &str) -> Option<FsMainSpan> {
+    let bytes = source.as_bytes();
+    let n = bytes.len();
+    let mut i = 0usize;
+    while i < n {
+        i = match skip_wgsl_trivia(bytes, i) {
+            Some(p) => p,
+            None => return None,
+        };
+        if i >= n {
+            break;
+        }
+        if bytes[i] == b'@' {
+            let attr_start = i;
+            if let Some(after_frag) = eat_keyword(bytes, i + 1, b"fragment")
+                && let Some(after_fn) = eat_keyword(bytes, after_frag, b"fn")
+                && let Some(after_name) = eat_keyword(bytes, after_fn, b"fs_main")
+                && let Some(after_open) = eat_punct(bytes, after_name, b"(")
+            {
+                let open_pos = after_open - 1;
+                let params_end = match find_matching_delim(bytes, open_pos, b'(', b')') {
+                    Some(p) => p,
+                    None => return None,
+                };
+                if !validate_params(bytes, after_open, params_end) {
+                    return None;
+                }
+                let after_arrow = match eat_punct(bytes, params_end + 1, b"->") {
+                    Some(p) => p,
+                    None => return None,
+                };
+                let after_at = match eat_punct(bytes, after_arrow, b"@") {
+                    Some(p) => p,
+                    None => return None,
+                };
+                let after_loc = match eat_keyword(bytes, after_at, b"location") {
+                    Some(p) => p,
+                    None => return None,
+                };
+                let after_lp = match eat_punct(bytes, after_loc, b"(") {
+                    Some(p) => p,
+                    None => return None,
+                };
+                let after_zero = match eat_punct(bytes, after_lp, b"0") {
+                    Some(p) => p,
+                    None => return None,
+                };
+                let after_rp = match eat_punct(bytes, after_zero, b")") {
+                    Some(p) => p,
+                    None => return None,
+                };
+                let after_vec = match eat_keyword(bytes, after_rp, b"vec4") {
+                    Some(p) => p,
+                    None => return None,
+                };
+                let after_lt = match eat_punct(bytes, after_vec, b"<") {
+                    Some(p) => p,
+                    None => return None,
+                };
+                let after_f32 = match eat_keyword(bytes, after_lt, b"f32") {
+                    Some(p) => p,
+                    None => return None,
+                };
+                let after_gt = match eat_punct(bytes, after_f32, b">") {
+                    Some(p) => p,
+                    None => return None,
+                };
+                let after_brace = match eat_punct(bytes, after_gt, b"{") {
+                    Some(p) => p,
+                    None => return None,
+                };
+                let body_start = after_brace - 1;
+                if find_matching_delim(bytes, body_start, b'{', b'}').is_none() {
+                    return None;
+                }
+                return Some(FsMainSpan {
+                    attr_start,
+                    params_start: after_open,
+                    params_end,
+                    body_start,
+                });
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+// Drawpane: fail at compile time if upstream `vello_gpu_shaders` changes `fs_main`'s signature.
+const _: () = {
+    if parse_fs_main(vello_gpu_shaders::wgsl::RENDER).is_none() {
+        panic!("vello_gpu strip shader (RENDER) fs_main signature changed");
+    }
+    #[cfg(feature = "wgpu_external_texture")]
+    if parse_fs_main(vello_gpu_shaders::wgsl::RENDER_TEXTURE_EXTERNAL).is_none() {
+        panic!("vello_gpu strip shader (RENDER_TEXTURE_EXTERNAL) fs_main signature changed");
+    }
+};
+
 /// Drawpane: rewrites `vello_gpu_shaders`'s `fs_main` fragment entry point into a shared
 /// helper `drawpane_strip_color` and appends quantized fragment entry points for
 /// `linear_burn` and `linear_dodge` in the same WGSL module.
 fn build_strip_shader_with_hw_blends(source: &str) -> String {
-    let frag_pos = source
-        .find("@fragment")
-        .expect("vello_gpu strip shader missing @fragment entry point");
-    let after_frag = &source[frag_pos + "@fragment".len()..];
-    let fn_rel = after_frag
-        .find("fs_main")
-        .expect("vello_gpu strip shader missing fs_main");
-    let open_paren_rel = after_frag[fn_rel..]
-        .find('(')
-        .expect("vello_gpu strip shader fs_main missing '('");
-    let params_start = frag_pos + "@fragment".len() + fn_rel + open_paren_rel + 1;
-
-    let mut depth = 1usize;
-    let mut params_end = None;
-    for (off, ch) in source[params_start..].char_indices() {
-        match ch {
-            '(' => depth += 1,
-            ')' => {
-                depth -= 1;
-                if depth == 0 {
-                    params_end = Some(params_start + off);
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let params_end = params_end.expect("vello_gpu strip shader fs_main unterminated params");
-    let params_raw = &source[params_start..params_end];
-
-    let body_rel = source[params_end..]
-        .find('{')
-        .expect("vello_gpu strip shader fs_main missing '{'");
-    let body_start = params_end + body_rel;
+    let span =
+        parse_fs_main(source).expect("vello_gpu strip shader fs_main signature failed validation");
+    let bytes = source.as_bytes();
+    let params_raw = &source[span.params_start..span.params_end];
 
     let mut clean_params = Vec::new();
     let mut call_args = Vec::new();
-    let mut seg_start = 0usize;
+    let mut seg_start = span.params_start;
+    let mut i = span.params_start;
     let mut pdepth = 0usize;
-    fn push_param<'a>(raw: &'a str, clean_params: &mut Vec<String>, call_args: &mut Vec<&'a str>) {
-        let trimmed = raw.trim();
-        if trimmed.is_empty() {
-            return;
+    let mut emit_param = |start: usize, end: usize| {
+        if let Some((ident_start, ident_end, colon)) = parse_param_segment(bytes, start, end) {
+            let ident = &source[ident_start..ident_end];
+            let ty = source[colon + 1..end].trim();
+            clean_params.push(format!("{ident}:{ty}"));
+            call_args.push(ident);
         }
-        let colon = trimmed
-            .find(':')
-            .expect("vello_gpu strip shader fs_main param missing ':'");
-        let lhs = trimmed[..colon].trim();
-        let ty = trimmed[colon + 1..].trim();
-        let ident_start = lhs
-            .rfind(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
-            .map_or(0, |idx| idx + 1);
-        let ident = &lhs[ident_start..];
-        assert!(
-            !ident.is_empty(),
-            "vello_gpu strip shader fs_main param missing identifier"
-        );
-        clean_params.push(format!("{ident}:{ty}"));
-        call_args.push(ident);
-    }
-    for (idx, ch) in params_raw.char_indices() {
-        match ch {
-            '(' => pdepth += 1,
-            ')' => pdepth = pdepth.saturating_sub(1),
-            ',' if pdepth == 0 => {
-                push_param(&params_raw[seg_start..idx], &mut clean_params, &mut call_args);
-                seg_start = idx + 1;
+    };
+    while i < span.params_end {
+        if bytes[i] == b'/' && i + 1 < span.params_end && (bytes[i + 1] == b'/' || bytes[i + 1] == b'*') {
+            i = skip_wgsl_trivia(bytes, i).unwrap_or(span.params_end);
+            continue;
+        }
+        match bytes[i] {
+            b'(' => pdepth += 1,
+            b')' => pdepth = pdepth.saturating_sub(1),
+            b',' if pdepth == 0 => {
+                emit_param(seg_start, i);
+                seg_start = i + 1;
             }
             _ => {}
         }
+        i += 1;
     }
-    push_param(&params_raw[seg_start..], &mut clean_params, &mut call_args);
+    emit_param(seg_start, span.params_end);
 
     let clean_params_str = clean_params.join(",");
     let call_args_str = call_args.join(",");
-    let prefix = &source[..frag_pos];
-    let body_and_rest = &source[body_start..];
+    let prefix = &source[..span.attr_start];
+    let body_and_rest = &source[span.body_start..];
     format!(
         "{prefix}fn drawpane_strip_color({clean_params_str})->vec4<f32>{body_and_rest}\n\
          @fragment fn fs_main({params_raw})->@location(0)vec4<f32>{{return drawpane_strip_color({call_args_str});}}\n\
@@ -121,6 +447,22 @@ fn build_strip_shader_with_hw_blends(source: &str) -> String {
              return vec4<f32>(s,c.a);\
          }}\n"
     )
+}
+
+/// Drawpane: returns the patched WGSL source for the strip shader (matching `StripPipelines::new`).
+pub(crate) fn strip_shader_wgsl(wgpu_external_textures: bool) -> String {
+    #[cfg(feature = "wgpu_external_texture")]
+    let raw = if wgpu_external_textures {
+        vello_gpu_shaders::wgsl::RENDER_TEXTURE_EXTERNAL
+    } else {
+        vello_gpu_shaders::wgsl::RENDER
+    };
+    #[cfg(not(feature = "wgpu_external_texture"))]
+    let raw = {
+        let _ = wgpu_external_textures;
+        vello_gpu_shaders::wgsl::RENDER
+    };
+    build_strip_shader_with_hw_blends(raw)
 }
 
 const ALPHA_SRC_OVER: BlendComponent = BlendComponent {
@@ -288,15 +630,7 @@ impl StripPipelines {
                 entries: &external_texture_layout_entries,
             });
 
-        #[cfg(feature = "wgpu_external_texture")]
-        let strip_shader_source = if wgpu_external_textures {
-            vello_gpu_shaders::wgsl::RENDER_TEXTURE_EXTERNAL
-        } else {
-            vello_gpu_shaders::wgsl::RENDER
-        };
-        #[cfg(not(feature = "wgpu_external_texture"))]
-        let strip_shader_source = vello_gpu_shaders::wgsl::RENDER;
-        let strip_shader_source = build_strip_shader_with_hw_blends(strip_shader_source);
+        let strip_shader_source = strip_shader_wgsl(wgpu_external_textures);
         let strip_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("Strip Shader"),
             source: wgpu::ShaderSource::Wgsl(strip_shader_source.into()),
@@ -411,12 +745,14 @@ impl StripPipelines {
         }
     }
 
-    /// Drawpane: lazily builds a fixed-function hardware blend strip pipeline on first use.
+    /// Drawpane: lazily builds a fixed-function hardware blend strip pipeline for the given
+    /// target format and depth attachment mode.
     pub(crate) fn create_hw_blend_pipeline(
         &self,
         device: &Device,
         mode: HwBlendMode,
         with_depth: bool,
+        format: wgpu::TextureFormat,
     ) -> RenderPipeline {
         let idx = mode
             .non_normal_index()
@@ -452,7 +788,7 @@ impl StripPipelines {
                 module: &self.shader,
                 entry_point: Some(entry),
                 targets: &[Some(ColorTargetState {
-                    format: self.target_format,
+                    format,
                     blend: Some(blend),
                     write_mask: ColorWrites::ALL,
                 })],
@@ -467,6 +803,16 @@ impl StripPipelines {
             multiview_mask: None,
             cache: None,
         })
+    }
+
+    /// Drawpane: creates a root-target HW blend pipeline using `self.target_format`.
+    pub(crate) fn create_root_hw_blend_pipeline(
+        &self,
+        device: &Device,
+        mode: HwBlendMode,
+        with_depth: bool,
+    ) -> RenderPipeline {
+        self.create_hw_blend_pipeline(device, mode, with_depth, self.target_format)
     }
 }
 
@@ -819,30 +1165,53 @@ impl RendererContext<'_> {
             DrawPassTarget::Root(_) => self.view_config_offset,
             DrawPassTarget::Layer(_) => 0,
         };
-        if matches!(target, DrawPassTarget::Root(RootTarget::UserSurface)) && !blend_runs.is_empty()
-        {
-            let need_depth = depth_load.is_some()
-                || secondary_pass
-                    .as_ref()
-                    .is_some_and(|(_, _, _, _, dl)| dl.is_some());
-            let need_no_depth = depth_load.is_none()
-                || secondary_pass
-                    .as_ref()
-                    .is_some_and(|(_, _, _, _, dl)| dl.is_none());
-            for run in blend_runs {
-                if let Some(idx) = run.mode.non_normal_index() {
-                    if need_depth && self.resources.depth_hw_blend_pipelines[idx].is_none() {
-                        self.resources.depth_hw_blend_pipelines[idx] = Some(
-                            self.programs
-                                .strip
-                                .create_hw_blend_pipeline(self.device, run.mode, true),
-                        );
+        let is_user_root = matches!(target, DrawPassTarget::Root(RootTarget::UserSurface));
+        if !blend_runs.is_empty() {
+            if is_user_root {
+                let need_depth = depth_load.is_some()
+                    || secondary_pass
+                        .as_ref()
+                        .is_some_and(|(_, _, _, _, dl)| dl.is_some());
+                let need_no_depth = depth_load.is_none()
+                    || secondary_pass
+                        .as_ref()
+                        .is_some_and(|(_, _, _, _, dl)| dl.is_none());
+                for run in blend_runs {
+                    if let Some(idx) = run.mode.non_normal_index() {
+                        if need_depth && self.resources.depth_hw_blend_pipelines[idx].is_none() {
+                            self.resources.depth_hw_blend_pipelines[idx] = Some(
+                                self.programs
+                                    .strip
+                                    .create_root_hw_blend_pipeline(self.device, run.mode, true),
+                            );
+                        }
+                        if need_no_depth && self.resources.alpha_hw_blend_pipelines[idx].is_none() {
+                            self.resources.alpha_hw_blend_pipelines[idx] = Some(
+                                self.programs
+                                    .strip
+                                    .create_root_hw_blend_pipeline(self.device, run.mode, false),
+                            );
+                        }
                     }
-                    if need_no_depth && self.resources.alpha_hw_blend_pipelines[idx].is_none() {
-                        self.resources.alpha_hw_blend_pipelines[idx] = Some(
-                            self.programs
-                                .strip
-                                .create_hw_blend_pipeline(self.device, run.mode, false),
+                }
+            } else {
+                debug_assert!(
+                    false,
+                    "Drawpane: hardware blend runs are only valid on root UserSurface"
+                );
+                // Safe release fallback: execute requested HW blend modes on the Rgba8Unorm
+                // intermediate layer target instead of silently falling back to normal blending.
+                for run in blend_runs {
+                    if let Some(idx) = run.mode.non_normal_index()
+                        && self.resources.intermediate_hw_blend_pipelines[idx].is_none()
+                    {
+                        self.resources.intermediate_hw_blend_pipelines[idx] = Some(
+                            self.programs.strip.create_hw_blend_pipeline(
+                                self.device,
+                                run.mode,
+                                false,
+                                wgpu::TextureFormat::Rgba8Unorm,
+                            ),
                         );
                     }
                 }
@@ -950,12 +1319,7 @@ impl RendererContext<'_> {
             }
 
             if alpha_count > 0 {
-                let is_user_root = matches!(target, DrawPassTarget::Root(RootTarget::UserSurface));
-                if blend_runs.is_empty() || !is_user_root {
-                    debug_assert!(
-                        blend_runs.is_empty(),
-                        "Drawpane: hardware blend runs are only valid on root UserSurface"
-                    );
+                if blend_runs.is_empty() {
                     if is_user_root {
                         let pipeline = if pass_enable_opaque {
                             &programs.strip.depth_alpha
@@ -972,16 +1336,27 @@ impl RendererContext<'_> {
                     // Drawpane: merge-sweep `blend_runs` and `external_texture_runs` in exact
                     // painter's order inside this single render pass.
                     let pipeline_for = |mode: HwBlendMode| -> &RenderPipeline {
-                        match mode.non_normal_index() {
-                            Some(idx) if pass_enable_opaque => resources.depth_hw_blend_pipelines
-                                [idx]
-                                .as_ref()
-                                .expect("lazy depth HW blend pipeline must be initialized"),
-                            Some(idx) => resources.alpha_hw_blend_pipelines[idx]
-                                .as_ref()
-                                .expect("lazy alpha HW blend pipeline must be initialized"),
-                            None if pass_enable_opaque => &programs.strip.depth_alpha,
-                            None => &programs.strip.alpha,
+                        if is_user_root {
+                            match mode.non_normal_index() {
+                                Some(idx) if pass_enable_opaque => resources
+                                    .depth_hw_blend_pipelines[idx]
+                                    .as_ref()
+                                    .expect("lazy depth HW blend pipeline must be initialized"),
+                                Some(idx) => resources.alpha_hw_blend_pipelines[idx]
+                                    .as_ref()
+                                    .expect("lazy alpha HW blend pipeline must be initialized"),
+                                None if pass_enable_opaque => &programs.strip.depth_alpha,
+                                None => &programs.strip.alpha,
+                            }
+                        } else {
+                            match mode.non_normal_index() {
+                                Some(idx) => resources.intermediate_hw_blend_pipelines[idx]
+                                    .as_ref()
+                                    .expect(
+                                        "lazy intermediate HW blend pipeline must be initialized",
+                                    ),
+                                None => &programs.strip.intermediate,
+                            }
                         }
                     };
                     let mut bi = 0usize;
@@ -1075,7 +1450,7 @@ impl RendererContext<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::build_strip_shader_with_hw_blends;
+    use super::{build_strip_shader_with_hw_blends, parse_fs_main};
 
     #[test]
     fn strip_shader_adds_quantized_hw_blend_entry_points() {
@@ -1085,5 +1460,32 @@ mod tests {
         assert!(patched.contains("@fragment fn fs_main_linear_burn("));
         assert!(patched.contains("@fragment fn fs_main_linear_dodge("));
         assert!(!patched.contains("fn drawpane_strip_color(@"));
+    }
+
+    #[test]
+    fn strip_shader_parser_handles_whitespace_comments_and_rejects_mismatched_signatures() {
+        let formatted = r#"
+            // comment mentioning @fragment fn fs_main()
+            /* block /* nested */ @fragment fn fs_main() */
+            @fragment
+            fn fs_main(
+                @builtin(position) pos: vec4<f32>,
+                @location(0) @interpolate(flat, first) paint: u32,
+            ) -> @location(0) vec4<f32> {
+                return vec4<f32>(1.0);
+            }
+        "#;
+        assert!(parse_fs_main(formatted).is_some());
+        let patched = build_strip_shader_with_hw_blends(formatted);
+        assert!(patched.contains("fn drawpane_strip_color(pos:vec4<f32>,paint:u32)->vec4<f32>"));
+        assert!(patched.contains("drawpane_strip_color(pos,paint)"));
+
+        let wrong_ret =
+            "@fragment fn fs_main(@location(0) x: f32) -> vec4<f32> { return vec4<f32>(x); }";
+        assert!(parse_fs_main(wrong_ret).is_none());
+        let wrong_loc = "@fragment fn fs_main(@location(0) x: f32) -> @location(1) vec4<f32> { return vec4<f32>(x); }";
+        assert!(parse_fs_main(wrong_loc).is_none());
+        let wrong_name = "@fragment fn fs_main_other(@location(0) x: f32) -> @location(0) vec4<f32> { return vec4<f32>(x); }";
+        assert!(parse_fs_main(wrong_name).is_none());
     }
 }

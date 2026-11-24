@@ -23,14 +23,17 @@ crates.io, unchanged except:
   - `Draw` records contiguous `BlendRun` ranges (`blend_runs`, empty when all strips are `Normal`),
     and `DrawBuilder` always routes non-normal HW-blended strips to `alpha_strips` (never
     `opaque_strips`) with non-opaque `depth_index` so painter's-order depth testing stays exact.
-  - `StripPipelines` rewrites the minified WGSL `fs_main` into a shared `drawpane_strip_color`
-    helper and appends `fs_main_linear_burn` (`ceil(clamp((c.a - c.rgb) * 255, 0, 255) - 0.5001) / 255`
-    with `ReverseSubtract(One, One)`) and `fs_main_linear_dodge`
+  - `StripPipelines` uses a token-aware `const fn` WGSL parser (verified at compile time against
+    `vello_gpu_shaders`) to rewrite `fs_main` into a shared `drawpane_strip_color` helper and
+    append `fs_main_linear_burn` (`ceil(clamp((c.a - c.rgb) * 255, 0, 255) - 0.5001) / 255` with
+    `ReverseSubtract(One, One)`) and `fs_main_linear_dodge`
     (`floor(clamp(c.rgb * 255, 0, 255) + 0.5) / 255` with `Add(One, One)`), plus `Multiply`
     (`Add(Dst, OneMinusSrcAlpha)`) and `Screen` (`Add(One, OneMinusSrc)`), created lazily on first
-    use in `GpuResources` for both depth-tested and non-depth variants (avoiding startup shader
-    compilation overhead). `strip_pass_inner` merge-sweeps `blend_runs` and
-    `external_texture_runs` in painter's order inside a single render pass.
+    use or via idle `Renderer::warm_hw_blend_pipeline` / `Renderer::hw_blend_strip_shader_wgsl`
+    warmup (avoiding startup shader compilation overhead and mid-frame compile stalls).
+    `strip_pass_inner` merge-sweeps `blend_runs` and `external_texture_runs` in painter's order
+    inside a single render pass, with safe intermediate-layer HW-blend fallback in release builds
+    and an explicit error guard in the native `webgl` backend's `draw_pass`.
   - `Renderer::prepare_batch_render_dual` and `Renderer::execute_batch_render_dual` replay
     uploaded root strip passes directly onto a primary and secondary root target inside the same
     command encoder without allocating a transparent delta texture.

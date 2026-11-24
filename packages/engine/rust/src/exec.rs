@@ -5239,11 +5239,45 @@ impl<B: Backend> Walk<'_, B> {
         // An outline fill is one path, so glyphs that overlap (including across lines) aren't laid
         // over each other; masks are. Opaque, that's the same picture. See-through, a run whose
         // glyphs touch fills its outlines.
-        let masks = c[3] * alpha >= 1.0 || glyphs_non_overlapping(self.store, s, glyphs);
+        let mut masks = c[3] * alpha >= 1.0 || glyphs_non_overlapping(self.store, s, glyphs);
         // The run's place on the device is the same for every glyph but its offset: whether masks
         // can be used at all, and their scale, are the run's.
         let [a, b, cc, d, _, _] = (device * Affine::new([s, 0.0, 0.0, -s, 0.0, 0.0])).as_coeffs();
         let axis_aligned = b.abs() <= 1e-9 * (a.abs() + d.abs()) && cc.abs() <= 1e-9 * (a.abs() + d.abs());
+        if self.active_hw_blend != HwBlend::Normal && masks && axis_aligned {
+            // Under fixed-function HW blending, decide mask-vs-outline from the entire glyph run
+            // (independent of the current tile viewport). Otherwise a run mixing maskable and
+            // oversize glyphs would render masks on one tile and outlines on the next, leaving a
+            // seam at the tile edge.
+            let max_side = self.glyph_mask_side as u32;
+            for g in glyphs {
+                let Some(glyph) = self.store.glyphs.get(g.glyph) else {
+                    return Err(EngineError::unknown(format!("glyph {}", g.glyph)));
+                };
+                let Some(gb) = glyph.bounds else { continue };
+                let m = device * Affine::new([s, 0.0, 0.0, -s, f64::from(g.x), f64::from(g.y)]);
+                let [_, _, _, _, e, f] = m.as_coeffs();
+                let small =
+                    gb.width() * a.abs() <= self.glyph_mask_side && gb.height() * d.abs() <= self.glyph_mask_side;
+                if !(small && e.abs() < 1.0e7 && f.abs() < 1.0e7) {
+                    masks = false;
+                    break;
+                }
+                let (ix, iy) = (e.floor(), f.floor());
+                let mut px = ((e - ix) * PHASES).round();
+                let mut py = ((f - iy) * PHASES).round();
+                if px >= PHASES {
+                    px = 0.0;
+                }
+                if py >= PHASES {
+                    py = 0.0;
+                }
+                if !crate::masks::fits_bounds(gb, a, d, (px / PHASES, py / PHASES), max_side) {
+                    masks = false;
+                    break;
+                }
+            }
+        }
         let (sx, sy) = ((a as f32).to_bits(), (d as f32).to_bits());
         // Masks placed, each at its device pixel, with the glyph it's of: laid into one image of
         // the run and drawn once (`masks::compose_run`), so a run's overlaps are covered once, as
@@ -6295,6 +6329,10 @@ mod hw_blend_gate_tests {
         scopes_pushed: u32,
         dirty_marks: u32,
         destructive_root_calls: u32,
+        mask_support: Option<(
+            crate::masks::Rasterizer,
+            crate::masks::MaskCache<std::sync::Arc<vello_cpu::Pixmap>>,
+        )>,
     }
 
     impl SpyBackend {
@@ -6315,6 +6353,7 @@ mod hw_blend_gate_tests {
                 scopes_pushed: 0,
                 dirty_marks: 0,
                 destructive_root_calls: 0,
+                mask_support: None,
             }
         }
     }
@@ -6347,11 +6386,20 @@ mod hw_blend_gate_tests {
         fn checker(&mut self) -> ImageSource {
             unimplemented!()
         }
-        fn glyph_mask(&mut self, _key: MaskKey, _path: &BezPath, _s: (f64, f64), _p: (f64, f64)) -> Option<GlyphMask> {
-            None
+        fn glyph_mask(&mut self, key: MaskKey, path: &BezPath, s: (f64, f64), p: (f64, f64)) -> Option<GlyphMask> {
+            let (raster, cache) = self.mask_support.as_mut()?;
+            crate::masks::coverage(cache, raster, key, path, s, p, 160)
         }
-        fn run_image(&mut self, _w: u16, _h: u16, _pixels: Vec<u8>) -> Option<ImageSource> {
-            None
+        fn run_image(&mut self, w: u16, h: u16, pixels: Vec<u8>) -> Option<ImageSource> {
+            self.mask_support.as_ref()?;
+            let data = vello_common::peniko::ImageData {
+                data: pixels.into(),
+                format: vello_common::peniko::ImageFormat::Rgba8,
+                alpha_type: vello_common::peniko::ImageAlphaType::AlphaPremultiplied,
+                width: u32::from(w),
+                height: u32::from(h),
+            };
+            Some(ImageSource::from_peniko_image_data(&data))
         }
         fn whole_runs(&self) -> bool {
             false
@@ -6787,5 +6835,122 @@ mod hw_blend_gate_tests {
         let spy = run_spy(&s, full, true);
         assert_eq!(spy.destructive_root_calls, 1);
         assert_eq!(spy.scopes_pushed, 1);
+    }
+
+    #[test]
+    fn hw_blended_glyph_run_decides_masks_vs_outlines_consistently_across_tiles() {
+        let box_path = |w: f64, h: f64| {
+            let mut p = BezPath::new();
+            p.move_to((0.0, 0.0));
+            p.line_to((w, 0.0));
+            p.line_to((w, h));
+            p.line_to((0.0, h));
+            p.close_path();
+            p
+        };
+        let run_tile = |store: &Store, area: IRect| {
+            let limits = Limits::default();
+            let frame = Frame {
+                width: 1024,
+                height: 512,
+                view: Affine::IDENTITY,
+                detail: false,
+                area,
+            };
+            let mut backend = SpyBackend::new(1024, 512, true);
+            backend.area = area;
+            backend.mask_support = Some((
+                crate::masks::Rasterizer::default(),
+                crate::masks::MaskCache::new(1 << 20),
+            ));
+            let mut budget = limits.frame_verbs;
+            let stats = draw_split(store, &mut backend, &frame, &limits, &mut budget, &Split::all(), false).unwrap();
+            (backend.scopes_pushed, stats.glyphs_masked, stats.glyphs_outlined)
+        };
+        let left_tile = IRect {
+            x0: 0,
+            y0: 0,
+            x1: 512,
+            y1: 512,
+        };
+        let right_tile = IRect {
+            x0: 512,
+            y0: 0,
+            x1: 1024,
+            y1: 512,
+        };
+
+        // Mixed run: small glyph straddling x=512 plus tall (> 160 px) glyph strictly on the right
+        // tile. Both tiles must choose outlines (0 masked, >= 1 outlined, 0 scopes).
+        let limits = Limits::default();
+        let mut mixed = Store::new(limits);
+        mixed.glyphs.define(1, box_path(24.0, 30.0), &limits).unwrap();
+        mixed.glyphs.define(2, box_path(24.0, 204.0), &limits).unwrap();
+        let mut rec = Record::empty();
+        rec.flags = 0;
+        rec.size = [700.0, 300.0];
+        rec.paths.push(PathEntry::Glyphs {
+            scale: 1.0,
+            glyphs: vec![
+                GlyphInstance {
+                    glyph: 1,
+                    x: 500.0,
+                    y: 260.0,
+                },
+                GlyphInstance {
+                    glyph: 2,
+                    x: 560.0,
+                    y: 260.0,
+                },
+            ],
+        });
+        rec.ops = vec![Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::Solid([0.3, 0.3, 0.3, 0.8]),
+            blend: 17,
+        }];
+        mixed.insert_for_test(1, ROOT, rec);
+        for area in [left_tile, right_tile] {
+            let (scopes, masked, outlined) = run_tile(&mixed, area);
+            assert_eq!(scopes, 0, "mixed run stays HW-blended on {area:?}");
+            assert_eq!(masked, 0, "mixed run must not use masks on {area:?}");
+            assert!(outlined > 0, "mixed run must outline visible glyphs on {area:?}");
+        }
+
+        // Uniform small run straddling x=512: both tiles keep full mask-cache speed (0 scopes).
+        let mut uniform = Store::new(limits);
+        uniform.glyphs.define(1, box_path(24.0, 30.0), &limits).unwrap();
+        let mut rec = Record::empty();
+        rec.flags = 0;
+        rec.size = [700.0, 100.0];
+        rec.paths.push(PathEntry::Glyphs {
+            scale: 1.0,
+            glyphs: vec![
+                GlyphInstance {
+                    glyph: 1,
+                    x: 500.0,
+                    y: 80.0,
+                },
+                GlyphInstance {
+                    glyph: 1,
+                    x: 540.0,
+                    y: 80.0,
+                },
+            ],
+        });
+        rec.ops = vec![Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::Solid([0.3, 0.3, 0.3, 0.8]),
+            blend: 17,
+        }];
+        uniform.insert_for_test(1, ROOT, rec);
+        for area in [left_tile, right_tile] {
+            let (scopes, masked, outlined) = run_tile(&uniform, area);
+            assert_eq!(scopes, 0, "uniform run stays HW-blended on {area:?}");
+            assert!(masked > 0, "uniform run keeps mask cache on {area:?}");
+            assert_eq!(outlined, 0, "uniform run should not outline on {area:?}");
+        }
     }
 }

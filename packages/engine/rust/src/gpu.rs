@@ -3861,6 +3861,28 @@ impl Gpu {
         self.hw_blend_enabled
     }
 
+    /// Warms one HW-blend strip pipeline slot (`0..4` depth, `4..8` non-depth) in idle time.
+    /// Returns `true` when additional slots remain.
+    pub fn warm_hw_blend_pipeline(&mut self, slot: usize) -> bool {
+        if !self.hw_blend_enabled {
+            return false;
+        }
+        self.renderer.warm_hw_blend_pipeline(slot)
+    }
+
+    /// Returns the underlying browser `GPUDevice` handle plus the patched strip WGSL source and
+    /// external-texture flag so WebGPU callers can precompile HW-blend pipelines asynchronously
+    /// via `GPUDevice.createRenderPipelineAsync` before materializing `wgpu::RenderPipeline`s.
+    #[cfg(all(target_arch = "wasm32", feature = "gpu"))]
+    pub fn webgpu_hw_blend_warmup(&self) -> Option<(wasm_bindgen::JsValue, String, bool)> {
+        if !self.hw_blend_enabled {
+            return None;
+        }
+        let dev = self.device.as_webgpu()?;
+        let (wgsl, ext) = self.renderer.hw_blend_strip_shader_wgsl();
+        Some((wasm_bindgen::JsValue::from(dev.clone()), wgsl, ext))
+    }
+
     /// True iff every destination plane that the current scene will flush onto is guaranteed
     /// to have alpha == 1.0 across its active area, and the scene has not promoted root to an
     /// intermediate blend layer.
