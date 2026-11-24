@@ -1306,3 +1306,269 @@ for (const build of ["browser", "webgl"] as const) {
     expect(result.maxDelta).toBeLessThanOrEqual(1);
   });
 }
+
+for (const build of ["browser", "webgl"] as const) {
+  test(`inner shadow inversion matches uninverted blur byte-for-byte (${build})`, async ({
+    page,
+  }) => {
+    test.setTimeout(180_000);
+    const root = ROOTS[build];
+    const expectedBackend = build === "webgl" ? "webgl2" : "webgpu";
+    const width = 640;
+    const height = 448;
+
+    type InnerCase = {
+      name: "canonical" | "direct" | "pyramid" | "reduced";
+      w: number;
+      h: number;
+      radii: [number, number, number, number];
+      smoothing: number;
+      blur: number;
+      count: number;
+    };
+    const cases: InnerCase[] = [
+      {
+        name: "canonical",
+        w: 184,
+        h: 125,
+        radii: [13, 13, 13, 13],
+        smoothing: 0,
+        blur: 14,
+        count: 2,
+      },
+      {
+        name: "direct",
+        w: 184,
+        h: 125,
+        radii: [4, 30, 13, 40],
+        smoothing: 0.6,
+        blur: 14,
+        count: 2,
+      },
+      {
+        name: "pyramid",
+        w: 184,
+        h: 125,
+        radii: [4, 30, 13, 40],
+        smoothing: 0.6,
+        blur: 30,
+        count: 2,
+      },
+      {
+        name: "reduced",
+        w: 560,
+        h: 370,
+        radii: [4, 30, 13, 40],
+        smoothing: 0.6,
+        blur: 125,
+        count: 1,
+      },
+    ];
+
+    const buildLists = (c: InnerCase) => {
+      const make = (mode: "shape" | "inner" | "drop") => {
+        const w = new ListWriter(0xffffffff, 1);
+        w.reset();
+        let nextId = 0;
+        const paths: WireRecord["paths"] = [
+          { kind: "rect", w: c.w, h: c.h, radii: c.radii, smoothing: c.smoothing },
+        ];
+        for (let i = 0; i < c.count; i++) {
+          const x = 12.25 + i * 205;
+          const y = 21.5 + i * 72;
+          if (mode === "drop") {
+            const parentId = ++nextId;
+            w.set(parentId, ROOT, {
+              flags: 0,
+              opacity: 1,
+              transform: [1, 0, 0, 1, x, y],
+              width: c.w,
+              height: c.h,
+              coarseBelow: 0,
+              reach: 0,
+              unsupported: 0,
+              paths,
+              ops: [{ op: "clip", path: 0, evenOdd: false }, { op: "children" }, { op: "unclip" }],
+              coarse: [],
+            });
+            w.set(++nextId, parentId, {
+              flags: 0,
+              opacity: 1,
+              transform: [1, 0, 0, 1, 0, 0],
+              width: c.w,
+              height: c.h,
+              coarseBelow: 0,
+              reach: 0,
+              unsupported: 0,
+              paths,
+              ops: [
+                {
+                  op: "dropShadow",
+                  paths: [0],
+                  evenOdd: false,
+                  dx: 8.5,
+                  dy: -4.75,
+                  blur: c.blur,
+                  color: [1, 1, 1, 1],
+                  blend: 0,
+                },
+              ],
+              coarse: [],
+            });
+          } else {
+            w.set(++nextId, ROOT, {
+              flags: 0,
+              opacity: 1,
+              transform: [1, 0, 0, 1, x, y],
+              width: c.w,
+              height: c.h,
+              coarseBelow: 0,
+              reach: 0,
+              unsupported: 0,
+              paths,
+              ops:
+                mode === "shape"
+                  ? [
+                      {
+                        op: "fill",
+                        path: 0,
+                        evenOdd: false,
+                        paint: { kind: "solid", color: [1, 1, 1, 1] },
+                      },
+                    ]
+                  : [
+                      {
+                        op: "innerShadow",
+                        shape: 0,
+                        hole: 0,
+                        evenOdd: false,
+                        dx: 8.5,
+                        dy: -4.75,
+                        blur: c.blur,
+                        color: [1, 1, 1, 1],
+                        blend: 0,
+                      },
+                    ],
+              coarse: [],
+            });
+          }
+        }
+        return [...w.finish()];
+      };
+      return {
+        name: c.name,
+        shape: make("shape"),
+        inner: make("inner"),
+        drop: make("drop"),
+      };
+    };
+
+    await page.route(`${origin}/**`, async (route) => {
+      const name = new URL(route.request().url()).pathname.slice(1);
+      if (name === "engine.js" || name === "engine_bg.wasm") {
+        await route.fulfill({
+          body: await readFile(root + name),
+          contentType: name.endsWith(".js") ? "text/javascript" : "application/wasm",
+        });
+      } else {
+        await route.fulfill({ body: "<!doctype html>", contentType: "text/html" });
+      }
+    });
+    await page.goto(origin);
+
+    const results = await page.evaluate(
+      async ({ scenes, width, height, expectedBackend }) => {
+        const mod = "/engine.js";
+        const glue = (await import(mod)) as typeof import("@drawpane/engine/browser-glue");
+        await glue.default({ module_or_path: "/engine_bg.wasm" });
+        if (glue.gpuBackend() !== expectedBackend) throw new Error("wrong GPU backend");
+        const check = (out: { ok: boolean; message: string; free(): void } | undefined) => {
+          if (!out) throw new Error("missing GPU API");
+          const { ok, message } = out;
+          out.free();
+          if (!ok) throw new Error(message);
+        };
+        const black = new Float32Array([0, 0, 0, 1]);
+        const render = async (list: number[]) => {
+          let device = await glue.createGpu(null, 0);
+          for (let attempt = 0; attempt < 3 && !device.ok; attempt++) {
+            device.free();
+            await new Promise((r) => setTimeout(r, 300));
+            device = await glue.createGpu(null, 0);
+          }
+          if (!device.ok) {
+            const msg = device.message;
+            device.free();
+            throw new Error(msg);
+          }
+          const engine = new glue.Engine(0, 0);
+          try {
+            check(engine.attachGpu?.(device));
+            check(engine.apply(new Uint8Array(list)));
+            const draw = engine.renderGpu?.(width, height, 1, 0, 0, 1, black, false, 0);
+            if (!draw) throw new Error("no renderGpu");
+            const shadowHits = draw.shadow_hits;
+            const shadowOps = draw.shadow_ops;
+            check(draw);
+            const pixels = await engine.gpuPixels?.();
+            if (!(pixels instanceof Uint8Array)) throw new Error("gpuPixels failed");
+            return { pixels, shadowHits, shadowOps };
+          } finally {
+            engine.free();
+            device.free();
+          }
+        };
+
+        const summary = [];
+        for (const s of scenes) {
+          const shape = await render(s.shape);
+          const inner = await render(s.inner);
+          const drop = await render(s.drop);
+          let interior = 0;
+          let graded = 0;
+          let diffCount = 0;
+          let maxDiff = 0;
+          for (let i = 0; i < shape.pixels.length; i += 4) {
+            if (shape.pixels[i] !== 255) continue;
+            interior++;
+            const iv = inner.pixels[i] ?? 0;
+            const dv = drop.pixels[i] ?? 0;
+            if (iv > 0 && iv < 255) graded++;
+            const err = Math.abs(iv + dv - 255);
+            if (err > 0) {
+              diffCount++;
+              if (err > maxDiff) maxDiff = err;
+            }
+          }
+          summary.push({
+            name: s.name,
+            interior,
+            graded,
+            diffCount,
+            maxDiff,
+            innerHits: inner.shadowHits,
+            innerOps: inner.shadowOps,
+          });
+        }
+        return summary;
+      },
+      { scenes: cases.map(buildLists), width, height, expectedBackend },
+    );
+
+    for (const row of results) {
+      expect(row.interior).toBeGreaterThan(10_000);
+      expect(row.graded).toBeGreaterThan(1_000);
+      if (row.name === "canonical") {
+        expect(row.innerHits).toBeGreaterThanOrEqual(1);
+        expect(row.diffCount).toBe(0);
+      } else if (row.name === "direct" || row.name === "pyramid") {
+        expect(row.innerHits).toBe(0);
+        expect(row.diffCount).toBe(0);
+      } else {
+        // Reduced shadows invert after bilinear upsampling in shadow.wgsl::fs_upsample_mask.
+        expect(row.innerHits).toBe(0);
+        expect(row.maxDiff).toBeLessThanOrEqual(1);
+      }
+    }
+  });
+}

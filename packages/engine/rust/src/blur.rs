@@ -1729,12 +1729,44 @@ pub mod gpu {
         (texture, view, crate::blend::gpu::next_view_id())
     }
 
+    /// Hardware blend state for single-pass inner-shadow alpha inversion (`vec4(0, 0, 0, 1 - src.a)`)
+    /// over a destination cleared to `(0, 0, 0, 1)`. Quantizing `src.a` through the target's own
+    /// `Rgba8Unorm` ROP before subtracting matches writing an `Rgba8Unorm` intermediate followed by
+    /// a separate `1 - a` pass bit-for-bit on both WebGPU and WebGL2.
+    const INVERT_ALPHA_BLEND: wgpu::BlendState = wgpu::BlendState {
+        color: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::Zero,
+            dst_factor: wgpu::BlendFactor::Zero,
+            operation: wgpu::BlendOperation::Add,
+        },
+        alpha: wgpu::BlendComponent {
+            src_factor: wgpu::BlendFactor::One,
+            dst_factor: wgpu::BlendFactor::One,
+            operation: wgpu::BlendOperation::ReverseSubtract,
+        },
+    };
+    const CLEAR_ALPHA_ONE: wgpu::Color = wgpu::Color {
+        r: 0.0,
+        g: 0.0,
+        b: 0.0,
+        a: 1.0,
+    };
+
+    fn dst_load_op(invert_alpha: bool) -> wgpu::LoadOp<wgpu::Color> {
+        if invert_alpha {
+            wgpu::LoadOp::Clear(CLEAR_ALPHA_ONE)
+        } else {
+            wgpu::LoadOp::Load
+        }
+    }
+
     fn make_pipeline(
         device: &wgpu::Device,
         layout: &wgpu::PipelineLayout,
         module: &wgpu::ShaderModule,
         entry: &str,
         format: wgpu::TextureFormat,
+        blend: Option<wgpu::BlendState>,
         label: &str,
     ) -> wgpu::RenderPipeline {
         device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -1755,7 +1787,7 @@ pub mod gpu {
                 compilation_options: Default::default(),
                 targets: &[Some(wgpu::ColorTargetState {
                     format,
-                    blend: None,
+                    blend,
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
             }),
@@ -1773,9 +1805,11 @@ pub mod gpu {
         inter_bpp: usize,
         blur_1d_inter: wgpu::RenderPipeline,
         blur_1d_dst: wgpu::RenderPipeline,
+        blur_1d_dst_invert: wgpu::RenderPipeline,
         downsample_l0: wgpu::RenderPipeline,
         downsample_next: wgpu::RenderPipeline,
         upsample: wgpu::RenderPipeline,
+        upsample_invert: wgpu::RenderPipeline,
         linear_sampler: wgpu::Sampler,
         uniform_align: u32,
         uniform_slabs: Vec<wgpu::Buffer>,
@@ -1851,6 +1885,7 @@ pub mod gpu {
                 &module,
                 "fs_blur_1d",
                 intermediate_format,
+                None,
                 "blur 1d inter",
             );
             let blur_1d_dst = make_pipeline(
@@ -1859,7 +1894,17 @@ pub mod gpu {
                 &module,
                 "fs_blur_1d",
                 DST_FORMAT,
+                None,
                 "blur 1d dst",
+            );
+            let blur_1d_dst_invert = make_pipeline(
+                device,
+                &pipeline_layout,
+                &module,
+                "fs_blur_1d",
+                DST_FORMAT,
+                Some(INVERT_ALPHA_BLEND),
+                "blur 1d dst invert",
             );
             let downsample_l0 = make_pipeline(
                 device,
@@ -1867,6 +1912,7 @@ pub mod gpu {
                 &module,
                 "fs_downsample_l0",
                 intermediate_format,
+                None,
                 "blur down l0",
             );
             let downsample_next = make_pipeline(
@@ -1875,6 +1921,7 @@ pub mod gpu {
                 &module,
                 "fs_downsample_next",
                 intermediate_format,
+                None,
                 "blur down next",
             );
             let upsample = make_pipeline(
@@ -1883,7 +1930,17 @@ pub mod gpu {
                 &module,
                 "fs_upsample",
                 DST_FORMAT,
+                None,
                 "blur upsample",
+            );
+            let upsample_invert = make_pipeline(
+                device,
+                &pipeline_layout,
+                &module,
+                "fs_upsample",
+                DST_FORMAT,
+                Some(INVERT_ALPHA_BLEND),
+                "blur upsample invert",
             );
             let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("blur linear"),
@@ -1900,9 +1957,11 @@ pub mod gpu {
                 inter_bpp: format_bpp(intermediate_format),
                 blur_1d_inter,
                 blur_1d_dst,
+                blur_1d_dst_invert,
                 downsample_l0,
                 downsample_next,
                 upsample,
+                upsample_invert,
                 linear_sampler,
                 uniform_align,
                 uniform_slabs: vec![slab],
@@ -2341,6 +2400,7 @@ pub mod gpu {
             dst_view: &wgpu::TextureView,
             scissor: (u32, u32, u32, u32),
             data: UniformData,
+            invert_alpha: bool,
         ) {
             if scissor.2 == 0 || scissor.3 == 0 {
                 return;
@@ -2354,14 +2414,18 @@ pub mod gpu {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
+                        load: dst_load_op(invert_alpha),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
                 ..Default::default()
             });
             pass.set_scissor_rect(scissor.0, scissor.1, scissor.2, scissor.3);
-            pass.set_pipeline(&self.blur_1d_dst);
+            pass.set_pipeline(if invert_alpha {
+                &self.blur_1d_dst_invert
+            } else {
+                &self.blur_1d_dst
+            });
             pass.set_bind_group(0, &group, &[offset]);
             pass.draw(0..3, 0..1);
             self.draws += 1;
@@ -2626,6 +2690,38 @@ pub mod gpu {
             spec: &BlurSpec,
             pyramid_key: Option<PyramidKey>,
         ) -> Result<()> {
+            self.encode_with_invert(
+                device,
+                encoder,
+                src_view,
+                src_id,
+                src_size,
+                dst_view,
+                dst_size,
+                dst_origin,
+                spec,
+                pyramid_key,
+                false,
+            )
+        }
+
+        /// Encodes a separable Gaussian blur, optionally inverting the final output alpha
+        /// (`vec4(0, 0, 0, 1 - a)`) in the last pass for inner shadows without an extra pass.
+        #[allow(clippy::too_many_arguments)]
+        pub fn encode_with_invert(
+            &mut self,
+            device: &wgpu::Device,
+            encoder: &mut wgpu::CommandEncoder,
+            src_view: &wgpu::TextureView,
+            src_id: u64,
+            src_size: (u32, u32),
+            dst_view: &wgpu::TextureView,
+            dst_size: (u32, u32),
+            dst_origin: (i32, i32),
+            spec: &BlurSpec,
+            pyramid_key: Option<PyramidKey>,
+            invert_alpha: bool,
+        ) -> Result<()> {
             let max_tex = device.limits().max_texture_dimension_2d;
             let dirty = effective_dirty(spec.dirty, dst_size, dst_origin);
             let cb = Self::source_bounds(spec, src_size, dirty);
@@ -2655,7 +2751,16 @@ pub mod gpu {
                     ],
                     border: spec.edge.border_f32(),
                 };
-                self.run_dst_blur_1d(device, encoder, src_view, src_id, dst_view, dst_scissor, data);
+                self.run_dst_blur_1d(
+                    device,
+                    encoder,
+                    src_view,
+                    src_id,
+                    dst_view,
+                    dst_scissor,
+                    data,
+                    invert_alpha,
+                );
                 return Ok(());
             }
 
@@ -2664,7 +2769,18 @@ pub mod gpu {
             let (level, level_sigma) = choose_level_view(spec.sigma);
             if level == 0 {
                 return self.encode_direct(
-                    device, encoder, src_view, src_id, cb, spec.edge, spec.sigma, dst_view, dst_origin, dirty, max_tex,
+                    device,
+                    encoder,
+                    src_view,
+                    src_id,
+                    cb,
+                    spec.edge,
+                    spec.sigma,
+                    dst_view,
+                    dst_origin,
+                    dirty,
+                    max_tex,
+                    invert_alpha,
                 );
             }
 
@@ -2864,14 +2980,18 @@ pub mod gpu {
                         depth_slice: None,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
+                            load: dst_load_op(invert_alpha),
                             store: wgpu::StoreOp::Store,
                         },
                     })],
                     ..Default::default()
                 });
                 pass.set_scissor_rect(dst_scissor.0, dst_scissor.1, dst_scissor.2, dst_scissor.3);
-                pass.set_pipeline(&self.upsample);
+                pass.set_pipeline(if invert_alpha {
+                    &self.upsample_invert
+                } else {
+                    &self.upsample
+                });
                 pass.set_bind_group(0, &group, &[offset]);
                 pass.draw(0..3, 0..1);
                 drop(pass);
@@ -2961,6 +3081,7 @@ pub mod gpu {
             dst_origin: (i32, i32),
             dirty: IRect,
             max_tex: u32,
+            invert_alpha: bool,
         ) -> Result<()> {
             let r = kernel_radius(sigma).min(MAX_KERNEL_RADIUS);
             let dw = (dirty.x1 - dirty.x0) as u32;
@@ -2986,7 +3107,16 @@ pub mod gpu {
                             p2: [0.0, 0.0, edge.mode_code() as f32, 0.0],
                             border: edge.border_f32(),
                         };
-                        self.run_dst_blur_1d(device, encoder, src_view, src_id, dst_view, dst_scissor, data);
+                        self.run_dst_blur_1d(
+                            device,
+                            encoder,
+                            src_view,
+                            src_id,
+                            dst_view,
+                            dst_scissor,
+                            data,
+                            invert_alpha,
+                        );
                         return Ok(());
                     }
                     (lo, hi)
@@ -3073,14 +3203,18 @@ pub mod gpu {
                         depth_slice: None,
                         resolve_target: None,
                         ops: wgpu::Operations {
-                            load: wgpu::LoadOp::Load,
+                            load: dst_load_op(invert_alpha),
                             store: wgpu::StoreOp::Store,
                         },
                     })],
                     ..Default::default()
                 });
                 pass.set_scissor_rect(dst_scissor.0, dst_scissor.1, dst_scissor.2, dst_scissor.3);
-                pass.set_pipeline(&self.blur_1d_dst);
+                pass.set_pipeline(if invert_alpha {
+                    &self.blur_1d_dst_invert
+                } else {
+                    &self.blur_1d_dst
+                });
                 pass.set_bind_group(0, &group, &[offset]);
                 pass.draw(0..3, 0..1);
                 drop(pass);

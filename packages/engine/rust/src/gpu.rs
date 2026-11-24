@@ -10942,9 +10942,6 @@ impl Backend for Gpu {
                 let max_tex = self.device.limits().max_texture_dimension_2d;
                 if cw <= max_tex && ch <= max_tex {
                     self.ensure_scratch_mask(cw, ch)?;
-                    if invert {
-                        self.ensure_scratch_blur(cw, ch)?;
-                    }
                     let full = IRect {
                         x0: 0,
                         y0: 0,
@@ -11000,49 +10997,19 @@ impl Backend for Gpu {
                         });
                         self.vello_render(true, &mask_view, Some(&mask_depth), options, "shadow cache")?;
                         let mut encoder = self.take_encoder("shadow cache");
-                        let blur_res = if !invert {
-                            self.blur.encode(
-                                &self.device,
-                                &mut encoder,
-                                &mask_view,
-                                mask_id,
-                                (mask_w_alloc, mask_h_alloc),
-                                &view,
-                                (cw, ch),
-                                (0, 0),
-                                &spec,
-                                None,
-                            )
-                        } else {
-                            let (blur_view, blur_id) = {
-                                let blur_tex = self.scratch_blur.as_ref().expect("scratch_blur");
-                                (blur_tex.view.clone(), blur_tex.view_id)
-                            };
-                            let r = self.blur.encode(
-                                &self.device,
-                                &mut encoder,
-                                &mask_view,
-                                mask_id,
-                                (mask_w_alloc, mask_h_alloc),
-                                &blur_view,
-                                (cw, ch),
-                                (0, 0),
-                                &spec,
-                                None,
-                            );
-                            if r.is_ok() {
-                                self.shadow.encode_invert_alpha(
-                                    &self.device,
-                                    &mut encoder,
-                                    &blur_view,
-                                    blur_id,
-                                    &view,
-                                    cw,
-                                    ch,
-                                );
-                            }
-                            r
-                        };
+                        let blur_res = self.blur.encode_with_invert(
+                            &self.device,
+                            &mut encoder,
+                            &mask_view,
+                            mask_id,
+                            (mask_w_alloc, mask_h_alloc),
+                            &view,
+                            (cw, ch),
+                            (0, 0),
+                            &spec,
+                            None,
+                            invert,
+                        );
                         if let Err(e) = blur_res {
                             drop(encoder);
                             return Err(e);
@@ -11172,9 +11139,6 @@ impl Backend for Gpu {
                         .estimate_work_bytes((mask_w, mask_h), (dirty_w, dirty_h), dst_origin, &spec, None);
                 self.reserve_or_trim(blur_work, 0, "a shadow blur")?;
                 self.ensure_scratch_mask(mask_w, mask_h)?;
-                if invert {
-                    self.ensure_scratch_blur(dirty_w, dirty_h)?;
-                }
                 self.mask_scene.reset_and_resize(mask_w as u16, mask_h as u16);
                 let base_shift = Affine::translate((-(mask.x0 as f64), -(mask.y0 as f64)));
                 self.mask_scene.set_paint(AlphaColor::<Srgb>::new([1.0, 1.0, 1.0, 1.0]));
@@ -11220,49 +11184,19 @@ impl Backend for Gpu {
                 });
                 self.vello_render(true, &mask_view, Some(&mask_depth), options, "shadow")?;
                 let mut encoder = self.take_encoder("shadow");
-                let blur_res = if !invert {
-                    self.blur.encode(
-                        &self.device,
-                        &mut encoder,
-                        &mask_view,
-                        mask_id,
-                        (mask_w_alloc, mask_h_alloc),
-                        &temp.view,
-                        (dirty_w, dirty_h),
-                        dst_origin,
-                        &spec,
-                        None,
-                    )
-                } else {
-                    let (blur_view, blur_id) = {
-                        let blur_tex = self.scratch_blur.as_ref().expect("scratch_blur");
-                        (blur_tex.view.clone(), blur_tex.view_id)
-                    };
-                    let r = self.blur.encode(
-                        &self.device,
-                        &mut encoder,
-                        &mask_view,
-                        mask_id,
-                        (mask_w_alloc, mask_h_alloc),
-                        &blur_view,
-                        (dirty_w, dirty_h),
-                        dst_origin,
-                        &spec,
-                        None,
-                    );
-                    if r.is_ok() {
-                        self.shadow.encode_invert_alpha(
-                            &self.device,
-                            &mut encoder,
-                            &blur_view,
-                            blur_id,
-                            &temp.view,
-                            dirty_w,
-                            dirty_h,
-                        );
-                    }
-                    r
-                };
+                let blur_res = self.blur.encode_with_invert(
+                    &self.device,
+                    &mut encoder,
+                    &mask_view,
+                    mask_id,
+                    (mask_w_alloc, mask_h_alloc),
+                    &temp.view,
+                    (dirty_w, dirty_h),
+                    dst_origin,
+                    &spec,
+                    None,
+                    invert,
+                );
                 if let Err(e) = blur_res {
                     drop(encoder);
                     return Err(e);

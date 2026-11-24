@@ -1,8 +1,7 @@
-// Shadow helper passes (decision 0040):
-// - `fs_invert_alpha`: inverts blurred mask alpha (`1 - a`) for inner shadows.
+// Shadow helper pass (decision 0040):
 // - `fs_upsample_mask`: bilinearly upsamples a reduced-resolution blurred shadow mask to full
 //   device resolution and optionally inverts alpha for inner shadows.
-// Pure full-screen triangle fragment passes compatible with WebGPU Core, Compatibility, and
+// Pure full-screen triangle fragment pass compatible with WebGPU Core, Compatibility, and
 // wgpu's WebGL2 (GLSL ES 3.00) backend.
 
 struct UpsampleUniforms {
@@ -25,12 +24,6 @@ struct UpsampleUniforms {
 fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4<f32> {
   let p = vec2<f32>(f32((i << 1u) & 2u), f32(i & 2u));
   return vec4<f32>(p * 2.0 - 1.0, 0.0, 1.0);
-}
-
-@fragment
-fn fs_invert_alpha(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
-  let c = textureLoad(src_tex, vec2<i32>(pos.xy), 0);
-  return vec4<f32>(0.0, 0.0, 0.0, clamp(1.0 - c.a, 0.0, 1.0));
 }
 
 @fragment
