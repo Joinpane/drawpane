@@ -632,8 +632,8 @@ impl<T> ShadowMaskCache<T> {
     }
 }
 
-/// GPU shadow helper pipelines (`shadow.wgsl`): inner-shadow alpha inversion and reduced-mask
-/// bilinear upsampling.
+/// GPU shadow helper pipeline (`shadow.wgsl`): reduced-mask bilinear upsampling with optional
+/// inner-shadow alpha inversion.
 #[cfg(feature = "gpu-common")]
 pub mod gpu {
     use std::collections::HashMap;
@@ -644,8 +644,6 @@ pub mod gpu {
     const BG_CACHE_CAP: usize = 256;
 
     pub struct GpuShadow {
-        invert_layout: wgpu::BindGroupLayout,
-        invert_alpha: wgpu::RenderPipeline,
         upsample_layout: wgpu::BindGroupLayout,
         upsample_mask: wgpu::RenderPipeline,
         linear_sampler: wgpu::Sampler,
@@ -654,7 +652,6 @@ pub mod gpu {
         uniform_bytes: Vec<Vec<u8>>,
         slab_idx: usize,
         slab_slot: u32,
-        invert_bgs: HashMap<u64, wgpu::BindGroup>,
         upsample_bgs: HashMap<(u64, usize), wgpu::BindGroup>,
         draws: u32,
     }
@@ -662,19 +659,6 @@ pub mod gpu {
     impl GpuShadow {
         pub fn new(device: &wgpu::Device) -> Self {
             let uniform_align = device.limits().min_uniform_buffer_offset_alignment.max(256);
-            let invert_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("shadow invert layout"),
-                entries: &[wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                }],
-            });
             let upsample_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
                 label: Some("shadow upsample layout"),
                 entries: &[
@@ -706,11 +690,6 @@ pub mod gpu {
                     },
                 ],
             });
-            let invert_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-                label: Some("shadow invert pipeline layout"),
-                bind_group_layouts: &[Some(&invert_layout)],
-                immediate_size: 0,
-            });
             let upsample_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("shadow upsample pipeline layout"),
                 bind_group_layouts: &[Some(&upsample_layout)],
@@ -720,35 +699,31 @@ pub mod gpu {
                 label: Some("shadow helpers"),
                 source: wgpu::ShaderSource::Wgsl(SHADER.into()),
             });
-            let make = |pl: &wgpu::PipelineLayout, entry: &str, label: &str| {
-                device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-                    label: Some(label),
-                    layout: Some(pl),
-                    vertex: wgpu::VertexState {
-                        module: &module,
-                        entry_point: Some("vs"),
-                        compilation_options: Default::default(),
-                        buffers: &[],
-                    },
-                    primitive: wgpu::PrimitiveState::default(),
-                    depth_stencil: None,
-                    multisample: wgpu::MultisampleState::default(),
-                    fragment: Some(wgpu::FragmentState {
-                        module: &module,
-                        entry_point: Some(entry),
-                        compilation_options: Default::default(),
-                        targets: &[Some(wgpu::ColorTargetState {
-                            format: wgpu::TextureFormat::Rgba8Unorm,
-                            blend: None,
-                            write_mask: wgpu::ColorWrites::ALL,
-                        })],
-                    }),
-                    multiview_mask: None,
-                    cache: None,
-                })
-            };
-            let invert_alpha = make(&invert_pl, "fs_invert_alpha", "shadow invert alpha");
-            let upsample_mask = make(&upsample_pl, "fs_upsample_mask", "shadow upsample mask");
+            let upsample_mask = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some("shadow upsample mask"),
+                layout: Some(&upsample_pl),
+                vertex: wgpu::VertexState {
+                    module: &module,
+                    entry_point: Some("vs"),
+                    compilation_options: Default::default(),
+                    buffers: &[],
+                },
+                primitive: wgpu::PrimitiveState::default(),
+                depth_stencil: None,
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &module,
+                    entry_point: Some("fs_upsample_mask"),
+                    compilation_options: Default::default(),
+                    targets: &[Some(wgpu::ColorTargetState {
+                        format: wgpu::TextureFormat::Rgba8Unorm,
+                        blend: None,
+                        write_mask: wgpu::ColorWrites::ALL,
+                    })],
+                }),
+                multiview_mask: None,
+                cache: None,
+            });
             let linear_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
                 label: Some("shadow upsample linear"),
                 address_mode_u: wgpu::AddressMode::ClampToEdge,
@@ -759,8 +734,6 @@ pub mod gpu {
             });
             let slab = Self::make_slab(device, uniform_align);
             Self {
-                invert_layout,
-                invert_alpha,
                 upsample_layout,
                 upsample_mask,
                 linear_sampler,
@@ -769,7 +742,6 @@ pub mod gpu {
                 uniform_bytes: vec![Vec::new()],
                 slab_idx: 0,
                 slab_slot: 0,
-                invert_bgs: HashMap::new(),
                 upsample_bgs: HashMap::new(),
                 draws: 0,
             }
@@ -797,9 +769,6 @@ pub mod gpu {
             }
             self.slab_idx = 0;
             self.slab_slot = 0;
-            if self.invert_bgs.len() > BG_CACHE_CAP {
-                self.invert_bgs.clear();
-            }
             if self.upsample_bgs.len() > BG_CACHE_CAP {
                 self.upsample_bgs.clear();
             }
@@ -811,9 +780,6 @@ pub mod gpu {
             }
             self.slab_idx = 0;
             self.slab_slot = 0;
-            if self.invert_bgs.len() > BG_CACHE_CAP {
-                self.invert_bgs.clear();
-            }
             if self.upsample_bgs.len() > BG_CACHE_CAP {
                 self.upsample_bgs.clear();
             }
@@ -838,61 +804,6 @@ pub mod gpu {
             buf.resize(offset as usize, 0);
             buf.extend_from_slice(bytes);
             (self.slab_idx, offset)
-        }
-
-        #[allow(clippy::too_many_arguments)]
-        pub fn encode_invert_alpha(
-            &mut self,
-            device: &wgpu::Device,
-            encoder: &mut wgpu::CommandEncoder,
-            src_view: &wgpu::TextureView,
-            src_id: u64,
-            dst_view: &wgpu::TextureView,
-            width: u32,
-            height: u32,
-        ) {
-            if width == 0 || height == 0 {
-                return;
-            }
-            let make_bg = || {
-                device.create_bind_group(&wgpu::BindGroupDescriptor {
-                    label: None,
-                    layout: &self.invert_layout,
-                    entries: &[wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: wgpu::BindingResource::TextureView(src_view),
-                    }],
-                })
-            };
-            let group = if src_id != 0 {
-                if let Some(cached) = self.invert_bgs.get(&src_id) {
-                    cached.clone()
-                } else {
-                    let created = make_bg();
-                    self.invert_bgs.insert(src_id, created.clone());
-                    created
-                }
-            } else {
-                make_bg()
-            };
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("shadow invert alpha"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: dst_view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                })],
-                ..Default::default()
-            });
-            pass.set_scissor_rect(0, 0, width, height);
-            pass.set_pipeline(&self.invert_alpha);
-            pass.set_bind_group(0, &group, &[]);
-            pass.draw(0..3, 0..1);
-            self.draws += 1;
         }
 
         #[allow(clippy::too_many_arguments)]

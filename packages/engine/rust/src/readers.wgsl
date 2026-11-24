@@ -312,7 +312,7 @@ struct GlassU {
     tune_b: vec4<f32>,
     // (shade, shade_reach, valid_lw, valid_lh)
     tune_c: vec4<f32>,
-    // (flags: bit0=height_packed bit1=quad_phase_x bit2=quad_phase_y, mask_x, mask_y, device px per optical px)
+    // (flags: bit0=height_packed bit1=quad_phase_x bit2=quad_phase_y bit3=opaque_blend, mask_x, mask_y, device px per optical px)
     tune_d: vec4<f32>,
     // (native coordinate at the optical origin, native sampling enabled, backdrop divisor)
     native_map: vec4<f32>,
@@ -546,8 +546,8 @@ fn fs_glass(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     let green = glass_color(uv_g, dx_g, dy_g);
     let blue = glass_color(uv_b, dx_b, dy_b);
 
+    let opaque_blend = (tune_flags & 8) != 0;
     let dst_coord = vec2<i32>(floor(pos.xy - gu.origin.zw));
-    let dst = textureLoad(g_dst, dst_coord, 0);
 
     let mask_coord = vec2<i32>(floor(p));
     let in_mask = mask_coord.x >= 0 && mask_coord.y >= 0 && mask_coord.x < i32(rw) && mask_coord.y < i32(rh);
@@ -561,7 +561,10 @@ fn fs_glass(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     }
     let a_eff = clamp(a * clip_cov * gu.light_box.w, 0.0, 1.0);
     if (a_eff <= 0.0) {
-        return dst;
+        if (opaque_blend) {
+            return vec4<f32>(0.0);
+        }
+        return textureLoad(g_dst, dst_coord, 0);
     }
 
     let seen_alpha = max(red.a, max(green.a, blue.a));
@@ -577,6 +580,10 @@ fn fs_glass(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
     );
     seen = mix(seen, vec3<f32>(seen_alpha), clamp(intensity * edge * hair, 0.0, 1.0));
 
+    if (opaque_blend) {
+        return vec4<f32>(seen * a_eff, a_eff);
+    }
+    let dst = textureLoad(g_dst, dst_coord, 0);
     let glass_col = vec4<f32>(seen, seen_alpha);
     return dst * (1.0 - a_eff) + glass_col * a_eff;
 }
@@ -591,7 +598,7 @@ struct CoarseU {
     a: vec4<f32>,
     // (region_x0_in_target, region_y0_in_target, dst_x0_in_target, dst_y0_in_target)
     origin: vec4<f32>,
-    // (has_clip_mask, mask_mode: 0=tex 1=box 2=ellipse, unit_px, 0)
+    // (has_clip_mask, mask_mode: 0=tex 1=box 2=ellipse, unit_px, opaque_blend)
     flags: vec4<f32>,
     // (uv_offset_x, uv_offset_y, inv_backdrop_w, inv_backdrop_h)
     uv_map: vec4<f32>,
@@ -614,8 +621,8 @@ struct CoarseU {
 
 @fragment
 fn fs_glass_coarse(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let opaque_blend = cu.flags.w > 0.5;
     let dst_coord = vec2<i32>(floor(pos.xy - cu.origin.zw));
-    let dst = textureLoad(c_dst, dst_coord, 0);
     let p = pos.xy - cu.origin.xy;
     let mask_mode = cu.flags.y;
     var a = 0.0;
@@ -638,7 +645,10 @@ fn fs_glass_coarse(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> 
         let rw = i32(cu.a.x);
         let rh = i32(cu.a.y);
         if (mask_coord.x < 0 || mask_coord.y < 0 || mask_coord.x >= rw || mask_coord.y >= rh) {
-            return dst;
+            if (opaque_blend) {
+                return vec4<f32>(0.0);
+            }
+            return textureLoad(c_dst, dst_coord, 0);
         }
         a = textureLoad(c_mask, mask_coord, 0).a;
     }
@@ -648,10 +658,17 @@ fn fs_glass_coarse(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> 
     }
     let a_eff = clamp(a * clip_cov * cu.a.w, 0.0, 1.0);
     if (a_eff <= 0.0) {
-        return dst;
+        if (opaque_blend) {
+            return vec4<f32>(0.0);
+        }
+        return textureLoad(c_dst, dst_coord, 0);
     }
     let uv = clamp((p + cu.uv_map.xy) * cu.uv_map.zw, vec2<f32>(0.0), vec2<f32>(1.0));
     let seen = textureSampleLevel(c_backdrop, c_mip_samp, uv, cu.a.z);
+    if (opaque_blend) {
+        return vec4<f32>(seen.rgb * a_eff, a_eff);
+    }
+    let dst = textureLoad(c_dst, dst_coord, 0);
     return dst * (1.0 - a_eff) + seen * a_eff;
 }
 
@@ -693,7 +710,7 @@ fn fs_composite_dual(@builtin(position) pos: vec4<f32>) -> DualComposite {
 struct BgBlurCompU {
     // (dirty_x0_in_target, dirty_y0_in_target, alpha, has_clip_mask)
     a: vec4<f32>,
-    // (coarse origin x/y, low pixels per device pixel, unused)
+    // (coarse origin x/y, low pixels per device pixel, opaque_blend)
     map: vec4<f32>,
     size: vec4<f32>,
 };
@@ -706,8 +723,8 @@ struct BgBlurCompU {
 
 @fragment
 fn fs_bg_blur_composite(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let opaque_blend = bgu.map.w > 0.5;
     let local = vec2<i32>(floor(pos.xy - bgu.a.xy));
-    let dst = textureLoad(bg_dst, local, 0);
     let m = textureLoad(bg_mask, local, 0).a;
     var clip_cov = 1.0;
     if (bgu.a.w > 0.5) {
@@ -715,7 +732,10 @@ fn fs_bg_blur_composite(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<
     }
     let a_eff = clamp(m * clip_cov * bgu.a.z, 0.0, 1.0);
     if (a_eff <= 0.0) {
-        return dst;
+        if (opaque_blend) {
+            return vec4<f32>(0.0);
+        }
+        return textureLoad(bg_dst, local, 0);
     }
     var blurred = textureLoad(bg_blurred, local, 0);
     if (bgu.map.z > 0.0) {
@@ -730,6 +750,10 @@ fn fs_bg_blur_composite(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<
             f.y
         );
     }
+    if (opaque_blend) {
+        return vec4<f32>(blurred.rgb * a_eff, a_eff);
+    }
+    let dst = textureLoad(bg_dst, local, 0);
     return dst * (1.0 - a_eff) + blurred * a_eff;
 }
 
@@ -749,7 +773,7 @@ struct ProgBlurU {
     stops0: vec4<f32>,
     stops1: vec4<f32>,
     stops2: vec4<f32>,
-    // (frame_x_of_target, frame_y_of_target, unused, unused)
+    // (frame_x_of_target, frame_y_of_target, opaque_blend, unused)
     frame_origin: vec4<f32>,
     // Tier 1 coarse patch: (offset x/y, inverse divisor, first stop)
     halo_map: vec4<f32>,
@@ -959,8 +983,8 @@ fn fs_downsample_rect(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f3
 
 @fragment
 fn fs_progressive_blur(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+    let opaque_blend = pbu.frame_origin.z > 0.5;
     let local = vec2<i32>(floor(pos.xy - pbu.tile.xy));
-    let dst = textureLoad(pb_dst, local, 0);
     let mask_coord = local + vec2<i32>(i32(pbu.mask_info.x), i32(pbu.mask_info.y));
     let m = textureLoad(pb_mask, mask_coord, 0).a;
     var clip_cov = 1.0;
@@ -969,7 +993,10 @@ fn fs_progressive_blur(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f
     }
     let a_eff = clamp(m * clip_cov * pbu.mask_info.z, 0.0, 1.0);
     if (a_eff <= 0.0) {
-        return dst;
+        if (opaque_blend) {
+            return vec4<f32>(0.0);
+        }
+        return textureLoad(pb_dst, local, 0);
     }
     let t = clamp(dot(pos.xy + pbu.frame_origin.xy - pbu.grad.xy, pbu.grad.zw), 0.0, 1.0);
     let sigma = pbu.params.x + (pbu.params.y - pbu.params.x) * t;
@@ -997,5 +1024,9 @@ fn fs_progressive_blur(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f
     let c0 = sample_progressive_stop(lo, local, pos.xy);
     let c1 = sample_progressive_stop(hi, local, pos.xy);
     let blurred = mix(c0, c1, frac);
+    if (opaque_blend) {
+        return vec4<f32>(blurred.rgb * a_eff, a_eff);
+    }
+    let dst = textureLoad(pb_dst, local, 0);
     return dst * (1.0 - a_eff) + blurred * a_eff;
 }
