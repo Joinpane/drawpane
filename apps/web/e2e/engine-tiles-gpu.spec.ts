@@ -4814,6 +4814,231 @@ for (const build of ["browser", "webgl"] as const) {
       return [...list.finish()];
     };
 
+    /**
+     * Exact curved/rotated/even-odd clip-atlas regression scene (big rounded clip A holding
+     * nested rotated clip B, overlapping multi-subpath circles C, even-odd circles D with
+     * blends/blurs/glass, plus 48 neighboring small rounded clips that pack and overflow slots).
+     */
+    const clipAtlasCurvedEdgesScene = (revision: number, sx = 0): number[] => {
+      const list = new ListWriter(0xffffffff, revision);
+      list.reset();
+      let nextId = 1;
+      let seed = 23 >>> 0;
+      const rand = () => {
+        seed = (seed * 1664525 + 1013904223) >>> 0;
+        return seed / 2 ** 32;
+      };
+      const rr = (w: number, h: number, r: number): WireRecord["paths"] => [
+        { kind: "rect", w, h, radii: [r, r, r, r], smoothing: 0 },
+      ];
+      const circle = (p: PathData, cx: number, cy: number, r: number): PathData => {
+        const k = 0.5523 * r;
+        return p
+          .moveTo(cx + r, cy)
+          .cubicTo(cx + r, cy + k, cx + k, cy + r, cx, cy + r)
+          .cubicTo(cx - k, cy + r, cx - r, cy + k, cx - r, cy)
+          .cubicTo(cx - r, cy - k, cx - k, cy - r, cx, cy - r)
+          .cubicTo(cx + k, cy - r, cx + r, cy - k, cx + r, cy)
+          .close();
+      };
+      const add = (
+        parent: number,
+        r: Partial<WireRecord> & {
+          x?: number;
+          y?: number;
+          w: number;
+          h: number;
+          ops: WireRecord["ops"];
+        },
+        id?: number,
+      ): number => {
+        const nid = id ?? nextId++;
+        if (id && id >= nextId) nextId = id + 1;
+        const { x = 0, y = 0, w, h, ...rest } = r;
+        list.set(nid, parent, {
+          flags: 0,
+          transform: [1, 0, 0, 1, x, y],
+          opacity: 1,
+          width: w,
+          height: h,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [{ kind: "rect", w, h, radii: [0, 0, 0, 0], smoothing: 0 }],
+          coarse: [],
+          ...rest,
+        });
+        return nid;
+      };
+      const fill = (
+        color: readonly [number, number, number, number],
+        blend?: number,
+      ): WireRecord["ops"][number] => ({
+        op: "fill",
+        path: 0,
+        evenOdd: false,
+        paint: blend === undefined ? { kind: "solid", color } : { kind: "solid", color, blend },
+      });
+      const clipOps: WireRecord["ops"] = [
+        { op: "clip", path: 0, evenOdd: false },
+        { op: "children" },
+        { op: "unclip" },
+      ];
+      const bb = (radius: number): WireRecord["ops"][number] => ({
+        op: "backgroundBlur",
+        paths: [0],
+        evenOdd: false,
+        radius,
+      });
+      const glass = (frost: number, r: number): WireRecord["ops"][number] => ({
+        op: "glass",
+        paths: [0],
+        evenOdd: false,
+        kind: 0,
+        inradius: 20,
+        angle: -45,
+        intensity: 50,
+        refraction: 45,
+        depth: 10,
+        dispersion: 16,
+        frost,
+        splay: 0,
+        boxRadii: [r, r, r, r],
+        boxSmoothing: [0, 0, 0, 0],
+      });
+      const blends = [
+        BLEND.luminosity,
+        BLEND.saturation,
+        BLEND.difference,
+        BLEND.hue,
+        BLEND.exclusion,
+        BLEND.overlay,
+      ] as const;
+
+      for (let i = 0; i < 30; i++) {
+        add(ROOT, {
+          x: i * 40 + sx,
+          y: 0,
+          w: 40,
+          h: 1100,
+          ops: [fill([rand(), rand(), rand(), 1])],
+        });
+      }
+      for (let i = 0; i < 14; i++) {
+        add(ROOT, {
+          x: sx,
+          y: 15 + i * 75,
+          w: 1200,
+          h: 9,
+          ops: [fill([rand(), rand(), rand(), 1])],
+        });
+      }
+      const clipA = add(
+        ROOT,
+        { x: 40 + sx, y: 30, w: 700, h: 700, paths: rr(700, 700, 90), ops: clipOps },
+        900,
+      );
+      add(clipA, {
+        x: 20,
+        y: 20,
+        w: 420,
+        h: 400,
+        ops: [fill([0.9, 0.2, 0.3, 0.7], BLEND.luminosity)],
+      });
+      const rot = 0.3;
+      const c = Math.cos(rot);
+      const sn = Math.sin(rot);
+      const clipB = add(
+        clipA,
+        { x: 0, y: 0, w: 640, h: 600, transform: [c, sn, -sn, c, 120, -60], ops: clipOps },
+        901,
+      );
+      add(clipB, {
+        x: 10,
+        y: 10,
+        w: 560,
+        h: 520,
+        ops: [fill([0.2, 0.7, 0.9, 0.6], BLEND.difference)],
+      });
+      add(clipB, { x: 200, y: 150, w: 260, h: 220, ops: [bb(14)] });
+      add(clipA, {
+        x: 260,
+        y: 280,
+        w: 420,
+        h: 400,
+        ops: [fill([0.3, 0.9, 0.2, 0.7], BLEND.saturation)],
+      });
+      const two = circle(circle(new PathData(), 160, 160, 150), 290, 230, 150);
+      const clipC = add(
+        clipA,
+        { x: 20, y: 300, w: 450, h: 390, paths: [{ kind: "path", path: two }], ops: clipOps },
+        902,
+      );
+      add(clipC, {
+        x: 0,
+        y: 0,
+        w: 450,
+        h: 390,
+        ops: [fill([0.95, 0.8, 0.1, 0.65], BLEND.hue)],
+      });
+      add(clipC, {
+        x: 120,
+        y: 80,
+        w: 220,
+        h: 200,
+        ops: [
+          {
+            op: "progressiveBlur",
+            paths: [0],
+            evenOdd: false,
+            startRadius: 1,
+            endRadius: 20,
+            start: [0, 0],
+            end: [1, 1],
+          },
+        ],
+      });
+      const two2 = circle(circle(new PathData(), 150, 150, 140), 260, 200, 140);
+      const clipD = add(
+        clipA,
+        {
+          x: 330,
+          y: 40,
+          w: 410,
+          h: 350,
+          paths: [{ kind: "path", path: two2 }],
+          ops: [{ op: "clip", path: 0, evenOdd: true }, { op: "children" }, { op: "unclip" }],
+        },
+        903,
+      );
+      add(clipD, {
+        x: 0,
+        y: 0,
+        w: 410,
+        h: 350,
+        ops: [fill([0.6, 0.3, 0.9, 0.7], BLEND.exclusion)],
+      });
+      add(clipD, { x: 60, y: 60, w: 280, h: 230, paths: rr(280, 230, 30), ops: [glass(5, 30)] });
+      for (let k = 0; k < 48; k++) {
+        const gx = 760 + sx + (k % 6) * 74;
+        const gy = 30 + Math.floor(k / 6) * 66;
+        const g = add(
+          ROOT,
+          { x: gx, y: gy, w: 70, h: 62, paths: rr(70, 62, 8 + (k % 7) * 3), ops: clipOps },
+          1000 + k,
+        );
+        add(g, {
+          x: -6,
+          y: -6,
+          w: 82,
+          h: 74,
+          ops: [fill([rand(), rand(), rand(), 0.75], blends[k % blends.length])],
+        });
+        if (k % 3 === 0) add(g, { x: 10, y: 8, w: 50, h: 46, ops: [bb(10)] });
+      }
+      return [...list.finish()];
+    };
+
     test("clip-chain mask cache and integer AA-rect scissor fast path stay byte-identical across scopes, blurs, glass, fractional clips, tile shifts and patches", async ({
       page,
     }) => {
@@ -5229,6 +5454,189 @@ for (const build of ["browser", "webgl"] as const) {
       expect(result.fastVsSlowBytes).toBe(0);
       expect(result.pausedVsFastBytes).toBe(0);
       expect(result.midPauseEditVsFreshBytes).toBe(0);
+    });
+
+    test("clip-atlas target-space rasterization matches uncached path byte-for-byte on curved, rotated, and even-odd clips across zooms", async ({
+      page,
+    }) => {
+      test.setTimeout(240_000);
+      await openEngine(page, build);
+      const views = [
+        {
+          id: "whole1",
+          size: [1200, 760] as [number, number],
+          cam: [1, 0, 0] as [number, number, number],
+          budget: 0,
+          ev: false,
+        },
+        {
+          id: "tiled1",
+          size: [1200, 760] as [number, number],
+          cam: [1, 0, 0] as [number, number, number],
+          budget: 40,
+          ev: true,
+        },
+        {
+          id: "z0.75",
+          size: [900, 600] as [number, number],
+          cam: [0.75, 0, 0] as [number, number, number],
+          budget: 40,
+          ev: true,
+        },
+        {
+          id: "z1.5",
+          size: [900, 700] as [number, number],
+          cam: [1.5, -100, -20] as [number, number, number],
+          budget: 40,
+          ev: true,
+        },
+      ];
+      const result = await page.evaluate(
+        async ({
+          warmups,
+          list,
+          views,
+          expectedBackend,
+          scopeClipIdx,
+          blurClipIdx,
+          readerClipIdx,
+        }) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          const check = (out: { ok: boolean; message: string; free(): void }) => {
+            const { ok, message } = out;
+            out.free();
+            if (!ok) throw new Error(message);
+          };
+          const diffStats = (a: Uint8Array, b: Uint8Array, w: number) => {
+            let bytes = Math.abs(a.length - b.length);
+            let maxDelta = 0;
+            let first: { x: number; y: number; a: number[]; b: number[] } | null = null;
+            const n = Math.min(a.length, b.length);
+            for (let i = 0; i < n; i++) {
+              const d = Math.abs((a[i] ?? 0) - (b[i] ?? 0));
+              if (d !== 0) {
+                bytes++;
+                if (d > maxDelta) maxDelta = d;
+                if (!first) {
+                  const p = Math.floor(i / 4);
+                  first = {
+                    x: p % w,
+                    y: Math.floor(p / w),
+                    a: [a[p * 4] ?? 0, a[p * 4 + 1] ?? 0, a[p * 4 + 2] ?? 0, a[p * 4 + 3] ?? 0],
+                    b: [b[p * 4] ?? 0, b[p * 4 + 1] ?? 0, b[p * 4 + 2] ?? 0, b[p * 4 + 3] ?? 0],
+                  };
+                }
+              }
+            }
+            return { bytes, maxDelta, first };
+          };
+          let device = await glue.createGpu(null, 0);
+          for (let attempt = 0; attempt < 3 && !device.ok; attempt++) {
+            device.free();
+            await new Promise((r) => setTimeout(r, 300));
+            device = await glue.createGpu(null, 0);
+          }
+          if (!device.ok || device.backend !== expectedBackend)
+            throw new Error(device.message || `expected ${expectedBackend}`);
+          const engine = new glue.Engine(0, 0);
+          try {
+            if (
+              !engine.attachGpu ||
+              !engine.renderGpu ||
+              !engine.gpuPixels ||
+              !engine.gpuCounters
+            ) {
+              throw new Error("missing GPU entry points");
+            }
+            check(engine.attachGpu(device));
+            const warmBg = new Float32Array([0.5, 0.5, 0.5, 1]);
+            for (const wl of warmups) {
+              check(engine.apply(new Uint8Array(wl)));
+              check(engine.renderGpu(16, 16, 1, 0, 0, 1, warmBg, false, 0, true));
+              const px = await engine.gpuPixels();
+              if (!(px instanceof Uint8Array)) throw new Error(px.message);
+            }
+            engine.clearTiles?.();
+            check(engine.apply(new Uint8Array(list)));
+            const bg = new Float32Array([0.15, 0.25, 0.35, 1]);
+            const clipTotal = (before: Uint32Array, after: Uint32Array) =>
+              (after[scopeClipIdx] ?? 0) -
+              (before[scopeClipIdx] ?? 0) +
+              ((after[blurClipIdx] ?? 0) - (before[blurClipIdx] ?? 0)) +
+              ((after[readerClipIdx] ?? 0) - (before[readerClipIdx] ?? 0));
+            const renderView = async (v: (typeof views)[number], fast: boolean) => {
+              engine.setGpuClipFastPath?.(fast);
+              engine.clearTiles?.();
+              const before = engine.gpuCounters?.() ?? new Uint32Array(0);
+              let exact = false;
+              let attempts = 0;
+              do {
+                const out = engine.renderGpu?.(
+                  v.size[0],
+                  v.size[1],
+                  v.cam[0],
+                  v.cam[1],
+                  v.cam[2],
+                  1,
+                  bg,
+                  false,
+                  v.budget,
+                  v.ev,
+                );
+                if (!out) throw new Error("no renderGpu");
+                exact = out.exact;
+                attempts++;
+                check(out);
+                await engine.gpuFinished?.();
+              } while (!exact && attempts < 120);
+              const px = await engine.gpuPixels?.();
+              if (!(px instanceof Uint8Array)) throw new Error(px?.message ?? "no readback");
+              const after = engine.gpuCounters?.() ?? new Uint32Array(0);
+              return { pixels: new Uint8Array(px), exact, clips: clipTotal(before, after) };
+            };
+
+            const out: Record<
+              string,
+              {
+                exact: [boolean, boolean];
+                clips: [number, number];
+                diff: ReturnType<typeof diffStats>;
+              }
+            > = {};
+            for (const v of views) {
+              const on = await renderView(v, true);
+              const off = await renderView(v, false);
+              out[v.id] = {
+                exact: [on.exact, off.exact],
+                clips: [on.clips, off.clips],
+                diff: diffStats(on.pixels, off.pixels, v.size[0]),
+              };
+            }
+            return out;
+          } finally {
+            engine.free();
+            device.free();
+          }
+        },
+        {
+          warmups: clipWarmupLists(),
+          list: clipAtlasCurvedEdgesScene(40, 0),
+          views,
+          expectedBackend: build === "webgl" ? "webgl2" : "webgpu",
+          scopeClipIdx: SCOPE_CLIP_COUNTER,
+          blurClipIdx: BLUR_CLIP_COUNTER,
+          readerClipIdx: READER_CLIP_COUNTER,
+        },
+      );
+
+      for (const v of views) {
+        const row = result[v.id];
+        expect(row, `missing result for ${v.id}`).toBeDefined();
+        expect(row?.exact, `${v.id} exact`).toEqual([true, true]);
+        expect(row?.diff.bytes, `${v.id}: ${JSON.stringify(row?.diff)}`).toBe(0);
+      }
     });
   });
 }

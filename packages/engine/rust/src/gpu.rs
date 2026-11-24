@@ -698,6 +698,7 @@ struct CachedClipMask {
     key_hash: u64,
     key: Vec<ClipStepKey>,
     bounds: IRect,
+    target_size: (u16, u16),
     /// Target-space origin `(bounds.x0 - slot_x, bounds.y0 - slot_y)` for `textureLoad`.
     origin: (i32, i32),
 }
@@ -716,6 +717,7 @@ struct ClipAnalysis<'a> {
     mask_clips: Vec<(&'a BezPath, Affine, bool)>,
     cache_key: Option<(u64, Vec<ClipStepKey>)>,
     mask_bounds: IRect,
+    target_size: (u16, u16),
 }
 
 /// The scratch target and its depth buffer (`TILE + 2 * halo` square for tiles, or `w x h` whole).
@@ -1722,16 +1724,25 @@ fn align4_rect(r: IRect, target: IRect) -> IRect {
     }
 }
 
-fn raster_clip_list(scene: &mut Scene, clips: &[(&BezPath, Affine, bool)], shift: Affine, size: (u32, u32)) {
+/// Rasterizes `clips` in target-space coordinates (`scene` sized to `target_size`) bounded by
+/// `bounds`. Keeping clip geometry unshifted and translating only via `RenderOptions::offset`
+/// makes cached atlas masks, uncached scratch masks, and `self.scene` clips flatten and
+/// anti-alias curved or rotated edges identically regardless of caching history.
+fn raster_clip_list(scene: &mut Scene, clips: &[(&BezPath, Affine, bool)], bounds: IRect) {
     for &(path, transform, even_odd) in clips {
-        scene.set_transform(shift * transform);
+        scene.set_transform(transform);
         scene.set_fill_rule(if even_odd { Fill::EvenOdd } else { Fill::NonZero });
         scene.push_clip_path(path);
     }
     scene.set_transform(Affine::IDENTITY);
     scene.set_fill_rule(Fill::NonZero);
     scene.set_paint(vello_common::color::palette::css::WHITE);
-    scene.fill_rect(&Rect::new(0.0, 0.0, f64::from(size.0), f64::from(size.1)));
+    scene.fill_rect(&Rect::new(
+        f64::from(bounds.x0),
+        f64::from(bounds.y0),
+        f64::from(bounds.x1),
+        f64::from(bounds.y1),
+    ));
     for _ in 0..clips.len() {
         scene.pop_clip();
     }
@@ -1746,6 +1757,10 @@ fn analyze_open_clips_inner(
     fast_path: bool,
     max_tex: u32,
 ) -> ClipAnalysis<'_> {
+    let target_size = (
+        target_rect.x1.max(0).min(i32::from(u16::MAX)) as u16,
+        target_rect.y1.max(0).min(i32::from(u16::MAX)) as u16,
+    );
     if !fast_path {
         let mut any_clip = false;
         let mut clips = Vec::new();
@@ -1772,7 +1787,8 @@ fn analyze_open_clips_inner(
             clipped_rect: rect,
             mask_clips: if needs_mask { clips } else { Vec::new() },
             cache_key: None,
-            mask_bounds: rect,
+            mask_bounds: align4_rect(rect, target_rect),
+            target_size,
         };
     }
 
@@ -1806,6 +1822,7 @@ fn analyze_open_clips_inner(
                     mask_clips: Vec::new(),
                     cache_key: None,
                     mask_bounds: clipped_rect,
+                    target_size,
                 };
             }
             continue;
@@ -1829,6 +1846,7 @@ fn analyze_open_clips_inner(
                 mask_clips: Vec::new(),
                 cache_key: None,
                 mask_bounds: clipped_rect,
+                target_size,
             };
         }
     }
@@ -1843,6 +1861,7 @@ fn analyze_open_clips_inner(
             mask_clips: Vec::new(),
             cache_key: None,
             mask_bounds: clipped_rect,
+            target_size,
         };
     }
 
@@ -1884,6 +1903,7 @@ fn analyze_open_clips_inner(
         mask_clips,
         cache_key,
         mask_bounds,
+        target_size,
     }
 }
 
@@ -2841,6 +2861,7 @@ impl Gpu {
             && let Some(atlas) = self.clip_atlas.as_ref()
             && let Some(entry) = self.clip_mask_cache.iter().find(|e| {
                 e.key_hash == hash
+                    && e.target_size == analysis.target_size
                     && e.key.as_slice() == key.as_slice()
                     && e.bounds.contains_rect(analysis.clipped_rect)
             })
@@ -2855,7 +2876,7 @@ impl Gpu {
         let bounds = analysis.mask_bounds;
         let w = (bounds.x1 - bounds.x0).max(0) as u32;
         let h = (bounds.y1 - bounds.y0).max(0) as u32;
-        if w == 0 || h == 0 {
+        if w == 0 || h == 0 || analysis.target_size.0 == 0 || analysis.target_size.1 == 0 {
             return Ok(None);
         }
 
@@ -2905,10 +2926,12 @@ impl Gpu {
                             color: AlphaColor::TRANSPARENT,
                         })
                     };
-                    atlas_opts.offset = (slot_x as i32, slot_y as i32);
-                    let shift = Affine::translate((-f64::from(bounds.x0), -f64::from(bounds.y0)));
-                    self.mask_scene.reset_and_resize(w as u16, h as u16);
-                    raster_clip_list(&mut self.mask_scene, &analysis.mask_clips, shift, (w, h));
+                    // Rasterize in target-space coordinates and shift strips into the 4px-aligned
+                    // atlas slot with RenderOptions::offset so cached and uncached masks match bit-for-bit.
+                    atlas_opts.offset = (slot_x as i32 - bounds.x0, slot_y as i32 - bounds.y0);
+                    self.mask_scene
+                        .reset_and_resize(analysis.target_size.0, analysis.target_size.1);
+                    raster_clip_list(&mut self.mask_scene, &analysis.mask_clips, bounds);
                     let t_vr = now();
                     let vr_sub0 = self.active.as_ref().map_or(0.0, |a| a.submit_ms);
                     // Single white fill_rect has no overlapping opaque geometry, so depth is
@@ -2926,6 +2949,7 @@ impl Gpu {
                         key_hash: hash,
                         key: key.clone(),
                         bounds,
+                        target_size: analysis.target_size,
                         origin,
                     });
                     return Ok(Some(ClipMaskBinding {
@@ -2938,7 +2962,8 @@ impl Gpu {
         }
 
         // Uncached fallback (non-cacheable clip, 1st sight while moving, atlas full while
-        // recording, oversized bounds, or fast path disabled). Rasterize only the caller's tight rect.
+        // recording, oversized bounds, or fast path disabled). Rasterize only the caller's tight rect
+        // in target-space coordinates shifted via RenderOptions::offset so pixels are history-independent.
         let fb = if analysis.cache_key.is_some() {
             align4_rect(analysis.clipped_rect, bounds)
         } else {
@@ -2953,10 +2978,11 @@ impl Gpu {
         options.target_init = TargetInit::Clear(ClearSettings::Viewport {
             color: AlphaColor::TRANSPARENT,
         });
-        let shift = Affine::translate((-f64::from(fb.x0), -f64::from(fb.y0)));
+        options.offset = (-fb.x0, -fb.y0);
         self.ensure_scratch_mask(fw, fh)?;
-        self.mask_scene.reset_and_resize(fw as u16, fh as u16);
-        raster_clip_list(&mut self.mask_scene, &analysis.mask_clips, shift, (fw, fh));
+        self.mask_scene
+            .reset_and_resize(analysis.target_size.0, analysis.target_size.1);
+        raster_clip_list(&mut self.mask_scene, &analysis.mask_clips, fb);
         let (mask_view, mask_view_id, mask_depth) = {
             let mask = self.scratch_mask.as_ref().expect("clip mask scratch");
             (mask.view.clone(), mask.view_id, mask.depth.clone())
