@@ -183,6 +183,12 @@ function wideLayer(
 type Step =
   | { apply: number[] }
   | { image: { id: number; side: number; color: string } }
+  /** Rows `from` to `to` of a level in strips of `strip` (`putGpuImageRows`), in bands of `colors`. */
+  | {
+      rows: { id: number; side: number; colors: string[]; from: number; to: number; strip: number };
+    }
+  /** Lets go of a level part uploaded in strips (`cancelGpuImageRows`). */
+  | { cancel: { id: number; width: number } }
   | {
       name: string;
       size: [number, number];
@@ -248,6 +254,34 @@ async function presented(
             } finally {
               bitmap.close();
             }
+            continue;
+          }
+          if ("rows" in step) {
+            const { id, side, colors, from, to, strip } = step.rows;
+            const canvas = new OffscreenCanvas(side, side);
+            const ctx = canvas.getContext("2d");
+            if (!ctx) throw new Error("no 2D context");
+            const band = side / colors.length;
+            colors.forEach((c, k) => {
+              ctx.fillStyle = c;
+              ctx.fillRect(0, k * band, side, band);
+            });
+            const bitmap = await createImageBitmap(canvas);
+            try {
+              for (let y = from; y < to; y += strip) {
+                const put = engine.putGpuImageRows?.(id, bitmap, y, Math.min(strip, to - y));
+                if (!put) throw new Error("no putGpuImageRows");
+                requireOk(put);
+              }
+            } finally {
+              bitmap.close();
+            }
+            continue;
+          }
+          if ("cancel" in step) {
+            const out = engine.cancelGpuImageRows?.(step.cancel.id, step.cancel.width);
+            if (!out) throw new Error("no cancelGpuImageRows");
+            requireOk(out);
             continue;
           }
           const out = engine.renderGpu?.(
@@ -320,9 +354,11 @@ function neverBack(rows: { name: string; samples: number[][] }[], old: number[],
 /**
  * A `color` board of 1,024 x 256 under a dark square every 8 px (4,096 of them, so a tile takes
  * longer than a 1 ms slice): a fresh list, or (with `base`) a patch recolouring the board only.
+ * "placeholder" fills the board with image 1's placeholder, and "loaded" with image 1 clipped to
+ * the board, as the editor does once the image is there.
  */
 function slowBoard(
-  color: readonly [number, number, number, number] | "image",
+  color: readonly [number, number, number, number] | "image" | "placeholder" | "loaded",
   base = 0xffffffff,
 ): number[] {
   const list = new ListWriter(base, base === 0xffffffff ? 1 : base + 1);
@@ -333,8 +369,26 @@ function slowBoard(
     y: number,
     w: number,
     h: number,
-    c: readonly number[] | "image",
-  ) =>
+    c: readonly number[] | "image" | "placeholder" | "loaded",
+  ) => {
+    const image = {
+      kind: "image",
+      image: 1,
+      matrix: [w, 0, 0, h, 0, 0],
+      tile: false,
+      opacity: 1,
+    } as const;
+    const fill = {
+      op: "fill",
+      path: 0,
+      evenOdd: false,
+      paint:
+        c === "image" || c === "loaded"
+          ? image
+          : c === "placeholder"
+            ? ({ kind: "placeholder", opacity: 1 } as const)
+            : ({ kind: "solid", color: c as [number, number, number, number] } as const),
+    } as const;
     list.set(id, ROOT, {
       flags: 0,
       transform: [1, 0, 0, 1, x, y],
@@ -345,19 +399,11 @@ function slowBoard(
       reach: 0,
       unsupported: 0,
       paths: [{ kind: "rect", w, h, radii: [0, 0, 0, 0], smoothing: 0 }],
-      ops: [
-        {
-          op: "fill",
-          path: 0,
-          evenOdd: false,
-          paint:
-            c === "image"
-              ? { kind: "image", image: 1, matrix: [w, 0, 0, h, 0, 0], tile: false, opacity: 1 }
-              : { kind: "solid", color: c as [number, number, number, number] },
-        },
-      ],
+      ops:
+        c === "loaded" ? [{ op: "clip", path: 0, evenOdd: false }, fill, { op: "unclip" }] : [fill],
       coarse: [],
     });
+  };
   rect(1, 0, 0, 1024, 256, color);
   if (base === 0xffffffff) {
     let id = 2;
@@ -365,6 +411,39 @@ function slowBoard(
       for (let x = 0; x < 1024; x += 8) rect(id++, x + 1, y + 1, 5, 5, [0.2, 0.2, 0.2, 1]);
     }
   }
+  return [...list.finish()];
+}
+
+/** Image 1 stretched over a 1,024 x 256 board. */
+function imageBoard(): number[] {
+  const list = new ListWriter(0xffffffff, 1);
+  list.reset();
+  list.set(1, ROOT, {
+    flags: 0,
+    transform: [1, 0, 0, 1, 0, 0],
+    opacity: 1,
+    width: 1024,
+    height: 256,
+    coarseBelow: 0,
+    reach: 0,
+    unsupported: 0,
+    paths: [{ kind: "rect", w: 1024, h: 256, radii: [0, 0, 0, 0], smoothing: 0 }],
+    ops: [
+      {
+        op: "fill",
+        path: 0,
+        evenOdd: false,
+        paint: {
+          kind: "image",
+          image: 1,
+          matrix: [1024, 0, 0, 256, 0, 0],
+          tile: false,
+          opacity: 1,
+        },
+      },
+    ],
+    coarse: [],
+  });
   return [...list.finish()];
 }
 
@@ -1411,6 +1490,161 @@ for (const build of ["browser", "webgl"] as const) {
       for (const row of rows) {
         expect(row.samples, `${row.name} showed a hole where the image was`).toEqual([red, red]);
       }
+      expect(rows.at(-1)).toMatchObject({ exact: true, pending: 0 });
+    });
+
+    test("image rows uploaded in strips land where they belong", async ({ page }) => {
+      // A 512 px level in 8 bands, in strips of 48 rows (not a band's multiple), stretched over
+      // the 1,024 x 256 board: each band's middle shows its colour.
+      const bands = ["#ff0000", "#00ff00", "#0000ff", "#ffff00", "#ff00ff", "#00ffff"];
+      const rgba = [
+        [255, 0, 0, 255],
+        [0, 255, 0, 255],
+        [0, 0, 255, 255],
+        [255, 255, 0, 255],
+        [255, 0, 255, 255],
+        [0, 255, 255, 255],
+      ];
+      const band = 256 / bands.length;
+      const rows = await presented(
+        page,
+        build,
+        imageBoard(),
+        [
+          { rows: { id: 1, side: 512, colors: bands, from: 0, to: 512, strip: 48 } },
+          {
+            name: "after the strips",
+            size: [1024, 256],
+            scale: 1,
+            moving: false,
+            budget: 0,
+            samples: bands.map((_, k) => [512, Math.floor(k * band + band / 2)]),
+          },
+        ],
+        { viewImages: true },
+      );
+      expect(rows[0]).toMatchObject({ exact: true });
+      rows[0]?.samples.forEach((got, k) => {
+        for (let c = 0; c < 4; c++)
+          expect(Math.abs((got[c] ?? -999) - (rgba[k]?.[c] ?? 0)), `band ${k}`).toBeLessThanOrEqual(
+            2,
+          );
+      });
+    });
+
+    test("a level replaced at its width in strips shows the old one until its last strip", async ({
+      page,
+    }) => {
+      // A red 512 px level, then a green one of that width in strips of 64 rows. Until the last
+      // strip is in, frames show the red level (never less) and none is exact; then green, and
+      // once green is shown, never red again. A cancelled upload keeps the red level, exact.
+      const green = [0, 255, 0, 255];
+      const rest = (name: string, budget = 0): Step => ({
+        name,
+        size: [1024, 256],
+        scale: 1,
+        moving: false,
+        budget,
+        samples: [
+          [100, 40],
+          [700, 200],
+        ],
+      });
+      const strips = (from: number, to: number): Step => ({
+        rows: { id: 1, side: 512, colors: ["#00ff00"], from, to, strip: 64 },
+      });
+      const rows = await presented(
+        page,
+        build,
+        imageBoard(),
+        [
+          { image: { id: 1, side: 512, color: "#ff0000" } },
+          rest("whole level"),
+          strips(0, 64),
+          rest("after the first strip"),
+          strips(64, 448),
+          rest("before the last strip"),
+          strips(448, 512),
+          ...Array.from({ length: 6 }, (_, i) => rest(`after the last strip ${i}`, 1)),
+          rest("exact"),
+        ],
+        { viewImages: true },
+      );
+      expect(rows[0]).toMatchObject({ exact: true, samples: [red, red] });
+      for (const row of rows.slice(1, 3)) {
+        expect(row.samples, `${row.name} showed less than the red level`).toEqual([red, red]);
+        expect(row.exact, `${row.name} was exact mid-upload`).toBe(false);
+      }
+      for (const row of rows) {
+        for (const sample of row.samples)
+          expect([red.join(), green.join()], `${row.name}`).toContain(sample.join());
+      }
+      neverBack(rows, red, green);
+      expect(rows.at(-1)).toMatchObject({ exact: true, pending: 0, samples: [green, green] });
+
+      const cancelled = await presented(
+        page,
+        build,
+        imageBoard(),
+        [
+          { image: { id: 1, side: 512, color: "#ff0000" } },
+          rest("whole level"),
+          strips(0, 128),
+          { cancel: { id: 1, width: 512 } },
+          rest("cancelled"),
+        ],
+        { viewImages: true },
+      );
+      expect(cancelled.at(-1)).toMatchObject({ exact: true, pending: 0, samples: [red, red] });
+    });
+
+    test("an image once shown never goes back to its placeholder at another zoom", async ({
+      page,
+    }) => {
+      // The board drawn at zoom 1 with its image's placeholder; the image arrives (the same
+      // picture: zoom 1's tiles stand in until drawn again); zoom 2 drawn exact with it; then
+      // back to zoom 1, moving and at rest, 1 ms at a time. Where zoom 2 showed the image, no
+      // frame shows the placeholder again: tiles drawn with it lie beneath the frame on screen
+      // and zoom 2's tiles (#352 re-check).
+      const frame = (name: string, scale: number, moving: boolean, budget: number): Step => ({
+        name,
+        size: [1024, 256],
+        scale,
+        moving,
+        budget,
+        // Page (103.5, 47.5) and (399.5, 103.5), between the dark squares, shown at zoom 2.
+        samples: [
+          [Math.floor(103.5 * scale), Math.floor(47.5 * scale)],
+          [Math.floor(399.5 * scale), Math.floor(103.5 * scale)],
+        ],
+      });
+      const rows = await presented(
+        page,
+        build,
+        slowBoard("placeholder"),
+        [
+          frame("zoom 1", 1, false, 0),
+          { image: { id: 1, side: 64, color: "#ff0000" } },
+          { apply: slowBoard("loaded", 1) },
+          frame("zoom 2", 2, false, 0),
+          frame("zooming 1.6", 1.6, true, 1),
+          frame("zooming 1.25", 1.25, true, 1),
+          frame("zooming 1", 1, true, 1),
+          ...Array.from({ length: 20 }, (_, i) => frame(`zoom 1 slice ${i}`, 1, false, 1)),
+          frame("zoom 1 exact", 1, false, 0),
+        ],
+        { viewImages: true },
+      );
+      expect(rows[0]).toMatchObject({ exact: true });
+      expect(rows[0]?.samples[0], "the placeholder first").not.toEqual(red);
+      expect(rows[1]).toMatchObject({ exact: true, samples: [red, red] });
+      for (const row of rows.slice(1)) {
+        expect(row.samples, `${row.name} went back to the placeholder`).toEqual([red, red]);
+      }
+      expect(
+        rows.slice(2, -1).some((r) => !r.exact),
+        "zoom 1 took more than one frame to draw again",
+      ).toBe(true);
       expect(rows.at(-1)).toMatchObject({ exact: true, pending: 0 });
     });
 

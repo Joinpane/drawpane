@@ -100,6 +100,7 @@ export class Engine {
   putCpuImageLevel(id: number, width: number, height: number, rgba: Uint8Array): Outcome;
   putGpuImageLevel?(id: number, bitmap: ImageBitmap): Outcome;
   putGpuImageRows?(id: number, bitmap: ImageBitmap, y: number, rows: number): Outcome;
+  cancelGpuImageRows?(id: number, width: number): Outcome;
   dropImageLevel(id: number, width: number): Outcome;
   renderCpu(
     width: number,

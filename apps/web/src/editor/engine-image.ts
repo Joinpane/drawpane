@@ -169,10 +169,13 @@ interface ImageBackend {
   readonly retryUpload?: boolean;
   upload(handle: number, bitmap: ImageBitmap): boolean | Promise<boolean>;
   /**
-   * Uploads rows `y` to `y + rows` of a level, in order from 0 (the level is drawn once its last
-   * rows are in), so a large one spreads over frames. `drop` lets go of one left part done.
+   * Uploads rows `y` to `y + rows` of a level, in order from 0, so a large one spreads over
+   * frames. The level is drawn once its last rows are in, in place of the resident one of its
+   * width, kept until then (both count against the budget meanwhile).
    */
   uploadRows?(handle: number, bitmap: ImageBitmap, y: number, rows: number): boolean;
+  /** Lets go of a level left part done by `uploadRows` (the resident one of its width stays). */
+  cancelRows?(handle: number, width: number): void;
   drop(handle: number, width: number): void;
 }
 
@@ -1214,7 +1217,11 @@ export class ViewImages {
 
   #room(target: Target, missingFallback?: Target): Resident[] | null {
     const existing = this.#residents.get(levelKey(target));
-    const delta = existing ? Math.max(0, bytes(target) - bytes(existing)) : bytes(target);
+    // A level uploaded in strips lands beside the one it replaces, which goes only then.
+    const delta =
+      existing && !this.#backend?.uploadRows
+        ? Math.max(0, bytes(target) - bytes(existing))
+        : bytes(target);
     const available = this.#budget - this.#residentBytes;
     const extra = missingFallback ? bytes(missingFallback) : 0;
     const need = delta + extra - available;
@@ -1835,8 +1842,16 @@ export class ViewImages {
       }
     }
     if (signal.aborted || backend !== this.#backend) {
-      if (uploaded) backend.drop(target.handle, target.width);
-      return false;
+      // A level that landed took the place of the resident one of its width (the backend let
+      // that one go): it stays resident there. Otherwise it's let go.
+      const replaced =
+        uploaded && backend === this.#backend && !this.#hidden
+          ? this.#residents.get(lKey)
+          : undefined;
+      if (!replaced) {
+        if (uploaded) backend.drop(target.handle, target.width);
+        return false;
+      }
     }
     if (uploaded) {
       const replaced = this.#residents.get(lKey);
@@ -1852,7 +1867,8 @@ export class ViewImages {
 
   /**
    * Uploads a level whole, or in row strips paced over frames (the caller paced the first). A
-   * level left part done (dropped, or a strip refused) is let go.
+   * level left part done (dropped, or a strip refused) is let go; the resident one of its width
+   * stays.
    */
   async #upload(
     target: Target,
@@ -1877,7 +1893,10 @@ export class ViewImages {
         backend !== this.#backend ||
         !backend.uploadRows(target.handle, bitmap, y, rows)
       ) {
-        if (y > 0) backend.drop(target.handle, width);
+        if (y > 0) {
+          if (backend.cancelRows) backend.cancelRows(target.handle, width);
+          else backend.drop(target.handle, width);
+        }
         return false;
       }
     }

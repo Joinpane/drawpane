@@ -502,6 +502,18 @@ impl Engine {
         outcome(self.core.put_gpu_image_rows(id, bitmap, y, rows))
     }
 
+    /// Lets go of a level being uploaded with `putGpuImageRows`, its last rows not in: the image
+    /// keeps the levels it had, the one of that width included.
+    #[cfg(all(target_arch = "wasm32", feature = "gpu-common"))]
+    #[wasm_bindgen(js_name = cancelGpuImageRows)]
+    pub fn cancel_gpu_image_rows(&mut self, id: u32, width: u32) -> Outcome {
+        if let Some(o) = self.exporting() {
+            return o;
+        }
+        self.core.cancel_gpu_image_rows(id, width);
+        Outcome::ok()
+    }
+
     #[wasm_bindgen(js_name = dropImageLevel)]
     pub fn drop_image_level(&mut self, id: u32, width: u32) -> Outcome {
         if let Some(o) = self.exporting() {

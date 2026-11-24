@@ -2088,6 +2088,9 @@ export class EngineView {
           if (!result.ok && result.code === ErrorCode.Trap) this.#handleGpuFailure(result, false);
           return result.ok;
         },
+        cancelRows: (handle, width) => {
+          engine.cancelGpuImageRows(handle, width);
+        },
         drop: (handle, width) => {
           engine.dropImageLevel(handle, width);
         },

@@ -627,7 +627,8 @@ impl Engine {
     }
 
     /// `put_gpu_image_level` in row strips over frames (`Gpu::put_image_bitmap_rows`): the level
-    /// changes what's drawn once its last rows are in.
+    /// changes what's drawn once its last rows are in, as a whole upload does then (one of a
+    /// size the image had is a replacement). Meanwhile, frames that would draw it aren't exact.
     #[cfg(all(target_arch = "wasm32", feature = "gpu-common"))]
     pub fn put_gpu_image_rows(&mut self, id: u32, bitmap: &web_sys::ImageBitmap, y: u32, rows: u32) -> Result<()> {
         let gpu = self
@@ -641,12 +642,50 @@ impl Engine {
             let after = gpu.image_sizes(id);
             let replaced = before.contains(&size).then_some(size);
             self.image_levels_changed(id, &before, &after, replaced);
-        } else if y == 0 && before.contains(&size) {
-            // The level it replaces went with the first rows: drawn with the others meanwhile.
-            let after = gpu.image_sizes(id);
-            self.image_levels_changed(id, &before, &after, None);
         }
         Ok(())
+    }
+
+    /// Lets go of a level being uploaded in strips, its last rows not in: the image keeps the
+    /// levels it had (the one of that width included).
+    #[cfg(feature = "gpu-common")]
+    pub fn cancel_gpu_image_rows(&mut self, id: u32, width: u32) {
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.drop_pending_image(id, width);
+        }
+    }
+
+    /// Whether a level being uploaded in strips is one a frame of `view` (`size` pixels) would
+    /// draw an image in it with: what it shows changes once that level's last rows are in.
+    #[cfg(feature = "gpu-common")]
+    fn uploading_in_view(&mut self, view: Affine, size: (u32, u32)) -> bool {
+        let Some(gpu) = self.gpu.as_ref() else {
+            return false;
+        };
+        let uploading: Vec<_> = gpu
+            .uploading()
+            .into_iter()
+            .map(|(id, level)| (id, level, gpu.image_sizes(id)))
+            .collect();
+        if uploading.is_empty() || view.determinant().abs() == 0.0 {
+            return false;
+        }
+        let scale = view.as_coeffs()[0].abs();
+        let page = view
+            .inverse()
+            .transform_rect_bbox(Rect::new(0.0, 0.0, f64::from(size.0), f64::from(size.1)));
+        let both_axes = self.store.view_images;
+        uploading.into_iter().any(|(id, level, mut levels)| {
+            // The levels once it's in: in place of one of its width, widest first.
+            levels.retain(|l| l.0 != level.0);
+            let at = levels.partition_point(|l| l.0 > level.0);
+            levels.insert(at, level);
+            let picked = self.store.image_spans(id).iter().any(|&(x, y)| {
+                let span = (x * scale, if both_axes { y * scale } else { 0.0 });
+                levels.get(images::pick(levels.iter().copied(), span)) == Some(&level)
+            });
+            picked && self.store.image_users(id).iter().any(|d| d.rect.overlaps(page))
+        })
     }
 
     #[cfg(all(target_arch = "wasm32", feature = "gpu-common"))]
@@ -1795,6 +1834,10 @@ impl Engine {
         if stats.exact && self.store.provisional_shown().is_some() {
             stats.exact = false;
             stats.standin = true;
+        }
+        // Nor while a level it would draw an image with is still being uploaded in strips.
+        if stats.exact && self.uploading_in_view(view, (width, height)) {
+            stats.exact = false;
         }
         Ok(stats)
     }
@@ -3396,6 +3439,39 @@ impl Engine {
             comp_exact = comp.exact;
             stats.pending = comp.pending;
             if !comp.complete {
+                // Scaled tiles, nearest pixel (stand-ins).
+                let lay = |frame: &mut [u8], sc: &crate::tiles::Scaled| {
+                    let Some(src) = tiles.slots.get(sc.slot as usize) else {
+                        return;
+                    };
+                    if src.len() != t * t * 4 {
+                        return;
+                    }
+                    let d = sc.dst;
+                    let x0 = d.x0.max(0.0).floor() as usize;
+                    let y0 = d.y0.max(0.0).floor() as usize;
+                    let x1 = (d.x1.min(f64::from(width))).ceil().max(0.0) as usize;
+                    let y1 = (d.y1.min(f64::from(height))).ceil().max(0.0) as usize;
+                    for y in y0..y1.min(height as usize) {
+                        let v = ((y as f64 + 0.5 - d.y0) / d.height() * t as f64).floor();
+                        if !(0.0..t as f64).contains(&v) {
+                            continue;
+                        }
+                        for x in x0..x1.min(width as usize) {
+                            let u = ((x as f64 + 0.5 - d.x0) / d.width() * t as f64).floor();
+                            if !(0.0..t as f64).contains(&u) {
+                                continue;
+                            }
+                            let from = (v as usize * t + u as usize) * 4;
+                            let to = y * stride + x * 4;
+                            frame[to..to + 4].copy_from_slice(&src[from..from + 4]);
+                        }
+                    }
+                };
+                // Refined tiles: beneath anything drawn since (the last frame, other levels').
+                for sc in &comp.beneath {
+                    lay(&mut frame, sc);
+                }
                 // Where something changed since, the last frame's pixels are old: then it isn't
                 // laid at all here (the GPU lays it round what changed).
                 if let (Some(m), Some(l), true) = (comp.base, last, comp.holes.is_empty()) {
@@ -3418,32 +3494,7 @@ impl Engine {
                     }
                 }
                 for sc in &comp.scaled {
-                    let Some(src) = tiles.slots.get(sc.slot as usize) else {
-                        continue;
-                    };
-                    if src.len() != t * t * 4 {
-                        continue;
-                    }
-                    let d = sc.dst;
-                    let x0 = d.x0.max(0.0).floor() as usize;
-                    let y0 = d.y0.max(0.0).floor() as usize;
-                    let x1 = (d.x1.min(f64::from(width))).ceil().max(0.0) as usize;
-                    let y1 = (d.y1.min(f64::from(height))).ceil().max(0.0) as usize;
-                    for y in y0..y1.min(height as usize) {
-                        let v = ((y as f64 + 0.5 - d.y0) / d.height() * t as f64).floor();
-                        if !(0.0..t as f64).contains(&v) {
-                            continue;
-                        }
-                        for x in x0..x1.min(width as usize) {
-                            let u = ((x as f64 + 0.5 - d.x0) / d.width() * t as f64).floor();
-                            if !(0.0..t as f64).contains(&u) {
-                                continue;
-                            }
-                            let from = (v as usize * t + u as usize) * 4;
-                            let to = y * stride + x * 4;
-                            frame[to..to + 4].copy_from_slice(&src[from..from + 4]);
-                        }
-                    }
+                    lay(&mut frame, sc);
                 }
             }
             for c in &comp.copies {

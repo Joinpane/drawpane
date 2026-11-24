@@ -2015,13 +2015,26 @@ GPU work a frame queued had no bound, and input waited behind it.
     (`TileCache::frame_drawn`).
   - Another resolution of the same image (a sharper level arriving, or one dropped) isn't a
     change: tiles drawn with the old one stand in, never exact, and are drawn again
-    (`TileEntry::refine`). A level replaced at a size the image had is treated as other content.
+    (`TileEntry::refine`), the overview's between frames like stale ones. A level replaced at a
+    size the image had is treated as other content.
   - So is an image loaded where its placeholder was: a record set again with only its
     placeholder fills become fills of the image, clipped to its shape (`Dirty::refine`,
-    `Store::fills_placeholder`). Anything else changing with it, another image, or another fill
-    is an edit. Zooming out brings boards into view whose images then load: each counted as an
-    edit staled the overview tile over its board (one covers about 23,000 page units on the iOS
+    `Store::fills_placeholder`). Its paths, parent and everything else stay as they were, the
+    image's opacity and blend are the placeholder's, and the clip around the image fill is the
+    placeholder's path. Anything else changing with it, another image, or another fill is an
+    edit. Zooming out brings boards into view whose images then load: each counted as an edit
+    staled the overview tile over its board (one covers about 23,000 page units on the iOS
     kit), and the pinch-out drew what it stood in for, 5 to 34 tiles a gesture.
+  - A refined tile, of the frame's level too, never goes over anything drawn since: it's laid
+    over the overview and beneath the frame on screen and other levels' current tiles
+    (`Composite::beneath`), so it fills in only where nothing else stands in. Laid on top, a zoom
+    from 1 to 2 and back showed zoom 1's placeholder again where zoom 2 had shown the image (#352
+    re-check).
+  - An image level uploaded in row strips over frames (`putGpuImageRows`) lands with its last
+    strip, in place of the level of its width, which stays until then; both count against the
+    image budget meanwhile, and frames that would draw an image with it aren't exact. One left
+    part done is let go alone (`cancelGpuImageRows`). Dropping the old level with the first
+    strip showed the placeholder until the last, reported exact.
   - Why the first two rules: one set of changes forgotten by exact frames wasn't enough. A frame
     at rest laid stale tiles of another scale and put old pixels back after an exact frame at
     another scale had covered one of two changes. Laying holes at rest instead showed the

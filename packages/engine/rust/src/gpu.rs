@@ -46,7 +46,7 @@ use crate::shadow::{
     scaled_shadow_sigma,
 };
 use crate::store::Store;
-use crate::tiles::{Composite, Last, TILE, TileCache, TileKey};
+use crate::tiles::{Composite, Last, Scaled, TILE, TileCache, TileKey};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -3470,9 +3470,10 @@ impl Gpu {
     }
 
     /// Uploads rows `y..y + rows` of `bitmap`, an image level, so a large one spreads over
-    /// frames: the first rows (`y` 0) make its texture, within `budget` as `put_image_bitmap`
-    /// does, and rows must follow in order. Once its last rows are in, the level is resident
-    /// (true); until then it's drawn with the levels there were.
+    /// frames: the first rows (`y` 0) make its texture, within `budget`, and rows must follow in
+    /// order. Once its last rows are in, the level is resident (true), in place of one of its
+    /// width; until then it's drawn with the levels there were, that one included, so both count
+    /// against the budget meanwhile.
     #[cfg(target_arch = "wasm32")]
     pub fn put_image_bitmap_rows(
         &mut self,
@@ -3487,16 +3488,10 @@ impl Gpu {
             self.drop_pending_image(id, width);
             self.check_texture_size(width, height, "an image")?;
             let bytes = width as usize * height as usize * 4;
-            let freed = self
-                .images
-                .get(&id)
-                .and_then(|levels| levels.iter().find(|(_, _, w, _)| *w == width))
-                .map_or(0, |(_, _, w, h)| (*w * *h * 4) as usize);
-            if self.image_bytes - freed + bytes > budget {
+            if self.image_bytes + bytes > budget {
                 return Err(EngineError::limit("images over their budget"));
             }
-            self.reserve_or_trim(bytes, freed, "an image")?;
-            self.drop_image_level(id, width);
+            self.reserve_or_trim(bytes, 0, "an image")?;
             let tex = texture(
                 &self.device,
                 width,
@@ -3552,6 +3547,8 @@ impl Gpu {
         let Some(done) = self.pending_images.remove(&(id, width)) else {
             return Ok(false);
         };
+        // The level it replaces goes now, never before: what's drawn never has less.
+        self.drop_image_level(id, width);
         let tid = TextureId((1 << 50) | (u64::from(id) << 16) | u64::from(width));
         self.bindings.insert(tid, done.tex.create_view(&Default::default()));
         let levels = self.images.entry(id).or_default();
@@ -3560,8 +3557,17 @@ impl Gpu {
         Ok(true)
     }
 
-    /// Drops a level being uploaded in strips, with its budget.
-    fn drop_pending_image(&mut self, id: u32, width: u32) {
+    /// The image levels being uploaded in strips: each image's id and the level's size.
+    pub fn uploading(&self) -> Vec<(u32, (u32, u32))> {
+        self.pending_images
+            .iter()
+            .map(|(&(id, width), p)| (id, (width, p.height)))
+            .collect()
+    }
+
+    /// Drops a level being uploaded in strips, with its budget (the level it would replace
+    /// stays).
+    pub fn drop_pending_image(&mut self, id: u32, width: u32) {
         if let Some(p) = self.pending_images.remove(&(id, width)) {
             let bytes = width as usize * p.height as usize * 4;
             self.image_bytes -= bytes;
@@ -5394,7 +5400,8 @@ impl Gpu {
         if !paused {
             for job in &jobs {
                 // Drawn by the resume above, or the overview went with a failed one.
-                if !self.tiles.is_overview(&job.key) || self.tiles.get(&job.key).is_some_and(|e| !e.stale) {
+                if !self.tiles.is_overview(&job.key) || self.tiles.get(&job.key).is_some_and(|e| !e.stale && !e.refine)
+                {
                     continue;
                 }
                 if deadline.is_some_and(|d| now() >= d) {
@@ -10184,8 +10191,8 @@ impl Gpu {
     }
 
     /// Lays a frame into frame texture `dst`: under what the frame's own tiles don't cover, the
-    /// background, the last frame moved and scaled, and other levels' tiles scaled; then the
-    /// frame's tiles, pixel for pixel. When `submit` is false, returns the open encoder so
+    /// background, the overview, refined tiles, the last frame moved and scaled, and other
+    /// levels' tiles scaled; then the frame's tiles, pixel for pixel. When `submit` is false, returns the open encoder so
     /// `finish_frame` can record the present blit into the same submission.
     #[allow(clippy::too_many_arguments)]
     fn composite(
@@ -10205,9 +10212,40 @@ impl Gpu {
             label: Some("composite"),
         });
         if !comp.complete {
-            // Quads by source texture: the overview beneath, the last frame, then pages, in the
-            // order given.
+            // Quads by source texture: the overview beneath, refined tiles, the last frame, then
+            // pages, in the order given.
             let mut quads: Vec<(Option<usize>, [f32; 12])> = Vec::new();
+            let pages = self.pages.len();
+            let page_quad = |sc: &Scaled| -> Option<(Option<usize>, [f32; 12])> {
+                let page = (sc.slot / per_page) as usize;
+                if page >= pages {
+                    return None;
+                }
+                let within = sc.slot % per_page;
+                let (x, y) = (
+                    f64::from((within % per_row) * TILE),
+                    f64::from((within / per_row) * TILE),
+                );
+                let (p, t) = (f64::from(page_side), f64::from(TILE));
+                let d = sc.dst;
+                Some((
+                    Some(page),
+                    [
+                        d.x0 as f32,
+                        d.y0 as f32,
+                        d.x1 as f32,
+                        d.y1 as f32,
+                        (x / p) as f32,
+                        (y / p) as f32,
+                        ((x + t) / p) as f32,
+                        ((y + t) / p) as f32,
+                        ((x + 0.5) / p) as f32,
+                        ((y + 0.5) / p) as f32,
+                        ((x + t - 0.5) / p) as f32,
+                        ((y + t - 0.5) / p) as f32,
+                    ],
+                ))
+            };
             // The overview's tiles, from its own texture.
             if let Some(grid) = self.overview_page.as_ref().map(|o| o.grid) {
                 let (pw, ph, t) = (f64::from(grid.0 * TILE), f64::from(grid.1 * TILE), f64::from(TILE));
@@ -10239,6 +10277,8 @@ impl Gpu {
                     ));
                 }
             }
+            // Refined tiles: beneath anything drawn since (the last frame, other levels' tiles).
+            quads.extend(comp.beneath.iter().filter_map(page_quad));
             if let Some(m) = comp.base
                 && let Some(l) = self.last
                 && self
@@ -10280,36 +10320,7 @@ impl Gpu {
                     ));
                 }
             }
-            for sc in &comp.scaled {
-                let page = (sc.slot / per_page) as usize;
-                if page >= self.pages.len() {
-                    continue;
-                }
-                let within = sc.slot % per_page;
-                let (x, y) = (
-                    f64::from((within % per_row) * TILE),
-                    f64::from((within / per_row) * TILE),
-                );
-                let (p, t) = (f64::from(page_side), f64::from(TILE));
-                let d = sc.dst;
-                quads.push((
-                    Some(page),
-                    [
-                        d.x0 as f32,
-                        d.y0 as f32,
-                        d.x1 as f32,
-                        d.y1 as f32,
-                        (x / p) as f32,
-                        (y / p) as f32,
-                        ((x + t) / p) as f32,
-                        ((y + t) / p) as f32,
-                        ((x + 0.5) / p) as f32,
-                        ((y + 0.5) / p) as f32,
-                        ((x + t - 0.5) / p) as f32,
-                        ((y + t - 0.5) / p) as f32,
-                    ],
-                ));
-            }
+            quads.extend(comp.scaled.iter().filter_map(page_quad));
             let c = self
                 .compositor
                 .as_mut()

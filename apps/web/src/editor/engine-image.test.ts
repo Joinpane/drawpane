@@ -545,6 +545,11 @@ describe("progressive image tiers", () => {
       fallbackToFull?: boolean;
       previewMissing?: boolean;
       onPreviewMissing?: (ref: string, blob: Blob) => void;
+      /**
+       * Uploads in row strips as the engine does: a level lands with its last strip, in place of
+       * the one of its width (kept until then, both counted meanwhile).
+       */
+      strips?: boolean;
     } = {},
   ) {
     const defaultSize = opts.size ?? { width: 3093, height: 2247 };
@@ -556,6 +561,12 @@ describe("progressive image tiers", () => {
     const refGates = new Map<string, Array<() => void>>();
     let total = 0;
     let peak = 0;
+    /** Each strip: its level's width, first row, and whether a level of that width was held. */
+    const strips: Array<{ width: number; y: number; replacing: boolean }> = [];
+    const cancels: Array<{ handle: number; width: number }> = [];
+    const drops: Array<{ handle: number; width: number }> = [];
+    const parts = new Map<string, number>();
+    const refuse = { strip: false };
 
     vi.stubGlobal(
       "createImageBitmap",
@@ -627,16 +638,53 @@ describe("progressive image tiers", () => {
         return true;
       },
       drop(handle, width) {
+        drops.push({ handle, width });
         const levels = held.get(handle);
         total -= levels?.get(width) ?? 0;
         levels?.delete(width);
       },
+      ...(opts.strips
+        ? {
+            uploadRows(handle: number, bitmap: ImageBitmap, y: number, rows: number) {
+              const levels = held.get(handle) ?? new Map<number, number>();
+              const key = `${handle}/${bitmap.width}`;
+              const next = bitmap.width * bitmap.height * 4;
+              strips.push({ width: bitmap.width, y, replacing: levels.has(bitmap.width) });
+              if (y > 0 && refuse.strip) return false;
+              if (y === 0) {
+                total += next - (parts.get(key) ?? 0);
+                parts.set(key, next);
+                peak = Math.max(peak, total);
+              }
+              if (y + rows < bitmap.height) return true;
+              parts.delete(key);
+              uploads.push({ handle, width: bitmap.width, height: bitmap.height });
+              total -= levels.get(bitmap.width) ?? 0;
+              levels.set(bitmap.width, next);
+              held.set(handle, levels);
+              return true;
+            },
+            cancelRows(handle: number, width: number) {
+              cancels.push({ handle, width });
+              const key = `${handle}/${width}`;
+              total -= parts.get(key) ?? 0;
+              parts.delete(key);
+            },
+          }
+        : {}),
     });
 
     return {
       images,
       fetched,
       uploads,
+      strips,
+      cancels,
+      drops,
+      refuse,
+      get total() {
+        return total;
+      },
       held: (ref: string) => held.get(images.info(ref)?.handle ?? -1),
       releaseTier: (tier: ImageTier) => {
         opts.holdTiers?.delete(tier);
@@ -802,6 +850,69 @@ describe("progressive image tiers", () => {
       // Same-width replacement must not double-count 256x256 (only adds the 32x32 fallback).
       expect(r.images.residentBytes).toBe(256 * 256 * 4 + 32 * 32 * 4);
       expect(r.uploads.filter((u) => u.width === 256)).toHaveLength(2);
+    } finally {
+      r.releaseTier("full");
+      r.images.setBackend(null);
+    }
+  });
+
+  it("replaces a same-width preview in strips only with its last strip, counting both meanwhile", async () => {
+    // A 1,024 px photo: its 1,024 preview, then the full image at the same width, 4 MiB each,
+    // so each goes in 4 strips. The preview stays until the full image's last strip is in.
+    const r = progressiveRig({
+      size: { width: 1024, height: 1024 },
+      holdTiers: new Set<ImageTier>(["full"]),
+      strips: true,
+    });
+    const demands = demand(["photo"], 700, 700);
+    try {
+      await eventually(() => {
+        r.images.update(demands, 1, limit(64), 0, true);
+        expect(r.held("photo")?.has(1024)).toBe(true);
+      });
+      const before = r.strips.length;
+      r.releaseTier("full");
+      await eventually(() => {
+        expect(r.images.update(demands, 1, limit(64), 16, false)).toBe(true);
+      });
+      const full = r.strips.slice(before).filter((s) => s.width === 1024);
+      expect(full.length).toBeGreaterThan(1);
+      expect(
+        full.every((s) => s.replacing),
+        "the preview was held through every strip",
+      ).toBe(true);
+      expect(r.peak).toBeGreaterThanOrEqual(2 * 1024 * 1024 * 4);
+      expect(r.images.residentBytes).toBe(r.total);
+      expect(r.cancels).toEqual([]);
+    } finally {
+      r.releaseTier("full");
+      r.images.setBackend(null);
+    }
+  });
+
+  it("lets go of only the part done when a strip is refused: the resident level of its width stays", async () => {
+    const r = progressiveRig({
+      size: { width: 1024, height: 1024 },
+      holdTiers: new Set<ImageTier>(["full"]),
+      strips: true,
+    });
+    const demands = demand(["photo"], 700, 700);
+    try {
+      await eventually(() => {
+        r.images.update(demands, 1, limit(64), 0, true);
+        expect(r.held("photo")?.has(1024)).toBe(true);
+      });
+      const handle = r.images.info("photo")?.handle ?? -1;
+      const preview = r.held("photo")?.get(1024);
+      r.refuse.strip = true;
+      r.releaseTier("full");
+      await eventually(() => {
+        expect(r.cancels).toContainEqual({ handle, width: 1024 });
+      });
+      r.images.update(demands, 1, limit(64), 16, false);
+      expect(r.held("photo")?.get(1024)).toBe(preview);
+      expect(r.drops.filter((d) => d.width === 1024)).toEqual([]);
+      expect(r.images.residentBytes).toBe(r.total);
     } finally {
       r.releaseTier("full");
       r.images.setBackend(null);

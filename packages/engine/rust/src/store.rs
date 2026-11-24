@@ -856,7 +856,7 @@ impl Store {
                     txn.filling = self
                         .nodes
                         .get(&id)
-                        .is_some_and(|n| Self::fills_placeholder(&n.record, &record))
+                        .is_some_and(|n| n.parent == parent && Self::fills_placeholder(&n.record, &record))
                         .then_some(id);
                     self.note_before(id, txn);
                     txn.filling = None;
@@ -1317,44 +1317,77 @@ impl Store {
         }
     }
 
-    /// Whether setting `old` to `new` only fills an image placeholder: the placeholder fills
-    /// become fills of the image (clipped to the shape), and nothing else about the record changes.
+    /// Whether setting `old` to `new` only loads an image where its placeholder was (#352
+    /// re-check): each placeholder fill becomes the image filled inside a clip to the very same
+    /// path (same contents, even-odd rule), at the placeholder's opacity and blend, and nothing
+    /// else about the record changes. Its paths keep their contents at their places (more may
+    /// follow, for the images), and every other op is the same, in order. The caller checks the
+    /// parent.
     fn fills_placeholder(old: &Record, new: &Record) -> bool {
         use crate::record::Paint;
-        let placeholder = |op: &Op| {
-            matches!(
-                op,
+        // One op of each, in order: an image filled where its placeholder was, or anything else.
+        #[derive(PartialEq)]
+        enum Token {
+            Image {
+                clip: String,
+                even_odd: bool,
+                opacity: u32,
+                blend: u8,
+            },
+            Other(String),
+        }
+        let path = |r: &Record, i: u32| r.paths.get(i as usize).map(|p| format!("{p:?}"));
+        let old_tokens: Option<Vec<Token>> = old
+            .ops
+            .iter()
+            .map(|op| match op {
                 Op::Fill {
-                    paint: Paint::Placeholder(_),
+                    path: p,
+                    even_odd,
+                    paint: Paint::Placeholder(opacity),
+                    blend,
+                } => Some(Token::Image {
+                    clip: path(old, *p)?,
+                    even_odd: *even_odd,
+                    opacity: opacity.to_bits(),
+                    blend: *blend,
+                }),
+                other => Some(Token::Other(format!("{other:?}"))),
+            })
+            .collect();
+        let mut new_tokens = Vec::with_capacity(new.ops.len());
+        let mut k = 0;
+        while k < new.ops.len() {
+            if let (
+                Some(Op::Clip { path: c, even_odd }),
+                Some(Op::Fill {
+                    paint: Paint::Image(image),
+                    blend,
                     ..
-                }
-            )
-        };
-        let image = |op: &Op| {
-            matches!(
-                op,
-                Op::Fill {
-                    paint: Paint::Image(_),
-                    ..
-                }
-            )
-        };
-        // Everything but the fills, and the clip round the image, that loading it swaps, in order.
-        let rest = |ops: &[Op]| -> Vec<String> {
-            ops.iter()
-                .filter(|op| {
-                    !matches!(
-                        op,
-                        Op::Fill {
-                            paint: Paint::Placeholder(_) | Paint::Image(_),
-                            ..
-                        } | Op::Clip { .. }
-                            | Op::Unclip
-                    )
-                })
-                .map(|op| format!("{op:?}"))
-                .collect()
-        };
+                }),
+                Some(Op::Unclip),
+            ) = (new.ops.get(k), new.ops.get(k + 1), new.ops.get(k + 2))
+            {
+                let Some(clip) = path(new, *c) else { return false };
+                new_tokens.push(Token::Image {
+                    clip,
+                    even_odd: *even_odd,
+                    opacity: image.opacity.to_bits(),
+                    blend: *blend,
+                });
+                k += 3;
+            } else {
+                new_tokens.push(Token::Other(format!("{:?}", new.ops[k])));
+                k += 1;
+            }
+        }
+        let Some(old_tokens) = old_tokens else { return false };
+        let paths_kept = new.paths.len() >= old.paths.len()
+            && old
+                .paths
+                .iter()
+                .zip(&new.paths)
+                .all(|(a, b)| format!("{a:?}") == format!("{b:?}"));
         old.flags == new.flags
             && old.opacity == new.opacity
             && old.transform == new.transform
@@ -1364,12 +1397,11 @@ impl Store {
             && old.blend == new.blend
             && old.mask == new.mask
             && old.unsupported == new.unsupported
-            && old.ops.iter().any(placeholder)
-            && !new.ops.iter().any(placeholder)
-            && new.ops.iter().any(image)
             && format!("{:?}", old.post_effects) == format!("{:?}", new.post_effects)
             && format!("{:?}", old.coarse) == format!("{:?}", new.coarse)
-            && rest(&old.ops) == rest(&new.ops)
+            && paths_kept
+            && old_tokens.iter().any(|t| matches!(t, Token::Image { .. }))
+            && old_tokens == new_tokens
     }
 
     /// Paint order: each record's preorder index and the last index in its subtree.
