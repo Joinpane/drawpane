@@ -13,6 +13,8 @@ if (!process.env.ENGINE_BROWSER || process.env.ENGINE_BROWSER === "chromium") {
       args: [
         "--enable-unsafe-webgpu",
         "--enable-unsafe-swiftshader",
+        "--use-webgpu-adapter=swiftshader",
+        "--disable-gpu-sandbox",
         ...(process.env.ENGINE_CHROME_ARGS ?? "").split(/\s+/).filter(Boolean),
       ],
       ...(process.env.CHROMIUM_PATH ? { executablePath: process.env.CHROMIUM_PATH } : {}),
@@ -42,12 +44,12 @@ function pngChunk(type: string, data: Uint8Array): Uint8Array {
 
 /**
  * Generates a high-resolution textured PNG (left half blue, right half orange) large enough
- * that lossy WebP previews are much smaller than the original while preserving crisp color halves.
+ * that lossy previews are much smaller than the original while preserving crisp color halves.
  */
-function makeTexturedSplitPng(width: number, height: number): Uint8Array {
+function makeTexturedSplitPng(width: number, height: number, seedInit = 0x12345678): Uint8Array {
   const stride = 1 + width * 4;
   const raw = new Uint8Array(stride * height);
-  let seed = 0x12345678;
+  let seed = seedInit >>> 0;
   for (let y = 0; y < height; y++) {
     const row = y * stride;
     raw[row] = 0;
@@ -144,7 +146,7 @@ async function waitForLive(page: Page): Promise<void> {
       return w.drawpane?.s.status === "live" && Boolean(w.drawpaneEngineView);
     },
     undefined,
-    { timeout: 30_000 },
+    { timeout: 60_000 },
   );
 }
 
@@ -160,9 +162,8 @@ test.describe
       test.setTimeout(180_000);
       instance = await freshInstance(browser, { port: PORT, inspectorPort: PORT + 540 });
       const png = makeTexturedSplitPng(2000, 1500);
-      // Import a document with one 1600x1200 photo and a wide sibling board so Fit view draws
-      // the photo small (~70 px wide, inside the 256 px preview tier).
-      fileId = await importNodes(
+      // Upload the original without previews first to exercise pre-existing image backfill.
+      const seedFileId = await importNodes(
         instance.page,
         [
           { id: "p1", parent: ROOT_ID, key: "a0", type: "page", props: { name: "Page 1" } },
@@ -181,9 +182,9 @@ test.describe
             },
           },
         ],
-        "Progressive test",
+        "Progressive seed",
       );
-      const up = await instance.page.request.post(`/api/files/${fileId}/media`, {
+      const up = await instance.page.request.post(`/api/files/${seedFileId}/media`, {
         data: Buffer.from(png),
         headers: { "content-type": "image/png" },
       });
@@ -192,7 +193,7 @@ test.describe
       expect(info).toMatchObject({ width: 2000, height: 1500 });
       sha = info.sha;
 
-      // Add the photo rect using a second file so nodes reference the uploaded sha cleanly.
+      // Wide overview board ensures Fit view draws the 1600x1200 hero small (inside w=256 tier).
       fileId = await importNodes(
         instance.page,
         [
@@ -234,25 +235,34 @@ test.describe
       await instance?.stop();
     });
 
-    test("Fit view fetches only the 256 WebP preview and settles exact without fetching full resolution", async () => {
-      const tab = await openEngineTab(instance);
-      const seen: Array<{ url: string; preview: string | null; type: string | null }> = [];
-      tab.on("response", (res) => {
-        if (new URL(res.url()).pathname === `/api/media/${sha}`) {
-          seen.push({
-            url: res.url(),
+    test("backfills missing previews on first editor open so subsequent loads serve cached previews", async () => {
+      test.setTimeout(120_000);
+      const tab1 = await openEngineTab(instance);
+      const firstGets: Array<{ url: string; missing: string | null; preview: string | null }> = [];
+      const putStatuses: Array<{ url: string; status: number }> = [];
+      tab1.on("response", (res) => {
+        const u = new URL(res.url());
+        if (res.request().method() === "GET" && u.pathname === `/api/media/${sha}`) {
+          firstGets.push({
+            url: `${u.pathname}${u.search}`,
+            missing: res.headers()["x-image-preview-missing"] ?? null,
             preview: res.headers()["x-image-preview"] ?? null,
-            type: res.headers()["content-type"] ?? null,
           });
+        }
+        if (
+          res.request().method() === "PUT" &&
+          u.pathname.startsWith(`/api/media/${sha}/previews/`)
+        ) {
+          putStatuses.push({ url: u.pathname, status: res.status() });
         }
       });
       try {
-        await tab.goto(`/f/${fileId}`);
-        await waitForLive(tab);
+        await tab1.goto(`/f/${fileId}`);
+        await waitForLive(tab1);
         await expect
           .poll(
-            async () =>
-              tab.evaluate(() => {
+            () =>
+              tab1.evaluate(() => {
                 const w = window as unknown as DebugWindow;
                 return {
                   exact: Boolean(w.drawpaneFrames?.exact && w.drawpaneEngineView?.last.exact),
@@ -262,32 +272,85 @@ test.describe
             { timeout: 30_000 },
           )
           .toEqual({ exact: true, reduced: 0 });
-        // Give any speculative background work a beat: Fit view must still have ONLY fetched ?w=256.
-        await tab.waitForTimeout(300);
-        expect(seen.length).toBeGreaterThanOrEqual(1);
-        expect(seen.every((r) => r.url.endsWith("?w=256"))).toBe(true);
-        expect(seen.every((r) => r.type === "image/webp" && r.preview === "256")).toBe(true);
+        expect(firstGets.some((g) => g.missing === "1" && g.preview === null)).toBe(true);
+
+        // Background backfill uploads both 256 and 1024 previews for the pre-existing image.
+        await expect
+          .poll(
+            () =>
+              putStatuses
+                .filter((p) => p.status === 201 || p.status === 200)
+                .map((p) => p.url)
+                .sort(),
+            { timeout: 30_000 },
+          )
+          .toEqual([`/api/media/${sha}/previews/1024`, `/api/media/${sha}/previews/256`]);
       } finally {
-        await tab.close();
+        await tab1.close();
+      }
+
+      // Second tab receives the stored preview on ?w=256 and still upgrades to original for exact=true.
+      const tab2 = await openEngineTab(instance);
+      const secondGets: Array<{ url: string; preview: string | null; type: string | null }> = [];
+      tab2.on("response", (res) => {
+        const u = new URL(res.url());
+        if (res.request().method() === "GET" && u.pathname === `/api/media/${sha}`) {
+          secondGets.push({
+            url: `${u.pathname}${u.search}`,
+            preview: res.headers()["x-image-preview"] ?? null,
+            type: res.headers()["content-type"] ?? null,
+          });
+        }
+      });
+      try {
+        await tab2.goto(`/f/${fileId}`);
+        await waitForLive(tab2);
+        await expect
+          .poll(
+            () =>
+              tab2.evaluate(() => {
+                const w = window as unknown as DebugWindow;
+                return {
+                  exact: Boolean(w.drawpaneFrames?.exact && w.drawpaneEngineView?.last.exact),
+                  reduced: w.drawpaneEngineView?.reducedImages ?? -1,
+                };
+              }),
+            { timeout: 30_000 },
+          )
+          .toEqual({ exact: true, reduced: 0 });
+        const previewHit = secondGets.find((g) => g.url === `/api/media/${sha}?w=256`);
+        expect(previewHit?.preview).toBe("256");
+        expect(previewHit?.type).toBe("image/jpeg");
+        // Strict exactness rule: bare original was also fetched so the settled exact frame uses original pixels.
+        expect(
+          secondGets.some((g) => g.url === `/api/media/${sha}` && g.type === "image/png"),
+        ).toBe(true);
+      } finally {
+        await tab2.close();
       }
     });
 
-    test("shows preview immediately with exact=false while full resolution loads, then upgrades to exact=true", async () => {
+    test("previews are never exact: shows w=256 immediately with exact=false while full original is held, then settles exact=true", async () => {
+      test.setTimeout(120_000);
       const tab = await openEngineTab(instance);
-      const fullGate: { release: (() => void) | null; requested: boolean } = {
-        release: null,
+      const fullGate: { released: boolean; requested: boolean; waiters: Array<() => void> } = {
+        released: false,
         requested: false,
+        waiters: [],
+      };
+      const releaseFull = () => {
+        fullGate.released = true;
+        for (const done of fullGate.waiters.splice(0)) done();
       };
       const seenUrls: string[] = [];
 
       await tab.route(`**/api/media/${sha}**`, async (route) => {
         const url = new URL(route.request().url());
         seenUrls.push(`${url.pathname}${url.search}`);
-        // Hold ONLY the bare full-resolution request so we can assert on the live preview state.
-        if (!url.searchParams.has("w")) {
+        if (!url.searchParams.has("w") && !fullGate.released) {
           fullGate.requested = true;
           await new Promise<void>((resolve) => {
-            fullGate.release = resolve;
+            fullGate.waiters.push(resolve);
           });
         }
         await route.continue();
@@ -296,16 +359,12 @@ test.describe
       try {
         await tab.goto(`/f/${fileId}`);
         await waitForLive(tab);
-        // Wait for Fit view to settle on w=256 first.
-        await expect
-          .poll(
-            () =>
-              tab.evaluate(() => Boolean((window as unknown as DebugWindow).drawpaneFrames?.exact)),
-            { timeout: 30_000 },
-          )
-          .toBe(true);
 
-        // Zoom to 100% centered on the 1600x1200 hero photo: demands full resolution (> 1024 px).
+        // Even at Fit zoom, the preview displays immediately while full original is requested and held.
+        await expect.poll(() => fullGate.requested, { timeout: 30_000 }).toBe(true);
+        expect(seenUrls).toContain(`/api/media/${sha}?w=256`);
+
+        // Zoom onto the hero while full is still held: preview renders visibly AND exact MUST be false.
         await tab.evaluate(() => {
           const w = window as unknown as DebugWindow;
           const e = w.drawpane;
@@ -316,17 +375,13 @@ test.describe
           }
         });
 
-        // Full-resolution fetch starts and is held; preview is visible on screen AND exact is false.
-        await expect.poll(() => fullGate.requested, { timeout: 30_000 }).toBe(true);
         await expect
           .poll(
             async () => {
               const box = await tab.evaluate(() => {
                 const c = document.querySelector<HTMLCanvasElement>('[data-canvas-role="engine"]');
                 const r = c?.getBoundingClientRect();
-                return r
-                  ? { cx: r.left + r.width / 2, cy: r.top + r.height / 2, w: r.width }
-                  : null;
+                return r ? { cx: r.left + r.width / 2, cy: r.top + r.height / 2 } : null;
               });
               if (!box) return { blueOk: false, orangeOk: false, exact: true };
               const [lr, , lb] = parseHex(await canvasColor(tab, { x: box.cx - 120, y: box.cy }));
@@ -345,8 +400,8 @@ test.describe
           )
           .toEqual({ blueOk: true, orangeOk: true, exact: false });
 
-        // Release full resolution: frame transitions cleanly to exact=true with reducedImages=0.
-        fullGate.release?.();
+        // Release full original: frame upgrades and settles exact=true with reducedImages=0.
+        releaseFull();
         await expect
           .poll(
             () =>
@@ -360,15 +415,95 @@ test.describe
             { timeout: 30_000 },
           )
           .toEqual({ exact: true, reduced: 0 });
-        expect(seenUrls).toContain(`/api/media/${sha}?w=256`);
-        expect(seenUrls).toContain(`/api/media/${sha}`);
       } finally {
-        fullGate.release?.();
+        releaseFull();
         await tab.close();
       }
     });
 
-    test("exports always fetch the full-resolution original without ?w= even from a preview-only Fit view", async () => {
+    test("falls back cleanly to the bare original URL when ?w= returns 500", async () => {
+      const tab = await openEngineTab(instance);
+      const seen: Array<{ url: string; status: number }> = [];
+      await tab.route(`**/api/media/${sha}?w=*`, async (route) => {
+        await route.fulfill({ status: 500, body: "preview failure" });
+      });
+      tab.on("response", (res) => {
+        const u = new URL(res.url());
+        if (u.pathname === `/api/media/${sha}`) {
+          seen.push({ url: `${u.pathname}${u.search}`, status: res.status() });
+        }
+      });
+      try {
+        await tab.goto(`/f/${fileId}`);
+        await waitForLive(tab);
+        await expect
+          .poll(
+            () =>
+              tab.evaluate(() => {
+                const w = window as unknown as DebugWindow;
+                return {
+                  exact: Boolean(w.drawpaneFrames?.exact && w.drawpaneEngineView?.last.exact),
+                  reduced: w.drawpaneEngineView?.reducedImages ?? -1,
+                };
+              }),
+            { timeout: 30_000 },
+          )
+          .toEqual({ exact: true, reduced: 0 });
+        expect(seen.some((s) => s.url === `/api/media/${sha}?w=256` && s.status === 500)).toBe(
+          true,
+        );
+        expect(seen.some((s) => s.url === `/api/media/${sha}` && s.status === 200)).toBe(true);
+      } finally {
+        await tab.close();
+      }
+    });
+
+    test("original upload succeeds when preview PUT fails with 500", async () => {
+      const tab = await openEngineTab(instance);
+      const previewPutStatuses: number[] = [];
+      await tab.route("**/api/media/*/previews/*", async (route) => {
+        previewPutStatuses.push(500);
+        await route.fulfill({ status: 500, body: "preview store unavailable" });
+      });
+      try {
+        await tab.goto(`/f/${fileId}`);
+        await waitForLive(tab);
+        const png = makeTexturedSplitPng(600, 400, 0x99887766);
+        const uploaded = tab.waitForResponse(
+          (r) => r.url().endsWith("/media") && r.request().method() === "POST",
+        );
+        await tab.evaluate(
+          ({ bytes }) => {
+            const file = new File([new Uint8Array(bytes)], "preview-fail-test.png", {
+              type: "image/png",
+            });
+            const data = new DataTransfer();
+            data.items.add(file);
+            const target = document.querySelector(".canvas__overlay");
+            target?.dispatchEvent(
+              new DragEvent("drop", {
+                dataTransfer: data,
+                clientX: 400,
+                clientY: 300,
+                bubbles: true,
+                cancelable: true,
+              }),
+            );
+          },
+          { bytes: [...png] },
+        );
+        const res = await uploaded;
+        expect(res.status()).toBe(201);
+        await expect(tab.getByRole("region", { name: "Image uploads" })).toContainText("Done", {
+          timeout: 15_000,
+        });
+        await expect.poll(() => previewPutStatuses.length, { timeout: 15_000 }).toBeGreaterThan(0);
+      } finally {
+        await tab.close();
+      }
+    });
+
+    test("exports always fetch the full-resolution original without ?w=", async () => {
       const tab = await openEngineTab(instance);
       const exportRequests: Array<{ url: string; type: string | null }> = [];
       tab.on("response", (res) => {
@@ -389,10 +524,8 @@ test.describe
             { timeout: 30_000 },
           )
           .toBe(true);
-        // Confirm only the 256 preview was loaded in Fit view before export.
-        expect(exportRequests.every((r) => r.url.endsWith("?w=256"))).toBe(true);
 
-        // Select the Hero Photo layer and export 1x PNG.
+        exportRequests.length = 0;
         await tab.getByRole("treeitem", { name: /Hero Photo/ }).click();
         const downloadPromise = tab.waitForEvent("download");
         await tab.keyboard.press("ControlOrMeta+Shift+E");
@@ -401,10 +534,11 @@ test.describe
         const bytes = readFileSync(await download.path());
         expect(pngSize(bytes)).toEqual({ width: 1600, height: 1200 });
 
-        // Export must have fetched the bare original PNG URL (no ?w= query parameter).
+        // Export must fetch only the bare original PNG URL (never ?w=).
         const bareOriginal = exportRequests.find((r) => r.url.endsWith(`/api/media/${sha}`));
         expect(bareOriginal).toBeDefined();
         expect(bareOriginal?.type).toBe("image/png");
+        expect(exportRequests.every((r) => !new URL(r.url).searchParams.has("w"))).toBe(true);
       } finally {
         await tab.close();
       }

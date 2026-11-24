@@ -24,6 +24,7 @@ import {
   svgSize,
   svgToLayers,
 } from "@drawpane/svg";
+import { uploadMediaPreviews } from "./image-preview";
 
 const caches = new WeakMap<Editor, ImageCache>();
 const queues = new WeakMap<Editor, UploadQueue>();
@@ -110,6 +111,9 @@ export class UploadQueue {
     try {
       const info = await this.#send(fileId, blob, (loaded) => this.#update(id, { loaded }));
       this.#update(id, { status: "done", loaded: blob.size });
+      // Generate and upload fixed-size previews asynchronously after the original lands;
+      // preview failures never fail or block the original upload.
+      void uploadMediaPreviews(info.sha, blob);
       return info;
     } catch (error) {
       this.#update(id, { status: "error" });

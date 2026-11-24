@@ -3,7 +3,13 @@ import {
   exifOrientation,
   MEDIA_MAX_BYTES,
   MEDIA_PREVIEW_SIZES,
+  MEDIA_PREVIEW_VERSION,
+  mediaPreviewBucketFor,
   mediaPreviewDimensions,
+  mediaPreviewKey,
+  mediaPreviewMatchesOriginal,
+  mediaPreviewMaxBytes,
+  mediaPreviewTiersFor,
   mediaProblem,
   orientedSize,
   parseMediaPreviewSize,
@@ -86,6 +92,27 @@ describe("sniffImage", () => {
       width: 200,
       height: 100,
     });
+    expect(mediaPreviewKey("a".repeat(64), 256)).toBe(
+      `media/previews/v${MEDIA_PREVIEW_VERSION}/${"a".repeat(64)}/256`,
+    );
+    expect(mediaPreviewTiersFor(200, 100)).toEqual([256]);
+    expect(mediaPreviewTiersFor(1200, 800)).toEqual([256, 1024]);
+    expect(mediaPreviewBucketFor(200, 100, 1024)).toBe(256);
+    expect(mediaPreviewBucketFor(1200, 800, 1024)).toBe(1024);
+    expect(mediaPreviewMaxBytes(256)).toBe(256 * 1024);
+    expect(mediaPreviewMaxBytes(1024)).toBe(1024 * 1024);
+    expect(
+      mediaPreviewMatchesOriginal({ width: 4032, height: 3024 }, { width: 256, height: 192 }, 256),
+    ).toEqual({ ok: true, swapped: false });
+    expect(
+      mediaPreviewMatchesOriginal({ width: 4032, height: 3024 }, { width: 192, height: 256 }, 256),
+    ).toEqual({ ok: true, swapped: true });
+    expect(
+      mediaPreviewMatchesOriginal({ width: 4032, height: 3024 }, { width: 300, height: 225 }, 256),
+    ).toEqual({ ok: false });
+    expect(
+      mediaPreviewMatchesOriginal({ width: 4032, height: 3024 }, { width: 256, height: 10 }, 256),
+    ).toEqual({ ok: false });
   });
 
   it("reads EXIF orientation for rotated JPEGs", () => {

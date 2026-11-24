@@ -1,5 +1,5 @@
 [workspace]
-members = ["decoder", "preview"]
+members = ["decoder"]
 exclude = ["vendor/jpeg-decoder", "vendor/vello_shaders"]
 resolver = "3"
 

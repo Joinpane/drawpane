@@ -994,15 +994,18 @@ export async function prepareSnapshotJob(
             }
             preview = MEDIA_PREVIEW_SIZES.find((s) => s >= maxNeeded);
           }
-          const { blob, size } = await cache.encoded(
-            ref,
-            timeout.signal,
-            preview ? { preview } : undefined,
-          );
+          let encoded = await cache.encoded(ref, timeout.signal, preview ? { preview } : undefined);
           if (signal?.aborted) throw abortError();
-          const natural = size ?? cache.natural(ref) ?? (await measureBlobSize(blob, signal));
+          let natural =
+            encoded.size ?? cache.natural(ref) ?? (await measureBlobSize(encoded.blob, signal));
+          if ((!natural || natural.width <= 0 || natural.height <= 0) && preview) {
+            encoded = await cache.encoded(ref, timeout.signal);
+            if (signal?.aborted) throw abortError();
+            natural =
+              encoded.size ?? cache.natural(ref) ?? (await measureBlobSize(encoded.blob, signal));
+          }
           if (!natural || natural.width <= 0 || natural.height <= 0) return;
-          loaded.push({ ref, blob, natural, uses });
+          loaded.push({ ref, blob: encoded.blob, natural, uses });
         } catch (err) {
           if (isAbortError(err)) throw err;
           // Unavailable image: omitted in display list rather than crashing the snapshot.

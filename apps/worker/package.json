@@ -18,7 +18,6 @@
   },
   "dependencies": {
     "@drawpane/editor": "workspace:*",
-    "@drawpane/engine": "workspace:*",
     "@drawpane/model": "workspace:*",
     "@simplewebauthn/server": "14.1.0",
     "hono": "4.13.18",

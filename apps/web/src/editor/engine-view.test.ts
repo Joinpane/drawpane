@@ -92,6 +92,7 @@ vi.mock("@drawpane/editor", () => ({
     revision = 1;
     stats = { fresh: true, records: 1 };
     opening = false;
+    openingVisible = false;
     setEditorState() {}
     setView() {}
     openSlice(id: string) {
@@ -1248,7 +1249,7 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
       },
     } as never;
 
-    state.imageDemands = [{ ref: "hero", visible: true, span: { width: 1500, height: 1100 } }];
+    state.imageDemands = [{ ref: "hero", visible: true, span: { width: 100, height: 75 } }];
     const view = await EngineView.create(
       new FakeCanvas(true) as unknown as HTMLCanvasElement,
       editor,
@@ -1263,10 +1264,11 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
       });
 
     try {
-      // Initial draw starts preview fetch -> not exact.
+      // Even at Fit scale (100x75), preview stand-in is never exact while full is in flight.
       expect(draw()?.exact).toBe(false);
       await vi.waitFor(() => {
         const res = draw();
+        expect(encodedCalls).toContain(256);
         expect(encodedCalls).toContain("full");
         expect(res?.exact).toBe(false);
       });
@@ -1296,6 +1298,79 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
     } finally {
       holdFull = false;
       for (const done of fullResolvers.splice(0)) done();
+      state.imageDemands = [];
+      view?.dispose();
+    }
+  });
+
+  it("defers Lane C full refinement on initial page open until visible tiles finish and present", async () => {
+    vi.stubGlobal("navigator", {
+      gpu: { requestAdapter: async () => ({ info: { description: "NVIDIA T4" } }) },
+    });
+    vi.stubGlobal(
+      "ImageData",
+      class {
+        constructor(readonly data: Uint8ClampedArray) {}
+      },
+    );
+    vi.stubGlobal("createImageBitmap", async (_blob: Blob, o: ImageBitmapOptions) => ({
+      width: o.resizeWidth ?? 3093,
+      height: o.resizeHeight ?? 2247,
+      close() {},
+    }));
+    state.readbackError = false;
+    state.framePending = 2;
+    const encodedCalls: Array<256 | 1024 | "full"> = [];
+    const editor = { scene: {}, doc: { version: 1 } } as never;
+    const images = {
+      subscribe: () => () => {},
+      natural: () => null,
+      get: () => null,
+      encodedVersion: () => 0,
+      encoded: async (_ref: string, _signal: AbortSignal, opts?: { preview?: 256 | 1024 }) => {
+        const tier = opts?.preview ?? "full";
+        encodedCalls.push(tier);
+        return {
+          blob: new Blob([String(tier)]),
+          size: { width: 3093, height: 2247 },
+          ...(opts?.preview ? { preview: opts.preview } : {}),
+        };
+      },
+    } as never;
+
+    state.imageDemands = [{ ref: "hero", visible: true, span: { width: 100, height: 75 } }];
+    const view = await EngineView.create(
+      new FakeCanvas(true) as unknown as HTMLCanvasElement,
+      editor,
+      {} as never,
+      images,
+      "engine",
+    );
+    const draw = () =>
+      view?.draw("fit-page", { zoom: 1, x: 0, y: 0 }, 65, 17, 1, "#ffffff", {
+        hidden: new Set(),
+        whole: null,
+      });
+
+    try {
+      // While tiles are still baking (framePending > 0), only ?w=256 downloads; full stays deferred.
+      await vi.waitFor(() => {
+        draw();
+        expect(state.uploadedWidths).toContain(193);
+      });
+      await new Promise((r) => setTimeout(r, 20));
+      expect(encodedCalls).toEqual([256]);
+
+      // Once visible tiles finish (framePending = 0) and present, Lane C launches full and settles exact.
+      state.framePending = 0;
+      await vi.waitFor(() => {
+        const res = draw();
+        expect(encodedCalls).toEqual([256, "full"]);
+        expect(res?.exact).toBe(true);
+      });
+      expect(view?.reducedImages).toBe(0);
+    } finally {
+      state.framePending = 0;
       state.imageDemands = [];
       view?.dispose();
     }

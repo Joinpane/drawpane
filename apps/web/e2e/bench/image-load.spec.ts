@@ -7,10 +7,13 @@
  *   - time to the first useful image
  *   - time to sharp (`exact` frame shown)
  *   - total image bytes downloaded (broken down by ?w=256, ?w=1024, and full original)
+ *   - per-request start/end timeline (for diagnosing fetch scheduling / starvation)
+ *   - client-side browser preview encode time across the kit's images (when supported)
  *
  * Designed to run identically against `main` and a feature branch for apples-to-apples comparison.
  */
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 import { freshInstance, type Instance } from "../fresh-instance";
 import { importConverted } from "../import-converted";
@@ -29,6 +32,34 @@ interface MediaEvent {
   readonly atMs: number;
   readonly bytes: number;
   readonly tier: "256" | "1024" | "full";
+}
+
+interface RequestTimelineItem {
+  readonly sha: string;
+  readonly tier: "256" | "1024" | "full";
+  readonly startMs: number;
+  readonly endMs: number | null;
+  readonly bytes: number;
+}
+
+interface ClientEncodeStats {
+  readonly imagesTotal: number;
+  readonly imagesWithPreviews: number;
+  readonly skippedSmall: number;
+  readonly skippedPixelLimit: number;
+  readonly previewsGenerated: number;
+  readonly previewsUploaded: number;
+  readonly totalOriginalBytes: number;
+  readonly totalPreviewBytes: number;
+  readonly w256Bytes: number;
+  readonly w1024Bytes: number;
+  readonly mimeCounts: Record<string, number>;
+  readonly wallMs: number;
+  readonly encodeMsTotal: number;
+  readonly encodeMsMean: number;
+  readonly encodeMsP50: number;
+  readonly encodeMsP95: number;
+  readonly encodeMsMax: number;
 }
 
 interface ViewResult {
@@ -51,6 +82,7 @@ interface ViewResult {
     readonly w1024: { count: number; bytes: number };
     readonly full: { count: number; bytes: number };
   };
+  readonly timeline: readonly RequestTimelineItem[];
   readonly reducedImages: number;
   readonly timedOut: boolean;
 }
@@ -87,6 +119,25 @@ interface DebugWindow {
     centerOn(point: { x: number; y: number }): void;
   };
   drawpaneFrames?: { exact: boolean };
+  drawpanePreviews?: () => Promise<{
+    uploadMediaPreviews(
+      sha: string,
+      blob: Blob,
+      options?: { readonly force?: boolean },
+    ): Promise<{
+      readonly generated: number;
+      readonly uploaded: number;
+      readonly encodeMs: number;
+      readonly skipped?: "unsupported" | "pixel-limit" | "small";
+      readonly previews: readonly {
+        readonly size: 256 | 1024;
+        readonly width: number;
+        readonly height: number;
+        readonly bytes: number;
+        readonly mime: string;
+      }[];
+    }>;
+  }>;
   drawpaneEngineView?: {
     canvas: HTMLCanvasElement;
     adapter: string;
@@ -100,6 +151,116 @@ interface DebugWindow {
     shown: { n: number; at: number };
     last: { n: number; exact: boolean; pageId: string; supported: boolean };
   };
+}
+
+/**
+ * On branches that expose client-side preview generation (`drawpanePreviews`), generates and
+ * uploads previews for all imported kit images using the real browser preview worker, measuring
+ * exact client-side encode CPU/wall time. No-ops cleanly on `main`.
+ */
+async function populateClientPreviews(
+  instance: Instance,
+  fileId: string,
+  folder: string,
+): Promise<ClientEncodeStats | null> {
+  const meta = JSON.parse(readFileSync(join(folder, "meta.json"), "utf8")) as {
+    images: { sha: string; mime: string }[];
+  };
+  if (meta.images.length === 0) return null;
+
+  const tab = await instance.context.newPage();
+  await tab.addInitScript(() => {
+    try {
+      localStorage.setItem("drawpane:debug", "1");
+      localStorage.setItem("drawpane:renderer", "canvas");
+    } catch {
+      // Ignore opaque origins before navigation.
+    }
+  });
+  try {
+    await tab.goto(`/f/${fileId}`);
+    await tab.waitForFunction(
+      () => (window as unknown as DebugWindow).drawpane?.s.status === "live",
+      undefined,
+      { timeout: 60_000, polling: 200 },
+    );
+    const hasHelper = await tab.evaluate(
+      () => typeof (window as unknown as DebugWindow).drawpanePreviews === "function",
+    );
+    if (!hasHelper) return null;
+
+    const shas = meta.images.map((i) => i.sha);
+    const stats = await tab.evaluate(async (imageShas) => {
+      const w = window as unknown as DebugWindow;
+      const mod = await w.drawpanePreviews?.();
+      if (!mod) return null;
+      const encodeTimes: number[] = [];
+      let imagesWithPreviews = 0;
+      let skippedSmall = 0;
+      let skippedPixelLimit = 0;
+      let previewsGenerated = 0;
+      let previewsUploaded = 0;
+      let totalOriginalBytes = 0;
+      let totalPreviewBytes = 0;
+      let w256Bytes = 0;
+      let w1024Bytes = 0;
+      const mimeCounts: Record<string, number> = {};
+
+      const wallStart = performance.now();
+      for (const sha of imageShas) {
+        const res = await fetch(`/api/media/${sha}`, { credentials: "same-origin" });
+        if (!res.ok) continue;
+        const blob = await res.blob();
+        totalOriginalBytes += blob.size;
+        const out = await mod.uploadMediaPreviews(sha, blob, { force: true });
+        encodeTimes.push(out.encodeMs);
+        if (out.skipped === "small") skippedSmall++;
+        if (out.skipped === "pixel-limit") skippedPixelLimit++;
+        if (out.generated > 0) imagesWithPreviews++;
+        previewsGenerated += out.generated;
+        previewsUploaded += out.uploaded;
+        for (const p of out.previews) {
+          totalPreviewBytes += p.bytes;
+          if (p.size === 256) w256Bytes += p.bytes;
+          else w1024Bytes += p.bytes;
+          mimeCounts[p.mime] = (mimeCounts[p.mime] ?? 0) + 1;
+        }
+      }
+      const wallMs = Math.round(performance.now() - wallStart);
+      encodeTimes.sort((a, b) => a - b);
+      const pct = (q: number) =>
+        encodeTimes.length === 0
+          ? 0
+          : Math.round(
+              (encodeTimes[Math.min(encodeTimes.length - 1, Math.floor(encodeTimes.length * q))] ??
+                0) * 10,
+            ) / 10;
+      const encodeMsTotal = Math.round(encodeTimes.reduce((s, v) => s + v, 0));
+      return {
+        imagesTotal: imageShas.length,
+        imagesWithPreviews,
+        skippedSmall,
+        skippedPixelLimit,
+        previewsGenerated,
+        previewsUploaded,
+        totalOriginalBytes,
+        totalPreviewBytes,
+        w256Bytes,
+        w1024Bytes,
+        mimeCounts,
+        wallMs,
+        encodeMsTotal,
+        encodeMsMean:
+          encodeTimes.length > 0 ? Math.round((encodeMsTotal / encodeTimes.length) * 10) / 10 : 0,
+        encodeMsP50: pct(0.5),
+        encodeMsP95: pct(0.95),
+        encodeMsMax: pct(1),
+      };
+    }, shas);
+    return stats;
+  } finally {
+    await tab.close();
+  }
 }
 
 async function measureColdView(
@@ -130,7 +291,14 @@ async function measureColdView(
 
   const mediaRequests = new Map<
     string,
-    { tier: "256" | "1024" | "full"; streamed: number; finished: boolean }
+    {
+      sha: string;
+      tier: "256" | "1024" | "full";
+      startMs: number;
+      endMs: number | null;
+      streamed: number;
+      finished: boolean;
+    }
   >();
   const events: MediaEvent[] = [];
   let recording = false;
@@ -138,11 +306,20 @@ async function measureColdView(
 
   cdp.on("Network.requestWillBeSent", (params) => {
     if (!recording) return;
+    if (params.request.method !== "GET") return;
     const url = new URL(params.request.url);
     if (!url.pathname.startsWith("/api/media/")) return;
+    const sha = url.pathname.slice("/api/media/".length).split("/")[0] ?? "";
     const w = url.searchParams.get("w");
     const tier: "256" | "1024" | "full" = w === "256" ? "256" : w === "1024" ? "1024" : "full";
-    mediaRequests.set(params.requestId, { tier, streamed: 0, finished: false });
+    mediaRequests.set(params.requestId, {
+      sha: sha.slice(0, 8),
+      tier,
+      startMs: Math.round(performance.now() - startedWallMs),
+      endMs: null,
+      streamed: 0,
+      finished: false,
+    });
   });
   cdp.on("Network.dataReceived", (params) => {
     if (!recording) return;
@@ -159,6 +336,7 @@ async function measureColdView(
     const req = mediaRequests.get(params.requestId);
     if (!req) return;
     req.finished = true;
+    req.endMs = Math.round(performance.now() - startedWallMs);
     const extra = Math.max(0, params.encodedDataLength - req.streamed);
     if (extra > 0) {
       req.streamed += extra;
@@ -217,7 +395,6 @@ async function measureColdView(
 
         const samples: Array<{ n: number; at: number; px: Uint8ClampedArray }> = [];
         const shownBefore = v?.shown.n ?? 0;
-        if (v) v.stamps = {};
         const t0 = performance.now();
 
         // Switch page and immediately position camera before the first rAF so 100% mode never
@@ -231,6 +408,7 @@ async function measureColdView(
           e.zoomTo(1);
           e.centerOn({ x: b.x + b.width / 2, y: b.y + b.height / 2 });
         }
+        if (v) v.stamps = {};
 
         let lastSampled = shownBefore;
         const take = () => {
@@ -250,11 +428,15 @@ async function measureColdView(
         for (;;) {
           await frame();
           take();
+          const st = v?.stamps;
+          // Ignore a stale readback from the previous page landing before this page drew.
+          if (st?.shown && (!st.drawn || st.shown.n < st.drawn.n)) {
+            delete st.shown;
+          }
           if (exactAny === null && w.drawpaneFrames?.exact && (!v || v.last.exact)) {
             exactAny = performance.now() - t0;
           }
-          const st = v?.stamps;
-          const engineDone = Boolean(st?.drawn && st.shown);
+          const engineDone = Boolean(st?.drawn && st.shown && st.shown.n >= st.drawn.n);
           if (
             (v?.last.supported ? engineDone : exactAny !== null) ||
             performance.now() - t0 > 90_000
@@ -390,11 +572,20 @@ async function measureColdView(
     const w256 = { count: 0, bytes: 0 };
     const w1024 = { count: 0, bytes: 0 };
     const full = { count: 0, bytes: 0 };
+    const timeline: RequestTimelineItem[] = [];
     for (const req of mediaRequests.values()) {
       const bucket = req.tier === "256" ? w256 : req.tier === "1024" ? w1024 : full;
       bucket.count++;
       bucket.bytes += req.streamed;
+      timeline.push({
+        sha: req.sha,
+        tier: req.tier,
+        startMs: req.startMs,
+        endMs: req.endMs,
+        bytes: req.streamed,
+      });
     }
+    timeline.sort((a, b) => a.startMs - b.startMs);
     const totalImageBytes = w256.bytes + w1024.bytes + full.bytes;
 
     return {
@@ -412,6 +603,7 @@ async function measureColdView(
       sharpExactDrawnMs: timing.sharpExactDrawnMs,
       totalImageBytes,
       requests: { total: mediaRequests.size, w256, w1024, full },
+      timeline,
       reducedImages: timing.reducedImages,
       timedOut: timing.timedOut,
     };
@@ -449,6 +641,29 @@ test.describe("Cold-load progressive image benchmark", () => {
     const importSeconds = Math.round((Date.now() - importStart) / 1000);
     console.log(`Imported kit in ${importSeconds} s (page ${TARGET_PAGE} = ${pageId}).`);
 
+    // Seed the file's dashboard thumbnail once so useThumbnailPublisher's 10 s timer does not
+    // fire mid-benchmark on `main` (which skips populateClientPreviews) to re-fetch Cover media.
+    const onePxPng = Buffer.from(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=",
+      "base64",
+    );
+    const thumbRes = await instance.page.request.put(`/api/files/${fileId}/thumbnail`, {
+      headers: { "Content-Type": "image/png" },
+      data: onePxPng,
+    });
+    expect(thumbRes.ok(), `seed thumbnail PUT failed (${thumbRes.status()})`).toBe(true);
+
+    const clientEncode = await populateClientPreviews(instance, fileId, folder);
+    if (clientEncode) {
+      console.log(
+        `[client-encode] ${clientEncode.imagesTotal} images -> ${clientEncode.previewsUploaded}/${clientEncode.previewsGenerated} previews uploaded ` +
+          `(${(clientEncode.totalPreviewBytes / 1e6).toFixed(2)} MB vs ${(clientEncode.totalOriginalBytes / 1e6).toFixed(2)} MB orig) | ` +
+          `wall=${clientEncode.wallMs} ms, encodeTotal=${clientEncode.encodeMsTotal} ms ` +
+          `(mean=${clientEncode.encodeMsMean} ms, p50=${clientEncode.encodeMsP50} ms, p95=${clientEncode.encodeMsP95} ms, max=${clientEncode.encodeMsMax} ms) | ` +
+          `mimes=${JSON.stringify(clientEncode.mimeCounts)}`,
+      );
+    }
+
     const fit = await measureColdView(instance, fileId, pageId, "fit", TARGET_FRAME);
     const full100 = await measureColdView(instance, fileId, pageId, "100%", TARGET_FRAME);
 
@@ -470,6 +685,7 @@ test.describe("Cold-load progressive image benchmark", () => {
       page: { id: pageId, name: TARGET_PAGE },
       frameId: TARGET_FRAME,
       importSeconds,
+      clientEncode,
       mbps: MBPS,
       latencyMs: LATENCY_MS,
       fit,

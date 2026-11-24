@@ -8,6 +8,7 @@
  */
 import type { NodeRecord } from "@drawpane/model";
 import { api, type FileMeta } from "../api/client";
+import { uploadMediaPreviews } from "../editor/image-preview";
 import { saveImport } from "./import-save";
 
 export type ImportStage =
@@ -53,7 +54,9 @@ async function upload(fileId: string, bytes: Uint8Array, mime: string): Promise<
   });
   if (response.status === 413 || response.status === 415 || response.status === 400) return null;
   if (!response.ok) throw new Error("Couldn't upload the file's images. Try again.");
-  return ((await response.json()) as MediaInfo).sha;
+  const { sha } = (await response.json()) as MediaInfo;
+  await uploadMediaPreviews(sha, new Blob([bytes as Uint8Array<ArrayBuffer>], { type: mime }));
+  return sha;
 }
 
 export interface PenpotImportOptions {

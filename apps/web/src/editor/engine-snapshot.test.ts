@@ -604,7 +604,7 @@ describe("renderEngineRasterExport", () => {
     service.dispose();
   });
 
-  it("uses server-side previews for detail thumbnails but always fetches full originals for exports", async () => {
+  it("uses stored previews for detail thumbnails but always fetches full originals for exports", async () => {
     const ref = "a".repeat(64);
     const editor = makeEditor([
       {

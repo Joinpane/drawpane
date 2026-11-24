@@ -23,11 +23,11 @@
       "persistent": true
     },
     "@drawpane/worker#build": {
-      "dependsOn": ["^build", "@drawpane/web#build"],
+      "dependsOn": ["@drawpane/web#build"],
       "outputs": ["dist/**"]
     },
     "@drawpane/worker#test": {
-      "dependsOn": ["^build", "@drawpane/web#build"],
+      "dependsOn": ["@drawpane/web#build"],
       "outputs": []
     },
     "create-drawpane#build": {

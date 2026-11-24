@@ -426,6 +426,8 @@ function FileEditor({ fileId }: { fileId: string }) {
       drawpaneHeadless?: ReturnType<typeof headlessDebug>;
       /** The canvas and HarfBuzz text measurers, for the text parity test. */
       drawpaneMeasurers?: () => Promise<typeof import("./measure-parity")>;
+      /** Client preview generator/uploader, for cold-load image benchmarks. */
+      drawpanePreviews?: () => Promise<typeof import("./image-preview")>;
       /** Fonts, layout and exact renders of a layer, for kit parity (tools/kit-parity). */
       drawpaneParity?: ReturnType<typeof parityDebug>;
       /** The render engine off screen, for its gates and benches (decision 0040). */
@@ -436,6 +438,7 @@ function FileEditor({ fileId }: { fileId: string }) {
     w.drawpaneParity = parityDebug(editor);
     w.drawpaneEngine = engineDebug(editor);
     w.drawpaneMeasurers = () => import("./measure-parity");
+    w.drawpanePreviews = () => import("./image-preview");
     w.drawpaneGlass = { set: setGlassTuning, get: glassTuning };
     w.drawpaneFrames = frameStatsFor(editor);
     w.drawpaneVersion = history.view.preview;
@@ -445,6 +448,7 @@ function FileEditor({ fileId }: { fileId: string }) {
       delete w.drawpaneHeadless;
       delete w.drawpaneParity;
       delete w.drawpaneEngine;
+      delete w.drawpanePreviews;
       delete w.drawpaneVersion;
     };
   }, [editor, history.view]);

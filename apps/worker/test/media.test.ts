@@ -1,8 +1,7 @@
 import { env } from "cloudflare:test";
-import { sniffImage } from "@drawpane/model";
-import { afterEach, describe, expect, it } from "vitest";
-import { mediaKey, mediaPreviewKey } from "../src/api/media";
-import { generateMediaPreview, setPreviewGeneratorForTest } from "../src/api/media-preview";
+import { MEDIA_PREVIEW_VERSION, mediaPreviewMaxBytes, sniffImage } from "@drawpane/model";
+import { describe, expect, it } from "vitest";
+import { mediaPreviewKey } from "../src/api/media";
 import phoneJpegUrl from "./fixtures/progressive-4032.jpg?inline";
 import { Browser, signedInUser } from "./helpers";
 
@@ -184,38 +183,92 @@ describe("media API", () => {
 });
 
 describe("media previews API", () => {
-  afterEach(() => {
-    setPreviewGeneratorForTest(null);
-  });
+  function putPreview(
+    browser: Browser,
+    sha: string,
+    size: number | string,
+    body: Uint8Array,
+    type = "image/png",
+    extraHeaders: Record<string, string> = {},
+  ) {
+    return browser.fetch(`/api/media/${sha}/previews/${size}`, {
+      method: "PUT",
+      headers: { "content-type": type, ...extraHeaders },
+      body,
+    });
+  }
 
-  it("generates and caches 256 and 1024 WebP previews on upload while preserving the original", async () => {
+  it("uploads originals without generating previews server-side and streams originals when previews are missing", async () => {
     const { browser, projectId } = await signedInUser();
     const fileId = await newFile(browser, projectId);
     const up = await upload(browser, fileId, PHONE_JPEG, "image/jpeg");
     expect(up.status).toBe(201);
     const { sha } = (await up.json()) as MediaInfo;
 
-    // Previews live under media/previews/<sha>/ so media/<sha> listing stays clean.
-    const origListing = await env.FILES.list({ prefix: `media/${sha}` });
-    expect(origListing.objects).toHaveLength(1);
-    expect(await env.FILES.head(mediaPreviewKey(sha, 256))).not.toBeNull();
-    expect(await env.FILES.head(mediaPreviewKey(sha, 1024))).not.toBeNull();
+    // Upload never creates previews in R2 (zero server decode/encode CPU).
+    expect(await env.FILES.head(mediaPreviewKey(sha, 256))).toBeNull();
+    expect(await env.FILES.head(mediaPreviewKey(sha, 1024))).toBeNull();
 
-    for (const size of [256, 1024] as const) {
+    // Missing preview streams the original directly with no-cache and X-Image-Preview-Missing: 1.
+    const miss = await browser.fetch(`/api/media/${sha}?w=256`);
+    expect(miss.status).toBe(200);
+    expect(miss.headers.get("content-type")).toBe("image/jpeg");
+    expect(miss.headers.get("cache-control")).toBe("private, no-cache");
+    expect(miss.headers.get("x-image-preview")).toBeNull();
+    expect(miss.headers.get("x-image-preview-missing")).toBe("1");
+    expect(new Uint8Array(await miss.arrayBuffer())).toEqual(PHONE_JPEG);
+
+    // Invalid ?w= values are rejected cleanly.
+    for (const bad of ["0", "-1", "500", "abc", "256px"]) {
+      expect((await browser.fetch(`/api/media/${sha}?w=${bad}`)).status, bad).toBe(400);
+    }
+  });
+
+  it("stores validated client previews under versioned keys, deduplicates, and serves with immutable caching", async () => {
+    const { browser, projectId } = await signedInUser();
+    const fileId = await newFile(browser, projectId);
+    const up = await upload(browser, fileId, PHONE_JPEG, "image/jpeg");
+    expect(up.status).toBe(201);
+    const { sha } = (await up.json()) as MediaInfo;
+
+    const preview256 = fakePng(256, 192, 2048);
+    const preview1024 = fakePng(1024, 768, 8192);
+
+    const first = await putPreview(browser, sha, 256, preview256, "image/png", {
+      "x-preview-width": "256",
+      "x-preview-height": "192",
+      "x-image-width": "4032",
+      "x-image-height": "3024",
+    });
+    expect(first.status).toBe(201);
+    expect(await first.json()).toEqual({ ok: true, cached: false });
+
+    // Stored under a versioned, content-addressed key separate from media/<sha>.
+    const key256 = mediaPreviewKey(sha, 256);
+    expect(key256).toBe(`media/previews/v${MEDIA_PREVIEW_VERSION}/${sha}/256`);
+    expect(await env.FILES.head(key256)).not.toBeNull();
+
+    // Second upload for the same sha+size deduplicates cleanly.
+    const dup = await putPreview(browser, sha, 256, preview256, "image/png");
+    expect(dup.status).toBe(200);
+    expect(await dup.json()).toEqual({ ok: true, cached: true });
+
+    const put1024 = await putPreview(browser, sha, 1024, preview1024, "image/png");
+    expect(put1024.status).toBe(201);
+
+    for (const [size, expected] of [
+      [256, preview256],
+      [1024, preview1024],
+    ] as const) {
       const res = await browser.fetch(`/api/media/${sha}?w=${size}`);
       expect(res.status).toBe(200);
-      expect(res.headers.get("content-type")).toBe("image/webp");
+      expect(res.headers.get("content-type")).toBe("image/png");
       expect(res.headers.get("cache-control")).toBe("private, max-age=31536000, immutable");
       expect(res.headers.get("x-image-preview")).toBe(String(size));
+      expect(res.headers.get("x-image-preview-missing")).toBeNull();
       expect(res.headers.get("x-image-width")).toBe("4032");
       expect(res.headers.get("x-image-height")).toBe("3024");
-      const bytes = new Uint8Array(await res.arrayBuffer());
-      expect(bytes.byteLength).toBeLessThan(PHONE_JPEG.byteLength);
-      const info = sniffImage(bytes);
-      expect(info?.mime).toBe("image/webp");
-      const longest = Math.max(info?.width ?? 0, info?.height ?? 0);
-      expect(longest).toBeLessThanOrEqual(size);
-      expect(longest).toBeGreaterThanOrEqual((size * 3) / 4);
+      expect(new Uint8Array(await res.arrayBuffer())).toEqual(expected);
 
       const notModified = await browser.fetch(`/api/media/${sha}?w=${size}`, {
         headers: { "if-none-match": res.headers.get("etag") ?? "" },
@@ -224,112 +277,107 @@ describe("media previews API", () => {
       expect(notModified.headers.get("x-image-preview")).toBe(String(size));
     }
 
-    // Bare URL always returns the exact original bytes (used by exports).
+    // Bare original URL always returns the untouched original bytes.
     const full = await browser.fetch(`/api/media/${sha}`);
     expect(full.status).toBe(200);
     expect(full.headers.get("content-type")).toBe("image/jpeg");
     expect(full.headers.get("x-image-preview")).toBeNull();
     expect(new Uint8Array(await full.arrayBuffer())).toEqual(PHONE_JPEG);
-
-    // Invalid ?w= values are rejected cleanly.
-    for (const bad of ["0", "-1", "500", "abc", "256px"]) {
-      expect((await browser.fetch(`/api/media/${sha}?w=${bad}`)).status, bad).toBe(400);
-    }
-  }, 15_000);
-
-  it("lazily generates and caches previews for pre-existing images without migration", async () => {
-    const { browser, teamId } = await signedInUser();
-    const sha = "d".repeat(64);
-    await env.FILES.put(mediaKey(sha), PHONE_JPEG, {
-      httpMetadata: { contentType: "image/jpeg" },
-    });
-    await env.DB.prepare(
-      `INSERT INTO media (sha, team_id, mime, width, height, bytes, created_at)
-       VALUES (?, ?, 'image/jpeg', 4032, 3024, ?, ?)`,
-    )
-      .bind(sha, teamId, PHONE_JPEG.byteLength, Date.now())
-      .run();
-
-    expect(await env.FILES.head(mediaPreviewKey(sha, 256))).toBeNull();
-
-    let calls = 0;
-    const real = generateMediaPreview;
-    const spy: Parameters<typeof setPreviewGeneratorForTest>[0] = (file, size) => {
-      calls++;
-      setPreviewGeneratorForTest(null);
-      try {
-        return real(file, size);
-      } finally {
-        setPreviewGeneratorForTest(spy);
-      }
-    };
-    setPreviewGeneratorForTest(spy);
-
-    const first = await browser.fetch(`/api/media/${sha}?w=256`);
-    expect(first.status).toBe(200);
-    expect(first.headers.get("content-type")).toBe("image/webp");
-    expect(first.headers.get("x-image-preview")).toBe("256");
-    expect(calls).toBe(1);
-    expect(await env.FILES.head(mediaPreviewKey(sha, 256))).not.toBeNull();
-
-    // Second request is served straight from the R2 cache without invoking the generator.
-    const second = await browser.fetch(`/api/media/${sha}?w=256`);
-    expect(second.status).toBe(200);
-    expect(second.headers.get("content-type")).toBe("image/webp");
-    expect(calls).toBe(1);
-    expect(new Uint8Array(await second.arrayBuffer())).toEqual(
-      new Uint8Array(await first.arrayBuffer()),
-    );
   });
 
-  it("falls back to the original when a preview cannot be made and caches the sentinel", async () => {
-    const { browser, projectId, teamId } = await signedInUser();
-    const fileId = await newFile(browser, projectId);
+  it("enforces access control and rejects oversized, invalid or mismatched previews", async () => {
+    const owner = await signedInUser("Owner");
+    const viewer = await signedInUser("Viewer", "viewer", owner.teamId);
+    const outsider = await signedInUser("Outsider");
+    const fileId = await newFile(owner.browser, owner.projectId);
+    const largeOrig = fakePng(4032, 3024, 16_384);
+    const { sha } = (await (
+      await upload(owner.browser, fileId, largeOrig, "image/png")
+    ).json()) as MediaInfo;
 
-    // Tiny original (<= 4 KiB) falls back cleanly to original PNG.
-    const smallUp = await upload(browser, fileId, PNG);
-    const { sha: smallSha } = (await smallUp.json()) as MediaInfo;
-    const smallPreview = await browser.fetch(`/api/media/${smallSha}?w=256`);
-    expect(smallPreview.status).toBe(200);
-    expect(smallPreview.headers.get("content-type")).toBe("image/png");
-    expect(smallPreview.headers.get("x-image-preview")).toBeNull();
-    expect(smallPreview.headers.get("x-image-width")).toBe("3");
-    expect(smallPreview.headers.get("x-image-height")).toBe("2");
-    expect(new Uint8Array(await smallPreview.arrayBuffer())).toEqual(PNG);
+    const valid256 = fakePng(256, 192, 1024);
 
-    // Explicit generator refusal (e.g. over memory cap) falls back to original and stores sentinel.
-    const sha = "e".repeat(64);
-    await env.FILES.put(mediaKey(sha), PHONE_JPEG, {
-      httpMetadata: { contentType: "image/jpeg" },
+    // Access control matches originals: anonymous 401, outsider 404, viewer 403.
+    expect((await putPreview(new Browser(), sha, 256, valid256)).status).toBe(401);
+    expect((await putPreview(outsider.browser, sha, 256, valid256)).status).toBe(404);
+    expect((await putPreview(viewer.browser, sha, 256, valid256)).status).toBe(403);
+
+    // Invalid tier size.
+    expect((await putPreview(owner.browser, sha, 512, valid256)).status).toBe(400);
+
+    // Unsupported content-type (GIF, SVG) and spoofed magic bytes.
+    expect((await putPreview(owner.browser, sha, 256, GIF, "image/gif")).status).toBe(415);
+    expect((await putPreview(owner.browser, sha, 256, SVG, "image/svg+xml")).status).toBe(415);
+    expect((await putPreview(owner.browser, sha, 256, valid256, "image/webp")).status).toBe(415);
+
+    // Oversized preview exceeding tier byte cap.
+    const tooBig = fakePng(256, 192, mediaPreviewMaxBytes(256) + 1);
+    expect((await putPreview(owner.browser, sha, 256, tooBig)).status).toBe(413);
+
+    // Dimensions exceeding tier or mismatched aspect ratio.
+    const overTier = fakePng(512, 384, 1024);
+    expect((await putPreview(owner.browser, sha, 256, overTier)).status).toBe(400);
+    const wrongAspect = fakePng(256, 32, 1024);
+    expect((await putPreview(owner.browser, sha, 256, wrongAspect)).status).toBe(400);
+
+    // Lying declared dimension headers are rejected.
+    expect(
+      (
+        await putPreview(owner.browser, sha, 256, valid256, "image/png", {
+          "x-preview-width": "200",
+          "x-preview-height": "150",
+        })
+      ).status,
+    ).toBe(400);
+    expect(
+      (
+        await putPreview(owner.browser, sha, 256, valid256, "image/png", {
+          "x-image-width": "100",
+          "x-image-height": "100",
+        })
+      ).status,
+    ).toBe(400);
+    // Swapped natural dimensions cannot be declared on an unswapped landscape preview.
+    expect(
+      (
+        await putPreview(owner.browser, sha, 256, valid256, "image/png", {
+          "x-image-width": "3024",
+          "x-image-height": "4032",
+        })
+      ).status,
+    ).toBe(400);
+
+    // EXIF-swapped portrait preview (192x256 for 4032x3024) is accepted and preserves display size.
+    const rotated = fakePng(192, 256, 1024);
+    const ok = await putPreview(owner.browser, sha, 256, rotated, "image/png", {
+      "x-preview-width": "192",
+      "x-preview-height": "256",
+      "x-image-width": "3024",
+      "x-image-height": "4032",
     });
-    await env.DB.prepare(
-      `INSERT INTO media (sha, team_id, mime, width, height, bytes, created_at)
-       VALUES (?, ?, 'image/jpeg', 4032, 3024, ?, ?)`,
-    )
-      .bind(sha, teamId, PHONE_JPEG.byteLength, Date.now())
-      .run();
-
-    let calls = 0;
-    setPreviewGeneratorForTest(() => {
-      calls++;
-      return null;
+    expect(ok.status).toBe(201);
+    const served = await viewer.browser.fetch(`/api/media/${sha}?w=256`);
+    expect(served.status).toBe(200);
+    expect(served.headers.get("x-image-width")).toBe("3024");
+    expect(served.headers.get("x-image-height")).toBe("4032");
+    expect(sniffImage(new Uint8Array(await served.arrayBuffer()))).toEqual({
+      mime: "image/png",
+      width: 192,
+      height: 256,
     });
 
-    const first = await browser.fetch(`/api/media/${sha}?w=256`);
-    expect(first.status).toBe(200);
-    expect(first.headers.get("content-type")).toBe("image/jpeg");
-    expect(first.headers.get("x-image-preview")).toBeNull();
-    expect(first.headers.get("x-image-width")).toBe("4032");
-    expect(first.headers.get("x-image-height")).toBe("3024");
-    expect(new Uint8Array(await first.arrayBuffer())).toEqual(PHONE_JPEG);
-    expect(calls).toBe(1);
-
-    // Second request hits the 0-byte fallback sentinel and does not re-run the generator.
-    const second = await browser.fetch(`/api/media/${sha}?w=256`);
-    expect(second.status).toBe(200);
-    expect(second.headers.get("content-type")).toBe("image/jpeg");
-    expect(second.headers.get("x-image-preview")).toBeNull();
-    expect(calls).toBe(1);
+    // Preview must be smaller than the original image.
+    const smallOrig = fakePng(200, 100, 512);
+    const { sha: smallSha } = (await (
+      await upload(owner.browser, fileId, smallOrig, "image/png")
+    ).json()) as MediaInfo;
+    expect(
+      (await putPreview(owner.browser, smallSha, 256, fakePng(200, 100, 512), "image/png")).status,
+    ).toBe(400);
+    // Asking to store a 1024 tier for a 200x100 image is rejected (only 256 applies).
+    expect(
+      (await putPreview(owner.browser, smallSha, 1024, fakePng(200, 100, 128), "image/png")).status,
+    ).toBe(400);
   });
 });
 

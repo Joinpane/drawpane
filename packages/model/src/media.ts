@@ -18,9 +18,52 @@ export const MEDIA_MAX_BYTES = 20 * 1024 * 1024;
 /** Largest side of an image, in pixels. Larger images are refused rather than decoded. */
 export const MEDIA_MAX_SIDE = 16_384;
 
-/** Fixed server-generated preview long-side sizes, smallest first. */
+/** Fixed preview long-side sizes, smallest first. */
 export const MEDIA_PREVIEW_SIZES = [256, 1024] as const;
 export type MediaPreviewSize = (typeof MEDIA_PREVIEW_SIZES)[number];
+
+/** Format/generator version embedded in stored preview R2 keys. */
+export const MEDIA_PREVIEW_VERSION = 1;
+
+/** Accepted MIME types for client-generated previews (JPEG for opaque, WebP or PNG for alpha). */
+export const MEDIA_PREVIEW_TYPES = ["image/webp", "image/jpeg", "image/png"] as const;
+export type MediaPreviewType = (typeof MEDIA_PREVIEW_TYPES)[number];
+
+/** Pixel-count gate on client-side preview generation (64 MP; skips 16384^2 decompression bombs). */
+export const MEDIA_PREVIEW_MAX_PIXELS = 64_000_000;
+
+/** Originals at or below the smallest preview side and this byte count stay as originals. */
+export const MEDIA_PREVIEW_MIN_ORIGINAL_BYTES = 4096;
+
+/** Maximum accepted byte size for a stored preview of `size`. */
+export function mediaPreviewMaxBytes(size: MediaPreviewSize): number {
+  return size === 256 ? 256 * 1024 : 1024 * 1024;
+}
+
+/** Versioned, content-addressed R2 key for a preview of `sha` at `size`. */
+export function mediaPreviewKey(sha: string, size: MediaPreviewSize): string {
+  return `media/previews/v${MEDIA_PREVIEW_VERSION}/${sha}/${size}`;
+}
+
+/** Preview tiers worth generating for an image of `width` x `height` (never upscaled tiers). */
+export function mediaPreviewTiersFor(width: number, height: number): MediaPreviewSize[] {
+  const longest = Math.max(width, height);
+  const smallest = MEDIA_PREVIEW_SIZES[0];
+  return MEDIA_PREVIEW_SIZES.filter((size) => size === smallest || longest > smallest);
+}
+
+/** Effective stored preview bucket for a request of `requested` on an image of `width` x `height`. */
+export function mediaPreviewBucketFor(
+  width: number,
+  height: number,
+  requested: MediaPreviewSize,
+): MediaPreviewSize {
+  const longest = Math.max(width, height);
+  for (const size of MEDIA_PREVIEW_SIZES) {
+    if (size >= requested || longest <= size) return size;
+  }
+  return requested;
+}
 
 /** Parses a preview size query parameter (`256` or `1024`), or null if invalid. */
 export function parseMediaPreviewSize(value: string | null | undefined): MediaPreviewSize | null {
@@ -44,6 +87,35 @@ export function mediaPreviewDimensions(
     width: Math.max(1, Math.round(natural.width * scale)),
     height: Math.max(1, Math.round(natural.height * scale)),
   };
+}
+
+/**
+ * Validates that a preview's dimensions fit within `tier` and match `original` (either upright
+ * or 90/270-degree EXIF-swapped) within rounding tolerance.
+ */
+export function mediaPreviewMatchesOriginal(
+  original: { readonly width: number; readonly height: number },
+  preview: { readonly width: number; readonly height: number },
+  tier: MediaPreviewSize,
+): { readonly ok: true; readonly swapped: boolean } | { readonly ok: false } {
+  if (
+    preview.width < 1 ||
+    preview.height < 1 ||
+    preview.width > tier ||
+    preview.height > tier ||
+    Math.max(preview.width, preview.height) > Math.max(original.width, original.height)
+  ) {
+    return { ok: false };
+  }
+  const within = (
+    a: { readonly width: number; readonly height: number },
+    b: { readonly width: number; readonly height: number },
+  ) => Math.abs(a.width - b.width) <= 2 && Math.abs(a.height - b.height) <= 2;
+  const normal = mediaPreviewDimensions(original, tier);
+  if (within(preview, normal)) return { ok: true, swapped: false };
+  const swapped = mediaPreviewDimensions({ width: original.height, height: original.width }, tier);
+  if (within(preview, swapped)) return { ok: true, swapped: true };
+  return { ok: false };
 }
 
 function tiffOrientation(b: Uint8Array, start: number, end: number): number | null {

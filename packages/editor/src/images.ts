@@ -183,10 +183,12 @@ export interface EncodedImage {
   readonly size?: Size;
   /** Preview long-side size served by the Worker, or undefined when full original bytes were returned. */
   readonly preview?: MediaPreviewSize;
+  /** True when a `?w=` preview was requested but none is stored yet (server streamed the original). */
+  readonly previewMissing?: boolean;
 }
 
 export interface EncodedImageOptions {
-  /** Request a fixed server-generated preview tier instead of the full original. */
+  /** Request a fixed stored preview tier instead of the full original. */
   readonly preview?: MediaPreviewSize;
 }
 
@@ -320,6 +322,11 @@ export class ImageCache {
     return this.#encodedVersions.get(sha) ?? 0;
   }
 
+  /** Base URL used to fetch `sha` (defaults to `/api/media/<sha>`). */
+  encodedUrl(sha: string): string {
+    return this.#url(sha);
+  }
+
   /** Reads stored media without populating the canvas renderer's decoded cache. */
   async encoded(
     sha: string,
@@ -329,23 +336,36 @@ export class ImageCache {
     const local = this.#localSources.get(sha);
     if (local) return local;
     const base = this.#url(sha);
-    const url = options?.preview
-      ? `${base}${base.includes("?") ? "&" : "?"}w=${options.preview}`
-      : base;
-    const response = await fetch(url, { credentials: "same-origin", signal });
-    if (!response.ok) throw new Error(`Image ${sha} answered ${response.status}`);
-    const headerW = Number(response.headers.get("x-image-width"));
-    const headerH = Number(response.headers.get("x-image-height"));
-    const size =
-      Number.isFinite(headerW) && headerW > 0 && Number.isFinite(headerH) && headerH > 0
-        ? { width: headerW, height: headerH }
-        : undefined;
-    const preview = parseMediaPreviewSize(response.headers.get("x-image-preview"));
-    return {
-      blob: await response.blob(),
-      ...(size ? { size } : {}),
-      ...(preview ? { preview } : {}),
+    const readResponse = async (response: Response): Promise<EncodedImage> => {
+      const headerW = Number(response.headers.get("x-image-width"));
+      const headerH = Number(response.headers.get("x-image-height"));
+      const size =
+        Number.isFinite(headerW) && headerW > 0 && Number.isFinite(headerH) && headerH > 0
+          ? { width: headerW, height: headerH }
+          : undefined;
+      const preview = parseMediaPreviewSize(response.headers.get("x-image-preview"));
+      const previewMissing = response.headers.get("x-image-preview-missing") === "1";
+      return {
+        blob: await response.blob(),
+        ...(size ? { size } : {}),
+        ...(preview ? { preview } : {}),
+        ...(previewMissing ? { previewMissing: true } : {}),
+      };
     };
+    if (options?.preview) {
+      const previewUrl = `${base}${base.includes("?") ? "&" : "?"}w=${options.preview}`;
+      try {
+        const response = await fetch(previewUrl, { credentials: "same-origin", signal });
+        if (response.ok) return await readResponse(response);
+        await response.body?.cancel().catch(() => {});
+      } catch (err) {
+        if (signal.aborted) throw err;
+        // Fall through to the original URL whenever a preview fetch errors.
+      }
+    }
+    const response = await fetch(base, { credentials: "same-origin", signal });
+    if (!response.ok) throw new Error(`Image ${sha} answered ${response.status}`);
+    return readResponse(response);
   }
 
   /** Adds an image decoded elsewhere (a file just dropped), so it draws before its upload ends. */
