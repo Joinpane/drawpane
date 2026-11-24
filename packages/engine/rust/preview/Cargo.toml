@@ -1,0 +1,18 @@
+[package]
+name = "drawpane-image-preview"
+version = "0.1.0"
+edition = "2024"
+license = "MPL-2.0"
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+drawpane-image-decoder = { path = "../decoder", default-features = false }
+oxideav-webp = { version = "0.3.2", default-features = false }
+wasm-bindgen = "=0.2.130"
+
+[dev-dependencies]
+gif = { version = "0.14", default-features = false, features = ["std"] }
+png = "0.18"

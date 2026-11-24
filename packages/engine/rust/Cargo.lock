@@ -291,6 +291,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "drawpane-image-preview"
+version = "0.1.0"
+dependencies = [
+ "drawpane-image-decoder",
+ "gif",
+ "oxideav-webp",
+ "png",
+ "wasm-bindgen",
+]
+
+[[package]]
 name = "either"
 version = "1.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -941,6 +952,21 @@ name = "once_cell"
 version = "1.21.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9f7c3e4beb33f85d45ae3e3a1792185706c8e16d043238c593331cc7cd313b50"
+
+[[package]]
+name = "oxideav-vp8"
+version = "0.2.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c449a84e4f468bb88e40868383e297605c6ab4b591ca600b5f78345e40f281e"
+
+[[package]]
+name = "oxideav-webp"
+version = "0.3.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dfca0cb5908192778a23da0b3ede28db58e663069ea70aab72b65b1cfaeb45b8"
+dependencies = [
+ "oxideav-vp8",
+]
 
 [[package]]
 name = "parking_lot"

@@ -18,6 +18,109 @@ export const MEDIA_MAX_BYTES = 20 * 1024 * 1024;
 /** Largest side of an image, in pixels. Larger images are refused rather than decoded. */
 export const MEDIA_MAX_SIDE = 16_384;
 
+/** Fixed server-generated preview long-side sizes, smallest first. */
+export const MEDIA_PREVIEW_SIZES = [256, 1024] as const;
+export type MediaPreviewSize = (typeof MEDIA_PREVIEW_SIZES)[number];
+
+/** Parses a preview size query parameter (`256` or `1024`), or null if invalid. */
+export function parseMediaPreviewSize(value: string | null | undefined): MediaPreviewSize | null {
+  if (!value || !/^\d+$/.test(value)) return null;
+  const n = Number(value);
+  return (MEDIA_PREVIEW_SIZES as readonly number[]).includes(n) ? (n as MediaPreviewSize) : null;
+}
+
+/**
+ * The dimensions a preview of `natural` capped to `maxSide` on its longest side
+ * will have. Never upscales; always at least 1x1.
+ */
+export function mediaPreviewDimensions(
+  natural: { readonly width: number; readonly height: number },
+  maxSide: number,
+): { readonly width: number; readonly height: number } {
+  const longest = Math.max(natural.width, natural.height);
+  if (longest <= maxSide) return { width: natural.width, height: natural.height };
+  const scale = maxSide / longest;
+  return {
+    width: Math.max(1, Math.round(natural.width * scale)),
+    height: Math.max(1, Math.round(natural.height * scale)),
+  };
+}
+
+function tiffOrientation(b: Uint8Array, start: number, end: number): number | null {
+  if (end - start < 8) return null;
+  const little = b[start] === 0x49 && b[start + 1] === 0x49;
+  const big = b[start] === 0x4d && b[start + 1] === 0x4d;
+  if (!little && !big) return null;
+  const read16 = (at: number) => (little ? u16le(b, start + at) : u16be(b, start + at));
+  const read32 = (at: number) =>
+    little ? u16le(b, start + at) + u16le(b, start + at + 2) * 65536 : u32be(b, start + at);
+  if (read16(2) !== 42) return null;
+  const ifd = read32(4);
+  if (start + ifd + 2 > end) return null;
+  const count = Math.min(256, read16(ifd));
+  for (let i = 0; i < count; i++) {
+    const entry = ifd + 2 + i * 12;
+    if (start + entry + 12 > end) break;
+    if (read16(entry) === 0x0112) {
+      if (read16(entry + 2) === 3 && read32(entry + 4) === 1) {
+        const value = read16(entry + 8);
+        if (value >= 1 && value <= 8) return value;
+      }
+      return null;
+    }
+  }
+  return null;
+}
+
+/** Extracts EXIF orientation (1..8) from JPEG APP1 or WebP EXIF chunks. Defaults to 1. */
+export function exifOrientation(b: Uint8Array): number {
+  if (startsWith(b, [0xff, 0xd8])) {
+    let i = 2;
+    while (i + 4 <= b.length) {
+      if (b[i] !== 0xff) break;
+      while (b[i] === 0xff && i < b.length) i++;
+      const marker = b[i] ?? 0;
+      i++;
+      if (marker === 0x01 || (marker >= 0xd0 && marker <= 0xd8)) continue;
+      if (marker === 0xd9 || marker === 0xda) break;
+      const length = u16be(b, i);
+      if (length < 2 || i + length > b.length) break;
+      if (marker === 0xe1 && ascii(b, i + 2, "Exif\0\0")) {
+        const found = tiffOrientation(b, i + 8, i + length);
+        if (found !== null) return found;
+      }
+      i += length;
+    }
+    return 1;
+  }
+  if (b.length >= 12 && ascii(b, 0, "RIFF") && ascii(b, 8, "WEBP")) {
+    let i = 12;
+    while (i + 8 <= b.length) {
+      const len = u16le(b, i + 4) + u16le(b, i + 6) * 65536;
+      const start = i + 8;
+      const end = start + len;
+      if (end > b.length) break;
+      if (ascii(b, i, "EXIF")) {
+        const tiffStart = ascii(b, start, "Exif\0\0") ? start + 6 : start;
+        return tiffOrientation(b, tiffStart, end) ?? 1;
+      }
+      i = end + (len & 1);
+    }
+  }
+  return 1;
+}
+
+/** Dimensions after applying EXIF orientation (swaps width and height for orientations 5..8). */
+export function orientedSize(
+  size: { readonly width: number; readonly height: number },
+  bytes: Uint8Array,
+): { readonly width: number; readonly height: number } {
+  const orientation = exifOrientation(bytes);
+  return orientation >= 5 && orientation <= 8
+    ? { width: size.height, height: size.width }
+    : { width: size.width, height: size.height };
+}
+
 export const MEDIA_TYPES = ["image/png", "image/jpeg", "image/webp", "image/gif"] as const;
 export type MediaType = (typeof MEDIA_TYPES)[number];
 

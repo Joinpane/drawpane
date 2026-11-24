@@ -8,6 +8,7 @@
  * downscaled copy (made once, also off the main thread), which is both
  * sharper and cheaper than shrinking a full-size bitmap every frame.
  */
+import { type MediaPreviewSize, parseMediaPreviewSize } from "@drawpane/model";
 import type { Point, Rect } from "./geometry";
 
 export type ScaleMode = "fill" | "fit" | "tile" | "stretch" | "crop";
@@ -177,8 +178,20 @@ async function defaultResize(bitmap: ImageBitmap, width: number, height: number)
   });
 }
 
-export function mediaUrl(sha: string): string {
-  return `/api/media/${sha}`;
+export interface EncodedImage {
+  readonly blob: Blob;
+  readonly size?: Size;
+  /** Preview long-side size served by the Worker, or undefined when full original bytes were returned. */
+  readonly preview?: MediaPreviewSize;
+}
+
+export interface EncodedImageOptions {
+  /** Request a fixed server-generated preview tier instead of the full original. */
+  readonly preview?: MediaPreviewSize;
+}
+
+export function mediaUrl(sha: string, preview?: MediaPreviewSize): string {
+  return preview ? `/api/media/${sha}?w=${preview}` : `/api/media/${sha}`;
 }
 
 function defaultLoader(
@@ -308,12 +321,31 @@ export class ImageCache {
   }
 
   /** Reads stored media without populating the canvas renderer's decoded cache. */
-  async encoded(sha: string, signal: AbortSignal): Promise<{ blob: Blob; size?: Size }> {
+  async encoded(
+    sha: string,
+    signal: AbortSignal,
+    options?: EncodedImageOptions,
+  ): Promise<EncodedImage> {
     const local = this.#localSources.get(sha);
     if (local) return local;
-    const response = await fetch(this.#url(sha), { credentials: "same-origin", signal });
+    const base = this.#url(sha);
+    const url = options?.preview
+      ? `${base}${base.includes("?") ? "&" : "?"}w=${options.preview}`
+      : base;
+    const response = await fetch(url, { credentials: "same-origin", signal });
     if (!response.ok) throw new Error(`Image ${sha} answered ${response.status}`);
-    return { blob: await response.blob() };
+    const headerW = Number(response.headers.get("x-image-width"));
+    const headerH = Number(response.headers.get("x-image-height"));
+    const size =
+      Number.isFinite(headerW) && headerW > 0 && Number.isFinite(headerH) && headerH > 0
+        ? { width: headerW, height: headerH }
+        : undefined;
+    const preview = parseMediaPreviewSize(response.headers.get("x-image-preview"));
+    return {
+      blob: await response.blob(),
+      ...(size ? { size } : {}),
+      ...(preview ? { preview } : {}),
+    };
   }
 
   /** Adds an image decoded elsewhere (a file just dropped), so it draws before its upload ends. */

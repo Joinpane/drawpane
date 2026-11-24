@@ -342,6 +342,9 @@ importers:
       '@drawpane/editor':
         specifier: workspace:*
         version: link:../../packages/editor
+      '@drawpane/engine':
+        specifier: workspace:*
+        version: link:../../packages/engine
       '@drawpane/model':
         specifier: workspace:*
         version: link:../../packages/model

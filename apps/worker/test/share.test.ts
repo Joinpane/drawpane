@@ -1,7 +1,12 @@
 import { env } from "cloudflare:test";
-import type { NodeRecord, Op } from "@drawpane/model";
+import { type NodeRecord, type Op, sniffImage } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
+import phoneJpegUrl from "./fixtures/progressive-4032.jpg?inline";
 import { Browser, openSocket, openSocketAt, signedInUser } from "./helpers";
+
+const PHONE_JPEG = Uint8Array.from(atob(phoneJpegUrl.slice(phoneJpegUrl.indexOf(",") + 1)), (c) =>
+  c.charCodeAt(0),
+);
 
 async function sharedFile() {
   const owner = await signedInUser("Ana");
@@ -181,5 +186,20 @@ describe("prototype links", () => {
     expect(new Uint8Array(await image.arrayBuffer())).toEqual(new Uint8Array([1, 2, 3]));
     expect((await guest.fetch(`/api/share/${token}/media/${theirs}`)).status).toBe(404);
     expect((await guest.fetch(`/api/share/${token}/media/nope`)).status).toBe(404);
+
+    // Previews work through share links too (lazy generation + size validation).
+    const big = "c".repeat(64);
+    await env.DB.prepare(
+      "INSERT INTO media (sha, team_id, mime, width, height, bytes, created_at) VALUES (?, ?, 'image/jpeg', 4032, 3024, ?, ?)",
+    )
+      .bind(big, teamId, PHONE_JPEG.byteLength, now)
+      .run();
+    await env.FILES.put(`media/${big}`, PHONE_JPEG);
+    const preview = await guest.fetch(`/api/share/${token}/media/${big}?w=256`);
+    expect(preview.status).toBe(200);
+    expect(preview.headers.get("content-type")).toBe("image/webp");
+    expect(preview.headers.get("x-image-preview")).toBe("256");
+    expect(sniffImage(new Uint8Array(await preview.arrayBuffer()))?.mime).toBe("image/webp");
+    expect((await guest.fetch(`/api/share/${token}/media/${big}?w=500`)).status).toBe(400);
   });
 });

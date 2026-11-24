@@ -5,6 +5,7 @@
 //   dist/compute/  the opt-in WebGPU compute experiment               at most 1 MB
 //   dist/webgl/    the WebGL2 backend (naga + GL) and CPU (lazy)      at most 1.45 MB
 //   dist/decoder/  image decoding for headless exports               at most 200 KB
+//   dist/preview/  image resizing and WebP encoding for previews     at most 350 KB
 // The toolchain is this package's mise.toml (Rust with the wasm32 target, wasm-bindgen).
 // ENGINE_SKIP_BUILD=1 keeps whatever dist/ holds (CI restores it from its cache).
 import { execFileSync } from "node:child_process";
@@ -21,6 +22,7 @@ const BUDGETS = {
   compute: 1000 * 1000,
   webgl: 1450 * 1000,
   decoder: 200 * 1000,
+  preview: 350 * 1000,
 };
 
 /**
@@ -45,6 +47,14 @@ const all = [
     crate: "drawpane-image-decoder",
     entry: "decodeImage",
     output: "image_decoder",
+  },
+  {
+    name: "preview",
+    features: [],
+    rustflags: `-C link-arg=--max-memory=${32 << 20}`,
+    crate: "drawpane-image-preview",
+    entry: "makePreview",
+    output: "image_preview",
   },
 ];
 

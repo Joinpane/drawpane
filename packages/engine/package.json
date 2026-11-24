@@ -12,6 +12,7 @@
     "./compare": "./src/compare.ts",
     "./browser": "./src/browser.ts",
     "./decode": "./src/decode.ts",
+    "./preview": "./src/preview.ts",
     "./node": "./src/node.ts",
     "./browser-glue": {
       "types": "./src/glue.d.ts",
@@ -35,6 +36,11 @@
       "default": "./dist/decoder/image_decoder.js"
     },
     "./decoder.wasm": "./dist/decoder/image_decoder_bg.wasm",
+    "./preview-glue": {
+      "types": "./src/preview-glue.d.ts",
+      "default": "./dist/preview/image_preview.js"
+    },
+    "./preview.wasm": "./dist/preview/image_preview_bg.wasm",
     "./browser.wasm": "./dist/browser/engine_bg.wasm",
     "./webgl.wasm": "./dist/webgl/engine_bg.wasm"
   },

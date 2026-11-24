@@ -6,7 +6,11 @@ license = "MPL-2.0"
 publish = false
 
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = ["wasm"]
+wasm = []
 
 [dependencies]
 gif = { version = "0.14", default-features = false, features = ["std"] }

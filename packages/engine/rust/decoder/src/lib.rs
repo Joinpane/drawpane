@@ -4,6 +4,7 @@ use std::io::Cursor;
 use wasm_bindgen::prelude::*;
 
 const MIB: usize = 1 << 20;
+#[cfg(feature = "wasm")]
 const MAX_MEMORY: usize = 16 * MIB;
 // Bound total scan work before calling jpeg-decoder, which walks every block of a
 // scan even when a tiny crafted file repeats empty SOS markers. Typical progressive
@@ -13,6 +14,7 @@ const MAX_MEMORY: usize = 16 * MIB;
 const MAX_JPEG_SCANS: usize = 256;
 const MAX_JPEG_SCAN_BLOCKS: u64 = 32_000_000;
 
+#[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = memoryBytes)]
 pub fn memory_bytes() -> u32 {
     #[cfg(target_arch = "wasm32")]
@@ -351,7 +353,44 @@ fn jpeg_scaled(natural: (u32, u32), target: (u32, u32), bytes: &[u8], room: usiz
     Ok(Some(resample(&data, (w.into(), h.into()), target, channels)))
 }
 
+/// Decodes and resamples an image into straight RGBA8 inside `budget` bytes of working memory.
+/// Returns `Ok(None)` when the image or target exceeds memory or scan budgets.
+pub fn decode_rgba(
+    natural: (u32, u32),
+    target: (u32, u32),
+    bytes: &[u8],
+    budget: usize,
+    max_natural_side: u32,
+) -> Result<Option<Vec<u8>>, String> {
+    let (width, height) = natural;
+    let (output_width, output_height) = target;
+    if width == 0
+        || height == 0
+        || width.max(height) > max_natural_side
+        || output_width == 0
+        || output_height == 0
+        || output_width > width
+        || output_height > height
+    {
+        return Err("image dimensions exceed the decoder's limit".into());
+    }
+    let room = budget.saturating_sub(bytes.len() + 2 * MIB);
+    if pixels(output_width, output_height) * 4 > room {
+        return Ok(None);
+    }
+    let format = image::guess_format(bytes).map_err(|e| e.to_string())?;
+    let result = match format {
+        ImageFormat::Png => png_rows(natural, target, bytes, room),
+        ImageFormat::Jpeg => jpeg_scaled(natural, target, bytes, room),
+        ImageFormat::Gif => gif_rows(natural, target, bytes, room),
+        ImageFormat::WebP => full_image(natural, target, bytes, room, ImageFormat::WebP),
+        _ => return Err("unsupported image format".into()),
+    };
+    result.map_err(|e| format!("{e:?}"))
+}
+
 /// A missing result asks the host for a smaller level. Invalid input returns an error.
+#[cfg(feature = "wasm")]
 #[wasm_bindgen(js_name = decodeImage)]
 pub fn decode_image(
     width: u32,

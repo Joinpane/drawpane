@@ -14,13 +14,28 @@
  * carry scripts, external references and CSS, and serving one from this
  * origin would let it run with the user's session.
  */
-import { MEDIA_MAX_BYTES, mediaProblem, type SniffedImage, sniffImage } from "@drawpane/model";
+import {
+  MEDIA_MAX_BYTES,
+  type MediaPreviewSize,
+  mediaProblem,
+  orientedSize,
+  parseMediaPreviewSize,
+  type SniffedImage,
+  sniffImage,
+} from "@drawpane/model";
 import { Hono } from "hono";
 import { requireUser } from "../auth/session";
 import type { AppContext } from "../env";
 import { readCapped, sha256 } from "../lib/body";
 import { badRequest, notFound, unsupportedMedia } from "../lib/http";
 import { requireFileRole } from "./access";
+import {
+  type GeneratedPreview,
+  generateMediaPreview,
+  mediaPreviewKey,
+  previewBucketFor,
+  previewTiersFor,
+} from "./media-preview";
 
 /** Thumbnails are at most this many bytes. */
 export const THUMBNAIL_MAX_BYTES = 1024 * 1024;
@@ -42,10 +57,195 @@ export interface MediaInfo {
 
 export const mediaKey = (sha: string) => `media/${sha}`;
 export const thumbnailKey = (fileId: string) => `files/${fileId}/thumbnail`;
+export { mediaPreviewKey } from "./media-preview";
 
 function etagMatches(request: Request, etag: string): boolean {
   const header = request.headers.get("if-none-match");
   return !!header && header.split(",").some((t) => t.trim().replace(/^W\//, "") === etag);
+}
+
+/** Pre-generates and stores WebP previews for a newly uploaded original. Never throws. */
+async function storeMediaPreviews(
+  files: R2Bucket,
+  sha: string,
+  image: { readonly width: number; readonly height: number; readonly bytes: Uint8Array },
+): Promise<void> {
+  for (const size of previewTiersFor(image.width, image.height)) {
+    const key = mediaPreviewKey(sha, size);
+    try {
+      const preview = generateMediaPreview(image, size);
+      if (preview) {
+        await putCachedPreview(files, key, preview);
+      } else {
+        await files.put(key, new Uint8Array(0), { customMetadata: { fallback: "1" } });
+      }
+    } catch {
+      // Preview generation is best-effort: never fail an upload if encoding fails.
+    }
+  }
+}
+
+async function putCachedPreview(
+  files: R2Bucket,
+  key: string,
+  preview: GeneratedPreview,
+): Promise<void> {
+  await files.put(key, preview.bytes, {
+    httpMetadata: { contentType: "image/webp", cacheControl: IMMUTABLE },
+    customMetadata: {
+      naturalWidth: String(preview.naturalWidth),
+      naturalHeight: String(preview.naturalHeight),
+      width: String(preview.width),
+      height: String(preview.height),
+    },
+  });
+}
+
+function previewHeaders(
+  bucket: MediaPreviewSize,
+  etag: string,
+  cacheControl: string,
+  naturalWidth: string,
+  naturalHeight: string,
+  contentType: string,
+  extraHeaders?: Record<string, string>,
+): Headers {
+  return new Headers({
+    "cache-control": cacheControl,
+    etag,
+    "content-type": contentType,
+    "content-security-policy": MEDIA_CSP,
+    "x-image-preview": String(bucket),
+    "x-image-width": naturalWidth,
+    "x-image-height": naturalHeight,
+    ...(extraHeaders ?? {}),
+  });
+}
+
+/**
+ * Serves either the original image or a fixed-size WebP preview (`?w=256` or `?w=1024`).
+ * Previews missing from R2 (pre-existing uploads) are generated lazily and cached in R2.
+ * Falls back to serving the original whenever a preview cannot be produced.
+ */
+export async function serveMedia(
+  request: Request,
+  files: R2Bucket,
+  row: {
+    readonly sha: string;
+    readonly mime: string;
+    readonly width: number;
+    readonly height: number;
+  },
+  requestedParam: string | undefined,
+  options: { readonly cacheControl: string; readonly extraHeaders?: Record<string, string> },
+): Promise<Response> {
+  const origEtag = `"${row.sha}"`;
+  const serveOriginal = async (prefetched?: Uint8Array): Promise<Response> => {
+    const headers = new Headers({
+      "cache-control": options.cacheControl,
+      etag: origEtag,
+      "content-type": row.mime,
+      "content-security-policy": MEDIA_CSP,
+      ...(options.extraHeaders ?? {}),
+    });
+    // PNG and GIF headers always reflect display orientation; JPEG/WebP may carry EXIF rotation.
+    if (prefetched) {
+      const natural = orientedSize(row, prefetched);
+      headers.set("x-image-width", String(natural.width));
+      headers.set("x-image-height", String(natural.height));
+    } else if (row.mime === "image/png" || row.mime === "image/gif") {
+      headers.set("x-image-width", String(row.width));
+      headers.set("x-image-height", String(row.height));
+    }
+    if (etagMatches(request, origEtag)) return new Response(null, { status: 304, headers });
+    if (prefetched) {
+      headers.set("content-length", String(prefetched.byteLength));
+      return new Response(prefetched, { headers });
+    }
+    const object = await files.get(mediaKey(row.sha));
+    if (!object) throw notFound("That image is missing from storage. Upload it again.");
+    headers.set("content-length", String(object.size));
+    return new Response(object.body, { headers });
+  };
+
+  if (requestedParam === undefined) return serveOriginal();
+  const requested = parseMediaPreviewSize(requestedParam);
+  if (!requested) throw badRequest("Preview size must be 256 or 1024.");
+
+  const bucket = previewBucketFor(row.width, row.height, requested);
+  const previewEtag = `"${row.sha}-p${bucket}"`;
+  if (etagMatches(request, previewEtag)) {
+    const headers = new Headers({
+      "cache-control": options.cacheControl,
+      etag: previewEtag,
+      "content-type": "image/webp",
+      "content-security-policy": MEDIA_CSP,
+      "x-image-preview": String(bucket),
+      ...(options.extraHeaders ?? {}),
+    });
+    return new Response(null, { status: 304, headers });
+  }
+
+  const key = mediaPreviewKey(row.sha, bucket);
+  const cached = await files.get(key);
+  if (cached) {
+    if (cached.size > 0) {
+      const headers = previewHeaders(
+        bucket,
+        previewEtag,
+        options.cacheControl,
+        cached.customMetadata?.naturalWidth ?? String(row.width),
+        cached.customMetadata?.naturalHeight ?? String(row.height),
+        cached.httpMetadata?.contentType ?? "image/webp",
+        options.extraHeaders,
+      );
+      headers.set("content-length", String(cached.size));
+      return new Response(cached.body, { headers });
+    }
+    await cached.body.cancel();
+    if (cached.customMetadata?.fallback === "1") return serveOriginal();
+  }
+
+  // Lazy generation for images uploaded before previews existed (no migration needed).
+  const original = await files.get(mediaKey(row.sha));
+  if (!original) throw notFound("That image is missing from storage. Upload it again.");
+  const origBytes = new Uint8Array(await original.arrayBuffer());
+  let preview: GeneratedPreview | null = null;
+  let failed = false;
+  try {
+    preview = generateMediaPreview(
+      { width: row.width, height: row.height, bytes: origBytes },
+      bucket,
+    );
+  } catch {
+    failed = true;
+  }
+  if (preview) {
+    try {
+      await putCachedPreview(files, key, preview);
+    } catch {
+      // Serving the freshly generated preview still succeeds if caching fails.
+    }
+    const headers = previewHeaders(
+      bucket,
+      previewEtag,
+      options.cacheControl,
+      String(preview.naturalWidth),
+      String(preview.naturalHeight),
+      "image/webp",
+      options.extraHeaders,
+    );
+    headers.set("content-length", String(preview.bytes.byteLength));
+    return new Response(preview.bytes, { headers });
+  }
+  if (!failed) {
+    try {
+      await files.put(key, new Uint8Array(0), { customMetadata: { fallback: "1" } });
+    } catch {
+      // Best-effort sentinel.
+    }
+  }
+  return serveOriginal(origBytes);
 }
 
 export const media = new Hono<AppContext>()
@@ -68,6 +268,11 @@ export const media = new Hono<AppContext>()
       await c.env.FILES.put(key, bytes, {
         httpMetadata: { contentType: image.mime, cacheControl: IMMUTABLE },
         sha256: sha,
+      });
+      await storeMediaPreviews(c.env.FILES, sha, {
+        width: image.width,
+        height: image.height,
+        bytes,
       });
     }
     const result = await c.env.DB.prepare(
@@ -104,18 +309,9 @@ export const media = new Hono<AppContext>()
   .get("/media/:sha", async (c) => {
     const user = requireUser(c);
     const row = await readableMedia(c.env.DB, user.id, c.req.param("sha"));
-    const etag = `"${row.sha}"`;
-    const headers = new Headers({
-      "cache-control": IMMUTABLE,
-      etag,
-      "content-type": row.mime,
-      "content-security-policy": MEDIA_CSP,
+    return serveMedia(c.req.raw, c.env.FILES, row, c.req.query("w"), {
+      cacheControl: IMMUTABLE,
     });
-    if (etagMatches(c.req.raw, etag)) return new Response(null, { status: 304, headers });
-    const object = await c.env.FILES.get(mediaKey(row.sha));
-    if (!object) throw notFound("That image is missing from storage. Upload it again.");
-    headers.set("content-length", String(object.size));
-    return new Response(object.body, { headers });
   })
 
   .put("/files/:fileId/thumbnail", async (c) => {

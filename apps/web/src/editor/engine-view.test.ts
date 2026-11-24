@@ -1212,4 +1212,92 @@ describe("EngineView lifecycle and CPU job regressions (PR #233)", () => {
         origRaf;
     }
   });
+
+  it("never reports exact while showing a preview stand-in or after an upgrade fails", async () => {
+    vi.stubGlobal("navigator", {
+      gpu: { requestAdapter: async () => ({ info: { description: "NVIDIA T4" } }) },
+    });
+    vi.stubGlobal("createImageBitmap", async (_blob: Blob, o: ImageBitmapOptions) => ({
+      width: o.resizeWidth ?? 3093,
+      height: o.resizeHeight ?? 2247,
+      close() {},
+    }));
+    let holdFull = true;
+    let failFull = false;
+    const fullResolvers: Array<() => void> = [];
+    const encodedCalls: Array<256 | 1024 | "full"> = [];
+    let version = 0;
+    const editor = { scene: {}, doc: { version: 1 } } as never;
+    const images = {
+      subscribe: () => () => {},
+      natural: () => null,
+      get: () => null,
+      encodedVersion: () => version,
+      encoded: async (_ref: string, _signal: AbortSignal, opts?: { preview?: 256 | 1024 }) => {
+        const tier = opts?.preview ?? "full";
+        encodedCalls.push(tier);
+        if (tier === "full" && holdFull) {
+          await new Promise<void>((resolve) => fullResolvers.push(resolve));
+        }
+        if (tier === "full" && failFull) throw new Error("network down");
+        return {
+          blob: new Blob([String(tier)]),
+          size: { width: 3093, height: 2247 },
+          ...(opts?.preview ? { preview: opts.preview } : {}),
+        };
+      },
+    } as never;
+
+    state.imageDemands = [{ ref: "hero", visible: true, span: { width: 1500, height: 1100 } }];
+    const view = await EngineView.create(
+      new FakeCanvas(true) as unknown as HTMLCanvasElement,
+      editor,
+      {} as never,
+      images,
+      "engine",
+    );
+    const draw = () =>
+      view?.draw("page", { zoom: 1, x: 0, y: 0 }, 800, 600, 1, "#ffffff", {
+        hidden: new Set(),
+        whole: null,
+      });
+
+    try {
+      // Initial draw starts preview fetch -> not exact.
+      expect(draw()?.exact).toBe(false);
+      await vi.waitFor(() => {
+        const res = draw();
+        expect(encodedCalls).toContain("full");
+        expect(res?.exact).toBe(false);
+      });
+      expect(view?.last.exact).toBe(false);
+
+      // If full upgrade fails, frame settles with preview visible, reducedImages === 1, exact === false.
+      failFull = true;
+      holdFull = false;
+      for (const done of fullResolvers.splice(0)) done();
+      await vi.waitFor(() => {
+        const res = draw();
+        expect(res?.settled).toBe(true);
+        expect(view?.reducedImages).toBe(1);
+        expect(res?.exact).toBe(false);
+        expect(view?.last.exact).toBe(false);
+      });
+
+      // When a new version arrives and full succeeds, frame transitions to exact === true.
+      failFull = false;
+      version = 1;
+      await vi.waitFor(() => {
+        const res = draw();
+        expect(view?.reducedImages).toBe(0);
+        expect(res?.exact).toBe(true);
+        expect(view?.last.exact).toBe(true);
+      });
+    } finally {
+      holdFull = false;
+      for (const done of fullResolvers.splice(0)) done();
+      state.imageDemands = [];
+      view?.dispose();
+    }
+  });
 });

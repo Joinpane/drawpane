@@ -1,5 +1,11 @@
-import { describe, expect, it, vi } from "vitest";
-import { ImageCache, imagePlacement, type LoadedImage, layoutImageRow } from "../src/images";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import {
+  ImageCache,
+  imagePlacement,
+  type LoadedImage,
+  layoutImageRow,
+  mediaUrl,
+} from "../src/images";
 
 describe("imagePlacement", () => {
   const box = { width: 200, height: 100 };
@@ -269,4 +275,52 @@ describe("ImageCache", () => {
     await ready;
     expect(done).toBe(true);
   });
+
+  it("passes ?w= only when preview is requested and always uses originals for default loads and exports", async () => {
+    const requested: string[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL) => {
+        const url = String(input);
+        requested.push(url);
+        const w = new URL(url, "https://drawpane.test").searchParams.get("w");
+        return new Response(new Uint8Array([1, 2, 3]), {
+          status: 200,
+          headers: {
+            "content-type": w ? "image/webp" : "image/png",
+            "x-image-width": "3000",
+            "x-image-height": "2000",
+            ...(w ? { "x-image-preview": w } : {}),
+          },
+        });
+      }),
+    );
+    vi.stubGlobal("createImageBitmap", async () => bitmap(3000, 2000));
+    try {
+      expect(mediaUrl("abc")).toBe("/api/media/abc");
+      expect(mediaUrl("abc", 256)).toBe("/api/media/abc?w=256");
+      expect(mediaUrl("abc", 1024)).toBe("/api/media/abc?w=1024");
+
+      const cache = new ImageCache();
+      const signal = new AbortController().signal;
+      const small = await cache.encoded("abc", signal, { preview: 256 });
+      expect(small.preview).toBe(256);
+      expect(small.size).toEqual({ width: 3000, height: 2000 });
+
+      // Export path calls encoded(sha, signal) with no preview option -> full original.
+      const original = await cache.encoded("abc", signal);
+      expect(original.preview).toBeUndefined();
+      expect(original.size).toEqual({ width: 3000, height: 2000 });
+
+      // Default canvas/export loader (get / ready) also fetches the bare original URL.
+      await cache.ready(["abc"]);
+      expect(requested).toEqual(["/api/media/abc?w=256", "/api/media/abc", "/api/media/abc"]);
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+afterEach(() => {
+  vi.unstubAllGlobals();
 });

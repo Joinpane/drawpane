@@ -19,12 +19,11 @@ import type { AppContext, Env } from "../env";
 import { bytesToBase64Url, randomToken } from "../lib/crypto";
 import { notFound } from "../lib/http";
 import { type FileRow, requireFileRole } from "./access";
-import { mediaKey } from "./media";
+import { serveMedia } from "./media";
 
 const encoder = new TextEncoder();
 const TOKEN = /^([A-Za-z0-9_-]{16})\.([A-Za-z0-9_-]{22})$/;
 const SHA = /^[0-9a-f]{64}$/;
-const MEDIA_CSP = "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; sandbox";
 
 async function mac(secret: string, id: string): Promise<string> {
   const key = await crypto.subtle.importKey(
@@ -151,22 +150,14 @@ export const share = new Hono<AppContext>()
     const sha = c.req.param("sha");
     if (!shared || !SHA.test(sha)) throw notFound();
     const row = await c.env.DB.prepare(
-      "SELECT sha, mime FROM media WHERE sha = ? AND team_id = ? LIMIT 1",
+      "SELECT sha, mime, width, height FROM media WHERE sha = ? AND team_id = ? LIMIT 1",
     )
       .bind(sha, shared.file.team_id)
-      .first<{ sha: string; mime: string }>();
+      .first<{ sha: string; mime: string; width: number; height: number }>();
     if (!row) throw notFound();
-    const etag = `"${row.sha}"`;
     // Short-lived: turning the link off should stop images loading soon after.
-    const headers = new Headers({
-      "cache-control": "private, max-age=300",
-      etag,
-      "content-type": row.mime,
-      "content-security-policy": MEDIA_CSP,
-      "referrer-policy": "no-referrer",
+    return serveMedia(c.req.raw, c.env.FILES, row, c.req.query("w"), {
+      cacheControl: "private, max-age=300",
+      extraHeaders: { "referrer-policy": "no-referrer" },
     });
-    const object = await c.env.FILES.get(mediaKey(row.sha));
-    if (!object) throw notFound();
-    headers.set("content-length", String(object.size));
-    return new Response(object.body, { headers });
   });

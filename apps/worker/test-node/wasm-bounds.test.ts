@@ -77,9 +77,15 @@ describe("the bundled Wasm budgets", () => {
     const decoder = readFileSync(
       new URL("../../../packages/engine/dist/decoder/image_decoder_bg.wasm", import.meta.url),
     );
+    const preview = readFileSync(
+      new URL("../../../packages/engine/dist/preview/image_preview_bg.wasm", import.meta.url),
+    );
     const hb = readFileSync(require.resolve("harfbuzzjs/dist/harfbuzz.wasm"));
     expect(memoryLimits(engine)?.max).toBe((25 << 20) / 65_536);
     expect(memoryLimits(decoder)?.max).toBe((16 << 20) / 65_536);
+    // Preview runs in the main API Worker (no engine/decoder/HarfBuzz in that isolate) and
+    // disposes its instance after bursts over 16 MiB.
+    expect(memoryLimits(preview)?.max).toBe((32 << 20) / 65_536);
     expect(memoryLimits(withMemoryMaximum(hb, HARFBUZZ_MAX_BYTES))?.max).toBe(
       HARFBUZZ_MAX_BYTES / 65_536,
     );

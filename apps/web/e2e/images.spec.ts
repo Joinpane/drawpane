@@ -66,7 +66,9 @@ test.describe
 
       // A second tab has nothing cached: it loads the image from storage.
       const other = await instance.context.newPage();
-      const served = other.waitForResponse((r) => r.url().endsWith(`/api/media/${sha}`));
+      const served = other.waitForResponse(
+        (r) => new URL(r.url()).pathname === `/api/media/${sha}`,
+      );
       await other.goto(fileUrl);
       expect((await served).headers()["content-type"]).toBe("image/png");
       await expect(other.getByRole("treeitem", { name: /hero-photo/ })).toBeVisible();

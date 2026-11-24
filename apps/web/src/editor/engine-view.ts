@@ -2478,7 +2478,8 @@ export class EngineView {
       return NOT_DRAWN;
     }
     const cam: Camera = { zoom: camera.zoom, x: camera.x, y: camera.y, dpr };
-    const imagesExact = this.#updateImages(cam, width, height);
+    const imagesSettled = this.#updateImages(cam, width, height);
+    const imagesExact = imagesSettled && this.#images.reduced === 0;
     // While text in view is still to be sent whole, a frame draws only what nothing stands in
     // for (as while moving): a tile drawn now would be stale again when the text arrives, and the
     // time between frames sends the text first.
@@ -2966,7 +2967,8 @@ export class EngineView {
     const renderH = bounded.height;
     const fullResolution = renderW === width && renderH === height;
     const cam: Camera = { zoom: camera.zoom, x: camera.x, y: camera.y, dpr: bounded.dpr };
-    const imagesExact = this.#updateImages(cam, renderW, renderH);
+    const imagesSettled = this.#updateImages(cam, renderW, renderH);
+    const imagesExact = imagesSettled && this.#images.reduced === 0;
     const sceneKey = `${pageId}|${this.#cpuRevision}|${this.#imageVersion}|${width}x${height}|${renderW}x${renderH}|${cam.zoom}|${cam.x}|${cam.y}|${cam.dpr}|${background}`;
     const hasPendingText = this.#builder.pending > 0;
     const textFirst = this.#builder.pendingVisible > 0;
