@@ -1,6 +1,6 @@
 [workspace]
 members = ["decoder"]
-exclude = ["vendor/jpeg-decoder", "vendor/vello_shaders"]
+exclude = ["vendor/jpeg-decoder", "vendor/vello_shaders", "vendor/wgpu-core", "vendor/wgpu-hal"]
 resolver = "3"
 
 [package]
@@ -73,5 +73,9 @@ opt-level = 1
 
 # vello_gpu with Drawpane's patch (uploads through the queue on the web): see
 # vendor/vello_gpu/VENDORED.md.
+# wgpu-hal and wgpu-core with Drawpane's WebGL2 pass-overhead patches: see
+# vendor/wgpu-hal/VENDORED.md and vendor/wgpu-core/VENDORED.md.
 [patch.crates-io]
 vello_gpu = { path = "vendor/vello_gpu" }
+wgpu-hal = { path = "vendor/wgpu-hal" }
+wgpu-core = { path = "vendor/wgpu-core" }

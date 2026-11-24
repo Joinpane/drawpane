@@ -12,6 +12,7 @@ export function installGlSpy(): void {
   const totals = {
     binds: 0,
     canvasBinds: 0,
+    framebufferTexture2D: 0,
     draws: 0,
     clears: 0,
     uploads: 0,
@@ -36,6 +37,7 @@ export function installGlSpy(): void {
     if (framebuffer) totals.binds++;
     else totals.canvasBinds++;
   });
+  wrap("framebufferTexture2D", () => totals.framebufferTexture2D++);
   for (const name of [
     "drawArrays",
     "drawElements",
