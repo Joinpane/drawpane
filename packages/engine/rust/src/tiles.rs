@@ -312,9 +312,10 @@ pub struct TileCache {
     /// The next plan may draw the overview's tiles (set by the backend: frames at rest with a
     /// budget, and the time between frames; never a frame drawn at once, nor one in motion).
     pub bake_overview: bool,
-    /// What changed (page units) since the frame shown last was drawn (`note_changed`): its
-    /// pixels there are old, so while moving neither it nor a stale tile stands in there.
-    /// Forgotten once a frame shows nothing old (`frame_shown`).
+    /// What changed (page units) since an exact frame last showed it (`note_changed`): any
+    /// frame shown since may hold old pixels there (a stand-in laid at rest, a frame warped from
+    /// an older one), so while moving neither the last frame nor a stale tile stands in there.
+    /// An exact frame forgets what it covers (`shown_exact`), and nothing else does.
     changed: Vec<Rect>,
     /// An overview tile failed to draw (past a limit, say): none is kept until the cache clears.
     overview_refused: bool,
@@ -1131,12 +1132,25 @@ impl TileCache {
         }
     }
 
-    /// A frame was shown: when nothing in it is old (`fresh`: exact, drawn whole, or what changed
-    /// left out of it), what changed before it no longer matters.
-    pub fn frame_shown(&mut self, fresh: bool) {
-        if fresh {
-            self.changed.clear();
+    /// An exact frame was shown, under `view` on a frame of `size`: what changed within it is
+    /// drawn there now, so the frames after it hold nothing old there. What changed outside it
+    /// is kept: no exact frame has shown it yet (a frame laid at rest may still show it old).
+    pub fn shown_exact(&mut self, view: Affine, size: (u32, u32)) {
+        if self.changed.is_empty() || view.determinant().abs() <= 0.0 {
+            return;
         }
+        let shown = view
+            .inverse()
+            .transform_rect_bbox(Rect::new(0.0, 0.0, f64::from(size.0), f64::from(size.1)));
+        let changed = std::mem::take(&mut self.changed);
+        let left: Vec<Rect> = changed.into_iter().flat_map(|c| rect_minus(c, &[shown])).collect();
+        self.note_changed(&left);
+    }
+
+    /// What changed since an exact frame last showed it (`note_changed`), in page units.
+    #[doc(hidden)]
+    pub fn changed(&self) -> &[Rect] {
+        &self.changed
     }
 
     /// Whether anything changed in `page` (page units) since the last frame was drawn.
@@ -2087,7 +2101,6 @@ mod tests {
         let plan = c.plan(last.view, last.size, true, None, false, false).expect("plan");
         let comp = c.compose(&plan, None);
         assert!(!comp.under.is_empty(), "the last frame showed the overview");
-        c.frame_shown(true);
         let o = c.overview.map(|o| o.id).expect("overview");
         let grid = c.level(o).expect("level").grid();
         c.invalidate(o, &[grid.transform_rect_bbox(Rect::new(25.0, 25.0, 40.0, 40.0))]);
@@ -2106,13 +2119,39 @@ mod tests {
         // The last frame is laid only round what changed (in this frame's pixels, 25-40 at 9).
         let hole = comp.holes.iter().copied().reduce(|a, b| a.union(b)).expect("a hole");
         assert!(hole.contains_rect(Rect::new(225.0, 225.0, 360.0, 360.0)), "{hole:?}");
-        // At rest the last frame stands in as before, and once a frame showed nothing old the
-        // change is forgotten.
-        c.frame_shown(true);
+        // Once an exact frame showed it, the change is forgotten.
+        c.shown_exact(Affine::scale(9.0), (512, 512));
         let next = c
             .plan(Affine::scale(9.0), (512, 512), true, Some(last), false, false)
             .expect("plan");
         assert!(c.compose(&next, Some(last)).holes.is_empty());
+    }
+
+    /// What changed stays left out of the last frame while moving, through any number of frames
+    /// that aren't exact (stand-ins after a limit, a frame laid at rest from stale tiles), until
+    /// an exact frame shows it; an exact frame forgets only what it covers (final re-check of
+    /// #345: a second limited frame and a restarted pinch brought old pixels back).
+    #[test]
+    fn only_an_exact_frame_covering_a_change_forgets_it() {
+        let mut c = TileCache::new(512, 8);
+        c.begin([1.0; 4], 0);
+        c.moving = true;
+        let view = Affine::scale(2.0);
+        c.note_changed(&[Rect::new(10.0, 10.0, 20.0, 20.0), Rect::new(900.0, 10.0, 950.0, 20.0)]);
+        let holes = |c: &TileCache| c.holes(view, (2048, 512));
+        assert_eq!(holes(&c).len(), 2);
+        // An exact frame over the first change only (page 0-256 x 0-128 at 2x).
+        c.shown_exact(view, (512, 256));
+        let left = holes(&c);
+        assert_eq!(left.len(), 1, "{left:?}");
+        assert!(left[0].contains_rect(Rect::new(1800.0, 20.0, 1900.0, 40.0)), "{left:?}");
+        // One over half the second: what it didn't cover is kept.
+        c.shown_exact(view, (1850, 512));
+        let left = c.changed().to_vec();
+        assert_eq!(left, vec![Rect::new(925.0, 10.0, 950.0, 20.0)]);
+        c.shown_exact(Affine::IDENTITY, (1024, 64));
+        assert!(c.changed().is_empty());
+        assert!(holes(&c).is_empty());
     }
 
     /// The overview's tiles live apart from the frames' (`OVERVIEW_SLOT`): no frame's tile takes

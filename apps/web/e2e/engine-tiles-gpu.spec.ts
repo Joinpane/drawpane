@@ -81,6 +81,27 @@ function solid(
   return [...list.finish()];
 }
 
+/** A patch on `base`: 30 green 1,600 x 512 rectangles over the page, 150 path verbs in all. */
+function denseGreen(base: number): number[] {
+  const list = new ListWriter(base, base + 1);
+  for (let id = 1; id <= 30; id++) {
+    list.set(id, ROOT, {
+      flags: 0,
+      transform: [1, 0, 0, 1, 0, 0],
+      opacity: 1,
+      width: 1600,
+      height: 512,
+      coarseBelow: 0,
+      reach: 0,
+      unsupported: 0,
+      paths: [{ kind: "rect", w: 1600, h: 512, radii: [0, 0, 0, 0], smoothing: 0 }],
+      ops: [{ op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [0, 1, 0, 1] } }],
+      coarse: [],
+    });
+  }
+  return [...list.finish()];
+}
+
 function directStripes(count = 12): number[] {
   const list = new ListWriter(0xffffffff, 1);
   list.reset();
@@ -570,6 +591,208 @@ for (const build of ["browser", "webgl"] as const) {
       // Moving frames still draw (rough, the nearest the middle first): green shows before rest.
       expect(frames.slice(1, 4).some((f) => f?.pixel.join() === green.join())).toBe(true);
       expect(frames[4]).toMatchObject({ exact: true, pending: 0, pixel: green });
+    });
+
+    test("a second limited moving frame after an edit still leaves the old fill out", async ({
+      page,
+    }) => {
+      // No tile slots and a 6-verb limit: after the edit (150 verbs) every moving frame hits the
+      // limit and shows the last frame warped, round what changed. The frame it warps from is
+      // still the red one, so the second such frame must leave it out as the first did (final
+      // re-check of #345: it brought the red back).
+      await openEngine(page, build);
+      const rows = await page.evaluate(
+        async ({ before, patch }) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          const engine = new glue.Engine(0, 0);
+          const read = (out: {
+            ok: boolean;
+            message: string;
+            exact: boolean;
+            standin: boolean;
+            tiles_drawn: number;
+            free(): void;
+          }) => {
+            const row = {
+              ok: out.ok,
+              message: out.message,
+              exact: out.exact,
+              standin: out.standin,
+            };
+            const drawn = out.tiles_drawn;
+            out.free();
+            if (!row.ok) throw new Error(row.message);
+            return { exact: row.exact, standin: row.standin, drawn };
+          };
+          const requireOk = (out: { ok: boolean; message: string; free(): void }) => {
+            const { ok, message } = out;
+            out.free();
+            if (!ok) throw new Error(message);
+          };
+          try {
+            requireOk(engine.setLimit("tile_bytes", 0));
+            requireOk(engine.setLimit("frame_verbs", 6));
+            const gpu = await glue.createGpu(null, 0);
+            const attached = engine.attachGpu?.(gpu);
+            gpu.free();
+            if (!attached) throw new Error("no GPU entry points");
+            requireOk(attached);
+            const draw = async (scale: number, moving: boolean) => {
+              const out = engine.renderGpu?.(
+                1024,
+                256,
+                scale,
+                0,
+                0,
+                1,
+                new Float32Array([0, 0, 0, 1]),
+                moving,
+                moving ? 4 : 0,
+              );
+              if (!out) throw new Error("no renderGpu");
+              const row = read(out as never);
+              const pixels = await engine.gpuPixels?.();
+              if (!(pixels instanceof Uint8Array)) throw new Error("no read-back");
+              const at = (96 * 1024 + 250) * 4;
+              return { ...row, pixel: [...pixels.subarray(at, at + 4)] };
+            };
+            requireOk(engine.apply(new Uint8Array(before)));
+            const initial = await draw(1, false);
+            requireOk(engine.apply(new Uint8Array(patch)));
+            const first = await draw(0.99, true);
+            const second = await draw(0.98, true);
+            const third = await draw(0.97, true);
+            return { initial, first, second, third };
+          } finally {
+            engine.free();
+          }
+        },
+        { before: solid(6000), patch: denseGreen(1) },
+      );
+      expect(rows.initial).toMatchObject({ exact: true, pixel: red });
+      for (const moving of [rows.first, rows.second, rows.third]) {
+        expect(moving).toMatchObject({ exact: false, standin: true, drawn: 0 });
+        expect(
+          moving.pixel,
+          "a limited moving frame showed the fill from before the edit",
+        ).not.toEqual(red);
+      }
+    });
+
+    test("a pinch restarted after an inexact frame at rest never shows the old fill", async ({
+      page,
+    }) => {
+      // GPU completions held back, so nothing is drawn while moving. After the edit: a pinch
+      // frame, a composite-only frame at rest (laid from the stale red tile, inexact), then the
+      // pinch again. What changed must stay left out of the frame it warps from until an exact
+      // frame shows it (final re-check of #345: the restart showed the red).
+      await openEngine(page, build);
+      const rows = await page.evaluate(
+        async ({ before, patch, build }) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          let hold = false;
+          if (build === "browser") {
+            const proto = (window as unknown as { GPUQueue: { prototype: GPUQueue } }).GPUQueue
+              .prototype;
+            const done = proto.onSubmittedWorkDone;
+            proto.onSubmittedWorkDone = function (this: GPUQueue) {
+              return hold ? new Promise<undefined>(() => {}) : done.call(this);
+            };
+          } else {
+            const proto = WebGL2RenderingContext.prototype;
+            const status = proto.getSyncParameter;
+            const wait = proto.clientWaitSync;
+            proto.getSyncParameter = function (
+              this: WebGL2RenderingContext,
+              sync: WebGLSync,
+              pname: GLenum,
+            ) {
+              return hold && pname === this.SYNC_STATUS
+                ? this.UNSIGNALED
+                : status.call(this, sync, pname);
+            };
+            proto.clientWaitSync = function (
+              this: WebGL2RenderingContext,
+              sync: WebGLSync,
+              flags: GLbitfield,
+              timeout: GLuint64,
+            ) {
+              return hold ? this.TIMEOUT_EXPIRED : wait.call(this, sync, flags, timeout);
+            };
+          }
+          const engine = new glue.Engine(0, 0);
+          const requireOk = (out: { ok: boolean; message: string; free(): void }) => {
+            const { ok, message } = out;
+            out.free();
+            if (!ok) throw new Error(message);
+          };
+          try {
+            const gpu = await glue.createGpu(null, 0);
+            const attached = engine.attachGpu?.(gpu);
+            gpu.free();
+            if (!attached) throw new Error("no GPU entry points");
+            requireOk(attached);
+            const bg = new Float32Array([0, 0, 0, 1]);
+            const draw = (scale: number, moving: boolean, budget: number) => {
+              const out = engine.renderGpu?.(256, 256, scale, 0, 0, 1, bg, moving, budget);
+              if (!out) throw new Error("no renderGpu");
+              const row = {
+                ok: out.ok,
+                message: out.message,
+                exact: out.exact,
+                pending: out.pending,
+                drawn: out.tiles_drawn,
+              };
+              out.free();
+              if (!row.ok) throw new Error(row.message);
+              return { exact: row.exact, pending: row.pending, drawn: row.drawn };
+            };
+            const pixel = async () => {
+              const rgba = await engine.gpuPixels?.();
+              if (!(rgba instanceof Uint8Array)) throw new Error("no read-back");
+              const at = (100 * 256 + 100) * 4;
+              return [...rgba.subarray(at, at + 4)];
+            };
+            requireOk(engine.apply(new Uint8Array(before)));
+            hold = true;
+            const initial = draw(1, false, 0);
+            requireOk(engine.apply(new Uint8Array(patch)));
+            const pinch = draw(0.99, true, 4);
+            const settle = draw(1, false, -1);
+            const restart = draw(0.98, true, 4);
+            const again = draw(0.97, true, 4);
+            hold = false;
+            const restarted = await pixel();
+            const exact = draw(0.97, false, 0);
+            return {
+              initial,
+              pinch,
+              settle,
+              restart,
+              again,
+              restarted,
+              exact,
+              final: await pixel(),
+            };
+          } finally {
+            engine.free();
+          }
+        },
+        { before: solid(6000), patch: solid(6000, [0, 1, 0, 1], 1), build },
+      );
+      expect(rows.initial).toMatchObject({ exact: true });
+      for (const frame of [rows.pinch, rows.settle, rows.restart, rows.again]) {
+        expect(frame).toMatchObject({ exact: false, drawn: 0 });
+      }
+      expect(rows.restarted, "a restarted pinch showed the fill from before the edit").not.toEqual(
+        red,
+      );
+      expect(rows.exact).toMatchObject({ exact: true, pending: 0 });
+      expect(rows.final).toEqual([0, 255, 0, 255]);
     });
 
     test("a whole frame done in its first call reports the overview still to draw", async ({

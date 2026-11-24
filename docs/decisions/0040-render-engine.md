@@ -1995,11 +1995,14 @@ GPU work a frame queued had no bound, and input waited behind it.
   beneath the last frame (`Composite::under`). A stale tile (an edit, an image changed) never
   stands in nor is laid while moving: what it covered is drawn instead, until it's drawn again.
   At rest nothing changes: what nothing nearer stands in for is drawn.
-- **Nothing old shows while moving.** The cache keeps the page regions an edit changed since the
-  last frame drawn exact (`TileCache::note_changed`). While moving, the composite lays the last
-  frame round them (`Composite::holes`), and the plan treats them as uncovered, so they show only
-  what's drawn since: a tile drawn in this frame or an earlier one, or the overview redrawn. Until
-  then they show the background, never old content.
+- **Nothing old shows while moving.** The cache keeps the page regions an edit changed since an
+  exact frame last showed them (`TileCache::note_changed`). While moving, the composite lays the
+  last frame round them (`Composite::holes`), and the plan treats them as uncovered, so they show
+  only what's drawn since: a tile drawn in this frame or an earlier one, or the overview redrawn.
+  Until then they show the background, never old content. Only an exact frame forgets them, and
+  only what it covers (`TileCache::shown_exact`): any other frame may still hold old pixels there
+  (a stand-in after a limit warps the older frame it keeps, a frame laid at rest from stale
+  tiles), and the next moving frame may warp it.
 - **GPU work per moving frame is held.** A frame while moving starts at most 48 GPU passes of
   tile work (`MOVING_PASSES`: Vello renders, isolation scopes, and an estimate of the kernel
   passes each reader and blurred shadow runs; Figma caps a frame at about 255 framebuffer binds,

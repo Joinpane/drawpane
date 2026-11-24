@@ -3333,7 +3333,6 @@ impl Engine {
                 }
             }
             let comp = tiles.cache.compose(&plan, last);
-            tiles.cache.frame_shown(comp.exact);
             comp_exact = comp.exact;
             stats.pending = comp.pending;
             if !comp.complete {
@@ -3488,6 +3487,10 @@ impl Engine {
             size: (width, height),
         });
         tiles.last_scale = Some(scale);
+        // An exact frame forgets what changed within it (`TileCache::shown_exact`).
+        if stats.exact {
+            tiles.cache.shown_exact(view, (width, height));
+        }
         Ok(stats)
     }
 

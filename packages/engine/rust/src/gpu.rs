@@ -1403,9 +1403,6 @@ pub struct Gpu {
     motion_starved: crate::pacing::Starvation,
     /// The walk drawing now draws a rough stand-in (an overview tile, `exec::Backend::rough`).
     rough: bool,
-    /// The frame being made laid the last frame round what changed since (`Composite::holes`):
-    /// nothing old shows in it.
-    holes_laid: bool,
     overview_page: Option<OverviewPage>,
     /// Tile cooperatively paused mid-walk so no single frame stalls past its CPU budget.
     pending_tile: Option<PendingTile>,
@@ -2085,7 +2082,6 @@ impl Gpu {
             gpu_done: Arc::new(AtomicU64::new(0)),
             motion_starved: crate::pacing::Starvation::default(),
             rough: false,
-            holes_laid: false,
             overview_page: None,
             pending_tile: None,
             pending_whole: None,
@@ -3584,11 +3580,11 @@ impl Gpu {
                     self.gate_overflows = 0;
                 }
                 if gated.on_screen {
-                    if gated.generation == generation {
-                        self.shown = Some((gated.generation, gated.background, true));
-                    }
                     self.last_scale = Some(gated.last.view.as_coeffs()[0]);
                     self.last = Some(gated.last);
+                    if gated.generation == generation {
+                        self.set_shown(gated.generation, gated.background, true);
+                    }
                     verdict = GateFinish::Verified;
                 }
             }
@@ -3664,7 +3660,7 @@ impl Gpu {
             self.cur_page = true;
             self.last_scale = Some(staged.last.view.as_coeffs()[0]);
             self.last = Some(staged.last);
-            self.shown = Some((staged.generation, staged.background, true));
+            self.set_shown(staged.generation, staged.background, true);
             self.last_compute_used = true;
         }
         Ok(ComputeFinish::Frame(stats))
@@ -6522,7 +6518,7 @@ impl Gpu {
         self.last_scale = Some(view.as_coeffs()[0]);
         self.whole_samples = (padded.is_some() == samples.is_some()).then_some(samples);
         self.whole_reader_halo = self.reader_halo.is_some() && !moving;
-        self.shown = Some((generation, bg_bits, stats.exact));
+        self.set_shown(generation, bg_bits, stats.exact);
         Ok(stats)
     }
 
@@ -6560,7 +6556,6 @@ impl Gpu {
         {
             comp.base = Some(view * l.view.inverse());
             comp.holes = self.tiles.holes(view, (w, h));
-            self.holes_laid = self.tiles.moving;
         }
         let mut stats = DrawStats {
             standin: true,
@@ -7067,7 +7062,6 @@ impl Gpu {
                 job.direct = late.iter().any(|l| l.key == job.key);
             }
             let comp = self.tiles.compose(&plan, plan_last);
-            self.holes_laid = self.tiles.moving;
             stats.exact = comp.exact;
             stats.pending = comp.pending;
             // A frame shows a reduced effect when a visible tile holds one, whenever it was drawn.
@@ -7134,8 +7128,18 @@ impl Gpu {
         self.last = Some(Last { view, size: (w, h) });
         self.last_scale = Some(scale);
         self.whole_samples = None;
-        self.shown = Some((generation, bg_bits, stats.exact));
+        self.set_shown(generation, bg_bits, stats.exact);
         Ok(stats)
+    }
+
+    /// Records the frame shown (`last`, set first) as made at `generation` over `background`.
+    /// An exact one forgets what changed within it (`TileCache::shown_exact`): the frames after
+    /// it hold nothing old there.
+    fn set_shown(&mut self, generation: u64, background: [u32; 4], exact: bool) {
+        self.shown = Some((generation, background, exact));
+        if exact && let Some(l) = self.last {
+            self.tiles.shown_exact(l.view, l.size);
+        }
     }
 
     /// The frame last shown: the view it was drawn under and its size.
@@ -7330,10 +7334,6 @@ impl Gpu {
         pending_encoder: Option<wgpu::CommandEncoder>,
     ) -> Result<DrawStats> {
         let t1 = now();
-        // What changed before this frame no longer shows once it's in (`TileCache::frame_shown`):
-        // it's exact, or it left what changed out.
-        let laid = std::mem::take(&mut self.holes_laid);
-        self.tiles.frame_shown(stats.exact || laid);
         self.check()?;
         self.standin_frame = None;
         self.configure_surface(frame)?;
