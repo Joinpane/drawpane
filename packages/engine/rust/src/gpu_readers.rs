@@ -1482,17 +1482,7 @@ impl GpuReaders {
         draws: &mut u32,
     ) {
         for (view, group) in mips.mip_views[1..].iter().zip(&mips.downsample_groups) {
-            Self::encode_fullscreen_pass(
-                encoder,
-                draws,
-                "reader mip_down",
-                view,
-                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                None,
-                mip_pipe,
-                group,
-                None,
-            );
+            Self::encode_fullscreen_pass(encoder, draws, "reader mip_down", view, None, mip_pipe, group, None);
         }
     }
 
@@ -1566,7 +1556,6 @@ impl GpuReaders {
             &mut self.draws,
             "coarse backdrop downsample",
             &mips.mip_views[0],
-            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
             None,
             &self.coarse_down_pipe,
             &group,
@@ -1674,7 +1663,6 @@ impl GpuReaders {
             &mut self.draws,
             "reader copy_ext",
             &self.mip_pool[idx].mip_views[0],
-            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
             None,
             &self.copy_ext_pipe,
             &group,
@@ -2015,7 +2003,6 @@ impl GpuReaders {
                 &mut self.draws,
                 "reader frost_h",
                 &self.frosted_tmp.as_ref().expect("frosted_tmp").view,
-                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                 None,
                 &self.frost_pipe,
                 &group_h,
@@ -2044,7 +2031,6 @@ impl GpuReaders {
                 &mut self.draws,
                 "reader frost_v",
                 &self.mip_pool[frosted_idx].mip_views[0],
-                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                 None,
                 &self.frost_pipe,
                 &group_v,
@@ -2121,7 +2107,6 @@ impl GpuReaders {
                 &mut self.draws,
                 "reader down",
                 &self.low_0.as_ref().expect("low_0").view,
-                wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                 Some((0, 0, lw, lh)),
                 &self.down_pipe,
                 &group_down,
@@ -2154,7 +2139,6 @@ impl GpuReaders {
             &mut self.draws,
             "reader blur_x",
             &self.low_1.as_ref().expect("low_1").view,
-            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
             Some((0, 0, lw, lh)),
             &self.blur_x_pipe,
             &group_bx,
@@ -2172,7 +2156,6 @@ impl GpuReaders {
             &mut self.draws,
             "reader blur_y",
             &self.low_0.as_ref().expect("low_0").view,
-            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
             Some((0, 0, lw, lh)),
             &self.blur_y_pipe,
             &group_by,
@@ -2863,6 +2846,8 @@ impl GpuReaders {
         bg
     }
 
+    /// Encodes a fullscreen triangle pass with `LoadOp::Load`. Callers either overwrite the entire
+    /// target (`scissor: None`) or overwrite a scissored active region whose readers clamp inside it.
     #[allow(clippy::too_many_arguments)]
     #[inline(never)]
     fn encode_fullscreen_pass(
@@ -2870,7 +2855,6 @@ impl GpuReaders {
         draws: &mut u32,
         label: &str,
         dst_view: &wgpu::TextureView,
-        load: wgpu::LoadOp<wgpu::Color>,
         scissor: Option<(u32, u32, u32, u32)>,
         pipeline: &wgpu::RenderPipeline,
         group: &wgpu::BindGroup,
@@ -2883,7 +2867,7 @@ impl GpuReaders {
                 depth_slice: None,
                 resolve_target: None,
                 ops: wgpu::Operations {
-                    load,
+                    load: wgpu::LoadOp::Load,
                     store: wgpu::StoreOp::Store,
                 },
             })],
@@ -2917,7 +2901,6 @@ impl GpuReaders {
             draws,
             label,
             dst_view,
-            wgpu::LoadOp::Load,
             Some(scissor),
             pipeline,
             group,
