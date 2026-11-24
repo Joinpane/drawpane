@@ -10994,16 +10994,9 @@ impl Backend for Gpu {
                                 mask_tex.height,
                             )
                         };
-                        let mask_clear = [RectU16 {
-                            x0: 0,
-                            y0: 0,
-                            x1: cw as u16,
-                            y1: ch as u16,
-                        }];
                         let mut options = RenderOptions::default();
-                        options.target_init = TargetInit::Clear(ClearSettings::Rects {
+                        options.target_init = TargetInit::Clear(ClearSettings::Viewport {
                             color: AlphaColor::TRANSPARENT,
-                            rects: &mask_clear,
                         });
                         self.vello_render(true, &mask_view, Some(&mask_depth), options, "shadow cache")?;
                         let mut encoder = self.take_encoder("shadow cache");
@@ -11221,16 +11214,9 @@ impl Backend for Gpu {
                         mask_tex.height,
                     )
                 };
-                let mask_clear = [RectU16 {
-                    x0: 0,
-                    y0: 0,
-                    x1: mask_w as u16,
-                    y1: mask_h as u16,
-                }];
                 let mut options = RenderOptions::default();
-                options.target_init = TargetInit::Clear(ClearSettings::Rects {
+                options.target_init = TargetInit::Clear(ClearSettings::Viewport {
                     color: AlphaColor::TRANSPARENT,
-                    rects: &mask_clear,
                 });
                 self.vello_render(true, &mask_view, Some(&mask_depth), options, "shadow")?;
                 let mut encoder = self.take_encoder("shadow");
@@ -11352,16 +11338,9 @@ impl Backend for Gpu {
                     let blur_tex = self.scratch_blur.as_ref().expect("scratch_blur");
                     (blur_tex.view.clone(), blur_tex.view_id, blur_tex.width, blur_tex.height)
                 };
-                let mask_clear = [RectU16 {
-                    x0: 0,
-                    y0: 0,
-                    x1: sw as u16,
-                    y1: sh as u16,
-                }];
                 let mut options = RenderOptions::default();
-                options.target_init = TargetInit::Clear(ClearSettings::Rects {
+                options.target_init = TargetInit::Clear(ClearSettings::Viewport {
                     color: AlphaColor::TRANSPARENT,
-                    rects: &mask_clear,
                 });
                 self.vello_render(true, &mask_view, Some(&mask_depth), options, "shadow reduced")?;
                 let mut encoder = self.take_encoder("shadow reduced");
