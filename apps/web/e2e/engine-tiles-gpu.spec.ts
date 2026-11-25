@@ -1894,13 +1894,13 @@ for (const build of ["browser", "webgl"] as const) {
         build,
         solid(6000),
         [
-          ...Array.from({ length: 6 }, (_, i) => frame(`light ${i}`)),
+          ...Array.from({ length: 20 }, (_, i) => frame(`light ${i}`)),
           { apply: denseSquares(2048, 1024, 2) },
           frame("dense, first"),
         ],
         { tileBytes: 0 },
       );
-      expect(rows[5]).toMatchObject({ exact: true });
+      expect(rows[19]).toMatchObject({ exact: true });
       const first = rows.at(-1);
       expect(first?.exact, "the dense frame was drawn at once").toBe(false);
       expect(first?.drawn).toBeLessThan(8);
