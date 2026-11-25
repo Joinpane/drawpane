@@ -1934,6 +1934,11 @@ The WebGL2 module's budget goes from 1,400 to 1,450 KB gzipped. Slicing adds 6 K
 reasonable saving left in it: `wasm-opt -Os` makes it smaller raw but larger gzipped (1,396 to
 1,440 KB measured), and the module loads only where WebGPU can't.
 
+With #358 it goes from 1,450 to 1,475 KB. Main with #353 and #362 (`7cb0001b`) builds to
+1,446 KB; merged with #358's slices at rest, 1,452 KB. #352 (strip uploads, image fill-ins as
+refinements) adds about 13 KB more on main, which the step leaves room for. The compute module,
+which shares the code, stays under its 1,000 KB (992 KB merged with #358).
+
 ### Measured on a T4 (three paired runs against main with #330)
 
 Figma's G2 replayed in the file bench (`zoom, figma G2`, draft PR #331): the iOS kit's Control
