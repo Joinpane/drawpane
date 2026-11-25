@@ -2,7 +2,7 @@
 
 Runs apps/web's Playwright benchmark, parity, and e2e suites (`apps/web/e2e/**/*.spec.ts`)
 across Chromium, Firefox, and WebKit on a real NVIDIA GPU on [Modal](https://modal.com), from
-any machine, in one command. Canvas, WebGL2, and WebGPU timings from a machine without
+Linux or macOS, in one command. Canvas, WebGL2, and WebGPU timings from a machine without
 a GPU (like the development VM) say little about a designer's laptop. These do.
 
 ```sh
@@ -18,6 +18,9 @@ pnpm gpu-bench --browsers chromium,firefox,webkit --env ENGINE_PARITY_BACKENDS=a
 # A baseline and a change, back to back in the same container:
 pnpm gpu-bench --ref origin/main --ref HEAD -- bench/canvas.spec.ts
 
+# Five independent containers, each running the same baseline and change:
+pnpm gpu-bench --ref origin/main --ref HEAD --repeat 5 -- bench/canvas.spec.ts
+
 # A real file, with Chromium's GPU disabled too for comparison:
 pnpm gpu-bench --file <converted kit folder> --modes gpu,cpu -- bench/file.spec.ts
 
@@ -25,10 +28,12 @@ pnpm gpu-bench --file <converted kit folder> --modes gpu,cpu -- bench/file.spec.
 pnpm gpu-bench --kit 2ddaf31f5bb47444 --modes gpu -- bench/real-input.spec.ts
 ```
 
-Results land in `tools/gpu-bench/runs/<time>/` (ignored by git): `summary.md`,
-`result.json`, and per checkout and mode the gate's findings, the Playwright
-log and JSON report, `bench.json` (each test's `bench` annotation), CPU
-profiles with `--profile`, and Playwright's traces of failed tests.
+Results land in `tools/gpu-bench/runs/<time>/` (ignored by git). The combined
+`summary.md` and `result.json` report build time, container results, and total
+estimated cost. Each container has a directory (`c1/`, `c2/`, and so on) with
+its result and per-checkout artifacts. These include the gate's findings, the
+Playwright log and JSON report, `bench.json` (each test's `bench` annotation),
+CPU profiles with `--profile`, and Playwright's traces of failed tests.
 
 ## Setup
 
@@ -38,9 +43,8 @@ profiles with `--profile`, and Playwright's traces of failed tests.
 - Modal credentials: `modal token set`, or `MODAL_TOKEN_ID` and
   `MODAL_TOKEN_SECRET` in the environment (for example through a secret
   manager that runs the command with them set). Never commit them.
-- Nothing to build locally: the container installs the checkout's
-  dependencies and builds apps/web itself, so a run is the same from any
-  machine (this VM is arm64, Modal's GPUs are x86-64).
+- Modal builds the checkout on x86-64, so you can launch a benchmark from
+  an arm64 machine without building locally.
 
 ## Options
 
@@ -57,8 +61,12 @@ profiles with `--profile`, and Playwright's traces of failed tests.
 | `--kit <hash>` | Reuse a converted kit already in the private volume by its 16-digit content hash. Sets `BENCH_FILE` just like `--file`. |
 | `--env KEY=VALUE` | Passed to the bench, e.g. `BENCH_PAGES`, `BENCH_FRAMES`, `BENCH_PAGE_COUNT`. |
 | `--profile` | CPU profiles of each measurement (`BENCH_PROFILE`). |
-| `--timeout <min>` | Per Playwright run, default 45. The container's own timeout is that per run plus room for builds. |
+| `--timeout <min>` | Per Playwright run, default 45. The GPU container also allows time for setup and gates. |
 | `--attempts <n>` | Containers to try when the NVIDIA Vulkan driver doesn't load (default 3). |
+| `--repeat <n>` | Run the same ordered checkouts in N independent GPU containers in parallel (default 1). |
+| `--rebuild` | Recompile each unique source on CPU and refresh its cached outputs. |
+| `--max-cost <usd>` | Refuse estimates above this amount (default $5). |
+| `--spend` | Show today and this week's Modal workspace spend, with local GPU bench estimates as a fallback. |
 | `--out <dir>` | Output folder. |
 | `--doctor` | Only check the GPU stack on a small container: Vulkan, then the gate for the `gpu` and `webgpu` modes. No checkout is built. |
 
@@ -68,10 +76,14 @@ kit).
 
 ## What runs where
 
-`gpu_bench.py` is both the local runner and the Modal app. Locally it packs
-each checkout (about 13 MB compressed), uploads the kit if one is named, and calls the
-`bench` function once with every checkout. The function runs on a
-single-use container (4 cores, 12 GiB, the chosen GPU) whose image has:
+`gpu_bench.py` is both the local runner and the Modal app. The runner packs each
+checkout and hashes its file contents and build toolchain. For each cache miss,
+an 8-core, 16 GiB CPU container runs `pnpm install --frozen-lockfile` and
+`pnpm --filter @drawpane/web... build`, then publishes `packages/engine/dist`
+and `apps/web/dist` under `/builds/<key>/` in the private data Volume. Once
+every build is ready, the runner launches the GPU containers. Each single-use
+container (4 cores, 12 GiB, the chosen GPU) runs every checkout in order. Its
+image has:
 
 - Ubuntu 24.04, Node and pnpm at the repo's versions (`mise.toml`,
   `packageManager`; a checkout pinning others gets them installed at run
@@ -81,10 +93,10 @@ single-use container (4 cores, 12 GiB, the chosen GPU) whose image has:
   `libegl1` intact), plus `xvfb`, `mesa-utils`, and `openssl`;
 - the Vulkan loader and `vulkaninfo`.
 
-For each checkout it runs `pnpm install --frozen-lockfile` and `pnpm
---filter @drawpane/web build`, then for each mode the gate and `playwright
-test --project=bench`, with `CHROMIUM_PATH` pointing at a wrapper that adds
-the mode's flags. The tarball of `/out` comes back as the function's result.
+For each checkout the GPU container runs `pnpm install --frozen-lockfile` and
+restores the cached files onto local disk. For each mode it runs the gate before
+starting Playwright, with `CHROMIUM_PATH` pointing at a wrapper that adds the
+mode's flags. The tarball of `/out` comes back as the function's result.
 
 ### The NVIDIA driver and Vulkan
 
@@ -105,7 +117,7 @@ SwiftShader. The image installs `libglvnd0`, `libgl1`, `libglx0` and
 Every run still starts with `vulkaninfo`, limited to the NVIDIA ICD
 (`VK_DRIVER_FILES`: Mesa's software lavapipe is installed alongside and must
 not be picked). If the NVIDIA driver doesn't load, the container stops
-before building anything and the runner tries a new container, up to
+before checkout setup and the runner tries a new container, up to
 `--attempts` times. `vulkaninfo.txt` in the output keeps what it said.
 `pnpm gpu-bench --doctor` checks this and the gate on one small container.
 
@@ -206,29 +218,27 @@ image or this repository. Large licensed kits (such as a large iOS UI kit)
 stay on the Volume only; remove one with
 `modal volume rm -r drawpane-gpu-bench-data /kits/<hash>`.
 
-## Cost
+## Using Modal efficiently
 
-Modal bills per second while the container runs (list prices, November
-2026): T4 $0.000164/s, L4 $0.000222/s, plus $0.0000131 per core and
-$0.00000222 per GiB each second. With 4 cores and 12 GiB a T4 container
-costs about $0.86 an hour, an L4 about $1.07. The summary gives each run's
-container time and estimated cost. Containers are single-use, nothing is
-kept warm, and every Playwright run and the container itself have a timeout.
+- A T4 container costs about $0.0146 per minute at list prices, including its
+  CPU and memory. L4 costs about $0.0181 per minute. A cold CPU build takes
+  roughly five minutes and costs about $0.04 per checkout. Modal caches it by
+  source content and toolchain, including for dirty worktrees.
+- Run correctness e2e locally on SwiftShader first. On the T4, run the specs
+  the change touches and run the full T4 e2e suite once before merge. There's
+  no need to run the full suite on every push.
+- Use `--repeat 5` or `--repeat 6` for paired gate batches so every pair runs
+  in a separate container and shares the same builds. Run more pairs when the
+  result is borderline. Reviewers can reuse the author's T4 numbers unless
+  they need to check something specific.
 
-Measured on a T4 in November 2026 (the image cached; building it the first
-time takes about 3 minutes more):
-
-| Run | Container time | Wall time | Cost |
-| --- | --- | --- | --- |
-| `bench/canvas.spec.ts`, modes `gpu,cpu` | 142 s | 153 s | $0.035 |
-| canvas and `file.spec.ts` with a large iOS UI kit, modes `gpu,cpu` | 443 s | 465 s (with the kit's first upload) | $0.11 |
-| canvas, two commits, modes `gpu,webgpu` | 279 s | 319 s | $0.07 |
-
-Installing dependencies and building apps/web takes 5 to 15 s per checkout.
-
-T4 is the default: a Turing part with roughly a laptop GPU's 2D throughput,
-and the cheapest. L4 (Ada) is closer to a recent laptop's; compare a
-baseline and a change on the same type.
+The runner prints a cost estimate before launching. `--max-cost` defaults to
+$5 per invocation. `GPU_BENCH_DAILY_CAP` defaults to $25 in workspace spend
+plus the new estimate. These checks use expected runtimes, and Modal billing
+can lag. If the billing API is unavailable the runner warns and continues.
+Use `pnpm gpu-bench --spend` to check spend for the current UTC day and week.
+The local ledger at `~/.cache/drawpane-gpu-bench/ledger.jsonl` records reported
+container seconds and estimated costs, including CPU builds and GPU retries.
 
 ## Camera fidelity replay
 
