@@ -372,13 +372,36 @@ impl Engine {
         at: Option<&dyn Fn(f64) -> bool>,
         refine: bool,
     ) {
+        // Another resolution of an image, or an image loaded where its placeholder was
+        // (`Dirty::refine`), isn't a change: what was drawn before stands in (`TileCache::refine`).
+        let (soft, strict): (Vec<Dirty>, Vec<Dirty>) = if refine {
+            (changes.to_vec(), Vec::new())
+        } else {
+            changes.iter().copied().partition(|d| d.refine)
+        };
         // What changed, in page units, for the last frame shown (`TileCache::note_changed`),
         // whatever levels the cache holds. An image change counts at the scale the last frame was
         // drawn at only if the level drawn there changed.
-        let changed = if full || changes.is_empty() || refine {
+        let changed = if full || strict.is_empty() {
             Vec::new()
         } else {
-            self.store.dirty(changes, Affine::IDENTITY, 1.5)
+            self.store.dirty(&strict, Affine::IDENTITY, 1.5)
+        };
+        // A frame no slot can hold, drawn over several frames at rest, keeps no tiles to mark:
+        // where the same picture got sharper at its scale (`Gpu::direct_slices_scale`), the tiles
+        // it has drawn are drawn again (`TileCache::note_sharpened`, page units; never a hole).
+        #[cfg(feature = "gpu-common")]
+        let sharpened = if !full
+            && !soft.is_empty()
+            && self
+                .gpu
+                .as_ref()
+                .and_then(|g| g.direct_slices_scale())
+                .is_some_and(|scale| at.is_none_or(|select| select(scale)))
+        {
+            self.store.dirty(&soft, Affine::IDENTITY, 1.5)
+        } else {
+            Vec::new()
         };
         let store = &mut self.store;
         let mut each = |cache: &mut TileCache| {
@@ -393,15 +416,21 @@ impl Engine {
                 if at.is_some_and(|select| !select(level.scale)) {
                     continue;
                 }
-                let rects: Vec<Rect> = store.dirty(changes, level.grid(), 1.5);
-                if refine {
-                    cache.refine(id, &rects);
-                } else {
-                    cache.invalidate(id, &rects);
-                }
-                // An edit beside a drag: its parts around the selection are drawn again there.
-                if drag_parts {
-                    cache.drag_invalidate(id, &rects);
+                // Soft first: a tile both reach is stale.
+                for (set, stale) in [(&soft, false), (&strict, true)] {
+                    if set.is_empty() {
+                        continue;
+                    }
+                    let rects: Vec<Rect> = store.dirty(set, level.grid(), 1.5);
+                    if stale {
+                        cache.invalidate(id, &rects);
+                    } else {
+                        cache.refine(id, &rects);
+                    }
+                    // An edit beside a drag: its parts around the selection are drawn again there.
+                    if drag_parts {
+                        cache.drag_invalidate(id, &rects);
+                    }
                 }
             }
             if at.is_none() && store.provisional_shown().is_none() {
@@ -420,6 +449,7 @@ impl Engine {
         #[cfg(feature = "gpu-common")]
         if let Some(g) = self.gpu.as_mut() {
             each(&mut g.tiles);
+            g.tiles.note_sharpened(&sharpened);
             // As the cache's inexact tiles above: a sliced frame's are drawn again.
             if !full && !changes.is_empty() && at.is_none() && store.provisional_shown().is_none() {
                 g.direct_slices_drop_inexact();
@@ -560,12 +590,13 @@ impl Engine {
         };
         // A frame no slot can hold, drawn over several frames at rest (`Gpu::direct_slices_scale`),
         // keeps no tiles to mark: where the level its scale picks changed, the tiles it has drawn
-        // are drawn again (`TileCache::note_refined`; not a change, so never a hole).
+        // are drawn again (`TileCache::note_sharpened`; not a change, so never a hole). Before
+        // the return below, which `invalidate_tiles_at` (that notes it too) may not reach.
         #[cfg(feature = "gpu-common")]
         if self.gpu.as_ref().and_then(|g| g.direct_slices_scale()).is_some_and(at) {
             let page = self.store.dirty(&users, Affine::IDENTITY, 1.5);
             if let Some(g) = self.gpu.as_mut() {
-                g.tiles.note_refined(&page);
+                g.tiles.note_sharpened(&page);
             }
         }
         // A level no sampler picks at any scale drawn or being drawn (one warmed ahead of a
@@ -591,6 +622,8 @@ impl Engine {
         #[cfg(feature = "gpu-common")]
         if let Some(g) = self.gpu.as_ref() {
             scales.extend(g.scales_in_use()?);
+            // A frame drawn over several frames at rest is drawn at its scale too.
+            scales.extend(g.direct_slices_scale());
             tiled = true;
         }
         tiled.then_some(scales)
@@ -611,6 +644,54 @@ impl Engine {
         let replaced = before.contains(&(width, height)).then_some((width, height));
         self.image_levels_changed(id, &before, &after, replaced);
         Ok(())
+    }
+
+    /// `put_gpu_image_level` in row strips over frames (`Gpu::put_image_bitmap_rows`): the level
+    /// changes what's drawn once its last rows are in, as a whole upload does then (one of a
+    /// size the image had is a replacement). Meanwhile, frames showing the image aren't exact.
+    #[cfg(all(target_arch = "wasm32", feature = "gpu-common"))]
+    pub fn put_gpu_image_rows(&mut self, id: u32, bitmap: &web_sys::ImageBitmap, y: u32, rows: u32) -> Result<()> {
+        let gpu = self
+            .gpu
+            .as_mut()
+            .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
+        image_level_size(bitmap.width(), bitmap.height(), self.store.limits.texture_side)?;
+        let size = (bitmap.width(), bitmap.height());
+        let before = gpu.image_sizes(id);
+        if gpu.put_image_bitmap_rows(id, bitmap, y, rows, self.store.limits.image_bytes)? {
+            let after = gpu.image_sizes(id);
+            let replaced = before.contains(&size).then_some(size);
+            self.image_levels_changed(id, &before, &after, replaced);
+        }
+        Ok(())
+    }
+
+    /// Lets go of a level being uploaded in strips, its last rows not in: the image keeps the
+    /// levels it had (the one of that width included).
+    #[cfg(feature = "gpu-common")]
+    pub fn cancel_gpu_image_rows(&mut self, id: u32, width: u32) {
+        if let Some(gpu) = self.gpu.as_mut() {
+            gpu.drop_pending_image(id, width);
+        }
+    }
+
+    /// Whether an image a frame of `view` (`size` pixels) shows has a level being uploaded in
+    /// strips: what it shows may change once that level's last rows are in.
+    #[cfg(feature = "gpu-common")]
+    fn uploading_in_view(&mut self, view: Affine, size: (u32, u32)) -> bool {
+        let Some(gpu) = self.gpu.as_ref() else {
+            return false;
+        };
+        let uploading = gpu.uploading();
+        if uploading.is_empty() || view.determinant().abs() == 0.0 {
+            return false;
+        }
+        let page = view
+            .inverse()
+            .transform_rect_bbox(Rect::new(0.0, 0.0, f64::from(size.0), f64::from(size.1)));
+        uploading
+            .into_iter()
+            .any(|id| self.store.image_users(id).iter().any(|d| d.rect.overlaps(page)))
     }
 
     #[cfg(all(target_arch = "wasm32", feature = "gpu-common"))]
@@ -1527,6 +1608,9 @@ impl Engine {
             (gpu.halo_replay_limit(), gpu.tiles.halo(), gpu.max_view_apron())
         };
         let view = camera.view();
+        if let Some(g) = self.gpu.as_mut() {
+            g.note_input(view, (width, height), options.moving);
+        }
         let frame_rect = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
         let drag = self.drag_frame();
         let simple_reader_drag =
@@ -1759,6 +1843,10 @@ impl Engine {
         if stats.exact && self.store.provisional_shown().is_some() {
             stats.exact = false;
             stats.standin = true;
+        }
+        // Nor while a level it would draw an image with is still being uploaded in strips.
+        if stats.exact && self.uploading_in_view(view, (width, height)) {
+            stats.exact = false;
         }
         Ok(stats)
     }
@@ -3360,6 +3448,39 @@ impl Engine {
             comp_exact = comp.exact;
             stats.pending = comp.pending;
             if !comp.complete {
+                // Scaled tiles, nearest pixel (stand-ins).
+                let lay = |frame: &mut [u8], sc: &crate::tiles::Scaled| {
+                    let Some(src) = tiles.slots.get(sc.slot as usize) else {
+                        return;
+                    };
+                    if src.len() != t * t * 4 {
+                        return;
+                    }
+                    let d = sc.dst;
+                    let x0 = d.x0.max(0.0).floor() as usize;
+                    let y0 = d.y0.max(0.0).floor() as usize;
+                    let x1 = (d.x1.min(f64::from(width))).ceil().max(0.0) as usize;
+                    let y1 = (d.y1.min(f64::from(height))).ceil().max(0.0) as usize;
+                    for y in y0..y1.min(height as usize) {
+                        let v = ((y as f64 + 0.5 - d.y0) / d.height() * t as f64).floor();
+                        if !(0.0..t as f64).contains(&v) {
+                            continue;
+                        }
+                        for x in x0..x1.min(width as usize) {
+                            let u = ((x as f64 + 0.5 - d.x0) / d.width() * t as f64).floor();
+                            if !(0.0..t as f64).contains(&u) {
+                                continue;
+                            }
+                            let from = (v as usize * t + u as usize) * 4;
+                            let to = y * stride + x * 4;
+                            frame[to..to + 4].copy_from_slice(&src[from..from + 4]);
+                        }
+                    }
+                };
+                // Refined tiles: beneath anything drawn since (the last frame, other levels').
+                for sc in &comp.beneath {
+                    lay(&mut frame, sc);
+                }
                 // Where something changed since, the last frame's pixels are old: then it isn't
                 // laid at all here (the GPU lays it round what changed).
                 if let (Some(m), Some(l), true) = (comp.base, last, comp.holes.is_empty()) {
@@ -3382,32 +3503,7 @@ impl Engine {
                     }
                 }
                 for sc in &comp.scaled {
-                    let Some(src) = tiles.slots.get(sc.slot as usize) else {
-                        continue;
-                    };
-                    if src.len() != t * t * 4 {
-                        continue;
-                    }
-                    let d = sc.dst;
-                    let x0 = d.x0.max(0.0).floor() as usize;
-                    let y0 = d.y0.max(0.0).floor() as usize;
-                    let x1 = (d.x1.min(f64::from(width))).ceil().max(0.0) as usize;
-                    let y1 = (d.y1.min(f64::from(height))).ceil().max(0.0) as usize;
-                    for y in y0..y1.min(height as usize) {
-                        let v = ((y as f64 + 0.5 - d.y0) / d.height() * t as f64).floor();
-                        if !(0.0..t as f64).contains(&v) {
-                            continue;
-                        }
-                        for x in x0..x1.min(width as usize) {
-                            let u = ((x as f64 + 0.5 - d.x0) / d.width() * t as f64).floor();
-                            if !(0.0..t as f64).contains(&u) {
-                                continue;
-                            }
-                            let from = (v as usize * t + u as usize) * 4;
-                            let to = y * stride + x * 4;
-                            frame[to..to + 4].copy_from_slice(&src[from..from + 4]);
-                        }
-                    }
+                    lay(&mut frame, sc);
                 }
             }
             for c in &comp.copies {

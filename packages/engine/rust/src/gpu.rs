@@ -46,7 +46,7 @@ use crate::shadow::{
     scaled_shadow_sigma,
 };
 use crate::store::Store;
-use crate::tiles::{Composite, Last, TILE, TileCache, TileKey};
+use crate::tiles::{Composite, Last, Scaled, TILE, TileCache, TileKey};
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -273,7 +273,7 @@ const DIRECT_SLICE_MAX_MS: f64 = 32.0;
 /// tiles drawn so far, all in the frame shown (`frame`), which each next frame lays beneath
 /// itself unchanged before it draws more. One view, size, background and halo. What changed
 /// since the last slice (`TileCache::changed_on`), and where an image got another resolution
-/// (`TileCache::refined_on`), drops the tiles under it, to be drawn again.
+/// (`TileCache::sharpened_on`), drops the tiles under it, to be drawn again.
 struct DirectSlices {
     view: [u64; 6],
     size: (u32, u32),
@@ -319,6 +319,13 @@ fn nearest_middle(jobs: &mut [crate::tiles::Job], origin: (i64, i64), size: (u32
     };
     jobs.sort_by(|a, b| away(a).total_cmp(&away(b)));
 }
+/// How long the camera stays still before the time between frames draws the overview's refined
+/// tiles again (`TileCache::refine_overview`): they still stand in, and a big one's GPU work
+/// submitted just before a gesture would hold that gesture's first frames.
+const OVERVIEW_REFINE_QUIET_MS: f64 = 1000.0;
+/// GPU passes one slice of a refined overview tile submits before its walk pauses: no single
+/// submission is long.
+const OVERVIEW_REFINE_PASSES: u32 = MOVING_PASSES;
 
 /// Budget for the GPU canonical shadow mask cache (strictly enforced LRU).
 const GPU_SHADOW_CACHE_BYTES: usize = 16 << 20;
@@ -572,6 +579,45 @@ struct V {
 ";
 
 /// A page of tiles.
+/// An image level part uploaded (`Gpu::put_image_bitmap_rows`): its texture, its height, the
+/// next row to upload, and the bitmap its rows come from (rows from another are refused).
+struct PendingImage {
+    tex: wgpu::Texture,
+    height: u32,
+    next: u32,
+    #[cfg(target_arch = "wasm32")]
+    source: web_sys::ImageBitmap,
+}
+
+/// The image levels being uploaded in strips, by image id and width: a few at a time (the
+/// editor uploads one level at once), so a list, which keeps the module smaller than a map.
+#[derive(Default)]
+struct PendingImages(Vec<((u32, u32), PendingImage)>);
+
+impl PendingImages {
+    fn at(&self, key: &(u32, u32)) -> Option<usize> {
+        self.0.iter().position(|(k, _)| k == key)
+    }
+    fn get(&self, key: &(u32, u32)) -> Option<&PendingImage> {
+        self.at(key).map(|i| &self.0[i].1)
+    }
+    fn get_mut(&mut self, key: &(u32, u32)) -> Option<&mut PendingImage> {
+        self.at(key).map(|i| &mut self.0[i].1)
+    }
+    fn insert(&mut self, key: (u32, u32), image: PendingImage) {
+        match self.at(&key) {
+            Some(i) => self.0[i].1 = image,
+            None => self.0.push((key, image)),
+        }
+    }
+    fn remove(&mut self, key: &(u32, u32)) -> Option<PendingImage> {
+        self.at(key).map(|i| self.0.swap_remove(i).1)
+    }
+    fn keys(&self) -> impl Iterator<Item = &(u32, u32)> {
+        self.0.iter().map(|(k, _)| k)
+    }
+}
+
 struct Page {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
@@ -1505,6 +1551,9 @@ pub struct Gpu {
     rough: bool,
     /// An exact frame no slot can hold, part drawn at rest (`DirectSlices`).
     direct_slices: Option<DirectSlices>,
+    /// When the camera last moved or changed (`note_input`), and the view and size it changed to.
+    last_input_ms: f64,
+    input_view: Option<([u64; 6], (u32, u32))>,
     overview_page: Option<OverviewPage>,
     /// Tile cooperatively paused mid-walk so no single frame stalls past its CPU budget.
     pending_tile: Option<PendingTile>,
@@ -1555,6 +1604,9 @@ pub struct Gpu {
     submit_ratio: f64,
     blit: Option<wgpu::RenderPipeline>,
     images: HashMap<u32, Vec<(TextureId, wgpu::Texture, u32, u32)>>,
+    /// Image levels being uploaded in row strips (`put_image_bitmap_rows`), by image and width:
+    /// counted in the budget, resident once their last rows are in.
+    pending_images: PendingImages,
     /// Per-draw temporary textures (e.g. diamond gradients), released right after submit.
     temp_textures: Vec<(TextureId, wgpu::Texture)>,
     temp_bytes: usize,
@@ -2409,6 +2461,8 @@ impl Gpu {
             motion_starved: crate::pacing::Starvation::default(),
             rough: false,
             direct_slices: None,
+            last_input_ms: 0.0,
+            input_view: None,
             overview_page: None,
             pending_tile: None,
             pending_whole: None,
@@ -2440,6 +2494,7 @@ impl Gpu {
             submit_ratio: if IS_WEBGL { 1.0 } else { 0.0 },
             blit,
             images: HashMap::new(),
+            pending_images: PendingImages::default(),
             temp_textures: Vec::new(),
             temp_bytes: 0,
             image_bytes: 0,
@@ -3457,6 +3512,116 @@ impl Gpu {
         Ok(())
     }
 
+    /// Uploads rows `y..y + rows` of `bitmap`, an image level, so a large one spreads over
+    /// frames: the first rows (`y` 0) make its texture, within `budget`, and rows must follow in
+    /// order. Once its last rows are in, the level is resident (true), in place of one of its
+    /// width; until then it's drawn with the levels there were, that one included, so both count
+    /// against the budget meanwhile.
+    #[cfg(target_arch = "wasm32")]
+    pub fn put_image_bitmap_rows(
+        &mut self,
+        id: u32,
+        bitmap: &web_sys::ImageBitmap,
+        y: u32,
+        rows: u32,
+        budget: usize,
+    ) -> Result<bool> {
+        let (width, height) = (bitmap.width(), bitmap.height());
+        let pending = self.pending_images.get(&(id, width));
+        let start = crate::images::strip_step(pending.map(|p| (&p.source, p.height, p.next)), bitmap, height, y, rows)?;
+        if start {
+            self.drop_pending_image(id, width);
+            self.check_texture_size(width, height, "an image")?;
+            let bytes = width as usize * height as usize * 4;
+            if self.image_bytes + bytes > budget {
+                return Err(EngineError::limit("images over their budget"));
+            }
+            self.reserve_or_trim(bytes, 0, "an image")?;
+            let tex = texture(
+                &self.device,
+                width,
+                height,
+                wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_DST
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT,
+                "resident image",
+            );
+            self.image_bytes += bytes;
+            self.bytes += bytes;
+            self.pending_images.insert(
+                (id, width),
+                PendingImage {
+                    tex,
+                    height,
+                    next: 0,
+                    source: bitmap.clone(),
+                },
+            );
+        }
+        let Some(pending) = self.pending_images.get_mut(&(id, width)) else {
+            return Err(EngineError::new(
+                ErrorCode::State,
+                "image rows before the level's first",
+            ));
+        };
+        let webgl = self.backend == "webgl2";
+        self.queue.copy_external_image_to_texture(
+            &wgpu::CopyExternalImageSourceInfo {
+                source: wgpu::ExternalImageSource::ImageBitmap(bitmap.clone()),
+                origin: wgpu::Origin2d { x: 0, y },
+                flip_y: false,
+            },
+            wgpu::CopyExternalImageDestInfo {
+                texture: &pending.tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: 0, y, z: 0 },
+                aspect: wgpu::TextureAspect::All,
+                color_space: wgpu::PredefinedColorSpace::Srgb,
+                premultiplied_alpha: !webgl,
+            },
+            wgpu::Extent3d {
+                width,
+                height: rows,
+                depth_or_array_layers: 1,
+            },
+        );
+        if webgl {
+            // Executed before the caller closes its source bitmap (see `put_image_bitmap`).
+            self.queue.submit([]);
+        }
+        pending.next += rows;
+        if pending.next < height {
+            return Ok(false);
+        }
+        let Some(done) = self.pending_images.remove(&(id, width)) else {
+            return Ok(false);
+        };
+        // The level it replaces goes now, never before: what's drawn never has less.
+        self.drop_image_level(id, width);
+        let tid = TextureId((1 << 50) | (u64::from(id) << 16) | u64::from(width));
+        self.bindings.insert(tid, done.tex.create_view(&Default::default()));
+        let levels = self.images.entry(id).or_default();
+        let at = levels.partition_point(|(_, _, w, _)| *w > width);
+        levels.insert(at, (tid, done.tex, width, height));
+        Ok(true)
+    }
+
+    /// The images with a level being uploaded in strips.
+    pub fn uploading(&self) -> Vec<u32> {
+        self.pending_images.keys().map(|&(id, _)| id).collect()
+    }
+
+    /// Drops a level being uploaded in strips, with its budget (the level it would replace
+    /// stays).
+    pub fn drop_pending_image(&mut self, id: u32, width: u32) {
+        if let Some(p) = self.pending_images.remove(&(id, width)) {
+            let bytes = width as usize * p.height as usize * 4;
+            self.image_bytes -= bytes;
+            self.bytes -= bytes;
+            p.tex.destroy();
+        }
+    }
+
     pub fn image_sizes(&self, id: u32) -> Vec<(u32, u32)> {
         self.images
             .get(&id)
@@ -3467,6 +3632,7 @@ impl Gpu {
     }
 
     pub fn drop_image_level(&mut self, id: u32, width: u32) {
+        self.drop_pending_image(id, width);
         if let Some(levels) = self.images.get_mut(&id) {
             if let Some(at) = levels.iter().position(|(_, _, w, _)| *w == width) {
                 let (tid, tex, w, h) = levels.remove(at);
@@ -3483,6 +3649,15 @@ impl Gpu {
     }
 
     pub fn drop_image(&mut self, id: u32) {
+        let pending: Vec<u32> = self
+            .pending_images
+            .keys()
+            .filter(|(i, _)| *i == id)
+            .map(|(_, w)| *w)
+            .collect();
+        for width in pending {
+            self.drop_pending_image(id, width);
+        }
         if let Some(levels) = self.images.remove(&id) {
             for (tid, tex, w, h) in levels {
                 self.bindings.remove(tid);
@@ -5252,15 +5427,27 @@ impl Gpu {
         self.shadow.begin_frame();
         self.tiles.begin_scaled(background, scale, self.tiles.halo());
         self.set_overview(store);
+        self.tiles.refine_overview = self.quiet_for_overview();
         self.fit_tiles(store.limits.tile_bytes);
         let jobs = self.tiles.overview_ahead(scale);
+        // A paused tile no job here wants any more (a refined one while the camera hasn't been
+        // still long enough) is let go, as the tiled time between frames does.
+        if self
+            .pending_tile
+            .as_ref()
+            .is_some_and(|pt| !jobs.iter().any(|j| j.key == pt.key))
+        {
+            self.abort_pending_tile();
+        }
         let deadline = (budget_ms > 0.0).then_some(t0 + self.walk_budget_ms(budget_ms));
         let mut verbs = store.limits.frame_verbs;
         let mut paused = false;
-        if self.pending_tile.is_some() {
+        if let Some(key) = self.pending_tile.as_ref().map(|pt| pt.key) {
             self.deadline_ms = deadline;
+            self.idle_pass_budget(&key);
             let step = self.resume_pending_tile(store, &mut stats);
             self.deadline_ms = None;
+            self.pass_budget = None;
             match step {
                 Ok(TileStep::Paused) => paused = true,
                 Ok(_) => {}
@@ -5271,15 +5458,18 @@ impl Gpu {
         if !paused {
             for job in &jobs {
                 // Drawn by the resume above, or the overview went with a failed one.
-                if !self.tiles.is_overview(&job.key) || self.tiles.get(&job.key).is_some_and(|e| !e.stale) {
+                if !self.tiles.is_overview(&job.key) || self.tiles.get(&job.key).is_some_and(|e| !e.stale && !e.refine)
+                {
                     continue;
                 }
                 if deadline.is_some_and(|d| now() >= d) {
                     break;
                 }
                 self.deadline_ms = deadline;
+                self.idle_pass_budget(&job.key);
                 let step = self.start_slot_tile(store, job, true, 0, background, inputs, &mut stats, &mut verbs);
                 self.deadline_ms = None;
+                self.pass_budget = None;
                 match step {
                     Ok(TileStep::Paused) => {
                         paused = true;
@@ -5296,7 +5486,9 @@ impl Gpu {
         }
         // Nothing the view shows changed: no tile drawn to present, only work going on.
         stats.tiles_drawn = 0;
-        stats.in_progress = paused || !self.tiles.overview_ahead(scale).is_empty();
+        // Refined tiles waiting for the camera to be still count as work going on.
+        stats.in_progress =
+            paused || !self.tiles.overview_ahead(scale).is_empty() || self.tiles.overview_refined_left(scale) > 0;
         stats.held = self.tiles.len() as u32;
         stats.evicted = self.tiles.stats.evicted;
         stats.submits = self.submits.saturating_sub(submits0);
@@ -7262,6 +7454,8 @@ impl Gpu {
         // older than the screen where something changed since (`TileCache::base_kept`).
         self.tiles.base_kept = self.screen.standin.is_some();
         self.tiles.bake_overview = !options.moving && options.budget_ms > 0.0;
+        // The overview's refined tiles are the time between frames' (`ahead`), once still.
+        self.tiles.refine_overview = false;
         self.fit_tiles(store.limits.tile_bytes);
         let zooming = options.moving && self.last_scale.is_some_and(|s| s != scale);
         // A page just shown (opened, switched to, its list made afresh): nothing to stand on.
@@ -7700,7 +7894,7 @@ impl Gpu {
                 // here starts the slice budget over.
                 let mut gone = self.tiles.changed_on(view, (w, h));
                 let edited = !gone.is_empty();
-                gone.extend(self.tiles.refined_on(view, (w, h)));
+                gone.extend(self.tiles.sharpened_on(view, (w, h)));
                 let t = i64::from(TILE);
                 let origin = plan.origin;
                 let s = self.direct_slices.as_mut().expect("sliced frame");
@@ -7958,6 +8152,30 @@ impl Gpu {
         }
     }
 
+    /// A frame was asked for at `view` and `size`: when it moves, or the view changed, the camera
+    /// had input then (`OVERVIEW_REFINE_QUIET_MS` counts from it).
+    pub fn note_input(&mut self, view: Affine, size: (u32, u32), moving: bool) {
+        let at = (view.as_coeffs().map(f64::to_bits), size);
+        if moving || self.input_view != Some(at) {
+            self.last_input_ms = now();
+            self.input_view = Some(at);
+        }
+    }
+
+    /// Whether the camera has been still long enough to draw the overview's refined tiles again.
+    fn quiet_for_overview(&self) -> bool {
+        now() - self.last_input_ms >= OVERVIEW_REFINE_QUIET_MS
+    }
+
+    /// Before drawing `key` between frames: a refined overview tile's walk pauses after
+    /// `OVERVIEW_REFINE_PASSES` GPU passes, so no submission of it is long; anything else has
+    /// no pass budget there.
+    fn idle_pass_budget(&mut self, key: &TileKey) {
+        let refined = self.tiles.is_overview(key) && self.tiles.get(key).is_some_and(|e| !e.stale && e.refine);
+        self.pass_budget = refined.then_some(OVERVIEW_REFINE_PASSES);
+        self.passes_at = self.passes;
+    }
+
     fn set_shown(&mut self, generation: u64, background: [u32; 4], exact: bool) {
         self.shown = Some((generation, background, exact));
         self.tiles.frame_drawn();
@@ -8013,6 +8231,7 @@ impl Gpu {
         self.set_overview(store);
         self.tiles.moving = false;
         self.tiles.bake_overview = true;
+        self.tiles.refine_overview = self.quiet_for_overview();
         self.fit_tiles(store.limits.tile_bytes);
         let opening = self.opening_pending;
         self.tiles.opening = opening;
@@ -8060,8 +8279,10 @@ impl Gpu {
             let key = pt.key;
             let rough = pt.rough;
             self.deadline_ms = deadline;
+            self.idle_pass_budget(&key);
             let step = self.resume_pending_tile(store, &mut stats);
             self.deadline_ms = None;
+            self.pass_budget = None;
             // An overview tile that can't be drawn drops the overview, never the slice.
             let step = match step {
                 Err(e) if e.code != ErrorCode::DeviceLost && rough => {
@@ -8095,6 +8316,7 @@ impl Gpu {
                     break;
                 }
                 self.deadline_ms = deadline;
+                self.idle_pass_budget(&job.key);
                 let step = self.start_slot_tile(
                     store,
                     job,
@@ -8106,6 +8328,7 @@ impl Gpu {
                     &mut verbs,
                 );
                 self.deadline_ms = None;
+                self.pass_budget = None;
                 let step = match step {
                     Err(e) if e.code != ErrorCode::DeviceLost && job.rough => {
                         self.refuse_overview();
@@ -8124,6 +8347,11 @@ impl Gpu {
             }
         }
         let (mut pending, queued) = self.tiles.left(&plan);
+        // The overview's refined tiles wait for the camera to be still a while: the time between
+        // frames goes on (doing nothing) until they're drawn.
+        if pending == 0 && queued == 0 && self.tiles.overview_refined_left(last.view.as_coeffs()[0]) > 0 {
+            stats.in_progress = true;
+        }
         if opening && pending == 0 && self.pending_tile.is_none() {
             // Coarse opening ladder tiles are complete; next slices refine exact tiles.
             self.opening_pending = false;
@@ -10061,8 +10289,9 @@ impl Gpu {
     }
 
     /// Lays a frame into frame texture `dst`: under what the frame's own tiles don't cover, the
-    /// background, the last frame moved and scaled, and other levels' tiles scaled; then the
-    /// frame's tiles, pixel for pixel. When `submit` is false, returns the open encoder so
+    /// background, refined tiles (the overview's, then other levels'), the overview's current
+    /// tiles, the last frame moved and scaled, and other levels' tiles scaled; then the frame's
+    /// tiles, pixel for pixel. When `submit` is false, returns the open encoder so
     /// `finish_frame` can record the present blit into the same submission.
     #[allow(clippy::too_many_arguments)]
     fn composite(
@@ -10082,40 +10311,80 @@ impl Gpu {
             label: Some("composite"),
         });
         if !comp.complete {
-            // Quads by source texture: the overview beneath, the last frame, then pages, in the
-            // order given.
+            // Quads by source texture: the overview beneath, refined tiles, the last frame, then
+            // pages, in the order given.
             let mut quads: Vec<(Option<usize>, [f32; 12])> = Vec::new();
-            // The overview's tiles, from its own texture.
-            if let Some(grid) = self.overview_page.as_ref().map(|o| o.grid) {
-                let (pw, ph, t) = (f64::from(grid.0 * TILE), f64::from(grid.1 * TILE), f64::from(TILE));
-                for sc in &comp.under {
-                    let Some(index) = sc.slot.checked_sub(crate::tiles::OVERVIEW_SLOT) else {
-                        continue;
-                    };
-                    if index >= grid.0 * grid.1 {
-                        continue;
-                    }
-                    let (x, y) = (f64::from((index % grid.0) * TILE), f64::from((index / grid.0) * TILE));
-                    let d = sc.dst;
-                    quads.push((
-                        Some(OVERVIEW_PAGE),
-                        [
-                            d.x0 as f32,
-                            d.y0 as f32,
-                            d.x1 as f32,
-                            d.y1 as f32,
-                            (x / pw) as f32,
-                            (y / ph) as f32,
-                            ((x + t) / pw) as f32,
-                            ((y + t) / ph) as f32,
-                            ((x + 0.5) / pw) as f32,
-                            ((y + 0.5) / ph) as f32,
-                            ((x + t - 0.5) / pw) as f32,
-                            ((y + t - 0.5) / ph) as f32,
-                        ],
-                    ));
+            let pages = self.pages.len();
+            let page_quad = |sc: &Scaled| -> Option<(Option<usize>, [f32; 12])> {
+                let page = (sc.slot / per_page) as usize;
+                if page >= pages {
+                    return None;
                 }
-            }
+                let within = sc.slot % per_page;
+                let (x, y) = (
+                    f64::from((within % per_row) * TILE),
+                    f64::from((within / per_row) * TILE),
+                );
+                let (p, t) = (f64::from(page_side), f64::from(TILE));
+                let d = sc.dst;
+                Some((
+                    Some(page),
+                    [
+                        d.x0 as f32,
+                        d.y0 as f32,
+                        d.x1 as f32,
+                        d.y1 as f32,
+                        (x / p) as f32,
+                        (y / p) as f32,
+                        ((x + t) / p) as f32,
+                        ((y + t) / p) as f32,
+                        ((x + 0.5) / p) as f32,
+                        ((y + 0.5) / p) as f32,
+                        ((x + t - 0.5) / p) as f32,
+                        ((y + t - 0.5) / p) as f32,
+                    ],
+                ))
+            };
+            // The overview's tiles, from its own texture.
+            let overview_grid = self.overview_page.as_ref().map(|o| o.grid);
+            let overview_quad = |sc: &Scaled| -> Option<(Option<usize>, [f32; 12])> {
+                let grid = overview_grid?;
+                let (pw, ph, t) = (f64::from(grid.0 * TILE), f64::from(grid.1 * TILE), f64::from(TILE));
+                let index = sc.slot.checked_sub(crate::tiles::OVERVIEW_SLOT)?;
+                if index >= grid.0 * grid.1 {
+                    return None;
+                }
+                let (x, y) = (f64::from((index % grid.0) * TILE), f64::from((index / grid.0) * TILE));
+                let d = sc.dst;
+                Some((
+                    Some(OVERVIEW_PAGE),
+                    [
+                        d.x0 as f32,
+                        d.y0 as f32,
+                        d.x1 as f32,
+                        d.y1 as f32,
+                        (x / pw) as f32,
+                        (y / ph) as f32,
+                        ((x + t) / pw) as f32,
+                        ((y + t) / ph) as f32,
+                        ((x + 0.5) / pw) as f32,
+                        ((y + 0.5) / ph) as f32,
+                        ((x + t - 0.5) / pw) as f32,
+                        ((y + t - 0.5) / ph) as f32,
+                    ],
+                ))
+            };
+            // Refined tiles beneath anything drawn since, of any level, the longest drawn first
+            // (`Composite::beneath`; the overview's by slot), then the overview's current tiles
+            // over them.
+            quads.extend(comp.beneath.iter().filter_map(|sc| {
+                if sc.slot >= crate::tiles::OVERVIEW_SLOT {
+                    overview_quad(sc)
+                } else {
+                    page_quad(sc)
+                }
+            }));
+            quads.extend(comp.under.iter().filter_map(overview_quad));
             if let Some(m) = comp.base
                 && let Some(l) = self.last
                 && self
@@ -10157,36 +10426,7 @@ impl Gpu {
                     ));
                 }
             }
-            for sc in &comp.scaled {
-                let page = (sc.slot / per_page) as usize;
-                if page >= self.pages.len() {
-                    continue;
-                }
-                let within = sc.slot % per_page;
-                let (x, y) = (
-                    f64::from((within % per_row) * TILE),
-                    f64::from((within / per_row) * TILE),
-                );
-                let (p, t) = (f64::from(page_side), f64::from(TILE));
-                let d = sc.dst;
-                quads.push((
-                    Some(page),
-                    [
-                        d.x0 as f32,
-                        d.y0 as f32,
-                        d.x1 as f32,
-                        d.y1 as f32,
-                        (x / p) as f32,
-                        (y / p) as f32,
-                        ((x + t) / p) as f32,
-                        ((y + t) / p) as f32,
-                        ((x + 0.5) / p) as f32,
-                        ((y + 0.5) / p) as f32,
-                        ((x + t - 0.5) / p) as f32,
-                        ((y + t - 0.5) / p) as f32,
-                    ],
-                ));
-            }
+            quads.extend(comp.scaled.iter().filter_map(page_quad));
             let c = self
                 .compositor
                 .as_mut()

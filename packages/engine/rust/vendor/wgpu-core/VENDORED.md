@@ -27,4 +27,9 @@ Drawpane modifications (marked `Drawpane:` in the code, per Apache-2.0 section 4
     no indirect validation, and no backend-active barriers (on GL/WebGL2, only storage-write
     transitions emit `glMemoryBarrier`).
 
+- `src/device/queue.rs`:
+  - `Queue::copy_external_image_to_texture` no longer requires
+    `DownlevelFlags::UNRESTRICTED_EXTERNAL_TEXTURE_COPIES` for a nonzero source origin on the GL
+    backend: the vendored `wgpu-hal` selects it with WebGL2's unpack skips.
+
 The upstream `.cargo-ok`, `Cargo.lock`, and `Cargo.toml.orig` files were omitted.

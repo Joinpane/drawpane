@@ -89,6 +89,37 @@ pub fn premultiply(rgba: &[u8], premultiplied: bool) -> Vec<u8> {
 }
 
 /// The smallest resident level covering both projected axes, else the largest.
+/// What rows `y..y + rows` of a level `height` rows tall, uploaded in strips from `source`, do
+/// to the part of that level uploaded so far (`pending`: its source, height and next row): start
+/// it afresh (`true`: rows from 0, any part from another upload let go) or go on with it
+/// (`false`). Rows out of order, past the level, or from another source than the part uploaded
+/// so far are refused: a level never mixes two images.
+pub fn strip_step<S: PartialEq>(
+    pending: Option<(&S, u32, u32)>,
+    source: &S,
+    height: u32,
+    y: u32,
+    rows: u32,
+) -> Result<bool> {
+    if rows == 0 || y >= height || rows > height - y {
+        return Err(EngineError::new(ErrorCode::State, "image rows out of order"));
+    }
+    if y == 0 {
+        return Ok(true);
+    }
+    match pending {
+        None => Err(EngineError::new(
+            ErrorCode::State,
+            "image rows before the level's first",
+        )),
+        Some((s, _, _)) if s != source => Err(EngineError::new(ErrorCode::State, "image rows from another upload")),
+        Some((_, h, next)) if h != height || y != next => {
+            Err(EngineError::new(ErrorCode::State, "image rows out of order"))
+        }
+        Some(_) => Ok(false),
+    }
+}
+
 pub fn pick(sizes: impl Iterator<Item = (u32, u32)>, span: (f64, f64)) -> usize {
     sizes
         .take_while(|&(width, height)| f64::from(width) >= span.0 && f64::from(height) >= span.1)
@@ -100,4 +131,28 @@ pub fn pick(sizes: impl Iterator<Item = (u32, u32)>, span: (f64, f64)) -> usize 
 pub fn span(matrix: vello_common::kurbo::Affine) -> (f64, f64) {
     let [a, b, c, d, ..] = matrix.as_coeffs();
     (a.hypot(b), c.hypot(d))
+}
+
+#[cfg(test)]
+mod strip_tests {
+    use super::strip_step;
+
+    /// Two uploads of one width interleaved: the second's first rows start it afresh, and the
+    /// first's later rows are refused, never landing in the second's texture (#352 re-check 2).
+    #[test]
+    fn strips_from_another_upload_never_land_in_a_level() {
+        let (a, b) = (1u32, 2u32);
+        assert!(strip_step(None, &a, 512, 0, 64).expect("a starts"));
+        assert!(!strip_step(Some((&a, 512, 64)), &a, 512, 64, 64).expect("a goes on"));
+        assert!(strip_step(Some((&a, 512, 128)), &b, 512, 0, 64).expect("b starts afresh"));
+        let refused = strip_step(Some((&b, 512, 64)), &a, 512, 128, 64).expect_err("a's rows refused");
+        assert!(refused.message.contains("another upload"));
+        assert!(!strip_step(Some((&b, 512, 64)), &b, 512, 64, 448).expect("b finishes"));
+        // Out of order, past the level, empty, or with nothing started.
+        assert!(strip_step(Some((&b, 512, 64)), &b, 512, 128, 64).is_err());
+        assert!(strip_step(Some((&b, 512, 64)), &b, 512, 64, 449).is_err());
+        assert!(strip_step(Some((&b, 512, 64)), &b, 512, 64, 0).is_err());
+        assert!(strip_step(None, &b, 512, 64, 64).is_err());
+        assert!(strip_step(Some((&b, 256, 64)), &b, 512, 64, 64).is_err());
+    }
 }

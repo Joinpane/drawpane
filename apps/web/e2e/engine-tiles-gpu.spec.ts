@@ -183,6 +183,28 @@ function wideLayer(
 type Step =
   | { apply: number[] }
   | { image: { id: number; side: number; color: string } }
+  /**
+   * Rows `from` to `to` of a level in strips of `strip` (`putGpuImageRows`), in bands of
+   * `colors`, from one bitmap per upload (steps with the same `id`, `side` and `colors` share
+   * it, as the editor's strips do). `refused`: the first strip must be refused.
+   */
+  | {
+      rows: {
+        id: number;
+        side: number;
+        colors: string[];
+        from: number;
+        to: number;
+        strip: number;
+        refused?: boolean;
+      };
+    }
+  /** Lets go of a level part uploaded in strips (`cancelGpuImageRows`). */
+  | { cancel: { id: number; width: number } }
+  /** `times` slices of the time between frames (`renderGpuAhead`), `budget` ms each. */
+  | { ahead: { times: number; budget: number } }
+  /** Waits `ms` (the camera still): the overview's refined tiles wait for a still camera. */
+  | { wait: number }
   | {
       name: string;
       size: [number, number];
@@ -212,6 +234,8 @@ async function presented(
       const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
       await glue.default({ module_or_path: "/engine_bg.wasm" });
       const engine = new glue.Engine(0, 0);
+      /** Bitmaps of strip uploads (`rows` steps), one per upload. */
+      const uploads = new Map<string, ImageBitmap>();
       const requireOk = (out: { ok: boolean; message: string; free(): void }) => {
         const { ok, message } = out;
         out.free();
@@ -248,6 +272,53 @@ async function presented(
             } finally {
               bitmap.close();
             }
+            continue;
+          }
+          if ("rows" in step) {
+            const { id, side, colors, from, to, strip, refused } = step.rows;
+            const key = `${id}/${side}/${colors.join()}`;
+            let bitmap = uploads.get(key);
+            if (!bitmap) {
+              const canvas = new OffscreenCanvas(side, side);
+              const ctx = canvas.getContext("2d");
+              if (!ctx) throw new Error("no 2D context");
+              const band = side / colors.length;
+              colors.forEach((c, k) => {
+                ctx.fillStyle = c;
+                ctx.fillRect(0, k * band, side, band);
+              });
+              bitmap = await createImageBitmap(canvas);
+              uploads.set(key, bitmap);
+            }
+            for (let y = from; y < to; y += strip) {
+              const put = engine.putGpuImageRows?.(id, bitmap, y, Math.min(strip, to - y));
+              if (!put) throw new Error("no putGpuImageRows");
+              if (refused) {
+                const { ok } = put;
+                put.free();
+                if (ok) throw new Error(`rows ${y} of ${key} were taken`);
+                break;
+              }
+              requireOk(put);
+            }
+            continue;
+          }
+          if ("ahead" in step) {
+            for (let k = 0; k < step.ahead.times; k++) {
+              const a = engine.renderGpuAhead?.(bg, step.ahead.budget);
+              if (!a) throw new Error("no renderGpuAhead");
+              a.free();
+            }
+            continue;
+          }
+          if ("wait" in step) {
+            await new Promise((done) => setTimeout(done, step.wait));
+            continue;
+          }
+          if ("cancel" in step) {
+            const out = engine.cancelGpuImageRows?.(step.cancel.id, step.cancel.width);
+            if (!out) throw new Error("no cancelGpuImageRows");
+            requireOk(out);
             continue;
           }
           const out = engine.renderGpu?.(
@@ -290,11 +361,29 @@ async function presented(
         }
         return rows;
       } finally {
+        for (const bitmap of uploads.values()) bitmap.close();
         engine.free();
       }
     },
     { list, steps, options },
   );
+}
+
+/**
+ * Display never goes back: at each sample, once `colour` (an image's, say) was shown, nothing
+ * else is shown there again, whatever shade a placeholder would come back in.
+ */
+function stays(rows: { name: string; samples: number[][] }[], colour: number[]) {
+  const count = Math.max(...rows.map((r) => r.samples.length));
+  for (let k = 0; k < count; k++) {
+    let seen = false;
+    for (const row of rows) {
+      const sample = row.samples[k];
+      if (!sample) continue;
+      if (seen) expect(sample, `${row.name} sample ${k} went back`).toEqual(colour);
+      if (sample.join() === colour.join()) seen = true;
+    }
+  }
 }
 
 /**
@@ -320,9 +409,11 @@ function neverBack(rows: { name: string; samples: number[][] }[], old: number[],
 /**
  * A `color` board of 1,024 x 256 under a dark square every 8 px (4,096 of them, so a tile takes
  * longer than a 1 ms slice): a fresh list, or (with `base`) a patch recolouring the board only.
+ * "placeholder" fills the board with image 1's placeholder, and "loaded" with image 1 clipped to
+ * the board, as the editor does once the image is there.
  */
 function slowBoard(
-  color: readonly [number, number, number, number] | "image",
+  color: readonly [number, number, number, number] | "image" | "placeholder" | "loaded",
   base = 0xffffffff,
 ): number[] {
   const list = new ListWriter(base, base === 0xffffffff ? 1 : base + 1);
@@ -333,8 +424,26 @@ function slowBoard(
     y: number,
     w: number,
     h: number,
-    c: readonly number[] | "image",
-  ) =>
+    c: readonly number[] | "image" | "placeholder" | "loaded",
+  ) => {
+    const image = {
+      kind: "image",
+      image: 1,
+      matrix: [w, 0, 0, h, 0, 0],
+      tile: false,
+      opacity: 1,
+    } as const;
+    const fill = {
+      op: "fill",
+      path: 0,
+      evenOdd: false,
+      paint:
+        c === "image" || c === "loaded"
+          ? image
+          : c === "placeholder"
+            ? ({ kind: "placeholder", opacity: 1 } as const)
+            : ({ kind: "solid", color: c as [number, number, number, number] } as const),
+    } as const;
     list.set(id, ROOT, {
       flags: 0,
       transform: [1, 0, 0, 1, x, y],
@@ -345,19 +454,11 @@ function slowBoard(
       reach: 0,
       unsupported: 0,
       paths: [{ kind: "rect", w, h, radii: [0, 0, 0, 0], smoothing: 0 }],
-      ops: [
-        {
-          op: "fill",
-          path: 0,
-          evenOdd: false,
-          paint:
-            c === "image"
-              ? { kind: "image", image: 1, matrix: [w, 0, 0, h, 0, 0], tile: false, opacity: 1 }
-              : { kind: "solid", color: c as [number, number, number, number] },
-        },
-      ],
+      ops:
+        c === "loaded" ? [{ op: "clip", path: 0, evenOdd: false }, fill, { op: "unclip" }] : [fill],
       coarse: [],
     });
+  };
   rect(1, 0, 0, 1024, 256, color);
   if (base === 0xffffffff) {
     let id = 2;
@@ -365,6 +466,94 @@ function slowBoard(
       for (let x = 0; x < 1024; x += 8) rect(id++, x + 1, y + 1, 5, 5, [0.2, 0.2, 0.2, 1]);
     }
   }
+  return [...list.finish()];
+}
+
+/**
+ * A 1,024 x 256 board filled with image 1's placeholder, or with the image once loaded, and (in
+ * a fresh list) a speck far to the right, so the page is wide and its overview coarse.
+ */
+function farBoard(kind: "placeholder" | "loaded", base = 0xffffffff): number[] {
+  const list = new ListWriter(base, base === 0xffffffff ? 1 : base + 1);
+  if (base === 0xffffffff) list.reset();
+  const fill = {
+    op: "fill",
+    path: 0,
+    evenOdd: false,
+    paint:
+      kind === "loaded"
+        ? ({
+            kind: "image",
+            image: 1,
+            matrix: [1024, 0, 0, 256, 0, 0],
+            tile: false,
+            opacity: 1,
+          } as const)
+        : ({ kind: "placeholder", opacity: 1 } as const),
+  } as const;
+  list.set(1, ROOT, {
+    flags: 0,
+    transform: [1, 0, 0, 1, 0, 0],
+    opacity: 1,
+    width: 1024,
+    height: 256,
+    coarseBelow: 0,
+    reach: 0,
+    unsupported: 0,
+    paths: [{ kind: "rect", w: 1024, h: 256, radii: [0, 0, 0, 0], smoothing: 0 }],
+    ops:
+      kind === "loaded"
+        ? [{ op: "clip", path: 0, evenOdd: false }, fill, { op: "unclip" }]
+        : [fill],
+    coarse: [],
+  });
+  if (base === 0xffffffff)
+    list.set(2, ROOT, {
+      flags: 0,
+      transform: [1, 0, 0, 1, 16000, 0],
+      opacity: 1,
+      width: 8,
+      height: 8,
+      coarseBelow: 0,
+      reach: 0,
+      unsupported: 0,
+      paths: [{ kind: "rect", w: 8, h: 8, radii: [0, 0, 0, 0], smoothing: 0 }],
+      ops: [{ op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [0, 0, 1, 1] } }],
+      coarse: [],
+    });
+  return [...list.finish()];
+}
+
+/** Image 1 stretched over a 1,024 x 256 board. */
+function imageBoard(): number[] {
+  const list = new ListWriter(0xffffffff, 1);
+  list.reset();
+  list.set(1, ROOT, {
+    flags: 0,
+    transform: [1, 0, 0, 1, 0, 0],
+    opacity: 1,
+    width: 1024,
+    height: 256,
+    coarseBelow: 0,
+    reach: 0,
+    unsupported: 0,
+    paths: [{ kind: "rect", w: 1024, h: 256, radii: [0, 0, 0, 0], smoothing: 0 }],
+    ops: [
+      {
+        op: "fill",
+        path: 0,
+        evenOdd: false,
+        paint: {
+          kind: "image",
+          image: 1,
+          matrix: [1024, 0, 0, 256, 0, 0],
+          tile: false,
+          opacity: 1,
+        },
+      },
+    ],
+    coarse: [],
+  });
   return [...list.finish()];
 }
 
@@ -1414,6 +1603,304 @@ for (const build of ["browser", "webgl"] as const) {
       expect(rows.at(-1)).toMatchObject({ exact: true, pending: 0 });
     });
 
+    test("image rows uploaded in strips land where they belong", async ({ page }) => {
+      // A 512 px level in 8 bands, in strips of 48 rows (not a band's multiple), stretched over
+      // the 1,024 x 256 board: each band's middle shows its colour.
+      const bands = ["#ff0000", "#00ff00", "#0000ff", "#ffff00", "#ff00ff", "#00ffff"];
+      const rgba = [
+        [255, 0, 0, 255],
+        [0, 255, 0, 255],
+        [0, 0, 255, 255],
+        [255, 255, 0, 255],
+        [255, 0, 255, 255],
+        [0, 255, 255, 255],
+      ];
+      const band = 256 / bands.length;
+      const rows = await presented(
+        page,
+        build,
+        imageBoard(),
+        [
+          { rows: { id: 1, side: 512, colors: bands, from: 0, to: 512, strip: 48 } },
+          {
+            name: "after the strips",
+            size: [1024, 256],
+            scale: 1,
+            moving: false,
+            budget: 0,
+            samples: bands.map((_, k) => [512, Math.floor(k * band + band / 2)]),
+          },
+        ],
+        { viewImages: true },
+      );
+      expect(rows[0]).toMatchObject({ exact: true });
+      rows[0]?.samples.forEach((got, k) => {
+        for (let c = 0; c < 4; c++)
+          expect(Math.abs((got[c] ?? -999) - (rgba[k]?.[c] ?? 0)), `band ${k}`).toBeLessThanOrEqual(
+            2,
+          );
+      });
+    });
+
+    test("a level replaced at its width in strips shows the old one until its last strip", async ({
+      page,
+    }) => {
+      // A red 512 px level, then a green one of that width in strips of 64 rows. Until the last
+      // strip is in, frames show the red level (never less) and none is exact; then green, and
+      // once green is shown, never red again. A cancelled upload keeps the red level, exact.
+      const green = [0, 255, 0, 255];
+      const rest = (name: string, budget = 0): Step => ({
+        name,
+        size: [1024, 256],
+        scale: 1,
+        moving: false,
+        budget,
+        samples: [
+          [100, 40],
+          [700, 200],
+        ],
+      });
+      const strips = (from: number, to: number): Step => ({
+        rows: { id: 1, side: 512, colors: ["#00ff00"], from, to, strip: 64 },
+      });
+      const rows = await presented(
+        page,
+        build,
+        imageBoard(),
+        [
+          { image: { id: 1, side: 512, color: "#ff0000" } },
+          rest("whole level"),
+          strips(0, 64),
+          rest("after the first strip"),
+          strips(64, 448),
+          rest("before the last strip"),
+          strips(448, 512),
+          ...Array.from({ length: 6 }, (_, i) => rest(`after the last strip ${i}`, 1)),
+          rest("exact"),
+        ],
+        { viewImages: true },
+      );
+      expect(rows[0]).toMatchObject({ exact: true, samples: [red, red] });
+      for (const row of rows.slice(1, 3)) {
+        expect(row.samples, `${row.name} showed less than the red level`).toEqual([red, red]);
+        expect(row.exact, `${row.name} was exact mid-upload`).toBe(false);
+      }
+      for (const row of rows) {
+        for (const sample of row.samples)
+          expect([red.join(), green.join()], `${row.name}`).toContain(sample.join());
+      }
+      neverBack(rows, red, green);
+      expect(rows.at(-1)).toMatchObject({ exact: true, pending: 0, samples: [green, green] });
+
+      const cancelled = await presented(
+        page,
+        build,
+        imageBoard(),
+        [
+          { image: { id: 1, side: 512, color: "#ff0000" } },
+          rest("whole level"),
+          strips(0, 128),
+          { cancel: { id: 1, width: 512 } },
+          rest("cancelled"),
+        ],
+        { viewImages: true },
+      );
+      expect(cancelled.at(-1)).toMatchObject({ exact: true, pending: 0, samples: [red, red] });
+    });
+
+    test("strips of two uploads of one width never mix", async ({ page }) => {
+      // A second strip upload of the same width starts (rows from 0) while a first is part
+      // done: the first's later rows are refused, never landing in the second's texture, and
+      // once the second is in, the level is all its colour (#352 re-check 2, probe R).
+      const blue = [0, 0, 255, 255];
+      const green = [0, 255, 0, 255];
+      const rest = (name: string): Step => ({
+        name,
+        size: [1024, 256],
+        scale: 1,
+        moving: false,
+        budget: 0,
+        samples: [
+          [500, 8],
+          [500, 200],
+        ],
+      });
+      const rows = await presented(
+        page,
+        build,
+        imageBoard(),
+        [
+          { image: { id: 1, side: 512, color: "#ff0000" } },
+          { rows: { id: 1, side: 512, colors: ["#0000ff"], from: 0, to: 64, strip: 64 } },
+          { rows: { id: 1, side: 512, colors: ["#00ff00"], from: 0, to: 64, strip: 64 } },
+          {
+            rows: {
+              id: 1,
+              side: 512,
+              colors: ["#0000ff"],
+              from: 64,
+              to: 128,
+              strip: 64,
+              refused: true,
+            },
+          },
+          rest("the second part done"),
+          { rows: { id: 1, side: 512, colors: ["#00ff00"], from: 64, to: 512, strip: 64 } },
+          rest("the second in"),
+        ],
+        { viewImages: true },
+      );
+      expect(rows[0]).toMatchObject({ exact: false, samples: [red, red] });
+      expect(rows[1]).toMatchObject({ exact: true, samples: [green, green] });
+      for (const row of rows) expect(row.samples, row.name).not.toContainEqual(blue);
+    });
+
+    test("a level's placeholder tiles never lie over an overview drawn with the image", async ({
+      page,
+    }) => {
+      // Zoom 2 drawn with the placeholder; the image loads, and once the camera has been still
+      // a while the overview is drawn again with it. A moving frame at zoom 12 shows page
+      // (40, 10) as the image through the overview; at zoom 2.5, zoom 2's placeholder tiles stand
+      // in there too, beneath the overview, never over it (#352 re-check 2, probe H).
+      const frame = (
+        name: string,
+        scale: number,
+        x: number,
+        moving: boolean,
+        budget: number,
+      ): Step => {
+        const at: [number, number] = [Math.floor(40 * scale + x), Math.floor(10 * scale)];
+        const inside = at[0] >= 0 && at[0] < 1024 && at[1] >= 0 && at[1] < 256;
+        return { name, size: [1024, 256], scale, x, moving, budget, samples: inside ? [at] : [] };
+      };
+      const rows = await presented(
+        page,
+        build,
+        farBoard("placeholder"),
+        [
+          frame("zoom 2 left, placeholder", 2, 0, false, 0),
+          frame("zoom 2 right, placeholder", 2, -1024, false, 0),
+          { ahead: { times: 40, budget: 50 } },
+          { image: { id: 1, side: 64, color: "#ff0000" } },
+          { apply: farBoard("loaded", 1) },
+          frame("zoom 2 right, image", 2, -1024, false, 0),
+          { wait: 1100 },
+          { ahead: { times: 40, budget: 50 } },
+          frame("zoom 12 left, moving", 12, 0, true, 1),
+          frame("zoom 12 panned, moving", 12, -1200, true, 1),
+          frame("zoom 2.5 left, moving", 2.5, 0, true, 1),
+          frame("zoom 2.5 left, rest", 2.5, 0, false, 0),
+        ],
+        { viewImages: true },
+      );
+      expect(rows[0]?.samples[0], "the placeholder first").not.toEqual(red);
+      expect(
+        rows.find((r) => r.name === "zoom 12 left, moving")?.samples[0],
+        "the overview shows the image",
+      ).toEqual(red);
+      stays(rows, red);
+      expect(rows.at(-1)).toMatchObject({ exact: true, samples: [red] });
+    });
+
+    test("an overview drawn with the image stays over placeholder tiles when the image changes again", async ({
+      page,
+    }) => {
+      // Probe H with a 16 px first level: the overview is drawn again with the image and shown at
+      // zoom 12; then a 512 px level arrives, refining the overview too. Refined tiles lie by when
+      // they were drawn, so at zoom 2.5 the overview (drawn later, with the image) stays over
+      // zoom 2's placeholder tiles (drawn earlier): the image never goes back (#352 re-check 3,
+      // probe K-overview).
+      const frame = (
+        name: string,
+        scale: number,
+        x: number,
+        moving: boolean,
+        budget: number,
+      ): Step => {
+        const at: [number, number] = [Math.floor(40 * scale + x), Math.floor(10 * scale)];
+        const inside = at[0] >= 0 && at[0] < 1024 && at[1] >= 0 && at[1] < 256;
+        return { name, size: [1024, 256], scale, x, moving, budget, samples: inside ? [at] : [] };
+      };
+      const rows = await presented(
+        page,
+        build,
+        farBoard("placeholder"),
+        [
+          frame("zoom 2 left, placeholder", 2, 0, false, 0),
+          frame("zoom 2 right, placeholder", 2, -1024, false, 0),
+          { ahead: { times: 40, budget: 50 } },
+          { image: { id: 1, side: 16, color: "#ff0000" } },
+          { apply: farBoard("loaded", 1) },
+          frame("zoom 2 right, image", 2, -1024, false, 0),
+          { wait: 1100 },
+          { ahead: { times: 40, budget: 50 } },
+          frame("zoom 12 left, moving", 12, 0, true, 1),
+          frame("zoom 12 panned, moving", 12, -1200, true, 1),
+          { image: { id: 1, side: 512, color: "#ff0000" } },
+          frame("zoom 12 panned again, moving", 12, -1300, true, 1),
+          frame("zoom 2.5 left, moving", 2.5, 0, true, 1),
+          frame("zoom 2.5 left, rest", 2.5, 0, false, 0),
+        ],
+        { viewImages: true },
+      );
+      expect(
+        rows.find((r) => r.name === "zoom 12 left, moving")?.samples[0],
+        "the overview shows the image",
+      ).toEqual(red);
+      stays(rows, red);
+      expect(rows.at(-1)).toMatchObject({ exact: true, samples: [red] });
+    });
+
+    test("an image once shown never goes back to its placeholder at another zoom", async ({
+      page,
+    }) => {
+      // The board drawn at zoom 1 with its image's placeholder; the image arrives (the same
+      // picture: zoom 1's tiles stand in until drawn again); zoom 2 drawn exact with it; then
+      // back to zoom 1, moving and at rest, 1 ms at a time. Where zoom 2 showed the image, no
+      // frame shows the placeholder again: tiles drawn with it lie beneath the frame on screen
+      // and zoom 2's tiles (#352 re-check).
+      const frame = (name: string, scale: number, moving: boolean, budget: number): Step => ({
+        name,
+        size: [1024, 256],
+        scale,
+        moving,
+        budget,
+        // Page (103.5, 47.5) and (399.5, 103.5), between the dark squares, shown at zoom 2.
+        samples: [
+          [Math.floor(103.5 * scale), Math.floor(47.5 * scale)],
+          [Math.floor(399.5 * scale), Math.floor(103.5 * scale)],
+        ],
+      });
+      const rows = await presented(
+        page,
+        build,
+        slowBoard("placeholder"),
+        [
+          frame("zoom 1", 1, false, 0),
+          { image: { id: 1, side: 64, color: "#ff0000" } },
+          { apply: slowBoard("loaded", 1) },
+          frame("zoom 2", 2, false, 0),
+          frame("zooming 1.6", 1.6, true, 1),
+          frame("zooming 1.25", 1.25, true, 1),
+          frame("zooming 1", 1, true, 1),
+          ...Array.from({ length: 20 }, (_, i) => frame(`zoom 1 slice ${i}`, 1, false, 1)),
+          frame("zoom 1 exact", 1, false, 0),
+        ],
+        { viewImages: true },
+      );
+      expect(rows[0]).toMatchObject({ exact: true });
+      expect(rows[0]?.samples[0], "the placeholder first").not.toEqual(red);
+      expect(rows[1]).toMatchObject({ exact: true, samples: [red, red] });
+      for (const row of rows.slice(1)) {
+        expect(row.samples, `${row.name} went back to the placeholder`).toEqual([red, red]);
+      }
+      expect(
+        rows.slice(2, -1).some((r) => !r.exact),
+        "zoom 1 took more than one frame to draw again",
+      ).toBe(true);
+      expect(rows.at(-1)).toMatchObject({ exact: true, pending: 0 });
+    });
+
     for (const kind of ["edit", "image", "glyph"] as const) {
       test(`content arriving while pinching (${kind}) never goes back`, async ({ page }) => {
         // A remote fill edit (then its undo), an image replaced at the size it had, or shaped
@@ -1797,6 +2284,45 @@ for (const build of ["browser", "webgl"] as const) {
         pending: 0,
         samples: [green, green, green],
       });
+    });
+
+    test("an image loaded where its placeholder was mid-series shows, and settles exact", async ({
+      page,
+    }) => {
+      // A frame no slot can hold, drawn over 1 ms slices, shows the placeholder; mid-series the
+      // image loads where it was (a fill-in, not an edit). The finished tiles are drawn again
+      // (`note_sharpened`, from the fill-in itself): no frame is exact with the placeholder, the
+      // image never goes back once shown, and the view settles exact with it (#352 on #358).
+      const frame = (name: string): Step => ({
+        name,
+        size: [1024, 256],
+        scale: 1,
+        moving: false,
+        budget: 1,
+        samples: [
+          [103, 47],
+          [399, 103],
+          [903, 199],
+        ],
+      });
+      const rows = await presented(
+        page,
+        build,
+        slowBoard("placeholder"),
+        [
+          ...Array.from({ length: 3 }, (_, i) => frame(`placeholder ${i}`)),
+          { image: { id: 1, side: 16, color: "#ff0000" } },
+          { apply: slowBoard("loaded", 1) },
+          ...Array.from({ length: 30 }, (_, i) => frame(`image ${i}`)),
+        ],
+        { tileBytes: 0, viewImages: true },
+      );
+      expect(rows[0]?.samples[0], "the placeholder first").not.toEqual(red);
+      for (const row of rows.slice(3))
+        if (row.exact)
+          expect(row.samples, `${row.name} exact with the placeholder`).toEqual([red, red, red]);
+      stays(rows, red);
+      expect(rows.at(-1)).toMatchObject({ exact: true, pending: 0, samples: [red, red, red] });
     });
 
     test("an image's first level arriving mid-series on slow tiles shows, and settles exact", async ({

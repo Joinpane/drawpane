@@ -301,6 +301,7 @@ fn a_reader_chain_against_preorder_checks_each_change_once() {
             order: 0,
             end: 0,
             stale: true,
+            refine: false,
         };
         UNRELATED
     ];
@@ -310,6 +311,7 @@ fn a_reader_chain_against_preorder_checks_each_change_once() {
         order: 0,
         end: 0,
         stale: true,
+        refine: false,
     });
     let result = engine.store.dirty(&dirty, Affine::IDENTITY, 1.5);
     assert_eq!(result.len(), dirty.len() + NESTED as usize);
@@ -2195,4 +2197,517 @@ fn provisional_text_in_reader_halo_converges_to_exact() {
         s2.exact,
         "tile that saw provisional record only in its reader halo must converge to exact: {s2:?}"
     );
+}
+
+/// An image loaded where its placeholder was (a record set again with only its placeholder fills
+/// become the image, clipped to the same path, at the same opacity and blend) is the same picture
+/// arriving, not an edit: tiles drawn with the placeholder stand in until drawn again, never
+/// exact, and nothing is noted as changed. Anything else changing with it stays an edit: the
+/// record moved, a path changed (corner radius), the image's opacity, its content clip, its
+/// parent (#352 re-check), another image, an image already there swapped, or a fill that isn't
+/// the image. Ops compare by their paths' contents, caches set aside: a tiled image, a stroke
+/// drawn before, or the placement's path shifting another's index is still a fill-in.
+#[test]
+fn an_image_loaded_where_its_placeholder_was_refines_and_anything_else_is_an_edit() {
+    fn shape(radius: f32, ops: Vec<Op>) -> Rec {
+        let mut r = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [64.0, 64.0]);
+        r.paths.push(Entry::Rect {
+            w: 64.0,
+            h: 64.0,
+            radii: [radius; 4],
+        });
+        r.ops = ops;
+        r
+    }
+    fn fill(paint: Paint) -> Op {
+        Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint,
+        }
+    }
+    fn image(id: u32, opacity: f32) -> Paint {
+        Paint::Image {
+            id,
+            m: [64.0, 0.0, 0.0, 64.0, 0.0, 0.0],
+            tile: false,
+            opacity,
+        }
+    }
+    fn clip() -> Op {
+        Op::Clip {
+            path: 0,
+            even_odd: false,
+        }
+    }
+    fn loaded_at(id: u32, opacity: f32, radius: f32) -> Rec {
+        shape(radius, vec![clip(), fill(image(id, opacity)), Op::Unclip])
+    }
+    fn loaded(id: u32) -> Rec {
+        loaded_at(id, 1.0, 0.0)
+    }
+    fn stroke() -> Op {
+        Op::Stroke {
+            path: 0,
+            width: 4.0,
+            join: 0,
+            cap: 0,
+            dashes: vec![],
+            offset: 0.0,
+            paint: Paint::Solid([0.0, 0.0, 0.0, 1.0]),
+        }
+    }
+    // A square inside the shape, its path after the shape's; loaded, the image's placement is a
+    // path between them, as the editor emits it.
+    fn inner(loaded: bool) -> Rec {
+        let mut r = shape(0.0, vec![]);
+        let square = Entry::Rect {
+            w: 32.0,
+            h: 32.0,
+            radii: [0.0; 4],
+        };
+        let solid = |path| Op::Fill {
+            path,
+            even_odd: false,
+            paint: Paint::Solid([0.0, 0.0, 1.0, 1.0]),
+        };
+        if loaded {
+            r.paths.push(Entry::Rect {
+                w: 64.0,
+                h: 64.0,
+                radii: [0.0; 4],
+            });
+            r.paths.push(square);
+            r.ops = vec![
+                clip(),
+                Op::Fill {
+                    path: 1,
+                    even_odd: false,
+                    paint: image(1, 1.0),
+                },
+                Op::Unclip,
+                solid(2),
+            ];
+        } else {
+            r.paths.push(square);
+            r.ops = vec![fill(Paint::PlaceholderAt(1.0)), solid(1)];
+        }
+        r
+    }
+    let placeholder = shape(0.0, vec![fill(Paint::PlaceholderAt(1.0))]);
+    // A frame clipping its content, a child poking out of it to the right and below.
+    let framed = shape(
+        0.0,
+        vec![fill(Paint::PlaceholderAt(1.0)), clip(), Op::Children, Op::Unclip],
+    );
+    let mut child = Rec::new([1.0, 0.0, 0.0, 1.0, 32.0, 32.0], [80.0, 80.0]);
+    child.paths.push(Entry::Rect {
+        w: 80.0,
+        h: 80.0,
+        radii: [0.0; 4],
+    });
+    child.ops.push(fill(Paint::Solid([0.0, 0.0, 1.0, 1.0])));
+    let mut offset = Rec::group();
+    offset.transform = [1.0, 0.0, 0.0, 1.0, 64.0, 0.0];
+    type Edit = Box<dyn Fn(&mut W)>;
+    type Case = (&'static str, Vec<(u32, u32, Rec)>, Edit, bool);
+    let cases: Vec<Case> = vec![
+        (
+            "its image loaded tiled",
+            vec![(1, 0, placeholder.clone())],
+            Box::new(|w: &mut W| {
+                let tiled = Paint::Image {
+                    id: 1,
+                    m: [16.0, 0.0, 0.0, 16.0, 0.0, 0.0],
+                    tile: true,
+                    opacity: 1.0,
+                };
+                w.set(1, 0, &shape(0.0, vec![fill(tiled)]));
+            }),
+            false,
+        ),
+        (
+            "its image loaded under a stroke drawn before",
+            vec![(1, 0, shape(0.0, vec![fill(Paint::PlaceholderAt(1.0)), stroke()]))],
+            Box::new(|w: &mut W| {
+                w.set(
+                    1,
+                    0,
+                    &shape(0.0, vec![clip(), fill(image(1, 1.0)), Op::Unclip, stroke()]),
+                )
+            }),
+            false,
+        ),
+        (
+            "its image loaded beside one already there",
+            vec![(
+                1,
+                0,
+                shape(
+                    0.0,
+                    vec![clip(), fill(image(2, 1.0)), Op::Unclip, fill(Paint::PlaceholderAt(1.0))],
+                ),
+            )],
+            Box::new(|w: &mut W| {
+                w.set(
+                    1,
+                    0,
+                    &shape(
+                        0.0,
+                        vec![
+                            clip(),
+                            fill(image(2, 1.0)),
+                            Op::Unclip,
+                            clip(),
+                            fill(image(1, 1.0)),
+                            Op::Unclip,
+                        ],
+                    ),
+                )
+            }),
+            false,
+        ),
+        (
+            "its image loaded as the one already there was swapped",
+            vec![(
+                1,
+                0,
+                shape(
+                    0.0,
+                    vec![clip(), fill(image(2, 1.0)), Op::Unclip, fill(Paint::PlaceholderAt(1.0))],
+                ),
+            )],
+            Box::new(|w: &mut W| {
+                w.set(
+                    1,
+                    0,
+                    &shape(
+                        0.0,
+                        vec![
+                            clip(),
+                            fill(image(1, 1.0)),
+                            Op::Unclip,
+                            clip(),
+                            fill(image(1, 1.0)),
+                            Op::Unclip,
+                        ],
+                    ),
+                )
+            }),
+            true,
+        ),
+        (
+            "its image loaded, its placement a path before another",
+            vec![(1, 0, inner(false))],
+            Box::new(|w: &mut W| w.set(1, 0, &inner(true))),
+            false,
+        ),
+        (
+            "its image loaded",
+            vec![(1, 0, placeholder.clone())],
+            Box::new(|w: &mut W| w.set(1, 0, &loaded(1))),
+            false,
+        ),
+        (
+            "its image loaded in a frame clipping its content",
+            vec![(1, 0, framed.clone()), (2, 1, child.clone())],
+            Box::new(|w: &mut W| {
+                w.set(
+                    1,
+                    0,
+                    &shape(
+                        0.0,
+                        vec![
+                            clip(),
+                            fill(image(1, 1.0)),
+                            Op::Unclip,
+                            clip(),
+                            Op::Children,
+                            Op::Unclip,
+                        ],
+                    ),
+                )
+            }),
+            false,
+        ),
+        (
+            "its image loaded as it moved",
+            vec![(1, 0, placeholder.clone())],
+            Box::new(|w: &mut W| {
+                w.set(1, 0, &loaded(1));
+                w.transform(1, [1.0, 0.0, 0.0, 1.0, 2.0, 0.0]);
+            }),
+            true,
+        ),
+        (
+            "its image loaded as its corners rounded",
+            vec![(1, 0, placeholder.clone())],
+            Box::new(|w: &mut W| w.set(1, 0, &loaded_at(1, 1.0, 32.0))),
+            true,
+        ),
+        (
+            "its image loaded at another opacity",
+            vec![(1, 0, placeholder.clone())],
+            Box::new(|w: &mut W| w.set(1, 0, &loaded_at(1, 0.2, 0.0))),
+            true,
+        ),
+        (
+            "its image loaded as the frame stopped clipping its content",
+            vec![(1, 0, framed), (2, 1, child)],
+            Box::new(|w: &mut W| {
+                w.set(
+                    1,
+                    0,
+                    &shape(0.0, vec![clip(), fill(image(1, 1.0)), Op::Unclip, Op::Children]),
+                )
+            }),
+            true,
+        ),
+        (
+            "its image loaded as it moved to another parent",
+            vec![(10, 0, Rec::group()), (11, 0, offset), (1, 10, placeholder.clone())],
+            Box::new(|w: &mut W| w.set(1, 11, &loaded(1))),
+            true,
+        ),
+        (
+            "another image",
+            vec![(1, 0, loaded(1))],
+            Box::new(|w: &mut W| w.set(1, 0, &loaded(2))),
+            true,
+        ),
+        (
+            "a solid fill for its placeholder",
+            vec![(1, 0, placeholder)],
+            Box::new(|w: &mut W| w.set(1, 0, &shape(0.0, vec![fill(Paint::Solid([0.0, 1.0, 0.0, 1.0]))]))),
+            true,
+        ),
+    ];
+    for (label, before, edit, strict) in cases {
+        let mut engine = Engine::new(Limits::default());
+        let mut w = W::new(ANY, 1);
+        w.reset();
+        for (id, parent, r) in &before {
+            w.set(*id, *parent, r);
+        }
+        engine.apply(&w.finish()).expect("list");
+        for (id, c) in [(1, 200u8), (2, 40u8)] {
+            engine.put_image(id, 2, 2, &[c; 16], false).expect("image");
+        }
+        engine.use_cpu_tiles(64, 64);
+        engine
+            .render_cpu_tiled(128, 128, camera(1.0, 0.0, 0.0), [1.0; 4], TiledOptions::default())
+            .expect("frame");
+        let mut w = W::new(1, 2);
+        edit(&mut w);
+        engine.apply(&w.finish()).expect("patch");
+        let cache = &engine.cpu_tiles.as_ref().expect("cpu tiles").cache;
+        let tile = cache
+            .levels()
+            .into_iter()
+            .find_map(|(id, _)| cache.get(&TileKey { level: id, i: 0, j: 0 }).copied())
+            .expect("the tile under the record");
+        assert_eq!(tile.stale, strict, "{label}: stale");
+        assert_eq!(tile.refine, !strict, "{label}: refine");
+        assert!(!tile.current(), "{label}: drawn again");
+        assert_eq!(cache.changed().is_empty(), !strict, "{label}: noted as changed");
+    }
+}
+
+/// Display never goes back to a placeholder (#352 re-check). Zoom 1 is drawn with the
+/// placeholder, the image loads (a refinement: zoom 1's tiles stand in until drawn again), zoom 2
+/// is drawn exact with the image, then the view zooms back to 1, moving and at rest with no tile
+/// drawn: where zoom 2 showed the image, every frame shows it (the frame on screen and zoom 2's
+/// tiles outrank tiles drawn with the placeholder, at the frame's level too), and the view
+/// settles exact. With the load counted as an edit (as before #352), the same holds.
+#[test]
+fn an_image_once_shown_never_goes_back_to_its_placeholder_at_another_zoom() {
+    for strict in [false, true] {
+        let mut engine = Engine::new(Limits::default());
+        let mut w = W::new(ANY, 1);
+        w.reset();
+        let mut r = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [256.0, 256.0]);
+        r.paths.push(Entry::Rect {
+            w: 256.0,
+            h: 256.0,
+            radii: [0.0; 4],
+        });
+        r.ops = vec![Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::PlaceholderAt(1.0),
+        }];
+        w.set(1, 0, &r);
+        engine.apply(&w.finish()).expect("list");
+        engine
+            .put_image(1, 2, 2, &[255, 0, 0, 255].repeat(4), false)
+            .expect("image");
+        engine.use_cpu_tiles(64, 128);
+        let red = [255u8, 0, 0, 255];
+        let px = |f: &[u8], x: usize, y: usize| -> [u8; 4] {
+            let i = (y * 256 + x) * 4;
+            [f[i], f[i + 1], f[i + 2], f[i + 3]]
+        };
+        let (f, s) = engine
+            .render_cpu_tiled(256, 256, camera(1.0, 0.0, 0.0), [1.0; 4], TiledOptions::default())
+            .expect("zoom 1");
+        assert!(s.exact, "strict={strict}: zoom 1 exact");
+        assert_ne!(px(f, 20, 20), red, "strict={strict}: the placeholder first");
+        let mut loaded = r.clone();
+        loaded.ops = vec![
+            Op::Clip {
+                path: 0,
+                even_odd: false,
+            },
+            Op::Fill {
+                path: 0,
+                even_odd: false,
+                paint: Paint::Image {
+                    id: 1,
+                    m: [256.0, 0.0, 0.0, 256.0, 0.0, 0.0],
+                    tile: false,
+                    opacity: 1.0,
+                },
+            },
+            Op::Unclip,
+        ];
+        let mut w = W::new(1, 2);
+        w.set(1, 0, &loaded);
+        if strict {
+            w.transform(1, [1.0, 0.0, 0.0, 1.0, 0.0, 0.0]);
+        }
+        engine.apply(&w.finish()).expect("patch");
+        let (f, s) = engine
+            .render_cpu_tiled(256, 256, camera(2.0, 0.0, 0.0), [1.0; 4], TiledOptions::default())
+            .expect("zoom 2");
+        assert!(s.exact, "strict={strict}: zoom 2 exact");
+        assert_eq!(px(f, 40, 40), red, "strict={strict}: zoom 2 shows the image");
+        // Page (20, 20) and (100, 100): both shown red at zoom 2.
+        let none = |moving| TiledOptions {
+            moving,
+            max_jobs: 0,
+            budget_ms: 0.0,
+            prefetch: false,
+        };
+        for (zoom, moving) in [(1.6, true), (1.25, true), (1.0, true), (1.0, false), (1.0, false)] {
+            let (f, s) = engine
+                .render_cpu_tiled(256, 256, camera(zoom, 0.0, 0.0), [1.0; 4], none(moving))
+                .expect("frame");
+            for p in [20.0, 100.0] {
+                let at = (p * zoom) as usize;
+                assert_eq!(
+                    px(f, at, at),
+                    red,
+                    "strict={strict}: zoom {zoom} (moving {moving}) went back to the placeholder at page {p}"
+                );
+            }
+            assert!(!s.exact, "strict={strict}: zoom {zoom} isn't drawn yet");
+        }
+        let mut settled = false;
+        for _ in 0..40 {
+            let (f, s) = engine
+                .render_cpu_tiled(256, 256, camera(1.0, 0.0, 0.0), [1.0; 4], TiledOptions::default())
+                .expect("settle");
+            assert_eq!(px(f, 20, 20), red, "strict={strict}: settling went back");
+            if s.exact {
+                assert_eq!(px(f, 200, 200), red, "strict={strict}: settled with the image");
+                settled = true;
+                break;
+            }
+        }
+        assert!(settled, "strict={strict}: never exact at rest");
+    }
+}
+
+/// Refined tiles lie by when they were drawn, not by level (#352 re-check 3, probe K). Zoom 2
+/// and zoom 1 are drawn with the placeholder; the image loads and zoom 1 is drawn again with it
+/// (shown); the view pans away; another level of the image arrives, so zoom 1's tiles are
+/// refined again while zoom 2's still are. Moving back at zoom 1.5, zoom 2's placeholder (drawn
+/// earlier) lies beneath zoom 1's image (drawn later), so the image shows. Controls: without zoom
+/// 2, and without the second level.
+#[test]
+fn a_refined_tile_drawn_later_lies_over_one_drawn_earlier() {
+    const SIDE: u32 = 256;
+    let px = |f: &[u8], x: usize, y: usize| -> [u8; 4] {
+        let i = (y * SIDE as usize + x) * 4;
+        [f[i], f[i + 1], f[i + 2], f[i + 3]]
+    };
+    let settle = |engine: &mut Engine, c: Camera| -> Vec<u8> {
+        for _ in 0..60 {
+            let (f, s) = engine
+                .render_cpu_tiled(SIDE, SIDE, c, [1.0; 4], TiledOptions::default())
+                .expect("settle");
+            if s.exact && s.pending == 0 {
+                return f.to_vec();
+            }
+        }
+        panic!("never exact at rest");
+    };
+    let red = [255u8, 0, 0, 255];
+    for (with_zoom_2, with_level) in [(true, true), (false, true), (true, false)] {
+        let mut engine = Engine::new(Limits::default());
+        let mut w = W::new(ANY, 1);
+        w.reset();
+        let mut r = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [1024.0, 1024.0]);
+        r.paths.push(Entry::Rect {
+            w: 1024.0,
+            h: 1024.0,
+            radii: [0.0; 4],
+        });
+        r.ops = vec![Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::PlaceholderAt(1.0),
+        }];
+        w.set(1, 0, &r);
+        engine.apply(&w.finish()).expect("list");
+        engine.put_image(1, 2, 2, &red.repeat(4), false).expect("image");
+        engine.use_cpu_tiles(64, 256);
+        if with_zoom_2 {
+            settle(&mut engine, camera(2.0, 0.0, 0.0));
+        }
+        settle(&mut engine, camera(1.0, 0.0, 0.0));
+        let mut loaded = r.clone();
+        loaded.ops = vec![
+            Op::Clip {
+                path: 0,
+                even_odd: false,
+            },
+            Op::Fill {
+                path: 0,
+                even_odd: false,
+                paint: Paint::Image {
+                    id: 1,
+                    m: [1024.0, 0.0, 0.0, 1024.0, 0.0, 0.0],
+                    tile: false,
+                    opacity: 1.0,
+                },
+            },
+            Op::Unclip,
+        ];
+        let mut w = W::new(1, 2);
+        w.set(1, 0, &loaded);
+        engine.apply(&w.finish()).expect("patch");
+        let f = settle(&mut engine, camera(1.0, 0.0, 0.0));
+        assert_eq!(px(&f, 20, 20), red, "zoom 1 shows the image");
+        settle(&mut engine, camera(1.0, -600.0, 0.0));
+        if with_level {
+            engine
+                .put_cpu_image_level(1, 512, 512, &red.repeat(512 * 512))
+                .expect("level");
+        }
+        let moving = TiledOptions {
+            moving: true,
+            max_jobs: 0,
+            budget_ms: 0.0,
+            prefetch: false,
+        };
+        let (f, _) = engine
+            .render_cpu_tiled(SIDE, SIDE, camera(1.5, 0.0, 0.0), [1.0; 4], moving)
+            .expect("moving");
+        assert_eq!(
+            px(f, 30, 30),
+            red,
+            "zoom 2 {with_zoom_2}, level {with_level}: went back to the placeholder"
+        );
+    }
 }

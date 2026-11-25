@@ -1337,6 +1337,17 @@ impl super::Queue {
                         gl.pixel_store_bool(UNPACK_PREMULTIPLY_ALPHA_WEBGL, true);
                     }
                 }
+                // Drawpane: a source origin is a sub-rectangle of the image (WebGL2 applies the
+                // unpack skips to a TexImageSource), so an image can be uploaded in strips.
+                let skip = copy.src_base.origin;
+                unsafe {
+                    if skip.x != 0 {
+                        gl.pixel_store_i32(glow::UNPACK_SKIP_PIXELS, skip.x as i32);
+                    }
+                    if skip.y != 0 {
+                        gl.pixel_store_i32(glow::UNPACK_SKIP_ROWS, skip.y as i32);
+                    }
+                }
 
                 unsafe { gl.bind_texture(dst_target, Some(dst)) };
                 let format_desc = self.shared.describe_texture_format(dst_format);
@@ -1538,6 +1549,13 @@ impl super::Queue {
                     }
                     if dst_premultiplication {
                         gl.pixel_store_bool(UNPACK_PREMULTIPLY_ALPHA_WEBGL, false);
+                    }
+                    // Drawpane: back to the defaults the other uploads assume.
+                    if skip.x != 0 {
+                        gl.pixel_store_i32(glow::UNPACK_SKIP_PIXELS, 0);
+                    }
+                    if skip.y != 0 {
+                        gl.pixel_store_i32(glow::UNPACK_SKIP_ROWS, 0);
                     }
                 }
             }

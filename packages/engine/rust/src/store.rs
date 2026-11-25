@@ -47,6 +47,19 @@ pub enum CachedReaderKind {
     ProgressiveBlur,
 }
 
+/// A shown reader as `Store::dirty` sees it, in page units: its paint order and subtree end, the
+/// region it reads (its halo included) and the one it paints (through enclosing layer effects),
+/// whether it reads after its children, and whether it writes the backdrop later readers sample.
+#[derive(Clone, Copy, Debug)]
+pub struct DirtyReader {
+    order: u32,
+    end: u32,
+    reads: Rect,
+    paints: Rect,
+    after_children: bool,
+    writes_backdrop: bool,
+}
+
 /// Lazily computed per-revision reader acceleration structure, avoiding full-graph walks on
 /// camera-only pan/zoom frames and per-tile `plan_readers` / `has_reader_in_rect` checks.
 pub struct ReaderCache {
@@ -186,6 +199,10 @@ pub struct Dirty {
     /// moved or reordered later in the same message): not comparable with the graph's order now,
     /// so it counts as beneath every reader.
     pub stale: bool,
+    /// A record's image arrived where it drew its placeholder, and nothing else about it changed
+    /// (`Store::fills_placeholder`): the same picture, loaded. What was drawn with the placeholder
+    /// still stands in, never exact (`TileCache::refine`), as for a sharper image level.
+    pub refine: bool,
 }
 
 #[derive(Default, Debug)]
@@ -239,6 +256,9 @@ pub struct Store {
     structure: u64,
     /// Cached per-revision reader index, invalidated whenever the graph mutates.
     reader_cache: RefCell<Option<ReaderCache>>,
+    /// The readers as `dirty` sees them, in page units: worked out once a revision, not once a
+    /// call (a change invalidates tiles at every cached level, and a page can hold hundreds).
+    dirty_readers: RefCell<Option<std::rc::Rc<Vec<DirtyReader>>>>,
 }
 
 struct PassAncestor {
@@ -274,6 +294,13 @@ struct Txn {
     iso_replay: HashSet<u32>,
     page_scope: Option<PageScope>,
     full: bool,
+    /// The record whose `Set` is noting it now fills its image placeholder (`fills_placeholder`).
+    filling: Option<u32>,
+    /// Records set only to fill their image placeholder, and those changed any other way.
+    filled: HashSet<u32>,
+    changed_otherwise: HashSet<u32>,
+    /// Where each record's entry from before is in `before`.
+    before_at: HashMap<u32, usize>,
 }
 
 impl Txn {
@@ -291,8 +318,13 @@ impl Txn {
             iso_replay: HashSet::new(),
             page_scope: None,
             full: false,
+            filling: None,
+            filled: HashSet::new(),
+            changed_otherwise: HashSet::new(),
+            before_at: HashMap::new(),
         }
     }
+
     fn push(&mut self, u: Undo) {
         if self.track {
             self.undo.push(u);
@@ -325,6 +357,7 @@ impl Store {
             order: None,
             structure: 0,
             reader_cache: RefCell::new(None),
+            dirty_readers: RefCell::new(None),
         }
     }
 
@@ -441,6 +474,7 @@ impl Store {
         self.revision = next;
         if changed || txn.full {
             *self.reader_cache.borrow_mut() = None;
+            *self.dirty_readers.borrow_mut() = None;
         }
         if txn.full {
             return Ok(Applied {
@@ -484,6 +518,7 @@ impl Store {
                         order,
                         end,
                         stale: false,
+                        refine: false,
                     });
                 }
                 txn.touched.push(a);
@@ -495,7 +530,16 @@ impl Store {
             }
         }
         let touched = txn.touched.clone();
-        let mut changes = self.changes(std::mem::take(&mut txn.before), &txn.touched);
+        // Records whose only change in the message filled their image placeholder.
+        let refined: HashSet<u32> = txn.filled.difference(&txn.changed_otherwise).copied().collect();
+        for id in &refined {
+            if let Some(&at) = txn.before_at.get(id)
+                && let Some(d) = txn.before.get_mut(at)
+            {
+                d.refine = true;
+            }
+        }
+        let mut changes = self.changes(std::mem::take(&mut txn.before), &txn.touched, &refined);
         if let Some(PageScope {
             before_rect,
             replay: true,
@@ -516,6 +560,7 @@ impl Store {
                     order: 0,
                     end: u32::MAX,
                     stale: true,
+                    refine: false,
                 });
             }
         }
@@ -577,6 +622,7 @@ impl Store {
         self.structure += 1;
         self.revision = next;
         *self.reader_cache.borrow_mut() = None;
+        *self.dirty_readers.borrow_mut() = None;
         Ok(Applied {
             changes: Vec::new(),
             full: true,
@@ -807,7 +853,13 @@ impl Store {
                 let new_mask = record.is_mask();
                 let new_ends = record.ends_mask();
                 if txn.track {
+                    txn.filling = self
+                        .nodes
+                        .get(&id)
+                        .is_some_and(|n| n.parent == parent && Self::fills_placeholder(&n.record, &record))
+                        .then_some(id);
                     self.note_before(id, txn);
+                    txn.filling = None;
                     let draws_children = record.ops.iter().any(|op| matches!(op, Op::Children));
                     let may_flush = !record.hidden()
                         && (self.parent_has_mask(parent)
@@ -1232,6 +1284,11 @@ impl Store {
     /// Notes where `id`'s subtree paints now, before a command changes it (at most once per
     /// transaction so batch patches never build duplicate dirty rectangles).
     fn note_before(&mut self, id: u32, txn: &mut Txn) {
+        if txn.filling == Some(id) {
+            txn.filled.insert(id);
+        } else {
+            txn.changed_otherwise.insert(id);
+        }
         if !txn.before_seen.insert(id) {
             return;
         }
@@ -1249,13 +1306,209 @@ impl Store {
             (0, u32::MAX)
         };
         if let Some(rect) = self.dirty_extent(id) {
+            txn.before_at.insert(id, txn.before.len());
             txn.before.push(Dirty {
                 rect,
                 order,
                 end,
                 stale: false,
+                refine: false,
             });
         }
+    }
+
+    /// Whether setting `old` to `new` only loads an image where its placeholder was (#352
+    /// re-check): a placeholder fill becomes the image, clipped to the very same shape (path
+    /// contents and even-odd rule) or filling it (tiled), at the placeholder's opacity and blend,
+    /// and nothing else about the record changes. Ops compare by what they draw: their paths'
+    /// contents, not indices (the image's placement adds a path), caches set aside. An image
+    /// already there stays exactly as it was. The caller checks the parent.
+    fn fills_placeholder(old: &Record, new: &Record) -> bool {
+        use crate::record::Paint;
+        // Paths compare by contents, not index: the image's placement adds a path, which shifts
+        // later indices. Everything compares with `PartialEq`, never by formatting.
+        fn same_path(a: &Record, i: u32, b: &Record, j: u32) -> bool {
+            matches!((a.paths.get(i as usize), b.paths.get(j as usize)), (Some(p), Some(q)) if p == q)
+        }
+        fn same_paths(a: &Record, i: &[u32], b: &Record, j: &[u32]) -> bool {
+            i.len() == j.len() && i.iter().zip(j).all(|(&x, &y)| same_path(a, x, b, y))
+        }
+        /// Whether two ops draw the same: equal but for path indices (their paths compare), a
+        /// stroke's outline cache and a glass op's measured inradius set aside.
+        fn same_op(a: &Record, x: &Op, b: &Record, y: &Op) -> bool {
+            match (x, y) {
+                (
+                    Op::Fill {
+                        path: p,
+                        even_odd: e,
+                        paint: f,
+                        blend: l,
+                    },
+                    Op::Fill {
+                        path: q,
+                        even_odd: e2,
+                        paint: f2,
+                        blend: l2,
+                    },
+                ) => e == e2 && f == f2 && l == l2 && same_path(a, *p, b, *q),
+                (
+                    Op::Stroke {
+                        path: p,
+                        style: s,
+                        paint: f,
+                        blend: l,
+                        ..
+                    },
+                    Op::Stroke {
+                        path: q,
+                        style: s2,
+                        paint: f2,
+                        blend: l2,
+                        ..
+                    },
+                ) => s == s2 && f == f2 && l == l2 && same_path(a, *p, b, *q),
+                (Op::Clip { path: p, even_odd: e }, Op::Clip { path: q, even_odd: e2 }) => {
+                    e == e2 && same_path(a, *p, b, *q)
+                }
+                (Op::Unclip, Op::Unclip) | (Op::Children, Op::Children) | (Op::Unlayer, Op::Unlayer) => true,
+                (Op::Read { kernel: k, halo: h }, Op::Read { kernel: k2, halo: h2 }) => k == k2 && h == h2,
+                (Op::Layer { compose: c }, Op::Layer { compose: c2 }) => c == c2,
+                (
+                    Op::DropShadow {
+                        paths: p,
+                        even_odd: e,
+                        dx,
+                        dy,
+                        blur,
+                        color,
+                        blend,
+                        stroke,
+                    },
+                    Op::DropShadow {
+                        paths: q,
+                        even_odd: e2,
+                        dx: dx2,
+                        dy: dy2,
+                        blur: r2,
+                        color: c2,
+                        blend: l2,
+                        stroke: s2,
+                    },
+                ) => {
+                    e == e2
+                        && (dx, dy, blur, color, blend) == (dx2, dy2, r2, c2, l2)
+                        && stroke == s2
+                        && same_paths(a, p, b, q)
+                }
+                (
+                    Op::InnerShadow {
+                        shape: p,
+                        hole: h,
+                        even_odd: e,
+                        dx,
+                        dy,
+                        blur,
+                        color,
+                        blend,
+                    },
+                    Op::InnerShadow {
+                        shape: q,
+                        hole: h2,
+                        even_odd: e2,
+                        dx: dx2,
+                        dy: dy2,
+                        blur: r2,
+                        color: c2,
+                        blend: l2,
+                    },
+                ) => {
+                    e == e2
+                        && (dx, dy, blur, color, blend) == (dx2, dy2, r2, c2, l2)
+                        && same_path(a, *p, b, *q)
+                        && match (h, h2) {
+                            (None, None) => true,
+                            (Some(i), Some(j)) => same_path(a, *i, b, *j),
+                            _ => false,
+                        }
+                }
+                (Op::Glass(g), Op::Glass(g2)) => {
+                    let set_aside = |g: &crate::record::GlassOp| {
+                        let mut g = g.clone();
+                        g.paths.clear();
+                        g.measured_inradius.set(-1.0);
+                        g
+                    };
+                    set_aside(g) == set_aside(g2) && same_paths(a, &g.paths, b, &g2.paths)
+                }
+                (Op::BackgroundBlur(o), Op::BackgroundBlur(o2)) => {
+                    (o.even_odd, o.radius) == (o2.even_odd, o2.radius) && same_paths(a, &o.paths, b, &o2.paths)
+                }
+                (Op::ProgressiveBlur(o), Op::ProgressiveBlur(o2)) => {
+                    (o.even_odd, o.start_radius, o.end_radius, o.start, o.end)
+                        == (o2.even_odd, o2.start_radius, o2.end_radius, o2.start, o2.end)
+                        && same_paths(a, &o.paths, b, &o2.paths)
+                }
+                _ => false,
+            }
+        }
+        // Old and new ops in step: a placeholder fill becomes the image on its very shape (the
+        // image clipped to the placeholder's path, or filling it, tiled), at its opacity and
+        // blend; every other op draws the same, an image already there included.
+        let (o, n) = (&old.ops, &new.ops);
+        let (mut i, mut j, mut filled) = (0, 0, false);
+        while i < o.len() {
+            if let Op::Fill {
+                path: p,
+                even_odd: e,
+                paint: Paint::Placeholder(opacity),
+                blend: l,
+            } = &o[i]
+            {
+                let image = |paint: &Paint, blend: &u8| {
+                    matches!(paint, Paint::Image(im) if im.opacity == *opacity) && blend == l
+                };
+                let step = match (n.get(j), n.get(j + 1), n.get(j + 2)) {
+                    (
+                        Some(Op::Clip { path: c, even_odd: e2 }),
+                        Some(Op::Fill { paint, blend, .. }),
+                        Some(Op::Unclip),
+                    ) if e == e2 && image(paint, blend) && same_path(old, *p, new, *c) => 3,
+                    (
+                        Some(Op::Fill {
+                            path: q,
+                            even_odd: e2,
+                            paint,
+                            blend,
+                        }),
+                        ..,
+                    ) if e == e2 && image(paint, blend) && same_path(old, *p, new, *q) => 1,
+                    _ => return false,
+                };
+                filled = true;
+                i += 1;
+                j += step;
+                continue;
+            }
+            if !n.get(j).is_some_and(|y| same_op(old, &o[i], new, y)) {
+                return false;
+            }
+            i += 1;
+            j += 1;
+        }
+        filled
+            && j == n.len()
+            && old.flags == new.flags
+            && old.opacity == new.opacity
+            && old.transform == new.transform
+            && old.size == new.size
+            && old.coarse_below == new.coarse_below
+            && old.reach == new.reach
+            && old.blend == new.blend
+            && old.mask == new.mask
+            && old.unsupported == new.unsupported
+            && old.post_effects == new.post_effects
+            && old.coarse.len() == new.coarse.len()
+            && old.coarse.iter().zip(&new.coarse).all(|(x, y)| same_op(old, x, new, y))
     }
 
     /// Paint order: each record's preorder index and the last index in its subtree.
@@ -1756,7 +2009,7 @@ impl Store {
     }
 
     /// Where the touched records paint now, added to where they painted before.
-    fn changes(&mut self, before: Vec<Dirty>, touched: &[u32]) -> Vec<Dirty> {
+    fn changes(&mut self, before: Vec<Dirty>, touched: &[u32], refined: &HashSet<u32>) -> Vec<Dirty> {
         let mut items = before;
         let mut seen = std::collections::HashSet::new();
         for id in touched {
@@ -1770,6 +2023,7 @@ impl Store {
                     order,
                     end,
                     stale: false,
+                    refine: refined.contains(id),
                 });
             }
         }
@@ -1783,6 +2037,11 @@ impl Store {
     /// pixels, so this is resolved on the device, for a camera, not in page units. Call it
     /// before the next patch: it uses the paint order the graph has now.
     pub fn dirty(&mut self, changes: &[Dirty], view: Affine, slop: f64) -> Vec<Rect> {
+        self.dirty_with(changes, view, slop, true)
+    }
+
+    /// `dirty`, with the readers' page boxes kept a revision (`cached`) or worked out afresh.
+    fn dirty_with(&mut self, changes: &[Dirty], view: Affine, slop: f64, cached: bool) -> Vec<Rect> {
         let mut items: Vec<Dirty> = changes
             .iter()
             .map(|d| Dirty {
@@ -1805,43 +2064,43 @@ impl Store {
                 seen: usize,
                 joined: bool,
             }
-            let mut readers: Vec<Reader> = Vec::with_capacity(self.readers.len());
-            for id in self.readers.clone() {
-                if !self.drawn(id) {
-                    continue;
-                }
-                let (order, end) = self.order_of(id);
-                let Some(node) = self.nodes.get(&id) else { continue };
-                let r = &node.record;
-                let halo = f64::from(r.reads().unwrap_or(0.0));
-                let box_rect = Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1]));
-                let b = r
-                    .content_bounds(&|g| self.glyphs.bounds(g))
-                    .map_or(box_rect, |cb| cb.union(box_rect));
-                let device = view * self.world(id);
-                let paint = device.transform_rect_bbox(b);
-                // A reader's result passes through its own and enclosing layer effects.
-                // Include that expanded output in damage and in later reader dependencies.
-                let paint = self
-                    .dirty_extent(id)
-                    .map_or(paint, |extent| paint.union(view.transform_rect_bbox(extent)));
-                readers.push(Reader {
-                    order,
-                    end,
-                    reads: device.transform_rect_bbox(b.inflate(halo, halo)).inflate(slop, slop),
-                    paints: paint.inflate(slop, slop),
-                    // Its own subtree's changes are above it, unless it reads (any of its reads)
-                    // after its children are drawn.
-                    after_children: r
-                        .ops
-                        .iter()
-                        .skip_while(|op| !matches!(op, Op::Children))
-                        .any(Op::is_reader),
-                    writes_backdrop: r.reader_writes_backdrop(),
-                    seen: 0,
-                    joined: false,
-                });
-            }
+            // A view that keeps axes (a tile grid, a camera) maps page boxes to device boxes exactly,
+            // so the readers' page boxes, worked out once a revision, serve every level.
+            let [_, b, c, ..] = view.as_coeffs();
+            let page = if cached && b == 0.0 && c == 0.0 {
+                Some(self.dirty_readers())
+            } else {
+                None
+            };
+            let mut readers: Vec<Reader> = match &page {
+                Some(page) => page
+                    .iter()
+                    .map(|r| Reader {
+                        order: r.order,
+                        end: r.end,
+                        reads: view.transform_rect_bbox(r.reads).inflate(slop, slop),
+                        paints: view.transform_rect_bbox(r.paints).inflate(slop, slop),
+                        after_children: r.after_children,
+                        writes_backdrop: r.writes_backdrop,
+                        seen: 0,
+                        joined: false,
+                    })
+                    .collect(),
+                None => self
+                    .readers_seen(view)
+                    .into_iter()
+                    .map(|r| Reader {
+                        order: r.order,
+                        end: r.end,
+                        reads: r.reads.inflate(slop, slop),
+                        paints: r.paints.inflate(slop, slop),
+                        after_children: r.after_children,
+                        writes_backdrop: r.writes_backdrop,
+                        seen: 0,
+                        joined: false,
+                    })
+                    .collect(),
+            };
             readers.sort_unstable_by_key(|r| r.order);
             // In paint order, then again until no reader joins: a reader that reads after its
             // children reads what readers inside it paint, and those come later in paint order
@@ -1874,6 +2133,7 @@ impl Store {
                                 order: r.order,
                                 end: r.order,
                                 stale: false,
+                                refine: false,
                             });
                         } else {
                             output_only.push(r.paints);
@@ -1888,6 +2148,63 @@ impl Store {
         }
         let mut out: Vec<Rect> = items.into_iter().map(|d| d.rect).collect();
         out.extend(output_only);
+        out
+    }
+
+    /// Drops the readers' page boxes kept for this revision (`dirty_readers`), as an edit does:
+    /// for tests that compare against a store that keeps them.
+    #[doc(hidden)]
+    pub fn forget_dirty_readers(&self) {
+        self.dirty_readers.borrow_mut().take();
+    }
+
+    /// The shown readers in page units (`DirtyReader`), worked out once a revision.
+    fn dirty_readers(&mut self) -> std::rc::Rc<Vec<DirtyReader>> {
+        if let Some(cached) = self.dirty_readers.borrow().as_ref() {
+            return cached.clone();
+        }
+        let built = std::rc::Rc::new(self.readers_seen(Affine::IDENTITY));
+        *self.dirty_readers.borrow_mut() = Some(built.clone());
+        built
+    }
+
+    /// The shown readers as `dirty` sees them under `view` (device boxes, before slop).
+    fn readers_seen(&mut self, view: Affine) -> Vec<DirtyReader> {
+        let mut out = Vec::with_capacity(self.readers.len());
+        for id in self.readers.clone() {
+            if !self.drawn(id) {
+                continue;
+            }
+            let (order, end) = self.order_of(id);
+            let Some(node) = self.nodes.get(&id) else { continue };
+            let r = &node.record;
+            let halo = f64::from(r.reads().unwrap_or(0.0));
+            let box_rect = Rect::new(0.0, 0.0, f64::from(r.size[0]), f64::from(r.size[1]));
+            let b = r
+                .content_bounds(&|g| self.glyphs.bounds(g))
+                .map_or(box_rect, |cb| cb.union(box_rect));
+            let device = view * self.world(id);
+            let paint = device.transform_rect_bbox(b);
+            // A reader's result passes through its own and enclosing layer effects.
+            // Include that expanded output in damage and in later reader dependencies.
+            let paints = self
+                .dirty_extent(id)
+                .map_or(paint, |extent| paint.union(view.transform_rect_bbox(extent)));
+            out.push(DirtyReader {
+                order,
+                end,
+                reads: device.transform_rect_bbox(b.inflate(halo, halo)),
+                paints,
+                // Its own subtree's changes are above it, unless it reads (any of its reads)
+                // after its children are drawn.
+                after_children: r
+                    .ops
+                    .iter()
+                    .skip_while(|op| !matches!(op, Op::Children))
+                    .any(Op::is_reader),
+                writes_backdrop: r.reader_writes_backdrop(),
+            });
+        }
         out
     }
 
@@ -1980,6 +2297,7 @@ impl Store {
                     order,
                     end,
                     stale: false,
+                    refine: false,
                 });
             }
         }
@@ -2153,5 +2471,79 @@ impl Store {
             p.children.push(id);
         }
         self.reader_cache.borrow_mut().take();
+        self.dirty_readers.borrow_mut().take();
+    }
+}
+
+#[cfg(test)]
+mod dirty_tests {
+    use super::*;
+    use crate::record::{BackgroundBlurOp, CompactPath, PathEntry};
+
+    fn rect_path(w: f64, h: f64) -> PathEntry {
+        use vello_common::kurbo::Shape;
+        PathEntry::Path(CompactPath::from_bez(&Rect::new(0.0, 0.0, w, h).into_path(0.1)))
+    }
+
+    /// The readers' page boxes, kept a revision, give what working them out under each view gives:
+    /// tile grids at any scale and offset, readers under rotated and scaled groups, with halos.
+    #[test]
+    fn readers_kept_a_revision_dirty_what_each_view_works_out() {
+        let mut store = Store::new(Limits::default());
+        let mut group = Record::empty();
+        group.transform = Affine::translate((40.0, -20.0)) * Affine::rotate(0.4) * Affine::scale(1.5);
+        group.size = [200.0, 120.0];
+        group.ops = vec![Op::Children];
+        store.insert_for_test(1, ROOT, group);
+        let mut blur = Record::empty();
+        blur.transform = Affine::translate((10.0, 15.0));
+        blur.size = [60.0, 30.0];
+        blur.paths.push(rect_path(60.0, 30.0));
+        blur.ops = vec![Op::BackgroundBlur(Box::new(BackgroundBlurOp {
+            paths: vec![0],
+            even_odd: false,
+            radius: 8.0,
+        }))];
+        store.insert_for_test(2, 1, blur);
+        let mut read = Record::empty();
+        read.transform = Affine::translate((300.0, 90.0)) * Affine::scale_non_uniform(0.5, 2.0);
+        read.size = [40.0, 40.0];
+        read.ops = vec![Op::Read { kernel: 0, halo: 12.0 }];
+        store.insert_for_test(3, ROOT, read);
+        let mut plain = Record::empty();
+        plain.size = [500.0, 400.0];
+        store.insert_for_test(4, ROOT, plain);
+        let changes = [
+            Dirty {
+                rect: Rect::new(30.0, 0.0, 80.0, 60.0),
+                order: 0,
+                end: 0,
+                stale: true,
+                refine: false,
+            },
+            Dirty {
+                rect: Rect::new(280.0, 60.0, 330.0, 200.0),
+                order: 0,
+                end: 0,
+                stale: true,
+                refine: false,
+            },
+        ];
+        for view in [
+            Affine::IDENTITY,
+            Affine::new([0.25, 0.0, 0.0, 0.25, -12.5, 7.0]),
+            Affine::new([3.0, 0.0, 0.0, 3.0, -900.0, -40.0]),
+            Affine::new([0.0371, 0.0, 0.0, 0.0371, 3.25, 1.75]),
+        ] {
+            let kept = store.dirty_with(&changes, view, 1.5, true);
+            let afresh = store.dirty_with(&changes, view, 1.5, false);
+            assert_eq!(kept.len(), afresh.len(), "{view:?}");
+            assert!(kept.len() > changes.len(), "a reader joined under {view:?}");
+            for (a, b) in kept.iter().zip(&afresh) {
+                for (x, y) in [(a.x0, b.x0), (a.y0, b.y0), (a.x1, b.x1), (a.y1, b.y1)] {
+                    assert!((x - y).abs() < 1e-9, "{a:?} vs {b:?} under {view:?}");
+                }
+            }
+        }
     }
 }
