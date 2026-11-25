@@ -562,12 +562,7 @@ impl Engine {
         // keeps no tiles to mark: where the level its scale picks changed, the tiles it has drawn
         // are drawn again (`TileCache::note_refined`; not a change, so never a hole).
         #[cfg(feature = "gpu-common")]
-        if self
-            .gpu
-            .as_ref()
-            .and_then(|g| g.direct_slices_scale())
-            .is_some_and(|scale| at(scale))
-        {
+        if self.gpu.as_ref().and_then(|g| g.direct_slices_scale()).is_some_and(at) {
             let page = self.store.dirty(&users, Affine::IDENTITY, 1.5);
             if let Some(g) = self.gpu.as_mut() {
                 g.tiles.note_refined(&page);
