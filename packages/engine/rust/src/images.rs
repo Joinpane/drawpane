@@ -120,6 +120,19 @@ pub fn strip_step<S: PartialEq>(
     }
 }
 
+pub fn pick(sizes: impl Iterator<Item = (u32, u32)>, span: (f64, f64)) -> usize {
+    sizes
+        .take_while(|&(width, height)| f64::from(width) >= span.0 && f64::from(height) >= span.1)
+        .count()
+        .saturating_sub(1)
+}
+
+/// The projected lengths of the image's unit-square axes.
+pub fn span(matrix: vello_common::kurbo::Affine) -> (f64, f64) {
+    let [a, b, c, d, ..] = matrix.as_coeffs();
+    (a.hypot(b), c.hypot(d))
+}
+
 #[cfg(test)]
 mod strip_tests {
     use super::strip_step;
@@ -142,17 +155,4 @@ mod strip_tests {
         assert!(strip_step(None, &b, 512, 64, 64).is_err());
         assert!(strip_step(Some((&b, 256, 64)), &b, 512, 64, 64).is_err());
     }
-}
-
-pub fn pick(sizes: impl Iterator<Item = (u32, u32)>, span: (f64, f64)) -> usize {
-    sizes
-        .take_while(|&(width, height)| f64::from(width) >= span.0 && f64::from(height) >= span.1)
-        .count()
-        .saturating_sub(1)
-}
-
-/// The projected lengths of the image's unit-square axes.
-pub fn span(matrix: vello_common::kurbo::Affine) -> (f64, f64) {
-    let [a, b, c, d, ..] = matrix.as_coeffs();
-    (a.hypot(b), c.hypot(d))
 }
