@@ -4784,14 +4784,15 @@ impl<B: Backend> Walk<'_, B> {
             let period: f64 = style.dashes.iter().map(|d| f64::from(*d)).sum();
             self.spend((length / period * style.dashes.len() as f64).ceil() as usize)?;
         }
+        let (stroke_path, kurbo_stroke) = crate::stroke::prepare_dashed_stroke(&p, style, &stroke_limits)?;
         if !self.set_paint(paint, device, alpha, self.region(r, i, style.reach()))? {
             return Ok(());
         }
         let sd = self.scene_device(device);
         let scene = self.backend.scene();
         scene.set_transform(sd);
-        scene.set_stroke(crate::stroke::make_kurbo_stroke(style));
-        scene.stroke_path(&p);
+        scene.set_stroke(kurbo_stroke);
+        scene.stroke_path(&stroke_path);
         self.backend.mark_dirty();
         Ok(())
     }
@@ -4925,27 +4926,24 @@ impl<B: Backend> Walk<'_, B> {
                 return Ok(());
             }
             if let Some(st) = stroke_style {
+                let stroke_limits = crate::limits::Limits {
+                    frame_verbs: self.verbs_left,
+                    ..self.store.limits
+                };
                 if !st.dashes.is_empty() {
                     let length = polygon_length(&combined);
-                    crate::record::check_dashes(
-                        st,
-                        length,
-                        &crate::limits::Limits {
-                            frame_verbs: self.verbs_left,
-                            ..self.store.limits
-                        },
-                    )?;
+                    crate::record::check_dashes(st, length, &stroke_limits)?;
                     let period: f64 = st.dashes.iter().map(|d| f64::from(*d)).sum();
                     self.spend((length / period * st.dashes.len() as f64).ceil() as usize)?;
                 }
-                let s = Self::make_kurbo_stroke(st);
+                let (stroke_path, s) = crate::stroke::prepare_dashed_stroke(&combined, st, &stroke_limits)?;
                 let sd = self.scene_device(shifted_device);
                 let scene = self.backend.scene();
                 scene.reset_paint_transform();
                 scene.set_paint(tint.into());
                 scene.set_transform(sd);
                 scene.set_stroke(s);
-                scene.stroke_path(&combined);
+                scene.stroke_path(&stroke_path);
             } else {
                 let sd = self.scene_device(shifted_device);
                 let scene = self.backend.scene();
@@ -4997,6 +4995,7 @@ impl<B: Backend> Walk<'_, B> {
             (f64::from(pad) + 2.0) / s
         };
         if let Some(st) = stroke_style {
+            let verbs_before = self.verbs_left;
             let stroke_grow = f64::from(st.width) * f64::from(st.miter.max(1.0)) + 1.0;
             let mut local_paths = Vec::with_capacity(paths.len());
             let mut bbox: Option<Rect> = None;
@@ -5031,10 +5030,22 @@ impl<B: Backend> Walk<'_, B> {
             if dirty.is_empty() {
                 return Ok(());
             }
+            let stroke = if !st.dashes.is_empty() && local_paths.iter().any(crate::stroke::needs_safe_dash) {
+                let stroke_limits = crate::limits::Limits {
+                    frame_verbs: verbs_before,
+                    ..self.store.limits
+                };
+                for p in &mut local_paths {
+                    *p = crate::stroke::dash_path_safely(p, st, &stroke_limits)?;
+                }
+                crate::stroke::make_kurbo_stroke_undashed(st)
+            } else {
+                Self::make_kurbo_stroke(st)
+            };
             let cast = ShadowCast::Stroke {
                 paths: &local_paths,
                 transform: shifted_device,
-                stroke: Self::make_kurbo_stroke(st),
+                stroke,
                 bbox,
             };
             let open = self.open.clone();
