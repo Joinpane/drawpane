@@ -2048,7 +2048,8 @@ GPU work a frame queued had no bound, and input waited behind it.
   stand-ins. Once every tile is in, the frame is exact and shown again as it is.
   While the view rests unchanged, each slice's budget doubles from the caller's (8, 16, then
   32 ms, never more: a longer call holds the first input at rest); a new view, a moving frame or
-  an edit in view starts it over. A slice whose remaining tiles fit in about one and a half of
+  an edit in view starts it over. After its first tile, a slice starts no tile the slowest of the
+  series says would end past its budget: a tile can't pause, so that's what keeps calls near it. A slice whose remaining tiles fit in about one and a half of
   the caller's budgets more (12 ms at 8), by the slowest tile of the series so far, finishes in
   that call. (Drawing a new
   view at once when its tiles seemed to fit, by recent tiles' cost, was tried and dropped: the
