@@ -589,6 +589,38 @@ struct PendingImage {
     source: web_sys::ImageBitmap,
 }
 
+/// The image levels being uploaded in strips, by image id and width: a few at a time (the
+/// editor uploads one level at once), so a list, which keeps the module smaller than a map.
+#[derive(Default)]
+struct PendingImages(Vec<((u32, u32), PendingImage)>);
+
+impl PendingImages {
+    fn at(&self, key: &(u32, u32)) -> Option<usize> {
+        self.0.iter().position(|(k, _)| k == key)
+    }
+    fn get(&self, key: &(u32, u32)) -> Option<&PendingImage> {
+        self.at(key).map(|i| &self.0[i].1)
+    }
+    fn get_mut(&mut self, key: &(u32, u32)) -> Option<&mut PendingImage> {
+        self.at(key).map(|i| &mut self.0[i].1)
+    }
+    fn insert(&mut self, key: (u32, u32), image: PendingImage) {
+        match self.at(&key) {
+            Some(i) => self.0[i].1 = image,
+            None => self.0.push((key, image)),
+        }
+    }
+    fn remove(&mut self, key: &(u32, u32)) -> Option<PendingImage> {
+        self.at(key).map(|i| self.0.swap_remove(i).1)
+    }
+    fn iter(&self) -> impl Iterator<Item = (&(u32, u32), &PendingImage)> {
+        self.0.iter().map(|(k, v)| (k, v))
+    }
+    fn keys(&self) -> impl Iterator<Item = &(u32, u32)> {
+        self.0.iter().map(|(k, _)| k)
+    }
+}
+
 struct Page {
     texture: wgpu::Texture,
     view: wgpu::TextureView,
@@ -1577,7 +1609,7 @@ pub struct Gpu {
     images: HashMap<u32, Vec<(TextureId, wgpu::Texture, u32, u32)>>,
     /// Image levels being uploaded in row strips (`put_image_bitmap_rows`), by image and width:
     /// counted in the budget, resident once their last rows are in.
-    pending_images: HashMap<(u32, u32), PendingImage>,
+    pending_images: PendingImages,
     /// Per-draw temporary textures (e.g. diamond gradients), released right after submit.
     temp_textures: Vec<(TextureId, wgpu::Texture)>,
     temp_bytes: usize,
@@ -2465,7 +2497,7 @@ impl Gpu {
             submit_ratio: if IS_WEBGL { 1.0 } else { 0.0 },
             blit,
             images: HashMap::new(),
-            pending_images: HashMap::new(),
+            pending_images: PendingImages::default(),
             temp_textures: Vec::new(),
             temp_bytes: 0,
             image_bytes: 0,
