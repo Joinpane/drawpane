@@ -2409,3 +2409,33 @@ fn isolated_faded_reader_with_fill_inside_mask_matches_figma_alpha() {
     // Mask (0.5) * faded layer (0.9) = 0.45 over 0.502 backdrop -> 0.45 + 0.55 * 0.502 = 0.726 -> 185.
     assert_eq!(img[mid + 3], 185, "mid pixel {:?}", &img[mid..mid + 4]);
 }
+
+/// Regression for issue #361 (`FUZZ_SEED=1795567103465747915`): a dashed stroke on a glyph run
+/// containing a far-offset glyph at `x = 1e30` (and a stroked drop shadow on a huge curve) must
+/// render without panicking or hanging inside `kurbo::common::solve_itp_fallible`.
+#[test]
+fn dashed_stroke_at_far_offset_renders_without_panicking() {
+    let mut list = W::new(ANY, 1);
+    list.reset();
+    list.glyph(2, &common::glyph_outline(2));
+    let mut rec = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [64.0, 64.0]);
+    rec.paths.push(Entry::Glyphs {
+        scale: 0.028048828,
+        glyphs: vec![(2, 0.0, 9.399767), (2, 1.0e30, 9.399767), (2, 27.0, 9.399767)],
+    });
+    rec.ops.push(Op::Stroke {
+        path: 0,
+        width: 4.282675,
+        join: 0,
+        cap: 0,
+        dashes: vec![4.7269444, 3.1771529],
+        offset: 0.0,
+        paint: Paint::Solid([0.2, 0.4, 0.8, 1.0]),
+    });
+    list.set(1, 0, &rec);
+
+    let mut engine = Engine::new(Limits::default());
+    engine.apply(&list.finish()).unwrap();
+    let (px, _) = engine.render_cpu(64, 48, camera(), [1.0; 4], true).unwrap();
+    assert!(px.iter().any(|&v| v != 255), "visible glyphs should still draw");
+}
