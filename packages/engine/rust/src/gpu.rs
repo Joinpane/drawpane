@@ -6813,15 +6813,14 @@ impl Gpu {
         // frames (`DirectSlices`), exact tiles within the budget each, nearest the middle first:
         // shown inexact, never old, until every tile is in. No budget: drawn at once, as before;
         // nor when all its tiles fit in the budget, by what direct tiles took lately at a scale
-        // near this one.
+        // within 1.25x of this one (the slowest of the last frame that drew any).
         let slice_ms = if options.budget_ms >= 1.0 {
             options.budget_ms
         } else {
             DIRECT_SLICE_MS
         };
-        let fits = |cost: Option<(f64, f64)>, tiles: usize, budget: f64| {
-            cost.is_some_and(|(at, ms)| (0.5..=2.0).contains(&(scale / at)) && ms * tiles as f64 <= budget)
-        };
+        let near = |cost: Option<(f64, f64)>| cost.filter(|(at, _)| (0.8..=1.25).contains(&(scale / at)));
+        let fits = |cost: Option<f64>, tiles: usize, budget: f64| cost.is_some_and(|ms| ms * tiles as f64 <= budget);
         // One for this view part drawn, or done (then shown again as it is), always goes on.
         let series_here = self.direct_slices.as_ref().is_some_and(|s| {
             s.view == view.as_coeffs().map(f64::to_bits) && s.size == (w, h) && self.cur == Some(s.frame)
@@ -6830,7 +6829,7 @@ impl Gpu {
             && !options.moving
             && selection.is_none()
             && (options.budget_ms >= 1.0 || options.budget_ms < 0.0)
-            && (series_here || !fits(self.direct_tile_ms, plan.jobs.len(), slice_ms));
+            && (series_here || !fits(near(self.direct_tile_ms).map(|(_, ms)| ms), plan.jobs.len(), slice_ms));
         self.pass_budget = motion_capped.then_some(MOVING_PASSES);
         self.passes_at = self.passes;
         let mut budget_hit = false;
@@ -7251,12 +7250,17 @@ impl Gpu {
                     continue;
                 }
                 // A sliced frame's tiles stop at its budget (the first always goes), unless what's
-                // left fits in about one and a half budgets more: then this call finishes it.
+                // left fits in about one and a half budgets more, by the slowest tile this call and
+                // the last frame drew: then this call finishes it.
                 if direct_sliced
                     && n > 0
                     && now() >= slice_deadline
                     && !fits(
-                        slowest_tile.map(|ms| (scale, ms)).or(self.direct_tile_ms),
+                        near(self.direct_tile_ms)
+                            .map(|(_, ms)| ms)
+                            .into_iter()
+                            .chain(slowest_tile)
+                            .reduce(f64::max),
                         late.len() - n,
                         1.5 * slice_ms,
                     )

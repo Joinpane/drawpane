@@ -2041,8 +2041,8 @@ GPU work a frame queued had no bound, and input waited behind it.
   drawn inexact, beside provisional text say, leaves when it's drawn again exact). A new view
   starts over on stand-ins. Once every tile is in, the frame is exact and shown again as it is.
   A slice whose remaining tiles fit in about one and a half budgets more (by the slowest tile
-  it drew) finishes in that call, and a frame whose tiles all fit in its budget, by what direct
-  tiles took lately at a scale within 2× of its own, is drawn at once.
+  it or the last frame drew) finishes in that call, and a frame whose tiles all fit in its
+  budget, by the slowest direct tile lately at a scale within 1.25× of its own, is drawn at once.
   Without a budget it's drawn at once, as before. At a 4 MiB tile budget on the iOS kit, such
   a frame took 0.9 to 1.2 s in one call, a stall at every rest between Cmd+scroll notches.
 - **Forward progress.** A moving frame that has started no tile work for 100 ms while some was
