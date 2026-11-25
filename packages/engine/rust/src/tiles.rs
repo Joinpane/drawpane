@@ -156,6 +156,9 @@ pub struct TileEntry {
     pub reduced: bool,
     /// The frame it was last shown or drawn in.
     pub used: u64,
+    /// When it was drawn, in the order tiles are drawn (`TileCache::drawn`): of two refined
+    /// tiles, the later one holds the newer picture.
+    pub seq: u64,
 }
 
 impl TileEntry {
@@ -243,9 +246,9 @@ pub struct Scaled {
     pub dst: Rect,
 }
 
-/// What a frame shows, back to front: refined tiles (the overview's, then other levels' and the
-/// frame level's), the overview's current tiles, the last frame (mapped by `base`), other levels'
-/// tiles scaled, then the frame level's tiles copied.
+/// What a frame shows, back to front: refined tiles of any level (the longest drawn first), the
+/// overview's current tiles, the last frame (mapped by `base`), other levels' tiles scaled, then
+/// the frame level's tiles copied.
 #[derive(Clone, Debug, Default)]
 pub struct Composite {
     /// The last frame, mapped into this one (its device pixels to this frame's): a stand-in
@@ -254,13 +257,13 @@ pub struct Composite {
     /// Where the last frame's pixels are old (this frame's pixels): what changed since it was
     /// drawn, while moving. The last frame isn't laid there; the overview or the background shows.
     pub holes: Vec<Rect>,
-    /// The overview's refined tiles (`TileEntry::refine`), scaled, beneath everything: drawn
-    /// before an image arrived or got sharper, they show only where nothing else does.
-    pub refined_under: Vec<Scaled>,
-    /// Other levels' refined tiles, the frame level's last (on top), beneath the overview's
-    /// current tiles and the last frame: they fill in only where nothing drawn since stands in
-    /// (the frame on screen, a current tile of the overview or another level), never over it, so
-    /// an image once shown never goes back to its placeholder or a coarser level.
+    /// Refined tiles (`TileEntry::refine`) of any level, the overview's and the frame level's
+    /// included, scaled, the longest drawn first (at the bottom: `TileEntry::seq`), beneath the
+    /// overview's current tiles and the last frame. Drawn before an image arrived or got sharper,
+    /// they fill in only where nothing drawn since stands in (the frame on screen, a current tile
+    /// of the overview or another level), never over it, and a later one over an earlier one, so
+    /// an image once shown never goes back to its placeholder or a coarser level, however many
+    /// times it changed. The overview's are told apart by slot (`OVERVIEW_SLOT` on).
     pub beneath: Vec<Scaled>,
     /// The overview's current tiles, scaled, beneath the last frame: what shows where nothing
     /// nearer does.
@@ -352,6 +355,8 @@ pub struct TileCache {
     /// Overview tiles dropped (a cleared cache, a refused or moved overview): diagnostics.
     pub overview_lost: u32,
     pub stats: TileStats,
+    /// Tiles drawn so far (`TileEntry::seq`).
+    draws: u64,
 }
 
 /// The overview's level and the tiles of it the page covers.
@@ -496,6 +501,7 @@ impl TileCache {
             overview_lost: 0,
             overview_refused: false,
             stats: TileStats::default(),
+            draws: 0,
         }
     }
 
@@ -1347,6 +1353,7 @@ impl TileCache {
     pub fn drawn(&mut self, key: TileKey, slot: u32, exact: bool, full: bool, reduced: bool) {
         self.unpainted.remove(&key);
         self.free.retain(|s| *s != slot);
+        self.draws += 1;
         self.tiles.insert(
             key,
             TileEntry {
@@ -1357,6 +1364,7 @@ impl TileCache {
                 refine: false,
                 reduced,
                 used: self.frame,
+                seq: self.draws,
             },
         );
         self.stats.drawn += 1;
@@ -1856,9 +1864,8 @@ impl TileCache {
             complete: true,
             ..Composite::default()
         };
-        // The frame level's refined tiles, laid beneath the last frame and on top of other
-        // levels' refined tiles.
-        let mut refined = Vec::new();
+        // Refined tiles of every level, with when each was drawn: laid the longest drawn first.
+        let mut refined: Vec<(u64, Scaled)> = Vec::new();
         for &(i, j) in &plan.visible {
             let key = TileKey {
                 level: plan.level,
@@ -1889,10 +1896,13 @@ impl TileCache {
                 out.pending += 1;
                 let fx = (i64::from(i) * i64::from(t) + plan.origin.0) as f64;
                 let fy = (i64::from(j) * i64::from(t) + plan.origin.1) as f64;
-                refined.push(Scaled {
-                    slot: e.slot,
-                    dst: Rect::new(fx, fy, fx + f64::from(t), fy + f64::from(t)),
-                });
+                refined.push((
+                    e.seq,
+                    Scaled {
+                        slot: e.slot,
+                        dst: Rect::new(fx, fy, fx + f64::from(t), fy + f64::from(t)),
+                    },
+                ));
                 continue;
             }
             if e.reduced && !e.stale {
@@ -1989,26 +1999,23 @@ impl TileCache {
                         f64::from(i + 1) * tf,
                         f64::from(j + 1) * tf,
                     );
-                    let layer = if Some(id) == overview {
-                        if e.refine {
-                            &mut out.refined_under
-                        } else {
-                            &mut out.under
-                        }
-                    } else if e.refine {
-                        &mut out.beneath
-                    } else {
-                        &mut out.scaled
-                    };
-                    layer.push(Scaled {
+                    let quad = Scaled {
                         slot: e.slot,
                         dst: to_frame.transform_rect_bbox(r),
-                    });
+                    };
+                    if e.refine {
+                        refined.push((e.seq, quad));
+                    } else if Some(id) == overview {
+                        out.under.push(quad);
+                    } else {
+                        out.scaled.push(quad);
+                    }
                     self.touch(&key);
                 }
             }
         }
-        out.beneath.extend(refined);
+        refined.sort_by_key(|(seq, _)| *seq);
+        out.beneath.extend(refined.into_iter().map(|(_, quad)| quad));
         out
     }
 }
@@ -2459,12 +2466,7 @@ mod tests {
         let plan = c
             .plan(Affine::scale(6.0), (512, 512), true, None, false, false)
             .expect("plan");
-        assert!(
-            c.compose(&plan, None)
-                .refined_under
-                .iter()
-                .any(|q| q.slot == entry.slot)
-        );
+        assert!(c.compose(&plan, None).beneath.iter().any(|q| q.slot == entry.slot));
         c.moving = false;
         c.begin([1.0; 4], 0);
         c.set_overview(Some(page));
@@ -2521,10 +2523,17 @@ mod tests {
             c.moving = false;
             comp
         };
-        // Both refined: the overview's lie beneath level one's.
+        // Both refined: the overview's (drawn first) lie beneath level one's.
+        let overview_slot = |q: &Scaled| q.slot >= OVERVIEW_SLOT;
         let comp = compose_moving(&mut c);
-        assert!(!comp.refined_under.is_empty() && comp.under.is_empty());
-        assert!(!comp.beneath.is_empty());
+        assert!(comp.under.is_empty());
+        let last_overview = comp.beneath.iter().rposition(overview_slot).expect("the overview's");
+        let first_one = comp
+            .beneath
+            .iter()
+            .position(|q| !overview_slot(q))
+            .expect("level one's");
+        assert!(last_overview < first_one, "the longest drawn at the bottom");
         // The overview is drawn again, with the image: now it lies over level one's placeholder.
         c.begin([1.0; 4], 0);
         c.set_overview(Some(page));
@@ -2536,11 +2545,23 @@ mod tests {
         c.refine_overview = false;
         assert!(c.overview_ready());
         let comp = compose_moving(&mut c);
-        assert!(comp.refined_under.is_empty() && !comp.under.is_empty());
+        assert!(!comp.under.is_empty() && !comp.beneath.iter().any(overview_slot));
         assert!(
             !comp.beneath.is_empty(),
             "level one's placeholder still fills in beneath it"
         );
+        // Another level of the image arrives: the overview, drawn with the image after level one
+        // was drawn with the placeholder, is refined too, and stays over level one's (K-overview).
+        c.refine(o.id, &[ro]);
+        let comp = compose_moving(&mut c);
+        assert!(comp.under.is_empty());
+        let first_overview = comp.beneath.iter().position(overview_slot).expect("the overview's");
+        let last_one = comp
+            .beneath
+            .iter()
+            .rposition(|q| !overview_slot(q))
+            .expect("level one's");
+        assert!(last_one < first_overview, "the overview drawn later lies on top");
     }
 
     /// A refined tile never goes over one drawn since: another level's current tile and the

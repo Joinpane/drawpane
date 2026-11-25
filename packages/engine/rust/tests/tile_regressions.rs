@@ -2617,3 +2617,97 @@ fn an_image_once_shown_never_goes_back_to_its_placeholder_at_another_zoom() {
         assert!(settled, "strict={strict}: never exact at rest");
     }
 }
+
+/// Refined tiles lie by when they were drawn, not by level (#352 re-check 3, probe K). Zoom 2
+/// and zoom 1 are drawn with the placeholder; the image loads and zoom 1 is drawn again with it
+/// (shown); the view pans away; another level of the image arrives, so zoom 1's tiles are
+/// refined again while zoom 2's still are. Moving back at zoom 1.5, zoom 2's placeholder (drawn
+/// earlier) lies beneath zoom 1's image (drawn later), so the image shows. Controls: without zoom
+/// 2, and without the second level.
+#[test]
+fn a_refined_tile_drawn_later_lies_over_one_drawn_earlier() {
+    const SIDE: u32 = 256;
+    let px = |f: &[u8], x: usize, y: usize| -> [u8; 4] {
+        let i = (y * SIDE as usize + x) * 4;
+        [f[i], f[i + 1], f[i + 2], f[i + 3]]
+    };
+    let settle = |engine: &mut Engine, c: Camera| -> Vec<u8> {
+        for _ in 0..60 {
+            let (f, s) = engine
+                .render_cpu_tiled(SIDE, SIDE, c, [1.0; 4], TiledOptions::default())
+                .expect("settle");
+            if s.exact && s.pending == 0 {
+                return f.to_vec();
+            }
+        }
+        panic!("never exact at rest");
+    };
+    let red = [255u8, 0, 0, 255];
+    for (with_zoom_2, with_level) in [(true, true), (false, true), (true, false)] {
+        let mut engine = Engine::new(Limits::default());
+        let mut w = W::new(ANY, 1);
+        w.reset();
+        let mut r = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [1024.0, 1024.0]);
+        r.paths.push(Entry::Rect {
+            w: 1024.0,
+            h: 1024.0,
+            radii: [0.0; 4],
+        });
+        r.ops = vec![Op::Fill {
+            path: 0,
+            even_odd: false,
+            paint: Paint::PlaceholderAt(1.0),
+        }];
+        w.set(1, 0, &r);
+        engine.apply(&w.finish()).expect("list");
+        engine.put_image(1, 2, 2, &red.repeat(4), false).expect("image");
+        engine.use_cpu_tiles(64, 256);
+        if with_zoom_2 {
+            settle(&mut engine, camera(2.0, 0.0, 0.0));
+        }
+        settle(&mut engine, camera(1.0, 0.0, 0.0));
+        let mut loaded = r.clone();
+        loaded.ops = vec![
+            Op::Clip {
+                path: 0,
+                even_odd: false,
+            },
+            Op::Fill {
+                path: 0,
+                even_odd: false,
+                paint: Paint::Image {
+                    id: 1,
+                    m: [1024.0, 0.0, 0.0, 1024.0, 0.0, 0.0],
+                    tile: false,
+                    opacity: 1.0,
+                },
+            },
+            Op::Unclip,
+        ];
+        let mut w = W::new(1, 2);
+        w.set(1, 0, &loaded);
+        engine.apply(&w.finish()).expect("patch");
+        let f = settle(&mut engine, camera(1.0, 0.0, 0.0));
+        assert_eq!(px(&f, 20, 20), red, "zoom 1 shows the image");
+        settle(&mut engine, camera(1.0, -600.0, 0.0));
+        if with_level {
+            engine
+                .put_cpu_image_level(1, 512, 512, &red.repeat(512 * 512))
+                .expect("level");
+        }
+        let moving = TiledOptions {
+            moving: true,
+            max_jobs: 0,
+            budget_ms: 0.0,
+            prefetch: false,
+        };
+        let (f, _) = engine
+            .render_cpu_tiled(SIDE, SIDE, camera(1.5, 0.0, 0.0), [1.0; 4], moving)
+            .expect("moving");
+        assert_eq!(
+            px(f, 30, 30),
+            red,
+            "zoom 2 {with_zoom_2}, level {with_level}: went back to the placeholder"
+        );
+    }
+}

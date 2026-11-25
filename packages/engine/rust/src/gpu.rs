@@ -5436,6 +5436,15 @@ impl Gpu {
         self.tiles.refine_overview = self.quiet_for_overview();
         self.fit_tiles(store.limits.tile_bytes);
         let jobs = self.tiles.overview_ahead(scale);
+        // A paused tile no job here wants any more (a refined one while the camera hasn't been
+        // still long enough) is let go, as the tiled time between frames does.
+        if self
+            .pending_tile
+            .as_ref()
+            .is_some_and(|pt| !jobs.iter().any(|j| j.key == pt.key))
+        {
+            self.abort_pending_tile();
+        }
         let deadline = (budget_ms > 0.0).then_some(t0 + self.walk_budget_ms(budget_ms));
         let mut verbs = store.limits.frame_verbs;
         let mut paused = false;
@@ -10371,10 +10380,16 @@ impl Gpu {
                     ],
                 ))
             };
-            // Refined tiles beneath anything drawn since: the overview's, then other levels'
-            // (`Composite::beneath`), then the overview's current tiles over them.
-            quads.extend(comp.refined_under.iter().filter_map(overview_quad));
-            quads.extend(comp.beneath.iter().filter_map(page_quad));
+            // Refined tiles beneath anything drawn since, of any level, the longest drawn first
+            // (`Composite::beneath`; the overview's by slot), then the overview's current tiles
+            // over them.
+            quads.extend(comp.beneath.iter().filter_map(|sc| {
+                if sc.slot >= crate::tiles::OVERVIEW_SLOT {
+                    overview_quad(sc)
+                } else {
+                    page_quad(sc)
+                }
+            }));
             quads.extend(comp.under.iter().filter_map(overview_quad));
             if let Some(m) = comp.base
                 && let Some(l) = self.last

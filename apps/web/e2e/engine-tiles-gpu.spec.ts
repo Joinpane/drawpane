@@ -1802,6 +1802,55 @@ for (const build of ["browser", "webgl"] as const) {
       expect(rows.at(-1)).toMatchObject({ exact: true, samples: [red] });
     });
 
+    test("an overview drawn with the image stays over placeholder tiles when the image changes again", async ({
+      page,
+    }) => {
+      // Probe H with a 16 px first level: the overview is drawn again with the image and shown at
+      // zoom 12; then a 512 px level arrives, refining the overview too. Refined tiles lie by when
+      // they were drawn, so at zoom 2.5 the overview (drawn later, with the image) stays over
+      // zoom 2's placeholder tiles (drawn earlier): the image never goes back (#352 re-check 3,
+      // probe K-overview).
+      const frame = (
+        name: string,
+        scale: number,
+        x: number,
+        moving: boolean,
+        budget: number,
+      ): Step => {
+        const at: [number, number] = [Math.floor(40 * scale + x), Math.floor(10 * scale)];
+        const inside = at[0] >= 0 && at[0] < 1024 && at[1] >= 0 && at[1] < 256;
+        return { name, size: [1024, 256], scale, x, moving, budget, samples: inside ? [at] : [] };
+      };
+      const rows = await presented(
+        page,
+        build,
+        farBoard("placeholder"),
+        [
+          frame("zoom 2 left, placeholder", 2, 0, false, 0),
+          frame("zoom 2 right, placeholder", 2, -1024, false, 0),
+          { ahead: { times: 40, budget: 50 } },
+          { image: { id: 1, side: 16, color: "#ff0000" } },
+          { apply: farBoard("loaded", 1) },
+          frame("zoom 2 right, image", 2, -1024, false, 0),
+          { wait: 1100 },
+          { ahead: { times: 40, budget: 50 } },
+          frame("zoom 12 left, moving", 12, 0, true, 1),
+          frame("zoom 12 panned, moving", 12, -1200, true, 1),
+          { image: { id: 1, side: 512, color: "#ff0000" } },
+          frame("zoom 12 panned again, moving", 12, -1300, true, 1),
+          frame("zoom 2.5 left, moving", 2.5, 0, true, 1),
+          frame("zoom 2.5 left, rest", 2.5, 0, false, 0),
+        ],
+        { viewImages: true },
+      );
+      expect(
+        rows.find((r) => r.name === "zoom 12 left, moving")?.samples[0],
+        "the overview shows the image",
+      ).toEqual(red);
+      stays(rows, red);
+      expect(rows.at(-1)).toMatchObject({ exact: true, samples: [red] });
+    });
+
     test("an image once shown never goes back to its placeholder at another zoom", async ({
       page,
     }) => {
