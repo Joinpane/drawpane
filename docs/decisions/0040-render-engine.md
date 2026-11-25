@@ -1934,6 +1934,11 @@ The WebGL2 module's budget goes from 1,400 to 1,450 KB gzipped. Slicing adds 6 K
 reasonable saving left in it: `wasm-opt -Os` makes it smaller raw but larger gzipped (1,396 to
 1,440 KB measured), and the module loads only where WebGPU can't.
 
+With #358 it goes from 1,450 to 1,475 KB. Main with #353 and #362 (`7cb0001b`) builds to
+1,446 KB; merged with #358's slices at rest, 1,452 KB. #352 (strip uploads, image fill-ins as
+refinements) adds about 13 KB more on main, which the step leaves room for. The compute module,
+which shares the code, stays under its 1,000 KB (992 KB merged with #358).
+
 ### Measured on a T4 (three paired runs against main with #330)
 
 Figma's G2 replayed in the file bench (`zoom, figma G2`, draft PR #331): the iOS kit's Control
@@ -2028,6 +2033,32 @@ GPU work a frame queued had no bound, and input waited behind it.
   under the pass cap. They're drawn rough (no readers, isolated scopes or shadows), so each is
   cheap, over the last frame moved (round what changed) and the overview; they're drawn exactly
   at rest.
+- **Exact frames no slot can hold, at rest, over several frames.** At rest, under a budget (or
+  composite-only), a frame made only of tiles no slot can hold draws its exact tiles nearest
+  the middle first until the budget is spent (at least one a frame), and shows inexact until
+  the last is in (`DirectSlices`). Each next frame lays the one shown beneath it unchanged, so
+  the tiles in it stay exact. Where an edit changed something since the last slice
+  (`TileCache::changed_on`), or an image got another resolution (`TileCache::refined_on`, never
+  a hole), both cleared by every frame drawn so a slice never waits on an exact frame, its tiles
+  are drawn again; the old pixels show there until they are, as on any frame on screen. Tiles
+  to draw again go the longest dropped first (one drawn and dropped again goes to the back) and
+  take turns with those never drawn, so edits before every slice never starve the rest. The
+  frame is exact once every tile is in and none was last drawn inexact (one drawn inexact,
+  beside provisional text say, leaves when it's drawn again exact). A new view starts over on
+  stand-ins. Once every tile is in, the frame is exact and shown again as it is.
+  While the view rests unchanged, each slice's budget doubles from the caller's (8, 16, then
+  32 ms, never more: a longer call holds the first input at rest); a new view, a moving frame or
+  an edit in view starts it over. After its first tile, a slice starts no tile the slowest of the
+  series says would end past its budget: a tile can't pause, so that's what keeps calls near it. A slice whose remaining tiles fit in about one and a half of
+  the caller's budgets more (12 ms at 8), by the slowest tile of the series so far, finishes in
+  that call. (Drawing a new
+  view at once when its tiles seemed to fit, by recent tiles' cost, was tried and dropped: the
+  estimate went stale and cheap, and a dense page then drew whole frames in 200-246 ms calls.)
+  Slices only run when the tile budget holds fewer slots than the view has tiles: at the
+  default limits (256 MiB of tiles, 768 MiB of GPU memory) no frame is direct even at 6,016 ×
+  3,384 device pixels, so this matters only on memory-squeezed devices.
+  Without a budget it's drawn at once, as before. At a 4 MiB tile budget on the iOS kit, such
+  a frame took 0.9 to 1.2 s in one call, a stall at every rest between Cmd+scroll notches.
 - **Forward progress.** A moving frame that has started no tile work for 100 ms while some was
   wanted (`pacing::Starvation`) starts one unit anyway, whatever back-pressure says: one tile
   walk, paused at the cap, or a direct frame's bounded few rough tiles.

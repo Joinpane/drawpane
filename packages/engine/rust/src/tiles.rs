@@ -327,6 +327,11 @@ pub struct TileCache {
     /// goes back); if a stand-in was shown since (`base_kept`), it's laid round them (`holes`).
     /// A frame drawn forgets them (`frame_drawn`): no stale tile is ever laid in one.
     changed: Vec<Rect>,
+    /// Where an image got another resolution (page units) since the last frame was drawn
+    /// (`note_refined`): not a change, so never a hole, but a frame drawn over several frames
+    /// keeps no tiles to mark, and draws its tiles there again (`refined_on`). A frame drawn
+    /// forgets them (`frame_drawn`).
+    refined: Vec<Rect>,
     /// An overview tile failed to draw (past a limit, say): none is kept until the cache clears.
     overview_refused: bool,
     /// Overview tiles dropped (a cleared cache, a refused or moved overview): diagnostics.
@@ -471,6 +476,7 @@ impl TileCache {
             base_kept: false,
             bake_overview: false,
             changed: Vec::new(),
+            refined: Vec::new(),
             overview_lost: 0,
             overview_refused: false,
             stats: TileStats::default(),
@@ -1168,6 +1174,21 @@ impl TileCache {
     /// Not for a stand-in that keeps the frame it was warped from.
     pub fn frame_drawn(&mut self) {
         self.changed.clear();
+        self.refined.clear();
+    }
+
+    /// Where an image got another resolution (page units) since the last frame was drawn: for a
+    /// frame drawn over several frames, which draws its tiles there again (`refined_on`).
+    pub fn note_refined(&mut self, page: &[Rect]) {
+        for r in page {
+            if r.is_finite() && !self.refined.iter().any(|c| c.contains_rect(*r)) {
+                self.refined.push(*r);
+            }
+        }
+        if self.refined.len() > 64 {
+            let all = self.refined.iter().copied().reduce(|a, b| a.union(b));
+            self.refined = all.into_iter().collect();
+        }
     }
 
     /// What changed since the last frame was drawn (`note_changed`), in page units.
@@ -1188,9 +1209,24 @@ impl TileCache {
         if !self.base_kept {
             return Vec::new();
         }
+        self.changed_on(view, size)
+    }
+
+    /// What changed since the last frame was drawn (`note_changed`), on a frame of `size` under
+    /// `view`, grown a pixel: moving or not.
+    pub fn changed_on(&self, view: Affine, size: (u32, u32)) -> Vec<Rect> {
+        Self::on_frame(&self.changed, view, size)
+    }
+
+    /// Where an image got another resolution since the last frame was drawn (`note_refined`), on
+    /// a frame of `size` under `view`, grown a pixel. Never a hole.
+    pub fn refined_on(&self, view: Affine, size: (u32, u32)) -> Vec<Rect> {
+        Self::on_frame(&self.refined, view, size)
+    }
+
+    fn on_frame(page: &[Rect], view: Affine, size: (u32, u32)) -> Vec<Rect> {
         let frame = Rect::new(0.0, 0.0, f64::from(size.0), f64::from(size.1));
-        self.changed
-            .iter()
+        page.iter()
             .map(|c| view.transform_rect_bbox(*c).inflate(1.0, 1.0).intersect(frame))
             .filter(|r| r.width() > 0.0 && r.height() > 0.0)
             .collect()
