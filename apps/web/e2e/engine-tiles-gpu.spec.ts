@@ -1837,8 +1837,8 @@ for (const build of ["browser", "webgl"] as const) {
     });
 
     test("edits near the middle before every slice never starve the rest", async ({ page }) => {
-      // Eight slow direct tiles turn green, then a small square near the middle changes before
-      // every 1 ms slice (a collaborator dragging). Tiles drawn again take turns with those never
+      // Eight slow direct tiles are drawn green, while a small square near the middle changes
+      // before every 1 ms slice (a collaborator dragging). Tiles drawn again take turns with those never
       // drawn, so every tile shows green well within 30 slices, and the view settles once the
       // edits stop (#358 review, P4).
       const green = [0, 255, 0, 255];
@@ -1853,7 +1853,9 @@ for (const build of ["browser", "webgl"] as const) {
         budget,
         samples: points,
       });
-      const steps: Step[] = [frame("initial", 0), { apply: cover(1, 999999, [0, 1, 0, 1]) }];
+      // No frame drawn at once first: 32,768 squares in one call can outlast a read-back's wait
+      // on SwiftShader.
+      const steps: Step[] = [{ apply: cover(1, 999999, [0, 1, 0, 1]) }];
       for (let i = 0; i < 30; i++) {
         steps.push({ apply: cover(2 + i, 1000000, [0, 0, 1, 1], 20, 20, [1000 + (i % 2), 500]) });
         steps.push(frame(`slice ${i}`));
