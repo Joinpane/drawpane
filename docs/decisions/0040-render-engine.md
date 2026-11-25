@@ -2036,13 +2036,20 @@ GPU work a frame queued had no bound, and input waited behind it.
   (`TileCache::changed_on`), or an image got another resolution (`TileCache::refined_on`, never
   a hole), both cleared by every frame drawn so a slice never waits on an exact frame, its tiles
   are drawn again; the old pixels show there until they are, as on any frame on screen. Tiles
-  to draw again take turns with those never drawn, so edits before every slice never starve
-  the rest. The frame is exact once every tile is in and none was last drawn inexact (one
-  drawn inexact, beside provisional text say, leaves when it's drawn again exact). A new view
-  starts over on stand-ins. Once every tile is in, the frame is exact and shown again as it is.
-  A slice whose remaining tiles fit in about one and a half budgets more (by the slowest tile
-  it or the last frame drew) finishes in that call, and a frame whose tiles all fit in its
-  budget, by the slowest direct tile lately at a scale within 1.25× of its own, is drawn at once.
+  to draw again go the longest dropped first (one drawn and dropped again goes to the back) and
+  take turns with those never drawn, so edits before every slice never starve the rest. The
+  frame is exact once every tile is in and none was last drawn inexact (one drawn inexact,
+  beside provisional text say, leaves when it's drawn again exact). A new view starts over on
+  stand-ins. Once every tile is in, the frame is exact and shown again as it is.
+  While the view rests unchanged, each slice's budget doubles from the caller's (8, 16, then
+  32 ms, never more: a longer call holds the first input at rest); a new view, a moving frame or
+  an edit in view starts it over. A slice whose remaining tiles fit in about one and a half
+  budgets more, by the slowest tile of the series so far, finishes in that call. (Drawing a new
+  view at once when its tiles seemed to fit, by recent tiles' cost, was tried and dropped: the
+  estimate went stale and cheap, and a dense page then drew whole frames in 200-246 ms calls.)
+  Slices only run when the tile budget holds fewer slots than the view has tiles: at the
+  default limits (256 MiB of tiles, 768 MiB of GPU memory) no frame is direct even at 6,016 ×
+  3,384 device pixels, so this matters only on memory-squeezed devices.
   Without a budget it's drawn at once, as before. At a 4 MiB tile budget on the iOS kit, such
   a frame took 0.9 to 1.2 s in one call, a stall at every rest between Cmd+scroll notches.
 - **Forward progress.** A moving frame that has started no tile work for 100 ms while some was

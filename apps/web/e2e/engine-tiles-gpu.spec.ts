@@ -511,9 +511,12 @@ function directStripes(count = 12): number[] {
   return [...list.finish()];
 }
 
-/** A grid of small squares every 8 px over `width` x `height`: tiles that take a while each. */
-function denseSquares(width: number, height: number): number[] {
-  const list = new ListWriter(0xffffffff, 1);
+/**
+ * A grid of small squares every 8 px over `width` x `height`: tiles that take a while each. A
+ * fresh list at `revision`.
+ */
+function denseSquares(width: number, height: number, revision = 1): number[] {
+  const list = new ListWriter(0xffffffff, revision);
   list.reset();
   let id = 1;
   for (let y = 0; y < height; y += 8) {
@@ -1836,6 +1839,71 @@ for (const build of ["browser", "webgl"] as const) {
         pending: 0,
         samples: [green, green, green],
       });
+    });
+
+    test("after a wide edit, edits near the middle before every slice never starve the rest", async ({
+      page,
+    }) => {
+      // The frame is done, then a wide edit drops all eight tiles, then a 20 px square near the
+      // middle changes before every 1 ms slice. Tiles to draw again go longest dropped first, one
+      // drawn and dropped again to the back, so every tile shows green within 20 slices (#358
+      // re-check 2, P6).
+      test.setTimeout(150_000);
+      const green = [0, 255, 0, 255];
+      const points: [number, number][] = [];
+      for (let j = 0; j < 2; j++)
+        for (let i = 0; i < 4; i++) points.push([258 + 512 * i, 258 + 512 * j]);
+      const frame = (name: string): Step => ({
+        name,
+        size: [2048, 1024],
+        scale: 1,
+        moving: false,
+        budget: 1,
+        samples: points,
+      });
+      const steps: Step[] = Array.from({ length: 14 }, (_, i) => frame(`warm ${i}`));
+      steps.push({ apply: cover(1, 999999, [0, 1, 0, 1]) });
+      for (let i = 0; i < 20; i++) {
+        steps.push({ apply: cover(2 + i, 1000000, [0, 0, 1, 1], 20, 20, [1000 + (i % 2), 500]) });
+        steps.push(frame(`slice ${i}`));
+      }
+      const rows = await presented(page, build, denseSquares(2048, 1024), steps, { tileBytes: 0 });
+      expect(rows.find((r) => r.name === "warm 13")?.exact, "the first series finished").toBe(true);
+      const greenAt = (name: string) =>
+        rows.find((r) => r.name === name)?.samples.filter((s) => s.join() === green.join()).length;
+      expect(greenAt("slice 19"), "tiles away from the edits were starved").toBe(points.length);
+    });
+
+    test("a cheap page's slices never make the next page's frame be drawn at once", async ({
+      page,
+    }) => {
+      // A light page's frame no slot can hold settles over cheap slices; then a dense page is
+      // loaded. Its first frame at rest is still sliced, never drawn whole in one call on an
+      // estimate from the cheap tiles (#358 re-check 2, P7).
+      test.setTimeout(150_000);
+      const frame = (name: string): Step => ({
+        name,
+        size: [2048, 1024],
+        scale: 1,
+        moving: false,
+        budget: 8,
+        samples: [[1, 1]],
+      });
+      const rows = await presented(
+        page,
+        build,
+        solid(6000),
+        [
+          ...Array.from({ length: 6 }, (_, i) => frame(`light ${i}`)),
+          { apply: denseSquares(2048, 1024, 2) },
+          frame("dense, first"),
+        ],
+        { tileBytes: 0 },
+      );
+      expect(rows[5]).toMatchObject({ exact: true });
+      const first = rows.at(-1);
+      expect(first?.exact, "the dense frame was drawn at once").toBe(false);
+      expect(first?.drawn).toBeLessThan(8);
     });
 
     test("edits near the middle before every slice never starve the rest", async ({ page }) => {

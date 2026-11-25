@@ -265,6 +265,9 @@ const DIRECT_MOVING_TILES: usize = 2;
 /// The slice a composite-only call at rest spends on a frame no slot can hold (`DirectSlices`):
 /// the editor's own budget at rest.
 const DIRECT_SLICE_MS: f64 = 8.0;
+/// A sliced frame's slice budget doubles while its view rests (8, 16, then 32 ms), never past
+/// this: a longer call would hold the first input at rest.
+const DIRECT_SLICE_MAX_MS: f64 = 32.0;
 
 /// An exact frame no slot can hold (`Plan::direct`), drawn at rest over several frames: the
 /// tiles drawn so far, all in the frame shown (`frame`), which each next frame lays beneath
@@ -282,11 +285,27 @@ struct DirectSlices {
     /// Those of `done` drawn inexact (a provisional record in reach, say): the frame is exact
     /// once every tile is in and none is here. Each leaves when it's dropped or drawn exact.
     inexact: HashSet<TileKey>,
-    /// Tiles drawn once and dropped since (an edit, an image level): they take turns with those
-    /// never drawn, so a stream of edits near the middle never starves the rest.
-    redraw: HashSet<TileKey>,
+    /// Tiles drawn once and dropped since (an edit, an image level), the longest dropped first:
+    /// one drawn and dropped again goes to the back, so a stream of edits near the middle never
+    /// starves the rest. They take turns with tiles never drawn.
+    redraw: Vec<TileKey>,
     /// The next slice starts with a tile of `redraw` (else one never drawn).
     redraw_first: bool,
+    /// The slowest tile this series has drawn (milliseconds): whether what's left of it fits in
+    /// what's left of a slice.
+    slowest_ms: f64,
+    /// Slices since the view came to rest here or last changed: each doubles the last one's
+    /// budget, up to `DIRECT_SLICE_MAX_MS`.
+    resting: u32,
+}
+
+/// How far `key`'s tile lies from the middle of a frame of `size` whose tile grid starts at
+/// `origin` (frame pixels).
+fn from_middle(key: &TileKey, origin: (i64, i64), size: (u32, u32)) -> f64 {
+    let t = f64::from(TILE);
+    let x = f64::from(key.i) * t + origin.0 as f64 + t / 2.0 - f64::from(size.0) / 2.0;
+    let y = f64::from(key.j) * t + origin.1 as f64 + t / 2.0 - f64::from(size.1) / 2.0;
+    x.hypot(y)
 }
 
 /// `jobs`, nearest the frame's middle first.
@@ -1443,9 +1462,6 @@ pub struct Gpu {
     rough: bool,
     /// An exact frame no slot can hold, part drawn at rest (`DirectSlices`).
     direct_slices: Option<DirectSlices>,
-    /// What a direct tile took to draw lately (milliseconds, the slowest of the last frame's) and
-    /// the scale it was drawn at: whether what's left of a sliced frame, or all of it, fits.
-    direct_tile_ms: Option<(f64, f64)>,
     overview_page: Option<OverviewPage>,
     /// Tile cooperatively paused mid-walk so no single frame stalls past its CPU budget.
     pending_tile: Option<PendingTile>,
@@ -2127,7 +2143,6 @@ impl Gpu {
             motion_starved: crate::pacing::Starvation::default(),
             rough: false,
             direct_slices: None,
-            direct_tile_ms: None,
             overview_page: None,
             pending_tile: None,
             pending_whole: None,
@@ -6811,25 +6826,11 @@ impl Gpu {
         let direct_moving = plan.direct && motion_capped && !composite_only && selection.is_none();
         // At rest, under a real budget (or composite-only), such a frame is drawn over several
         // frames (`DirectSlices`), exact tiles within the budget each, nearest the middle first:
-        // shown inexact, never old, until every tile is in. No budget: drawn at once, as before;
-        // nor when all its tiles fit in the budget, by what direct tiles took lately at a scale
-        // within 1.25x of this one (the slowest of the last frame that drew any).
-        let slice_ms = if options.budget_ms >= 1.0 {
-            options.budget_ms
-        } else {
-            DIRECT_SLICE_MS
-        };
-        let near = |cost: Option<(f64, f64)>| cost.filter(|(at, _)| (0.8..=1.25).contains(&(scale / at)));
-        let fits = |cost: Option<f64>, tiles: usize, budget: f64| cost.is_some_and(|ms| ms * tiles as f64 <= budget);
-        // One for this view part drawn, or done (then shown again as it is), always goes on.
-        let series_here = self.direct_slices.as_ref().is_some_and(|s| {
-            s.view == view.as_coeffs().map(f64::to_bits) && s.size == (w, h) && self.cur == Some(s.frame)
-        });
+        // shown inexact, never old, until every tile is in. No budget: drawn at once, as before.
         let direct_sliced = plan.direct
             && !options.moving
             && selection.is_none()
-            && (options.budget_ms >= 1.0 || options.budget_ms < 0.0)
-            && (series_here || !fits(near(self.direct_tile_ms).map(|(_, ms)| ms), plan.jobs.len(), slice_ms));
+            && (options.budget_ms >= 1.0 || options.budget_ms < 0.0);
         self.pass_budget = motion_capped.then_some(MOVING_PASSES);
         self.passes_at = self.passes;
         let mut budget_hit = false;
@@ -7137,12 +7138,17 @@ impl Gpu {
             });
             if goes_on {
                 // What changed, and where an image got another resolution (never a hole: the
-                // frame on screen shows there until drawn again, as for a refined tile).
+                // frame on screen shows there until drawn again, as for a refined tile). An edit
+                // here starts the slice budget over.
                 let mut gone = self.tiles.changed_on(view, (w, h));
+                let edited = !gone.is_empty();
                 gone.extend(self.tiles.refined_on(view, (w, h)));
                 let t = i64::from(TILE);
                 let origin = plan.origin;
                 let s = self.direct_slices.as_mut().expect("sliced frame");
+                if edited {
+                    s.resting = 0;
+                }
                 let mut dropped = Vec::new();
                 s.done.retain(|k| {
                     let (x, y) = (i64::from(k.i) * t + origin.0, i64::from(k.j) * t + origin.1);
@@ -7155,9 +7161,14 @@ impl Gpu {
                     }
                     !under
                 });
+                // To the back of the queue to draw again, nearest the middle first among those
+                // dropped together; one already waiting keeps its place.
+                dropped.sort_by(|a, b| from_middle(a, origin, (w, h)).total_cmp(&from_middle(b, origin, (w, h))));
                 for k in dropped {
                     s.inexact.remove(&k);
-                    s.redraw.insert(k);
+                    if !s.redraw.contains(&k) {
+                        s.redraw.push(k);
+                    }
                 }
                 // None while it's the frame on screen (`TileCache::base_kept`).
                 slice_holes = Some(self.tiles.holes(view, (w, h)));
@@ -7170,21 +7181,28 @@ impl Gpu {
                     frame: dst,
                     done: Vec::new(),
                     inexact: HashSet::new(),
-                    redraw: HashSet::new(),
+                    redraw: Vec::new(),
                     redraw_first: false,
+                    slowest_ms: 0.0,
+                    resting: 0,
                 });
             }
-            // Tiles never drawn and tiles to draw again take turns, each nearest the middle
-            // first, whichever starts alternating by slice: each slice makes progress on both.
+            // Tiles never drawn (nearest the middle first) and tiles to draw again (the longest
+            // dropped first) take turns, whichever starts alternating by slice: each slice makes
+            // progress on both.
             let s = self.direct_slices.as_mut().expect("sliced frame");
-            let (mut again, mut fresh): (Vec<crate::tiles::Job>, Vec<crate::tiles::Job>) = plan
+            let mut fresh: Vec<crate::tiles::Job> = plan
                 .jobs
                 .iter()
-                .filter(|j| !s.done.contains(&j.key))
+                .filter(|j| !s.done.contains(&j.key) && !s.redraw.contains(&j.key))
                 .copied()
-                .partition(|j| s.redraw.contains(&j.key));
-            nearest_middle(&mut again, plan.origin, (w, h));
+                .collect();
             nearest_middle(&mut fresh, plan.origin, (w, h));
+            let again: Vec<crate::tiles::Job> = s
+                .redraw
+                .iter()
+                .filter_map(|k| plan.jobs.iter().find(|j| j.key == *k && !s.done.contains(k)).copied())
+                .collect();
             let (first, second) = if s.redraw_first { (again, fresh) } else { (fresh, again) };
             s.redraw_first = !s.redraw_first;
             let (mut a, mut b) = (first.into_iter(), second.into_iter());
@@ -7197,8 +7215,21 @@ impl Gpu {
                 late.extend(y);
             }
         }
+        // The slice's budget: the caller's (or `DIRECT_SLICE_MS` composite-only), doubled for
+        // each slice the view has rested unchanged, up to `DIRECT_SLICE_MAX_MS`.
+        let base_ms = if options.budget_ms >= 1.0 {
+            options.budget_ms
+        } else {
+            DIRECT_SLICE_MS
+        };
+        let (resting, series_slowest) = self
+            .direct_slices
+            .as_ref()
+            .filter(|_| direct_sliced)
+            .map_or((0, 0.0), |s| (s.resting, s.slowest_ms));
+        let slice_ms = (base_ms * f64::from(1u32 << resting.min(8))).min(DIRECT_SLICE_MAX_MS.max(base_ms));
         let slice_deadline = t0 + self.walk_budget_ms(slice_ms);
-        // The slowest direct tile this frame (for `direct_tile_ms`).
+        // The slowest tile drawn this frame (for `DirectSlices::slowest_ms`).
         let mut slowest_tile: Option<f64> = None;
         let t1 = now();
         let mut present_encoder = None;
@@ -7250,20 +7281,13 @@ impl Gpu {
                     continue;
                 }
                 // A sliced frame's tiles stop at its budget (the first always goes), unless what's
-                // left fits in about one and a half budgets more, by the slowest tile this call and
-                // the last frame drew: then this call finishes it.
+                // left fits in about one and a half budgets more, by the slowest tile of the
+                // series so far: then this call finishes it.
+                let slowest = slowest_tile.unwrap_or(0.0).max(series_slowest);
                 if direct_sliced
                     && n > 0
                     && now() >= slice_deadline
-                    && !fits(
-                        near(self.direct_tile_ms)
-                            .map(|(_, ms)| ms)
-                            .into_iter()
-                            .chain(slowest_tile)
-                            .reduce(f64::max),
-                        late.len() - n,
-                        1.5 * slice_ms,
-                    )
+                    && slowest * (late.len() - n) as f64 > 1.5 * slice_ms
                 {
                     stats.pending += (late.len() - n) as u32;
                     break;
@@ -7322,11 +7346,6 @@ impl Gpu {
             stats.exact = stats.pending == 0 && !inexact;
             stats.plan = if stats.exact { 2 } else { 1 };
         }
-        if plan.direct
-            && let Some(ms) = slowest_tile
-        {
-            self.direct_tile_ms = Some((scale, ms));
-        }
         stats.direct = plan.direct || !late.is_empty();
         stats.standin = !stats.exact;
         stats.held = self.tiles.len() as u32;
@@ -7340,9 +7359,11 @@ impl Gpu {
         self.set_shown(generation, bg_bits, stats.exact);
         if direct_sliced && let Some(s) = self.direct_slices.as_mut() {
             s.frame = dst;
+            s.slowest_ms = s.slowest_ms.max(slowest_tile.unwrap_or(0.0));
+            s.resting = s.resting.saturating_add(1);
             for (k, inexact) in slice_drawn {
                 s.done.push(k);
-                s.redraw.remove(&k);
+                s.redraw.retain(|r| *r != k);
                 if inexact {
                     s.inexact.insert(k);
                 } else {
@@ -7370,7 +7391,11 @@ impl Gpu {
         if let Some(s) = self.direct_slices.as_mut() {
             let inexact = std::mem::take(&mut s.inexact);
             s.done.retain(|k| !inexact.contains(k));
-            s.redraw.extend(inexact);
+            for k in inexact {
+                if !s.redraw.contains(&k) {
+                    s.redraw.push(k);
+                }
+            }
         }
     }
 
