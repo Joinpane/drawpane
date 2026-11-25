@@ -1623,6 +1623,8 @@ for (const build of ["browser", "webgl"] as const) {
     test("an exact frame no slot can hold is drawn over several frames at rest", async ({
       page,
     }) => {
+      // Up to 40 frames of 32,768 squares and a fresh reference: 40-50 s on SwiftShader.
+      test.setTimeout(120_000);
       // 32,768 squares over a 2,048 x 1,024 view: eight direct tiles that take more than the
       // 1 ms budget each. The view settles over several calls, never one stall, inexact until
       // the last tile is in, and then matches a frame drawn at once byte for byte.
@@ -1837,9 +1839,11 @@ for (const build of ["browser", "webgl"] as const) {
     });
 
     test("edits near the middle before every slice never starve the rest", async ({ page }) => {
+      // 32 frames of 32,768 squares take 40-55 s on SwiftShader.
+      test.setTimeout(120_000);
       // Eight slow direct tiles are drawn green, while a small square near the middle changes
       // before every 1 ms slice (a collaborator dragging). Tiles drawn again take turns with those never
-      // drawn, so every tile shows green well within 30 slices, and the view settles once the
+      // drawn, so every tile shows green within 20 slices, and the view settles once the
       // edits stop (#358 review, P4).
       const green = [0, 255, 0, 255];
       const points: [number, number][] = [];
@@ -1856,7 +1860,7 @@ for (const build of ["browser", "webgl"] as const) {
       // No frame drawn at once first: 32,768 squares in one call can outlast a read-back's wait
       // on SwiftShader.
       const steps: Step[] = [{ apply: cover(1, 999999, [0, 1, 0, 1]) }];
-      for (let i = 0; i < 30; i++) {
+      for (let i = 0; i < 20; i++) {
         steps.push({ apply: cover(2 + i, 1000000, [0, 0, 1, 1], 20, 20, [1000 + (i % 2), 500]) });
         steps.push(frame(`slice ${i}`));
       }
@@ -1864,7 +1868,7 @@ for (const build of ["browser", "webgl"] as const) {
       const rows = await presented(page, build, denseSquares(2048, 1024), steps, { tileBytes: 0 });
       const greenAt = (name: string) =>
         rows.find((r) => r.name === name)?.samples.filter((s) => s.join() === green.join()).length;
-      expect(greenAt("slice 29"), "tiles away from the edits were starved").toBe(points.length);
+      expect(greenAt("slice 19"), "tiles away from the edits were starved").toBe(points.length);
       expect(rows.at(-1)).toMatchObject({ exact: true, pending: 0 });
     });
 
