@@ -2586,7 +2586,10 @@ for (const build of ["browser", "webgl"] as const) {
 }
 
 const SCOPE_CLIP_COUNTER = GPU_RENDER_KINDS.indexOf("scopeClip");
+const BLUR_CLIP_COUNTER = GPU_RENDER_KINDS.indexOf("blurClip");
+const READER_CLIP_COUNTER = GPU_RENDER_KINDS.indexOf("readerClip");
 const SCOPES_COUNTER = GPU_RENDER_KINDS.length + GPU_FLUSH_CAUSES.length;
+const PAUSES_COUNTER = GPU_RENDER_KINDS.length + GPU_FLUSH_CAUSES.length + 3;
 
 function hwBlendWarmupLists(): number[][] {
   const modes = [
@@ -4278,6 +4281,1362 @@ for (const build of ["browser", "webgl"] as const) {
       expect(result.asyncOk).toBe(true);
       expect(result.slotMore).toEqual([true, true, true, true, true, true, true, false]);
       expect(result.healthOk, result.healthMsg).toBe(true);
+    });
+  });
+
+  test.describe(`clip mask cache and AA-rect scissor (${build})`, () => {
+    const clipWarmupLists = (): number[][] => {
+      const make = (
+        rev: number,
+        ops: WireRecord["ops"],
+        radii: readonly [number, number, number, number] = [0, 0, 0, 0],
+      ): number[] => {
+        const w = new ListWriter(0xffffffff, rev);
+        w.reset();
+        w.set(1, ROOT, {
+          flags: 0,
+          transform: [1, 0, 0, 1, 0, 0],
+          opacity: 1,
+          width: 16,
+          height: 16,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [{ kind: "rect", w: 16, h: 16, radii, smoothing: 0 }],
+          ops,
+          coarse: [],
+        });
+        return [...w.finish()];
+      };
+      return [
+        make(1, [
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: { kind: "solid", color: [0.5, 0.4, 0.3, 0.7], blend: BLEND.luminosity },
+          },
+        ]),
+        make(2, [{ op: "backgroundBlur", paths: [0], evenOdd: false, radius: 6 }]),
+        make(3, [
+          {
+            op: "progressiveBlur",
+            paths: [0],
+            evenOdd: false,
+            startRadius: 2,
+            endRadius: 8,
+            start: [0, 0],
+            end: [0, 1],
+          },
+        ]),
+        make(
+          4,
+          [
+            {
+              op: "glass",
+              paths: [0],
+              evenOdd: false,
+              kind: 0,
+              inradius: 8,
+              angle: -45,
+              intensity: 40,
+              refraction: 40,
+              depth: 8,
+              dispersion: 10,
+              frost: 2,
+              splay: 0,
+              boxRadii: [4, 4, 4, 4],
+              boxSmoothing: [0, 0, 0, 0],
+            },
+          ],
+          [4, 4, 4, 4],
+        ),
+      ];
+    };
+
+    const clipAaRectScissorScene = (revision: number, offsetX = 0): number[] => {
+      const list = new ListWriter(0xffffffff, revision);
+      list.reset();
+      let nextId = 1;
+      const setBox = (
+        parent: number,
+        transform: readonly [number, number, number, number, number, number],
+        w: number,
+        h: number,
+        ops: WireRecord["ops"],
+        opts?: {
+          id?: number;
+          flags?: number;
+          blend?: number;
+          opacity?: number;
+          radii?: readonly [number, number, number, number];
+        },
+      ) => {
+        const id = opts?.id ?? nextId++;
+        list.set(id, parent, {
+          flags: opts?.flags ?? 0,
+          transform: [...transform],
+          opacity: opts?.opacity ?? 1,
+          ...(opts?.blend !== undefined ? { blend: opts.blend } : {}),
+          width: w,
+          height: h,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [
+            {
+              kind: "rect",
+              w,
+              h,
+              radii: [...(opts?.radii ?? [0, 0, 0, 0])],
+              smoothing: 0,
+            },
+          ],
+          ops,
+          coarse: [],
+        });
+        return id;
+      };
+      const glassOp = (): WireRecord["ops"] => [
+        {
+          op: "glass",
+          paths: [0],
+          evenOdd: false,
+          kind: 0,
+          inradius: 24,
+          angle: -45,
+          intensity: 55,
+          refraction: 45,
+          depth: 12,
+          dispersion: 18,
+          frost: 4,
+          splay: 0,
+          boxRadii: [10, 10, 10, 10],
+          boxSmoothing: [0, 0, 0, 0],
+        },
+      ];
+      // Varied opaque backdrop straddling tile boundary x = 512.
+      for (let i = 0; i < 8; i++) {
+        setBox(ROOT, [1, 0, 0, 1, 384 + offsetX + i * 32, 64], 32, 192, [
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: {
+              kind: "solid",
+              color: [0.18 + (i % 4) * 0.2, 0.25 + ((i + 1) % 3) * 0.24, 0.78 - i * 0.07, 1],
+            },
+          },
+        ]);
+      }
+      // 1. Plain integer AA-rect clip straddling x = 512.
+      const clipA = setBox(
+        ROOT,
+        [1, 0, 0, 1, 396 + offsetX, 76],
+        156,
+        88,
+        [{ op: "clip", path: 0, evenOdd: false }, { op: "children" }, { op: "unclip" }],
+        { flags: 0 },
+      );
+      // Non-HW blends extending past the clip edge (triggers scopeClip without fast path).
+      setBox(clipA, [1, 0, 0, 1, -12, -10], 70, 54, [
+        {
+          op: "fill",
+          path: 0,
+          evenOdd: false,
+          paint: { kind: "solid", color: [0.92, 0.35, 0.2, 0.85], blend: BLEND.luminosity },
+        },
+      ]);
+      setBox(clipA, [1, 0, 0, 1, 98, -8], 76, 52, [
+        {
+          op: "fill",
+          path: 0,
+          evenOdd: false,
+          paint: { kind: "solid", color: [0.25, 0.82, 0.65, 0.75], blend: BLEND["color-dodge"] },
+        },
+      ]);
+      // Background blur, progressive blur, and glass crossing clipA edges.
+      setBox(clipA, [1, 0, 0, 1, 34, 48], 60, 56, [
+        { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 14 },
+      ]);
+      setBox(clipA, [1, 0, 0, 1, 108, 42], 64, 58, [
+        {
+          op: "progressiveBlur",
+          paths: [0],
+          evenOdd: false,
+          startRadius: 2,
+          endRadius: 18,
+          start: [0, 0],
+          end: [0, 1],
+        },
+      ]);
+      setBox(clipA, [1, 0, 0, 1, -8, 40], 54, 58, glassOp(), { radii: [10, 10, 10, 10] });
+      // Completely clipped-out children (must contribute 0 pixels and 0 masks).
+      setBox(clipA, [1, 0, 0, 1, 220, 10], 40, 40, [
+        {
+          op: "fill",
+          path: 0,
+          evenOdd: false,
+          paint: { kind: "solid", color: [1, 0, 0, 1], blend: BLEND.difference },
+        },
+      ]);
+      setBox(clipA, [1, 0, 0, 1, 220, 10], 40, 40, [
+        { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 12 },
+      ]);
+
+      // 2. Nested 90-degree rotated + horizontally flipped integer AA-rect clips.
+      const clipRot = setBox(
+        ROOT,
+        [0, 1, -1, 0, 560 + offsetX, 174],
+        64,
+        140,
+        [{ op: "clip", path: 0, evenOdd: false }, { op: "children" }, { op: "unclip" }],
+        { flags: 0 },
+      );
+      const clipFlip = setBox(
+        clipRot,
+        [-1, 0, 0, 1, 56, 12],
+        48,
+        112,
+        [{ op: "clip", path: 0, evenOdd: false }, { op: "children" }, { op: "unclip" }],
+        { flags: 0 },
+      );
+      setBox(clipFlip, [1, 0, 0, 1, -10, -10], 70, 72, [
+        {
+          op: "fill",
+          path: 0,
+          evenOdd: false,
+          paint: { kind: "solid", color: [0.85, 0.72, 0.18, 0.8], blend: BLEND.difference },
+        },
+      ]);
+      setBox(clipFlip, [1, 0, 0, 1, 4, 56], 54, 68, glassOp(), { radii: [8, 8, 8, 8] });
+      return [...list.finish()];
+    };
+
+    const clipChainCacheScene = (
+      revision: number,
+      offsetX = 0,
+      opts?: { radius?: number; clipShiftX?: number },
+    ): number[] => {
+      const list = new ListWriter(0xffffffff, revision);
+      list.reset();
+      let nextId = 1;
+      const setBox = (
+        parent: number,
+        transform: readonly [number, number, number, number, number, number],
+        w: number,
+        h: number,
+        ops: WireRecord["ops"],
+        extra?: {
+          id?: number;
+          flags?: number;
+          radii?: readonly [number, number, number, number];
+        },
+      ) => {
+        const id = extra?.id ?? nextId++;
+        list.set(id, parent, {
+          flags: extra?.flags ?? 0,
+          transform: [...transform],
+          opacity: 1,
+          width: w,
+          height: h,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [
+            {
+              kind: "rect",
+              w,
+              h,
+              radii: [...(extra?.radii ?? [0, 0, 0, 0])],
+              smoothing: 0,
+            },
+          ],
+          ops,
+          coarse: [],
+        });
+        return id;
+      };
+      const glassOp = (): WireRecord["ops"] => [
+        {
+          op: "glass",
+          paths: [0],
+          evenOdd: false,
+          kind: 0,
+          inradius: 20,
+          angle: -35,
+          intensity: 50,
+          refraction: 40,
+          depth: 10,
+          dispersion: 16,
+          frost: 3,
+          splay: 0,
+          boxRadii: [8, 8, 8, 8],
+          boxSmoothing: [0, 0, 0, 0],
+        },
+      ];
+      // Varied opaque backdrop.
+      for (let i = 0; i < 8; i++) {
+        setBox(ROOT, [1, 0, 0, 1, 384 + offsetX + i * 32, 64], 32, 192, [
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: {
+              kind: "solid",
+              color: [0.22 + (i % 3) * 0.25, 0.72 - (i % 4) * 0.14, 0.3 + (i % 5) * 0.12, 1],
+            },
+          },
+        ]);
+      }
+      // Card A: shared rounded clip (id=500) straddling x = 512.
+      const rad = opts?.radius ?? 24;
+      const shiftX = opts?.clipShiftX ?? 0;
+      const cardA = setBox(
+        ROOT,
+        [1, 0, 0, 1, 392 + offsetX + shiftX, 72],
+        136,
+        164,
+        [{ op: "clip", path: 0, evenOdd: false }, { op: "children" }, { op: "unclip" }],
+        { id: 500, flags: 0, radii: [rad, rad, rad, rad] },
+      );
+      const modes = [
+        BLEND.luminosity,
+        BLEND["color-dodge"],
+        BLEND.saturation,
+        BLEND.difference,
+        BLEND.exclusion,
+        BLEND["hard-light"],
+      ] as const;
+      for (const [i, blend] of modes.entries()) {
+        setBox(cardA, [1, 0, 0, 1, (i % 2) * 70 - 6, Math.floor(i / 2) * 52 - 6], 78, 56, [
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: {
+              kind: "solid",
+              color: [0.3 + i * 0.1, 0.85 - i * 0.1, 0.45 + (i % 3) * 0.2, 0.78],
+              blend,
+            },
+          },
+        ]);
+      }
+      // Inner integer AA-rect clip inside Card A: collapses onto Card A's cached rounded mask.
+      const innerAa = setBox(
+        cardA,
+        [1, 0, 0, 1, 6, 8],
+        124,
+        148,
+        [{ op: "clip", path: 0, evenOdd: false }, { op: "children" }, { op: "unclip" }],
+        { flags: 0 },
+      );
+      for (let i = 0; i < 3; i++) {
+        setBox(innerAa, [1, 0, 0, 1, -8 + i * 44, -8], 52, 48, [
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: { kind: "solid", color: [0.9, 0.4, 0.7, 0.65], blend: BLEND.overlay },
+          },
+        ]);
+      }
+      setBox(innerAa, [1, 0, 0, 1, -4, 96], 62, 60, [
+        { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 12 },
+      ]);
+      setBox(innerAa, [1, 0, 0, 1, 66, 92], 64, 64, [
+        {
+          op: "progressiveBlur",
+          paths: [0],
+          evenOdd: false,
+          startRadius: 2,
+          endRadius: 16,
+          start: [0, 0],
+          end: [0, 1],
+        },
+      ]);
+      setBox(innerAa, [1, 0, 0, 1, 32, 46], 60, 56, glassOp(), { radii: [8, 8, 8, 8] });
+
+      // Card B: fractional-offset AA rect clip (must NOT fold into integer scissor).
+      const fracClip = setBox(
+        ROOT,
+        [1, 0, 0, 1, 536.25 + offsetX, 74.5],
+        88,
+        74,
+        [{ op: "clip", path: 0, evenOdd: false }, { op: "children" }, { op: "unclip" }],
+        { flags: 0 },
+      );
+      setBox(fracClip, [1, 0, 0, 1, -8, -8], 104, 48, [
+        {
+          op: "fill",
+          path: 0,
+          evenOdd: false,
+          paint: { kind: "solid", color: [0.95, 0.25, 0.55, 0.82], blend: BLEND.luminosity },
+        },
+      ]);
+      setBox(fracClip, [1, 0, 0, 1, -4, 34], 96, 48, [
+        { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 10 },
+      ]);
+
+      // Card C: 15-degree rotated rect clip (must NOT fold into integer scissor).
+      const c = Math.cos(Math.PI / 12);
+      const s = Math.sin(Math.PI / 12);
+      const rotClip = setBox(
+        ROOT,
+        [c, s, -s, c, 554 + offsetX, 166],
+        68,
+        56,
+        [{ op: "clip", path: 0, evenOdd: false }, { op: "children" }, { op: "unclip" }],
+        { flags: 0 },
+      );
+      setBox(rotClip, [1, 0, 0, 1, -8, -8], 84, 72, [
+        {
+          op: "fill",
+          path: 0,
+          evenOdd: false,
+          paint: { kind: "solid", color: [0.2, 0.85, 0.9, 0.78], blend: BLEND.difference },
+        },
+      ]);
+      setBox(rotClip, [1, 0, 0, 1, 4, 6], 56, 44, glassOp(), { radii: [8, 8, 8, 8] });
+
+      return [...list.finish()];
+    };
+
+    const clipPausedWalkScene = (revision: number, radius = 28): number[] => {
+      const list = new ListWriter(0xffffffff, revision);
+      list.reset();
+      let nextId = 1;
+      const setBox = (
+        parent: number,
+        x: number,
+        y: number,
+        w: number,
+        h: number,
+        ops: WireRecord["ops"],
+        extra?: {
+          id?: number;
+          flags?: number;
+          radii?: readonly [number, number, number, number];
+        },
+      ) => {
+        const id = extra?.id ?? nextId++;
+        list.set(id, parent, {
+          flags: extra?.flags ?? 0,
+          transform: [1, 0, 0, 1, x, y],
+          opacity: 1,
+          width: w,
+          height: h,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [
+            {
+              kind: "rect",
+              w,
+              h,
+              radii: [...(extra?.radii ?? [0, 0, 0, 0])],
+              smoothing: 0,
+            },
+          ],
+          ops,
+          coarse: [],
+        });
+        return id;
+      };
+      setBox(ROOT, 0, 0, 256, 256, [
+        {
+          op: "fill",
+          path: 0,
+          evenOdd: false,
+          paint: { kind: "solid", color: [0.16, 0.28, 0.52, 1] },
+        },
+      ]);
+      setBox(ROOT, 128, 0, 128, 256, [
+        {
+          op: "fill",
+          path: 0,
+          evenOdd: false,
+          paint: { kind: "solid", color: [0.76, 0.42, 0.22, 1] },
+        },
+      ]);
+      const card = setBox(
+        ROOT,
+        16,
+        16,
+        224,
+        224,
+        [{ op: "clip", path: 0, evenOdd: false }, { op: "children" }, { op: "unclip" }],
+        { id: 500, flags: 0, radii: [radius, radius, radius, radius] },
+      );
+      const modes = [
+        BLEND.luminosity,
+        BLEND["color-dodge"],
+        BLEND.difference,
+        BLEND.overlay,
+      ] as const;
+      for (let i = 0; i < 18; i++) {
+        const x = (i % 3) * 76 - 10;
+        const y = Math.floor(i / 3) * 38 - 10;
+        setBox(card, x, y, 88, 46, [
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: {
+              kind: "solid",
+              color: [0.25 + (i % 5) * 0.15, 0.85 - (i % 4) * 0.18, 0.35 + (i % 3) * 0.22, 0.7],
+              blend: modes[i % modes.length] ?? BLEND.luminosity,
+            },
+          },
+        ]);
+      }
+      setBox(card, -6, 150, 110, 80, [
+        { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 14 },
+      ]);
+      setBox(card, 120, 150, 110, 80, [
+        {
+          op: "glass",
+          paths: [0],
+          evenOdd: false,
+          kind: 0,
+          inradius: 20,
+          angle: -45,
+          intensity: 50,
+          refraction: 45,
+          depth: 10,
+          dispersion: 16,
+          frost: 4,
+          splay: 0,
+          boxRadii: [10, 10, 10, 10],
+          boxSmoothing: [0, 0, 0, 0],
+        },
+      ]);
+      return [...list.finish()];
+    };
+
+    /**
+     * Exact curved/rotated/even-odd clip-atlas regression scene (big rounded clip A holding
+     * nested rotated clip B, overlapping multi-subpath circles C, even-odd circles D with
+     * blends/blurs/glass, plus 48 neighboring small rounded clips that pack and overflow slots).
+     */
+    const clipAtlasCurvedEdgesScene = (revision: number, sx = 0): number[] => {
+      const list = new ListWriter(0xffffffff, revision);
+      list.reset();
+      let nextId = 1;
+      let seed = 23 >>> 0;
+      const rand = () => {
+        seed = (seed * 1664525 + 1013904223) >>> 0;
+        return seed / 2 ** 32;
+      };
+      const rr = (w: number, h: number, r: number): WireRecord["paths"] => [
+        { kind: "rect", w, h, radii: [r, r, r, r], smoothing: 0 },
+      ];
+      const circle = (p: PathData, cx: number, cy: number, r: number): PathData => {
+        const k = 0.5523 * r;
+        return p
+          .moveTo(cx + r, cy)
+          .cubicTo(cx + r, cy + k, cx + k, cy + r, cx, cy + r)
+          .cubicTo(cx - k, cy + r, cx - r, cy + k, cx - r, cy)
+          .cubicTo(cx - r, cy - k, cx - k, cy - r, cx, cy - r)
+          .cubicTo(cx + k, cy - r, cx + r, cy - k, cx + r, cy)
+          .close();
+      };
+      const add = (
+        parent: number,
+        r: Partial<WireRecord> & {
+          x?: number;
+          y?: number;
+          w: number;
+          h: number;
+          ops: WireRecord["ops"];
+        },
+        id?: number,
+      ): number => {
+        const nid = id ?? nextId++;
+        if (id && id >= nextId) nextId = id + 1;
+        const { x = 0, y = 0, w, h, ...rest } = r;
+        list.set(nid, parent, {
+          flags: 0,
+          transform: [1, 0, 0, 1, x, y],
+          opacity: 1,
+          width: w,
+          height: h,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [{ kind: "rect", w, h, radii: [0, 0, 0, 0], smoothing: 0 }],
+          coarse: [],
+          ...rest,
+        });
+        return nid;
+      };
+      const fill = (
+        color: readonly [number, number, number, number],
+        blend?: number,
+      ): WireRecord["ops"][number] => ({
+        op: "fill",
+        path: 0,
+        evenOdd: false,
+        paint: blend === undefined ? { kind: "solid", color } : { kind: "solid", color, blend },
+      });
+      const clipOps: WireRecord["ops"] = [
+        { op: "clip", path: 0, evenOdd: false },
+        { op: "children" },
+        { op: "unclip" },
+      ];
+      const bb = (radius: number): WireRecord["ops"][number] => ({
+        op: "backgroundBlur",
+        paths: [0],
+        evenOdd: false,
+        radius,
+      });
+      const glass = (frost: number, r: number): WireRecord["ops"][number] => ({
+        op: "glass",
+        paths: [0],
+        evenOdd: false,
+        kind: 0,
+        inradius: 20,
+        angle: -45,
+        intensity: 50,
+        refraction: 45,
+        depth: 10,
+        dispersion: 16,
+        frost,
+        splay: 0,
+        boxRadii: [r, r, r, r],
+        boxSmoothing: [0, 0, 0, 0],
+      });
+      const blends = [
+        BLEND.luminosity,
+        BLEND.saturation,
+        BLEND.difference,
+        BLEND.hue,
+        BLEND.exclusion,
+        BLEND.overlay,
+      ] as const;
+
+      for (let i = 0; i < 30; i++) {
+        add(ROOT, {
+          x: i * 40 + sx,
+          y: 0,
+          w: 40,
+          h: 1100,
+          ops: [fill([rand(), rand(), rand(), 1])],
+        });
+      }
+      for (let i = 0; i < 14; i++) {
+        add(ROOT, {
+          x: sx,
+          y: 15 + i * 75,
+          w: 1200,
+          h: 9,
+          ops: [fill([rand(), rand(), rand(), 1])],
+        });
+      }
+      const clipA = add(
+        ROOT,
+        { x: 40 + sx, y: 30, w: 700, h: 700, paths: rr(700, 700, 90), ops: clipOps },
+        900,
+      );
+      add(clipA, {
+        x: 20,
+        y: 20,
+        w: 420,
+        h: 400,
+        ops: [fill([0.9, 0.2, 0.3, 0.7], BLEND.luminosity)],
+      });
+      const rot = 0.3;
+      const c = Math.cos(rot);
+      const sn = Math.sin(rot);
+      const clipB = add(
+        clipA,
+        { x: 0, y: 0, w: 640, h: 600, transform: [c, sn, -sn, c, 120, -60], ops: clipOps },
+        901,
+      );
+      add(clipB, {
+        x: 10,
+        y: 10,
+        w: 560,
+        h: 520,
+        ops: [fill([0.2, 0.7, 0.9, 0.6], BLEND.difference)],
+      });
+      add(clipB, { x: 200, y: 150, w: 260, h: 220, ops: [bb(14)] });
+      add(clipA, {
+        x: 260,
+        y: 280,
+        w: 420,
+        h: 400,
+        ops: [fill([0.3, 0.9, 0.2, 0.7], BLEND.saturation)],
+      });
+      const two = circle(circle(new PathData(), 160, 160, 150), 290, 230, 150);
+      const clipC = add(
+        clipA,
+        { x: 20, y: 300, w: 450, h: 390, paths: [{ kind: "path", path: two }], ops: clipOps },
+        902,
+      );
+      add(clipC, {
+        x: 0,
+        y: 0,
+        w: 450,
+        h: 390,
+        ops: [fill([0.95, 0.8, 0.1, 0.65], BLEND.hue)],
+      });
+      add(clipC, {
+        x: 120,
+        y: 80,
+        w: 220,
+        h: 200,
+        ops: [
+          {
+            op: "progressiveBlur",
+            paths: [0],
+            evenOdd: false,
+            startRadius: 1,
+            endRadius: 20,
+            start: [0, 0],
+            end: [1, 1],
+          },
+        ],
+      });
+      const two2 = circle(circle(new PathData(), 150, 150, 140), 260, 200, 140);
+      const clipD = add(
+        clipA,
+        {
+          x: 330,
+          y: 40,
+          w: 410,
+          h: 350,
+          paths: [{ kind: "path", path: two2 }],
+          ops: [{ op: "clip", path: 0, evenOdd: true }, { op: "children" }, { op: "unclip" }],
+        },
+        903,
+      );
+      add(clipD, {
+        x: 0,
+        y: 0,
+        w: 410,
+        h: 350,
+        ops: [fill([0.6, 0.3, 0.9, 0.7], BLEND.exclusion)],
+      });
+      add(clipD, { x: 60, y: 60, w: 280, h: 230, paths: rr(280, 230, 30), ops: [glass(5, 30)] });
+      for (let k = 0; k < 48; k++) {
+        const gx = 760 + sx + (k % 6) * 74;
+        const gy = 30 + Math.floor(k / 6) * 66;
+        const g = add(
+          ROOT,
+          { x: gx, y: gy, w: 70, h: 62, paths: rr(70, 62, 8 + (k % 7) * 3), ops: clipOps },
+          1000 + k,
+        );
+        add(g, {
+          x: -6,
+          y: -6,
+          w: 82,
+          h: 74,
+          ops: [fill([rand(), rand(), rand(), 0.75], blends[k % blends.length])],
+        });
+        if (k % 3 === 0) add(g, { x: 10, y: 8, w: 50, h: 46, ops: [bb(10)] });
+      }
+      return [...list.finish()];
+    };
+
+    test("clip-chain mask cache and integer AA-rect scissor fast path stay byte-identical across scopes, blurs, glass, fractional clips, tile shifts and patches", async ({
+      page,
+    }) => {
+      test.setTimeout(180_000);
+      await openEngine(page, build);
+      const tileShiftPx = 128;
+      // Patch 1: move Card A's clip transform by +12 px.
+      const transformPatch = new ListWriter(20, 21);
+      transformPatch.transform(500, [1, 0, 0, 1, 392 + 12, 72]);
+      // Patch 2: change Card A's corner radius from 24 to 8 while keeping shifted transform.
+      const radiusPatch = new ListWriter(21, 22);
+      radiusPatch.set(500, ROOT, {
+        flags: 0,
+        transform: [1, 0, 0, 1, 392 + 12, 72],
+        opacity: 1,
+        width: 136,
+        height: 164,
+        coarseBelow: 0,
+        reach: 0,
+        unsupported: 0,
+        paths: [{ kind: "rect", w: 136, h: 164, radii: [8, 8, 8, 8], smoothing: 0 }],
+        ops: [{ op: "clip", path: 0, evenOdd: false }, { op: "children" }, { op: "unclip" }],
+        coarse: [],
+      });
+
+      const result = await page.evaluate(
+        async ({
+          warmups,
+          aaBase,
+          aaShifted,
+          cacheBase,
+          cacheShifted,
+          transformPatchBytes,
+          radiusPatchBytes,
+          cacheFreshTransform,
+          cacheFreshRadius,
+          tileShiftPx,
+          expectedBackend,
+          scopeClipIdx,
+          blurClipIdx,
+          readerClipIdx,
+        }) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          const check = (out: { ok: boolean; message: string; free(): void }) => {
+            const { ok, message } = out;
+            out.free();
+            if (!ok) throw new Error(message);
+          };
+          const diffStats = (a: Uint8Array, b: Uint8Array) => {
+            let bytes = Math.abs(a.length - b.length);
+            let maxDelta = 0;
+            let firstDiff: { px: number; a: number[]; b: number[] } | null = null;
+            const n = Math.min(a.length, b.length);
+            for (let i = 0; i < n; i++) {
+              const d = Math.abs((a[i] ?? 0) - (b[i] ?? 0));
+              if (d !== 0) {
+                bytes++;
+                if (d > maxDelta) maxDelta = d;
+                if (!firstDiff) {
+                  const p = Math.floor(i / 4) * 4;
+                  firstDiff = {
+                    px: p / 4,
+                    a: [a[p] ?? 0, a[p + 1] ?? 0, a[p + 2] ?? 0, a[p + 3] ?? 0],
+                    b: [b[p] ?? 0, b[p + 1] ?? 0, b[p + 2] ?? 0, b[p + 3] ?? 0],
+                  };
+                }
+              }
+            }
+            return { bytes, maxDelta, firstDiff };
+          };
+          const open = async () => {
+            let device = await glue.createGpu(null, 0);
+            for (let attempt = 0; attempt < 3 && !device.ok; attempt++) {
+              device.free();
+              await new Promise((r) => setTimeout(r, 300));
+              device = await glue.createGpu(null, 0);
+            }
+            if (!device.ok || device.backend !== expectedBackend)
+              throw new Error(device.message || `expected ${expectedBackend}`);
+            const engine = new glue.Engine(0, 0);
+            if (!engine.attachGpu || !engine.renderGpu || !engine.gpuPixels) {
+              throw new Error("missing GPU entry points");
+            }
+            check(engine.attachGpu(device));
+            // Warm reader and blend pipelines individually so SwiftShader WebGPU does not pile
+            // several first-time shader compiles into a single 12 s readback window.
+            const warmBg = new Float32Array([0.5, 0.5, 0.5, 1]);
+            for (const list of warmups) {
+              check(engine.apply(new Uint8Array(list)));
+              check(engine.renderGpu(16, 16, 1, 0, 0, 1, warmBg, false, 0, true));
+              const px = await engine.gpuPixels();
+              if (!(px instanceof Uint8Array)) throw new Error(px.message);
+            }
+            engine.clearTiles?.();
+            return { engine, device };
+          };
+          const draw = async (
+            engine: InstanceType<typeof glue.Engine>,
+            list: number[] | null,
+            fastPath: boolean,
+            camX = -384,
+            clearTiles = true,
+          ) => {
+            if (!engine.renderGpu || !engine.gpuPixels || !engine.gpuCounters)
+              throw new Error("missing GPU entry points");
+            engine.setGpuClipFastPath?.(fastPath);
+            if (clearTiles) engine.clearTiles?.();
+            if (list) check(engine.apply(new Uint8Array(list)));
+            const before = engine.gpuCounters();
+            const bg = new Float32Array([0.12, 0.16, 0.22, 1]);
+            check(engine.renderGpu(256, 192, 1, camX, -64, 1, bg, false, 0, true));
+            const pixels = await engine.gpuPixels();
+            if (!(pixels instanceof Uint8Array)) throw new Error(pixels.message);
+            const after = engine.gpuCounters();
+            return {
+              pixels: new Uint8Array(pixels),
+              scopeClip: (after[scopeClipIdx] ?? 0) - (before[scopeClipIdx] ?? 0),
+              blurClip: (after[blurClipIdx] ?? 0) - (before[blurClipIdx] ?? 0),
+              readerClip: (after[readerClipIdx] ?? 0) - (before[readerClipIdx] ?? 0),
+            };
+          };
+
+          const primary = await open();
+          const secondary = await open();
+          try {
+            const aaOn = await draw(primary.engine, aaBase, true, -384);
+            const aaOff = await draw(primary.engine, null, false, -384);
+            const aaShift = await draw(primary.engine, aaShifted, true, -384 - tileShiftPx);
+
+            const cacheOn = await draw(primary.engine, cacheBase, true, -384);
+            const cacheOff = await draw(primary.engine, null, false, -384);
+            // Warm revision 20, apply transform patch (21), then radius patch (22).
+            await draw(primary.engine, null, true, -384);
+            const patchedTransform = await draw(
+              primary.engine,
+              transformPatchBytes,
+              true,
+              -384,
+              false,
+            );
+            const patchedRadius = await draw(primary.engine, radiusPatchBytes, true, -384, false);
+            const cacheShift = await draw(primary.engine, cacheShifted, true, -384 - tileShiftPx);
+
+            const freshTransform = await draw(secondary.engine, cacheFreshTransform, true, -384);
+            const freshRadius = await draw(secondary.engine, cacheFreshRadius, true, -384);
+
+            return {
+              aa: {
+                on: {
+                  scopeClip: aaOn.scopeClip,
+                  blurClip: aaOn.blurClip,
+                  readerClip: aaOn.readerClip,
+                },
+                off: {
+                  scopeClip: aaOff.scopeClip,
+                  blurClip: aaOff.blurClip,
+                  readerClip: aaOff.readerClip,
+                },
+                onVsOff: diffStats(aaOn.pixels, aaOff.pixels),
+                tileShift: diffStats(aaOn.pixels, aaShift.pixels),
+              },
+              cache: {
+                on: {
+                  scopeClip: cacheOn.scopeClip,
+                  blurClip: cacheOn.blurClip,
+                  readerClip: cacheOn.readerClip,
+                },
+                off: {
+                  scopeClip: cacheOff.scopeClip,
+                  blurClip: cacheOff.blurClip,
+                  readerClip: cacheOff.readerClip,
+                },
+                onVsOff: diffStats(cacheOn.pixels, cacheOff.pixels),
+                tileShift: diffStats(cacheOn.pixels, cacheShift.pixels),
+                patchedTransformVsFresh: diffStats(patchedTransform.pixels, freshTransform.pixels),
+                patchedRadiusVsFresh: diffStats(patchedRadius.pixels, freshRadius.pixels),
+              },
+            };
+          } finally {
+            primary.engine.free();
+            primary.device.free();
+            secondary.engine.free();
+            secondary.device.free();
+          }
+        },
+        {
+          warmups: clipWarmupLists(),
+          aaBase: clipAaRectScissorScene(10, 0),
+          aaShifted: clipAaRectScissorScene(11, tileShiftPx),
+          cacheBase: clipChainCacheScene(20, 0),
+          cacheShifted: clipChainCacheScene(23, tileShiftPx),
+          transformPatchBytes: [...transformPatch.finish()],
+          radiusPatchBytes: [...radiusPatch.finish()],
+          cacheFreshTransform: clipChainCacheScene(21, 0, { clipShiftX: 12 }),
+          cacheFreshRadius: clipChainCacheScene(22, 0, { clipShiftX: 12, radius: 8 }),
+          tileShiftPx,
+          expectedBackend: build === "webgl" ? "webgl2" : "webgpu",
+          scopeClipIdx: SCOPE_CLIP_COUNTER,
+          blurClipIdx: BLUR_CLIP_COUNTER,
+          readerClipIdx: READER_CLIP_COUNTER,
+        },
+      );
+
+      // AA-rect scissor fast path: zero clip masks rasterized, byte-identical to mask path and +128px shift.
+      expect(result.aa.on).toEqual({ scopeClip: 0, blurClip: 0, readerClip: 0 });
+      expect(result.aa.off.scopeClip).toBeGreaterThan(0);
+      expect(result.aa.off.blurClip).toBeGreaterThan(0);
+      expect(result.aa.off.readerClip).toBeGreaterThan(0);
+      expect(result.aa.onVsOff.bytes, JSON.stringify(result.aa.onVsOff)).toBe(0);
+      expect(result.aa.tileShift.bytes, JSON.stringify(result.aa.tileShift)).toBe(0);
+
+      // Clip-chain cache + fractional/rotated preservation: big drop in clip renders, 0 differing bytes.
+      const cacheOnTotal =
+        result.cache.on.scopeClip + result.cache.on.blurClip + result.cache.on.readerClip;
+      const cacheOffTotal =
+        result.cache.off.scopeClip + result.cache.off.blurClip + result.cache.off.readerClip;
+      expect(cacheOnTotal).toBeGreaterThan(0);
+      expect(cacheOnTotal).toBeLessThan(Math.floor(cacheOffTotal / 2));
+      expect(result.cache.onVsOff.bytes, JSON.stringify(result.cache.onVsOff)).toBe(0);
+      expect(result.cache.tileShift.bytes, JSON.stringify(result.cache.tileShift)).toBe(0);
+      expect(
+        result.cache.patchedTransformVsFresh.bytes,
+        JSON.stringify(result.cache.patchedTransformVsFresh),
+      ).toBe(0);
+      expect(
+        result.cache.patchedRadiusVsFresh.bytes,
+        JSON.stringify(result.cache.patchedRadiusVsFresh),
+      ).toBe(0);
+    });
+
+    test("clip-chain mask cache stays exact across mid-tile PausedWalk pause/resume and mid-pause edits", async ({
+      page,
+    }) => {
+      test.setTimeout(180_000);
+      await openEngine(page, build);
+      const midPausePatch = new ListWriter(30, 31);
+      midPausePatch.set(500, ROOT, {
+        flags: 0,
+        transform: [1, 0, 0, 1, 16, 16],
+        opacity: 1,
+        width: 224,
+        height: 224,
+        coarseBelow: 0,
+        reach: 0,
+        unsupported: 0,
+        paths: [{ kind: "rect", w: 224, h: 224, radii: [6, 6, 6, 6], smoothing: 0 }],
+        ops: [{ op: "clip", path: 0, evenOdd: false }, { op: "children" }, { op: "unclip" }],
+        coarse: [],
+      });
+
+      const result = await page.evaluate(
+        async ({
+          warmups,
+          initial,
+          midPausePatchBytes,
+          freshEdited,
+          expectedBackend,
+          scopeClipIdx,
+          blurClipIdx,
+          readerClipIdx,
+          pausesIdx,
+        }) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          const check = (out: { ok: boolean; message: string; free(): void }) => {
+            const { ok, message } = out;
+            out.free();
+            if (!ok) throw new Error(message);
+          };
+          const diffBytes = (a: Uint8Array, b: Uint8Array) => {
+            let bytes = Math.abs(a.length - b.length);
+            const n = Math.min(a.length, b.length);
+            for (let i = 0; i < n; i++) if (a[i] !== b[i]) bytes++;
+            return bytes;
+          };
+          const open = async () => {
+            let device = await glue.createGpu(null, 0);
+            for (let attempt = 0; attempt < 3 && !device.ok; attempt++) {
+              device.free();
+              await new Promise((r) => setTimeout(r, 300));
+              device = await glue.createGpu(null, 0);
+            }
+            if (!device.ok || device.backend !== expectedBackend)
+              throw new Error(device.message || `expected ${expectedBackend}`);
+            const engine = new glue.Engine(0, 0);
+            if (!engine.attachGpu || !engine.renderGpu || !engine.gpuPixels) {
+              throw new Error("missing GPU entry points");
+            }
+            check(engine.attachGpu(device));
+            // Warm reader and blend pipelines individually so SwiftShader WebGPU does not pile
+            // several first-time shader compiles into a single 12 s readback window.
+            const warmBg = new Float32Array([0.5, 0.5, 0.5, 1]);
+            for (const list of warmups) {
+              check(engine.apply(new Uint8Array(list)));
+              check(engine.renderGpu(16, 16, 1, 0, 0, 1, warmBg, false, 0, true));
+              const px = await engine.gpuPixels();
+              if (!(px instanceof Uint8Array)) throw new Error(px.message);
+            }
+            engine.clearTiles?.();
+            return { engine, device };
+          };
+          const clipTotal = (before: Uint32Array, after: Uint32Array) =>
+            (after[scopeClipIdx] ?? 0) -
+            (before[scopeClipIdx] ?? 0) +
+            ((after[blurClipIdx] ?? 0) - (before[blurClipIdx] ?? 0)) +
+            ((after[readerClipIdx] ?? 0) - (before[readerClipIdx] ?? 0));
+
+          const primary = await open();
+          const secondary = await open();
+          try {
+            const p = primary.engine;
+            const s = secondary.engine;
+            if (!p.renderGpu || !p.gpuPixels || !p.gpuCounters || !s.renderGpu || !s.gpuPixels) {
+              throw new Error("missing GPU entry points");
+            }
+            const readPixels = async (engine: typeof p) => {
+              const px = await engine.gpuPixels?.();
+              if (!(px instanceof Uint8Array)) {
+                throw new Error(px?.message ?? "no GPU readback");
+              }
+              return new Uint8Array(px);
+            };
+            const bg = new Float32Array([0.1, 0.14, 0.2, 1]);
+            check(p.apply(new Uint8Array(initial)));
+
+            // 1. Unbudgeted baseline: fast path ON vs OFF.
+            p.setGpuClipFastPath?.(true);
+            p.clearTiles?.();
+            let b0 = p.gpuCounters();
+            check(p.renderGpu(256, 256, 1, 0, 0, 1, bg, false, 0, true));
+            const fastPixels = await readPixels(p);
+            const fastClips = clipTotal(b0, p.gpuCounters());
+
+            p.setGpuClipFastPath?.(false);
+            p.clearTiles?.();
+            b0 = p.gpuCounters();
+            check(p.renderGpu(256, 256, 1, 0, 0, 1, bg, false, 0, true));
+            const slowPixels = await readPixels(p);
+            const slowClips = clipTotal(b0, p.gpuCounters());
+
+            // 2. Tiny budget forcing PausedWalk mid-tile pauses across the shared clip chain.
+            p.setGpuClipFastPath?.(true);
+            p.clearTiles?.();
+            b0 = p.gpuCounters();
+            let slices = 0;
+            let exact = false;
+            while (!exact && slices < 120) {
+              const out = p.renderGpu(256, 256, 1, 0, 0, 1, bg, false, 0.01, true);
+              exact = out.exact;
+              check(out);
+              await p.gpuFinished?.();
+              slices++;
+            }
+            const pausedPixels = await readPixels(p);
+            const afterPaused = p.gpuCounters();
+            const pausedClips = clipTotal(b0, afterPaused);
+            const pauses = (afterPaused[pausesIdx] ?? 0) - (b0[pausesIdx] ?? 0);
+
+            // 3. Edit clip mid-pause and verify cache invalidation matches fresh engine.
+            p.clearTiles?.();
+            const firstSlice = p.renderGpu(256, 256, 1, 0, 0, 1, bg, false, 0.01, true);
+            const startedPaused = firstSlice.in_progress;
+            check(firstSlice);
+            await p.gpuFinished?.();
+            check(p.apply(new Uint8Array(midPausePatchBytes)));
+            check(p.renderGpu(256, 256, 1, 0, 0, 1, bg, false, 0, true));
+            const editedPixels = await readPixels(p);
+
+            s.setGpuClipFastPath?.(true);
+            check(s.apply(new Uint8Array(freshEdited)));
+            check(s.renderGpu(256, 256, 1, 0, 0, 1, bg, false, 0, true));
+            const freshEditedPixels = await readPixels(s);
+
+            return {
+              exact,
+              pauses,
+              startedPaused,
+              fastClips,
+              slowClips,
+              pausedClips,
+              fastVsSlowBytes: diffBytes(fastPixels, slowPixels),
+              pausedVsFastBytes: diffBytes(pausedPixels, fastPixels),
+              midPauseEditVsFreshBytes: diffBytes(editedPixels, freshEditedPixels),
+            };
+          } finally {
+            primary.engine.free();
+            primary.device.free();
+            secondary.engine.free();
+            secondary.device.free();
+          }
+        },
+        {
+          warmups: clipWarmupLists(),
+          initial: clipPausedWalkScene(30, 28),
+          midPausePatchBytes: [...midPausePatch.finish()],
+          freshEdited: clipPausedWalkScene(31, 6),
+          expectedBackend: build === "webgl" ? "webgl2" : "webgpu",
+          scopeClipIdx: SCOPE_CLIP_COUNTER,
+          blurClipIdx: BLUR_CLIP_COUNTER,
+          readerClipIdx: READER_CLIP_COUNTER,
+          pausesIdx: PAUSES_COUNTER,
+        },
+      );
+
+      expect(result.exact).toBe(true);
+      expect(result.pauses).toBeGreaterThan(0);
+      expect(result.fastClips).toBeLessThanOrEqual(2);
+      expect(result.slowClips).toBeGreaterThanOrEqual(16);
+      expect(result.pausedClips).toBeLessThanOrEqual(2);
+      expect(result.fastVsSlowBytes).toBe(0);
+      expect(result.pausedVsFastBytes).toBe(0);
+      expect(result.midPauseEditVsFreshBytes).toBe(0);
+    });
+
+    test("clip-atlas target-space rasterization matches uncached path byte-for-byte on curved, rotated, and even-odd clips across zooms", async ({
+      page,
+    }) => {
+      test.setTimeout(240_000);
+      await openEngine(page, build);
+      const views = [
+        {
+          id: "whole1",
+          size: [1200, 760] as [number, number],
+          cam: [1, 0, 0] as [number, number, number],
+          budget: 0,
+          ev: false,
+        },
+        {
+          id: "tiled1",
+          size: [1200, 760] as [number, number],
+          cam: [1, 0, 0] as [number, number, number],
+          budget: 40,
+          ev: true,
+        },
+        {
+          id: "z0.75",
+          size: [900, 600] as [number, number],
+          cam: [0.75, 0, 0] as [number, number, number],
+          budget: 40,
+          ev: true,
+        },
+        {
+          id: "z1.5",
+          size: [900, 700] as [number, number],
+          cam: [1.5, -100, -20] as [number, number, number],
+          budget: 40,
+          ev: true,
+        },
+      ];
+      const result = await page.evaluate(
+        async ({
+          warmups,
+          list,
+          views,
+          expectedBackend,
+          scopeClipIdx,
+          blurClipIdx,
+          readerClipIdx,
+        }) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          const check = (out: { ok: boolean; message: string; free(): void }) => {
+            const { ok, message } = out;
+            out.free();
+            if (!ok) throw new Error(message);
+          };
+          const diffStats = (a: Uint8Array, b: Uint8Array, w: number) => {
+            let bytes = Math.abs(a.length - b.length);
+            let maxDelta = 0;
+            let first: { x: number; y: number; a: number[]; b: number[] } | null = null;
+            const n = Math.min(a.length, b.length);
+            for (let i = 0; i < n; i++) {
+              const d = Math.abs((a[i] ?? 0) - (b[i] ?? 0));
+              if (d !== 0) {
+                bytes++;
+                if (d > maxDelta) maxDelta = d;
+                if (!first) {
+                  const p = Math.floor(i / 4);
+                  first = {
+                    x: p % w,
+                    y: Math.floor(p / w),
+                    a: [a[p * 4] ?? 0, a[p * 4 + 1] ?? 0, a[p * 4 + 2] ?? 0, a[p * 4 + 3] ?? 0],
+                    b: [b[p * 4] ?? 0, b[p * 4 + 1] ?? 0, b[p * 4 + 2] ?? 0, b[p * 4 + 3] ?? 0],
+                  };
+                }
+              }
+            }
+            return { bytes, maxDelta, first };
+          };
+          let device = await glue.createGpu(null, 0);
+          for (let attempt = 0; attempt < 3 && !device.ok; attempt++) {
+            device.free();
+            await new Promise((r) => setTimeout(r, 300));
+            device = await glue.createGpu(null, 0);
+          }
+          if (!device.ok || device.backend !== expectedBackend)
+            throw new Error(device.message || `expected ${expectedBackend}`);
+          const engine = new glue.Engine(0, 0);
+          try {
+            if (
+              !engine.attachGpu ||
+              !engine.renderGpu ||
+              !engine.gpuPixels ||
+              !engine.gpuCounters
+            ) {
+              throw new Error("missing GPU entry points");
+            }
+            check(engine.attachGpu(device));
+            const warmBg = new Float32Array([0.5, 0.5, 0.5, 1]);
+            for (const wl of warmups) {
+              check(engine.apply(new Uint8Array(wl)));
+              check(engine.renderGpu(16, 16, 1, 0, 0, 1, warmBg, false, 0, true));
+              const px = await engine.gpuPixels();
+              if (!(px instanceof Uint8Array)) throw new Error(px.message);
+            }
+            engine.clearTiles?.();
+            check(engine.apply(new Uint8Array(list)));
+            const bg = new Float32Array([0.15, 0.25, 0.35, 1]);
+            const clipTotal = (before: Uint32Array, after: Uint32Array) =>
+              (after[scopeClipIdx] ?? 0) -
+              (before[scopeClipIdx] ?? 0) +
+              ((after[blurClipIdx] ?? 0) - (before[blurClipIdx] ?? 0)) +
+              ((after[readerClipIdx] ?? 0) - (before[readerClipIdx] ?? 0));
+            const renderView = async (v: (typeof views)[number], fast: boolean) => {
+              engine.setGpuClipFastPath?.(fast);
+              engine.clearTiles?.();
+              const before = engine.gpuCounters?.() ?? new Uint32Array(0);
+              let exact = false;
+              let attempts = 0;
+              do {
+                const out = engine.renderGpu?.(
+                  v.size[0],
+                  v.size[1],
+                  v.cam[0],
+                  v.cam[1],
+                  v.cam[2],
+                  1,
+                  bg,
+                  false,
+                  v.budget,
+                  v.ev,
+                );
+                if (!out) throw new Error("no renderGpu");
+                exact = out.exact;
+                attempts++;
+                check(out);
+                await engine.gpuFinished?.();
+              } while (!exact && attempts < 120);
+              const px = await engine.gpuPixels?.();
+              if (!(px instanceof Uint8Array)) throw new Error(px?.message ?? "no readback");
+              const after = engine.gpuCounters?.() ?? new Uint32Array(0);
+              return { pixels: new Uint8Array(px), exact, clips: clipTotal(before, after) };
+            };
+
+            const out: Record<
+              string,
+              {
+                exact: [boolean, boolean];
+                clips: [number, number];
+                diff: ReturnType<typeof diffStats>;
+              }
+            > = {};
+            for (const v of views) {
+              const on = await renderView(v, true);
+              const off = await renderView(v, false);
+              out[v.id] = {
+                exact: [on.exact, off.exact],
+                clips: [on.clips, off.clips],
+                diff: diffStats(on.pixels, off.pixels, v.size[0]),
+              };
+            }
+            return out;
+          } finally {
+            engine.free();
+            device.free();
+          }
+        },
+        {
+          warmups: clipWarmupLists(),
+          list: clipAtlasCurvedEdgesScene(40, 0),
+          views,
+          expectedBackend: build === "webgl" ? "webgl2" : "webgpu",
+          scopeClipIdx: SCOPE_CLIP_COUNTER,
+          blurClipIdx: BLUR_CLIP_COUNTER,
+          readerClipIdx: READER_CLIP_COUNTER,
+        },
+      );
+
+      for (const v of views) {
+        const row = result[v.id];
+        expect(row, `missing result for ${v.id}`).toBeDefined();
+        expect(row?.exact, `${v.id} exact`).toEqual([true, true]);
+        expect(row?.diff.bytes, `${v.id}: ${JSON.stringify(row?.diff)}`).toBe(0);
+      }
     });
   });
 }

@@ -512,6 +512,105 @@ pub fn path_covers_rect(path: &BezPath, transform: Affine, even_odd: bool, rect:
     if even_odd { (winding & 1) != 0 } else { winding != 0 }
 }
 
+/// If `path` transformed by `transform` is a single closed axis-aligned rectangle whose vertices
+/// all land on integer coordinates within `1e-4` device pixels (well below Vello's `0.5 / 255`
+/// coverage rounding threshold), returns that exact integer `IRect` (empty for zero-area).
+/// Returns `None` for any curved, fractional, sheared, multi-contour, or non-rectangular clip.
+pub fn path_as_integer_aa_rect(path: &BezPath, transform: Affine) -> Option<crate::exec::IRect> {
+    use vello_common::kurbo::PathEl;
+
+    if transform.as_coeffs().iter().any(|c| !c.is_finite()) {
+        return None;
+    }
+    const TOL: f64 = 1e-4;
+    const MAX_COORD: f64 = 1_048_576.0;
+    let snap = |p: Point| -> Option<(i32, i32)> {
+        let tp = transform * p;
+        if !tp.x.is_finite() || !tp.y.is_finite() || tp.x.abs() > MAX_COORD || tp.y.abs() > MAX_COORD {
+            return None;
+        }
+        let rx = tp.x.round();
+        let ry = tp.y.round();
+        if (tp.x - rx).abs() > TOL || (tp.y - ry).abs() > TOL {
+            return None;
+        }
+        Some((rx as i32, ry as i32))
+    };
+
+    let mut pts = [(0i32, 0i32); 4];
+    let mut n = 0usize;
+    let mut started = false;
+    let mut closed = false;
+    let mut returned = false;
+    for el in path.elements() {
+        if closed {
+            return None;
+        }
+        match *el {
+            PathEl::MoveTo(p) => {
+                if started {
+                    return None;
+                }
+                started = true;
+                pts[0] = snap(p)?;
+                n = 1;
+            }
+            PathEl::LineTo(p) => {
+                if !started {
+                    return None;
+                }
+                let q = snap(p)?;
+                if returned {
+                    if q != pts[0] {
+                        return None;
+                    }
+                } else if q != pts[n - 1] {
+                    if n == 4 {
+                        if q != pts[0] {
+                            return None;
+                        }
+                        returned = true;
+                    } else {
+                        pts[n] = q;
+                        n += 1;
+                    }
+                }
+            }
+            PathEl::ClosePath => closed = true,
+            PathEl::QuadTo(..) | PathEl::CurveTo(..) => return None,
+        }
+    }
+    if !started {
+        return None;
+    }
+    if n > 1 && pts[n - 1] == pts[0] {
+        n -= 1;
+    }
+    if n <= 2 {
+        return Some(crate::exec::IRect {
+            x0: 0,
+            y0: 0,
+            x1: 0,
+            y1: 0,
+        });
+    }
+    if n != 4 {
+        return None;
+    }
+    let [a, b, c, d] = pts;
+    let horiz_first = a.1 == b.1 && b.0 == c.0 && c.1 == d.1 && d.0 == a.0;
+    let vert_first = a.0 == b.0 && b.1 == c.1 && c.0 == d.0 && d.1 == a.1;
+    if !horiz_first && !vert_first {
+        return None;
+    }
+    Some(crate::exec::IRect {
+        x0: a.0.min(c.0),
+        y0: a.1.min(c.1),
+        x1: a.0.max(c.0),
+        y1: a.1.max(c.1),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -669,5 +768,157 @@ mod tests {
             false,
             r(0, 0, 10, 10)
         ));
+    }
+
+    #[test]
+    fn path_as_integer_aa_rect_accepts_only_pixel_aligned_axis_aligned_rects() {
+        use crate::exec::IRect;
+        let r = |x0, y0, x1, y1| IRect { x0, y0, x1, y1 };
+
+        // Plain rectangle with identity, integer translate, negative offsets, 2x scale.
+        let box_path = rect_path(Rect::new(10.0, 20.0, 110.0, 80.0));
+        assert_eq!(
+            path_as_integer_aa_rect(&box_path, Affine::IDENTITY),
+            Some(r(10, 20, 110, 80))
+        );
+        assert_eq!(
+            path_as_integer_aa_rect(&box_path, Affine::translate((-35.0, 12.0))),
+            Some(r(-25, 32, 75, 92))
+        );
+        assert_eq!(
+            path_as_integer_aa_rect(&box_path, Affine::scale(2.0)),
+            Some(r(20, 40, 220, 160))
+        );
+        // Fractional source scaled into integer device pixels is exact.
+        let half_box = rect_path(Rect::new(0.5, 1.5, 10.5, 20.5));
+        assert_eq!(
+            path_as_integer_aa_rect(&half_box, Affine::scale(2.0)),
+            Some(r(1, 3, 21, 41))
+        );
+        // Within 1e-4 floating-point drift (far below 0.5/255 quantization boundary).
+        assert_eq!(
+            path_as_integer_aa_rect(&box_path, Affine::translate((5e-5, -5e-5))),
+            Some(r(10, 20, 110, 80))
+        );
+        // Flipped and 90/180/270-degree rotated rects remain integer AA rects.
+        assert_eq!(
+            path_as_integer_aa_rect(&box_path, Affine::scale_non_uniform(-1.0, 1.0)),
+            Some(r(-110, 20, -10, 80))
+        );
+        assert_eq!(
+            path_as_integer_aa_rect(&box_path, Affine::rotate(core::f64::consts::FRAC_PI_2)),
+            Some(r(-80, 10, -20, 110))
+        );
+        assert_eq!(
+            path_as_integer_aa_rect(&box_path, Affine::rotate(core::f64::consts::PI)),
+            Some(r(-110, -80, -10, -20))
+        );
+        // Degenerate zero-area rect folds to an empty IRect.
+        let flat = rect_path(Rect::new(10.0, 20.0, 10.0, 80.0));
+        assert_eq!(path_as_integer_aa_rect(&flat, Affine::IDENTITY), Some(r(0, 0, 0, 0)));
+
+        // Fractional edges must be rejected so AA coverage is preserved.
+        for dx in [0.002, -0.002, 0.25, 0.5, 0.99] {
+            assert_eq!(
+                path_as_integer_aa_rect(&box_path, Affine::translate((dx, 0.0))),
+                None,
+                "dx={dx} must not fold into scissor"
+            );
+        }
+        // Arbitrary rotation, shear, rounded rect, triangle, multi-contour, and empty path rejected.
+        assert_eq!(path_as_integer_aa_rect(&box_path, Affine::rotate(0.1)), None);
+        assert_eq!(
+            path_as_integer_aa_rect(&box_path, Affine::new([1.0, 0.0, 0.01, 1.0, 0.0, 0.0])),
+            None
+        );
+        assert_eq!(
+            path_as_integer_aa_rect(&rounded_rect(100.0, 80.0, [4.0; 4], 0.0), Affine::IDENTITY),
+            None
+        );
+        let mut tri = BezPath::new();
+        tri.move_to((0.0, 0.0));
+        tri.line_to((100.0, 0.0));
+        tri.line_to((100.0, 80.0));
+        tri.close_path();
+        assert_eq!(path_as_integer_aa_rect(&tri, Affine::IDENTITY), None);
+
+        let mut two = rect_path(Rect::new(0.0, 0.0, 100.0, 100.0));
+        for el in rect_path(Rect::new(20.0, 20.0, 80.0, 80.0)).elements() {
+            two.push(*el);
+        }
+        assert_eq!(path_as_integer_aa_rect(&two, Affine::IDENTITY), None);
+        assert_eq!(path_as_integer_aa_rect(&BezPath::new(), Affine::IDENTITY), None);
+    }
+
+    #[test]
+    fn integer_aa_rect_scissor_matches_vello_rasterized_mask_byte_for_byte() {
+        use vello_common::color::palette::css::WHITE;
+        use vello_common::peniko::Fill;
+
+        let cases: &[(&str, BezPath, Affine)] = &[
+            (
+                "identity",
+                rect_path(Rect::new(8.0, 12.0, 52.0, 44.0)),
+                Affine::IDENTITY,
+            ),
+            (
+                "drift_within_tol",
+                rect_path(Rect::new(8.0, 12.0, 52.0, 44.0)),
+                Affine::translate((9e-5, -9e-5)),
+            ),
+            (
+                "scaled_half",
+                rect_path(Rect::new(4.5, 6.5, 26.5, 22.5)),
+                Affine::scale(2.0),
+            ),
+            (
+                "rotated_90",
+                rect_path(Rect::new(10.0, -48.0, 42.0, -12.0)),
+                Affine::rotate(core::f64::consts::FRAC_PI_2),
+            ),
+            (
+                "flipped_x",
+                rect_path(Rect::new(-52.0, 12.0, -8.0, 44.0)),
+                Affine::scale_non_uniform(-1.0, 1.0),
+            ),
+            (
+                "clipped_partially_off_left_top",
+                rect_path(Rect::new(-10.0, -5.0, 30.0, 25.0)),
+                Affine::IDENTITY,
+            ),
+        ];
+
+        let (w, h) = (64u16, 64u16);
+        for &(name, ref path, tf) in cases {
+            let aa = path_as_integer_aa_rect(path, tf).expect(name);
+            for even_odd in [false, true] {
+                let mut ctx = vello_cpu::RenderContext::new(w, h);
+                ctx.set_transform(tf);
+                ctx.set_fill_rule(if even_odd { Fill::EvenOdd } else { Fill::NonZero });
+                ctx.push_clip_path(path);
+                ctx.set_transform(Affine::IDENTITY);
+                ctx.set_fill_rule(Fill::NonZero);
+                ctx.set_paint(WHITE);
+                ctx.fill_rect(&Rect::new(0.0, 0.0, f64::from(w), f64::from(h)));
+                ctx.pop_clip();
+                ctx.flush();
+                let mut pixmap = vello_cpu::Pixmap::new(w, h);
+                let mut resources = vello_cpu::Resources::new();
+                ctx.render_with(&mut pixmap, &mut resources, vello_cpu::RasterizerSettings::default());
+                let px = pixmap.data_as_u8_slice();
+                for y in 0..i32::from(h) {
+                    for x in 0..i32::from(w) {
+                        let inside = x >= aa.x0 && x < aa.x1 && y >= aa.y0 && y < aa.y1;
+                        let want = if inside { 255u8 } else { 0u8 };
+                        let off = ((y as usize) * usize::from(w) + (x as usize)) * 4;
+                        assert_eq!(
+                            &px[off..off + 4],
+                            &[want, want, want, want],
+                            "case={name} even_odd={even_odd} at ({x},{y}) aa={aa:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 }

@@ -24,8 +24,8 @@ struct BlendParams {
     mode: u32,
     opacity: f32,
     mask_kind: u32,
-    _pad0: u32,
-    _pad1: u32,
+    clip_origin_x: i32,
+    clip_origin_y: i32,
     _pad2: u32,
 };
 
@@ -226,8 +226,9 @@ fn fs_blend(in: VsOut) -> @location(0) vec4f {
 
 @fragment
 fn fs_blend_clipped(in: VsOut) -> @location(0) vec4f {
-    let p = vec2i(in.pos.xy) - vec2i(params.dst_origin_x, params.dst_origin_y);
-    let clip_a = textureLoad(clip_tex, p, 0).a;
+    let pos = vec2i(in.pos.xy);
+    let p = pos - vec2i(params.dst_origin_x, params.dst_origin_y);
+    let clip_a = textureLoad(clip_tex, pos - vec2i(params.clip_origin_x, params.clip_origin_y), 0).a;
     let s_raw = textureLoad(src_tex, p, 0);
     let b = textureLoad(backdrop_tex, p, 0);
     return composite(s_raw, b, params.opacity * clip_a * picture_coverage(p));

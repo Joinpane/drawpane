@@ -547,7 +547,7 @@ pub mod gpu {
             encoder: &mut wgpu::CommandEncoder,
             src: (&wgpu::TextureView, u64),
             backdrop: (&wgpu::TextureView, u64),
-            clip: Option<(&wgpu::TextureView, u64)>,
+            clip: Option<(&wgpu::TextureView, u64, (i32, i32))>,
             picture: Option<(&wgpu::TextureView, u64, u32)>,
             dst_view: &wgpu::TextureView,
             dst_origin: (i32, i32),
@@ -565,16 +565,19 @@ pub mod gpu {
             bytes[12..16].copy_from_slice(&opacity.clamp(0.0, 1.0).to_le_bytes());
             let mask_kind = picture.map_or(0, |(_, _, kind)| kind);
             bytes[16..20].copy_from_slice(&mask_kind.to_le_bytes());
+            let clip_origin = clip.map_or((0, 0), |(_, _, origin)| origin);
+            bytes[20..24].copy_from_slice(&clip_origin.0.to_le_bytes());
+            bytes[24..28].copy_from_slice(&clip_origin.1.to_le_bytes());
             let offset = self.push_uniform(&bytes);
             let key = (
                 src.1,
                 backdrop.1,
-                clip.map_or(0, |(_, id)| id),
+                clip.map_or(0, |(_, id, _)| id),
                 picture.map_or(0, |(_, id, _)| id),
             );
             let make_bg = || {
                 let picture_view = picture.map_or(&self.dummy_view, |(view, _, _)| view);
-                let clip_view = clip.map_or(&self.dummy_view, |(view, _)| view);
+                let clip_view = clip.map_or(&self.dummy_view, |(view, _, _)| view);
                 device.create_bind_group(&wgpu::BindGroupDescriptor {
                     label: Some("blend bg"),
                     layout: &self.bgl,
