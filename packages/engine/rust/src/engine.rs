@@ -1602,6 +1602,9 @@ impl Engine {
             (gpu.halo_replay_limit(), gpu.tiles.halo(), gpu.max_view_apron())
         };
         let view = camera.view();
+        if let Some(g) = self.gpu.as_mut() {
+            g.note_input(view, (width, height), options.moving);
+        }
         let frame_rect = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
         let drag = self.drag_frame();
         let simple_reader_drag =

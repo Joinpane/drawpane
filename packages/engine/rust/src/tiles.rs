@@ -243,8 +243,9 @@ pub struct Scaled {
     pub dst: Rect,
 }
 
-/// What a frame shows, back to front: the overview's tiles, refined tiles (any level's), the
-/// last frame (mapped by `base`), other levels' tiles scaled, then the frame level's tiles copied.
+/// What a frame shows, back to front: refined tiles (the overview's, then other levels' and the
+/// frame level's), the overview's current tiles, the last frame (mapped by `base`), other levels'
+/// tiles scaled, then the frame level's tiles copied.
 #[derive(Clone, Debug, Default)]
 pub struct Composite {
     /// The last frame, mapped into this one (its device pixels to this frame's): a stand-in
@@ -253,13 +254,17 @@ pub struct Composite {
     /// Where the last frame's pixels are old (this frame's pixels): what changed since it was
     /// drawn, while moving. The last frame isn't laid there; the overview or the background shows.
     pub holes: Vec<Rect>,
-    /// The overview's tiles, scaled, beneath the last frame: what shows where nothing else does.
-    pub under: Vec<Scaled>,
-    /// Refined tiles (`TileEntry::refine`, the frame level's too), over the overview and beneath
-    /// the last frame: drawn before an image arrived or got sharper, they fill in only where
-    /// nothing drawn since stands in (the frame on screen, another level's current tile), never
-    /// over it, so an image once shown never goes back to its placeholder or a coarser level.
+    /// The overview's refined tiles (`TileEntry::refine`), scaled, beneath everything: drawn
+    /// before an image arrived or got sharper, they show only where nothing else does.
+    pub refined_under: Vec<Scaled>,
+    /// Other levels' refined tiles, the frame level's last (on top), beneath the overview's
+    /// current tiles and the last frame: they fill in only where nothing drawn since stands in
+    /// (the frame on screen, a current tile of the overview or another level), never over it, so
+    /// an image once shown never goes back to its placeholder or a coarser level.
     pub beneath: Vec<Scaled>,
+    /// The overview's current tiles, scaled, beneath the last frame: what shows where nothing
+    /// nearer does.
+    pub under: Vec<Scaled>,
     pub scaled: Vec<Scaled>,
     pub copies: Vec<Copy>,
     /// Every visible tile of the frame's level is there, up to date and drawn exactly: the
@@ -326,6 +331,11 @@ pub struct TileCache {
     /// The next plan may draw the overview's tiles (set by the backend: frames at rest with a
     /// budget, and the time between frames; never a frame drawn at once, nor one in motion).
     pub bake_overview: bool,
+    /// The next plan may draw the overview's refined tiles again (set by the backend: the time
+    /// between frames, once the camera has been still a while). They still stand in, so they
+    /// wait until everything else the view wants (its tiles, the ring round it) is drawn; a
+    /// stale or missing overview tile doesn't.
+    pub refine_overview: bool,
     /// What changed (page units) since the frame the next is laid on (the last frame drawn) was
     /// drawn (`note_changed`). That frame shows older pixels there than the current version: if
     /// it's still the one on screen, it may be laid as it is until they're drawn (display never
@@ -480,6 +490,7 @@ impl TileCache {
             moving: false,
             base_kept: false,
             bake_overview: false,
+            refine_overview: false,
             changed: Vec::new(),
             refined: Vec::new(),
             overview_lost: 0,
@@ -565,6 +576,12 @@ impl TileCache {
 
     /// The overview's tiles not up to date, as jobs (with level of detail, never `must`).
     fn overview_jobs(&self) -> Vec<Job> {
+        self.overview_jobs_where(None)
+    }
+
+    /// The overview's tiles to draw again: only refined ones (`Some(true)`), only stale or
+    /// missing ones (`Some(false)`), or both.
+    fn overview_jobs_where(&self, refined: Option<bool>) -> Vec<Job> {
         let Some(o) = self.overview else {
             return Vec::new();
         };
@@ -576,7 +593,12 @@ impl TileCache {
             for i in o.span.0..=o.span.2 {
                 let key = TileKey { level: o.id, i, j };
                 // A refined tile (an image arrived) stands in until drawn again, here too.
-                if self.tiles.get(&key).is_some_and(|e| !e.stale && !e.refine) {
+                let held = self.tiles.get(&key);
+                if held.is_some_and(|e| !e.stale && !e.refine) {
+                    continue;
+                }
+                let is_refined = held.is_some_and(|e| !e.stale && e.refine);
+                if refined.is_some_and(|r| r != is_refined) {
                     continue;
                 }
                 jobs.push(Job {
@@ -613,12 +635,25 @@ impl TileCache {
     }
 
     /// The overview's tiles to draw between frames for a view at `scale` (none when it isn't 4×
-    /// coarser than the view).
+    /// coarser than the view): stale or missing ones, else refined ones once `refine_overview`.
     pub fn overview_ahead(&self, scale: f64) -> Vec<Job> {
         if self.coarse_overview(scale).is_none() {
             return Vec::new();
         }
-        self.overview_jobs()
+        let urgent = self.overview_jobs_where(Some(false));
+        if !urgent.is_empty() || !self.refine_overview {
+            return urgent;
+        }
+        self.overview_jobs_where(Some(true))
+    }
+
+    /// The overview's refined tiles left to draw again for a view at `scale` (they wait for
+    /// `refine_overview`).
+    pub fn overview_refined_left(&self, scale: f64) -> u32 {
+        if self.coarse_overview(scale).is_none() {
+            return 0;
+        }
+        self.overview_jobs_where(Some(true)).len() as u32
     }
 
     /// The overview's tiles still to draw between frames for a view at `scale`.
@@ -1690,7 +1725,7 @@ impl TileCache {
         // stands on.
         // Its tiles have their own storage: they take no room from the frame's.
         if self.bake_overview && !self.moving && !zooming && coarse.is_some() {
-            plan.jobs.extend(self.overview_jobs());
+            plan.jobs.extend(self.overview_jobs_where(Some(false)));
         }
         // Not zooming: tiles round the view, for the pan to come, while slots allow.
         if prefetch && !zooming && visible.len() * 2 <= self.max_slots {
@@ -1764,6 +1799,17 @@ impl TileCache {
                     }
                 }
             }
+        }
+        // The overview's refined tiles, once the camera has been still a while and everything
+        // else is drawn: they stand in meanwhile.
+        if self.refine_overview
+            && self.bake_overview
+            && !self.moving
+            && !zooming
+            && coarse.is_some()
+            && self.left(&plan) == (0, 0)
+        {
+            plan.jobs.extend(self.overview_jobs_where(Some(true)));
         }
         Some(plan)
     }
@@ -1944,7 +1990,11 @@ impl TileCache {
                         f64::from(j + 1) * tf,
                     );
                     let layer = if Some(id) == overview {
-                        &mut out.under
+                        if e.refine {
+                            &mut out.refined_under
+                        } else {
+                            &mut out.under
+                        }
                     } else if e.refine {
                         &mut out.beneath
                     } else {
@@ -2372,26 +2422,125 @@ mod tests {
         assert!(entry.refine && !entry.stale);
         c.begin([1.0; 4], 0);
         c.set_overview(Some(page));
+        assert!(c.overview_ahead(8.0).is_empty(), "not while the camera may still move");
+        assert_eq!(c.overview_refined_left(8.0), 1);
+        assert_eq!(c.overview_left(8.0), 1);
+        assert!(!c.overview_ready());
+        c.refine_overview = true;
         let ahead = c.overview_ahead(8.0);
         assert_eq!(
             ahead.iter().map(|j| j.key).collect::<Vec<_>>(),
             vec![key],
             "drawn again"
         );
-        assert_eq!(c.overview_left(8.0), 1);
-        assert!(!c.overview_ready());
-        // Meanwhile it stands in while moving, as the overview does.
+        // A frame's plan takes it only once the view's own tiles are drawn.
+        c.bake_overview = true;
+        let first = c
+            .plan(Affine::scale(8.0), (512, 512), false, None, false, false)
+            .expect("plan");
+        assert!(
+            !first.jobs.is_empty() && !first.jobs.iter().any(|j| j.key == key),
+            "the view first"
+        );
+        draw_all(&mut c, &first);
+        c.begin([1.0; 4], 0);
+        c.set_overview(Some(page));
+        let then = c
+            .plan(Affine::scale(8.0), (512, 512), false, None, false, false)
+            .expect("plan");
+        assert_eq!(
+            then.jobs.iter().map(|j| j.key).collect::<Vec<_>>(),
+            vec![key],
+            "then it"
+        );
+        c.refine_overview = false;
+        // Meanwhile it stands in while moving (at a scale nothing is drawn at), beneath everything.
         c.moving = true;
         let plan = c
-            .plan(Affine::scale(8.0), (512, 512), true, None, false, false)
+            .plan(Affine::scale(6.0), (512, 512), true, None, false, false)
             .expect("plan");
-        assert!(c.compose(&plan, None).under.iter().any(|q| q.slot == entry.slot));
+        assert!(
+            c.compose(&plan, None)
+                .refined_under
+                .iter()
+                .any(|q| q.slot == entry.slot)
+        );
         c.moving = false;
         c.begin([1.0; 4], 0);
         c.set_overview(Some(page));
         let slot = c.slot_for(key).expect("its slot");
         c.drawn(key, slot, false, false, false);
         assert!(c.overview_ready() && c.overview_ahead(8.0).is_empty());
+    }
+
+    /// A level's tiles drawn with an image's placeholder never lie over an overview tile drawn
+    /// with the image since: refined tiles of the overview, then of other levels, then the
+    /// overview's current tiles (#352 re-check 2, probe H).
+    #[test]
+    fn refined_tiles_never_lie_over_an_overview_drawn_with_the_image() {
+        let page = Rect::new(0.0, 0.0, 4000.0, 2000.0);
+        let mut c = TileCache::new(512, 64);
+        let size = (1024, 512);
+        c.begin([1.0; 4], 0);
+        c.set_overview(Some(page));
+        for job in c.overview_ahead(64.0) {
+            let slot = c.slot_for(job.key).expect("slot");
+            c.drawn(job.key, slot, false, false, false);
+        }
+        let o = c.overview.expect("overview");
+        let s1 = c.level(o.id).expect("level").scale * 8.0;
+        c.begin([1.0; 4], 0);
+        c.set_overview(Some(page));
+        let plan = c
+            .plan(Affine::scale(s1), size, false, None, false, false)
+            .expect("plan");
+        let one = plan.level;
+        for j in plan
+            .jobs
+            .iter()
+            .filter(|j| !c.is_overview(&j.key))
+            .copied()
+            .collect::<Vec<_>>()
+        {
+            let slot = c.slot_for(j.key).expect("slot");
+            c.drawn(j.key, slot, true, true, false);
+        }
+        // The image arrives: every held tile is refined, the overview's too.
+        let whole = |c: &TileCache, id: u32| c.level(id).expect("level").grid().transform_rect_bbox(page);
+        let (r1, ro) = (whole(&c, one), whole(&c, o.id));
+        c.refine(one, &[r1]);
+        c.refine(o.id, &[ro]);
+        let compose_moving = |c: &mut TileCache| {
+            c.begin([1.0; 4], 0);
+            c.set_overview(Some(page));
+            c.moving = true;
+            let plan = c
+                .plan(Affine::scale(s1 * 1.25), size, false, None, false, false)
+                .expect("plan");
+            let comp = c.compose(&plan, None);
+            c.moving = false;
+            comp
+        };
+        // Both refined: the overview's lie beneath level one's.
+        let comp = compose_moving(&mut c);
+        assert!(!comp.refined_under.is_empty() && comp.under.is_empty());
+        assert!(!comp.beneath.is_empty());
+        // The overview is drawn again, with the image: now it lies over level one's placeholder.
+        c.begin([1.0; 4], 0);
+        c.set_overview(Some(page));
+        c.refine_overview = true;
+        for job in c.overview_ahead(s1) {
+            let slot = c.slot_for(job.key).expect("slot");
+            c.drawn(job.key, slot, false, false, false);
+        }
+        c.refine_overview = false;
+        assert!(c.overview_ready());
+        let comp = compose_moving(&mut c);
+        assert!(comp.refined_under.is_empty() && !comp.under.is_empty());
+        assert!(
+            !comp.beneath.is_empty(),
+            "level one's placeholder still fills in beneath it"
+        );
     }
 
     /// A refined tile never goes over one drawn since: another level's current tile and the

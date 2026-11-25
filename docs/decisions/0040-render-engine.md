@@ -2015,8 +2015,11 @@ GPU work a frame queued had no bound, and input waited behind it.
     (`TileCache::frame_drawn`).
   - Another resolution of the same image (a sharper level arriving, or one dropped) isn't a
     change: tiles drawn with the old one stand in, never exact, and are drawn again
-    (`TileEntry::refine`), the overview's between frames like stale ones. A level replaced at a
-    size the image had is treated as other content.
+    (`TileEntry::refine`). The overview's are drawn again between frames, but only once the
+    view's tiles and the ring round it are drawn and the camera has been still for 1 s, each in
+    walks paused every 48 GPU passes (a big one's GPU work submitted just before a pinch held
+    its first frames); stale overview tiles stay urgent. A level replaced at a size the image
+    had is treated as other content.
   - So is an image loaded where its placeholder was: a record set again with only its
     placeholder fills become fills of the image, clipped to its shape (`Dirty::refine`,
     `Store::fills_placeholder`). The image fills the placeholder's very shape (clipped to it, or
@@ -2025,16 +2028,19 @@ GPU work a frame queued had no bound, and input waited behind it.
     they were. Anything else changing with it, another image, or another fill is an edit. Zooming out brings boards into view whose images then load: each counted as an edit
     staled the overview tile over its board (one covers about 23,000 page units on the iOS
     kit), and the pinch-out drew what it stood in for, 5 to 34 tiles a gesture.
-  - A refined tile, of the frame's level too, never goes over anything drawn since: it's laid
-    over the overview and beneath the frame on screen and other levels' current tiles
-    (`Composite::beneath`), so it fills in only where nothing else stands in. Laid on top, a zoom
-    from 1 to 2 and back showed zoom 1's placeholder again where zoom 2 had shown the image (#352
-    re-check).
+  - A refined tile, of the frame's level too, never goes over anything drawn since. Back to
+    front: the overview's refined tiles (`Composite::refined_under`), other levels' and the
+    frame level's refined tiles (`Composite::beneath`), the overview's current tiles, then the
+    frame on screen, other levels' current tiles and the frame's own. A refined tile fills in
+    only where nothing else stands in. Laid on top, a zoom from 1 to 2 and back showed zoom 1's
+    placeholder again where zoom 2 had shown the image; laid over the whole overview, it covered
+    an overview tile drawn again with the image since (#352 re-checks).
   - An image level uploaded in row strips over frames (`putGpuImageRows`) lands with its last
     strip, in place of the level of its width, which stays until then; both count against the
     image budget meanwhile, and frames that would draw an image with it aren't exact. One left
     part done is let go alone (`cancelGpuImageRows`). Dropping the old level with the first
-    strip showed the placeholder until the last, reported exact.
+    strip showed the placeholder until the last, reported exact. Rows from another bitmap than
+    the part uploaded so far are refused (`images::strip_step`), so a level never mixes two.
   - Why the first two rules: one set of changes forgotten by exact frames wasn't enough. A frame
     at rest laid stale tiles of another scale and put old pixels back after an exact frame at
     another scale had covered one of two changes. Laying holes at rest instead showed the
