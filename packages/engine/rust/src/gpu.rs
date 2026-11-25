@@ -7281,13 +7281,13 @@ impl Gpu {
                     continue;
                 }
                 // A sliced frame's tiles stop at its budget (the first always goes), unless what's
-                // left fits in about one and a half budgets more, by the slowest tile of the
-                // series so far: then this call finishes it.
+                // left fits in about one and a half of the caller's budgets more (never of a grown
+                // slice's), by the slowest tile of the series so far: then this call finishes it.
                 let slowest = slowest_tile.unwrap_or(0.0).max(series_slowest);
                 if direct_sliced
                     && n > 0
                     && now() >= slice_deadline
-                    && slowest * (late.len() - n) as f64 > 1.5 * slice_ms
+                    && slowest * (late.len() - n) as f64 > 1.5 * base_ms
                 {
                     stats.pending += (late.len() - n) as u32;
                     break;
