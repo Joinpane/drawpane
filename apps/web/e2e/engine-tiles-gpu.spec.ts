@@ -2286,6 +2286,45 @@ for (const build of ["browser", "webgl"] as const) {
       });
     });
 
+    test("an image loaded where its placeholder was mid-series shows, and settles exact", async ({
+      page,
+    }) => {
+      // A frame no slot can hold, drawn over 1 ms slices, shows the placeholder; mid-series the
+      // image loads where it was (a fill-in, not an edit). The finished tiles are drawn again
+      // (`note_sharpened`, from the fill-in itself): no frame is exact with the placeholder, the
+      // image never goes back once shown, and the view settles exact with it (#352 on #358).
+      const frame = (name: string): Step => ({
+        name,
+        size: [1024, 256],
+        scale: 1,
+        moving: false,
+        budget: 1,
+        samples: [
+          [103, 47],
+          [399, 103],
+          [903, 199],
+        ],
+      });
+      const rows = await presented(
+        page,
+        build,
+        slowBoard("placeholder"),
+        [
+          ...Array.from({ length: 3 }, (_, i) => frame(`placeholder ${i}`)),
+          { image: { id: 1, side: 16, color: "#ff0000" } },
+          { apply: slowBoard("loaded", 1) },
+          ...Array.from({ length: 30 }, (_, i) => frame(`image ${i}`)),
+        ],
+        { tileBytes: 0, viewImages: true },
+      );
+      expect(rows[0]?.samples[0], "the placeholder first").not.toEqual(red);
+      for (const row of rows.slice(3))
+        if (row.exact)
+          expect(row.samples, `${row.name} exact with the placeholder`).toEqual([red, red, red]);
+      stays(rows, red);
+      expect(rows.at(-1)).toMatchObject({ exact: true, pending: 0, samples: [red, red, red] });
+    });
+
     test("an image's first level arriving mid-series on slow tiles shows, and settles exact", async ({
       page,
     }) => {

@@ -387,6 +387,22 @@ impl Engine {
         } else {
             self.store.dirty(&strict, Affine::IDENTITY, 1.5)
         };
+        // A frame no slot can hold, drawn over several frames at rest, keeps no tiles to mark:
+        // where the same picture got sharper at its scale (`Gpu::direct_slices_scale`), the tiles
+        // it has drawn are drawn again (`TileCache::note_sharpened`, page units; never a hole).
+        #[cfg(feature = "gpu-common")]
+        let sharpened = if !full
+            && !soft.is_empty()
+            && self
+                .gpu
+                .as_ref()
+                .and_then(|g| g.direct_slices_scale())
+                .is_some_and(|scale| at.is_none_or(|select| select(scale)))
+        {
+            self.store.dirty(&soft, Affine::IDENTITY, 1.5)
+        } else {
+            Vec::new()
+        };
         let store = &mut self.store;
         let mut each = |cache: &mut TileCache| {
             if full {
@@ -433,6 +449,7 @@ impl Engine {
         #[cfg(feature = "gpu-common")]
         if let Some(g) = self.gpu.as_mut() {
             each(&mut g.tiles);
+            g.tiles.note_sharpened(&sharpened);
             // As the cache's inexact tiles above: a sliced frame's are drawn again.
             if !full && !changes.is_empty() && at.is_none() && store.provisional_shown().is_none() {
                 g.direct_slices_drop_inexact();
@@ -573,12 +590,13 @@ impl Engine {
         };
         // A frame no slot can hold, drawn over several frames at rest (`Gpu::direct_slices_scale`),
         // keeps no tiles to mark: where the level its scale picks changed, the tiles it has drawn
-        // are drawn again (`TileCache::note_refined`; not a change, so never a hole).
+        // are drawn again (`TileCache::note_sharpened`; not a change, so never a hole). Before
+        // the return below, which `invalidate_tiles_at` (that notes it too) may not reach.
         #[cfg(feature = "gpu-common")]
         if self.gpu.as_ref().and_then(|g| g.direct_slices_scale()).is_some_and(at) {
             let page = self.store.dirty(&users, Affine::IDENTITY, 1.5);
             if let Some(g) = self.gpu.as_mut() {
-                g.tiles.note_refined(&page);
+                g.tiles.note_sharpened(&page);
             }
         }
         // A level no sampler picks at any scale drawn or being drawn (one warmed ahead of a
@@ -604,6 +622,8 @@ impl Engine {
         #[cfg(feature = "gpu-common")]
         if let Some(g) = self.gpu.as_ref() {
             scales.extend(g.scales_in_use()?);
+            // A frame drawn over several frames at rest is drawn at its scale too.
+            scales.extend(g.direct_slices_scale());
             tiled = true;
         }
         tiled.then_some(scales)

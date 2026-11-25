@@ -273,7 +273,7 @@ const DIRECT_SLICE_MAX_MS: f64 = 32.0;
 /// tiles drawn so far, all in the frame shown (`frame`), which each next frame lays beneath
 /// itself unchanged before it draws more. One view, size, background and halo. What changed
 /// since the last slice (`TileCache::changed_on`), and where an image got another resolution
-/// (`TileCache::refined_on`), drops the tiles under it, to be drawn again.
+/// (`TileCache::sharpened_on`), drops the tiles under it, to be drawn again.
 struct DirectSlices {
     view: [u64; 6],
     size: (u32, u32),
@@ -7900,7 +7900,7 @@ impl Gpu {
                 // here starts the slice budget over.
                 let mut gone = self.tiles.changed_on(view, (w, h));
                 let edited = !gone.is_empty();
-                gone.extend(self.tiles.refined_on(view, (w, h)));
+                gone.extend(self.tiles.sharpened_on(view, (w, h)));
                 let t = i64::from(TILE);
                 let origin = plan.origin;
                 let s = self.direct_slices.as_mut().expect("sliced frame");

@@ -61,7 +61,7 @@ pub mod derived {
 /// The diagnostic text fallback bit (wire.ts UNSUPPORTED.textWithoutOutlines).
 const TEXT_WITHOUT_OUTLINES: u32 = 1 << 8;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct GlyphInstance {
     pub glyph: u32,
     pub x: f32,
@@ -70,7 +70,7 @@ pub struct GlyphInstance {
 
 /// A path as it arrives (verbs and f32 coordinates), expanded only to draw: kurbo's `BezPath`
 /// takes 56 bytes an element, and a Worker holds tens of thousands of records under its cap.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct CompactPath {
     verbs: Vec<u8>,
     coords: Vec<f32>,
@@ -238,7 +238,7 @@ pub enum CanonicalShadowShape {
 }
 
 /// One of a record's shapes, referred to by its ops by index.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PathEntry {
     Path(CompactPath),
     /// A box with corner radii (top left, top right, bottom right, bottom left) and corner
@@ -289,7 +289,7 @@ pub enum GradientKind {
     Diamond,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Paint {
     Solid(Rgba),
     /// Boxed, as images are: most paints are solid, and a record's ops stay small (a Worker holds
@@ -311,7 +311,7 @@ fn paint_bytes(p: &Paint) -> usize {
 
 /// The unit gradient (linear along x from 0 to 1; radial, angular and diamond around the origin
 /// with radius 1) mapped into the layer by `matrix`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct GradientPaint {
     pub kind: GradientKind,
     pub matrix: Affine,
@@ -319,7 +319,7 @@ pub struct GradientPaint {
 }
 
 /// An image: `matrix` maps its unit square into the layer; tiled repeats it.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ImagePaint {
     pub image: u32,
     pub matrix: Affine,
@@ -327,7 +327,7 @@ pub struct ImagePaint {
     pub opacity: f32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct StrokeStyle {
     pub width: f32,
     pub join: u8,
@@ -364,7 +364,7 @@ pub enum ComposeMode {
     DestIn,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct GlassOp {
     /// Path entries forming the lens mask (1 entry for shapes; all runs + bars for text).
     pub paths: Vec<u32>,
@@ -386,14 +386,14 @@ pub struct GlassOp {
     pub measured_inradius: std::cell::Cell<f32>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct BackgroundBlurOp {
     pub paths: Vec<u32>,
     pub even_odd: bool,
     pub radius: f32,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct ProgressiveBlurOp {
     pub paths: Vec<u32>,
     pub even_odd: bool,
@@ -481,7 +481,7 @@ impl Op {
 
 /// An ordered post-effect applied to a record's finished picture (fills, strokes, shadows, and
 /// children together), matching `packages/editor/src/post-effects.ts`.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum PostEffect {
     /// Gaussian layer blur with Figma `radius` in page units, using decision 0013's sigma.
     LayerBlur { radius: f32 },

@@ -1325,114 +1325,178 @@ impl Store {
     /// already there stays exactly as it was. The caller checks the parent.
     fn fills_placeholder(old: &Record, new: &Record) -> bool {
         use crate::record::Paint;
-        /// Where an image goes: its shape's contents, rule, opacity and blend.
-        #[derive(PartialEq)]
-        struct Place(String, bool, u32, u8);
-        enum Unit {
-            Placeholder(Place),
-            /// An image fill (clipped, or tiled), and the ops it is, as drawn.
-            Image(Place, String),
-            Op(String),
+        // Paths compare by contents, not index: the image's placement adds a path, which shifts
+        // later indices. Everything compares with `PartialEq`, never by formatting.
+        fn same_path(a: &Record, i: u32, b: &Record, j: u32) -> bool {
+            matches!((a.paths.get(i as usize), b.paths.get(j as usize)), (Some(p), Some(q)) if p == q)
         }
-        let path = |r: &Record, i: u32| r.paths.get(i as usize).map(|p| format!("{p:?}"));
-        // An op as drawn: its paths' contents in place of their indices, caches set aside.
-        let drawn = |r: &Record, op: &Op| -> Option<String> {
-            let mut op = op.clone();
-            let mut at = Vec::new();
-            match &mut op {
-                Op::Fill { path, .. } | Op::Clip { path, .. } => at.push(std::mem::take(path)),
-                Op::Stroke { path, cache, .. } => {
-                    at.push(std::mem::take(path));
-                    *cache = Default::default();
+        fn same_paths(a: &Record, i: &[u32], b: &Record, j: &[u32]) -> bool {
+            i.len() == j.len() && i.iter().zip(j).all(|(&x, &y)| same_path(a, x, b, y))
+        }
+        /// Whether two ops draw the same: equal but for path indices (their paths compare), a
+        /// stroke's outline cache and a glass op's measured inradius set aside.
+        fn same_op(a: &Record, x: &Op, b: &Record, y: &Op) -> bool {
+            match (x, y) {
+                (
+                    Op::Fill {
+                        path: p,
+                        even_odd: e,
+                        paint: f,
+                        blend: l,
+                    },
+                    Op::Fill {
+                        path: q,
+                        even_odd: e2,
+                        paint: f2,
+                        blend: l2,
+                    },
+                ) => e == e2 && f == f2 && l == l2 && same_path(a, *p, b, *q),
+                (
+                    Op::Stroke {
+                        path: p,
+                        style: s,
+                        paint: f,
+                        blend: l,
+                        ..
+                    },
+                    Op::Stroke {
+                        path: q,
+                        style: s2,
+                        paint: f2,
+                        blend: l2,
+                        ..
+                    },
+                ) => s == s2 && f == f2 && l == l2 && same_path(a, *p, b, *q),
+                (Op::Clip { path: p, even_odd: e }, Op::Clip { path: q, even_odd: e2 }) => {
+                    e == e2 && same_path(a, *p, b, *q)
                 }
-                Op::DropShadow { paths, .. } => at.append(paths),
-                Op::InnerShadow { shape, hole, .. } => {
-                    at.push(std::mem::take(shape));
-                    at.extend(hole.take());
+                (Op::Unclip, Op::Unclip) | (Op::Children, Op::Children) | (Op::Unlayer, Op::Unlayer) => true,
+                (Op::Read { kernel: k, halo: h }, Op::Read { kernel: k2, halo: h2 }) => k == k2 && h == h2,
+                (Op::Layer { compose: c }, Op::Layer { compose: c2 }) => c == c2,
+                (
+                    Op::DropShadow {
+                        paths: p,
+                        even_odd: e,
+                        dx,
+                        dy,
+                        blur,
+                        color,
+                        blend,
+                        stroke,
+                    },
+                    Op::DropShadow {
+                        paths: q,
+                        even_odd: e2,
+                        dx: dx2,
+                        dy: dy2,
+                        blur: r2,
+                        color: c2,
+                        blend: l2,
+                        stroke: s2,
+                    },
+                ) => {
+                    e == e2
+                        && (dx, dy, blur, color, blend) == (dx2, dy2, r2, c2, l2)
+                        && stroke == s2
+                        && same_paths(a, p, b, q)
                 }
-                Op::Glass(g) => {
-                    at.append(&mut g.paths);
-                    g.measured_inradius.set(-1.0);
+                (
+                    Op::InnerShadow {
+                        shape: p,
+                        hole: h,
+                        even_odd: e,
+                        dx,
+                        dy,
+                        blur,
+                        color,
+                        blend,
+                    },
+                    Op::InnerShadow {
+                        shape: q,
+                        hole: h2,
+                        even_odd: e2,
+                        dx: dx2,
+                        dy: dy2,
+                        blur: r2,
+                        color: c2,
+                        blend: l2,
+                    },
+                ) => {
+                    e == e2
+                        && (dx, dy, blur, color, blend) == (dx2, dy2, r2, c2, l2)
+                        && same_path(a, *p, b, *q)
+                        && match (h, h2) {
+                            (None, None) => true,
+                            (Some(i), Some(j)) => same_path(a, *i, b, *j),
+                            _ => false,
+                        }
                 }
-                Op::BackgroundBlur(b) => at.append(&mut b.paths),
-                Op::ProgressiveBlur(b) => at.append(&mut b.paths),
-                Op::Unclip | Op::Children | Op::Read { .. } | Op::Layer { .. } | Op::Unlayer => {}
-            }
-            let contents = at.iter().map(|&i| path(r, i)).collect::<Option<Vec<_>>>()?;
-            Some(format!("{op:?} {contents:?}"))
-        };
-        let units = |r: &Record, ops: &[Op]| -> Option<Vec<Unit>> {
-            let mut out = Vec::with_capacity(ops.len());
-            let mut k = 0;
-            while k < ops.len() {
-                let unit = match (&ops[k], ops.get(k + 1), ops.get(k + 2)) {
-                    (
-                        Op::Fill {
-                            path: p,
-                            even_odd,
-                            paint: Paint::Placeholder(opacity),
-                            blend,
-                        },
-                        ..,
-                    ) => Unit::Placeholder(Place(path(r, *p)?, *even_odd, opacity.to_bits(), *blend)),
-                    (
-                        Op::Clip { path: c, even_odd },
-                        Some(
-                            fill @ Op::Fill {
-                                paint: Paint::Image(image),
-                                blend,
-                                ..
-                            },
-                        ),
-                        Some(Op::Unclip),
-                    ) => {
-                        let ops = [drawn(r, &ops[k])?, drawn(r, fill)?, drawn(r, &Op::Unclip)?];
-                        k += 2;
-                        Unit::Image(
-                            Place(path(r, *c)?, *even_odd, image.opacity.to_bits(), *blend),
-                            ops.join(" "),
-                        )
-                    }
-                    (
-                        fill @ Op::Fill {
-                            path: p,
-                            even_odd,
-                            paint: Paint::Image(image),
-                            blend,
-                        },
-                        ..,
-                    ) => Unit::Image(
-                        Place(path(r, *p)?, *even_odd, image.opacity.to_bits(), *blend),
-                        drawn(r, fill)?,
-                    ),
-                    (op, ..) => Unit::Op(drawn(r, op)?),
-                };
-                out.push(unit);
-                k += 1;
-            }
-            Some(out)
-        };
-        let same = |a: &[Op], b: &[Op]| {
-            a.len() == b.len()
-                && a.iter()
-                    .zip(b)
-                    .all(|(x, y)| drawn(old, x).is_some() && drawn(old, x) == drawn(new, y))
-        };
-        let (Some(was), Some(now)) = (units(old, &old.ops), units(new, &new.ops)) else {
-            return false;
-        };
-        let mut filled = false;
-        let units_match = was.len() == now.len()
-            && was.iter().zip(&now).all(|pair| match pair {
-                (Unit::Placeholder(a), Unit::Image(b, _)) => {
-                    filled = true;
-                    a == b
+                (Op::Glass(g), Op::Glass(g2)) => {
+                    let set_aside = |g: &crate::record::GlassOp| {
+                        let mut g = g.clone();
+                        g.paths.clear();
+                        g.measured_inradius.set(-1.0);
+                        g
+                    };
+                    set_aside(g) == set_aside(g2) && same_paths(a, &g.paths, b, &g2.paths)
                 }
-                (Unit::Image(_, a), Unit::Image(_, b)) | (Unit::Op(a), Unit::Op(b)) => a == b,
+                (Op::BackgroundBlur(o), Op::BackgroundBlur(o2)) => {
+                    (o.even_odd, o.radius) == (o2.even_odd, o2.radius) && same_paths(a, &o.paths, b, &o2.paths)
+                }
+                (Op::ProgressiveBlur(o), Op::ProgressiveBlur(o2)) => {
+                    (o.even_odd, o.start_radius, o.end_radius, o.start, o.end)
+                        == (o2.even_odd, o2.start_radius, o2.end_radius, o2.start, o2.end)
+                        && same_paths(a, &o.paths, b, &o2.paths)
+                }
                 _ => false,
-            });
-        units_match
-            && filled
+            }
+        }
+        // Old and new ops in step: a placeholder fill becomes the image on its very shape (the
+        // image clipped to the placeholder's path, or filling it, tiled), at its opacity and
+        // blend; every other op draws the same, an image already there included.
+        let (o, n) = (&old.ops, &new.ops);
+        let (mut i, mut j, mut filled) = (0, 0, false);
+        while i < o.len() {
+            if let Op::Fill {
+                path: p,
+                even_odd: e,
+                paint: Paint::Placeholder(opacity),
+                blend: l,
+            } = &o[i]
+            {
+                let image = |paint: &Paint, blend: &u8| {
+                    matches!(paint, Paint::Image(im) if im.opacity == *opacity) && blend == l
+                };
+                let step = match (n.get(j), n.get(j + 1), n.get(j + 2)) {
+                    (
+                        Some(Op::Clip { path: c, even_odd: e2 }),
+                        Some(Op::Fill { paint, blend, .. }),
+                        Some(Op::Unclip),
+                    ) if e == e2 && image(paint, blend) && same_path(old, *p, new, *c) => 3,
+                    (
+                        Some(Op::Fill {
+                            path: q,
+                            even_odd: e2,
+                            paint,
+                            blend,
+                        }),
+                        ..,
+                    ) if e == e2 && image(paint, blend) && same_path(old, *p, new, *q) => 1,
+                    _ => return false,
+                };
+                filled = true;
+                i += 1;
+                j += step;
+                continue;
+            }
+            if !n.get(j).is_some_and(|y| same_op(old, &o[i], new, y)) {
+                return false;
+            }
+            i += 1;
+            j += 1;
+        }
+        filled
+            && j == n.len()
             && old.flags == new.flags
             && old.opacity == new.opacity
             && old.transform == new.transform
@@ -1442,8 +1506,9 @@ impl Store {
             && old.blend == new.blend
             && old.mask == new.mask
             && old.unsupported == new.unsupported
-            && format!("{:?}", old.post_effects) == format!("{:?}", new.post_effects)
-            && same(&old.coarse, &new.coarse)
+            && old.post_effects == new.post_effects
+            && old.coarse.len() == new.coarse.len()
+            && old.coarse.iter().zip(&new.coarse).all(|(x, y)| same_op(old, x, new, y))
     }
 
     /// Paint order: each record's preorder index and the last index in its subtree.
