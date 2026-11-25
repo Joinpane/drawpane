@@ -613,9 +613,6 @@ impl PendingImages {
     fn remove(&mut self, key: &(u32, u32)) -> Option<PendingImage> {
         self.at(key).map(|i| self.0.swap_remove(i).1)
     }
-    fn iter(&self) -> impl Iterator<Item = (&(u32, u32), &PendingImage)> {
-        self.0.iter().map(|(k, v)| (k, v))
-    }
     fn keys(&self) -> impl Iterator<Item = &(u32, u32)> {
         self.0.iter().map(|(k, _)| k)
     }
@@ -3609,12 +3606,9 @@ impl Gpu {
         Ok(true)
     }
 
-    /// The image levels being uploaded in strips: each image's id and the level's size.
-    pub fn uploading(&self) -> Vec<(u32, (u32, u32))> {
-        self.pending_images
-            .iter()
-            .map(|(&(id, width), p)| (id, (width, p.height)))
-            .collect()
+    /// The images with a level being uploaded in strips.
+    pub fn uploading(&self) -> Vec<u32> {
+        self.pending_images.keys().map(|&(id, _)| id).collect()
     }
 
     /// Drops a level being uploaded in strips, with its budget (the level it would replace

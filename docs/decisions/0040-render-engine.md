@@ -1936,8 +1936,9 @@ reasonable saving left in it: `wasm-opt -Os` makes it smaller raw but larger gzi
 
 With #358 it goes from 1,450 to 1,475 KB. Main with #353 and #362 (`7cb0001b`) builds to
 1,446 KB; merged with #358's slices at rest, 1,452 KB. #352 (strip uploads, image fill-ins as
-refinements) adds about 13 KB more on main, which the step leaves room for. The compute module,
-which shares the code, stays under its 1,000 KB (992 KB merged with #358).
+refinements) brings it to 1,460 KB, within the step. The compute module, which shares the code,
+went from 992 to 999 KB: under its 1,000 KB by 0.7 KB, once #352's fill-in comparison stopped
+formatting ops with `Debug` (which had put it at 1,005 KB). The next growth there needs room made.
 
 ### Measured on a T4 (three paired runs against main with #330)
 
@@ -2029,15 +2030,17 @@ GPU work a frame queued had no bound, and input waited behind it.
     staled the overview tile over its board (one covers about 23,000 page units on the iOS
     kit), and the pinch-out drew what it stood in for, 5 to 34 tiles a gesture.
   - A refined tile, of the frame's level too, never goes over anything drawn since. Back to
-    front: the overview's refined tiles (`Composite::refined_under`), other levels' and the
-    frame level's refined tiles (`Composite::beneath`), the overview's current tiles, then the
-    frame on screen, other levels' current tiles and the frame's own. A refined tile fills in
-    only where nothing else stands in. Laid on top, a zoom from 1 to 2 and back showed zoom 1's
-    placeholder again where zoom 2 had shown the image; laid over the whole overview, it covered
-    an overview tile drawn again with the image since (#352 re-checks).
+    front: refined tiles of every level, the overview's included, the longest drawn first
+    (`Composite::beneath`, by `TileEntry::seq`); the overview's current tiles; then the frame on
+    screen, other levels' current tiles and the frame's own. A refined tile fills in only where
+    nothing else stands in, and of two, the later drawn holds the newer picture. Laid on top, a
+    zoom from 1 to 2 and back showed zoom 1's placeholder again where zoom 2 had shown the
+    image; laid over the whole overview, it covered an overview tile drawn again with the image
+    since; stacked by level, it came back once an image changed twice (a preview level, then a
+    sharper one) (#352 re-checks).
   - An image level uploaded in row strips over frames (`putGpuImageRows`) lands with its last
     strip, in place of the level of its width, which stays until then; both count against the
-    image budget meanwhile, and frames that would draw an image with it aren't exact. One left
+    image budget meanwhile, and frames showing the image aren't exact. One left
     part done is let go alone (`cancelGpuImageRows`). Dropping the old level with the first
     strip showed the placeholder until the last, reported exact. Rows from another bitmap than
     the part uploaded so far are refused (`images::strip_step`), so a level never mixes two.
@@ -2063,8 +2066,9 @@ GPU work a frame queued had no bound, and input waited behind it.
   the middle first until the budget is spent (at least one a frame), and shows inexact until
   the last is in (`DirectSlices`). Each next frame lays the one shown beneath it unchanged, so
   the tiles in it stay exact. Where an edit changed something since the last slice
-  (`TileCache::changed_on`), or an image got another resolution (`TileCache::sharpened_on`, never
-  a hole), both cleared by every frame drawn so a slice never waits on an exact frame, its tiles
+  (`TileCache::changed_on`), or the same picture got sharper (`TileCache::sharpened_on`: another
+  resolution of an image, or an image loaded where its placeholder was; never a hole), both
+  cleared by every frame drawn so a slice never waits on an exact frame, its tiles
   are drawn again; the old pixels show there until they are, as on any frame on screen. Tiles
   to draw again go the longest dropped first (one drawn and dropped again goes to the back) and
   take turns with those never drawn, so edits before every slice never starve the rest. The

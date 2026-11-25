@@ -849,7 +849,7 @@ export class RenderEngine {
   /**
    * `putGpuImageLevel` in row strips over frames, so no frame spends long uploading: rows `y` to
    * `y + rows` of the level, in order from 0. The level is drawn once its last rows are in, in
-   * place of one of its width (kept until then); meanwhile, frames that would draw it aren't
+   * place of one of its width (kept until then); meanwhile, frames showing the image aren't
    * exact.
    */
   putGpuImageRows(id: number, bitmap: ImageBitmap, y: number, rows: number): Result {

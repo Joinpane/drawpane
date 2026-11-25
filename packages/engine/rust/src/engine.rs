@@ -648,7 +648,7 @@ impl Engine {
 
     /// `put_gpu_image_level` in row strips over frames (`Gpu::put_image_bitmap_rows`): the level
     /// changes what's drawn once its last rows are in, as a whole upload does then (one of a
-    /// size the image had is a replacement). Meanwhile, frames that would draw it aren't exact.
+    /// size the image had is a replacement). Meanwhile, frames showing the image aren't exact.
     #[cfg(all(target_arch = "wasm32", feature = "gpu-common"))]
     pub fn put_gpu_image_rows(&mut self, id: u32, bitmap: &web_sys::ImageBitmap, y: u32, rows: u32) -> Result<()> {
         let gpu = self
@@ -675,37 +675,23 @@ impl Engine {
         }
     }
 
-    /// Whether a level being uploaded in strips is one a frame of `view` (`size` pixels) would
-    /// draw an image in it with: what it shows changes once that level's last rows are in.
+    /// Whether an image a frame of `view` (`size` pixels) shows has a level being uploaded in
+    /// strips: what it shows may change once that level's last rows are in.
     #[cfg(feature = "gpu-common")]
     fn uploading_in_view(&mut self, view: Affine, size: (u32, u32)) -> bool {
         let Some(gpu) = self.gpu.as_ref() else {
             return false;
         };
-        let uploading: Vec<_> = gpu
-            .uploading()
-            .into_iter()
-            .map(|(id, level)| (id, level, gpu.image_sizes(id)))
-            .collect();
+        let uploading = gpu.uploading();
         if uploading.is_empty() || view.determinant().abs() == 0.0 {
             return false;
         }
-        let scale = view.as_coeffs()[0].abs();
         let page = view
             .inverse()
             .transform_rect_bbox(Rect::new(0.0, 0.0, f64::from(size.0), f64::from(size.1)));
-        let both_axes = self.store.view_images;
-        uploading.into_iter().any(|(id, level, mut levels)| {
-            // The levels once it's in: in place of one of its width, widest first.
-            levels.retain(|l| l.0 != level.0);
-            let at = levels.partition_point(|l| l.0 > level.0);
-            levels.insert(at, level);
-            let picked = self.store.image_spans(id).iter().any(|&(x, y)| {
-                let span = (x * scale, if both_axes { y * scale } else { 0.0 });
-                levels.get(images::pick(levels.iter().copied(), span)) == Some(&level)
-            });
-            picked && self.store.image_users(id).iter().any(|d| d.rect.overlaps(page))
-        })
+        uploading
+            .into_iter()
+            .any(|id| self.store.image_users(id).iter().any(|d| d.rect.overlaps(page)))
     }
 
     #[cfg(all(target_arch = "wasm32", feature = "gpu-common"))]
