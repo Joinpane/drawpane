@@ -543,6 +543,32 @@ function denseSquares(width: number, height: number): number[] {
   return [...list.finish()];
 }
 
+/** A `width` x `height` fill over the page at revision `base`, record `id`: a patch. */
+function cover(
+  base: number,
+  id: number,
+  color: [number, number, number, number],
+  width = 2048,
+  height = 1024,
+  at: [number, number] = [0, 0],
+): number[] {
+  const list = new ListWriter(base, base + 1);
+  list.set(id, ROOT, {
+    flags: 0,
+    transform: [1, 0, 0, 1, at[0], at[1]],
+    opacity: 1,
+    width,
+    height,
+    coarseBelow: 0,
+    reach: 0,
+    unsupported: 0,
+    paths: [{ kind: "rect", w: width, h: height, radii: [0, 0, 0, 0], smoothing: 0 }],
+    ops: [{ op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color } }],
+    coarse: [],
+  });
+  return [...list.finish()];
+}
+
 function checkpointScene(neighbour: "green" | "empty" | "none" | "clipped"): number[] {
   const list = new ListWriter(0xffffffff, 1);
   list.reset();
@@ -1671,6 +1697,173 @@ for (const build of ["browser", "webgl"] as const) {
         samples: [green, green, green],
       });
       expect(rows.at(-1)).toMatchObject({ exact: true, samples: [green, green, green] });
+    });
+
+    for (const budget of [1, 8, -1]) {
+      test(`text replacing provisional bars between slices settles exact (budget ${budget})`, async ({
+        page,
+      }) => {
+        // Provisional bars draw a sliced frame inexact; the real glyphs arrive between slices
+        // and redraw those tiles exact. One inexact tile once must not keep the frame inexact
+        // for good (#358 review, P1).
+        const green = [0, 255, 0, 255];
+        const rest = (name: string): Step => ({
+          name,
+          size: [1536, 512],
+          scale: 1,
+          moving: false,
+          budget,
+          samples: [
+            [100, 256],
+            [800, 256],
+            [1400, 256],
+          ],
+        });
+        const rows = await presented(
+          page,
+          build,
+          wideLayer("provisional"),
+          [
+            ...Array.from({ length: 10 }, (_, i) => rest(`bars ${i}`)),
+            { apply: wideLayer("glyph", 1) },
+            ...Array.from({ length: 20 }, (_, i) => rest(`glyphs ${i}`)),
+          ],
+          { tileBytes: 0 },
+        );
+        expect(
+          rows.slice(0, 10).every((r) => !r.exact),
+          "bars are never exact",
+        ).toBe(true);
+        expect(rows.at(-1)).toMatchObject({
+          exact: true,
+          pending: 0,
+          samples: [green, green, green],
+        });
+      });
+    }
+
+    test("an image's first level arriving between slices shows, and the view settles exact", async ({
+      page,
+    }) => {
+      // The placeholder is drawn into finished tiles of a sliced frame; the image's first level
+      // arrives between slices. Those tiles are drawn again (an image level records where it
+      // shows for sliced frames), never reported exact with the placeholder (#358 review, P2).
+      const green = [0, 255, 0, 255];
+      const rest = (name: string, budget: number): Step => ({
+        name,
+        size: [1536, 512],
+        scale: 1,
+        moving: false,
+        budget,
+        samples: [
+          [100, 256],
+          [800, 256],
+          [1400, 256],
+        ],
+      });
+      const rows = await presented(
+        page,
+        build,
+        wideLayer("image"),
+        [
+          ...Array.from({ length: 10 }, (_, i) => rest(`no image ${i}`, 1)),
+          { image: { id: 1, side: 16, color: "#00ff00" } },
+          ...Array.from({ length: 20 }, (_, i) => rest(`image ${i}`, 1)),
+        ],
+        { tileBytes: 0, viewImages: true },
+      );
+      const after = rows.slice(10);
+      for (const row of after)
+        if (row.exact)
+          expect(row.samples, `${row.name} exact with the placeholder`).toEqual([
+            green,
+            green,
+            green,
+          ]);
+      // Once the image shows at a sample, it stays.
+      for (let k = 0; k < 3; k++) {
+        const first = after.findIndex((r) => r.samples[k]?.join() === green.join());
+        if (first >= 0)
+          for (const row of after.slice(first))
+            expect(row.samples[k], `${row.name} sample ${k} went back`).toEqual(green);
+      }
+      expect(rows.at(-1)).toMatchObject({
+        exact: true,
+        pending: 0,
+        samples: [green, green, green],
+      });
+    });
+
+    test("an image's first level arriving mid-series on slow tiles shows, and settles exact", async ({
+      page,
+    }) => {
+      // As above, with tiles slower than a 1 ms slice (#358 review, P2b).
+      const green = [0, 255, 0, 255];
+      const frame = (name: string): Step => ({
+        name,
+        size: [1024, 256],
+        scale: 1,
+        moving: false,
+        budget: 1,
+        samples: [
+          [0, 0],
+          [512, 0],
+          [1020, 0],
+        ],
+      });
+      const rows = await presented(
+        page,
+        build,
+        slowBoard("image"),
+        [
+          frame("first"),
+          { image: { id: 1, side: 16, color: "#00ff00" } },
+          ...Array.from({ length: 20 }, (_, i) => frame(`image ${i}`)),
+        ],
+        { tileBytes: 0, viewImages: true },
+      );
+      for (const row of rows.slice(1))
+        if (row.exact)
+          expect(row.samples, `${row.name} exact with the placeholder`).toEqual([
+            green,
+            green,
+            green,
+          ]);
+      expect(rows.at(-1)).toMatchObject({
+        exact: true,
+        pending: 0,
+        samples: [green, green, green],
+      });
+    });
+
+    test("edits near the middle before every slice never starve the rest", async ({ page }) => {
+      // Eight slow direct tiles turn green, then a small square near the middle changes before
+      // every 1 ms slice (a collaborator dragging). Tiles drawn again take turns with those never
+      // drawn, so every tile shows green well within 30 slices, and the view settles once the
+      // edits stop (#358 review, P4).
+      const green = [0, 255, 0, 255];
+      const points: [number, number][] = [];
+      for (let j = 0; j < 2; j++)
+        for (let i = 0; i < 4; i++) points.push([258 + 512 * i, 258 + 512 * j]);
+      const frame = (name: string, budget = 1): Step => ({
+        name,
+        size: [2048, 1024],
+        scale: 1,
+        moving: false,
+        budget,
+        samples: points,
+      });
+      const steps: Step[] = [frame("initial", 0), { apply: cover(1, 999999, [0, 1, 0, 1]) }];
+      for (let i = 0; i < 30; i++) {
+        steps.push({ apply: cover(2 + i, 1000000, [0, 0, 1, 1], 20, 20, [1000 + (i % 2), 500]) });
+        steps.push(frame(`slice ${i}`));
+      }
+      steps.push(...Array.from({ length: 12 }, (_, i) => frame(`quiet ${i}`)));
+      const rows = await presented(page, build, denseSquares(2048, 1024), steps, { tileBytes: 0 });
+      const greenAt = (name: string) =>
+        rows.find((r) => r.name === name)?.samples.filter((s) => s.join() === green.join()).length;
+      expect(greenAt("slice 29"), "tiles away from the edits were starved").toBe(points.length);
+      expect(rows.at(-1)).toMatchObject({ exact: true, pending: 0 });
     });
 
     for (const neighbour of ["green", "empty", "none", "clipped"] as const) {

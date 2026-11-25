@@ -420,6 +420,10 @@ impl Engine {
         #[cfg(feature = "gpu-common")]
         if let Some(g) = self.gpu.as_mut() {
             each(&mut g.tiles);
+            // As the cache's inexact tiles above: a sliced frame's are drawn again.
+            if !full && !changes.is_empty() && at.is_none() && store.provisional_shown().is_none() {
+                g.direct_slices_drop_inexact();
+            }
             if full {
                 g.forget_last();
             } else if let Some(last) = g.last()
@@ -554,6 +558,21 @@ impl Engine {
                 old != new || replaced.is_some_and(|size| new == Some(size))
             })
         };
+        // A frame no slot can hold, drawn over several frames at rest (`Gpu::direct_slices_scale`),
+        // keeps no tiles to mark: where the level its scale picks changed, the tiles it has drawn
+        // are drawn again (`TileCache::note_refined`; not a change, so never a hole).
+        #[cfg(feature = "gpu-common")]
+        if self
+            .gpu
+            .as_ref()
+            .and_then(|g| g.direct_slices_scale())
+            .is_some_and(|scale| at(scale))
+        {
+            let page = self.store.dirty(&users, Affine::IDENTITY, 1.5);
+            if let Some(g) = self.gpu.as_mut() {
+                g.tiles.note_refined(&page);
+            }
+        }
         // A level no sampler picks at any scale drawn or being drawn (one warmed ahead of a
         // zoom, say) changes nothing drawn: work in progress keeps going instead of starting over.
         if self.view_scales().is_some_and(|scales| !scales.into_iter().any(at)) {

@@ -2033,10 +2033,16 @@ GPU work a frame queued had no bound, and input waited behind it.
   the middle first until the budget is spent (at least one a frame), and shows inexact until
   the last is in (`DirectSlices`). Each next frame lays the one shown beneath it unchanged, so
   the tiles in it stay exact. Where an edit changed something since the last slice
-  (`TileCache::changed_on`, cleared by every frame drawn, so a slice never waits on an exact
-  frame), its tiles are drawn again; the old pixels show there until they are, as on any frame
-  on screen. A new view starts over on stand-ins. Once every tile is in, the frame is exact and
-  shown again as it is.
+  (`TileCache::changed_on`), or an image got another resolution (`TileCache::refined_on`, never
+  a hole), both cleared by every frame drawn so a slice never waits on an exact frame, its tiles
+  are drawn again; the old pixels show there until they are, as on any frame on screen. Tiles
+  to draw again take turns with those never drawn, so edits before every slice never starve
+  the rest. The frame is exact once every tile is in and none was last drawn inexact (one
+  drawn inexact, beside provisional text say, leaves when it's drawn again exact). A new view
+  starts over on stand-ins. Once every tile is in, the frame is exact and shown again as it is.
+  A slice whose remaining tiles fit in about one and a half budgets more (by the slowest tile
+  it drew) finishes in that call, and a frame whose tiles all fit in its budget, by what direct
+  tiles took lately at a scale within 2× of its own, is drawn at once.
   Without a budget it's drawn at once, as before. At a 4 MiB tile budget on the iOS kit, such
   a frame took 0.9 to 1.2 s in one call, a stall at every rest between Cmd+scroll notches.
 - **Forward progress.** A moving frame that has started no tile work for 100 ms while some was
