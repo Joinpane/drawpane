@@ -2,7 +2,7 @@
 
 Runs apps/web's Playwright benchmark, parity, and e2e suites (`apps/web/e2e/**/*.spec.ts`)
 across Chromium, Firefox, and WebKit on a real NVIDIA GPU on [Modal](https://modal.com), from
-any machine, in one command. Canvas, WebGL2, and WebGPU timings from a machine without
+Linux or macOS, in one command. Canvas, WebGL2, and WebGPU timings from a machine without
 a GPU (like the development VM) say little about a designer's laptop. These do.
 
 ```sh

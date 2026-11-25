@@ -11,6 +11,7 @@ const venv = join(homedir(), ".venvs/modal/bin/python");
 // biome-ignore lint/suspicious/noUndeclaredEnvVars: a tool run by hand, outside every build pipeline.
 const python = process.env.MODAL_PYTHON ?? (existsSync(venv) ? venv : "python3");
 const script = join(import.meta.dirname, "gpu_bench.py");
+const caller = process.ppid;
 // -u: stream the container's output as it comes.
 const run = spawn(python, ["-u", script, ...process.argv.slice(2)], {
   env: { ...process.env, GPU_BENCH_PARENT_FD: "3" },
@@ -20,6 +21,15 @@ const run = spawn(python, ["-u", script, ...process.argv.slice(2)], {
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"]) {
   process.on(signal, () => run.kill(signal));
 }
+// pnpm's shell execs this launcher so pnpm is its direct parent. Check that
+// it still exists because a killed pnpm may leave its children running.
+setInterval(() => {
+  try {
+    process.kill(caller, 0);
+  } catch (error) {
+    if (error.code === "ESRCH") run.kill("SIGTERM");
+  }
+}, 1_000).unref();
 run.on("error", (error) => {
   console.error(
     `Couldn't run ${python}: ${error.message}. Set MODAL_PYTHON to a Python with modal installed.`,
