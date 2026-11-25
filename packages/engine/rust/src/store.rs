@@ -1324,7 +1324,7 @@ impl Store {
     /// contents, not indices (the image's placement adds a path), caches set aside. An image
     /// already there stays exactly as it was. The caller checks the parent.
     fn fills_placeholder(old: &Record, new: &Record) -> bool {
-        use crate::record::Paint;
+        use crate::record::{BackgroundBlurOp, Paint, ProgressiveBlurOp};
         // Paths compare by contents, not index: the image's placement adds a path, which shifts
         // later indices. Everything compares with `PartialEq`, never by formatting.
         fn same_path(a: &Record, i: u32, b: &Record, j: u32) -> bool {
@@ -1357,14 +1357,14 @@ impl Store {
                         style: s,
                         paint: f,
                         blend: l,
-                        ..
+                        cache: _,
                     },
                     Op::Stroke {
                         path: q,
                         style: s2,
                         paint: f2,
                         blend: l2,
-                        ..
+                        cache: _,
                     },
                 ) => s == s2 && f == f2 && l == l2 && same_path(a, *p, b, *q),
                 (Op::Clip { path: p, even_odd: e }, Op::Clip { path: q, even_odd: e2 }) => {
@@ -1440,13 +1440,38 @@ impl Store {
                     };
                     set_aside(g) == set_aside(g2) && same_paths(a, &g.paths, b, &g2.paths)
                 }
+                // Destructured whole, so a field added later can't go uncompared.
                 (Op::BackgroundBlur(o), Op::BackgroundBlur(o2)) => {
-                    (o.even_odd, o.radius) == (o2.even_odd, o2.radius) && same_paths(a, &o.paths, b, &o2.paths)
+                    let BackgroundBlurOp {
+                        paths: p,
+                        even_odd: e,
+                        radius: r,
+                    } = &**o;
+                    let BackgroundBlurOp {
+                        paths: q,
+                        even_odd: e2,
+                        radius: r2,
+                    } = &**o2;
+                    (e, r) == (e2, r2) && same_paths(a, p, b, q)
                 }
                 (Op::ProgressiveBlur(o), Op::ProgressiveBlur(o2)) => {
-                    (o.even_odd, o.start_radius, o.end_radius, o.start, o.end)
-                        == (o2.even_odd, o2.start_radius, o2.end_radius, o2.start, o2.end)
-                        && same_paths(a, &o.paths, b, &o2.paths)
+                    let ProgressiveBlurOp {
+                        paths: p,
+                        even_odd: e,
+                        start_radius: r0,
+                        end_radius: r1,
+                        start: s0,
+                        end: s1,
+                    } = &**o;
+                    let ProgressiveBlurOp {
+                        paths: q,
+                        even_odd: e2,
+                        start_radius: r0_2,
+                        end_radius: r1_2,
+                        start: s0_2,
+                        end: s1_2,
+                    } = &**o2;
+                    (e, r0, r1, s0, s1) == (e2, r0_2, r1_2, s0_2, s1_2) && same_paths(a, p, b, q)
                 }
                 _ => false,
             }
@@ -1495,18 +1520,36 @@ impl Store {
             i += 1;
             j += 1;
         }
+        // Everything else about the record stays as it was. Destructured whole, so a field
+        // added later can't go uncompared: paths compare through the ops that use them, ops
+        // above, and the coarse ops below, op by op.
+        let Record {
+            flags,
+            opacity,
+            transform,
+            size,
+            coarse_below,
+            reach,
+            paths: _,
+            ops: _,
+            coarse: _,
+            post_effects,
+            blend,
+            mask,
+            unsupported,
+        } = old;
         filled
             && j == n.len()
-            && old.flags == new.flags
-            && old.opacity == new.opacity
-            && old.transform == new.transform
-            && old.size == new.size
-            && old.coarse_below == new.coarse_below
-            && old.reach == new.reach
-            && old.blend == new.blend
-            && old.mask == new.mask
-            && old.unsupported == new.unsupported
-            && old.post_effects == new.post_effects
+            && *flags == new.flags
+            && *opacity == new.opacity
+            && *transform == new.transform
+            && *size == new.size
+            && *coarse_below == new.coarse_below
+            && *reach == new.reach
+            && *post_effects == new.post_effects
+            && *blend == new.blend
+            && *mask == new.mask
+            && *unsupported == new.unsupported
             && old.coarse.len() == new.coarse.len()
             && old.coarse.iter().zip(&new.coarse).all(|(x, y)| same_op(old, x, new, y))
     }
