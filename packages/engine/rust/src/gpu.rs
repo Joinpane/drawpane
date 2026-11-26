@@ -323,6 +323,9 @@ fn nearest_middle(jobs: &mut [crate::tiles::Job], origin: (i64, i64), size: (u32
 /// tiles again (`TileCache::refine_overview`): they still stand in, and a big one's GPU work
 /// submitted just before a gesture would hold that gesture's first frames.
 const OVERVIEW_REFINE_QUIET_MS: f64 = 1000.0;
+/// How long a view stays still before a pass refused beside tile pages drops them (keeping the
+/// overview) and retries once in budgeted slices (`PendingStage::Retry`).
+const RETRY_QUIET_MS: f64 = 200.0;
 /// GPU passes one slice of a refined overview tile submits before its walk pauses: no single
 /// submission is long.
 const OVERVIEW_REFINE_PASSES: u32 = MOVING_PASSES;
@@ -668,6 +671,17 @@ impl Compositor {
                 },
             ],
         })
+    }
+
+    #[inline(never)]
+    fn set_size(&mut self, queue: &wgpu::Queue, size: (u32, u32)) {
+        if self.uniform_size != size {
+            let mut ub = [0u8; 16];
+            ub[0..4].copy_from_slice(&(size.0 as f32).to_le_bytes());
+            ub[4..8].copy_from_slice(&(size.1 as f32).to_le_bytes());
+            queue.write_buffer(&self.uniforms, 0, &ub);
+            self.uniform_size = size;
+        }
     }
 }
 
@@ -1081,13 +1095,17 @@ struct PendingWhole {
     background: [f32; 4],
     view_bits: [u64; 6],
     inputs: DrawInputs,
+    /// 1 once a pass hit a memory limit (or stepped down from native) beside held tile pages:
+    /// after its stand-in frame shows and the view stays still for `RETRY_QUIET_MS`, tile pages
+    /// are dropped (keeping the overview) and the view retries once (2).
+    retry: u8,
 }
 
 impl PendingWhole {
     /// Whether a stage's walk is paused, holding its scratch and glass masks.
     fn paused(&self) -> bool {
         match &self.stage {
-            PendingStage::Start | PendingStage::CoarseStart(_) => false,
+            PendingStage::Start | PendingStage::CoarseStart(_) | PendingStage::Retry => false,
             PendingStage::Native(pass) | PendingStage::CoarseWhole(_, pass) => pass.paused.is_some(),
             PendingStage::Halo(run) => run.pass.as_ref().is_some_and(|p| p.paused.is_some()),
         }
@@ -1105,6 +1123,8 @@ enum PendingStage {
     /// Unpadded coarse-reader whole pass at divisor `div` (1 = device resolution, 2/4 = scaled)
     /// when the full halo exceeds GPU memory.
     CoarseWhole(u32, Box<WholePass>),
+    /// Waits for the view to be still, then drops tile pages (keeping the overview) and starts again.
+    Retry,
 }
 
 type CoarseTile = (u32, u32, u32, u32);
@@ -3713,7 +3733,9 @@ impl Gpu {
             return Ok(());
         }
         if self.check_frame(dst, width, height, 0, 0).is_err() {
-            self.trim_pools(0);
+            if self.pool_bytes > 0 && self.check_frame(dst, width, height, 0, self.pool_bytes).is_ok() {
+                self.trim_pools(0);
+            }
             self.check_frame(dst, width, height, 0, 0)?;
         }
         if let Some(old) = self.frames.get(dst) {
@@ -4513,28 +4535,14 @@ impl Gpu {
     /// `tile_bytes`, in whole pages. Pages past it go, with their tiles. When no pages are
     /// allocated yet, picks 4096x4096 (64 tiles/page) if device limits and budget allow.
     fn fit_tiles(&mut self, tile_bytes: usize) {
-        let mut limit = 0;
-        let mut pbytes = 0;
-        let mut pages = 0;
-        for attempt in 0..2 {
-            let beside = self.bytes_beside_tiles() + self.readbacks.bytes.get() + HEADROOM;
-            limit = tile_bytes.min(self.budget.saturating_sub(beside));
-            if self.pages.is_empty() {
-                self.page_side = self.choose_page_side(limit);
-            }
-            pbytes = self.page_bytes();
-            pages = (limit / pbytes).min(1024);
-            if attempt == 0
-                && tile_bytes > 0
-                && (pages < self.pages.len() || pages == 0)
-                && self.active.is_none()
-                && !self.walk_paused()
-            {
-                self.trim_transient();
-                continue;
-            }
-            break;
+        let beside = self.bytes_beside_tiles() + self.readbacks.bytes.get() + HEADROOM;
+        let room = self.budget.saturating_sub(beside);
+        let limit = tile_bytes.min(room);
+        if self.pages.is_empty() {
+            self.page_side = self.choose_page_side(limit);
         }
+        let mut pbytes = self.page_bytes();
+        let mut pages = (limit / pbytes).min(1024);
         while self.pages.len() > pages {
             if let Some(p) = self.pages.pop() {
                 p.texture.destroy();
@@ -4553,13 +4561,10 @@ impl Gpu {
     }
 
     /// Room remaining under `self.budget` for `self.readers` allocations.
-    /// Trims unused pooled textures when pools exceed the keep cap or headroom is tight, so
-    /// stale offscreen targets from an earlier pass never starve a reader allocation.
+    /// Trims unused pooled textures only when headroom is tight, so steady-state frames keep warm
+    /// offscreen targets pooled while tight budgets avoid starving reader allocations.
     #[inline(never)]
     fn reader_budget_room(&mut self) -> usize {
-        if self.pool_bytes > GPU_POOL_KEEP_BYTES {
-            self.trim_pools(GPU_POOL_KEEP_BYTES);
-        }
         for attempt in 0..2 {
             let room = self
                 .budget
@@ -5327,7 +5332,8 @@ impl Gpu {
     /// target's size, if one device-resolution pass of it fits this GPU: the texture limit, the
     /// software raster budget and the GPU memory budget. `draw_whole_pass` draws by this check,
     /// and the engine and `render_whole` decide by it (`prefers_padded_view`).
-    fn padded_view(&self, samples: IRect, size: (u32, u32)) -> Result<((u32, u32), (u32, u32))> {
+    #[inline(never)]
+    fn padded_view(&self, samples: IRect, size: (u32, u32), extra_freed: usize) -> Result<((u32, u32), (u32, u32))> {
         // Keep the same strip phase at the original viewport origin.
         let x = samples.x0.unsigned_abs().next_multiple_of(4);
         let y = samples.y0.unsigned_abs().next_multiple_of(4);
@@ -5354,27 +5360,43 @@ impl Gpu {
             size.0,
             size.1,
             pixels.saturating_mul(12),
-            scratch_bytes.saturating_add(self.readers.bytes()),
+            scratch_bytes
+                .saturating_add(self.readers.bytes())
+                .saturating_add(extra_freed),
         )?;
         Ok(((x, y), padded))
+    }
+
+    #[inline(never)]
+    fn prefers_padded_with(
+        &self,
+        plan: &ViewportHaloPlan,
+        size: (u32, u32),
+        max_pixels: usize,
+        extra_freed: usize,
+    ) -> bool {
+        plan.coarse_post_scopes.is_empty()
+            && self
+                .padded_view(plan.samples, size, extra_freed)
+                .is_ok_and(|(_, (w, h))| (w as usize).saturating_mul(h as usize) <= max_pixels)
     }
 
     /// Whether a `size` view needing `plan` is drawn exact in one device-resolution pass: no
     /// layer-blur scope needs the far tier, the padded view fits (`padded_view`), and it holds at
     /// most `max_pixels` (`Limits::padded_view_pixels`), past which apron tiles are cheaper.
     pub fn prefers_padded_view(&self, plan: &ViewportHaloPlan, size: (u32, u32), max_pixels: usize) -> bool {
-        plan.coarse_post_scopes.is_empty()
-            && self
-                .padded_view(plan.samples, size)
-                .is_ok_and(|(_, (w, h))| (w as usize).saturating_mul(h as usize) <= max_pixels)
+        self.prefers_padded_with(plan, size, max_pixels, 0)
     }
 
     /// Draws the whole frame of a view at rest (what `render_whole` draws: one native pass of
     /// the padded view, else the reduced reader-halo frame) a slice at a time, at most
     /// `budget_ms` a call, so no frame waits for all of it. Until its last slice lands each call
     /// shows the last frame warped to the view (one quad, `present_motion_standin`) with one tile
-    /// pending; `ahead_whole` runs the slices between frames. The finished frame is the one
-    /// `render_whole` draws: a slice that hits a memory limit hands the frame to `render_whole`.
+    /// pending; `ahead_whole` runs the slices between frames. A slice that hits a memory limit
+    /// steps down to the halo or a budgeted coarse stand-in without blocking or dropping view
+    /// caches immediately; if tile pages were held, once the view stays still for
+    /// `RETRY_QUIET_MS`, tile pages are dropped (keeping the overview) and the view retries once
+    /// in budgeted slices.
     #[inline(never)]
     #[allow(clippy::too_many_arguments)]
     pub fn render_whole_sliced(
@@ -5416,15 +5438,13 @@ impl Gpu {
                 background,
                 view_bits,
                 inputs,
+                retry: 0,
             });
         }
         if let Some(stats) = self.advance_pending_whole(store, budget_ms)? {
             return Ok(stats);
         }
-        let mut stats = self.present_motion_standin(frame.view, background, size.0, size.1, t0, submits0, false)?;
-        stats.pending = stats.pending.max(1);
-        stats.in_progress = true;
-        Ok(stats)
+        self.present_pending_whole(frame.view, view_bits, background, size, inputs, t0, submits0)
     }
 
     /// Whether a whole frame is being drawn over slices (`render_whole_sliced`).
@@ -5582,7 +5602,7 @@ impl Gpu {
         let mut stats = match self.advance_pending_whole(store, budget_ms)? {
             Some(mut stats) => {
                 stats.tiles_drawn = 1;
-                stats.pending = 0;
+                stats.pending = u32::from(self.pending_whole.is_some());
                 stats
             }
             None => {
@@ -5623,20 +5643,34 @@ impl Gpu {
                 return None;
             }
             let (t0, submits0) = (now(), self.submits);
-            return Some(
-                self.present_motion_standin(view, background, size.0, size.1, t0, submits0, false)
-                    .map(|mut stats| {
-                        stats.pending = stats.pending.max(1);
-                        stats.in_progress = true;
-                        stats
-                    }),
-            );
+            return Some(self.present_pending_whole(view, view_bits, background, size, inputs, t0, submits0));
         }
         self.present_finished_whole(view_bits, size, inputs)
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn present_pending_whole(
+        &mut self,
+        view: Affine,
+        view_bits: [u64; 6],
+        background: [f32; 4],
+        size: (u32, u32),
+        inputs: DrawInputs,
+        t0: f64,
+        submits0: u32,
+    ) -> Result<DrawStats> {
+        if let Some(shown) = self.present_finished_whole(view_bits, size, inputs) {
+            return shown;
+        }
+        let mut stats = self.present_motion_standin(view, background, size.0, size.1, t0, submits0, false)?;
+        stats.pending = stats.pending.max(1);
+        stats.in_progress = true;
+        Ok(stats)
+    }
+
     /// Shows again the whole frame drawn over slices when it's still the one shown and it's for
     /// this view, size and inputs.
+    #[inline(never)]
     fn present_finished_whole(
         &mut self,
         view_bits: [u64; 6],
@@ -5648,11 +5682,16 @@ impl Gpu {
         let cur = self.cur.filter(|_| matches)?;
         let (t0, submits0) = (now(), self.submits);
         let scale = f64::from_bits(view_bits[0]);
+        let pending = self.pending_whole.is_some();
         let stats = DrawStats {
             direct: true,
-            plan: key.plan,
-            exact: key.exact,
-            standin: !key.exact,
+            plan: if pending { 1 } else { key.plan },
+            exact: key.exact && !pending,
+            standin: !key.exact || pending,
+            pending: u32::from(pending),
+            in_progress: pending,
+            held: self.tiles.len() as u32,
+            evicted: self.tiles.stats.evicted,
             // The time between frames still has the overview to draw (`ahead_overview`).
             queued: self.tiles.overview_left(scale),
             ..DrawStats::default()
@@ -5662,7 +5701,8 @@ impl Gpu {
 
     /// Runs the pending whole frame until `budget_ms` runs out. Returns its counts once it
     /// finished and showed. Never drops view caches or runs an unbudgeted whole pass on a memory
-    /// limit: `step_pending_whole` steps down to a budgeted coarse fallback instead.
+    /// limit: `step_pending_whole` steps down to a budgeted coarse fallback instead, and schedules
+    /// one quiet-gated retry once tile pages can be dropped.
     #[inline(never)]
     fn advance_pending_whole(&mut self, store: &Store, budget_ms: f64) -> Result<Option<DrawStats>> {
         let Some(mut pending) = self.pending_whole.take() else {
@@ -5672,7 +5712,7 @@ impl Gpu {
         self.deadline_ms = budgeted.then(|| now() + self.walk_budget_ms(budget_ms));
         let result = self.step_pending_whole(store, &mut pending, budgeted);
         self.deadline_ms = None;
-        let stats = match result {
+        let mut stats = match result {
             Ok(None) => {
                 self.pending_whole = Some(pending);
                 return Ok(None);
@@ -5683,6 +5723,11 @@ impl Gpu {
                 return Err(e);
             }
         };
+        let retry = !stats.exact && pending.retry == 1;
+        if retry {
+            stats.plan = 1;
+            stats.standin = true;
+        }
         self.sliced_frame = Some(SlicedFrame {
             view_bits: pending.view_bits,
             size: (u32::from(pending.frame.width), u32::from(pending.frame.height)),
@@ -5694,15 +5739,22 @@ impl Gpu {
         // first presentation on (`present_finished_whole` after), so the time between frames
         // wakes to draw it.
         self.set_overview(store);
-        let mut stats = stats;
         stats.queued = stats
             .queued
             .max(self.tiles.overview_left(f64::from_bits(pending.view_bits[0])));
+        if retry {
+            pending.retry = 2;
+            pending.stage = PendingStage::Retry;
+            self.pending_whole = Some(pending);
+            stats.pending = 1;
+            stats.in_progress = true;
+        }
         Ok(Some(stats))
     }
 
     /// Moves an already-begun pass's active draw into `pass.paused` when setup exhausted the
     /// slice budget, so `self.active` is never left dangling across a stand-in presentation.
+    #[inline(never)]
     fn pause_begun(&mut self, pass: &mut WholePass) {
         pass.paused = Some(PausedWalk {
             active: self.active.take().expect("a begun pass"),
@@ -5716,13 +5768,9 @@ impl Gpu {
     /// Starts the halo stage after a native limit, or queues `CoarseStart(1)` if halo setup itself
     /// hits a memory limit or there is no halo plan.
     #[inline(never)]
-    fn start_halo_or_coarse(
-        &mut self,
-        pending: &PendingWhole,
-        halo_plan: Option<&ViewportHaloPlan>,
-    ) -> Result<PendingStage> {
+    fn start_halo_or_coarse(&mut self, pending: &mut PendingWhole) -> Result<PendingStage> {
         self.trim_transient();
-        let Some(plan) = halo_plan else {
+        let Some(plan) = pending.plan.as_ref().filter(|p| p.use_coarse_halo) else {
             return Ok(PendingStage::CoarseStart(1));
         };
         match self.begin_reader_halo(
@@ -5734,10 +5782,16 @@ impl Gpu {
         ) {
             Ok(run) => Ok(PendingStage::Halo(Box::new(run))),
             Err(e) if e.code == ErrorCode::Limit => {
-                self.trim_transient();
+                self.mark_retry(&mut pending.retry);
                 Ok(PendingStage::CoarseStart(1))
             }
             Err(e) => Err(e),
+        }
+    }
+
+    fn mark_retry(&self, retry: &mut u8) {
+        if *retry == 0 && !self.pages.is_empty() {
+            *retry = 1;
         }
     }
 
@@ -5798,6 +5852,7 @@ impl Gpu {
 
     /// Bilinearly upscales the active scratch texture (`src_size`) to `frames[dst]` (`dst_size`)
     /// using the compositor pipeline for a scaled-down coarse fallback pass.
+    #[inline(never)]
     fn blit_scratch_scaled(
         &mut self,
         encoder: &mut wgpu::CommandEncoder,
@@ -5823,22 +5878,13 @@ impl Gpu {
             (sw - 0.5) / sw,
             (sh - 0.5) / sh,
         ];
-        let mut qbytes = [0u8; 48];
-        for (i, v) in quad.iter().enumerate() {
-            qbytes[i * 4..(i + 1) * 4].copy_from_slice(&v.to_le_bytes());
-        }
+        let qbytes: Vec<u8> = quad.iter().flat_map(|v| v.to_le_bytes()).collect();
         self.queue.write_buffer(&c.instances, 0, &qbytes);
-        if c.uniform_size != dst_size {
-            let mut ubytes = [0u8; 16];
-            ubytes[0..4].copy_from_slice(&w.to_le_bytes());
-            ubytes[4..8].copy_from_slice(&h.to_le_bytes());
-            self.queue.write_buffer(&c.uniforms, 0, &ubytes);
-            c.uniform_size = dst_size;
-        }
+        c.set_size(&self.queue, dst_size);
         let scratch = self.scratches[self.active_scratch].as_ref().expect("scratch");
-        let group = c.create_bind_group(&self.device, &scratch.view, "scaled fallback");
+        let group = c.create_bind_group(&self.device, &scratch.view, "composite");
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("scaled fallback"),
+            label: Some("composite"),
             color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                 view: &self.frames[dst].view,
                 depth_slice: None,
@@ -5869,12 +5915,29 @@ impl Gpu {
     ) -> Result<Option<DrawStats>> {
         let generation = pending.inputs.generation;
         let size = (u32::from(pending.frame.width), u32::from(pending.frame.height));
-        let halo_plan = pending.plan.as_ref().filter(|p| p.use_coarse_halo);
         loop {
             match std::mem::replace(&mut pending.stage, PendingStage::Start) {
                 PendingStage::Start => {
-                    let halo =
-                        halo_plan.is_some_and(|p| !self.prefers_padded_view(p, size, store.limits.padded_view_pixels));
+                    let halo = if let Some(p) = pending.plan.as_ref().filter(|p| p.use_coarse_halo) {
+                        if self.prefers_padded_view(p, size, store.limits.padded_view_pixels) {
+                            false
+                        } else {
+                            if pending.retry == 0
+                                && !self.pages.is_empty()
+                                && self.prefers_padded_with(
+                                    p,
+                                    size,
+                                    store.limits.padded_view_pixels,
+                                    self.pages.len() * self.page_bytes() + self.pool_bytes,
+                                )
+                            {
+                                pending.retry = 1;
+                            }
+                            true
+                        }
+                    } else {
+                        false
+                    };
                     let native = if halo {
                         Err(EngineError::limit("padded reader view exceeds whole-frame budget"))
                     } else {
@@ -5893,7 +5956,12 @@ impl Gpu {
                     pending.stage = match native {
                         Ok(WholeStart::Unchanged(stats)) => return Ok(Some(stats)),
                         Ok(WholeStart::Pass(pass)) => PendingStage::Native(pass),
-                        Err(e) if e.code == ErrorCode::Limit => self.start_halo_or_coarse(pending, halo_plan)?,
+                        Err(e) if e.code == ErrorCode::Limit => {
+                            if !halo {
+                                self.mark_retry(&mut pending.retry);
+                            }
+                            self.start_halo_or_coarse(pending)?
+                        }
                         Err(e) => return Err(e),
                     };
                 }
@@ -5909,13 +5977,18 @@ impl Gpu {
                     match res {
                         Ok(stats) => return Ok(Some(stats)),
                         Err(e) if e.code == ErrorCode::Limit => {
-                            pending.stage = self.start_halo_or_coarse(pending, halo_plan)?;
+                            self.mark_retry(&mut pending.retry);
+                            pending.stage = self.start_halo_or_coarse(pending)?;
                         }
                         Err(e) => return Err(e),
                     }
                 }
                 PendingStage::Halo(mut run) => {
-                    let plan = halo_plan.expect("a halo plan");
+                    let plan = pending
+                        .plan
+                        .as_ref()
+                        .filter(|p| p.use_coarse_halo)
+                        .expect("a halo plan");
                     match self.step_reader_halo(store, &mut run, plan, budgeted) {
                         Ok(None) => {
                             pending.stage = PendingStage::Halo(run);
@@ -5928,13 +6001,22 @@ impl Gpu {
                         Err(e) => {
                             self.end_reader_halo(&mut run, plan, false);
                             if e.code == ErrorCode::Limit {
-                                self.trim_transient();
+                                self.mark_retry(&mut pending.retry);
                                 pending.stage = PendingStage::CoarseStart(1);
                             } else {
                                 return Err(e);
                             }
                         }
                     }
+                }
+                PendingStage::Retry => {
+                    if now() - self.last_input_ms < RETRY_QUIET_MS {
+                        pending.stage = PendingStage::Retry;
+                        return Ok(None);
+                    }
+                    self.tiles.clear_keeping_overview();
+                    self.fit_tiles(0);
+                    self.trim_transient();
                 }
                 PendingStage::CoarseStart(div) => {
                     self.trim_transient();
@@ -5967,7 +6049,6 @@ impl Gpu {
                             pending.stage = PendingStage::CoarseWhole(div, pass);
                         }
                         Err(e) if e.code == ErrorCode::Limit && div < 4 => {
-                            self.trim_transient();
                             pending.stage = PendingStage::CoarseStart(div * 2);
                         }
                         Err(e) => return Err(e),
@@ -5986,11 +6067,10 @@ impl Gpu {
                         Ok(mut stats) => {
                             stats.exact = false;
                             stats.standin = true;
-                            stats.plan = 4;
+                            stats.plan = 1;
                             return Ok(Some(stats));
                         }
                         Err(e) if e.code == ErrorCode::Limit && div < 4 => {
-                            self.trim_transient();
                             pending.stage = PendingStage::CoarseStart(div * 2);
                         }
                         Err(e) => return Err(e),
@@ -6014,7 +6094,7 @@ impl Gpu {
     /// frame's captures); it starts again from its setup if run again.
     fn drop_pending_stage(&mut self, pending: &mut PendingWhole) {
         match std::mem::replace(&mut pending.stage, PendingStage::Start) {
-            PendingStage::Start | PendingStage::CoarseStart(_) => {}
+            PendingStage::Start | PendingStage::CoarseStart(_) | PendingStage::Retry => {}
             PendingStage::Native(pass) | PendingStage::CoarseWhole(_, pass) => {
                 if pass.paused.is_some() {
                     self.drop_walk();
@@ -6321,9 +6401,6 @@ impl Gpu {
         }
         // Keep the supersampled replay and its reader/mask/prefix working set comfortably within
         // the GPU memory budget so supersampling steps down gracefully before hitting Limit.
-        if self.pool_bytes > GPU_POOL_KEEP_BYTES {
-            self.trim_pools(GPU_POOL_KEEP_BYTES);
-        }
         let scratch_slot = if is_far {
             FAR_HALO_SCRATCH_SLOT
         } else {
@@ -6332,6 +6409,7 @@ impl Gpu {
         let freed = self.scratches[scratch_slot]
             .as_ref()
             .map_or(0, |s| (s.width as usize) * (s.height as usize) * 8);
+        let mut trimmed = false;
         while supersample > 1 {
             let fw = (coarse_size.0 * supersample) as usize;
             let fh = (coarse_size.1 * supersample) as usize;
@@ -6341,6 +6419,11 @@ impl Gpu {
                 .is_ok()
             {
                 break;
+            }
+            if !trimmed {
+                trimmed = true;
+                self.trim_pools(0);
+                continue;
             }
             supersample /= 2;
         }
@@ -7348,11 +7431,15 @@ impl Gpu {
         }
         let dst = self.next_frame();
         let padded = match samples {
-            Some(bounds) => Some(match self.padded_view(bounds, (width, height)) {
+            Some(bounds) => Some(match self.padded_view(bounds, (width, height), 0) {
                 Ok(p) => p,
-                Err(e) if e.code == ErrorCode::Limit => {
+                Err(e)
+                    if e.code == ErrorCode::Limit
+                        && self.pool_bytes > 0
+                        && self.padded_view(bounds, (width, height), self.pool_bytes).is_ok() =>
+                {
                     self.trim_pools(0);
-                    self.padded_view(bounds, (width, height))?
+                    self.padded_view(bounds, (width, height), 0)?
                 }
                 Err(e) => return Err(e),
             }),
@@ -7629,10 +7716,14 @@ impl Gpu {
         drag: Option<&DragFrame>,
     ) -> Result<DrawStats> {
         self.check()?;
+        let from_whole = self.sliced_frame.is_some() || self.whole_reader_halo || self.pending_whole.is_some();
         self.abort_pending_whole();
         // What this shows is made of tiles, not a whole frame (`present_sliced_frame` and
         // `render_whole` show one again only while it's shown).
         self.whole_reader_halo = false;
+        if from_whole {
+            self.trim_transient();
+        }
         self.pass_budget = None;
         #[cfg(feature = "compute")]
         {
@@ -10193,10 +10284,8 @@ impl Gpu {
             return Ok(());
         };
         let side = TILE + 2 * halo.max(0) as u32;
-        let size: [f32; 4] = [plan.size.0 as f32, plan.size.1 as f32, 0.0, 0.0];
-        let ub: Vec<u8> = size.iter().flat_map(|v| v.to_le_bytes()).collect();
-        if let Some(c) = self.compositor.as_ref() {
-            self.queue.write_buffer(&c.uniforms, 0, &ub);
+        if let Some(c) = self.compositor.as_mut() {
+            c.set_size(&self.queue, plan.size);
         }
         'tiles: for dt in self.tiles.drag_tiles(plan, now) {
             let view = level.tile_view(dt.i, dt.j, TILE);
@@ -10604,12 +10693,7 @@ impl Gpu {
             if !bytes.is_empty() {
                 self.queue.write_buffer(&c.instances, 0, &bytes);
             }
-            if c.uniform_size != (w, h) {
-                let size: [f32; 4] = [w as f32, h as f32, 0.0, 0.0];
-                let ub: Vec<u8> = size.iter().flat_map(|v| v.to_le_bytes()).collect();
-                self.queue.write_buffer(&c.uniforms, 0, &ub);
-                c.uniform_size = (w, h);
-            }
+            c.set_size(&self.queue, (w, h));
             // Runs of quads sharing a source, reusing cached bind groups on frames and tile pages.
             let mut runs: Vec<(Option<usize>, u32, u32)> = Vec::new();
             let mut i = 0;
