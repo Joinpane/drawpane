@@ -1940,8 +1940,8 @@ refinements) brings it to 1,460 KB, within the step. The compute module, which s
 went from 992 to 999 KB: under its 1,000 KB by 0.7 KB, once #352's fill-in comparison stopped
 formatting ops with `Debug` (which had put it at 1,005 KB). The next growth there needs room made.
 
-#363 then took the rest of the formatting out of the fill-in comparison, whose glass arm was the
-last to clone an op to set its cache aside. It now destructures the op whole, so a field added
+#363 found no formatting left in the fill-in comparison; its glass arm was the last to clone an
+op to set its cache aside. It now destructures the op whole, so a field added
 later can't go uncompared, and skips `measured_inradius` there as it does `Stroke`'s `cache`. That
 is 153 bytes gzipped in `compute` (999,107 to 998,954) and 209 in `browser`; the engine's own
 `Debug` derives cost nothing, since no format string reaches a release module. The whole
