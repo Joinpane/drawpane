@@ -4648,9 +4648,11 @@ for (const build of ["browser", "webgl"] as const) {
         { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [...c, a] } },
       ];
       add(ROOT, -2000, -2000, 4000, 4000, fill([0.92, 0.2, 0.15]));
-      for (let i = 0; i < 300; i++) {
-        const c: [number, number, number] = i % 2 === 0 ? [0.1, 0.25, 0.78] : [0.08, 0.62, 0.3];
-        add(ROOT, -1500, -1500 + i * 10, 3000, 4, fill(c));
+      for (let row = 0; row < 300; row++) {
+        const c: [number, number, number] = row % 2 === 0 ? [0.1, 0.25, 0.78] : [0.08, 0.62, 0.3];
+        for (let col = 0; col < 3; col++) {
+          add(ROOT, -1500 + col * 1000, -1500 + row * 10, 960, 4, fill(c));
+        }
       }
       let parent = ROOT;
       for (let d = 0; d < 3; d++) {
@@ -4817,14 +4819,19 @@ for (const build of ["browser", "webgl"] as const) {
               const standinPx = standin.ok ? await pixels(engine) : new Uint8Array(0);
 
               // Idle through the 200 ms quiet window and retry slices until exact lands, checking
-              // monotonic display on intermediate present-only frames (use a 2 ms retry slice budget
-              // so the retried native pass itself spans multiple slices for monotonicity checks).
+              // monotonic display and cooperative pauses AFTER tile pages drop (use a 0.5 ms retry
+              // slice budget so the retried native pass itself pauses across multiple slices even
+              // on fast GPUs, ensuring an unbudgeted retry fails on post-drop pauses directly).
               const tIdle = performance.now();
               let idleSlices = 0;
               let maxIdleSliceMs = 0;
               let midPresents = 0;
               let midDiffFromStandin = 0;
+              let postDropPauses = 0;
+              let postDropInProgressSlices = 0;
+              let postDropMidPresents = 0;
               let shown = standinShown;
+              let prevPauses = engine.gpuCounters?.()[29] ?? 0;
               while (
                 cur.ok &&
                 (cur.inProgress || cur.pending > 0 || !shown.exact) &&
@@ -4832,17 +4839,27 @@ for (const build of ["browser", "webgl"] as const) {
                 performance.now() - tIdle < 4000
               ) {
                 await new Promise((r) => setTimeout(r, 4));
-                cur = ahead(engine, 2);
+                const beforePauses = prevPauses;
+                cur = ahead(engine, 0.5);
                 if (cur.cpuMs > maxIdleSliceMs) maxIdleSliceMs = cur.cpuMs;
                 idleSlices++;
-                if (cur.drawn > 0 || idleSlices <= 3 || idleSlices % 4 === 0) {
-                  shown = renderAt(engine, 1, -1);
-                  if (shown.cpuMs > maxIdleSliceMs) maxIdleSliceMs = shown.cpuMs;
-                  if (!shown.exact && cur.drawn === 0 && standinPx.length > 0) {
-                    midPresents++;
-                    const midPx = await pixels(engine);
-                    midDiffFromStandin += diffBytes(midPx, standinPx);
+                const afterPauses = engine.gpuCounters?.()[29] ?? 0;
+                const dpauses = afterPauses - beforePauses;
+                prevPauses = afterPauses;
+                shown = renderAt(engine, 1, -1);
+                if (shown.cpuMs > maxIdleSliceMs) maxIdleSliceMs = shown.cpuMs;
+                const dropped = shown.held < warmHeld;
+                if (dropped) {
+                  postDropPauses += dpauses;
+                  if (cur.drawn === 0 && cur.inProgress) {
+                    postDropInProgressSlices++;
                   }
+                }
+                if (!shown.exact && cur.drawn === 0 && standinPx.length > 0) {
+                  midPresents++;
+                  if (dropped) postDropMidPresents++;
+                  const midPx = await pixels(engine);
+                  midDiffFromStandin += diffBytes(midPx, standinPx);
                 }
                 if (cur.drawn > 0 && !cur.inProgress && cur.pending === 0) break;
               }
@@ -4882,6 +4899,9 @@ for (const build of ["browser", "webgl"] as const) {
                 maxIdleSliceMs,
                 midPresents,
                 midDiffFromStandin,
+                postDropPauses,
+                postDropInProgressSlices,
+                postDropMidPresents,
                 diffFromRef: finalPx.length === refPx.length ? diffBytes(finalPx, refPx) : -1,
               });
             } finally {
@@ -4924,6 +4944,18 @@ for (const build of ["browser", "webgl"] as const) {
             r.standinShown.held,
             `${r.capMiB} MiB: tile cache kept until quiet retry`,
           ).toBeGreaterThanOrEqual(r.warmHeld);
+          expect(
+            r.postDropPauses,
+            `${r.capMiB} MiB: retried native pass paused cooperatively after tile drop`,
+          ).toBeGreaterThanOrEqual(1);
+          expect(
+            r.postDropInProgressSlices,
+            `${r.capMiB} MiB: at least one in-progress slice followed tile drop`,
+          ).toBeGreaterThanOrEqual(1);
+          expect(
+            r.postDropMidPresents,
+            `${r.capMiB} MiB: monotonic intermediate present checked after tile drop`,
+          ).toBeGreaterThanOrEqual(1);
         }
       }
       // At least the tightest cap (60 MiB) must have actually exercised the stand-in -> quiet retry
@@ -4933,6 +4965,14 @@ for (const build of ["browser", "webgl"] as const) {
         tightest?.standinShown.exact,
         "60 MiB: exercised reduced stand-in before exact retry",
       ).toBe(false);
+      expect(
+        tightest?.postDropPauses,
+        "60 MiB: retried native pass paused cooperatively after dropping tiles",
+      ).toBeGreaterThanOrEqual(1);
+      expect(
+        tightest?.postDropInProgressSlices,
+        "60 MiB: retried native pass spanned multiple slices after dropping tiles",
+      ).toBeGreaterThanOrEqual(1);
       expect(
         tightest?.midPresents,
         "60 MiB: verified monotonic intermediate presents",
