@@ -1431,14 +1431,44 @@ impl Store {
                             _ => false,
                         }
                 }
+                // Destructured whole, so a field added later can't go uncompared. The lens's
+                // measured inradius is a cache of what drawing measured, so it is set aside.
                 (Op::Glass(g), Op::Glass(g2)) => {
-                    let set_aside = |g: &crate::record::GlassOp| {
-                        let mut g = g.clone();
-                        g.paths.clear();
-                        g.measured_inradius.set(-1.0);
-                        g
-                    };
-                    set_aside(g) == set_aside(g2) && same_paths(a, &g.paths, b, &g2.paths)
+                    let crate::record::GlassOp {
+                        paths: p,
+                        even_odd: e,
+                        kind: k,
+                        inradius: r,
+                        angle: an,
+                        intensity: i,
+                        refraction: rf,
+                        depth: d,
+                        dispersion: di,
+                        frost: fr,
+                        splay: sp,
+                        box_radii: br,
+                        box_smoothing: bs,
+                        measured_inradius: _,
+                    } = &**g;
+                    let crate::record::GlassOp {
+                        paths: q,
+                        even_odd: e2,
+                        kind: k2,
+                        inradius: r2,
+                        angle: an2,
+                        intensity: i2,
+                        refraction: rf2,
+                        depth: d2,
+                        dispersion: di2,
+                        frost: fr2,
+                        splay: sp2,
+                        box_radii: br2,
+                        box_smoothing: bs2,
+                        measured_inradius: _,
+                    } = &**g2;
+                    (e, k, r, an, i, rf, d, di, fr, sp, br, bs)
+                        == (e2, k2, r2, an2, i2, rf2, d2, di2, fr2, sp2, br2, bs2)
+                        && same_paths(a, p, b, q)
                 }
                 // Destructured whole, so a field added later can't go uncompared.
                 (Op::BackgroundBlur(o), Op::BackgroundBlur(o2)) => {
