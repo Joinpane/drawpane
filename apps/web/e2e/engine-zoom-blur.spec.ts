@@ -4184,5 +4184,799 @@ for (const build of ["browser", "webgl"] as const) {
         expect(stats.p99, `${route}: max=${stats.max} p99=${stats.p99}`).toBeLessThanOrEqual(1);
       }
     });
+
+    test("budgeted halo memory-limit fallback keeps slices bounded and preserves view caches", async ({
+      page,
+    }) => {
+      test.setTimeout(300_000);
+      await openEngine(page, build);
+      const expectedBackend = build === "webgl" ? "webgl2" : "webgpu";
+      // Many stripes under a wide backgroundBlur (radius 1500, reach 2250 px at zoom 1, past the
+      // 1792 px hardware max_view_apron): at zoom 0.1 reach is 225 px <= 512 tile halo so tiles
+      // warm and settle exact; at zoom 1 the view routes through render_whole_sliced -> Halo.
+      // Under a tight gpu_bytes cap that Halo exceeds, advance_pending_whole must step down to
+      // budgeted CoarseWhole (divisor 1, 2 or 4) stand-in slices (plan 1, distinct from Halo's
+      // plan 4), cooperatively pause within CoarseWhole itself, keep cached tiles intact while
+      // the stand-in shows, queue a quiet retry (pending 1, inProgress true), and never drop to
+      // an unbudgeted synchronous walk.
+      const list = new ListWriter(0xffffffff, 1);
+      list.reset();
+      let nextId = 1;
+      const add = (
+        parent: number,
+        x: number,
+        y: number,
+        w: number,
+        h: number,
+        ops: WireRecord["ops"],
+        opacity = 1,
+        flags = 0,
+      ) => {
+        const id = nextId++;
+        list.set(id, parent, {
+          flags,
+          transform: [1, 0, 0, 1, x, y],
+          opacity,
+          width: w,
+          height: h,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [{ kind: "rect", w, h, radii: [0, 0, 0, 0], smoothing: 0 }],
+          ops,
+          coarse: [],
+        });
+        return id;
+      };
+      const fill = (c: [number, number, number], a = 1): WireRecord["ops"] => [
+        { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [...c, a] } },
+      ];
+      // 1,500 root stripe segments (300 rows x 5 columns) make an unbudgeted CoarseWhole walk
+      // clearly exceed a slice budget and require many cooperative pauses within CoarseWhole
+      // itself; two nested isolation groups (opacity < 1) with wide + medium backdrop blurs
+      // mirror heavy reader-halo pages like Control Center (G2) while leaving sharp 3 px stripes
+      // exposed around the edges so Halo (plan 4), CoarseWhole div=1 (plan 1), and scaled
+      // CoarseWhole div=2 (plan 1) separate cleanly in both memory and rendered output.
+      add(ROOT, -1600, -1600, 3200, 3200, fill([0.92, 0.2, 0.15]));
+      for (let row = 0; row < 300; row++) {
+        const c: [number, number, number] = row % 2 === 0 ? [0.1, 0.25, 0.78] : [0.08, 0.62, 0.3];
+        for (let col = 0; col < 5; col++) {
+          add(ROOT, -1500 + col * 600, -1500 + row * 10, 580, 3, fill(c));
+        }
+      }
+      const group = add(ROOT, -1600, -1600, 3200, 3200, [{ op: "children" }], 0.95, FLAG.isolate);
+      add(group, 800, 1152, 1600, 896, [
+        { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 1500 },
+        ...fill([0.95, 0.95, 0.98], 0.08),
+      ]);
+      const inner = add(group, 800, 1152, 1600, 896, [{ op: "children" }], 0.95, FLAG.isolate);
+      add(inner, 0, 0, 1600, 896, [
+        { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 28 },
+        ...fill([0.95, 0.98, 1.0], 0.08),
+      ]);
+      const bytes = [...list.finish()];
+
+      const out = await page.evaluate(
+        async ({ bytes, expectedBackend }) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          type Engine = InstanceType<typeof glue.Engine>;
+          const bg = new Float32Array([1, 1, 1, 1]);
+          const [w, h, dpr] = [1920, 1024, 1];
+          type Facts = {
+            ok: boolean;
+            code: number;
+            message: string;
+            plan: number;
+            pending: number;
+            inProgress: boolean;
+            exact: boolean;
+            standin: boolean;
+            drawn: number;
+            held: number;
+            cpuMs: number;
+          };
+          const facts = (o: {
+            ok: boolean;
+            code: number;
+            message: string;
+            plan: number;
+            pending: number;
+            in_progress: boolean;
+            exact: boolean;
+            standin: boolean;
+            tiles_drawn: number;
+            held: number;
+            cpu_ms: number;
+            free(): void;
+          }): Facts => {
+            const f = {
+              ok: o.ok,
+              code: o.code,
+              message: o.message,
+              plan: o.plan,
+              pending: o.pending,
+              inProgress: o.in_progress,
+              exact: o.exact,
+              standin: o.standin,
+              drawn: o.tiles_drawn,
+              held: o.held,
+              cpuMs: o.cpu_ms,
+            };
+            o.free();
+            return f;
+          };
+          const must = (f: Facts) => {
+            if (!f.ok) throw new Error(f.message);
+            return f;
+          };
+          const entry = <T>(answer: T | undefined): T => {
+            if (answer === undefined) throw new Error("missing GPU entry point");
+            return answer;
+          };
+          const renderAt = (e: Engine, zoom: number, budget: number) =>
+            facts(
+              entry(e.renderGpu?.(w, h, zoom, w / 2, h / 2, dpr, bg, false, budget, true)) as never,
+            );
+          const ahead = (e: Engine, budget: number) =>
+            facts(entry(e.renderGpuAhead?.(bg, budget)) as never);
+
+          const runCase = async (
+            capMiB: number,
+            tileMiB: number,
+            midPresent: boolean,
+            drainRetry: boolean,
+          ) => {
+            const dev = await glue.createGpu(null, 0);
+            if (!dev.ok) throw new Error(dev.message);
+            if (dev.backend !== expectedBackend) throw new Error(`wrong backend ${dev.backend}`);
+            const engine = new glue.Engine(0, 0);
+            try {
+              const capBytes = capMiB * 1024 * 1024;
+              must(facts(engine.setLimit("tile_bytes", tileMiB * 1024 * 1024) as never));
+              must(facts(engine.setLimit("gpu_bytes", capBytes) as never));
+              must(facts(entry(engine.attachGpu?.(dev)) as never));
+              dev.free();
+              must(facts(engine.apply(new Uint8Array(bytes)) as never));
+
+              // 1. Warm the tiled cache at zoom 0.1 so view caches hold live tiles.
+              let warm = must(renderAt(engine, 0.1, 8));
+              for (let i = 0; i < 400 && !warm.exact; i++) {
+                ahead(engine, 8);
+                warm = must(renderAt(engine, 0.1, 8));
+              }
+              const warmHeld = warm.held;
+
+              // 2. Zoom to 1 with a tight 0.75 ms slice budget and run until the first whole frame
+              // finishes (`drawn === 1`), tracking per-slice pause deltas and cpuMs.
+              const sliceBudget = 0.75;
+              let prevPauses = engine.gpuCounters?.()[29] ?? 0;
+              const first = must(renderAt(engine, 1, sliceBudget));
+              let midShown: Facts | null = null;
+              let last = first;
+              let slices = 0;
+              const history: Array<{ dpauses: number; cpuMs: number; drawn: number }> = [];
+              {
+                const p = engine.gpuCounters?.()[29] ?? 0;
+                history.push({ dpauses: p - prevPauses, cpuMs: first.cpuMs, drawn: first.drawn });
+                prevPauses = p;
+              }
+              while (last.ok && last.drawn === 0 && last.inProgress && slices < 4000) {
+                if (midPresent && slices === 2) {
+                  midShown = must(renderAt(engine, 1, -1));
+                }
+                if (slices > 0 && slices % 10 === 0) {
+                  await new Promise((r) => setTimeout(r, 0));
+                }
+                last = ahead(engine, sliceBudget);
+                const p = engine.gpuCounters?.()[29] ?? 0;
+                history.push({ dpauses: p - prevPauses, cpuMs: last.cpuMs, drawn: last.drawn });
+                prevPauses = p;
+                slices++;
+              }
+              // Count the contiguous pause streak immediately before the finishing slice:
+              // CoarseStart yields with dpauses === 0 (pause_begun) and Halo Far finishes with
+              // dpauses === 0, so this streak counts ONLY cooperative pauses inside the finishing
+              // pass itself (0 if CoarseWhole were walked unbudgeted).
+              let tailPauseSlices = 0;
+              let maxTailSliceMs = last.cpuMs;
+              for (let i = history.length - 2; i >= 0; i--) {
+                const s = history[i];
+                if (!s || s.dpauses <= 0) break;
+                tailPauseSlices++;
+                if (s.cpuMs > maxTailSliceMs) maxTailSliceMs = s.cpuMs;
+              }
+              const finishSliceMs = last.cpuMs;
+              const shown = last.ok ? renderAt(engine, 1, -1) : last;
+
+              const px = await entry(engine.gpuPixels?.());
+              if (!(px instanceof Uint8Array)) throw new Error(px.message);
+              let nonWhite = 0;
+              for (let i = 0; i < px.length; i += 4) {
+                if (px[i] !== 255 || px[i + 1] !== 255 || px[i + 2] !== 255) nonWhite++;
+              }
+
+              // 3. Before quiet retry fires, composite-only return to the cached tiled view must
+              // reuse cached tiles with zero redraws.
+              let back: Facts | null = null;
+              let retryEnd: Facts | null = null;
+              let retryShown: Facts | null = null;
+              let retrySlices = 0;
+              let retryMaxSliceMs = 0;
+              if (!drainRetry) {
+                back = must(renderAt(engine, 0.1, -1));
+              } else {
+                // Keep the view still past RETRY_QUIET_MS (200 ms) so PendingStage::Retry fires,
+                // drops the tile page, and finishes cleanly in budgeted slices without looping.
+                const tRetry = performance.now();
+                let r = last;
+                while (
+                  r.ok &&
+                  (r.inProgress || r.pending > 0) &&
+                  retrySlices < 4000 &&
+                  performance.now() - tRetry < 15_000
+                ) {
+                  if (performance.now() - tRetry < 260) {
+                    await new Promise((res) => setTimeout(res, 10));
+                  } else if (retrySlices % 10 === 0) {
+                    await new Promise((res) => setTimeout(res, 0));
+                  }
+                  r = ahead(engine, 4);
+                  if (r.cpuMs > retryMaxSliceMs) retryMaxSliceMs = r.cpuMs;
+                  retrySlices++;
+                }
+                retryEnd = r;
+                retryShown = r.ok ? renderAt(engine, 1, -1) : r;
+              }
+
+              return {
+                capMiB,
+                warm,
+                warmHeld,
+                first,
+                midShown,
+                last,
+                shown,
+                slices,
+                tailPauseSlices,
+                finishSliceMs,
+                maxTailSliceMs,
+                nonWhite,
+                back,
+                retryEnd,
+                retryShown,
+                retrySlices,
+                retryMaxSliceMs,
+                px,
+              };
+            } finally {
+              engine.free();
+            }
+          };
+
+          // Reference with generous memory so Halo completes without hitting Limit (plan 4).
+          const haloRef = await runCase(240, 16, false, false);
+          // Case A: enough room for cached 16 MiB tile page + CoarseWhole div=1 (~104 MiB),
+          // too tight for Halo (~150+ MiB). Preserves cached tiles and queues quiet retry.
+          const coarseWhole = await runCase(116, 16, false, false);
+          // Case B: 88 MiB (tightest cap, no tile pages fit): forces scaled CoarseWhole div=2
+          // without futilely queuing a retry when no tile pages exist to drop.
+          const coarseScaled = await runCase(88, 16, true, false);
+          // Case C: letting CoarseWhole sit still past RETRY_QUIET_MS triggers the quiet retry,
+          // drops tile pages, and upgrades cleanly to Halo (plan 4) in budgeted slices.
+          const coarseAfterQuiet = await runCase(116, 16, false, true);
+          const diffCount = (a: Uint8Array, b: Uint8Array) => {
+            let n = 0;
+            for (let i = 0; i < a.length; i += 4) {
+              if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2]) n++;
+            }
+            return n;
+          };
+          const stripPx = <T extends { px: Uint8Array }>(r: T) => {
+            const { px: _px, ...rest } = r;
+            return rest;
+          };
+          return {
+            haloRef: stripPx(haloRef),
+            coarseWhole: {
+              ...stripPx(coarseWhole),
+              diffFromHalo: diffCount(coarseWhole.px, haloRef.px),
+            },
+            coarseScaled: {
+              ...stripPx(coarseScaled),
+              diffFromHalo: diffCount(coarseScaled.px, haloRef.px),
+              diffFromCoarseWhole: diffCount(coarseScaled.px, coarseWhole.px),
+            },
+            coarseAfterQuiet: stripPx(coarseAfterQuiet),
+          };
+        },
+        { bytes, expectedBackend },
+      );
+
+      console.log(`[zoom-blur ${build}] budgeted halo fallback: ${JSON.stringify(out)}`);
+      // Verify the halo reference itself finished cleanly on plan 4 (reader-halo) without falling back.
+      expect(out.haloRef.warm.exact, "haloRef: warm tiled view settled exact").toBe(true);
+      expect(out.haloRef.warmHeld, "haloRef: warm view cached tiles").toBeGreaterThan(0);
+      expect(out.haloRef.first.inProgress, "haloRef: first slice yields").toBe(true);
+      expect(out.haloRef.last.ok, `haloRef: ${out.haloRef.last.message}`).toBe(true);
+      expect(out.haloRef.last.drawn, "haloRef: finished whole frame").toBe(1);
+      expect(out.haloRef.last.inProgress, "haloRef: settled with no retry queued").toBe(false);
+      expect(out.haloRef.last.pending, "haloRef: nothing pending").toBe(0);
+      expect(out.haloRef.shown.plan, "haloRef: settled on reader-halo plan 4").toBe(4);
+      expect(out.haloRef.shown.exact, "haloRef: reduced halo reports not exact").toBe(false);
+      expect(out.haloRef.shown.standin, "haloRef: reduced halo reports standin").toBe(true);
+      expect(out.haloRef.nonWhite, "haloRef: rendered non-blank content").toBeGreaterThan(100_000);
+      expect(out.haloRef.back?.exact, "haloRef: return to tiles exact").toBe(true);
+      expect(out.haloRef.back?.plan, "haloRef: return stays on tiles").toBe(0);
+      expect(out.haloRef.back?.drawn, "haloRef: zero redraws on return").toBe(0);
+      expect(out.haloRef.back?.held, "haloRef: cached tiles preserved").toBeGreaterThanOrEqual(
+        out.haloRef.warmHeld,
+      );
+
+      for (const [label, c, hasCachedTiles] of [
+        ["coarseWhole", out.coarseWhole, true],
+        ["coarseScaled", out.coarseScaled, false],
+      ] as const) {
+        expect(c.warm.exact, `${label}: warm view settled exact`).toBe(true);
+        expect(c.first.inProgress, `${label}: first slice yields instead of blocking`).toBe(true);
+        expect(c.last.ok, `${label}: ${c.last.message}`).toBe(true);
+        expect(c.last.drawn, `${label}: coarse stand-in frame landed`).toBe(1);
+        // F4: CoarseWhole is always a stand-in (plan 1 on renderGpu, distinct from Halo's plan 4)
+        // and queues F1's quiet retry whenever tile pages are held (pending 1, inProgress true).
+        expect(
+          c.shown.plan,
+          `${label}: present-only reports stand-in plan 1, not reader-halo 4`,
+        ).toBe(1);
+        expect(c.shown.exact, `${label}: reduced fallback reports not exact`).toBe(false);
+        expect(c.shown.standin, `${label}: reduced fallback reports standin`).toBe(true);
+        // F2: prove CoarseWhole itself paused cooperatively across multiple slices (not just Halo
+        // prior to fallback) and kept its finishing slice bounded.
+        expect(
+          c.tailPauseSlices,
+          `${label}: CoarseWhole cooperatively paused across multiple slices`,
+        ).toBeGreaterThanOrEqual(2);
+        expect(
+          c.finishSliceMs,
+          `${label}: CoarseWhole finishing slice stayed bounded (got ${c.finishSliceMs} ms)`,
+        ).toBeLessThan(25);
+        expect(c.nonWhite, `${label}: rendered non-blank content`).toBeGreaterThan(100_000);
+        expect(
+          c.diffFromHalo,
+          `${label}: actually took coarse fallback instead of full halo`,
+        ).toBeGreaterThan(0);
+        if (hasCachedTiles) {
+          expect(c.warmHeld, `${label}: warm view cached tiles`).toBeGreaterThan(0);
+          expect(c.last.pending, `${label}: quiet retry queued while tile pages held`).toBe(1);
+          expect(c.last.inProgress, `${label}: not settled before quiet retry`).toBe(true);
+          expect(c.shown.pending, `${label}: present-only keeps retry pending`).toBe(1);
+          expect(c.shown.inProgress, `${label}: present-only keeps draw in progress`).toBe(true);
+          expect(
+            c.last.held,
+            `${label}: view tile cache preserved before quiet retry`,
+          ).toBeGreaterThanOrEqual(c.warmHeld);
+          expect(c.shown.held, `${label}: present-only keeps tile cache`).toBeGreaterThanOrEqual(
+            c.warmHeld,
+          );
+          expect(
+            c.back?.held,
+            `${label}: view tile cache still held on return before quiet retry`,
+          ).toBeGreaterThanOrEqual(c.warmHeld);
+          expect(c.back?.exact, `${label}: subsequent view still reaches exact`).toBe(true);
+          expect(c.back?.plan, `${label}: subsequent tiled view stays on tiles`).toBe(0);
+          expect(c.back?.drawn, `${label}: cached tiles reused with zero redraws`).toBe(0);
+        } else {
+          expect(c.last.pending, `${label}: no futile retry without tile pages`).toBe(0);
+          expect(c.last.inProgress, `${label}: finished cleanly without tile pages`).toBe(false);
+        }
+        if (c.midShown) {
+          expect(c.midShown.inProgress, `${label}: mid-progress present keeps draw alive`).toBe(
+            true,
+          );
+          expect(
+            c.midShown.held,
+            `${label}: mid-progress keeps view caches`,
+          ).toBeGreaterThanOrEqual(c.warmHeld);
+        }
+      }
+      expect(
+        out.coarseScaled.diffFromCoarseWhole,
+        "coarseScaled stepped down to a smaller divisor than coarseWhole",
+      ).toBeGreaterThan(0);
+      // After sitting still past RETRY_QUIET_MS, quiet retry drops tile pages and terminates
+      // cleanly in budgeted slices (no infinite retry loop).
+      expect(out.coarseAfterQuiet.retryEnd?.ok, "coarseAfterQuiet: retry finished ok").toBe(true);
+      expect(
+        out.coarseAfterQuiet.retryEnd?.inProgress,
+        "coarseAfterQuiet: retry settled without looping",
+      ).toBe(false);
+      expect(out.coarseAfterQuiet.retryEnd?.pending, "coarseAfterQuiet: nothing left pending").toBe(
+        0,
+      );
+      expect(
+        out.coarseAfterQuiet.retryShown?.held,
+        "coarseAfterQuiet: quiet retry dropped regular tile pages",
+      ).toBeLessThan(out.coarseAfterQuiet.warmHeld);
+      expect(
+        out.coarseAfterQuiet.retryShown?.plan,
+        "coarseAfterQuiet: still stand-in (1) or halo (4), never falsely exact",
+      ).not.toBe(2);
+    });
+
+    test("native pass refused beside held tile pages retries exact after quiet while keeping slices bounded", async ({
+      page,
+    }) => {
+      test.setTimeout(240_000);
+      await openEngine(page, build);
+      const expectedBackend = build === "webgl" ? "webgl2" : "webgpu";
+      // Small 200x200 view with a backdrop blur reaching ~517 px (past the 512 tile halo, padded
+      // view ~1236x1236 = 1.53M px < 2M software cap) inside nested isolation groups. Warming a
+      // 64 MiB tile page at 10% zoom leaves tight gpu_bytes caps unable to fit the native pass
+      // beside the tile page. The engine must show a budgeted stand-in first (keeping tiles),
+      // keep display monotonic during the 200 ms quiet window and retry slices, then drop tile
+      // pages (keeping the overview) and finish exact (plan 2) in budgeted slices.
+      const list = new ListWriter(0xffffffff, 1);
+      list.reset();
+      let nextId = 1;
+      const add = (
+        parent: number,
+        x: number,
+        y: number,
+        w: number,
+        h: number,
+        ops: WireRecord["ops"],
+        opacity = 1,
+        flags = 0,
+      ) => {
+        const id = nextId++;
+        list.set(id, parent, {
+          flags,
+          transform: [1, 0, 0, 1, x, y],
+          opacity,
+          width: w,
+          height: h,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [{ kind: "rect", w, h, radii: [Math.min(w, h) * 0.1, 8, 0, 24], smoothing: 0 }],
+          ops,
+          coarse: [],
+        });
+        return id;
+      };
+      const fill = (c: [number, number, number], a = 1): WireRecord["ops"] => [
+        { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [...c, a] } },
+      ];
+      add(ROOT, -2000, -2000, 4000, 4000, fill([0.92, 0.2, 0.15]));
+      for (let row = 0; row < 300; row++) {
+        const c: [number, number, number] = row % 2 === 0 ? [0.1, 0.25, 0.78] : [0.08, 0.62, 0.3];
+        for (let col = 0; col < 3; col++) {
+          add(ROOT, -1500 + col * 1000, -1500 + row * 10, 960, 4, fill(c));
+        }
+      }
+      let parent = ROOT;
+      for (let d = 0; d < 3; d++) {
+        parent = add(
+          parent,
+          d === 0 ? -1600 : 0,
+          d === 0 ? -1600 : 0,
+          3200,
+          3200,
+          [{ op: "children" }],
+          0.95,
+          FLAG.isolate,
+        );
+        add(
+          parent,
+          1500 + d * 20,
+          1500 + d * 20,
+          400 - d * 40,
+          400 - d * 40,
+          d === 0
+            ? [
+                { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 345 },
+                ...fill([0.95, 0.95, 0.98], 0.1),
+              ]
+            : fill([0.2, 0.9, 0.95], 0.3),
+        );
+      }
+      const bytes = [...list.finish()];
+
+      const out = await page.evaluate(
+        async ({ bytes, expectedBackend }) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          type Engine = InstanceType<typeof glue.Engine>;
+          const bg = new Float32Array([1, 1, 1, 1]);
+          const [w, h] = [200, 200];
+          type Facts = {
+            ok: boolean;
+            code: number;
+            message: string;
+            plan: number;
+            pending: number;
+            inProgress: boolean;
+            exact: boolean;
+            standin: boolean;
+            drawn: number;
+            held: number;
+            cpuMs: number;
+          };
+          const facts = (o: {
+            ok: boolean;
+            code: number;
+            message: string;
+            plan: number;
+            pending: number;
+            in_progress: boolean;
+            exact: boolean;
+            standin: boolean;
+            tiles_drawn: number;
+            held: number;
+            cpu_ms: number;
+            free(): void;
+          }): Facts => {
+            const f = {
+              ok: o.ok,
+              code: o.code,
+              message: o.message,
+              plan: o.plan,
+              pending: o.pending,
+              inProgress: o.in_progress,
+              exact: o.exact,
+              standin: o.standin,
+              drawn: o.tiles_drawn,
+              held: o.held,
+              cpuMs: o.cpu_ms,
+            };
+            o.free();
+            return f;
+          };
+          const must = (f: Facts) => {
+            if (!f.ok) throw new Error(f.message);
+            return f;
+          };
+          const entry = <T>(answer: T | undefined): T => {
+            if (answer === undefined) throw new Error("missing GPU entry point");
+            return answer;
+          };
+          const renderAt = (e: Engine, zoom: number, budget: number) =>
+            facts(
+              entry(e.renderGpu?.(w, h, zoom, w / 2, h / 2, 1, bg, false, budget, true)) as never,
+            );
+          const ahead = (e: Engine, budget: number) =>
+            facts(entry(e.renderGpuAhead?.(bg, budget)) as never);
+          const pixels = async (e: Engine) => {
+            const px = await entry(e.gpuPixels?.());
+            if (!(px instanceof Uint8Array)) throw new Error(px.message);
+            return px;
+          };
+          const diffBytes = (a: Uint8Array, b: Uint8Array) => {
+            let n = 0;
+            for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) n++;
+            return n;
+          };
+
+          // Reference exact frame drawn synchronously with generous memory.
+          const refPx = await (async () => {
+            const dev = await glue.createGpu(null, 0);
+            if (!dev.ok) throw new Error(dev.message);
+            if (dev.backend !== expectedBackend) throw new Error(`wrong backend ${dev.backend}`);
+            const engine = new glue.Engine(0, 0);
+            try {
+              must(facts(entry(engine.attachGpu?.(dev)) as never));
+              dev.free();
+              must(facts(engine.apply(new Uint8Array(bytes)) as never));
+              const f = must(renderAt(engine, 1, 0));
+              if (!f.exact || f.plan !== 2) {
+                throw new Error(`ref not exact: plan=${f.plan} exact=${f.exact}`);
+              }
+              return await pixels(engine);
+            } finally {
+              engine.free();
+            }
+          })();
+
+          const results = [];
+          for (const capMiB of [120, 90, 70, 60]) {
+            const dev = await glue.createGpu(null, 0);
+            if (!dev.ok) throw new Error(dev.message);
+            if (dev.backend !== expectedBackend) throw new Error(`wrong backend ${dev.backend}`);
+            const engine = new glue.Engine(0, 0);
+            try {
+              must(facts(engine.setLimit("tile_bytes", 64 << 20) as never));
+              must(facts(engine.setLimit("gpu_bytes", capMiB << 20) as never));
+              must(facts(entry(engine.attachGpu?.(dev)) as never));
+              dev.free();
+              must(facts(engine.apply(new Uint8Array(bytes)) as never));
+
+              // Warm a 64 MiB tile page at 10% zoom.
+              let warm = must(renderAt(engine, 0.1, 8));
+              for (let i = 0; i < 400 && !warm.exact; i++) {
+                ahead(engine, 8);
+                warm = must(renderAt(engine, 0.1, 8));
+              }
+              const warmHeld = warm.held;
+
+              // Zoom to 100% with an 8 ms slice budget.
+              const first = must(renderAt(engine, 1, 8));
+              let cur = first;
+              let maxSliceMs = first.cpuMs;
+              let slicesToStandin = 0;
+              while (
+                cur.ok &&
+                cur.drawn === 0 &&
+                (cur.inProgress || cur.pending > 0) &&
+                slicesToStandin < 2000
+              ) {
+                cur = ahead(engine, 8);
+                if (cur.cpuMs > maxSliceMs) maxSliceMs = cur.cpuMs;
+                slicesToStandin++;
+              }
+              const standin = cur;
+              const standinShown = standin.ok ? renderAt(engine, 1, -1) : standin;
+              const standinPx = standin.ok ? await pixels(engine) : new Uint8Array(0);
+
+              // Idle through the 200 ms quiet window and retry slices until exact lands, checking
+              // monotonic display and cooperative pauses AFTER tile pages drop (use a 0.5 ms retry
+              // slice budget so the retried native pass itself pauses across multiple slices even
+              // on fast GPUs, ensuring an unbudgeted retry fails on post-drop pauses directly).
+              const tIdle = performance.now();
+              let idleSlices = 0;
+              let maxIdleSliceMs = 0;
+              let midPresents = 0;
+              let midDiffFromStandin = 0;
+              let postDropPauses = 0;
+              let postDropInProgressSlices = 0;
+              let postDropMidPresents = 0;
+              let shown = standinShown;
+              let prevPauses = engine.gpuCounters?.()[29] ?? 0;
+              while (
+                cur.ok &&
+                (cur.inProgress || cur.pending > 0 || !shown.exact) &&
+                idleSlices < 1000 &&
+                performance.now() - tIdle < 4000
+              ) {
+                await new Promise((r) => setTimeout(r, 4));
+                const beforePauses = prevPauses;
+                cur = ahead(engine, 0.5);
+                if (cur.cpuMs > maxIdleSliceMs) maxIdleSliceMs = cur.cpuMs;
+                idleSlices++;
+                const afterPauses = engine.gpuCounters?.()[29] ?? 0;
+                const dpauses = afterPauses - beforePauses;
+                prevPauses = afterPauses;
+                shown = renderAt(engine, 1, -1);
+                if (shown.cpuMs > maxIdleSliceMs) maxIdleSliceMs = shown.cpuMs;
+                const dropped = shown.held < warmHeld;
+                if (dropped) {
+                  postDropPauses += dpauses;
+                  if (cur.drawn === 0 && cur.inProgress) {
+                    postDropInProgressSlices++;
+                  }
+                }
+                if (!shown.exact && cur.drawn === 0 && standinPx.length > 0) {
+                  midPresents++;
+                  if (dropped) postDropMidPresents++;
+                  const midPx = await pixels(engine);
+                  midDiffFromStandin += diffBytes(midPx, standinPx);
+                }
+                if (cur.drawn > 0 && !cur.inProgress && cur.pending === 0) break;
+              }
+              if (cur.ok) shown = renderAt(engine, 1, -1);
+              const finalPx = shown.ok ? await pixels(engine) : new Uint8Array(0);
+
+              results.push({
+                capMiB,
+                warmExact: warm.exact,
+                warmHeld,
+                standin: {
+                  ok: standin.ok,
+                  exact: standin.exact,
+                  plan: standin.plan,
+                  pending: standin.pending,
+                  inProgress: standin.inProgress,
+                  held: standin.held,
+                },
+                standinShown: {
+                  exact: standinShown.exact,
+                  plan: standinShown.plan,
+                  pending: standinShown.pending,
+                  inProgress: standinShown.inProgress,
+                  held: standinShown.held,
+                },
+                final: {
+                  ok: shown.ok,
+                  exact: shown.exact,
+                  plan: shown.plan,
+                  pending: shown.pending,
+                  inProgress: shown.inProgress,
+                  standin: shown.standin,
+                },
+                slicesToStandin,
+                idleSlices,
+                maxSliceMs,
+                maxIdleSliceMs,
+                midPresents,
+                midDiffFromStandin,
+                postDropPauses,
+                postDropInProgressSlices,
+                postDropMidPresents,
+                diffFromRef: finalPx.length === refPx.length ? diffBytes(finalPx, refPx) : -1,
+              });
+            } finally {
+              engine.free();
+            }
+          }
+          return results;
+        },
+        { bytes, expectedBackend },
+      );
+
+      console.log(`[zoom-blur ${build}] native quiet-retry exactness: ${JSON.stringify(out)}`);
+      for (const r of out) {
+        expect(r.warmExact, `${r.capMiB} MiB: warm tiles settled exact`).toBe(true);
+        expect(r.warmHeld, `${r.capMiB} MiB: warmed tile cache`).toBeGreaterThan(0);
+        expect(r.final.ok, `${r.capMiB} MiB: finished cleanly`).toBe(true);
+        expect(r.final.exact, `${r.capMiB} MiB: view reached exact after quiet retry`).toBe(true);
+        expect(r.final.plan, `${r.capMiB} MiB: settled on native direct plan 2`).toBe(2);
+        expect(r.final.pending, `${r.capMiB} MiB: nothing left pending`).toBe(0);
+        expect(r.final.inProgress, `${r.capMiB} MiB: no work still in progress`).toBe(false);
+        expect(r.final.standin, `${r.capMiB} MiB: not a stand-in`).toBe(false);
+        expect(r.diffFromRef, `${r.capMiB} MiB: exact pixels match reference`).toBe(0);
+        expect(
+          r.midDiffFromStandin,
+          `${r.capMiB} MiB: stand-in stayed monotonic during retry`,
+        ).toBe(0);
+        expect(
+          Math.max(r.maxSliceMs, r.maxIdleSliceMs),
+          `${r.capMiB} MiB: every slice stayed budgeted`,
+        ).toBeLessThan(80);
+        // Whenever the first pass was refused beside tiles (standin not exact), verify retry was
+        // queued and tiles survived until quiet retry ran.
+        if (!r.standinShown.exact) {
+          expect(r.standinShown.plan, `${r.capMiB} MiB: intermediate stand-in reports plan 1`).toBe(
+            1,
+          );
+          expect(r.standin.pending, `${r.capMiB} MiB: retry queued`).toBe(1);
+          expect(r.standin.inProgress, `${r.capMiB} MiB: draw still active`).toBe(true);
+          expect(
+            r.standinShown.held,
+            `${r.capMiB} MiB: tile cache kept until quiet retry`,
+          ).toBeGreaterThanOrEqual(r.warmHeld);
+          expect(
+            r.postDropPauses,
+            `${r.capMiB} MiB: retried native pass paused cooperatively after tile drop`,
+          ).toBeGreaterThanOrEqual(1);
+          expect(
+            r.postDropInProgressSlices,
+            `${r.capMiB} MiB: at least one in-progress slice followed tile drop`,
+          ).toBeGreaterThanOrEqual(1);
+          expect(
+            r.postDropMidPresents,
+            `${r.capMiB} MiB: monotonic intermediate present checked after tile drop`,
+          ).toBeGreaterThanOrEqual(1);
+        }
+      }
+      // At least the tightest cap (60 MiB) must have actually exercised the stand-in -> quiet retry
+      // path rather than fitting natively on the first pass.
+      const tightest = out.find((r) => r.capMiB === 60);
+      expect(
+        tightest?.standinShown.exact,
+        "60 MiB: exercised reduced stand-in before exact retry",
+      ).toBe(false);
+      expect(
+        tightest?.postDropPauses,
+        "60 MiB: retried native pass paused cooperatively after dropping tiles",
+      ).toBeGreaterThanOrEqual(1);
+      expect(
+        tightest?.postDropInProgressSlices,
+        "60 MiB: retried native pass spanned multiple slices after dropping tiles",
+      ).toBeGreaterThanOrEqual(1);
+      expect(
+        tightest?.midPresents,
+        "60 MiB: verified monotonic intermediate presents",
+      ).toBeGreaterThan(0);
+    });
   });
 }
