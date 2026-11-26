@@ -4184,5 +4184,290 @@ for (const build of ["browser", "webgl"] as const) {
         expect(stats.p99, `${route}: max=${stats.max} p99=${stats.p99}`).toBeLessThanOrEqual(1);
       }
     });
+
+    test("budgeted halo memory-limit fallback keeps slices bounded and preserves view caches", async ({
+      page,
+    }) => {
+      test.setTimeout(240_000);
+      await openEngine(page, build);
+      const expectedBackend = build === "webgl" ? "webgl2" : "webgpu";
+      // Many stripes under a wide backgroundBlur (radius 1500, reach 2250 px at zoom 1, past the
+      // 1792 px hardware max_view_apron): at zoom 0.1 reach is 225 px <= 512 tile halo so tiles
+      // warm and settle exact; at zoom 1 the view routes through render_whole_sliced -> Halo.
+      // Under a tight gpu_bytes cap that Halo exceeds, advance_pending_whole must step down to
+      // budgeted CoarseWhole (divisor 1, 2 or 4) slices, report inexact (plan 4, exact false),
+      // keep cached tiles intact, and never drop to an unbudgeted synchronous render_whole.
+      const list = new ListWriter(0xffffffff, 1);
+      list.reset();
+      let nextId = 1;
+      const add = (
+        parent: number,
+        x: number,
+        y: number,
+        w: number,
+        h: number,
+        ops: WireRecord["ops"],
+        opacity = 1,
+        flags = 0,
+      ) => {
+        const id = nextId++;
+        list.set(id, parent, {
+          flags,
+          transform: [1, 0, 0, 1, x, y],
+          opacity,
+          width: w,
+          height: h,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [{ kind: "rect", w, h, radii: [0, 0, 0, 0], smoothing: 0 }],
+          ops,
+          coarse: [],
+        });
+        return id;
+      };
+      const fill = (c: [number, number, number], a = 1): WireRecord["ops"] => [
+        { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [...c, a] } },
+      ];
+      // Background stripes at ROOT let resumable walks pause cooperatively between records; two
+      // nested isolation groups (opacity < 1) with translucent fills and wide + medium backdrop
+      // blurs mirror heavy reader-halo pages like Control Center (G2) while leaving sharp root
+      // stripes exposed around the edges so Halo, CoarseWhole div=1, and scaled CoarseWhole div=2
+      // are all cleanly separated in both memory and rendered output.
+      add(ROOT, -1600, -1600, 3200, 3200, fill([0.92, 0.2, 0.15]));
+      for (let i = 0; i < 500; i++) {
+        const c: [number, number, number] = i % 2 === 0 ? [0.1, 0.25, 0.78] : [0.08, 0.62, 0.3];
+        add(ROOT, -1500, -1500 + i * 6, 3000, 3, fill(c));
+      }
+      const group = add(ROOT, -1600, -1600, 3200, 3200, [{ op: "children" }], 0.95, FLAG.isolate);
+      add(group, 800, 1152, 1600, 896, [
+        { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 1500 },
+        ...fill([0.95, 0.95, 0.98], 0.08),
+      ]);
+      const inner = add(group, 800, 1152, 1600, 896, [{ op: "children" }], 0.95, FLAG.isolate);
+      add(inner, 0, 0, 1600, 896, [
+        { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 28 },
+        ...fill([0.95, 0.98, 1.0], 0.08),
+      ]);
+      const bytes = [...list.finish()];
+
+      const out = await page.evaluate(
+        async ({ bytes, expectedBackend }) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          type Engine = InstanceType<typeof glue.Engine>;
+          const bg = new Float32Array([1, 1, 1, 1]);
+          const [w, h, dpr] = [1920, 1024, 1];
+          type Facts = {
+            ok: boolean;
+            code: number;
+            message: string;
+            plan: number;
+            pending: number;
+            inProgress: boolean;
+            exact: boolean;
+            standin: boolean;
+            drawn: number;
+            held: number;
+            cpuMs: number;
+          };
+          const facts = (o: {
+            ok: boolean;
+            code: number;
+            message: string;
+            plan: number;
+            pending: number;
+            in_progress: boolean;
+            exact: boolean;
+            standin: boolean;
+            tiles_drawn: number;
+            held: number;
+            cpu_ms: number;
+            free(): void;
+          }): Facts => {
+            const f = {
+              ok: o.ok,
+              code: o.code,
+              message: o.message,
+              plan: o.plan,
+              pending: o.pending,
+              inProgress: o.in_progress,
+              exact: o.exact,
+              standin: o.standin,
+              drawn: o.tiles_drawn,
+              held: o.held,
+              cpuMs: o.cpu_ms,
+            };
+            o.free();
+            return f;
+          };
+          const must = (f: Facts) => {
+            if (!f.ok) throw new Error(f.message);
+            return f;
+          };
+          const entry = <T>(answer: T | undefined): T => {
+            if (answer === undefined) throw new Error("missing GPU entry point");
+            return answer;
+          };
+          const renderAt = (e: Engine, zoom: number, budget: number) =>
+            facts(
+              entry(e.renderGpu?.(w, h, zoom, w / 2, h / 2, dpr, bg, false, budget, true)) as never,
+            );
+          const ahead = (e: Engine, budget: number) =>
+            facts(entry(e.renderGpuAhead?.(bg, budget)) as never);
+
+          const runCase = async (capMiB: number, midPresent: boolean) => {
+            const dev = await glue.createGpu(null, 0);
+            if (!dev.ok) throw new Error(dev.message);
+            if (dev.backend !== expectedBackend) throw new Error(`wrong backend ${dev.backend}`);
+            const engine = new glue.Engine(0, 0);
+            try {
+              // Keep tile atlas compact (one 16 MiB 2048x2048 page) so resident baseline is a
+              // deterministic ~40 MiB (16 MiB glyph atlas + 16 MiB tile page + 6 MiB frames +
+              // 2 MiB tile scratch) on both software and hardware GPUs.
+              const capBytes = capMiB * 1024 * 1024;
+              must(facts(engine.setLimit("tile_bytes", 16 * 1024 * 1024) as never));
+              must(facts(engine.setLimit("gpu_bytes", capBytes) as never));
+              must(facts(entry(engine.attachGpu?.(dev)) as never));
+              dev.free();
+              must(facts(engine.apply(new Uint8Array(bytes)) as never));
+
+              // 1. Warm the tiled cache at zoom 0.1 (budget > 0 uses tiled rendering) so view
+              // caches hold live tiles in the 16 MiB tile atlas page.
+              let warm = must(renderAt(engine, 0.1, 8));
+              for (let i = 0; i < 400 && !warm.exact; i++) {
+                ahead(engine, 8);
+                warm = must(renderAt(engine, 0.1, 8));
+              }
+              const warmHeld = warm.held;
+
+              // 2. Zoom to 1 where the halo stage exceeds gpu_bytes while cached tiles stay resident.
+              const pausesBefore = engine.gpuCounters?.()[29] ?? 0;
+              const first = must(renderAt(engine, 1, 0.05));
+              let midShown: Facts | null = null;
+              let last = first;
+              let slices = 0;
+              while (last.ok && last.inProgress && slices < 4000) {
+                if (midPresent && slices === 2) {
+                  midShown = must(renderAt(engine, 1, -1));
+                }
+                last = ahead(engine, 0.05);
+                slices++;
+              }
+              const pausesAfter = engine.gpuCounters?.()[29] ?? 0;
+              const shown = last.ok ? renderAt(engine, 1, -1) : last;
+
+              const px = await entry(engine.gpuPixels?.());
+              if (!(px instanceof Uint8Array)) throw new Error(px.message);
+              let nonWhite = 0;
+              for (let i = 0; i < px.length; i += 4) {
+                if (px[i] !== 255 || px[i + 1] !== 255 || px[i + 2] !== 255) nonWhite++;
+              }
+
+              // 3. Composite-only return to the cached tiled view: caches must still be warm
+              // (0 tiles redrawn, exact: true immediately, plan: 0).
+              const back = must(renderAt(engine, 0.1, -1));
+
+              return {
+                capMiB,
+                warm,
+                warmHeld,
+                first,
+                midShown,
+                last,
+                shown,
+                slices,
+                pauses: pausesAfter - pausesBefore,
+                nonWhite,
+                back,
+                px,
+              };
+            } finally {
+              engine.free();
+            }
+          };
+
+          // Reference with generous memory so Halo completes without hitting Limit.
+          const haloRef = await runCase(240, false);
+          // Case A: enough room for cached tiles + CoarseWhole div=1 + readback (~106 MiB),
+          // too tight for Halo (~150+ MiB).
+          const coarseWhole = await runCase(116, false);
+          // Case B: 88 MiB: enough for cached tiles (16 MiB page) + scaled CoarseWhole div=2 +
+          // readback (~70 MiB), too tight for CoarseWhole div=1 (~94+ MiB).
+          const coarseScaled = await runCase(88, true);
+          const diffCount = (a: Uint8Array, b: Uint8Array) => {
+            let n = 0;
+            for (let i = 0; i < a.length; i += 4) {
+              if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2]) n++;
+            }
+            return n;
+          };
+          const stripPx = <T extends { px: Uint8Array }>(r: T) => {
+            const { px: _px, ...rest } = r;
+            return rest;
+          };
+          return {
+            haloRef: stripPx(haloRef),
+            coarseWhole: {
+              ...stripPx(coarseWhole),
+              diffFromHalo: diffCount(coarseWhole.px, haloRef.px),
+            },
+            coarseScaled: {
+              ...stripPx(coarseScaled),
+              diffFromHalo: diffCount(coarseScaled.px, haloRef.px),
+              diffFromCoarseWhole: diffCount(coarseScaled.px, coarseWhole.px),
+            },
+          };
+        },
+        { bytes, expectedBackend },
+      );
+
+      console.log(`[zoom-blur ${build}] budgeted halo fallback: ${JSON.stringify(out)}`);
+      for (const [label, c] of [
+        ["coarseWhole", out.coarseWhole],
+        ["coarseScaled", out.coarseScaled],
+      ] as const) {
+        expect(c.warm.exact, `${label}: warm tiled view settled exact`).toBe(true);
+        expect(c.warmHeld, `${label}: warm view cached tiles`).toBeGreaterThan(0);
+        expect(c.first.inProgress, `${label}: first slice yields instead of blocking`).toBe(true);
+        expect(c.last.ok, `${label}: ${c.last.message}`).toBe(true);
+        expect(c.last.inProgress, `${label}: finishes cleanly`).toBe(false);
+        expect(c.last.pending, `${label}: nothing left pending`).toBe(0);
+        expect(c.slices, `${label}: completes over multiple budgeted slices`).toBeGreaterThan(1);
+        expect(c.pauses, `${label}: cooperatively paused during fallback`).toBeGreaterThan(0);
+        expect(c.shown.exact, `${label}: reduced fallback reports not exact`).toBe(false);
+        expect(c.shown.standin, `${label}: reduced fallback reports standin`).toBe(true);
+        expect(c.shown.plan, `${label}: reduced fallback reports reader-halo plan`).toBe(4);
+        expect(c.last.held, `${label}: view tile cache not wiped`).toBeGreaterThanOrEqual(
+          c.warmHeld,
+        );
+        expect(
+          c.back.held,
+          `${label}: view tile cache still held on return`,
+        ).toBeGreaterThanOrEqual(c.warmHeld);
+        expect(c.nonWhite, `${label}: rendered non-blank content`).toBeGreaterThan(100_000);
+        expect(
+          c.diffFromHalo,
+          `${label}: actually took coarse fallback instead of full halo`,
+        ).toBeGreaterThan(0);
+        expect(c.back.exact, `${label}: subsequent view still reaches exact`).toBe(true);
+        expect(c.back.plan, `${label}: subsequent tiled view stays on tiles`).toBe(0);
+        expect(c.back.drawn, `${label}: cached tiles reused with zero redraws`).toBe(0);
+        if (c.midShown) {
+          expect(c.midShown.inProgress, `${label}: mid-progress present keeps draw alive`).toBe(
+            true,
+          );
+          expect(
+            c.midShown.held,
+            `${label}: mid-progress keeps view caches`,
+          ).toBeGreaterThanOrEqual(c.warmHeld);
+        }
+      }
+      expect(
+        out.coarseScaled.diffFromCoarseWhole,
+        "coarseScaled stepped down to a smaller divisor than coarseWhole",
+      ).toBeGreaterThan(0);
+    });
   });
 }

@@ -1087,8 +1087,8 @@ impl PendingWhole {
     /// Whether a stage's walk is paused, holding its scratch and glass masks.
     fn paused(&self) -> bool {
         match &self.stage {
-            PendingStage::Start => false,
-            PendingStage::Native(pass) => pass.paused.is_some(),
+            PendingStage::Start | PendingStage::CoarseStart(_) => false,
+            PendingStage::Native(pass) | PendingStage::CoarseWhole(_, pass) => pass.paused.is_some(),
             PendingStage::Halo(run) => run.pass.as_ref().is_some_and(|p| p.paused.is_some()),
         }
     }
@@ -1099,7 +1099,15 @@ enum PendingStage {
     Start,
     Native(Box<WholePass>),
     Halo(Box<HaloRun>),
+    /// Staged memory-limit fallback at divisor `div` (1, 2 or 4): yields if the failed stage used
+    /// the slice up before starting `CoarseWhole`.
+    CoarseStart(u32),
+    /// Unpadded coarse-reader whole pass at divisor `div` (1 = device resolution, 2/4 = scaled)
+    /// when the full halo exceeds GPU memory.
+    CoarseWhole(u32, Box<WholePass>),
 }
+
+type CoarseTile = (u32, u32, u32, u32);
 
 /// The whole frame a `PendingWhole` finished, shown now: what a present-only frame of the same
 /// view shows again (`Gpu::present_sliced_frame`).
@@ -2755,6 +2763,7 @@ impl Gpu {
     }
 
     /// Refuses an allocation of `bytes` (beside `freed`, about to go) past the budget.
+    #[inline(never)]
     fn reserve(&self, bytes: usize, freed: usize, what: &str) -> Result<()> {
         // Read-back buffers in flight count against the budget.
         let held = self.bytes() + self.readbacks.bytes.get();
@@ -2784,6 +2793,7 @@ impl Gpu {
     }
 
     /// Releases unused pooled textures until `pool_bytes <= keep_bytes`.
+    #[inline(never)]
     fn trim_pools(&mut self, keep_bytes: usize) {
         if keep_bytes == 0 {
             if !self.reader_halo.as_ref().is_some_and(ReaderHalo::capturing) {
@@ -3676,6 +3686,7 @@ impl Gpu {
         width as usize * height as usize * 4
     }
 
+    #[inline(never)]
     fn check_frame(&self, dst: usize, width: u32, height: u32, work: usize, freed: usize) -> Result<()> {
         self.check_texture_size(width, height, "a frame")?;
         let bytes = Self::frame_bytes(width, height);
@@ -3701,7 +3712,10 @@ impl Gpu {
         {
             return Ok(());
         }
-        self.check_frame(dst, width, height, 0, 0)?;
+        if self.check_frame(dst, width, height, 0, 0).is_err() {
+            self.trim_pools(0);
+            self.check_frame(dst, width, height, 0, 0)?;
+        }
         if let Some(old) = self.frames.get(dst) {
             old.texture.destroy();
         }
@@ -4499,14 +4513,28 @@ impl Gpu {
     /// `tile_bytes`, in whole pages. Pages past it go, with their tiles. When no pages are
     /// allocated yet, picks 4096x4096 (64 tiles/page) if device limits and budget allow.
     fn fit_tiles(&mut self, tile_bytes: usize) {
-        let beside = self.bytes_beside_tiles() + self.readbacks.bytes.get() + HEADROOM;
-        let room = self.budget.saturating_sub(beside);
-        let limit = tile_bytes.min(room);
-        if self.pages.is_empty() {
-            self.page_side = self.choose_page_side(limit);
+        let mut limit = 0;
+        let mut pbytes = 0;
+        let mut pages = 0;
+        for attempt in 0..2 {
+            let beside = self.bytes_beside_tiles() + self.readbacks.bytes.get() + HEADROOM;
+            limit = tile_bytes.min(self.budget.saturating_sub(beside));
+            if self.pages.is_empty() {
+                self.page_side = self.choose_page_side(limit);
+            }
+            pbytes = self.page_bytes();
+            pages = (limit / pbytes).min(1024);
+            if attempt == 0
+                && tile_bytes > 0
+                && (pages < self.pages.len() || pages == 0)
+                && self.active.is_none()
+                && !self.walk_paused()
+            {
+                self.trim_transient();
+                continue;
+            }
+            break;
         }
-        let mut pbytes = self.page_bytes();
-        let mut pages = (limit / pbytes).min(1024);
         while self.pages.len() > pages {
             if let Some(p) = self.pages.pop() {
                 p.texture.destroy();
@@ -4525,9 +4553,38 @@ impl Gpu {
     }
 
     /// Room remaining under `self.budget` for `self.readers` allocations.
-    fn reader_budget_room(&self) -> usize {
-        self.budget
-            .saturating_sub(self.bytes() - self.readers.bytes() + self.readbacks.bytes.get())
+    /// Trims unused pooled textures when pools exceed the keep cap or headroom is tight, so
+    /// stale offscreen targets from an earlier pass never starve a reader allocation.
+    #[inline(never)]
+    fn reader_budget_room(&mut self) -> usize {
+        if self.pool_bytes > GPU_POOL_KEEP_BYTES {
+            self.trim_pools(GPU_POOL_KEEP_BYTES);
+        }
+        for attempt in 0..2 {
+            let room = self
+                .budget
+                .saturating_sub(self.bytes() - self.readers.bytes() + self.readbacks.bytes.get());
+            if attempt == 1 || room >= self.readers.bytes().saturating_add(GPU_POOL_KEEP_BYTES) {
+                return room;
+            }
+            self.trim_pools(0);
+        }
+        0
+    }
+
+    /// Releases transient pools, scratch and reader working textures between failed whole-frame
+    /// stages without touching cached tiles, overview tiles, shown frames, images or glyph atlas.
+    #[inline(never)]
+    fn trim_transient(&mut self) {
+        self.trim_pools(0);
+        if self.active.is_none() && !self.walk_paused() {
+            self.readers.evict_frame_scratch();
+            self.readers.flush_retired();
+            if let Some(old) = self.scratches[1].take() {
+                self.bytes -= Self::frame_bytes(old.width, old.height) * 2;
+                old.texture.destroy();
+            }
+        }
     }
 
     /// The page and position of a slot, making its page (within the budget `fit_tiles` set).
@@ -5044,12 +5101,14 @@ impl Gpu {
             .as_ref()
             .map_or(0, |s| (s.width as usize) * (s.height as usize) * 4 * 2);
         let bytes = (width as usize) * (height as usize) * 4 * 2;
-        for other in 0..self.scratches.len() {
+        for step in 0..=self.scratches.len() {
             if self.reserve(bytes, freed, "the scratch tile").is_ok() {
                 break;
             }
-            if other != slot
-                && let Some(old) = self.scratches[other].take()
+            if step == 0 {
+                self.trim_pools(0);
+            } else if step - 1 != slot
+                && let Some(old) = self.scratches[step - 1].take()
             {
                 self.bytes -= Self::frame_bytes(old.width, old.height) * 2;
                 old.texture.destroy();
@@ -5602,8 +5661,8 @@ impl Gpu {
     }
 
     /// Runs the pending whole frame until `budget_ms` runs out. Returns its counts once it
-    /// finished and showed. A slice that hits a memory limit, anywhere, drops what the slices
-    /// drew and draws the frame as `render_whole` does, at once: what a synchronous frame shows.
+    /// finished and showed. Never drops view caches or runs an unbudgeted whole pass on a memory
+    /// limit: `step_pending_whole` steps down to a budgeted coarse fallback instead.
     #[inline(never)]
     fn advance_pending_whole(&mut self, store: &Store, budget_ms: f64) -> Result<Option<DrawStats>> {
         let Some(mut pending) = self.pending_whole.take() else {
@@ -5621,39 +5680,7 @@ impl Gpu {
             Ok(Some(stats)) => stats,
             Err(e) => {
                 self.drop_pending_stage(&mut pending);
-                if e.code != ErrorCode::Limit {
-                    return Err(e);
-                }
-                // What the slices held (the stand-in, scratch, tiles and caches) goes, so the
-                // frame drawn at once gets the memory a frame drawn at once from the start had.
-                // The overview stays (a zoom out stands on it), unless the frame still doesn't
-                // fit: then it goes too, and the frame is drawn once more.
-                self.clear_view_caches();
-                self.release_spare_frames();
-                let drawn = self.render_whole(
-                    store,
-                    &pending.frame,
-                    pending.background,
-                    pending.inputs.generation,
-                    false,
-                    None,
-                    pending.plan.as_ref(),
-                );
-                match drawn {
-                    Err(e) if e.code == ErrorCode::Limit && self.overview_page.is_some() => {
-                        self.clear_tiles();
-                        self.render_whole(
-                            store,
-                            &pending.frame,
-                            pending.background,
-                            pending.inputs.generation,
-                            false,
-                            None,
-                            pending.plan.as_ref(),
-                        )?
-                    }
-                    drawn => drawn?,
-                }
+                return Err(e);
             }
         };
         self.sliced_frame = Some(SlicedFrame {
@@ -5674,10 +5701,165 @@ impl Gpu {
         Ok(Some(stats))
     }
 
+    /// Moves an already-begun pass's active draw into `pass.paused` when setup exhausted the
+    /// slice budget, so `self.active` is never left dangling across a stand-in presentation.
+    fn pause_begun(&mut self, pass: &mut WholePass) {
+        pass.paused = Some(PausedWalk {
+            active: self.active.take().expect("a begun pass"),
+            scratch: self.active_scratch,
+            backdrop_gen: self.backdrop_gen,
+            checkpoint: None,
+        });
+        self.scene.reset();
+    }
+
+    /// Starts the halo stage after a native limit, or queues `CoarseStart(1)` if halo setup itself
+    /// hits a memory limit or there is no halo plan.
+    #[inline(never)]
+    fn start_halo_or_coarse(
+        &mut self,
+        pending: &PendingWhole,
+        halo_plan: Option<&ViewportHaloPlan>,
+    ) -> Result<PendingStage> {
+        self.trim_transient();
+        let Some(plan) = halo_plan else {
+            return Ok(PendingStage::CoarseStart(1));
+        };
+        match self.begin_reader_halo(
+            &pending.frame,
+            pending.background,
+            pending.inputs.generation,
+            false,
+            plan,
+        ) {
+            Ok(run) => Ok(PendingStage::Halo(Box::new(run))),
+            Err(e) if e.code == ErrorCode::Limit => {
+                self.trim_transient();
+                Ok(PendingStage::CoarseStart(1))
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Starts a scratch tile draw: ensures scratch, resets per-tile state, and begins `active`.
+    #[inline(never)]
+    fn begin_scratch_draw(&mut self, side: u32, background: [f32; 4], detail: bool) -> Result<()> {
+        self.ensure_scratch(side)?;
+        self.masks.begin_frame();
+        self.atlas.at = (0, 0, 0);
+        self.scene.reset_and_resize(side as u16, side as u16);
+        self.readers.begin_frame();
+        self.blur.begin_frame();
+        self.shadow.begin_frame();
+        self.backdrop_gen += 1;
+        self.begin_active(None, None, side, side, background, detail);
+        Ok(())
+    }
+
+    /// Flushes `self.scene`, optionally copies the active scratch into a frame or tile page,
+    /// submits, and trims transient pools.
+    #[inline(never)]
+    fn finish_scratch_to_frame(
+        &mut self,
+        copy: Option<(bool, usize, (u32, u32), CoarseTile)>,
+        flush_why: u8,
+    ) -> Result<ActiveDraw> {
+        self.flush_why = flush_why;
+        if let Err(e) = self.flush_scene_gpu(true) {
+            self.discard_draw();
+            return Err(e);
+        }
+        if let Some((is_page, idx, src_origin, (x0, y0, tw, th))) = copy {
+            let mut encoder = self.take_encoder("copy scratch");
+            let (sw, sh) = {
+                let s = self.scratches[self.active_scratch].as_ref().expect("scratch");
+                (s.width, s.height)
+            };
+            if !is_page && src_origin == (0, 0) && (sw < tw || sh < th) {
+                self.blit_scratch_scaled(&mut encoder, idx, (tw, th), (sw, sh));
+            } else {
+                let source = &self.scratches[self.active_scratch].as_ref().expect("scratch").texture;
+                let destination = if is_page {
+                    &self.page(idx).texture
+                } else {
+                    &self.frames[idx].texture
+                };
+                copy_rect(&mut encoder, source, destination, src_origin, (x0, y0), (tw, th));
+            }
+            self.stash_encoder(encoder);
+        }
+        self.submit_active_encoder();
+        let active = self.active.take().expect("active draw");
+        self.clear_clip_mask_cache();
+        self.recycle_scene_textures();
+        self.trim_pools(GPU_POOL_KEEP_BYTES);
+        Ok(active)
+    }
+
+    /// Bilinearly upscales the active scratch texture (`src_size`) to `frames[dst]` (`dst_size`)
+    /// using the compositor pipeline for a scaled-down coarse fallback pass.
+    fn blit_scratch_scaled(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+        dst: usize,
+        dst_size: (u32, u32),
+        src_size: (u32, u32),
+    ) {
+        self.ensure_compositor();
+        let c = self.compositor.as_mut().expect("compositor");
+        let (w, h) = (dst_size.0 as f32, dst_size.1 as f32);
+        let (sw, sh) = (src_size.0 as f32, src_size.1 as f32);
+        let quad: [f32; 12] = [
+            0.0,
+            0.0,
+            w,
+            h,
+            0.0,
+            0.0,
+            1.0,
+            1.0,
+            0.5 / sw,
+            0.5 / sh,
+            (sw - 0.5) / sw,
+            (sh - 0.5) / sh,
+        ];
+        let mut qbytes = [0u8; 48];
+        for (i, v) in quad.iter().enumerate() {
+            qbytes[i * 4..(i + 1) * 4].copy_from_slice(&v.to_le_bytes());
+        }
+        self.queue.write_buffer(&c.instances, 0, &qbytes);
+        if c.uniform_size != dst_size {
+            let mut ubytes = [0u8; 16];
+            ubytes[0..4].copy_from_slice(&w.to_le_bytes());
+            ubytes[4..8].copy_from_slice(&h.to_le_bytes());
+            self.queue.write_buffer(&c.uniforms, 0, &ubytes);
+            c.uniform_size = dst_size;
+        }
+        let scratch = self.scratches[self.active_scratch].as_ref().expect("scratch");
+        let group = c.create_bind_group(&self.device, &scratch.view, "scaled fallback");
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("scaled fallback"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: &self.frames[dst].view,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            ..Default::default()
+        });
+        pass.set_pipeline(&c.pipeline);
+        pass.set_vertex_buffer(0, c.instances.slice(0..48));
+        pass.set_bind_group(0, &group, &[]);
+        pass.draw(0..4, 0..1);
+    }
+
     /// Runs `pending`'s stages on for this slice: sets up its native pass (or, where the view
-    /// needs it, its reduced reader-halo frame), walks it, and finishes it. A native pass that
-    /// hits a memory limit goes on as the reduced frame, as `render_whole` does. Answers the
-    /// finished frame's counts, or None while it isn't done.
+    /// needs it, its reduced reader-halo frame), walks it, and finishes it. A native or halo pass
+    /// that hits a memory limit steps down to a budgeted coarse fallback (divisor 1, 2 or 4)
+    /// instead of wiping caches or running an unbudgeted whole pass.
     #[inline(never)]
     fn step_pending_whole(
         &mut self,
@@ -5711,61 +5893,118 @@ impl Gpu {
                     pending.stage = match native {
                         Ok(WholeStart::Unchanged(stats)) => return Ok(Some(stats)),
                         Ok(WholeStart::Pass(pass)) => PendingStage::Native(pass),
-                        Err(e)
-                            if e.code == ErrorCode::Limit
-                                && let Some(plan) = halo_plan =>
-                        {
-                            PendingStage::Halo(Box::new(self.begin_reader_halo(
-                                &pending.frame,
-                                pending.background,
-                                generation,
-                                false,
-                                plan,
-                            )?))
-                        }
+                        Err(e) if e.code == ErrorCode::Limit => self.start_halo_or_coarse(pending, halo_plan)?,
                         Err(e) => return Err(e),
                     };
                 }
-                PendingStage::Native(mut pass) => match self.walk_whole_pass(store, &mut pass, budgeted) {
-                    Ok(false) => {
-                        pending.stage = PendingStage::Native(pass);
-                        return Ok(None);
+                PendingStage::Native(mut pass) => {
+                    let res = match self.walk_whole_pass(store, &mut pass, budgeted) {
+                        Ok(false) => {
+                            pending.stage = PendingStage::Native(pass);
+                            return Ok(None);
+                        }
+                        Ok(true) => self.finish_whole_pass(pass, generation),
+                        Err(e) => Err(e),
+                    };
+                    match res {
+                        Ok(stats) => return Ok(Some(stats)),
+                        Err(e) if e.code == ErrorCode::Limit => {
+                            pending.stage = self.start_halo_or_coarse(pending, halo_plan)?;
+                        }
+                        Err(e) => return Err(e),
                     }
-                    Ok(true) => return self.finish_whole_pass(pass, generation).map(Some),
-                    Err(e)
-                        if e.code == ErrorCode::Limit
-                            && let Some(plan) = halo_plan =>
-                    {
-                        pending.stage = PendingStage::Halo(Box::new(self.begin_reader_halo(
-                            &pending.frame,
-                            pending.background,
-                            generation,
-                            false,
-                            plan,
-                        )?));
-                    }
-                    Err(e) => return Err(e),
-                },
+                }
                 PendingStage::Halo(mut run) => {
                     let plan = halo_plan.expect("a halo plan");
-                    return match self.step_reader_halo(store, &mut run, plan, budgeted) {
+                    match self.step_reader_halo(store, &mut run, plan, budgeted) {
                         Ok(None) => {
                             pending.stage = PendingStage::Halo(run);
-                            Ok(None)
+                            return Ok(None);
                         }
                         Ok(Some(stats)) => {
                             self.end_reader_halo(&mut run, plan, true);
-                            Ok(Some(stats))
+                            return Ok(Some(stats));
                         }
                         Err(e) => {
                             self.end_reader_halo(&mut run, plan, false);
-                            Err(e)
+                            if e.code == ErrorCode::Limit {
+                                self.trim_transient();
+                                pending.stage = PendingStage::CoarseStart(1);
+                            } else {
+                                return Err(e);
+                            }
+                        }
+                    }
+                }
+                PendingStage::CoarseStart(div) => {
+                    self.trim_transient();
+                    let (sw, sh) = (size.0.div_ceil(div).max(1), size.1.div_ceil(div).max(1));
+                    let scaled = if div == 1 {
+                        pending.frame
+                    } else {
+                        Frame {
+                            width: sw as u16,
+                            height: sh as u16,
+                            view: Affine::scale_non_uniform(
+                                f64::from(sw) / f64::from(size.0),
+                                f64::from(sh) / f64::from(size.1),
+                            ) * pending.frame.view,
+                            detail: false,
+                            area: IRect {
+                                x0: 0,
+                                y0: 0,
+                                x1: sw as i32,
+                                y1: sh as i32,
+                            },
                         }
                     };
+                    match self.begin_whole_pass(store, &scaled, pending.background, generation, true, None, None, true)
+                    {
+                        Ok(WholeStart::Unchanged(stats)) => return Ok(Some(stats)),
+                        Ok(WholeStart::Pass(mut pass)) => {
+                            pass.size = size;
+                            pass.view = pending.frame.view;
+                            pending.stage = PendingStage::CoarseWhole(div, pass);
+                        }
+                        Err(e) if e.code == ErrorCode::Limit && div < 4 => {
+                            self.trim_transient();
+                            pending.stage = PendingStage::CoarseStart(div * 2);
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
+                PendingStage::CoarseWhole(div, mut pass) => {
+                    let res = match self.walk_whole_pass(store, &mut pass, budgeted) {
+                        Ok(false) => {
+                            pending.stage = PendingStage::CoarseWhole(div, pass);
+                            return Ok(None);
+                        }
+                        Ok(true) => self.finish_whole_pass(pass, generation),
+                        Err(e) => Err(e),
+                    };
+                    match res {
+                        Ok(mut stats) => {
+                            stats.exact = false;
+                            stats.standin = true;
+                            stats.plan = 4;
+                            return Ok(Some(stats));
+                        }
+                        Err(e) if e.code == ErrorCode::Limit && div < 4 => {
+                            self.trim_transient();
+                            pending.stage = PendingStage::CoarseStart(div * 2);
+                        }
+                        Err(e) => return Err(e),
+                    }
                 }
             }
             // A stage's setup may have used the slice up.
             if budgeted && self.deadline_reached() {
+                match &mut pending.stage {
+                    PendingStage::Native(pass) | PendingStage::CoarseWhole(_, pass) if pass.paused.is_none() => {
+                        self.pause_begun(pass);
+                    }
+                    _ => {}
+                }
                 return Ok(None);
             }
         }
@@ -5775,8 +6014,8 @@ impl Gpu {
     /// frame's captures); it starts again from its setup if run again.
     fn drop_pending_stage(&mut self, pending: &mut PendingWhole) {
         match std::mem::replace(&mut pending.stage, PendingStage::Start) {
-            PendingStage::Start => {}
-            PendingStage::Native(pass) => {
+            PendingStage::Start | PendingStage::CoarseStart(_) => {}
+            PendingStage::Native(pass) | PendingStage::CoarseWhole(_, pass) => {
                 if pass.paused.is_some() {
                     self.drop_walk();
                 }
@@ -5790,19 +6029,6 @@ impl Gpu {
                 self.end_reader_halo(&mut run, plan, false);
             }
         }
-    }
-
-    /// Forgets the frame shown (a stand-in) and frees the frame textures past the first: the next
-    /// frame draws into the first, as an engine's first frame does.
-    fn release_spare_frames(&mut self) {
-        self.cur = None;
-        self.direct_slices = None;
-        while self.frames.len() > 1 {
-            let old = self.frames.pop().expect("a frame");
-            self.bytes -= Self::frame_bytes(old.width, old.height);
-            old.texture.destroy();
-        }
-        self.screen = crate::pacing::Screen::default();
     }
 
     /// Drops the whole frame being drawn over slices, if any, and forgets the one shown.
@@ -6095,6 +6321,9 @@ impl Gpu {
         }
         // Keep the supersampled replay and its reader/mask/prefix working set comfortably within
         // the GPU memory budget so supersampling steps down gracefully before hitting Limit.
+        if self.pool_bytes > GPU_POOL_KEEP_BYTES {
+            self.trim_pools(GPU_POOL_KEEP_BYTES);
+        }
         let scratch_slot = if is_far {
             FAR_HALO_SCRATCH_SLOT
         } else {
@@ -6402,13 +6631,7 @@ impl Gpu {
                             // the pass, its target taken along as a paused walk's is.
                             if allow_yield && self.deadline_reached() {
                                 let mut pass = pass;
-                                pass.paused = Some(PausedWalk {
-                                    active: self.active.take().expect("a begun pass"),
-                                    scratch: self.active_scratch,
-                                    backdrop_gen: self.backdrop_gen,
-                                    checkpoint: None,
-                                });
-                                self.scene.reset();
+                                self.pause_begun(&mut pass);
                                 self.swap_halo_reader_planes(is_far);
                                 run.pass = Some(pass);
                                 return Ok(None);
@@ -6446,7 +6669,7 @@ impl Gpu {
                             self.reader_halo.as_mut().expect("reader halo").capture = None;
                             let native = plan.native_samples;
                             let samples = (native != run.frame.area).then_some(native);
-                            match self.begin_whole_pass(
+                            let mut pass = match self.begin_whole_pass(
                                 store,
                                 &run.frame,
                                 run.background,
@@ -6458,7 +6681,13 @@ impl Gpu {
                             )? {
                                 WholeStart::Pass(pass) => pass,
                                 WholeStart::Unchanged(_) => unreachable!("a halo frame always draws"),
+                            };
+                            if allow_yield && self.deadline_reached() {
+                                self.pause_begun(&mut pass);
+                                run.pass = Some(pass);
+                                return Ok(None);
                             }
+                            pass
                         }
                     };
                     if !self.walk_whole_pass(store, &mut pass, allow_yield)? {
@@ -7044,6 +7273,7 @@ impl Gpu {
         })
     }
 
+    #[inline(never)]
     fn recycle_halo_prefix(&mut self, prefix: HaloPatch) {
         let bytes = Self::frame_bytes(prefix.texture.width(), prefix.texture.height());
         self.bytes -= bytes;
@@ -7118,10 +7348,17 @@ impl Gpu {
         }
         let dst = self.next_frame();
         let padded = match samples {
-            Some(bounds) => Some(self.padded_view(bounds, (width, height))?),
+            Some(bounds) => Some(match self.padded_view(bounds, (width, height)) {
+                Ok(p) => p,
+                Err(e) if e.code == ErrorCode::Limit => {
+                    self.trim_pools(0);
+                    self.padded_view(bounds, (width, height))?
+                }
+                Err(e) => return Err(e),
+            }),
             None => (scratch_target && !capturing).then_some(((0, 0), (width, height))),
         };
-        if !capturing {
+        if !capturing && padded.is_none() {
             self.ensure_frame(dst, width, height)?;
         }
         if prefix.is_none() {
@@ -7274,11 +7511,6 @@ impl Gpu {
             ..
         } = *pass;
         let total = total.expect("a walked pass");
-        self.flush_why = 3;
-        if let Err(e) = self.flush_scene_gpu(true) {
-            self.discard_draw();
-            return Err(e);
-        }
         // A pass that paused may have seen other frames take `dst`: copy into the next one now.
         let dst = if padded.is_some() && !capturing {
             let next = self.next_frame();
@@ -7290,26 +7522,8 @@ impl Gpu {
         } else {
             dst
         };
-        if let Some((start, _)) = padded {
-            let mut encoder = self.take_encoder("crop padded frame");
-            let source = &self.scratches[self.active_scratch]
-                .as_ref()
-                .expect("padded frame")
-                .texture;
-            copy_rect(
-                &mut encoder,
-                source,
-                &self.frames[dst].texture,
-                start,
-                (0, 0),
-                (width, height),
-            );
-            self.stash_encoder(encoder);
-        }
-        self.submit_active_encoder();
-        let active = self.active.take().expect("active draw");
-        self.clear_clip_mask_cache();
-        self.recycle_scene_textures();
+        let copy = padded.map(|(start, _)| (false, dst, start, (0, 0, width, height)));
+        let active = self.finish_scratch_to_frame(copy, 3)?;
         active.record_into(&mut stats, now() - t0);
         if capturing {
             stats.submits = self.submits.saturating_sub(submits0);
@@ -7343,6 +7557,7 @@ impl Gpu {
     /// sharp frame it was warped from, so the next frame warps from that again; a read-back shows
     /// this one (`pacing::Screen`).
     #[allow(clippy::too_many_arguments)]
+    #[inline(never)]
     fn present_motion_standin(
         &mut self,
         view: Affine,
@@ -8577,18 +8792,7 @@ impl Gpu {
         let side = TILE + 2 * h;
         // Every tile renders into the active scratch slot (ensured before walking so mid-tile
         // reader flushes can target it directly).
-        self.ensure_scratch(side)?;
-        // Each tile is its own render and submission: masks the tiles before it drew from may go
-        // now, and its run images pack from the atlas's top left again (the draws before run
-        // before any upload made after them).
-        self.masks.begin_frame();
-        self.atlas.at = (0, 0, 0);
-        self.scene.reset_and_resize(side as u16, side as u16);
-        self.readers.begin_frame();
-        self.blur.begin_frame();
-        self.shadow.begin_frame();
-        self.backdrop_gen += 1;
-        self.begin_active(None, None, side, side, background, coarse_readers);
+        self.begin_scratch_draw(side, background, coarse_readers)?;
         let tile = Frame {
             width: side as u16,
             height: side as u16,
@@ -8636,7 +8840,7 @@ impl Gpu {
             None
         } else {
             match place {
-                Some((p, x, y)) => Some((Some(p), (h, h), (x, y), (TILE, TILE))),
+                Some((p, x, y)) => Some((true, p, (h, h), (x, y, TILE, TILE))),
                 None => {
                     let t = i64::from(TILE);
                     let fx = i64::from(key.i) * t + plan.origin.0;
@@ -8648,43 +8852,17 @@ impl Gpu {
                         None
                     } else {
                         Some((
-                            None,
+                            false,
+                            dst,
                             (h + (x0 - fx) as u32, h + (y0 - fy) as u32),
-                            (x0 as u32, y0 as u32),
-                            ((x1 - x0) as u32, (y1 - y0) as u32),
+                            (x0 as u32, y0 as u32, (x1 - x0) as u32, (y1 - y0) as u32),
                         ))
                     }
                 }
             }
         };
 
-        self.flush_why = 4;
-        if let Err(e) = self.flush_scene_gpu(true) {
-            self.discard_draw();
-            return Err(e);
-        }
-        if let Some((page, src_origin, dst_origin, size)) = copy_info {
-            let mut encoder = self.take_encoder("tile copy");
-            let scratch = self.scratches[self.active_scratch].as_ref().expect("scratch");
-            let destination = match page {
-                Some(page) => &self.page(page).texture,
-                None => &self.frames[dst].texture,
-            };
-            copy_rect(
-                &mut encoder,
-                &scratch.texture,
-                destination,
-                src_origin,
-                dst_origin,
-                size,
-            );
-            self.stash_encoder(encoder);
-        }
-        self.submit_active_encoder();
-        let active = self.active.take().expect("active draw");
-        self.clear_clip_mask_cache();
-        self.recycle_scene_textures();
-        self.trim_pools(GPU_POOL_KEEP_BYTES);
+        let active = self.finish_scratch_to_frame(copy_info, 4)?;
         active.record_into(stats, now() - t0);
         Ok(exact)
     }
@@ -8740,15 +8918,7 @@ impl Gpu {
         };
         let h = tile_halo as u32;
         let side = TILE + 2 * h;
-        self.ensure_scratch(side)?;
-        self.masks.begin_frame();
-        self.atlas.at = (0, 0, 0);
-        self.scene.reset_and_resize(side as u16, side as u16);
-        self.readers.begin_frame();
-        self.blur.begin_frame();
-        self.shadow.begin_frame();
-        self.backdrop_gen += 1;
-        self.begin_active(None, None, side, side, background, coarse_readers);
+        self.begin_scratch_draw(side, background, coarse_readers)?;
         let tile = Frame {
             width: side as u16,
             height: side as u16,
@@ -8938,35 +9108,19 @@ impl Gpu {
                     },
                     None => None,
                 };
-                self.flush_why = 6;
-                if let Err(e) = self.flush_scene_gpu(true) {
-                    if let Some((s, _)) = place {
-                        self.tiles.release(key, s);
+                let copy = place.map(|(_, (page, x, y))| (true, page, (h, h), (x, y, TILE, TILE)));
+                let active = match self.finish_scratch_to_frame(copy, 6) {
+                    Ok(active) => active,
+                    Err(e) => {
+                        if let Some((s, _)) = place {
+                            self.tiles.release(key, s);
+                        }
+                        self.readers.drop_glass_mask_atlas();
+                        return Err(e);
                     }
-                    self.discard_draw();
-                    self.readers.drop_glass_mask_atlas();
-                    return Err(e);
-                }
-                if let Some((_, (page, x, y))) = place {
-                    let mut encoder = self.take_encoder("tile copy");
-                    let scratch = self.scratches[self.active_scratch].as_ref().expect("scratch");
-                    copy_rect(
-                        &mut encoder,
-                        &scratch.texture,
-                        &self.page(page).texture,
-                        (h, h),
-                        (x, y),
-                        (TILE, TILE),
-                    );
-                    self.stash_encoder(encoder);
-                }
-                self.submit_active_encoder();
-                let active = self.active.take().expect("active draw");
-                self.clear_clip_mask_cache();
-                self.recycle_scene_textures();
+                };
                 self.readers.drop_glass_mask_atlas();
                 self.readers.flush_retired();
-                self.trim_pools(GPU_POOL_KEEP_BYTES);
                 let slice_total = now() - t0;
                 active.record_into(stats, slice_total);
                 self.update_submit_ratio(slice_total, stats.submit_ms - sub0);
@@ -9043,6 +9197,7 @@ impl Gpu {
         self.clear_clip_mask_cache();
         self.scene.reset();
         self.recycle_scene_textures();
+        self.trim_pools(GPU_POOL_KEEP_BYTES);
         self.atlas.at = (0, 0, 0);
     }
 
