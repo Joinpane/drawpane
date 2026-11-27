@@ -888,14 +888,17 @@ function FileCard({
   const [name, setName] = useState(file.name);
   const [error, setError] = useState<string | null>(null);
   const finishing = useRef(false);
+  const cancelling = useRef(false);
 
   function startRename() {
     finishing.current = false;
+    cancelling.current = false;
     setName(file.name);
     setRenaming(true);
   }
 
   function cancelRename() {
+    cancelling.current = true;
     finishing.current = true;
     setName(file.name);
     setRenaming(false);
@@ -947,7 +950,7 @@ function FileCard({
 
   function commitRename(event?: FormEvent) {
     event?.preventDefault();
-    if (finishing.current) return;
+    if (finishing.current || cancelling.current) return;
     finishing.current = true;
     setRenaming(false);
     const next = name.trim();
@@ -988,17 +991,26 @@ function FileCard({
             className="dash__rename-form"
             onSubmit={commitRename}
             onBlur={(e) => {
+              if (cancelling.current) {
+                cancelRename();
+                return;
+              }
               if (!e.currentTarget.contains(e.relatedTarget as Node | null)) commitRename();
             }}
           >
             <input
               className="dash__rename"
               value={name}
-              onChange={(e) => setName(e.target.value)}
+              onChange={(e) => {
+                cancelling.current = false;
+                setName(e.target.value);
+              }}
               onKeyDown={(e) => {
                 if (e.key === "Escape") {
                   e.preventDefault();
                   cancelRename();
+                } else {
+                  cancelling.current = false;
                 }
               }}
               aria-label="File name"
@@ -1006,11 +1018,27 @@ function FileCard({
               autoFocus
             />
             <span className="dash__rename-actions">
-              <IconButton type="submit" icon="check" label="Save name" />
+              <IconButton
+                type="submit"
+                icon="check"
+                label="Save name"
+                onPointerDown={(e) => e.preventDefault()}
+                onMouseDown={(e) => e.preventDefault()}
+              />
               <IconButton
                 icon="close"
                 label="Cancel rename"
-                onPointerDown={(e) => e.preventDefault()}
+                onPointerDown={(e) => {
+                  cancelling.current = true;
+                  e.preventDefault();
+                }}
+                onMouseDown={(e) => {
+                  cancelling.current = true;
+                  e.preventDefault();
+                }}
+                onPointerCancel={() => {
+                  cancelling.current = false;
+                }}
                 onClick={cancelRename}
               />
             </span>

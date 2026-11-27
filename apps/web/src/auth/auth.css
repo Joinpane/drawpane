@@ -273,6 +273,7 @@
     padding-bottom: var(--space-200);
   }
   .provider-button {
+    box-sizing: border-box;
     min-height: 44px;
     height: auto;
     padding: var(--space-200) var(--space-400);

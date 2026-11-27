@@ -1,9 +1,12 @@
 /**
- * Mobile web team routes, account entry and file browsing on phone profiles
- * (360 px phone, Pixel 8, iPhone 15): passkey sign-in, drawer keyboard
- * navigation and dismissal, file search, compact tiles with visible touch
- * overflow menus, rename without double-click, enabled Kit store, New file
- * preset creation, Invite and account settings, and Inbox mention deep links.
+ * Mobile and tablet web team routes, account entry and file browsing:
+ * - 360 px phone, Pixel 8, iPhone 15 (Chromium with Playwright's iPhone 15
+ *   descriptor, defaultBrowserType stripped), and 768 x 1024 touch tablet.
+ * - Passkey sign-in, modal drawer keyboard nav, scroll-lock and Escape-with-menu,
+ *   file search, compact tiles with visible touch overflow menus, rename-commits-
+ *   exactly-once matrix (Enter, Escape, Cancel tap, Save tap, outside blur),
+ *   long team/project name overflow checks, enabled Kit store, New file preset
+ *   creation, Invite and account settings, and Inbox mention deep links.
  */
 import {
   type Browser,
@@ -32,17 +35,22 @@ type DebugWindow = {
   };
 };
 
-interface PhoneProfile {
+interface DeviceProfile {
   readonly name: string;
   readonly options: BrowserContextOptions;
 }
 
+/**
+ * Strip `defaultBrowserType` so descriptors like `devices["iPhone 15"]` run in
+ * this suite's Chromium project while keeping the device viewport, DPR, touch,
+ * and user-agent settings.
+ */
 function deviceOptions(descriptor: (typeof devices)[string]): BrowserContextOptions {
   const { defaultBrowserType: _ignored, ...rest } = descriptor;
   return rest;
 }
 
-const PHONE_PROFILES: readonly PhoneProfile[] = [
+const PHONE_PROFILES: readonly DeviceProfile[] = [
   {
     name: "360 px phone",
     options: {
@@ -57,10 +65,31 @@ const PHONE_PROFILES: readonly PhoneProfile[] = [
     options: deviceOptions(devices["Pixel 8"]),
   },
   {
-    name: "iPhone 15",
+    // Runs in Chromium using Playwright's iPhone 15 device descriptor (not WebKit).
+    name: "iPhone 15 (Chromium)",
     options: deviceOptions(devices["iPhone 15"]),
   },
 ];
+
+const TABLET_PORTRAIT_PROFILE: DeviceProfile = {
+  name: "768 px tablet portrait",
+  options: {
+    viewport: { width: 768, height: 1024 },
+    deviceScaleFactor: 2,
+    isMobile: true,
+    hasTouch: true,
+  },
+};
+
+const DESKTOP_PROFILE: DeviceProfile = {
+  name: "1280 px desktop",
+  options: {
+    viewport: { width: 1280, height: 800 },
+    deviceScaleFactor: 1,
+    isMobile: false,
+    hasTouch: false,
+  },
+};
 
 async function assertNoHorizontalScroll(page: Page) {
   const metrics = await page.evaluate(() => ({
@@ -70,11 +99,24 @@ async function assertNoHorizontalScroll(page: Page) {
   expect(metrics.scrollWidth).toBeLessThanOrEqual(metrics.clientWidth);
 }
 
-async function assertTouchTarget(locator: Locator, { minWidth = 44, minHeight = 44 } = {}) {
+async function assertTouchTarget(
+  locator: Locator,
+  { minWidth = 44, minHeight = 44, maxHeight = 48 } = {},
+) {
+  await expect(locator).toBeVisible();
   const box = await locator.boundingBox();
   expect(box).not.toBeNull();
   expect(box?.width ?? 0).toBeGreaterThanOrEqual(minWidth);
   expect(box?.height ?? 0).toBeGreaterThanOrEqual(minHeight);
+  expect(box?.height ?? 0).toBeLessThanOrEqual(maxHeight);
+}
+
+async function assertInsideViewport(locator: Locator, viewportWidth: number) {
+  await expect(locator).toBeVisible();
+  const box = await locator.boundingBox();
+  expect(box).not.toBeNull();
+  expect(box?.x ?? -1).toBeGreaterThanOrEqual(0);
+  expect((box?.x ?? 0) + (box?.width ?? 0)).toBeLessThanOrEqual(viewportWidth);
 }
 
 async function waitForLiveEditor(page: Page) {
@@ -89,13 +131,14 @@ async function waitForLiveEditor(page: Page) {
     .toBe("live");
 }
 
-async function createPhoneContext(
+async function createDeviceContext(
   browser: Browser,
   baseURL: string,
-  profile: PhoneProfile,
+  profile: DeviceProfile,
 ): Promise<{ context: BrowserContext; page: Page }> {
   const context = await browser.newContext({
     baseURL,
+    reducedMotion: "reduce",
     ...profile.options,
   });
   const page = await context.newPage();
@@ -113,6 +156,8 @@ test.describe
     let ownerContext: BrowserContext;
     let ownerPage: Page;
     let teamUrl: string;
+    let teamId: string;
+    let defaultProjectId: string;
     let seededFileId: string;
     let seededPageId: string;
     let ownerId: string;
@@ -128,7 +173,11 @@ test.describe
       });
       baseURL = worker.url;
 
-      const created = await createPhoneContext(browser, baseURL, PHONE_PROFILES[0] as PhoneProfile);
+      const created = await createDeviceContext(
+        browser,
+        baseURL,
+        PHONE_PROFILES[0] as DeviceProfile,
+      );
       ownerContext = created.context;
       ownerPage = created.page;
 
@@ -144,9 +193,20 @@ test.describe
       await expect(ownerPage.getByRole("heading", { name: "Recent files" })).toBeVisible();
       await ownerPage.evaluate(() => localStorage.setItem("drawpane:debug", "1"));
       teamUrl = ownerPage.url();
-      ownerId = await ownerPage.evaluate(
-        async () => (await (await fetch("/api/session")).json()).user.id as string,
-      );
+      const ids = await ownerPage.evaluate(async () => {
+        const session = await (await fetch("/api/session")).json();
+        const { teams } = await (await fetch("/api/teams")).json();
+        const tid = teams[0].id as string;
+        const { projects } = await (await fetch(`/api/teams/${tid}/projects`)).json();
+        return {
+          ownerId: session.user.id as string,
+          teamId: tid,
+          projectId: projects[0].id as string,
+        };
+      });
+      ownerId = ids.ownerId;
+      teamId = ids.teamId;
+      defaultProjectId = ids.projectId;
     });
 
     test.afterAll(async () => {
@@ -155,7 +215,7 @@ test.describe
       await registry?.stop();
     });
 
-    test("360 px phone: virtual passkey sign-in, drawer keyboard nav and dismissal", async () => {
+    test("360 px phone: virtual passkey sign-in, drawer keyboard nav, scroll-lock and dismissal", async () => {
       const page = ownerPage;
       await page.goto(teamUrl);
       await expect(page.getByRole("heading", { name: "Recent files" })).toBeVisible();
@@ -165,15 +225,17 @@ test.describe
       await assertTouchTarget(menuBtn);
       const nav = page.locator("#dash-nav");
 
-      // Open drawer, check focus lands on active link, Tab wraps within the modal drawer.
+      // Open drawer, check scroll-lock, focus on active link, 44-48 px rows, and Tab wrap.
       await menuBtn.tap();
       await expect(page.getByRole("dialog", { name: "Navigation" })).toHaveAttribute(
         "aria-modal",
         "true",
       );
+      expect(await page.evaluate(() => document.body.style.overflow)).toBe("hidden");
       await expect(nav.getByRole("link", { name: /^Recent/ })).toBeFocused();
       await assertTouchTarget(nav.getByRole("button", { name: "Close navigation" }));
       await assertTouchTarget(nav.getByRole("link", { name: /^Recent/ }));
+      await assertTouchTarget(nav.getByRole("link", { name: /Ana Lima/ }));
       await assertNoHorizontalScroll(page);
 
       const focusCount = await nav.evaluate(
@@ -193,22 +255,40 @@ test.describe
       await page.keyboard.press("Shift+Tab");
       expect(await page.evaluate(() => !!document.activeElement?.closest("#dash-nav"))).toBe(true);
 
-      // Escape dismisses and returns focus to the trigger.
+      // Escape with an open menu inside the drawer closes only the menu; a second Escape closes the drawer.
+      const projectMenuBtn = nav.locator(".dash__project-menu").first();
+      await assertTouchTarget(projectMenuBtn);
+      await projectMenuBtn.tap();
+      const projectMenu = page.locator(".dp-menu").first();
+      await expect(projectMenu).toBeVisible();
+      await assertTouchTarget(projectMenu.getByRole("menuitem").first());
+      await page.keyboard.press("Escape");
+      await expect(projectMenu).not.toBeVisible();
+      await expect(page.getByRole("dialog", { name: "Navigation" })).toHaveAttribute(
+        "aria-modal",
+        "true",
+      );
+      expect(await page.evaluate(() => document.body.style.overflow)).toBe("hidden");
+
       await page.keyboard.press("Escape");
       await expect(nav.getByRole("link", { name: /^Recent/ })).not.toBeVisible();
+      expect(await page.evaluate(() => document.body.style.overflow)).toBe("");
       await expect(menuBtn).toBeFocused();
 
-      // Tapping outside on the scrim dismisses and returns focus to the trigger.
+      // Tapping outside on the scrim dismisses, unlocks scroll, and returns focus to the trigger.
       await menuBtn.tap();
       await expect(nav.getByRole("link", { name: /^Recent/ })).toBeVisible();
+      expect(await page.evaluate(() => document.body.style.overflow)).toBe("hidden");
       await page.locator(".dash__scrim").tap({ position: { x: 340, y: 200 } });
       await expect(nav.getByRole("link", { name: /^Recent/ })).not.toBeVisible();
+      expect(await page.evaluate(() => document.body.style.overflow)).toBe("");
       await expect(menuBtn).toBeFocused();
 
       // Close button dismisses and returns focus to the trigger.
       await menuBtn.tap();
       await nav.getByRole("button", { name: "Close navigation" }).tap();
       await expect(nav.getByRole("link", { name: /^Recent/ })).not.toBeVisible();
+      expect(await page.evaluate(() => document.body.style.overflow)).toBe("");
       await expect(menuBtn).toBeFocused();
 
       // Sign out from drawer and sign back in with the virtual passkey.
@@ -226,61 +306,150 @@ test.describe
       await assertNoHorizontalScroll(page);
     });
 
-    test("360 px phone: compact tiles, visible overflow menu, rename without double-click, search and tile open", async () => {
+    test("360 px phone: compact tiles, visible overflow menu, rename matrix, search and tile open", async () => {
       const page = ownerPage;
-      await page.evaluate(async () => {
-        const post = (path: string, body: unknown) =>
-          fetch(`/api${path}`, {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify(body),
-          }).then((r) => r.json());
-        const { teams } = await (await fetch("/api/teams")).json();
-        const team = teams[0].id;
-        const { projects } = await (await fetch(`/api/teams/${team}/projects`)).json();
-        await post(`/projects/${projects[0].id}/files`, { name: "iOS & iPadOS 27 Community" });
-        await post(`/projects/${projects[0].id}/files`, { name: "Landing draft" });
-      });
+      const matrixFileId = await page.evaluate(
+        async ({ projectId }) => {
+          const post = (path: string, body: unknown) =>
+            fetch(`/api${path}`, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify(body),
+            }).then((r) => r.json());
+          await post(`/projects/${projectId}/files`, { name: "iOS & iPadOS 27 Community" });
+          const created = await post(`/projects/${projectId}/files`, { name: "Landing draft" });
+          return created.file.id as string;
+        },
+        { projectId: defaultProjectId },
+      );
       await page.reload();
       await expect(page.getByRole("heading", { name: "Recent files" })).toBeVisible();
       await assertNoHorizontalScroll(page);
 
       // Tiles stay compact on phone so the first file does not take most of the viewport.
-      const firstCard = page.locator(".dash__card").first();
+      const draftCard = page.locator(".dash__card").filter({ hasText: "Landing draft" });
+      await expect(draftCard).toBeVisible();
+      const firstCard = page.locator(".dash__card:not(.dash__card--skeleton)").first();
+      await expect(firstCard).toBeVisible();
       const cardBox = await firstCard.boundingBox();
       expect(cardBox).not.toBeNull();
       expect(cardBox?.height ?? 999).toBeLessThan(140);
 
-      // Overflow actions are visible without hovering and meet 44 px touch targets.
-      const draftCard = page.locator(".dash__card").filter({ hasText: "Landing draft" });
+      // Overflow actions are visible without hovering and meet 44-48 px touch targets.
       const actions = draftCard.locator(".dash__card-actions");
       expect(await actions.evaluate((el) => getComputedStyle(el).opacity)).toBe("1");
       const overflowBtn = draftCard.getByRole("button", { name: "Options for Landing draft" });
-      await expect(overflowBtn).toBeVisible();
       await assertTouchTarget(overflowBtn);
 
-      // Rename through the visible overflow menu without double-click.
-      await overflowBtn.tap();
-      const menu = page.getByRole("menu", { name: "Options for Landing draft" });
-      await expect(menu).toBeVisible();
-      const renameItem = menu.getByRole("menuitem", { name: "Rename" });
-      await assertTouchTarget(renameItem);
-      await expect(menu.getByRole("menuitem", { name: "Move to…" })).toBeVisible();
-      await expect(menu.getByRole("menuitem", { name: "Move to trash" })).toBeVisible();
-      await renameItem.tap();
+      // Rename-commits-exactly-once matrix: count PATCH /api/files/:id across all 5 paths.
+      let patchCount = 0;
+      const onRequest = (req: { method(): string; url(): string }) => {
+        if (req.method() === "PATCH" && req.url().endsWith(`/api/files/${matrixFileId}`)) {
+          patchCount += 1;
+        }
+      };
+      page.on("request", onRequest);
+      try {
+        const startRename = async (currentName: string) => {
+          const card = page.locator(".dash__card").filter({ hasText: currentName });
+          const trigger = card.getByRole("button", { name: `Options for ${currentName}` });
+          await assertTouchTarget(trigger);
+          await trigger.tap();
+          const menu = page.getByRole("menu", { name: `Options for ${currentName}` });
+          await expect(menu).toBeVisible();
+          const renameItem = menu.getByRole("menuitem", { name: "Rename" });
+          await assertTouchTarget(renameItem);
+          await assertTouchTarget(menu.getByRole("menuitem", { name: "Move to…" }));
+          await assertTouchTarget(menu.getByRole("menuitem", { name: "Move to trash" }));
+          await renameItem.tap();
+          const input = page.getByRole("textbox", { name: "File name" });
+          await expect(input).toBeVisible();
+          await expect(trigger).not.toBeVisible();
+          await assertTouchTarget(page.getByRole("button", { name: "Save name" }));
+          await assertTouchTarget(page.getByRole("button", { name: "Cancel rename" }));
+          return input;
+        };
 
-      const renameInput = page.getByRole("textbox", { name: "File name" });
-      await expect(renameInput).toBeVisible();
-      await renameInput.fill("Mobile Checkout");
-      await page.getByRole("button", { name: "Save name" }).tap();
-      await expect(
-        page.locator(".dash__card").filter({ hasText: "Mobile Checkout" }),
-      ).toBeVisible();
+        // 1. Escape cancels without patching.
+        patchCount = 0;
+        let renameInput = await startRename("Landing draft");
+        await renameInput.fill("Discarded via Escape");
+        await renameInput.press("Escape");
+        await expect(renameInput).not.toBeVisible();
+        await page.waitForTimeout(150);
+        expect(patchCount).toBe(0);
+        await expect(
+          page.locator(".dash__card").filter({ hasText: "Landing draft" }),
+        ).toBeVisible();
+
+        // 2. Cancel tap cancels without patching (even if blur runs before click).
+        patchCount = 0;
+        renameInput = await startRename("Landing draft");
+        await renameInput.fill("Discarded via Cancel");
+        await page.getByRole("button", { name: "Cancel rename" }).tap();
+        await expect(renameInput).not.toBeVisible();
+        await page.waitForTimeout(150);
+        expect(patchCount).toBe(0);
+        await expect(
+          page.locator(".dash__card").filter({ hasText: "Landing draft" }),
+        ).toBeVisible();
+
+        // 3. Enter commits once.
+        patchCount = 0;
+        renameInput = await startRename("Landing draft");
+        await renameInput.fill("Rename via Enter");
+        const enterPatch = page.waitForResponse(
+          (res) =>
+            res.request().method() === "PATCH" && res.url().endsWith(`/api/files/${matrixFileId}`),
+        );
+        await renameInput.press("Enter");
+        expect((await enterPatch).status()).toBe(200);
+        await expect(
+          page.locator(".dash__card").filter({ hasText: "Rename via Enter" }),
+        ).toBeVisible();
+        await page.waitForTimeout(150);
+        expect(patchCount).toBe(1);
+
+        // 4. Tapping outside (blur) commits once.
+        patchCount = 0;
+        renameInput = await startRename("Rename via Enter");
+        await renameInput.fill("Rename via Blur");
+        const blurPatch = page.waitForResponse(
+          (res) =>
+            res.request().method() === "PATCH" && res.url().endsWith(`/api/files/${matrixFileId}`),
+        );
+        await page.getByRole("searchbox", { name: "Search files" }).tap();
+        expect((await blurPatch).status()).toBe(200);
+        await expect(
+          page.locator(".dash__card").filter({ hasText: "Rename via Blur" }),
+        ).toBeVisible();
+        await page.waitForTimeout(150);
+        expect(patchCount).toBe(1);
+
+        // 5. Save tap commits once.
+        patchCount = 0;
+        renameInput = await startRename("Rename via Blur");
+        await renameInput.fill("Mobile Checkout");
+        const savePatch = page.waitForResponse(
+          (res) =>
+            res.request().method() === "PATCH" && res.url().endsWith(`/api/files/${matrixFileId}`),
+        );
+        await page.getByRole("button", { name: "Save name" }).tap();
+        expect((await savePatch).status()).toBe(200);
+        await expect(
+          page.locator(".dash__card").filter({ hasText: "Mobile Checkout" }),
+        ).toBeVisible();
+        await page.waitForTimeout(150);
+        expect(patchCount).toBe(1);
+      } finally {
+        page.off("request", onRequest);
+      }
       await assertNoHorizontalScroll(page);
 
       // Search filters team files cleanly on 360 px.
       const search = page.getByRole("searchbox", { name: "Search files" });
       await assertTouchTarget(page.locator(".dash__search"));
+      await expect(page.locator(".dash__search kbd")).not.toBeVisible();
       await search.fill("Checkout");
       await expect(page.getByRole("heading", { name: "Results for “Checkout”" })).toBeVisible();
       await expect(page.locator(".dash__card")).toHaveCount(1);
@@ -290,7 +459,7 @@ test.describe
 
       // Tapping a tile opens its editor route.
       const openBtn = page.getByRole("button", { name: "Open Mobile Checkout" });
-      await assertTouchTarget(openBtn);
+      await assertTouchTarget(openBtn, { maxHeight: 80 });
       await openBtn.tap();
       await waitForLiveEditor(page);
       seededFileId = new URL(page.url()).pathname.split("/").at(-1) as string;
@@ -345,7 +514,7 @@ test.describe
       await assertTouchTarget(page.getByRole("button", { name: "Close" }));
 
       const phonePreset = page.getByRole("button", { name: /^Phone/ });
-      await assertTouchTarget(phonePreset);
+      await assertTouchTarget(phonePreset, { maxHeight: 200 });
       await phonePreset.tap();
       await waitForLiveEditor(page);
       const frame = await page.evaluate(() => {
@@ -361,6 +530,7 @@ test.describe
       await inviteBtn.tap();
       const inviteDialog = page.getByRole("dialog", { name: "Invite to this team" });
       await expect(inviteDialog).toBeVisible();
+      await assertTouchTarget(inviteDialog.locator(".app-radio").filter({ hasText: "Editor" }));
       await inviteDialog.getByRole("radio", { name: "Editor" }).check();
       await inviteDialog.getByRole("button", { name: "Create link" }).tap();
       const inviteUrl = (await inviteDialog.locator(".app-copy code").textContent()) as string;
@@ -385,7 +555,7 @@ test.describe
       await expect(page.getByRole("heading", { name: "Recent files" })).toBeVisible();
 
       // Second member joins on 360 px phone and seeds an unread comment mention for Ana.
-      const bo = await createPhoneContext(browser, baseURL, PHONE_PROFILES[0] as PhoneProfile);
+      const bo = await createDeviceContext(browser, baseURL, PHONE_PROFILES[0] as DeviceProfile);
       try {
         await bo.page.goto(new URL(inviteUrl).pathname);
         await expect(bo.page.getByRole("heading", { name: /Join Ana's team/ })).toBeVisible();
@@ -420,12 +590,12 @@ test.describe
       // Ana opens Inbox from the topbar unread badge, taps the mention, lands on thread route and marks it read.
       await page.reload();
       const topbarInbox = page.locator(".dash__topbar-inbox");
-      await expect(topbarInbox).toBeVisible();
       await assertTouchTarget(topbarInbox);
       await topbarInbox.tap();
       await expect(page.getByRole("heading", { name: "Inbox", level: 1 })).toBeVisible();
       await assertNoHorizontalScroll(page);
       await assertTouchTarget(page.getByRole("button", { name: "Mark all read" }));
+      await assertTouchTarget(page.locator(".inbox__bar .dp-seg__option").first());
 
       const mention = page
         .getByRole("region", { name: "Notifications" })
@@ -453,24 +623,167 @@ test.describe
       await expect(page.getByText("You're all caught up.")).toBeVisible();
     });
 
+    test("768 px tablet portrait and long team/project names across phone, tablet and desktop", async ({
+      browser,
+    }) => {
+      const longTeamName = "Northwind Product Design and Research Collective Studio";
+      const longProjectName = "Customer onboarding and lifecycle marketing experiments Q4 2026";
+
+      // Create a long-named project and capture original team name.
+      const { originalTeamName, longProjectId, inviteUrl } = await ownerPage.evaluate(
+        async ({ tid, projectName }) => {
+          const { teams } = await (await fetch("/api/teams")).json();
+          const currentTeam = teams.find((t: { id: string }) => t.id === tid);
+          const createdProject = await fetch(`/api/teams/${tid}/projects`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ name: projectName }),
+          }).then((r) => r.json());
+          const invite = await fetch(`/api/teams/${tid}/invites`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ role: "editor" }),
+          }).then((r) => r.json());
+          return {
+            originalTeamName: currentTeam.name as string,
+            longProjectId: createdProject.project.id as string,
+            inviteUrl: invite.url as string,
+          };
+        },
+        { tid: teamId, projectName: longProjectName },
+      );
+
+      // Long team name on 360 px phone stays inside viewport without horizontal scroll.
+      await ownerPage.evaluate(
+        async ({ tid, name }) => {
+          const res = await fetch(`/api/teams/${tid}`, {
+            method: "PATCH",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ name }),
+          });
+          if (!res.ok) throw new Error(`Failed to rename team: ${res.status}`);
+        },
+        { tid: teamId, name: longTeamName },
+      );
+      try {
+        await ownerPage.goto(teamUrl);
+        await expect(ownerPage.locator(".dash__topbar-team")).toHaveText(longTeamName);
+        await assertNoHorizontalScroll(ownerPage);
+        await assertInsideViewport(ownerPage.locator(".dash__topbar-team"), 360);
+
+        // Long project name on 360 px phone stays inside viewport.
+        await ownerPage.goto(`${teamUrl}?project=${longProjectId}`);
+        await expect(ownerPage.getByRole("heading", { name: longProjectName })).toBeVisible();
+        await assertNoHorizontalScroll(ownerPage);
+      } finally {
+        await ownerPage.evaluate(
+          async ({ tid, name }) => {
+            await fetch(`/api/teams/${tid}`, {
+              method: "PATCH",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ name }),
+            });
+          },
+          { tid: teamId, name: originalTeamName },
+        );
+      }
+
+      // Tablet portrait (768 x 1024, touch): header fits, kbd hidden, 44 px targets, overflow hides on rename.
+      const tablet = await createDeviceContext(browser, baseURL, TABLET_PORTRAIT_PROFILE);
+      try {
+        await tablet.page.goto(new URL(inviteUrl).pathname);
+        await tablet.page.getByLabel("Your name").fill("Tablet Tester");
+        await tablet.page.getByLabel("Email").fill("tablet@example.com");
+        await tablet.page.getByRole("button", { name: "Create account with a passkey" }).tap();
+        await expect(tablet.page.getByRole("heading", { name: "Recent files" })).toBeVisible();
+
+        await assertNoHorizontalScroll(tablet.page);
+        const tabletHeaderNewFile = tablet.page
+          .locator(".dash__header")
+          .getByRole("button", { name: "New file" });
+        await assertInsideViewport(tabletHeaderNewFile, 768);
+        await assertTouchTarget(tabletHeaderNewFile);
+        await assertTouchTarget(tablet.page.locator(".dash__search"));
+        await expect(tablet.page.locator(".dash__search kbd")).not.toBeVisible();
+        await assertTouchTarget(tablet.page.getByRole("button", { name: "Sign out" }));
+
+        const tabletCard = tablet.page
+          .locator(".dash__card")
+          .filter({ hasText: "Mobile Checkout" });
+        await expect(tabletCard).toBeVisible();
+        expect(
+          await tabletCard
+            .locator(".dash__card-actions")
+            .evaluate((el) => getComputedStyle(el).opacity),
+        ).toBe("1");
+        const tabletOverflow = tabletCard.getByRole("button", {
+          name: "Options for Mobile Checkout",
+        });
+        await assertTouchTarget(tabletOverflow);
+        await tabletOverflow.tap();
+        await assertTouchTarget(tablet.page.getByRole("menuitem", { name: "Rename" }));
+        await tablet.page.getByRole("menuitem", { name: "Rename" }).tap();
+        await expect(tabletOverflow).not.toBeVisible();
+        await assertTouchTarget(tablet.page.getByRole("button", { name: "Save name" }));
+        await assertTouchTarget(tablet.page.getByRole("button", { name: "Cancel rename" }));
+        await tablet.page.getByRole("button", { name: "Cancel rename" }).tap();
+        await expect(tabletOverflow).toBeVisible();
+
+        // Long project name on 768 px tablet portrait stays inside viewport.
+        await tablet.page.goto(`${teamUrl}?project=${longProjectId}`);
+        await expect(tablet.page.getByRole("heading", { name: longProjectName })).toBeVisible();
+        await assertNoHorizontalScroll(tablet.page);
+        await assertInsideViewport(tabletHeaderNewFile, 768);
+
+        // Long project name on 1280 px desktop stays inside viewport.
+        const desktopInvite = await ownerPage.evaluate(async (tid) => {
+          const res = await fetch(`/api/teams/${tid}/invites`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ role: "editor" }),
+          });
+          return (await res.json()).url as string;
+        }, teamId);
+        const desktop = await createDeviceContext(browser, baseURL, DESKTOP_PROFILE);
+        try {
+          await desktop.page.goto(new URL(desktopInvite).pathname);
+          await desktop.page.getByLabel("Your name").fill("Desktop Tester");
+          await desktop.page.getByLabel("Email").fill("desktop@example.com");
+          await desktop.page.getByRole("button", { name: "Create account with a passkey" }).click();
+          await expect(desktop.page.getByRole("heading", { name: "Recent files" })).toBeVisible();
+
+          await desktop.page.goto(`${teamUrl}?project=${longProjectId}`);
+          await expect(desktop.page.getByRole("heading", { name: longProjectName })).toBeVisible();
+          await assertNoHorizontalScroll(desktop.page);
+          await assertInsideViewport(
+            desktop.page.locator(".dash__header").getByRole("button", { name: "New file" }),
+            1280,
+          );
+        } finally {
+          await desktop.context.close();
+        }
+      } finally {
+        await tablet.context.close();
+      }
+    });
+
     for (const profile of PHONE_PROFILES.slice(1)) {
       test(`${profile.name}: virtual passkey sign-in, drawer, visible file menu rename, search and preset`, async ({
         browser,
       }) => {
         // Create an editor invite so this device profile has its own passkey credential.
-        const inviteUrl = await ownerPage.evaluate(async () => {
-          const { teams } = await (await fetch("/api/teams")).json();
-          const response = await fetch(`/api/teams/${teams[0].id}/invites`, {
+        const inviteUrl = await ownerPage.evaluate(async (tid) => {
+          const response = await fetch(`/api/teams/${tid}/invites`, {
             method: "POST",
             headers: { "content-type": "application/json" },
             body: JSON.stringify({ role: "editor" }),
           });
           return (await response.json()).url as string;
-        });
+        }, teamId);
 
-        const { context, page } = await createPhoneContext(browser, baseURL, profile);
+        const { context, page } = await createDeviceContext(browser, baseURL, profile);
         try {
-          const slug = profile.name.toLowerCase().replace(/\s+/g, "-");
+          const slug = profile.name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
           await page.goto(new URL(inviteUrl).pathname);
           await assertNoHorizontalScroll(page);
           await page.getByLabel("Your name").fill(`User ${profile.name}`);
@@ -499,19 +812,22 @@ test.describe
           // Create a file for this profile, verify compact tile + visible overflow menu + rename.
           const initialName = `Draft ${profile.name}`;
           const renamed = `Renamed ${profile.name}`;
-          await page.evaluate(async (name) => {
-            const { teams } = await (await fetch("/api/teams")).json();
-            const { projects } = await (await fetch(`/api/teams/${teams[0].id}/projects`)).json();
-            await fetch(`/api/projects/${projects[0].id}/files`, {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({ name }),
-            });
-          }, initialName);
+          await page.evaluate(
+            async ({ projectId, name }) => {
+              await fetch(`/api/projects/${projectId}/files`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ name }),
+              });
+            },
+            { projectId: defaultProjectId, name: initialName },
+          );
           await page.reload();
 
           const card = page.locator(".dash__card").filter({ hasText: initialName });
+          await expect(card).toBeVisible();
           const cardBox = await card.boundingBox();
+          expect(cardBox).not.toBeNull();
           expect(cardBox?.height ?? 999).toBeLessThan(140);
           expect(
             await card

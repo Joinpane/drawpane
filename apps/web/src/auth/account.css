@@ -605,10 +605,12 @@
 
 @media (max-width: 760px), (hover: none), (pointer: coarse) {
   .account__back {
+    box-sizing: border-box;
     min-height: 44px;
     padding: 0 var(--space-300) 0 var(--space-200);
   }
   .settings-nav__link {
+    box-sizing: border-box;
     min-height: 44px;
     height: auto;
   }
@@ -621,6 +623,7 @@
     height: 44px;
   }
   .account__connect {
+    box-sizing: border-box;
     min-height: 44px;
     height: auto;
     padding: 0 var(--space-300);
@@ -636,6 +639,7 @@
     font-size: 16px;
   }
   .keyprefs__search {
+    box-sizing: border-box;
     min-height: 44px;
     height: 44px;
   }
@@ -646,6 +650,7 @@
     min-height: 48px;
   }
   .keyprefs__keys {
+    box-sizing: border-box;
     min-height: 44px;
     height: auto;
     min-width: 64px;

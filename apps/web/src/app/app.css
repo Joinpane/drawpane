@@ -153,6 +153,7 @@ body {
     font-size: 16px;
   }
   .app-radio {
+    box-sizing: border-box;
     min-height: 44px;
     height: auto;
     padding: var(--space-200) var(--space-300);

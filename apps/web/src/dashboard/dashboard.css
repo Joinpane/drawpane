@@ -233,17 +233,21 @@
 /* The title, and a project's options beside it. */
 .dash__heading {
   display: flex;
-  flex: none;
+  flex: 0 1 auto;
   align-items: center;
   gap: var(--space-100);
   min-width: 0;
+  max-width: 100%;
   margin-right: auto;
 }
 
 .dash__title {
-  /* The search gives way first; the title stays whole. */
-  flex: none;
+  /* The search gives way first; very long project names truncate instead of overflowing. */
+  flex: 0 1 auto;
+  min-width: 0;
   margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
   font: 600 22px / 28px var(--font-ui);
   letter-spacing: -0.01em;
@@ -267,12 +271,11 @@
     white-space: nowrap;
   }
 }
-
 .dash__search {
   display: flex;
   align-items: center;
   gap: var(--space-200);
-  flex: 0 1 280px;
+  flex: 0 2 280px;
   min-width: 160px;
   height: var(--size-control-lg);
   padding: 0 var(--space-300);
@@ -298,6 +301,18 @@
 .dash__search kbd {
   color: var(--ink-muted);
   font: 500 11px / 14px var(--font-mono);
+}
+/* Tablet portrait (768px with sidebar) and narrow panes: wrap search onto a full-width row. */
+@container dash (max-width: 680px) {
+  .dash__header {
+    flex-wrap: wrap;
+    gap: var(--space-200);
+  }
+  .dash__search {
+    order: 10;
+    flex: 1 1 100%;
+    min-width: 0;
+  }
 }
 
 .dash__error {
@@ -483,12 +498,13 @@
   opacity: 0.6;
 }
 
-/* Touch devices: keep file and project actions visible and touch-sized, not hover-only. */
-@media (hover: none), (pointer: coarse) {
+/* Touch devices and phone widths: visible actions and 44 px border-box touch targets. */
+@media (hover: none), (pointer: coarse), (max-width: 760px) {
   .dash__link {
+    box-sizing: border-box;
     min-height: 44px;
     height: auto;
-    padding: 10px var(--space-300);
+    padding: var(--space-200) var(--space-300);
   }
   .dash__section .dp-iconbtn {
     width: 44px;
@@ -520,6 +536,24 @@
   .dash__project[data-menu-open] .dash__link-label {
     margin-right: 0;
   }
+  .dash__user {
+    flex-wrap: wrap;
+    gap: var(--space-200);
+  }
+  .dash__account {
+    box-sizing: border-box;
+    flex: 1 1 100%;
+    min-height: 44px;
+  }
+  .dash__user-actions {
+    width: 100%;
+    justify-content: flex-start;
+    gap: var(--space-100);
+  }
+  .dash__user-actions .dp-iconbtn {
+    width: 44px;
+    height: 44px;
+  }
   .dash__header > .dp-btn {
     min-height: 44px;
   }
@@ -527,17 +561,29 @@
     width: 44px;
     height: 44px;
   }
+  @container dash (max-width: 880px) {
+    .dash__header > .dp-btn:has(.dash__btn-label) {
+      width: 44px;
+      min-width: 44px;
+      height: 44px;
+      padding: 0;
+    }
+  }
   .dash__search {
+    box-sizing: border-box;
     min-height: 44px;
     height: 44px;
   }
   .dash__search input {
     font-size: 16px;
   }
+  .dash__search kbd {
+    display: none;
+  }
   .dash__empty-actions .dp-btn {
     min-height: 44px;
   }
-  .dash__card:not(.dash__card--trash) .dash__card-meta {
+  .dash__card:not(.dash__card--trash):not(.dash__card--renaming) .dash__card-meta {
     padding-right: 48px;
   }
   .dash__card-actions {
@@ -546,6 +592,12 @@
   .dash__card-actions .dp-iconbtn {
     width: 44px;
     height: 44px;
+  }
+  .dash__card--renaming .dash__card-meta {
+    padding-right: 0;
+  }
+  .dash__card--renaming .dash__card-actions {
+    display: none;
   }
   .dash__card--trash .dash__card-meta {
     padding-right: 0;
@@ -564,8 +616,8 @@
   }
   .dash__rename {
     flex: 1 1 140px;
-    min-height: 40px;
-    height: 40px;
+    min-height: 44px;
+    height: 44px;
     font-size: 16px;
   }
   .dash__rename-actions {
@@ -579,6 +631,7 @@
     height: 44px;
   }
   .dash__move-option {
+    box-sizing: border-box;
     min-height: 44px;
   }
   .members__action .dp-btn {
@@ -590,21 +643,23 @@
     height: 44px;
   }
   .import-pages__page {
+    box-sizing: border-box;
     min-height: 44px;
   }
   .import-source > .dp-seg > .dp-seg__option {
+    box-sizing: border-box;
     min-height: 44px;
     height: auto;
   }
 }
 
-/* Phones: a top bar, and the sidebar as a drawer over the page. */
+/* Phones: a top bar, the sidebar as a drawer, and compact horizontal file tiles. */
 .dash__topbar {
   display: none;
 }
 @media (max-width: 760px) {
   .dash {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto 1fr;
   }
   .dash__topbar {
@@ -614,6 +669,7 @@
     display: flex;
     align-items: center;
     gap: var(--space-200);
+    min-width: 0;
     min-height: 52px;
     padding: var(--space-100) var(--space-200);
     border-bottom: 1px solid var(--line);
@@ -632,6 +688,7 @@
     white-space: nowrap;
   }
   .dash__topbar-inbox {
+    box-sizing: border-box;
     display: inline-flex;
     align-items: center;
     justify-content: center;
@@ -675,58 +732,6 @@
     width: 44px;
     height: 44px;
   }
-  .dash__link {
-    min-height: 44px;
-    height: auto;
-    padding: 10px var(--space-300);
-  }
-  .dash__section .dp-iconbtn {
-    width: 44px;
-    height: 44px;
-  }
-  .dash__project {
-    display: flex;
-    align-items: center;
-    gap: 2px;
-  }
-  .dash__project > .dash__link {
-    flex: 1;
-    min-width: 0;
-  }
-  .dash__project-menu {
-    position: static;
-    transform: none;
-    opacity: 1;
-    width: 44px;
-    height: 44px;
-  }
-  .dash__project:has(.dash__project-menu):hover .dash__count,
-  .dash__project:has(.dash__project-menu):focus-within .dash__count,
-  .dash__project[data-menu-open] .dash__count {
-    visibility: visible;
-  }
-  .dash__project:has(.dash__project-menu):hover .dash__link-label,
-  .dash__project:has(.dash__project-menu):focus-within .dash__link-label,
-  .dash__project[data-menu-open] .dash__link-label {
-    margin-right: 0;
-  }
-  .dash__user {
-    flex-wrap: wrap;
-    gap: var(--space-200);
-  }
-  .dash__account {
-    flex: 1 1 100%;
-    min-height: 44px;
-  }
-  .dash__user-actions {
-    width: 100%;
-    justify-content: flex-start;
-    gap: var(--space-100);
-  }
-  .dash__user-actions .dp-iconbtn {
-    width: 44px;
-    height: 44px;
-  }
   .dash__scrim {
     position: fixed;
     inset: 0;
@@ -737,51 +742,8 @@
   .dash__main {
     padding: var(--space-400);
   }
-  /* The header wraps: the title and its actions, then search across the full width. */
   .dash__header {
-    flex-wrap: wrap;
-    gap: var(--space-200);
     margin-bottom: var(--space-400);
-  }
-  .dash__heading {
-    flex: 1 1 auto;
-    min-width: 0;
-    max-width: 100%;
-  }
-  .dash__title {
-    flex: 0 1 auto;
-    min-width: 0;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
-  .dash__heading .dp-iconbtn {
-    width: 44px;
-    height: 44px;
-  }
-  .dash__header > .dp-btn {
-    min-height: 44px;
-  }
-  .dash__header > .dp-btn:has(.dash__btn-label) {
-    width: 44px;
-    min-width: 44px;
-    height: 44px;
-    padding: 0;
-  }
-  .dash__search {
-    order: 10;
-    flex: 1 1 100%;
-    min-width: 0;
-    min-height: 44px;
-    height: 44px;
-  }
-  .dash__search input {
-    font-size: 16px;
-  }
-  .dash__search kbd {
-    display: none;
-  }
-  .dash__empty-actions .dp-btn {
-    min-height: 44px;
   }
   /* Compact horizontal file tiles on phones so multiple files fit on the first screen
    * and per-file actions stay visible without hover. */
@@ -814,7 +776,7 @@
   .thumb--image {
     padding: var(--space-100);
   }
-  .dash__card:not(.dash__card--trash) .dash__card-meta,
+  .dash__card:not(.dash__card--trash):not(.dash__card--renaming) .dash__card-meta,
   .dash__card-meta {
     padding-right: 0;
     gap: 2px;
@@ -826,64 +788,21 @@
   }
   .dash__card-actions {
     position: static;
-    opacity: 1;
     align-self: center;
-  }
-  .dash__card-actions .dp-iconbtn {
-    width: 44px;
-    height: 44px;
   }
   .dash__card--renaming {
     grid-template-columns: 88px minmax(0, 1fr);
-  }
-  .dash__card--renaming .dash__card-actions {
-    display: none;
-  }
-  .dash__rename-form {
-    flex-wrap: wrap;
-  }
-  .dash__rename {
-    flex: 1 1 140px;
-    min-height: 40px;
-    height: 40px;
-    font-size: 16px;
-  }
-  .dash__rename-actions {
-    display: inline-flex;
-    align-items: center;
-    gap: 2px;
-    flex: none;
-  }
-  .dash__rename-actions .dp-iconbtn {
-    width: 44px;
-    height: 44px;
   }
   .dash__card--trash {
     grid-template-columns: 88px minmax(0, 1fr);
   }
   .dash__card--trash .dash__card-actions {
     grid-column: 1 / -1;
-    flex-wrap: wrap;
-    gap: var(--space-200);
     padding-top: var(--space-200);
     border-top: 1px solid var(--line);
   }
-  .dash__card--trash .dash__card-actions .dp-btn {
-    min-height: 44px;
-    padding: 0 var(--space-300);
-  }
   .dash__card > .dp-badge {
     grid-column: 1 / -1;
-  }
-  .dash__move-option {
-    min-height: 44px;
-  }
-  .import-pages__page {
-    min-height: 44px;
-  }
-  .import-source > .dp-seg > .dp-seg__option {
-    min-height: 44px;
-    height: auto;
   }
 }
 @keyframes dash-scrim {

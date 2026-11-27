@@ -368,6 +368,7 @@
 
 @media (max-width: 760px), (hover: none), (pointer: coarse) {
   .kits__filter {
+    box-sizing: border-box;
     min-height: 44px;
     height: auto;
     padding: 0 var(--space-400);
@@ -377,6 +378,7 @@
     padding: 0 var(--space-300);
   }
   .kit__licence summary {
+    box-sizing: border-box;
     min-height: 44px;
   }
 }

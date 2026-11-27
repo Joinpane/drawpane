@@ -99,6 +99,7 @@
 }
 @media (max-width: 760px), (hover: none), (pointer: coarse) {
   .dp-dropdown > .dp-menu .dp-menu__item {
+    box-sizing: border-box;
     min-height: 44px;
     height: auto;
     padding-top: var(--space-200);
