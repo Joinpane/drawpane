@@ -4361,7 +4361,7 @@ impl<B: Backend> Walk<'_, B> {
             return false;
         }
         // A device pixel and a half to spare: anti-aliasing, and the flattened arc lying inside
-        // the true one by up to a quarter pixel.
+        // the true one (by up to 1/16 px since vendor/vello_common; a quarter before).
         let (px, py) = (1.5 / a.abs(), 1.5 / d.abs());
         let (w, h) = (f64::from(*w), f64::from(*h));
         if !(e.is_finite() && e.x0 >= px && e.y0 >= py && e.x1 <= w - px && e.y1 <= h - py) {

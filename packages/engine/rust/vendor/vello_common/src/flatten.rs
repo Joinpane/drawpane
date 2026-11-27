@@ -14,7 +14,10 @@ pub use crate::flatten_simd::FlattenCtx;
 
 // The current tolerance is set to 0.25. Since `sqrt` doesn't work in const contexts, we instead
 // hardcode the squared tolerance and derive the others from that.
-pub(crate) const SQRT_TOL: f64 = 0.5;
+// Drawpane: a 1/16 px tolerance (upstream 0.25 px). Flattened chords always lie on the inner side
+// of a curve, so upstream's quarter pixel drew every small circle and rounded corner visibly
+// inside Figma's edge (an 8 px dot lost a sixth of its edge coverage). See VENDORED.md.
+pub(crate) const SQRT_TOL: f64 = 0.25;
 pub(crate) const TOL: f64 = SQRT_TOL * SQRT_TOL;
 pub(crate) const TOL_2: f64 = TOL * TOL;
 

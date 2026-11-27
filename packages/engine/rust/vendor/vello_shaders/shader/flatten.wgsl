@@ -2,8 +2,8 @@
 // SPDX-License-Identifier: Apache-2.0 OR MIT OR Unlicense
 //
 // Drawpane: replaced Vello 0.12's Euler-spiral flattener and GPU stroke expander with a direct
-// WGSL port of vello_common 0.4's `flatten_simd` (0.25 px Wang/parabola-integral flattener) plus
-// conservative-bbox viewport culling. All strokes arrive pre-expanded as cached filled outlines
+// WGSL port of vello_common 0.4's `flatten_simd` (Wang/parabola-integral flattener at the vendored
+// vello_common's 1/16 px tolerance) plus conservative-bbox viewport culling. All strokes arrive pre-expanded as cached filled outlines
 // (`src/stroke.rs`), so CPU (`vello_cpu`), `vello_gpu`, and GPU compute flatten identical curves
 // with the same algorithm.
 
@@ -40,16 +40,17 @@ var<storage, read_write> bump: BumpAllocators;
 @group(0) @binding(5)
 var<storage, read_write> lines: array<LineSoup>;
 
-// vello_common 0.4 flattening constants (flatten.rs / flatten_simd.rs).
-const TOL: f32 = 0.25;
-const SQRT_TOL: f32 = 0.5;
-const TOL_2: f32 = 0.0625;
+// vello_common 0.4 flattening constants (flatten.rs / flatten_simd.rs), with Drawpane's 1/16 px
+// tolerance (vendor/vello_common/VENDORED.md).
+const TOL: f32 = 0.0625;
+const SQRT_TOL: f32 = 0.25;
+const TOL_2: f32 = 0.00390625;
 const TO_QUAD_TOL: f32 = 0.1;
-const CUBIC_TOL: f32 = 0.225;
-const CUBIC_SQRT_TOL: f32 = 0.47434165; // sqrt(0.225)
+const CUBIC_TOL: f32 = 0.05625;
+const CUBIC_SQRT_TOL: f32 = 0.23717082; // sqrt(0.05625)
 const MAX_QUADS: u32 = 16u;
 const MAX_QUAD_LINES: u32 = 4096u;
-const MAX_HYPOT2: f32 = 0.27; // 432.0 * (0.25 * 0.1)^2
+const MAX_HYPOT2: f32 = 0.016875; // 432.0 * (0.0625 * 0.1)^2
 const BBOX_CLAMP: f32 = 1.0e8;
 
 const D_CONST: f32 = 0.67;

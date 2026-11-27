@@ -526,11 +526,11 @@ mod tests {
 
     // Exact scalar Rust mirror of `vendor/vello_shaders/shader/flatten.wgsl` so native `cargo test`
     // continuously checks our WGSL flattener port against `vello_common 0.4::flatten::fill`.
-    const TOL_2: f32 = 0.0625;
-    const SQRT_TOL: f32 = 0.5;
-    const CUBIC_SQRT_TOL: f32 = 0.47434165;
+    const TOL_2: f32 = 0.00390625;
+    const SQRT_TOL: f32 = 0.25;
+    const CUBIC_SQRT_TOL: f32 = 0.23717082;
     const MAX_QUADS: usize = 16;
-    const MAX_HYPOT2: f32 = 0.27;
+    const MAX_HYPOT2: f32 = 0.016875;
 
     fn approx_parabola_integral(x: f32) -> f32 {
         const D: f32 = 0.67;
@@ -787,18 +787,38 @@ mod tests {
                 mirror_nonempty.len(),
                 ref_nonempty.len()
             );
-            let mut max_err = 0.0f32;
+            // Each mirror vertex against the reference polyline: its distance off it, and how far
+            // along it from the reference's own vertex.
+            let mut max_off = 0.0f32;
+            let mut max_slide = 0.0f32;
             for (m, r) in mirror_nonempty.iter().zip(&ref_nonempty) {
-                max_err = max_err
+                max_slide = max_slide
                     .max((m.0[0] - r.0[0]).abs())
                     .max((m.0[1] - r.0[1]).abs())
                     .max((m.1[0] - r.1[0]).abs())
                     .max((m.1[1] - r.1[1]).abs());
+                for v in [m.0, m.1] {
+                    let off = ref_nonempty
+                        .iter()
+                        .map(|(a, b)| line_nearest_dist_sq(*a, *b, v).sqrt())
+                        .fold(f32::INFINITY, f32::min);
+                    max_off = max_off.max(off);
+                }
             }
             // vello_common's baseline SIMD level differs by platform (SSE without fused
             // multiply-add on x86-64, NEON with it on arm64), so tight bends land up to ~3e-4 px
-            // apart between them. A porting error shows as a different line count or ~0.1 px.
-            assert!(max_err <= 1e-3, "shape {si}: max vertex error {max_err} > 1e-3");
+            // apart between them. A porting error shows as a different line count or a vertex
+            // ~0.1 px off the curve. Near the cusp-like bend f32 rounding of the parameter
+            // slides vertices along the curve (up to ~0.05 px at 1/16 px tolerance) without
+            // moving them off it.
+            assert!(
+                max_off <= 1e-3,
+                "shape {si}: a vertex {max_off} px off the reference outline"
+            );
+            assert!(
+                max_slide <= 0.1,
+                "shape {si}: a vertex {max_slide} px along the outline from the reference's"
+            );
         }
         let _ = SQRT_TOL;
     }
