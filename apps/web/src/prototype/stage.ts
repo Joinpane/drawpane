@@ -486,10 +486,15 @@ export class PlayerStage {
     // view, so a bar pinned to the bottom of the design isn't cut off by the
     // browser's own bars. Only a design much taller than the phone (a long
     // page with no device) fits the width and scrolls instead.
-    if (box.width < 520 && box.width > 0 && box.height > 0) {
+    const narrow = box.width < 520;
+    const shortTouchStage =
+      box.height < 520 &&
+      typeof matchMedia === "function" &&
+      matchMedia("(pointer: coarse)").matches;
+    if ((narrow || shortTouchStage) && box.width > 0 && box.height > 0) {
       const byWidth = box.width / this.#vw;
       const byHeight = box.height / this.#vh;
-      const whole = byHeight >= byWidth * PHONE_MIN_FIT;
+      const whole = !narrow || device.kind !== "none" || byHeight >= byWidth * PHONE_MIN_FIT;
       this.#scale = whole ? Math.min(byWidth, byHeight) : byWidth;
       if (!whole) this.#vh = box.height / this.#scale;
       this.#deviceEl.dataset.kind = "none";
