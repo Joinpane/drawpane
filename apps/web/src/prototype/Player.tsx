@@ -580,7 +580,11 @@ function EngineScreenThumb({
           const surface = new OffscreenCanvas(pw, ph);
           const ctx = surface.getContext("2d");
           if (!ctx) throw error;
-          renderer.renderNodes(ctx, [id], bounds, scale * dpr, "#ffffff");
+          try {
+            renderer.renderNodes(ctx, [id], bounds, scale * dpr, "#ffffff");
+          } finally {
+            renderer.images.releaseDisplayView(surface);
+          }
           return surface.convertToBlob({ type: "image/webp", quality: 0.85 });
         })
         .then((blob) => {

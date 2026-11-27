@@ -55,7 +55,11 @@ async function renderCanvasComponentPreview(editor: Editor, nodeId: string): Pro
   );
   const ctx = canvas.getContext("2d");
   if (!ctx) return null;
-  renderer.renderNodes(ctx, [nodeId], rect, camera.zoom * dpr, null, false, false);
+  try {
+    renderer.renderNodes(ctx, [nodeId], rect, camera.zoom * dpr, null, false, false);
+  } finally {
+    renderer.images.releaseDisplayView(canvas);
+  }
   return canvas.convertToBlob({ type: "image/png" });
 }
 

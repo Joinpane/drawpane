@@ -1,4 +1,6 @@
+import { ROOT_ID } from "@drawpane/model";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { Doc } from "../src/doc";
 import {
   ImageCache,
   imagePlacement,
@@ -6,6 +8,8 @@ import {
   layoutImageRow,
   mediaUrl,
 } from "../src/images";
+import { CanvasRenderer } from "../src/render";
+import { Scene } from "../src/scene";
 
 describe("imagePlacement", () => {
   const box = { width: 200, height: 100 };
@@ -358,8 +362,277 @@ describe("ImageCache", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it("can retry a transient request once without retrying a missing image", async () => {
+    const fetchImage = vi.fn(async () => new Response(null, { status: 404 }));
+    fetchImage.mockResolvedValueOnce(new Response(null, { status: 503 }));
+    fetchImage.mockResolvedValueOnce(new Response(new Uint8Array([1])));
+    vi.stubGlobal("fetch", fetchImage);
+    const cache = new ImageCache();
+    const signal = new AbortController().signal;
+    const options = { retryTransient: true };
+    expect((await cache.encoded("available", signal, options)).blob.size).toBe(1);
+    await expect(cache.encoded("missing", signal, options)).rejects.toThrow("404");
+    expect(fetchImage).toHaveBeenCalledTimes(3);
+  });
 });
 
 afterEach(() => {
   vi.unstubAllGlobals();
+});
+
+describe("bounded display images", () => {
+  const maxBytes = 2 * 256 * 256 * 4;
+  const resize = async (_b: ImageBitmap, width: number, height: number) => bitmap(width, height);
+
+  function draw(cache: ImageCache, refs: string[], width = 256): void {
+    cache.frame();
+    for (const ref of refs) cache.get(ref, width);
+  }
+
+  it("keeps every visible image when the working set grows, then sharpens in place", async () => {
+    const header = new Uint8Array(32);
+    header.set([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]);
+    const size = new DataView(header.buffer);
+    size.setUint32(16, 512);
+    size.setUint32(20, 512);
+    const fetchImage = vi.fn(async () => new Response(header));
+    vi.stubGlobal("fetch", fetchImage);
+    vi.stubGlobal(
+      "createImageBitmap",
+      vi.fn(async (_source, options?: ImageBitmapOptions) =>
+        bitmap(options?.resizeWidth ?? 512, options?.resizeHeight ?? 512),
+      ),
+    );
+    const cache = new ImageCache({ maxBytes, maxSide: 256, enforceMaxBytes: true, resize });
+    try {
+      draw(cache, ["a", "b"]);
+      await vi.waitFor(() => expect(cache.bytes).toBe(maxBytes));
+      draw(cache, ["a", "b", "c", "d"]);
+      await vi.waitFor(() => {
+        expect(["a", "b", "c", "d"].map((ref) => cache.status(ref))).toEqual(
+          Array(4).fill("ready"),
+        );
+      });
+      expect(cache.bytes).toBeLessThanOrEqual(maxBytes);
+      expect(cache.get("d", 256)?.bitmap.width).toBeLessThan(256);
+
+      for (let i = 0; i < 10; i++) {
+        draw(cache, ["a", "b", "c"]);
+        await flush();
+        draw(cache, ["a", "b", "c", "d"]);
+        await flush();
+      }
+      expect(fetchImage).toHaveBeenCalledTimes(4);
+
+      draw(cache, ["d"]);
+      await vi.waitFor(() => expect(cache.get("d", 256)?.bitmap.width).toBe(256));
+      expect(fetchImage).toHaveBeenCalledTimes(4);
+      expect(cache.bytes).toBeLessThanOrEqual(maxBytes);
+    } finally {
+      cache.clear();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("drops decode work that was queued for an image that left the view", async () => {
+    const { calls, load } = deferredLoader();
+    const cache = new ImageCache({ maxBytes, maxSide: 256, enforceMaxBytes: true, resize, load });
+    draw(cache, ["a", "b", "c"]);
+    await flush();
+    expect(calls.map(({ sha }) => sha)).toEqual(["a", "b"]);
+    draw(cache, ["a", "b", "d"]);
+    const resolve = (i: number) =>
+      calls[i]?.resolve({ bitmap: bitmap(256, 256), naturalWidth: 256, naturalHeight: 256 });
+    resolve(0);
+    resolve(1);
+    await flush();
+    expect(calls.map(({ sha }) => sha)).toEqual(["a", "b", "d"]);
+    resolve(2);
+    await flush();
+    cache.clear();
+  });
+
+  it("keeps settled sizes when a small preview briefly joins a full view", async () => {
+    const cache = new ImageCache({
+      maxBytes: 12 * 256 * 256 * 4,
+      maxSide: 256,
+      enforceMaxBytes: true,
+      resize,
+      load: async () => ({ bitmap: bitmap(256, 256), naturalWidth: 256, naturalHeight: 256 }),
+    });
+    const editor = {};
+    const preview = {};
+    const demands = new Map(Array.from({ length: 12 }, (_, i) => [`photo-${i}`, 256]));
+    try {
+      cache.setDisplayView(editor, demands);
+      await vi.waitFor(() => expect([...demands].every(([ref]) => cache.peek(ref))).toBe(true));
+      const initial = [...demands].map(([ref]) => cache.peek(ref)?.bitmap);
+      cache.setDisplayView(preview, new Map([["preview", 64]]));
+      await vi.waitFor(() => expect(cache.peek("preview")).not.toBeNull());
+      cache.releaseDisplayView(preview);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      for (const [index, ref] of [...demands.keys()].entries()) {
+        expect(cache.peek(ref)?.bitmap).toBe(initial[index]);
+      }
+    } finally {
+      cache.clear();
+    }
+  });
+
+  it("retries a transient failure while its view is idle", async () => {
+    const load = vi.fn(async () => ({
+      bitmap: bitmap(64, 64),
+      naturalWidth: 64,
+      naturalHeight: 64,
+    }));
+    load.mockRejectedValueOnce(new Error("Temporary network error"));
+    const cache = new ImageCache({ enforceMaxBytes: true, load, retryMs: 30 });
+    const owner = {};
+    try {
+      cache.setDisplayView(owner, new Map([["photo", 64]]));
+      await vi.waitFor(() => expect(cache.status("photo")).toBe("ready"));
+      expect(load).toHaveBeenCalledTimes(2);
+    } finally {
+      cache.clear();
+    }
+  });
+
+  it("overlaps small source decodes and runs an oversized source alone", async () => {
+    const header = (width: number, height: number) => {
+      const bytes = new Uint8Array(32);
+      bytes.set([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]);
+      const view = new DataView(bytes.buffer);
+      view.setUint32(16, width);
+      view.setUint32(20, height);
+      return bytes;
+    };
+    vi.stubGlobal(
+      "fetch",
+      async (url: string) =>
+        new Response(url.endsWith("/large") ? header(8000, 6000) : header(512, 512)),
+    );
+    const pending: (() => void)[] = [];
+    vi.stubGlobal(
+      "createImageBitmap",
+      (_: Blob, options: ImageBitmapOptions) =>
+        new Promise((resolve) => {
+          pending.push(() =>
+            resolve(bitmap(options.resizeWidth ?? 512, options.resizeHeight ?? 512)),
+          );
+        }),
+    );
+    const cache = new ImageCache({ enforceMaxBytes: true, decodeBytes: 16 * 1024 * 1024 });
+    const owner = {};
+    const six = Array.from({ length: 6 }, (_, i) => [`small-${i}`, 64] as const);
+    try {
+      cache.setDisplayView(owner, new Map(six));
+      await vi.waitFor(() => expect(pending).toHaveLength(6));
+      cache.setDisplayView(owner, new Map([...six, ["large", 64]]));
+      for (const resolve of pending.splice(0)) resolve();
+      await vi.waitFor(() => expect(pending).toHaveLength(1));
+      cache.setDisplayView(owner, new Map([...six, ["large", 64], ["extra", 64]]));
+      await vi.waitFor(() => expect(cache.natural("extra")).not.toBeNull());
+      expect(pending).toHaveLength(1);
+      pending.shift()?.();
+      await vi.waitFor(() => expect(pending).toHaveLength(1));
+      pending.shift()?.();
+      await vi.waitFor(() => expect(cache.status("extra")).toBe("ready"));
+    } finally {
+      for (const resolve of pending.splice(0)) resolve();
+      cache.clear();
+    }
+  });
+});
+
+describe("shared mobile image cache", () => {
+  it("keeps the main canvas's image when an independent preview draws repeatedly", async () => {
+    vi.stubGlobal(
+      "Path2D",
+      class {
+        rect() {}
+      },
+    );
+    const bytes = 256 * 256 * 4;
+    const cache = new ImageCache({
+      maxBytes: bytes,
+      maxSide: 256,
+      enforceMaxBytes: true,
+      load: async () => ({
+        bitmap: bitmap(256, 256),
+        naturalWidth: 256,
+        naturalHeight: 256,
+      }),
+      resize: async (_b, width, height) => bitmap(width, height),
+    });
+    const doc = new Doc();
+    const mainRef = "a".repeat(64);
+    const previewRefs = ["b", "c", "d", "e"].map((prefix) => prefix.repeat(64));
+    doc.apply([{ op: "create", id: "page", parent: ROOT_ID, type: "page", key: "a0", props: {} }]);
+    for (const [index, ref] of [mainRef, ...previewRefs].entries()) {
+      doc.apply([
+        {
+          op: "create",
+          id: ref,
+          parent: "page",
+          type: "rect",
+          key: `a${index}`,
+          props: { width: 256, height: 256, fills: [{ type: "image", ref, scaleMode: "fill" }] },
+        },
+      ]);
+    }
+    const scene = new Scene(doc);
+    const measurer = { width: () => 0 };
+    const main = new CanvasRenderer(scene, measurer, { images: cache });
+    const preview = new CanvasRenderer(scene, measurer, { images: cache });
+    const rect = { x: 0, y: 0, width: 256, height: 256 };
+    const context = () => ({
+      canvas: { width: 256, height: 256 },
+      clearRect: vi.fn(),
+      clip: vi.fn(),
+      drawImage: vi.fn(),
+      fillRect: vi.fn(),
+      getTransform: () => ({ a: 1, b: 0 }),
+      restore: vi.fn(),
+      save: vi.fn(),
+      setTransform: vi.fn(),
+    });
+    const mainContext = context();
+    const previewContext = context();
+    const draw = (renderer: CanvasRenderer, ctx: ReturnType<typeof context>, ref: string) =>
+      renderer.renderNodes(ctx as unknown as CanvasRenderingContext2D, [ref], rect, 1);
+    try {
+      draw(main, mainContext, mainRef);
+      await vi.waitFor(() => expect(cache.peek(mainRef)?.bitmap.width).toBe(256));
+      for (const ref of previewRefs) {
+        draw(preview, previewContext, ref);
+        await vi.waitFor(() => expect(cache.peek(ref)).not.toBeNull());
+        mainContext.drawImage.mockClear();
+        draw(main, mainContext, mainRef);
+        expect(mainContext.drawImage).toHaveBeenCalledOnce();
+        expect(cache.bytes).toBeLessThanOrEqual(bytes);
+      }
+      cache.releaseDisplayView(previewContext.canvas);
+      await vi.waitFor(() => expect(cache.peek(mainRef)?.bitmap.width).toBe(256));
+    } finally {
+      cache.clear();
+    }
+  });
+
+  it("does not decode for metadata callers with no Canvas frame and closes oversized seeds", async () => {
+    const load = vi.fn(async () => ({
+      bitmap: bitmap(256, 256),
+      naturalWidth: 256,
+      naturalHeight: 256,
+    }));
+    const cache = new ImageCache({ maxBytes: 1024, enforceMaxBytes: true, load });
+    expect(cache.natural("inspection")).toBeNull();
+    await flush();
+    expect(load).not.toHaveBeenCalled();
+    const supplied = bitmap(256, 256);
+    cache.put("oversized", { bitmap: supplied, naturalWidth: 256, naturalHeight: 256 });
+    expect(supplied.closed).toBe(true);
+    expect(cache.natural("oversized")).toEqual({ width: 256, height: 256 });
+    expect(cache.bytes).toBe(0);
+  });
 });

@@ -2166,3 +2166,60 @@ the same container. The gate's budgets: lag p95 ≤ 100 ms, dropped frames ≤ 5
 - Tried and left out: holding image decodes and uploads while moving (fewer long frames while
   moving, but the levels then arrive during refinement, and time to exact after Cmd+scroll out
   went to 1.9-2.7 s), and less text per moving frame (no difference in three paired runs).
+
+## Mobile browser memory profile
+
+At `98be4471`, a clean browser session still uses Canvas 2D. The engine switch starts WebGPU,
+WebGL2, or the CPU worker. The editor and prototype select the same renderer memory policy
+before creating their surfaces. Phones and tablets, including iPads using a desktop user
+agent, keep the mobile profile with a mouse or trackpad attached. Other devices with hover
+and a fine pointer use desktop limits. Touch devices without hover use the mobile profile
+at any screen size.
+
+| Reported memory on mobile | GPU | GPU tiles | GPU glyph masks on CPU | Decoded image allowance | Pixels per backing |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Up to 2 GiB | 128 MiB | 16 MiB | 8 MiB | 48 MiB | 6 million |
+| Above 2 and below 6 GiB, or no hint | 160 MiB | 24 MiB | 8 MiB | 56 MiB | 7 million |
+| At least 6 GiB | 192 MiB | 32 MiB | 12 MiB | 64 MiB | 8 million |
+
+The existing tile allocator chooses pages of 16 MiB or less within these budgets. The GPU
+glyph atlas starts at 16 MiB. The CPU worker keeps 16, 24 or 32 tile slots and uses
+4, 4 or 6 MiB for glyph masks. Engine image planning uses the lower of the profile and
+adapter limits and keeps image levels up to 2,048 or 2,560 pixels on the long side.
+
+Canvas 2D plans one decoded level per visible image, up to 1,024 or 1,536 pixels on the
+long side. When room is tight it evicts off-screen bitmaps and shrinks visible ones to
+make room for new images. A settled view sharpens images that need more pixels. Each
+canvas records its image needs as it draws, so a preview cannot evict an image the
+main canvas still needs. The cache leaves headroom and rounds levels during memory
+pressure, so a small preview can join a full view without resizing its images.
+It overlaps up to ten original fetches and up to six decodes. The 16, 20 or 24 MiB
+decode allowance is based on source pixels. A source above that allowance decodes alone.
+
+Raster exports, the Export panel and dashboard thumbnails use display pixels when they
+are sharp enough for the output. Raster exports overlap up to eight requests, admit
+up to 24 MiB of encoded bodies for staging, and decode one image at a time. The
+temporary bitmap limit matches the device's display allowance, with up to 4,096 pixels
+on each side. Canvas releases those bitmaps after compositing and before encoding.
+Dashboard thumbnails request stored previews and retain up to 8 MiB of thumbnail
+bitmaps across publishes.
+
+The editor and prototype use native DPR within the area allowance. The 2D prototype
+stage can use tall backings for scrolling screens. Engine surfaces also respect the
+engine's side limit. Editor overscan uses the remaining room at the effective DPR.
+
+A mobile context or device loss during normal use steps down to the next available
+backend. A loss while hidden or within 1.5 seconds of returning gets one same-backend
+retry when visible, with a 60-second window before another retry. The replacement renders
+the same document at the same camera while Canvas covers recovery. Editor debug stats
+estimate canvas and fallback snapshot bytes. Engine image estimates include resident
+levels, staged uploads and in-flight copies. The browser can hold additional memory.
+
+Tune the limits with the small file and the full iOS kit on a lower-memory supported iPhone,
+a WebGPU-capable iPhone, an iPad in both orientations, and an Android phone. Compare Safari
+WebGPU and WebGL2 where available. Record peak GPU and CPU allocations, aggregate canvas
+backing pixels, cold open to first usable frame, image sharpness and frame pacing during
+pan and pinch. Repeat rotation and background/foreground cycles. Record context losses,
+backend transitions, persistent blank frames and tab reloads, and check that a recovered
+view keeps the document and camera. Compare frame pacing against the existing file and
+real-input benches before setting rollout gates.

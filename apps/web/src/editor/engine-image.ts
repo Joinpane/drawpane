@@ -8,6 +8,7 @@ import {
   sniffImage,
 } from "@drawpane/model";
 import type { DecodeReply, DecodeRequest } from "./image-decode.worker";
+import type { MobileRendererMemory } from "./renderer-memory";
 
 const MIB = 1024 * 1024;
 const MAX_DECODES = 4;
@@ -465,6 +466,9 @@ export class ViewImages {
   #uploadFrame: Promise<void> | undefined;
   #inflightBytes = 0;
   #stagedBytes = 0;
+  #flushingBytes = 0;
+  #thumbnailBytes = 0;
+  #peakBytes = 0;
   #flushingStaged = false;
   /** Decoded levels waiting their turn to upload, one at a time, what the view shows first. */
   #commits: {
@@ -492,6 +496,7 @@ export class ViewImages {
     private readonly decode: Decode = decodeInWorker,
     private readonly onPreviewMissing?: (ref: string, blob: Blob) => void,
     private readonly onAllVisibleFullReady?: () => void,
+    private readonly memory?: MobileRendererMemory,
   ) {}
 
   info(ref: string): ImageInfo | null {
@@ -500,6 +505,23 @@ export class ViewImages {
 
   get residentBytes(): number {
     return this.#residentBytes;
+  }
+
+  get memoryEstimate() {
+    return {
+      budget: this.#budget,
+      residentBytes: this.#residentBytes,
+      workingBytes: this.#workingBytes,
+      peakBytes: this.#peakBytes,
+    };
+  }
+
+  get #workingBytes(): number {
+    return this.#inflightBytes + this.#stagedBytes + this.#flushingBytes + this.#thumbnailBytes;
+  }
+
+  #recordMemory(): void {
+    this.#peakBytes = Math.max(this.#peakBytes, this.#residentBytes + this.#workingBytes);
   }
 
   get budget(): number {
@@ -670,9 +692,11 @@ export class ViewImages {
     this.#hidden = false;
     clearTimeout(this.#refineTimer);
     this.#refineTimer = undefined;
-    const budget = deviceImageBudget(limits.bytes);
+    const budget = this.memory
+      ? Math.min(limits.bytes, this.memory.imageBytes)
+      : deviceImageBudget(limits.bytes);
     if (budget !== this.#budget) this.#denied.clear();
-    const maxSide = Math.min(MAX_BITMAP_SIDE, limits.side);
+    const maxSide = Math.min(this.memory?.imageSide ?? MAX_BITMAP_SIDE, limits.side);
     const candidates = new Map<string, Target>();
     const metadata = new Map<string, MetaDemand>();
     const ideal = new Map<string, Target>();
@@ -1370,9 +1394,10 @@ export class ViewImages {
     if (!source) return;
     const cached = cachedBlobFor(source, target.tier);
     if (!cached) return;
-    if (this.#shouldStageUpload(target) && this.#stagedBytes + bytes(target) > STAGED_UPLOAD_BYTES)
-      return;
-    if (this.#inflightBytes > 0 && this.#inflightBytes + bytes(target) > DECODE_BYTES) return;
+    const stagedLimit = this.memory?.stagedImageBytes ?? STAGED_UPLOAD_BYTES;
+    if (this.#shouldStageUpload(target) && this.#stagedBytes + bytes(target) > stagedLimit) return;
+    const decodeLimit = this.memory?.decodeBytes ?? DECODE_BYTES;
+    if (this.#inflightBytes > 0 && this.#inflightBytes + bytes(target) > decodeLimit) return;
     // A finer bitmap already resident (still wanted in the plan, or for any background target)
     // can serve this level as well without evicting itself.
     if (target.width !== this.#fallbacks.get(target.ref)?.width) {
@@ -1795,6 +1820,7 @@ export class ViewImages {
     const backend = this.#backend;
     if (!backend || this.#staged.size === 0 || this.#flushingStaged) return;
     const batch = [...this.#staged.values()];
+    this.#flushingBytes = this.#stagedBytes;
     this.#staged.clear();
     this.#stagedBytes = 0;
     this.#flushingStaged = true;
@@ -1810,9 +1836,14 @@ export class ViewImages {
             if (uploaded) didChange = true;
           } finally {
             entry.bitmap.close();
+            this.#flushingBytes -= entry.bytes;
           }
         }
       } finally {
+        if (this.#flushingBytes > 0) {
+          for (const entry of batch) entry.bitmap.close();
+          this.#flushingBytes = 0;
+        }
         this.#flushingStaged = false;
         if (didChange && backend === this.#backend) this.changed();
         if (!this.#deferRefine && this.#staged.size > 0) this.#flushStaged();
@@ -1858,6 +1889,7 @@ export class ViewImages {
       if (replaced) this.#residentBytes -= bytes(replaced);
       this.#residents.set(lKey, { ...target, used: this.#clock });
       this.#residentBytes += bytes(target);
+      this.#recordMemory();
     } else {
       this.#denied.add(lKey);
     }
@@ -1957,6 +1989,8 @@ export class ViewImages {
     if (fallback) {
       // Reuse the decoded pixels. Restoring a tab needs no second full decode.
       let thumbnail: ImageBitmap | undefined;
+      this.#thumbnailBytes += bytes(fallback);
+      this.#recordMemory();
       try {
         thumbnail = await untilAborted(createImageBitmap(bitmap, resize(fallback)), signal, (b) =>
           b.close(),
@@ -1975,6 +2009,7 @@ export class ViewImages {
         if (!signal.aborted) this.#denied.add(levelKey(fallback));
       } finally {
         thumbnail?.close();
+        this.#thumbnailBytes -= bytes(fallback);
       }
     }
     await this.#paceUpload(this.#firstUpload(target), signal);
@@ -1998,6 +2033,8 @@ export class ViewImages {
     this.#decodeJobs.set(key, { ref: target.ref, abort, target });
     const need = bytes(target);
     this.#inflightBytes += need;
+    this.#recordMemory();
+    let staged = false;
     void (async () => {
       let bitmap: ImageBitmap | undefined;
       const version = this.cache.encodedVersion(target.ref);
@@ -2012,7 +2049,7 @@ export class ViewImages {
             !abort.signal.aborted &&
             backend === this.#backend &&
             this.#shouldStageUpload(target) &&
-            this.#stagedBytes + need <= STAGED_UPLOAD_BYTES
+            this.#stagedBytes + need <= (this.memory?.stagedImageBytes ?? STAGED_UPLOAD_BYTES)
           ) {
             const lKey = levelKey(target);
             const prev = this.#staged.get(lKey);
@@ -2022,6 +2059,10 @@ export class ViewImages {
             }
             this.#staged.set(lKey, { target, bitmap: decoded, bytes: need });
             this.#stagedBytes += need;
+            if (this.memory) {
+              this.#inflightBytes -= need;
+              staged = true;
+            }
             bitmap = undefined;
             if (this.allVisibleFullReady) this.onAllVisibleFullReady?.();
             return;
@@ -2041,7 +2082,7 @@ export class ViewImages {
         }
       } finally {
         bitmap?.close();
-        this.#inflightBytes -= need;
+        if (!staged) this.#inflightBytes -= need;
         this.#decodeJobs.delete(key);
         this.#pump();
       }

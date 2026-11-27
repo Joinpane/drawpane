@@ -539,6 +539,20 @@ export class CanvasRenderer {
    * they're skipped.
    */
   #fresh: ReadonlySet<string> | null = null;
+  /** Image paints recorded on the main draw walk, including retained pixels. */
+  readonly #viewImageUses = new Map<
+    string,
+    { node: NodeRecord; bounds: Rect; widths: Map<string, number>; pass: number }
+  >();
+  #imagePaints: {
+    scale: number;
+    view: Rect | null;
+    widths: Map<string, number>;
+  } | null = null;
+  #imagePass = 0;
+  #imagePage: string | null = null;
+  #imageDocVersion = -1;
+  #imageHidden: ReadonlySet<string> | null = null;
   /** The last exact frame's pixels, scaled while zooming (see `#preview`). */
   #snapshot: OffscreenCanvas | HTMLCanvasElement | null = null;
   #snapshotFrame: LastFrame | null = null;
@@ -637,10 +651,12 @@ export class CanvasRenderer {
     const start = performance.now();
     const settling = this.#settling(start, budget);
     this.stats = { drawn: 0, culled: 0, ms: 0 };
-    this.images.frame();
+    if (!this.images.boundedDisplay) this.images.frame();
     const page = this.#scene.doc.get(pageId);
     resetState(ctx);
     if (!page) {
+      this.images.releaseDisplayView(ctx.canvas);
+      this.#viewImageUses.clear();
       this.#last = null;
       this.#work.clear();
       this.#pendingReaders.clear();
@@ -672,12 +688,20 @@ export class CanvasRenderer {
       tx,
       ty,
     };
+    const visible = this.images.boundedDisplay ? snapped.visibleRect(viewport) : null;
+    const imageScale = camera.zoom * dpr;
+    if (visible) {
+      this.#pruneImageUses(pageId, visible, imageScale);
+      this.#imagePaints = { scale: imageScale, view: visible, widths: new Map() };
+      this.#imagePass++;
+    }
     if (!this.#last || !sameContent(this.#last, frame)) this.#generation++;
     if (!exact && this.#preview(ctx, frame)) {
       this.#work.clear();
       this.#pendingReaders.clear();
       this.pending = false;
       this.stats.ms = performance.now() - start;
+      this.#publishImageUses(ctx.canvas);
       return false;
     }
     this.#screen = ctx;
@@ -686,11 +710,77 @@ export class CanvasRenderer {
       done = this.#paint(ctx, frame, snapped, viewport, dpr, start, budget, settling);
     } finally {
       this.#screen = null;
+      this.#publishImageUses(ctx.canvas);
     }
     this.pending = !done;
     this.stats.ms = performance.now() - start;
     this.#lastCall = { start, ms: this.stats.ms };
     return done;
+  }
+
+  /** Reconcile only images encountered during painting, including retained strips and slices. */
+  #pruneImageUses(pageId: string, view: Rect, scale: number): void {
+    if (this.#imagePage !== pageId) this.#viewImageUses.clear();
+    const scene = this.#scene;
+    const edits = scene.doc.version !== this.#imageDocVersion || this.#imageHidden !== this.hidden;
+    const margin = cullPad(scale, 1);
+    const visible = {
+      x: view.x - margin,
+      y: view.y - margin,
+      width: view.width + margin * 2,
+      height: view.height + margin * 2,
+    };
+    for (const [id, use] of this.#viewImageUses) {
+      if (edits) {
+        const bounds = scene.extent(id);
+        if (
+          !bounds ||
+          scene.doc.get(id) !== use.node ||
+          !scene.isVisible(id) ||
+          this.hidden.has(id) ||
+          scene.doc.ancestors(id).some((node) => this.hidden.has(node.id))
+        ) {
+          this.#viewImageUses.delete(id);
+          continue;
+        }
+        use.bounds = bounds;
+      }
+      if (!rectsIntersect(use.bounds, visible)) this.#viewImageUses.delete(id);
+    }
+    this.#imagePage = pageId;
+    this.#imageDocVersion = scene.doc.version;
+    this.#imageHidden = this.hidden;
+  }
+
+  #recordImageUse(node: NodeRecord, ref: string, width: number): void {
+    const paint = this.#imagePaints;
+    if (!paint) return;
+    if (!paint.view) {
+      paint.widths.set(ref, Math.max(paint.widths.get(ref) ?? 0, width));
+      return;
+    }
+    let use = this.#viewImageUses.get(node.id);
+    if (use?.pass !== this.#imagePass) {
+      const bounds = this.#scene.extent(node.id);
+      if (!bounds) return;
+      use = { node, bounds, widths: new Map(), pass: this.#imagePass };
+      this.#viewImageUses.set(node.id, use);
+    }
+    use.widths.set(ref, Math.max(use.widths.get(ref) ?? 0, width / paint.scale));
+  }
+
+  #publishImageUses(canvas: object): void {
+    const paint = this.#imagePaints;
+    if (!paint) return;
+    this.#imagePaints = null;
+    if (paint.view) {
+      for (const { widths } of this.#viewImageUses.values()) {
+        for (const [ref, width] of widths) {
+          paint.widths.set(ref, Math.max(paint.widths.get(ref) ?? 0, width * paint.scale));
+        }
+      }
+    }
+    this.images.setDisplayView(canvas, paint.widths);
   }
 
   /**
@@ -1100,6 +1190,10 @@ export class CanvasRenderer {
     return true;
   }
 
+  get snapshotBytes(): number {
+    return this.#snapshot ? this.#snapshot.width * this.#snapshot.height * 4 : 0;
+  }
+
   #snapshotFor(width: number, height: number): OffscreenCanvas | HTMLCanvasElement | null {
     if (this.#snapshot && this.#snapshot.width === width && this.#snapshot.height === height)
       return this.#snapshot;
@@ -1463,7 +1557,9 @@ export class CanvasRenderer {
      */
     context = false,
   ): void {
-    this.images.frame();
+    if (this.images.boundedDisplay) {
+      this.#imagePaints = { scale, view: null, widths: new Map() };
+    } else this.images.frame();
     this.stats = { drawn: 0, culled: 0, ms: 0 };
     resetState(ctx);
     ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
@@ -1481,6 +1577,7 @@ export class CanvasRenderer {
       if (context) this.#recordContext(ctx, ids, camera, rect);
       for (const id of ids) this.#draw(ctx, id, camera, 1, rect);
     } finally {
+      this.#publishImageUses(ctx.canvas);
       this.hidden = hidden;
       this.#detail = true;
       this.#context = null;
@@ -2519,7 +2616,9 @@ export class CanvasRenderer {
     const place = natural
       ? imagePlacement(paint.scaleMode, { width: w, height: h }, natural, paint.crop)
       : null;
-    const view = place ? this.images.get(paint.ref, place.width * deviceScale) : null;
+    const width = (place?.width ?? w / (paint.crop?.width || 1)) * deviceScale;
+    if (paint.opacity !== 0) this.#recordImageUse(node, paint.ref, width);
+    const view = place ? this.images.get(paint.ref, width) : null;
     if (!place || !view) {
       ctx.fillStyle = this.#placeholder(ctx);
       ctx.fillRect(0, 0, w, h);

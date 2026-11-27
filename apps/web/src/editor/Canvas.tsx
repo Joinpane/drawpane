@@ -40,6 +40,7 @@ import { frameStatsFor } from "./frame-stats";
 import { useEditor, useEditorState } from "./hooks";
 import { LIBRARY_DRAG_MIME, type LibraryDrag, loadedSource } from "./libraries/sources";
 import { imagesFor } from "./media";
+import { mobileBacking, mobileOverscan, readMobileRendererMemory } from "./renderer-memory";
 import { engineBackendLabel, fallbackToReason, setRendererStatus } from "./renderer-status";
 import { shaper } from "./shaping";
 import { TextEditor } from "./TextEditor";
@@ -138,6 +139,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       !engineSlotEl
     )
       return;
+    const memory = readMobileRendererMemory();
     const cctx = contentCanvas.getContext("2d", { alpha: false });
     const pctx = pixelGridCanvas.getContext("2d");
     const lctx = labelsCanvas.getContext("2d");
@@ -151,7 +153,8 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     let pixelGridEnabled = true;
 
     // Cropping starts from what a fill shows, which needs each image's own size.
-    editor.imageSize = (ref) => imagesFor(editor).natural(ref);
+    editor.imageSize = (ref) =>
+      imagesFor(editor).natural(ref) ?? (memory && engine?.imageNaturalSize(ref)) ?? null;
     const canvasToken = () =>
       getComputedStyle(document.documentElement).getPropertyValue("--canvas").trim() || "#ebeae6";
     let theme = readTheme();
@@ -296,6 +299,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         paintCoverSync();
       }
       engineShowing = on;
+      if (on) rendererRef.current.instance?.images.releaseDisplayView(contentCanvas);
       engineSlotEl.style.visibility = on ? "visible" : "hidden";
       if (activeEngineCanvas) {
         activeEngineCanvas.style.visibility = on ? "visible" : "hidden";
@@ -318,6 +322,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         imagesFor(editor),
         choice,
         engineInit.signal,
+        memory,
       ).then((view) => {
         if (disposed || engineInit.signal.aborted) {
           view?.dispose();
@@ -440,7 +445,8 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         schedule();
       });
     }
-    let dpr = window.devicePixelRatio || 1;
+    let deviceDpr = window.devicePixelRatio || 1;
+    let dpr = deviceDpr;
     let contentDirty = true;
     /**
      * What the page shows changed since the engine last drew (the document, images, fonts),
@@ -560,7 +566,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       presentOnly = false;
       cancelIdle();
       const liveDpr = window.devicePixelRatio || 1;
-      if (liveDpr !== dpr) applySize();
+      if (liveDpr !== deviceDpr) applySize();
       const s = editor.s;
       const t0 = performance.now();
       const page = s.pageId ? editor.doc.get(s.pageId) : undefined;
@@ -782,6 +788,27 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
           }, wait + 16);
         }
       }
+      if (memory) {
+        const backingBytes =
+          4 *
+          [contentCanvas, overlayCanvas, labelsCanvas, pixelGridCanvas, activeEngineCanvas].reduce(
+            (pixels, canvas) => pixels + (canvas ? canvas.width * canvas.height : 0),
+            0,
+          );
+        const snapshotBytes =
+          (rendererRef.current.instance?.snapshotBytes ?? 0) + (engine?.cpuSnapshotBytes ?? 0);
+        const imageMemory = engine?.imageMemoryEstimate;
+        const decodedBytes = imagesFor(editor).bytes;
+        timing.mobileMemory = {
+          backingBytes,
+          snapshotBytes,
+          decodedBytes,
+          peakBytes: Math.max(
+            timing.mobileMemory?.peakBytes ?? 0,
+            backingBytes + snapshotBytes + decodedBytes + (imageMemory?.peakBytes ?? 0),
+          ),
+        };
+      }
       timing.record(t1 - t0, performance.now() - t1);
     };
     const schedule = () => {
@@ -796,7 +823,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         dprQuery = null;
       }
       if (typeof window.matchMedia === "function") {
-        dprQuery = window.matchMedia(`(resolution: ${dpr}dppx)`);
+        dprQuery = window.matchMedia(`(resolution: ${deviceDpr}dppx)`);
         dprQuery.addEventListener("change", onDprChange);
       }
     };
@@ -806,7 +833,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     const syncDpr = () => {
       if (disposed || document.hidden) return;
       const live = window.devicePixelRatio || 1;
-      if (live !== dpr || (dprQuery && !dprQuery.matches)) {
+      if (live !== deviceDpr || (dprQuery && !dprQuery.matches)) {
         resize();
       }
     };
@@ -815,11 +842,13 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     document.addEventListener("visibilitychange", syncDpr);
 
     const applySize = () => {
-      dpr = window.devicePixelRatio || 1;
+      deviceDpr = window.devicePixelRatio || 1;
       watchDpr();
       const { width, height } = hostEl.getBoundingClientRect();
-      const devW = Math.max(1, Math.round(width * dpr));
-      const devH = Math.max(1, Math.round(height * dpr));
+      const bounded = memory && mobileBacking(memory, width, height, deviceDpr);
+      dpr = bounded?.dpr ?? deviceDpr;
+      const devW = bounded?.width ?? Math.max(1, Math.round(width * dpr));
+      const devH = bounded?.height ?? Math.max(1, Math.round(height * dpr));
       for (const canvas of [contentCanvas, overlayCanvas]) {
         canvas.width = devW;
         canvas.height = devH;
@@ -831,7 +860,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       pixelGridEnabled = retainedAllowed;
       if (retainedAllowed) {
         const maxCss = Math.floor(MAX_LABEL_CANVAS_PX / dpr);
-        const pad = Math.max(
+        const maxPad = Math.max(
           0,
           Math.min(
             LABEL_OVERSCAN_CSS,
@@ -839,13 +868,20 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
             Math.floor((maxCss - height) / 2),
           ),
         );
+        const pad = memory ? mobileOverscan(memory, width, height, dpr, maxPad) : maxPad;
         const retainedW = width + pad * 2;
         const retainedH = height + pad * 2;
         // The pixel grid and labels are the same kind of retained surface:
         // overscanned, CSS-translated on a same-zoom pan, capped per axis.
         for (const canvas of [pixelGridCanvas, labelsCanvas]) {
-          canvas.width = Math.min(MAX_LABEL_CANVAS_PX, Math.max(1, Math.round(retainedW * dpr)));
-          canvas.height = Math.min(MAX_LABEL_CANVAS_PX, Math.max(1, Math.round(retainedH * dpr)));
+          canvas.width =
+            memory && pad === 0
+              ? devW
+              : Math.min(MAX_LABEL_CANVAS_PX, Math.max(1, Math.round(retainedW * dpr)));
+          canvas.height =
+            memory && pad === 0
+              ? devH
+              : Math.min(MAX_LABEL_CANVAS_PX, Math.max(1, Math.round(retainedH * dpr)));
           canvas.style.display = "";
           canvas.style.width = `${retainedW}px`;
           canvas.style.height = `${retainedH}px`;
@@ -983,6 +1019,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
 
     return () => {
       disposed = true;
+      rendererRef.current.instance?.images.releaseDisplayView(contentCanvas);
       engineInit.abort();
       const w = window as unknown as { drawpaneEngineView?: EngineView };
       if (createdView && w.drawpaneEngineView === createdView) delete w.drawpaneEngineView;

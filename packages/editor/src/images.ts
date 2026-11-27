@@ -8,7 +8,13 @@
  * downscaled copy (made once, also off the main thread), which is both
  * sharper and cheaper than shrinking a full-size bitmap every frame.
  */
-import { type MediaPreviewSize, parseMediaPreviewSize } from "@drawpane/model";
+import {
+  exifOrientationComplete,
+  type MediaPreviewSize,
+  mediaPreviewDimensions,
+  parseMediaPreviewSize,
+  sniffImage,
+} from "@drawpane/model";
 import type { Point, Rect } from "./geometry";
 
 export type ScaleMode = "fill" | "fit" | "tile" | "stretch" | "crop";
@@ -134,8 +140,16 @@ export interface ImageCacheOptions {
   readonly resize?: (bitmap: ImageBitmap, width: number, height: number) => Promise<ImageBitmap>;
   /** Decoded bytes to keep (4 per pixel). Default 384 MB. */
   readonly maxBytes?: number;
+  /** Keep decoded pixels within maxBytes, including those used in the current view. */
+  readonly enforceMaxBytes?: boolean;
+  /** Source RGBA bytes allowed in concurrent display decodes. Oversized sources decode alone. */
+  readonly decodeBytes?: number;
   /** Longest side to keep a bitmap at; larger images decode, then shrink to this. Default 4096. */
   readonly maxSide?: number;
+  /** Limit concurrent fetch/decode jobs. */
+  readonly maxConcurrentLoads?: number;
+  /** Output caches already hold the size the raster needs. */
+  readonly mipmaps?: boolean;
   /** First retry delay after a failed load; doubles each time up to a minute. Default 2 s. */
   readonly retryMs?: number;
   /** Clock, for tests. */
@@ -154,6 +168,10 @@ interface Entry {
   usedFrame: number;
   attempts: number;
   retryAt: number;
+  /** Width of the largest drawn use during the current display frame. */
+  wantedWidth?: number;
+  /** Some custom sources supply fewer pixels than the natural dimensions imply. */
+  displaySourceSide?: number;
   abort: AbortController | null;
 }
 
@@ -167,8 +185,15 @@ const MAX_RETRY_MS = 60_000;
  * pasted from another team's file.
  */
 const MAX_ATTEMPTS = 8;
+const DISPLAY_FETCHES = 10;
+const DISPLAY_DECODES = 6;
+const DISPLAY_REPAINT_MS = 75;
+const DISPLAY_STAGING_BYTES = 24 * 1024 * 1024;
+const DISPLAY_SOURCE_BYTES = 32 * 1024 * 1024;
+const DISPLAY_REFINE_MS = 150;
+const DISPLAY_MIN_SIDE = 64;
 
-const bytesOf = (b: ImageBitmap) => b.width * b.height * 4;
+const bytesOf = ({ width, height }: Size) => width * height * 4;
 
 async function defaultResize(bitmap: ImageBitmap, width: number, height: number) {
   return createImageBitmap(bitmap, {
@@ -190,10 +215,79 @@ export interface EncodedImage {
 export interface EncodedImageOptions {
   /** Request a fixed stored preview tier instead of the full original. */
   readonly preview?: MediaPreviewSize;
+  readonly retryTransient?: boolean;
+  /** Admit a response body before reading it into a blob. */
+  readonly beforeRead?: (bytes: number | null) => Promise<void>;
 }
 
 export function mediaUrl(sha: string, preview?: MediaPreviewSize): string {
   return preview ? `/api/media/${sha}?w=${preview}` : `/api/media/${sha}`;
+}
+
+/** Reads display-oriented dimensions without allocating an RGBA bitmap. */
+export async function imageBlobSize(blob: Blob): Promise<Size | null> {
+  let size = Math.min(blob.size, 64 * 1024);
+  for (;;) {
+    const head = new Uint8Array(await blob.slice(0, size).arrayBuffer());
+    const info = sniffImage(head);
+    const orientation =
+      info?.mime === "image/jpeg" || info?.mime === "image/webp"
+        ? exifOrientationComplete(head)
+        : 1;
+    if (info && orientation !== null) {
+      return orientation >= 5 && orientation <= 8
+        ? { width: info.height, height: info.width }
+        : { width: info.width, height: info.height };
+    }
+    if (size === blob.size) return null;
+    size = Math.min(blob.size, size * 4);
+  }
+}
+
+export async function decodeImageAtSize(
+  blob: Blob,
+  natural: Size,
+  target: Size,
+  resizeQuality: "low" | "medium" | "high" = "high",
+): Promise<LoadedImage> {
+  const bitmap =
+    target.width === natural.width && target.height === natural.height
+      ? await createImageBitmap(blob)
+      : await createImageBitmap(blob, {
+          resizeWidth: target.width,
+          resizeHeight: target.height,
+          resizeQuality,
+        });
+  return { bitmap, naturalWidth: natural.width, naturalHeight: natural.height };
+}
+
+/** Decode directly to the smaller size when we can determine display-oriented dimensions. */
+export async function decodeBoundedImage(
+  blob: Blob,
+  limit: number | ((natural: Size) => number),
+): Promise<LoadedImage> {
+  const targetSize = (width: number, height: number) => {
+    const natural = { width, height };
+    return mediaPreviewDimensions(natural, typeof limit === "number" ? limit : limit(natural));
+  };
+  const natural = await imageBlobSize(blob);
+  if (natural) return decodeImageAtSize(blob, natural, targetSize(natural.width, natural.height));
+
+  const full = await createImageBitmap(blob);
+  const naturalWidth = full.width;
+  const naturalHeight = full.height;
+  const size = targetSize(naturalWidth, naturalHeight);
+  if (size.width === naturalWidth && size.height === naturalHeight)
+    return { bitmap: full, naturalWidth, naturalHeight };
+  try {
+    return {
+      bitmap: await defaultResize(full, size.width, size.height),
+      naturalWidth,
+      naturalHeight,
+    };
+  } finally {
+    full.close();
+  }
 }
 
 function defaultLoader(
@@ -206,7 +300,8 @@ function defaultLoader(
     if (!response.ok) throw new Error(`Image ${sha} answered ${response.status}`);
     // Decoding happens off the main thread; EXIF orientation is applied, so the
     // bitmap's size is the size people see.
-    let bitmap = await createImageBitmap(await response.blob());
+    const blob = await response.blob();
+    let bitmap = await createImageBitmap(blob);
     const naturalWidth = bitmap.width;
     const naturalHeight = bitmap.height;
     const longest = Math.max(naturalWidth, naturalHeight);
@@ -224,6 +319,11 @@ function defaultLoader(
   };
 }
 
+interface DisplayView {
+  readonly owner: WeakRef<object>;
+  demands: ReadonlyMap<string, number>;
+}
+
 /**
  * Decoded images by content hash. `get` returns what can be drawn now and
  * starts whatever loading is missing; `subscribe` hears when something new
@@ -237,8 +337,36 @@ export class ImageCache {
   readonly #encodedVersions = new Map<string, number>();
   readonly #localSources = new Map<string, { blob: Blob; size: Size }>();
   #localBytes = 0;
+  readonly #mipmaps: boolean;
   readonly #resize: NonNullable<ImageCacheOptions["resize"]>;
   readonly #maxBytes: number;
+  readonly #enforceMaxBytes: boolean;
+  readonly #maxConcurrentLoads: number;
+  readonly #queuedLoads = new Map<string, Entry>();
+  #activeLoads = 0;
+  readonly #displaySide: number;
+  readonly #decodeBytes: number | undefined;
+  readonly #customLoad: ImageCacheOptions["load"];
+  readonly #displayViews = new Set<DisplayView>();
+  readonly #viewByOwner = new WeakMap<object, DisplayView>();
+  readonly #implicitDemands = new Map<string, number>();
+  readonly #displayFetches = new Map<string, AbortController>();
+  readonly #fetchedDisplay = new Map<string, EncodedImage>();
+  #fetchedDisplayBytes = 0;
+  readonly #displayDemands = new Map<string, Entry>();
+  readonly #displaySources = new Map<string, EncodedImage>();
+  #displaySourceBytes = 0;
+  #displayTargets = new Map<string, number>();
+  #displayGeometry: { ref: string; side: number; width: number; height: number }[] = [];
+  #collectingDisplayFrame = false;
+  #displayQueued = false;
+  readonly #displayDecodes = new Set<string>();
+  #displayReservedBytes = 0;
+  #displayWorkBytes = 0;
+  #shrinkingDisplay = false;
+  #displayRepaint: ReturnType<typeof setTimeout> | undefined;
+  #refineAt = 0;
+  #refineTimer: ReturnType<typeof setTimeout> | undefined;
   readonly #retryMs: number;
   readonly #now: () => number;
   #frame = 0;
@@ -247,11 +375,25 @@ export class ImageCache {
 
   constructor(options: ImageCacheOptions = {}) {
     this.#url = options.url ?? mediaUrl;
+    this.#mipmaps = options.mipmaps ?? true;
     this.#resize = options.resize ?? defaultResize;
-    this.#load = options.load ?? defaultLoader(options.maxSide ?? 4096, this.#resize, options.url);
+    this.#maxConcurrentLoads = Math.max(1, options.maxConcurrentLoads ?? Infinity);
+    this.#enforceMaxBytes = options.enforceMaxBytes ?? false;
+    this.#decodeBytes = options.decodeBytes;
+    this.#displaySide = options.maxSide ?? 4096;
+    this.#customLoad = options.load;
+    this.#load = options.load ?? defaultLoader(this.#displaySide, this.#resize, options.url);
     this.#maxBytes = options.maxBytes ?? 384 * 1024 * 1024;
     this.#retryMs = options.retryMs ?? 2000;
     this.#now = options.now ?? (() => Date.now());
+  }
+
+  get boundedDisplay(): boolean {
+    return this.#enforceMaxBytes;
+  }
+
+  get decodedBudget(): number {
+    return this.#maxBytes;
   }
 
   /** Decoded bytes held, including downscaled copies. */
@@ -275,19 +417,62 @@ export class ImageCache {
 
   /** Marks the start of a frame. Images drawn in this frame or the last one are never evicted. */
   frame(): void {
+    if (this.#enforceMaxBytes) {
+      // A stage and its overlays can draw in one turn. Keep their demands together.
+      if (!this.#collectingDisplayFrame) {
+        this.#implicitDemands.clear();
+        this.#collectingDisplayFrame = true;
+        queueMicrotask(() => {
+          this.#collectingDisplayFrame = false;
+        });
+      }
+      this.#scheduleDisplay();
+      return;
+    }
     this.#frame++;
     this.#evict();
   }
 
+  /** Each canvas owns its demands independently, including when its pixels are retained. */
+  setDisplayView(owner: object, demands: ReadonlyMap<string, number>): void {
+    if (!this.#enforceMaxBytes) return;
+    let view = this.#viewByOwner.get(owner);
+    if (!view) {
+      view = { owner: new WeakRef(owner), demands };
+      this.#viewByOwner.set(owner, view);
+    } else view.demands = demands;
+    this.#displayViews.add(view);
+    this.#scheduleDisplay();
+  }
+
+  releaseDisplayView(owner: object): void {
+    const view = this.#viewByOwner.get(owner);
+    if (view && this.#displayViews.delete(view)) this.#scheduleDisplay();
+  }
+
+  /** Read dimensions or pixels without scheduling a display decode. */
+  peek(sha: string): ImageView | null {
+    const entry = this.#entries.get(sha);
+    return entry?.full
+      ? {
+          bitmap: entry.full,
+          naturalWidth: entry.naturalWidth,
+          naturalHeight: entry.naturalHeight,
+        }
+      : null;
+  }
+
   /**
-   * The image's natural size if it has loaded, else null (and loading starts).
+   * The image's natural size if known. Desktop starts loading unknown images here.
+   * Bounded display caches wait for a renderer to request pixels.
    * Use it to place the image before asking for a bitmap at the right size.
    */
   natural(sha: string): Size | null {
-    const entry = this.#touch(sha);
-    return entry.status === "ready"
-      ? { width: entry.naturalWidth, height: entry.naturalHeight }
-      : null;
+    const entry = this.#enforceMaxBytes ? this.#entries.get(sha) : this.#touch(sha);
+    if (entry && (entry.status === "ready" || (this.#enforceMaxBytes && entry.naturalWidth > 0))) {
+      return { width: entry.naturalWidth, height: entry.naturalHeight };
+    }
+    return this.#localSources.get(sha)?.size ?? null;
   }
 
   /**
@@ -296,7 +481,7 @@ export class ImageCache {
    * shows at under half its bitmap size; until it arrives the full one is used.
    */
   get(sha: string, targetWidth = Number.POSITIVE_INFINITY): ImageView | null {
-    const entry = this.#touch(sha);
+    const entry = this.#touch(sha, targetWidth);
     const full = entry.full;
     if (entry.status !== "ready" || !full) return null;
     const view = (bitmap: ImageBitmap): ImageView => ({
@@ -304,7 +489,13 @@ export class ImageCache {
       naturalWidth: entry.naturalWidth,
       naturalHeight: entry.naturalHeight,
     });
-    if (!(targetWidth < full.width / 2) || full.width <= MIN_LEVEL * 2) return view(full);
+    if (
+      !this.#mipmaps ||
+      this.#enforceMaxBytes ||
+      !(targetWidth < full.width / 2) ||
+      full.width <= MIN_LEVEL * 2
+    )
+      return view(full);
     // Halve until one more halving would drop below the target.
     let width = full.width;
     while (width / 2 >= Math.max(targetWidth, MIN_LEVEL)) width = Math.floor(width / 2);
@@ -335,7 +526,29 @@ export class ImageCache {
   ): Promise<EncodedImage> {
     const local = this.#localSources.get(sha);
     if (local) return local;
+    if (!options?.preview) {
+      const original = this.#fetchedDisplay.get(sha) ?? this.#cachedDisplaySource(sha);
+      if (original) return original;
+    }
     const base = this.#url(sha);
+    const request = async (url: string): Promise<Response> => {
+      const attempts = options?.retryTransient ? 2 : 1;
+      for (let attempt = 1; ; attempt++) {
+        try {
+          const response = await fetch(url, { credentials: "same-origin", signal });
+          if (
+            attempt === attempts ||
+            (response.status < 500 && response.status !== 408 && response.status !== 429)
+          )
+            return response;
+          void response.body?.cancel().catch(() => {});
+        } catch (error) {
+          if (signal.aborted || attempt === attempts) throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 150));
+        signal.throwIfAborted();
+      }
+    };
     const readResponse = async (response: Response): Promise<EncodedImage> => {
       const headerW = Number(response.headers.get("x-image-width"));
       const headerH = Number(response.headers.get("x-image-height"));
@@ -345,6 +558,16 @@ export class ImageCache {
           : undefined;
       const preview = parseMediaPreviewSize(response.headers.get("x-image-preview"));
       const previewMissing = response.headers.get("x-image-preview-missing") === "1";
+      if (options?.beforeRead) {
+        const length = Number(response.headers.get("content-length"));
+        try {
+          await options.beforeRead(length > 0 && Number.isFinite(length) ? length : null);
+          signal.throwIfAborted();
+        } catch (error) {
+          void response.body?.cancel().catch(() => {});
+          throw error;
+        }
+      }
       return {
         blob: await response.blob(),
         ...(size ? { size } : {}),
@@ -354,18 +577,31 @@ export class ImageCache {
     };
     if (options?.preview) {
       const previewUrl = `${base}${base.includes("?") ? "&" : "?"}w=${options.preview}`;
+      let response: Response | undefined;
       try {
-        const response = await fetch(previewUrl, { credentials: "same-origin", signal });
-        if (response.ok) return await readResponse(response);
-        await response.body?.cancel().catch(() => {});
+        response = await request(previewUrl);
       } catch (err) {
         if (signal.aborted) throw err;
         // Fall through to the original URL whenever a preview fetch errors.
       }
+      if (response?.ok) return readResponse(response);
+      void response?.body?.cancel().catch(() => {});
     }
-    const response = await fetch(base, { credentials: "same-origin", signal });
-    if (!response.ok) throw new Error(`Image ${sha} answered ${response.status}`);
+    const response = await request(base);
+    if (!response.ok) {
+      void response.body?.cancel().catch(() => {});
+      throw new Error(`Image ${sha} answered ${response.status}`);
+    }
     return readResponse(response);
+  }
+
+  /** Transfers the base bitmap to the caller, who must close it. */
+  take(sha: string): ImageView | null {
+    const entry = this.#entries.get(sha);
+    if (!entry?.full) return null;
+    const image = this.peek(sha);
+    this.#drop(sha, entry, true);
+    return image;
   }
 
   /** Adds an image decoded elsewhere (a file just dropped), so it draws before its upload ends. */
@@ -389,12 +625,23 @@ export class ImageCache {
     const existing = this.#entries.get(sha);
     if (existing) this.#drop(sha, existing);
     const entry = this.#newEntry();
-    entry.status = "ready";
-    entry.full = image.bitmap;
+    this.#entries.set(sha, entry);
+    if (this.#enforceMaxBytes) {
+      entry.naturalWidth = image.naturalWidth;
+      entry.naturalHeight = image.naturalHeight;
+      if (this.#bytes + bytesOf(image.bitmap) <= this.#maxBytes) {
+        this.#replaceDisplay(entry, image.bitmap);
+        this.#notify();
+      } else {
+        image.bitmap.close();
+      }
+      this.#scheduleDisplay();
+      return;
+    }
     entry.naturalWidth = image.naturalWidth;
     entry.naturalHeight = image.naturalHeight;
-    entry.usedFrame = this.#frame;
-    this.#entries.set(sha, entry);
+    entry.status = "ready";
+    entry.full = image.bitmap;
     this.#bytes += bytesOf(image.bitmap);
     this.#evict();
     this.#notify();
@@ -428,6 +675,19 @@ export class ImageCache {
   /** Releases every bitmap and cancels loads. */
   clear(): void {
     this.#localSources.clear();
+    this.#displaySources.clear();
+    this.#displaySourceBytes = 0;
+    this.#displayDemands.clear();
+    this.#displayViews.clear();
+    this.#implicitDemands.clear();
+    this.#fetchedDisplay.clear();
+    this.#fetchedDisplayBytes = 0;
+    for (const pending of this.#displayFetches.values()) pending.abort();
+    this.#displayTargets.clear();
+    this.#displayGeometry = [];
+    clearTimeout(this.#refineTimer);
+    clearTimeout(this.#displayRepaint);
+    this.#displayRepaint = undefined;
     this.#encodedVersions.clear();
     this.#localBytes = 0;
     for (const [sha, entry] of this.#entries) this.#drop(sha, entry);
@@ -449,7 +709,7 @@ export class ImageCache {
   }
 
   /** Finds or creates the entry, marks it used and most recent, and (re)starts loading if due. */
-  #touch(sha: string): Entry {
+  #touch(sha: string, targetWidth = DISPLAY_MIN_SIDE): Entry {
     let entry = this.#entries.get(sha);
     if (entry) {
       // Map order is the LRU order: move to the end.
@@ -459,44 +719,426 @@ export class ImageCache {
       entry = this.#newEntry();
       this.#entries.set(sha, entry);
     }
+    if (this.#enforceMaxBytes) {
+      if (this.#collectingDisplayFrame) {
+        this.#implicitDemands.set(sha, Math.max(this.#implicitDemands.get(sha) ?? 0, targetWidth));
+        this.#scheduleDisplay();
+      }
+      return entry;
+    }
     entry.usedFrame = this.#frame;
     if (entry.status === "error" && this.#now() >= entry.retryAt) entry.status = "loading";
-    if (entry.status === "loading" && !entry.abort) this.#start(sha, entry);
+    if (entry.status === "loading" && !entry.abort) {
+      if (this.#activeLoads < this.#maxConcurrentLoads) this.#start(sha, entry);
+      else this.#queuedLoads.set(sha, entry);
+    }
     return entry;
   }
 
   #start(sha: string, entry: Entry): void {
     const abort = new AbortController();
     entry.abort = abort;
-    this.#load(sha, abort.signal).then(
-      (image) => {
-        if (this.#entries.get(sha) !== entry || abort.signal.aborted) {
-          image.bitmap.close();
-          return;
+    this.#activeLoads++;
+    this.#queuedLoads.delete(sha);
+    this.#load(sha, abort.signal)
+      .then(
+        (image) => {
+          if (this.#entries.get(sha) !== entry || abort.signal.aborted) {
+            image.bitmap.close();
+            return;
+          }
+          entry.abort = null;
+          entry.status = "ready";
+          entry.full = image.bitmap;
+          entry.naturalWidth = image.naturalWidth;
+          entry.naturalHeight = image.naturalHeight;
+          entry.attempts = 0;
+          this.#bytes += bytesOf(image.bitmap);
+          this.#evict();
+          this.#notify();
+        },
+        () => {
+          if (this.#entries.get(sha) !== entry || abort.signal.aborted) return;
+          // Often a collaborator's upload that hasn't finished yet: try again, backing off.
+          entry.abort = null;
+          entry.status = "error";
+          entry.attempts++;
+          entry.retryAt =
+            entry.attempts >= MAX_ATTEMPTS
+              ? Number.POSITIVE_INFINITY
+              : this.#now() + Math.min(MAX_RETRY_MS, this.#retryMs * 2 ** (entry.attempts - 1));
+          this.#notify();
+        },
+      )
+      .finally(() => {
+        this.#activeLoads--;
+        for (const [next, queued] of this.#queuedLoads) {
+          this.#start(next, queued);
+          break;
         }
-        entry.abort = null;
-        entry.status = "ready";
-        entry.full = image.bitmap;
+      });
+  }
+
+  #collectDisplay(): void {
+    this.#displayDemands.clear();
+    const add = (demands: ReadonlyMap<string, number>) => {
+      for (const [ref, width] of demands) {
+        const entry = this.#entries.get(ref) ?? this.#newEntry();
+        if (!this.#displayDemands.has(ref)) entry.wantedWidth = 0;
+        entry.wantedWidth = Math.max(entry.wantedWidth ?? 0, width);
+        this.#entries.delete(ref);
+        this.#entries.set(ref, entry);
+        this.#displayDemands.set(ref, entry);
+      }
+    };
+    for (const view of this.#displayViews) {
+      const owner = view.owner.deref();
+      if (!owner || ("isConnected" in owner && owner.isConnected === false)) {
+        this.#displayViews.delete(view);
+      } else add(view.demands);
+    }
+    add(this.#implicitDemands);
+    for (const [ref, pending] of this.#displayFetches) {
+      if (!this.#displayDemands.has(ref)) pending.abort();
+    }
+    for (const ref of this.#fetchedDisplay.keys()) {
+      if (!this.#displayDemands.has(ref)) {
+        const source = this.#takeFetchedDisplay(ref);
+        if (source) this.#rememberDisplaySource(ref, source);
+      }
+    }
+  }
+
+  #scheduleDisplay(): void {
+    if (this.#displayQueued) return;
+    this.#displayQueued = true;
+    queueMicrotask(() => {
+      this.#displayQueued = false;
+      this.#pumpDisplay();
+    });
+  }
+
+  #displaySize(entry: Entry, side: number): Size {
+    return mediaPreviewDimensions(
+      {
+        width: entry.naturalWidth || this.#displaySide,
+        height: entry.naturalHeight || this.#displaySide,
+      },
+      side,
+    );
+  }
+
+  /** Reserve a level for every visible ref before assigning bytes to any one refinement. */
+  #planDisplay(): Map<string, number> {
+    const desired = Array.from(this.#displayDemands, ([ref, entry]) => {
+      const width = entry.naturalWidth || this.#displaySide;
+      const height = entry.naturalHeight || this.#displaySide;
+      const longest = Math.max(width, height);
+      const wanted = ((entry.wantedWidth ?? DISPLAY_MIN_SIDE) * longest) / width;
+      const tier = 2 ** Math.ceil(Math.log2(Math.max(DISPLAY_MIN_SIDE, wanted)));
+      return {
+        ref,
+        width,
+        height,
+        side: Math.min(longest, entry.displaySourceSide ?? this.#displaySide, tier),
+      };
+    });
+    // A decode finishing at an already planned level does not change any target.
+    if (
+      this.#displayGeometry.length === desired.length &&
+      desired.every((item, index) => {
+        const previous = this.#displayGeometry[index];
+        return (
+          previous?.ref === item.ref &&
+          previous.side === item.side &&
+          previous.width === item.width &&
+          previous.height === item.height
+        );
+      })
+    )
+      return this.#displayTargets;
+    this.#displayGeometry = desired;
+    const reserve = Math.min(this.#maxBytes / 100, 256 * 1024);
+    const headroom = reserve >= DISPLAY_MIN_SIDE ** 2 * 4 ? reserve : 0;
+    const sideAt = (side: number, scale: number) => {
+      if (scale === 1) return side;
+      // Leave room for small view changes without resizing every image at once.
+      const step = headroom ? Math.max(1, Math.floor(side / 32)) : 1;
+      return Math.max(1, Math.floor((side * scale) / step) * step);
+    };
+    const cost = (scale: number) =>
+      desired.reduce((bytes, { side, width, height }) => {
+        const size = mediaPreviewDimensions({ width, height }, sideAt(side, scale));
+        return bytes + size.width * size.height * 4;
+      }, 0);
+
+    const limit = this.#maxBytes - headroom;
+    let scale = 1;
+    if (cost(1) > limit) {
+      scale = 0;
+      let high = 1;
+      for (let i = 0; i < 15; i++) {
+        const mid = (scale + high) / 2;
+        if (cost(mid) <= limit) scale = mid;
+        else high = mid;
+      }
+    }
+    return new Map(desired.map(({ ref, side }) => [ref, sideAt(side, scale)]));
+  }
+
+  #pumpDisplay(): void {
+    this.#collectDisplay();
+    const targets = this.#planDisplay();
+    const now = this.#now();
+    if (
+      this.#displayTargets.size !== targets.size ||
+      [...targets].some(([ref, side]) => this.#displayTargets.get(ref) !== side)
+    ) {
+      this.#displayTargets = targets;
+      this.#refineAt = now + DISPLAY_REFINE_MS;
+    }
+
+    type Request = { ref: string; entry: Entry; side: number };
+    const missing: Request[] = [];
+    const finer: Request[] = [];
+    let shrink: Request | undefined;
+    let wakeAt = Infinity;
+    const ready = (ref: string, entry: Entry): boolean => {
+      if (this.#customLoad || this.#sourceAvailable(ref)) return true;
+      if (
+        !this.#displayFetches.has(ref) &&
+        this.#displayFetches.size < DISPLAY_FETCHES &&
+        this.#fetchedDisplay.size < DISPLAY_FETCHES &&
+        this.#fetchedDisplayBytes < DISPLAY_STAGING_BYTES
+      )
+        this.#fetchDisplay(ref, entry);
+      return false;
+    };
+    for (const [ref, entry] of this.#displayDemands) {
+      const side = targets.get(ref) ?? 1;
+      if (entry.retryAt > now) {
+        wakeAt = Math.min(wakeAt, entry.retryAt);
+        continue;
+      }
+      if (this.#displayDecodes.has(ref)) continue;
+      const current = entry.full ? Math.max(entry.full.width, entry.full.height) : 0;
+      if (!current) {
+        if (ready(ref, entry)) missing.push({ ref, entry, side });
+      } else if (current < side) {
+        if (now < this.#refineAt) wakeAt = Math.min(wakeAt, this.#refineAt);
+        else if (ready(ref, entry)) finer.push({ ref, entry, side });
+      } else if (current > side) shrink ??= { ref, entry, side };
+    }
+
+    clearTimeout(this.#refineTimer);
+    if (Number.isFinite(wakeAt))
+      this.#refineTimer = setTimeout(() => this.#scheduleDisplay(), wakeAt - now);
+    if (this.#displayDecodes.size >= (this.#decodeBytes === undefined ? 2 : DISPLAY_DECODES))
+      return;
+    const canDecode = (workBytes: number) =>
+      !this.#displayDecodes.size ||
+      this.#displayWorkBytes + workBytes <= (this.#decodeBytes ?? Infinity);
+    let blockedOnSpace = false;
+    for (const { entry, side, ref } of [...missing, ...finer]) {
+      const workBytes =
+        (entry.naturalWidth || this.#displaySide) * (entry.naturalHeight || this.#displaySide) * 4;
+      if (!canDecode(workBytes)) continue;
+      const dim = this.#displaySize(entry, side);
+      const incoming = bytesOf(dim) - (entry.full ? bytesOf(entry.full) : 0);
+      const reserved = this.#displayReservedBytes + incoming;
+      this.#evictDisplay(reserved);
+      if (this.#bytes + reserved > this.#maxBytes) {
+        blockedOnSpace = true;
+        continue;
+      }
+      this.#runDisplay(ref, entry, side, incoming, workBytes, false);
+      this.#scheduleDisplay();
+      return;
+    }
+    const bitmap = shrink?.entry.full;
+    if (blockedOnSpace && shrink && bitmap && !this.#shrinkingDisplay && canDecode(bytesOf(bitmap)))
+      this.#runDisplay(shrink.ref, shrink.entry, shrink.side, 0, bytesOf(bitmap), true);
+  }
+
+  #sourceAvailable(ref: string): boolean {
+    return (
+      this.#localSources.has(ref) || this.#fetchedDisplay.has(ref) || this.#displaySources.has(ref)
+    );
+  }
+
+  #cachedDisplaySource(ref: string): EncodedImage | undefined {
+    const source = this.#displaySources.get(ref);
+    if (source) {
+      this.#displaySources.delete(ref);
+      this.#displaySources.set(ref, source);
+    }
+    return source;
+  }
+
+  #takeFetchedDisplay(ref: string): EncodedImage | undefined {
+    const source = this.#fetchedDisplay.get(ref);
+    if (source) {
+      this.#fetchedDisplay.delete(ref);
+      this.#fetchedDisplayBytes -= source.blob.size;
+    }
+    return source;
+  }
+
+  #rememberDisplaySource(ref: string, source: EncodedImage): void {
+    if (this.#localSources.has(ref) || this.#displaySources.has(ref)) return;
+    this.#displaySources.set(ref, source);
+    this.#displaySourceBytes += source.blob.size;
+    for (const [old, stored] of this.#displaySources) {
+      if (this.#displaySourceBytes <= DISPLAY_SOURCE_BYTES) break;
+      this.#displaySources.delete(old);
+      this.#displaySourceBytes -= stored.blob.size;
+    }
+  }
+
+  #fetchDisplay(ref: string, entry: Entry): void {
+    const abort = new AbortController();
+    this.#displayFetches.set(ref, abort);
+    void (async () => {
+      try {
+        const source = await this.encoded(ref, abort.signal);
+        const size = source.size ?? (await imageBlobSize(source.blob));
+        if (abort.signal.aborted) return;
+        if (size) {
+          entry.naturalWidth = size.width;
+          entry.naturalHeight = size.height;
+        }
+        this.#fetchedDisplay.set(ref, size ? { ...source, size } : source);
+        this.#fetchedDisplayBytes += source.blob.size;
+      } catch {
+        if (!abort.signal.aborted) this.#displayFailed(entry);
+      } finally {
+        this.#displayFetches.delete(ref);
+        this.#scheduleDisplay();
+      }
+    })();
+  }
+
+  #displayFailed(entry: Entry): void {
+    entry.attempts++;
+    entry.retryAt =
+      entry.attempts >= MAX_ATTEMPTS
+        ? Infinity
+        : this.#now() + Math.min(MAX_RETRY_MS, this.#retryMs * 2 ** (entry.attempts - 1));
+    if (!entry.full) entry.status = "error";
+    this.#notify();
+  }
+
+  #evictDisplay(incoming: number): void {
+    for (const [ref, entry] of this.#entries) {
+      if (this.#bytes + incoming <= this.#maxBytes) break;
+      if (this.#displayDemands.has(ref) || this.#displayDecodes.has(ref) || !entry.full) continue;
+      this.#bytes -= bytesOf(entry.full);
+      entry.full.close();
+      entry.full = null;
+      entry.status = "loading";
+    }
+  }
+
+  #runDisplay(
+    ref: string,
+    entry: Entry,
+    side: number,
+    reserved: number,
+    workBytes: number,
+    shrink: boolean,
+  ): void {
+    const abort = new AbortController();
+    const prior = entry.full;
+    this.#displayDecodes.add(ref);
+    this.#displayReservedBytes += reserved;
+    this.#displayWorkBytes += workBytes;
+    if (shrink) this.#shrinkingDisplay = true;
+    entry.abort = abort;
+    if (!prior) entry.status = "loading";
+    void (async () => {
+      let image: LoadedImage | undefined;
+      try {
+        if (shrink && prior) {
+          const { width, height } = this.#displaySize(entry, side);
+          image = {
+            bitmap: await this.#resize(prior, width, height),
+            naturalWidth: entry.naturalWidth,
+            naturalHeight: entry.naturalHeight,
+          };
+        } else {
+          image = await this.#loadDisplay(ref, side, abort.signal);
+        }
+        if (this.#entries.get(ref) !== entry || abort.signal.aborted) return;
         entry.naturalWidth = image.naturalWidth;
         entry.naturalHeight = image.naturalHeight;
-        entry.attempts = 0;
-        this.#bytes += bytesOf(image.bitmap);
-        this.#evict();
-        this.#notify();
-      },
-      () => {
-        if (this.#entries.get(sha) !== entry || abort.signal.aborted) return;
-        // Often a collaborator's upload that hasn't finished yet: try again, backing off.
+        const loadedSide = Math.max(image.bitmap.width, image.bitmap.height);
+        if (!shrink && loadedSide < side) entry.displaySourceSide = loadedSide;
+        const incoming = bytesOf(image.bitmap) - (entry.full ? bytesOf(entry.full) : 0);
+        const peak = this.#displayReservedBytes - reserved + incoming;
+        if (this.#displayDemands.has(ref)) this.#evictDisplay(peak);
+        if (this.#bytes + peak > this.#maxBytes) return;
+        this.#replaceDisplay(entry, image.bitmap);
+        image = undefined;
+        this.#notifyDisplay();
+      } catch {
+        if (abort.signal.aborted) return;
+        this.#displayFailed(entry);
+      } finally {
+        image?.bitmap.close();
         entry.abort = null;
-        entry.status = "error";
-        entry.attempts++;
-        entry.retryAt =
-          entry.attempts >= MAX_ATTEMPTS
-            ? Number.POSITIVE_INFINITY
-            : this.#now() + Math.min(MAX_RETRY_MS, this.#retryMs * 2 ** (entry.attempts - 1));
-        this.#notify();
-      },
-    );
+        this.#displayDecodes.delete(ref);
+        this.#displayReservedBytes -= reserved;
+        this.#displayWorkBytes -= workBytes;
+        if (shrink) this.#shrinkingDisplay = false;
+        this.#scheduleDisplay();
+      }
+    })();
+  }
+
+  #notifyDisplay(): void {
+    if (this.#displayRepaint !== undefined) return;
+    this.#displayRepaint = setTimeout(() => {
+      this.#displayRepaint = undefined;
+      this.#notify();
+    }, DISPLAY_REPAINT_MS);
+  }
+
+  #replaceDisplay(entry: Entry, bitmap: ImageBitmap): void {
+    if (entry.full) {
+      this.#bytes -= bytesOf(entry.full);
+      entry.full.close();
+    }
+    entry.full = bitmap;
+    entry.status = "ready";
+    entry.attempts = 0;
+    entry.retryAt = 0;
+    this.#bytes += bytesOf(bitmap);
+  }
+
+  async #loadDisplay(ref: string, side: number, signal: AbortSignal): Promise<LoadedImage> {
+    if (!this.#customLoad) {
+      const fetched = this.#takeFetchedDisplay(ref);
+      const source = this.#localSources.get(ref) ?? fetched ?? this.#cachedDisplaySource(ref);
+      if (!source) throw new Error("Image source was evicted");
+      if (fetched) this.#rememberDisplaySource(ref, fetched);
+      if (source.size)
+        return decodeImageAtSize(
+          source.blob,
+          source.size,
+          mediaPreviewDimensions(source.size, side),
+          "low",
+        );
+      return decodeBoundedImage(source.blob, side);
+    }
+
+    const image = await this.#load(ref, signal);
+    if (Math.max(image.bitmap.width, image.bitmap.height) <= side) return image;
+    const size = mediaPreviewDimensions(image.bitmap, side);
+    try {
+      return { ...image, bitmap: await this.#resize(image.bitmap, size.width, size.height) };
+    } finally {
+      image.bitmap.close();
+    }
   }
 
   #makeLevel(sha: string, entry: Entry, full: ImageBitmap, width: number): void {
@@ -522,7 +1164,11 @@ export class ImageCache {
     );
   }
 
-  #drop(sha: string, entry: Entry): void {
+  #drop(sha: string, entry: Entry, keepFull = false): void {
+    this.#queuedLoads.delete(sha);
+    this.#displayDemands.delete(sha);
+    this.#displayFetches.get(sha)?.abort();
+    this.#takeFetchedDisplay(sha);
     entry.abort?.abort();
     for (const bitmap of entry.levels.values()) {
       if (bitmap === entry.full) continue;
@@ -532,7 +1178,7 @@ export class ImageCache {
     entry.levels.clear();
     if (entry.full) {
       this.#bytes -= bytesOf(entry.full);
-      entry.full.close();
+      if (!keepFull) entry.full.close();
       entry.full = null;
     }
     this.#entries.delete(sha);

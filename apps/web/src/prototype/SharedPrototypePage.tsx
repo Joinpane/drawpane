@@ -5,6 +5,7 @@ import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { useEffect, useMemo, useState } from "react";
 import { api } from "../api/client";
 import { connectFile } from "../editor/connection";
+import { mobileImageCacheOptions } from "../editor/renderer-memory";
 import { textMeasurer } from "../editor/shaping";
 import { Player, resolveTarget, useDoc } from "./Player";
 import { useLoaded } from "./PresentPage";
@@ -33,6 +34,7 @@ function Shared({ token }: { token: string }) {
   const images = useMemo(
     () =>
       new ImageCache({
+        ...mobileImageCacheOptions(),
         url: (sha) => `/api/share/${encodeURIComponent(token)}/media/${sha}`,
       }),
     [token],
