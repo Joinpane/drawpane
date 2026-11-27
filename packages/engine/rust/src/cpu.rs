@@ -9,7 +9,7 @@
 use crate::blur;
 use crate::blur::{BlurSpec, EdgeMode, try_blur_cpu, validate_sigma};
 use crate::error::{EngineError, Result};
-use crate::exec::{Backend, GlyphMask, IRect, ImageView, Isolation, Open, PostStep, ShadowCast, impl_draw};
+use crate::exec::{Backend, Draw, GlyphMask, IRect, ImageView, Isolation, Open, PostStep, ShadowCast, impl_draw};
 use crate::exec::{reader_backdrop_layers, resolve_inradius};
 use crate::glass;
 use crate::images::{self, Level};
@@ -953,9 +953,7 @@ impl Cpu {
 }
 
 impl Backend for Cpu {
-    type Scene = RenderContext;
-
-    fn scene(&mut self) -> &mut RenderContext {
+    fn scene(&mut self) -> &mut dyn Draw {
         &mut self.scene
     }
 

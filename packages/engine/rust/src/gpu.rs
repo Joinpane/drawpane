@@ -28,7 +28,7 @@ use crate::blur::{self, BlurSpec, EdgeMode, validate_view_sigma};
 use crate::engine::{DragFrame, TiledOptions};
 use crate::error::{EngineError, ErrorCode, Result};
 use crate::exec::{
-    self, Backend, DrawStats, Frame, GlyphMask, HwBlend, IRect, ImageView, Isolation, Open, Pass, PostStep,
+    self, Backend, Draw, DrawStats, Frame, GlyphMask, HwBlend, IRect, ImageView, Isolation, Open, Pass, PostStep,
     ReducedBlurLimits, ReducedPost, ShadowCast, Split, impl_draw, resolve_inradius,
 };
 use crate::glass::{self, GlassMaskSlot};
@@ -11685,9 +11685,7 @@ pub async fn read_timestamp_ms(
 }
 
 impl Backend for Gpu {
-    type Scene = Scene;
-
-    fn scene(&mut self) -> &mut Scene {
+    fn scene(&mut self) -> &mut dyn Draw {
         // Direct Draw calls also include analytic shadows and Vello mask layers.
         self.mark_dirty();
         &mut self.scene
@@ -12867,7 +12865,9 @@ impl Backend for Gpu {
         self.reopen_clips(open);
     }
 
-    const ALLOW_UNBOUNDED_VIEW_BLUR: bool = true;
+    fn allow_unbounded_view_blur(&self) -> bool {
+        true
+    }
 
     fn reduced_layer_blur_limits(&self) -> ReducedBlurLimits {
         let (native_side, native_pixels) = if self.fallback_adapter {
