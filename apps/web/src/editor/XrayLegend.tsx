@@ -17,7 +17,7 @@ export function XrayLegend() {
   // Re-read the frames as the selection and hover move.
   useEditorState((s) => s.selection);
   useEditorState((s) => s.hover);
-  const canEdit = useEditorState((s) => s.role !== "viewer");
+  const canEdit = useEditorState((s) => s.role !== "viewer" && !s.readOnly);
   const single = useEditorState((s) => s.selection.length === 1);
   const pinned = useUi(editor, (ui) => ui.xrayPinned);
   if (!xray || xrayFrames(editor).length === 0) return null;

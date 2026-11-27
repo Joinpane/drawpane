@@ -104,6 +104,16 @@ export function useDocSelector<T>(
 export const shallowArray = <T>(a: readonly T[], b: readonly T[]) =>
   a.length === b.length && a.every((v, i) => v === b[i]);
 
+/** Whether document edits are permitted in the current role and workspace mode. */
+export function canEditState(state: EditorState): boolean {
+  return state.role !== "viewer" && !state.readOnly;
+}
+
+/** Subscribes to whether the current workspace allows document edits. */
+export function useCanEdit(): boolean {
+  return useEditorState(canEditState);
+}
+
 /** Like `useEditorState`, for components that own the editor (outside its context). */
 export function useEditorStateOutside<T>(editor: Editor, select: (state: EditorState) => T): T {
   return useSyncExternalStore(editor.state.subscribe, () => select(editor.state.get()));

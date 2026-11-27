@@ -3,7 +3,7 @@ import { ContextMenu, Icon, IconButton, type IconName, Kbd, Tooltip } from "@dra
 import { useRef, useState } from "react";
 import { ACTIONS, type ActionContext, capsFor, shortcutFor, shortcutProp } from "./actions";
 import { PASS_GESTURES } from "./canvas-gestures";
-import { useEditor, useEditorState } from "./hooks";
+import { useCanEdit, useEditor, useEditorState } from "./hooks";
 
 interface Tool {
   readonly id: ToolId;
@@ -40,7 +40,7 @@ const VIEWER_TOOLS: ReadonlySet<ToolId> = new Set(["select", "comment", "hand"])
 export function Toolbar({ onSearch, ctx }: { onSearch: () => void; ctx: ActionContext }) {
   const editor = useEditor();
   const tool = useEditorState((s) => s.tool);
-  const canEdit = useEditorState((s) => s.role !== "viewer");
+  const canEdit = useCanEdit();
   const button = (t: Tool) => {
     const shortcut = shortcutFor(`tool.${t.id}`);
     return (

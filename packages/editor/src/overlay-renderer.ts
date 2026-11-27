@@ -305,6 +305,7 @@ export function overlayStateChanged(prev: EditorState, next: EditorState): boole
     prev.explain !== next.explain ||
     prev.focusMode !== next.focusMode ||
     prev.role !== next.role ||
+    prev.readOnly !== next.readOnly ||
     prev.peers !== next.peers ||
     prev.vectorEdit !== next.vectorEdit ||
     prev.vectorPointer !== next.vectorPointer ||

@@ -202,6 +202,11 @@ export interface EditorState {
   readonly focusMode: boolean;
   readonly status: ConnectionStatus;
   readonly role: "owner" | "editor" | "viewer";
+  /**
+   * True when the workspace itself forbids document edits (such as phone view-and-comment mode),
+   * independent of the server role so comments and file-level permissions keep the real role.
+   */
+  readonly readOnly: boolean;
   readonly peers: ReadonlyMap<string, Peer>;
   readonly canUndo: boolean;
   readonly canRedo: boolean;
@@ -524,6 +529,7 @@ export class Editor {
     focusMode: false,
     status: "connecting",
     role: "viewer",
+    readOnly: false,
     peers: new Map(),
     canUndo: false,
     canRedo: false,
@@ -616,7 +622,30 @@ export class Editor {
   }
 
   get canEdit(): boolean {
-    return this.s.role !== "viewer";
+    return this.s.role !== "viewer" && !this.s.readOnly;
+  }
+
+  /**
+   * Locks or unlocks document editing for the current workspace (for example phone
+   * view-and-comment mode) without altering the server role.
+   */
+  setReadOnly(readOnly: boolean): void {
+    if (this.s.readOnly === readOnly) return;
+    if (readOnly) {
+      if (this.s.editingText) this.endTextEdit();
+      const allowedTool =
+        this.s.tool === "select" || this.s.tool === "hand" || this.s.tool === "comment";
+      this.state.set({
+        readOnly: true,
+        ...(allowedTool ? {} : { tool: "select" }),
+        renamingFrame: null,
+        vectorEdit: null,
+        cropping: null,
+        guideDraft: null,
+      });
+      return;
+    }
+    this.state.set({ readOnly: false });
   }
 
   /**
@@ -1172,6 +1201,7 @@ export class Editor {
   }
 
   setTool(tool: ToolId): void {
+    if (this.s.readOnly && tool !== "select" && tool !== "hand" && tool !== "comment") return;
     this.state.set({ tool, editingText: null });
   }
 
@@ -1413,11 +1443,11 @@ export class Editor {
     this.setCamera(camera.zoomAt(centre, zoom));
   }
 
-  zoomToFit(): void {
+  zoomToFit(padding = 64): void {
     const { pageId, viewport, insets } = this.s;
     if (!pageId) return;
     const bounds = this.scene.unionBounds(this.doc.childIds(pageId));
-    if (bounds) this.setCamera(this.s.camera.fit(bounds, viewport, 64, 1, insets));
+    if (bounds) this.setCamera(this.s.camera.fit(bounds, viewport, padding, 1, insets));
   }
 
   /** Pans (or zooms out) just enough to bring the selection into the visible part of the canvas. */

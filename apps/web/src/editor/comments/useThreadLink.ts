@@ -8,11 +8,13 @@ import { useQueryClient } from "@tanstack/react-query";
 import { useEffect } from "react";
 import { markRead } from "../../inbox/inbox";
 import { clampPane, PANE, panelLayout } from "../panel-layout";
+import { uiFor } from "../ui-state";
+import { isCompactTablet } from "../workspace-mode";
 import { useComments } from "./CommentsLayer";
 import { focusThread } from "./CommentsPanel";
 import type { CommentStore } from "./store";
 
-/** Opens a thread of this file at its pin, with the comments panel; says so when it's gone. */
+/** Opens a thread of this file at its pin, using the active workspace's visible insets; says so when gone. */
 export function openThread(
   editor: Editor,
   store: CommentStore,
@@ -24,10 +26,24 @@ export function openThread(
     editor.notify("That comment was deleted.");
     return false;
   }
+  const mode = uiFor(editor).get().workspaceMode;
+  if (mode === "phone") {
+    // On phones, opening the thread shows the focused thread sheet rather than a desktop side pane.
+    const { viewport, insets } = editor.s;
+    focusThread(editor, store, thread, {
+      left: 0,
+      right: 0,
+      top: insets.top,
+      bottom: Math.max(insets.bottom, Math.round(viewport.height * 0.5)),
+    });
+    return true;
+  }
   store.setPanel(true);
+  const compact = isCompactTablet(mode, window.innerWidth);
+  const effectiveLeft = compact ? 0 : left;
   // The comments panel takes up the right of the canvas, at the right panel's width.
-  const right = PANE.gutter + clampPane(panelLayout().right, window.innerWidth, left);
-  focusThread(editor, store, thread, { left, right });
+  const right = PANE.gutter + clampPane(panelLayout().right, window.innerWidth, effectiveLeft);
+  focusThread(editor, store, thread, { left: effectiveLeft, right });
   return true;
 }
 

@@ -5,7 +5,7 @@
  */
 import { type Editor, modeTag } from "@drawpane/editor";
 import { getProp, keyBetween, type NodeRecord, type Op } from "@drawpane/model";
-import { Icon, IconButton, LayerRow, type PresenceSlot } from "@drawpane/ui";
+import { Button, Icon, IconButton, LayerRow, type PresenceSlot } from "@drawpane/ui";
 import {
   type KeyboardEvent,
   useCallback,
@@ -17,7 +17,7 @@ import {
 } from "react";
 import { isMac } from "../app/format";
 import { shortcutFor } from "./actions";
-import { useDeferredDocVersion, useEditor, useEditorState } from "./hooks";
+import { useCanEdit, useDeferredDocVersion, useEditor, useEditorState } from "./hooks";
 import {
   aimDrop,
   containersWithin,
@@ -74,8 +74,13 @@ export function LayersPanel() {
   const pageId = useEditorState((s) => s.pageId);
   const selection = useEditorState((s) => s.selection);
   const peers = useEditorState((s) => s.peers);
-  const canEdit = useEditorState((s) => s.role !== "viewer");
+  const canEdit = useCanEdit();
+  const workspaceMode = useUi(editor, (ui) => ui.workspaceMode);
+  const explicitRename = workspaceMode === "tablet";
   const renaming = useUi(editor, (ui) => ui.renaming);
+  const renamingNode = explicitRename && canEdit && renaming ? editor.doc.get(renaming) : undefined;
+  const renamingLayer = renamingNode && renamingNode.type !== "page" ? renamingNode : undefined;
+  const renameInput = useRef<HTMLInputElement>(null);
   const findRequest = useUi(editor, (ui) => ui.findLayers);
   const collapseRequest = useUi(editor, (ui) => ui.collapseLayers);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
@@ -544,6 +549,51 @@ export function LayersPanel() {
           }}
         />
       ) : null}
+      {renamingLayer ? (
+        <section className="tablet-rename" aria-label="Rename layer">
+          <input
+            ref={renameInput}
+            key={renamingLayer.id}
+            className="tablet-rename__input"
+            aria-label="Layer name"
+            defaultValue={getProp(renamingLayer.props, "name")}
+            // biome-ignore lint/a11y/noAutofocus: renaming starts from an explicit action
+            autoFocus
+            onFocus={(e) => e.currentTarget.select()}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") {
+                const next = e.currentTarget.value.trim();
+                if (next) editor.rename(renamingLayer.id, next);
+                uiFor(editor).set({ renaming: null });
+              }
+              if (e.key === "Escape") uiFor(editor).set({ renaming: null });
+            }}
+          />
+          <div className="tablet-rename__actions">
+            <Button
+              size="sm"
+              variant="ghost"
+              onPointerDown={(e) => e.preventDefault()}
+              onClick={() => uiFor(editor).set({ renaming: null })}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="sm"
+              variant="primary"
+              onPointerDown={(e) => e.preventDefault()}
+              onClick={() => {
+                const next = renameInput.current?.value.trim() ?? "";
+                if (next) editor.rename(renamingLayer.id, next);
+                uiFor(editor).set({ renaming: null });
+              }}
+            >
+              Done
+            </Button>
+          </div>
+        </section>
+      ) : null}
       <div
         ref={scroller}
         className={[
@@ -643,7 +693,7 @@ export function LayersPanel() {
                     {...(canEdit
                       ? {
                           onRename: (name: string) => editor.rename(node.id, name),
-                          renaming: renaming === node.id,
+                          renaming: !explicitRename && renaming === node.id,
                           onRenamingChange: (on: boolean) =>
                             uiFor(editor).set({ renaming: on ? node.id : null }),
                           draggable: true,

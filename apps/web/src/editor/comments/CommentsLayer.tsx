@@ -10,6 +10,9 @@ import type { CommentPerson, CommentThread } from "@drawpane/model";
 import { Icon } from "@drawpane/ui";
 import { useCallback, useEffect, useLayoutEffect, useRef, useSyncExternalStore } from "react";
 import { useEditor, useEditorState } from "../hooks";
+import { MobileSheet } from "../MobileSheet";
+import { useUi } from "../ui-state";
+import { readVisualViewport } from "../visual-viewport";
 import { anchorAt, anchorLabel, type PinPosition, resolveAnchor } from "./anchor";
 import { colorStyle, displayName, personInitials } from "./people";
 import { type CommentStore, type CommentsState, matchesFilter } from "./store";
@@ -32,10 +35,24 @@ export interface CommentsLayerProps {
   readonly people: readonly CommentPerson[];
   /** Width the floating panes cover on each side, so popovers open over the canvas. */
   readonly insets: { readonly left: number; readonly right: number };
+  /** Fallback trigger to focus when closing a phone comment sheet whose pin isn't available. */
+  readonly phoneReturnFocusTo?: (() => HTMLElement | null) | undefined;
+  /** Optional Back button handler in phone thread sheet (returns to the Comments list sheet). */
+  readonly onPhoneBackToList?: (() => void) | undefined;
 }
 
-export function CommentsLayer({ store, interaction, people, insets }: CommentsLayerProps) {
+export function CommentsLayer({
+  store,
+  interaction,
+  people,
+  insets,
+  phoneReturnFocusTo,
+  onPhoneBackToList,
+}: CommentsLayerProps) {
   const editor = useEditor();
+  const workspaceMode = useUi(editor, (ui) => ui.workspaceMode);
+  const isPhone = workspaceMode === "phone";
+  const isTouchWorkspace = workspaceMode !== "desktop";
   const threads = useComments(store, (s) => s.threads);
   const filter = useComments(store, (s) => s.filter);
   const openId = useComments(store, (s) => s.openId);
@@ -119,14 +136,34 @@ export function CommentsLayer({ store, interaction, people, insets }: CommentsLa
           pop.hidden = false;
           const { width: vw, height: vh } = editor.s.viewport;
           const { left: insetLeft, right: insetRight } = insetsRef.current;
+          const vv = readVisualViewport();
+          const leftEdge = Math.max(0, vv.offsetLeft);
+          const rightEdge = Math.min(vw, vv.offsetLeft + vv.width);
+          const topBound = Math.max(
+            TOP,
+            editor.s.insets.top > TOP ? editor.s.insets.top + 4 : TOP,
+            vv.offsetTop + GAP,
+          );
+          const bottomBound = Math.min(vh, vv.offsetTop + vv.height) - GAP;
+          const availH = Math.max(160, bottomBound - topBound);
+          if (vv.bottomInset > 0 || vv.offsetTop > 0) {
+            pop.style.maxHeight = `${Math.round(availH)}px`;
+          } else {
+            pop.style.removeProperty("max-height");
+          }
           const w = pop.offsetWidth;
-          const h = pop.offsetHeight;
+          const h = Math.min(pop.offsetHeight, availH);
           const minX = insetLeft + GAP;
           const maxX = vw - insetRight - GAP - w;
           let x = anchor.x + PIN + GAP;
           if (x > maxX) x = anchor.x - GAP - w;
-          x = Math.max(minX, Math.min(x, Math.max(minX, maxX)));
-          const y = Math.max(TOP, Math.min(anchor.y - PIN - 8, vh - GAP - h));
+          if (maxX >= minX) x = Math.max(minX, Math.min(x, maxX));
+          // Never clip past the visual viewport even when side panels leave narrow space.
+          const hardMinX = leftEdge + GAP;
+          const hardMaxX = Math.max(hardMinX, rightEdge - GAP - w);
+          x = Math.max(hardMinX, Math.min(x, hardMaxX));
+          const maxY = Math.max(topBound, bottomBound - h);
+          const y = Math.max(topBound, Math.min(anchor.y - PIN - 8, maxY));
           pop.style.transform = `translate3d(${Math.round(x)}px, ${Math.round(y)}px, 0)`;
         }
       }
@@ -140,14 +177,26 @@ export function CommentsLayer({ store, interaction, people, insets }: CommentsLa
     let last = editor.s;
     const offState = editor.state.subscribe(() => {
       const s = editor.s;
-      if (s.camera !== last.camera || s.pageId !== last.pageId || s.viewport !== last.viewport)
+      if (
+        s.camera !== last.camera ||
+        s.pageId !== last.pageId ||
+        s.viewport !== last.viewport ||
+        s.insets !== last.insets
+      )
         request();
       last = s;
     });
     const offDoc = editor.doc.subscribe(request);
+    const vv = typeof window !== "undefined" ? window.visualViewport : null;
+    vv?.addEventListener("resize", request);
+    vv?.addEventListener("scroll", request);
+    window.addEventListener("resize", request);
     return () => {
       offState();
       offDoc();
+      vv?.removeEventListener("resize", request);
+      vv?.removeEventListener("scroll", request);
+      window.removeEventListener("resize", request);
       if (frame) cancelAnimationFrame(frame);
     };
   }, [editor, store]);
@@ -205,17 +254,19 @@ export function CommentsLayer({ store, interaction, people, insets }: CommentsLa
     const pin = cs.openId ? pins.current.get(cs.openId) : null;
     if (cs.openId) store.close();
     if (cs.draft) store.cancelDraft();
+    if (isPhone && editor.s.tool === "comment") editor.setTool("select");
     if (pin && !pin.hidden) pin.focus();
-  }, [store]);
+  }, [editor, isPhone, store]);
 
   // Escape closes the open thread or draft wherever focus is, then leaves the comment tool.
   // It listens in the capture phase so it runs before the editor's own Escape handling;
-  // inside a popover, the popover handles Escape itself (a mention list closes first).
+  // inside a popover or phone sheet, those surfaces handle Escape themselves.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       const target = e.target instanceof Node ? e.target : null;
       if (target && popover.current?.contains(target)) return;
+      if (isPhone && (store.state.get().openId || store.state.get().draft)) return;
       // A field elsewhere (the command bar, a rename) owns its own Escape.
       const el = target instanceof HTMLElement ? target : null;
       if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return;
@@ -232,7 +283,7 @@ export function CommentsLayer({ store, interaction, people, insets }: CommentsLa
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [editor, store, closeAndRefocus]);
+  }, [editor, isPhone, store, closeAndRefocus]);
 
   // Moving pins: drag with the pointer, or arrow keys while a pin has focus.
   // Authors move their own threads; editors can move anyone's.
@@ -428,25 +479,78 @@ export function CommentsLayer({ store, interaction, people, insets }: CommentsLa
         </span>
       ) : null}
       {open ? (
-        <ThreadPopover
-          key={open.id}
-          ref={popoverRef}
-          store={store}
-          thread={open}
-          label={anchorLabel(editor.scene, open.anchor, open.pageId)}
-          people={people}
-          role={role}
-          onClose={closeAndRefocus}
-        />
+        isPhone ? (
+          <MobileSheet
+            key={open.id}
+            title="Comment"
+            ariaLabel={`Thread on ${anchorLabel(editor.scene, open.anchor, open.pageId)}`}
+            variant="thread"
+            focusInside
+            onBack={onPhoneBackToList}
+            backLabel="Back to comments"
+            returnFocusTo={() => {
+              const pin = pins.current.get(open.id);
+              if (pin && !pin.hidden && pin.isConnected) return pin;
+              return phoneReturnFocusTo?.() ?? null;
+            }}
+            onClose={closeAndRefocus}
+          >
+            <ThreadPopover
+              store={store}
+              thread={open}
+              label={anchorLabel(editor.scene, open.anchor, open.pageId)}
+              people={people}
+              role={role}
+              presentation="sheet"
+              onClose={closeAndRefocus}
+            />
+          </MobileSheet>
+        ) : (
+          <ThreadPopover
+            key={open.id}
+            ref={popoverRef}
+            store={store}
+            thread={open}
+            label={anchorLabel(editor.scene, open.anchor, open.pageId)}
+            people={people}
+            role={role}
+            onClose={closeAndRefocus}
+          />
+        )
       ) : draft ? (
-        <DraftPopover
-          ref={popoverRef}
-          store={store}
-          text={draft.text}
-          label={anchorLabel(editor.scene, draft.anchor, draft.pageId)}
-          people={people}
-          onCancel={closeAndRefocus}
-        />
+        isPhone ? (
+          <MobileSheet
+            title={anchorLabel(editor.scene, draft.anchor, draft.pageId)}
+            ariaLabel={`New comment on ${anchorLabel(editor.scene, draft.anchor, draft.pageId)}`}
+            variant="thread"
+            focusInside
+            returnFocusTo={phoneReturnFocusTo}
+            onClose={closeAndRefocus}
+          >
+            <DraftPopover
+              store={store}
+              text={draft.text}
+              label={anchorLabel(editor.scene, draft.anchor, draft.pageId)}
+              people={people}
+              presentation="sheet"
+              showCancel
+              onCreated={() => {
+                if (editor.s.tool === "comment") editor.setTool("select");
+              }}
+              onCancel={closeAndRefocus}
+            />
+          </MobileSheet>
+        ) : (
+          <DraftPopover
+            ref={popoverRef}
+            store={store}
+            text={draft.text}
+            label={anchorLabel(editor.scene, draft.anchor, draft.pageId)}
+            people={people}
+            showCancel={isTouchWorkspace}
+            onCancel={closeAndRefocus}
+          />
+        )
       ) : null}
     </section>
   );

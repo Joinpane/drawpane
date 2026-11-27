@@ -4,6 +4,7 @@ import type { CommentPerson } from "@drawpane/model";
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 import { api } from "../../api/client";
+import { uiFor } from "../ui-state";
 import { CommentStore } from "./store";
 
 export { CommentsLayer, useComments } from "./CommentsLayer";
@@ -44,7 +45,12 @@ export function useCommentStore(editor: Editor, fileId: string) {
     return editor.state.subscribe(() => {
       const s = editor.s;
       if (s.status === "live" && status !== "live") void store.load();
-      if (s.tool === "comment" && tool !== "comment") store.setPanel(true);
+      if (
+        s.tool === "comment" &&
+        tool !== "comment" &&
+        uiFor(editor).get().workspaceMode !== "phone"
+      )
+        store.setPanel(true);
       status = s.status;
       tool = s.tool;
     });

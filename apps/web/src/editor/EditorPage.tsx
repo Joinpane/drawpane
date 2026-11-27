@@ -1,4 +1,5 @@
 import {
+  type Camera,
   Editor,
   glassTuning,
   Interaction,
@@ -14,6 +15,7 @@ import {
   type CSSProperties,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -53,6 +55,7 @@ import {
   useComments,
   useMarkOpenThreadRead,
 } from "./comments";
+import { matchesFilter } from "./comments/store";
 import { connectFile } from "./connection";
 import { ExplainCard } from "./ExplainCard";
 import { ExportPanel } from "./ExportSection";
@@ -83,6 +86,7 @@ import { PublishDialog } from "./libraries/PublishDialog";
 import { Minimap } from "./Minimap";
 import { MissingFontsDialog } from "./MissingFonts";
 import { MissingFontsButton, MissingFontsNotice } from "./MissingFontsNotice";
+import { MobileSheet } from "./MobileSheet";
 import {
   chooseImageFiles,
   filesFrom,
@@ -107,6 +111,8 @@ import { TokensWorkspace } from "./tokens/TokensWorkspace";
 import { uiFor, useUi } from "./ui-state";
 import { useEditorLink } from "./useEditorLink";
 import { useViewPreferences } from "./view-preferences";
+import { useVisualViewport } from "./visual-viewport";
+import { fitPaddingForMode, useWorkspaceMode, type WorkspaceMode } from "./workspace-mode";
 import { XrayLegend } from "./XrayLegend";
 import "./editor.css";
 import { PASS_GESTURES } from "./canvas-gestures";
@@ -135,19 +141,36 @@ function isControl(target: EventTarget | null): boolean {
 
 function FileEditor({ fileId }: { fileId: string }) {
   const navigate = useNavigate();
+  const workspace = useWorkspaceMode();
+  const workspaceMode = workspace.mode;
+  const isPhone = workspaceMode === "phone";
+  const isTablet = workspaceMode === "tablet";
+  const compactTablet = workspace.compactTablet;
+  const fitPadding = fitPaddingForMode(workspaceMode);
+  const vv = useVisualViewport(workspaceMode !== "desktop");
   const meta = useQuery({
     queryKey: ["file", fileId],
     queryFn: () => api.file(fileId),
     retry: false,
   });
   // How copies are kept (decision 0029) is the file's: the room says at hello.
-  const [editor] = useState(
-    () => new Editor({ measurer: textMeasurer(), booleanEngine: loadBooleanEngine }),
-  );
+  const [editor] = useState(() => {
+    const ed = new Editor({ measurer: textMeasurer(), booleanEngine: loadBooleanEngine });
+    ed.setReadOnly(workspaceMode === "phone");
+    uiFor(ed).set({ workspaceMode });
+    return ed;
+  });
+  useLayoutEffect(() => {
+    editor.setReadOnly(workspaceMode === "phone");
+    uiFor(editor).set({ workspaceMode });
+  }, [editor, workspaceMode]);
   const interaction = useMemo(() => new Interaction(editor), [editor]);
   // The inspector's popovers open over the canvas, clear of it and of the selection.
   const inspectorPane = useRef<HTMLElement>(null);
   const inspectorRoom = useInspectorRoom(editor, inspectorPane);
+  const topbarRef = useRef<HTMLDivElement>(null);
+  const bottomBarRef = useRef<HTMLDivElement>(null);
+  const [chromeInsets, setChromeInsets] = useState<{ top: number; bottom: number } | null>(null);
   usePageZoomLock();
   const [commandOpen, setCommandOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
@@ -163,19 +186,67 @@ function FileEditor({ fileId }: { fileId: string }) {
   useEffect(() => {
     if (isViewer) setRightTab("inspect");
   }, [isViewer]);
-  const [rightOpen, setRightOpen] = useState(true);
+  // Cramped portrait tablets default to one open side panel (Layers) so the canvas stays wide.
+  const [rightOpen, setRightOpen] = useState(() => !compactTablet);
+  const rightAutoCollapsed = useRef(compactTablet);
+  const [phoneSheet, setPhoneSheet] = useState<PhoneSheet>(null);
+  const pagesBtnRef = useRef<HTMLButtonElement>(null);
+  const inspectBtnRef = useRef<HTMLButtonElement>(null);
+  const commentsBtnRef = useRef<HTMLButtonElement>(null);
   // Panel widths and Minimize UI (⇧⌘\\), remembered in this browser.
   const layout = usePanelLayout();
-  // Minimized: the layers panel tucks away until it's asked for.
-  const leftShown = leftOpen && !layout.minimized;
+  // Minimized: the layers panel tucks away until it's asked for. Tablet controls its own toggles.
+  const leftShown = !isPhone && leftOpen && (isTablet || !layout.minimized);
   const hasSelection = useEditorStateOutside(editor, (s) => s.selection.length > 0);
-  const viewportWidth = useEditorStateOutside(editor, (s) => s.viewport.width) || window.innerWidth;
+  const activeTool = useEditorStateOutside(editor, (s) => s.tool);
+  const viewportWidth = useEditorStateOutside(editor, (s) => s.viewport.width) || workspace.width;
+  const viewportHeight =
+    useEditorStateOutside(editor, (s) => s.viewport.height) || workspace.height;
   const [fatal, setFatal] = useState<string | null>(null);
   const queryClient = useQueryClient();
   const comments = useCommentStore(editor, fileId);
   const commentsOpen = useComments(comments.store, (s) => s.panelOpen);
+  const openCommentsCount = useComments(comments.store, (s) => {
+    let n = 0;
+    const me = comments.store.me?.id ?? null;
+    for (const t of s.threads.values()) if (matchesFilter(t, "open", me)) n++;
+    return n;
+  });
   // An open thread or new comment sits by its pin, often where the Lens would.
   const threadOpen = useComments(comments.store, (s) => s.openId !== null || s.draft !== null);
+  useEffect(() => {
+    if (!isPhone) {
+      setPhoneSheet(null);
+      return;
+    }
+    if (view !== "design") setView("design");
+    if (commentsOpen) comments.store.setPanel(false);
+  }, [isPhone, view, commentsOpen, comments.store]);
+  useEffect(() => {
+    if (isPhone && threadOpen) setPhoneSheet(null);
+  }, [isPhone, threadOpen]);
+  // In cramped tablet portrait, keep at most one side panel open at a time.
+  const prevCompactTablet = useRef(compactTablet);
+  useEffect(() => {
+    const wasCompact = prevCompactTablet.current;
+    prevCompactTablet.current = compactTablet;
+    if (compactTablet && !wasCompact) {
+      if (commentsOpen) {
+        setLeftOpen(false);
+      } else if (leftOpen && rightOpen) {
+        rightAutoCollapsed.current = true;
+        setRightOpen(false);
+      }
+    } else if (!compactTablet && wasCompact && isTablet) {
+      if (rightAutoCollapsed.current && leftOpen && !rightOpen) {
+        rightAutoCollapsed.current = false;
+        setRightOpen(true);
+      }
+    }
+  }, [compactTablet, isTablet, leftOpen, rightOpen, commentsOpen]);
+  useEffect(() => {
+    if (compactTablet && commentsOpen && leftOpen) setLeftOpen(false);
+  }, [compactTablet, commentsOpen, leftOpen]);
   // Version history: the History tab lists versions; picking one puts it on the canvas, read-only.
   const history = useVersionHistory(
     editor,
@@ -271,21 +342,69 @@ function FileEditor({ fileId }: { fileId: string }) {
   const active = history.active;
   const activeInteraction = viewing ? history.view.interaction : interaction;
   // Minimized: the inspector comes while something is selected (or a version is on screen).
-  const rightShown = rightOpen && (!layout.minimized || hasSelection || viewing !== null);
-  const rightRoom = view === "design" && (commentsOpen || rightShown);
-  const leftRoom = view === "design" && leftShown;
-  const rightWidth = clampPane(layout.right, viewportWidth, leftRoom ? PANE.min : 0);
-  const leftWidth = clampPane(layout.left, viewportWidth, rightRoom ? rightWidth : 0);
-  /** Shows the layers panel (leaving Minimize UI: it was asked for). */
+  // Tablets use their own explicit panel toggles instead of desktop Minimize UI.
+  const rightShown =
+    !isPhone && rightOpen && (isTablet || !layout.minimized || hasSelection || viewing !== null);
+  const rightRoom = !isPhone && view === "design" && (commentsOpen || rightShown);
+  const leftRoom = !isPhone && view === "design" && leftShown;
+  const desiredRight = isTablet
+    ? Math.min(layout.right, compactTablet ? PANE.min : 240)
+    : layout.right;
+  const desiredLeft = isTablet
+    ? Math.min(layout.left, compactTablet ? PANE.min : 240)
+    : layout.left;
+  const rightWidth = clampPane(desiredRight, viewportWidth, leftRoom ? PANE.min : 0);
+  const leftWidth = clampPane(desiredLeft, viewportWidth, rightRoom ? rightWidth : 0);
+  /** Shows the layers panel (leaving Minimize UI on desktop; closing right in cramped tablet). */
   const showLeft = useCallback(() => {
     setLeftOpen(true);
-    if (panelLayout().minimized) setPanelLayout({ minimized: false });
-  }, []);
-  /** Shows the inspector (leaving Minimize UI: it was asked for). */
+    if (compactTablet) {
+      setRightOpen(false);
+      comments.store.setPanel(false);
+      rightAutoCollapsed.current = false;
+    } else if (!isTablet && panelLayout().minimized) {
+      setPanelLayout({ minimized: false });
+    }
+  }, [compactTablet, isTablet, comments.store]);
+  /** Shows the inspector (leaving Minimize UI on desktop; closing left in cramped tablet). */
   const showRight = useCallback(() => {
     setRightOpen(true);
-    if (panelLayout().minimized) setPanelLayout({ minimized: false });
-  }, []);
+    rightAutoCollapsed.current = false;
+    if (compactTablet) {
+      setLeftOpen(false);
+    } else if (!isTablet && panelLayout().minimized) {
+      setPanelLayout({ minimized: false });
+    }
+  }, [compactTablet, isTablet]);
+  const toggleTabletLeft = useCallback(() => {
+    setLeftOpen((open) => {
+      if (open) return false;
+      if (compactTablet) {
+        setRightOpen(false);
+        comments.store.setPanel(false);
+        rightAutoCollapsed.current = false;
+      }
+      return true;
+    });
+  }, [compactTablet, comments.store]);
+  const toggleTabletRight = useCallback(() => {
+    if (comments.store.s.panelOpen) {
+      comments.store.setPanel(false);
+      setRightOpen(false);
+      rightAutoCollapsed.current = false;
+      return;
+    }
+    setRightOpen((open) => {
+      rightAutoCollapsed.current = false;
+      if (open) return false;
+      if (compactTablet) setLeftOpen(false);
+      return true;
+    });
+  }, [compactTablet, comments.store]);
+  const [threadFromList, setThreadFromList] = useState(false);
+  useEffect(() => {
+    if (!threadOpen) setThreadFromList(false);
+  }, [threadOpen]);
   const [versionTab, setVersionTab] = useState<"version" | "inspect">("version");
   const [naming, setNaming] = useState<{ version: VersionInfo | null } | null>(null);
   // Team libraries (decision 0010): the team's libraries, and publishing this file as one.
@@ -328,19 +447,80 @@ function FileEditor({ fileId }: { fileId: string }) {
   const rulerLeft = insets.left > 0 ? insets.left + 12 : 12;
   const rulerRight = insets.right > 0 ? insets.right + 12 : 12;
 
+  // Measure real top/bottom chrome insets on phone and tablet so camera fit uses the actual
+  // exposed canvas area (including safe areas and two-row portrait tablet headers).
+  useLayoutEffect(() => {
+    if (workspaceMode === "desktop") {
+      setChromeInsets(null);
+      return;
+    }
+    const measure = () => {
+      const topEl = topbarRef.current;
+      const bottomEl = bottomBarRef.current;
+      const top = topEl
+        ? Math.min(
+            Math.round(window.innerHeight * 0.45),
+            Math.max(0, Math.round(topEl.getBoundingClientRect().bottom + 4)),
+          )
+        : isPhone
+          ? 60
+          : compactTablet
+            ? 128
+            : 68;
+      const bottom = bottomEl
+        ? Math.min(
+            Math.round(window.innerHeight * 0.45),
+            Math.max(0, Math.round(window.innerHeight - bottomEl.getBoundingClientRect().top + 4)),
+          )
+        : isPhone
+          ? 68
+          : 64;
+      setChromeInsets((prev) =>
+        prev && prev.top === top && prev.bottom === bottom ? prev : { top, bottom },
+      );
+    };
+    measure();
+    const observer = new ResizeObserver(measure);
+    if (topbarRef.current) observer.observe(topbarRef.current);
+    if (bottomBarRef.current) observer.observe(bottomBarRef.current);
+    window.addEventListener("resize", measure);
+    return () => {
+      observer.disconnect();
+      window.removeEventListener("resize", measure);
+    };
+  }, [workspaceMode, isPhone, compactTablet, view, historyOpen]);
+
   // Fitting and revealing aim for the part of the canvas the panes don't cover:
-  // 12px margins, 264px panes, the top bar and the zoom controls.
-  // The timeline replaces the zoom controls while history is open.
-  useEffect(() => {
+  // 12px margins, floating panes, the top bar and the bottom bar.
+  // Applied in useLayoutEffect so insets are always current before initial fit runs.
+  useLayoutEffect(() => {
     // Rulers take 20px plus a 4px gap, along the top and the left.
-    const ruler = rulersOn ? RULER + RULER_GAP : 0;
+    const ruler = rulersOn && !isPhone ? RULER + RULER_GAP : 0;
     // Side by side, each half sits between the panes already; the compare bar and labels are on top.
     const between = comparing && compareMode === "side";
+    const defaultTop = isPhone
+      ? 60
+      : isTablet
+        ? compactTablet
+          ? 128
+          : 68
+        : comparing
+          ? 148
+          : (viewing ? 104 : 60) + ruler;
+    const defaultBottom = isPhone ? 68 : isTablet ? 64 : historyOpen ? 128 : 56;
     const next = {
-      top: comparing ? 148 : (viewing ? 104 : 60) + ruler,
-      bottom: historyOpen ? 128 : 56,
-      left: between ? 0 : rulersOn ? rulerLeft + ruler : insets.left,
-      right: between ? 0 : insets.right,
+      top:
+        workspaceMode === "desktop"
+          ? defaultTop
+          : (chromeInsets?.top ?? defaultTop) + (comparing ? 52 : viewing ? 40 : 0) + ruler,
+      bottom:
+        workspaceMode === "desktop"
+          ? defaultBottom
+          : historyOpen
+            ? 128
+            : (chromeInsets?.bottom ?? defaultBottom),
+      left: isPhone || between ? 0 : rulersOn ? rulerLeft + ruler : insets.left,
+      right: isPhone || between ? 0 : insets.right,
     };
     editor.state.set({ insets: next });
     history.view.preview.state.set({ insets: next });
@@ -356,6 +536,11 @@ function FileEditor({ fileId }: { fileId: string }) {
     rulerLeft,
     comparing,
     compareMode,
+    workspaceMode,
+    isPhone,
+    isTablet,
+    compactTablet,
+    chromeInsets,
   ]);
 
   // A reload for a newer Drawpane waits until this file's edits are saved.
@@ -453,24 +638,98 @@ function FileEditor({ fileId }: { fileId: string }) {
     };
   }, [editor, history.view]);
 
-  // The first time a page shows with content, fit it to the screen.
+  // The first time a page shows with content, fit it to the exposed canvas.
+  // On phones and tablets, also re-fit when rotating, resizing or toggling panes
+  // while the user is still at the fitted view (never interrupting active editing or comments).
+  const fitEnvRef = useRef({
+    workspaceMode,
+    fitPadding,
+    viewing: viewing !== null,
+    comparing,
+  });
+  fitEnvRef.current = { workspaceMode, fitPadding, viewing: viewing !== null, comparing };
   useEffect(() => {
-    const fitted = new Set<string>();
+    const fitted = new Map<
+      string,
+      {
+        width: number;
+        height: number;
+        top: number;
+        right: number;
+        bottom: number;
+        left: number;
+        camera: Camera;
+      }
+    >();
+    let fitting = false;
+    const fitPage = (pageId: string) => {
+      if (fitting) return;
+      fitting = true;
+      try {
+        const { viewport, insets: curInsets } = editor.s;
+        const { fitPadding: pad } = fitEnvRef.current;
+        if (editor.doc.childIds(pageId).length > 0) {
+          editor.zoomToFit(pad);
+        } else {
+          const areaW = Math.max(1, viewport.width - curInsets.left - curInsets.right);
+          const areaH = Math.max(1, viewport.height - curInsets.top - curInsets.bottom);
+          editor.setCamera(
+            editor.s.camera
+              .zoomAt({ x: 0, y: 0 }, 1)
+              .pan(curInsets.left + areaW / 2 - 200, curInsets.top + areaH / 2 - 150),
+          );
+        }
+        fitted.set(pageId, {
+          width: viewport.width,
+          height: viewport.height,
+          top: curInsets.top,
+          right: curInsets.right,
+          bottom: curInsets.bottom,
+          left: curInsets.left,
+          camera: editor.s.camera,
+        });
+      } finally {
+        fitting = false;
+      }
+    };
     const check = () => {
-      const { pageId, status, viewport } = editor.s;
-      if (!pageId || status !== "live" || viewport.width === 0 || fitted.has(pageId)) return;
-      fitted.add(pageId);
-      if (editor.doc.childIds(pageId).length > 0) editor.zoomToFit();
-      else
-        editor.setCamera(
-          editor.s.camera
-            .zoomAt({ x: 0, y: 0 }, 1)
-            .pan(viewport.width / 2 - 200, viewport.height / 2 - 150),
-        );
+      if (fitting) return;
+      const { pageId, status, viewport, insets: curInsets, camera } = editor.s;
+      if (!pageId || status !== "live" || viewport.width === 0 || viewport.height === 0) return;
+      const prev = fitted.get(pageId);
+      if (!prev) {
+        fitPage(pageId);
+        return;
+      }
+      const env = fitEnvRef.current;
+      if (env.workspaceMode === "desktop" || env.viewing || env.comparing) return;
+      const layoutChanged =
+        prev.width !== viewport.width ||
+        prev.height !== viewport.height ||
+        prev.top !== curInsets.top ||
+        prev.right !== curInsets.right ||
+        prev.bottom !== curInsets.bottom ||
+        prev.left !== curInsets.left;
+      if (!layoutChanged) return;
+      const cs = comments.store.s;
+      if (
+        editor.s.editingText ||
+        editor.s.gesture ||
+        editor.s.following ||
+        cs.openId !== null ||
+        cs.draft !== null ||
+        isTyping(document.activeElement)
+      )
+        return;
+      // Re-fit if the camera is still at our auto-fit position, or if viewport width changed
+      // (rotation or resize, distinct from a keyboard-only height shrink).
+      if (camera.equals(prev.camera) || prev.width !== viewport.width) {
+        fitPage(pageId);
+      }
     };
     check();
     return editor.state.subscribe(check);
-  }, [editor]);
+  }, [editor, comments.store]);
   useEditorLink(editor, fileId, comments.store, insets.left);
 
   useEffect(() => {
@@ -486,9 +745,21 @@ function FileEditor({ fileId }: { fileId: string }) {
   const ctx = useMemo<ActionContext>(
     () => ({
       editor,
-      openCommandBar: () => setCommandOpen(true),
-      toggleTokens: () => setView((v) => (v === "tokens" ? "design" : "tokens")),
+      openCommandBar: () => {
+        if (!isPhone) setCommandOpen(true);
+      },
+      toggleTokens: () => {
+        if (!isPhone) setView((v) => (v === "tokens" ? "design" : "tokens"));
+      },
       toggleLeftPane: () => {
+        if (isPhone) {
+          setPhoneSheet((s) => (s === "pages" ? null : "pages"));
+          return;
+        }
+        if (isTablet) {
+          toggleTabletLeft();
+          return;
+        }
         if (panelLayout().minimized) {
           setPanelLayout({ minimized: false });
           setLeftOpen(true);
@@ -496,16 +767,43 @@ function FileEditor({ fileId }: { fileId: string }) {
       },
       // The comments panel sits where the inspector does; asking for the inspector swaps back.
       toggleRightPane: () => {
+        if (isPhone) {
+          setPhoneSheet((s) => (s === "inspect" ? null : "inspect"));
+          return;
+        }
+        if (isTablet) {
+          toggleTabletRight();
+          return;
+        }
         if (comments.store.s.panelOpen || panelLayout().minimized) {
           comments.store.setPanel(false);
           setPanelLayout({ minimized: false });
           setRightOpen(true);
         } else setRightOpen((v) => !v);
       },
-      toggleMinimized: () => setPanelLayout({ minimized: !panelLayout().minimized }),
-      toggleComments: () => comments.store.setPanel(!comments.store.s.panelOpen),
+      toggleMinimized: () => {
+        if (isPhone) {
+          setPhoneSheet(null);
+          return;
+        }
+        if (isTablet) {
+          toggleTabletLeft();
+          return;
+        }
+        setPanelLayout({ minimized: !panelLayout().minimized });
+      },
+      toggleComments: () => {
+        if (isPhone) {
+          setPhoneSheet((s) => (s === "comments" ? null : "comments"));
+          return;
+        }
+        const next = !comments.store.s.panelOpen;
+        comments.store.setPanel(next);
+        if (next && compactTablet) setLeftOpen(false);
+      },
       present: () => navigate(presentTarget(editor, fileId)),
       showHistory: () => {
+        if (isPhone) return;
         setView("design");
         showLeft();
         setLeftTab("history");
@@ -513,7 +811,9 @@ function FileEditor({ fileId }: { fileId: string }) {
       saveVersion: () => {
         if (editor.canEdit) setNaming({ version: null });
       },
-      browseLibraries: () => setLibrariesOpen(true),
+      browseLibraries: () => {
+        if (!isPhone) setLibrariesOpen(true);
+      },
       publishLibrary: () => {
         if (editor.canEdit) setPublishOpen(true);
       },
@@ -527,6 +827,7 @@ function FileEditor({ fileId }: { fileId: string }) {
         uiFor(editor).set({ renaming: id });
       },
       findLayers: () => {
+        if (isPhone) return;
         // The search lives in the layers panel: make sure it's showing.
         setView("design");
         showLeft();
@@ -534,8 +835,11 @@ function FileEditor({ fileId }: { fileId: string }) {
         const ui = uiFor(editor);
         ui.set({ findLayers: ui.get().findLayers + 1 });
       },
-      showShortcuts: () => setShortcutsOpen(true),
+      showShortcuts: () => {
+        if (!isPhone) setShortcutsOpen(true);
+      },
       placeImage: () => {
+        if (!editor.canEdit) return;
         void chooseImageFiles().then((files) => {
           if (files.length === 0) return;
           const { camera, viewport, insets } = editor.s;
@@ -548,6 +852,10 @@ function FileEditor({ fileId }: { fileId: string }) {
         });
       },
       showTab: (tab) => {
+        if (isPhone) {
+          setPhoneSheet("inspect");
+          return;
+        }
         setView("design");
         comments.store.setPanel(false);
         showRight();
@@ -563,12 +871,25 @@ function FileEditor({ fileId }: { fileId: string }) {
         if (data) void navigator.clipboard.writeText(data);
       },
       paste: () => {
+        if (!editor.canEdit) return;
         void pasteFromClipboard(editor, fileId).then((pasted) => {
           if (!pasted) editor.notify("The clipboard doesn't hold Drawpane layers, images or SVG.");
         });
       },
     }),
-    [editor, fileId, comments.store, showLeft, showRight],
+    [
+      editor,
+      fileId,
+      comments.store,
+      showLeft,
+      showRight,
+      isPhone,
+      isTablet,
+      compactTablet,
+      toggleTabletLeft,
+      toggleTabletRight,
+      navigate,
+    ],
   );
   const ctxRef = useRef<ActionContext | null>(null);
   ctxRef.current = ctx;
@@ -791,21 +1112,33 @@ function FileEditor({ fileId }: { fileId: string }) {
 
   const fileName = meta.data?.file.name ?? "";
   const canEdit = editor.canEdit;
+  const showPaneResizers = workspaceMode === "desktop" || (isTablet && workspace.anyFine);
+  const editorStyle: CSSProperties = {
+    "--pane-left": `${leftWidth}px`,
+    "--pane-right": `${rightWidth}px`,
+    // Where the canvas's open area starts and ends, beside the panels (or the window's edges).
+    "--canvas-left": `${leftRoom ? leftWidth + PANE.gutter * 2 : PANE.gutter}px`,
+    "--canvas-right": `${rightRoom ? rightWidth + PANE.gutter * 2 : PANE.gutter}px`,
+    ...(workspaceMode !== "desktop"
+      ? {
+          "--vv-width": `${vv.width}px`,
+          "--vv-height": `${vv.height}px`,
+          "--vv-top": `${vv.offsetTop}px`,
+          "--vv-left": `${vv.offsetLeft}px`,
+          "--vv-bottom": `${vv.bottomInset}px`,
+        }
+      : {}),
+  } as CSSProperties;
+
   return (
     <EditorContext.Provider value={editor}>
       <div
         className="editor"
+        data-workspace={workspaceMode}
+        data-compact-tablet={compactTablet || undefined}
         data-history={historyOpen || undefined}
         data-left-closed={!leftShown || undefined}
-        style={
-          {
-            "--pane-left": `${leftWidth}px`,
-            "--pane-right": `${rightWidth}px`,
-            // Where the canvas's open area starts and ends, beside the panels (or the window's edges).
-            "--canvas-left": `${leftRoom ? leftWidth + PANE.gutter * 2 : PANE.gutter}px`,
-            "--canvas-right": `${rightRoom ? rightWidth + PANE.gutter * 2 : PANE.gutter}px`,
-          } as CSSProperties
-        }
+        style={editorStyle}
       >
         {/* Canvas, toolbar and layers show whichever document is on screen: now, or a version. */}
         {comparing && review.rows && branch && mainFile ? (
@@ -827,44 +1160,74 @@ function FileEditor({ fileId }: { fileId: string }) {
           </EditorContext.Provider>
         )}
         {comparing ? <CompareBar compare={compare} /> : null}
-        {rulersOn ? <Rulers interaction={interaction} left={rulerLeft} right={rulerRight} /> : null}
+        {rulersOn && !isPhone ? (
+          <Rulers interaction={interaction} left={rulerLeft} right={rulerRight} />
+        ) : null}
         {view === "design" && !viewing && !comparing ? (
           <CommentsLayer
             store={comments.store}
             interaction={interaction}
             people={comments.people}
             insets={insets}
+            phoneReturnFocusTo={() => commentsBtnRef.current}
+            onPhoneBackToList={
+              threadFromList
+                ? () => {
+                    setThreadFromList(false);
+                    comments.store.close();
+                    setPhoneSheet("comments");
+                  }
+                : undefined
+            }
           />
         ) : null}
-        <div className="topbar">
-          <FileTitle
-            view={view}
-            minimized={layout.minimized}
-            onToggleMinimized={ctx.toggleMinimized}
-            onToggleTokens={() => setView((v) => (v === "tokens" ? "design" : "tokens"))}
+        {isPhone ? (
+          <PhoneTopBar
+            barRef={topbarRef}
             fileId={fileId}
             teamId={meta.data?.file.teamId ?? null}
             name={fileName}
-            project={meta.data?.project?.name ?? ""}
             main={mainFile}
             branch={branch}
+            fitPadding={fitPadding}
           />
-          <EditorContext.Provider value={active}>
-            <Toolbar onSearch={() => setCommandOpen(true)} ctx={ctx} />
-          </EditorContext.Provider>
-          <TopRight
-            fileId={fileId}
-            fileName={fileName}
-            teamId={meta.data?.file.teamId ?? null}
-            branchOpen={branch !== null && !branch.merged}
-            onMerge={
-              branch && !branch.merged && !reviewing && canMerge ? () => setReviewing(true) : null
-            }
-            onPresent={ctx.present}
-            onOpenThread={(threadId) => openThread(editor, comments.store, threadId, insets.left)}
-          />
-        </div>
-        {view === "tokens" ? (
+        ) : (
+          <div className="topbar" ref={isTablet ? topbarRef : undefined}>
+            <FileTitle
+              view={view}
+              workspaceMode={workspaceMode}
+              leftOpen={leftShown}
+              onToggleLeft={isTablet ? toggleTabletLeft : undefined}
+              minimized={layout.minimized}
+              onToggleMinimized={ctx.toggleMinimized}
+              onToggleTokens={() => setView((v) => (v === "tokens" ? "design" : "tokens"))}
+              fileId={fileId}
+              teamId={meta.data?.file.teamId ?? null}
+              name={fileName}
+              project={meta.data?.project?.name ?? ""}
+              main={mainFile}
+              branch={branch}
+            />
+            <EditorContext.Provider value={active}>
+              <Toolbar onSearch={() => setCommandOpen(true)} ctx={ctx} />
+            </EditorContext.Provider>
+            <TopRight
+              fileId={fileId}
+              fileName={fileName}
+              teamId={meta.data?.file.teamId ?? null}
+              workspaceMode={workspaceMode}
+              rightOpen={rightShown || commentsOpen}
+              onToggleRight={isTablet ? toggleTabletRight : undefined}
+              branchOpen={branch !== null && !branch.merged}
+              onMerge={
+                branch && !branch.merged && !reviewing && canMerge ? () => setReviewing(true) : null
+              }
+              onPresent={ctx.present}
+              onOpenThread={(threadId) => openThread(editor, comments.store, threadId, insets.left)}
+            />
+          </div>
+        )}
+        {!isPhone && view === "tokens" ? (
           <TokensWorkspace
             onShowLayer={(id) => {
               setView("design");
@@ -875,7 +1238,7 @@ function FileEditor({ fileId }: { fileId: string }) {
             }}
           />
         ) : null}
-        {leftRoom ? (
+        {showPaneResizers && leftRoom ? (
           <PaneResizer
             side="left"
             label="layers panel"
@@ -884,7 +1247,7 @@ function FileEditor({ fileId }: { fileId: string }) {
             other={rightRoom ? rightWidth : 0}
           />
         ) : null}
-        {rightRoom ? (
+        {showPaneResizers && rightRoom ? (
           <PaneResizer
             side="right"
             label={commentsOpen ? "comments panel" : "inspector"}
@@ -940,13 +1303,13 @@ function FileEditor({ fileId }: { fileId: string }) {
             </aside>
           </EditorContext.Provider>
         ) : null}
-        {commentsOpen && view === "design" ? (
+        {!isPhone && commentsOpen && view === "design" ? (
           <CommentsPanel
             store={comments.store}
             insets={insets}
             onClose={() => comments.store.setPanel(false)}
           />
-        ) : reviewing && rightShown && mainFile ? (
+        ) : !isPhone && reviewing && rightShown && mainFile ? (
           <MergePane main={mainFile} review={review} canMerge={canMerge} />
         ) : rightShown && view === "design" && viewing ? (
           <EditorContext.Provider value={active}>
@@ -1009,11 +1372,11 @@ function FileEditor({ fileId }: { fileId: string }) {
           </aside>
         ) : null}
         {/* Anchored to the one full canvas: not while main and the branch share the screen. */}
-        {view === "design" && !viewing && !comparing ? <CropBar /> : null}
+        {!isPhone && view === "design" && !viewing && !comparing ? <CropBar /> : null}
         {view === "design" && !viewing && !comparing ? <FollowOverlay /> : null}
-        {view === "design" && !viewing && !comparing ? <ExplainCard /> : null}
-        {view === "design" && !viewing && !comparing ? <XrayLegend /> : null}
-        {view === "design" && !viewing && !threadOpen && !comparing ? (
+        {!isPhone && view === "design" && !viewing && !comparing ? <ExplainCard /> : null}
+        {!isPhone && view === "design" && !viewing && !comparing ? <XrayLegend /> : null}
+        {!isPhone && view === "design" && !viewing && !threadOpen && !comparing ? (
           <Lens
             onOpenInspector={() => {
               comments.store.setPanel(false);
@@ -1030,7 +1393,86 @@ function FileEditor({ fileId }: { fileId: string }) {
             onBack={history.leave}
           />
         ) : null}
-        {historyOpen ? (
+        {isPhone ? (
+          <>
+            {activeTool === "comment" && !threadOpen ? (
+              <div className="phone-comment-banner pane" role="status">
+                <span>Tap the canvas to place a comment</span>
+                <Button size="md" variant="ghost" onClick={() => editor.setTool("select")}>
+                  Cancel
+                </Button>
+              </div>
+            ) : null}
+            <PhoneDock
+              dockRef={bottomBarRef}
+              activeSheet={threadOpen ? "comments" : phoneSheet}
+              hasSelection={hasSelection}
+              openCommentsCount={openCommentsCount}
+              pagesBtnRef={pagesBtnRef}
+              inspectBtnRef={inspectBtnRef}
+              commentsBtnRef={commentsBtnRef}
+              onToggleSheet={(sheet) => {
+                if (threadOpen) {
+                  comments.store.close();
+                  comments.store.cancelDraft();
+                }
+                if (activeTool === "comment") editor.setTool("select");
+                setPhoneSheet((cur) => (cur === sheet ? null : sheet));
+              }}
+              onPresent={ctx.present}
+            />
+            {!threadOpen && phoneSheet === "pages" ? (
+              <MobileSheet
+                id="phone-sheet-pages"
+                title="Pages"
+                returnFocusTo={pagesBtnRef}
+                onClose={() => setPhoneSheet(null)}
+              >
+                <PhonePagesSheetContent onDone={() => setPhoneSheet(null)} />
+              </MobileSheet>
+            ) : null}
+            {!threadOpen && phoneSheet === "inspect" ? (
+              <MobileSheet
+                id="phone-sheet-inspect"
+                title="Inspect"
+                variant="inspect"
+                returnFocusTo={inspectBtnRef}
+                onClose={() => setPhoneSheet(null)}
+              >
+                <InspectPanel />
+              </MobileSheet>
+            ) : null}
+            {!threadOpen && phoneSheet === "comments" ? (
+              <MobileSheet
+                id="phone-sheet-comments"
+                title="Comments"
+                returnFocusTo={commentsBtnRef}
+                onClose={() => setPhoneSheet(null)}
+              >
+                <CommentsPanel
+                  store={comments.store}
+                  insets={{
+                    left: 0,
+                    right: 0,
+                    top: editor.s.insets.top,
+                    bottom: Math.max(editor.s.insets.bottom, Math.round(viewportHeight * 0.5)),
+                  }}
+                  embedded
+                  onClose={() => setPhoneSheet(null)}
+                  onAddComment={() => {
+                    setPhoneSheet(null);
+                    editor.setTool("comment");
+                  }}
+                  onSelectThread={() => {
+                    setThreadFromList(true);
+                    setPhoneSheet(null);
+                  }}
+                />
+              </MobileSheet>
+            ) : null}
+            <SyncStatus compact />
+          </>
+        ) : historyOpen ? (
           <Scrubber
             versions={history.versions ?? []}
             byId={history.byId}
@@ -1040,9 +1482,9 @@ function FileEditor({ fileId }: { fileId: string }) {
         ) : view === "design" ? (
           <>
             <EditorContext.Provider value={active}>
-              {comparing ? null : <Minimap />}
-              <div className="bottom-bar">
-                <ZoomControls />
+              {comparing || isTablet ? null : <Minimap />}
+              <div className="bottom-bar" ref={isTablet ? bottomBarRef : undefined}>
+                <ZoomControls fitPadding={fitPadding} />
                 <RendererStatus />
               </div>
             </EditorContext.Provider>
@@ -1056,10 +1498,12 @@ function FileEditor({ fileId }: { fileId: string }) {
           fileId={fileId}
           teamId={meta.data ? (meta.data.file.teamId ?? null) : undefined}
         />
-        {viewing ? null : <ImageDrop fileId={fileId} />}
+        {viewing || isPhone ? null : <ImageDrop fileId={fileId} />}
         <UploadTray />
-        {commandOpen ? <CommandPalette ctx={ctx} onClose={() => setCommandOpen(false)} /> : null}
-        {view === "design" ? (
+        {!isPhone && commandOpen ? (
+          <CommandPalette ctx={ctx} onClose={() => setCommandOpen(false)} />
+        ) : null}
+        {!isPhone && view === "design" ? (
           <ContextMenus editor={active} ctx={ctx} fileId={fileId} commentsShown={commentsOpen} />
         ) : null}
         <ShortcutsDialog open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
@@ -1121,6 +1565,9 @@ function FileEditor({ fileId }: { fileId: string }) {
 
 function FileTitle({
   view,
+  workspaceMode,
+  leftOpen,
+  onToggleLeft,
   onToggleTokens,
   minimized,
   onToggleMinimized,
@@ -1132,6 +1579,9 @@ function FileTitle({
   branch,
 }: {
   view: "design" | "tokens";
+  workspaceMode: WorkspaceMode;
+  leftOpen: boolean;
+  onToggleLeft?: (() => void) | undefined;
   onToggleTokens: () => void;
   /** Minimize UI is on: the button brings the panels back. */
   minimized: boolean;
@@ -1146,15 +1596,26 @@ function FileTitle({
 }) {
   const queryClient = useQueryClient();
   const canEdit = useEditorState((s) => s.role !== "viewer");
+  const isTablet = workspaceMode === "tablet";
   const [editing, setEditing] = useState(false);
   const input = useRef<HTMLInputElement>(null);
-  const save = async (value: string) => {
-    setEditing(false);
-    const next = value.trim();
-    if (!next || next === name) return;
-    await api.patch(`/files/${fileId}`, { name: next });
-    await queryClient.invalidateQueries({ queryKey: ["file", fileId] });
-  };
+  const nameButton = useRef<HTMLButtonElement>(null);
+  const finish = useCallback(
+    async (value: string | null) => {
+      setEditing(false);
+      if (value === null) {
+        requestAnimationFrame(() => nameButton.current?.focus());
+        return;
+      }
+      const next = value.trim();
+      if (next && next !== name) {
+        await api.patch(`/files/${fileId}`, { name: next });
+        await queryClient.invalidateQueries({ queryKey: ["file", fileId] });
+      }
+      if (isTablet) requestAnimationFrame(() => nameButton.current?.focus());
+    },
+    [fileId, isTablet, name, queryClient],
+  );
   return (
     <div className="file-title pane">
       {teamId ? (
@@ -1180,7 +1641,7 @@ function FileTitle({
         >
           {main.name}
         </Link>
-      ) : editing ? (
+      ) : editing && !isTablet ? (
         <input
           ref={input}
           className="file-title__input"
@@ -1189,15 +1650,16 @@ function FileTitle({
           // biome-ignore lint/a11y/noAutofocus: renaming starts from an explicit click
           autoFocus
           onFocus={(e) => e.currentTarget.select()}
-          onBlur={(e) => void save(e.currentTarget.value)}
+          onBlur={(e) => void finish(e.currentTarget.value)}
           onKeyDown={(e) => {
             e.stopPropagation();
             if (e.key === "Enter") e.currentTarget.blur();
-            if (e.key === "Escape") setEditing(false);
+            if (e.key === "Escape") void finish(null);
           }}
         />
       ) : (
         <button
+          ref={nameButton}
           type="button"
           className="file-title__name"
           onClick={() => canEdit && setEditing(true)}
@@ -1206,6 +1668,36 @@ function FileTitle({
           {name || "…"}
         </button>
       )}
+      {editing && isTablet && !branch ? (
+        <div className="file-title__rename-popover pane" role="dialog" aria-label="Rename file">
+          <input
+            ref={input}
+            className="file-title__input file-title__input--touch"
+            defaultValue={name}
+            aria-label="File name"
+            // biome-ignore lint/a11y/noAutofocus: renaming starts from an explicit tap
+            autoFocus
+            onFocus={(e) => e.currentTarget.select()}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") void finish(e.currentTarget.value);
+              if (e.key === "Escape") void finish(null);
+            }}
+          />
+          <div className="file-title__rename-actions">
+            <Button size="md" variant="ghost" onClick={() => void finish(null)}>
+              Cancel
+            </Button>
+            <Button
+              size="md"
+              variant="primary"
+              onClick={() => void finish(input.current?.value ?? "")}
+            >
+              Done
+            </Button>
+          </div>
+        </div>
+      ) : null}
       {main ? <BranchMenu fileId={fileId} main={main} branch={branch} /> : null}
       {/* A merged branch says so in its chip. */}
       {!canEdit && !branch?.merged ? <span className="file-title__badge">View only</span> : null}
@@ -1217,20 +1709,292 @@ function FileTitle({
         className="file-title__tokens"
         onClick={onToggleTokens}
       />
-      <IconButton
-        icon="sidebar"
-        label={minimized ? "Show panels" : "Minimize UI"}
-        shortcut={shortcutFor("view.minimizeUi")}
-        pressed={minimized}
-        className="file-title__panels"
-        onClick={onToggleMinimized}
-      />
+      {isTablet && onToggleLeft ? (
+        <IconButton
+          icon="sidebar"
+          label={leftOpen ? "Hide layers panel" : "Show layers panel"}
+          size="md"
+          pressed={leftOpen}
+          className="file-title__panels"
+          onClick={onToggleLeft}
+        />
+      ) : (
+        <IconButton
+          icon="sidebar"
+          label={minimized ? "Show panels" : "Minimize UI"}
+          shortcut={shortcutFor("view.minimizeUi")}
+          pressed={minimized}
+          className="file-title__panels"
+          onClick={onToggleMinimized}
+        />
+      )}
     </div>
   );
 }
 
 type RightTab = "design" | "prototype" | "inspect";
 type LeftTab = "layers" | "assets" | "history";
+type PhoneSheet = "pages" | "inspect" | "comments" | null;
+
+/** Compact phone top bar: back to files, file name (with owner rename), zoom-to-fit and Share. */
+function PhoneTopBar({
+  barRef,
+  fileId,
+  teamId,
+  name,
+  main,
+  branch,
+  fitPadding,
+}: {
+  barRef: React.RefObject<HTMLDivElement | null>;
+  fileId: string;
+  teamId: string | null;
+  name: string;
+  main: { readonly id: string; readonly name: string } | null;
+  branch: BranchInfo | null;
+  fitPadding: number;
+}) {
+  const editor = useEditor();
+  const queryClient = useQueryClient();
+  const canRename = useEditorState((s) => s.role !== "viewer");
+  const [editing, setEditing] = useState(false);
+  const [sharing, setSharing] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const titleBtnRef = useRef<HTMLButtonElement>(null);
+
+  const finishRename = async (value: string | null) => {
+    setEditing(false);
+    if (value !== null) {
+      const next = value.trim();
+      if (next && next !== name) {
+        await api.patch(`/files/${fileId}`, { name: next });
+        await queryClient.invalidateQueries({ queryKey: ["file", fileId] });
+      }
+    }
+    requestAnimationFrame(() => titleBtnRef.current?.focus());
+  };
+
+  return (
+    <header ref={barRef} className="phone-topbar pane" {...PASS_GESTURES}>
+      {editing && !branch ? (
+        <form
+          className="phone-topbar__rename"
+          onSubmit={(e) => {
+            e.preventDefault();
+            void finishRename(inputRef.current?.value ?? "");
+          }}
+        >
+          <input
+            ref={inputRef}
+            className="phone-topbar__input"
+            defaultValue={name}
+            aria-label="File name"
+            // biome-ignore lint/a11y/noAutofocus: renaming starts from an explicit tap
+            autoFocus
+            onFocus={(e) => e.currentTarget.select()}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Escape") {
+                e.preventDefault();
+                void finishRename(null);
+              }
+            }}
+          />
+          <Button
+            size="md"
+            variant="ghost"
+            className="phone-topbar__action"
+            onClick={() => void finishRename(null)}
+          >
+            Cancel
+          </Button>
+          <Button size="md" variant="primary" type="submit" className="phone-topbar__action">
+            Done
+          </Button>
+        </form>
+      ) : (
+        <>
+          {teamId ? (
+            <Link
+              to="/t/$teamId"
+              params={{ teamId }}
+              search={{}}
+              className="phone-topbar__home"
+              aria-label="Back to files"
+            >
+              <Logo size={20} label="" />
+            </Link>
+          ) : (
+            <span className="phone-topbar__home" aria-hidden="true" />
+          )}
+          {branch && main ? (
+            <Link
+              to="/f/$fileId"
+              params={{ fileId: main.id }}
+              className="phone-topbar__title"
+              title={`Open ${main.name}`}
+            >
+              {main.name}
+            </Link>
+          ) : canRename ? (
+            <button
+              ref={titleBtnRef}
+              type="button"
+              className="phone-topbar__title"
+              aria-label={`Rename file ${name || "Untitled"}`}
+              onClick={() => setEditing(true)}
+            >
+              {name || "…"}
+            </button>
+          ) : (
+            <span className="phone-topbar__title phone-topbar__title--static">{name || "…"}</span>
+          )}
+          {!canRename && !branch?.merged ? (
+            <span className="file-title__badge">View only</span>
+          ) : null}
+          <MissingFontsButton editor={editor} />
+          <IconButton
+            icon="fit"
+            label="Zoom to fit"
+            size="md"
+            className="phone-topbar__icon"
+            onClick={() => editor.zoomToFit(fitPadding)}
+          />
+          <Button
+            variant="primary"
+            size="md"
+            className="phone-topbar__share"
+            onClick={() => setSharing(true)}
+          >
+            Share
+          </Button>
+        </>
+      )}
+      <ShareDialog
+        fileId={fileId}
+        fileName={name}
+        canEdit={canRename}
+        open={sharing}
+        onClose={() => setSharing(false)}
+      />
+    </header>
+  );
+}
+
+/** Bottom navigation dock for phone view-and-comment mode: Pages, Inspect, Comments and Play. */
+function PhoneDock({
+  dockRef,
+  activeSheet,
+  hasSelection,
+  openCommentsCount,
+  pagesBtnRef,
+  inspectBtnRef,
+  commentsBtnRef,
+  onToggleSheet,
+  onPresent,
+}: {
+  dockRef: React.RefObject<HTMLDivElement | null>;
+  activeSheet: PhoneSheet;
+  hasSelection: boolean;
+  openCommentsCount: number;
+  pagesBtnRef: React.RefObject<HTMLButtonElement | null>;
+  inspectBtnRef: React.RefObject<HTMLButtonElement | null>;
+  commentsBtnRef: React.RefObject<HTMLButtonElement | null>;
+  onToggleSheet: (sheet: Exclude<PhoneSheet, null>) => void;
+  onPresent: () => void;
+}) {
+  return (
+    <nav
+      ref={dockRef}
+      className="phone-dock pane"
+      aria-label="Workspace controls"
+      {...PASS_GESTURES}
+    >
+      <button
+        ref={pagesBtnRef}
+        type="button"
+        className="phone-dock__btn"
+        aria-pressed={activeSheet === "pages"}
+        aria-expanded={activeSheet === "pages"}
+        aria-controls="phone-sheet-pages"
+        onClick={() => onToggleSheet("pages")}
+      >
+        <Icon name="layers" size={16} />
+        <span className="phone-dock__label">Pages</span>
+      </button>
+      <button
+        ref={inspectBtnRef}
+        type="button"
+        className="phone-dock__btn"
+        aria-pressed={activeSheet === "inspect"}
+        aria-expanded={activeSheet === "inspect"}
+        aria-controls="phone-sheet-inspect"
+        onClick={() => onToggleSheet("inspect")}
+      >
+        <span className="phone-dock__icon-wrap">
+          <Icon name="inspector" size={16} />
+          {hasSelection ? <span className="phone-dock__dot" aria-hidden="true" /> : null}
+        </span>
+        <span className="phone-dock__label">Inspect</span>
+      </button>
+      <button
+        ref={commentsBtnRef}
+        type="button"
+        className="phone-dock__btn"
+        aria-pressed={activeSheet === "comments"}
+        aria-expanded={activeSheet === "comments"}
+        aria-controls="phone-sheet-comments"
+        onClick={() => onToggleSheet("comments")}
+      >
+        <span className="phone-dock__icon-wrap">
+          <Icon name="comment" size={16} />
+          {openCommentsCount > 0 ? (
+            <span className="phone-dock__badge" aria-hidden="true">
+              {openCommentsCount > 99 ? "99+" : openCommentsCount}
+            </span>
+          ) : null}
+        </span>
+        <span className="phone-dock__label">Comments</span>
+      </button>
+      <button
+        type="button"
+        className="phone-dock__btn"
+        aria-label="Play prototype"
+        onClick={onPresent}
+      >
+        <Icon name="play" size={16} />
+        <span className="phone-dock__label">Play</span>
+      </button>
+    </nav>
+  );
+}
+
+/** Pages sheet content on phones: immediate page switcher, with an optional read-only Layers tab. */
+function PhonePagesSheetContent({ onDone }: { onDone: () => void }) {
+  const [tab, setTab] = useState<"pages" | "layers">("pages");
+  return (
+    <div className="phone-pages-sheet">
+      <div className="phone-pages-sheet__tabs">
+        <SegmentedControl
+          label="Browse"
+          options={[
+            { value: "pages", label: "Pages" },
+            { value: "layers", label: "Layers" },
+          ]}
+          value={tab}
+          onChange={(v) => setTab(v as "pages" | "layers")}
+        />
+      </div>
+      {tab === "pages" ? (
+        <PagesList phone onSelectPage={onDone} />
+      ) : (
+        <div className="phone-pages-sheet__layers">
+          <LayersPanel />
+        </div>
+      )}
+    </div>
+  );
+}
 
 /** Where Play goes: the selected screen's flow if it starts one, else from that screen. */
 function presentTarget(editor: Editor, fileId: string) {
@@ -1251,6 +2015,9 @@ function TopRight({
   fileId,
   fileName,
   teamId,
+  workspaceMode,
+  rightOpen,
+  onToggleRight,
   branchOpen,
   onMerge,
   onPresent,
@@ -1259,6 +2026,9 @@ function TopRight({
   fileId: string;
   fileName: string;
   teamId: string | null;
+  workspaceMode: WorkspaceMode;
+  rightOpen: boolean;
+  onToggleRight?: (() => void) | undefined;
   /** An open branch: merging, not sharing, is its next step. */
   branchOpen: boolean;
   /** On an open branch: starts its review. */
@@ -1269,6 +2039,7 @@ function TopRight({
   const editor = useEditor();
   const hasPeers = useEditorState((s) => s.peers.size > 0);
   const canEdit = useEditorState((s) => s.role !== "viewer");
+  const isTablet = workspaceMode === "tablet";
   const [sharing, setSharing] = useState(false);
   return (
     <div className="top-right pane">
@@ -1296,6 +2067,16 @@ function TopRight({
           Merge
         </Button>
       ) : null}
+      {isTablet && onToggleRight ? (
+        <IconButton
+          icon="inspector"
+          label={rightOpen ? "Hide inspector panel" : "Show inspector panel"}
+          size="md"
+          pressed={rightOpen}
+          className="top-right__inspector"
+          onClick={onToggleRight}
+        />
+      ) : null}
       <ShareDialog
         fileId={fileId}
         fileName={fileName}
@@ -1307,7 +2088,7 @@ function TopRight({
   );
 }
 
-function ZoomControls() {
+function ZoomControls({ fitPadding }: { fitPadding: number }) {
   const editor = useEditor();
   const zoom = useEditorState((s) => s.camera.zoom);
   return (
@@ -1336,13 +2117,13 @@ function ZoomControls() {
         icon="fit"
         label="Zoom to fit"
         shortcut={shortcutFor("view.zoomFit")}
-        onClick={() => editor.zoomToFit()}
+        onClick={() => editor.zoomToFit(fitPadding)}
       />
     </fieldset>
   );
 }
 
-function SyncStatus() {
+function SyncStatus({ compact = false }: { compact?: boolean }) {
   const status = useEditorState((s) => s.status);
   const editor = useEditor();
   // Follows the room as it confirms edits, not on a timer.
@@ -1362,9 +2143,12 @@ function SyncStatus() {
           status === "syncing"
           ? "Loading the file…"
           : "Connecting…";
+  const quiet = compact && status === "live" && pending === 0;
   return (
     <div
-      className={`sync pane sync--${status}`}
+      className={
+        quiet ? "dp-visually-hidden" : `sync pane sync--${status}${compact ? " sync--phone" : ""}`
+      }
       role="status"
       aria-live="polite"
       {...PASS_GESTURES}

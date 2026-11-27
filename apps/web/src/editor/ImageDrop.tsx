@@ -1,6 +1,6 @@
 import { Icon } from "@drawpane/ui";
 import { useEffect, useState, useSyncExternalStore } from "react";
-import { useEditor, useEditorState } from "./hooks";
+import { useCanEdit, useEditor, useEditorState } from "./hooks";
 import { filesFrom, importImageFiles, uploadsFor } from "./media";
 import "./media.css";
 
@@ -16,7 +16,7 @@ function carriesFiles(e: DragEvent): boolean {
  */
 export function ImageDrop({ fileId }: { fileId: string }) {
   const editor = useEditor();
-  const canEdit = useEditorState((s) => s.role !== "viewer");
+  const canEdit = useCanEdit();
   const [drag, setDrag] = useState<{ x: number; y: number; count: number } | null>(null);
 
   useEffect(() => {

@@ -25,11 +25,13 @@ export interface ThreadPopoverProps {
   readonly people: readonly CommentPerson[];
   readonly role: Role;
   readonly onClose: () => void;
+  /** Sheet mode for phone bottom sheets: renders inside MobileSheet without duplicating a dialog shell. */
+  readonly presentation?: "popover" | "sheet";
 }
 
-/** The popover for one thread: its messages, a reply box, resolve, and author actions. */
+/** The popover (or phone sheet body) for one thread: messages, reply box, resolve and author actions. */
 export const ThreadPopover = forwardRef<HTMLElement, ThreadPopoverProps>(function ThreadPopover(
-  { store, thread, label, people, role, onClose },
+  { store, thread, label, people, role, onClose, presentation = "popover" },
   ref,
 ) {
   const me = store.me?.id ?? null;
@@ -88,31 +90,40 @@ export const ThreadPopover = forwardRef<HTMLElement, ThreadPopoverProps>(functio
       : []),
   ];
 
-  return (
-    <section
-      ref={ref}
-      className="comment-popover"
-      role="dialog"
-      aria-label={`Thread on ${label}`}
-      onKeyDown={onKeyDown}
-    >
-      <header className="comment-popover__head">
-        <span className="comment-popover__title" title={label}>
-          {label}
-        </span>
-        <IconButton
-          icon="check"
-          label={resolved ? "Reopen thread" : "Resolve thread"}
-          shortcut={isMac() ? "⌘⇧R" : "Ctrl+Shift+R"}
-          pressed={resolved}
-          // aria-disabled, not disabled: a disabled button drops keyboard focus onto the page.
-          aria-disabled={busy || undefined}
-          onClick={() => {
-            if (!busy) void run(() => store.setResolved(thread.id, !resolved));
-          }}
-        />
-        <MenuButton label="Thread options" items={menuItems} />
-      </header>
+  const headActions = (
+    <>
+      <IconButton
+        icon="check"
+        label={resolved ? "Reopen thread" : "Resolve thread"}
+        shortcut={isMac() ? "⌘⇧R" : "Ctrl+Shift+R"}
+        pressed={resolved}
+        // aria-disabled, not disabled: a disabled button drops keyboard focus onto the page.
+        aria-disabled={busy || undefined}
+        onClick={() => {
+          if (!busy) void run(() => store.setResolved(thread.id, !resolved));
+        }}
+      />
+      <MenuButton label="Thread options" items={menuItems} />
+    </>
+  );
+
+  const body = (
+    <>
+      {presentation === "sheet" ? (
+        <div className="comment-sheet__toolbar">
+          <span className="comment-sheet__anchor" title={label}>
+            {label}
+          </span>
+          <div className="comment-sheet__toolbar-actions">{headActions}</div>
+        </div>
+      ) : (
+        <header className="comment-popover__head">
+          <span className="comment-popover__title" title={label}>
+            {label}
+          </span>
+          {headActions}
+        </header>
+      )}
       {resolved ? (
         <p className="comment-popover__resolved">
           <Icon name="check" size={12} />
@@ -170,8 +181,8 @@ export const ThreadPopover = forwardRef<HTMLElement, ThreadPopoverProps>(functio
           label="Reply"
           busy={busy}
           autoFocus
-          onSubmit={(body, mentions) =>
-            void run(() => store.reply(thread.id, body, mentions)).then((ok) => {
+          onSubmit={(bodyText, mentions) =>
+            void run(() => store.reply(thread.id, bodyText, mentions)).then((ok) => {
               if (ok) setReply("");
             })
           }
@@ -182,6 +193,22 @@ export const ThreadPopover = forwardRef<HTMLElement, ThreadPopoverProps>(functio
           </p>
         ) : null}
       </div>
+    </>
+  );
+
+  if (presentation === "sheet") {
+    return <div className="comment-sheet">{body}</div>;
+  }
+
+  return (
+    <section
+      ref={ref}
+      className="comment-popover"
+      role="dialog"
+      aria-label={`Thread on ${label}`}
+      onKeyDown={onKeyDown}
+    >
+      {body}
     </section>
   );
 });
@@ -311,15 +338,58 @@ export interface DraftPopoverProps {
   readonly label: string;
   readonly people: readonly CommentPerson[];
   readonly onCancel: () => void;
+  readonly presentation?: "popover" | "sheet";
+  /** Show an explicit Cancel button beside Comment (for touch devices without Escape). */
+  readonly showCancel?: boolean;
+  /** Called right after the new thread is created. */
+  readonly onCreated?: () => void;
 }
 
-/** The popover for a new pin: the first message of a thread. */
+/** The popover (or phone sheet body) for a new pin: the first message of a thread. */
 export const DraftPopover = forwardRef<HTMLElement, DraftPopoverProps>(function DraftPopover(
-  { store, text, label, people, onCancel },
+  { store, text, label, people, onCancel, presentation = "popover", showCancel = false, onCreated },
   ref,
 ) {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const replyBox = (
+    <div className="comment-popover__reply comment-popover__reply--draft">
+      <Composer
+        people={people}
+        value={text}
+        onChange={(value) => store.setDraftText(value)}
+        submitLabel="Comment"
+        placeholder="Add a comment"
+        label="Comment"
+        busy={busy}
+        autoFocus
+        {...(showCancel ? { onCancel } : {})}
+        onSubmit={async (body, mentions) => {
+          const draft = store.s.draft;
+          if (!draft) return;
+          setBusy(true);
+          setError(null);
+          try {
+            await store.create(draft, body, mentions);
+            onCreated?.();
+          } catch (e) {
+            setError(errorText(e));
+            setBusy(false);
+          }
+        }}
+      />
+      {error ? (
+        <p className="comment-error" role="alert">
+          {error}
+        </p>
+      ) : null}
+    </div>
+  );
+
+  if (presentation === "sheet") {
+    return <div className="comment-sheet comment-sheet--draft">{replyBox}</div>;
+  }
+
   return (
     <section
       ref={ref}
@@ -338,35 +408,7 @@ export const DraftPopover = forwardRef<HTMLElement, DraftPopoverProps>(function 
           {label}
         </span>
       </header>
-      <div className="comment-popover__reply comment-popover__reply--draft">
-        <Composer
-          people={people}
-          value={text}
-          onChange={(value) => store.setDraftText(value)}
-          submitLabel="Comment"
-          placeholder="Add a comment"
-          label="Comment"
-          busy={busy}
-          autoFocus
-          onSubmit={async (body, mentions) => {
-            const draft = store.s.draft;
-            if (!draft) return;
-            setBusy(true);
-            setError(null);
-            try {
-              await store.create(draft, body, mentions);
-            } catch (e) {
-              setError(errorText(e));
-              setBusy(false);
-            }
-          }}
-        />
-        {error ? (
-          <p className="comment-error" role="alert">
-            {error}
-          </p>
-        ) : null}
-      </div>
+      {replyBox}
     </section>
   );
 });
