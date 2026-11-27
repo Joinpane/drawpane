@@ -6,6 +6,9 @@
  *   pixel, every chord inside its curve, so the iOS kit's 8 x 8 page dot (16 px at 2x) and a
  *   38 x 38 circle came out polygonal and light at the edge. The vendored vello_common flattens
  *   at 1/16 px (packages/engine/rust/vendor/vello_common/VENDORED.md).
+ * - A closed path that only retraces itself (`M8 0 L0 8 Z`, the shadcn kit's Lucide X instances)
+ *   strokes like the open lines: stroked closed, its two outlines coincide and the engine's
+ *   analytic coverage counted their edges twice, half a pixel wider (engine/retraced.ts).
  */
 import { expect, type Page, test } from "@playwright/test";
 import { freshInstance } from "./fresh-instance";
@@ -140,6 +143,14 @@ test.describe
           const e = (window as unknown as W).drawpane;
           const page = e.s.pageId;
           const black = [{ type: "solid", color: "#000000" }];
+          const ink = [{ type: "solid", color: "#0a0a0a" }];
+          const x = {
+            strokes: ink,
+            strokeWeight: 1.5,
+            strokeAlign: "center",
+            strokeJoin: "round",
+            strokeCap: "round",
+          };
           return {
             // The iOS kit's page dot.
             dot: e.createLayer("frame", { x: 0, y: 0, width: 8, height: 8 }, page, {
@@ -149,6 +160,16 @@ test.describe
             // The iOS date picker's selected day.
             circle: e.createLayer("ellipse", { x: 20, y: 0, width: 38, height: 38 }, page, {
               fills: black,
+            }),
+            // The shadcn kit's Lucide X as its instances hold it, and as lines.
+            closed: e.createLayer("path", { x: 80, y: 0, width: 8, height: 8 }, page, {
+              ...x,
+              pathData: "M8 0 L0 8 Z M0 0 L8 8 Z",
+              fills: ink,
+            }),
+            open: e.createLayer("path", { x: 100, y: 0, width: 8, height: 8 }, page, {
+              ...x,
+              pathData: "M8 0 L0 8 M0 0 L8 8",
             }),
           };
         }),
@@ -176,6 +197,25 @@ test.describe
         // At a quarter pixel its top was one 17 px chord: 52 levels off at worst.
         expect(circle.worst, "the 76 px circle's worst pixel").toBeLessThanOrEqual(16);
         expect(Math.abs(circle.bias), "the 76 px circle's edge on average").toBeLessThanOrEqual(8);
+      });
+
+      test(`a retraced closed path strokes like its open lines (${backend})`, async () => {
+        test.setTimeout(120_000);
+        const closed = await alpha(page, backend, ids.closed as string, {
+          x: 76,
+          y: -4,
+          width: 16,
+          height: 16,
+        });
+        const open = await alpha(page, backend, ids.open as string, {
+          x: 96,
+          y: -4,
+          width: 16,
+          height: 16,
+        });
+        // Stroked closed, a 45° edge pixel the lines cover 157/255 of came out 255.
+        expect(Math.max(...closed.map((a, i) => Math.abs(a - (open[i] as number))))).toBe(0);
+        expect(open.some((a) => a > 0 && a < 255)).toBe(true);
       });
     }
   });

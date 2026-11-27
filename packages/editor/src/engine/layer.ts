@@ -70,6 +70,7 @@ import { lastResortText } from "../text-fallback";
 import { isClosedPath } from "../vector/cache";
 import { nodePath } from "../vector/shapes";
 import { serializePath } from "../vector/svg";
+import { openRetraced } from "./retraced";
 import { svgPathData } from "./svg-path";
 
 export interface LayerContext {
@@ -547,9 +548,22 @@ function shapeStrokes(b: Builder, node: NodeRecord, shape: number, w: number, h:
   }
   const markers = markersOf(node);
   const trimmed = markers ? trimmedStroke(node, markers.start.inset, markers.end.inset) : null;
+  // Closed subpaths that only retrace themselves, stroked open (retraced.ts), when the layer's
+  // cap is the end their join makes: the whole path stays one stroke.
+  const parsed = b.paths[shape];
+  const opened =
+    node.type === "path" &&
+    !markers &&
+    dashes.length === 0 &&
+    parsed?.kind === "path" &&
+    (cap === "round" ? join === "round" : (cap === "none" || cap === "butt") && join !== "round")
+      ? openRetraced(parsed.path)
+      : null;
   const line = trimmed
     ? b.path({ kind: "path", path: svgPathData(serializePath(trimmed)) })
-    : shape;
+    : opened
+      ? b.path({ kind: "path", path: opened })
+      : shape;
   const pieces = dashes.length > 0 && !markers ? dashedPieces(node, w, h) : null;
   const pieceEntries = pieces?.map((p) => ({
     path: b.path({ kind: "path", path: p.path }),
