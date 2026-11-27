@@ -180,6 +180,12 @@
   gap: var(--space-200);
   padding: var(--space-100) var(--space-100) 0;
 }
+.dash__user-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-200);
+  flex: none;
+}
 
 .dash__avatar {
   display: inline-grid;
@@ -227,17 +233,21 @@
 /* The title, and a project's options beside it. */
 .dash__heading {
   display: flex;
-  flex: none;
+  flex: 0 1 auto;
   align-items: center;
   gap: var(--space-100);
   min-width: 0;
+  max-width: 100%;
   margin-right: auto;
 }
 
 .dash__title {
-  /* The search gives way first; the title stays whole. */
-  flex: none;
+  /* The search gives way first; very long project names truncate instead of overflowing. */
+  flex: 0 1 auto;
+  min-width: 0;
   margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
   font: 600 22px / 28px var(--font-ui);
   letter-spacing: -0.01em;
@@ -261,12 +271,11 @@
     white-space: nowrap;
   }
 }
-
 .dash__search {
   display: flex;
   align-items: center;
   gap: var(--space-200);
-  flex: 0 1 280px;
+  flex: 0 100000 280px;
   min-width: 160px;
   height: var(--size-control-lg);
   padding: 0 var(--space-300);
@@ -292,6 +301,18 @@
 .dash__search kbd {
   color: var(--ink-muted);
   font: 500 11px / 14px var(--font-mono);
+}
+/* Tablet portrait (768px with sidebar) and narrow panes below 1024px: wrap search onto a full-width row. */
+@container dash (max-width: 719px) {
+  .dash__header {
+    flex-wrap: wrap;
+    gap: var(--space-200);
+  }
+  .dash__search {
+    order: 10;
+    flex: 1 1 100%;
+    min-width: 0;
+  }
 }
 
 .dash__error {
@@ -374,7 +395,15 @@
   border-radius: var(--radius-xs);
 }
 
+.dash__rename-form {
+  display: flex;
+  align-items: center;
+  gap: var(--space-100);
+  min-width: 0;
+}
 .dash__rename {
+  flex: 1;
+  min-width: 0;
   width: 100%;
   height: 22px;
   padding: 0 var(--space-100);
@@ -385,6 +414,9 @@
   font: 600 13px / 18px var(--font-ui);
   outline: none;
   box-sizing: border-box;
+}
+.dash__rename-actions {
+  display: none;
 }
 
 .dash__card-sub {
@@ -405,7 +437,8 @@
   transition: opacity 90ms ease-out;
 }
 .dash__card:hover .dash__card-actions,
-.dash__card:focus-within .dash__card-actions {
+.dash__card:focus-within .dash__card-actions,
+.dash__card[data-menu-open] .dash__card-actions {
   opacity: 1;
 }
 
@@ -465,13 +498,168 @@
   opacity: 0.6;
 }
 
-/* Phones: a top bar, and the sidebar as a drawer over the page. */
+/* Touch devices and phone widths: visible actions and 44 px border-box touch targets. */
+@media (hover: none), (pointer: coarse), (max-width: 760px) {
+  .dash__link {
+    box-sizing: border-box;
+    min-height: 44px;
+    height: auto;
+    padding: var(--space-200) var(--space-300);
+  }
+  .dash__section .dp-iconbtn {
+    width: 44px;
+    height: 44px;
+  }
+  .dash__project {
+    display: flex;
+    align-items: center;
+    gap: 2px;
+  }
+  .dash__project > .dash__link {
+    flex: 1;
+    min-width: 0;
+  }
+  .dash__project-menu {
+    position: static;
+    transform: none;
+    opacity: 1;
+    width: 44px;
+    height: 44px;
+  }
+  .dash__project:has(.dash__project-menu):hover .dash__count,
+  .dash__project:has(.dash__project-menu):focus-within .dash__count,
+  .dash__project[data-menu-open] .dash__count {
+    visibility: visible;
+  }
+  .dash__project:has(.dash__project-menu):hover .dash__link-label,
+  .dash__project:has(.dash__project-menu):focus-within .dash__link-label,
+  .dash__project[data-menu-open] .dash__link-label {
+    margin-right: 0;
+  }
+  .dash__user {
+    flex-wrap: wrap;
+    gap: var(--space-200);
+  }
+  .dash__account {
+    box-sizing: border-box;
+    flex: 1 1 100%;
+    min-height: 44px;
+  }
+  .dash__user-actions {
+    width: 100%;
+    justify-content: flex-start;
+    gap: var(--space-100);
+  }
+  .dash__user-actions .dp-iconbtn {
+    width: 44px;
+    height: 44px;
+  }
+  .dash__header > .dp-btn {
+    min-height: 44px;
+  }
+  .dash__heading .dp-iconbtn {
+    width: 44px;
+    height: 44px;
+  }
+  @container dash (max-width: 880px) {
+    .dash__header > .dp-btn:has(.dash__btn-label) {
+      width: 44px;
+      min-width: 44px;
+      height: 44px;
+      padding: 0;
+    }
+  }
+  .dash__search {
+    box-sizing: border-box;
+    min-height: 44px;
+    height: 44px;
+  }
+  .dash__search input {
+    font-size: 16px;
+  }
+  .dash__search kbd {
+    display: none;
+  }
+  .dash__empty-actions .dp-btn {
+    min-height: 44px;
+  }
+  .dash__card:not(.dash__card--trash):not(.dash__card--renaming) .dash__card-meta {
+    padding-right: 48px;
+  }
+  .dash__card-actions {
+    opacity: 1;
+  }
+  .dash__card-actions .dp-iconbtn {
+    width: 44px;
+    height: 44px;
+  }
+  .dash__card--renaming .dash__card-meta {
+    padding-right: 0;
+  }
+  .dash__card--renaming .dash__card-actions {
+    display: none;
+  }
+  .dash__card--trash .dash__card-meta {
+    padding-right: 0;
+  }
+  .dash__card--trash .dash__card-actions {
+    position: static;
+    flex-wrap: wrap;
+    gap: var(--space-200);
+  }
+  .dash__card--trash .dash__card-actions .dp-btn {
+    min-height: 44px;
+    padding: 0 var(--space-300);
+  }
+  .dash__rename-form {
+    flex-wrap: wrap;
+  }
+  .dash__rename {
+    flex: 1 1 140px;
+    min-height: 44px;
+    height: 44px;
+    font-size: 16px;
+  }
+  .dash__rename-actions {
+    display: inline-flex;
+    align-items: center;
+    gap: 2px;
+    flex: none;
+  }
+  .dash__rename-actions .dp-iconbtn {
+    width: 44px;
+    height: 44px;
+  }
+  .dash__move-option {
+    box-sizing: border-box;
+    min-height: 44px;
+  }
+  .members__action .dp-btn {
+    min-height: 44px;
+    padding: 0 var(--space-300);
+  }
+  .team-fonts__faces .dp-iconbtn {
+    width: 44px;
+    height: 44px;
+  }
+  .import-pages__page {
+    box-sizing: border-box;
+    min-height: 44px;
+  }
+  .import-source > .dp-seg > .dp-seg__option {
+    box-sizing: border-box;
+    min-height: 44px;
+    height: auto;
+  }
+}
+
+/* Phones: a top bar, the sidebar as a drawer, and compact horizontal file tiles. */
 .dash__topbar {
   display: none;
 }
 @media (max-width: 760px) {
   .dash {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto 1fr;
   }
   .dash__topbar {
@@ -481,9 +669,15 @@
     display: flex;
     align-items: center;
     gap: var(--space-200);
-    padding: var(--space-200) var(--space-300);
+    min-width: 0;
+    min-height: 52px;
+    padding: var(--space-100) var(--space-200);
     border-bottom: 1px solid var(--line);
     background: var(--surface);
+  }
+  .dash__topbar > .dp-iconbtn {
+    width: 44px;
+    height: 44px;
   }
   .dash__topbar-team {
     flex: 1;
@@ -494,7 +688,18 @@
     white-space: nowrap;
   }
   .dash__topbar-inbox {
+    box-sizing: border-box;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 44px;
+    border-radius: var(--radius-sm);
     text-decoration: none;
+  }
+  .dash__topbar-inbox:focus-visible {
+    outline: none;
+    box-shadow: var(--shadow-focus);
   }
   .dash__side {
     position: fixed;
@@ -504,6 +709,7 @@
     z-index: 40;
     width: min(300px, 86vw);
     height: auto;
+    overscroll-behavior: contain;
     box-shadow: var(--shadow-popover);
     transform: translateX(-100%);
     visibility: hidden;
@@ -516,10 +722,15 @@
     visibility: visible;
     transition: transform 200ms cubic-bezier(0.2, 0, 0, 1);
   }
+  .dash__team {
+    padding-right: 48px;
+  }
   .dash__side-close {
     position: absolute;
-    top: var(--space-300);
-    right: var(--space-300);
+    top: var(--space-200);
+    right: var(--space-200);
+    width: 44px;
+    height: 44px;
   }
   .dash__scrim {
     position: fixed;
@@ -531,16 +742,75 @@
   .dash__main {
     padding: var(--space-400);
   }
-  /* The header wraps: the title and its actions, then search across the full width. */
+  /* Phone layout (including 713-760 px windows): always wrap search onto row 2. */
   .dash__header {
     flex-wrap: wrap;
+    gap: var(--space-200);
+    margin-bottom: var(--space-400);
   }
   .dash__search {
     order: 10;
     flex: 1 1 100%;
+    min-width: 0;
   }
-  .dash__search kbd {
-    display: none;
+  /* Compact horizontal file tiles on phones so multiple files fit on the first screen
+   * and per-file actions stay visible without hover. */
+  .dash__grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: var(--space-200);
+  }
+  .dash__card {
+    display: grid;
+    grid-template-columns: 88px minmax(0, 1fr) auto;
+    align-items: center;
+    column-gap: var(--space-300);
+    row-gap: var(--space-200);
+    padding: var(--space-200);
+    border-radius: var(--radius-md);
+    background: var(--surface-raised);
+    box-shadow: 0 0 0 1px var(--line);
+  }
+  .dash__card--skeleton {
+    aspect-ratio: auto;
+    height: 82px;
+    box-shadow: none;
+  }
+  .dash__thumb {
+    width: 88px;
+    height: 66px;
+    aspect-ratio: 4 / 3;
+    border-radius: var(--radius-sm);
+  }
+  .thumb--image {
+    padding: var(--space-100);
+  }
+  .dash__card:not(.dash__card--trash):not(.dash__card--renaming) .dash__card-meta,
+  .dash__card-meta {
+    padding-right: 0;
+    gap: 2px;
+  }
+  .dash__card-name {
+    width: 100%;
+    font-size: 14px;
+    line-height: 20px;
+  }
+  .dash__card-actions {
+    position: static;
+    align-self: center;
+  }
+  .dash__card--renaming {
+    grid-template-columns: 88px minmax(0, 1fr);
+  }
+  .dash__card--trash {
+    grid-template-columns: 88px minmax(0, 1fr);
+  }
+  .dash__card--trash .dash__card-actions {
+    grid-column: 1 / -1;
+    padding-top: var(--space-200);
+    border-top: 1px solid var(--line);
+  }
+  .dash__card > .dp-badge {
+    grid-column: 1 / -1;
   }
 }
 @keyframes dash-scrim {
@@ -1402,6 +1672,9 @@
 }
 /* Narrow: how they sign in moves under their name. */
 @media (max-width: 720px) {
+  .members__head {
+    flex-wrap: wrap;
+  }
   .members__row {
     grid-template-columns: 28px minmax(0, 1fr) auto;
     grid-template-areas:
@@ -1417,12 +1690,35 @@
   }
   .members__meta {
     grid-area: meta;
-    grid-auto-flow: column;
-    justify-content: start;
-    gap: var(--space-300);
+    display: flex;
+    flex-wrap: wrap;
+    column-gap: var(--space-300);
+    row-gap: 2px;
+    white-space: normal;
   }
   .members__action {
     grid-area: action;
+  }
+  .members__action .dp-btn {
+    min-height: 44px;
+    padding: 0 var(--space-300);
+  }
+  .team-fonts__head {
+    flex-wrap: wrap;
+  }
+  .team-fonts__row {
+    grid-template-columns: minmax(0, 1fr) auto 12px;
+    gap: var(--space-200);
+  }
+  .team-fonts__sample {
+    grid-column: 1 / -1;
+  }
+  .team-fonts__faces {
+    overflow-x: auto;
+  }
+  .team-fonts__faces .dp-iconbtn {
+    width: 44px;
+    height: 44px;
   }
 }
 

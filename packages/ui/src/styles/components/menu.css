@@ -93,8 +93,20 @@
 }
 .dp-dropdown > .dp-menu {
   min-width: 176px;
+  max-width: calc(100vw - 16px);
   max-height: calc(100vh - 16px);
   overflow-y: auto;
+}
+@media (max-width: 760px), (hover: none), (pointer: coarse) {
+  .dp-dropdown > .dp-menu .dp-menu__item {
+    box-sizing: border-box;
+    min-height: 44px;
+    height: auto;
+    padding-top: var(--space-200);
+    padding-bottom: var(--space-200);
+    font-size: 14px;
+    line-height: 20px;
+  }
 }
 @keyframes dp-dropdown-in {
   from {

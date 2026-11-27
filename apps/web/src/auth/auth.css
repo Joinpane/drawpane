@@ -72,6 +72,8 @@
 .auth__panel {
   display: grid;
   place-items: center;
+  box-sizing: border-box;
+  min-width: 0;
   padding: var(--space-800) var(--space-600);
 }
 
@@ -255,4 +257,30 @@
   outline: none;
   border-radius: 2px;
   box-shadow: var(--shadow-focus);
+}
+
+@media (max-width: 600px) {
+  .auth__panel {
+    padding: var(--space-600) var(--space-400);
+  }
+}
+
+@media (max-width: 760px), (hover: none), (pointer: coarse) {
+  .auth__form .dp-btn {
+    min-height: 44px;
+    height: auto;
+    padding-top: var(--space-200);
+    padding-bottom: var(--space-200);
+  }
+  .provider-button {
+    box-sizing: border-box;
+    min-height: 44px;
+    height: auto;
+    padding: var(--space-200) var(--space-400);
+  }
+  .auth__form .dp-tf__input {
+    min-height: 44px;
+    height: 44px;
+    font-size: 16px;
+  }
 }

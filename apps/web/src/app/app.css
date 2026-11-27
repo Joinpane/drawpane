@@ -60,6 +60,7 @@ body {
 
 /* Dialog */
 .app-dialog {
+  box-sizing: border-box;
   width: min(440px, calc(100vw - 32px));
   padding: 0;
   border: 0;
@@ -115,6 +116,7 @@ body {
 
 .app-radio-row {
   display: flex;
+  flex-wrap: wrap;
   gap: var(--space-200);
 }
 .app-radio {
@@ -135,6 +137,31 @@ body {
 .app-radio input {
   accent-color: var(--signal);
   margin: 0;
+}
+
+@media (max-width: 760px), (hover: none), (pointer: coarse) {
+  .app-dialog__footer {
+    flex-wrap: wrap;
+  }
+  .app-dialog__footer .dp-btn {
+    min-height: 44px;
+    padding: 0 var(--space-400);
+  }
+  .app-dialog .dp-tf__input {
+    min-height: 44px;
+    height: 44px;
+    font-size: 16px;
+  }
+  .app-radio {
+    box-sizing: border-box;
+    min-height: 44px;
+    height: auto;
+    padding: var(--space-200) var(--space-300);
+  }
+  .app-copy .dp-btn {
+    min-height: 44px;
+    padding: 0 var(--space-300);
+  }
 }
 
 @keyframes app-pop {
