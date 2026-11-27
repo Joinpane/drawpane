@@ -34,16 +34,16 @@ const COMPACT_TABLET_WIDTH_MAX = 1000;
 
 /**
  * Classifies the workspace from viewport size and pointer capability:
- * - Phone: coarse primary pointer, no fine pointer (so a mouse, trackpad or Pencil
- *   is never forced into view-only phone mode), and short side under 600 px (keeps
- *   rotated landscape phones in phone mode).
- * - Tablet: coarse primary pointer up to 1366 px wide (including narrow Split View
- *   when a fine pointer or Pencil is present).
+ * - Phone: coarse primary pointer and short side under 600 px regardless of `anyFine`
+ *   (covers portrait and rotated phones, including Android phones with a stylus or paired
+ *   mouse; no iPad has a short side under 744 px).
+ * - Tablet: coarse primary pointer with short side >= 600 px and width up to 1366 px
+ *   (covers iPads and Android tablets with or without Apple Pencil / trackpad).
  * - Desktop: fine primary pointer or screens wider than 1366 px.
  */
 export function classifyWorkspaceMode(viewport: WorkspaceViewport): WorkspaceMode {
   const shortSide = Math.min(viewport.width, viewport.height);
-  if (viewport.coarse && !viewport.anyFine && shortSide < PHONE_SHORT_SIDE_MAX) return "phone";
+  if (viewport.coarse && shortSide < PHONE_SHORT_SIDE_MAX) return "phone";
   if (viewport.coarse && viewport.width <= TABLET_WIDTH_MAX) return "tablet";
   return "desktop";
 }

@@ -3461,7 +3461,15 @@
   animation: mobile-sheet-in var(--duration-popover) ease-out;
 }
 .mobile-sheet[data-variant="thread"] {
-  max-height: min(max(76%, 340px), calc(100% - var(--space-200) - env(safe-area-inset-top)));
+  max-height: min(68%, calc(100% - var(--space-300) - env(safe-area-inset-top)));
+}
+.editor[data-short-vv="true"] .mobile-sheet[data-variant="thread"] {
+  max-height: calc(100% - var(--space-100));
+  border-radius: var(--radius-md) var(--radius-md) 0 0;
+}
+.editor[data-short-vv="true"] .mobile-sheet__head {
+  min-height: 44px;
+  padding: 0 var(--space-100) 0 var(--space-300);
 }
 @keyframes mobile-sheet-in {
   from {
@@ -3499,7 +3507,8 @@
   gap: var(--space-100);
   flex: none;
 }
-.mobile-sheet__btn.dp-iconbtn {
+.mobile-sheet__btn.dp-iconbtn,
+.mobile-sheet__actions .dp-iconbtn {
   width: 44px;
   height: 44px;
 }
@@ -3510,6 +3519,9 @@
   flex-direction: column;
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+.mobile-sheet[data-variant="thread"] .mobile-sheet__body {
+  overflow: hidden;
 }
 .mobile-sheet__body .inspector {
   padding-bottom: var(--space-400);
@@ -3578,7 +3590,12 @@
 .editor[data-workspace="tablet"] .file-title {
   position: relative;
   width: auto;
-  max-width: 300px;
+  max-width: 260px;
+}
+@media (min-width: 1180px) {
+  .editor[data-workspace="tablet"] .file-title {
+    max-width: 360px;
+  }
 }
 .editor[data-workspace="tablet"] .file-title__home {
   width: 44px;
@@ -3608,7 +3625,7 @@
   height: 44px;
 }
 .editor[data-workspace="tablet"] .toolbar__more {
-  width: 28px;
+  width: 44px;
   height: 44px;
   margin-left: 0;
 }
@@ -3655,6 +3672,34 @@
 .editor[data-workspace="tablet"] .pane__head .dp-iconbtn {
   width: 44px;
   height: 44px;
+}
+/* 44 px touch targets on layer rows (Lock, Hide, and disclosure caret) on tablets and phone Layers sheet. */
+.editor[data-workspace="tablet"] .dp-layer,
+.phone-pages-sheet__layers .dp-layer {
+  height: 44px;
+  padding-right: 4px;
+}
+.editor[data-workspace="tablet"] .dp-layer__caret,
+.phone-pages-sheet__layers .dp-layer__caret {
+  width: 28px;
+}
+.editor[data-workspace="tablet"] .dp-layer__toggle,
+.phone-pages-sheet__layers .dp-layer__toggle {
+  width: 44px;
+  height: 44px;
+}
+.editor[data-workspace="tablet"] .dp-layer__caret.dp-layer__toggle,
+.phone-pages-sheet__layers .dp-layer__caret.dp-layer__toggle {
+  width: 44px;
+  height: 44px;
+  margin-inline: -8px;
+}
+.editor[data-workspace="tablet"] .dp-layer__actions {
+  right: 2px;
+  gap: 0;
+}
+.editor[data-workspace="tablet"] .dp-layer__actions .is-offer {
+  opacity: 0.72;
 }
 .editor[data-workspace="tablet"] .bottom-bar {
   bottom: calc(var(--space-300) + env(safe-area-inset-bottom));
@@ -3753,7 +3798,7 @@
 .pages__rename-bar .pages__rename,
 .tablet-rename__input {
   width: 100%;
-  height: 40px;
+  height: 44px;
   box-sizing: border-box;
   padding: 0 var(--space-200);
   border: 1px solid var(--signal);
@@ -3771,21 +3816,21 @@
 }
 .editor[data-workspace] .pages__rename-actions .dp-btn,
 .editor[data-workspace] .tablet-rename__actions .dp-btn {
-  min-height: 40px;
-  height: 40px;
+  min-height: 44px;
+  height: 44px;
 }
 
 .text-edit-bar,
 .frame-name-bar {
   position: absolute;
   z-index: 6;
-  left: calc(var(--vv-left, 0px) + var(--vv-width, 100%) / 2);
-  top: calc(
-    var(--vv-top, 0px) +
-    var(--vv-height, 100%) -
-    var(--space-300) -
-    env(safe-area-inset-bottom)
+  left: calc(
+    var(--canvas-left, 12px) +
+    (100% - var(--canvas-left, 12px) - var(--canvas-right, 12px)) /
+    2
   );
+  /* Clear of the 52 px tablet zoom bar when no on-screen keyboard is open. */
+  top: calc(var(--vv-top, 0px) + var(--vv-height, 100%) - 76px - env(safe-area-inset-bottom));
   transform: translate(-50%, -100%);
   max-width: calc(var(--vv-width, 100%) - var(--space-600));
   display: flex;
@@ -3793,6 +3838,16 @@
   gap: var(--space-200);
   padding: var(--space-100) var(--space-200);
   box-sizing: border-box;
+}
+.editor[data-keyboard="true"] .text-edit-bar,
+.editor[data-keyboard="true"] .frame-name-bar {
+  left: calc(var(--vv-left, 0px) + var(--vv-width, 100%) / 2);
+  top: calc(
+    var(--vv-top, 0px) +
+    var(--vv-height, 100%) -
+    var(--space-300) -
+    env(safe-area-inset-bottom)
+  );
 }
 .text-edit-bar__label {
   padding: 0 var(--space-200);

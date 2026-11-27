@@ -30,9 +30,16 @@ describe("classifyWorkspaceMode", () => {
     }
   });
 
-  it("does not treat a hardware pointer or Pencil as a phone", () => {
-    // Narrow Split View on an iPad with Apple Pencil or trackpad attached.
-    expect(classifyWorkspaceMode({ width: 412, height: 839, coarse: true, anyFine: true })).toBe(
+  it("keeps phone-sized touch devices in phone mode even with anyFine, and keeps iPads in tablet mode", () => {
+    // Android phone reporting a fine stylus or paired mouse still gets phone mode.
+    expect(classifyWorkspaceMode({ width: 412, height: 915, coarse: true, anyFine: true })).toBe(
+      "phone",
+    );
+    expect(classifyWorkspaceMode({ width: 915, height: 412, coarse: true, anyFine: true })).toBe(
+      "phone",
+    );
+    // Tablets (including iPad mini at 744 px) with Apple Pencil or trackpad stay tablet.
+    expect(classifyWorkspaceMode({ width: 744, height: 1133, coarse: true, anyFine: true })).toBe(
       "tablet",
     );
     expect(classifyWorkspaceMode({ width: 768, height: 1024, coarse: true, anyFine: true })).toBe(

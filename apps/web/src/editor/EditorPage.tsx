@@ -111,7 +111,7 @@ import { TokensWorkspace } from "./tokens/TokensWorkspace";
 import { uiFor, useUi } from "./ui-state";
 import { useEditorLink } from "./useEditorLink";
 import { useViewPreferences } from "./view-preferences";
-import { useVisualViewport } from "./visual-viewport";
+import { useSyncVisualViewportVars } from "./visual-viewport";
 import { fitPaddingForMode, useWorkspaceMode, type WorkspaceMode } from "./workspace-mode";
 import { XrayLegend } from "./XrayLegend";
 import "./editor.css";
@@ -147,7 +147,23 @@ function FileEditor({ fileId }: { fileId: string }) {
   const isTablet = workspaceMode === "tablet";
   const compactTablet = workspace.compactTablet;
   const fitPadding = fitPaddingForMode(workspaceMode);
-  const vv = useVisualViewport(workspaceMode !== "desktop");
+  const editorRef = useRef<HTMLDivElement>(null);
+  useSyncVisualViewportVars(editorRef, workspaceMode !== "desktop");
+  // Scope viewport-fit=cover strictly to the editor route, where safe-area insets are padded,
+  // so other routes (dashboard, auth, prototype player) stay clear of notches on iOS.
+  useEffect(() => {
+    const metaTag = document.querySelector<HTMLMetaElement>('meta[name="viewport"]');
+    if (!metaTag) return;
+    const prev = metaTag.content;
+    if (!/viewport-fit\s*=/i.test(prev)) {
+      metaTag.content = prev
+        ? `${prev}, viewport-fit=cover`
+        : "width=device-width, initial-scale=1.0, viewport-fit=cover";
+    }
+    return () => {
+      metaTag.content = prev;
+    };
+  }, []);
   const meta = useQuery({
     queryKey: ["file", fileId],
     queryFn: () => api.file(fileId),
@@ -198,7 +214,6 @@ function FileEditor({ fileId }: { fileId: string }) {
   // Minimized: the layers panel tucks away until it's asked for. Tablet controls its own toggles.
   const leftShown = !isPhone && leftOpen && (isTablet || !layout.minimized);
   const hasSelection = useEditorStateOutside(editor, (s) => s.selection.length > 0);
-  const activeTool = useEditorStateOutside(editor, (s) => s.tool);
   const viewportWidth = useEditorStateOutside(editor, (s) => s.viewport.width) || workspace.width;
   const viewportHeight =
     useEditorStateOutside(editor, (s) => s.viewport.height) || workspace.height;
@@ -639,8 +654,11 @@ function FileEditor({ fileId }: { fileId: string }) {
   }, [editor, history.view]);
 
   // The first time a page shows with content, fit it to the exposed canvas.
-  // On phones and tablets, also re-fit when rotating, resizing or toggling panes
-  // while the user is still at the fitted view (never interrupting active editing or comments).
+  // On phones and tablets:
+  // - While the camera is still at our last auto-fit, re-fit on rotate, resize or pane toggle.
+  // - Once the user zooms or pans manually, preserve their zoom and keep the same page point
+  //   centred in the exposed canvas across rotation/resize/pane changes.
+  // - Never fire a postponed refit after text editing or comments close.
   const fitEnvRef = useRef({
     workspaceMode,
     fitPadding,
@@ -658,7 +676,7 @@ function FileEditor({ fileId }: { fileId: string }) {
         right: number;
         bottom: number;
         left: number;
-        camera: Camera;
+        autoFitCamera: Camera | null;
       }
     >();
     let fitting = false;
@@ -686,7 +704,7 @@ function FileEditor({ fileId }: { fileId: string }) {
           right: curInsets.right,
           bottom: curInsets.bottom,
           left: curInsets.left,
-          camera: editor.s.camera,
+          autoFitCamera: editor.s.camera,
         });
       } finally {
         fitting = false;
@@ -703,6 +721,10 @@ function FileEditor({ fileId }: { fileId: string }) {
       }
       const env = fitEnvRef.current;
       if (env.workspaceMode === "desktop" || env.viewing || env.comparing) return;
+      // Record immediately once the user has zoomed or panned away from our automatic fit.
+      if (prev.autoFitCamera && !camera.equals(prev.autoFitCamera)) {
+        prev.autoFitCamera = null;
+      }
       const layoutChanged =
         prev.width !== viewport.width ||
         prev.height !== viewport.height ||
@@ -712,20 +734,53 @@ function FileEditor({ fileId }: { fileId: string }) {
         prev.left !== curInsets.left;
       if (!layoutChanged) return;
       const cs = comments.store.s;
-      if (
-        editor.s.editingText ||
+      const blocked =
+        editor.s.editingText !== null ||
         editor.s.gesture ||
-        editor.s.following ||
+        editor.s.following !== null ||
         cs.openId !== null ||
         cs.draft !== null ||
-        isTyping(document.activeElement)
-      )
+        isTyping(document.activeElement);
+      if (blocked) {
+        // Sync layout dimensions while blocked so leaving text edit or comments never fires a postponed refit.
+        prev.width = viewport.width;
+        prev.height = viewport.height;
+        prev.top = curInsets.top;
+        prev.right = curInsets.right;
+        prev.bottom = curInsets.bottom;
+        prev.left = curInsets.left;
         return;
-      // Re-fit if the camera is still at our auto-fit position, or if viewport width changed
-      // (rotation or resize, distinct from a keyboard-only height shrink).
-      if (camera.equals(prev.camera) || prev.width !== viewport.width) {
-        fitPage(pageId);
       }
+      if (prev.autoFitCamera && camera.equals(prev.autoFitCamera)) {
+        fitPage(pageId);
+        return;
+      }
+      // User has custom zoom/pan: keep their zoom and keep the same content point centred.
+      const prevCenterX = prev.left + Math.max(1, prev.width - prev.left - prev.right) / 2;
+      const prevCenterY = prev.top + Math.max(1, prev.height - prev.top - prev.bottom) / 2;
+      const nextCenterX =
+        curInsets.left + Math.max(1, viewport.width - curInsets.left - curInsets.right) / 2;
+      const nextCenterY =
+        curInsets.top + Math.max(1, viewport.height - curInsets.top - curInsets.bottom) / 2;
+      const focusPage = camera.toPage({ x: prevCenterX, y: prevCenterY });
+      fitting = true;
+      try {
+        editor.setCamera(
+          camera.pan(
+            nextCenterX - (focusPage.x * camera.zoom + camera.x),
+            nextCenterY - (focusPage.y * camera.zoom + camera.y),
+          ),
+        );
+      } finally {
+        fitting = false;
+      }
+      prev.width = viewport.width;
+      prev.height = viewport.height;
+      prev.top = curInsets.top;
+      prev.right = curInsets.right;
+      prev.bottom = curInsets.bottom;
+      prev.left = curInsets.left;
+      prev.autoFitCamera = null;
     };
     check();
     return editor.state.subscribe(check);
@@ -1119,20 +1174,12 @@ function FileEditor({ fileId }: { fileId: string }) {
     // Where the canvas's open area starts and ends, beside the panels (or the window's edges).
     "--canvas-left": `${leftRoom ? leftWidth + PANE.gutter * 2 : PANE.gutter}px`,
     "--canvas-right": `${rightRoom ? rightWidth + PANE.gutter * 2 : PANE.gutter}px`,
-    ...(workspaceMode !== "desktop"
-      ? {
-          "--vv-width": `${vv.width}px`,
-          "--vv-height": `${vv.height}px`,
-          "--vv-top": `${vv.offsetTop}px`,
-          "--vv-left": `${vv.offsetLeft}px`,
-          "--vv-bottom": `${vv.bottomInset}px`,
-        }
-      : {}),
   } as CSSProperties;
 
   return (
     <EditorContext.Provider value={editor}>
       <div
+        ref={editorRef}
         className="editor"
         data-workspace={workspaceMode}
         data-compact-tablet={compactTablet || undefined}
@@ -1395,14 +1442,7 @@ function FileEditor({ fileId }: { fileId: string }) {
         ) : null}
         {isPhone ? (
           <>
-            {activeTool === "comment" && !threadOpen ? (
-              <div className="phone-comment-banner pane" role="status">
-                <span>Tap the canvas to place a comment</span>
-                <Button size="md" variant="ghost" onClick={() => editor.setTool("select")}>
-                  Cancel
-                </Button>
-              </div>
-            ) : null}
+            <PhoneCommentBanner threadOpen={threadOpen} />
             <PhoneDock
               dockRef={bottomBarRef}
               activeSheet={threadOpen ? "comments" : phoneSheet}
@@ -1416,7 +1456,7 @@ function FileEditor({ fileId }: { fileId: string }) {
                   comments.store.close();
                   comments.store.cancelDraft();
                 }
-                if (activeTool === "comment") editor.setTool("select");
+                if (editor.s.tool === "comment") editor.setTool("select");
                 setPhoneSheet((cur) => (cur === sheet ? null : sheet));
               }}
               onPresent={ctx.present}
@@ -1498,7 +1538,7 @@ function FileEditor({ fileId }: { fileId: string }) {
           fileId={fileId}
           teamId={meta.data ? (meta.data.file.teamId ?? null) : undefined}
         />
-        {viewing || isPhone ? null : <ImageDrop fileId={fileId} />}
+        {viewing ? null : <ImageDrop fileId={fileId} />}
         <UploadTray />
         {!isPhone && commandOpen ? (
           <CommandPalette ctx={ctx} onClose={() => setCommandOpen(false)} />
@@ -1878,6 +1918,21 @@ function PhoneTopBar({
         onClose={() => setSharing(false)}
       />
     </header>
+  );
+}
+
+/** Placement prompt shown on phones while the comment tool is active, subscribed narrowly to `s.tool`. */
+function PhoneCommentBanner({ threadOpen }: { threadOpen: boolean }) {
+  const editor = useEditor();
+  const placing = useEditorState((s) => s.tool === "comment");
+  if (!placing || threadOpen) return null;
+  return (
+    <div className="phone-comment-banner pane" role="status">
+      <span>Tap the canvas to place a comment</span>
+      <Button size="md" variant="ghost" onClick={() => editor.setTool("select")}>
+        Cancel
+      </Button>
+    </div>
   );
 }
 

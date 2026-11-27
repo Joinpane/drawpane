@@ -569,6 +569,7 @@ a.comment-link:focus-visible {
   padding: var(--space-300) var(--space-400);
 }
 .comment-sheet .comment-popover__reply {
+  flex: none;
   padding: var(--space-200) var(--space-400) var(--space-300);
   border-top: 1px solid var(--line);
   background: var(--surface);
@@ -654,6 +655,27 @@ a.comment-link:focus-visible {
 .editor[data-workspace="phone"] .comment-composer__actions .dp-btn__key,
 .editor[data-workspace="tablet"] .comment-composer__actions .dp-btn__key {
   display: none;
+}
+/* Compact vertical spacing in landscape + keyboard (short visual viewport) so the
+   44 px submit button always stays strictly inside visualViewport. */
+.editor[data-short-vv="true"] .comment-sheet .comment-popover__messages {
+  padding: var(--space-100) var(--space-300);
+  gap: var(--space-200);
+}
+.editor[data-short-vv="true"] .comment-sheet .comment-popover__reply {
+  padding: var(--space-100) var(--space-300);
+}
+.editor[data-short-vv="true"] .comment-sheet .comment-composer {
+  padding: var(--space-100) var(--space-200);
+}
+.editor[data-short-vv="true"] .comment-sheet .comment-composer__foot {
+  margin-top: var(--space-100);
+}
+.editor[data-short-vv="true"] .comment-sheet .comment-composer__hint {
+  display: none;
+}
+.editor[data-short-vv="true"] .comment-sheet .comment-composer__field {
+  max-height: 52px;
 }
 .editor[data-workspace="phone"] .comment-message__more,
 .editor[data-workspace="tablet"] .comment-message__more {

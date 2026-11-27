@@ -36,8 +36,6 @@ export function TextEditor({ nodeId }: { nodeId: string }) {
   const box = useRef<HTMLDivElement>(null);
   const node = editor.doc.get(nodeId);
   const [value, setValue] = useState(() => (node ? getProp(node.props, "characters") : ""));
-  const initialChars = useRef(node ? getProp(node.props, "characters") : "");
-  const dirty = useRef(false);
   // Where ↑ and ↓ aim, kept across presses so a short line doesn't pull the caret left.
   const goal = useRef<number | null>(null);
   const dragging = useRef<number | null>(null);
@@ -118,17 +116,7 @@ export function TextEditor({ nodeId }: { nodeId: string }) {
   const caret = focused && start === end ? caretBox(node, layout, editor.measurer, caretAt) : null;
 
   const cancelEdit = () => {
-    if (dirty.current) {
-      if (initialChars.current.trim() === "") {
-        editor.updateText(nodeId, "");
-        editor.endTextEdit();
-      } else {
-        editor.endTextEdit();
-        editor.undo();
-      }
-      return;
-    }
-    editor.endTextEdit();
+    editor.cancelTextEdit();
   };
 
   return (
@@ -216,7 +204,6 @@ export function TextEditor({ nodeId }: { nodeId: string }) {
           spellCheck
           onChange={(e) => {
             const t = e.target;
-            dirty.current = true;
             setValue(t.value);
             editor.updateText(nodeId, t.value, t.selectionEnd);
             // "- " or "1. " at a paragraph's start: a list item (decision 0017).

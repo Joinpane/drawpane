@@ -4417,6 +4417,23 @@ export class Editor {
       this.select([]);
     }
   }
+
+  /**
+   * Leaves text editing and discards everything typed or styled since `startTextEdit`,
+   * keeping an existing layer even if its text was cleared and leaving undo/redo as
+   * if the edit never started. A layer that was already empty before editing is removed.
+   */
+  cancelTextEdit(): void {
+    const id = this.s.editingText;
+    if (!id) return;
+    this.state.set({ editingText: null, textSelection: null, textPending: null });
+    while (this.history.grouping) this.cancelGesture();
+    const node = this.doc.get(id);
+    if (node && getProp(node.props, "characters").trim() === "") {
+      applyBestEffort((ops) => this.#commitWithFixups(ops, false), [{ op: "delete", id }]);
+      this.select([]);
+    }
+  }
 }
 
 export { ALIGN_EDGES };

@@ -140,7 +140,7 @@ export function PagesList({
                   />
                   <div className="pages__rename-actions">
                     <Button
-                      size="sm"
+                      size="md"
                       variant="ghost"
                       onPointerDown={(e) => e.preventDefault()}
                       onClick={() => setRenaming(null)}
@@ -148,7 +148,7 @@ export function PagesList({
                       Cancel
                     </Button>
                     <Button
-                      size="sm"
+                      size="md"
                       variant="primary"
                       onPointerDown={(e) => e.preventDefault()}
                       onClick={() => {

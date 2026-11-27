@@ -3,7 +3,7 @@
  * on-screen keyboard opens on iOS or Android) so comment sheets, popovers and
  * mobile text editing bars stay visible above the keyboard.
  */
-import { useEffect, useState } from "react";
+import { type RefObject, useEffect, useState } from "react";
 
 export interface VisualViewportRect {
   readonly width: number;
@@ -67,6 +67,61 @@ function sameRect(a: VisualViewportRect, b: VisualViewportRect): boolean {
     a.scale === b.scale &&
     a.bottomInset === b.bottomInset
   );
+}
+
+/**
+ * Writes `--vv-*` CSS variables and keyboard/short-viewport data attributes directly onto
+ * `targetRef.current` so keyboard animations never trigger React re-renders of the editor.
+ */
+export function useSyncVisualViewportVars(
+  targetRef: RefObject<HTMLElement | null>,
+  active: boolean,
+): void {
+  useEffect(() => {
+    const el = targetRef.current;
+    if (!el || typeof window === "undefined") return;
+    const clear = () => {
+      el.style.removeProperty("--vv-width");
+      el.style.removeProperty("--vv-height");
+      el.style.removeProperty("--vv-top");
+      el.style.removeProperty("--vv-left");
+      el.style.removeProperty("--vv-bottom");
+      delete el.dataset.keyboard;
+      delete el.dataset.shortVv;
+    };
+    if (!active) {
+      clear();
+      return;
+    }
+    let last: VisualViewportRect | null = null;
+    const apply = () => {
+      const next = readVisualViewport();
+      if (last && sameRect(last, next)) return;
+      last = next;
+      el.style.setProperty("--vv-width", `${next.width}px`);
+      el.style.setProperty("--vv-height", `${next.height}px`);
+      el.style.setProperty("--vv-top", `${next.offsetTop}px`);
+      el.style.setProperty("--vv-left", `${next.offsetLeft}px`);
+      el.style.setProperty("--vv-bottom", `${next.bottomInset}px`);
+      if (next.bottomInset > 40) el.dataset.keyboard = "true";
+      else delete el.dataset.keyboard;
+      if (next.height <= 420) el.dataset.shortVv = "true";
+      else delete el.dataset.shortVv;
+    };
+    const vv = window.visualViewport;
+    vv?.addEventListener("resize", apply);
+    vv?.addEventListener("scroll", apply);
+    window.addEventListener("resize", apply);
+    window.addEventListener("orientationchange", apply);
+    apply();
+    return () => {
+      vv?.removeEventListener("resize", apply);
+      vv?.removeEventListener("scroll", apply);
+      window.removeEventListener("resize", apply);
+      window.removeEventListener("orientationchange", apply);
+      clear();
+    };
+  }, [targetRef, active]);
 }
 
 /** Subscribes to `window.visualViewport` resize/scroll events when `active` is true. */

@@ -73,4 +73,43 @@ describe("workspace readOnly mode", () => {
     // (393 - 128) / 1000 = 0.265
     expect(desktopZoom).toBeCloseTo(0.265, 3);
   });
+
+  it("cancelTextEdit restores cleared or edited text without deleting the layer or polluting redo", () => {
+    const { editor, pageId } = makeEditor();
+    const textId = editor.createLayer("text", { x: 40, y: 40, width: 140, height: 28 }, pageId);
+    expect(textId).toBeTruthy();
+    editor.setProp([textId as string], "characters", "Original title");
+    expect(editor.s.canUndo).toBe(true);
+    expect(editor.s.canRedo).toBe(false);
+
+    // Clearing all text and cancelling restores the original text, keeps the layer,
+    // and leaves undo/redo as if the edit never started.
+    editor.startTextEdit(textId as string);
+    editor.updateText(textId as string, "");
+    editor.cancelTextEdit();
+    expect(editor.s.editingText).toBeNull();
+    expect(editor.doc.get(textId as string)).toBeDefined();
+    expect(getProp(editor.doc.get(textId as string)?.props ?? {}, "characters")).toBe(
+      "Original title",
+    );
+    expect(editor.s.canRedo).toBe(false);
+
+    // Typing new words and cancelling also leaves the redo stack untouched.
+    editor.startTextEdit(textId as string);
+    editor.updateText(textId as string, "Cancelled typing");
+    editor.cancelTextEdit();
+    expect(getProp(editor.doc.get(textId as string)?.props ?? {}, "characters")).toBe(
+      "Original title",
+    );
+    expect(editor.s.canRedo).toBe(false);
+
+    // A brand-new empty text layer cancelled without ever having text is still removed.
+    const freshId = editor.createLayer("text", { x: 40, y: 120, width: 120, height: 24 }, pageId);
+    expect(freshId).toBeTruthy();
+    editor.startTextEdit(freshId as string);
+    editor.updateText(freshId as string, "Temporary");
+    editor.cancelTextEdit();
+    expect(editor.doc.get(freshId as string)).toBeUndefined();
+    expect(editor.s.canRedo).toBe(false);
+  });
 });

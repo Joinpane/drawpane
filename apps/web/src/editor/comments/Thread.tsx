@@ -9,6 +9,7 @@ import {
   useState,
 } from "react";
 import { isMac } from "../../app/format";
+import { MobileSheet } from "../MobileSheet";
 import { Composer } from "./Composer";
 import { Avatar, CommentText, displayName, When } from "./people";
 import type { CommentStore } from "./store";
@@ -27,11 +28,15 @@ export interface ThreadPopoverProps {
   readonly onClose: () => void;
   /** Sheet mode for phone bottom sheets: renders inside MobileSheet without duplicating a dialog shell. */
   readonly presentation?: "popover" | "sheet";
+  /** Optional Back button in phone sheet header (returns to Comments list). */
+  readonly onBack?: (() => void) | undefined;
+  /** Element to restore focus to when closing the phone sheet. */
+  readonly returnFocusTo?: (() => HTMLElement | null) | undefined;
 }
 
 /** The popover (or phone sheet body) for one thread: messages, reply box, resolve and author actions. */
 export const ThreadPopover = forwardRef<HTMLElement, ThreadPopoverProps>(function ThreadPopover(
-  { store, thread, label, people, role, onClose, presentation = "popover" },
+  { store, thread, label, people, role, onClose, presentation = "popover", onBack, returnFocusTo },
   ref,
 ) {
   const me = store.me?.id ?? null;
@@ -109,14 +114,7 @@ export const ThreadPopover = forwardRef<HTMLElement, ThreadPopoverProps>(functio
 
   const body = (
     <>
-      {presentation === "sheet" ? (
-        <div className="comment-sheet__toolbar">
-          <span className="comment-sheet__anchor" title={label}>
-            {label}
-          </span>
-          <div className="comment-sheet__toolbar-actions">{headActions}</div>
-        </div>
-      ) : (
+      {presentation === "sheet" ? null : (
         <header className="comment-popover__head">
           <span className="comment-popover__title" title={label}>
             {label}
@@ -197,7 +195,22 @@ export const ThreadPopover = forwardRef<HTMLElement, ThreadPopoverProps>(functio
   );
 
   if (presentation === "sheet") {
-    return <div className="comment-sheet">{body}</div>;
+    return (
+      <MobileSheet
+        title={label}
+        ariaLabel={`Thread on ${label}`}
+        closeLabel="Close comment"
+        headerActions={headActions}
+        onBack={onBack}
+        backLabel="Back to comments"
+        returnFocusTo={returnFocusTo}
+        onClose={onClose}
+        variant="thread"
+        focusInside
+      >
+        <div className="comment-sheet">{body}</div>
+      </MobileSheet>
+    );
   }
 
   return (

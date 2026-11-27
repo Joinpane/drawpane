@@ -96,11 +96,14 @@ interface DebugEditor {
     readonly tool: string;
     readonly selection: readonly string[];
     readonly editingText: string | null;
+    readonly canUndo: boolean;
+    readonly canRedo: boolean;
     readonly camera: {
       readonly x: number;
       readonly y: number;
       readonly zoom: number;
       toScreen(p: { x: number; y: number }): { x: number; y: number };
+      toPage(p: { x: number; y: number }): { x: number; y: number };
     };
     readonly viewport: { readonly width: number; readonly height: number };
     readonly insets: {
@@ -128,6 +131,8 @@ interface DebugEditor {
   select(ids: string[]): void;
   setProp(ids: string[], prop: string, value: unknown): void;
   startTextEdit(id: string): void;
+  zoomTo(zoom: number): void;
+  undo(): void;
   createLayer(
     type: string,
     rect: { x: number; y: number; width: number; height: number },
@@ -333,6 +338,24 @@ async function expectContentFitsExposedCanvas(page: Page, label: string) {
     const exposedW = Math.max(1, exposedRight - exposedLeft);
     const exposedH = Math.max(1, exposedBottom - exposedTop);
     const fillRatio = Math.max((br.x - tl.x) / exposedW, (br.y - tl.y) / exposedH);
+    const rectOf = (sel: string) => {
+      const el = document.querySelector<HTMLElement>(sel);
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return r.width > 0 && r.height > 0
+        ? { top: r.top, right: r.right, bottom: r.bottom, left: r.left }
+        : null;
+    };
+    const domTop = Math.max(rectOf(".phone-topbar")?.bottom ?? 0, rectOf(".topbar")?.bottom ?? 0);
+    const dockRect = rectOf(".phone-dock");
+    const barRect = rectOf(".bottom-bar");
+    const domBottom = Math.min(
+      dockRect ? dockRect.top : viewport.height,
+      barRect ? barRect.top : viewport.height,
+    );
+    const domLeft = rectOf(".pane--left")?.right ?? 0;
+    const rightPane = rectOf(".pane--right");
+    const domRight = rightPane ? rightPane.left : viewport.width;
     return {
       zoom: camera.zoom,
       tl,
@@ -341,24 +364,28 @@ async function expectContentFitsExposedCanvas(page: Page, label: string) {
       exposedRight,
       exposedTop,
       exposedBottom,
+      domLeft,
+      domRight,
+      domTop,
+      domBottom,
       fillRatio,
     };
   });
 
   // Never the broken 2% MIN_ZOOM fallback.
   expect(info.zoom, `${label}: zoom`).toBeGreaterThan(0.05);
-  // Content sits inside the exposed canvas clear of chrome (2 px rounding tolerance).
+  // Content sits inside both reported insets and actual rendered DOM chrome (2 px rounding tolerance).
   expect(info.tl.x, `${label}: content left inside exposed canvas`).toBeGreaterThanOrEqual(
-    info.exposedLeft - 2,
+    Math.max(info.exposedLeft, info.domLeft) - 2,
   );
   expect(info.br.x, `${label}: content right inside exposed canvas`).toBeLessThanOrEqual(
-    info.exposedRight + 2,
+    Math.min(info.exposedRight, info.domRight) + 2,
   );
   expect(info.tl.y, `${label}: content top inside exposed canvas`).toBeGreaterThanOrEqual(
-    info.exposedTop - 2,
+    Math.max(info.exposedTop, info.domTop) - 2,
   );
   expect(info.br.y, `${label}: content bottom inside exposed canvas`).toBeLessThanOrEqual(
-    info.exposedBottom + 2,
+    Math.min(info.exposedBottom, info.domBottom) + 2,
   );
   // Content occupies a meaningful portion of the exposed area (unless already at 100%).
   if (info.zoom < 0.99) {
@@ -728,6 +755,8 @@ test.describe
         await expect(inspectSheet).toBeVisible();
         await expect(inspectSheet.getByRole("heading", { name: "Hero banner" })).toBeVisible();
         await expect(inspectSheet.getByRole("button", { name: "Copy code" })).toBeVisible();
+        // Backdrop scrim is hidden from assistive tech so there is only one Close Inspect button.
+        await expect(page.getByRole("button", { name: "Close Inspect" })).toHaveCount(1);
         await maybeShot(page, "after-phone-393-inspect.png");
         await inspectSheet.getByRole("button", { name: "Close Inspect" }).tap();
         await expect(inspectSheet).toBeHidden();
@@ -771,7 +800,7 @@ test.describe
           page.getByRole("button", { name: /Rename file Mobile Checkout v2/ }),
         ).toBeVisible();
 
-        // Rotate phone to landscape (852 x 393): stays in phone mode, re-fits, no overflow.
+        // Rotate phone to landscape (852 x 393): untouched auto-fit re-fits, no overflow.
         await page.setViewportSize({ width: 852, height: 393 });
         await expect(page.locator(".editor")).toHaveAttribute("data-workspace", "phone");
         await expectNoHorizontalScroll(page, "phone-393 rotated landscape");
@@ -781,15 +810,87 @@ test.describe
         await page.setViewportSize({ width: 393, height: 852 });
         await expectNoHorizontalScroll(page, "phone-393 rotated portrait");
         await expectContentFitsExposedCanvas(page, "phone-393 rotated portrait");
+
+        // Once the user zooms in manually, rotation preserves their zoom and centred page point.
+        const customFocusBefore = await page.evaluate(() => {
+          const e = (window as unknown as DebugWindow).drawpane;
+          e.zoomTo(2.2);
+          const { viewport, insets, camera } = e.s;
+          const cx = insets.left + (viewport.width - insets.left - insets.right) / 2;
+          const cy = insets.top + (viewport.height - insets.top - insets.bottom) / 2;
+          return { zoom: camera.zoom, focus: camera.toPage({ x: cx, y: cy }) };
+        });
+        await page.setViewportSize({ width: 852, height: 393 });
+        await expect
+          .poll(() =>
+            page.evaluate(() => (window as unknown as DebugWindow).drawpane.s.viewport.width),
+          )
+          .toBe(852);
+        const customFocusAfter = await page.evaluate(() => {
+          const e = (window as unknown as DebugWindow).drawpane;
+          const { viewport, insets, camera } = e.s;
+          const cx = insets.left + (viewport.width - insets.left - insets.right) / 2;
+          const cy = insets.top + (viewport.height - insets.top - insets.bottom) / 2;
+          return { zoom: camera.zoom, focus: camera.toPage({ x: cx, y: cy }) };
+        });
+        expect(customFocusAfter.zoom).toBeCloseTo(customFocusBefore.zoom, 2);
+        expect(Math.abs(customFocusAfter.focus.x - customFocusBefore.focus.x)).toBeLessThan(2);
+        expect(Math.abs(customFocusAfter.focus.y - customFocusBefore.focus.y)).toBeLessThan(2);
+        await page.setViewportSize({ width: 393, height: 852 });
+
+        // File drops on a phone are swallowed so the browser does not navigate away or mutate the file.
+        const dropResult = await page.evaluate(() => {
+          const e = (window as unknown as DebugWindow).drawpane;
+          const versionBefore = e.doc.version;
+          const dt = new DataTransfer();
+          dt.items.add(new File(["hello"], "drop.png", { type: "image/png" }));
+          const over = new DragEvent("dragover", {
+            bubbles: true,
+            cancelable: true,
+            dataTransfer: dt,
+          });
+          const drop = new DragEvent("drop", {
+            bubbles: true,
+            cancelable: true,
+            dataTransfer: dt,
+          });
+          const target = document.querySelector(".canvas") ?? document.body;
+          target.dispatchEvent(over);
+          target.dispatchEvent(drop);
+          return {
+            overPrevented: over.defaultPrevented,
+            dropPrevented: drop.defaultPrevented,
+            unchanged: e.doc.version === versionBefore,
+          };
+        });
+        expect(dropResult).toEqual({
+          overPrevented: true,
+          dropPrevented: true,
+          unchanged: true,
+        });
+
+        // viewport-fit=cover is active inside the editor and removed when leaving to dashboard.
+        const editorMeta = await page.evaluate(
+          () => document.querySelector('meta[name="viewport"]')?.getAttribute("content") ?? "",
+        );
+        expect(editorMeta).toContain("viewport-fit=cover");
+        await page.getByRole("link", { name: "Back to files" }).tap();
+        await expect(page.getByRole("heading", { name: "Recent files" })).toBeVisible({
+          timeout: 15_000,
+        });
+        const dashboardMeta = await page.evaluate(
+          () => document.querySelector('meta[name="viewport"]')?.getAttribute("content") ?? "",
+        );
+        expect(dashboardMeta).not.toContain("viewport-fit=cover");
       } finally {
         await context.close();
       }
     });
 
-    test("phone deep-linked comment thread, visualViewport keyboard geometry, touch submit, and viewer role", async ({
+    test("phone deep-linked comment thread, touch pin placement, draft preservation, landscape keyboard geometry, and viewer role", async ({
       browser,
     }) => {
-      test.setTimeout(120_000);
+      test.setTimeout(150_000);
       // Open the deep-linked thread as viewer (Bo Chen) on 412 px phone.
       const { context, page } = await openDeviceContext(
         browser,
@@ -850,10 +951,88 @@ test.describe
           timeout: 10_000,
         });
 
-        // Dismiss keyboard and close thread sheet.
+        // Landscape phone (852 x 393) with 45% on-screen keyboard: Android (offsetTop 0)
+        // and iOS (offsetTop 120) both keep the sheet and 44 px Reply button inside visualViewport.
+        await page.setViewportSize({ width: 852, height: 393 });
+        await setKeyboardViewport(page, { width: 852, height: 216, offsetTop: 0 });
+        await expect
+          .poll(() =>
+            page.evaluate(() => document.querySelector(".editor")?.getAttribute("data-short-vv")),
+          )
+          .toBe("true");
+        const androidSheet = await box(threadSheet);
+        const androidSubmit = await box(submitBtn);
+        expect(androidSheet.y).toBeGreaterThanOrEqual(0);
+        expect(androidSheet.y + androidSheet.height).toBeLessThanOrEqual(217);
+        expect(androidSubmit.height).toBeGreaterThanOrEqual(44);
+        expect(androidSubmit.y + androidSubmit.height).toBeLessThanOrEqual(217);
+        await maybeShot(page, "after-phone-landscape-comment-keyboard.png");
+
+        await setKeyboardViewport(page, { width: 852, height: 216, offsetTop: 120 });
+        await expect
+          .poll(() =>
+            page.evaluate(() =>
+              getComputedStyle(document.querySelector(".editor") as HTMLElement)
+                .getPropertyValue("--vv-top")
+                .trim(),
+            ),
+          )
+          .toBe("120px");
+        const iosSheet = await box(threadSheet);
+        const iosSubmit = await box(submitBtn);
+        expect(iosSheet.y).toBeGreaterThanOrEqual(119);
+        expect(iosSheet.y + iosSheet.height).toBeLessThanOrEqual(337);
+        expect(iosSubmit.y).toBeGreaterThanOrEqual(119);
+        expect(iosSubmit.y + iosSubmit.height).toBeLessThanOrEqual(337);
+
+        // Return to portrait, dismiss keyboard, and close thread sheet.
         await setKeyboardViewport(page, null);
-        await threadSheet.getByRole("button", { name: "Close Comment" }).tap();
+        await page.setViewportSize(PHONE_412.viewport);
+        await threadSheet.getByRole("button", { name: "Close comment" }).tap();
         await expect(threadSheet).toBeHidden();
+
+        // Real touch placement of a brand-new comment on a phone (F1 + F6):
+        // tap Comments -> Add comment -> touchscreen.tap on canvas keeps Draft sheet open.
+        const commentsTrigger = page
+          .locator(".phone-dock")
+          .getByRole("button", { name: /^Comments/ });
+        await commentsTrigger.tap();
+        const commentsSheet = page.getByRole("dialog", { name: "Comments" });
+        await expect(commentsSheet).toBeVisible();
+        await commentsSheet.getByRole("button", { name: "Add comment" }).tap();
+        await expect(commentsSheet).toBeHidden();
+        await expect(page.getByText("Tap the canvas to place a comment")).toBeVisible();
+
+        await page.touchscreen.tap(210, 340);
+        const draftSheet = page.getByRole("dialog", { name: /^New comment on / });
+        await expect(draftSheet).toBeVisible({ timeout: 5_000 });
+        const draftInput = draftSheet.getByRole("combobox", { name: "Comment" });
+        await draftInput.fill("Touch pin @An");
+        const mentionList = page.getByRole("listbox", { name: "People" });
+        await expect(mentionList).toBeVisible();
+
+        // Escape dismisses the @mention list first without closing the draft sheet or losing words.
+        await page.keyboard.press("Escape");
+        await expect(mentionList).toBeHidden();
+        await expect(draftSheet).toBeVisible();
+        await expect(draftInput).toHaveValue("Touch pin @An");
+
+        // Tapping the backdrop scrim with unsent words keeps the draft sheet and words intact.
+        await page.touchscreen.tap(24, 90);
+        await expect(draftSheet).toBeVisible();
+        await expect(draftInput).toHaveValue("Touch pin @An");
+
+        // Posting via the 44 px Comment button creates and opens the new thread sheet.
+        const postBtn = draftSheet.getByRole("button", { name: "Comment", exact: true });
+        await expectTouchTargetAtLeast44(postBtn, "phone new comment post");
+        await postBtn.tap();
+        const createdThread = page.getByRole("dialog", { name: /^Thread on / });
+        await expect(createdThread).toBeVisible({ timeout: 10_000 });
+        await expect(
+          createdThread.getByRole("list", { name: "Messages" }).getByText("Touch pin @An"),
+        ).toBeVisible();
+        await createdThread.getByRole("button", { name: "Close comment" }).tap();
+        await expect(createdThread).toBeHidden();
 
         // Viewer can still inspect a selected layer on phone.
         await page.evaluate((id) => {
@@ -899,7 +1078,7 @@ test.describe
         await expectContentFitsExposedCanvas(page, "tablet-768 portrait default");
         await maybeShot(page, "after-tablet-768-portrait.png");
 
-        // Primary actions on tablet are at least 44 px.
+        // Primary actions on tablet (including More shapes and layer row controls) are at least 44 px.
         const leftToggle = page.getByRole("button", { name: /layers panel/i });
         const rightToggle = page.getByRole("button", { name: /inspector panel/i });
         await expectTouchTargetAtLeast44(leftToggle, "tablet left toggle");
@@ -911,6 +1090,14 @@ test.describe
         await expectTouchTargetAtLeast44(
           page.locator(".toolbar").getByRole("button", { name: "Move" }),
           "tablet Move tool",
+        );
+        await expectTouchTargetAtLeast44(
+          page.locator(".toolbar__more"),
+          "tablet More shapes trigger",
+        );
+        await expectTouchTargetAtLeast44(
+          leftPane.locator(".dp-layer__toggle").first(),
+          "tablet layer row Lock/Hide toggle",
         );
 
         // Opening right panel in cramped portrait closes left panel (mutual exclusion).
@@ -924,14 +1111,71 @@ test.describe
         await expect(rightPane).toHaveCount(0);
         await expectContentFitsExposedCanvas(page, "tablet-768 portrait both collapsed");
 
-        // Full editor works on tablet: start text editing and verify explicit Done/Cancel bar
-        // stays inside the visualViewport when the on-screen keyboard opens.
+        // Full editor works on tablet: text editing Done/Cancel clears zoom pill, never deletes
+        // a cleared layer on Cancel, and leaves undo/redo clean (F2).
         await page.evaluate((id) => {
           const e = (window as unknown as DebugWindow).drawpane;
           e.select([id]);
           e.startTextEdit(id);
         }, heroTitleId);
         const textBar = page.getByRole("toolbar", { name: "Text editing actions" });
+        await expect(textBar).toBeVisible();
+
+        // With no keyboard up, text action bar sits clear above the bottom zoom pill.
+        const textBarNoKb = await box(textBar);
+        const zoomPillBox = await box(page.locator(".zoom"));
+        expect(textBarNoKb.y + textBarNoKb.height).toBeLessThanOrEqual(zoomPillBox.y + 1);
+
+        // Clearing all text and tapping Cancel restores original text, keeps layer, and leaves redo empty.
+        await page.keyboard.press("Control+a");
+        await page.keyboard.press("Backspace");
+        const cancelTextBtn = textBar.getByRole("button", { name: "Cancel" });
+        await expectTouchTargetAtLeast44(cancelTextBtn, "tablet text Cancel");
+        await cancelTextBtn.tap();
+        await expect(textBar).toBeHidden();
+        const afterClearCancel = await page.evaluate((id) => {
+          const e = (window as unknown as DebugWindow).drawpane;
+          const node = e.doc.get(id);
+          return {
+            exists: Boolean(node),
+            characters: node?.props.characters,
+            canRedo: e.s.canRedo,
+          };
+        }, heroTitleId);
+        expect(afterClearCancel).toEqual({
+          exists: true,
+          characters: "Review your order",
+          canRedo: false,
+        });
+
+        // Typing then tapping Cancel restores exact pre-edit text with nothing pushed onto redo.
+        await page.evaluate((id) => {
+          const e = (window as unknown as DebugWindow).drawpane;
+          e.select([id]);
+          e.startTextEdit(id);
+        }, heroTitleId);
+        await expect(textBar).toBeVisible();
+        await page.keyboard.type(" discarded");
+        await cancelTextBtn.tap();
+        await expect(textBar).toBeHidden();
+        const afterTypeCancel = await page.evaluate((id) => {
+          const e = (window as unknown as DebugWindow).drawpane;
+          return {
+            characters: e.doc.get(id)?.props.characters,
+            canRedo: e.s.canRedo,
+          };
+        }, heroTitleId);
+        expect(afterTypeCancel).toEqual({
+          characters: "Review your order",
+          canRedo: false,
+        });
+
+        // Typing with keyboard up and tapping Done commits cleanly and undoes in one step.
+        await page.evaluate((id) => {
+          const e = (window as unknown as DebugWindow).drawpane;
+          e.select([id]);
+          e.startTextEdit(id);
+        }, heroTitleId);
         await expect(textBar).toBeVisible();
         await setKeyboardViewport(page, { height: 520, offsetTop: 0 });
         await expect
@@ -941,11 +1185,24 @@ test.describe
           })
           .toBeLessThanOrEqual(520);
 
+        await page.keyboard.press("Control+a");
+        await page.keyboard.type("Confirmed order");
         const doneTextBtn = textBar.getByRole("button", { name: "Done" });
         await expectTouchTargetAtLeast44(doneTextBtn, "tablet text Done");
         await doneTextBtn.tap();
         await expect(textBar).toBeHidden();
         await setKeyboardViewport(page, null);
+        const afterDoneAndUndo = await page.evaluate((id) => {
+          const e = (window as unknown as DebugWindow).drawpane;
+          const committed = e.doc.get(id)?.props.characters;
+          e.undo();
+          const undone = e.doc.get(id)?.props.characters;
+          return { committed, undone };
+        }, heroTitleId);
+        expect(afterDoneAndUndo).toEqual({
+          committed: "Confirmed order",
+          undone: "Review your order",
+        });
 
         // Comment popover on tablet stays inside visualViewport when keyboard opens.
         const pin = page.getByRole("button", { name: /^Comment by Ana Lima/ }).first();
@@ -984,7 +1241,7 @@ test.describe
       }
     });
 
-    test("tablet 1194 landscape iPad (larger file, owner & viewer, collapsed panes) and hardware pointer/Pencil classification", async ({
+    test("tablet 1194 landscape iPad (larger file, zoom preservation, title width, owner & viewer) and fine-pointer classification", async ({
       browser,
     }) => {
       test.setTimeout(150_000);
@@ -1001,6 +1258,9 @@ test.describe
         await expect(page.locator(".editor")).toHaveAttribute("data-workspace", "tablet");
         await expectNoHorizontalScroll(page, "tablet-1194 landscape large");
         await expectContentFitsExposedCanvas(page, "tablet-1194 landscape large");
+        // Wide landscape tablet gives the file title room instead of pinching it to 150 px.
+        const titleBox = await box(page.locator(".file-title__name"));
+        expect(titleBox.width).toBeGreaterThanOrEqual(100);
         await maybeShot(page, "after-tablet-1194-landscape.png");
 
         // Both panels start open on wide landscape tablet and collapse cleanly.
@@ -1019,6 +1279,61 @@ test.describe
         await expect(leftPane).toHaveCount(0);
         await expect(rightPane).toHaveCount(0);
         await expectContentFitsExposedCanvas(page, "tablet-1194 both collapsed");
+
+        // User zoom is preserved across width resize (F4).
+        await page.evaluate(() => {
+          (window as unknown as DebugWindow).drawpane.zoomTo(3.5);
+        });
+        await page.setViewportSize({ width: 1040, height: 834 });
+        await expect
+          .poll(() =>
+            page.evaluate(() => (window as unknown as DebugWindow).drawpane.s.viewport.width),
+          )
+          .toBe(1040);
+        const zoomAfterResize = await page.evaluate(
+          () => (window as unknown as DebugWindow).drawpane.s.camera.zoom,
+        );
+        expect(zoomAfterResize).toBeCloseTo(3.5, 2);
+
+        // A resize during text editing never fires a postponed refit when tapping Done (F4).
+        const firstTextId = await page.evaluate(() => {
+          const e = (window as unknown as DebugWindow).drawpane;
+          const findText = (parentId: string): string | null => {
+            for (const id of e.doc.childIds(parentId)) {
+              const node = e.doc.get(id);
+              if (node?.type === "text") return id;
+              const nested = findText(id);
+              if (nested) return nested;
+            }
+            return null;
+          };
+          const tid = findText(e.s.pageId);
+          if (tid) {
+            e.select([tid]);
+            e.startTextEdit(tid);
+          }
+          return tid;
+        });
+        expect(firstTextId).toBeTruthy();
+        const textBar = page.getByRole("toolbar", { name: "Text editing actions" });
+        await expect(textBar).toBeVisible();
+        await page.setViewportSize({ width: 1194, height: 834 });
+        await expect
+          .poll(() =>
+            page.evaluate(() => (window as unknown as DebugWindow).drawpane.s.viewport.width),
+          )
+          .toBe(1194);
+        const camBeforeDone = await page.evaluate(() => {
+          const c = (window as unknown as DebugWindow).drawpane.s.camera;
+          return { x: c.x, y: c.y, zoom: c.zoom };
+        });
+        await textBar.getByRole("button", { name: "Done" }).tap();
+        await expect(textBar).toBeHidden();
+        const camAfterDone = await page.evaluate(() => {
+          const c = (window as unknown as DebugWindow).drawpane.s.camera;
+          return { x: c.x, y: c.y, zoom: c.zoom };
+        });
+        expect(camAfterDone).toEqual(camBeforeDone);
       } finally {
         await context.close();
       }
@@ -1040,51 +1355,76 @@ test.describe
         await viewer.context.close();
       }
 
-      // 3. Hardware pointer / Apple Pencil on a touch tablet must NOT be classified as a phone
-      // even when the window is narrow (e.g. Slide Over / split-screen with Pencil or trackpad).
-      const pencilCtx = await browser.newContext({
+      // 3. F3: Android phone with stylus/paired mouse (coarse + any-pointer: fine, shortSide < 600)
+      // stays in phone mode, while a 768 px iPad with Pencil/trackpad stays in tablet mode.
+      const installPointerMedia = async (ctx: BrowserContext) => {
+        await ctx.addInitScript(() => {
+          try {
+            localStorage.setItem("drawpane:debug", "1");
+          } catch {
+            // Ignore opaque origin.
+          }
+          const orig = window.matchMedia.bind(window);
+          window.matchMedia = ((query: string) => {
+            if (query === "(pointer: coarse)" || query === "(any-pointer: fine)") {
+              return {
+                matches: true,
+                media: query,
+                onchange: null,
+                addEventListener() {},
+                removeEventListener() {},
+                addListener() {},
+                removeListener() {},
+                dispatchEvent: () => false,
+              } as unknown as MediaQueryList;
+            }
+            return orig(query);
+          }) as typeof window.matchMedia;
+        });
+      };
+
+      const stylusPhoneCtx = await browser.newContext({
         baseURL: instance.url,
-        viewport: { width: 430, height: 932 },
+        viewport: { width: 412, height: 915 },
+        deviceScaleFactor: 2.625,
+        isMobile: true,
+        hasTouch: true,
+        storageState: ownerState,
+      });
+      await installPointerMedia(stylusPhoneCtx);
+      try {
+        const stylusPhonePage = await stylusPhoneCtx.newPage();
+        await stylusPhonePage.goto(smallFilePath);
+        await waitForEditorReady(stylusPhonePage);
+        await expect(stylusPhonePage.locator(".editor")).toHaveAttribute("data-workspace", "phone");
+        const readOnly = await stylusPhonePage.evaluate(
+          () => (window as unknown as DebugWindow).drawpane.s.readOnly,
+        );
+        expect(readOnly).toBe(true);
+      } finally {
+        await stylusPhoneCtx.close();
+      }
+
+      const pencilIpadCtx = await browser.newContext({
+        baseURL: instance.url,
+        viewport: { width: 768, height: 1024 },
         deviceScaleFactor: 2,
         isMobile: false,
         hasTouch: true,
         storageState: ownerState,
       });
-      await pencilCtx.addInitScript(() => {
-        try {
-          localStorage.setItem("drawpane:debug", "1");
-        } catch {
-          // Ignore opaque origin.
-        }
-        const orig = window.matchMedia.bind(window);
-        window.matchMedia = ((query: string) => {
-          if (query === "(pointer: coarse)" || query === "(any-pointer: fine)") {
-            return {
-              matches: true,
-              media: query,
-              onchange: null,
-              addEventListener() {},
-              removeEventListener() {},
-              addListener() {},
-              removeListener() {},
-              dispatchEvent: () => false,
-            } as unknown as MediaQueryList;
-          }
-          return orig(query);
-        }) as typeof window.matchMedia;
-      });
+      await installPointerMedia(pencilIpadCtx);
       try {
-        const pencilPage = await pencilCtx.newPage();
+        const pencilPage = await pencilIpadCtx.newPage();
         await pencilPage.goto(smallFilePath);
         await waitForEditorReady(pencilPage);
-        // Classified as tablet (full editor), never phone view-only mode.
         await expect(pencilPage.locator(".editor")).toHaveAttribute("data-workspace", "tablet");
         const readOnly = await pencilPage.evaluate(
           () => (window as unknown as DebugWindow).drawpane.s.readOnly,
         );
         expect(readOnly).toBe(false);
       } finally {
-        await pencilCtx.close();
+        await pencilIpadCtx.close();
       }
     });
   });

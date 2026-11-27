@@ -21,7 +21,10 @@ export interface MobileSheetProps {
   readonly id?: string | undefined;
   readonly title: string;
   readonly ariaLabel?: string | undefined;
+  readonly closeLabel?: string | undefined;
   readonly onClose: () => void;
+  /** Optional handler for tapping the backdrop; defaults to `onClose`. */
+  readonly onScrimClick?: (() => void) | undefined;
   /** Optional Back button before the title (for example Thread back to Comments list). */
   readonly onBack?: (() => void) | undefined;
   readonly backLabel?: string | undefined;
@@ -49,7 +52,9 @@ export function MobileSheet({
   id,
   title,
   ariaLabel,
+  closeLabel,
   onClose,
+  onScrimClick,
   onBack,
   backLabel = "Back",
   headerActions,
@@ -60,6 +65,7 @@ export function MobileSheet({
 }: MobileSheetProps) {
   const titleId = useId();
   const sheetRef = useRef<HTMLElement>(null);
+  const scrimPressed = useRef(false);
   const returnFocusRef = useRef(returnFocusTo);
   returnFocusRef.current = returnFocusTo;
   const onCloseRef = useRef(onClose);
@@ -92,23 +98,26 @@ export function MobileSheet({
     };
   }, [focusInside]);
 
-  // Escape dismisses the sheet before global editor shortcuts see it.
+  // Listen in the bubble phase so nested popups (such as the @mention listbox or a menu)
+  // consume Escape first without closing the sheet.
   useEffect(() => {
     const onKey = (e: globalThis.KeyboardEvent) => {
       if (e.key !== "Escape") return;
-      // Let a nested native dialog or open mention listbox handle Escape first.
-      if (document.querySelector("dialog[open]:modal")) return;
       if (e.defaultPrevented) return;
+      if (document.querySelector('dialog[open]:modal, [role="listbox"], [role="menu"]') !== null)
+        return;
       e.preventDefault();
       e.stopPropagation();
       onCloseRef.current();
     };
-    window.addEventListener("keydown", onKey, true);
-    return () => window.removeEventListener("keydown", onKey, true);
+    window.addEventListener("keydown", onKey, false);
+    return () => window.removeEventListener("keydown", onKey, false);
   }, []);
 
   const handleKeyDown = (e: KeyboardEvent<HTMLElement>) => {
-    if (e.key === "Escape") {
+    if (e.key === "Escape" && !e.defaultPrevented) {
+      if (document.querySelector('dialog[open]:modal, [role="listbox"], [role="menu"]') !== null)
+        return;
       e.preventDefault();
       e.stopPropagation();
       onClose();
@@ -120,9 +129,20 @@ export function MobileSheet({
       <button
         type="button"
         className="mobile-sheet-scrim"
-        aria-label={`Close ${title}`}
+        aria-hidden="true"
         tabIndex={-1}
-        onClick={onClose}
+        onPointerDown={(e) => {
+          if (e.button === 0) scrimPressed.current = true;
+        }}
+        onPointerCancel={() => {
+          scrimPressed.current = false;
+        }}
+        onClick={() => {
+          // Ignore a compatibility click from the gesture that mounted this sheet.
+          if (!scrimPressed.current) return;
+          scrimPressed.current = false;
+          (onScrimClick ?? onClose)();
+        }}
       />
       <section
         ref={sheetRef}
@@ -152,7 +172,7 @@ export function MobileSheet({
           {headerActions ? <div className="mobile-sheet__actions">{headerActions}</div> : null}
           <IconButton
             icon="close"
-            label={`Close ${title}`}
+            label={closeLabel ?? `Close ${title}`}
             size="md"
             className="mobile-sheet__btn"
             onClick={onClose}

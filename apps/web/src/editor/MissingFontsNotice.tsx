@@ -79,6 +79,7 @@ export function MissingFontsNotice({
   const [decided, setDecided] = useState(false);
   const [open, setOpen] = useState(false);
   const panelOpen = useUi(editor, (ui) => ui.missingFonts);
+  const isPhone = useUi(editor, (ui) => ui.workspaceMode === "phone");
   useEffect(() => {
     if (live && loadedAt === null) setLoadedAt(editor.doc.version);
   }, [editor, live, loadedAt]);
@@ -110,7 +111,7 @@ export function MissingFontsNotice({
           <Icon name="warning" size={16} />
           <span className="fonts-notice__text">{missingFontsMessage(missing)}</span>
           <Button size="sm" variant="ghost" onClick={() => openMissingFonts(editor)}>
-            Replace fonts…
+            {isPhone ? "View fonts" : "Replace fonts…"}
           </Button>
           <IconButton icon="close" label="Dismiss" onClick={() => setOpen(false)} />
         </section>

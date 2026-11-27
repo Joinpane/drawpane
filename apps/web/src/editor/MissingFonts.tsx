@@ -118,6 +118,10 @@ function MissingFontsBody({ editor, onClose }: { editor: Editor; onClose: () => 
   const groups = useMemo(choices, [report]);
   // Viewers see what's missing, but only editors can rewrite the file.
   const canEdit = useSyncExternalStore(editor.state.subscribe, () => editor.canEdit);
+  const phoneReadOnly = useSyncExternalStore(
+    editor.state.subscribe,
+    () => editor.s.readOnly && editor.s.role !== "viewer",
+  );
   const readOnlyId = useId();
   const teamId = fonts.teamId;
 
@@ -248,8 +252,9 @@ function MissingFontsBody({ editor, onClose }: { editor: Editor; onClose: () => 
         <p id={readOnlyId} className="missing-fonts__readonly">
           <Icon name="eye" size={12} />
           <span>
-            You can view this file but not edit it, so its fonts can't be replaced here. Ask someone
-            who can edit it.
+            {phoneReadOnly
+              ? "Editing is turned off on phones, so fonts can't be replaced here. Open this file on a tablet or desktop to replace them."
+              : "You can view this file but not edit it, so its fonts can't be replaced here. Ask someone who can edit it."}
           </span>
         </p>
       ) : null}
