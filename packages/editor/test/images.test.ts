@@ -362,6 +362,19 @@ describe("ImageCache", () => {
       vi.unstubAllGlobals();
     }
   });
+
+  it("can retry a transient request once without retrying a missing image", async () => {
+    const fetchImage = vi.fn(async () => new Response(null, { status: 404 }));
+    fetchImage.mockResolvedValueOnce(new Response(null, { status: 503 }));
+    fetchImage.mockResolvedValueOnce(new Response(new Uint8Array([1])));
+    vi.stubGlobal("fetch", fetchImage);
+    const cache = new ImageCache();
+    const signal = new AbortController().signal;
+    const options = { retryTransient: true };
+    expect((await cache.encoded("available", signal, options)).blob.size).toBe(1);
+    await expect(cache.encoded("missing", signal, options)).rejects.toThrow("404");
+    expect(fetchImage).toHaveBeenCalledTimes(3);
+  });
 });
 
 afterEach(() => {
@@ -438,6 +451,97 @@ describe("bounded display images", () => {
     resolve(2);
     await flush();
     cache.clear();
+  });
+
+  it("keeps settled sizes when a small preview briefly joins a full view", async () => {
+    const cache = new ImageCache({
+      maxBytes: 12 * 256 * 256 * 4,
+      maxSide: 256,
+      enforceMaxBytes: true,
+      resize,
+      load: async () => ({ bitmap: bitmap(256, 256), naturalWidth: 256, naturalHeight: 256 }),
+    });
+    const editor = {};
+    const preview = {};
+    const demands = new Map(Array.from({ length: 12 }, (_, i) => [`photo-${i}`, 256]));
+    try {
+      cache.setDisplayView(editor, demands);
+      await vi.waitFor(() => expect([...demands].every(([ref]) => cache.peek(ref))).toBe(true));
+      const initial = [...demands].map(([ref]) => cache.peek(ref)?.bitmap);
+      cache.setDisplayView(preview, new Map([["preview", 64]]));
+      await vi.waitFor(() => expect(cache.peek("preview")).not.toBeNull());
+      cache.releaseDisplayView(preview);
+      await new Promise((resolve) => setTimeout(resolve, 200));
+      for (const [index, ref] of [...demands.keys()].entries()) {
+        expect(cache.peek(ref)?.bitmap).toBe(initial[index]);
+      }
+    } finally {
+      cache.clear();
+    }
+  });
+
+  it("retries a transient failure while its view is idle", async () => {
+    const load = vi.fn(async () => ({
+      bitmap: bitmap(64, 64),
+      naturalWidth: 64,
+      naturalHeight: 64,
+    }));
+    load.mockRejectedValueOnce(new Error("Temporary network error"));
+    const cache = new ImageCache({ enforceMaxBytes: true, load, retryMs: 30 });
+    const owner = {};
+    try {
+      cache.setDisplayView(owner, new Map([["photo", 64]]));
+      await vi.waitFor(() => expect(cache.status("photo")).toBe("ready"));
+      expect(load).toHaveBeenCalledTimes(2);
+    } finally {
+      cache.clear();
+    }
+  });
+
+  it("overlaps small source decodes and runs an oversized source alone", async () => {
+    const header = (width: number, height: number) => {
+      const bytes = new Uint8Array(32);
+      bytes.set([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]);
+      const view = new DataView(bytes.buffer);
+      view.setUint32(16, width);
+      view.setUint32(20, height);
+      return bytes;
+    };
+    vi.stubGlobal(
+      "fetch",
+      async (url: string) =>
+        new Response(url.endsWith("/large") ? header(8000, 6000) : header(512, 512)),
+    );
+    const pending: (() => void)[] = [];
+    vi.stubGlobal(
+      "createImageBitmap",
+      (_: Blob, options: ImageBitmapOptions) =>
+        new Promise((resolve) => {
+          pending.push(() =>
+            resolve(bitmap(options.resizeWidth ?? 512, options.resizeHeight ?? 512)),
+          );
+        }),
+    );
+    const cache = new ImageCache({ enforceMaxBytes: true, decodeBytes: 16 * 1024 * 1024 });
+    const owner = {};
+    const six = Array.from({ length: 6 }, (_, i) => [`small-${i}`, 64] as const);
+    try {
+      cache.setDisplayView(owner, new Map(six));
+      await vi.waitFor(() => expect(pending).toHaveLength(6));
+      cache.setDisplayView(owner, new Map([...six, ["large", 64]]));
+      for (const resolve of pending.splice(0)) resolve();
+      await vi.waitFor(() => expect(pending).toHaveLength(1));
+      cache.setDisplayView(owner, new Map([...six, ["large", 64], ["extra", 64]]));
+      await vi.waitFor(() => expect(cache.natural("extra")).not.toBeNull());
+      expect(pending).toHaveLength(1);
+      pending.shift()?.();
+      await vi.waitFor(() => expect(pending).toHaveLength(1));
+      pending.shift()?.();
+      await vi.waitFor(() => expect(cache.status("extra")).toBe("ready"));
+    } finally {
+      for (const resolve of pending.splice(0)) resolve();
+      cache.clear();
+    }
   });
 });
 

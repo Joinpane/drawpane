@@ -99,6 +99,7 @@ export function mobileImageCacheOptions(profile = readMobileRendererMemory()): I
     ? {
         maxBytes: profile.imageBytes,
         maxSide: profile.canvasImageSide,
+        decodeBytes: profile.decodeBytes,
         enforceMaxBytes: true,
       }
     : {};

@@ -101,7 +101,7 @@ async function canvasRasterExport(
     readonly background?: string | null;
   },
   signal?: AbortSignal,
-  onImageReductions?: (count: number) => void,
+  onImageCounts?: (reduced: number, omitted: number) => void,
 ): Promise<Blob> {
   return withCanvasOutputRenderer(
     editor,
@@ -110,7 +110,7 @@ async function canvasRasterExport(
       scale: options.scale,
       context: true,
       ...(signal ? { signal } : {}),
-      ...(onImageReductions ? { onImageReductions } : {}),
+      ...(onImageCounts ? { onImageCounts } : {}),
     },
     (renderer, onDrawn) =>
       exportRaster(renderer, editor.scene, ids, {
@@ -176,14 +176,22 @@ export async function renderExportWithMeta(
 
   const canvasResult = async (fallback = false): Promise<RenderedExport> => {
     let reduced: number | undefined;
-    const blob = await canvasRasterExport(editor, ids, canvasOptions, signal, (count) => {
-      reduced = count;
-    });
+    let omitted = 0;
+    const blob = await canvasRasterExport(
+      editor,
+      ids,
+      canvasOptions,
+      signal,
+      (smaller, missing) => {
+        reduced = smaller;
+        omitted = missing;
+      },
+    );
     return {
       blob,
       reducedImages:
         reduced ?? (fallback ? estimateCanvasReducedExportImages(editor, ids, scale) : 0),
-      omittedImages: 0,
+      omittedImages: omitted,
     };
   };
   if (!useEngineRenderer()) return canvasResult();

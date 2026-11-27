@@ -63,9 +63,9 @@ function useImagePreview(
   const cache = imagesFor(editor);
   const [loaded, setLoaded] = useState(false);
   useEffect(() => {
+    const el = canvas.current;
+    if (!el) return;
     const draw = () => {
-      const el = canvas.current;
-      if (!el) return;
       const dpr = window.devicePixelRatio || 1;
       const w = el.clientWidth;
       const h = el.clientHeight;
@@ -78,6 +78,8 @@ function useImagePreview(
       const place = natural
         ? imagePlacement(mode === "crop" ? "fit" : mode, { width: w, height: h }, natural)
         : null;
+      if (cache.boundedDisplay)
+        cache.setDisplayView(el, new Map([[sha, (place?.width ?? w) * dpr]]));
       const view = place ? cache.get(sha, place.width * dpr) : null;
       setLoaded(!!view);
       if (!place || !view) return;
@@ -116,7 +118,11 @@ function useImagePreview(
       }
     };
     draw();
-    return cache.subscribe(draw);
+    const off = cache.subscribe(draw);
+    return () => {
+      off();
+      cache.releaseDisplayView(el);
+    };
   }, [cache, canvas, sha, mode, crop?.x, crop?.y, crop?.width, crop?.height]);
   return loaded;
 }

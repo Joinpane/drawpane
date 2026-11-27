@@ -48,7 +48,7 @@ async function renderCanvasPageThumbnail(
     if (!layout) return Promise.resolve(null);
     return withCanvasOutputRenderer(
       editor,
-      { ids: layout.ids, scale: layout.scale, ...(signal ? { signal } : {}) },
+      { ids: layout.ids, scale: layout.scale, thumbnail: true, ...(signal ? { signal } : {}) },
       (renderer, onDrawn) =>
         renderThumbnail(renderer, editor.scene, pageId, {
           maxWidth: width,

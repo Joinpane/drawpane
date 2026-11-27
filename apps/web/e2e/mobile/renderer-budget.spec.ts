@@ -336,6 +336,68 @@ test.describe("Mobile renderer budgets", () => {
     }
   });
 
+  test("the inspector paints a selected offscreen image in Canvas and engine mode", async ({
+    browser,
+  }) => {
+    test.setTimeout(100_000);
+    for (const mode of ["canvas", "engine-webgl"] as const) {
+      const context = await mobilePage(
+        browser,
+        instance,
+        { ...pixel, viewport: { width: 1194, height: 834 } },
+        2,
+        mode,
+      );
+      try {
+        const page = await context.newPage();
+        await createFile(page);
+        const png = await page.evaluate(() => {
+          const canvas = document.createElement("canvas");
+          canvas.width = canvas.height = 64;
+          const ctx = canvas.getContext("2d");
+          if (!ctx) throw new Error("Missing image fixture context");
+          ctx.fillStyle = "#ff0000";
+          ctx.fillRect(0, 0, 64, 64);
+          return canvas.toDataURL().split(",")[1] ?? "";
+        });
+        const ref = "b".repeat(64);
+        await page.route(`**/api/media/${ref}*`, (route) =>
+          route.fulfill({ body: Buffer.from(png, "base64"), contentType: "image/png" }),
+        );
+        await page.evaluate((ref) => {
+          const e = (window as unknown as DebugWindow).drawpane;
+          if (!e.s.pageId) throw new Error("Missing page");
+          const id = e.createLayer(
+            "rect",
+            { x: 9_000, y: 0, width: 200, height: 200 },
+            e.s.pageId,
+            {
+              fills: [{ type: "image", ref, scaleMode: "fill" }],
+            },
+          );
+          if (!id) throw new Error("Missing image layer");
+          e.state.set({
+            camera: e.s.camera.fit({ x: 0, y: 0, width: 400, height: 400 }, e.s.viewport, 8, 1),
+          });
+          e.select([id]);
+        }, ref);
+        await page.getByRole("button", { name: "Edit fill", exact: true }).click();
+        await expect
+          .poll(() =>
+            page.locator(".image-fill__preview canvas").evaluate((canvas: HTMLCanvasElement) => {
+              const pixel = canvas
+                .getContext("2d")
+                ?.getImageData(canvas.width >> 1, canvas.height >> 1, 1, 1);
+              return [...(pixel?.data ?? [])];
+            }),
+          )
+          .toEqual([255, 0, 0, 255]);
+      } finally {
+        await context.close();
+      }
+    }
+  });
+
   test("a desktop-UA iPad without a hint bounds editor overscan and the prototype stage", async ({
     browser,
   }) => {

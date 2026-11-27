@@ -2191,14 +2191,18 @@ Canvas 2D plans one decoded level per visible image, up to 1,024 or 1,536 pixels
 long side. When room is tight it evicts off-screen bitmaps and shrinks visible ones to
 make room for new images. A settled view sharpens images that need more pixels. Each
 canvas records its image needs as it draws, so a preview cannot evict an image the
-main canvas still needs. The cache reuses encoded originals, overlaps up to ten fetches,
-and decodes at most two display bitmaps at a time.
+main canvas still needs. The cache leaves headroom and rounds levels during memory
+pressure, so a small preview can join a full view without resizing its images.
+It overlaps up to ten original fetches and up to six decodes. The 16, 20 or 24 MiB
+decode allowance is based on source pixels. A source above that allowance decodes alone.
 
 Raster exports, the Export panel and dashboard thumbnails use display pixels when they
-are sharp enough for the output. The remaining originals decode one at a time into
-a temporary working set. Its decoded byte limit matches the device's display allowance
-and each image is capped at 4,096 pixels on the long side. Canvas releases the set
-after compositing and before encoding the output.
+are sharp enough for the output. Raster exports overlap up to eight requests, admit
+up to 24 MiB of encoded bodies for staging, and decode one image at a time. The
+temporary bitmap limit matches the device's display allowance, with up to 4,096 pixels
+on each side. Canvas releases those bitmaps after compositing and before encoding.
+Dashboard thumbnails request stored previews and retain up to 8 MiB of thumbnail
+bitmaps across publishes.
 
 The editor and prototype use native DPR within the area allowance. The 2D prototype
 stage can use tall backings for scrolling screens. Engine surfaces also respect the

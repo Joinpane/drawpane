@@ -5,6 +5,7 @@ import { imagesFor } from "./media";
 
 const output = vi.hoisted(() => ({
   box: { width: 8_000, height: 6_000 },
+  refs: ["photo"],
 }));
 
 vi.mock("@drawpane/editor", async (original) => ({
@@ -25,9 +26,9 @@ vi.mock("@drawpane/editor", async (original) => ({
     }
   },
   collectExportImageUses: () =>
-    new Map([
-      [
-        "photo",
+    new Map(
+      output.refs.map((ref) => [
+        ref,
         [
           {
             paint: { type: "image", scaleMode: "fill" },
@@ -35,8 +36,8 @@ vi.mock("@drawpane/editor", async (original) => ({
             scale: { width: 1, height: 1 },
           },
         ],
-      ],
-    ]),
+      ]),
+    ),
 }));
 
 vi.mock("./media", () => ({ imagesFor: vi.fn() }));
@@ -58,6 +59,7 @@ const editor = {} as Editor;
 
 describe("mobile Canvas output images", () => {
   afterEach(() => {
+    output.refs = ["photo"];
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
   });
@@ -79,7 +81,7 @@ describe("mobile Canvas output images", () => {
 
     await withCanvasOutputRenderer(
       editor,
-      { ids: ["layer"], scale: 1, onImageReductions: reduced },
+      { ids: ["layer"], scale: 1, onImageCounts: reduced },
       async (renderer, release) => {
         const picture = renderer.images.peek("photo")?.bitmap;
         expect(picture).toBe(temporary);
@@ -92,7 +94,7 @@ describe("mobile Canvas output images", () => {
     );
     expect(decode).toHaveBeenCalledTimes(1);
     expect(decode.mock.calls[0]?.[0]).toBe(original);
-    expect(reduced).toHaveBeenCalledWith(1);
+    expect(reduced).toHaveBeenCalledWith(1, 0);
   });
 
   it("uses already decoded display pixels for a small output without fetching the original", async () => {
@@ -117,6 +119,81 @@ describe("mobile Canvas output images", () => {
     });
     expect(copy.close).toHaveBeenCalledTimes(1);
     expect(cached.close).not.toHaveBeenCalled();
+    display.clear();
+  });
+
+  it("reuses an offscreen server preview on a second thumbnail for the same page", async () => {
+    output.box = { width: 90, height: 90 };
+    const display = new ImageCache({ enforceMaxBytes: true });
+    vi.mocked(imagesFor).mockReturnValue(display);
+    const source = pngHeader(256, 256);
+    const fetch = vi.spyOn(display, "encoded").mockResolvedValue({
+      blob: source,
+      preview: 256,
+      size: { width: 2048, height: 2048 },
+    });
+    const decoded = bitmap(90, 90);
+    const decode = vi.fn(async () => decoded);
+    vi.stubGlobal("createImageBitmap", decode);
+    for (let publish = 0; publish < 2; publish++) {
+      await withCanvasOutputRenderer(
+        editor,
+        { ids: ["layer"], scale: 1, thumbnail: true },
+        async (renderer, release) => {
+          expect(renderer.images.peek("photo")?.bitmap).toBe(decoded);
+          release?.();
+        },
+      );
+    }
+    expect(fetch).toHaveBeenCalledExactlyOnceWith(
+      "photo",
+      expect.any(AbortSignal),
+      expect.objectContaining({ preview: 256 }),
+    );
+    expect(decode).toHaveBeenCalledTimes(1);
+    expect(decoded.close).not.toHaveBeenCalled();
+  });
+
+  it("overlaps export requests but only stages one large body at a time", async () => {
+    output.box = { width: 90, height: 90 };
+    output.refs = ["first", "cached", "last", "missing"];
+    const display = new ImageCache({ enforceMaxBytes: true });
+    display.put("cached", { bitmap: bitmap(90, 90), naturalWidth: 90, naturalHeight: 90 });
+    vi.mocked(imagesFor).mockReturnValue(display);
+    const order: string[] = [];
+    const source = pngHeader(90, 90);
+    const fetch = vi.spyOn(display, "encoded").mockImplementation(async (ref, _, options) => {
+      order.push(`request ${ref}`);
+      if (ref === "missing") throw new Error("Media unavailable");
+      if (ref === "first") await new Promise((resolve) => setTimeout(resolve, 30));
+      await options?.beforeRead?.(20 * 1024 * 1024);
+      order.push(`read ${ref}`);
+      return { blob: source };
+    });
+    const counts = vi.fn();
+    vi.stubGlobal(
+      "createImageBitmap",
+      vi.fn(async (src) => {
+        if (src === source) order.push("decode original");
+        return bitmap(90, 90);
+      }),
+    );
+    await withCanvasOutputRenderer(
+      editor,
+      { ids: ["layer"], scale: 1, onImageCounts: counts },
+      async (renderer) => expect(renderer.images.peek("last")).not.toBeNull(),
+    );
+    expect(order).toEqual([
+      "request first",
+      "request last",
+      "request missing",
+      "read first",
+      "decode original",
+      "read last",
+      "decode original",
+    ]);
+    expect(fetch).toHaveBeenCalledTimes(3);
+    expect(counts).toHaveBeenCalledWith(0, 1);
     display.clear();
   });
 });
