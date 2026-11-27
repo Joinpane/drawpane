@@ -57,6 +57,9 @@ describe("openRetraced", () => {
       "M0 0 L10 0 L10 10 L10 0 L5 5 Z", // retraces part of itself only
       "M0 0 Q5 5 10 0 Q5 5 0 0 Z", // curves
       "M3 3 Z", // a point
+      "M0 0 L20 0 L0 0.00008 Z", // a thin triangle: its joins are a stroke's width wide
+      "M0 0 L20 0 L0 0 L0 0.00008 Z", // back to the start, then a hair off it
+      "M0 0 L10 0 L5 5 L10 0 L10 10 Z", // revisits a point and encloses area
     ])
       expect(openRetraced(svgPathData(d)), d).toBeNull();
   });
@@ -136,6 +139,12 @@ describe("a retraced closed path's stroke record", () => {
         "M0 0 L8 0 L8 8 L0 8 Z M4 0 L4 8 L4 0 Z",
       );
     }
+  });
+
+  it("keeps a thin triangle closed: its joins are a stroke's width wide", () => {
+    // Opened, the review's `M0 0 L20 0 L0 0.00008 Z` lost 32 opaque pixels of its left miter at 4x.
+    const entry = strokes(docWith("M0 0 L20 0 L0 0.00008 Z", "miter", "none"))[0];
+    expect(entry?.kind === "path" && text(entry.path)).toBe("M0 0 L20 0 L0 0.00008 Z");
   });
 });
 

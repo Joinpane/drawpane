@@ -14,12 +14,13 @@
  */
 import { PathData, VERB } from "@drawpane/engine/wire";
 
-/** Points closer than this (in the layer's units) are the same point. */
-const SAME = 1e-4;
-
+/**
+ * The same point, exactly: a nearly retraced path still turns at its ends, and that join, however
+ * short its closing segment, is a stroke's width wide (`M0 0 L20 0 L0 0.00008 Z` keeps a miter at
+ * its left end that the open line would lose).
+ */
 const same = (pts: readonly number[], a: number, b: number) =>
-  Math.abs((pts[a * 2] as number) - (pts[b * 2] as number)) <= SAME &&
-  Math.abs((pts[a * 2 + 1] as number) - (pts[b * 2 + 1] as number)) <= SAME;
+  pts[a * 2] === pts[b * 2] && pts[a * 2 + 1] === pts[b * 2 + 1];
 
 const size = (v: number | undefined) =>
   v === VERB.move || v === VERB.line ? 2 : v === VERB.quad ? 4 : v === VERB.cubic ? 6 : 0;
