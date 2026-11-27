@@ -71,7 +71,6 @@ import { isClosedPath } from "../vector/cache";
 import { nodePath } from "../vector/shapes";
 import { serializePath } from "../vector/svg";
 import { openRetraced } from "./retraced";
-import { hidesWhatsUnder, underRim } from "./rim";
 import { svgPathData } from "./svg-path";
 
 export interface LayerContext {
@@ -1003,6 +1002,18 @@ function paintsSomething(node: NodeRecord): boolean {
   return getProp(node.props, "fills").some(visible) || getProp(node.props, "strokes").some(visible);
 }
 
+/** A paint that hides whatever is beneath it (render.ts `hidesWhatsUnder`). */
+function hidesWhatsUnder(paint: Paint): boolean {
+  if (paint.visible === false || paint.type !== "solid" || (paint.opacity ?? 1) < 1) return false;
+  if (!/^#[0-9a-f]{6}(ff)?$/i.test(paint.color.trim())) return false;
+  const mode = paint.blendMode ?? "normal";
+  if (mode === "normal") return true;
+  const hex = paint.color.slice(1, 7).toLowerCase();
+  if (hex === "ffffff") return ["linear-dodge", "screen", "lighten"].includes(mode);
+  if (hex === "000000") return ["linear-burn", "multiply", "darken"].includes(mode);
+  return false;
+}
+
 /** Resolves a layer's visible background blur (even or progressive) into a wire op, or null. */
 function backgroundBlurOp(
   node: NodeRecord,
@@ -1288,20 +1299,16 @@ export function encodeLayer(node: NodeRecord, ctx: LayerContext): EncodedLayer {
           });
         }
       }
-      // Under an opaque inside stroke, fills stop halfway under its band (rim.ts).
-      const fills = getProp(node.props, "fills").filter(shows);
-      const rim = tinyDetail || fills.length === 0 ? undefined : underRim(node, w, h);
-      const fillPath = rim === undefined ? shape : rim === null ? null : b.path(rim);
-      for (const paint of fillPath === null ? [] : fills) {
+      for (const paint of getProp(node.props, "fills")) {
+        if (!shows(paint)) continue;
         const effective =
           tinyDetail && paint.blendMode && paint.blendMode !== "normal"
             ? { ...paint, blendMode: "normal" as const }
             : paint;
-        const path = fillPath ?? shape;
-        if (effective.type === "image") imageFill(b, path, evenOdd, effective, w, h, ctx);
+        if (effective.type === "image") imageFill(b, shape, evenOdd, effective, w, h, ctx);
         else {
           const p = wirePaint(effective, w, h);
-          if (p) b.ops.push({ op: "fill", path, evenOdd, paint: p });
+          if (p) b.ops.push({ op: "fill", path: shape, evenOdd, paint: p });
         }
       }
     }

@@ -11,7 +11,9 @@
  *   analytic coverage counted their edges twice, half a pixel wider (engine/retraced.ts).
  * - A filled box with an opaque inside stroke covers its edge once, as its fill alone does: fill
  *   and stroke both ended on the edge, and an edge pixel got 2c - c² of coverage (the shadcn
- *   Carousel button). Its fills now stop halfway under the stroke (engine/rim.ts).
+ *   Carousel button). Its fills stop halfway under the stroke where that can't show (the engine's
+ *   `rim_inset`): a band two device pixels wide or more, so a thin border never turns an opaque
+ *   box see-through, and nothing beneath reading the backdrop the fill leaves.
  */
 import { expect, type Page, test } from "@playwright/test";
 import { freshInstance } from "./fresh-instance";
@@ -78,6 +80,47 @@ function errors(drawn: number[], exact: number[]): { worst: number; bias: number
   return { worst, bias: sum / Math.max(1, edge) };
 }
 
+/** One layer drawn alone at `scale` on `backend` over `background`: its RGBA, row by row. */
+async function pixels(
+  page: Page,
+  backend: Backend,
+  id: string,
+  rect: { x: number; y: number; width: number; height: number },
+  scale = 2,
+  background = [0, 0, 0, 0],
+): Promise<number[]> {
+  for (let attempt = 0; ; attempt++) {
+    const r = await page.evaluate(
+      async ({ backend, id, rect, scale, background }) => {
+        const w = window as unknown as W;
+        const out = await w.drawpaneEngine.render({
+          pageId: w.drawpane.s.pageId,
+          ids: [id],
+          rect,
+          scale,
+          width: Math.round(rect.width * scale),
+          height: Math.round(rect.height * scale),
+          backend,
+          background,
+        });
+        if (!out.ok || !out.rgba) return { error: out.error ?? "no pixels" };
+        const bytes = atob(out.rgba);
+        const px: number[] = [];
+        for (let i = 0; i < bytes.length; i++) px.push(bytes.charCodeAt(i));
+        return { px, gpu: out.gpu?.backend ?? null };
+      },
+      { backend, id, rect, scale, background },
+    );
+    if ("px" in r) {
+      if (backend !== "cpu") expect(r.gpu).toBe(backend === "gpu" ? "webgpu" : "webgl2");
+      return r.px;
+    }
+    // SwiftShader under load can miss the engine's GPU wait once; anything else fails.
+    if (attempt < 2 && /timed out/.test(r.error)) continue;
+    throw new Error(`${backend}: ${r.error}`);
+  }
+}
+
 /** One layer drawn alone at 2x on `backend`, over transparency: its alpha, row by row. */
 async function alpha(
   page: Page,
@@ -85,36 +128,7 @@ async function alpha(
   id: string,
   rect: { x: number; y: number; width: number; height: number },
 ): Promise<number[]> {
-  for (let attempt = 0; ; attempt++) {
-    const r = await page.evaluate(
-      async ({ backend, id, rect }) => {
-        const w = window as unknown as W;
-        const out = await w.drawpaneEngine.render({
-          pageId: w.drawpane.s.pageId,
-          ids: [id],
-          rect,
-          scale: 2,
-          width: rect.width * 2,
-          height: rect.height * 2,
-          backend,
-          background: [0, 0, 0, 0],
-        });
-        if (!out.ok || !out.rgba) return { error: out.error ?? "no pixels" };
-        const bytes = atob(out.rgba);
-        const a: number[] = [];
-        for (let i = 3; i < bytes.length; i += 4) a.push(bytes.charCodeAt(i));
-        return { alpha: a, gpu: out.gpu?.backend ?? null };
-      },
-      { backend, id, rect },
-    );
-    if ("alpha" in r) {
-      if (backend !== "cpu") expect(r.gpu).toBe(backend === "gpu" ? "webgpu" : "webgl2");
-      return r.alpha;
-    }
-    // SwiftShader under load can miss the engine's GPU wait once; anything else fails.
-    if (attempt < 2 && /timed out/.test(r.error)) continue;
-    throw new Error(`${backend}: ${r.error}`);
-  }
+  return (await pixels(page, backend, id, rect)).filter((_, i) => i % 4 === 3);
 }
 
 test.describe
@@ -186,6 +200,35 @@ test.describe
               cornerRadius: 9999,
               fills: [{ type: "solid", color: "#f5f5f5" }],
             }),
+            // The review's black box with a black inside border, drawn below 2 px of band.
+            thin: e.createLayer("rect", { x: 220, y: 0, width: 32, height: 28 }, page, {
+              fills: black,
+              strokes: black,
+              strokeWeight: 1,
+              strokeAlign: "inside",
+            }),
+            // The review's red frame with a 20 unit black border over a child that blurs what's
+            // behind it, and the same with a border a hair short of opaque (never stopped).
+            ...Object.fromEntries(
+              (["#000000", "#000000fe"] as const).map((ink, i) => {
+                const frame = e.createLayer(
+                  "frame",
+                  { x: 300 + i * 120, y: 0, width: 100, height: 76 },
+                  page,
+                  {
+                    fills: [{ type: "solid", color: "#ff0000" }],
+                    strokes: [{ type: "solid", color: ink }],
+                    strokeWeight: 20,
+                    strokeAlign: "inside",
+                  },
+                );
+                e.createLayer("rect", { x: 10, y: 10, width: 80, height: 56 }, frame, {
+                  fills: [{ type: "solid", color: "#ffffff05" }],
+                  effects: [{ type: "background-blur", radius: 20 }],
+                });
+                return [i === 0 ? "readerOpaque" : "readerHair", frame];
+              }),
+            ),
           };
         }),
       );
@@ -252,6 +295,58 @@ test.describe
           Math.max(...bordered.map((a, i) => Math.abs(a - (plain[i] as number)))),
         ).toBeLessThanOrEqual(1);
         expect(plain.some((a) => a > 0 && a < 255)).toBe(true);
+      });
+
+      test(`an opaque box stays opaque under a thin inside border (${backend})`, async () => {
+        test.setTimeout(120_000);
+        // Bands of 0.5, 1 and 1.5 device pixels, at fractional spots: every pixel the box
+        // covers whole stays opaque (a fill stopped under a thin band left 223).
+        for (const [scale, x0] of [
+          [0.5, 219.4],
+          [1, 219.7],
+          [1.5, 219.2],
+        ] as const) {
+          const rect = { x: x0, y: -0.6, width: 36, height: 32 };
+          const a = (await pixels(page, backend, ids.thin as string, rect, scale)).filter(
+            (_, i) => i % 4 === 3,
+          );
+          const width = Math.round(rect.width * scale);
+          const [left, right] = [(220 - x0) * scale, (252 - x0) * scale];
+          const [top, bottom] = [(0 - rect.y) * scale, (28 - rect.y) * scale];
+          let inside = 0;
+          for (let y = Math.ceil(top); y + 1 <= bottom; y++)
+            for (let x = Math.ceil(left); x + 1 <= right; x++) {
+              inside++;
+              expect(a[y * width + x], `scale ${scale}, pixel (${x}, ${y})`).toBe(255);
+            }
+          expect(inside).toBeGreaterThan(100);
+        }
+      });
+
+      test(`a border over a backdrop reader leaves its fill whole (${backend})`, async () => {
+        test.setTimeout(120_000);
+        const white = [1, 1, 1, 1];
+        const opaque = await pixels(
+          page,
+          backend,
+          ids.readerOpaque as string,
+          { x: 300, y: 0, width: 100, height: 76 },
+          1,
+          white,
+        );
+        const hair = await pixels(
+          page,
+          backend,
+          ids.readerHair as string,
+          { x: 420, y: 0, width: 100, height: 76 },
+          1,
+          white,
+        );
+        // Stopped under the band, the fill left the child's blur a white page to sample: a halo
+        // of (255, 32, 32) where (255, 5, 5) belongs.
+        expect(
+          Math.max(...opaque.map((v, i) => Math.abs(v - (hair[i] as number)))),
+        ).toBeLessThanOrEqual(2);
       });
     }
   });
