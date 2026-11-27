@@ -72,29 +72,29 @@ function Present({ fileId }: { fileId: string }) {
   }
   const fileName = meta.data?.file.name ?? "";
   return (
-    <>
-      <Player
-        key={`${target.pageId}:${target.flow?.id ?? ""}`}
-        editor={editor}
-        images={imagesFor(editor)}
-        target={target}
-        initialScreen={search.screen ?? null}
-        onFlow={(page, flow) => navigate({ search: { page, flow }, replace: true })}
-        leading={
-          <>
-            <Link to="/f/$fileId" params={{ fileId }} className="present__back">
-              <Icon name="arrow-left" size={12} />
-              Back to editor
-            </Link>
-            <span className="present__divider" aria-hidden="true" />
-          </>
-        }
-        actions={
-          <Button variant="primary" size="md" onClick={() => setSharing(true)}>
-            Share prototype
-          </Button>
-        }
-      />
+    <Player
+      key={`${target.pageId}:${target.flow?.id ?? ""}`}
+      editor={editor}
+      images={imagesFor(editor)}
+      target={target}
+      initialScreen={search.screen ?? null}
+      onFlow={(page, flow) => navigate({ search: { page, flow }, replace: true })}
+      leading={
+        <>
+          <Link
+            to="/f/$fileId"
+            params={{ fileId }}
+            className="present__back"
+            aria-label="Back to editor"
+          >
+            <Icon name="arrow-left" size={12} />
+            <span>Back to editor</span>
+          </Link>
+          <span className="present__divider" aria-hidden="true" />
+        </>
+      }
+      onShare={() => setSharing(true)}
+    >
       <ShareDialog
         fileId={fileId}
         fileName={fileName}
@@ -103,7 +103,7 @@ function Present({ fileId }: { fileId: string }) {
         open={sharing}
         onClose={() => setSharing(false)}
       />
-    </>
+    </Player>
   );
 }
 

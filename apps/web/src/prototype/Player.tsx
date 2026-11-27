@@ -10,9 +10,19 @@ import {
   screensInReadingOrder,
 } from "@drawpane/editor";
 import { DEVICE_IDS, DEVICES, type DeviceId, type Flow, getProp } from "@drawpane/model";
-import { Icon, IconButton } from "@drawpane/ui";
-import { type ReactNode, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { Button, Icon, IconButton, MenuButton } from "@drawpane/ui";
+import {
+  type ReactNode,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
+import { Dialog } from "../app/Dialog";
 import { isMac } from "../app/format";
+import { useMediaQuery } from "../app/media";
 import { isAbortError, renderEngineSnapshot } from "../editor/engine-snapshot";
 import { useEngineRenderer } from "../editor/renderer-switch";
 import { PlayerStage } from "./stage";
@@ -64,9 +74,12 @@ export interface PlayerProps {
   readonly onFlow: (pageId: string, flowId: string) => void;
   /** Left of the flow picker: a way back, or the file's name. */
   readonly leading: ReactNode;
-  /** Right of the player's own controls: sharing. */
-  readonly actions?: ReactNode;
+  readonly onShare?: () => void;
+  readonly children?: ReactNode;
 }
+
+// A short, coarse-pointer viewport also covers phones held in landscape.
+const COMPACT = "(max-width: 720px), (pointer: coarse) and (max-height: 520px)";
 
 /**
  * A prototype playing in a device: the bar (flow, screen count, device,
@@ -80,7 +93,8 @@ export function Player({
   initialScreen,
   onFlow,
   leading,
-  actions,
+  onShare,
+  children,
 }: PlayerProps) {
   useDoc(editor);
   const { pageId, start } = target;
@@ -90,13 +104,27 @@ export function Player({
     (cb) => player.subscribe(cb),
     () => player.state,
   );
+  const root = useRef<HTMLDivElement>(null);
   const host = useRef<HTMLDivElement>(null);
   const stage = useRef<PlayerStage | null>(null);
+  const moreButton = useRef<HTMLButtonElement>(null);
+  const pickerClose = useRef<HTMLButtonElement>(null);
+  const compact = useMediaQuery(COMPACT);
+  const touch = useMediaQuery("(pointer: coarse)");
+  const fitViewport = compact || touch;
+  useLayoutEffect(() => {
+    const el = root.current;
+    if (el && fitViewport) return fitVisibleViewport(el);
+  }, [fitViewport]);
   const page = editor.doc.get(pageId);
   const pageDevice = page ? getProp(page.props, "prototypeDevice") : "none";
   const [device, setDevice] = useState<DeviceId>(pageDevice);
   useEffect(() => setDevice(pageDevice), [pageDevice]);
   const [panelOpen, setPanelOpen] = useState(() => window.innerWidth >= 960);
+  const [pickerOpen, setPickerOpen] = useState(false);
+  useEffect(() => {
+    if (compact && pickerOpen) pickerClose.current?.focus({ preventScroll: true });
+  }, [compact, pickerOpen]);
   const [hint, setHint] = useState<{ id: number; text: string } | null>({
     id: 0,
     text: touchFirst()
@@ -170,7 +198,7 @@ export function Player({
     const onKey = (e: KeyboardEvent) => {
       const el = e.target as HTMLElement | null;
       if (el && (el.tagName === "INPUT" || el.tagName === "SELECT" || el.isContentEditable)) return;
-      if (el?.closest("dialog")) return;
+      if (el?.closest("dialog, [role='menu']")) return;
       const press = {
         key: e.key,
         shift: e.shiftKey,
@@ -194,8 +222,37 @@ export function Player({
     return () => window.removeEventListener("keydown", onKey);
   });
 
+  const screensList = (compact ? pickerOpen : panelOpen) ? (
+    <ol className="present__screens">
+      {screens.map((id) => (
+        <li key={id}>
+          <button
+            type="button"
+            className="present__screen"
+            aria-current={id === state.screen || undefined}
+            onClick={() => {
+              stage.current?.play(player.goTo(id));
+              if (compact) setPickerOpen(false);
+            }}
+          >
+            <ScreenThumb editor={editor} images={images} id={id} />
+            <span className="present__screen-text">
+              <span className="present__screen-name">{nameOf(id)}</span>
+              <span className="present__screen-meta">{screenMeta(editor, id, start)}</span>
+            </span>
+          </button>
+        </li>
+      ))}
+    </ol>
+  ) : null;
+
   return (
-    <div className="present">
+    <div
+      ref={root}
+      className="present"
+      data-compact={compact || undefined}
+      data-fit-viewport={fitViewport || undefined}
+    >
       <header className="present__bar">
         <div className="present__left">
           {leading}
@@ -255,15 +312,62 @@ export function Player({
             </select>
             <Icon name="chevron-down" size={12} />
           </span>
-          <IconButton icon="restart" label="Restart" shortcut="R" size="md" onClick={restart} />
-          <IconButton
-            icon="layers"
-            label={panelOpen ? "Hide screens" : "Show screens"}
-            size="md"
-            pressed={panelOpen}
-            onClick={() => setPanelOpen((v) => !v)}
-          />
-          {actions}
+          {(!compact || !onShare) && (
+            <IconButton icon="restart" label="Restart" shortcut="R" size="md" onClick={restart} />
+          )}
+          {compact ? (
+            <Button
+              icon="layers"
+              variant="ghost"
+              aria-label="Show screens"
+              aria-haspopup="dialog"
+              aria-expanded={pickerOpen}
+              onClick={(e) => {
+                e.currentTarget.focus({ preventScroll: true });
+                setPickerOpen(true);
+              }}
+            >
+              Screens
+            </Button>
+          ) : (
+            <IconButton
+              icon="layers"
+              label={panelOpen ? "Hide screens" : "Show screens"}
+              size="md"
+              pressed={panelOpen}
+              onClick={() => setPanelOpen((v) => !v)}
+            />
+          )}
+          {onShare &&
+            (compact ? (
+              <MenuButton
+                ref={moreButton}
+                label="More actions"
+                size="md"
+                items={[
+                  {
+                    label: "Restart",
+                    icon: "restart",
+                    onSelect: () => {
+                      moreButton.current?.focus({ preventScroll: true });
+                      restart();
+                    },
+                  },
+                  {
+                    label: "Share prototype",
+                    icon: "link",
+                    onSelect: () => {
+                      moreButton.current?.focus({ preventScroll: true });
+                      onShare();
+                    },
+                  },
+                ]}
+              />
+            ) : (
+              <Button variant="primary" size="md" onClick={onShare}>
+                Share prototype
+              </Button>
+            ))}
         </div>
       </header>
       <div className="present__body">
@@ -274,40 +378,66 @@ export function Player({
             </p>
           ) : null}
         </main>
-        {panelOpen ? (
+        {!compact && panelOpen ? (
           <aside className="present__panel" aria-label="Screens">
             <h2 className="present__panel-title">Screens</h2>
-            <ol className="present__screens">
-              {screens.map((id) => (
-                <li key={id}>
-                  <button
-                    type="button"
-                    className="present__screen"
-                    aria-current={id === state.screen || undefined}
-                    onClick={() => {
-                      stage.current?.play(player.goTo(id));
-                      // Narrow, the list covers the screen: get out of the way.
-                      if (window.matchMedia(NARROW).matches) setPanelOpen(false);
-                    }}
-                  >
-                    <ScreenThumb editor={editor} images={images} id={id} />
-                    <span className="present__screen-text">
-                      <span className="present__screen-name">{nameOf(id)}</span>
-                      <span className="present__screen-meta">{screenMeta(editor, id, start)}</span>
-                    </span>
-                  </button>
-                </li>
-              ))}
-            </ol>
+            {screensList}
           </aside>
         ) : null}
       </div>
+      <Dialog
+        open={compact && pickerOpen}
+        title="Screens"
+        onClose={() => setPickerOpen(false)}
+        footer={
+          <Button ref={pickerClose} variant="secondary" onClick={() => setPickerOpen(false)}>
+            Close
+          </Button>
+        }
+      >
+        <aside className="present__picker" aria-label="Screens">
+          {screensList}
+        </aside>
+      </Dialog>
+      {children}
     </div>
   );
 }
 
-/** Where the screens list floats over the prototype instead of sitting beside it (present.css). */
-const NARROW = "(max-width: 720px)";
+/** Browser bars can resize or move the visible area without resizing the layout viewport. */
+function fitVisibleViewport(el: HTMLElement): () => void {
+  const meta = document.querySelector<HTMLMetaElement>('meta[name="viewport"]');
+  const content = meta?.content;
+  // Opt in to safe-area insets while playing. Other routes keep the browser's default insets.
+  if (meta && content && !content.includes("viewport-fit")) {
+    meta.content = `${content}, viewport-fit=cover`;
+  }
+  const viewport = window.visualViewport;
+  let frame = 0;
+  const update = () => {
+    // Keep native pinch zoom available without refitting the stage during the gesture.
+    if (viewport?.scale !== 1 || !viewport.width || !viewport.height) return;
+    el.style.setProperty("--present-left", `${viewport.offsetLeft}px`);
+    el.style.setProperty("--present-top", `${viewport.offsetTop}px`);
+    el.style.setProperty("--present-width", `${viewport.width}px`);
+    el.style.setProperty("--present-height", `${viewport.height}px`);
+  };
+  const schedule = () => {
+    cancelAnimationFrame(frame);
+    frame = requestAnimationFrame(update);
+  };
+  update();
+  viewport?.addEventListener("resize", schedule);
+  viewport?.addEventListener("scroll", schedule, { passive: true });
+  window.addEventListener("resize", schedule);
+  return () => {
+    cancelAnimationFrame(frame);
+    viewport?.removeEventListener("resize", schedule);
+    viewport?.removeEventListener("scroll", schedule);
+    window.removeEventListener("resize", schedule);
+    if (meta && content !== undefined) meta.content = content;
+  };
+}
 
 /** A touch screen is the main way in: hints talk about taps, not keys. */
 const touchFirst = () => window.matchMedia("(pointer: coarse)").matches;

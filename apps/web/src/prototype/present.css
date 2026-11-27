@@ -4,7 +4,8 @@
   position: fixed;
   inset: 0;
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto minmax(0, 1fr);
   background: var(--canvas);
   color: var(--ink);
 }
@@ -24,6 +25,10 @@
   align-items: center;
   gap: var(--space-200);
   min-width: 0;
+}
+.present__right,
+.present__back {
+  flex: none;
 }
 .present__back {
   display: inline-flex;
@@ -69,6 +74,7 @@
   border-radius: var(--radius-sm);
   background: var(--surface-sunken);
   color: var(--ink-muted);
+  min-width: 0;
 }
 .present__flow:hover {
   background: var(--surface-hover);
@@ -85,6 +91,7 @@
 }
 .present__flow select {
   height: 100%;
+  min-width: 0;
   max-width: 220px;
   padding: 0 28px 0 28px;
   border: 0;
@@ -104,8 +111,11 @@
   font: var(--type-ui-body);
 }
 .present__count {
+  min-width: 0;
+  overflow: hidden;
   color: var(--ink-muted);
   font: var(--type-ui-body);
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -305,33 +315,6 @@
   pointer-events: none;
 }
 
-@media (max-width: 720px) {
-  .present__count,
-  .present__device,
-  .present__divider {
-    display: none;
-  }
-  /* The screens list floats over the prototype, from the right edge. */
-  .present__body {
-    position: relative;
-  }
-  .present__panel {
-    position: absolute;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    z-index: 4;
-    width: min(280px, calc(100% - 2 * var(--space-400)));
-    margin: var(--space-200);
-    box-shadow: var(--shadow-popover);
-  }
-  .present__hint {
-    max-width: calc(100% - 2 * var(--space-400));
-    white-space: normal;
-    text-align: center;
-  }
-}
-
 .present__brand {
   display: inline-flex;
   align-items: center;
@@ -344,4 +327,107 @@
 }
 .present__brand .present__divider {
   margin-left: var(--space-100);
+}
+
+.present[data-fit-viewport] {
+  --present-safe-width: calc(
+    var(--present-width, 100vw) -
+    env(safe-area-inset-left) -
+    env(safe-area-inset-right)
+  );
+  --present-safe-height: calc(
+    var(--present-height, 100dvh) -
+    env(safe-area-inset-top) -
+    env(safe-area-inset-bottom)
+  );
+  box-sizing: border-box;
+  inset: var(--present-top, 0px) auto auto var(--present-left, 0px);
+  width: var(--present-width, 100vw);
+  height: var(--present-height, 100dvh);
+  padding: env(safe-area-inset-top) env(safe-area-inset-right) env(safe-area-inset-bottom)
+    env(safe-area-inset-left);
+  background: linear-gradient(
+    to bottom,
+    var(--surface) env(safe-area-inset-top),
+    var(--canvas) env(safe-area-inset-top)
+  );
+}
+.present[data-fit-viewport] .app-dialog {
+  position: fixed;
+  inset: auto;
+  top: calc(var(--present-top, 0px) + env(safe-area-inset-top) + var(--present-safe-height) / 2);
+  left: calc(var(--present-left, 0px) + env(safe-area-inset-left) + var(--present-safe-width) / 2);
+  width: min(440px, calc(var(--present-safe-width) - 2 * var(--space-400)));
+  max-width: none;
+  max-height: calc(var(--present-safe-height) - 2 * var(--space-400));
+  margin: 0;
+  translate: -50% -50%;
+}
+.present[data-fit-viewport] .app-dialog__title {
+  overflow-wrap: anywhere;
+}
+
+.present[data-compact] .present__bar,
+.present[data-compact] .present__left,
+.present[data-compact] .present__right {
+  gap: var(--space-100);
+}
+.present[data-compact] .present__bar {
+  padding-inline: var(--space-200);
+}
+.present[data-compact] .present__device,
+.present[data-compact] .present__divider,
+.present[data-compact] .present__back > span {
+  display: none;
+}
+.present[data-compact] .present__count {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+}
+.present[data-compact] .present__back,
+.present[data-compact] .present__flow,
+.present[data-compact] .present__right > button,
+.present[data-compact] .app-dialog__footer > button {
+  height: 44px;
+}
+.present[data-compact] .present__back,
+.present[data-compact] .present__right > .dp-iconbtn {
+  justify-content: center;
+  width: 44px;
+  padding: 0;
+}
+.present[data-compact] .present__back .dp-icon {
+  width: 16px;
+  height: 16px;
+}
+.present[data-compact] .present__flow select {
+  font-size: 16px;
+}
+.present[data-compact] .present__brand:has(+ .present__flow) .present__file {
+  max-width: 96px;
+}
+.present[data-compact] .present__brand + .present__flow {
+  flex-shrink: 0;
+  max-width: 65%;
+}
+.present[data-compact] .present__hint {
+  max-width: calc(100% - 2 * var(--space-400));
+  white-space: normal;
+  text-align: center;
+}
+.present .app-dialog:has(.present__picker) .app-dialog__body {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  max-height: inherit;
+  box-sizing: border-box;
+}
+.present__picker {
+  overflow: auto;
+  overscroll-behavior: contain;
+}
+.present__picker .present__screens {
+  padding: var(--space-100);
 }

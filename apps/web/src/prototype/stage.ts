@@ -489,7 +489,7 @@ export class PlayerStage {
     if (box.width < 520 && box.width > 0 && box.height > 0) {
       const byWidth = box.width / this.#vw;
       const byHeight = box.height / this.#vh;
-      const whole = byHeight >= byWidth * PHONE_MIN_FIT;
+      const whole = device.kind !== "none" || byHeight >= byWidth * PHONE_MIN_FIT;
       this.#scale = whole ? Math.min(byWidth, byHeight) : byWidth;
       if (!whole) this.#vh = box.height / this.#scale;
       this.#deviceEl.dataset.kind = "none";
