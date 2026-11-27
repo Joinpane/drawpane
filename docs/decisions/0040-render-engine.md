@@ -2171,31 +2171,38 @@ the same container. The gate's budgets: lag p95 ≤ 100 ms, dropped frames ≤ 5
 
 At `98be4471`, a clean browser session still uses Canvas 2D. The engine switch starts WebGPU,
 WebGL2, or the CPU worker. The editor and prototype select the same renderer memory policy
-before creating their surfaces. It recognizes mobile user agents, desktop-UA iPads with touch,
-and coarse pointers on screens with a short side up to 1,024 CSS pixels. Desktop follows the
-existing sizing and limit paths.
+before creating their surfaces. A device with hover and a fine pointer uses the desktop
+path. The profile recognizes mobile user agents, desktop-UA iPads with touch, and touch
+devices without hover at any screen size.
 
-| Reported memory on mobile | GPU | GPU tiles | GPU glyph masks on CPU | Decoded image allowance | Pixels per backing | Maximum effective DPR |
-| --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Up to 2 GiB | 128 MiB | 16 MiB | 8 MiB | 48 MiB | 6 million | 2 |
-| Above 2 and below 6 GiB, or no hint | 160 MiB | 24 MiB | 8 MiB | 56 MiB | 2.5 |
-| At least 6 GiB | 192 MiB | 32 MiB | 12 MiB | 64 MiB | 3 |
+| Reported memory on mobile | GPU | GPU tiles | GPU glyph masks on CPU | Decoded image allowance | Pixels per backing |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Up to 2 GiB | 128 MiB | 16 MiB | 8 MiB | 48 MiB | 6 million |
+| Above 2 and below 6 GiB, or no hint | 160 MiB | 24 MiB | 8 MiB | 56 MiB | 7 million |
+| At least 6 GiB | 192 MiB | 32 MiB | 12 MiB | 64 MiB | 8 million |
 
 The existing tile allocator chooses pages of 16 MiB or less within these budgets. The GPU
-glyph atlas still starts at 16 MiB. The CPU worker keeps 16, 24 or 32 tile slots and uses
+glyph atlas starts at 16 MiB. The CPU worker keeps 16, 24 or 32 tile slots and uses
 4, 4 or 6 MiB for glyph masks. Engine image planning uses the lower of the profile and
-adapter limits and keeps image levels up to 2,048 or 2,560 pixels on the long side. Canvas
-2D keeps one bitmap per ref, up to 1,024 or 1,536 pixels on the long side. It shares the
-remaining allowance among images loading together. If a view fills the cache, an image
-without room can retry after it leaves and reenters the view. Editor, worker and prototype
-backings use the profile's area cap and a 4,096 px side cap. Editor overscan uses the space
-remaining at the effective DPR.
+adapter limits and keeps image levels up to 2,048 or 2,560 pixels on the long side.
 
-On mobile, the first backend loss steps down for the tab session. The replacement renders
-the same document at the same camera while the existing Canvas fallback covers recovery.
-The editor debug stats estimate canvas and fallback snapshot bytes. Engine image estimates
-include resident levels, staged uploads and in-flight copies. The browser can hold more
-memory than these estimates cover.
+Canvas 2D plans one decoded level per visible image, up to 1,024 or 1,536 pixels on the
+long side. When room is tight it evicts off-screen bitmaps and shrinks visible ones to
+make room for new images. A settled view sharpens images that need more pixels. A
+bounded cache of encoded originals lets these changes reuse the downloaded data.
+Raster exports, the Export panel and dashboard thumbnails on mobile decode the originals
+at the output's required resolution in a temporary cache and release them after rendering.
+
+The editor and prototype use native DPR within the area allowance. The 2D prototype
+stage can use tall backings for scrolling screens. Engine surfaces also respect the
+engine's side limit. Editor overscan uses the remaining room at the effective DPR.
+
+A mobile context or device loss during normal use steps down to the next available
+backend. A loss while hidden or within 1.5 seconds of returning gets one same-backend
+retry when visible, with a 60-second window before another retry. The replacement renders
+the same document at the same camera while Canvas covers recovery. Editor debug stats
+estimate canvas and fallback snapshot bytes. Engine image estimates include resident
+levels, staged uploads and in-flight copies. The browser can hold additional memory.
 
 Tune the limits with the small file and the full iOS kit on a lower-memory supported iPhone,
 a WebGPU-capable iPhone, an iPad in both orientations, and an Android phone. Compare Safari

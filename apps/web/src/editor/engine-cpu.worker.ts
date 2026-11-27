@@ -10,11 +10,11 @@
  * ImageBitmap with bounded worker-wide credit backpressure, and yields between slices so a
  * newer camera or edit cancels stale work at once.
  */
-import { type Camera, ErrorCode, type FrameStats, RenderEngine } from "@drawpane/engine";
+import { type Camera, ErrorCode, type FrameStats, MAX_SIDE, RenderEngine } from "@drawpane/engine";
 import { loadBrowserEngine } from "@drawpane/engine/browser";
 import { CPU_IMAGE_BUDGET, uploadCpuLevel } from "./engine-image";
 import { fitEngineRaster } from "./engine-raster";
-import { MOBILE_BACKING_SIDE, type MobileRendererMemory } from "./renderer-memory";
+import type { MobileRendererMemory } from "./renderer-memory";
 
 /** Maximum unacknowledged frame transfers in flight between the worker and the main thread. */
 const MAX_INFLIGHT_TRANSFERS = 2;
@@ -490,7 +490,7 @@ scope.onmessage = async ({ data }) => {
       if (
         memory &&
         (data.width * data.height > memory.backingPixels ||
-          Math.max(data.width, data.height) > MOBILE_BACKING_SIDE)
+          Math.max(data.width, data.height) > MAX_SIDE)
       ) {
         post({
           type: "error",

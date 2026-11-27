@@ -18,7 +18,7 @@ import { Camera } from "./camera";
 import { layerCorners, spreadRadii } from "./corners";
 import { boxPath2D } from "./corners-canvas";
 import { boxOutline, ellipseOutline, fitDashes, type OutlineSegment } from "./dashes";
-import { exportBounds } from "./export";
+import { collectExportImageUses, exportBounds } from "./export";
 import { apply, invert, type Matrix, type Rect, rectsIntersect } from "./geometry";
 import { GlassPainter, glassParams } from "./glass";
 import {
@@ -27,7 +27,7 @@ import {
   gradientMatrix,
   linearInPixels,
 } from "./gradients";
-import { ImageCache, imagePlacement } from "./images";
+import { ImageCache, imageDrawnSize, imagePlacement } from "./images";
 import { Inradii } from "./inradius";
 import { BlendApart, type DeviceBox, deviceBox } from "./linear-blend";
 import { LuminanceMask, opaqueAlpha } from "./luminance";
@@ -540,6 +540,11 @@ export class CanvasRenderer {
    */
   #fresh: ReadonlySet<string> | null = null;
   /** The last exact frame's pixels, scaled while zooming (see `#preview`). */
+  #imageView: {
+    key: string;
+    hidden: ReadonlySet<string>;
+    uses: ReturnType<typeof collectExportImageUses>;
+  } | null = null;
   #snapshot: OffscreenCanvas | HTMLCanvasElement | null = null;
   #snapshotFrame: LastFrame | null = null;
   #epoch = 0;
@@ -672,6 +677,9 @@ export class CanvasRenderer {
       tx,
       ty,
     };
+    if (this.images.boundedDisplay) {
+      this.#trackViewImages(pageId, snapped.visibleRect(viewport), camera.zoom * dpr);
+    }
     if (!this.#last || !sameContent(this.#last, frame)) this.#generation++;
     if (!exact && this.#preview(ctx, frame)) {
       this.#work.clear();
@@ -691,6 +699,43 @@ export class CanvasRenderer {
     this.stats.ms = performance.now() - start;
     this.#lastCall = { start, ms: this.stats.ms };
     return done;
+  }
+
+  /** Retained pans and sliced paints still need a demand for the whole visible view. */
+  #trackViewImages(pageId: string, rect: Rect, scale: number): void {
+    const scene = this.#scene;
+    const key = [pageId, scene.doc.version, rect.x, rect.y, rect.width, rect.height, scale].join(
+      "/",
+    );
+    if (this.#imageView?.key !== key || this.#imageView.hidden !== this.hidden) {
+      const hidden = this.hidden;
+      function* visible(parent: string): IterableIterator<NodeRecord> {
+        for (const id of scene.childrenIn(parent, rect)) {
+          const node = scene.doc.get(id);
+          if (!node || node.props.visible === false || hidden.has(id)) continue;
+          const extent = scene.extent(id);
+          if (extent && !rectsIntersect(extent, rect)) continue;
+          yield node;
+          yield* visible(id);
+        }
+      }
+      this.#imageView = {
+        key,
+        hidden,
+        uses: collectExportImageUses(scene, visible(pageId), scale),
+      };
+    }
+    for (const [ref, uses] of this.#imageView.uses) {
+      const natural = this.images.natural(ref);
+      let width = 1;
+      for (const { paint, box, scale } of uses) {
+        const drawn = natural
+          ? imageDrawnSize(paint.scaleMode, box, natural, scale, paint.crop).width
+          : (box.width * scale.width) / (paint.crop?.width || 1);
+        width = Math.max(width, drawn);
+      }
+      this.images.demand(ref, width);
+    }
   }
 
   /**

@@ -8,9 +8,10 @@
  * inside the 64 KiB keepalive budget where possible) when the engine is on, and CanvasRenderer
  * when canvas mode is active.
  */
-import { CanvasRenderer, type Editor, renderThumbnail, thumbnailLayout } from "@drawpane/editor";
+import { type Editor, renderThumbnail, thumbnailLayout } from "@drawpane/editor";
 import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useRef } from "react";
+import { withCanvasOutputRenderer } from "./canvas-output";
 import { isAbortError, renderEngineSnapshot, type SnapshotPriority } from "./engine-snapshot";
 import { imagesFor } from "./media";
 import { useEngineRenderer } from "./renderer-switch";
@@ -39,33 +40,37 @@ async function renderCanvasPageThumbnail(
   maxHeight: number,
   format: "webp" | "png",
   quality: number,
+  signal?: AbortSignal,
 ): Promise<Blob | null> {
-  let renderer: CanvasRenderer;
-  try {
-    renderer = new CanvasRenderer(editor.scene, editor.measurer, { images: imagesFor(editor) });
-  } catch {
-    return null;
-  }
-  const type = format === "png" ? "image/png" : "image/webp";
-  let blob = await renderThumbnail(renderer, editor.scene, pageId, {
-    maxWidth,
-    maxHeight,
-    type,
-    quality,
-  });
-  for (
-    let size = Math.floor(maxWidth / 2);
-    blob && blob.size > MAX_BYTES && size >= 80;
-    size = Math.floor(size / 2)
-  ) {
-    blob = await renderThumbnail(renderer, editor.scene, pageId, {
-      maxWidth: size,
-      maxHeight: Math.max(1, Math.round((size * maxHeight) / maxWidth)),
-      type,
-      quality,
-    });
-  }
-  return blob && blob.size <= MAX_BYTES ? blob : null;
+  const layout = thumbnailLayout(editor.scene, pageId, { maxWidth, maxHeight });
+  if (!layout) return null;
+  const { ids, scale } = layout;
+  return withCanvasOutputRenderer(
+    editor,
+    { ids, scale, ...(signal ? { signal } : {}) },
+    async (renderer) => {
+      const type = format === "png" ? "image/png" : "image/webp";
+      let blob = await renderThumbnail(renderer, editor.scene, pageId, {
+        maxWidth,
+        maxHeight,
+        type,
+        quality,
+      });
+      for (
+        let size = Math.floor(maxWidth / 2);
+        blob && blob.size > MAX_BYTES && size >= 80;
+        size = Math.floor(size / 2)
+      ) {
+        blob = await renderThumbnail(renderer, editor.scene, pageId, {
+          maxWidth: size,
+          maxHeight: Math.max(1, Math.round((size * maxHeight) / maxWidth)),
+          type,
+          quality,
+        });
+      }
+      return blob && blob.size <= MAX_BYTES ? blob : null;
+    },
+  );
 }
 
 /**
@@ -85,7 +90,15 @@ export async function renderPageThumbnail(
   const baseQuality = options.quality ?? 0.85;
 
   if (!options.forceEngine && !useEngineRenderer()) {
-    return renderCanvasPageThumbnail(editor, pageId, maxWidth, maxHeight, format, baseQuality);
+    return renderCanvasPageThumbnail(
+      editor,
+      pageId,
+      maxWidth,
+      maxHeight,
+      format,
+      baseQuality,
+      options.signal,
+    );
   }
 
   const drawAt = async (
@@ -147,6 +160,7 @@ export async function renderPageThumbnail(
           maxHeight,
           format,
           baseQuality,
+          options.signal,
         );
         if (fallback) return fallback;
       } catch {

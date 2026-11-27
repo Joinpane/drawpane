@@ -2,12 +2,9 @@ import type { ImageCacheOptions } from "@drawpane/editor";
 import type { EngineOptions } from "@drawpane/engine";
 
 const MIB = 1024 * 1024;
-/** Keep canvas dimensions within older mobile browsers' per-axis allowance, too. */
-export const MOBILE_BACKING_SIDE = 4096;
 
 export interface MobileRendererMemory {
   readonly gpuLimits: Required<Pick<EngineOptions, "gpuBytes" | "tileBytes" | "glyphMaskBytes">>;
-  readonly maxDpr: number;
   readonly backingPixels: number;
   readonly imageBytes: number;
   readonly imageSide: number;
@@ -23,13 +20,12 @@ interface DeviceSignals {
   readonly userAgent?: string | undefined;
   readonly maxTouchPoints?: number | undefined;
   readonly coarsePointer?: boolean | undefined;
-  readonly screenWidth?: number | undefined;
-  readonly screenHeight?: number | undefined;
+  readonly hover?: boolean | undefined;
+  readonly finePointer?: boolean | undefined;
 }
 
 const LOW_MOBILE: MobileRendererMemory = {
   gpuLimits: { gpuBytes: 128 * MIB, tileBytes: 16 * MIB, glyphMaskBytes: 8 * MIB },
-  maxDpr: 2,
   backingPixels: 6_000_000,
   imageBytes: 48 * MIB,
   imageSide: 2048,
@@ -42,7 +38,6 @@ const LOW_MOBILE: MobileRendererMemory = {
 
 const MOBILE: MobileRendererMemory = {
   gpuLimits: { gpuBytes: 160 * MIB, tileBytes: 24 * MIB, glyphMaskBytes: 8 * MIB },
-  maxDpr: 2.5,
   backingPixels: 7_000_000,
   imageBytes: 56 * MIB,
   imageSide: 2048,
@@ -55,7 +50,6 @@ const MOBILE: MobileRendererMemory = {
 
 const HIGH_MOBILE: MobileRendererMemory = {
   gpuLimits: { gpuBytes: 192 * MIB, tileBytes: 32 * MIB, glyphMaskBytes: 12 * MIB },
-  maxDpr: 3,
   backingPixels: 8_000_000,
   imageBytes: 64 * MIB,
   imageSide: 2560,
@@ -66,21 +60,20 @@ const HIGH_MOBILE: MobileRendererMemory = {
   cpuTileSlots: 32,
 };
 
-/** Screen dimensions are stable across pane resizes and browser chrome changes. */
+/** Pointer capabilities distinguish touch tablets with desktop UAs from touch laptops. */
 export function mobileRendererMemory({
   deviceMemory,
   userAgent = "",
   maxTouchPoints = 0,
   coarsePointer = false,
-  screenWidth = 0,
-  screenHeight = 0,
+  hover,
+  finePointer = false,
 }: DeviceSignals): MobileRendererMemory | undefined {
   const mobileUA = /\b(Android|iPhone|iPad|iPod|Mobile)\b/i.test(userAgent);
+  if (hover && finePointer) return undefined;
   const desktopIpad = /Macintosh/i.test(userAgent) && maxTouchPoints > 1;
-  const shortSide = Math.min(screenWidth, screenHeight);
-  if (!mobileUA && !desktopIpad && !(coarsePointer && shortSide > 0 && shortSide <= 1024)) {
-    return undefined;
-  }
+  const touchOnly = hover === false && (maxTouchPoints > 0 || coarsePointer);
+  if (!mobileUA && !desktopIpad && !touchOnly) return undefined;
   if (deviceMemory !== undefined && Number.isFinite(deviceMemory) && deviceMemory > 0) {
     if (deviceMemory <= 2) return LOW_MOBILE;
     if (deviceMemory >= 6) return HIGH_MOBILE;
@@ -96,8 +89,8 @@ export function readMobileRendererMemory(): MobileRendererMemory | undefined {
     userAgent: nav?.userAgent,
     maxTouchPoints: nav?.maxTouchPoints,
     coarsePointer: window.matchMedia?.("(pointer: coarse)").matches,
-    screenWidth: window.screen?.width,
-    screenHeight: window.screen?.height,
+    hover: window.matchMedia?.("(any-hover: hover)").matches,
+    finePointer: window.matchMedia?.("(any-pointer: fine)").matches,
   });
 }
 
@@ -107,7 +100,6 @@ export function mobileImageCacheOptions(profile = readMobileRendererMemory()): I
         maxBytes: profile.imageBytes,
         maxSide: profile.canvasImageSide,
         enforceMaxBytes: true,
-        maxConcurrentLoads: 2,
       }
     : {};
 }
@@ -117,19 +109,19 @@ export function mobileBacking(
   profile: MobileRendererMemory,
   cssWidth: number,
   cssHeight: number,
-  deviceDpr: number,
+  dpr: number,
+  maxSide = Infinity,
 ) {
-  const dpr = Math.min(deviceDpr, profile.maxDpr);
   const w = Math.max(1, Math.round(cssWidth * dpr));
   const h = Math.max(1, Math.round(cssHeight * dpr));
-  if (w * h <= profile.backingPixels && Math.max(w, h) <= MOBILE_BACKING_SIDE) {
+  if (w * h <= profile.backingPixels && Math.max(w, h) <= maxSide) {
     return { width: w, height: h, dpr };
   }
 
   const scale = Math.min(
     dpr,
     Math.sqrt(profile.backingPixels / (Math.max(1, cssWidth) * Math.max(1, cssHeight))),
-    MOBILE_BACKING_SIDE / Math.max(cssWidth, cssHeight),
+    maxSide / Math.max(cssWidth, cssHeight),
   );
   return {
     width: Math.max(1, Math.floor(cssWidth * scale)),
@@ -152,7 +144,7 @@ export function mobileOverscan(
     const mid = Math.ceil((low + high) / 2);
     const w = Math.max(1, Math.round((width + mid * 2) * dpr));
     const h = Math.max(1, Math.round((height + mid * 2) * dpr));
-    if (w * h <= profile.backingPixels && Math.max(w, h) <= MOBILE_BACKING_SIDE) low = mid;
+    if (w * h <= profile.backingPixels) low = mid;
     else high = mid - 1;
   }
   return low;

@@ -15,6 +15,7 @@ import { Button, PropertySection, SegmentedControl, type SegmentedOption } from 
 import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 import { isMac } from "../app/format";
 import { shortcutFor } from "./actions";
+import { withCanvasOutputRenderer } from "./canvas-output";
 import {
   estimateCanvasReducedExportImages,
   estimateReducedExportImages,
@@ -67,15 +68,25 @@ async function renderCanvasPreview(
   width: number,
   height: number,
   scale: number,
+  signal: AbortSignal,
 ): Promise<Blob | null> {
   if (typeof OffscreenCanvas === "undefined") return null;
+  const draw = (renderer: CanvasRenderer) => {
+    const canvas = new OffscreenCanvas(width, height);
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return null;
+    renderer.renderNodes(ctx, ids, rect, scale, null, false, true);
+    return canvas.convertToBlob({ type: "image/png" });
+  };
+  if (imagesFor(editor).boundedDisplay) {
+    return withCanvasOutputRenderer(
+      editor,
+      { ids, scale, context: true, signal },
+      async (renderer) => draw(renderer),
+    );
+  }
   const renderer = getPreviewRenderer(editor);
-  if (!renderer) return null;
-  const canvas = new OffscreenCanvas(width, height);
-  const ctx = canvas.getContext("2d");
-  if (!ctx) return null;
-  renderer.renderNodes(ctx, ids, rect, scale, null, false, true);
-  return canvas.convertToBlob({ type: "image/png" });
+  return renderer ? draw(renderer) : null;
 }
 
 /**
@@ -132,13 +143,21 @@ function useExportPreview(
             });
           } catch (error) {
             if (!abort.signal.aborted && !isAbortError(error)) {
-              blob = await renderCanvasPreview(editor, list, rect, width, height, scale);
+              blob = await renderCanvasPreview(
+                editor,
+                list,
+                rect,
+                width,
+                height,
+                scale,
+                abort.signal,
+              );
             } else {
               throw error;
             }
           }
         } else {
-          blob = await renderCanvasPreview(editor, list, rect, width, height, scale);
+          blob = await renderCanvasPreview(editor, list, rect, width, height, scale, abort.signal);
         }
         if (cancelled || !blob) return;
         made = URL.createObjectURL(blob);

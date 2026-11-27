@@ -363,3 +363,73 @@ describe("ImageCache", () => {
 afterEach(() => {
   vi.unstubAllGlobals();
 });
+
+describe("bounded display images", () => {
+  const maxBytes = 2 * 256 * 256 * 4;
+  const resize = async (_b: ImageBitmap, width: number, height: number) => bitmap(width, height);
+
+  function draw(cache: ImageCache, refs: string[], width = 256): void {
+    cache.frame();
+    for (const ref of refs) cache.get(ref, width);
+  }
+
+  it("keeps every visible image when the working set grows, then sharpens in place", async () => {
+    const header = new Uint8Array(32);
+    header.set([137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82]);
+    const size = new DataView(header.buffer);
+    size.setUint32(16, 512);
+    size.setUint32(20, 512);
+    const fetchImage = vi.fn(async () => new Response(header));
+    vi.stubGlobal("fetch", fetchImage);
+    vi.stubGlobal(
+      "createImageBitmap",
+      vi.fn(async (_source, options?: ImageBitmapOptions) =>
+        bitmap(options?.resizeWidth ?? 512, options?.resizeHeight ?? 512),
+      ),
+    );
+    const cache = new ImageCache({ maxBytes, maxSide: 256, enforceMaxBytes: true, resize });
+    try {
+      draw(cache, ["a", "b"]);
+      await vi.waitFor(() => expect(cache.bytes).toBe(maxBytes));
+      draw(cache, ["a", "b", "c", "d"]);
+      await vi.waitFor(() => {
+        expect(["a", "b", "c", "d"].map((ref) => cache.status(ref))).toEqual(
+          Array(4).fill("ready"),
+        );
+      });
+      expect(cache.bytes).toBeLessThanOrEqual(maxBytes);
+      expect(cache.get("d", 256)?.bitmap.width).toBeLessThan(256);
+
+      for (let i = 0; i < 10; i++) {
+        draw(cache, ["a", "b", "c"]);
+        await flush();
+        draw(cache, ["a", "b", "c", "d"]);
+        await flush();
+      }
+      expect(fetchImage).toHaveBeenCalledTimes(4);
+
+      draw(cache, ["d"]);
+      await vi.waitFor(() => expect(cache.get("d", 256)?.bitmap.width).toBe(256));
+      expect(fetchImage).toHaveBeenCalledTimes(4);
+      expect(cache.bytes).toBeLessThanOrEqual(maxBytes);
+    } finally {
+      cache.clear();
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("drops decode work that was queued for an image that left the view", async () => {
+    const { calls, load } = deferredLoader();
+    const cache = new ImageCache({ maxBytes, maxSide: 256, enforceMaxBytes: true, resize, load });
+    draw(cache, ["a", "b", "c"]);
+    await flush();
+    expect(calls.map(({ sha }) => sha)).toEqual(["a"]);
+    draw(cache, ["a", "c"]);
+    calls[0]?.resolve({ bitmap: bitmap(256, 256), naturalWidth: 256, naturalHeight: 256 });
+    await flush();
+    expect(calls.map(({ sha }) => sha)).toEqual(["a", "c"]);
+    calls[1]?.resolve({ bitmap: bitmap(256, 256), naturalWidth: 256, naturalHeight: 256 });
+    await flush();
+    cache.clear();
+  });
+});

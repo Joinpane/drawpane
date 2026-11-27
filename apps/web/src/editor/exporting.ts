@@ -5,7 +5,6 @@
  * paths, then the result downloads. Settings are remembered per browser.
  */
 import {
-  CanvasRenderer,
   cssRule,
   type Editor,
   EXPORT_MIME,
@@ -20,6 +19,7 @@ import {
   MAX_EXPORT_SIDE,
   snapToPixels,
 } from "@drawpane/editor";
+import { withCanvasOutputRenderer } from "./canvas-output";
 import {
   canvasExportIsSharper,
   estimateCanvasReducedExportImages,
@@ -92,7 +92,7 @@ export function exportName(editor: Editor, ids: readonly string[]): string {
   return ids.length > 1 ? `${name} and ${ids.length - 1} more` : name;
 }
 
-function tryCanvasRasterExport(
+async function canvasRasterExport(
   editor: Editor,
   ids: readonly string[],
   options: {
@@ -100,18 +100,13 @@ function tryCanvasRasterExport(
     readonly scale: number;
     readonly background?: string | null;
   },
-): Promise<Blob> | null {
-  let renderer: CanvasRenderer;
-  try {
-    renderer = new CanvasRenderer(editor.scene, editor.measurer, { images: imagesFor(editor) });
-  } catch {
-    return null;
-  }
-  return exportRaster(renderer, editor.scene, ids, {
-    format: options.format,
-    scale: options.scale,
-    ...(options.background !== undefined ? { background: options.background } : {}),
-  });
+  signal?: AbortSignal,
+): Promise<Blob> {
+  return withCanvasOutputRenderer(
+    editor,
+    { ids, scale: options.scale, context: true, ...(signal ? { signal } : {}) },
+    (renderer) => exportRaster(renderer, editor.scene, ids, options),
+  );
 }
 
 /**
@@ -153,18 +148,11 @@ export async function renderExportWithMeta(
       omittedImages: 0,
     };
   }
-  if (!useEngineRenderer()) {
-    const renderer = new CanvasRenderer(editor.scene, editor.measurer, {
-      images: imagesFor(editor),
-    });
-    const blob = await exportRaster(renderer, editor.scene, ids, {
-      format,
-      scale,
-      ...(background !== undefined ? { background } : {}),
-    });
-    return { blob, reducedImages: 0, omittedImages: 0 };
-  }
-
+  const canvasOptions = {
+    format,
+    scale,
+    ...(background !== undefined ? { background } : {}),
+  };
   // Validate product-level maximum (16,384 px) up front so oversized exports fail clearly.
   const bounds = exportBounds(editor.scene, ids);
   if (!bounds) throw new ExportError("Nothing visible to export. Show the layer and try again.");
@@ -175,27 +163,24 @@ export async function renderExportWithMeta(
     throw exportSizeError(width, height, MAX_EXPORT_SIDE);
   }
 
-  const canvasOptions = {
-    format,
-    scale,
-    ...(background !== undefined ? { background } : {}),
-  };
+  if (!useEngineRenderer()) {
+    const blob = await canvasRasterExport(editor, ids, canvasOptions, signal);
+    return { blob, reducedImages: 0, omittedImages: 0 };
+  }
 
   // If the engine's image budget would downsample or omit photos that canvas draws sharper, use
   // the canvas exporter so multi-photo exports stay sharp instead of upscaling reduced levels.
   if (canvasExportIsSharper(editor, ids, scale, imagesFor(editor), imageBudget)) {
-    const fallback = tryCanvasRasterExport(editor, ids, canvasOptions);
-    if (fallback) {
-      try {
-        const blob = await fallback;
-        return {
-          blob,
-          reducedImages: estimateCanvasReducedExportImages(editor, ids, scale),
-          omittedImages: 0,
-        };
-      } catch {
-        // Fall through to the engine export when canvas cannot render this export.
-      }
+    try {
+      const blob = await canvasRasterExport(editor, ids, canvasOptions, signal);
+      return {
+        blob,
+        reducedImages: estimateCanvasReducedExportImages(editor, ids, scale),
+        omittedImages: 0,
+      };
+    } catch (fallbackError) {
+      if (signal?.aborted || isAbortError(fallbackError)) throw fallbackError;
+      // Fall through to the engine export when canvas cannot render this export.
     }
   }
 
@@ -212,18 +197,16 @@ export async function renderExportWithMeta(
     // The engine reduced photos the plan didn't expect (a cold cache or a Worker step-down).
     // Its reductions halve a photo, which canvas's 4,096 px cap beats for any photo it can hold.
     if (result.reducedImages > 0 || result.omittedImages > 0) {
-      const fallback = tryCanvasRasterExport(editor, ids, canvasOptions);
-      if (fallback) {
-        try {
-          const blob = await fallback;
-          return {
-            blob,
-            reducedImages: estimateCanvasReducedExportImages(editor, ids, scale),
-            omittedImages: 0,
-          };
-        } catch {
-          // Keep the engine export (with its reduction note) if canvas also fails.
-        }
+      try {
+        const blob = await canvasRasterExport(editor, ids, canvasOptions, signal);
+        return {
+          blob,
+          reducedImages: estimateCanvasReducedExportImages(editor, ids, scale),
+          omittedImages: 0,
+        };
+      } catch (fallbackError) {
+        if (signal?.aborted || isAbortError(fallbackError)) throw fallbackError;
+        // Keep the engine export (with its reduction note) if canvas also fails.
       }
     }
     return result;
@@ -234,18 +217,16 @@ export async function renderExportWithMeta(
     // applies to 8,193..16,384 px exports (`reason: "size"`), unsupported features
     // (`reason: "unsupported"`), and worker or runtime failures.
     if (error instanceof ExportError && error.reason === "limit") throw error;
-    const fallback = tryCanvasRasterExport(editor, ids, canvasOptions);
-    if (fallback) {
-      try {
-        const blob = await fallback;
-        return {
-          blob,
-          reducedImages: estimateCanvasReducedExportImages(editor, ids, scale),
-          omittedImages: 0,
-        };
-      } catch {
-        // Keep the original engine error only when the canvas also fails.
-      }
+    try {
+      const blob = await canvasRasterExport(editor, ids, canvasOptions, signal);
+      return {
+        blob,
+        reducedImages: estimateCanvasReducedExportImages(editor, ids, scale),
+        omittedImages: 0,
+      };
+    } catch (fallbackError) {
+      if (signal?.aborted || isAbortError(fallbackError)) throw fallbackError;
+      // Keep the original engine error only when the canvas also fails.
     }
     throw error;
   }

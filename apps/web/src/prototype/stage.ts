@@ -542,7 +542,7 @@ export class PlayerStage {
     return this.#vw / this.#frameSize(root).width;
   }
 
-  #screenMetrics(root: string, contentScale: number) {
+  #screenMetrics(root: string, contentScale: number, engine = this.#useEngine) {
     const size = this.#frameSize(root);
     const css = contentScale * this.#scale;
     let dpr = window.devicePixelRatio || 1;
@@ -554,7 +554,7 @@ export class PlayerStage {
         css,
         cssWidth,
         cssHeight,
-        ...mobileBacking(this.#memory, cssWidth, cssHeight, dpr),
+        ...mobileBacking(this.#memory, cssWidth, cssHeight, dpr, engine ? MAX_SIDE : undefined),
       };
     }
     const pixels = size.width * size.height * (css * dpr) ** 2;
@@ -581,7 +581,7 @@ export class PlayerStage {
   #paintCanvasSurface(root: string, contentScale: number, canvas: HTMLCanvasElement): boolean {
     const renderer = this.#getCanvasRenderer();
     const bounds = this.#editor.scene.bounds(root);
-    const m = this.#screenMetrics(root, contentScale);
+    const m = this.#screenMetrics(root, contentScale, false);
     if (canvas.width !== m.width || canvas.height !== m.height) {
       canvas.width = m.width;
       canvas.height = m.height;

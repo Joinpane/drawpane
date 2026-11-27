@@ -43,6 +43,7 @@ import {
   type Camera,
   ErrorCode,
   type FrameStats,
+  MAX_SIDE,
   RenderEngine,
   type Result,
   refusingBits,
@@ -54,7 +55,6 @@ import { CPU_IMAGE_BUDGET, CPU_IMAGE_SIDE, ViewImages } from "./engine-image";
 import { fitEngineRaster, MIN_RASTER_SCALE } from "./engine-raster";
 import { backfillMediaPreviews } from "./image-preview";
 import {
-  MOBILE_BACKING_SIDE,
   type MobileRendererMemory,
   mobileBacking,
   readMobileRendererMemory,
@@ -112,6 +112,8 @@ const WEBGL2_PROBE_SIDE = 512;
 
 /** Sliding window for GPU device/context loss recovery before stepping down one backend. */
 const LOSS_WINDOW_MS = 60_000;
+/** The driver may report a background loss just after the page becomes visible again. */
+const MOBILE_RESUME_LOSS_MS = 1_500;
 /** Number of same-backend recoveries allowed within LOSS_WINDOW_MS (3rd loss steps down). */
 const MAX_RECOVERIES_IN_WINDOW = 2;
 /** Consecutive healthy GPU wait timeouts before stepping down without blaming device loss. */
@@ -512,6 +514,25 @@ function waitBeforeStartupRetry(signal?: AbortSignal): Promise<boolean> {
     } else {
       timer = window.setTimeout(() => finish(true), 150);
     }
+  });
+}
+
+/** A backgrounded device gets rebuilt after the browser makes the page visible. */
+function waitForVisible(signal: AbortSignal): Promise<boolean> {
+  if (signal.aborted) return Promise.resolve(false);
+  if (document.visibilityState !== "hidden") return Promise.resolve(true);
+  return new Promise((resolve) => {
+    const finish = (ready: boolean) => {
+      document.removeEventListener("visibilitychange", onVisible);
+      signal.removeEventListener("abort", onAbort);
+      resolve(ready);
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible") finish(true);
+    };
+    const onAbort = () => finish(false);
+    document.addEventListener("visibilitychange", onVisible);
+    signal.addEventListener("abort", onAbort, { once: true });
   });
 }
 
@@ -1108,6 +1129,8 @@ export class EngineView {
   #dead = false;
   #unpresented = 0;
   /** Async device/context recovery or backend step-down in flight. */
+  #lastVisibleAt = -Infinity;
+  readonly #mobileRecoveries = new Map<EngineBackend, number>();
   #recovering: Promise<void> | null = null;
   /** Loss timestamps within the last LOSS_WINDOW_MS per backend. */
   readonly #losses = new Map<EngineBackend, number[]>();
@@ -1835,8 +1858,8 @@ export class EngineView {
 
   /**
    * Handles a GPU failure (device loss, WebGL context loss, or unrecoverable error).
-   * Recoverable losses rebuild the same backend on a fresh canvas up to MAX_RECOVERIES_IN_WINDOW
-   * times within LOSS_WINDOW_MS; the next loss steps down one backend for the session.
+   * Desktop losses can rebuild twice in the recovery window. On mobile, only a loss around
+   * backgrounding gets one retry in that window before stepping down.
    */
   #handleGpuFailure(
     r: { readonly message: string; readonly code: ErrorCode | null },
@@ -1865,11 +1888,18 @@ export class EngineView {
     const isLoss =
       recoverable &&
       (r.code === ErrorCode.DeviceLost || r.code === ErrorCode.Gpu || /lost/i.test(r.message));
-    if (
-      !this.memoryProfile &&
-      isLoss &&
-      (this.#backend === "webgpu" || this.#backend === "webgl2")
-    ) {
+    const gpuBackend = this.#backend === "webgpu" || this.#backend === "webgl2";
+    if (this.memoryProfile && isLoss && gpuBackend) {
+      const now = Date.now();
+      const backgroundLoss =
+        document.visibilityState === "hidden" || now - this.#lastVisibleAt <= MOBILE_RESUME_LOSS_MS;
+      const previous = this.#mobileRecoveries.get(this.#backend) ?? -Infinity;
+      if (backgroundLoss && now - previous >= LOSS_WINDOW_MS) {
+        this.#recovering = this.#recoverSameBackend(r, 1, true);
+        return NOT_DRAWN;
+      }
+    }
+    if (!this.memoryProfile && isLoss && gpuBackend) {
       const now = Date.now();
       const history = (this.#losses.get(this.#backend) ?? []).filter(
         (t) => now - t < LOSS_WINDOW_MS,
@@ -1888,6 +1918,7 @@ export class EngineView {
   async #recoverSameBackend(
     r: { readonly message: string; readonly code: ErrorCode | null },
     attempt: number,
+    afterBackground = false,
   ): Promise<void> {
     const backend = this.#backend;
     const engine = this.#engine;
@@ -1899,12 +1930,16 @@ export class EngineView {
     try {
       this.#detachImages();
       engine.detachGpu();
-      const candidate = createCandidateCanvas(this.#canvas);
+      if (afterBackground) {
+        if (!(await waitForVisible(this.#lifecycle.signal))) return;
+        this.#mobileRecoveries.set(backend, Date.now());
+      }
+      const candidate = createCandidateCanvas(this.#canvas, Boolean(this.memoryProfile));
       const useReadback = presentation() === "readback";
       const readback = useReadback ? candidate.getContext("2d") : null;
       const gpu = await engine.attachGpu(useReadback ? null : candidate, {
         ...(backend === "webgpu" ? { compatibility: this.#compatibility } : {}),
-        glyphMaskBytes: 32 << 20,
+        glyphMaskBytes: this.memoryProfile?.gpuLimits.glyphMaskBytes ?? 32 << 20,
       });
       if (this.#dead) return;
       if (!gpu.ok) {
@@ -1942,7 +1977,7 @@ export class EngineView {
       this.#recovering = null;
       this.#attachImages();
       console.info(
-        `Drawpane: render engine recovered on ${backend} (${gpu.value.adapter}) after device loss (attempt ${attempt}/${MAX_RECOVERIES_IN_WINDOW} in 60 s).`,
+        `Drawpane: render engine recovered on ${backend} (${gpu.value.adapter}) after device loss (attempt ${attempt}/${afterBackground ? 1 : MAX_RECOVERIES_IN_WINDOW} in 60 s).`,
       );
       window.dispatchEvent(
         new CustomEvent<RecoveredEvent>("drawpane:renderer-recovered", {
@@ -2189,6 +2224,7 @@ export class EngineView {
     if (document.visibilityState === "hidden") {
       this.#hiddenImageTimer = setTimeout(this.#evictImages, 30_000);
     } else {
+      this.#lastVisibleAt = Date.now();
       this.onChange();
     }
   };
@@ -2360,13 +2396,8 @@ export class EngineView {
   ): EngineDraw {
     if (this.#dead || this.#recovering) return NOT_DRAWN;
     const profile = this.memoryProfile;
-    if (
-      profile &&
-      (width * height > profile.backingPixels ||
-        Math.max(width, height) > MOBILE_BACKING_SIDE ||
-        dpr > profile.maxDpr)
-    ) {
-      ({ width, height, dpr } = mobileBacking(profile, width / dpr, height / dpr, dpr));
+    if (profile && (width * height > profile.backingPixels || Math.max(width, height) > MAX_SIDE)) {
+      ({ width, height, dpr } = mobileBacking(profile, width / dpr, height / dpr, dpr, MAX_SIDE));
     }
     const at = this.#presenting;
     if (!at || at.pageId !== pageId || at.width !== width || at.height !== height) {

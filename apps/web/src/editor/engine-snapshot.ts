@@ -829,6 +829,7 @@ export function estimateCanvasReducedExportImages(
   scale: number,
   cache: ImageCache = imagesFor(editor),
 ): number {
+  if (cache.boundedDisplay) return 0;
   const builder = new DisplayListBuilder(editor.scene, editor.measurer);
   const plan = builder.planLayers(ids, { context: true });
   const usesByRef = collectExportImageUses(editor.scene, plan.visibleNodes(), scale);
@@ -883,7 +884,7 @@ export function canvasExportIsSharper(
   for (const { ref, natural, uses } of candidates) {
     const desired = chooseDrawnImageSize(natural, uses, MAX_EXPORT_SIDE);
     const wanted = Math.max(desired.width, desired.height);
-    const canvasSide = Math.min(wanted, CANVAS_IMAGE_MAX_SIDE);
+    const canvasSide = cache.boundedDisplay ? wanted : Math.min(wanted, CANVAS_IMAGE_MAX_SIDE);
     const engine = budgeted.get(ref);
     const engineSide = engine ? Math.max(engine.target.width, engine.target.height) : 0;
     canvasWorst = Math.min(canvasWorst, canvasSide / wanted);
