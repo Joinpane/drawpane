@@ -60,10 +60,6 @@ interface RouterContext {
 const sessionQuery = { queryKey: ["session"], queryFn: api.session };
 
 const rootRoute = createRootRouteWithContext<RouterContext>()({
-  beforeLoad: ({ location, preload }) => {
-    // Keep speculative link preloads from changing the renderer of the page on screen.
-    if (!preload) selectRendererForLocation(location.pathname, location.searchStr);
-  },
   component: () => (
     <>
       <ShortcutsSync />
@@ -314,6 +310,11 @@ export const router = createRouter({
   scrollRestoration: true,
   parseSearch: parseAppSearch,
   stringifySearch: stringifyAppSearch,
+});
+
+// Navigation events include in-place query changes even when the root route is reused.
+router.subscribe("onBeforeLoad", ({ toLocation }) => {
+  selectRendererForLocation(toLocation.pathname, toLocation.searchStr);
 });
 
 declare module "@tanstack/react-router" {
