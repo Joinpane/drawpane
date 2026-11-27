@@ -5,20 +5,22 @@
  *
  * Verifies:
  * - Phone (393 x 852): tap selects for Inspect, one-finger drag pans camera
- *   at constant zoom even over selected layers, two-finger translation moves
- *   camera at constant zoom, two-finger pinch zooms around its centroid,
- *   stationary hold starts a comment draft, two-finger gesture preserves
- *   selection/geometry/undo/comments, and touchcancel cleans up cleanly.
- * - Tablet (1024 x 768 & 768 x 1024): tap selects, one-finger drag on a layer
- *   moves it, one-finger drag on empty canvas marquees in Move tool and pans
- *   in Hand tool, two-finger gestures over a selected layer or its resize
- *   handles (both within slop and mid-drag rollback) leave node geometry,
- *   selection, undo/redo depth, server revision, and comment drafts unchanged,
- *   lifting and re-adding a second finger mid-pinch never starts a tool
- *   action, stationary long-press opens the context menu at the finger,
- *   touchcancel rolls back uncommitted drags, and Apple Pencil (`pointerType:
- *   "pen"`) draws precisely while fingers switch to navigation-only palm
- *   rejection.
+ *   at constant zoom even over selected layers, stylus drag pans camera,
+ *   two-finger translation moves camera at constant zoom, two-finger pinch
+ *   zooms around its centroid with 0 React commits per move, stationary hold
+ *   starts a comment draft, and touchcancel recovers cleanly.
+ * - Tablet (1024 x 768 & 768 x 1024): tap selects (including a 5 px layer
+ *   4 px right of a selection at 50% zoom), one-finger drag on a layer moves
+ *   it, empty-canvas drag marquees in Select tool and pans in Hand tool or
+ *   when read-only, two-finger pinch over resize handles (both within slop
+ *   and mid-drag rollback) or with one finger on the Selection Lens / text
+ *   editing box / side panel leaves geometry, selection, undo/redo, and
+ *   comment drafts unchanged, lifting finger 2 mid-pinch stays in 1:1 pan
+ *   tail and re-adding finger 3 resumes pinch without jumping, long-press
+ *   opens the context menu, Apple Pencil draws with concurrent palm rejection
+ *   and expires ~1 s after pen lift so fingers select again, and a two-client
+ *   drag holds for 200 ms then streams live (and syncs the revert if a second
+ *   finger cancels after 200 ms).
  */
 import { join } from "node:path";
 import { type BrowserContext, type CDPSession, expect, type Page, test } from "@playwright/test";
@@ -65,6 +67,7 @@ interface DebugEditor {
     readonly readOnly: boolean;
     readonly tool: string;
     readonly selection: readonly string[];
+    readonly editingText: string | null;
     readonly gesture: boolean;
     readonly canUndo: boolean;
     readonly canRedo: boolean;
@@ -101,6 +104,9 @@ interface DebugEditor {
   ): string | null;
   select(ids: string[]): void;
   setTool(tool: string): void;
+  setReadOnly(readOnly: boolean): void;
+  startTextEdit(id: string): void;
+  endTextEdit(): void;
   zoomTo(zoom: number): void;
   centerOn(p: { x: number; y: number }): void;
   undo(): void;
@@ -134,10 +140,11 @@ async function touchMove(cdp: CDPSession, points: readonly Pt[]) {
   });
 }
 
-async function touchEnd(cdp: CDPSession, remaining: readonly Pt[] = []) {
+/** Releases the listed touch points (empty array releases all active touch points). */
+async function touchEnd(cdp: CDPSession, released: readonly Pt[] = []) {
   await cdp.send("Input.dispatchTouchEvent", {
     type: "touchEnd",
-    touchPoints: remaining.map((p) => ({ x: Math.round(p.x), y: Math.round(p.y), id: p.id })),
+    touchPoints: released.map((p) => ({ x: Math.round(p.x), y: Math.round(p.y), id: p.id })),
   });
 }
 
@@ -149,8 +156,9 @@ async function touchCancel(cdp: CDPSession) {
 }
 
 async function cdpTap(cdp: CDPSession, x: number, y: number, id = 1) {
-  await touchStart(cdp, [{ id, x, y }]);
-  await touchEnd(cdp, []);
+  // Pipeline touchStart + touchEnd on the same CDP session so CPU spikes cannot insert
+  // a >500 ms stall that would misclassify a tap as a long-press.
+  await Promise.all([touchStart(cdp, [{ id, x, y }]), touchEnd(cdp, [])]);
 }
 
 async function cdpDrag(
@@ -160,14 +168,15 @@ async function cdpDrag(
   steps = 8,
   id = 1,
 ) {
-  await touchStart(cdp, [{ id, x: from.x, y: from.y }]);
+  const ops: Promise<unknown>[] = [touchStart(cdp, [{ id, x: from.x, y: from.y }])];
   for (let i = 1; i <= steps; i++) {
     const t = i / steps;
-    await touchMove(cdp, [
-      { id, x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t },
-    ]);
+    ops.push(
+      touchMove(cdp, [{ id, x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t }]),
+    );
   }
-  await touchEnd(cdp, []);
+  ops.push(touchEnd(cdp, []));
+  await Promise.all(ops);
 }
 
 async function cdpTwoFingerPan(
@@ -178,20 +187,25 @@ async function cdpTwoFingerPan(
   dy: number,
   steps = 8,
 ) {
-  await touchStart(cdp, [{ id: 1, x: p1.x, y: p1.y }]);
-  await touchStart(cdp, [
-    { id: 1, x: p1.x, y: p1.y },
-    { id: 2, x: p2.x, y: p2.y },
-  ]);
+  const ops: Promise<unknown>[] = [
+    touchStart(cdp, [{ id: 1, x: p1.x, y: p1.y }]),
+    touchStart(cdp, [
+      { id: 1, x: p1.x, y: p1.y },
+      { id: 2, x: p2.x, y: p2.y },
+    ]),
+  ];
   for (let i = 1; i <= steps; i++) {
     const t = i / steps;
-    await touchMove(cdp, [
-      { id: 1, x: p1.x + dx * t, y: p1.y + dy * t },
-      { id: 2, x: p2.x + dx * t, y: p2.y + dy * t },
-    ]);
+    ops.push(
+      touchMove(cdp, [
+        { id: 1, x: p1.x + dx * t, y: p1.y + dy * t },
+        { id: 2, x: p2.x + dx * t, y: p2.y + dy * t },
+      ]),
+    );
   }
-  await touchEnd(cdp, [{ id: 1, x: p1.x + dx, y: p1.y + dy }]);
-  await touchEnd(cdp, []);
+  ops.push(touchEnd(cdp, [{ id: 2, x: p2.x + dx, y: p2.y + dy }]));
+  ops.push(touchEnd(cdp, [{ id: 1, x: p1.x + dx, y: p1.y + dy }]));
+  await Promise.all(ops);
 }
 
 async function cdpPinch(
@@ -203,15 +217,51 @@ async function cdpPinch(
 ) {
   const f1 = (half: number) => ({ id: 1, x: center.x - half, y: center.y });
   const f2 = (half: number) => ({ id: 2, x: center.x + half, y: center.y });
-  await touchStart(cdp, [f1(startHalfSpan)]);
-  await touchStart(cdp, [f1(startHalfSpan), f2(startHalfSpan)]);
+  const ops: Promise<unknown>[] = [
+    touchStart(cdp, [f1(startHalfSpan)]),
+    touchStart(cdp, [f1(startHalfSpan), f2(startHalfSpan)]),
+  ];
   for (let i = 1; i <= steps; i++) {
     const t = i / steps;
     const half = startHalfSpan + (endHalfSpan - startHalfSpan) * t;
-    await touchMove(cdp, [f1(half), f2(half)]);
+    ops.push(touchMove(cdp, [f1(half), f2(half)]));
   }
-  await touchEnd(cdp, [f1(endHalfSpan)]);
-  await touchEnd(cdp, []);
+  ops.push(touchEnd(cdp, [f2(endHalfSpan)]));
+  ops.push(touchEnd(cdp, [f1(endHalfSpan)]));
+  await Promise.all(ops);
+}
+
+async function waitFrames(page: Page, count = 2) {
+  await page.evaluate(
+    (n) =>
+      new Promise<void>((resolve) => {
+        let left = n;
+        const step = () => {
+          if (--left <= 0) resolve();
+          else requestAnimationFrame(step);
+        };
+        requestAnimationFrame(step);
+      }),
+    count,
+  );
+}
+
+async function rectScreenBox(page: Page, id: string) {
+  return page.evaluate((nid) => {
+    const ed = (window as unknown as DebugWindow).drawpane;
+    const b = ed.scene.bounds(nid);
+    if (!b) throw new Error("missing bounds");
+    const tl = ed.s.camera.toScreen({ x: b.x, y: b.y });
+    const br = ed.s.camera.toScreen({ x: b.x + b.width, y: b.y + b.height });
+    return {
+      left: tl.x,
+      top: tl.y,
+      right: br.x,
+      bottom: br.y,
+      cx: (tl.x + br.x) / 2,
+      cy: (tl.y + br.y) / 2,
+    };
+  }, id);
 }
 
 async function readSnapshot(page: Page, nodeId: string) {
@@ -222,6 +272,7 @@ async function readSnapshot(page: Page, nodeId: string) {
     return {
       camera: { x: ed.s.camera.x, y: ed.s.camera.y, zoom: ed.s.camera.zoom },
       selection: [...ed.s.selection],
+      editingText: ed.s.editingText,
       tool: ed.s.tool,
       readOnly: ed.s.readOnly,
       gesture: ed.s.gesture,
@@ -344,7 +395,7 @@ test.describe("Mobile and tablet touch gesture arbitration", () => {
     await instance?.stop();
   });
 
-  test("phone: tap selects, 1-finger drag pans, 2-finger pan/pinch anchors cleanly, long-press starts comment, touchcancel recovers", async ({
+  test("phone: tap selects, 1-finger and stylus drag pan, 2-finger pan/pinch anchors cleanly, long-press starts comment, touchcancel recovers", async ({
     browser,
   }) => {
     const { context, page, cdp } = await openTouchPage(
@@ -355,7 +406,6 @@ test.describe("Mobile and tablet touch gesture arbitration", () => {
       fileUrl,
     );
     try {
-      // Position camera at 100% centered on rectA so coordinates are deterministic.
       await page.evaluate(() => {
         const ed = (window as unknown as DebugWindow).drawpane;
         ed.zoomTo(1);
@@ -393,6 +443,39 @@ test.describe("Mobile and tablet touch gesture arbitration", () => {
       expect(afterOneFingerPan.node).toEqual(beforeTap.node);
       expect(afterOneFingerPan.undoDepth).toBe(beforeTap.undoDepth);
 
+      // 2b. Stylus (pointerType: "pen") drag on a phone also pans the camera.
+      const beforePhonePen = await readSnapshot(page, rectAId);
+      await cdp.send("Input.dispatchMouseEvent", {
+        type: "mousePressed",
+        x: 160,
+        y: 380,
+        button: "left",
+        buttons: 1,
+        clickCount: 1,
+        pointerType: "pen",
+      });
+      await cdp.send("Input.dispatchMouseEvent", {
+        type: "mouseMoved",
+        x: 215,
+        y: 420,
+        button: "left",
+        buttons: 1,
+        pointerType: "pen",
+      });
+      await cdp.send("Input.dispatchMouseEvent", {
+        type: "mouseReleased",
+        x: 215,
+        y: 420,
+        button: "left",
+        buttons: 0,
+        clickCount: 1,
+        pointerType: "pen",
+      });
+      const afterPhonePen = await readSnapshot(page, rectAId);
+      expect(afterPhonePen.camera.x - beforePhonePen.camera.x).toBeCloseTo(55, 0);
+      expect(afterPhonePen.camera.y - beforePhonePen.camera.y).toBeCloseTo(40, 0);
+      expect(afterPhonePen.camera.zoom).toBeCloseTo(beforePhonePen.camera.zoom, 4);
+
       // 3. Two-finger translation moves camera at constant zoom, leaving layer & selection untouched.
       const beforeTwoPan = await readSnapshot(page, rectAId);
       await cdpTwoFingerPan(cdp, { x: 140, y: 360 }, { x: 250, y: 360 }, -60, -40);
@@ -413,27 +496,41 @@ test.describe("Mobile and tablet touch gesture arbitration", () => {
           zoom: ed.s.camera.zoom,
         };
       }, pinchCenter);
-      await touchStart(cdp, [{ id: 1, x: pinchCenter.x - 50, y: pinchCenter.y }]);
-      await touchStart(cdp, [
-        { id: 1, x: pinchCenter.x - 50, y: pinchCenter.y },
-        { id: 2, x: pinchCenter.x + 50, y: pinchCenter.y },
+      await Promise.all([
+        touchStart(cdp, [{ id: 1, x: pinchCenter.x - 50, y: pinchCenter.y }]),
+        touchStart(cdp, [
+          { id: 1, x: pinchCenter.x - 50, y: pinchCenter.y },
+          { id: 2, x: pinchCenter.x + 50, y: pinchCenter.y },
+        ]),
+        // Move 1 starts the pinch and lets gesture-start UI state settle.
+        touchMove(cdp, [
+          { id: 1, x: pinchCenter.x - 55, y: pinchCenter.y },
+          { id: 2, x: pinchCenter.x + 55, y: pinchCenter.y },
+        ]),
       ]);
+      await waitFrames(page, 2);
       const commitsBeforePinchMoves = await page.evaluate(
         () => (window as unknown as { __reactCommits?: number }).__reactCommits ?? 0,
       );
-      for (let i = 1; i <= 10; i++) {
+      const phoneMoves: Promise<unknown>[] = [];
+      for (let i = 2; i <= 10; i++) {
         const half = 50 + 50 * (i / 10);
-        await touchMove(cdp, [
-          { id: 1, x: pinchCenter.x - half, y: pinchCenter.y },
-          { id: 2, x: pinchCenter.x + half, y: pinchCenter.y },
-        ]);
+        phoneMoves.push(
+          touchMove(cdp, [
+            { id: 1, x: pinchCenter.x - half, y: pinchCenter.y },
+            { id: 2, x: pinchCenter.x + half, y: pinchCenter.y },
+          ]),
+        );
       }
+      await Promise.all(phoneMoves);
       const commitsAfterPinchMoves = await page.evaluate(
         () => (window as unknown as { __reactCommits?: number }).__reactCommits ?? 0,
       );
       expect(commitsAfterPinchMoves - commitsBeforePinchMoves).toBe(0);
-      await touchEnd(cdp, [{ id: 1, x: pinchCenter.x - 100, y: pinchCenter.y }]);
-      await touchEnd(cdp, []);
+      await Promise.all([
+        touchEnd(cdp, [{ id: 2, x: pinchCenter.x + 100, y: pinchCenter.y }]),
+        touchEnd(cdp, [{ id: 1, x: pinchCenter.x - 100, y: pinchCenter.y }]),
+      ]);
       const afterPinch = await page.evaluate((pt) => {
         const ed = (window as unknown as DebugWindow).drawpane;
         return {
@@ -450,9 +547,11 @@ test.describe("Mobile and tablet touch gesture arbitration", () => {
       await maybeShot(page, "phone-after-pinch.png");
 
       // 5. Touchcancel mid-gesture recovers cleanly without leaving stuck pointers.
-      await touchStart(cdp, [{ id: 1, x: 150, y: 400 }]);
-      await touchMove(cdp, [{ id: 1, x: 190, y: 400 }]);
-      await touchCancel(cdp);
+      await Promise.all([
+        touchStart(cdp, [{ id: 1, x: 150, y: 400 }]),
+        touchMove(cdp, [{ id: 1, x: 190, y: 400 }]),
+        touchCancel(cdp),
+      ]);
       const afterCancel = await readSnapshot(page, rectAId);
       await cdpDrag(cdp, { x: 150, y: 400 }, { x: 190, y: 400 }, 6);
       const afterRecoveryPan = await readSnapshot(page, rectAId);
@@ -470,7 +569,6 @@ test.describe("Mobile and tablet touch gesture arbitration", () => {
       expect(afterHold.node).toEqual(beforeHold.node);
       expect(afterHold.camera).toEqual(beforeHold.camera);
       await maybeShot(page, "phone-longpress-comment.png");
-      // Dismiss the draft sheet cleanly.
       await page.getByRole("button", { name: "Close comment" }).tap();
       await expect(commentBox).toBeHidden();
     } finally {
@@ -478,7 +576,7 @@ test.describe("Mobile and tablet touch gesture arbitration", () => {
     }
   });
 
-  test("tablet: 1-finger move/marquee/hand, 2-finger rollback over handles & comment drafts, lift/re-add finger, long-press menu, pen + palm rejection", async ({
+  test("tablet: 1-finger move, marquee, hand, read-only pan, and 50% zoom tiny-layer tap", async ({
     browser,
   }) => {
     const { context, page, cdp } = await openTouchPage(
@@ -489,7 +587,6 @@ test.describe("Mobile and tablet touch gesture arbitration", () => {
       fileUrl,
     );
     try {
-      // Collapse both side panels so the full 1024 x 768 canvas is unobstructed, zoom 100% centered.
       await page.evaluate(() => {
         const ed = (window as unknown as DebugWindow).drawpane;
         ed.zoomTo(1);
@@ -498,25 +595,8 @@ test.describe("Mobile and tablet touch gesture arbitration", () => {
       });
       await page.waitForTimeout(80);
 
-      const rectScreen = async (id: string) =>
-        page.evaluate((nid) => {
-          const ed = (window as unknown as DebugWindow).drawpane;
-          const b = ed.scene.bounds(nid);
-          if (!b) throw new Error("missing bounds");
-          const tl = ed.s.camera.toScreen({ x: b.x, y: b.y });
-          const br = ed.s.camera.toScreen({ x: b.x + b.width, y: b.y + b.height });
-          return {
-            left: tl.x,
-            top: tl.y,
-            right: br.x,
-            bottom: br.y,
-            cx: (tl.x + br.x) / 2,
-            cy: (tl.y + br.y) / 2,
-          };
-        }, id);
-
       // 1. Tap selects rectA; one-finger drag on rectA moves it.
-      const a0 = await rectScreen(rectAId);
+      const a0 = await rectScreenBox(page, rectAId);
       await cdpTap(cdp, a0.cx, a0.cy);
       expect((await readSnapshot(page, rectAId)).selection).toEqual([rectAId]);
 
@@ -527,14 +607,13 @@ test.describe("Mobile and tablet touch gesture arbitration", () => {
       expect(afterMove.node?.y).toBeCloseTo((beforeMove.node?.y ?? 0) + 30, 0);
       expect(afterMove.undoDepth).toBe(beforeMove.undoDepth + 1);
 
-      // Undo back to original position and wait for sync to settle.
       await page.evaluate(() => (window as unknown as DebugWindow).drawpane.undo());
       await expect(page.getByRole("status")).toContainText("Saved", { timeout: 10_000 });
       await page.waitForTimeout(100);
 
       // 2. One-finger drag on empty canvas marquee-selects in Select tool.
-      const a1 = await rectScreen(rectAId);
-      const b1 = await rectScreen(rectBId);
+      const a1 = await rectScreenBox(page, rectAId);
+      const b1 = await rectScreenBox(page, rectBId);
       await cdpDrag(
         cdp,
         { x: a1.left - 30, y: a1.top - 30 },
@@ -544,7 +623,7 @@ test.describe("Mobile and tablet touch gesture arbitration", () => {
       const afterMarquee = await readSnapshot(page, rectAId);
       expect(afterMarquee.selection.sort()).toEqual([rectAId, rectBId].sort());
 
-      // 3. In Hand tool, one-finger drag pans camera without moving layers.
+      // 3. In Hand tool and in read-only mode, one-finger drag pans camera without editing or marqueeing.
       await page.evaluate(() => (window as unknown as DebugWindow).drawpane.setTool("hand"));
       const beforeHand = await readSnapshot(page, rectAId);
       await cdpDrag(cdp, { x: a1.cx, y: a1.cy }, { x: a1.cx + 40, y: a1.cy - 20 }, 6);
@@ -552,7 +631,59 @@ test.describe("Mobile and tablet touch gesture arbitration", () => {
       expect(afterHand.camera.x - beforeHand.camera.x).toBeCloseTo(40, 0);
       expect(afterHand.camera.y - beforeHand.camera.y).toBeCloseTo(-20, 0);
       expect(afterHand.node).toEqual(beforeHand.node);
-      // Restore Select tool and recenter.
+
+      await page.evaluate((id) => {
+        const ed = (window as unknown as DebugWindow).drawpane;
+        ed.setTool("select");
+        ed.select([id]);
+        ed.setReadOnly(true);
+      }, rectAId);
+      const beforeReadOnlyPan = await readSnapshot(page, rectAId);
+      await cdpDrag(cdp, { x: 400, y: 400 }, { x: 460, y: 430 }, 6);
+      const afterReadOnlyPan = await readSnapshot(page, rectAId);
+      expect(afterReadOnlyPan.camera.x - beforeReadOnlyPan.camera.x).toBeCloseTo(60, 0);
+      expect(afterReadOnlyPan.camera.y - beforeReadOnlyPan.camera.y).toBeCloseTo(30, 0);
+      expect(afterReadOnlyPan.selection).toEqual([rectAId]);
+
+      // 4. At 50% zoom, tapping a 5 px layer 4 px right of selection selects it (F4).
+      const tinyId = await page.evaluate((id) => {
+        const ed = (window as unknown as DebugWindow).drawpane;
+        ed.setReadOnly(false);
+        ed.setTool("select");
+        const b = ed.scene.bounds(id);
+        if (!b) throw new Error("missing bounds");
+        const tiny = ed.createLayer(
+          "rect",
+          { x: b.x + b.width + 4, y: b.y + 45, width: 5, height: 10 },
+          ed.s.pageId,
+          { name: "Tiny Neighbour", fills: [{ type: "solid", color: "#f59e0b" }] },
+        ) as string;
+        ed.zoomTo(0.5);
+        ed.centerOn({ x: b.x + b.width / 2, y: b.y + b.height / 2 });
+        ed.select([id]);
+        return tiny;
+      }, rectAId);
+      const tinyPt = await rectScreenBox(page, tinyId);
+      await cdpTap(cdp, tinyPt.cx, tinyPt.cy);
+      expect((await readSnapshot(page, rectAId)).selection).toEqual([tinyId]);
+      await page.evaluate(() => (window as unknown as DebugWindow).drawpane.undo());
+      await expect(page.getByRole("status")).toContainText("Saved", { timeout: 10_000 });
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("tablet: 2-finger pinch over handles (0 React commits), floating Lens, text edit, and side panel", async ({
+    browser,
+  }) => {
+    const { context, page, cdp } = await openTouchPage(
+      browser,
+      instance.url,
+      storageState,
+      TABLET_1024,
+      fileUrl,
+    );
+    try {
       await page.evaluate((id) => {
         const ed = (window as unknown as DebugWindow).drawpane;
         ed.setTool("select");
@@ -560,36 +691,50 @@ test.describe("Mobile and tablet touch gesture arbitration", () => {
         ed.centerOn({ x: 380, y: 250 });
         ed.select([id]);
       }, rectAId);
+      const lensEl = page.locator(".lens-anchor");
+      await expect(lensEl).toBeVisible({ timeout: 2_000 });
       await page.waitForTimeout(100);
 
-      // 4. Two-finger pinch starting OVER the selected layer's SE resize handle (within slop):
-      // Must NOT resize the 160x100 rectangle and must leave selection, undo depth, and revn unchanged.
-      const handleBox = await rectScreen(rectAId);
+      // 1. Two-finger pinch over the selected layer's SE resize handle: 0 React commits per move.
+      const handleBox = await rectScreenBox(page, rectAId);
       const se = { x: handleBox.right, y: handleBox.bottom };
       const other = { x: handleBox.left, y: handleBox.top };
       const beforeHandlePinch = await readSnapshot(page, rectAId);
-      await touchStart(cdp, [{ id: 1, x: se.x, y: se.y }]);
-      await touchStart(cdp, [
-        { id: 1, x: se.x, y: se.y },
-        { id: 2, x: other.x, y: other.y },
+      await Promise.all([
+        touchStart(cdp, [{ id: 1, x: se.x, y: se.y }]),
+        touchStart(cdp, [
+          { id: 1, x: se.x, y: se.y },
+          { id: 2, x: other.x, y: other.y },
+        ]),
+        // Move 1 flushes the one-time Lens hide commit on cameraGesture start.
+        touchMove(cdp, [
+          { id: 1, x: se.x - 5, y: se.y - 3 },
+          { id: 2, x: other.x + 2, y: other.y + 2 },
+        ]),
       ]);
-      // Pinch inward aggressively (what previously shrank 160 -> 83 px) with zero React re-renders.
+      await waitFrames(page, 2);
       const tabletCommitsBefore = await page.evaluate(
         () => (window as unknown as { __reactCommits?: number }).__reactCommits ?? 0,
       );
-      for (let i = 1; i <= 8; i++) {
-        const t = i / 8;
-        await touchMove(cdp, [
-          { id: 1, x: se.x - 45 * t, y: se.y - 25 * t },
-          { id: 2, x: other.x + 20 * t, y: other.y + 15 * t },
-        ]);
+      const tabletMoves: Promise<unknown>[] = [];
+      for (let i = 2; i <= 10; i++) {
+        const t = i / 10;
+        tabletMoves.push(
+          touchMove(cdp, [
+            { id: 1, x: se.x - 45 * t, y: se.y - 25 * t },
+            { id: 2, x: other.x + 20 * t, y: other.y + 15 * t },
+          ]),
+        );
       }
+      await Promise.all(tabletMoves);
       const tabletCommitsAfter = await page.evaluate(
         () => (window as unknown as { __reactCommits?: number }).__reactCommits ?? 0,
       );
       expect(tabletCommitsAfter - tabletCommitsBefore).toBe(0);
-      await touchEnd(cdp, [{ id: 2, x: other.x + 20, y: other.y + 15 }]);
-      await touchEnd(cdp, []);
+      await Promise.all([
+        touchEnd(cdp, [{ id: 1, x: se.x - 45, y: se.y - 25 }]),
+        touchEnd(cdp, [{ id: 2, x: other.x + 20, y: other.y + 15 }]),
+      ]);
       await page.waitForTimeout(120);
       const afterHandlePinch = await readSnapshot(page, rectAId);
       expect(afterHandlePinch.camera.zoom).toBeLessThan(beforeHandlePinch.camera.zoom * 0.8);
@@ -600,50 +745,277 @@ test.describe("Mobile and tablet touch gesture arbitration", () => {
       expect(afterHandlePinch.revn).toBe(beforeHandlePinch.revn);
       expect(afterHandlePinch.pendingCount).toBe(0);
 
-      // 5. Mid-drag second-finger rollback: finger 1 drags the SE handle 40 px inward (past slop,
-      // actively resizing locally!), THEN finger 2 lands and pinches. Rollback must restore exact
-      // width/height, undoDepth, redoDepth, selection, and send ZERO transactions to server.
+      // 2. Pinch with Finger 1 on SE handle + Finger 2 on floating Selection Lens (F1): zooms without resizing.
       await page.evaluate((id) => {
         const ed = (window as unknown as DebugWindow).drawpane;
         ed.zoomTo(1);
         ed.centerOn({ x: 380, y: 250 });
         ed.select([id]);
       }, rectAId);
-      await page.waitForTimeout(100);
-      const midBox = await rectScreen(rectAId);
-      const beforeMidRollback = await readSnapshot(page, rectAId);
-      await touchStart(cdp, [{ id: 1, x: midBox.right, y: midBox.bottom }]);
-      await touchMove(cdp, [{ id: 1, x: midBox.right - 20, y: midBox.bottom }]);
-      await touchMove(cdp, [{ id: 1, x: midBox.right - 40, y: midBox.bottom }]);
-      // Confirm resize actually engaged locally before finger 2 lands.
-      const duringDrag = await readSnapshot(page, rectAId);
-      expect(duringDrag.node?.width).toBeLessThan(160);
-      expect(duringDrag.holding).toBe(true);
-      // Now finger 2 lands and expands to zoom in.
-      await touchStart(cdp, [
-        { id: 1, x: midBox.right - 40, y: midBox.bottom },
-        { id: 2, x: midBox.left, y: midBox.top },
-      ]);
+      await expect(lensEl).toBeVisible({ timeout: 2_000 });
+      const lensBox1 = await lensEl.boundingBox();
+      if (!lensBox1) throw new Error("missing lens bounding box");
+      const boxF1a = await rectScreenBox(page, rectAId);
+      const beforeLensPinchA = await readSnapshot(page, rectAId);
+      const f2Lens = { x: lensBox1.x + lensBox1.width / 2, y: lensBox1.y + lensBox1.height / 2 };
+      const f1aOps: Promise<unknown>[] = [
+        touchStart(cdp, [{ id: 1, x: boxF1a.right, y: boxF1a.bottom }]),
+        touchStart(cdp, [
+          { id: 1, x: boxF1a.right, y: boxF1a.bottom },
+          { id: 2, x: f2Lens.x, y: f2Lens.y },
+        ]),
+      ];
       for (let i = 1; i <= 6; i++) {
         const t = i / 6;
-        await touchMove(cdp, [
-          { id: 1, x: midBox.right - 40 + 40 * t, y: midBox.bottom + 20 * t },
-          { id: 2, x: midBox.left - 30 * t, y: midBox.top - 20 * t },
-        ]);
+        f1aOps.push(
+          touchMove(cdp, [
+            { id: 1, x: boxF1a.right + 25 * t, y: boxF1a.bottom - 20 * t },
+            { id: 2, x: f2Lens.x - 25 * t, y: f2Lens.y + 20 * t },
+          ]),
+        );
       }
-      // Lift finger 2 mid-pinch, drag finger 1 over the layer (must NOT move/resize it!), then re-add finger 2.
-      await touchEnd(cdp, [{ id: 1, x: midBox.right, y: midBox.bottom + 20 }]);
+      f1aOps.push(touchEnd(cdp, []));
+      await Promise.all(f1aOps);
+      await page.waitForTimeout(100);
+      const afterLensPinchA = await readSnapshot(page, rectAId);
+      expect(afterLensPinchA.camera.zoom).toBeGreaterThan(beforeLensPinchA.camera.zoom * 1.15);
+      expect(afterLensPinchA.node).toEqual(beforeLensPinchA.node);
+      expect(afterLensPinchA.undoDepth).toBe(beforeLensPinchA.undoDepth);
+
+      // 3. Pinch with Finger 1 on floating Lens + Finger 2 on rectA center (F1): zooms without moving.
+      await page.evaluate((id) => {
+        const ed = (window as unknown as DebugWindow).drawpane;
+        ed.zoomTo(1);
+        ed.centerOn({ x: 380, y: 250 });
+        ed.select([id]);
+      }, rectAId);
+      await expect(lensEl).toBeVisible({ timeout: 2_000 });
+      const lensBox2 = await lensEl.boundingBox();
+      if (!lensBox2) throw new Error("missing lens bounding box");
+      const boxF1b = await rectScreenBox(page, rectAId);
+      const beforeLensPinchB = await readSnapshot(page, rectAId);
+      const f1Lens = { x: lensBox2.x + lensBox2.width / 2, y: lensBox2.y + lensBox2.height / 2 };
+      const f1bOps: Promise<unknown>[] = [
+        touchStart(cdp, [{ id: 1, x: f1Lens.x, y: f1Lens.y }]),
+        touchStart(cdp, [
+          { id: 1, x: f1Lens.x, y: f1Lens.y },
+          { id: 2, x: boxF1b.cx, y: boxF1b.cy },
+        ]),
+      ];
+      for (let i = 1; i <= 6; i++) {
+        const t = i / 6;
+        f1bOps.push(
+          touchMove(cdp, [
+            { id: 1, x: f1Lens.x - 25 * t, y: f1Lens.y + 20 * t },
+            { id: 2, x: boxF1b.cx + 25 * t, y: boxF1b.cy - 20 * t },
+          ]),
+        );
+      }
+      f1bOps.push(touchEnd(cdp, []));
+      await Promise.all(f1bOps);
+      await page.waitForTimeout(100);
+      const afterLensPinchB = await readSnapshot(page, rectAId);
+      expect(afterLensPinchB.camera.zoom).toBeGreaterThan(beforeLensPinchB.camera.zoom * 1.15);
+      expect(afterLensPinchB.node).toEqual(beforeLensPinchB.node);
+      expect(afterLensPinchB.undoDepth).toBe(beforeLensPinchB.undoDepth);
+
+      // 4. Pinch while drag-selecting inside a text edit box keeps text editing open and zooms (F1).
+      const textId = await page.evaluate(() => {
+        const ed = (window as unknown as DebugWindow).drawpane;
+        const id = ed.createLayer("text", { x: 260, y: 360, width: 180, height: 40 }, ed.s.pageId, {
+          characters: "Pinch while editing",
+        }) as string;
+        ed.zoomTo(1);
+        ed.centerOn({ x: 380, y: 320 });
+        ed.select([id]);
+        ed.startTextEdit(id);
+        return id;
+      });
+      const textBoxEl = page.locator(".canvas__text-editing");
+      await expect(textBoxEl).toBeVisible({ timeout: 2_000 });
+      const tb = await textBoxEl.boundingBox();
+      if (!tb) throw new Error("missing text edit box");
+      const beforeTextPinch = await readSnapshot(page, rectAId);
+      const f1cOps: Promise<unknown>[] = [
+        touchStart(cdp, [{ id: 1, x: tb.x + 20, y: tb.y + tb.height / 2 }]),
+        touchMove(cdp, [{ id: 1, x: tb.x + 50, y: tb.y + tb.height / 2 }]),
+        touchStart(cdp, [
+          { id: 1, x: tb.x + 50, y: tb.y + tb.height / 2 },
+          { id: 2, x: tb.x + 150, y: tb.y - 60 },
+        ]),
+      ];
+      for (let i = 1; i <= 5; i++) {
+        const t = i / 5;
+        f1cOps.push(
+          touchMove(cdp, [
+            { id: 1, x: tb.x + 50 - 25 * t, y: tb.y + tb.height / 2 + 15 * t },
+            { id: 2, x: tb.x + 150 + 25 * t, y: tb.y - 60 - 15 * t },
+          ]),
+        );
+      }
+      f1cOps.push(touchEnd(cdp, []));
+      await Promise.all(f1cOps);
+      const afterTextPinch = await readSnapshot(page, rectAId);
+      expect(afterTextPinch.editingText).toBe(textId);
+      expect(afterTextPinch.camera.zoom).toBeGreaterThan(beforeTextPinch.camera.zoom * 1.15);
+      await page.evaluate(() => {
+        const ed = (window as unknown as DebugWindow).drawpane;
+        ed.endTextEdit();
+        ed.undo();
+      });
+      await expect(page.getByRole("status")).toContainText("Saved", { timeout: 10_000 });
+
+      // 5. Finger 1 drags a layer on canvas while Finger 2 lands on a non-canvas side panel:
+      // rolls back the uncommitted drag and blocks without pinching or committing (F1).
+      await page.evaluate((id) => {
+        const ed = (window as unknown as DebugWindow).drawpane;
+        ed.zoomTo(1);
+        ed.centerOn({ x: 380, y: 250 });
+        ed.select([id]);
+      }, rectAId);
+      const sidePane = page.locator(".pane--left, .pane--right").first();
+      const paneBox = await sidePane.boundingBox();
+      if (paneBox) {
+        const boxF1d = await rectScreenBox(page, rectAId);
+        const beforeSideCancel = await readSnapshot(page, rectAId);
+        await page.evaluate((id) => {
+          const ed = (window as unknown as DebugWindow).drawpane as DebugEditor & {
+            doc: { subscribe(fn: () => void): () => void };
+          };
+          const w = window as unknown as {
+            __sideMoved?: boolean;
+            __sideOff?: () => void;
+          };
+          w.__sideMoved = false;
+          const startX = Number(ed.doc.get(id)?.props.x);
+          w.__sideOff = ed.doc.subscribe(() => {
+            if (Number(ed.doc.get(id)?.props.x) !== startX) w.__sideMoved = true;
+          });
+        }, rectAId);
+        await Promise.all([
+          touchStart(cdp, [{ id: 1, x: boxF1d.cx, y: boxF1d.cy }]),
+          touchMove(cdp, [{ id: 1, x: boxF1d.cx + 30, y: boxF1d.cy }]),
+          touchStart(cdp, [
+            { id: 1, x: boxF1d.cx + 30, y: boxF1d.cy },
+            { id: 2, x: paneBox.x + paneBox.width / 2, y: paneBox.y + paneBox.height / 2 },
+          ]),
+          touchMove(cdp, [
+            { id: 1, x: boxF1d.cx + 60, y: boxF1d.cy + 20 },
+            { id: 2, x: paneBox.x + paneBox.width / 2, y: paneBox.y + paneBox.height / 2 },
+          ]),
+          touchEnd(cdp, []),
+        ]);
+        const sideMoved = await page.evaluate(() => {
+          const w = window as unknown as { __sideMoved?: boolean; __sideOff?: () => void };
+          w.__sideOff?.();
+          return Boolean(w.__sideMoved);
+        });
+        expect(sideMoved).toBe(true);
+        await page.waitForTimeout(80);
+        const afterSideCancel = await readSnapshot(page, rectAId);
+        expect(afterSideCancel.node).toEqual(beforeSideCancel.node);
+        expect(afterSideCancel.undoDepth).toBe(beforeSideCancel.undoDepth);
+        expect(afterSideCancel.camera).toEqual(beforeSideCancel.camera);
+      }
+    } finally {
+      await context.close();
+    }
+  });
+
+  test("tablet: mid-drag rollback, true tail pan, touchcancel, comment draft, long-press menu, and time-boxed pen + palm", async ({
+    browser,
+  }) => {
+    const { context, page, cdp } = await openTouchPage(
+      browser,
+      instance.url,
+      storageState,
+      TABLET_1024,
+      fileUrl,
+    );
+    try {
+      // 1. Mid-drag second-finger rollback + TRUE lift-finger-2 tail pan + re-add finger 3:
+      await page.evaluate((id) => {
+        const ed = (window as unknown as DebugWindow).drawpane;
+        ed.setTool("select");
+        ed.zoomTo(1);
+        ed.centerOn({ x: 380, y: 250 });
+        ed.select([id]);
+      }, rectAId);
+      await page.waitForTimeout(100);
+      const midBox = await rectScreenBox(page, rectAId);
+      const beforeMidRollback = await readSnapshot(page, rectAId);
+      // Observe local preview resize + sync hold synchronously inside the page so IPC latency
+      // can never let the 200 ms hold window elapse before finger 2 arrives.
+      await page.evaluate((id) => {
+        const ed = (window as unknown as DebugWindow).drawpane as DebugEditor & {
+          doc: { subscribe(fn: () => void): () => void };
+        };
+        const w = window as unknown as {
+          __midProbe?: { resized: boolean; held: boolean };
+          __midOff?: () => void;
+        };
+        w.__midProbe = { resized: false, held: false };
+        w.__midOff = ed.doc.subscribe(() => {
+          const width = Number(ed.doc.get(id)?.props.width);
+          if (width < 160 && w.__midProbe) {
+            w.__midProbe.resized = true;
+            if (ed.sync.holding) w.__midProbe.held = true;
+          }
+        });
+      }, rectAId);
+      const midPinchOps: Promise<unknown>[] = [
+        touchStart(cdp, [{ id: 1, x: midBox.right, y: midBox.bottom }]),
+        touchMove(cdp, [{ id: 1, x: midBox.right - 20, y: midBox.bottom }]),
+        touchMove(cdp, [{ id: 1, x: midBox.right - 40, y: midBox.bottom }]),
+        touchStart(cdp, [
+          { id: 1, x: midBox.right - 40, y: midBox.bottom },
+          { id: 2, x: midBox.left, y: midBox.top },
+        ]),
+      ];
+      for (let i = 1; i <= 6; i++) {
+        const t = i / 6;
+        midPinchOps.push(
+          touchMove(cdp, [
+            { id: 1, x: midBox.right - 40 + 40 * t, y: midBox.bottom + 20 * t },
+            { id: 2, x: midBox.left - 30 * t, y: midBox.top - 20 * t },
+          ]),
+        );
+      }
+      await Promise.all(midPinchOps);
+      const midProbe = await page.evaluate(() => {
+        const w = window as unknown as {
+          __midProbe?: { resized: boolean; held: boolean };
+          __midOff?: () => void;
+        };
+        w.__midOff?.();
+        return w.__midProbe ?? { resized: false, held: false };
+      });
+      expect(midProbe.resized).toBe(true);
+      expect(midProbe.held).toBe(true);
+
+      // Lift ONLY finger 2 (CDP touchEnd releases the points it lists!) and pan with finger 1 in tail.
+      await touchEnd(cdp, [{ id: 2, x: midBox.left - 30, y: midBox.top - 20 }]);
+      const camBeforeTail = (await readSnapshot(page, rectAId)).camera;
       await touchMove(cdp, [{ id: 1, x: midBox.right + 45, y: midBox.bottom + 35 }]);
+      const camAfterTail = (await readSnapshot(page, rectAId)).camera;
+      expect(camAfterTail.zoom).toBeCloseTo(camBeforeTail.zoom, 4);
+      expect(camAfterTail.x - camBeforeTail.x).toBeCloseTo(45, 0);
+      expect(camAfterTail.y - camBeforeTail.y).toBeCloseTo(15, 0);
+      // Re-add finger 3 and keep pinching with zero jump.
       await touchStart(cdp, [
         { id: 1, x: midBox.right + 45, y: midBox.bottom + 35 },
         { id: 3, x: midBox.left, y: midBox.top },
       ]);
-      await touchMove(cdp, [
-        { id: 1, x: midBox.right + 65, y: midBox.bottom + 45 },
-        { id: 3, x: midBox.left - 20, y: midBox.top - 10 },
+      const camAtReadd = (await readSnapshot(page, rectAId)).camera;
+      expect(camAtReadd.zoom).toBeCloseTo(camAfterTail.zoom, 4);
+      await Promise.all([
+        touchMove(cdp, [
+          { id: 1, x: midBox.right + 65, y: midBox.bottom + 45 },
+          { id: 3, x: midBox.left - 20, y: midBox.top - 10 },
+        ]),
+        touchEnd(cdp, [{ id: 3, x: midBox.left - 20, y: midBox.top - 10 }]),
+        touchEnd(cdp, [{ id: 1, x: midBox.right + 65, y: midBox.bottom + 45 }]),
       ]);
-      await touchEnd(cdp, [{ id: 1, x: midBox.right + 65, y: midBox.bottom + 45 }]);
-      await touchEnd(cdp, []);
       await page.waitForTimeout(150);
 
       const afterMidRollback = await readSnapshot(page, rectAId);
@@ -655,12 +1027,11 @@ test.describe("Mobile and tablet touch gesture arbitration", () => {
       expect(afterMidRollback.pendingCount).toBe(0);
       expect(afterMidRollback.holding).toBe(false);
       expect(afterMidRollback.camera.zoom).toBeGreaterThan(beforeMidRollback.camera.zoom * 1.2);
-      // Zoom pill updated live in DOM without React per-move renders.
       const zoomText = await page.locator(".zoom__value").textContent();
       expect(zoomText).toBe(`${Math.round(afterMidRollback.camera.zoom * 100)}%`);
       await maybeShot(page, "tablet-after-pinch-rollback.png");
 
-      // 6. Touchcancel mid-drag rolls back uncommitted move cleanly.
+      // 2. Touchcancel mid-drag rolls back uncommitted move cleanly.
       await page.evaluate((id) => {
         const ed = (window as unknown as DebugWindow).drawpane;
         ed.zoomTo(1);
@@ -668,19 +1039,37 @@ test.describe("Mobile and tablet touch gesture arbitration", () => {
         ed.select([id]);
       }, rectAId);
       await page.waitForTimeout(80);
-      const cancelBox = await rectScreen(rectAId);
+      const cancelBox = await rectScreenBox(page, rectAId);
       const beforeCancelDrag = await readSnapshot(page, rectAId);
-      await touchStart(cdp, [{ id: 1, x: cancelBox.cx, y: cancelBox.cy }]);
-      await touchMove(cdp, [{ id: 1, x: cancelBox.cx + 45, y: cancelBox.cy + 25 }]);
-      expect((await readSnapshot(page, rectAId)).node?.x).not.toBe(beforeCancelDrag.node?.x);
-      await touchCancel(cdp);
+      await page.evaluate((id) => {
+        const ed = (window as unknown as DebugWindow).drawpane as DebugEditor & {
+          doc: { subscribe(fn: () => void): () => void };
+        };
+        const w = window as unknown as { __cancelMoved?: boolean; __cancelOff?: () => void };
+        w.__cancelMoved = false;
+        const x0 = Number(ed.doc.get(id)?.props.x);
+        w.__cancelOff = ed.doc.subscribe(() => {
+          if (Number(ed.doc.get(id)?.props.x) !== x0) w.__cancelMoved = true;
+        });
+      }, rectAId);
+      await Promise.all([
+        touchStart(cdp, [{ id: 1, x: cancelBox.cx, y: cancelBox.cy }]),
+        touchMove(cdp, [{ id: 1, x: cancelBox.cx + 45, y: cancelBox.cy + 25 }]),
+        touchCancel(cdp),
+      ]);
+      const cancelMoved = await page.evaluate(() => {
+        const w = window as unknown as { __cancelMoved?: boolean; __cancelOff?: () => void };
+        w.__cancelOff?.();
+        return Boolean(w.__cancelMoved);
+      });
+      expect(cancelMoved).toBe(true);
       await page.waitForTimeout(100);
       const afterCancelDrag = await readSnapshot(page, rectAId);
       expect(afterCancelDrag.node).toEqual(beforeCancelDrag.node);
       expect(afterCancelDrag.undoDepth).toBe(beforeCancelDrag.undoDepth);
       expect(afterCancelDrag.revn).toBe(beforeCancelDrag.revn);
 
-      // 7. Two-finger pan/pinch leaves an open comment draft popover unchanged.
+      // 3. Two-finger pan/pinch leaves an open comment draft popover unchanged.
       await page.evaluate(() => (window as unknown as DebugWindow).drawpane.setTool("comment"));
       await cdpTap(cdp, 520, 420);
       const draftTextarea = page.locator(".comment-popover textarea, .comment-draft textarea");
@@ -692,24 +1081,21 @@ test.describe("Mobile and tablet touch gesture arbitration", () => {
       expect(afterDraftPinch.camera.x - beforeDraftPinch.camera.x).toBeCloseTo(-40, 0);
       await expect(draftTextarea).toBeVisible();
       await expect(draftTextarea).toHaveValue("Keep this draft intact");
-      // Cancel draft and switch back to Select tool.
       await page.getByRole("button", { name: "Cancel" }).click();
       await page.evaluate(() => (window as unknown as DebugWindow).drawpane.setTool("select"));
 
-      // 8. Stationary long-press on tablet opens context menu at the finger; lifting does not close or click it.
-      const menuBox = await rectScreen(rectAId);
+      // 4. Stationary long-press on tablet opens context menu at the finger; lifting does not close or click it.
+      const menuBox = await rectScreenBox(page, rectAId);
       await touchStart(cdp, [{ id: 1, x: menuBox.cx, y: menuBox.cy }]);
       await page.waitForTimeout(600);
       await touchEnd(cdp, []);
       const menu = page.getByRole("menu", { name: /actions/i });
       await expect(menu).toBeVisible({ timeout: 5_000 });
       await maybeShot(page, "tablet-longpress-contextmenu.png");
-      // Dismiss menu by tapping empty canvas.
       await cdpTap(cdp, 280, 140);
       await expect(menu).toBeHidden();
 
-      // 9. Apple Pencil (pointerType: "pen") draws precisely while concurrent palm is ignored,
-      // and subsequent finger touches switch to navigation-only (palm rejection).
+      // 5. Apple Pencil draws with concurrent palm rejection, then fingers select again after ~1 s (F3).
       await page.evaluate(() => {
         const ed = (window as unknown as DebugWindow).drawpane;
         ed.zoomTo(1);
@@ -718,7 +1104,6 @@ test.describe("Mobile and tablet touch gesture arbitration", () => {
       });
       await page.waitForTimeout(80);
       const beforePen = await readSnapshot(page, rectAId);
-      // Pen starts drawing a rectangle while a palm touch lands and slides nearby.
       await cdp.send("Input.dispatchMouseEvent", {
         type: "mousePressed",
         x: 360,
@@ -751,29 +1136,150 @@ test.describe("Mobile and tablet touch gesture arbitration", () => {
 
       const afterPen = await readSnapshot(page, rectAId);
       expect(afterPen.childCount).toBe(beforePen.childCount + 1);
-      // Concurrent palm did not pan the camera during the pen stroke.
       expect(afterPen.camera).toEqual(beforePen.camera);
 
-      // Now penSeen is true: switch back to rect tool and drag with a FINGER.
-      // Finger must PAN the camera (never draw another rectangle, never open menu on hold).
+      // Immediately after pen lift (< 1 s): finger drag pans instead of drawing another rect.
       await page.evaluate(() => (window as unknown as DebugWindow).drawpane.setTool("rect"));
       const beforePalmNav = await readSnapshot(page, rectAId);
-      // Stationary finger hold must not open context menu in palm-rejection mode.
-      await touchStart(cdp, [{ id: 1, x: 400, y: 300 }]);
-      await page.waitForTimeout(600);
-      await touchEnd(cdp, []);
-      await expect(page.getByRole("menu")).toHaveCount(0);
-      expect((await readSnapshot(page, rectAId)).childCount).toBe(beforePalmNav.childCount);
-
-      // Finger drag pans camera instead of drawing a rect.
       await cdpDrag(cdp, { x: 400, y: 300 }, { x: 480, y: 350 }, 6);
       const afterPalmNav = await readSnapshot(page, rectAId);
       expect(afterPalmNav.childCount).toBe(beforePalmNav.childCount);
       expect(afterPalmNav.camera.x - beforePalmNav.camera.x).toBeCloseTo(80, 0);
       expect(afterPalmNav.camera.y - beforePalmNav.camera.y).toBeCloseTo(50, 0);
       expect(afterPalmNav.camera.zoom).toBeCloseTo(beforePalmNav.camera.zoom, 4);
+
+      // After the ~1 s palm-rejection window expires, fingers select layers again!
+      await page.waitForTimeout(1100);
+      await page.evaluate(() => {
+        const ed = (window as unknown as DebugWindow).drawpane;
+        ed.undo(); // remove temporary pen-drawn rect
+        ed.setTool("select");
+        ed.zoomTo(1);
+        ed.centerOn({ x: 380, y: 250 });
+        ed.select([]);
+      });
+      const bAfterPen = await rectScreenBox(page, rectBId);
+      await cdpTap(cdp, bAfterPen.cx, bAfterPen.cy);
+      expect((await readSnapshot(page, rectAId)).selection).toEqual([rectBId]);
     } finally {
       await context.close();
+    }
+  });
+
+  test("tablet two-client collaboration: holds 200 ms then streams live, and second finger after 200 ms reverts for both", async ({
+    browser,
+  }) => {
+    const tablet = await openTouchPage(browser, instance.url, storageState, TABLET_1024, fileUrl);
+    const observer = await openTouchPage(browser, instance.url, storageState, TABLET_1024, fileUrl);
+    try {
+      await tablet.page.evaluate((id) => {
+        const ed = (window as unknown as DebugWindow).drawpane;
+        ed.setTool("select");
+        ed.zoomTo(1);
+        ed.centerOn({ x: 440, y: 250 });
+        ed.select([id]);
+      }, rectBId);
+      await tablet.page.waitForTimeout(100);
+
+      const startBox = await tablet.page.evaluate((nid) => {
+        const ed = (window as unknown as DebugWindow).drawpane;
+        const b = ed.scene.bounds(nid);
+        if (!b) throw new Error("missing bounds");
+        return ed.s.camera.toScreen({ x: b.x + b.width / 2, y: b.y + b.height / 2 });
+      }, rectBId);
+      const startX = (await readSnapshot(tablet.page, rectBId)).node?.x ?? 0;
+
+      // 1. Drag smoothly across > 500 ms: held initially, then streams live BEFORE lift.
+      await tablet.page.evaluate((id) => {
+        const ed = (window as unknown as DebugWindow).drawpane as DebugEditor & {
+          doc: { subscribe(fn: () => void): () => void };
+        };
+        const w = window as unknown as { __sawHoldOnMove?: boolean; __holdOff?: () => void };
+        w.__sawHoldOnMove = false;
+        const x0 = Number(ed.doc.get(id)?.props.x);
+        w.__holdOff = ed.doc.subscribe(() => {
+          if (Number(ed.doc.get(id)?.props.x) !== x0 && ed.sync.holding) {
+            w.__sawHoldOnMove = true;
+          }
+        });
+      }, rectBId);
+      await Promise.all([
+        touchStart(tablet.cdp, [{ id: 1, x: startBox.x, y: startBox.y }]),
+        touchMove(tablet.cdp, [{ id: 1, x: startBox.x + 25, y: startBox.y }]),
+      ]);
+      const sawHoldOnMove = await tablet.page.evaluate(() => {
+        const w = window as unknown as { __sawHoldOnMove?: boolean; __holdOff?: () => void };
+        w.__holdOff?.();
+        return Boolean(w.__sawHoldOnMove);
+      });
+      expect(sawHoldOnMove).toBe(true);
+
+      // Keep dragging past 200 ms without lifting finger 1.
+      for (let i = 2; i <= 8; i++) {
+        await tablet.page.waitForTimeout(65);
+        await touchMove(tablet.cdp, [{ id: 1, x: startBox.x + 15 * i, y: startBox.y }]);
+      }
+      // Observer sees live movement while finger 1 is STILL down!
+      await expect
+        .poll(async () => (await readSnapshot(observer.page, rectBId)).node?.x ?? 0, {
+          timeout: 5_000,
+        })
+        .toBeGreaterThan(startX + 40);
+
+      // Lift finger 1 -> both clients agree on final position.
+      await touchEnd(tablet.cdp, []);
+      await expect
+        .poll(async () => (await readSnapshot(observer.page, rectBId)).node?.x ?? 0, {
+          timeout: 5_000,
+        })
+        .toBeCloseTo(startX + 120, 0);
+
+      // Undo back to original position before testing post-200ms cancel.
+      await tablet.page.evaluate(() => (window as unknown as DebugWindow).drawpane.undo());
+      await expect
+        .poll(async () => (await readSnapshot(observer.page, rectBId)).node?.x ?? 0, {
+          timeout: 5_000,
+        })
+        .toBeCloseTo(startX, 0);
+
+      // 2. Drag past 200 ms so collaborator sees it live, THEN land a second finger:
+      // must revert like desktop Escape on BOTH clients with 0 undo/redo added.
+      const beforeCancel = await readSnapshot(tablet.page, rectBId);
+      await Promise.all([
+        touchStart(tablet.cdp, [{ id: 1, x: startBox.x, y: startBox.y }]),
+        touchMove(tablet.cdp, [{ id: 1, x: startBox.x + 18, y: startBox.y }]),
+      ]);
+      for (let i = 2; i <= 6; i++) {
+        await tablet.page.waitForTimeout(55);
+        await touchMove(tablet.cdp, [{ id: 1, x: startBox.x + 18 * i, y: startBox.y }]);
+      }
+      await expect
+        .poll(async () => (await readSnapshot(observer.page, rectBId)).node?.x ?? 0, {
+          timeout: 5_000,
+        })
+        .toBeGreaterThan(startX + 30);
+
+      // Second finger lands after 200 ms -> reverts locally AND syncs revert to observer.
+      await Promise.all([
+        touchStart(tablet.cdp, [
+          { id: 1, x: startBox.x + 108, y: startBox.y },
+          { id: 2, x: startBox.x - 80, y: startBox.y },
+        ]),
+        touchEnd(tablet.cdp, []),
+      ]);
+
+      const afterTablet = await readSnapshot(tablet.page, rectBId);
+      expect(afterTablet.node?.x).toBeCloseTo(startX, 0);
+      expect(afterTablet.undoDepth).toBe(beforeCancel.undoDepth);
+      expect(afterTablet.redoDepth).toBe(beforeCancel.redoDepth);
+      await expect
+        .poll(async () => (await readSnapshot(observer.page, rectBId)).node?.x ?? 0, {
+          timeout: 5_000,
+        })
+        .toBeCloseTo(startX, 0);
+    } finally {
+      await tablet.context.close();
+      await observer.context.close();
     }
   });
 
@@ -789,7 +1295,6 @@ test.describe("Mobile and tablet touch gesture arbitration", () => {
     );
     try {
       const before = await readSnapshot(page, rectAId);
-      // Exposed canvas on right side of the single default left panel (240 px + margins).
       const center = { x: 520, y: 500 };
       await cdpPinch(cdp, center, 45, 90, 8);
       const after = await readSnapshot(page, rectAId);

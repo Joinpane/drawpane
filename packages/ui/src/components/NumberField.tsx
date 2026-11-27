@@ -4,6 +4,7 @@ import {
   type KeyboardEvent,
   type PointerEvent,
   useCallback,
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -198,6 +199,18 @@ export function NumberField({
       finishEditing(true);
     }
   };
+
+  const onScrubEndRef = useRef(onScrubEnd);
+  onScrubEndRef.current = onScrubEnd;
+  useEffect(
+    () => () => {
+      if (!scrub.current) return;
+      scrub.current = null;
+      document.documentElement.classList.remove("dp-scrubbing");
+      onScrubEndRef.current?.();
+    },
+    [],
+  );
 
   const endScrub = (event: PointerEvent<HTMLSpanElement>) => {
     const active = scrub.current;

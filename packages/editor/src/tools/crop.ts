@@ -195,8 +195,21 @@ export class CropTool implements ToolHandler {
 
   key(input: KeyInput): boolean {
     if (!this.#editor.s.cropping) return false;
-    if (input.key === "Enter" || input.key === "Escape") {
-      this.cancel();
+    if (input.key === "Enter") {
+      if (this.#drag) {
+        if (this.#drag.moved) this.#editor.endGesture();
+        this.#drag = null;
+      }
+      this.#editor.exitCrop();
+      return true;
+    }
+    if (input.key === "Escape") {
+      // Match Figma: Escape mid-drag reverts that drag and stays in crop mode;
+      // pressing Escape when idle exits crop mode.
+      if (this.#drag) {
+        this.cancel();
+        return true;
+      }
       this.#editor.exitCrop();
       return true;
     }

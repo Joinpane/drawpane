@@ -1,8 +1,8 @@
 /**
- * Uncommitted touch interaction rollback: verifies that when a second finger
- * interrupts an in-progress touch move, resize, draw, pen stroke, vector edit,
- * or crop, the document, undo/redo stacks, selection, and collaborator sync
- * stream are completely unchanged.
+ * Uncommitted touch interaction rollback, sync hold scoping, and desktop cancel
+ * semantics: verifies that held touch drags revert cleanly without affecting
+ * undo/redo, collaborators, or unrelated mid-hold edits, and pins desktop Escape
+ * behavior for resize handles and image cropping.
  */
 import { type ClientMessage, type NodeRecord, ROOT_ID } from "@drawpane/model";
 import { describe, expect, it } from "vitest";
@@ -34,7 +34,7 @@ function setupConnected() {
   });
   editor.setPage("p");
   const ix = new Interaction(editor);
-  const txns = () => sent.filter((m) => m.t === "txn");
+  const txns = () => sent.filter((m) => m.t === "txn") as Extract<ClientMessage, { t: "txn" }>[];
   return { editor, ix, sent, txns };
 }
 
@@ -60,8 +60,10 @@ function beginHeldTouchDrag(
   const nestedMark = prevHistoryDepth > 0;
   if (nestedMark) editor.history.begin("Touch stroke", prevSelection);
   editor.sync.beginHold();
-  ix.down(start);
-  ix.move(cur);
+  editor.sync.withHeld(() => {
+    ix.down(start);
+    ix.move(cur);
+  });
   return { prevSelection, prevHistoryDepth, nestedMark };
 }
 
@@ -82,7 +84,7 @@ function rollbackHeldTouchDrag(
   });
 }
 
-describe("held touch rollback", () => {
+describe("held touch rollback and SyncEngine hold scoping", () => {
   it("rolls back a mid-drag move with zero document change, zero undo entries, and zero sent txns", () => {
     const { editor, ix, txns } = setupConnected();
     const id = editor.createLayer(
@@ -97,8 +99,7 @@ describe("held touch rollback", () => {
     const redoBefore = editor.history.redoDepth;
 
     const session = beginHeldTouchDrag(editor, ix, at(180, 150), at(240, 190));
-    ix.move(at(310, 240));
-    // Live local preview moved, but nothing flushed to collaborators while held.
+    editor.sync.withHeld(() => ix.move(at(310, 240)));
     expect((editor.doc.get(id) as NodeRecord).props.x).not.toBe(100);
     expect(txns().length).toBe(sentBefore);
 
@@ -126,7 +127,6 @@ describe("held touch rollback", () => {
     const sentBefore = txns().length;
     const undoBefore = editor.history.undoDepth;
 
-    // Grab the east handle at (260, 150) and pull inward to 83 px wide, then roll back.
     const session = beginHeldTouchDrag(editor, ix, at(260, 150), at(183, 150));
     expect((editor.doc.get(id) as NodeRecord).props.width).toBe(83);
     expect(txns().length).toBe(sentBefore);
@@ -180,12 +180,10 @@ describe("held touch rollback", () => {
     ) as string;
     editor.select([a]);
     editor.sync.flush();
-    // Acknowledge our setup transaction so revn advances to 2.
     editor.sync.receive({ t: "ack", seq: 1, revn: 2 });
     const sentBefore = txns().length;
 
     const session = beginHeldTouchDrag(editor, ix, at(150, 150), at(250, 150));
-    // A teammate moves `b` while our touch drag is held locally.
     editor.sync.receive({
       t: "txn",
       revn: 3,
@@ -197,16 +195,46 @@ describe("held touch rollback", () => {
 
     rollbackHeldTouchDrag(editor, ix, session);
 
-    // Our local drag reverted, while the teammate's move stays intact.
     expect((editor.doc.get(a) as NodeRecord).props.x).toBe(100);
     expect((editor.doc.get(b) as NodeRecord).props.x).toBe(520);
     expect(txns().length).toBe(sentBefore);
   });
 
+  it("exercises SyncEngine discardHold hasNonHeldAfter rebase and flushes preserved edits", () => {
+    const { editor, txns } = setupConnected();
+    const a = editor.createLayer(
+      "rect",
+      { x: 100, y: 100, width: 100, height: 100 },
+      "p",
+    ) as string;
+    const b = editor.createLayer(
+      "rect",
+      { x: 400, y: 100, width: 100, height: 100 },
+      "p",
+    ) as string;
+    editor.sync.flush();
+    const sentBefore = txns().length;
+
+    editor.sync.beginHold();
+    editor.sync.withHeld(() => editor.sync.commit([{ op: "set", id: a, prop: "x", value: 250 }]));
+    // Non-held commit arrives after the held commit (e.g. font refit or undo).
+    editor.sync.commit([{ op: "set", id: b, prop: "y", value: 333 }]);
+    // Further held commit interleaved after the non-held commit.
+    editor.sync.withHeld(() => editor.sync.commit([{ op: "set", id: a, prop: "x", value: 290 }]));
+    editor.sync.flush();
+    expect(txns().length).toBe(sentBefore);
+
+    expect(editor.sync.discardHold()).toBe(true);
+    expect((editor.doc.get(a) as NodeRecord).props.x).toBe(100);
+    expect((editor.doc.get(b) as NodeRecord).props.y).toBe(333);
+    // Preserved non-held edit flushed immediately on discardHold.
+    expect(txns().length).toBe(sentBefore + 1);
+    expect(txns().at(-1)?.ops).toEqual([{ op: "set", id: b, prop: "y", value: 333 }]);
+  });
+
   it("rolls back only the uncommitted anchor of an in-progress pen path", () => {
     const { editor, ix, txns } = setupConnected();
     editor.setTool("pen");
-    // Place two committed anchors first.
     ix.down(at(100, 100));
     ix.up(at(100, 100));
     ix.down(at(200, 100));
@@ -215,7 +243,6 @@ describe("held touch rollback", () => {
     const sentBefore = txns().length;
     expect(ix.pen.preview()?.anchors.length).toBe(2);
 
-    // Start dragging a third anchor, then roll back on second finger.
     const session = beginHeldTouchDrag(editor, ix, at(300, 200), at(340, 220));
     expect(ix.pen.preview()?.anchors.length).toBe(3);
     expect(txns().length).toBe(sentBefore);
@@ -227,17 +254,29 @@ describe("held touch rollback", () => {
     expect(txns().length).toBe(sentBefore);
   });
 
-  it("widens handle hit zones only for coarse touch input, leaving mouse precision unchanged", () => {
+  it("widens handle hit zones for coarse touch drags while skipping handles on taps", () => {
     const { editor, ix } = setupConnected();
     const id = editor.createLayer(
       "rect",
       { x: 100, y: 100, width: 160, height: 100 },
       "p",
     ) as string;
+    const tiny = editor.createLayer(
+      "rect",
+      { x: 264, y: 145, width: 5, height: 10 },
+      "p",
+    ) as string;
     editor.select([id]);
-    // 9 px outside the east handle at (260, 150): missed by mouse (6 px), hit by coarse touch (12 px).
+    // 9 px outside east handle at (260, 150): missed by mouse (6 px), hit by coarse touch (12 px).
     expect(ix.handleAt({ x: 269, y: 150 }, false)).toBeNull();
     expect(ix.handleAt({ x: 269, y: 150 }, true)).toEqual({ handle: "e", rotate: false });
+
+    // At 50% zoom, tapping `tiny` with `skipHandles: true` selects `tiny` instead of grabbing the handle.
+    editor.zoomTo(0.5);
+    const tinyScreen = editor.s.camera.toScreen({ x: 266.5, y: 150 });
+    ix.down(at(tinyScreen.x, tinyScreen.y, { coarse: false, skipHandles: true }));
+    ix.up(at(tinyScreen.x, tinyScreen.y, { coarse: false, skipHandles: true }));
+    expect(editor.s.selection).toEqual([tiny]);
   });
 
   it("rolls back a vector-edit anchor drag and restores prior anchor selection", () => {
@@ -252,7 +291,6 @@ describe("held touch rollback", () => {
     const undoBefore = editor.history.undoDepth;
     const beforePath = (editor.doc.get(id) as NodeRecord).props.pathData;
 
-    // Grab anchor 1 at screen (200, 100) and drag it to (260, 140), then roll back on second finger.
     const session = beginHeldTouchDrag(editor, ix, at(200, 100), at(260, 140));
     expect((editor.doc.get(id) as NodeRecord).props.pathData).not.toBe(beforePath);
     expect(txns().length).toBe(sentBefore);
@@ -263,5 +301,112 @@ describe("held touch rollback", () => {
     expect(editor.s.vectorEdit?.anchors).toEqual(["0:0"]);
     expect(editor.history.undoDepth).toBe(undoBefore);
     expect(txns().length).toBe(sentBefore);
+  });
+});
+
+describe("desktop Escape cancel semantics", () => {
+  const mouse = (x: number, y: number): PointerInput => at(x, y, { coarse: false });
+
+  it("keeps the previous edit when pressing Escape right after pressing a resize handle without moving", () => {
+    const { editor, ix } = setupConnected();
+    const id = editor.createLayer(
+      "rect",
+      { x: 100, y: 100, width: 160, height: 100 },
+      "p",
+    ) as string;
+    editor.setProp([id], "opacity", 0.5);
+    editor.select([id]);
+
+    ix.down(mouse(260, 150)); // press east handle without moving
+    ix.cancel();
+
+    expect((editor.doc.get(id) as NodeRecord).props.opacity).toBe(0.5);
+    expect(editor.history.redoDepth).toBe(0);
+    expect(editor.s.gesture).toBe(false);
+  });
+
+  it("reverts an in-progress resize on Escape without leaving a redo entry", () => {
+    const { editor, ix } = setupConnected();
+    const id = editor.createLayer(
+      "rect",
+      { x: 100, y: 100, width: 160, height: 100 },
+      "p",
+    ) as string;
+    editor.select([id]);
+    const undoBefore = editor.history.undoDepth;
+
+    ix.down(mouse(260, 150));
+    ix.move(mouse(320, 150));
+    expect((editor.doc.get(id) as NodeRecord).props.width).toBe(220);
+
+    ix.cancel();
+
+    expect((editor.doc.get(id) as NodeRecord).props.width).toBe(160);
+    expect(editor.history.undoDepth).toBe(undoBefore);
+    expect(editor.history.canRedo).toBe(false);
+    expect(editor.s.gesture).toBe(false);
+  });
+
+  it("reverts an active crop drag on Escape while staying in crop mode, and commits on Enter", () => {
+    const editor = new Editor({ measurer: { width: () => 0 }, clientId: "crop-escape" });
+    editor.state.set({ role: "editor", viewport: { width: 1000, height: 800 } });
+    editor.imageSize = () => ({ width: 2000, height: 1000 });
+    editor.doc.apply([
+      { op: "create", id: "p", type: "page", parent: ROOT_ID, key: "a0", props: {} },
+      {
+        op: "create",
+        id: "photo",
+        type: "rect",
+        parent: "p",
+        key: "a0",
+        props: {
+          x: 100,
+          y: 100,
+          width: 200,
+          height: 200,
+          fills: [{ type: "image", ref: "a".repeat(64), scaleMode: "fill" }],
+        },
+      },
+    ]);
+    editor.setPage("p");
+    const ix = new Interaction(editor);
+    editor.select(["photo"]);
+    editor.enterCrop("photo");
+    const undoBefore = editor.history.undoDepth;
+
+    // Start dragging the right crop handle inward, then press Escape:
+    // matches Figma by reverting the active drag while remaining in crop mode.
+    ix.down(mouse(300, 200));
+    ix.move(mouse(250, 200));
+    expect((editor.doc.get("photo") as NodeRecord).props.width).toBe(150);
+
+    expect(ix.key({ key: "Escape", shift: false, alt: false, mod: false })).toBe(true);
+    expect((editor.doc.get("photo") as NodeRecord).props.width).toBe(200);
+    expect(editor.history.undoDepth).toBe(undoBefore);
+    expect(editor.history.canRedo).toBe(false);
+    expect(editor.s.gesture).toBe(false);
+    expect(editor.s.cropping).toEqual({ id: "photo", index: 0 });
+
+    // A second Escape (when idle in crop mode) exits crop mode.
+    expect(ix.key({ key: "Escape", shift: false, alt: false, mod: false })).toBe(true);
+    expect(editor.s.cropping).toBeNull();
+
+    // Enter while dragging commits the crop drag and exits crop mode.
+    editor.enterCrop("photo");
+    ix.down(mouse(300, 200));
+    ix.move(mouse(260, 200));
+    expect(ix.key({ key: "Enter", shift: false, alt: false, mod: false })).toBe(true);
+    expect((editor.doc.get("photo") as NodeRecord).props.width).toBe(160);
+    expect(editor.s.cropping).toBeNull();
+    expect(editor.s.gesture).toBe(false);
+
+    // Direct interaction.cancel() mid-crop drag also reverts cleanly.
+    editor.enterCrop("photo");
+    ix.down(mouse(260, 200));
+    ix.move(mouse(220, 200));
+    expect((editor.doc.get("photo") as NodeRecord).props.width).toBe(120);
+    ix.cancel();
+    expect((editor.doc.get("photo") as NodeRecord).props.width).toBe(160);
+    expect(editor.history.canRedo).toBe(false);
   });
 });

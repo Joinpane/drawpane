@@ -59,6 +59,8 @@ export interface PointerInput {
   readonly clicks: number;
   /** True for direct finger touch input: widens handle hit zones without affecting mouse/pen. */
   readonly coarse?: boolean;
+  /** True for classified touch taps: skips resize/rotate handle zones since a tap cannot drag. */
+  readonly skipHandles?: boolean;
 }
 
 export type HandleId = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
@@ -339,7 +341,8 @@ export class Interaction {
       }
     }
 
-    const handle = editor.canEdit ? this.#handleAt(input.screen, input.coarse) : null;
+    const handle =
+      editor.canEdit && !input.skipHandles ? this.#handleAt(input.screen, input.coarse) : null;
     if (handle) {
       const nodes = this.#snapshot(editor.s.selection);
       editor.beginGesture(handle.rotate ? "Rotate" : "Resize");
@@ -811,7 +814,8 @@ export class Interaction {
       editor.state.set({ hover: null });
       return;
     }
-    const handle = editor.canEdit ? this.#handleAt(input.screen, input.coarse) : null;
+    const handle =
+      editor.canEdit && !input.skipHandles ? this.#handleAt(input.screen, input.coarse) : null;
     if (handle) {
       this.cursor = handle.rotate ? "alias" : resizeCursor(handle.handle, this.selectionFrame());
       editor.state.set({ hover: null });
@@ -865,10 +869,34 @@ export class Interaction {
    * The handle under a screen point, except a rotation zone where a frame's
    * name label sits: the label sits just outside the top-left corner, right
    * where you'd rotate, and naming or picking the frame wins there.
+   * For coarse touch drags, an unselected layer directly under the finger wins
+   * over the widened outer touch halo beyond the standard handle radius.
    */
   #handleAt(screen: Point, coarse = false): ReturnType<Interaction["handleAt"]> {
-    const handle = this.handleAt(screen, coarse);
-    return handle?.rotate && frameLabelAt(this.#editor, screen) ? null : handle;
+    const exact = this.handleAt(screen, false);
+    if (exact) {
+      return exact.rotate && frameLabelAt(this.#editor, screen) ? null : exact;
+    }
+    if (!coarse) return null;
+    const widened = this.handleAt(screen, true);
+    if (!widened) return null;
+    if (widened.rotate && frameLabelAt(this.#editor, screen)) return null;
+    const frame = this.selectionFrame();
+    const pageId = this.#editor.s.pageId;
+    if (pageId && (!frame || !this.#insideFrame(frame, screen))) {
+      const leaf = this.#pick(this.#page(screen));
+      if (leaf) {
+        const target = selectionTarget(
+          this.#editor.scene,
+          pageId,
+          leaf,
+          this.#editor.s.selection,
+          false,
+        );
+        if (!this.#editor.s.selection.includes(target)) return null;
+      }
+    }
+    return widened;
   }
 
   /**

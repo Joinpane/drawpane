@@ -1,5 +1,4 @@
 import {
-  Camera,
   CanvasRenderer,
   fontString,
   frameLabelAt,
@@ -23,6 +22,7 @@ import { loadedFamilies, watchDocumentFonts } from "../fonts/document-fonts";
 import { fonts } from "../fonts/fonts";
 import { COMPONENT_DRAG_MIME } from "./AssetsPanel";
 import { passesToCanvas } from "./canvas-gestures";
+import { createCanvasTouchHost, isCanvasTouchPassthrough } from "./canvas-touch";
 import {
   COMPOSITE_ONLY_MS,
   EngineView,
@@ -46,7 +46,7 @@ import { engineBackendLabel, fallbackToReason, setRendererStatus } from "./rende
 import { shaper } from "./shaping";
 import { TextEditor } from "./TextEditor";
 import { TouchArbiter, type TouchPoint } from "./touch-arbitration";
-import { commentBridgeFor, openMenu, uiFor } from "./ui-state";
+import { openMenu, uiFor } from "./ui-state";
 import { VectorHints } from "./VectorHints";
 import { settleAfterNotch } from "./wheel-notch";
 
@@ -1168,17 +1168,6 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       };
     };
 
-    const pointToInput = (point: TouchPoint, clicks = 1, coarse = false): PointerInput => ({
-      screen: point.screen,
-      button: point.button,
-      shift: point.shift,
-      alt: point.alt,
-      mod: point.mod,
-      noSnap: point.noSnap,
-      clicks,
-      ...(coarse ? { coarse: true } : {}),
-    });
-
     // Shared canvas context menu selection and open helper (mouse right-click and tablet long-press).
     const openCanvasContextMenu = (clientX: number, clientY: number, deep: boolean) => {
       if (interaction.busy) return;
@@ -1215,128 +1204,57 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       openMenu(editor, { kind: "canvas", x: clientX, y: clientY, point });
     };
 
-    /** Snapshot for rolling back an uncommitted single-finger touch tool drag on a second touch. */
-    let touchDrag: {
-      readonly prevSelection: readonly string[];
-      readonly prevHistoryDepth: number;
-      readonly nestedMark: boolean;
-    } | null = null;
+    /** Touch/mobile-pen pointerIds started on `.canvas__overlay`. */
+    const overlayTouches = new Set<number>();
+    /** Original target element for touches started outside `.canvas__overlay`, for capture release. */
+    const externalTargets = new Map<number, Element>();
 
-    const arbiter = new TouchArbiter({
-      workspaceMode: () => uiFor(editor).get().workspaceMode,
-      tool: () => editor.s.tool,
-      camera: () => editor.s.camera,
-      setCamera: (next) => editor.setCamera(new Camera(next.x, next.y, next.zoom)),
-      onCameraGestureStart: () => {
-        editor.stopCameraAnimation();
-        cameraMotion.current.active = true;
-        uiFor(editor).set({ cameraGesture: true });
+    const touchHost = createCanvasTouchHost({
+      editor,
+      interaction,
+      getHostElement: () => host.current,
+      setCursor: (next) => {
+        el.style.cursor = next;
       },
-      onCameraGestureEnd: () => {
+      blurOutsideCanvas,
+      openCanvasContextMenu,
+      onCameraMotionStart: () => {
+        cameraMotion.current.active = true;
+      },
+      onCameraMotionEnd: () => {
         cameraMotion.current.active = false;
-        uiFor(editor).set({ cameraGesture: false });
         cameraMotion.current.settle();
       },
-      onTap: (point, tapClicks) => {
-        blurOutsideCanvas();
-        if (editor.s.tool === "comment") {
-          const hostEl = host.current;
-          if (hostEl) commentBridgeFor(editor)?.placeAt(hostEl, point.client.x, point.client.y);
-          return;
+      onPromoteExternalTouches: (pointerIds) => {
+        for (const id of pointerIds) {
+          const target = externalTargets.get(id);
+          for (let cur: Element | null = target ?? null; cur; cur = cur.parentElement) {
+            try {
+              if (cur.hasPointerCapture(id)) cur.releasePointerCapture(id);
+            } catch {
+              // Synthetic or detached elements may not support capture release.
+            }
+          }
         }
-        commentBridgeFor(editor)?.dismissOpen();
-        const input = pointToInput(point, tapClicks, true);
-        interaction.down(input);
-        interaction.up(input);
-        el.style.cursor = interaction.cursor;
-      },
-      onLongPress: (point, mode) => {
-        blurOutsideCanvas();
-        if (mode === "phone") {
-          const hostEl = host.current;
-          if (hostEl) commentBridgeFor(editor)?.placeAt(hostEl, point.client.x, point.client.y);
-          return;
+        // Blur floating-chrome inputs (such as a Lens field) when promoted into a pinch,
+        // while keeping active canvas text editing open.
+        const active = document.activeElement;
+        if (
+          active instanceof HTMLElement &&
+          active.closest(".lens-anchor, .toolbar, .zoom, .crop-bar")
+        ) {
+          active.blur();
         }
-        commentBridgeFor(editor)?.dismissOpen();
-        openCanvasContextMenu(point.client.x, point.client.y, false);
-      },
-      onToolDragStart: (start, current) => {
-        blurOutsideCanvas();
-        commentBridgeFor(editor)?.dismissOpen();
-        if (editor.s.editingText !== null) editor.endTextEdit();
-        const prevSelection = editor.s.selection;
-        const prevHistoryDepth = editor.history.groupDepth;
-        const nestedMark = prevHistoryDepth > 0;
-        if (nestedMark) editor.history.begin("Touch stroke", prevSelection);
-        editor.sync.beginHold();
-        touchDrag = { prevSelection, prevHistoryDepth, nestedMark };
-        interaction.down(pointToInput(start, 1, true));
-        interaction.move(pointToInput(current, 1, true));
-        el.style.cursor = interaction.cursor;
-      },
-      onToolDragMove: (point) => {
-        interaction.move(pointToInput(point, 1, true));
-        el.style.cursor = interaction.cursor;
-      },
-      onToolDragEnd: (point) => {
-        const session = touchDrag;
-        touchDrag = null;
-        interaction.up(pointToInput(point, 1, true));
-        if (session?.nestedMark && editor.history.groupDepth > session.prevHistoryDepth) {
-          editor.history.end();
-        }
-        editor.sync.commitHold();
-        el.style.cursor = interaction.cursor;
-      },
-      onToolDragRollback: () => {
-        const session = touchDrag;
-        touchDrag = null;
-        interaction.rollback();
-        if (session) {
-          while (editor.history.groupDepth > session.prevHistoryDepth) editor.dropGesture();
-          editor.sync.discardHold();
-          editor.select(session.prevSelection.filter((id) => editor.doc.has(id)));
-        } else {
-          editor.sync.discardHold();
-        }
-        editor.state.set({
-          gesture: editor.history.grouping,
-          guides: [],
-          marquee: null,
-          guideDraft: null,
-        });
-        el.style.cursor = interaction.cursor;
-      },
-      onPenDown: (point, penClicks) => {
-        blurOutsideCanvas();
-        if (point.button === 2) return;
-        if (editor.s.tool === "comment" && point.button === 0) {
-          const hostEl = host.current;
-          if (hostEl) commentBridgeFor(editor)?.placeAt(hostEl, point.client.x, point.client.y);
-          return;
-        }
-        commentBridgeFor(editor)?.dismissOpen();
-        interaction.down(pointToInput(point, penClicks, false));
-        el.style.cursor = interaction.cursor;
-      },
-      onPenMove: (point) => {
-        interaction.move(pointToInput(point, 1, false));
-        el.style.cursor = interaction.cursor;
-      },
-      onPenUp: (point) => {
-        interaction.up(pointToInput(point, 1, false));
-        el.style.cursor = interaction.cursor;
-      },
-      onPenCancel: () => {
-        interaction.cancel();
-        el.style.cursor = interaction.cursor;
       },
     });
+    const arbiter = new TouchArbiter(touchHost.host);
 
     const onDown = (e: PointerEvent) => {
       if (e.button === 2) return;
-      const isTabletPen = e.pointerType === "pen" && uiFor(editor).get().workspaceMode === "tablet";
-      if (e.pointerType === "touch" || isTabletPen) {
+      const isMobilePen =
+        e.pointerType === "pen" && uiFor(editor).get().workspaceMode !== "desktop";
+      if (e.pointerType === "touch" || isMobilePen) {
+        overlayTouches.add(e.pointerId);
         try {
           el.setPointerCapture(e.pointerId);
         } catch {
@@ -1363,10 +1281,10 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     };
     const onMove = (e: PointerEvent) => {
       if (e.pointerType === "touch") {
-        arbiter.pointerMove(toTouchPoint(e));
+        if (overlayTouches.has(e.pointerId)) arbiter.pointerMove(toTouchPoint(e));
         return;
       }
-      if (e.pointerType === "pen" && uiFor(editor).get().workspaceMode === "tablet") {
+      if (e.pointerType === "pen" && uiFor(editor).get().workspaceMode !== "desktop") {
         arbiter.observePenHover(e.pointerType);
         if (arbiter.pointerMove(toTouchPoint(e))) {
           sendPresence(e);
@@ -1382,8 +1300,11 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     const onUp = (e: PointerEvent) => {
       if (
         e.pointerType === "touch" ||
-        (e.pointerType === "pen" && arbiter.phase === "pen-active")
+        (e.pointerType === "pen" &&
+          (arbiter.phase === "pen-active" || overlayTouches.has(e.pointerId)))
       ) {
+        if (e.pointerType === "touch" && !overlayTouches.has(e.pointerId)) return;
+        overlayTouches.delete(e.pointerId);
         if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
         arbiter.pointerUp(toTouchPoint(e));
         return;
@@ -1394,6 +1315,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       el.style.cursor = interaction.cursor;
     };
     const onCancel = (e: PointerEvent) => {
+      overlayTouches.delete(e.pointerId);
       if (arbiter.pointerCancel(e.pointerId, e.pointerType)) {
         if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
         return;
@@ -1401,7 +1323,9 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       interaction.cancel();
     };
     const onLostCapture = (e: PointerEvent) => {
-      arbiter.lostPointerCapture(e.pointerId, e.pointerType);
+      if (arbiter.lostPointerCapture(e.pointerId, e.pointerType)) {
+        overlayTouches.delete(e.pointerId);
+      }
     };
     const onLeave = (e: PointerEvent) => {
       if (e.pointerType === "touch") return;
@@ -1412,9 +1336,69 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     // strictly on the canvas overlay (never on chrome, panels, inputs, or TextEditor).
     const onCanvasTouch = (e: TouchEvent) => {
       e.preventDefault();
+      if (e.touches.length >= 2 && arbiter.activeTouchCount < 2 && arbiter.phase === "tool-drag") {
+        arbiter.enforceExternalMultiTouch();
+      }
     };
-    const onWindowPointerDown = () => {
-      arbiter.clearCompatSuppression();
+    // Page-wide touch tally in capture phase so a second finger landing on floating chrome
+    // (Lens, toolbar, text-editing box, side panels) rolls back uncommitted drags and hands
+    // over to pan/pinch when both fingers are usable over the canvas.
+    const onWindowPointerDown = (e: PointerEvent) => {
+      if (e.pointerType !== "touch") {
+        arbiter.clearCompatSuppression();
+        return;
+      }
+      if (e.target instanceof Node && el.contains(e.target)) return;
+      const usable = isCanvasTouchPassthrough(e.target, host.current, el, {
+        x: e.clientX,
+        y: e.clientY,
+      });
+      if (e.target instanceof Element) externalTargets.set(e.pointerId, e.target);
+      if (arbiter.externalTouchDown(toTouchPoint(e), usable)) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    const onWindowPointerMove = (e: PointerEvent) => {
+      if (e.pointerType !== "touch") return;
+      if (overlayTouches.has(e.pointerId)) return;
+      if (arbiter.isPromotedTouch(e.pointerId)) {
+        arbiter.pointerMove(toTouchPoint(e));
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      if (externalTargets.has(e.pointerId)) {
+        arbiter.externalTouchMove(toTouchPoint(e));
+      }
+    };
+    const onWindowPointerUp = (e: PointerEvent) => {
+      if (e.pointerType !== "touch") return;
+      if (overlayTouches.has(e.pointerId)) return;
+      externalTargets.delete(e.pointerId);
+      if (arbiter.isPromotedTouch(e.pointerId)) {
+        arbiter.pointerUp(toTouchPoint(e));
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+      arbiter.externalTouchUp(e.pointerId);
+    };
+    const onWindowPointerCancel = (e: PointerEvent) => {
+      if (e.pointerType !== "touch") return;
+      if (overlayTouches.has(e.pointerId)) return;
+      externalTargets.delete(e.pointerId);
+      if (arbiter.isPromotedTouch(e.pointerId)) {
+        arbiter.pointerCancel(e.pointerId, e.pointerType);
+        e.stopPropagation();
+        return;
+      }
+      arbiter.externalTouchCancel(e.pointerId);
+    };
+    const onWindowTouchMove = (e: TouchEvent) => {
+      if (arbiter.hasPromotedTouch && arbiter.cameraGestureActive) {
+        e.preventDefault();
+      }
     };
     const onCompatMouse = (e: MouseEvent) => {
       if (!arbiter.shouldSuppressCompatMouse({ x: e.clientX, y: e.clientY })) return;
@@ -1423,12 +1407,18 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     };
     const onWindowBlur = () => {
       safariGestureActive = false;
+      overlayTouches.clear();
+      externalTargets.clear();
       arbiter.cancelAll();
+      touchHost.dispose();
     };
     const onVisibilityChange = () => {
       if (document.hidden) {
         safariGestureActive = false;
+        overlayTouches.clear();
+        externalTargets.clear();
         arbiter.cancelAll();
+        touchHost.dispose();
       }
     };
     const onWheel = (e: WheelEvent) => {
@@ -1454,7 +1444,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     let safariGestureActive = false;
     const onGestureStart = (e: Event) => {
       e.preventDefault();
-      if (arbiter.hasActiveTouch) {
+      if (arbiter.hasPageTouch) {
         safariGestureActive = false;
         return;
       }
@@ -1464,7 +1454,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     };
     const onGestureChange = (e: Event) => {
       e.preventDefault();
-      if (arbiter.hasActiveTouch || !safariGestureActive) return;
+      if (arbiter.hasPageTouch || !safariGestureActive) return;
       notchSettle.current.until = Math.max(
         notchSettle.current.until,
         performance.now() + SETTLE_MS,
@@ -1515,6 +1505,10 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     window.addEventListener("keydown", onModifier);
     window.addEventListener("keyup", onModifier);
     window.addEventListener("pointerdown", onWindowPointerDown, true);
+    window.addEventListener("pointermove", onWindowPointerMove, true);
+    window.addEventListener("pointerup", onWindowPointerUp, true);
+    window.addEventListener("pointercancel", onWindowPointerCancel, true);
+    window.addEventListener("touchmove", onWindowTouchMove, { capture: true, passive: false });
     window.addEventListener("mousedown", onCompatMouse, true);
     window.addEventListener("mouseup", onCompatMouse, true);
     window.addEventListener("click", onCompatMouse, true);
@@ -1553,7 +1547,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     };
     let chromeGesture = false;
     const onChromeGestureStart = (e: Event) => {
-      if (arbiter.hasActiveTouch) return;
+      if (arbiter.hasPageTouch) return;
       const g = e as Event & { clientX: number; clientY: number };
       chromeGesture = fromChrome(e) && under(g) && passesToCanvas(e.target, null);
       if (chromeGesture) onGestureStart(e);
@@ -1593,10 +1587,17 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     });
     return () => {
       arbiter.dispose();
+      touchHost.dispose();
+      overlayTouches.clear();
+      externalTargets.clear();
       safariGestureActive = false;
       window.removeEventListener("keydown", onModifier);
       window.removeEventListener("keyup", onModifier);
       window.removeEventListener("pointerdown", onWindowPointerDown, true);
+      window.removeEventListener("pointermove", onWindowPointerMove, true);
+      window.removeEventListener("pointerup", onWindowPointerUp, true);
+      window.removeEventListener("pointercancel", onWindowPointerCancel, true);
+      window.removeEventListener("touchmove", onWindowTouchMove, true);
       window.removeEventListener("mousedown", onCompatMouse, true);
       window.removeEventListener("mouseup", onCompatMouse, true);
       window.removeEventListener("click", onCompatMouse, true);

@@ -250,10 +250,10 @@ export function CommentsLayer({
       const target = e.target instanceof Element ? e.target : null;
       const canvas = target?.closest<HTMLElement>(".canvas");
       if (!canvas) return;
-      // Touch (and Apple Pencil on tablets) is arbitrated by Canvas before deciding tap vs drag vs pinch.
+      // Touch (and mobile/tablet stylus) is arbitrated by Canvas before deciding tap vs drag vs pinch.
       const arbitrated =
         e.pointerType === "touch" ||
-        (e.pointerType === "pen" && uiFor(editor).get().workspaceMode === "tablet");
+        (e.pointerType === "pen" && uiFor(editor).get().workspaceMode !== "desktop");
       if (arbitrated) return;
       const panning =
         e.button !== 0 || interaction.cursor === "grab" || interaction.cursor === "grabbing";

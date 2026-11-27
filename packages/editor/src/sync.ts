@@ -118,6 +118,7 @@ export class SyncEngine {
   #seq = 0;
   #pending: PendingTxn[] = [];
   #holdDepth = 0;
+  #capturingHeld = 0;
   #flushScheduled = false;
   #lastFlush = 0;
   #snapshot: NodeRecord[] | null = null;
@@ -197,18 +198,33 @@ export class SyncEngine {
   get holding(): boolean {
     return this.#holdDepth > 0;
   }
+  /** True while synchronous commits in the current scope are tagged as held speculative edits. */
+  get capturingHeld(): boolean {
+    return this.#holdDepth > 0 && this.#capturingHeld > 0;
+  }
 
   /**
-   * Holds subsequent local commits in an unsent pending transaction without flushing
-   * them to collaborators until `commitHold()` or `discardHold()` is called.
-   * Pre-existing unheld edits flush first so transaction order is preserved.
+   * Opens a hold window so commits made inside `withHeld(...)` stay unsent until
+   * `commitHold()` or `discardHold()` is called. Commits outside `withHeld(...)`
+   * (such as font refits or keyboard undo/redo) remain unheld so rolling back
+   * the speculative drag never reverts unrelated edits.
    */
   beginHold(): void {
     if (this.#holdDepth === 0) this.flush();
     this.#holdDepth++;
   }
 
-  /** Releases the hold and flushes held local commits to the room. */
+  /** Runs `fn` tagging synchronous commits inside it as held while `holding` is true. */
+  withHeld<T>(fn: () => T): T {
+    this.#capturingHeld++;
+    try {
+      return fn();
+    } finally {
+      this.#capturingHeld--;
+    }
+  }
+
+  /** Releases the hold and flushes held and queued local commits to the room. */
   commitHold(): void {
     if (this.#holdDepth === 0) return;
     this.#holdDepth--;
@@ -220,22 +236,30 @@ export class SyncEngine {
         released = true;
       }
     }
-    if (released) {
+    const hasUnsent = this.#pending.some((t) => t.seq === null && !t.held);
+    if (released || hasUnsent) {
       this.flush();
       this.#progress();
     }
   }
 
   /**
-   * Releases the hold and reverts any held local transactions directly on the document,
-   * leaving nothing sent to collaborators and nothing left in pending.
+   * Releases the hold and reverts ONLY held speculative transactions on the document,
+   * preserving and flushing any unrelated non-held edits (such as font refits or undo/redo)
+   * that occurred during the hold window.
    */
   discardHold(): boolean {
     if (this.#holdDepth === 0) return false;
     this.#holdDepth--;
     if (this.#holdDepth > 0) return false;
     const firstHeld = this.#pending.findIndex((t) => t.held);
-    if (firstHeld === -1) return false;
+    if (firstHeld === -1) {
+      if (this.#pending.some((t) => t.seq === null && !t.held)) {
+        this.flush();
+        this.#progress();
+      }
+      return false;
+    }
     const hasNonHeldAfter = this.#pending.slice(firstHeld).some((t) => !t.held);
     this.#doc.batch(() => {
       if (!hasNonHeldAfter) {
@@ -251,6 +275,7 @@ export class SyncEngine {
         this.#redoPending();
       }
     });
+    if (this.#pending.some((t) => t.seq === null && !t.held)) this.flush();
     this.#progress();
     return true;
   }
@@ -290,7 +315,7 @@ export class SyncEngine {
     const inverse = this.#doc.apply(ops);
     const stored = [...this.#doc.lastStoredOps];
     const storedInverse = [...this.#doc.lastStoredInverse];
-    const held = this.#holdDepth > 0;
+    const held = this.capturingHeld;
     const last = this.#pending.at(-1);
     if (last && last.seq === null && Boolean(last.held) === held && last.inverse) {
       // Merge into the unsent transaction: undo order is newest first.

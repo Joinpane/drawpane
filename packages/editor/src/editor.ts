@@ -767,7 +767,11 @@ export class Editor {
       }
       throw error;
     }
-    this.history.record(label, inverse, this.s.selection);
+    // An edit triggered outside a held touch drag (for example a keyboard shortcut while
+    // a finger is down) stays independent of the held drag group so rollback keeps both
+    // the document and undo history consistent.
+    const externalDuringHold = this.sync.holding && !this.sync.capturingHeld;
+    this.history.record(label, inverse, this.s.selection, { bypassOpen: externalDuringHold });
     return true;
   }
 

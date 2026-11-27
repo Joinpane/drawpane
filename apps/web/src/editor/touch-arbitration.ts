@@ -2,10 +2,11 @@
  * Touch and stylus gesture arbitration for the design canvas.
  *
  * Tracks active pointers by id and type before any editor tool sees them,
- * classifies tap vs drag vs long-press using touch slop and dwell time,
- * rolls back uncommitted single-finger interactions when a second finger
- * lands, and owns centroid pan plus anchored pinch-zoom until all
- * participating fingers lift.
+ * counts page-wide touches so floating UI or side panels never turn a pinch
+ * into a single-finger edit, classifies tap vs drag vs long-press using touch
+ * slop and dwell time, rolls back uncommitted single-finger interactions when
+ * a second finger lands, and owns centroid pan plus anchored pinch-zoom until
+ * all participating fingers lift.
  *
  * Kept pure (zero DOM dependencies, injectable clock and timers) so the
  * state machine can be unit-tested exhaustively on its own.
@@ -27,6 +28,10 @@ export const PEN_DOUBLE_CLICK_SLOP_PX = 6;
 export const MIN_PINCH_DIST_PX = 10;
 /** Window in ms for suppressing browser duplicate contextmenu and synthetic mouse events. */
 export const COMPAT_SUPPRESS_MS = 450;
+/** Window in ms after the last pen event during which finger touches are rejected as palms. */
+export const PEN_REJECTION_MS = 1000;
+/** Window in ms to hold a single-finger drag before streaming live edits to collaborators. */
+export const TOUCH_HOLD_MS = 200;
 
 export interface Point2D {
   readonly x: number;
@@ -69,11 +74,14 @@ export type ArbiterPhase =
   | "multitouch-tail"
   | "long-press-fired"
   | "pen-active"
-  | "palm-cooldown";
+  | "palm-cooldown"
+  | "blocked";
 
 export interface TouchArbiterHost {
   readonly workspaceMode: () => WorkspaceMode;
   readonly tool: () => ToolId;
+  /** Whether the user can edit the document (false for viewers and read-only workspaces). */
+  readonly canEdit?: () => boolean;
   readonly camera: () => CameraSnapshot;
   readonly setCamera: (next: CameraSnapshot) => void;
   readonly onCameraGestureStart: () => void;
@@ -88,6 +96,8 @@ export interface TouchArbiterHost {
   readonly onPenMove: (point: TouchPoint) => void;
   readonly onPenUp: (point: TouchPoint) => void;
   readonly onPenCancel: () => void;
+  /** Called right before promoted floating-chrome touches enter multitouch pan/pinch. */
+  readonly onPromoteExternalTouches?: (pointerIds: readonly number[]) => void;
   readonly setTimer?: (fn: () => void, ms: number) => unknown;
   readonly clearTimer?: (handle: unknown) => void;
   readonly now?: () => number;
@@ -97,13 +107,20 @@ export interface TouchArbiterHost {
  * Whether a single-finger touch drag pans the camera instead of invoking the active tool.
  *
  * - Phones are read-only view-and-comment workspaces: 1-finger drag always pans.
- * - Tablets with an Apple Pencil / stylus seen enter palm-rejection mode: fingers only navigate.
+ * - Read-only tablets (viewer role or read-only lock) also pan instead of drawing a marquee.
+ * - Tablets within the active Apple Pencil palm-rejection window: fingers only navigate.
  * - Hand, Comment, and Text tools pan on 1-finger drag so dragging never drops stray pins or boxes.
  * - Tablet Select (Move) and drawing tools act on the canvas with 1 finger while 2 fingers pan/pinch.
  */
-export function shouldSingleTouchPan(mode: WorkspaceMode, tool: ToolId, penSeen: boolean): boolean {
+export function shouldSingleTouchPan(
+  mode: WorkspaceMode,
+  tool: ToolId,
+  penRejected: boolean,
+  canEdit = true,
+): boolean {
   if (mode === "phone") return true;
-  if (mode === "tablet" && penSeen) return true;
+  if (!canEdit) return true;
+  if (mode === "tablet" && penRejected) return true;
   return tool === "hand" || tool === "comment" || tool === "text";
 }
 
@@ -173,15 +190,21 @@ export class TouchArbiter {
   #phase: ArbiterPhase = "idle";
   readonly #touches = new Map<number, TouchPoint>();
   readonly #suppressedPalms = new Set<number>();
+  /** Touches currently down outside the canvas overlay (floating chrome or side panels). */
+  readonly #otherTouches = new Map<number, { point: TouchPoint; usable: boolean }>();
+  /** Touches that started on floating chrome and were promoted into `#touches` for multitouch. */
+  readonly #promotedIds = new Set<number>();
   #primaryId: number | null = null;
   #startPoint: TouchPoint | null = null;
+  /** Latched on touch down so a palm resting across the cooldown boundary cannot fire a tap on lift. */
+  #primaryPenRejected = false;
   #longPressHandle: unknown = null;
   #panAnchor: { camera: CameraSnapshot; screen: Point2D } | null = null;
   #multiAnchor: MultitouchAnchor | null = null;
   #cameraGestureActive = false;
 
   #activePenId: number | null = null;
-  #penSeen = false;
+  #penRejectUntil = Number.NEGATIVE_INFINITY;
 
   #lastTap: { at: number; client: Point2D; count: number } | null = null;
   #lastPenDown: { at: number; client: Point2D; count: number } | null = null;
@@ -201,14 +224,19 @@ export class TouchArbiter {
     return this.#phase;
   }
 
-  /** True when at least one touch pointer is currently tracked (including suppressed palms). */
+  /** True when at least one canvas-owned touch pointer is currently tracked (including palms). */
   get hasActiveTouch(): boolean {
     return this.#touches.size > 0 || this.#suppressedPalms.size > 0;
   }
 
-  /** True while a stylus/pen has been seen in tablet mode (enables finger-only navigation). */
-  get penSeen(): boolean {
-    return this.#penSeen;
+  /** True when any touch pointer is currently down anywhere on the page. */
+  get hasPageTouch(): boolean {
+    return this.#touches.size > 0 || this.#suppressedPalms.size > 0 || this.#otherTouches.size > 0;
+  }
+
+  /** True while palm rejection is active (pen down/hovering or within `PEN_REJECTION_MS`). */
+  get penRejectionActive(): boolean {
+    return this.#activePenId !== null || this.#now() < this.#penRejectUntil;
   }
 
   /** True while a touch pan or pinch-zoom camera gesture owns the viewport. */
@@ -216,18 +244,33 @@ export class TouchArbiter {
     return this.#cameraGestureActive;
   }
 
-  /** Number of currently tracked non-palm touch pointers. */
+  /** Number of currently tracked non-palm canvas touch pointers. */
   get activeTouchCount(): number {
     return this.#touches.size;
   }
 
+  /** True when at least one floating-chrome touch is currently promoted into canvas multitouch. */
+  get hasPromotedTouch(): boolean {
+    return this.#promotedIds.size > 0;
+  }
+
+  /** Whether this touch pointer is currently owned by the canvas arbiter. */
+  ownsTouch(pointerId: number): boolean {
+    return this.#touches.has(pointerId) || this.#suppressedPalms.has(pointerId);
+  }
+
+  /** Whether this touch pointer started on floating chrome and was promoted into multitouch. */
+  isPromotedTouch(pointerId: number): boolean {
+    return this.#promotedIds.has(pointerId);
+  }
+
   /**
    * Observes pen hover (`pointermove` without button down) in tablet mode so
-   * Apple Pencil Hover engages palm rejection before the tip touches glass.
+   * Apple Pencil Hover engages time-boxed palm rejection while the tip is near glass.
    */
   observePenHover(pointerType: string): void {
     if (pointerType === "pen" && this.#host.workspaceMode() === "tablet") {
-      this.#penSeen = true;
+      this.#touchPenActivity();
     }
   }
 
@@ -263,15 +306,136 @@ export class TouchArbiter {
   }
 
   /**
-   * Handles `pointerdown`. Returns true when the arbiter took ownership of the pointer
-   * (`touch`, or `pen` on tablets); returns false for desktop mouse / desktop pen.
+   * Observes a touch pointer down OUTSIDE the canvas overlay (page-wide capture).
+   *
+   * - `usable === true`: floating canvas chrome or sibling canvas overlay (Lens,
+   *   toolbar, text-edit box, comment pin) inside the canvas rect that can join
+   *   a two-finger pan/pinch.
+   * - `usable === false`: side panels, modal sheets, popovers, or out-of-bounds UI.
+   *
+   * Returns true when the arbiter promotes this touch into canvas multitouch (caller
+   * should suppress delivery to the underlying chrome and forward its move/up here).
+   */
+  externalTouchDown(point: TouchPoint, usable: boolean): boolean {
+    if (point.pointerType !== "touch") return false;
+    if (this.#phase === "pen-active") {
+      this.#otherTouches.set(point.pointerId, { point, usable: false });
+      return false;
+    }
+
+    const blockedByNonUsable = this.#hasNonUsableOtherTouch();
+
+    if (usable && !blockedByNonUsable) {
+      if (this.#touches.size >= 1) {
+        // Stay quiet if a long-press menu/sheet is already open or we are already blocked.
+        if (this.#phase === "long-press-fired" || this.#phase === "blocked") {
+          this.#otherTouches.set(point.pointerId, { point, usable });
+          return false;
+        }
+        // Finger 1 is on the canvas and Finger 2 landed on floating chrome over it:
+        // roll back any uncommitted drag and hand both fingers to pan/pinch.
+        this.#noteTouch(point);
+        this.#clearLongPress();
+        if (this.#phase === "tool-drag") {
+          this.#host.onToolDragRollback();
+        }
+        this.#promotedIds.add(point.pointerId);
+        this.#touches.set(point.pointerId, point);
+        this.#primaryId = null;
+        this.#startPoint = null;
+        this.#primaryPenRejected = false;
+        this.#panAnchor = null;
+        this.#phase = "multitouch";
+        this.#beginCameraGesture();
+        this.#reanchorMultitouch();
+        return true;
+      }
+
+      if (this.#otherTouches.size >= 1) {
+        // Two usable touches landed on floating chrome / text box over the canvas:
+        // promote the earlier touch(es) plus this touch straight into multitouch pan/pinch.
+        const promoted: number[] = [];
+        for (const [id, entry] of this.#otherTouches) {
+          this.#promotedIds.add(id);
+          this.#touches.set(id, entry.point);
+          promoted.push(id);
+        }
+        this.#otherTouches.clear();
+        this.#promotedIds.add(point.pointerId);
+        this.#touches.set(point.pointerId, point);
+        this.#noteTouch(point);
+        if (promoted.length > 0) this.#host.onPromoteExternalTouches?.(promoted);
+        this.#primaryId = null;
+        this.#startPoint = null;
+        this.#primaryPenRejected = false;
+        this.#panAnchor = null;
+        this.#phase = "multitouch";
+        this.#beginCameraGesture();
+        this.#reanchorMultitouch();
+        return true;
+      }
+
+      // First single finger on floating chrome: track it without interfering.
+      this.#otherTouches.set(point.pointerId, { point, usable: true });
+      return false;
+    }
+
+    // Non-usable touch elsewhere on the page (e.g. side panel or modal sheet):
+    // never let a canvas single-finger drag start or continue while another touch is down.
+    this.#otherTouches.set(point.pointerId, { point, usable });
+    if (
+      this.#touches.size > 0 &&
+      (this.#phase === "pending" || this.#phase === "tool-drag" || this.#phase === "single-pan")
+    ) {
+      this.#blockCanvasTouches();
+    }
+    return false;
+  }
+
+  /** Updates coordinates of a tracked non-promoted external touch. */
+  externalTouchMove(point: TouchPoint): void {
+    const entry = this.#otherTouches.get(point.pointerId);
+    if (!entry) return;
+    entry.point = point;
+  }
+
+  /** Removes a tracked non-promoted external touch on lift. */
+  externalTouchUp(pointerId: number): void {
+    this.#otherTouches.delete(pointerId);
+  }
+
+  /** Removes a tracked non-promoted external touch on cancel. */
+  externalTouchCancel(pointerId: number): void {
+    this.#otherTouches.delete(pointerId);
+  }
+
+  /**
+   * Belt-and-suspenders guard if `TouchEvent.touches.length` reveals another active
+   * touch that was not observed via pointer events: rolls back any active drag.
+   */
+  enforceExternalMultiTouch(): void {
+    if (this.#phase === "pending" || this.#phase === "tool-drag" || this.#phase === "single-pan") {
+      this.#blockCanvasTouches();
+    }
+  }
+
+  /**
+   * Handles `pointerdown` on the canvas overlay. Returns true when the arbiter took
+   * ownership (`touch`, or `pen` on phones/tablets); returns false for desktop mouse/pen.
    */
   pointerDown(point: TouchPoint): boolean {
     this.clearCompatSuppression();
     const mode = this.#host.workspaceMode();
-    if (point.pointerType === "pen" && mode === "tablet") {
-      this.#handlePenDown(point);
-      return true;
+    if (point.pointerType === "pen") {
+      if (mode === "tablet") {
+        this.#handlePenDown(point);
+        return true;
+      }
+      if (mode === "phone") {
+        this.#handleTouchDown(point);
+        return true;
+      }
+      return false;
     }
     if (point.pointerType !== "touch") return false;
     this.#handleTouchDown(point);
@@ -280,9 +444,17 @@ export class TouchArbiter {
 
   /** Handles `pointermove`. Returns true if this pointer belongs to the arbiter. */
   pointerMove(point: TouchPoint): boolean {
-    if (point.pointerType === "pen" && this.#activePenId === point.pointerId) {
-      this.#host.onPenMove(point);
-      return true;
+    if (point.pointerType === "pen") {
+      if (this.#activePenId === point.pointerId) {
+        this.#touchPenActivity();
+        this.#host.onPenMove(point);
+        return true;
+      }
+      if (this.#touches.has(point.pointerId)) {
+        this.#handleTouchMove(point);
+        return true;
+      }
+      return false;
     }
     if (point.pointerType !== "touch") return false;
     this.#handleTouchMove(point);
@@ -291,20 +463,34 @@ export class TouchArbiter {
 
   /** Handles `pointerup`. Returns true if this pointer belongs to the arbiter. */
   pointerUp(point: TouchPoint): boolean {
-    if (point.pointerType === "pen" && this.#activePenId === point.pointerId) {
-      this.#handlePenUp(point);
-      return true;
+    if (point.pointerType === "pen") {
+      if (this.#activePenId === point.pointerId) {
+        this.#handlePenUp(point);
+        return true;
+      }
+      if (this.#touches.has(point.pointerId)) {
+        this.#handleTouchUp(point);
+        return true;
+      }
+      return false;
     }
     if (point.pointerType !== "touch") return false;
     this.#handleTouchUp(point);
     return true;
   }
 
-  /** Handles `pointercancel` (or unexpected `lostpointercapture`). Returns true if owned. */
+  /** Handles `pointercancel`. Returns true if owned. */
   pointerCancel(pointerId: number, pointerType: string): boolean {
-    if (pointerType === "pen" && this.#activePenId === pointerId) {
-      this.#handlePenCancel();
-      return true;
+    if (pointerType === "pen") {
+      if (this.#activePenId === pointerId) {
+        this.#handlePenCancel();
+        return true;
+      }
+      if (this.#touches.has(pointerId)) {
+        this.#handleTouchCancel(pointerId);
+        return true;
+      }
+      return false;
     }
     if (pointerType !== "touch") return false;
     this.#handleTouchCancel(pointerId);
@@ -313,9 +499,16 @@ export class TouchArbiter {
 
   /** Handles `lostpointercapture` only if the pointer is still tracked as active. */
   lostPointerCapture(pointerId: number, pointerType: string): boolean {
-    if (pointerType === "pen" && this.#activePenId === pointerId) {
-      this.#handlePenCancel();
-      return true;
+    if (pointerType === "pen") {
+      if (this.#activePenId === pointerId) {
+        this.#handlePenCancel();
+        return true;
+      }
+      if (this.#touches.has(pointerId)) {
+        this.#handleTouchCancel(pointerId);
+        return true;
+      }
+      return false;
     }
     if (
       pointerType === "touch" &&
@@ -337,8 +530,11 @@ export class TouchArbiter {
     }
     this.#touches.clear();
     this.#suppressedPalms.clear();
+    this.#otherTouches.clear();
+    this.#promotedIds.clear();
     this.#primaryId = null;
     this.#startPoint = null;
+    this.#primaryPenRejected = false;
     this.#panAnchor = null;
     this.#multiAnchor = null;
     this.#activePenId = null;
@@ -352,10 +548,14 @@ export class TouchArbiter {
   }
 
   // -------------------------------------------------------------------------
-  // Pen (tablet Apple Pencil / stylus with palm rejection)
+  // Pen (tablet Apple Pencil / stylus with time-boxed palm rejection)
+
+  #touchPenActivity(): void {
+    this.#penRejectUntil = this.#now() + PEN_REJECTION_MS;
+  }
 
   #handlePenDown(point: TouchPoint): void {
-    this.#penSeen = true;
+    this.#touchPenActivity();
     this.#clearLongPress();
     // If a palm or finger touched down right before the Pencil tip landed,
     // immediately cancel/rollback the touch and suppress those contacts as palms.
@@ -367,8 +567,10 @@ export class TouchArbiter {
     }
     for (const id of this.#touches.keys()) this.#suppressedPalms.add(id);
     this.#touches.clear();
+    this.#promotedIds.clear();
     this.#primaryId = null;
     this.#startPoint = null;
+    this.#primaryPenRejected = false;
     this.#panAnchor = null;
     this.#multiAnchor = null;
 
@@ -390,12 +592,14 @@ export class TouchArbiter {
 
   #handlePenUp(point: TouchPoint): void {
     this.#activePenId = null;
+    this.#touchPenActivity();
     this.#host.onPenUp(point);
     this.#phase = this.#suppressedPalms.size > 0 ? "palm-cooldown" : "idle";
   }
 
   #handlePenCancel(): void {
     this.#activePenId = null;
+    this.#touchPenActivity();
     this.#host.onPenCancel();
     this.#phase = this.#suppressedPalms.size > 0 ? "palm-cooldown" : "idle";
   }
@@ -406,6 +610,27 @@ export class TouchArbiter {
   #noteTouch(point: TouchPoint): void {
     this.#lastTouchAt = this.#now();
     this.#lastTouchClient = point.client;
+  }
+
+  #hasNonUsableOtherTouch(): boolean {
+    for (const entry of this.#otherTouches.values()) {
+      if (!entry.usable) return true;
+    }
+    return false;
+  }
+
+  #blockCanvasTouches(): void {
+    this.#clearLongPress();
+    if (this.#phase === "tool-drag") {
+      this.#host.onToolDragRollback();
+    }
+    this.#primaryId = null;
+    this.#startPoint = null;
+    this.#primaryPenRejected = false;
+    this.#panAnchor = null;
+    this.#multiAnchor = null;
+    this.#phase = "blocked";
+    this.#endCameraGesture();
   }
 
   #handleTouchDown(point: TouchPoint): void {
@@ -421,15 +646,53 @@ export class TouchArbiter {
       this.#phase = "idle";
     }
 
-    this.#touches.set(point.pointerId, point);
-
     // Stay quiet while a long-press menu/sheet is already open under the held finger.
-    if (this.#phase === "long-press-fired") return;
+    if (this.#phase === "long-press-fired") {
+      this.#touches.set(point.pointerId, point);
+      return;
+    }
+
+    // Already blocked by an external non-canvas touch: keep ignoring until all touches lift.
+    if (this.#phase === "blocked") {
+      this.#touches.set(point.pointerId, point);
+      return;
+    }
+
+    // Another touch is ALREADY down outside the canvas overlay before this canvas touch lands:
+    // hand over to pan/pinch if every other touch is usable floating chrome, else block.
+    if (this.#touches.size === 0 && this.#otherTouches.size > 0) {
+      if (!this.#hasNonUsableOtherTouch()) {
+        const promoted: number[] = [];
+        for (const [id, entry] of this.#otherTouches) {
+          this.#promotedIds.add(id);
+          this.#touches.set(id, entry.point);
+          promoted.push(id);
+        }
+        this.#otherTouches.clear();
+        this.#touches.set(point.pointerId, point);
+        if (promoted.length > 0) this.#host.onPromoteExternalTouches?.(promoted);
+        this.#primaryId = null;
+        this.#startPoint = null;
+        this.#primaryPenRejected = false;
+        this.#panAnchor = null;
+        this.#phase = "multitouch";
+        this.#beginCameraGesture();
+        this.#reanchorMultitouch();
+        return;
+      }
+      this.#touches.set(point.pointerId, point);
+      this.#phase = "blocked";
+      return;
+    }
+
+    this.#touches.set(point.pointerId, point);
 
     if (this.#touches.size === 1) {
       // First finger down: delay tap vs drag vs long-press until slop or time decides.
+      const mode = this.#host.workspaceMode();
       this.#primaryId = point.pointerId;
       this.#startPoint = point;
+      this.#primaryPenRejected = mode === "tablet" && this.penRejectionActive;
       this.#phase = "pending";
       this.#scheduleLongPress(point);
       return;
@@ -443,6 +706,7 @@ export class TouchArbiter {
     }
     this.#primaryId = null;
     this.#startPoint = null;
+    this.#primaryPenRejected = false;
     this.#panAnchor = null;
     this.#phase = "multitouch";
     this.#beginCameraGesture();
@@ -466,7 +730,10 @@ export class TouchArbiter {
         this.#clearLongPress();
         const mode = this.#host.workspaceMode();
         const tool = this.#host.tool();
-        if (shouldSingleTouchPan(mode, tool, this.#penSeen)) {
+        const canEdit = this.#host.canEdit ? this.#host.canEdit() : true;
+        const penRejected =
+          this.#primaryPenRejected || (mode === "tablet" && this.penRejectionActive);
+        if (shouldSingleTouchPan(mode, tool, penRejected, canEdit)) {
           this.#phase = "single-pan";
           this.#panAnchor = { camera: this.#host.camera(), screen: this.#startPoint.screen };
           this.#beginCameraGesture();
@@ -492,6 +759,7 @@ export class TouchArbiter {
         this.#applyMultitouch();
         return;
       }
+      case "blocked":
       case "long-press-fired":
       case "pen-active":
       case "palm-cooldown":
@@ -510,16 +778,20 @@ export class TouchArbiter {
     if (!this.#touches.has(point.pointerId)) return;
     this.#noteTouch(point);
     this.#touches.delete(point.pointerId);
+    const wasPromoted = this.#promotedIds.delete(point.pointerId);
+    if (wasPromoted) this.armCompatSuppression(point.client);
 
     switch (this.#phase) {
       case "pending": {
         this.#clearLongPress();
         const mode = this.#host.workspaceMode();
+        const rejected = this.#primaryPenRejected || (mode === "tablet" && this.penRejectionActive);
         this.#primaryId = null;
         this.#startPoint = null;
+        this.#primaryPenRejected = false;
         this.#phase = this.#suppressedPalms.size > 0 ? "palm-cooldown" : "idle";
-        // Palm rejection: once a pen has been seen on tablet, finger taps do not edit or select.
-        if (mode === "tablet" && this.#penSeen) return;
+        // Palm rejection: within the active pen window on tablet, finger taps do not edit or select.
+        if (rejected) return;
         const now = point.timeStamp > 0 ? point.timeStamp : this.#now();
         const prev = this.#lastTap;
         const clicks =
@@ -538,6 +810,7 @@ export class TouchArbiter {
         if (point.pointerId !== this.#primaryId) return;
         this.#primaryId = null;
         this.#startPoint = null;
+        this.#primaryPenRejected = false;
         this.#phase = this.#suppressedPalms.size > 0 ? "palm-cooldown" : "idle";
         this.armCompatSuppression(point.client);
         this.#host.onToolDragEnd(point);
@@ -546,6 +819,7 @@ export class TouchArbiter {
       case "single-pan": {
         this.#primaryId = null;
         this.#startPoint = null;
+        this.#primaryPenRejected = false;
         this.#panAnchor = null;
         this.#phase = this.#suppressedPalms.size > 0 ? "palm-cooldown" : "idle";
         this.#endCameraGesture();
@@ -581,11 +855,21 @@ export class TouchArbiter {
         }
         return;
       }
+      case "blocked": {
+        if (this.#touches.size === 0) {
+          this.#primaryId = null;
+          this.#startPoint = null;
+          this.#primaryPenRejected = false;
+          this.#phase = this.#suppressedPalms.size > 0 ? "palm-cooldown" : "idle";
+        }
+        return;
+      }
       case "long-press-fired": {
         this.armCompatSuppression(point.client);
         if (this.#touches.size === 0) {
           this.#primaryId = null;
           this.#startPoint = null;
+          this.#primaryPenRejected = false;
           this.#phase = this.#suppressedPalms.size > 0 ? "palm-cooldown" : "idle";
         }
         return;
@@ -604,18 +888,21 @@ export class TouchArbiter {
     }
     if (!this.#touches.has(pointerId)) return;
     this.#touches.delete(pointerId);
+    this.#promotedIds.delete(pointerId);
 
     switch (this.#phase) {
       case "pending": {
         this.#clearLongPress();
         this.#primaryId = null;
         this.#startPoint = null;
+        this.#primaryPenRejected = false;
         this.#phase = this.#suppressedPalms.size > 0 ? "palm-cooldown" : "idle";
         return;
       }
       case "tool-drag": {
         this.#primaryId = null;
         this.#startPoint = null;
+        this.#primaryPenRejected = false;
         this.#phase = this.#suppressedPalms.size > 0 ? "palm-cooldown" : "idle";
         this.#host.onToolDragRollback();
         return;
@@ -623,6 +910,7 @@ export class TouchArbiter {
       case "single-pan": {
         this.#primaryId = null;
         this.#startPoint = null;
+        this.#primaryPenRejected = false;
         this.#panAnchor = null;
         this.#phase = this.#suppressedPalms.size > 0 ? "palm-cooldown" : "idle";
         this.#endCameraGesture();
@@ -657,10 +945,12 @@ export class TouchArbiter {
         }
         return;
       }
+      case "blocked":
       case "long-press-fired": {
         if (this.#touches.size === 0) {
           this.#primaryId = null;
           this.#startPoint = null;
+          this.#primaryPenRejected = false;
           this.#phase = this.#suppressedPalms.size > 0 ? "palm-cooldown" : "idle";
         }
         return;
@@ -675,12 +965,12 @@ export class TouchArbiter {
 
   #scheduleLongPress(point: TouchPoint): void {
     this.#clearLongPress();
-    const mode = this.#host.workspaceMode();
-    // In tablet pen-seen palm-rejection mode, resting fingers/palms must never open menus.
-    if (mode === "tablet" && this.#penSeen) return;
+    // In tablet palm-rejection window, resting fingers/palms must never open menus.
+    if (this.#primaryPenRejected) return;
     this.#longPressHandle = this.#setTimer(() => {
       this.#longPressHandle = null;
       if (this.#phase !== "pending" || this.#primaryId !== point.pointerId) return;
+      if (this.#primaryPenRejected) return;
       const latest = this.#touches.get(point.pointerId) ?? point;
       this.#phase = "long-press-fired";
       this.#lastTap = null;

@@ -39,6 +39,7 @@ export function TextEditor({ nodeId }: { nodeId: string }) {
   // Where ↑ and ↓ aim, kept across presses so a short line doesn't pull the caret left.
   const goal = useRef<number | null>(null);
   const dragging = useRef<number | null>(null);
+  const draggingPointerId = useRef<number | null>(null);
   // Double and triple clicks, counted here: pointer events don't carry a click count everywhere.
   const lastPress = useRef<{ x: number; y: number; at: number; count: number } | null>(null);
   // The caret shows while typing; styling the selection from the inspector keeps it selected.
@@ -127,6 +128,15 @@ export function TextEditor({ nodeId }: { nodeId: string }) {
         style={style}
         onPointerDown={(e) => {
           if (e.button !== 0) return;
+          if (
+            e.pointerType === "touch" &&
+            draggingPointerId.current !== null &&
+            draggingPointerId.current !== e.pointerId
+          ) {
+            dragging.current = null;
+            draggingPointerId.current = null;
+            return;
+          }
           // Keep focus in the textarea; we place the caret ourselves.
           e.preventDefault();
           ref.current?.focus();
@@ -156,14 +166,27 @@ export function TextEditor({ nodeId }: { nodeId: string }) {
           const anchor = e.shiftKey ? anchorIndex(t) : at;
           select(anchor, at);
           dragging.current = anchor;
+          draggingPointerId.current = e.pointerId;
           e.currentTarget.setPointerCapture(e.pointerId);
         }}
         onPointerMove={(e) => {
-          if (dragging.current === null) return;
+          if (dragging.current === null || draggingPointerId.current !== e.pointerId) return;
           select(dragging.current, indexAt(e));
         }}
-        onPointerUp={() => {
+        onPointerUp={(e) => {
+          if (draggingPointerId.current !== e.pointerId) return;
           dragging.current = null;
+          draggingPointerId.current = null;
+        }}
+        onPointerCancel={(e) => {
+          if (draggingPointerId.current !== e.pointerId) return;
+          dragging.current = null;
+          draggingPointerId.current = null;
+        }}
+        onLostPointerCapture={(e) => {
+          if (draggingPointerId.current !== e.pointerId) return;
+          dragging.current = null;
+          draggingPointerId.current = null;
         }}
       >
         {selectionBoxes(node, layout, editor.measurer, start, end).map((r) => (
