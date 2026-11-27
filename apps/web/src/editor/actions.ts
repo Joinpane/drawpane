@@ -22,6 +22,7 @@ import { copySelectionAs, exportPageAsPdf, exportSelection } from "./exporting";
 import { openTextStyles } from "./inspector/TextStyles";
 import { getOverrides } from "./shortcuts-store";
 import { openMissingFonts, toggleMinimap, toggleXray, uiFor } from "./ui-state";
+import { fitPaddingForMode } from "./workspace-mode";
 
 export interface Shortcut {
   /** `KeyboardEvent.key`, lowercased. */
@@ -818,7 +819,7 @@ export const ACTIONS: readonly Action[] = [
     group: "View",
     icon: "fit",
     defaultShortcut: { key: "1", shift: true },
-    run: ({ editor }) => editor.zoomToFit(),
+    run: ({ editor }) => editor.zoomToFit(fitPaddingForMode(uiFor(editor).get().workspaceMode)),
   },
   {
     id: "view.zoomSelection",

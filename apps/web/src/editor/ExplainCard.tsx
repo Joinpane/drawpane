@@ -42,7 +42,7 @@ export function ExplainCard() {
   const camera = useEditorState((s) => s.camera);
   const viewport = useEditorState((s) => s.viewport);
   const gesture = useEditorState((s) => s.gesture);
-  const canEdit = useEditorState((s) => s.role !== "viewer");
+  const canEdit = useEditorState((s) => s.role !== "viewer" && !s.readOnly);
   const ref = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState(ESTIMATE);
   const [bounds, setBounds] = useState({ left: 0, right: Number.POSITIVE_INFINITY });

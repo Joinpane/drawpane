@@ -6,6 +6,7 @@
  */
 import { type Editor, Store } from "@drawpane/editor";
 import { useSyncExternalStore } from "react";
+import type { WorkspaceMode } from "./workspace-mode";
 
 export interface MenuRequest {
   /** What was right-clicked: the canvas (with or without a selection), or a page in the list. */
@@ -48,6 +49,8 @@ export interface EditorUi {
   readonly inspectorPopovers: number;
   /** The missing fonts panel is open (decision 0036). */
   readonly missingFonts: boolean;
+  /** Active workspace presentation (phone, tablet, or desktop), readable by canvas/gesture hooks. */
+  readonly workspaceMode: WorkspaceMode;
 }
 
 const stores = new WeakMap<Editor, Store<EditorUi>>();
@@ -66,6 +69,7 @@ export function uiFor(editor: Editor): Store<EditorUi> {
       xrayPinned: false,
       inspectorPopovers: 0,
       missingFonts: false,
+      workspaceMode: "desktop",
     });
     stores.set(editor, store);
   }

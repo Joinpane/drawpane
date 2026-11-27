@@ -10,6 +10,9 @@ import type { CommentPerson, CommentThread } from "@drawpane/model";
 import { Icon } from "@drawpane/ui";
 import { useCallback, useEffect, useLayoutEffect, useRef, useSyncExternalStore } from "react";
 import { useEditor, useEditorState } from "../hooks";
+import { MobileSheet } from "../MobileSheet";
+import { useUi } from "../ui-state";
+import { readVisualViewport } from "../visual-viewport";
 import { anchorAt, anchorLabel, type PinPosition, resolveAnchor } from "./anchor";
 import { colorStyle, displayName, personInitials } from "./people";
 import { type CommentStore, type CommentsState, matchesFilter } from "./store";
@@ -32,10 +35,24 @@ export interface CommentsLayerProps {
   readonly people: readonly CommentPerson[];
   /** Width the floating panes cover on each side, so popovers open over the canvas. */
   readonly insets: { readonly left: number; readonly right: number };
+  /** Fallback trigger to focus when closing a phone comment sheet whose pin isn't available. */
+  readonly phoneReturnFocusTo?: (() => HTMLElement | null) | undefined;
+  /** Optional Back button handler in phone thread sheet (returns to the Comments list sheet). */
+  readonly onPhoneBackToList?: (() => void) | undefined;
 }
 
-export function CommentsLayer({ store, interaction, people, insets }: CommentsLayerProps) {
+export function CommentsLayer({
+  store,
+  interaction,
+  people,
+  insets,
+  phoneReturnFocusTo,
+  onPhoneBackToList,
+}: CommentsLayerProps) {
   const editor = useEditor();
+  const workspaceMode = useUi(editor, (ui) => ui.workspaceMode);
+  const isPhone = workspaceMode === "phone";
+  const isTouchWorkspace = workspaceMode !== "desktop";
   const threads = useComments(store, (s) => s.threads);
   const filter = useComments(store, (s) => s.filter);
   const openId = useComments(store, (s) => s.openId);
@@ -119,14 +136,34 @@ export function CommentsLayer({ store, interaction, people, insets }: CommentsLa
           pop.hidden = false;
           const { width: vw, height: vh } = editor.s.viewport;
           const { left: insetLeft, right: insetRight } = insetsRef.current;
+          const vv = readVisualViewport();
+          const leftEdge = Math.max(0, vv.offsetLeft);
+          const rightEdge = Math.min(vw, vv.offsetLeft + vv.width);
+          const topBound = Math.max(
+            TOP,
+            editor.s.insets.top > TOP ? editor.s.insets.top + 4 : TOP,
+            vv.offsetTop + GAP,
+          );
+          const bottomBound = Math.min(vh, vv.offsetTop + vv.height) - GAP;
+          const availH = Math.max(160, bottomBound - topBound);
+          if (vv.bottomInset > 0 || vv.offsetTop > 0) {
+            pop.style.maxHeight = `${Math.round(availH)}px`;
+          } else {
+            pop.style.removeProperty("max-height");
+          }
           const w = pop.offsetWidth;
-          const h = pop.offsetHeight;
+          const h = Math.min(pop.offsetHeight, availH);
           const minX = insetLeft + GAP;
           const maxX = vw - insetRight - GAP - w;
           let x = anchor.x + PIN + GAP;
           if (x > maxX) x = anchor.x - GAP - w;
-          x = Math.max(minX, Math.min(x, Math.max(minX, maxX)));
-          const y = Math.max(TOP, Math.min(anchor.y - PIN - 8, vh - GAP - h));
+          if (maxX >= minX) x = Math.max(minX, Math.min(x, maxX));
+          // Never clip past the visual viewport even when side panels leave narrow space.
+          const hardMinX = leftEdge + GAP;
+          const hardMaxX = Math.max(hardMinX, rightEdge - GAP - w);
+          x = Math.max(hardMinX, Math.min(x, hardMaxX));
+          const maxY = Math.max(topBound, bottomBound - h);
+          const y = Math.max(topBound, Math.min(anchor.y - PIN - 8, maxY));
           pop.style.transform = `translate3d(${Math.round(x)}px, ${Math.round(y)}px, 0)`;
         }
       }
@@ -140,14 +177,26 @@ export function CommentsLayer({ store, interaction, people, insets }: CommentsLa
     let last = editor.s;
     const offState = editor.state.subscribe(() => {
       const s = editor.s;
-      if (s.camera !== last.camera || s.pageId !== last.pageId || s.viewport !== last.viewport)
+      if (
+        s.camera !== last.camera ||
+        s.pageId !== last.pageId ||
+        s.viewport !== last.viewport ||
+        s.insets !== last.insets
+      )
         request();
       last = s;
     });
     const offDoc = editor.doc.subscribe(request);
+    const vv = typeof window !== "undefined" ? window.visualViewport : null;
+    vv?.addEventListener("resize", request);
+    vv?.addEventListener("scroll", request);
+    window.addEventListener("resize", request);
     return () => {
       offState();
       offDoc();
+      vv?.removeEventListener("resize", request);
+      vv?.removeEventListener("scroll", request);
+      window.removeEventListener("resize", request);
       if (frame) cancelAnimationFrame(frame);
     };
   }, [editor, store]);
@@ -166,10 +215,34 @@ export function CommentsLayer({ store, interaction, people, insets }: CommentsLa
     return () => observer.disconnect();
   }, []);
 
-  // The comment tool: a click on the canvas drops a pin instead of reaching the canvas.
+  // The comment tool: a click (or touch tap after slop) on the canvas drops a pin instead of reaching the canvas.
   useEffect(() => {
     const host = root.current?.parentElement;
     if (!host) return;
+    const TAP_SLOP = 8;
+    let touchTap: {
+      pointerId: number;
+      startX: number;
+      startY: number;
+      canvas: HTMLElement;
+    } | null = null;
+
+    const placePin = (canvas: HTMLElement, clientX: number, clientY: number) => {
+      const cs = store.state.get();
+      if (cs.draft && cs.draft.text.trim() !== "") {
+        // Keep unsent words: send focus back to them instead of dropping a new pin.
+        (popover.current ?? document.querySelector(".mobile-sheet"))
+          ?.querySelector("textarea")
+          ?.focus();
+        return;
+      }
+      const pageId = editor.s.pageId;
+      if (!pageId) return;
+      const rect = canvas.getBoundingClientRect();
+      const point = editor.s.camera.toPage({ x: clientX - rect.left, y: clientY - rect.top });
+      store.startDraft(pageId, anchorAt(editor.scene, pageId, point));
+    };
+
     const onDown = (e: PointerEvent) => {
       const target = e.target instanceof Element ? e.target : null;
       const canvas = target?.closest<HTMLElement>(".canvas");
@@ -178,26 +251,100 @@ export function CommentsLayer({ store, interaction, people, insets }: CommentsLa
       const panning =
         e.button !== 0 || interaction.cursor === "grab" || interaction.cursor === "grabbing";
       if (editor.s.tool === "comment" && !panning) {
-        e.stopPropagation();
-        e.preventDefault();
-        if (cs.draft && cs.draft.text.trim() !== "") {
-          // Keep unsent words: send focus back to them instead of dropping a new pin.
-          popover.current?.querySelector("textarea")?.focus();
+        if (e.pointerType === "touch") {
+          // On touch, decide on release after slop so a pan never drops a pin and the
+          // sheet scrim never mounts under the active touch.
+          e.stopPropagation();
+          touchTap = { pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, canvas };
           return;
         }
-        const pageId = editor.s.pageId;
-        if (!pageId) return;
-        const rect = canvas.getBoundingClientRect();
-        const point = editor.s.camera.toPage({ x: e.clientX - rect.left, y: e.clientY - rect.top });
-        store.startDraft(pageId, anchorAt(editor.scene, pageId, point));
+        e.stopPropagation();
+        e.preventDefault();
+        placePin(canvas, e.clientX, e.clientY);
         return;
       }
       // Any other click on the canvas closes the open thread; a draft with words stays.
       if (cs.openId) store.close();
       if (cs.draft && cs.draft.text.trim() === "") store.cancelDraft();
     };
+
+    const onMove = (e: PointerEvent) => {
+      if (!touchTap || e.pointerId !== touchTap.pointerId) return;
+      if (Math.hypot(e.clientX - touchTap.startX, e.clientY - touchTap.startY) > TAP_SLOP) {
+        touchTap = null;
+      }
+    };
+
+    let suppressMouseTimer: number | null = null;
+    let suppressMousePoint: { x: number; y: number } | null = null;
+    const clearSuppressedMouse = () => {
+      suppressMousePoint = null;
+      if (suppressMouseTimer !== null) {
+        window.clearTimeout(suppressMouseTimer);
+        suppressMouseTimer = null;
+      }
+    };
+    const withinSuppressedTap = (e: MouseEvent) =>
+      suppressMousePoint !== null &&
+      Math.hypot(e.clientX - suppressMousePoint.x, e.clientY - suppressMousePoint.y) <=
+        TAP_SLOP * 2;
+    const onSuppressedMouseDown = (e: MouseEvent) => {
+      if (!withinSuppressedTap(e)) return;
+      // Keep focus in the newly opened comment field instead of letting the tap's
+      // compatibility mousedown move focus onto the scrim or sheet chrome.
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    const onSuppressedClick = (e: MouseEvent) => {
+      if (!suppressMousePoint) return;
+      const hit = withinSuppressedTap(e);
+      clearSuppressedMouse();
+      if (hit) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    const onAnyPointerDown = () => {
+      // A new pointer interaction supersedes any pending compatibility-event suppression.
+      if (suppressMousePoint) clearSuppressedMouse();
+    };
+
+    const onUp = (e: PointerEvent) => {
+      if (!touchTap || e.pointerId !== touchTap.pointerId) return;
+      const tap = touchTap;
+      touchTap = null;
+      if (editor.s.tool !== "comment") return;
+      if (Math.hypot(e.clientX - tap.startX, e.clientY - tap.startY) > TAP_SLOP) return;
+      e.stopPropagation();
+      // Swallow the trailing compatibility mousedown/click from this touch tap so mounting
+      // the bottom sheet under the tapped spot never steals focus or triggers buttons/scrim.
+      clearSuppressedMouse();
+      suppressMousePoint = { x: e.clientX, y: e.clientY };
+      suppressMouseTimer = window.setTimeout(clearSuppressedMouse, 350);
+      placePin(tap.canvas, e.clientX, e.clientY);
+    };
+
+    const onCancel = (e: PointerEvent) => {
+      if (touchTap && e.pointerId === touchTap.pointerId) touchTap = null;
+    };
+
     host.addEventListener("pointerdown", onDown, true);
-    return () => host.removeEventListener("pointerdown", onDown, true);
+    window.addEventListener("pointerdown", onAnyPointerDown, true);
+    window.addEventListener("pointermove", onMove, true);
+    window.addEventListener("pointerup", onUp, true);
+    window.addEventListener("pointercancel", onCancel, true);
+    window.addEventListener("mousedown", onSuppressedMouseDown, true);
+    window.addEventListener("click", onSuppressedClick, true);
+    return () => {
+      clearSuppressedMouse();
+      host.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("pointerdown", onAnyPointerDown, true);
+      window.removeEventListener("pointermove", onMove, true);
+      window.removeEventListener("pointerup", onUp, true);
+      window.removeEventListener("pointercancel", onCancel, true);
+      window.removeEventListener("mousedown", onSuppressedMouseDown, true);
+      window.removeEventListener("click", onSuppressedClick, true);
+    };
   }, [editor, interaction, store]);
 
   const closeAndRefocus = useCallback(() => {
@@ -205,17 +352,19 @@ export function CommentsLayer({ store, interaction, people, insets }: CommentsLa
     const pin = cs.openId ? pins.current.get(cs.openId) : null;
     if (cs.openId) store.close();
     if (cs.draft) store.cancelDraft();
+    if (isPhone && editor.s.tool === "comment") editor.setTool("select");
     if (pin && !pin.hidden) pin.focus();
-  }, [store]);
+  }, [editor, isPhone, store]);
 
   // Escape closes the open thread or draft wherever focus is, then leaves the comment tool.
   // It listens in the capture phase so it runs before the editor's own Escape handling;
-  // inside a popover, the popover handles Escape itself (a mention list closes first).
+  // inside a popover or phone sheet, those surfaces handle Escape themselves.
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== "Escape") return;
       const target = e.target instanceof Node ? e.target : null;
       if (target && popover.current?.contains(target)) return;
+      if (isPhone && (store.state.get().openId || store.state.get().draft)) return;
       // A field elsewhere (the command bar, a rename) owns its own Escape.
       const el = target instanceof HTMLElement ? target : null;
       if (el && (el.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName))) return;
@@ -232,7 +381,7 @@ export function CommentsLayer({ store, interaction, people, insets }: CommentsLa
     };
     window.addEventListener("keydown", onKey, true);
     return () => window.removeEventListener("keydown", onKey, true);
-  }, [editor, store, closeAndRefocus]);
+  }, [editor, isPhone, store, closeAndRefocus]);
 
   // Moving pins: drag with the pointer, or arrow keys while a pin has focus.
   // Authors move their own threads; editors can move anyone's.
@@ -428,25 +577,80 @@ export function CommentsLayer({ store, interaction, people, insets }: CommentsLa
         </span>
       ) : null}
       {open ? (
-        <ThreadPopover
-          key={open.id}
-          ref={popoverRef}
-          store={store}
-          thread={open}
-          label={anchorLabel(editor.scene, open.anchor, open.pageId)}
-          people={people}
-          role={role}
-          onClose={closeAndRefocus}
-        />
+        isPhone ? (
+          <ThreadPopover
+            key={open.id}
+            store={store}
+            thread={open}
+            label={anchorLabel(editor.scene, open.anchor, open.pageId)}
+            people={people}
+            role={role}
+            presentation="sheet"
+            onBack={onPhoneBackToList}
+            returnFocusTo={() => {
+              const pin = pins.current.get(open.id);
+              if (pin && !pin.hidden && pin.isConnected) return pin;
+              return phoneReturnFocusTo?.() ?? null;
+            }}
+            onClose={closeAndRefocus}
+          />
+        ) : (
+          <ThreadPopover
+            key={open.id}
+            ref={popoverRef}
+            store={store}
+            thread={open}
+            label={anchorLabel(editor.scene, open.anchor, open.pageId)}
+            people={people}
+            role={role}
+            onClose={closeAndRefocus}
+          />
+        )
       ) : draft ? (
-        <DraftPopover
-          ref={popoverRef}
-          store={store}
-          text={draft.text}
-          label={anchorLabel(editor.scene, draft.anchor, draft.pageId)}
-          people={people}
-          onCancel={closeAndRefocus}
-        />
+        isPhone ? (
+          <MobileSheet
+            title={anchorLabel(editor.scene, draft.anchor, draft.pageId)}
+            ariaLabel={`New comment on ${anchorLabel(editor.scene, draft.anchor, draft.pageId)}`}
+            closeLabel="Close comment"
+            variant="thread"
+            focusInside
+            returnFocusTo={phoneReturnFocusTo}
+            onScrimClick={() => {
+              // Match desktop: keep unsent words when tapping outside the draft sheet.
+              if (store.state.get().draft?.text.trim()) {
+                document
+                  .querySelector<HTMLTextAreaElement>(".mobile-sheet textarea")
+                  ?.focus({ preventScroll: true });
+                return;
+              }
+              closeAndRefocus();
+            }}
+            onClose={closeAndRefocus}
+          >
+            <DraftPopover
+              store={store}
+              text={draft.text}
+              label={anchorLabel(editor.scene, draft.anchor, draft.pageId)}
+              people={people}
+              presentation="sheet"
+              showCancel
+              onCreated={() => {
+                if (editor.s.tool === "comment") editor.setTool("select");
+              }}
+              onCancel={closeAndRefocus}
+            />
+          </MobileSheet>
+        ) : (
+          <DraftPopover
+            ref={popoverRef}
+            store={store}
+            text={draft.text}
+            label={anchorLabel(editor.scene, draft.anchor, draft.pageId)}
+            people={people}
+            showCancel={isTouchWorkspace}
+            onCancel={closeAndRefocus}
+          />
+        )
       ) : null}
     </section>
   );

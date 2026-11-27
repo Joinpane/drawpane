@@ -20,6 +20,7 @@ import { modKey } from "../app/format";
 import { imageRefs } from "./export-assets";
 import { useDeferredDocVersion, useEditor, useEditorState } from "./hooks";
 import { imagesFor } from "./media";
+import { useUi } from "./ui-state";
 
 const KIND: Record<string, string> = {
   frame: "Frame",
@@ -42,6 +43,7 @@ export function InspectPanel() {
   const editor = useEditor();
   const version = useDeferredDocVersion();
   const selection = useEditorState((s) => s.selection);
+  const workspaceMode = useUi(editor, (ui) => ui.workspaceMode);
   const node = selection.length === 1 ? editor.doc.get(selection[0] as string) : undefined;
   const [format, setFormat] = useState<"css" | "tailwind" | "jsx" | "svg">("css");
   const svg = useSettledSvg(
@@ -55,8 +57,14 @@ export function InspectPanel() {
       <div className="inspector">
         <h2 className="inspector__title">Inspect</h2>
         <p className="inspector__hint">
-          Select a layer to see its measurements, the variables behind its values, and its code.
-          Hold <kbd>Alt</kbd> and hover another layer to measure the distance between them.
+          {workspaceMode === "phone" ? (
+            "Tap a layer on the canvas to see its measurements, the variables behind its values, and its code."
+          ) : (
+            <>
+              Select a layer to see its measurements, the variables behind its values, and its code.
+              Hold <kbd>Alt</kbd> and hover another layer to measure the distance between them.
+            </>
+          )}
         </p>
       </div>
     );

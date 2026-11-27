@@ -5,7 +5,7 @@
  */
 import { type Editor, modeTag } from "@drawpane/editor";
 import { getProp, keyBetween, type NodeRecord, type Op } from "@drawpane/model";
-import { Icon, IconButton, LayerRow, type PresenceSlot } from "@drawpane/ui";
+import { Button, Icon, IconButton, LayerRow, type PresenceSlot } from "@drawpane/ui";
 import {
   type KeyboardEvent,
   useCallback,
@@ -17,7 +17,7 @@ import {
 } from "react";
 import { isMac } from "../app/format";
 import { shortcutFor } from "./actions";
-import { useDeferredDocVersion, useEditor, useEditorState } from "./hooks";
+import { useCanEdit, useDeferredDocVersion, useEditor, useEditorState } from "./hooks";
 import {
   aimDrop,
   containersWithin,
@@ -43,6 +43,7 @@ import {
 import { openMenu, uiFor, useUi } from "./ui-state";
 
 const ROW_HEIGHT = 28;
+const TOUCH_ROW_HEIGHT = 44;
 /**
  * The rows drawn move a block at a time: scrolling within a block draws
  * nothing new, so most scroll frames render nothing at all.
@@ -50,7 +51,8 @@ const ROW_HEIGHT = 28;
 const BLOCK = 8;
 
 /** At most half the tree's height is pinned ancestors, so there's always room to see what's in them. */
-const maxPinsFor = (height: number) => Math.max(1, Math.floor(height / ROW_HEIGHT / 2));
+const maxPinsFor = (height: number, rowHeight: number) =>
+  Math.max(1, Math.floor(height / rowHeight / 2));
 
 /** What the scroll position decides for the tree, kept only when it changes. */
 interface View {
@@ -74,8 +76,14 @@ export function LayersPanel() {
   const pageId = useEditorState((s) => s.pageId);
   const selection = useEditorState((s) => s.selection);
   const peers = useEditorState((s) => s.peers);
-  const canEdit = useEditorState((s) => s.role !== "viewer");
+  const canEdit = useCanEdit();
+  const workspaceMode = useUi(editor, (ui) => ui.workspaceMode);
+  const rowHeight = workspaceMode === "desktop" ? ROW_HEIGHT : TOUCH_ROW_HEIGHT;
+  const explicitRename = workspaceMode === "tablet";
   const renaming = useUi(editor, (ui) => ui.renaming);
+  const renamingNode = explicitRename && canEdit && renaming ? editor.doc.get(renaming) : undefined;
+  const renamingLayer = renamingNode && renamingNode.type !== "page" ? renamingNode : undefined;
+  const renameInput = useRef<HTMLInputElement>(null);
   const findRequest = useUi(editor, (ui) => ui.findLayers);
   const collapseRequest = useUi(editor, (ui) => ui.collapseLayers);
   const [collapsed, setCollapsed] = useState<ReadonlySet<string>>(new Set());
@@ -209,19 +217,24 @@ export function LayersPanel() {
     const index = rows.findIndex((r) => r.node.id === id);
     const row = rows[index];
     if (!row) return;
-    const top = index * ROW_HEIGHT;
+    const top = index * rowHeight;
     // Under the pinned ancestors counts as out of view: it goes just below them.
-    const pins = pinnedRows(rowIndex, el.scrollTop, ROW_HEIGHT, maxPinsFor(el.clientHeight));
-    const covered = pins.rows.length * ROW_HEIGHT + pins.offset;
+    const pins = pinnedRows(
+      rowIndex,
+      el.scrollTop,
+      rowHeight,
+      maxPinsFor(el.clientHeight, rowHeight),
+    );
+    const covered = pins.rows.length * rowHeight + pins.offset;
     if (top < el.scrollTop + covered)
-      el.scrollTop = top - Math.min(row.depth, maxPinsFor(el.clientHeight)) * ROW_HEIGHT;
-    else if (top + ROW_HEIGHT > el.scrollTop + el.clientHeight)
-      el.scrollTop = top + ROW_HEIGHT - el.clientHeight;
+      el.scrollTop = top - Math.min(row.depth, maxPinsFor(el.clientHeight, rowHeight)) * rowHeight;
+    else if (top + rowHeight > el.scrollTop + el.clientHeight)
+      el.scrollTop = top + rowHeight - el.clientHeight;
     if (revealed.current === id) return;
     revealed.current = id;
     const left = revealLeft(row.depth, el.scrollLeft, el.clientWidth);
     if (left !== null) el.scrollLeft = left;
-  }, [selection, rows, rowIndex]);
+  }, [selection, rows, rowIndex, rowHeight]);
 
   // The scroll position, read on every scroll event and resize, renders the
   // tree only when it brings another block of rows into view. Scrolling
@@ -234,7 +247,7 @@ export function LayersPanel() {
     if (!el) return;
     const update = () => {
       placePins.current();
-      const block = Math.floor(el.scrollTop / ROW_HEIGHT / BLOCK);
+      const block = Math.floor(el.scrollTop / rowHeight / BLOCK);
       const height = el.clientHeight;
       const width = el.clientWidth;
       setView((prev) =>
@@ -251,7 +264,7 @@ export function LayersPanel() {
       observer.disconnect();
       el.removeEventListener("scroll", update);
     };
-  }, []);
+  }, [rowHeight]);
 
   /** Folds or opens a container; `deep` (⌥-click) does the same to everything inside it. */
   const toggle = useCallback(
@@ -441,7 +454,7 @@ export function LayersPanel() {
 
   // The block in view, a block above and two below: whichever way it scrolls next, those rows are drawn.
   const start = Math.max(0, (view.block - 1) * BLOCK);
-  const end = Math.min(rows.length, (view.block + 2) * BLOCK + Math.ceil(view.height / ROW_HEIGHT));
+  const end = Math.min(rows.length, (view.block + 2) * BLOCK + Math.ceil(view.height / rowHeight));
   const tabStop = focusId ?? selection[0] ?? rows[0]?.node.id;
 
   /** How a row looks and what its toggles, icon and menu do: the same in the tree and pinned above it. */
@@ -544,6 +557,51 @@ export function LayersPanel() {
           }}
         />
       ) : null}
+      {renamingLayer ? (
+        <section className="tablet-rename" aria-label="Rename layer">
+          <input
+            ref={renameInput}
+            key={renamingLayer.id}
+            className="tablet-rename__input"
+            aria-label="Layer name"
+            defaultValue={getProp(renamingLayer.props, "name")}
+            // biome-ignore lint/a11y/noAutofocus: renaming starts from an explicit action
+            autoFocus
+            onFocus={(e) => e.currentTarget.select()}
+            onKeyDown={(e) => {
+              e.stopPropagation();
+              if (e.key === "Enter") {
+                const next = e.currentTarget.value.trim();
+                if (next) editor.rename(renamingLayer.id, next);
+                uiFor(editor).set({ renaming: null });
+              }
+              if (e.key === "Escape") uiFor(editor).set({ renaming: null });
+            }}
+          />
+          <div className="tablet-rename__actions">
+            <Button
+              size="md"
+              variant="ghost"
+              onPointerDown={(e) => e.preventDefault()}
+              onClick={() => uiFor(editor).set({ renaming: null })}
+            >
+              Cancel
+            </Button>
+            <Button
+              size="md"
+              variant="primary"
+              onPointerDown={(e) => e.preventDefault()}
+              onClick={() => {
+                const next = renameInput.current?.value.trim() ?? "";
+                if (next) editor.rename(renamingLayer.id, next);
+                uiFor(editor).set({ renaming: null });
+              }}
+            >
+              Done
+            </Button>
+          </div>
+        </section>
+      ) : null}
       <div
         ref={scroller}
         className={[
@@ -583,13 +641,14 @@ export function LayersPanel() {
               rows={rows}
               index={rowIndex}
               width={treeWidth}
+              rowHeight={rowHeight}
             >
               {(row, index, slot) => {
                 const { node } = row;
                 // Shown where the row would be if it were scrolled to: just under its own pinned ancestors.
                 const scrollTo = () => {
                   const el = scroller.current;
-                  if (el) el.scrollTop = (index - slot) * ROW_HEIGHT;
+                  if (el) el.scrollTop = (index - slot) * rowHeight;
                 };
                 return (
                   <LayerRow
@@ -616,7 +675,7 @@ export function LayersPanel() {
             <div
               ref={listRef}
               className="layers__list"
-              style={{ height: rows.length * ROW_HEIGHT, width: treeWidth }}
+              style={{ height: rows.length * rowHeight, width: treeWidth }}
             >
               {rows.slice(start, end).map((row, i) => {
                 const { node } = row;
@@ -629,7 +688,7 @@ export function LayersPanel() {
                     style={
                       {
                         position: "absolute",
-                        top: (start + i) * ROW_HEIGHT,
+                        top: (start + i) * rowHeight,
                         left: 0,
                         right: 0,
                         ...(drop ? { "--drop-depth": drop.depth } : {}),
@@ -643,7 +702,7 @@ export function LayersPanel() {
                     {...(canEdit
                       ? {
                           onRename: (name: string) => editor.rename(node.id, name),
-                          renaming: renaming === node.id,
+                          renaming: !explicitRename && renaming === node.id,
                           onRenamingChange: (on: boolean) =>
                             uiFor(editor).set({ renaming: on ? node.id : null }),
                           draggable: true,
@@ -689,6 +748,7 @@ function PinnedRows({
   rows,
   index,
   width,
+  rowHeight,
   children,
 }: {
   scroller: React.RefObject<HTMLDivElement | null>;
@@ -696,6 +756,7 @@ function PinnedRows({
   rows: readonly Row[];
   index: RowIndex;
   width: number;
+  rowHeight: number;
   children: (row: Row, index: number, slot: number) => React.ReactNode;
 }) {
   const [pinned, setPinned] = useState<{ rows: readonly number[]; of: RowIndex | null }>({
@@ -706,7 +767,7 @@ function PinnedRows({
   place.current = () => {
     const el = scroller.current;
     if (!el) return;
-    const pins = pinnedRows(index, el.scrollTop, ROW_HEIGHT, maxPinsFor(el.clientHeight));
+    const pins = pinnedRows(index, el.scrollTop, rowHeight, maxPinsFor(el.clientHeight, rowHeight));
     setPinned((prev) =>
       prev.of === index &&
       prev.rows.length === pins.rows.length &&
@@ -737,7 +798,7 @@ function PinnedRows({
           <div
             key={row.node.id}
             className="layers__pin"
-            style={{ top: slot * ROW_HEIGHT, zIndex: shown.length - slot }}
+            style={{ top: slot * rowHeight, zIndex: shown.length - slot }}
           >
             {children(row, at, slot)}
           </div>

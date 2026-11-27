@@ -68,7 +68,7 @@ export function PrototypePanel({ fileId }: { fileId: string }) {
   useDeferredDocVersion();
   const selection = useEditorState((s) => s.selection);
   const pageId = useEditorState((s) => s.pageId);
-  const canEdit = useEditorState((s) => s.role !== "viewer");
+  const canEdit = useEditorState((s) => s.role !== "viewer" && !s.readOnly);
   const node = selection.length === 1 ? editor.doc.get(selection[0] as string) : undefined;
   const inScreen = node ? screenOf(editor.doc, node.id) !== null : false;
   if (!pageId) return null;

@@ -18,7 +18,7 @@ export function focusThread(
   editor: Editor,
   store: CommentStore,
   thread: CommentThread,
-  insets: { left: number; right: number },
+  insets: { left: number; right: number; top?: number; bottom?: number },
 ): void {
   const pos = resolveAnchor(editor.scene, thread.anchor, thread.pageId);
   if (!editor.doc.has(pos.pageId)) {
@@ -29,21 +29,40 @@ export function focusThread(
   if (editor.s.pageId !== pos.pageId) editor.setPage(pos.pageId);
   const { viewport, camera } = editor.s;
   const zoom = Math.max(camera.zoom, 1);
+  const top = insets.top ?? 0;
+  const bottom = insets.bottom ?? 0;
   const centreX = (insets.left + viewport.width - insets.right) / 2;
-  editor.setCamera(
-    new Camera(centreX - pos.point.x * zoom, viewport.height / 2 - pos.point.y * zoom, zoom),
-  );
+  const centreY = (top + viewport.height - bottom) / 2;
+  editor.setCamera(new Camera(centreX - pos.point.x * zoom, centreY - pos.point.y * zoom, zoom));
   store.open(thread.id);
 }
 
 export interface CommentsPanelProps {
   readonly store: CommentStore;
-  readonly insets: { readonly left: number; readonly right: number };
+  readonly insets: {
+    readonly left: number;
+    readonly right: number;
+    readonly top?: number;
+    readonly bottom?: number;
+  };
   readonly onClose: () => void;
+  /** True when rendered inside MobileSheet on phones instead of a floating right pane. */
+  readonly embedded?: boolean;
+  /** Runs when the user taps "Add comment" (defaults to picking the comment tool). */
+  readonly onAddComment?: () => void;
+  /** Runs right after a thread row is tapped and focused. */
+  readonly onSelectThread?: (thread: CommentThread) => void;
 }
 
 /** Every thread on this page (or in the file), most recent first. */
-export function CommentsPanel({ store, insets, onClose }: CommentsPanelProps) {
+export function CommentsPanel({
+  store,
+  insets,
+  onClose,
+  embedded = false,
+  onAddComment,
+  onSelectThread,
+}: CommentsPanelProps) {
   const editor = useEditor();
   useDeferredDocVersion();
   const pageId = useEditorState((s) => s.pageId);
@@ -74,21 +93,40 @@ export function CommentsPanel({ store, insets, onClose }: CommentsPanelProps) {
     resolved: `No resolved comments ${where}.`,
   };
 
-  return (
-    <aside className="pane pane--right comments-panel" aria-label="Comments">
-      <div className="comments-panel__head">
-        <h2 className="comments-panel__title">Comments</h2>
-        <select
-          className="comments-panel__scope"
-          aria-label="Which comments"
-          value={scope}
-          onChange={(e) => store.setScope(e.currentTarget.value as CommentScope)}
-        >
-          <option value="page">This page</option>
-          <option value="all">All pages</option>
-        </select>
-        <IconButton icon="close" label="Close comments" onClick={onClose} />
-      </div>
+  const startComment = onAddComment ?? (() => editor.setTool("comment"));
+
+  const content = (
+    <>
+      {embedded ? (
+        <div className="comments-panel__sheet-controls">
+          <select
+            className="comments-panel__scope"
+            aria-label="Which comments"
+            value={scope}
+            onChange={(e) => store.setScope(e.currentTarget.value as CommentScope)}
+          >
+            <option value="page">This page</option>
+            <option value="all">All pages</option>
+          </select>
+          <Button size="md" variant="primary" icon="comment" onClick={startComment}>
+            Add comment
+          </Button>
+        </div>
+      ) : (
+        <div className="comments-panel__head">
+          <h2 className="comments-panel__title">Comments</h2>
+          <select
+            className="comments-panel__scope"
+            aria-label="Which comments"
+            value={scope}
+            onChange={(e) => store.setScope(e.currentTarget.value as CommentScope)}
+          >
+            <option value="page">This page</option>
+            <option value="all">All pages</option>
+          </select>
+          <IconButton icon="close" label="Close comments" onClick={onClose} />
+        </div>
+      )}
       <div className="comments-panel__filters">
         <SegmentedControl
           label="Show"
@@ -111,7 +149,7 @@ export function CommentsPanel({ store, insets, onClose }: CommentsPanelProps) {
           <div className="comments-panel__empty">
             <p>{empty[filter]}</p>
             {filter === "open" ? (
-              <Button size="sm" icon="comment" onClick={() => editor.setTool("comment")}>
+              <Button size={embedded ? "md" : "sm"} icon="comment" onClick={startComment}>
                 Add comment
               </Button>
             ) : null}
@@ -137,7 +175,10 @@ export function CommentsPanel({ store, insets, onClose }: CommentsPanelProps) {
                     className="comments-panel__row"
                     aria-current={thread.id === openId || undefined}
                     data-resolved={resolved || undefined}
-                    onClick={() => focusThread(editor, store, thread, insets)}
+                    onClick={() => {
+                      focusThread(editor, store, thread, insets);
+                      onSelectThread?.(thread);
+                    }}
                   >
                     <span className="comments-panel__meta">
                       <Avatar person={thread.author} />
@@ -171,6 +212,16 @@ export function CommentsPanel({ store, insets, onClose }: CommentsPanelProps) {
           </ul>
         )}
       </div>
+    </>
+  );
+
+  if (embedded) {
+    return <div className="comments-panel comments-panel--embedded">{content}</div>;
+  }
+
+  return (
+    <aside className="pane pane--right comments-panel" aria-label="Comments">
+      {content}
     </aside>
   );
 }

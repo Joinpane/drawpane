@@ -39,6 +39,10 @@ export class History {
   get grouping(): boolean {
     return this.#open !== null;
   }
+  /** Number of currently open groups (0 when idle, 1 for one group, 1 + nested marks when nested). */
+  get groupDepth(): number {
+    return this.#open ? 1 + this.#open.marks.length : 0;
+  }
 
   subscribe(listener: () => void): () => void {
     this.#listeners.add(listener);

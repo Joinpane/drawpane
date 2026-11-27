@@ -6,9 +6,9 @@
  */
 import type { Doc } from "@drawpane/editor";
 import { getProp, type NodeRecord } from "@drawpane/model";
-import { IconButton } from "@drawpane/ui";
+import { Button, IconButton } from "@drawpane/ui";
 import { useEffect, useLayoutEffect, useRef, useState } from "react";
-import { shallowArray, useDocSelector, useEditor, useEditorState } from "./hooks";
+import { shallowArray, useCanEdit, useDocSelector, useEditor, useEditorState } from "./hooks";
 import { clampPages, PAGES, pagesRange, setPanelLayout, usePanelLayout } from "./panel-layout";
 import { Splitter } from "./Splitter";
 import { openMenu, uiFor, useUi } from "./ui-state";
@@ -29,7 +29,14 @@ const pageRows = (doc: Doc): Array<NodeRecord | number> =>
     return page ? [page, doc.childIds(id).length] : [];
   });
 
-export function PagesList() {
+export function PagesList({
+  phone = false,
+  onSelectPage,
+}: {
+  /** Compact sheet layout on phones: full-height list, no splitter or edit controls. */
+  phone?: boolean;
+  onSelectPage?: () => void;
+} = {}) {
   const editor = useEditor();
   // The pages and their layer counts: an edit inside a page doesn't render the list.
   const rows = useDocSelector(pageRows, shallowArray);
@@ -37,9 +44,12 @@ export function PagesList() {
   for (let i = 0; i < rows.length; i += 2)
     pages.push({ page: rows[i] as NodeRecord, count: rows[i + 1] as number });
   const pageId = useEditorState((s) => s.pageId);
-  const canEdit = useEditorState((s) => s.role !== "viewer");
+  const canEdit = useCanEdit();
+  const workspaceMode = useUi(editor, (ui) => ui.workspaceMode);
+  const explicitRename = workspaceMode === "tablet";
   const renaming = useUi(editor, (ui) => ui.renaming);
   const setRenaming = (id: string | null) => uiFor(editor).set({ renaming: id });
+  const renameInput = useRef<HTMLInputElement>(null);
 
   const chosen = usePanelLayout().pages;
   const section = useRef<HTMLDivElement>(null);
@@ -50,6 +60,7 @@ export function PagesList() {
   // and whenever the panel's height changes: before paint, so the list never shows a wrong height.
   const measure = useRef(() => {});
   measure.current = () => {
+    if (phone) return;
     const el = section.current;
     const ul = list.current;
     const pane = el?.parentElement;
@@ -63,12 +74,13 @@ export function PagesList() {
   };
   useLayoutEffect(() => measure.current());
   useEffect(() => {
+    if (phone) return;
     const pane = section.current?.parentElement;
     if (!pane) return;
     const observer = new ResizeObserver(() => measure.current());
     observer.observe(pane);
     return () => observer.disconnect();
-  }, []);
+  }, [phone]);
 
   const shown = fit ? clampPages(chosen, fit.content, fit.room) : chosen;
   const range = fit ? pagesRange(fit.content, fit.room) : { min: PAGES.min, max: shown };
@@ -89,45 +101,107 @@ export function PagesList() {
   }, [shown, pageId]);
 
   return (
-    <div className="pages" ref={section}>
-      <div className="pane__head">
-        <span className="pane__label">Pages</span>
-        {canEdit ? (
-          <IconButton icon="plus" label="Add page" onClick={() => editor.addPage()} />
-        ) : null}
-      </div>
-      <ul className="pages__list" aria-label="Pages" ref={list} style={{ maxHeight: shown }}>
+    <div className={phone ? "pages pages--sheet" : "pages"} ref={section}>
+      {phone ? null : (
+        <div className="pane__head">
+          <span className="pane__label">Pages</span>
+          {canEdit ? (
+            <IconButton icon="plus" label="Add page" onClick={() => editor.addPage()} />
+          ) : null}
+        </div>
+      )}
+      <ul
+        className="pages__list"
+        aria-label="Pages"
+        ref={list}
+        style={phone ? undefined : { maxHeight: shown }}
+      >
         {pages.map(({ page, count }) => (
           <li key={page.id}>
-            {renaming === page.id ? (
-              <input
-                className="pages__rename"
-                defaultValue={getProp(page.props, "name")}
-                aria-label="Page name"
-                // biome-ignore lint/a11y/noAutofocus: renaming starts from an explicit action
-                autoFocus
-                onFocus={(e) => e.currentTarget.select()}
-                onBlur={(e) => {
-                  editor.rename(page.id, e.currentTarget.value);
-                  setRenaming(null);
-                }}
-                onKeyDown={(e) => {
-                  e.stopPropagation();
-                  if (e.key === "Enter") e.currentTarget.blur();
-                  if (e.key === "Escape") setRenaming(null);
-                }}
-              />
+            {renaming === page.id && canEdit ? (
+              explicitRename ? (
+                <div className="pages__rename-bar">
+                  <input
+                    ref={renameInput}
+                    className="pages__rename"
+                    defaultValue={getProp(page.props, "name")}
+                    aria-label="Page name"
+                    // biome-ignore lint/a11y/noAutofocus: renaming starts from an explicit action
+                    autoFocus
+                    onFocus={(e) => e.currentTarget.select()}
+                    onKeyDown={(e) => {
+                      e.stopPropagation();
+                      if (e.key === "Enter") {
+                        editor.rename(page.id, e.currentTarget.value);
+                        setRenaming(null);
+                      }
+                      if (e.key === "Escape") setRenaming(null);
+                    }}
+                  />
+                  <div className="pages__rename-actions">
+                    <Button
+                      size="md"
+                      variant="ghost"
+                      onPointerDown={(e) => e.preventDefault()}
+                      onClick={() => setRenaming(null)}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      size="md"
+                      variant="primary"
+                      onPointerDown={(e) => e.preventDefault()}
+                      onClick={() => {
+                        editor.rename(page.id, renameInput.current?.value ?? "");
+                        setRenaming(null);
+                      }}
+                    >
+                      Done
+                    </Button>
+                  </div>
+                </div>
+              ) : (
+                <input
+                  className="pages__rename"
+                  defaultValue={getProp(page.props, "name")}
+                  aria-label="Page name"
+                  // biome-ignore lint/a11y/noAutofocus: renaming starts from an explicit action
+                  autoFocus
+                  onFocus={(e) => e.currentTarget.select()}
+                  onBlur={(e) => {
+                    editor.rename(page.id, e.currentTarget.value);
+                    setRenaming(null);
+                  }}
+                  onKeyDown={(e) => {
+                    e.stopPropagation();
+                    if (e.key === "Enter") e.currentTarget.blur();
+                    if (e.key === "Escape") setRenaming(null);
+                  }}
+                />
+              )
             ) : (
               <button
                 type="button"
                 className="pages__item"
                 aria-current={page.id === pageId ? "page" : undefined}
-                onClick={() => editor.setPage(page.id)}
-                onDoubleClick={() => canEdit && setRenaming(page.id)}
-                onContextMenu={(e) => {
-                  e.preventDefault();
-                  openMenu(editor, { kind: "page", x: e.clientX, y: e.clientY, pageId: page.id });
+                onClick={() => {
+                  editor.setPage(page.id);
+                  onSelectPage?.();
                 }}
+                onDoubleClick={() => canEdit && setRenaming(page.id)}
+                onContextMenu={
+                  phone
+                    ? undefined
+                    : (e) => {
+                        e.preventDefault();
+                        openMenu(editor, {
+                          kind: "page",
+                          x: e.clientX,
+                          y: e.clientY,
+                          pageId: page.id,
+                        });
+                      }
+                }
               >
                 <span>{getProp(page.props, "name") || "Page"}</span>
                 <span className="pages__count">{count || ""}</span>
@@ -136,27 +210,29 @@ export function PagesList() {
           </li>
         ))}
       </ul>
-      <Splitter
-        axis="y"
-        grows={1}
-        value={shown}
-        min={range.min}
-        max={range.max}
-        reset={PAGES.default}
-        onResize={(next, remember) => {
-          // Kept to what this window leaves room for, but not to the pages there are now: a
-          // list dragged past its last page shows just its pages, and grows with new ones.
-          const height = fit ? clampPages(next, PAGES.max, fit.room) : next;
-          setPanelLayout(
-            { pages: Math.round(Math.min(PAGES.max, Math.max(PAGES.min, height))) },
-            { remember },
-          );
-        }}
-        label="Resize the pages list"
-        valueText={`${shown} pixels tall`}
-        title="Drag to resize · double-click for the default height"
-        className="pages-resizer"
-      />
+      {phone ? null : (
+        <Splitter
+          axis="y"
+          grows={1}
+          value={shown}
+          min={range.min}
+          max={range.max}
+          reset={PAGES.default}
+          onResize={(next, remember) => {
+            // Kept to what this window leaves room for, but not to the pages there are now: a
+            // list dragged past its last page shows just its pages, and grows with new ones.
+            const height = fit ? clampPages(next, PAGES.max, fit.room) : next;
+            setPanelLayout(
+              { pages: Math.round(Math.min(PAGES.max, Math.max(PAGES.min, height))) },
+              { remember },
+            );
+          }}
+          label="Resize the pages list"
+          valueText={`${shown} pixels tall`}
+          title="Drag to resize · double-click for the default height"
+          className="pages-resizer"
+        />
+      )}
     </div>
   );
 }

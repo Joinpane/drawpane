@@ -19,7 +19,7 @@ import {
 import { type ReactNode, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { shortcutFor } from "./actions";
 import { PASS_GESTURES } from "./canvas-gestures";
-import { useDocVersion, useEditor, useEditorState } from "./hooks";
+import { useCanEdit, useDocVersion, useEditor, useEditorState } from "./hooks";
 import { FontPicker } from "./inspector/FontPicker";
 import { common } from "./inspector/fields";
 import { PaintSwatch } from "./inspector/PaintSection";
@@ -65,7 +65,7 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
   // Vector edit has its own marks on the canvas; keep the path clear.
   const vectorEdit = useEditorState((s) => s.vectorEdit !== null || s.cropping !== null);
   const editing = useEditorState((s) => s.editingText);
-  const canEdit = useEditorState((s) => s.role !== "viewer");
+  const canEdit = useCanEdit();
   const tool = useEditorState((s) => s.tool);
   // The Prototype tab puts connection handles where the Lens would sit.
   const prototyping = useEditorState((s) => s.prototyping);

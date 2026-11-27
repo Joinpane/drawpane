@@ -50,7 +50,7 @@ const SelectionInspector = memo(function SelectionInspector({
   const editor = useEditor();
   useDeferredDocVersion();
   const tool = useEditorState((s) => s.tool);
-  const canEdit = useEditorState((s) => s.role !== "viewer");
+  const canEdit = useEditorState((s) => s.role !== "viewer" && !s.readOnly);
   // While editing text, its typography and fill follow the selected characters.
   useEditorState((s) => s.textSelection);
   const nodes = selection.map((id) => editor.doc.get(id)).filter((n): n is NodeRecord => !!n);

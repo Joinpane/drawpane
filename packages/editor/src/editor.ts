@@ -202,6 +202,11 @@ export interface EditorState {
   readonly focusMode: boolean;
   readonly status: ConnectionStatus;
   readonly role: "owner" | "editor" | "viewer";
+  /**
+   * True when the workspace itself forbids document edits (such as phone view-and-comment mode),
+   * independent of the server role so comments and file-level permissions keep the real role.
+   */
+  readonly readOnly: boolean;
   readonly peers: ReadonlyMap<string, Peer>;
   readonly canUndo: boolean;
   readonly canRedo: boolean;
@@ -524,6 +529,7 @@ export class Editor {
     focusMode: false,
     status: "connecting",
     role: "viewer",
+    readOnly: false,
     peers: new Map(),
     canUndo: false,
     canRedo: false,
@@ -559,8 +565,17 @@ export class Editor {
   readonly #frames: FrameClock;
   readonly #reducedMotion: () => boolean;
   #motion: CameraMotion | null = null;
+  /** Undo-group depth immediately before the current `startTextEdit`, for scoped cancel/reconcile. */
+  #textEditDepth: number | null = null;
+  /** Camera produced by the latest `zoomToFit` call, per page, for auto-refit tracking. */
+  #lastFit: { readonly pageId: string; readonly camera: Camera } | null = null;
   #booleanLoader: BooleanEngineLoader;
   #booleanEngine: Promise<BooleanEngine> | null = null;
+
+  /** Camera produced by the most recent `zoomToFit` on the current page, if any. */
+  get lastFitCamera(): Camera | null {
+    return this.#lastFit && this.#lastFit.pageId === this.s.pageId ? this.#lastFit.camera : null;
+  }
 
   constructor(options: EditorOptions) {
     this.measurer = options.measurer;
@@ -616,7 +631,30 @@ export class Editor {
   }
 
   get canEdit(): boolean {
-    return this.s.role !== "viewer";
+    return this.s.role !== "viewer" && !this.s.readOnly;
+  }
+
+  /**
+   * Locks or unlocks document editing for the current workspace (for example phone
+   * view-and-comment mode) without altering the server role.
+   */
+  setReadOnly(readOnly: boolean): void {
+    if (this.s.readOnly === readOnly) return;
+    if (readOnly) {
+      if (this.s.editingText) this.endTextEdit();
+      const allowedTool =
+        this.s.tool === "select" || this.s.tool === "hand" || this.s.tool === "comment";
+      this.state.set({
+        readOnly: true,
+        ...(allowedTool ? {} : { tool: "select" }),
+        renamingFrame: null,
+        vectorEdit: null,
+        cropping: null,
+        guideDraft: null,
+      });
+      return;
+    }
+    this.state.set({ readOnly: false });
   }
 
   /**
@@ -669,12 +707,25 @@ export class Editor {
     const alive = selection.filter((id) => this.doc.has(id));
     if (alive.length !== selection.length) patch.selection = alive;
     if (hover && !this.doc.has(hover)) patch.hover = null;
+    let textLost = false;
     if (editingText && !this.doc.has(editingText)) {
       patch.editingText = null;
       patch.textSelection = null;
       patch.textPending = null;
+      textLost = true;
     }
     if (Object.keys(patch).length > 0) this.state.set(patch);
+    if (textLost) {
+      // Close the text-edit undo group so a peer deleting the layer never leaks an open group
+      // that would swallow later edits into one undo step or let a later Cancel revert them.
+      const targetDepth = this.#textEditDepth;
+      this.#textEditDepth = null;
+      if (targetDepth !== null) {
+        while (this.history.groupDepth > targetDepth) this.endGesture();
+      } else if (this.history.grouping) {
+        this.endGesture();
+      }
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -1137,6 +1188,7 @@ export class Editor {
   // Pages, selection, camera, tools
 
   setPage(pageId: string): void {
+    if (this.s.editingText) this.endTextEdit();
     const { pageId: current, camera } = this.s;
     if (current) this.#cameras.set(current, camera);
     this.state.set({
@@ -1172,7 +1224,9 @@ export class Editor {
   }
 
   setTool(tool: ToolId): void {
-    this.state.set({ tool, editingText: null });
+    if (this.s.readOnly && tool !== "select" && tool !== "hand" && tool !== "comment") return;
+    if (this.s.editingText) this.endTextEdit();
+    this.state.set({ tool });
   }
 
   /** Moves the view. Moving it yourself (pan, zoom, fit) stops following someone. */
@@ -1413,11 +1467,14 @@ export class Editor {
     this.setCamera(camera.zoomAt(centre, zoom));
   }
 
-  zoomToFit(): void {
+  zoomToFit(padding = 64): void {
     const { pageId, viewport, insets } = this.s;
     if (!pageId) return;
     const bounds = this.scene.unionBounds(this.doc.childIds(pageId));
-    if (bounds) this.setCamera(this.s.camera.fit(bounds, viewport, 64, 1, insets));
+    if (!bounds) return;
+    const next = this.s.camera.fit(bounds, viewport, padding, 1, insets);
+    this.#lastFit = { pageId, camera: next };
+    this.setCamera(next);
   }
 
   /** Pans (or zooms out) just enough to bring the selection into the visible part of the canvas. */
@@ -4321,6 +4378,7 @@ export class Editor {
       textSelection: null,
       textPending: null,
     });
+    this.#textEditDepth = this.history.groupDepth;
     this.beginGesture("Edit text");
   }
 
@@ -4377,11 +4435,37 @@ export class Editor {
   endTextEdit(): void {
     const id = this.s.editingText;
     if (!id) return;
+    const targetDepth = this.#textEditDepth;
+    this.#textEditDepth = null;
     // Out of editing first, so anything that hears the gesture end sees it finished.
     this.state.set({ editingText: null, textSelection: null, textPending: null });
-    this.endGesture();
+    if (targetDepth !== null) {
+      while (this.history.groupDepth > targetDepth) this.endGesture();
+    } else {
+      this.endGesture();
+    }
     const node = this.doc.get(id);
     // An empty text layer has nothing to show: remove it, like every design tool.
+    if (node && getProp(node.props, "characters").trim() === "") {
+      applyBestEffort((ops) => this.#commitWithFixups(ops, false), [{ op: "delete", id }]);
+      this.select([]);
+    }
+  }
+
+  /**
+   * Leaves text editing and discards only the undo groups opened since `startTextEdit`
+   * (including any nested preview group), keeping an existing layer even if its text
+   * was cleared and leaving undo/redo and any outer groups untouched. A layer that was
+   * already empty before editing is removed.
+   */
+  cancelTextEdit(): void {
+    const id = this.s.editingText;
+    if (!id) return;
+    const targetDepth = this.#textEditDepth ?? Math.max(0, this.history.groupDepth - 1);
+    this.#textEditDepth = null;
+    this.state.set({ editingText: null, textSelection: null, textPending: null });
+    while (this.history.groupDepth > targetDepth) this.cancelGesture();
+    const node = this.doc.get(id);
     if (node && getProp(node.props, "characters").trim() === "") {
       applyBestEffort((ops) => this.#commitWithFixups(ops, false), [{ op: "delete", id }]);
       this.select([]);

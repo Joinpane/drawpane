@@ -219,8 +219,8 @@ export function Composer({
               tabIndex={-1}
               aria-selected={i === active}
               className={i === active ? "dp-menu__item is-active" : "dp-menu__item"}
-              // Keep focus in the field: pick on mousedown, before blur.
-              onMouseDown={(e) => {
+              // Keep focus in the field: pick on pointerdown, before blur (works for mouse and touch).
+              onPointerDown={(e) => {
                 e.preventDefault();
                 pick(person);
               }}
