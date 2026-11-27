@@ -16,15 +16,21 @@ describe("renderer memory profile", () => {
       }),
     ).toBeUndefined();
     expect(mobileRendererMemory({ userAgent: "Macintosh" })).toBeUndefined();
-    expect(
-      mobileRendererMemory({ userAgent: "Android", hover: true, finePointer: true }),
-    ).toBeUndefined();
   });
 
-  test("recognizes desktop-UA iPads and Android tablets without hover", () => {
+  test("recognizes mobile UAs with attached pointers and touch-only desktop UAs", () => {
     const ipad = mobileRendererMemory({ userAgent: "Macintosh", maxTouchPoints: 5 });
     expect(ipad).toMatchObject({ backingPixels: 7_000_000, imageBytes: 56 * MiB });
-    expect(mobileRendererMemory({ userAgent: "iPhone" })).toBe(ipad);
+    for (const userAgent of ["iPhone", "Android", "Macintosh"]) {
+      expect(
+        mobileRendererMemory({
+          userAgent,
+          maxTouchPoints: 5,
+          hover: true,
+          finePointer: true,
+        }),
+      ).toBe(ipad);
+    }
     expect(
       mobileRendererMemory({
         userAgent: "X11; Linux x86_64",

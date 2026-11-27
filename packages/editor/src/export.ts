@@ -478,6 +478,7 @@ export interface RasterOptions {
   readonly background?: string | null;
   /** Encoder quality for JPEG and WebP, 0 to 1. */
   readonly quality?: number;
+  readonly onDrawn?: () => void;
 }
 
 /**
@@ -515,6 +516,7 @@ export async function exportRaster(
       : options.background;
   // As Figma exports: glass and background blur see what's under the layers on the page.
   renderer.renderNodes(ctx, ids, rect, options.scale, background, false, true);
+  options.onDrawn?.();
   const type = `image/${options.format}`;
   return canvas.convertToBlob({ type, quality: options.quality ?? 0.92 });
 }
@@ -525,6 +527,7 @@ export interface ThumbnailOptions {
   /** Preferred type; browsers that can't encode WebP return PNG. */
   readonly type?: "image/webp" | "image/png";
   readonly quality?: number;
+  readonly onDrawn?: () => void;
 }
 
 export interface ThumbnailLayout {
@@ -599,6 +602,7 @@ export async function renderThumbnail(
   if (!ctx) return null;
   // A thumbnail is small: unreadable text draws as bars, as on the canvas.
   renderer.renderNodes(ctx, layout.ids, layout.rect, layout.scale, layout.background, true);
+  options.onDrawn?.();
   return canvas.convertToBlob({
     type: options.type ?? "image/webp",
     quality: options.quality ?? 0.85,

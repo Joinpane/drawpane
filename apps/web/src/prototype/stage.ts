@@ -616,6 +616,7 @@ export class PlayerStage {
     } else {
       this.#usingFallbackCanvas = false;
       this.#screenDrawable = false;
+      this.#images.releaseDisplayView(this.#fallbackCanvas);
       this.#fallbackCanvas.style.display = "none";
       const ctx = this.#fallbackCanvas.getContext("2d");
       ctx?.clearRect(0, 0, this.#fallbackCanvas.width, this.#fallbackCanvas.height);
@@ -662,6 +663,7 @@ export class PlayerStage {
         this.#placeholderCanvas.width = m.width;
         this.#placeholderCanvas.height = m.height;
       }
+      this.#images.releaseDisplayView(this.#fallbackCanvas);
       this.#fallbackCanvas.style.display = "none";
       this.#unavailableEl.style.display = "none";
       this.#usingFallbackCanvas = false;

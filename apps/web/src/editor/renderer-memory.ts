@@ -70,8 +70,8 @@ export function mobileRendererMemory({
   finePointer = false,
 }: DeviceSignals): MobileRendererMemory | undefined {
   const mobileUA = /\b(Android|iPhone|iPad|iPod|Mobile)\b/i.test(userAgent);
-  if (hover && finePointer) return undefined;
   const desktopIpad = /Macintosh/i.test(userAgent) && maxTouchPoints > 1;
+  if (!mobileUA && !desktopIpad && hover && finePointer) return undefined;
   const touchOnly = hover === false && (maxTouchPoints > 0 || coarsePointer);
   if (!mobileUA && !desktopIpad && !touchOnly) return undefined;
   if (deviceMemory !== undefined && Number.isFinite(deviceMemory) && deviceMemory > 0) {

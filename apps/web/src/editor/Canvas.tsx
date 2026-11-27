@@ -153,7 +153,8 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     let pixelGridEnabled = true;
 
     // Cropping starts from what a fill shows, which needs each image's own size.
-    editor.imageSize = (ref) => imagesFor(editor).natural(ref);
+    editor.imageSize = (ref) =>
+      imagesFor(editor).natural(ref) ?? (memory && engine?.imageNaturalSize(ref)) ?? null;
     const canvasToken = () =>
       getComputedStyle(document.documentElement).getPropertyValue("--canvas").trim() || "#ebeae6";
     let theme = readTheme();
@@ -298,6 +299,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         paintCoverSync();
       }
       engineShowing = on;
+      if (on) rendererRef.current.instance?.images.releaseDisplayView(contentCanvas);
       engineSlotEl.style.visibility = on ? "visible" : "hidden";
       if (activeEngineCanvas) {
         activeEngineCanvas.style.visibility = on ? "visible" : "hidden";
@@ -1017,6 +1019,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
 
     return () => {
       disposed = true;
+      rendererRef.current.instance?.images.releaseDisplayView(contentCanvas);
       engineInit.abort();
       const w = window as unknown as { drawpaneEngineView?: EngineView };
       if (createdView && w.drawpaneEngineView === createdView) delete w.drawpaneEngineView;

@@ -2171,9 +2171,10 @@ the same container. The gate's budgets: lag p95 ≤ 100 ms, dropped frames ≤ 5
 
 At `98be4471`, a clean browser session still uses Canvas 2D. The engine switch starts WebGPU,
 WebGL2, or the CPU worker. The editor and prototype select the same renderer memory policy
-before creating their surfaces. A device with hover and a fine pointer uses the desktop
-path. The profile recognizes mobile user agents, desktop-UA iPads with touch, and touch
-devices without hover at any screen size.
+before creating their surfaces. Phones and tablets, including iPads using a desktop user
+agent, keep the mobile profile with a mouse or trackpad attached. Other devices with hover
+and a fine pointer use desktop limits. Touch devices without hover use the mobile profile
+at any screen size.
 
 | Reported memory on mobile | GPU | GPU tiles | GPU glyph masks on CPU | Decoded image allowance | Pixels per backing |
 | --- | ---: | ---: | ---: | ---: | ---: |
@@ -2188,10 +2189,16 @@ adapter limits and keeps image levels up to 2,048 or 2,560 pixels on the long si
 
 Canvas 2D plans one decoded level per visible image, up to 1,024 or 1,536 pixels on the
 long side. When room is tight it evicts off-screen bitmaps and shrinks visible ones to
-make room for new images. A settled view sharpens images that need more pixels. A
-bounded cache of encoded originals lets these changes reuse the downloaded data.
-Raster exports, the Export panel and dashboard thumbnails on mobile decode the originals
-at the output's required resolution in a temporary cache and release them after rendering.
+make room for new images. A settled view sharpens images that need more pixels. Each
+canvas records its image needs as it draws, so a preview cannot evict an image the
+main canvas still needs. The cache reuses encoded originals, overlaps up to ten fetches,
+and decodes at most two display bitmaps at a time.
+
+Raster exports, the Export panel and dashboard thumbnails use display pixels when they
+are sharp enough for the output. The remaining originals decode one at a time into
+a temporary working set. Its decoded byte limit matches the device's display allowance
+and each image is capped at 4,096 pixels on the long side. Canvas releases the set
+after compositing and before encoding the output.
 
 The editor and prototype use native DPR within the area allowance. The 2D prototype
 stage can use tall backings for scrolling screens. Engine surfaces also respect the

@@ -1,4 +1,6 @@
+import { ROOT_ID } from "@drawpane/model";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { Doc } from "../src/doc";
 import {
   ImageCache,
   imagePlacement,
@@ -6,6 +8,8 @@ import {
   layoutImageRow,
   mediaUrl,
 } from "../src/images";
+import { CanvasRenderer } from "../src/render";
+import { Scene } from "../src/scene";
 
 describe("imagePlacement", () => {
   const box = { width: 200, height: 100 };
@@ -423,13 +427,108 @@ describe("bounded display images", () => {
     const cache = new ImageCache({ maxBytes, maxSide: 256, enforceMaxBytes: true, resize, load });
     draw(cache, ["a", "b", "c"]);
     await flush();
-    expect(calls.map(({ sha }) => sha)).toEqual(["a"]);
-    draw(cache, ["a", "c"]);
-    calls[0]?.resolve({ bitmap: bitmap(256, 256), naturalWidth: 256, naturalHeight: 256 });
+    expect(calls.map(({ sha }) => sha)).toEqual(["a", "b"]);
+    draw(cache, ["a", "b", "d"]);
+    const resolve = (i: number) =>
+      calls[i]?.resolve({ bitmap: bitmap(256, 256), naturalWidth: 256, naturalHeight: 256 });
+    resolve(0);
+    resolve(1);
     await flush();
-    expect(calls.map(({ sha }) => sha)).toEqual(["a", "c"]);
-    calls[1]?.resolve({ bitmap: bitmap(256, 256), naturalWidth: 256, naturalHeight: 256 });
+    expect(calls.map(({ sha }) => sha)).toEqual(["a", "b", "d"]);
+    resolve(2);
     await flush();
     cache.clear();
+  });
+});
+
+describe("shared mobile image cache", () => {
+  it("keeps the main canvas's image when an independent preview draws repeatedly", async () => {
+    vi.stubGlobal(
+      "Path2D",
+      class {
+        rect() {}
+      },
+    );
+    const bytes = 256 * 256 * 4;
+    const cache = new ImageCache({
+      maxBytes: bytes,
+      maxSide: 256,
+      enforceMaxBytes: true,
+      load: async () => ({
+        bitmap: bitmap(256, 256),
+        naturalWidth: 256,
+        naturalHeight: 256,
+      }),
+      resize: async (_b, width, height) => bitmap(width, height),
+    });
+    const doc = new Doc();
+    const mainRef = "a".repeat(64);
+    const previewRefs = ["b", "c", "d", "e"].map((prefix) => prefix.repeat(64));
+    doc.apply([{ op: "create", id: "page", parent: ROOT_ID, type: "page", key: "a0", props: {} }]);
+    for (const [index, ref] of [mainRef, ...previewRefs].entries()) {
+      doc.apply([
+        {
+          op: "create",
+          id: ref,
+          parent: "page",
+          type: "rect",
+          key: `a${index}`,
+          props: { width: 256, height: 256, fills: [{ type: "image", ref, scaleMode: "fill" }] },
+        },
+      ]);
+    }
+    const scene = new Scene(doc);
+    const measurer = { width: () => 0 };
+    const main = new CanvasRenderer(scene, measurer, { images: cache });
+    const preview = new CanvasRenderer(scene, measurer, { images: cache });
+    const rect = { x: 0, y: 0, width: 256, height: 256 };
+    const context = () => ({
+      canvas: { width: 256, height: 256 },
+      clearRect: vi.fn(),
+      clip: vi.fn(),
+      drawImage: vi.fn(),
+      fillRect: vi.fn(),
+      getTransform: () => ({ a: 1, b: 0 }),
+      restore: vi.fn(),
+      save: vi.fn(),
+      setTransform: vi.fn(),
+    });
+    const mainContext = context();
+    const previewContext = context();
+    const draw = (renderer: CanvasRenderer, ctx: ReturnType<typeof context>, ref: string) =>
+      renderer.renderNodes(ctx as unknown as CanvasRenderingContext2D, [ref], rect, 1);
+    try {
+      draw(main, mainContext, mainRef);
+      await vi.waitFor(() => expect(cache.peek(mainRef)?.bitmap.width).toBe(256));
+      for (const ref of previewRefs) {
+        draw(preview, previewContext, ref);
+        await vi.waitFor(() => expect(cache.peek(ref)).not.toBeNull());
+        mainContext.drawImage.mockClear();
+        draw(main, mainContext, mainRef);
+        expect(mainContext.drawImage).toHaveBeenCalledOnce();
+        expect(cache.bytes).toBeLessThanOrEqual(bytes);
+      }
+      cache.releaseDisplayView(previewContext.canvas);
+      await vi.waitFor(() => expect(cache.peek(mainRef)?.bitmap.width).toBe(256));
+    } finally {
+      cache.clear();
+    }
+  });
+
+  it("does not decode for metadata callers with no Canvas frame and closes oversized seeds", async () => {
+    const load = vi.fn(async () => ({
+      bitmap: bitmap(256, 256),
+      naturalWidth: 256,
+      naturalHeight: 256,
+    }));
+    const cache = new ImageCache({ maxBytes: 1024, enforceMaxBytes: true, load });
+    expect(cache.natural("inspection")).toBeNull();
+    await flush();
+    expect(load).not.toHaveBeenCalled();
+    const supplied = bitmap(256, 256);
+    cache.put("oversized", { bitmap: supplied, naturalWidth: 256, naturalHeight: 256 });
+    expect(supplied.closed).toBe(true);
+    expect(cache.natural("oversized")).toEqual({ width: 256, height: 256 });
+    expect(cache.bytes).toBe(0);
   });
 });

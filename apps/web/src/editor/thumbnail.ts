@@ -42,35 +42,32 @@ async function renderCanvasPageThumbnail(
   quality: number,
   signal?: AbortSignal,
 ): Promise<Blob | null> {
-  const layout = thumbnailLayout(editor.scene, pageId, { maxWidth, maxHeight });
-  if (!layout) return null;
-  const { ids, scale } = layout;
-  return withCanvasOutputRenderer(
-    editor,
-    { ids, scale, ...(signal ? { signal } : {}) },
-    async (renderer) => {
-      const type = format === "png" ? "image/png" : "image/webp";
-      let blob = await renderThumbnail(renderer, editor.scene, pageId, {
-        maxWidth,
-        maxHeight,
-        type,
-        quality,
-      });
-      for (
-        let size = Math.floor(maxWidth / 2);
-        blob && blob.size > MAX_BYTES && size >= 80;
-        size = Math.floor(size / 2)
-      ) {
-        blob = await renderThumbnail(renderer, editor.scene, pageId, {
-          maxWidth: size,
-          maxHeight: Math.max(1, Math.round((size * maxHeight) / maxWidth)),
+  const type = format === "png" ? "image/png" : "image/webp";
+  const drawAt = (width: number, height: number) => {
+    const layout = thumbnailLayout(editor.scene, pageId, { maxWidth: width, maxHeight: height });
+    if (!layout) return Promise.resolve(null);
+    return withCanvasOutputRenderer(
+      editor,
+      { ids: layout.ids, scale: layout.scale, ...(signal ? { signal } : {}) },
+      (renderer, onDrawn) =>
+        renderThumbnail(renderer, editor.scene, pageId, {
+          maxWidth: width,
+          maxHeight: height,
           type,
           quality,
-        });
-      }
-      return blob && blob.size <= MAX_BYTES ? blob : null;
-    },
-  );
+          ...(onDrawn ? { onDrawn } : {}),
+        }),
+    );
+  };
+  let blob = await drawAt(maxWidth, maxHeight);
+  for (
+    let size = Math.floor(maxWidth / 2);
+    blob && blob.size > MAX_BYTES && size >= 80;
+    size = Math.floor(size / 2)
+  ) {
+    blob = await drawAt(size, Math.max(1, Math.round((size * maxHeight) / maxWidth)));
+  }
+  return blob && blob.size <= MAX_BYTES ? blob : null;
 }
 
 /**

@@ -139,6 +139,7 @@ test.describe("Mobile renderer budgets", () => {
     );
     try {
       const page = await context.newPage();
+      await page.setViewportSize({ width: 1194, height: 834 });
       await createFile(page);
       const marker = await page.evaluate(() => {
         const editor = (window as unknown as DebugWindow).drawpane;
@@ -153,6 +154,11 @@ test.describe("Mobile renderer budgets", () => {
         });
         return id;
       });
+      if (!marker) throw new Error("Missing fixture layer");
+      await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
+      await page.setViewportSize({ width: 320, height: 500 });
+      await page.reload();
+      await expect(page.locator(".editor")).toHaveAttribute("data-workspace", "phone");
       const host = page.locator(".canvas");
       await expect(host).toHaveAttribute("data-renderer", "webgl2", { timeout: 20_000 });
 
@@ -215,7 +221,7 @@ test.describe("Mobile renderer budgets", () => {
           ),
         )
         .toBe(surface.width * surface.height * 4);
-      await page.addStyleTag({ content: ".canvas { width: 1700px; height: 1300px; }" });
+      await page.addStyleTag({ content: ".canvas { flex: none; width: 1700px; height: 1300px; }" });
       await expect
         .poll(
           async () => {
@@ -308,12 +314,18 @@ test.describe("Mobile renderer budgets", () => {
       await createFile(page);
       const viewport = await page.locator("canvas[data-canvas-role=content]").evaluate(backing);
       expect(viewport.width).toBe(Math.round(viewport.cssWidth * 3));
+      const phone = page.viewportSize();
+      if (!phone) throw new Error("Missing iPhone viewport");
+      await page.setViewportSize({ width: 1194, height: 834 });
+      await expect(page.locator(".editor")).toHaveAttribute("data-workspace", "tablet");
       const frame = await page.evaluate(() => {
         const e = (window as unknown as DebugWindow).drawpane;
         if (!e.s.pageId) throw new Error("Missing page");
         return e.createLayer("frame", { x: 0, y: 0, width: 393, height: 6000 }, e.s.pageId);
       });
+      if (!frame) throw new Error("Missing prototype fixture");
       await expect(page.getByRole("status").filter({ hasText: "Saved" })).toBeVisible();
+      await page.setViewportSize(phone);
       await page.goto(`${new URL(page.url()).pathname}/present?screen=${frame}`);
       const surface = await page.locator(".stage__screen canvas").evaluate(backing);
       expect(surface.height).toBeGreaterThan(4096);
@@ -338,7 +350,7 @@ test.describe("Mobile renderer budgets", () => {
         return e.createLayer("frame", { x: 0, y: 0, width: 3200, height: 3000 }, pageId);
       });
 
-      await page.addStyleTag({ content: ".canvas { width: 2200px; height: 1700px; }" });
+      await page.addStyleTag({ content: ".canvas { flex: none; width: 2200px; height: 1700px; }" });
       const content = page.locator("canvas[data-canvas-role=content]");
       await expect
         .poll(async () => {
@@ -385,13 +397,14 @@ test.describe("Mobile renderer budgets", () => {
     const context = await mobilePage(
       browser,
       instance,
-      { ...pixel, deviceScaleFactor: 3 },
+      { ...pixel, viewport: { width: 1194, height: 834 }, deviceScaleFactor: 3 },
       1,
       "canvas",
     );
     try {
       const page = await context.newPage();
       await createFile(page);
+      await expect(page.locator(".editor")).toHaveAttribute("data-workspace", "tablet");
       const image = await page.evaluate(() => {
         const canvas = document.createElement("canvas");
         canvas.width = canvas.height = 1024;
@@ -537,7 +550,7 @@ test.describe("Mobile renderer budgets", () => {
       const exported = await page.evaluate((ref) => {
         const e = (window as unknown as DebugWindow).drawpane;
         if (!e.s.pageId) throw new Error("Missing export page");
-        return e.createLayer("rect", { x: 650, y: 0, width: 2400, height: 1600 }, e.s.pageId, {
+        return e.createLayer("rect", { x: 1200, y: 0, width: 2400, height: 1600 }, e.s.pageId, {
           fills: [{ type: "image", ref, scaleMode: "fill" }],
         });
       }, ref);
@@ -572,7 +585,7 @@ test.describe("Mobile renderer budgets", () => {
         if (!ctx) throw new Error("Missing thumbnail sample context");
         ctx.drawImage(bitmap, 0, 0);
         const { rect, scale } = result.layout;
-        return [...ctx.getImageData((1850 - rect.x) * scale, (1200 - rect.y) * scale, 1, 1).data];
+        return [...ctx.getImageData((2400 - rect.x) * scale, (1200 - rect.y) * scale, 1, 1).data];
       });
       expect(thumbColor).toEqual([0x26, 0x7c, 0xfc, 0xff]);
 

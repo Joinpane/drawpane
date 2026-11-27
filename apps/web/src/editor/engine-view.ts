@@ -2256,6 +2256,10 @@ export class EngineView {
     return this.#images.update(demands, scale, this.#imageLimits, undefined, deferRefine, opening);
   }
 
+  imageNaturalSize(ref: string): { width: number; height: number } | null {
+    return this.#images.info(ref);
+  }
+
   get reducedImages(): number {
     return this.#images.reduced;
   }

@@ -71,18 +71,19 @@ async function renderCanvasPreview(
   signal: AbortSignal,
 ): Promise<Blob | null> {
   if (typeof OffscreenCanvas === "undefined") return null;
-  const draw = (renderer: CanvasRenderer) => {
+  const draw = (renderer: CanvasRenderer, releaseImages?: () => void) => {
     const canvas = new OffscreenCanvas(width, height);
     const ctx = canvas.getContext("2d");
     if (!ctx) return null;
     renderer.renderNodes(ctx, ids, rect, scale, null, false, true);
+    releaseImages?.();
     return canvas.convertToBlob({ type: "image/png" });
   };
   if (imagesFor(editor).boundedDisplay) {
     return withCanvasOutputRenderer(
       editor,
       { ids, scale, context: true, signal },
-      async (renderer) => draw(renderer),
+      async (renderer, releaseImages) => draw(renderer, releaseImages),
     );
   }
   const renderer = getPreviewRenderer(editor);

@@ -36,7 +36,7 @@ import { mobileImageCacheOptions, readMobileRendererMemory } from "./renderer-me
 const caches = new WeakMap<Editor, ImageCache>();
 const queues = new WeakMap<Editor, UploadQueue>();
 
-/** The one decoded-image cache for a file, shared by the canvas, exports and thumbnails. */
+/** The file's display image cache and original media source for snapshots. */
 export function imagesFor(editor: Editor): ImageCache {
   let cache = caches.get(editor);
   if (!cache) {
