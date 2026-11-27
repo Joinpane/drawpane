@@ -220,6 +220,7 @@ struct HaloCache {
     view_bits: [u64; 6],
     size: (u32, u32),
     halo: i32,
+    wide: bool,
 }
 
 pub struct Engine {
@@ -245,6 +246,12 @@ pub struct Engine {
     /// The view whose apron tiles hit a GPU limit: it settles on the reduced halo frame instead.
     #[cfg(feature = "gpu-common")]
     apron_refused: Option<HaloCache>,
+    /// The view whose wide-blur cache hit a GPU limit: it falls back to aprons or reader-halo.
+    #[cfg(feature = "gpu-common")]
+    wide_refused: Option<HaloCache>,
+    /// The wide-blur plan matching `halo_cache` when `halo_cache.wide` is true.
+    #[cfg(feature = "gpu-common")]
+    wide_plan_cache: Option<crate::halo::WideBlurPlan>,
     /// The drag in progress, if the last messages only moved records.
     pub dragging: Option<Dragging>,
     drag_serial: u64,
@@ -266,6 +273,10 @@ impl Engine {
             halo_cache: None,
             #[cfg(feature = "gpu-common")]
             apron_refused: None,
+            #[cfg(feature = "gpu-common")]
+            wide_refused: None,
+            #[cfg(feature = "gpu-common")]
+            wide_plan_cache: None,
             dragging: None,
             drag_serial: 0,
         }
@@ -605,9 +616,16 @@ impl Engine {
             return;
         }
         self.generation += 1;
+        // When an image level changes only at the wide-blur cache's half scale, also refine or
+        // invalidate the tile level that cache serves so tiles sampled from the old cache redraw.
+        #[cfg(feature = "gpu-common")]
+        let wide_scale = self.gpu.as_ref().and_then(|g| g.wide_blur_scale());
+        #[cfg(not(feature = "gpu-common"))]
+        let wide_scale: Option<f64> = None;
+        let tile_at = |scale: f64| at(scale) || (wide_scale == Some(scale) && at(scale * 0.5));
         // A level of a size the image didn't have (or one dropped) is the same picture at another
         // resolution; one replaced at a size it had may be other content.
-        self.invalidate_tiles_at(&users, false, true, Some(&at), replaced.is_none());
+        self.invalidate_tiles_at(&users, false, true, Some(&tile_at), replaced.is_none());
     }
 
     /// The scales at which a view draws or keeps anything (tiles' levels, the frame shown), when
@@ -1516,14 +1534,14 @@ impl Engine {
     }
 
     #[cfg(feature = "gpu-common")]
-    fn cached_halo(&mut self, view: Affine, size: (u32, u32)) -> Result<i32> {
+    fn cached_halo(&mut self, view: Affine, size: (u32, u32)) -> Result<(i32, Option<crate::halo::WideBlurPlan>)> {
         let view_bits = view.as_coeffs().map(f64::to_bits);
         if let Some(c) = self.halo_cache
             && c.generation == self.generation
             && c.view_bits == view_bits
             && c.size == size
         {
-            return Ok(c.halo);
+            return Ok((c.halo, c.wide.then(|| self.wide_plan_cache.clone()).flatten()));
         }
         let rect = Rect::new(0.0, 0.0, f64::from(size.0), f64::from(size.1));
         let halo = self.halo_for_rect(view, rect)?;
@@ -1532,8 +1550,10 @@ impl Engine {
             view_bits,
             size,
             halo,
+            wide: false,
         });
-        Ok(halo)
+        self.wide_plan_cache = None;
+        Ok((halo, None))
     }
 
     /// Draws tiles on the GPU for the next frame of the view last drawn, for at most
@@ -1553,7 +1573,7 @@ impl Engine {
         let Some(last) = gpu.last() else {
             return Ok(DrawStats::default());
         };
-        let halo = match self.cached_halo(last.view, last.size) {
+        let (halo, wide_plan) = match self.cached_halo(last.view, last.size) {
             Ok(h) => h,
             // A view drawn as whole frames: no tiles of its own to draw ahead, only the overview.
             Err(e) if e.code == ErrorCode::Limit => {
@@ -1565,11 +1585,31 @@ impl Engine {
             }
             Err(e) => return Err(e),
         };
+        let wide = wide_plan.is_some();
         let gpu = self
             .gpu
             .as_mut()
             .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
-        match gpu.ahead(&self.store, background, self.generation, halo, budget_ms) {
+        match gpu.ahead(
+            &self.store,
+            background,
+            self.generation,
+            halo,
+            wide_plan.as_ref(),
+            budget_ms,
+        ) {
+            Err(e) if e.code == ErrorCode::Limit && wide => {
+                self.wide_refused = Some(HaloCache {
+                    generation: self.generation,
+                    view_bits: last.view.as_coeffs().map(f64::to_bits),
+                    size: last.size,
+                    halo,
+                    wide: true,
+                });
+                self.halo_cache = None;
+                self.wide_plan_cache = None;
+                Ok(DrawStats::default())
+            }
             // An apron tile too large for this GPU: the next frame settles without aprons.
             Err(e) if e.code == ErrorCode::Limit && i64::from(halo) > i64::from(self.store.limits.halo) => {
                 self.apron_refused = Some(HaloCache {
@@ -1577,6 +1617,7 @@ impl Engine {
                     view_bits: last.view.as_coeffs().map(f64::to_bits),
                     size: last.size,
                     halo,
+                    wide: false,
                 });
                 self.halo_cache = None;
                 Ok(DrawStats::default())
@@ -1600,12 +1641,17 @@ impl Engine {
         self.check_size(width, height)?;
         camera.check()?;
         self.check_supported()?;
-        let (replay_limit, cached_gpu_halo, max_apron) = {
+        let (replay_limit, cached_gpu_halo, max_apron, wide_limits) = {
             let gpu = self
                 .gpu
                 .as_ref()
                 .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
-            (gpu.halo_replay_limit(), gpu.tiles.halo(), gpu.max_view_apron())
+            (
+                gpu.halo_replay_limit(),
+                gpu.tiles.halo(),
+                gpu.max_view_apron(),
+                gpu.wide_blur_limits(),
+            )
         };
         let view = camera.view();
         if let Some(g) = self.gpu.as_mut() {
@@ -1633,8 +1679,8 @@ impl Engine {
                     && c.size == (width, height)
                     && c.halo == cached_gpu_halo
             });
-        let (halo_opt, mut halo_plan) = if composite_only || reuse_moving_halo {
-            (Some(cached_gpu_halo), None)
+        let (halo_opt, mut halo_plan, mut wide_plan) = if composite_only || reuse_moving_halo {
+            (Some(cached_gpu_halo), None, None)
         } else {
             let plan_viewport = editor_viewport
                 && !self.store.has_context()
@@ -1645,22 +1691,54 @@ impl Engine {
                 && c.view_bits == view_bits
                 && c.size == (width, height)
             {
-                (Some(c.halo), None)
+                (Some(c.halo), None, None)
             } else {
-                let (reach, _, halo_plan) = self.reader_halo_plan(view, Some(frame_rect), plan_viewport, replay_limit);
-                let apron = (plan_viewport && !options.moving)
-                    .then(|| self.rest_apron(halo_plan.as_ref(), reach, (width, height), view_bits, max_apron))
-                    .flatten();
-                let halo_opt = self.limit_halo(reach).ok().or(apron);
+                let wide_refused = self.wide_refused.is_some_and(|c| {
+                    c.generation == self.generation && c.view_bits == view_bits && c.size == (width, height)
+                });
+                let req_wide = (plan_viewport && !options.moving && !wide_refused).then_some(wide_limits);
+                let (reach, _, halo_plan, cand_wide) =
+                    self.reader_halo_plan(view, Some(frame_rect), plan_viewport, replay_limit, req_wide);
+                let native_fits = halo_plan.as_ref().is_none_or(|p| {
+                    self.gpu.as_ref().is_some_and(|g| {
+                        g.prefers_padded_view(p, (width, height), self.store.limits.padded_view_pixels)
+                    })
+                });
+                let use_wide = cand_wide.filter(|_| {
+                    plan_viewport
+                        && !options.moving
+                        && !wide_refused
+                        && reach > f64::from(self.store.limits.halo)
+                        && (reach > f64::from(max_apron) || !native_fits)
+                });
+                let (halo_opt, wide_active) = if let Some(ref wp) = use_wide {
+                    (Some(wp.residual_halo), true)
+                } else {
+                    let apron = (plan_viewport && !options.moving)
+                        .then(|| self.rest_apron(halo_plan.as_ref(), reach, (width, height), view_bits, max_apron))
+                        .flatten();
+                    // Keep GPU tile aprons even so tile origins stay aligned with 2x2 hardware
+                    // pixel quads (avoiding derivative phase flips on glass rims across tile seams).
+                    let even = |h: i32| if h > 0 { h + (h & 1) } else { 0 };
+                    let max_halo = self.store.limits.halo.min(i32::MAX as u32) as i32;
+                    let h = self
+                        .limit_halo(reach)
+                        .ok()
+                        .map(|h| even(h).min(max_halo))
+                        .or_else(|| apron.map(|h| even(h).min(max_apron)));
+                    (h, false)
+                };
                 if let Some(halo) = halo_opt {
                     self.halo_cache = Some(HaloCache {
                         generation: self.generation,
                         view_bits,
                         size: (width, height),
                         halo,
+                        wide: wide_active,
                     });
+                    self.wide_plan_cache = use_wide.clone();
                 }
-                (halo_opt, halo_plan)
+                (halo_opt, halo_plan, use_wide)
             }
         };
         let frame = Frame {
@@ -1704,8 +1782,10 @@ impl Engine {
         // the reduced halo frame, so it is skipped at every budget, unbounded draws included.
         let apron_chosen =
             !options.moving && halo_opt.is_some_and(|h| i64::from(h) > i64::from(self.store.limits.halo));
-        let whole =
-            !composite_only && !apron_chosen && halo_opt != Some(0) && (options.budget_ms == 0.0 || simple_reader_drag);
+        let whole = !composite_only
+            && !apron_chosen
+            && (halo_opt != Some(0) || wide_plan.is_some())
+            && (options.budget_ms == 0.0 || simple_reader_drag);
         let whole_stats = if whole {
             let mut result = gpu.render_whole(
                 &self.store,
@@ -1715,6 +1795,7 @@ impl Engine {
                 options.moving,
                 prefix,
                 halo_plan.as_ref(),
+                wide_plan.as_ref(),
             );
             if prefix.is_some() && result.as_ref().is_err_and(|e| e.code == ErrorCode::Limit) {
                 result = gpu.render_whole(
@@ -1725,6 +1806,7 @@ impl Engine {
                     options.moving,
                     None,
                     halo_plan.as_ref(),
+                    wide_plan.as_ref(),
                 );
             }
             match result {
@@ -1757,8 +1839,43 @@ impl Engine {
                 halo,
                 options,
                 drag.as_ref(),
+                wide_plan.as_ref(),
             ) {
                 Ok(stats) => stats,
+                Err(e) if e.code == ErrorCode::Limit && wide_plan.is_some() => {
+                    self.wide_refused = Some(HaloCache {
+                        generation: self.generation,
+                        view_bits,
+                        size: (width, height),
+                        halo,
+                        wide: true,
+                    });
+                    self.halo_cache = None;
+                    self.wide_plan_cache = None;
+                    wide_plan = None;
+                    let gpu = self.gpu.as_mut().expect("GPU attached");
+                    if sliced {
+                        gpu.render_whole_sliced(
+                            &self.store,
+                            &frame,
+                            background,
+                            self.generation,
+                            halo_plan.take(),
+                            options.budget_ms,
+                        )?
+                    } else {
+                        gpu.render_whole(
+                            &self.store,
+                            &frame,
+                            background,
+                            self.generation,
+                            options.moving,
+                            None,
+                            halo_plan.as_ref(),
+                            None,
+                        )?
+                    }
+                }
                 // Apron tiles too large for this GPU's memory: the view settles on the reduced
                 // halo frame (not exact) and stops trying aprons until it changes.
                 Err(e)
@@ -1771,6 +1888,7 @@ impl Engine {
                         view_bits: view.as_coeffs().map(f64::to_bits),
                         size: (width, height),
                         halo,
+                        wide: false,
                     });
                     self.halo_cache = None;
                     let gpu = self.gpu.as_mut().expect("GPU attached");
@@ -1792,6 +1910,7 @@ impl Engine {
                             options.moving,
                             None,
                             halo_plan.as_ref(),
+                            None,
                         )?
                     }
                 }
@@ -1810,6 +1929,7 @@ impl Engine {
                 i32::try_from(self.store.limits.halo.max(1)).unwrap_or(i32::MAX),
                 options,
                 drag.as_ref(),
+                None,
             )?
         } else if sliced {
             gpu.render_whole_sliced(
@@ -1829,8 +1949,10 @@ impl Engine {
                 options.moving,
                 None,
                 halo_plan.as_ref(),
+                None,
             )?
         };
+        let _ = wide_plan;
         // A cached halo may describe an earlier camera. Validate the current one before
         // calling the frame exact, even if all its tiles are already at the current scale.
         // (A reduced reader-halo frame shown again was drawn for this camera.)
@@ -1958,7 +2080,7 @@ impl Engine {
     /// later readers (decision 0007).
     pub fn halo(&self, view: Affine) -> Result<i32> {
         self.limit_halo(
-            self.reader_halo_plan(view, None, false, crate::halo::HALO_REPLAY_SIDE)
+            self.reader_halo_plan(view, None, false, crate::halo::HALO_REPLAY_SIDE, None)
                 .0,
         )
     }
@@ -1968,7 +2090,7 @@ impl Engine {
     /// inflate an export's halo.
     pub fn halo_for_rect(&self, view: Affine, crop: Rect) -> Result<i32> {
         self.limit_halo(
-            self.reader_halo_plan(view, Some(crop), false, crate::halo::HALO_REPLAY_SIDE)
+            self.reader_halo_plan(view, Some(crop), false, crate::halo::HALO_REPLAY_SIDE, None)
                 .0,
         )
     }
@@ -2014,7 +2136,8 @@ impl Engine {
     /// additionally bounds peak memory in Worker builds (`memory_bytes > 0`).
     fn export_halo(&self, view: Affine, width: u32, height: u32) -> Result<i32> {
         let crop = Rect::new(0.0, 0.0, f64::from(width), f64::from(height));
-        let (total, reader_only, _) = self.reader_halo_plan(view, Some(crop), false, crate::halo::HALO_REPLAY_SIDE);
+        let (total, reader_only, _, _) =
+            self.reader_halo_plan(view, Some(crop), false, crate::halo::HALO_REPLAY_SIDE, None);
         self.limit_halo(reader_only)?;
         if !total.is_finite() {
             return self.limit_halo(total);
@@ -2022,17 +2145,23 @@ impl Engine {
         Ok(total.min(f64::from(width.max(height))).ceil() as i32)
     }
 
-    /// Dependency reach `(total, reader_only, halo_plan)` outside a view, with an optional
-    /// divisor-aware viewport halo plan.
+    /// Dependency reach `(total, reader_only, halo_plan, wide_plan)` outside a view, with optional
+    /// divisor-aware viewport halo and world-grid 2x wide-blur plans.
     fn reader_halo_plan(
         &self,
         view: Affine,
         crop: Option<Rect>,
         plan_viewport: bool,
         replay_limit: u32,
-    ) -> (f64, f64, Option<crate::halo::ViewportHaloPlan>) {
+        wide_limits: Option<(u32, usize)>,
+    ) -> (
+        f64,
+        f64,
+        Option<crate::halo::ViewportHaloPlan>,
+        Option<crate::halo::WideBlurPlan>,
+    ) {
         if self.store.readers().is_empty() {
-            return (0.0, 0.0, None);
+            return (0.0, 0.0, None, None);
         }
         enum ReaderKind {
             Glass,
@@ -2056,6 +2185,7 @@ impl Engine {
             kind: ReaderKind,
             spatial_post_overflow: bool,
             paint_order: usize,
+            clip_rect: Option<Rect>,
             unfilled_clip: Option<[f32; 4]>,
         }
         let view_scale = view.determinant().abs().sqrt();
@@ -2236,38 +2366,55 @@ impl Engine {
                 }
             }
             let pushed_before = nodes.len();
-            let paint = device.transform_rect_bbox(cr.local);
-            let unfilled_clip = if plan_viewport && !cr.unfilled_clips.is_empty() {
-                let mut bounds: Option<[f32; 4]> = None;
-                for &(cw, lb) in &cr.unfilled_clips {
+            let clip_rect = if !cr.clip_within.is_empty() {
+                let mut bounds: Option<Rect> = None;
+                for &(cw, lb) in &cr.clip_within {
                     let b = (view * cw).transform_rect_bbox(lb);
                     bounds = Some(match bounds {
-                        Some([x0, y0, x1, y1]) => [
-                            x0.max(b.x0 as f32),
-                            y0.max(b.y0 as f32),
-                            x1.min(b.x1 as f32),
-                            y1.min(b.y1 as f32),
-                        ],
-                        None => [b.x0 as f32, b.y0 as f32, b.x1 as f32, b.y1 as f32],
+                        Some(acc) => acc.intersect(b),
+                        None => b,
                     });
                 }
-                bounds.filter(|[x0, y0, x1, y1]| x1 > x0 && y1 > y0)
+                bounds
+            } else {
+                None
+            };
+            let paint = match clip_rect {
+                Some(c) => {
+                    if c.width() <= 0.0 || c.height() <= 0.0 {
+                        continue;
+                    }
+                    let clipped = device.transform_rect_bbox(cr.local).intersect(c);
+                    if clipped.width() <= 0.0 || clipped.height() <= 0.0 {
+                        continue;
+                    }
+                    clipped
+                }
+                None => device.transform_rect_bbox(cr.local),
+            };
+            let clamp_read = |r: Rect| match clip_rect {
+                Some(c) => r.intersect(c.inflate(2.0, 2.0)),
+                None => r,
+            };
+            let unfilled_clip = if plan_viewport && cr.clip_unfilled {
+                clip_rect.map(|b| [b.x0 as f32, b.y0 as f32, b.x1 as f32, b.y1 as f32])
             } else {
                 None
             };
             match cr.kind {
-                crate::store::CachedReaderKind::Glass { local_halo } => {
-                    let reach_px = (f64::from(local_halo) * scale).ceil() + 2.0;
+                crate::store::CachedReaderKind::Glass { scale_halo, pad_px } => {
+                    let reach_px = (f64::from(scale_halo) * scale + f64::from(pad_px)).ceil() + 2.0;
                     nodes.push(ReaderNode {
                         key: cr.key,
                         paint,
-                        read: paint.inflate(reach_px, reach_px),
+                        read: clamp_read(paint.inflate(reach_px, reach_px)),
                         reach_px,
                         post_reach_px,
                         writes_backdrop: false,
                         kind: ReaderKind::Glass,
                         spatial_post_overflow,
                         paint_order: idx + 1,
+                        clip_rect,
                         unfilled_clip: None,
                     });
                 }
@@ -2276,20 +2423,21 @@ impl Engine {
                     nodes.push(ReaderNode {
                         key: cr.key,
                         paint,
-                        read: paint.inflate(reach_px, reach_px),
+                        read: clamp_read(paint.inflate(reach_px, reach_px)),
                         reach_px,
                         post_reach_px,
                         writes_backdrop: true,
                         kind: ReaderKind::Read,
                         spatial_post_overflow,
                         paint_order: idx + 1,
+                        clip_rect,
                         unfilled_clip: None,
                     });
                 }
                 crate::store::CachedReaderKind::BackgroundBlur { radius } => {
                     let sigma_px = crate::blur::sigma_from_radius(radius) * scale as f32;
                     let reach = if plan_viewport {
-                        crate::blur::replay_reach_view(sigma_px)
+                        crate::blur::replay_reach_view_bg(sigma_px)
                     } else {
                         crate::blur::replay_reach(sigma_px)
                     };
@@ -2298,13 +2446,14 @@ impl Engine {
                     nodes.push(ReaderNode {
                         key: cr.key,
                         paint,
-                        read: paint.inflate(reach_px, reach_px),
+                        read: clamp_read(paint.inflate(reach_px, reach_px)),
                         reach_px,
                         post_reach_px,
                         writes_backdrop: true,
                         kind: ReaderKind::UniformBlur { sigma: sigma_det },
                         spatial_post_overflow,
                         paint_order: idx + 1,
+                        clip_rect,
                         unfilled_clip,
                     });
                 }
@@ -2328,7 +2477,7 @@ impl Engine {
                     nodes.push(ReaderNode {
                         key: cr.key,
                         paint,
-                        read: paint.inflate(reach_px, reach_px),
+                        read: clamp_read(paint.inflate(reach_px, reach_px)),
                         reach_px,
                         post_reach_px,
                         writes_backdrop: true,
@@ -2339,6 +2488,7 @@ impl Engine {
                         },
                         spatial_post_overflow,
                         paint_order: idx + 1,
+                        clip_rect,
                         unfilled_clip,
                     });
                 }
@@ -2460,7 +2610,13 @@ impl Engine {
             if let Some(crop) = crop {
                 let visible = node.paint.intersect(crop.inflate(vis_pad, vis_pad));
                 if visible.width() > 0.0 && visible.height() > 0.0 {
-                    samples = samples.union(visible.inflate(node.reach_px, node.reach_px));
+                    let mut r = visible.inflate(node.reach_px, node.reach_px);
+                    if let Some(c) = node.clip_rect {
+                        r = r.intersect(c.inflate(2.0, 2.0));
+                    }
+                    if r.width() > 0.0 && r.height() > 0.0 {
+                        samples = samples.union(r);
+                    }
                 }
             }
             propagate_writers(
@@ -2474,7 +2630,7 @@ impl Engine {
             );
         }
         let Some(crop) = crop.filter(|_| plan_viewport) else {
-            return (total, reader_only, None);
+            return (total, reader_only, None, None);
         };
         let frame_irect = IRect::around(crop);
         // Wide layer-blur scopes whose readers draw, or whose blurred output reaches the crop:
@@ -2506,7 +2662,7 @@ impl Engine {
                 .iter()
                 .any(|&ci| candidates[ci].max_lb_sigma > crate::blur::MAX_BLUR_SIGMA)
         {
-            return (total, reader_only, None);
+            return (total, reader_only, None, None);
         }
 
         let far_divisor = crate::halo::replay_divisor(samples_rect, replay_limit);
@@ -2752,6 +2908,7 @@ impl Engine {
                     coarse_post_scopes: Vec::new(),
                     coarse_post_min_sigma: f32::INFINITY,
                 }),
+                None,
             );
         }
 
@@ -3055,6 +3212,212 @@ impl Engine {
             }
         }
 
+        // Plan a world-grid 2x-downsampled wide-blur cache when offloading uniform blurs with
+        // `sigma >= WIDE_BLUR_MIN_SIGMA` brings remaining tile reach within `Limits::halo` and
+        // the d = 2 capture fits `wide_limits`, so the view renders as ordinary 512 px tiles.
+        let wide_plan = if let Some((wide_max_side, wide_max_pixels)) = wide_limits
+            && total > f64::from(self.store.limits.halo)
+            && coarse_post_scopes.is_empty()
+            && !nodes
+                .iter()
+                .enumerate()
+                .any(|(i, n)| active_node[i] && n.spatial_post_overflow)
+            && let Some((level, frame_origin)) = crate::tiles::Level::of(view)
+        {
+            let t = i64::from(crate::tiles::TILE);
+            let gx0 = crop.x0.floor() as i64 - frame_origin.0;
+            let gy0 = crop.y0.floor() as i64 - frame_origin.1;
+            let gx1 = crop.x1.ceil() as i64 - frame_origin.0;
+            let gy1 = crop.y1.ceil() as i64 - frame_origin.1;
+            let tx0 = gx0.div_euclid(t) * t;
+            let ty0 = gy0.div_euclid(t) * t;
+            let tx1 = -(-gx1).div_euclid(t) * t;
+            let ty1 = -(-gy1).div_euclid(t) * t;
+            let visible_tiles_grid = match (
+                i32::try_from(tx0),
+                i32::try_from(ty0),
+                i32::try_from(tx1),
+                i32::try_from(ty1),
+            ) {
+                (Ok(x0), Ok(y0), Ok(x1), Ok(y1)) if x1 > x0 && y1 > y0 => Some(IRect { x0, y0, x1, y1 }),
+                _ => None,
+            };
+            visible_tiles_grid.and_then(|vis_tiles| {
+                let tile_grid_frame = Rect::new(
+                    (tx0 + frame_origin.0) as f64,
+                    (ty0 + frame_origin.1) as f64,
+                    (tx1 + frame_origin.0) as f64,
+                    (ty1 + frame_origin.1) as f64,
+                );
+                let is_wide = |n: &ReaderNode| {
+                    n.post_reach_px == 0.0
+                        && !n.spatial_post_overflow
+                        && matches!(n.kind, ReaderKind::UniformBlur { sigma } if sigma >= crate::halo::WIDE_BLUR_MIN_SIGMA)
+                };
+                let mut res_needed = vec![0.0f64; nodes.len()];
+                let mut res_total = 0.0f64;
+                let mut res_samples_f = crop;
+                let mut any_wide = false;
+                let mut residual_readers: Vec<(IRect, i32)> = Vec::new();
+                for (i, node) in nodes.iter().enumerate().rev() {
+                    let downstream = res_needed[i];
+                    let affected = node.paint.inflate(node.post_reach_px, node.post_reach_px);
+                    if downstream == 0.0 && !overlaps(affected, tile_grid_frame) {
+                        continue;
+                    }
+                    if is_wide(node) {
+                        any_wide = true;
+                        continue;
+                    }
+                    let reach = node.reach_px + node.post_reach_px + downstream;
+                    res_total = res_total.max(reach);
+                    if reach > 0.0 && reach.is_finite() {
+                        let aff = node.paint.inflate(
+                            node.post_reach_px + downstream + 2.0,
+                            node.post_reach_px + downstream + 2.0,
+                        );
+                        let gx0 = (aff.x0.floor() as i64 - frame_origin.0).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+                        let gy0 = (aff.y0.floor() as i64 - frame_origin.1).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+                        let gx1 = (aff.x1.ceil() as i64 - frame_origin.0).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+                        let gy1 = (aff.y1.ceil() as i64 - frame_origin.1).clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+                        if gx1 > gx0 && gy1 > gy0 {
+                            residual_readers.push((IRect { x0: gx0, y0: gy0, x1: gx1, y1: gy1 }, reach.ceil() as i32));
+                        }
+                    }
+                    let vis_pad = downstream + node.post_reach_px;
+                    let visible = node.paint.intersect(crop.inflate(vis_pad, vis_pad));
+                    if visible.width() > 0.0 && visible.height() > 0.0 {
+                        let mut r = visible.inflate(node.reach_px, node.reach_px);
+                        if let Some(c) = node.clip_rect {
+                            r = r.intersect(c.inflate(2.0, 2.0));
+                        }
+                        if r.width() > 0.0 && r.height() > 0.0 {
+                            res_samples_f = res_samples_f.union(r);
+                        }
+                    }
+                    propagate_writers(&writers, &nodes, i, reach, &mut res_needed, None, None);
+                }
+                let apron_glass_safe = !nodes.iter().enumerate().any(|(i, n)| {
+                    matches!(n.kind, ReaderKind::Read)
+                        && (n.reach_px > 0.0 || n.post_reach_px > 0.0)
+                        && nodes[..i]
+                            .iter()
+                            .any(|prev| matches!(prev.kind, ReaderKind::Glass) && overlaps(n.read, prev.paint))
+                });
+                if !any_wide || !res_total.is_finite() || res_total > f64::from(self.store.limits.halo) {
+                    return None;
+                }
+                let raw_halo = res_total.ceil() as i32;
+                let max_halo = i32::try_from(self.store.limits.halo).unwrap_or(i32::MAX);
+                let residual_halo = if raw_halo > 0 {
+                    (raw_halo + (raw_halo & 1)).min(max_halo)
+                } else {
+                    0
+                };
+                let cover_grid = vis_tiles.inflate(residual_halo, residual_halo);
+                let cover_frame = Rect::new(
+                    (i64::from(cover_grid.x0) + frame_origin.0) as f64,
+                    (i64::from(cover_grid.y0) + frame_origin.1) as f64,
+                    (i64::from(cover_grid.x1) + frame_origin.0) as f64,
+                    (i64::from(cover_grid.y1) + frame_origin.1) as f64,
+                );
+                let mut wide_needed = vec![0.0f64; nodes.len()];
+                let mut targets: Vec<(u32, usize)> = Vec::new();
+                let mut wide_downstream: Vec<(u32, usize)> = Vec::new();
+                let mut wide_ds_seen = vec![false; nodes.len()];
+                let mut wide_samples_f: Option<Rect> = None;
+                let mut max_wide_sigma = 0.0f32;
+                for (i, node) in nodes.iter().enumerate().rev() {
+                    let downstream = wide_needed[i];
+                    let wide = is_wide(node);
+                    if !wide && downstream == 0.0 {
+                        continue;
+                    }
+                    let affected = node.paint.inflate(node.post_reach_px, node.post_reach_px);
+                    if downstream == 0.0 && !overlaps(affected, cover_frame) {
+                        continue;
+                    }
+                    if wide {
+                        targets.push(node.key);
+                        if let ReaderKind::UniformBlur { sigma } = node.kind {
+                            max_wide_sigma = max_wide_sigma.max(sigma);
+                        }
+                    }
+                    let vis_pad = downstream + node.post_reach_px;
+                    let visible = node.paint.intersect(cover_frame.inflate(vis_pad, vis_pad));
+                    if visible.width() > 0.0 && visible.height() > 0.0 {
+                        let mut r = visible.inflate(node.reach_px, node.reach_px);
+                        if let Some(c) = node.clip_rect {
+                            r = r.intersect(c.inflate(2.0, 2.0));
+                        }
+                        let need = if r.width() > 0.0 && r.height() > 0.0 {
+                            visible.union(r)
+                        } else {
+                            visible
+                        };
+                        wide_samples_f = Some(wide_samples_f.map_or(need, |acc| acc.union(need)));
+                    }
+                    let reach = node.reach_px + node.post_reach_px + downstream;
+                    propagate_writers(
+                        &writers,
+                        &nodes,
+                        i,
+                        reach,
+                        &mut wide_needed,
+                        None,
+                        Some((&mut wide_downstream, &mut wide_ds_seen)),
+                    );
+                }
+                if targets.is_empty() {
+                    return None;
+                }
+                targets.reverse();
+                let ws = wide_samples_f?.inflate(4.0, 4.0);
+                let (max_lvl, _) = crate::blur::choose_level_view(max_wide_sigma * 0.5);
+                let snap = i64::from((2 * crate::blur::level_step(max_lvl)).clamp(64, 256));
+                let wx0 = ws.x0.floor() as i64 - frame_origin.0;
+                let wy0 = ws.y0.floor() as i64 - frame_origin.1;
+                let wx1 = ws.x1.ceil() as i64 - frame_origin.0;
+                let wy1 = ws.y1.ceil() as i64 - frame_origin.1;
+                let cx0 = wx0.div_euclid(snap) * snap;
+                let cy0 = wy0.div_euclid(snap) * snap;
+                let cx1 = -(-wx1).div_euclid(snap) * snap;
+                let cy1 = -(-wy1).div_euclid(snap) * snap;
+                let cap_w = (cx1 - cx0) / 2;
+                let cap_h = (cy1 - cy0) / 2;
+                if cap_w <= 0
+                    || cap_h <= 0
+                    || cap_w > i64::from(wide_max_side)
+                    || cap_h > i64::from(wide_max_side)
+                    || (cap_w as usize).saturating_mul(cap_h as usize) > wide_max_pixels
+                {
+                    return None;
+                }
+                let (Ok(x0), Ok(y0), Ok(x1), Ok(y1)) = (
+                    i32::try_from(cx0),
+                    i32::try_from(cy0),
+                    i32::try_from(cx1),
+                    i32::try_from(cy1),
+                ) else {
+                    return None;
+                };
+                Some(crate::halo::WideBlurPlan {
+                    level,
+                    cover_grid,
+                    cap_grid: IRect { x0, y0, x1, y1 },
+                    residual_halo,
+                    residual_samples: IRect::around(res_samples_f),
+                    targets,
+                    downstream_readers: wide_downstream,
+                    vis_tiles_grid: vis_tiles,
+                    apron_glass_safe,
+                    residual_readers,
+                })
+            })
+        } else {
+            None
+        };
+
         (
             total,
             reader_only,
@@ -3075,6 +3438,7 @@ impl Engine {
                 coarse_post_scopes,
                 coarse_post_min_sigma,
             }),
+            wide_plan,
         )
     }
 
@@ -3225,7 +3589,7 @@ impl Engine {
     /// Viewport tiles can grow past the export-band halo if their working target fits.
     fn cpu_view_halo(&self, view: Affine, crop: Rect, tile: u32) -> Result<i32> {
         let halo = self
-            .reader_halo_plan(view, Some(crop), false, crate::halo::HALO_REPLAY_SIDE)
+            .reader_halo_plan(view, Some(crop), false, crate::halo::HALO_REPLAY_SIDE, None)
             .0
             .ceil();
         let side = f64::from(tile) + 2.0 * halo;
@@ -3876,7 +4240,7 @@ mod halo_plan_tests {
         }
         .view();
         let crop = Rect::new(0.0, 0.0, 2880.0, 1800.0);
-        let (_, _, plan) = engine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
+        let (_, _, plan, _) = engine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE, None);
         let plan = plan.expect("viewport halo plan");
         assert!(plan.far_divisor >= 64, "far_divisor={}", plan.far_divisor);
         assert_eq!(plan.mid_divisor, Some(8), "mid tier keeps native cut-over at 32 px");
@@ -3896,7 +4260,8 @@ mod halo_plan_tests {
             dpr: 2.0,
         }
         .view();
-        let (_, _, deep_plan) = engine.reader_halo_plan(deep_view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
+        let (_, _, deep_plan, _) =
+            engine.reader_halo_plan(deep_view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE, None);
         let deep_plan = deep_plan.expect("deep blur halo plan");
         assert!(deep_plan.far_divisor >= 64);
         assert_eq!(deep_plan.mid_divisor, None, "deep interior skips unused mid tier");
@@ -3947,7 +4312,8 @@ mod halo_plan_tests {
             make_record([200.0, 200.0], clipped_ops.clone(), noise_pe.clone()),
         );
         noise_engine.store.insert_for_test(2, 1, wide_blur.clone());
-        let (_, _, noise_plan) = noise_engine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
+        let (_, _, noise_plan, _) =
+            noise_engine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE, None);
         let noise_plan = noise_plan.expect("clipped noise scope uses halo");
         assert!(noise_plan.use_coarse_halo);
         assert_eq!(
@@ -3967,8 +4333,8 @@ mod halo_plan_tests {
             .store
             .insert_for_test(1, ROOT, make_record([200.0, 200.0], vec![Op::Children], noise_pe));
         unclipped_noise.store.insert_for_test(2, 1, wide_blur.clone());
-        let (_, _, unclipped_plan) =
-            unclipped_noise.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
+        let (_, _, unclipped_plan, _) =
+            unclipped_noise.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE, None);
         let unclipped_plan = unclipped_plan.expect("unclipped noise scope uses halo");
         assert!(unclipped_plan.use_coarse_halo);
         assert_eq!(unclipped_plan.native_samples, noise_plan.native_samples);
@@ -3987,7 +4353,8 @@ mod halo_plan_tests {
             ),
         );
         lb_engine.store.insert_for_test(2, 1, wide_blur.clone());
-        let (_, _, lb_plan) = lb_engine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
+        let (_, _, lb_plan, _) =
+            lb_engine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE, None);
         let lb_plan = lb_plan.expect("clipped native-fitting LayerBlur uses halo");
         assert!(lb_plan.use_coarse_halo);
         assert!(lb_plan.native_samples.x0 <= -400 && lb_plan.native_samples.x1 >= 1040);
@@ -4006,8 +4373,8 @@ mod halo_plan_tests {
             ),
         );
         unclipped_lb.store.insert_for_test(2, 1, wide_blur.clone());
-        let (_, _, unclipped_lb_plan) =
-            unclipped_lb.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
+        let (_, _, unclipped_lb_plan, _) =
+            unclipped_lb.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE, None);
         let unclipped_lb_plan = unclipped_lb_plan.expect("unclipped LayerBlur plan");
         assert!(unclipped_lb_plan.use_coarse_halo);
         assert!(unclipped_lb_plan.native_samples.x0 <= -400 && unclipped_lb_plan.native_samples.x1 >= 1040);
@@ -4026,15 +4393,16 @@ mod halo_plan_tests {
             ),
         );
         ovf_engine.store.insert_for_test(2, 1, wide_blur);
-        let (_, _, ovf_plan) = ovf_engine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
+        let (_, _, ovf_plan, _) =
+            ovf_engine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE, None);
         let ovf_plan = ovf_plan.expect("coarse post-scope plan");
         assert!(ovf_plan.use_coarse_halo);
         assert_eq!(ovf_plan.coarse_post_scopes, vec![1]);
         assert!(ovf_plan.coarse_post_min_sigma > crate::blur::MAX_BLUR_SIGMA);
         assert_eq!(ovf_plan.native_samples, IRect::around(crop));
         // The same scope in an export plan keeps main's reach and refuses past the band halo.
-        let (export_total, _, export_plan) =
-            ovf_engine.reader_halo_plan(view, Some(crop), false, crate::halo::HALO_REPLAY_SIDE);
+        let (export_total, _, export_plan, _) =
+            ovf_engine.reader_halo_plan(view, Some(crop), false, crate::halo::HALO_REPLAY_SIDE, None);
         assert!(export_plan.is_none());
         assert!(ovf_engine.limit_halo(export_total).is_err());
     }
@@ -4080,7 +4448,7 @@ mod halo_plan_tests {
             }
             .view();
             let crop = Rect::new(0.0, 0.0, 640.0, 384.0);
-            let (_, _, plan) = engine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
+            let (_, _, plan, _) = engine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE, None);
             let plan = plan.expect("two-tier halo plan");
             assert!(plan.use_coarse_halo);
             assert!(
@@ -4117,7 +4485,7 @@ mod halo_plan_tests {
         }
         .view();
         let crop = Rect::new(0.0, 0.0, 224.0, 224.0);
-        let (_, _, plan) = engine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
+        let (_, _, plan, _) = engine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE, None);
         let plan = plan.expect("narrow whole-frame padding");
         assert!(!plan.use_coarse_halo);
         assert!(plan.samples.x0 < 0, "must pad left of viewport: {:?}", plan.samples);
@@ -4176,7 +4544,7 @@ mod halo_plan_tests {
         }
         .view();
         let crop = Rect::new(0.0, 0.0, 2880.0, 1800.0);
-        let (_, _, plan) = coarse.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
+        let (_, _, plan, _) = coarse.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE, None);
         let plan = plan.expect("coarse halo plan");
         assert!(plan.use_coarse_halo);
         // Feature width before blur is 5 * 20 = 100 px (the 1-unit stroke is AFTER the blur).
@@ -4204,7 +4572,7 @@ mod halo_plan_tests {
         );
         fine.store.insert_for_test(1, ROOT, thin);
         fine.store.insert_for_test(2, ROOT, blur);
-        let (_, _, fine_plan) = fine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
+        let (_, _, fine_plan, _) = fine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE, None);
         let fine_plan = fine_plan.expect("fine halo plan");
         assert!(
             (fine_plan.far_min_feature_px - 10.0).abs() < 0.5,
@@ -4270,7 +4638,7 @@ mod halo_plan_tests {
         }
         .view();
         let crop = Rect::new(0.0, 0.0, 512.0, 320.0);
-        let (_, _, plan) = engine.reader_halo_plan(view, Some(crop), true, 50);
+        let (_, _, plan, _) = engine.reader_halo_plan(view, Some(crop), true, 50, None);
         let plan = plan.expect("glass over blur plan");
         assert_eq!(plan.far_divisor, 64);
         assert!(
@@ -4320,7 +4688,7 @@ mod halo_plan_tests {
         }
         .view();
         let crop = Rect::new(0.0, 0.0, 512.0, 320.0);
-        let (_, _, plan) = unfilled.reader_halo_plan(view, Some(crop), true, 50);
+        let (_, _, plan, _) = unfilled.reader_halo_plan(view, Some(crop), true, 50, None);
         let plan = plan.expect("unfilled clip halo plan");
         assert_eq!(plan.clamp_clips.len(), 1);
         assert_eq!(plan.clamp_clips[0].reader_key, (2, 0));
@@ -4347,7 +4715,7 @@ mod halo_plan_tests {
         );
         filled.store.insert_for_test(1, ROOT, solid_frame);
         filled.store.insert_for_test(2, 1, blur);
-        let (_, _, filled_plan) = filled.reader_halo_plan(view, Some(crop), true, 50);
+        let (_, _, filled_plan, _) = filled.reader_halo_plan(view, Some(crop), true, 50, None);
         assert!(filled_plan.expect("filled clip plan").clamp_clips.is_empty());
     }
 
@@ -4404,7 +4772,7 @@ mod halo_plan_tests {
         }
         .view();
         let crop = Rect::new(0.0, 0.0, 2880.0, 1800.0);
-        let (_, _, plan) = engine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE);
+        let (_, _, plan, _) = engine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE, None);
         let plan = plan.expect("2,500% glass over progressive blur plan");
         assert!(plan.far_divisor >= 32, "far divisor {}", plan.far_divisor);
         assert!(
@@ -4412,5 +4780,143 @@ mod halo_plan_tests {
             "an off-screen sub-far progressive stop must not join the mid tier: {:?}",
             plan.downstream_mid_readers
         );
+    }
+
+    #[test]
+    fn wide_blur_plan_offloads_clipped_large_blurs_and_keeps_residual_within_tile_halo() {
+        use crate::record::GlassOp;
+        // Mirrors Control Center G2: a 393 x 852 clipped frame at 254% zoom / DPR 2 (scale 5.08)
+        // in an 1802 x 1800 viewport, holding large r=135.91 pills, an Overlay r=24 blur, a narrow
+        // r=10 blur, and frosted glass lenses.
+        let mut engine = Engine::new(Limits::default());
+        let frame = make_record(
+            [393.0, 852.0],
+            vec![
+                Op::Clip {
+                    path: 0,
+                    even_odd: false,
+                },
+                Op::Children,
+                Op::Unclip,
+            ],
+            Vec::new(),
+        );
+        let mut pill_wide = make_record(
+            [160.0, 160.0],
+            vec![Op::BackgroundBlur(Box::new(BackgroundBlurOp {
+                paths: vec![0],
+                even_odd: false,
+                radius: 135.91,
+            }))],
+            Vec::new(),
+        );
+        pill_wide.transform = Affine::translate((40.0, 120.0));
+        let mut narrow_blur = make_record(
+            [80.0, 40.0],
+            vec![Op::BackgroundBlur(Box::new(BackgroundBlurOp {
+                paths: vec![0],
+                even_odd: false,
+                radius: 10.0,
+            }))],
+            Vec::new(),
+        );
+        narrow_blur.transform = Affine::translate((40.0, 120.0));
+        let overlay = make_record(
+            [393.0, 852.0],
+            vec![Op::BackgroundBlur(Box::new(BackgroundBlurOp {
+                paths: vec![0],
+                even_odd: false,
+                radius: 24.0,
+            }))],
+            Vec::new(),
+        );
+        let mut glass_lens = make_record(
+            [68.0, 68.0],
+            vec![Op::Glass(Box::new(GlassOp {
+                paths: vec![0],
+                even_odd: false,
+                kind: crate::glass::KIND_BOX,
+                inradius: 34.0,
+                angle: -45.0,
+                intensity: 80.0,
+                refraction: 20.0,
+                depth: 10.0,
+                dispersion: 0.0,
+                frost: 3.0,
+                splay: 0.0,
+                box_radii: [34.0; 4],
+                box_smoothing: [0.0; 4],
+                measured_inradius: std::cell::Cell::new(-1.0),
+            }))],
+            Vec::new(),
+        );
+        glass_lens.transform = Affine::translate((120.0, 220.0));
+
+        engine.store.insert_for_test(1, ROOT, frame);
+        engine.store.insert_for_test(2, 1, pill_wide);
+        engine.store.insert_for_test(3, 1, narrow_blur);
+        engine.store.insert_for_test(4, 1, overlay);
+        engine.store.insert_for_test(5, 1, glass_lens);
+
+        let view = Camera {
+            zoom: 2.54,
+            x: 0.0,
+            y: 0.0,
+            dpr: 2.0,
+        }
+        .view();
+        let crop = Rect::new(0.0, 0.0, 1802.0, 1800.0);
+        let (total, _, _, wide) = engine.reader_halo_plan(
+            view,
+            Some(crop),
+            true,
+            crate::halo::HALO_REPLAY_SIDE,
+            Some((3072, 4_200_000)),
+        );
+        assert!(
+            total > f64::from(Limits::default().halo),
+            "unoffloaded reach {total} should exceed tile halo"
+        );
+        let wp = wide.expect("Control-Center-like scene admits WideBlurPlan");
+        assert_eq!(wp.targets, vec![(2, 0), (4, 0)]);
+        assert!(wp.downstream_readers.contains(&(2, 0)));
+        assert!(wp.downstream_readers.contains(&(3, 0)));
+        assert!(
+            wp.residual_halo <= Limits::default().halo as i32 && wp.residual_halo <= 220,
+            "residual_halo={} should stay compact",
+            wp.residual_halo
+        );
+        assert_eq!(wp.cap_grid.x0 % 2, 0);
+        assert_eq!(wp.cap_grid.y0 % 2, 0);
+        assert_eq!(wp.cap_grid.x1 % 2, 0);
+        assert_eq!(wp.cap_grid.y1 % 2, 0);
+        let cap_w = (wp.cap_grid.x1 - wp.cap_grid.x0) / 2;
+        let cap_h = (wp.cap_grid.y1 - wp.cap_grid.y0) / 2;
+        assert!(cap_w <= 3072 && cap_h <= 3072);
+        assert!((cap_w as usize) * (cap_h as usize) <= 4_200_000);
+
+        // Unclipped extreme blur (radius 1500 at 1x) exceeds wide capture limits -> None.
+        let mut huge = Engine::new(Limits::default());
+        huge.store.insert_for_test(
+            1,
+            ROOT,
+            make_record(
+                [1600.0, 896.0],
+                vec![Op::BackgroundBlur(Box::new(BackgroundBlurOp {
+                    paths: vec![0],
+                    even_odd: false,
+                    radius: 1500.0,
+                }))],
+                Vec::new(),
+            ),
+        );
+        let (_, _, _, huge_wide) = huge.reader_halo_plan(
+            Affine::IDENTITY,
+            Some(Rect::new(0.0, 0.0, 1600.0, 896.0)),
+            true,
+            crate::halo::HALO_REPLAY_SIDE,
+            Some((3072, 4_200_000)),
+        );
+        assert!(huge_wide.is_none(), "huge unclipped blur must fall back to reader-halo");
     }
 }

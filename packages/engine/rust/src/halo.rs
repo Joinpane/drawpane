@@ -378,6 +378,38 @@ pub fn rect_union(a: IRect, b: IRect) -> IRect {
     }
 }
 
+/// Minimum device-pixel sigma for a uniform background blur to be offloaded into the world-grid
+/// 2x-downsampled wide-blur cache (`WideBlurPlan`) when a GPU view's reader reach exceeds the
+/// bounded tile halo. At `d = 2`, `sigma_d2 >= 16.0` is more than 5x above `HALO_MIN_COARSE_SIGMA`.
+pub const WIDE_BLUR_MIN_SIGMA: f32 = 32.0;
+
+/// World-grid 2x-downsampled wide-blur capture plan for GPU views, letting large uniform
+/// background blurs feed ordinary 512 px tiles within `Limits::halo`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WideBlurPlan {
+    pub level: crate::tiles::Level,
+    /// Visible tile grid region inflated by `residual_halo` (in `level.grid()` px).
+    pub cover_grid: IRect,
+    /// Snapped `d = 2` capture bounds in `level.grid()` px (edges divisible by grid snap).
+    pub cap_grid: IRect,
+    /// Device-pixel halo needed by remaining (non-wide) readers in each 512 px tile (`<= Limits::halo`).
+    pub residual_halo: i32,
+    /// Residual sample bounds around the viewport (in frame px) for unbounded whole draws.
+    pub residual_samples: IRect,
+    /// Active wide uniform blurs `(record_id, op_index)` captured at `d = 2` in paint order.
+    pub targets: Vec<(u32, usize)>,
+    /// Earlier backdrop writers overlapped by any target wide blur (must composite in `d = 2`).
+    pub downstream_readers: Vec<(u32, usize)>,
+    /// Visible 512 px tile bounds in `level.grid()` space that `residual_readers` covers.
+    pub vis_tiles_grid: IRect,
+    /// True when no non-wide, non-glass reader painted after a glass lens overlaps that lens,
+    /// so haloed tiles may skip root glass lenses strictly outside `[h, h + TILE)`.
+    pub apron_glass_safe: bool,
+    /// Remaining (non-wide) readers' `(affected_grid, reach_px)` pairs in `level.grid()` space,
+    /// so each 512 px tile uses only the apron required by readers overlapping that tile.
+    pub residual_readers: Vec<(IRect, i32)>,
+}
+
 /// Complete viewport halo plan computed in `Engine::render_gpu` and executed by `Gpu::render_whole`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ViewportHaloPlan {

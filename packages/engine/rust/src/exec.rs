@@ -392,8 +392,7 @@ pub fn reader_backdrop_layers<T>(
 }
 
 pub trait Backend {
-    type Scene: Draw;
-    fn scene(&mut self) -> &mut Self::Scene;
+    fn scene(&mut self) -> &mut dyn Draw;
     fn mark_dirty(&mut self) {}
     /// Whether this backend can execute fixed-function hardware blending directly inside the
     /// active strip pass on the current target (true only on GPU when enabled and every active
@@ -543,7 +542,9 @@ pub trait Backend {
     fn abort_isolated(&mut self, open: &[Open]);
     /// Whether this backend draws view blurs of any sigma (the GPU view pyramid, layer blurs on a
     /// reduced grid past the native limits). CPU and Worker exports keep the native limits.
-    const ALLOW_UNBOUNDED_VIEW_BLUR: bool = false;
+    fn allow_unbounded_view_blur(&self) -> bool {
+        false
+    }
     /// Limits for a layer blur drawn at device resolution before it switches to a reduced grid.
     fn reduced_layer_blur_limits(&self) -> ReducedBlurLimits {
         ReducedBlurLimits {
@@ -1138,7 +1139,12 @@ pub fn export_plan_metrics(store: &Store, frame: &Frame, tile: (usize, usize)) -
     st.metrics
 }
 
-pub fn draw<B: Backend>(store: &Store, backend: &mut B, frame: &Frame, limits: &Limits) -> Result<DrawStats> {
+#[cfg(any(test, feature = "gpu-common"))]
+type WalkBackend = dyn Backend;
+#[cfg(not(any(test, feature = "gpu-common")))]
+type WalkBackend = crate::cpu::Cpu;
+
+pub fn draw(store: &Store, backend: &mut WalkBackend, frame: &Frame, limits: &Limits) -> Result<DrawStats> {
     let mut budget = limits.frame_verbs;
     draw_budgeted(store, backend, frame, limits, &mut budget)
 }
@@ -1189,9 +1195,9 @@ enum Phase {
 
 /// `draw`, charging what it generates to `budget` (path elements left), which several passes of
 /// one frame share (a pan's strips): what's left is written back.
-pub fn draw_budgeted<B: Backend>(
+pub fn draw_budgeted(
     store: &Store,
-    backend: &mut B,
+    backend: &mut WalkBackend,
     frame: &Frame,
     limits: &Limits,
     budget: &mut usize,
@@ -1226,9 +1232,9 @@ pub enum WalkOutcome {
 }
 
 /// `draw_budgeted`, drawing only the part of the page `split` names.
-pub fn draw_split<B: Backend>(
+pub fn draw_split(
     store: &Store,
-    backend: &mut B,
+    backend: &mut WalkBackend,
     frame: &Frame,
     limits: &Limits,
     budget: &mut usize,
@@ -1255,9 +1261,9 @@ pub fn draw_split<B: Backend>(
 /// `backend.deadline_reached()` triggers at a safe boundary (outside isolated and masked scopes).
 /// Pass `checkpoint` from `WalkOutcome::Paused` on the next slice to resume the same paint order.
 #[allow(clippy::too_many_arguments)]
-pub fn draw_split_resumable<B: Backend>(
+pub fn draw_split_resumable(
     store: &Store,
-    backend: &mut B,
+    backend: &mut WalkBackend,
     frame: &Frame,
     limits: &Limits,
     budget: &mut usize,
@@ -1399,11 +1405,11 @@ pub fn draw_split_resumable<B: Backend>(
     })
 }
 
-struct Walk<'a, B: Backend> {
+struct Walk<'a> {
     split: &'a Split,
     phase: Phase,
     store: &'a Store,
-    backend: &'a mut B,
+    backend: &'a mut WalkBackend,
     frame: Frame,
     coarse_readers: bool,
     /// A rough stand-in (`Backend::rough`).
@@ -2217,7 +2223,7 @@ const MAX_HW_BLEND_DRAWS: usize = 16;
 /// Maximum recursion depth when inspecting a blended layer subtree.
 const MAX_HW_BLEND_DEPTH: usize = 8;
 
-impl<B: Backend> Walk<'_, B> {
+impl Walk<'_> {
     /// Explicit fixed-function hardware blend precondition shared by every op and layer gate:
     /// the mode is one of `{Multiply, Screen, LinearDodge, LinearBurn}`, we are not already inside
     /// a HW-blended unit or an open Vello opacity/compose layer, and the backend confirms the
@@ -3437,7 +3443,7 @@ impl<B: Backend> Walk<'_, B> {
         let mut post_state: Option<PostIsoState> = None;
         let saved_open = if has_post {
             self.scope()?;
-            let unbounded = B::ALLOW_UNBOUNDED_VIEW_BLUR;
+            let unbounded = self.backend.allow_unbounded_view_blur();
             let parent_tb = self.backend.target_bounds();
             let raw_out = IRect::around(dev_bbox.inflate(1.0, 1.0));
             let padded_out = IRect {
@@ -4208,7 +4214,7 @@ impl<B: Backend> Walk<'_, B> {
             }
             self.open = post.prev_open;
             if res.is_ok() && !self.backend.stop_early() {
-                let unbounded = B::ALLOW_UNBOUNDED_VIEW_BLUR;
+                let unbounded = self.backend.allow_unbounded_view_blur();
                 let max_side = self.store.limits.texture_side as i32;
                 let mut steps = Vec::with_capacity(post.posts.len());
                 let mut post_res = Ok(());
@@ -4987,7 +4993,7 @@ impl<B: Backend> Walk<'_, B> {
         // General reference Gaussian blur over the rasterised cast mask (with canonical caching).
         let margin_local = {
             let s = scale_of(device).max(1e-6);
-            let pad = if B::ALLOW_UNBOUNDED_VIEW_BLUR {
+            let pad = if self.backend.allow_unbounded_view_blur() {
                 crate::shadow::blur_support_pad_view(sigma_dev)
             } else {
                 crate::shadow::blur_support_pad(sigma_dev)
@@ -5681,8 +5687,9 @@ mod resumable_tests {
     }
 
     impl<const UNBOUNDED: bool> Backend for AlwaysYieldCpu<UNBOUNDED> {
-        type Scene = <Cpu as Backend>::Scene;
-        const ALLOW_UNBOUNDED_VIEW_BLUR: bool = UNBOUNDED;
+        fn allow_unbounded_view_blur(&self) -> bool {
+            UNBOUNDED
+        }
         fn reduced_layer_blur_limits(&self) -> ReducedBlurLimits {
             ReducedBlurLimits {
                 replay_side: crate::halo::HALO_REPLAY_SIDE,
@@ -5704,7 +5711,7 @@ mod resumable_tests {
             self.inner.abort_isolated(open);
             Ok(())
         }
-        fn scene(&mut self) -> &mut Self::Scene {
+        fn scene(&mut self) -> &mut dyn Draw {
             self.inner.scene()
         }
         fn mark_dirty(&mut self) {
@@ -6589,8 +6596,7 @@ mod hw_blend_gate_tests {
     }
 
     impl Backend for SpyBackend {
-        type Scene = SpyScene;
-        fn scene(&mut self) -> &mut Self::Scene {
+        fn scene(&mut self) -> &mut dyn Draw {
             &mut self.scene
         }
         fn mark_dirty(&mut self) {

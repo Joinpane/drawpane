@@ -54,17 +54,16 @@ pub fn blur_dirty_rect(
 /// Resolves `(clamp_bounds, EdgeMode)` in target-local coordinates from an optional `ClipWithin`
 /// (decision 0007: background blur stops at clipping frames and extends an opaque solid fill).
 /// When a tile crops past the left or top of the real clamp region, `x0`/`y0` are anchored
-/// congruent to the frame clamp origin modulo `1 << level(max_sigma)` so pyramid downsampling
-/// stays bit-identical between whole frames and split tiles.
-pub fn blur_bounds_and_edge(
+/// congruent to the frame clamp origin modulo `align` so pyramid downsampling stays bit-identical
+/// between whole frames and split tiles.
+pub fn blur_bounds_and_edge_align(
     within: Option<ClipWithin>,
     frame_size: (i32, i32),
     shift: (i32, i32),
     target_size: (i32, i32),
-    max_sigma: f32,
+    align: i32,
 ) -> (IRect, EdgeMode) {
-    let (lvl, _) = blur::choose_level(max_sigma.clamp(0.0, blur::MAX_BLUR_SIGMA), blur::MAX_PYRAMID_LEVELS);
-    let align = 1i32 << lvl;
+    let align = align.max(1);
     let anchor_min = |raw: i32, limit: i32| -> i32 {
         if raw < 0 {
             raw.rem_euclid(align).min(limit)
@@ -108,6 +107,17 @@ pub fn blur_bounds_and_edge(
             (cb, EdgeMode::Clamp)
         }
     }
+}
+
+pub fn blur_bounds_and_edge(
+    within: Option<ClipWithin>,
+    frame_size: (i32, i32),
+    shift: (i32, i32),
+    target_size: (i32, i32),
+    max_sigma: f32,
+) -> (IRect, EdgeMode) {
+    let (lvl, _) = blur::choose_level(max_sigma.clamp(0.0, blur::MAX_BLUR_SIGMA), blur::MAX_PYRAMID_LEVELS);
+    blur_bounds_and_edge_align(within, frame_size, shift, target_size, 1i32 << lvl)
 }
 
 /// Premultiplied replace of `blurred` (`bw x bh` aligned at `dirty.x0, dirty.y0`) onto `dst`

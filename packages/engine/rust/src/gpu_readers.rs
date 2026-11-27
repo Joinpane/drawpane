@@ -1688,6 +1688,7 @@ impl GpuReaders {
         frame_size: (i32, i32),
         source_offset: (i32, i32),
         dst_offset: (i32, i32),
+        quad_phase: (u32, u32),
         backdrop_gen: u64,
         backdrop_is_frame: bool,
         params: &GlassParams,
@@ -2274,8 +2275,8 @@ impl GpuReaders {
             lh as f32,
             // Packed height/quad-phase/opaque-blend/clip flags, packed atlas mask origin, clip_origin_y, and device-per-optical scale.
             (u32::from(self.height_packed)
-                | (((dst_offset.0 & 1) as u32) << 1)
-                | (((dst_offset.1 & 1) as u32) << 2)
+                | ((quad_phase.0 & 1) << 1)
+                | ((quad_phase.1 & 1) << 2)
                 | (u32::from(use_hw_blend) << 3)
                 | (u32::from(has_clip_mask) << 4)) as f32,
             mask_offset,

@@ -2223,3 +2223,122 @@ pan and pinch. Repeat rotation and background/foreground cycles. Record context 
 backend transitions, persistent blank frames and tab reloads, and check that a recovered
 view keeps the document and camera. Compare frame pacing against the existing file and
 real-input benches before setting rollout gates.
+
+## Amendment: per-tile 2x-downsampled GPU background blur (2026-11-27)
+
+Large-radius background blurs on desktop views (such as Control Center's `r = 135.91` pills and
+`r = 24` overlay at 254% zoom / DPR 2, where sigma reaches 345 device px and full-resolution reach
+exceeds 1,400 px) forced the engine out of 512 px tiles into reduced whole-frame reader-halo mode
+(`plan 4`). Reader-halo frames cannot tile, cannot report `exact`, and re-render the whole view on
+pan.
+
+### Decision (approved as "exact" for GPU views)
+
+Interactive GPU views (WebGPU and WebGL2) use a deterministic, tile-consistent 2x-downsampled
+background blur as their exact representation. CPU rendering and headless/Worker exports keep the
+full-resolution reference blur unchanged.
+
+1. **Fused pyramid per-tile background blur (`sigma > 10.0`):**
+   - `VIEW_BG_DIRECT_SIGMA_MAX` matches `DIRECT_SIGMA_MAX` (`10.0`), so `sigma <= 10.0` stays on
+     direct full-resolution level 0 (preserving `main`'s exact Figma parity across all `blurs`,
+     `blur-scopes`, and `scoped-alpha` cells). Above `10.0`, interactive GPU views use the
+     variance-compensated pyramid (`choose_level_view_bg` delegates to `choose_level_view`).
+   - `GpuBlur::encode_view_bg_level` stops after the vertical separable pass in `scratch_v`,
+     skipping both `fs_upsample` and the full-resolution `blur_out` texture; `fs_bg_blur_composite`
+     bilinear-samples `scratch_v` directly inside the blur composite pass.
+   - In `BlurReaderDraw::bounds_and_edge`, unclipped blurs (both frame and isolation-scope sources)
+     anchor `cb.x0`/`cb.y0` per axis to `Level::grid()` modulo `level_step(level)`, and unfilled
+     clipped blurs (`w.fill.is_none()`) preserve their true `w.x0.floor()` / `w.y0.floor()` phase
+     modulo `align` when a tile or padded frame crops past the clip's left/top edge (`raw < 0`).
+     This keeps the pyramid phase bit-identical across 512 px tiles and whole frames at every pan
+     offset, including rotated and unrotated clipped blurs crossing tile seams.
+   - Disjoint sibling background blurs in the same draw reuse the cached backdrop pyramid via
+     `backdrop_blur_written` dirty-rect tracking, invalidating only when a subsequent blur reads
+     an area written by an earlier blur.
+2. **World-grid `d = 2` wide-blur cache for large radii (`sigma >= 32.0`) so views stay tiled:**
+   - `Store::CachedReader` records ancestor clipping rects (`clip_within`) for every reader, and
+     `Engine::reader_halo_plan` clamps each reader's paint and read extents to its enclosing clip
+     frame. Glass halo estimation separates zoom-scaled reach from fixed device pad
+     (`glass::halo_parts`: 20 px for refractive lenses, matching `main` so tile scratch sizes and
+     `engine-glass-atlas`'s 20 MiB budget stay unchanged).
+   - To keep glass lens rims identical between whole frames and 512 px tiles at every zoom and pan
+     without inflating tile pads:
+     - `glass::compute_regions` enables `align_mips` for all clear refractive lenses
+       (`params.frost <= 0.4 && params.refraction > 0.0`) before clipping and anchors both near
+       and far region edges to the unclipped lens origin modulo `alignment`, so tile clipping never
+       shifts mip or rim-height phase;
+     - GPU view tile aprons round up to even pixels (`Engine::render_gpu`), and `Gpu::encode_glass`
+       derives `quad_phase` from `ActiveDraw::draw_grid_origin` (including odd pans and isolation
+       scopes), keeping hardware 2x2 pixel-quad derivatives aligned to `Level::grid()`.
+   - When offloading uniform background blurs with `sigma >= 32.0` (`WIDE_BLUR_MIN_SIGMA`) reduces
+     the remaining tile reach to fit within `Limits::halo` (128 px) and the world-grid `d = 2`
+     capture fits within `WideBlurPlan` limits (`3072` px side / `4.2M` px on hardware, `2560` px
+     side / `3.5M` px on software adapters, further bounded by remaining GPU memory `room / 28` so
+     memory-tight mobile budgets do not plan captures that `reserve_or_trim` immediately refuses),
+     the engine builds a pan-invariant `d = 2` `WideBlurCache` cooperatively across budgeted slices
+     (`Gpu::step_wide_blur`, skipping glass during the wide capture and stopping right after the
+     last target blur) and then draws the view as ordinary 512 px tiles (`plan 0`, `exact: true`,
+     `pending: 0`).
+   - Tiles and unbudgeted whole frames sample the same `WideBlurCache` patches in `Level::grid()`
+     coordinates (`Gpu::sample_wide_blur_patch`), so `tiled == whole`, `panned == fresh`,
+     `patched == fresh`, and `WebGPU == WebGL2` are bit-identical across 512 px tile seams.
+   - Image level updates (`Engine::image_levels_changed`) that only change the image level selected
+     at the wide cache's half scale (`wide_scale * 0.5`) both bump generation (dropping the wide
+     cache) and refine/invalidate the tile level served by that cache (`Gpu::wide_blur_scale`).
+   - Each tile uses only the apron needed by remaining non-wide readers overlapping that 512 px
+     square (`WideBlurCache::halo_for_tile`, bounded by `vis_tiles_grid`), and when no spatial
+     `ReaderKind::Read` overlaps an earlier glass lens (`apron_glass_safe`), glass outside spatial
+     post-effect scopes (`GpuIsolation::clip_to_parent == true`) skips apron-only lenses strictly
+     outside `[h, h + 512)` in both `glass::plan_glass_masks_clipped` and `Gpu::glass`.
+   - When a wide-blur build hits a GPU memory limit (`ErrorCode::Limit`), the view records
+     `wide_refused` and falls back to the existing reader-halo path, with PR #368's budgeted
+     `CoarseWhole` (`div = 1, 2, 4` + `blit_scratch_scaled`) and quiet-gated exact retry kept
+     fully intact.
+3. **Code-size room (separate first commit):**
+   - Switched `exec::Walk` to `&mut dyn Backend` on GPU builds (keeping concrete `Cpu` dispatch on
+     `worker`) and returned `&mut dyn Draw` from `Backend::scene()`, freeing 16,453 B gzipped on
+     `compute` with no behavioral changes (keeping #368's `div = 2, 4` scaled coarse steps and all
+     device-lost / read-back error diagnostics intact).
+
+### Parity against Figma (SwiftShader Chromium, CPU / WebGPU / WebGL2)
+
+CPU rendering is unchanged; WebGPU and WebGL2 match identically on every cell and kit frame, with
+zero delta against `main` across all 17 blur and scope cells (`alpha.<backend>.mean`, unrounded).
+
+| Suite / corpus | Before (`main`) GPU mean (max px) | After GPU mean (max px) | After WebGL2 mean (max px) | CPU mean (unchanged) |
+| --- | ---: | ---: | ---: | ---: |
+| `blurs` (10 cells) | 0.6304 (32) | 0.6304 (32) | 0.6304 (32) | 0.6626 |
+| `blur-scopes` (2 cells) | 0.5242 (30) | 0.5242 (30) | 0.5242 (30) | 0.4993 |
+| `scoped-alpha` (5 cells) | 0.1628 (20) | 0.1628 (20) | 0.1628 (20) | 0.1625 |
+| `blurs/background-4` (`sigma = 4`, level 0) | 0.5529 (32) | 0.5529 (32) | 0.5529 (32) | 0.5908 |
+| `blur-scopes/bgblur-in-mask` (`sigma = 10`, level 0) | 0.4624 (30) | 0.4624 (30) | 0.4624 (30) | 0.4359 |
+| `blur-scopes/bgblur-in-blur` (`sigma = 10`, level 0) | 0.5860 (12) | 0.5860 (12) | 0.5860 (12) | 0.5626 |
+| Glass parity suites (10 suites, 145 cells) | unchanged | unchanged | unchanged | unchanged |
+| `ios27` blur-heavy kit frames (35 frames, `maxR` up to 135.91) | avg 0.7130, max frame 2.4392, p99 38, max px 255 | avg 0.7131, max frame 2.4392, p99 38, max px 255 | identical (0 diffs vs WebGPU) | N/A |
+
+### Measured on Modal T4 (paired containers, hardware WebGL2, `ios27` Examples)
+
+Refreshed 3-container paired check on `origin/main` (`dfe501bf`) vs final PR 5 (`VIEW_BG_DIRECT_SIGMA_MAX = 10.0`,
+restored `div = 2, 4` coarse steps, clipped phase anchoring, budget-bounded wide capture):
+
+| Metric | Main (`dfe501bf`, 3 pairs) | PR 5 (final, 3 pairs) |
+| --- | --- | --- |
+| Control Center G2 exact hit rate | 1 / 3 (2 missed on reader-halo) | 3 / 3 (all ordinary 16 x 512 px tiles) |
+| Control Center G2 time to exact (hits median) | 615 ms (1 hit; 2 timed out) | 596 ms (584, 596, 1,606 ms) |
+| Control Center G2 max idle slice (median) | 20.0 ms (15.7, 20.0, 21.2 ms) | 11.9 ms (10.2, 11.9, 17.0 ms; 0 ms longTask in all 3) |
+| Examples `zoom, whole` settle time (median) | 1,789 ms (1,770, 1,789, 2,022 ms) | 1,587 ms (1,437, 1,587, 1,982 ms) |
+| Examples `zoom, whole` blur ops during settle | 231 | 198 |
+
+Initial 5-container paired run (`98be4471` vs `9af7d512`) also recorded G2 GL binds per tile (`BENCH_GL_SPY=1`,
+untimed): 1,500.0 / pass (3,000 total across 2 whole passes) on `main` vs 299.2 / tile (4,788 total across 16 tiles)
+on PR 5, and Examples `zoom, whole` 403.8 / tile (21,804 total, 54 tiles) vs 398.2 / tile (19,909 total, 50 tiles).
+
+### WASM size budget (gzip level 9, all budgets unchanged)
+
+| Module (budget) | Main (`dfe501bf`) | After Commit 1 (`55ca0c04`) | After Commit 2 (final) | Headroom |
+| --- | ---: | ---: | ---: | ---: |
+| `worker` (400,000 B) | 390,657 B | 389,975 B | 390,973 B | 9,027 B |
+| `browser` (1,000,000 B) | 748,993 B | 733,227 B | 746,953 B | 253,047 B |
+| `compute` (1,000,000 B) | 999,624 B | 983,171 B | 997,394 B | 2,606 B |
+| `webgl` (1,475,000 B) | 1,460,633 B | 1,443,494 B | 1,458,160 B | 16,840 B |
+| `decoder` (200,000 B) | 161,466 B | 161,466 B | 161,466 B | 38,534 B |
