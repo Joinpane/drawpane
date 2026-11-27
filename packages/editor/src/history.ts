@@ -35,6 +35,14 @@ export class History {
   get canRedo(): boolean {
     return this.#redo.length > 0;
   }
+  /** Number of entries on the undo stack. */
+  get undoDepth(): number {
+    return this.#undo.length;
+  }
+  /** Number of entries on the redo stack. */
+  get redoDepth(): number {
+    return this.#redo.length;
+  }
   /** Whether a group (a gesture) is being recorded. */
   get grouping(): boolean {
     return this.#open !== null;
@@ -88,6 +96,20 @@ export class History {
     const undone = open.undo.splice(from).reverse().flat();
     if (mark === undefined) this.#open = null;
     if (undone.length > 0) applyBestEffort(commit, undone);
+    return true;
+  }
+
+  /**
+   * Closes the innermost open group and drops its recorded undo operations without
+   * committing inverses: used when `SyncEngine.discardHold` already reverted the document.
+   */
+  drop(): boolean {
+    const open = this.#open;
+    if (!open) return false;
+    const mark = open.marks.pop();
+    const from = mark ?? 0;
+    open.undo.splice(from);
+    if (mark === undefined) this.#open = null;
     return true;
   }
 

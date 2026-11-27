@@ -95,6 +95,7 @@ export function visibleHandles(path: VectorPath, selected: readonly string[]): V
 export class VectorEditTool implements ToolHandler {
   readonly #editor: Editor;
   #drag: Drag | null = null;
+  #prevAnchors: readonly string[] | null = null;
   #gesture = false;
   cursor = "default";
 
@@ -167,6 +168,7 @@ export class VectorEditTool implements ToolHandler {
     const v = editor.s.vectorEdit;
     if (!target || !v) return false;
     const { node, path, world } = target;
+    this.#prevAnchors = [...v.anchors];
     const page = editor.s.camera.toPage(input.screen);
     const local = apply(invert(world), page);
 
@@ -387,6 +389,7 @@ export class VectorEditTool implements ToolHandler {
         else editor.exitVectorEdit();
       }
     }
+    this.#prevAnchors = null;
     this.#end();
     return true;
   }
@@ -432,8 +435,20 @@ export class VectorEditTool implements ToolHandler {
   cancel(): void {
     const drag = this.#drag;
     this.#drag = null;
+    this.#prevAnchors = null;
     if (drag?.kind === "empty" && drag.marquee) this.#editor.state.set({ marquee: null });
     this.#end();
+  }
+
+  /** Resets the in-progress anchor/handle drag and restores pre-drag anchor selection. */
+  rollbackActive(): void {
+    const drag = this.#drag;
+    const prevAnchors = this.#prevAnchors;
+    this.#drag = null;
+    this.#prevAnchors = null;
+    this.#gesture = false;
+    if (drag?.kind === "empty" && drag.marquee) this.#editor.state.set({ marquee: null });
+    if (prevAnchors && this.#editor.s.vectorEdit) this.#editor.selectAnchors(prevAnchors);
   }
 
   #hover(input: PointerInput): void {

@@ -204,7 +204,12 @@ export class CropTool implements ToolHandler {
   }
 
   cancel(): void {
-    if (this.#drag?.moved) this.#editor.endGesture();
+    if (this.#drag?.moved) this.#editor.cancelGesture();
     this.#drag = null;
+  }
+
+  rollbackActive(): void {
+    this.#drag = null;
+    this.cursor = "default";
   }
 }

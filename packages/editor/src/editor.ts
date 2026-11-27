@@ -1142,6 +1142,15 @@ export class Editor {
   }
 
   /**
+   * Closes the innermost open gesture without committing inverse ops: used after
+   * `sync.discardHold()` has already reverted the held document changes locally.
+   */
+  dropGesture(): void {
+    this.history.drop();
+    this.state.set({ gesture: this.history.grouping, guides: [] });
+  }
+
+  /**
    * Re-measures text set in `families` (all text when omitted) and writes
    * corrected sizes, without an undo step: a web font arrived after the text
    * was measured with its fallback. Auto layout around it follows.

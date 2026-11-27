@@ -39,7 +39,7 @@ export function ExplainCard() {
   const editor = useEditor();
   useDocVersion();
   const explain = useEditorState((s) => s.explain);
-  const camera = useEditorState((s) => s.camera);
+  const camera = useEditorState((s) => (s.explain && !s.gesture ? s.camera : null));
   const viewport = useEditorState((s) => s.viewport);
   const gesture = useEditorState((s) => s.gesture);
   const canEdit = useEditorState((s) => s.role !== "viewer" && !s.readOnly);
@@ -80,7 +80,7 @@ export function ExplainCard() {
     if (left !== bounds.left || right !== bounds.right) setBounds({ left, right });
   });
 
-  if (!explain || gesture) return null;
+  if (!explain || gesture || !camera) return null;
   const explanation = explainSize(editor.doc, explain.id, explain.axis);
   const world = editor.scene.bounds(explain.id);
   if (!explanation || !world) return null;

@@ -51,9 +51,32 @@ export interface EditorUi {
   readonly missingFonts: boolean;
   /** Active workspace presentation (phone, tablet, or desktop), readable by canvas/gesture hooks. */
   readonly workspaceMode: WorkspaceMode;
+  /** True while a touch pan/pinch camera gesture is active (lets floating UI step aside without per-move renders). */
+  readonly cameraGesture: boolean;
+}
+
+/**
+ * Bridge registered by `CommentsLayer` so `Canvas`'s touch arbiter can place
+ * comments (on tap in Comment tool or long-press on phone) and dismiss open
+ * threads/empty drafts only after gesture classification, never on raw touch
+ * down before a second finger arrives.
+ */
+export interface CanvasCommentBridge {
+  readonly placeAt: (canvas: HTMLElement, clientX: number, clientY: number) => void;
+  readonly dismissOpen: () => void;
 }
 
 const stores = new WeakMap<Editor, Store<EditorUi>>();
+const commentBridges = new WeakMap<Editor, CanvasCommentBridge>();
+
+export function setCommentBridge(editor: Editor, bridge: CanvasCommentBridge | null): void {
+  if (bridge) commentBridges.set(editor, bridge);
+  else commentBridges.delete(editor);
+}
+
+export function commentBridgeFor(editor: Editor): CanvasCommentBridge | null {
+  return commentBridges.get(editor) ?? null;
+}
 
 export function uiFor(editor: Editor): Store<EditorUi> {
   let store = stores.get(editor);
@@ -70,6 +93,7 @@ export function uiFor(editor: Editor): Store<EditorUi> {
       inspectorPopovers: 0,
       missingFonts: false,
       workspaceMode: "desktop",
+      cameraGesture: false,
     });
     stores.set(editor, store);
   }

@@ -1,4 +1,5 @@
 import {
+  Camera,
   CanvasRenderer,
   fontString,
   frameLabelAt,
@@ -44,7 +45,8 @@ import { mobileBacking, mobileOverscan, readMobileRendererMemory } from "./rende
 import { engineBackendLabel, fallbackToReason, setRendererStatus } from "./renderer-status";
 import { shaper } from "./shaping";
 import { TextEditor } from "./TextEditor";
-import { openMenu } from "./ui-state";
+import { TouchArbiter, type TouchPoint } from "./touch-arbitration";
+import { commentBridgeFor, openMenu, uiFor } from "./ui-state";
 import { VectorHints } from "./VectorHints";
 import { settleAfterNotch } from "./wheel-notch";
 
@@ -120,6 +122,11 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
   }
   /** Until when (`performance.now()`) the camera counts as moving after a wheel notch. */
   const notchSettle = useRef({ until: 0 });
+  /** Active touch or Safari camera-motion state shared between the input and render loops. */
+  const cameraMotion = useRef<{ active: boolean; settle: () => void }>({
+    active: false,
+    settle: () => {},
+  });
 
   // Render loop: repaint content when the document, page or camera changes;
   // repaint the overlay on any state change. Never more than once per frame.
@@ -575,10 +582,12 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       // redraw never hides the engine's frame, and a read-back frame shows once it lands.
       let drewEngine = false;
       let runCompositeOnly = compositeOnly;
-      // Between wheel notches the camera isn't at rest: frames stay stand-ins until they stop.
+      // Between wheel notches or while a touch/trackpad camera gesture is active, frames stay
+      // stand-ins so the engine refines to exact once the gesture comes to rest.
       const notchUntil = notchSettle.current.until;
       const settling = performance.now() < notchUntil;
-      const gestureMoving = (s.gesture || settling) && s.editingText === null;
+      const gestureMoving =
+        (s.gesture || settling || cameraMotion.current.active) && s.editingText === null;
       if (
         contentDirty &&
         s.pageId !== null &&
@@ -741,18 +750,25 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
             s.camera,
             s.viewport,
             dpr,
-            whole ? { exact: true } : { exact, budget: timing.budget ?? CONTENT_BUDGET },
+            whole
+              ? { exact: true }
+              : {
+                  exact: exact && !cameraMotion.current.active,
+                  budget: timing.budget ?? CONTENT_BUDGET,
+                },
           );
           exact = false;
           whole = false;
           clearTimeout(settle);
+          settle = 0;
           contentDirty = false;
           if (r.pending) {
             // Drawn in part: the next frame draws more.
             contentDirty = true;
             schedule();
-          } else if (!done)
+          } else if (!done && !cameraMotion.current.active)
             settle = window.setTimeout(() => {
+              settle = 0;
               exact = true;
               contentDirty = true;
               schedule();
@@ -813,6 +829,20 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     };
     const schedule = () => {
       if (!frame) frame = requestAnimationFrame(draw);
+    };
+    cameraMotion.current.settle = () => {
+      if (disposed) return;
+      if (engine && engineShowing && engineMoved) {
+        contentDirty = true;
+        schedule();
+      } else if (!timing.exact && !settle) {
+        settle = window.setTimeout(() => {
+          settle = 0;
+          exact = true;
+          contentDirty = true;
+          schedule();
+        }, SETTLE_MS);
+      }
     };
 
     let dprQuery: MediaQueryList | null = null;
@@ -1020,6 +1050,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     return () => {
       disposed = true;
       rendererRef.current.instance?.images.releaseDisplayView(contentCanvas);
+      cameraMotion.current.settle = () => {};
       engineInit.abort();
       const w = window as unknown as { drawpaneEngineView?: EngineView };
       if (createdView && w.drawpaneEngineView === createdView) delete w.drawpaneEngineView;
@@ -1107,8 +1138,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       editor.sync.setPresence(editor.presence(cursor));
     };
 
-    const onDown = (e: PointerEvent) => {
-      if (e.button === 2) return;
+    const blurOutsideCanvas = () => {
       // The canvas takes focus back from controls outside it (a comment pin, an
       // inspector field), so arrow keys move layers again and typed values commit.
       // preventDefault below would otherwise leave focus where it was.
@@ -1120,87 +1150,50 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
         !canvasHost?.contains(active)
       )
         active.blur();
-      const now = performance.now();
-      clicks =
-        now - lastDown < 400 && Math.hypot(e.clientX - lastPos.x, e.clientY - lastPos.y) < 6
-          ? clicks + 1
-          : 1;
-      lastDown = now;
-      lastPos = { x: e.clientX, y: e.clientY };
-      el.setPointerCapture(e.pointerId);
-      pointer = e;
-      interaction.down(toInput(e, e, clicks));
-      el.style.cursor = interaction.cursor;
-      e.preventDefault();
-    };
-    const onMove = (e: PointerEvent) => {
-      // Coalesced events give smooth strokes on high-rate pointers; the last one is enough for moves.
-      pointer = e;
-      interaction.move(toInput(e, e));
-      el.style.cursor = interaction.cursor;
-      sendPresence(e);
-    };
-    const onUp = (e: PointerEvent) => {
-      if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
-      pointer = null;
-      interaction.up(toInput(e, e));
-      el.style.cursor = interaction.cursor;
-    };
-    const onCancel = () => interaction.cancel();
-    const onLeave = () => {
-      interaction.leave();
-      sendPresence(null);
-    };
-    const onWheel = (e: WheelEvent) => {
-      e.preventDefault();
-      notchSettle.current.until = settleAfterNotch(notchSettle.current.until, e, SETTLE_MS);
-      const rect = el.getBoundingClientRect();
-      // Normalize line and page deltas to pixels.
-      const scale = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? rect.height : 1;
-      interaction.wheel({
-        deltaX: e.deltaX * scale,
-        deltaY: e.deltaY * scale,
-        ctrlKey: e.ctrlKey,
-        metaKey: e.metaKey,
-        shiftKey: e.shiftKey,
-        screen: { x: e.clientX - rect.left, y: e.clientY - rect.top },
-      });
-    };
-    // Safari pinch gestures.
-    let gestureStart = 1;
-    const onGestureStart = (e: Event) => {
-      e.preventDefault();
-      gestureStart = editor.s.camera.zoom;
-    };
-    const onGestureChange = (e: Event) => {
-      e.preventDefault();
-      const g = e as Event & { scale: number; clientX: number; clientY: number };
-      const rect = el.getBoundingClientRect();
-      editor.setCamera(
-        editor.s.camera.zoomAt(
-          { x: g.clientX - rect.left, y: g.clientY - rect.top },
-          gestureStart * g.scale,
-        ),
-      );
     };
 
-    // Right-click: select what's under the pointer the way a click would
-    // (unless it's already in the selection), then open the menu there.
-    const onContextMenu = (e: MouseEvent) => {
-      e.preventDefault();
+    const toTouchPoint = (e: PointerEvent): TouchPoint => {
+      const rect = el.getBoundingClientRect();
+      return {
+        pointerId: e.pointerId,
+        pointerType: e.pointerType,
+        screen: { x: e.clientX - rect.left, y: e.clientY - rect.top },
+        client: { x: e.clientX, y: e.clientY },
+        button: e.button,
+        shift: e.shiftKey,
+        alt: e.altKey,
+        mod: isMac() ? e.metaKey : e.ctrlKey,
+        noSnap: e.ctrlKey,
+        timeStamp: e.timeStamp,
+      };
+    };
+
+    const pointToInput = (point: TouchPoint, clicks = 1, coarse = false): PointerInput => ({
+      screen: point.screen,
+      button: point.button,
+      shift: point.shift,
+      alt: point.alt,
+      mod: point.mod,
+      noSnap: point.noSnap,
+      clicks,
+      ...(coarse ? { coarse: true } : {}),
+    });
+
+    // Shared canvas context menu selection and open helper (mouse right-click and tablet long-press).
+    const openCanvasContextMenu = (clientX: number, clientY: number, deep: boolean) => {
       if (interaction.busy) return;
       const pageId = editor.s.pageId;
       if (!pageId) return;
       const rect = el.getBoundingClientRect();
-      const screen = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+      const screen = { x: clientX - rect.left, y: clientY - rect.top };
       const point = editor.s.camera.toPage(screen);
       // A guide under the pointer gets its own menu.
       const guide = guideAt(placedGuides(editor.scene, pageId), point, 4 / editor.s.camera.zoom);
       if (guide && editor.canEdit) {
         openMenu(editor, {
           kind: "guide",
-          x: e.clientX,
-          y: e.clientY,
+          x: clientX,
+          y: clientY,
           guide: { owner: guide.owner, index: guide.index },
         });
         return;
@@ -1217,10 +1210,299 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       else if (!keep && label) {
         if (!selection.includes(label.id)) editor.select([label.id]);
       } else if (!keep && leaf) {
-        const deep = isMac() ? e.metaKey : e.ctrlKey;
         editor.select([selectionTarget(editor.scene, pageId, leaf, selection, deep)]);
       }
-      openMenu(editor, { kind: "canvas", x: e.clientX, y: e.clientY, point });
+      openMenu(editor, { kind: "canvas", x: clientX, y: clientY, point });
+    };
+
+    /** Snapshot for rolling back an uncommitted single-finger touch tool drag on a second touch. */
+    let touchDrag: {
+      readonly prevSelection: readonly string[];
+      readonly prevHistoryDepth: number;
+      readonly nestedMark: boolean;
+    } | null = null;
+
+    const arbiter = new TouchArbiter({
+      workspaceMode: () => uiFor(editor).get().workspaceMode,
+      tool: () => editor.s.tool,
+      camera: () => editor.s.camera,
+      setCamera: (next) => editor.setCamera(new Camera(next.x, next.y, next.zoom)),
+      onCameraGestureStart: () => {
+        editor.stopCameraAnimation();
+        cameraMotion.current.active = true;
+        uiFor(editor).set({ cameraGesture: true });
+      },
+      onCameraGestureEnd: () => {
+        cameraMotion.current.active = false;
+        uiFor(editor).set({ cameraGesture: false });
+        cameraMotion.current.settle();
+      },
+      onTap: (point, tapClicks) => {
+        blurOutsideCanvas();
+        if (editor.s.tool === "comment") {
+          const hostEl = host.current;
+          if (hostEl) commentBridgeFor(editor)?.placeAt(hostEl, point.client.x, point.client.y);
+          return;
+        }
+        commentBridgeFor(editor)?.dismissOpen();
+        const input = pointToInput(point, tapClicks, true);
+        interaction.down(input);
+        interaction.up(input);
+        el.style.cursor = interaction.cursor;
+      },
+      onLongPress: (point, mode) => {
+        blurOutsideCanvas();
+        if (mode === "phone") {
+          const hostEl = host.current;
+          if (hostEl) commentBridgeFor(editor)?.placeAt(hostEl, point.client.x, point.client.y);
+          return;
+        }
+        commentBridgeFor(editor)?.dismissOpen();
+        openCanvasContextMenu(point.client.x, point.client.y, false);
+      },
+      onToolDragStart: (start, current) => {
+        blurOutsideCanvas();
+        commentBridgeFor(editor)?.dismissOpen();
+        if (editor.s.editingText !== null) editor.endTextEdit();
+        const prevSelection = editor.s.selection;
+        const prevHistoryDepth = editor.history.groupDepth;
+        const nestedMark = prevHistoryDepth > 0;
+        if (nestedMark) editor.history.begin("Touch stroke", prevSelection);
+        editor.sync.beginHold();
+        touchDrag = { prevSelection, prevHistoryDepth, nestedMark };
+        interaction.down(pointToInput(start, 1, true));
+        interaction.move(pointToInput(current, 1, true));
+        el.style.cursor = interaction.cursor;
+      },
+      onToolDragMove: (point) => {
+        interaction.move(pointToInput(point, 1, true));
+        el.style.cursor = interaction.cursor;
+      },
+      onToolDragEnd: (point) => {
+        const session = touchDrag;
+        touchDrag = null;
+        interaction.up(pointToInput(point, 1, true));
+        if (session?.nestedMark && editor.history.groupDepth > session.prevHistoryDepth) {
+          editor.history.end();
+        }
+        editor.sync.commitHold();
+        el.style.cursor = interaction.cursor;
+      },
+      onToolDragRollback: () => {
+        const session = touchDrag;
+        touchDrag = null;
+        interaction.rollback();
+        if (session) {
+          while (editor.history.groupDepth > session.prevHistoryDepth) editor.dropGesture();
+          editor.sync.discardHold();
+          editor.select(session.prevSelection.filter((id) => editor.doc.has(id)));
+        } else {
+          editor.sync.discardHold();
+        }
+        editor.state.set({
+          gesture: editor.history.grouping,
+          guides: [],
+          marquee: null,
+          guideDraft: null,
+        });
+        el.style.cursor = interaction.cursor;
+      },
+      onPenDown: (point, penClicks) => {
+        blurOutsideCanvas();
+        if (point.button === 2) return;
+        if (editor.s.tool === "comment" && point.button === 0) {
+          const hostEl = host.current;
+          if (hostEl) commentBridgeFor(editor)?.placeAt(hostEl, point.client.x, point.client.y);
+          return;
+        }
+        commentBridgeFor(editor)?.dismissOpen();
+        interaction.down(pointToInput(point, penClicks, false));
+        el.style.cursor = interaction.cursor;
+      },
+      onPenMove: (point) => {
+        interaction.move(pointToInput(point, 1, false));
+        el.style.cursor = interaction.cursor;
+      },
+      onPenUp: (point) => {
+        interaction.up(pointToInput(point, 1, false));
+        el.style.cursor = interaction.cursor;
+      },
+      onPenCancel: () => {
+        interaction.cancel();
+        el.style.cursor = interaction.cursor;
+      },
+    });
+
+    const onDown = (e: PointerEvent) => {
+      if (e.button === 2) return;
+      const isTabletPen = e.pointerType === "pen" && uiFor(editor).get().workspaceMode === "tablet";
+      if (e.pointerType === "touch" || isTabletPen) {
+        try {
+          el.setPointerCapture(e.pointerId);
+        } catch {
+          // Synthetic or detached pointer events may not support capture.
+        }
+        arbiter.pointerDown(toTouchPoint(e));
+        e.preventDefault();
+        return;
+      }
+      arbiter.clearCompatSuppression();
+      blurOutsideCanvas();
+      const now = performance.now();
+      clicks =
+        now - lastDown < 400 && Math.hypot(e.clientX - lastPos.x, e.clientY - lastPos.y) < 6
+          ? clicks + 1
+          : 1;
+      lastDown = now;
+      lastPos = { x: e.clientX, y: e.clientY };
+      el.setPointerCapture(e.pointerId);
+      pointer = e;
+      interaction.down(toInput(e, e, clicks));
+      el.style.cursor = interaction.cursor;
+      e.preventDefault();
+    };
+    const onMove = (e: PointerEvent) => {
+      if (e.pointerType === "touch") {
+        arbiter.pointerMove(toTouchPoint(e));
+        return;
+      }
+      if (e.pointerType === "pen" && uiFor(editor).get().workspaceMode === "tablet") {
+        arbiter.observePenHover(e.pointerType);
+        if (arbiter.pointerMove(toTouchPoint(e))) {
+          sendPresence(e);
+          return;
+        }
+      }
+      // Coalesced events give smooth strokes on high-rate pointers; the last one is enough for moves.
+      pointer = e;
+      interaction.move(toInput(e, e));
+      el.style.cursor = interaction.cursor;
+      sendPresence(e);
+    };
+    const onUp = (e: PointerEvent) => {
+      if (
+        e.pointerType === "touch" ||
+        (e.pointerType === "pen" && arbiter.phase === "pen-active")
+      ) {
+        if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
+        arbiter.pointerUp(toTouchPoint(e));
+        return;
+      }
+      if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
+      pointer = null;
+      interaction.up(toInput(e, e));
+      el.style.cursor = interaction.cursor;
+    };
+    const onCancel = (e: PointerEvent) => {
+      if (arbiter.pointerCancel(e.pointerId, e.pointerType)) {
+        if (el.hasPointerCapture(e.pointerId)) el.releasePointerCapture(e.pointerId);
+        return;
+      }
+      interaction.cancel();
+    };
+    const onLostCapture = (e: PointerEvent) => {
+      arbiter.lostPointerCapture(e.pointerId, e.pointerType);
+    };
+    const onLeave = (e: PointerEvent) => {
+      if (e.pointerType === "touch") return;
+      interaction.leave();
+      sendPresence(null);
+    };
+    // Suppress browser double-tap zoom, iOS selection callouts, and compatibility mouse events
+    // strictly on the canvas overlay (never on chrome, panels, inputs, or TextEditor).
+    const onCanvasTouch = (e: TouchEvent) => {
+      e.preventDefault();
+    };
+    const onWindowPointerDown = () => {
+      arbiter.clearCompatSuppression();
+    };
+    const onCompatMouse = (e: MouseEvent) => {
+      if (!arbiter.shouldSuppressCompatMouse({ x: e.clientX, y: e.clientY })) return;
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    const onWindowBlur = () => {
+      safariGestureActive = false;
+      arbiter.cancelAll();
+    };
+    const onVisibilityChange = () => {
+      if (document.hidden) {
+        safariGestureActive = false;
+        arbiter.cancelAll();
+      }
+    };
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      notchSettle.current.until = settleAfterNotch(notchSettle.current.until, e, SETTLE_MS);
+      const rect = el.getBoundingClientRect();
+      // Normalize line and page deltas to pixels.
+      const scale = e.deltaMode === 1 ? 16 : e.deltaMode === 2 ? rect.height : 1;
+      interaction.wheel({
+        deltaX: e.deltaX * scale,
+        deltaY: e.deltaY * scale,
+        ctrlKey: e.ctrlKey,
+        metaKey: e.metaKey,
+        shiftKey: e.shiftKey,
+        screen: { x: e.clientX - rect.left, y: e.clientY - rect.top },
+      });
+    };
+    // Safari pinch gestures (macOS trackpad). Ignored for camera updates while touch pointers are
+    // active so iOS/iPadOS Safari never double-zooms on top of pointer multi-touch arbitration.
+    // Uses the bounded notchSettle window rather than indefinite cameraMotion so a missing
+    // gestureend event can never leave the renderer or Lens stuck in motion mode.
+    let gestureStart = 1;
+    let safariGestureActive = false;
+    const onGestureStart = (e: Event) => {
+      e.preventDefault();
+      if (arbiter.hasActiveTouch) {
+        safariGestureActive = false;
+        return;
+      }
+      gestureStart = editor.s.camera.zoom;
+      safariGestureActive = true;
+      editor.stopCameraAnimation();
+    };
+    const onGestureChange = (e: Event) => {
+      e.preventDefault();
+      if (arbiter.hasActiveTouch || !safariGestureActive) return;
+      notchSettle.current.until = Math.max(
+        notchSettle.current.until,
+        performance.now() + SETTLE_MS,
+      );
+      const g = e as Event & { scale: number; clientX: number; clientY: number };
+      const rect = el.getBoundingClientRect();
+      editor.setCamera(
+        editor.s.camera.zoomAt(
+          { x: g.clientX - rect.left, y: g.clientY - rect.top },
+          gestureStart * g.scale,
+        ),
+      );
+    };
+    const onGestureEnd = (e: Event) => {
+      e.preventDefault();
+      if (!safariGestureActive) return;
+      safariGestureActive = false;
+      notchSettle.current.until = 0;
+      cameraMotion.current.settle();
+    };
+
+    // Right-click: select what's under the pointer the way a click would
+    // (unless it's already in the selection), then open the menu there.
+    // Suppresses browser-emitted duplicate contextmenu events from touch long-presses.
+    const onContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+      const ptr = e as MouseEvent & {
+        pointerType?: string;
+        sourceCapabilities?: { firesTouchEvents?: boolean };
+      };
+      if (
+        ptr.pointerType === "touch" ||
+        ptr.sourceCapabilities?.firesTouchEvents ||
+        arbiter.shouldSuppressContextMenu({ x: e.clientX, y: e.clientY })
+      ) {
+        return;
+      }
+      openCanvasContextMenu(e.clientX, e.clientY, isMac() ? e.metaKey : e.ctrlKey);
     };
 
     // Shift, Alt or Control pressed or let go mid-drag applies straight away, as if the pointer moved.
@@ -1232,15 +1514,26 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     };
     window.addEventListener("keydown", onModifier);
     window.addEventListener("keyup", onModifier);
+    window.addEventListener("pointerdown", onWindowPointerDown, true);
+    window.addEventListener("mousedown", onCompatMouse, true);
+    window.addEventListener("mouseup", onCompatMouse, true);
+    window.addEventListener("click", onCompatMouse, true);
+    window.addEventListener("dblclick", onCompatMouse, true);
+    window.addEventListener("blur", onWindowBlur);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     el.addEventListener("pointerdown", onDown);
     el.addEventListener("contextmenu", onContextMenu);
     el.addEventListener("pointermove", onMove);
     el.addEventListener("pointerup", onUp);
     el.addEventListener("pointercancel", onCancel);
+    el.addEventListener("lostpointercapture", onLostCapture);
     el.addEventListener("pointerleave", onLeave);
+    el.addEventListener("touchstart", onCanvasTouch, { passive: false });
+    el.addEventListener("touchmove", onCanvasTouch, { passive: false });
     el.addEventListener("wheel", onWheel, { passive: false });
     el.addEventListener("gesturestart", onGestureStart);
     el.addEventListener("gesturechange", onGestureChange);
+    el.addEventListener("gestureend", onGestureEnd);
 
     // Scrolls and pinches that start on chrome floating over this canvas
     // (canvas-gestures.ts) move it too, when the pointer is over it: in
@@ -1260,6 +1553,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     };
     let chromeGesture = false;
     const onChromeGestureStart = (e: Event) => {
+      if (arbiter.hasActiveTouch) return;
       const g = e as Event & { clientX: number; clientY: number };
       chromeGesture = fromChrome(e) && under(g) && passesToCanvas(e.target, null);
       if (chromeGesture) onGestureStart(e);
@@ -1267,9 +1561,14 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     const onChromeGestureChange = (e: Event) => {
       if (chromeGesture && fromChrome(e)) onGestureChange(e);
     };
+    const onChromeGestureEnd = (e: Event) => {
+      if (chromeGesture && fromChrome(e)) onGestureEnd(e);
+      chromeGesture = false;
+    };
     window.addEventListener("wheel", onChromeWheel, { passive: false });
     window.addEventListener("gesturestart", onChromeGestureStart);
     window.addEventListener("gesturechange", onChromeGestureChange);
+    window.addEventListener("gestureend", onChromeGestureEnd);
     // Tell collaborators when your selection, page or view changes, even without
     // moving the pointer: followers see what you see. (Sync throttles sending.)
     let last = editor.s;
@@ -1293,20 +1592,34 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       if (moved) editor.sync.setPresence(editor.presence(cursor));
     });
     return () => {
+      arbiter.dispose();
+      safariGestureActive = false;
       window.removeEventListener("keydown", onModifier);
       window.removeEventListener("keyup", onModifier);
+      window.removeEventListener("pointerdown", onWindowPointerDown, true);
+      window.removeEventListener("mousedown", onCompatMouse, true);
+      window.removeEventListener("mouseup", onCompatMouse, true);
+      window.removeEventListener("click", onCompatMouse, true);
+      window.removeEventListener("dblclick", onCompatMouse, true);
+      window.removeEventListener("blur", onWindowBlur);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
       el.removeEventListener("pointerdown", onDown);
       el.removeEventListener("contextmenu", onContextMenu);
       el.removeEventListener("pointermove", onMove);
       el.removeEventListener("pointerup", onUp);
       el.removeEventListener("pointercancel", onCancel);
+      el.removeEventListener("lostpointercapture", onLostCapture);
       el.removeEventListener("pointerleave", onLeave);
+      el.removeEventListener("touchstart", onCanvasTouch);
+      el.removeEventListener("touchmove", onCanvasTouch);
       el.removeEventListener("wheel", onWheel);
       el.removeEventListener("gesturestart", onGestureStart);
       el.removeEventListener("gesturechange", onGestureChange);
+      el.removeEventListener("gestureend", onGestureEnd);
       window.removeEventListener("wheel", onChromeWheel);
       window.removeEventListener("gesturestart", onChromeGestureStart);
       window.removeEventListener("gesturechange", onChromeGestureChange);
+      window.removeEventListener("gestureend", onChromeGestureEnd);
       offSelection();
     };
   }, [editor, interaction]);

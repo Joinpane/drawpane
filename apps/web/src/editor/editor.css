@@ -15,6 +15,10 @@
   inset: 0;
   overflow: hidden;
   touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
 }
 .canvas__layer {
   position: absolute;
@@ -77,6 +81,7 @@
   pointer-events: none;
   user-select: text;
   -webkit-user-select: text;
+  -webkit-touch-callout: default;
 }
 .canvas__text-editor::selection {
   background: transparent;
@@ -3200,6 +3205,9 @@
   font: 500 11px / 18px var(--font-ui);
   outline: none;
   box-shadow: 0 0 0 3px var(--signal-soft);
+  user-select: text;
+  -webkit-user-select: text;
+  -webkit-touch-callout: default;
 }
 .frame-name-input::selection {
   background: var(--signal-soft);

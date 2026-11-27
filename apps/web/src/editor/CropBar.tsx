@@ -30,7 +30,7 @@ export function CropBar() {
   const editor = useEditor();
   useDocVersion();
   const cropping = useEditorState((s) => s.cropping);
-  const camera = useEditorState((s) => s.camera);
+  const camera = useEditorState((s) => (s.cropping && !s.gesture ? s.camera : null));
   const viewport = useEditorState((s) => s.viewport);
   const gesture = useEditorState((s) => s.gesture);
   const [preset, setPreset] = useState<Preset>("free");
@@ -40,7 +40,7 @@ export function CropBar() {
     setCroppingId(cropping?.id ?? null);
     setPreset("free");
   }
-  if (!cropping || gesture) return null;
+  if (!cropping || gesture || !camera) return null;
   const bounds = cropArea(editor, cropping.id);
   if (!bounds) return null;
   const bottom = camera.toScreen({ x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height });

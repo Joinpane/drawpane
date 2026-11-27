@@ -57,6 +57,8 @@ export interface PointerInput {
    */
   readonly noSnap?: boolean;
   readonly clicks: number;
+  /** True for direct finger touch input: widens handle hit zones without affecting mouse/pen. */
+  readonly coarse?: boolean;
 }
 
 export type HandleId = "nw" | "n" | "ne" | "e" | "se" | "s" | "sw" | "w";
@@ -75,6 +77,8 @@ const HANDLE_POS: Record<HandleId, [number, number]> = {
 
 const HANDLE_HIT_PX = 6;
 const ROTATE_HIT_PX = 18;
+const TOUCH_HANDLE_HIT_PX = 12;
+const TOUCH_ROTATE_HIT_PX = 24;
 const DRAG_THRESHOLD_PX = 3;
 const SNAP_PX = 6;
 
@@ -216,12 +220,14 @@ export class Interaction {
   }
 
   /** Which handle (or rotation zone) is under a screen point. */
-  handleAt(screen: Point): { handle: HandleId; rotate: boolean } | null {
+  handleAt(screen: Point, coarse = false): { handle: HandleId; rotate: boolean } | null {
     const frame = this.selectionFrame();
     // The Prototype tab trades resize handles for the connection handle.
     if (!frame || this.#editor.s.editingText || this.#editor.s.prototyping) return null;
     if (this.#editor.selectionLocked) return null;
     const camera = this.#editor.s.camera;
+    const hitPx = coarse ? TOUCH_HANDLE_HIT_PX : HANDLE_HIT_PX;
+    const rotatePx = coarse ? TOUCH_ROTATE_HIT_PX : ROTATE_HIT_PX;
     // Tiny selections only get corner handles, so they stay draggable.
     const screenW = frame.width * camera.zoom;
     const screenH = frame.height * camera.zoom;
@@ -229,14 +235,14 @@ export class Interaction {
     for (const handle of handles) {
       const [u, v] = HANDLE_POS[handle];
       const p = camera.toScreen(apply(frame.matrix, { x: u * frame.width, y: v * frame.height }));
-      if (Math.abs(p.x - screen.x) <= HANDLE_HIT_PX && Math.abs(p.y - screen.y) <= HANDLE_HIT_PX)
+      if (Math.abs(p.x - screen.x) <= hitPx && Math.abs(p.y - screen.y) <= hitPx)
         return { handle, rotate: false };
     }
     for (const handle of HANDLES.filter((h) => h.length === 2)) {
       const [u, v] = HANDLE_POS[handle];
       const p = camera.toScreen(apply(frame.matrix, { x: u * frame.width, y: v * frame.height }));
       const d = Math.hypot(p.x - screen.x, p.y - screen.y);
-      if (d > HANDLE_HIT_PX && d <= ROTATE_HIT_PX && !this.#insideFrame(frame, screen))
+      if (d > hitPx && d <= rotatePx && !this.#insideFrame(frame, screen))
         return { handle, rotate: true };
     }
     return null;
@@ -333,7 +339,7 @@ export class Interaction {
       }
     }
 
-    const handle = editor.canEdit ? this.#handleAt(input.screen) : null;
+    const handle = editor.canEdit ? this.#handleAt(input.screen, input.coarse) : null;
     if (handle) {
       const nodes = this.#snapshot(editor.s.selection);
       editor.beginGesture(handle.rotate ? "Rotate" : "Resize");
@@ -721,12 +727,28 @@ export class Interaction {
       mode.kind === "move" ||
       mode.kind === "resize" ||
       mode.kind === "rotate" ||
-      mode.kind === "draw"
+      mode.kind === "draw" ||
+      mode.kind === "xray"
     ) {
-      editor.endGesture();
-      editor.undo();
+      editor.cancelGesture();
     }
+    this.cursor = this.#spaceHeld ? "grab" : "default";
     editor.state.set({ marquee: null, guides: [], guideDraft: null });
+  }
+
+  /**
+   * Resets only the active uncommitted pointer interaction (for example when a
+   * second finger takes over for pinch/pan). History and held sync rollback are
+   * performed by the caller so nothing reaches undo/redo or collaborators.
+   */
+  rollback(): void {
+    this.pen.rollbackActive();
+    this.vectorEdit.rollbackActive();
+    this.connect.rollbackActive();
+    this.crop.rollbackActive();
+    this.#mode = { kind: "idle" };
+    this.cursor = this.#spaceHeld ? "grab" : "default";
+    this.#editor.state.set({ marquee: null, guides: [], guideDraft: null });
   }
 
   wheel(e: {
@@ -789,7 +811,7 @@ export class Interaction {
       editor.state.set({ hover: null });
       return;
     }
-    const handle = editor.canEdit ? this.#handleAt(input.screen) : null;
+    const handle = editor.canEdit ? this.#handleAt(input.screen, input.coarse) : null;
     if (handle) {
       this.cursor = handle.rotate ? "alias" : resizeCursor(handle.handle, this.selectionFrame());
       editor.state.set({ hover: null });
@@ -844,8 +866,8 @@ export class Interaction {
    * name label sits: the label sits just outside the top-left corner, right
    * where you'd rotate, and naming or picking the frame wins there.
    */
-  #handleAt(screen: Point): ReturnType<Interaction["handleAt"]> {
-    const handle = this.handleAt(screen);
+  #handleAt(screen: Point, coarse = false): ReturnType<Interaction["handleAt"]> {
+    const handle = this.handleAt(screen, coarse);
     return handle?.rotate && frameLabelAt(this.#editor, screen) ? null : handle;
   }
 

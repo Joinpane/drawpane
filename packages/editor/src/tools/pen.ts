@@ -31,6 +31,12 @@ interface Drag {
   readonly start: Point;
   readonly closing: boolean;
   moved: boolean;
+  readonly rollback: {
+    readonly hadDrawing: boolean;
+    readonly anchors: Anchor[];
+    readonly closed: boolean;
+    readonly id: string | null;
+  };
 }
 
 export const PEN_STROKE = "#1c1b1a";
@@ -104,6 +110,19 @@ export class PenTool implements ToolHandler {
     const { pageId, camera } = editor.s;
     if (!pageId || !editor.canEdit) return true;
     const page = camera.toPage(input.screen);
+    const rollback = this.#drawing
+      ? {
+          hadDrawing: true,
+          anchors: this.#drawing.anchors.map((a) => ({
+            x: a.x,
+            y: a.y,
+            in: a.in ? { ...a.in } : null,
+            out: a.out ? { ...a.out } : null,
+          })),
+          closed: this.#drawing.closed,
+          id: this.#drawing.id,
+        }
+      : { hadDrawing: false, anchors: [], closed: false, id: null };
     if (!this.#drawing) {
       const parent = editor.dropTarget(page) ?? pageId;
       editor.beginGesture("Draw path");
@@ -111,14 +130,20 @@ export class PenTool implements ToolHandler {
     }
     const d = this.#drawing;
     if (this.#nearFirst(page)) {
-      this.#drag = { index: 0, start: input.screen, closing: true, moved: false };
+      this.#drag = { index: 0, start: input.screen, closing: true, moved: false, rollback };
       return true;
     }
     let p = editor.scene.toSpace(d.parent, page);
     const last = d.anchors[d.anchors.length - 1];
     if (input.shift && last) p = snap45(last, p);
     d.anchors.push({ x: p.x, y: p.y, in: null, out: null });
-    this.#drag = { index: d.anchors.length - 1, start: input.screen, closing: false, moved: false };
+    this.#drag = {
+      index: d.anchors.length - 1,
+      start: input.screen,
+      closing: false,
+      moved: false,
+      rollback,
+    };
     this.#commit();
     return true;
   }
@@ -185,6 +210,22 @@ export class PenTool implements ToolHandler {
 
   cancel(): void {
     if (this.#drawing) this.finish(false);
+  }
+
+  /** Reverts only the in-progress pointer stroke while preserving earlier committed anchors. */
+  rollbackActive(): void {
+    const drag = this.#drag;
+    if (!drag) return;
+    this.#drag = null;
+    const rb = drag.rollback;
+    if (!rb.hadDrawing) {
+      this.#drawing = null;
+    } else if (this.#drawing) {
+      this.#drawing.anchors = rb.anchors;
+      this.#drawing.closed = rb.closed;
+      this.#drawing.id = rb.id;
+    }
+    this.#editor.state.set({ vectorPointer: null });
   }
 
   /** Ends the drawing: one undo step, the new path selected. */
