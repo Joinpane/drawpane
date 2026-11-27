@@ -31,7 +31,7 @@ import {
 import {
   type EngineSearch,
   engineSearch,
-  rememberRendererSwitches,
+  selectRendererForLocation,
 } from "./editor/renderer-switch";
 import { NewFilePage } from "./new-file/NewFilePage";
 import type { PresentSearch } from "./prototype/PresentPage";
@@ -60,10 +60,9 @@ interface RouterContext {
 const sessionQuery = { queryKey: ["session"], queryFn: api.session };
 
 const rootRoute = createRootRouteWithContext<RouterContext>()({
-  beforeLoad: ({ location }) => {
-    // Remember URL render switches (`?renderer=...`, `?present=...`) for this session before any
-    // redirect (such as `/` -> `/t/$teamId` or `requireUser` -> `/signin`) can drop them.
-    rememberRendererSwitches(location.searchStr);
+  beforeLoad: ({ location, preload }) => {
+    // Keep speculative link preloads from changing the renderer of the page on screen.
+    if (!preload) selectRendererForLocation(location.pathname, location.searchStr);
   },
   component: () => (
     <>

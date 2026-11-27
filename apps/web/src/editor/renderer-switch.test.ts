@@ -8,14 +8,19 @@ import {
   sameRendererStatus,
 } from "./renderer-status";
 import {
+  DEFAULT_RENDERER_POLICY,
   engineSearch,
   MOTION_POLICY_STORAGE_KEY,
   motionPolicy,
   PRESENT_STORAGE_KEY,
   presentation,
   RENDERER_STORAGE_KEY,
+  type RendererChoice,
+  type RendererPolicy,
+  type RendererSource,
   rememberRendererSwitches,
   rendererChoice,
+  selectRenderer,
 } from "./renderer-switch";
 
 class MemoryStorage implements Storage {
@@ -88,6 +93,95 @@ describe("renderer-switch", () => {
     expect(engineSearch({ renderer: "engine-cpu" })).toEqual({ renderer: "engine-cpu" });
     expect(engineSearch({ renderer: "canvas" })).toEqual({ renderer: "canvas" });
     expect(engineSearch({ renderer: "bogus", present: "bogus" })).toEqual({});
+  });
+
+  const engineDefault: RendererPolicy = { defaultRenderer: "engine", forceCanvas: false };
+
+  it.each<{
+    source: RendererSource;
+    choice: RendererChoice;
+    url?: string;
+    session?: string;
+    local?: string;
+    policy?: RendererPolicy | null;
+  }>([
+    {
+      source: "server",
+      choice: "canvas",
+      url: "engine-webgl",
+      session: "engine-cpu",
+      local: "engine",
+      policy: { ...engineDefault, forceCanvas: true },
+    },
+    {
+      source: "url",
+      choice: "canvas",
+      url: "canvas",
+      session: "engine-cpu",
+      local: "engine",
+      policy: engineDefault,
+    },
+    {
+      source: "url",
+      choice: "engine-webgl",
+      url: "engine-webgl",
+      session: "canvas",
+      policy: engineDefault,
+    },
+    {
+      source: "session",
+      choice: "engine-cpu",
+      url: "bogus",
+      session: "engine-cpu",
+      local: "canvas",
+      policy: engineDefault,
+    },
+    { source: "local", choice: "canvas", session: "bogus", local: "canvas", policy: engineDefault },
+    { source: "instance-default", choice: "engine", local: "bogus", policy: engineDefault },
+    {
+      source: "instance-default",
+      choice: "canvas",
+      policy: { defaultRenderer: "canvas", forceCanvas: false },
+    },
+    { source: "built-in", choice: "canvas", policy: DEFAULT_RENDERER_POLICY },
+    { source: "built-in", choice: "canvas", url: "engine", policy: null },
+  ])("chooses $choice from $source", ({ source, choice, url, session, local, policy }) => {
+    if (session) sessionStorage.setItem(RENDERER_STORAGE_KEY, session);
+    if (local) localStorage.setItem(RENDERER_STORAGE_KEY, local);
+    expect(selectRenderer(url ? `?renderer=${url}` : "", policy)).toEqual({ choice, source });
+  });
+
+  it("remembers a Canvas URL escape on an engine-default instance", () => {
+    expect(selectRenderer("?renderer=canvas", engineDefault)).toEqual({
+      choice: "canvas",
+      source: "url",
+    });
+    expect(selectRenderer("", engineDefault)).toEqual({ choice: "canvas", source: "session" });
+  });
+
+  it("uses the next source when storage throws and keeps URL overrides through app navigation", () => {
+    const blocked = () => {
+      throw new Error("Storage is blocked");
+    };
+    const availableSession = sessionStorage;
+    Object.defineProperty(globalThis, "sessionStorage", { get: blocked, configurable: true });
+    localStorage.setItem(RENDERER_STORAGE_KEY, "canvas");
+    expect(selectRenderer("", engineDefault)).toEqual({ choice: "canvas", source: "local" });
+    Object.defineProperty(globalThis, "localStorage", { get: blocked, configurable: true });
+    expect(selectRenderer("", engineDefault)).toEqual({
+      choice: "engine",
+      source: "instance-default",
+    });
+    expect(selectRenderer("?renderer=canvas", engineDefault)).toEqual({
+      choice: "canvas",
+      source: "url",
+    });
+    expect(selectRenderer("", engineDefault)).toEqual({ choice: "canvas", source: "session" });
+    Object.defineProperty(globalThis, "sessionStorage", {
+      value: availableSession,
+      configurable: true,
+    });
+    rememberRendererSwitches("?renderer=canvas");
   });
 
   it("remembers ?renderer=engine, engine-compat, engine-webgl, and engine-cpu in sessionStorage", () => {

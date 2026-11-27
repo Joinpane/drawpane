@@ -33,7 +33,6 @@ import {
   motionPolicy,
   presentation,
   REST_BUDGET_MS,
-  rendererChoice,
   snapViewCamera,
 } from "./engine-view";
 import { FrameNameEditor } from "./FrameNameEditor";
@@ -42,7 +41,13 @@ import { useEditor, useEditorState } from "./hooks";
 import { LIBRARY_DRAG_MIME, type LibraryDrag, loadedSource } from "./libraries/sources";
 import { imagesFor } from "./media";
 import { mobileBacking, mobileOverscan, readMobileRendererMemory } from "./renderer-memory";
-import { engineBackendLabel, fallbackToReason, setRendererStatus } from "./renderer-status";
+import {
+  engineBackendLabel,
+  fallbackToReason,
+  recordRendererBackend,
+  setRendererStatus,
+} from "./renderer-status";
+import { rendererSelection } from "./renderer-switch";
 import { shaper } from "./shaping";
 import { TextEditor } from "./TextEditor";
 import { TouchArbiter, type TouchPoint } from "./touch-arbitration";
@@ -107,7 +112,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
   const editingText = useEditorState((s) => s.editingText);
   // Read the switch reactively so changing `?renderer=...` or `?present=...` in place takes effect without a reload.
   const searchStr = useRouterState({ select: (s) => s.location.searchStr });
-  const choice = useMemo(() => rendererChoice(searchStr), [searchStr]);
+  const selection = rendererSelection();
   const present = useMemo(() => presentation(searchStr), [searchStr]);
   // The editor's measurer re-measures after web fonts load (EditorPage gives it one that does).
   const measurer = editor.measurer as ShapingMeasurer;
@@ -131,6 +136,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
   // Render loop: repaint content when the document, page or camera changes;
   // repaint the overlay on any state change. Never more than once per frame.
   useEffect(() => {
+    const { choice } = selection;
     const contentCanvas = content.current;
     const pixelGridCanvas = pixelGrid.current;
     const labelsCanvas = labels.current;
@@ -200,7 +206,10 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
     let fallbackFrames = 0;
     const syncRendererAttr = () => {
       const active = engineShowing ? engine : null;
-      hostEl.dataset.renderer = active ? active.backend : "canvas";
+      const backend = active ? active.backend : "canvas";
+      recordRendererBackend(selection, backend);
+      hostEl.dataset.renderer = backend;
+      hostEl.dataset.rendererSource = selection.source;
       hostEl.dataset.rendererAdapter = active ? active.adapter : "canvas";
       hostEl.dataset.rendererAdapterClass = active ? active.adapterClass : "canvas";
       hostEl.dataset.rendererSoftware = active
@@ -1091,7 +1100,7 @@ export function Canvas({ interaction }: { interaction: Interaction }) {
       clearTimeout(settle);
       clearTimeout(fadeTimer);
     };
-  }, [editor, interaction, measurer, choice, present]);
+  }, [editor, interaction, measurer, selection, present]);
 
   // Pointer and wheel input.
   useEffect(() => {

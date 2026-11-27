@@ -6,7 +6,7 @@
 import { type Editor, Store } from "@drawpane/editor";
 import { useSyncExternalStore } from "react";
 import type { EngineBackend, FallbackEvent } from "./engine-view";
-import type { RendererChoice } from "./renderer-switch";
+import type { RendererChoice, RendererPolicy, RendererSelection } from "./renderer-switch";
 
 export type EngineChoice = Exclude<RendererChoice, "canvas">;
 
@@ -41,6 +41,51 @@ export type RendererStatus =
     };
 
 export type ActiveRendererStatus = Extract<RendererStatus, { switchOn: true }>;
+
+type ActiveBackend = EngineBackend | "canvas";
+interface RendererObservation extends RendererSelection {
+  readonly backend: ActiveBackend;
+}
+
+const OBSERVATION_KEY = "drawpane:renderer-observation";
+let lastObservation: RendererObservation | undefined;
+
+/** Keep only the last choice and visible backend in this tab, even across reloads. */
+export function recordRendererBackend(selection: RendererSelection, backend: ActiveBackend): void {
+  if (
+    lastObservation?.choice === selection.choice &&
+    lastObservation.source === selection.source &&
+    lastObservation.backend === backend
+  )
+    return;
+  lastObservation = { ...selection, backend };
+  try {
+    sessionStorage.setItem(OBSERVATION_KEY, JSON.stringify(lastObservation));
+  } catch {
+    // Still available in memory if storage is blocked.
+  }
+}
+
+export function lastRendererObservation(): RendererObservation | null {
+  if (lastObservation) return lastObservation;
+  try {
+    return JSON.parse(sessionStorage.getItem(OBSERVATION_KEY) ?? "null");
+  } catch {
+    return null;
+  }
+}
+
+export function showCanvasRendererChip(
+  selection: RendererSelection,
+  policy: RendererPolicy | null,
+): boolean {
+  return (
+    policy === null ||
+    Boolean(policy.defaultRenderer) ||
+    selection.source === "server" ||
+    selection.source === "local"
+  );
+}
 
 const FEATURE_LABELS: Record<string, string> = {
   shadow: "shadow",
@@ -130,8 +175,8 @@ export function fallbackToReason(event: FallbackEvent): RendererFallbackReason {
   return { kind: "error", message: event.reason };
 }
 
-export function rendererChipLabel(status: ActiveRendererStatus): string {
-  if (status.active !== "engine") return "Canvas renderer";
+export function rendererChipLabel(status: RendererStatus): string {
+  if (!status.switchOn || status.active !== "engine") return "Canvas renderer";
   const note = status.limit ? " · Reduced detail" : status.reducedImages ? " · Images reduced" : "";
   const compute = status.computeFallback ? " · Compute off" : "";
   return `Engine · ${status.backend}${compute}${note}`;
