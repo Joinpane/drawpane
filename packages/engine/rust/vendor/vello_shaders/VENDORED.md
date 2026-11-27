@@ -31,5 +31,8 @@ Changes:
   dropping the unused `fine_msaa8` and `fine_msaa16` variants to save ~32 KB of WASM gzipped size.
 - `build.rs`: panics on shader parse/validation failure instead of emitting a warning and leaving
   `OUT_DIR/shaders.rs` unwritten.
+- `src/compile/mod.rs`: `ShaderInfo::new` strips comments, blank lines and indentation from each
+  preprocessed shader (`strip`) before naga parses and validates it, so the embedded WGSL is the
+  code alone: about 16 KB less gzipped in the compute module.
 
 Patches are marked `Drawpane:` in the code.
