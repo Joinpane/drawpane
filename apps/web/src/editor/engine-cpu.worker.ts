@@ -14,6 +14,7 @@ import { type Camera, ErrorCode, type FrameStats, RenderEngine } from "@drawpane
 import { loadBrowserEngine } from "@drawpane/engine/browser";
 import { CPU_IMAGE_BUDGET, uploadCpuLevel } from "./engine-image";
 import { fitEngineRaster } from "./engine-raster";
+import { MOBILE_BACKING_SIDE, type MobileRendererMemory } from "./renderer-memory";
 
 /** Maximum unacknowledged frame transfers in flight between the worker and the main thread. */
 const MAX_INFLIGHT_TRANSFERS = 2;
@@ -33,7 +34,7 @@ const REST_SLICE_TILES = 4;
 const MOVING_SLICE_TILES = 0;
 
 export type CpuWorkerRequest =
-  | { readonly type: "init" }
+  | { readonly type: "init"; readonly memory?: MobileRendererMemory }
   | { readonly type: "apply"; readonly bytes: ArrayBuffer; readonly attempt?: number }
   | {
       readonly type: "put-image";
@@ -135,6 +136,7 @@ let pendingRender: {
 let pumping = false;
 const inflight: Array<{ readonly jobId: number; readonly bytes: number }> = [];
 let inflightBytes = 0;
+let memory: MobileRendererMemory | undefined;
 let creditWaiter: (() => void) | null = null;
 
 function canSendFrame(frameBytes: number): boolean {
@@ -212,7 +214,7 @@ async function pump(): Promise<void> {
             moving: job.moving,
             maxJobs: job.moving ? MOVING_SLICE_TILES : REST_SLICE_TILES,
             tile: tileSize,
-            slots: CPU_TILE_SLOTS,
+            slots: memory?.cpuTileSlots ?? CPU_TILE_SLOTS,
           });
           if (!r.ok && r.code === ErrorCode.Limit) {
             limit = r.message;
@@ -399,9 +401,10 @@ scope.onmessage = async ({ data }) => {
     if (data.type === "init") {
       const mod = await loadBrowserEngine();
       if (disposed) return;
+      memory = data.memory;
       engine = new RenderEngine(mod, {
-        glyphMaskBytes: 16 << 20,
-        imageBytes: CPU_IMAGE_BUDGET,
+        glyphMaskBytes: memory?.cpuGlyphMaskBytes ?? 16 << 20,
+        imageBytes: memory?.imageBytes ?? CPU_IMAGE_BUDGET,
       });
       if (engine.failure) {
         post({ type: "error", code: engine.failure.code, message: engine.failure.message });
@@ -484,6 +487,20 @@ scope.onmessage = async ({ data }) => {
       return;
     }
     if (data.type === "render") {
+      if (
+        memory &&
+        (data.width * data.height > memory.backingPixels ||
+          Math.max(data.width, data.height) > MOBILE_BACKING_SIDE)
+      ) {
+        post({
+          type: "error",
+          jobId: data.jobId,
+          revision: data.revision,
+          code: ErrorCode.Limit,
+          message: "CPU viewport exceeds the mobile raster budget",
+        });
+        return;
+      }
       if (applyRejected || data.revision !== committedRevision) {
         return;
       }

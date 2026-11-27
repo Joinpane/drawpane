@@ -12,7 +12,13 @@
  * detached document; chosen as an image fill, it's drawn to a PNG here and
  * that uploads like any image.
  */
-import { type Editor, ImageCache, type PlacedTree, type Point } from "@drawpane/editor";
+import {
+  decodeBoundedImage,
+  type Editor,
+  ImageCache,
+  type PlacedTree,
+  type Point,
+} from "@drawpane/editor";
 import { MEDIA_MAX_BYTES, mediaProblem, sniffImage } from "@drawpane/model";
 import {
   type ConvertedSvg,
@@ -25,6 +31,7 @@ import {
   svgToLayers,
 } from "@drawpane/svg";
 import { enqueueMediaPreviews } from "./image-preview";
+import { mobileImageCacheOptions, readMobileRendererMemory } from "./renderer-memory";
 
 const caches = new WeakMap<Editor, ImageCache>();
 const queues = new WeakMap<Editor, UploadQueue>();
@@ -33,7 +40,7 @@ const queues = new WeakMap<Editor, UploadQueue>();
 export function imagesFor(editor: Editor): ImageCache {
   let cache = caches.get(editor);
   if (!cache) {
-    cache = new ImageCache();
+    cache = new ImageCache(mobileImageCacheOptions());
     caches.set(editor, cache);
   }
   return cache;
@@ -246,6 +253,16 @@ async function prepare(file: File, cache: ImageCache): Promise<Prepared | string
   const problem = sniffed ? mediaProblem(bytes.byteLength, sniffed) : NOT_AN_IMAGE;
   if (problem) return problem;
   const sha = await sha256(bytes);
+  const memory = readMobileRendererMemory();
+  if (memory) {
+    try {
+      const image = await decodeBoundedImage(file, memory.canvasImageSide);
+      cache.put(sha, { ...image, source: file });
+      return { file, sha, width: image.naturalWidth, height: image.naturalHeight };
+    } catch {
+      return "The image looks damaged. Export it again and try once more.";
+    }
+  }
   let bitmap: ImageBitmap;
   try {
     // Decodes off the main thread and applies EXIF orientation, so the size is what people see.

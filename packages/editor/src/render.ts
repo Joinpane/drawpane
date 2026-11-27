@@ -1100,6 +1100,10 @@ export class CanvasRenderer {
     return true;
   }
 
+  get snapshotBytes(): number {
+    return this.#snapshot ? this.#snapshot.width * this.#snapshot.height * 4 : 0;
+  }
+
   #snapshotFor(width: number, height: number): OffscreenCanvas | HTMLCanvasElement | null {
     if (this.#snapshot && this.#snapshot.width === width && this.#snapshot.height === height)
       return this.#snapshot;

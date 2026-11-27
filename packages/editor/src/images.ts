@@ -8,7 +8,13 @@
  * downscaled copy (made once, also off the main thread), which is both
  * sharper and cheaper than shrinking a full-size bitmap every frame.
  */
-import { type MediaPreviewSize, parseMediaPreviewSize } from "@drawpane/model";
+import {
+  exifOrientationComplete,
+  type MediaPreviewSize,
+  mediaPreviewDimensions,
+  parseMediaPreviewSize,
+  sniffImage,
+} from "@drawpane/model";
 import type { Point, Rect } from "./geometry";
 
 export type ScaleMode = "fill" | "fit" | "tile" | "stretch" | "crop";
@@ -134,8 +140,12 @@ export interface ImageCacheOptions {
   readonly resize?: (bitmap: ImageBitmap, width: number, height: number) => Promise<ImageBitmap>;
   /** Decoded bytes to keep (4 per pixel). Default 384 MB. */
   readonly maxBytes?: number;
+  /** Keep decoded pixels within maxBytes, including those used in the current view. */
+  readonly enforceMaxBytes?: boolean;
   /** Longest side to keep a bitmap at; larger images decode, then shrink to this. Default 4096. */
   readonly maxSide?: number;
+  /** Limit concurrent fetch/decode jobs. */
+  readonly maxConcurrentLoads?: number;
   /** First retry delay after a failed load; doubles each time up to a minute. Default 2 s. */
   readonly retryMs?: number;
   /** Clock, for tests. */
@@ -154,6 +164,7 @@ interface Entry {
   usedFrame: number;
   attempts: number;
   retryAt: number;
+  blockedByBudget?: boolean;
   abort: AbortController | null;
 }
 
@@ -196,17 +207,59 @@ export function mediaUrl(sha: string, preview?: MediaPreviewSize): string {
   return preview ? `/api/media/${sha}?w=${preview}` : `/api/media/${sha}`;
 }
 
+/** Decode directly to the smaller size when we can determine display-oriented dimensions. */
+export async function decodeBoundedImage(blob: Blob, maxSide: number): Promise<LoadedImage> {
+  const head = new Uint8Array(await blob.slice(0, 64 * 1024).arrayBuffer());
+  const info = sniffImage(head);
+  const orientation =
+    info?.mime === "image/jpeg" || info?.mime === "image/webp" ? exifOrientationComplete(head) : 1;
+  if (info && orientation !== null) {
+    const rotated = orientation >= 5 && orientation <= 8;
+    const naturalWidth = rotated ? info.height : info.width;
+    const naturalHeight = rotated ? info.width : info.height;
+    const size = mediaPreviewDimensions({ width: naturalWidth, height: naturalHeight }, maxSide);
+    const bitmap =
+      size.width === naturalWidth && size.height === naturalHeight
+        ? await createImageBitmap(blob)
+        : await createImageBitmap(blob, {
+            resizeWidth: size.width,
+            resizeHeight: size.height,
+            resizeQuality: "high",
+          });
+    return { bitmap, naturalWidth, naturalHeight };
+  }
+
+  const full = await createImageBitmap(blob);
+  const naturalWidth = full.width;
+  const naturalHeight = full.height;
+  const size = mediaPreviewDimensions({ width: naturalWidth, height: naturalHeight }, maxSide);
+  if (size.width === naturalWidth && size.height === naturalHeight)
+    return { bitmap: full, naturalWidth, naturalHeight };
+  try {
+    return {
+      bitmap: await defaultResize(full, size.width, size.height),
+      naturalWidth,
+      naturalHeight,
+    };
+  } finally {
+    full.close();
+  }
+}
+
 function defaultLoader(
   maxSide: number,
   resize: ImageCacheOptions["resize"] = defaultResize,
   url: (sha: string) => string = mediaUrl,
+  decodeBounded = false,
 ) {
   return async (sha: string, signal: AbortSignal): Promise<LoadedImage> => {
     const response = await fetch(url(sha), { credentials: "same-origin", signal });
     if (!response.ok) throw new Error(`Image ${sha} answered ${response.status}`);
     // Decoding happens off the main thread; EXIF orientation is applied, so the
     // bitmap's size is the size people see.
-    let bitmap = await createImageBitmap(await response.blob());
+    const blob = await response.blob();
+    if (decodeBounded) return decodeBoundedImage(blob, maxSide);
+    let bitmap = await createImageBitmap(blob);
     const naturalWidth = bitmap.width;
     const naturalHeight = bitmap.height;
     const longest = Math.max(naturalWidth, naturalHeight);
@@ -239,6 +292,10 @@ export class ImageCache {
   #localBytes = 0;
   readonly #resize: NonNullable<ImageCacheOptions["resize"]>;
   readonly #maxBytes: number;
+  readonly #enforceMaxBytes: boolean;
+  readonly #maxConcurrentLoads: number;
+  readonly #queuedLoads = new Map<string, Entry>();
+  #activeLoads = 0;
   readonly #retryMs: number;
   readonly #now: () => number;
   #frame = 0;
@@ -248,7 +305,11 @@ export class ImageCache {
   constructor(options: ImageCacheOptions = {}) {
     this.#url = options.url ?? mediaUrl;
     this.#resize = options.resize ?? defaultResize;
-    this.#load = options.load ?? defaultLoader(options.maxSide ?? 4096, this.#resize, options.url);
+    this.#maxConcurrentLoads = Math.max(1, options.maxConcurrentLoads ?? Infinity);
+    this.#enforceMaxBytes = options.enforceMaxBytes ?? false;
+    this.#load =
+      options.load ??
+      defaultLoader(options.maxSide ?? 4096, this.#resize, options.url, this.#enforceMaxBytes);
     this.#maxBytes = options.maxBytes ?? 384 * 1024 * 1024;
     this.#retryMs = options.retryMs ?? 2000;
     this.#now = options.now ?? (() => Date.now());
@@ -285,7 +346,7 @@ export class ImageCache {
    */
   natural(sha: string): Size | null {
     const entry = this.#touch(sha);
-    return entry.status === "ready"
+    return entry.status === "ready" || (this.#enforceMaxBytes && entry.naturalWidth > 0)
       ? { width: entry.naturalWidth, height: entry.naturalHeight }
       : null;
   }
@@ -304,7 +365,8 @@ export class ImageCache {
       naturalWidth: entry.naturalWidth,
       naturalHeight: entry.naturalHeight,
     });
-    if (!(targetWidth < full.width / 2) || full.width <= MIN_LEVEL * 2) return view(full);
+    if (this.#enforceMaxBytes || !(targetWidth < full.width / 2) || full.width <= MIN_LEVEL * 2)
+      return view(full);
     // Halve until one more halving would drop below the target.
     let width = full.width;
     while (width / 2 >= Math.max(targetWidth, MIN_LEVEL)) width = Math.floor(width / 2);
@@ -389,15 +451,8 @@ export class ImageCache {
     const existing = this.#entries.get(sha);
     if (existing) this.#drop(sha, existing);
     const entry = this.#newEntry();
-    entry.status = "ready";
-    entry.full = image.bitmap;
-    entry.naturalWidth = image.naturalWidth;
-    entry.naturalHeight = image.naturalHeight;
-    entry.usedFrame = this.#frame;
     this.#entries.set(sha, entry);
-    this.#bytes += bytesOf(image.bitmap);
-    this.#evict();
-    this.#notify();
+    this.#store(entry, image);
   }
 
   /**
@@ -459,44 +514,98 @@ export class ImageCache {
       entry = this.#newEntry();
       this.#entries.set(sha, entry);
     }
+    if (entry.blockedByBudget && entry.usedFrame < this.#frame - 1) {
+      // A new visit can have room. A dense view that keeps asking cannot trigger a decode loop.
+      entry.blockedByBudget = false;
+      entry.retryAt = 0;
+    }
     entry.usedFrame = this.#frame;
     if (entry.status === "error" && this.#now() >= entry.retryAt) entry.status = "loading";
-    if (entry.status === "loading" && !entry.abort) this.#start(sha, entry);
+    if (entry.status === "loading" && !entry.abort) {
+      if (this.#activeLoads < this.#maxConcurrentLoads) this.#start(sha, entry);
+      else this.#queuedLoads.set(sha, entry);
+    }
     return entry;
   }
 
   #start(sha: string, entry: Entry): void {
     const abort = new AbortController();
     entry.abort = abort;
-    this.#load(sha, abort.signal).then(
-      (image) => {
-        if (this.#entries.get(sha) !== entry || abort.signal.aborted) {
-          image.bitmap.close();
-          return;
+    this.#activeLoads++;
+    this.#queuedLoads.delete(sha);
+    this.#load(sha, abort.signal)
+      .then(
+        async (loaded) => {
+          const image =
+            this.#enforceMaxBytes && !abort.signal.aborted ? await this.#fitLoad(loaded) : loaded;
+          if (this.#entries.get(sha) !== entry || abort.signal.aborted) {
+            image.bitmap.close();
+            return;
+          }
+          entry.abort = null;
+          this.#store(entry, image);
+        },
+        () => {
+          if (this.#entries.get(sha) !== entry || abort.signal.aborted) return;
+          // Often a collaborator's upload that hasn't finished yet: try again, backing off.
+          entry.abort = null;
+          entry.status = "error";
+          entry.attempts++;
+          entry.retryAt =
+            entry.attempts >= MAX_ATTEMPTS
+              ? Number.POSITIVE_INFINITY
+              : this.#now() + Math.min(MAX_RETRY_MS, this.#retryMs * 2 ** (entry.attempts - 1));
+          this.#notify();
+        },
+      )
+      .finally(() => {
+        this.#activeLoads--;
+        for (const [next, queued] of this.#queuedLoads) {
+          this.#start(next, queued);
+          break;
         }
-        entry.abort = null;
-        entry.status = "ready";
-        entry.full = image.bitmap;
-        entry.naturalWidth = image.naturalWidth;
-        entry.naturalHeight = image.naturalHeight;
-        entry.attempts = 0;
-        this.#bytes += bytesOf(image.bitmap);
-        this.#evict();
-        this.#notify();
-      },
-      () => {
-        if (this.#entries.get(sha) !== entry || abort.signal.aborted) return;
-        // Often a collaborator's upload that hasn't finished yet: try again, backing off.
-        entry.abort = null;
-        entry.status = "error";
-        entry.attempts++;
-        entry.retryAt =
-          entry.attempts >= MAX_ATTEMPTS
-            ? Number.POSITIVE_INFINITY
-            : this.#now() + Math.min(MAX_RETRY_MS, this.#retryMs * 2 ** (entry.attempts - 1));
-        this.#notify();
-      },
-    );
+      });
+  }
+
+  /** Divide the remaining space among a burst of requests from one visible view. */
+  async #fitLoad(image: LoadedImage): Promise<LoadedImage> {
+    const full = image.bitmap;
+    const size = bytesOf(full);
+    this.#evict(size);
+    const pending = this.#activeLoads + this.#queuedLoads.size;
+    const share = Math.floor((this.#maxBytes - this.#bytes) / pending);
+    // Keep at least a useful thumbnail when there is room for one.
+    if (share >= size || share < 16 * 1024) return image;
+    const scale = Math.sqrt(share / size);
+    const width = Math.max(1, Math.floor(full.width * scale));
+    const height = Math.max(1, Math.floor(full.height * scale));
+    try {
+      const bitmap = await this.#resize(full, width, height);
+      full.close();
+      return { ...image, bitmap };
+    } catch {
+      return image;
+    }
+  }
+
+  #store(entry: Entry, image: LoadedImage): void {
+    entry.naturalWidth = image.naturalWidth;
+    entry.naturalHeight = image.naturalHeight;
+    const size = bytesOf(image.bitmap);
+    if (this.#enforceMaxBytes && size <= this.#maxBytes) this.#evict(size);
+    if (this.#enforceMaxBytes && this.#bytes + size > this.#maxBytes) {
+      image.bitmap.close();
+      entry.status = "error";
+      entry.blockedByBudget = true;
+      entry.retryAt = Infinity;
+    } else {
+      entry.status = "ready";
+      entry.full = image.bitmap;
+      entry.attempts = 0;
+      this.#bytes += size;
+      this.#evict();
+    }
+    this.#notify();
   }
 
   #makeLevel(sha: string, entry: Entry, full: ImageBitmap, width: number): void {
@@ -523,6 +632,7 @@ export class ImageCache {
   }
 
   #drop(sha: string, entry: Entry): void {
+    this.#queuedLoads.delete(sha);
     entry.abort?.abort();
     for (const bitmap of entry.levels.values()) {
       if (bitmap === entry.full) continue;
@@ -542,10 +652,10 @@ export class ImageCache {
    * Least recently used first. Anything drawn in this frame or the previous
    * one stays, so a view showing more than the budget doesn't reload in a loop.
    */
-  #evict(): void {
-    if (this.#bytes <= this.#maxBytes) return;
+  #evict(incoming = 0): void {
+    if (this.#bytes + incoming <= this.#maxBytes) return;
     for (const [sha, entry] of this.#entries) {
-      if (this.#bytes <= this.#maxBytes) break;
+      if (this.#bytes + incoming <= this.#maxBytes) break;
       if (entry.usedFrame >= this.#frame - 1 || entry.status !== "ready") continue;
       this.#drop(sha, entry);
     }

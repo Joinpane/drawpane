@@ -54,6 +54,12 @@ import { CPU_IMAGE_BUDGET, CPU_IMAGE_SIDE, ViewImages } from "./engine-image";
 import { fitEngineRaster, MIN_RASTER_SCALE } from "./engine-raster";
 import { backfillMediaPreviews } from "./image-preview";
 import {
+  MOBILE_BACKING_SIDE,
+  type MobileRendererMemory,
+  mobileBacking,
+  readMobileRendererMemory,
+} from "./renderer-memory";
+import {
   type MotionPolicy,
   motionPolicy,
   type PresentationMode,
@@ -437,13 +443,15 @@ function isCanvasElement(el: HTMLElement): el is HTMLCanvasElement {
  * Each candidate backend probes on its own detached element so a failed or superseded probe never
  * locks the React-owned slot to an unusable context type.
  */
-function createCandidateCanvas(template: HTMLElement): HTMLCanvasElement {
+function createCandidateCanvas(template: HTMLElement, small = false): HTMLCanvasElement {
   const next = document.createElement("canvas");
   if (isCanvasElement(template)) {
     next.className = template.className;
     next.style.cssText = template.style.cssText;
-    next.width = template.width;
-    next.height = template.height;
+    if (!small) {
+      next.width = template.width;
+      next.height = template.height;
+    }
     const role = (template as { dataset?: { canvasRole?: string } }).dataset?.canvasRole;
     if (role && (next as { dataset?: { canvasRole?: string } }).dataset) {
       next.dataset.canvasRole = role;
@@ -715,7 +723,10 @@ function summarizeFailures(failed: readonly FailedCandidate[]): {
 }
 
 /** Starts a dedicated CPU view-mode worker and waits until its WASM engine is ready. */
-function startCpuWorker(signal?: AbortSignal): Promise<Worker> {
+function startCpuWorker(
+  memory: MobileRendererMemory | undefined,
+  signal?: AbortSignal,
+): Promise<Worker> {
   return new Promise((resolve, reject) => {
     if (signal?.aborted) {
       reject(new Error("aborted"));
@@ -762,7 +773,7 @@ function startCpuWorker(signal?: AbortSignal): Promise<Worker> {
     signal?.addEventListener("abort", onAbort, { once: true });
     worker.addEventListener("message", onMessage);
     worker.addEventListener("error", onError);
-    worker.postMessage({ type: "init" } satisfies CpuWorkerRequest);
+    worker.postMessage({ type: "init", ...(memory ? { memory } : {}) } satisfies CpuWorkerRequest);
   });
 }
 
@@ -775,6 +786,7 @@ async function initBackend(
   backend: EngineBackend,
   templateSlot: HTMLElement,
   choice: RendererChoice,
+  memory: MobileRendererMemory | undefined,
   signal?: AbortSignal,
 ): Promise<InitOutcome> {
   const aborted = (): InitOutcome => ({
@@ -788,6 +800,7 @@ async function initBackend(
 
   try {
     if (signal?.aborted) return aborted();
+    const gpuLimits = memory?.gpuLimits ?? { glyphMaskBytes: 32 << 20 };
 
     if (backend === "webgpu") {
       const level = await adapterLevel(choice);
@@ -809,7 +822,7 @@ async function initBackend(
           })
         : await loadBrowserEngine();
       if (signal?.aborted) return aborted();
-      const engine = new RenderEngine(mod, { glyphMaskBytes: 32 << 20 });
+      const engine = new RenderEngine(mod, gpuLimits);
       if (engine.failure) {
         return {
           ok: false,
@@ -820,11 +833,11 @@ async function initBackend(
         };
       }
       const useReadback = presentation() === "readback";
-      const surface = createCandidateCanvas(templateSlot);
+      const surface = createCandidateCanvas(templateSlot, !!memory);
       const readback = useReadback ? surface.getContext("2d") : null;
       const gpu = await engine.attachGpu(useReadback ? null : surface, {
         compatibility: level.compatibility,
-        glyphMaskBytes: 32 << 20,
+        glyphMaskBytes: gpuLimits.glyphMaskBytes,
       });
       if (signal?.aborted) {
         engine.dispose();
@@ -890,7 +903,7 @@ async function initBackend(
       // Lazy-load the WebGL2 WASM module only after WebGPU was absent/refused and WebGL2 probed ok.
       const mod = await loadWebglEngine();
       if (signal?.aborted) return aborted();
-      const engine = new RenderEngine(mod, { glyphMaskBytes: 32 << 20 });
+      const engine = new RenderEngine(mod, gpuLimits);
       if (engine.failure) {
         return {
           ok: false,
@@ -901,10 +914,10 @@ async function initBackend(
         };
       }
       const useReadback = presentation() === "readback";
-      const surface = createCandidateCanvas(templateSlot);
+      const surface = createCandidateCanvas(templateSlot, !!memory);
       const readback = useReadback ? surface.getContext("2d") : null;
       const gpu = await engine.attachGpu(useReadback ? null : surface, {
-        glyphMaskBytes: 32 << 20,
+        glyphMaskBytes: gpuLimits.glyphMaskBytes,
       });
       if (signal?.aborted) {
         engine.dispose();
@@ -954,12 +967,12 @@ async function initBackend(
     }
 
     // CPU view mode: start worker first, then create a fresh detached 2D canvas.
-    const cpuWorker = await startCpuWorker(signal);
+    const cpuWorker = await startCpuWorker(memory, signal);
     if (signal?.aborted) {
       cpuWorker.terminate();
       return aborted();
     }
-    const surface = createCandidateCanvas(templateSlot);
+    const surface = createCandidateCanvas(templateSlot, !!memory);
     const cpu2d = surface.getContext("2d");
     if (!cpu2d) {
       cpuWorker.terminate();
@@ -1269,6 +1282,7 @@ export class EngineView {
     measurer: TextMeasurer,
     images: ImageCache,
     choice: RendererChoice,
+    readonly memoryProfile: MobileRendererMemory | undefined,
   ) {
     this.#slot = slot;
     this.#canvas = init.canvas;
@@ -1316,6 +1330,7 @@ export class EngineView {
           this.#releasePreviewRefine(pageId);
         }
       },
+      memoryProfile,
     );
     this.#choice = choice;
     this.#backend = init.backend;
@@ -1354,6 +1369,7 @@ export class EngineView {
     images: ImageCache,
     choice: RendererChoice,
     signal?: AbortSignal,
+    memory = readMobileRendererMemory(),
   ): Promise<EngineView | null> {
     if (signal?.aborted) return null;
     // Supersede any earlier in-flight initialization targeting the same slot.
@@ -1370,12 +1386,12 @@ export class EngineView {
       for (const candidate of chain) {
         if (controller.signal.aborted) return null;
         if (sessionDisabled.has(candidate)) continue;
-        let res = await initBackend(candidate, slot, choice, controller.signal);
+        let res = await initBackend(candidate, slot, choice, memory, controller.signal);
         // Retry a slow startup once (deferring while hidden) before stepping down.
         if (!res.ok && !res.aborted && res.code === ErrorCode.Timeout) {
           const keepGoing = await waitBeforeStartupRetry(controller.signal);
           if (!keepGoing || controller.signal.aborted) return null;
-          res = await initBackend(candidate, slot, choice, controller.signal);
+          res = await initBackend(candidate, slot, choice, memory, controller.signal);
         }
         if (
           controller.signal.aborted ||
@@ -1404,7 +1420,7 @@ export class EngineView {
             });
           }
           const containerSlot = isCanvasElement(slot) ? null : slot;
-          return new EngineView(containerSlot, res, editor, measurer, images, choice);
+          return new EngineView(containerSlot, res, editor, measurer, images, choice, memory);
         }
         // Do not permanently blacklist a candidate across future views on a transient wait timeout.
         if (res.code !== ErrorCode.Timeout) sessionDisabled.add(candidate);
@@ -1494,6 +1510,15 @@ export class EngineView {
 
   get engine(): RenderEngine | null {
     return this.#engine;
+  }
+
+  /** Tracked image allocations for diagnostics. The browser can hold additional native copies. */
+  get imageMemoryEstimate() {
+    return this.#images.memoryEstimate;
+  }
+
+  get cpuSnapshotBytes(): number {
+    return this.#cpuBacking ? this.#cpuBacking.width * this.#cpuBacking.height * 4 : 0;
   }
 
   get builder(): DisplayListBuilder {
@@ -1840,7 +1865,11 @@ export class EngineView {
     const isLoss =
       recoverable &&
       (r.code === ErrorCode.DeviceLost || r.code === ErrorCode.Gpu || /lost/i.test(r.message));
-    if (isLoss && (this.#backend === "webgpu" || this.#backend === "webgl2")) {
+    if (
+      !this.memoryProfile &&
+      isLoss &&
+      (this.#backend === "webgpu" || this.#backend === "webgl2")
+    ) {
       const now = Date.now();
       const history = (this.#losses.get(this.#backend) ?? []).filter(
         (t) => now - t < LOSS_WINDOW_MS,
@@ -1967,7 +1996,13 @@ export class EngineView {
     for (let i = startAt; i < chain.length; i++) {
       const candidate = chain[i] as EngineBackend;
       if (sessionDisabled.has(candidate)) continue;
-      let res = await initBackend(candidate, this.#canvas, this.#choice, this.#lifecycle.signal);
+      let res = await initBackend(
+        candidate,
+        this.#canvas,
+        this.#choice,
+        this.memoryProfile,
+        this.#lifecycle.signal,
+      );
       // After a WebGPU device crash, Chromium's GPU process can take a few hundred ms to restart,
       // during which getContext("webgl2") transiently returns null. Retry briefly before giving up.
       for (
@@ -1983,7 +2018,13 @@ export class EngineView {
       ) {
         await new Promise((resolve) => window.setTimeout(resolve, 250 * (retry + 1)));
         if (this.#dead) return;
-        res = await initBackend(candidate, this.#canvas, this.#choice, this.#lifecycle.signal);
+        res = await initBackend(
+          candidate,
+          this.#canvas,
+          this.#choice,
+          this.memoryProfile,
+          this.#lifecycle.signal,
+        );
       }
       if (this.#dead || (!res.ok && res.aborted)) {
         if (res.ok) {
@@ -2096,7 +2137,10 @@ export class EngineView {
         },
       });
     } else if (worker) {
-      this.#imageLimits = { side: CPU_IMAGE_SIDE, bytes: CPU_IMAGE_BUDGET };
+      this.#imageLimits = {
+        side: this.memoryProfile?.imageSide ?? CPU_IMAGE_SIDE,
+        bytes: this.memoryProfile?.imageBytes ?? CPU_IMAGE_BUDGET,
+      };
       this.#images.setBackend({
         upload: (handle, bitmap) =>
           new Promise<boolean>((done) => {
@@ -2315,6 +2359,15 @@ export class EngineView {
     budgetMs = 0,
   ): EngineDraw {
     if (this.#dead || this.#recovering) return NOT_DRAWN;
+    const profile = this.memoryProfile;
+    if (
+      profile &&
+      (width * height > profile.backingPixels ||
+        Math.max(width, height) > MOBILE_BACKING_SIDE ||
+        dpr > profile.maxDpr)
+    ) {
+      ({ width, height, dpr } = mobileBacking(profile, width / dpr, height / dpr, dpr));
+    }
     const at = this.#presenting;
     if (!at || at.pageId !== pageId || at.width !== width || at.height !== height) {
       if (!at || at.pageId !== pageId) {

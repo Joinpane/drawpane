@@ -56,6 +56,13 @@ export class FrameStats {
   readonly #overlay = new Float64Array(SIZE);
   #count = 0;
   #at = 0;
+  /** Estimated RGBA bytes of retained canvases, snapshots and visible-renderer image copies. */
+  mobileMemory: {
+    backingBytes: number;
+    snapshotBytes: number;
+    decodedBytes: number;
+    peakBytes: number;
+  } | null = null;
   drawn = 0;
   culled = 0;
   /** Whether the last content frame was exact (not a stand-in, nor drawn in part). */

@@ -48,6 +48,7 @@ import {
   type RendererChoice,
   rendererChoice,
 } from "../editor/engine-view";
+import { mobileBacking, readMobileRendererMemory } from "../editor/renderer-memory";
 import { shaper } from "../editor/shaping";
 import { watchDocumentFonts } from "../fonts/document-fonts";
 
@@ -189,6 +190,7 @@ export class PlayerStage {
   #engineFailed = false;
   #usingFallbackCanvas = false;
   #screenDrawable = true;
+  readonly #memory = readMobileRendererMemory();
   readonly #engineInit = new AbortController();
   #disposed = false;
   #idleOn = false;
@@ -356,6 +358,7 @@ export class PlayerStage {
       this.#images,
       this.#choice,
       this.#engineInit.signal,
+      this.#memory,
     ).then((view) => {
       if (this.#disposed || this.#engineInit.signal.aborted) {
         view?.dispose();
@@ -543,6 +546,17 @@ export class PlayerStage {
     const size = this.#frameSize(root);
     const css = contentScale * this.#scale;
     let dpr = window.devicePixelRatio || 1;
+    const cssWidth = size.width * css;
+    const cssHeight = size.height * css;
+    if (this.#memory) {
+      return {
+        size,
+        css,
+        cssWidth,
+        cssHeight,
+        ...mobileBacking(this.#memory, cssWidth, cssHeight, dpr),
+      };
+    }
     const pixels = size.width * size.height * (css * dpr) ** 2;
     if (pixels > MAX_PIXELS) dpr *= Math.sqrt(MAX_PIXELS / pixels);
     if (this.#useEngine) {
@@ -559,8 +573,8 @@ export class PlayerStage {
       dpr,
       width,
       height,
-      cssWidth: size.width * css,
-      cssHeight: size.height * css,
+      cssWidth,
+      cssHeight,
     };
   }
 
