@@ -15,8 +15,20 @@ const profiles = [
     name: "360 px phone",
     options: { ...devices["Pixel 8"], viewport: { width: 360, height: 800 }, deviceScaleFactor: 3 },
   },
-  { name: "393 px phone", options: devices["iPhone 15"] },
+  {
+    name: "393 × 660 short phone",
+    options: { ...devices["iPhone 15"], viewport: { width: 393, height: 660 } },
+  },
   { name: "412 px phone", options: devices["Pixel 8"] },
+  { name: "430 px phone", options: devices["iPhone 15 Pro Max"] },
+  {
+    name: "800 × 360 landscape phone",
+    options: { ...devices["Pixel 8"], viewport: { width: 800, height: 360 }, deviceScaleFactor: 3 },
+  },
+  {
+    name: "768 px tablet",
+    options: { ...devices["iPad Pro 11"], viewport: { width: 768, height: 1024 } },
+  },
   { name: "834 px tablet", options: devices["iPad Pro 11"] },
 ];
 const longFile = "PrototypeReviewWithAnUnbrokenFileNameForCompactToolbars".repeat(2);
@@ -45,12 +57,15 @@ async function fits(page: Page, ...targets: Locator[]) {
       top: v?.offsetTop ?? 0,
       width: v?.width ?? innerWidth,
       height: v?.height ?? innerHeight,
-      scrollWidth: document.documentElement.scrollWidth,
-      clientWidth: document.documentElement.clientWidth,
     };
   });
-  expect(viewport.scrollWidth).toBeLessThanOrEqual(viewport.clientWidth);
-  for (const target of targets) {
+  const bar = page.locator(".present__bar");
+  const { scrollWidth, clientWidth } = await bar.evaluate((el) => ({
+    scrollWidth: el.scrollWidth,
+    clientWidth: el.clientWidth,
+  }));
+  expect(scrollWidth).toBeLessThanOrEqual(clientWidth);
+  for (const target of [bar, ...targets]) {
     await expect(target).toBeVisible();
     const rect = await target.boundingBox();
     if (!rect) throw new Error(`Missing bounds for ${target}`);
@@ -63,6 +78,19 @@ async function fits(page: Page, ...targets: Locator[]) {
       viewport.top + viewport.height + 1,
     );
   }
+}
+
+/** The fixture uses the 393 × 852 iPhone 16 preset. */
+async function fitsWholePreset(stage: Locator, viewport: Locator) {
+  await expect
+    .poll(async () => {
+      const box = await stage.boundingBox();
+      const device = await viewport.boundingBox();
+      if (!box || !device) throw new Error("Missing prototype viewport");
+      const fittedHeight = Math.min(box.height, (box.width * 852) / 393);
+      return Math.abs(device.height - fittedHeight);
+    })
+    .toBeLessThan(1);
 }
 
 test.describe("Prototype playback on touch screens", () => {
@@ -166,10 +194,13 @@ test.describe("Prototype playback on touch screens", () => {
           const more = page.getByRole("button", { name: "More actions" });
           const restart = page.getByRole("button", { name: "Restart" });
           const share = page.getByRole("button", { name: "Share prototype" });
-          const compact = options.viewport.width <= 720;
+          const { width, height } = options.viewport;
+          const compact = width <= 720 || height <= 520;
           const controls = signedIn ? [back, ...(compact ? [more] : [share, restart])] : [restart];
           await expect(count).toHaveText("Screen 1 of 3");
           await fits(page, stage, viewport, artwork, flow, show, ...controls);
+          if (compact) await fitsWholePreset(stage, viewport);
+          if (width === 768) await expect(count).toHaveCSS("clip-path", "inset(50%)");
 
           if (signedIn) {
             const entry = compact ? page.getByRole("menuitem", { name: "Share prototype" }) : share;
@@ -178,10 +209,11 @@ test.describe("Prototype playback on touch screens", () => {
             await entry.tap();
             const dialog = page.getByRole("dialog", { name: /^Share/ });
             const done = dialog.getByRole("button", { name: "Done" });
-            await fits(page, dialog, done);
             await expect(
               dialog.getByText("Anyone with the link can play the prototype."),
             ).toBeVisible();
+            await done.scrollIntoViewIfNeeded();
+            await fits(page, dialog, done);
             await done.tap();
             await expect(dialog).toBeHidden();
             if (compact) await expect(more).toBeFocused();
@@ -196,6 +228,12 @@ test.describe("Prototype playback on touch screens", () => {
             if (!box) throw new Error("No prototype viewport");
             await page.touchscreen.tap(box.x + box.width * x, box.y + box.height * y);
           };
+          if (compact && signedIn) {
+            await more.tap();
+            await tapStage(0.25, 0.2);
+            await expect(page.getByRole("menu", { name: "More actions" })).toBeHidden();
+            await expect(count).toHaveText("Screen 1 of 3");
+          }
           await tapStage(0.5, 0.3);
           await expect(count).toHaveText("Screen 2 of 3");
           await tapStage(0.5, 0.9);
@@ -209,10 +247,25 @@ test.describe("Prototype playback on touch screens", () => {
             const close = picker.getByRole("button", { name: "Close" });
             await show.tap();
             await fits(page, picker, close);
-            await expect(close).toBeFocused();
+            await expect(
+              picker.getByRole("button", { name: new RegExp(longScreen) }),
+            ).toBeFocused();
+            await expect(picker.getByRole("complementary")).toHaveCount(0);
+            await page.evaluate(() => (document.activeElement as HTMLElement).blur());
+            await expect(page.locator("body")).toBeFocused();
+            await page.keyboard.press("ArrowRight");
+            await expect(count).toHaveText("Screen 2 of 3");
             await page.keyboard.press("Escape");
             await expect(picker).toBeHidden();
             await expect(show).toBeFocused();
+            if (signedIn && width === 360) {
+              await show.tap();
+              await page.setViewportSize({ width: 1280, height: 800 });
+              await expect(picker).toBeHidden();
+              await expect(show).toBeFocused();
+              await page.setViewportSize(options.viewport);
+              await expect(count).toHaveText("Screen 2 of 3");
+            }
             await expect(count).toHaveText("Screen 2 of 3");
             await show.tap();
             await page.touchscreen.tap(4, 4);
@@ -224,7 +277,7 @@ test.describe("Prototype playback on touch screens", () => {
           await expect(flow).toHaveValue("flowDetail");
           await fits(page, stage, viewport, flow, show, ...controls);
           await show.tap();
-          const screens = page.getByRole("complementary", { name: "Screens" });
+          const screens = page.getByRole(compact ? "dialog" : "complementary", { name: "Screens" });
           await expect(
             screens.getByRole("button", { name: new RegExp(longScreen) }),
           ).toHaveAttribute("aria-current", "true");
@@ -233,9 +286,9 @@ test.describe("Prototype playback on touch screens", () => {
           await expect(screens).toBeHidden();
           await expect(count).toHaveText("Screen 2 of 2");
 
-          const { width, height } = options.viewport;
           await page.setViewportSize({ width: height, height: width });
           await fits(page, stage, viewport, flow, show, ...controls);
+          if (compact) await fitsWholePreset(stage, viewport);
           await expect(count).toHaveText("Screen 2 of 2");
           await expect(flow).toHaveValue("flowDetail");
 

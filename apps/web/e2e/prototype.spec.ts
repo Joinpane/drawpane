@@ -253,7 +253,7 @@ test.describe
       expect(shown.y + shown.height).toBeLessThanOrEqual(stage.y + stage.height + 0.5);
       expect(drawn.height).toBeLessThanOrEqual(shown.height + 0.5);
       await phonePage.getByRole("button", { name: "Show screens" }).tap();
-      const list = phonePage.getByRole("complementary", { name: "Screens" });
+      const list = phonePage.getByRole("dialog", { name: "Screens" });
       await expect(list).toBeVisible();
       await list.getByRole("button", { name: /^Today detail/ }).tap();
       await expect(list).toBeHidden();

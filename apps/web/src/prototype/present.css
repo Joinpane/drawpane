@@ -380,12 +380,14 @@
 .present[data-compact] .present__back > span {
   display: none;
 }
-.present[data-compact] .present__count {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  overflow: hidden;
-  clip-path: inset(50%);
+@media (max-width: 800px), (pointer: coarse) and (max-height: 520px) {
+  .present__count {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
 }
 .present[data-compact] .present__back,
 .present[data-compact] .present__flow,
@@ -417,6 +419,13 @@
   max-width: calc(100% - 2 * var(--space-400));
   white-space: normal;
   text-align: center;
+}
+/* The menu closes on pointerdown. Keep that pointer from starting a stage gesture. */
+.present:has(.present__more[aria-expanded="true"]) .present__stage::after {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  content: "";
 }
 .present .app-dialog:has(.present__picker) .app-dialog__body {
   display: grid;

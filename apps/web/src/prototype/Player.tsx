@@ -108,6 +108,8 @@ export function Player({
   const host = useRef<HTMLDivElement>(null);
   const stage = useRef<PlayerStage | null>(null);
   const moreButton = useRef<HTMLButtonElement>(null);
+  const screensButton = useRef<HTMLButtonElement>(null);
+  const picker = useRef<HTMLDivElement>(null);
   const pickerClose = useRef<HTMLButtonElement>(null);
   const compact = useMediaQuery(COMPACT);
   const touch = useMediaQuery("(pointer: coarse)");
@@ -123,7 +125,14 @@ export function Player({
   const [panelOpen, setPanelOpen] = useState(() => window.innerWidth >= 960);
   const [pickerOpen, setPickerOpen] = useState(false);
   useEffect(() => {
-    if (compact && pickerOpen) pickerClose.current?.focus({ preventScroll: true });
+    if (!pickerOpen) return;
+    if (!compact) {
+      setPickerOpen(false);
+      screensButton.current?.focus({ preventScroll: true });
+      return;
+    }
+    const current = picker.current?.querySelector<HTMLButtonElement>('[aria-current="true"]');
+    (current ?? pickerClose.current)?.focus();
   }, [compact, pickerOpen]);
   const [hint, setHint] = useState<{ id: number; text: string } | null>({
     id: 0,
@@ -196,6 +205,7 @@ export function Player({
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (document.querySelector("dialog:modal")) return;
       const el = e.target as HTMLElement | null;
       if (el && (el.tagName === "INPUT" || el.tagName === "SELECT" || el.isContentEditable)) return;
       if (el?.closest("dialog, [role='menu']")) return;
@@ -317,6 +327,7 @@ export function Player({
           )}
           {compact ? (
             <Button
+              ref={screensButton}
               icon="layers"
               variant="ghost"
               aria-label="Show screens"
@@ -331,6 +342,7 @@ export function Player({
             </Button>
           ) : (
             <IconButton
+              ref={screensButton}
               icon="layers"
               label={panelOpen ? "Hide screens" : "Show screens"}
               size="md"
@@ -342,6 +354,7 @@ export function Player({
             (compact ? (
               <MenuButton
                 ref={moreButton}
+                className="present__more"
                 label="More actions"
                 size="md"
                 items={[
@@ -395,9 +408,9 @@ export function Player({
           </Button>
         }
       >
-        <aside className="present__picker" aria-label="Screens">
+        <div ref={picker} className="present__picker">
           {screensList}
-        </aside>
+        </div>
       </Dialog>
       {children}
     </div>
