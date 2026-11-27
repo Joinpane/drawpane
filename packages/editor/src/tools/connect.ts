@@ -107,4 +107,8 @@ export class ConnectTool implements ToolHandler {
     this.cursor = "default";
     this.#editor.state.set({ connecting: null, hover: null });
   }
+
+  rollbackActive(): void {
+    this.cancel();
+  }
 }

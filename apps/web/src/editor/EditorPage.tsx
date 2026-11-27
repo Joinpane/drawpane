@@ -2153,7 +2153,18 @@ function TopRight({
 
 function ZoomControls({ fitPadding }: { fitPadding: number }) {
   const editor = useEditor();
-  const zoom = useEditorState((s) => s.camera.zoom);
+  const valueRef = useRef<HTMLButtonElement>(null);
+  // Update the percentage directly in the DOM so panning and pinch-zoom trigger zero React re-renders.
+  useLayoutEffect(() => {
+    let last = Math.round(editor.s.camera.zoom * 100);
+    if (valueRef.current) valueRef.current.textContent = `${last}%`;
+    return editor.state.subscribe(() => {
+      const pct = Math.round(editor.s.camera.zoom * 100);
+      if (pct === last) return;
+      last = pct;
+      if (valueRef.current) valueRef.current.textContent = `${pct}%`;
+    });
+  }, [editor]);
   return (
     <fieldset className="zoom pane" aria-label="Zoom" {...PASS_GESTURES}>
       <IconButton
@@ -2163,12 +2174,13 @@ function ZoomControls({ fitPadding }: { fitPadding: number }) {
         onClick={() => editor.zoomBy(1 / 1.5)}
       />
       <button
+        ref={valueRef}
         type="button"
         className="zoom__value"
         onClick={() => editor.zoomTo(1)}
         title={`Zoom to 100% (${shortcutFor("view.zoom100")})`}
       >
-        {Math.round(zoom * 100)}%
+        {Math.round(editor.s.camera.zoom * 100)}%
       </button>
       <IconButton
         icon="plus"

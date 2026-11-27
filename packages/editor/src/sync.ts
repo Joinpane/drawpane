@@ -43,6 +43,8 @@ interface PendingTxn {
   inverse: Op[] | null;
   /** Assigned when sent. */
   seq: number | null;
+  /** Uncommitted speculative local edit (e.g. an in-progress touch drag) held back from flushing. */
+  held?: boolean;
 }
 
 /** How this client can read a file's copies: both ways. */
@@ -115,6 +117,9 @@ export class SyncEngine {
   #revn: number | null = null;
   #seq = 0;
   #pending: PendingTxn[] = [];
+  #holdDepth = 0;
+  #capturingHeld = 0;
+  readonly #holdInterrupts: Array<() => void> = [];
   #flushScheduled = false;
   #lastFlush = 0;
   #snapshot: NodeRecord[] | null = null;
@@ -190,6 +195,111 @@ export class SyncEngine {
   get pendingCount(): number {
     return this.#pending.length;
   }
+  /** True while speculative local edits are held back from flushing (e.g. uncommitted touch drag). */
+  get holding(): boolean {
+    return this.#holdDepth > 0;
+  }
+  /** True while synchronous commits in the current scope are tagged as held speculative edits. */
+  get capturingHeld(): boolean {
+    return this.#holdDepth > 0 && this.#capturingHeld > 0;
+  }
+
+  /**
+   * Opens a hold window so commits made inside `withHeld(...)` stay unsent until
+   * `commitHold()` or `discardHold()` is called. An optional `onInterrupt` callback
+   * lets the host roll back its speculative interaction (just like a second finger
+   * landing) whenever an unrelated edit occurs outside `withHeld(...)` during the hold.
+   */
+  beginHold(onInterrupt?: () => void): void {
+    if (this.#holdDepth === 0) this.flush();
+    this.#holdDepth++;
+    if (onInterrupt) this.#holdInterrupts.push(onInterrupt);
+  }
+
+  /**
+   * Interrupts an active hold when an unrelated edit runs outside `withHeld(...)`.
+   * Runs registered hold interrupt handlers first so the host rolls back its tool
+   * state and drops its open history group, then guarantees no hold remains active.
+   */
+  interruptHold(): boolean {
+    if (this.#holdDepth === 0 || this.#capturingHeld > 0) return false;
+    const handlers = this.#holdInterrupts.splice(0);
+    for (let i = handlers.length - 1; i >= 0; i--) {
+      handlers[i]?.();
+    }
+    while (this.#holdDepth > 0) {
+      this.discardHold();
+    }
+    return true;
+  }
+
+  /** Runs `fn` tagging synchronous commits inside it as held while `holding` is true. */
+  withHeld<T>(fn: () => T): T {
+    this.#capturingHeld++;
+    try {
+      return fn();
+    } finally {
+      this.#capturingHeld--;
+    }
+  }
+
+  /** Releases the hold and flushes held and queued local commits to the room. */
+  commitHold(): void {
+    if (this.#holdDepth === 0) return;
+    this.#holdDepth--;
+    if (this.#holdDepth > 0) return;
+    this.#holdInterrupts.length = 0;
+    let released = false;
+    for (const txn of this.#pending) {
+      if (txn.held) {
+        delete txn.held;
+        released = true;
+      }
+    }
+    const hasUnsent = this.#pending.some((t) => t.seq === null && !t.held);
+    if (released || hasUnsent) {
+      this.flush();
+      this.#progress();
+    }
+  }
+
+  /**
+   * Releases the hold and reverts ONLY held speculative transactions on the document,
+   * preserving and flushing any unrelated non-held edits (such as font refits or undo/redo)
+   * that occurred during the hold window.
+   */
+  discardHold(): boolean {
+    if (this.#holdDepth === 0) return false;
+    this.#holdDepth--;
+    if (this.#holdDepth > 0) return false;
+    this.#holdInterrupts.length = 0;
+    const firstHeld = this.#pending.findIndex((t) => t.held);
+    if (firstHeld === -1) {
+      if (this.#pending.some((t) => t.seq === null && !t.held)) {
+        this.flush();
+        this.#progress();
+      }
+      return false;
+    }
+    const hasNonHeldAfter = this.#pending.slice(firstHeld).some((t) => !t.held);
+    this.#doc.batch(() => {
+      if (!hasNonHeldAfter) {
+        for (let i = this.#pending.length - 1; i >= firstHeld; i--) {
+          const txn = this.#pending[i] as PendingTxn;
+          if (txn.inverse) this.#doc.applyStored(txn.inverse, { held: true });
+          txn.inverse = null;
+        }
+        this.#pending.length = firstHeld;
+      } else {
+        this.#undoPending();
+        this.#pending = this.#pending.filter((t) => !t.held);
+        this.#redoPending();
+      }
+    });
+    if (this.#pending.some((t) => t.seq === null && !t.held)) this.flush();
+    this.#progress();
+    return true;
+  }
 
   on<K extends keyof SyncEvents>(event: K, listener: SyncEvents[K]): () => void {
     let set = this.#listeners[event] as Set<SyncEvents[K]> | undefined;
@@ -226,16 +336,23 @@ export class SyncEngine {
     const inverse = this.#doc.apply(ops);
     const stored = [...this.#doc.lastStoredOps];
     const storedInverse = [...this.#doc.lastStoredInverse];
+    const held = this.capturingHeld;
     const last = this.#pending.at(-1);
-    if (last && last.seq === null && last.inverse) {
+    if (last && last.seq === null && Boolean(last.held) === held && last.inverse) {
       // Merge into the unsent transaction: undo order is newest first.
       last.ops = compactOps([...last.ops, ...ops]);
       last.stored = compactOps([...last.stored, ...stored]);
       last.inverse = [...storedInverse, ...last.inverse];
     } else {
-      this.#pending.push({ ops: [...ops], stored, inverse: storedInverse, seq: null });
+      this.#pending.push({
+        ops: [...ops],
+        stored,
+        inverse: storedInverse,
+        seq: null,
+        ...(held ? { held: true } : {}),
+      });
     }
-    this.#scheduleFlush();
+    if (!held) this.#scheduleFlush();
     this.#progress();
     return inverse;
   }
@@ -247,9 +364,9 @@ export class SyncEngine {
    * committed. Empty when there's nothing unsent.
    */
   takeUnsent(): Op[] {
-    const unsent = this.#pending.filter((t) => t.seq === null);
+    const unsent = this.#pending.filter((t) => t.seq === null && !t.held);
     if (unsent.length === 0) return [];
-    this.#pending = this.#pending.filter((t) => t.seq !== null);
+    this.#pending = this.#pending.filter((t) => t.seq !== null || t.held);
     this.#progress();
     return compactOps(unsent.flatMap((t) => t.stored));
   }
@@ -264,11 +381,12 @@ export class SyncEngine {
     }, wait);
   }
 
-  /** Sends every unsent transaction now. */
+  /** Sends every unsent transaction now (stopping before any held speculative transaction). */
   flush(): void {
     if (!this.#send || this.#status !== "live") return;
     this.#lastFlush = Date.now();
     for (const txn of this.#pending) {
+      if (txn.held) break;
       if (txn.seq !== null) continue;
       txn.seq = ++this.#seq;
       this.#sentAt.set(txn.seq, Date.now());

@@ -110,6 +110,7 @@ export function Num({
       }}
       onScrubStart={() => editor.beginGesture(ariaLabel)}
       onScrubEnd={() => editor.endGesture()}
+      onScrubCancel={() => editor.cancelGesture()}
     />
   );
   if (!bindKey) return field();

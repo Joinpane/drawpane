@@ -11,7 +11,7 @@ import { Icon } from "@drawpane/ui";
 import { useCallback, useEffect, useLayoutEffect, useRef, useSyncExternalStore } from "react";
 import { useEditor, useEditorState } from "../hooks";
 import { MobileSheet } from "../MobileSheet";
-import { useUi } from "../ui-state";
+import { setCommentBridge, uiFor, useUi } from "../ui-state";
 import { readVisualViewport } from "../visual-viewport";
 import { anchorAt, anchorLabel, type PinPosition, resolveAnchor } from "./anchor";
 import { colorStyle, displayName, personInitials } from "./people";
@@ -215,17 +215,12 @@ export function CommentsLayer({
     return () => observer.disconnect();
   }, []);
 
-  // The comment tool: a click (or touch tap after slop) on the canvas drops a pin instead of reaching the canvas.
+  // The comment tool: mouse and desktop-pen clicks drop a pin directly; canvas touch
+  // (and tablet pen) routes through Canvas's touch arbiter via the comment bridge so
+  // two-finger pan/pinch never creates or cancels drafts and phone long-press drops a pin.
   useEffect(() => {
     const host = root.current?.parentElement;
     if (!host) return;
-    const TAP_SLOP = 8;
-    let touchTap: {
-      pointerId: number;
-      startX: number;
-      startY: number;
-      canvas: HTMLElement;
-    } | null = null;
 
     const placePin = (canvas: HTMLElement, clientX: number, clientY: number) => {
       const cs = store.state.get();
@@ -243,107 +238,39 @@ export function CommentsLayer({
       store.startDraft(pageId, anchorAt(editor.scene, pageId, point));
     };
 
+    const dismissOpen = () => {
+      const cs = store.state.get();
+      if (cs.openId) store.close();
+      if (cs.draft && cs.draft.text.trim() === "") store.cancelDraft();
+    };
+
+    setCommentBridge(editor, { placeAt: placePin, dismissOpen });
+
     const onDown = (e: PointerEvent) => {
       const target = e.target instanceof Element ? e.target : null;
       const canvas = target?.closest<HTMLElement>(".canvas");
       if (!canvas) return;
-      const cs = store.state.get();
+      // Touch (and mobile/tablet stylus) is arbitrated by Canvas before deciding tap vs drag vs pinch.
+      const arbitrated =
+        e.pointerType === "touch" ||
+        (e.pointerType === "pen" && uiFor(editor).get().workspaceMode !== "desktop");
+      if (arbitrated) return;
       const panning =
         e.button !== 0 || interaction.cursor === "grab" || interaction.cursor === "grabbing";
       if (editor.s.tool === "comment" && !panning) {
-        if (e.pointerType === "touch") {
-          // On touch, decide on release after slop so a pan never drops a pin and the
-          // sheet scrim never mounts under the active touch.
-          e.stopPropagation();
-          touchTap = { pointerId: e.pointerId, startX: e.clientX, startY: e.clientY, canvas };
-          return;
-        }
         e.stopPropagation();
         e.preventDefault();
         placePin(canvas, e.clientX, e.clientY);
         return;
       }
       // Any other click on the canvas closes the open thread; a draft with words stays.
-      if (cs.openId) store.close();
-      if (cs.draft && cs.draft.text.trim() === "") store.cancelDraft();
-    };
-
-    const onMove = (e: PointerEvent) => {
-      if (!touchTap || e.pointerId !== touchTap.pointerId) return;
-      if (Math.hypot(e.clientX - touchTap.startX, e.clientY - touchTap.startY) > TAP_SLOP) {
-        touchTap = null;
-      }
-    };
-
-    let suppressMouseTimer: number | null = null;
-    let suppressMousePoint: { x: number; y: number } | null = null;
-    const clearSuppressedMouse = () => {
-      suppressMousePoint = null;
-      if (suppressMouseTimer !== null) {
-        window.clearTimeout(suppressMouseTimer);
-        suppressMouseTimer = null;
-      }
-    };
-    const withinSuppressedTap = (e: MouseEvent) =>
-      suppressMousePoint !== null &&
-      Math.hypot(e.clientX - suppressMousePoint.x, e.clientY - suppressMousePoint.y) <=
-        TAP_SLOP * 2;
-    const onSuppressedMouseDown = (e: MouseEvent) => {
-      if (!withinSuppressedTap(e)) return;
-      // Keep focus in the newly opened comment field instead of letting the tap's
-      // compatibility mousedown move focus onto the scrim or sheet chrome.
-      e.preventDefault();
-      e.stopPropagation();
-    };
-    const onSuppressedClick = (e: MouseEvent) => {
-      if (!suppressMousePoint) return;
-      const hit = withinSuppressedTap(e);
-      clearSuppressedMouse();
-      if (hit) {
-        e.preventDefault();
-        e.stopPropagation();
-      }
-    };
-    const onAnyPointerDown = () => {
-      // A new pointer interaction supersedes any pending compatibility-event suppression.
-      if (suppressMousePoint) clearSuppressedMouse();
-    };
-
-    const onUp = (e: PointerEvent) => {
-      if (!touchTap || e.pointerId !== touchTap.pointerId) return;
-      const tap = touchTap;
-      touchTap = null;
-      if (editor.s.tool !== "comment") return;
-      if (Math.hypot(e.clientX - tap.startX, e.clientY - tap.startY) > TAP_SLOP) return;
-      e.stopPropagation();
-      // Swallow the trailing compatibility mousedown/click from this touch tap so mounting
-      // the bottom sheet under the tapped spot never steals focus or triggers buttons/scrim.
-      clearSuppressedMouse();
-      suppressMousePoint = { x: e.clientX, y: e.clientY };
-      suppressMouseTimer = window.setTimeout(clearSuppressedMouse, 350);
-      placePin(tap.canvas, e.clientX, e.clientY);
-    };
-
-    const onCancel = (e: PointerEvent) => {
-      if (touchTap && e.pointerId === touchTap.pointerId) touchTap = null;
+      dismissOpen();
     };
 
     host.addEventListener("pointerdown", onDown, true);
-    window.addEventListener("pointerdown", onAnyPointerDown, true);
-    window.addEventListener("pointermove", onMove, true);
-    window.addEventListener("pointerup", onUp, true);
-    window.addEventListener("pointercancel", onCancel, true);
-    window.addEventListener("mousedown", onSuppressedMouseDown, true);
-    window.addEventListener("click", onSuppressedClick, true);
     return () => {
-      clearSuppressedMouse();
+      setCommentBridge(editor, null);
       host.removeEventListener("pointerdown", onDown, true);
-      window.removeEventListener("pointerdown", onAnyPointerDown, true);
-      window.removeEventListener("pointermove", onMove, true);
-      window.removeEventListener("pointerup", onUp, true);
-      window.removeEventListener("pointercancel", onCancel, true);
-      window.removeEventListener("mousedown", onSuppressedMouseDown, true);
-      window.removeEventListener("click", onSuppressedClick, true);
     };
   }, [editor, interaction, store]);
 

@@ -21,6 +21,8 @@ export interface ToolHandler {
   key(input: KeyInput): boolean;
   /** Ends whatever is in progress (pointer cancel, page change). */
   cancel(): void;
+  /** Resets only the active uncommitted pointer drag without finishing earlier steps. */
+  rollbackActive?(): void;
   /** True while a gesture is in progress. */
   readonly busy: boolean;
   readonly cursor: string;

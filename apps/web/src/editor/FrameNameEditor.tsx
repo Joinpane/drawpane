@@ -16,8 +16,8 @@ export function FrameNameEditor() {
   useDocVersion();
   const id = useEditorState((s) => s.renamingFrame);
   const workspaceMode = useUi(editor, (ui) => ui.workspaceMode);
-  // Follow the label as the camera moves.
-  useEditorState((s) => s.camera);
+  // Follow the label as the camera moves, without subscribing when nothing is being renamed.
+  useEditorState((s) => (s.renamingFrame ? s.camera : null));
   const node = id ? editor.doc.get(id) : undefined;
   if (!id || !node) return null;
   const label = frameLabels(editor).find((l) => l.id === id);

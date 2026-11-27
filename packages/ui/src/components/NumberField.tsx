@@ -4,6 +4,7 @@ import {
   type KeyboardEvent,
   type PointerEvent,
   useCallback,
+  useEffect,
   useLayoutEffect,
   useRef,
   useState,
@@ -48,6 +49,8 @@ export interface NumberFieldProps
   /** Scrubbing started, for example to open an undo group. */
   onScrubStart?: () => void;
   onScrubEnd?: () => void;
+  /** Scrubbing was cancelled (for example a touch scrub taken over by a pinch). */
+  onScrubCancel?: () => void;
   /** Makes the bound TokenChip a button. */
   onTokenClick?: () => void;
   /**
@@ -62,11 +65,20 @@ export interface NumberFieldProps
   scrubFrom?: number;
 }
 
+/** Horizontal movement in CSS pixels before a touch drag on a label/unit begins scrubbing. */
+const TOUCH_SCRUB_SLOP_PX = 8;
+
 interface Scrub {
   pointerId: number;
+  pointerType: string;
+  startX: number;
   lastX: number;
   /** Unrounded value, so slow drags with Alt still accumulate. */
   exact: number;
+  /** False for touch until horizontal movement crosses `TOUCH_SCRUB_SLOP_PX`. */
+  started: boolean;
+  /** Value before scrubbing started, restored on uncontrolled cancel. */
+  initialValue: number | null;
 }
 
 function stepMultiplier(event: { shiftKey: boolean; altKey: boolean }): number {
@@ -94,6 +106,7 @@ export function NumberField({
   units,
   onScrubStart,
   onScrubEnd,
+  onScrubCancel,
   onTokenClick,
   nullLabel = "Mixed",
   onClear,
@@ -199,13 +212,44 @@ export function NumberField({
     }
   };
 
-  const endScrub = (event: PointerEvent<HTMLSpanElement>) => {
+  const onScrubEndRef = useRef(onScrubEnd);
+  onScrubEndRef.current = onScrubEnd;
+  const onScrubCancelRef = useRef(onScrubCancel);
+  onScrubCancelRef.current = onScrubCancel;
+  useEffect(
+    () => () => {
+      const active = scrub.current;
+      if (!active) return;
+      scrub.current = null;
+      document.documentElement.classList.remove("dp-scrubbing");
+      if (!active.started) return;
+      if (active.pointerType === "touch" && onScrubCancelRef.current) {
+        onScrubCancelRef.current();
+      } else {
+        onScrubEndRef.current?.();
+      }
+    },
+    [],
+  );
+
+  const finishScrub = (event: PointerEvent<HTMLSpanElement>, cancel: boolean) => {
     const active = scrub.current;
     if (!active || active.pointerId !== event.pointerId) return;
     scrub.current = null;
     document.documentElement.classList.remove("dp-scrubbing");
     if (event.currentTarget.hasPointerCapture(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (!active.started) return;
+    if (cancel && active.pointerType === "touch") {
+      if (!controlled) {
+        latest.current = active.initialValue;
+        setInternal(active.initialValue);
+      }
+      if (onScrubCancel) {
+        onScrubCancel();
+        return;
+      }
     }
     onScrubEnd?.();
   };
@@ -218,28 +262,45 @@ export function NumberField({
     onPointerDown: (event) => {
       if (!scrubbable || event.button !== 0) return;
       event.preventDefault();
-      commitDraft();
-      setDraft(null);
+      const isTouch = event.pointerType === "touch";
       event.currentTarget.setPointerCapture(event.pointerId);
       scrub.current = {
         pointerId: event.pointerId,
+        pointerType: event.pointerType,
+        startX: event.clientX,
         lastX: event.clientX,
         exact: value ?? scrubFrom,
+        started: !isTouch,
+        initialValue: latest.current,
       };
-      document.documentElement.classList.add("dp-scrubbing");
-      onScrubStart?.();
+      if (!isTouch) {
+        commitDraft();
+        setDraft(null);
+        document.documentElement.classList.add("dp-scrubbing");
+        onScrubStart?.();
+      }
     },
     onPointerMove: (event) => {
       const active = scrub.current;
       if (!active || active.pointerId !== event.pointerId) return;
+      if (!active.started) {
+        if (Math.abs(event.clientX - active.startX) < TOUCH_SCRUB_SLOP_PX) return;
+        active.started = true;
+        commitDraft();
+        setDraft(null);
+        active.initialValue = latest.current;
+        active.exact = latest.current ?? scrubFrom;
+        document.documentElement.classList.add("dp-scrubbing");
+        onScrubStart?.();
+      }
       const delta = (event.clientX - active.lastX) * step * stepMultiplier(event);
       active.lastX = event.clientX;
       active.exact = Math.min(max, Math.max(min, active.exact + delta));
       commitNumber(active.exact);
     },
-    onPointerUp: endScrub,
-    onPointerCancel: endScrub,
-    onLostPointerCapture: endScrub,
+    onPointerUp: (event) => finishScrub(event, false),
+    onPointerCancel: (event) => finishScrub(event, true),
+    onLostPointerCapture: (event) => finishScrub(event, true),
   } satisfies HTMLAttributes<HTMLSpanElement>;
 
   return (

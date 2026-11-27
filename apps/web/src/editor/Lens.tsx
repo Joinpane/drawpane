@@ -58,8 +58,8 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
   const insets = useEditorState((s) => s.insets);
   // One of the inspector's popovers is open: step aside, as Figma's on-canvas toolbars do.
   const inspectorPopover = useUi(editor, (ui) => ui.inspectorPopovers > 0);
+  const cameraGesture = useUi(editor, (ui) => ui.cameraGesture);
   const selection = useEditorState((s) => s.selection);
-  const camera = useEditorState((s) => s.camera);
   const viewport = useEditorState((s) => s.viewport);
   const gesture = useEditorState((s) => s.gesture);
   // Vector edit has its own marks on the canvas; keep the path clear.
@@ -76,6 +76,22 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
   const scrubbing = useRef(false);
   // One of the Lens's popovers (font, style, fill) is open: stay put while it's in use.
   const [holding, setHolding] = useState(false);
+  const camera = useEditorState((s) =>
+    !cameraGesture &&
+    enabled &&
+    s.selection.length === 1 &&
+    (!s.gesture || holding || scrubbing.current) &&
+    s.editingText === null &&
+    s.vectorEdit === null &&
+    s.cropping === null &&
+    s.role !== "viewer" &&
+    !s.readOnly &&
+    !s.prototyping &&
+    s.explain === null &&
+    s.tool === "select"
+      ? s.camera
+      : null,
+  );
   const ref = useRef<HTMLDivElement>(null);
   const [size, setSize] = useState(ESTIMATE);
   const previous = useRef<LensSide | null>(null);
@@ -138,6 +154,8 @@ export function Lens({ onOpenInspector }: { onOpenInspector: () => void }) {
   const held = holding || scrubbing.current;
   const hidden =
     !enabled ||
+    cameraGesture ||
+    !camera ||
     selection.length !== 1 ||
     (!held && (gesture || !settled || shift || measuring || inspectorPopover)) ||
     editing !== null ||
@@ -248,6 +266,10 @@ function lensContents(
       onScrubEnd={() => {
         ctx.scrubbing.current = false;
         editor.endGesture();
+      }}
+      onScrubCancel={() => {
+        ctx.scrubbing.current = false;
+        editor.cancelGesture();
       }}
     />
   );
