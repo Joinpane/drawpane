@@ -4655,7 +4655,7 @@ for (const build of ["browser", "webgl"] as const) {
         }
       }
       let parent = ROOT;
-      for (let d = 0; d < 3; d++) {
+      for (let d = 0; d < 4; d++) {
         parent = add(
           parent,
           d === 0 ? -1600 : 0,
@@ -4689,7 +4689,7 @@ for (const build of ["browser", "webgl"] as const) {
           await glue.default({ module_or_path: "/engine_bg.wasm" });
           type Engine = InstanceType<typeof glue.Engine>;
           const bg = new Float32Array([1, 1, 1, 1]);
-          const [w, h] = [200, 200];
+          const [w, h] = [224, 224];
           type Facts = {
             ok: boolean;
             code: number;
@@ -4779,7 +4779,7 @@ for (const build of ["browser", "webgl"] as const) {
           })();
 
           const results = [];
-          for (const capMiB of [120, 90, 70, 60]) {
+          for (const capMiB of [120, 90, 70]) {
             const dev = await glue.createGpu(null, 0);
             if (!dev.ok) throw new Error(dev.message);
             if (dev.backend !== expectedBackend) throw new Error(`wrong backend ${dev.backend}`);
@@ -4791,13 +4791,24 @@ for (const build of ["browser", "webgl"] as const) {
               dev.free();
               must(facts(engine.apply(new Uint8Array(bytes)) as never));
 
-              // Warm a 64 MiB tile page at 10% zoom.
-              let warm = must(renderAt(engine, 0.1, 8));
+              // Warm tile pages deterministically at 10% zoom: finish the opening frame and exact
+              // tiles without mid-tile pauses (so fit_tiles locks a consistent page side), then
+              // finish prefetching the ring while draining the GPU queue between bursts.
+              let warm = must(renderAt(engine, 0.1, 200));
+              let warmHeld = warm.held;
               for (let i = 0; i < 400 && !warm.exact; i++) {
-                ahead(engine, 8);
-                warm = must(renderAt(engine, 0.1, 8));
+                const a = ahead(engine, 200);
+                if (a.held > warmHeld) warmHeld = a.held;
+                warm = must(renderAt(engine, 0.1, 200));
+                if (warm.held > warmHeld) warmHeld = warm.held;
               }
-              const warmHeld = warm.held;
+              for (let i = 0; i < 16; i++) {
+                const a = ahead(engine, 50);
+                if (a.held > warmHeld) warmHeld = a.held;
+                if (a.drawn === 0 && !a.inProgress) break;
+                await pixels(engine);
+              }
+              await pixels(engine);
 
               // Zoom to 100% with an 8 ms slice budget.
               const first = must(renderAt(engine, 1, 8));
@@ -4958,25 +4969,28 @@ for (const build of ["browser", "webgl"] as const) {
           ).toBeGreaterThanOrEqual(1);
         }
       }
-      // At least the tightest cap (60 MiB) must have actually exercised the stand-in -> quiet retry
-      // path rather than fitting natively on the first pass.
-      const tightest = out.find((r) => r.capMiB === 60);
-      expect(
-        tightest?.standinShown.exact,
-        "60 MiB: exercised reduced stand-in before exact retry",
-      ).toBe(false);
-      expect(
-        tightest?.postDropPauses,
-        "60 MiB: retried native pass paused cooperatively after dropping tiles",
-      ).toBeGreaterThanOrEqual(1);
-      expect(
-        tightest?.postDropInProgressSlices,
-        "60 MiB: retried native pass spanned multiple slices after dropping tiles",
-      ).toBeGreaterThanOrEqual(1);
-      expect(
-        tightest?.midPresents,
-        "60 MiB: verified monotonic intermediate presents",
-      ).toBeGreaterThan(0);
+      // Both the 90 MiB cap (with 2 x 16 MiB warmed tile pages) and the tightest 70 MiB cap
+      // (with 3 x 4 MiB warmed tile pages) must deterministically exercise the stand-in -> quiet
+      // retry path on both WebGPU and WebGL2 rather than fitting natively on the first pass.
+      for (const requiredCap of [90, 70] as const) {
+        const cap = out.find((r) => r.capMiB === requiredCap);
+        expect(
+          cap?.standinShown.exact,
+          `${requiredCap} MiB: exercised reduced stand-in before exact retry`,
+        ).toBe(false);
+        expect(
+          cap?.postDropPauses,
+          `${requiredCap} MiB: retried native pass paused cooperatively after dropping tiles`,
+        ).toBeGreaterThanOrEqual(1);
+        expect(
+          cap?.postDropInProgressSlices,
+          `${requiredCap} MiB: retried native pass spanned multiple slices after dropping tiles`,
+        ).toBeGreaterThanOrEqual(1);
+        expect(
+          cap?.midPresents,
+          `${requiredCap} MiB: verified monotonic intermediate presents`,
+        ).toBeGreaterThan(0);
+      }
     });
   });
 }

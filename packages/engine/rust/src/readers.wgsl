@@ -743,7 +743,7 @@ fn fs_bg_blur_composite(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<
         }
         return textureLoad(bg_dst, local, 0);
     }
-    var blurred = textureLoad(bg_blurred, local, 0);
+    var blurred: vec4<f32>;
     if (bgu.map.z > 0.0) {
         let last = bgu.size.xy - vec2<f32>(1.0);
         let p = clamp(pos.xy * bgu.map.z + bgu.map.xy - vec2<f32>(0.5), vec2<f32>(0.0), last);
@@ -755,6 +755,8 @@ fn fs_bg_blur_composite(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<
             mix(textureLoad(bg_blurred, vec2<i32>(a.x, b.y), 0), textureLoad(bg_blurred, b, 0), f.x),
             f.y
         );
+    } else {
+        blurred = textureLoad(bg_blurred, local, 0);
     }
     if (opaque_blend) {
         return vec4<f32>(blurred.rgb * a_eff, a_eff);

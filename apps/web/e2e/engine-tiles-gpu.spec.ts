@@ -14,6 +14,7 @@ import {
   BLEND,
   CAP,
   FLAG,
+  GLASS_KIND,
   JOIN,
   ListWriter,
   PathData,
@@ -2785,7 +2786,7 @@ for (const build of ["browser", "webgl"] as const) {
           // Radius 160 at DPR 2 exceeds the tile halo so whole-frame reader
           // admission is observed directly instead of retrying on tiles. Both
           // the frame target (plainDpr2) and shape mask fit at 21 MiB, leaving
-          // `reader blur_out` to refuse admission.
+          // the fused backdrop Gaussian working textures to refuse admission.
           uniformLimited: await measure(uniform, 21, 2),
           uniformFits: await measure(uniform, 24, 2),
           progressiveLimited: await measure(progressive, 22),
@@ -2879,7 +2880,7 @@ for (const build of ["browser", "webgl"] as const) {
     expect(res.budgets.glassLimited.message).toContain("reader mask");
     expect(res.budgets.glassFits.ok).toBe(true);
     expect(res.budgets.uniformLimited).toMatchObject({ ok: false, code: 4 });
-    expect(res.budgets.uniformLimited.message).toContain("reader blur_out");
+    expect(res.budgets.uniformLimited.message).toContain("backdrop Gaussian working textures");
     expect(res.budgets.uniformFits.ok).toBe(true);
     expect(res.budgets.progressiveLimited).toMatchObject({ ok: false, code: 4 });
     expect(res.budgets.progressiveLimited.message).toContain("reader blur_out");
@@ -6550,6 +6551,996 @@ for (const build of ["browser", "webgl"] as const) {
         expect(row, `missing result for ${v.id}`).toBeDefined();
         expect(row?.exact, `${v.id} exact`).toEqual([true, true]);
         expect(row?.diff.bytes, `${v.id}: ${JSON.stringify(row?.diff)}`).toBe(0);
+      }
+    });
+
+    test("per-tile 2x-downsampled wide background blurs settle exact as ordinary 512 px tiles with zero seams", async ({
+      page,
+    }) => {
+      test.setTimeout(240_000);
+      await openEngine(page, build);
+      const makeControlCenterLikeScene = (
+        accent: [number, number, number, number],
+        revision = 1,
+        patchOnly = false,
+      ): number[] => {
+        const list = new ListWriter(patchOnly ? revision - 1 : 0xffffffff, revision);
+        if (!patchOnly) list.reset();
+        const rect = (
+          id: number,
+          parent: number,
+          x: number,
+          y: number,
+          w: number,
+          h: number,
+          ops: WireRecord["ops"],
+          flags = 0,
+          opacity = 1,
+          radii: [number, number, number, number] = [0, 0, 0, 0],
+        ) => {
+          list.set(id, parent, {
+            flags,
+            transform: [1, 0, 0, 1, x, y],
+            opacity,
+            width: w,
+            height: h,
+            coarseBelow: 0,
+            reach: 0,
+            unsupported: 0,
+            paths: [{ kind: "rect", w, h, radii, smoothing: 0 }],
+            ops,
+            coarse: [],
+          });
+        };
+        const solidOp = (color: [number, number, number, number]): WireRecord["ops"] => [
+          { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color } },
+        ];
+        if (patchOnly) {
+          rect(3, 2, 10, 10, 80, 65, solidOp(accent));
+          return [...list.finish()];
+        }
+        // Bright outside paint to ensure ancestor clip bounds stop wide blur sampling cleanly.
+        rect(1, ROOT, -200, -200, 900, 1400, solidOp([1, 0, 1, 1]));
+        // 180 x 150 clipped frame (at 254% DPR 2 = 914 x 762 device px, spans 2x2 512 px tiles).
+        rect(2, ROOT, 0, 0, 180, 150, [
+          { op: "clip", path: 0, evenOdd: false },
+          { op: "children" },
+          { op: "unclip" },
+        ]);
+        // Backdrop content inside the clipped frame (stripes + colorful blocks).
+        rect(3, 2, 10, 10, 80, 65, solidOp(accent));
+        rect(4, 2, 94, 10, 76, 65, solidOp([0.1, 0.72, 0.36, 1]));
+        rect(5, 2, 10, 80, 160, 60, solidOp([0.14, 0.34, 0.88, 1]));
+        for (let i = 0; i < 5; i++) {
+          rect(
+            10 + i,
+            2,
+            0,
+            i * 30,
+            180,
+            10,
+            solidOp(i % 2 === 0 ? [0.96, 0.84, 0.16, 1] : [0.08, 0.12, 0.2, 1]),
+          );
+        }
+        // Full-frame r=24 background blur overlay (sigma = 61 device px at 254% DPR 2).
+        rect(40, 2, 0, 0, 180, 150, [
+          { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 24 },
+          { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [0, 0, 0, 0.2] } },
+        ]);
+        // Large-radius pill r=250 (sigma=635, reach=1905 > hardware max_view_apron 1792) inside an
+        // isolated scope crossing the x=512 & y=512 tile seams.
+        rect(50, 2, 24, 34, 130, 100, [{ op: "children" }], FLAG.isolate, 0.92);
+        rect(
+          51,
+          50,
+          0,
+          0,
+          130,
+          100,
+          [
+            { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 250 },
+            {
+              op: "fill",
+              path: 0,
+              evenOdd: false,
+              paint: { kind: "solid", color: [1, 1, 1, 0.18] },
+            },
+          ],
+          0,
+          1,
+          [24, 24, 24, 24],
+        );
+        // Adjacent glass lenses straddling and bracketing the x=512 & y=512 tile seams.
+        const makeGlass = (w: number, h: number): WireRecord["ops"] => [
+          {
+            op: "glass",
+            paths: [0],
+            evenOdd: false,
+            kind: GLASS_KIND.box,
+            inradius: Math.min(w, h) * 0.5,
+            angle: -45,
+            intensity: 80,
+            refraction: 60,
+            depth: 10,
+            dispersion: 30,
+            frost: 4,
+            splay: 0,
+            boxRadii: [14, 14, 14, 14],
+            boxSmoothing: [0, 0, 0, 0],
+          },
+        ];
+        rect(60, 2, 66, 72, 32, 36, makeGlass(32, 36), 0, 1, [14, 14, 14, 14]);
+        rect(61, 2, 102, 72, 32, 36, makeGlass(32, 36), 0, 1, [14, 14, 14, 14]);
+        rect(62, 2, 84, 96, 36, 20, makeGlass(36, 20), 0, 1, [10, 10, 10, 10]);
+        return [...list.finish()];
+      };
+
+      const v1 = makeControlCenterLikeScene([0.92, 0.22, 0.14, 1], 1, false);
+      const patchToV2 = makeControlCenterLikeScene([0.08, 0.86, 0.78, 1], 2, true);
+      const freshV2 = makeControlCenterLikeScene([0.08, 0.86, 0.78, 1], 2, false);
+
+      const res = await page.evaluate(
+        async ({ v1, patchToV2, freshV2, expectedBackend }) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          const check = (out: { ok: boolean; message: string; free(): void }) => {
+            const { ok, message } = out;
+            out.free();
+            if (!ok) throw new Error(message);
+          };
+          const diffStats = (a: Uint8Array, b: Uint8Array) => {
+            let bytes = Math.abs(a.length - b.length);
+            let maxDelta = 0;
+            let outsideGlassBytes = 0;
+            // Device-pixel envelope covering glass lenses 60, 61, 62 at scale = 5.08.
+            const inGlass = (px: number, py: number) =>
+              (px >= 330 && px <= 686 && py >= 360 && py <= 554) ||
+              (px >= 422 && px <= 614 && py >= 482 && py <= 594);
+            const n = Math.min(a.length, b.length);
+            for (let i = 0; i < n; i++) {
+              const d = Math.abs((a[i] ?? 0) - (b[i] ?? 0));
+              if (d !== 0) {
+                bytes++;
+                if (d > maxDelta) maxDelta = d;
+                const p = Math.floor(i / 4);
+                if (!inGlass(p % w, Math.floor(p / w))) outsideGlassBytes++;
+              }
+            }
+            return { bytes, maxDelta, outsideGlassBytes };
+          };
+          const fnv1a = (buf: Uint8Array) => {
+            let h = 0x811c9dc5;
+            for (let i = 0; i < buf.length; i++) {
+              h ^= buf[i] ?? 0;
+              h = Math.imul(h, 0x01000193) >>> 0;
+            }
+            return h;
+          };
+          const makeEngine = async (list: number[]) => {
+            let dev = await glue.createGpu(null, 0);
+            for (let attempt = 0; attempt < 3 && !dev.ok; attempt++) {
+              dev.free();
+              await new Promise((r) => setTimeout(r, 300));
+              dev = await glue.createGpu(null, 0);
+            }
+            if (!dev.ok || dev.backend !== expectedBackend) {
+              const msg = dev.message || `expected ${expectedBackend}`;
+              dev.free();
+              throw new Error(msg);
+            }
+            const engine = new glue.Engine(0, 0);
+            if (
+              !engine.attachGpu ||
+              !engine.renderGpu ||
+              !engine.renderGpuAhead ||
+              !engine.gpuPixels
+            ) {
+              dev.free();
+              engine.free();
+              throw new Error("missing GPU entry points");
+            }
+            check(engine.attachGpu(dev));
+            dev.free();
+            check(engine.apply(new Uint8Array(list)));
+            return engine;
+          };
+          const bg = new Float32Array([0.12, 0.14, 0.18, 1]);
+          const [w, h, zoom, dpr] = [576, 576, 2.54, 2];
+          const settleTiled = async (
+            engine: InstanceType<typeof glue.Engine>,
+            x: number,
+            y: number,
+          ) => {
+            const renderGpu = engine.renderGpu;
+            const renderGpuAhead = engine.renderGpuAhead;
+            const gpuPixels = engine.gpuPixels;
+            if (!renderGpu || !renderGpuAhead || !gpuPixels)
+              throw new Error("missing GPU entry points");
+            let out = renderGpu.call(engine, w, h, zoom, x, y, dpr, bg, false, 8, true);
+            let plan = out.plan;
+            let exact = out.exact;
+            let pending = out.pending;
+            let standin = out.standin;
+            check(out);
+            let slices = 0;
+            await engine.gpuFinished?.();
+            while ((!exact || pending > 0) && slices < 400) {
+              const a = renderGpuAhead.call(engine, bg, 8);
+              check(a);
+              await engine.gpuFinished?.();
+              out = renderGpu.call(engine, w, h, zoom, x, y, dpr, bg, false, -1, true);
+              plan = out.plan;
+              exact = out.exact;
+              pending = out.pending;
+              standin = out.standin;
+              check(out);
+              await engine.gpuFinished?.();
+              slices++;
+              if (exact && pending === 0) break;
+              if (slices % 20 === 0) {
+                const r = renderGpu.call(engine, w, h, zoom, x, y, dpr, bg, false, 8, true);
+                plan = r.plan;
+                exact = r.exact;
+                pending = r.pending;
+                standin = r.standin;
+                check(r);
+                await engine.gpuFinished?.();
+              }
+            }
+            const px = await gpuPixels.call(engine);
+            if (!(px instanceof Uint8Array)) throw new Error(px.message);
+            return { plan, exact, pending, standin, slices, pixels: new Uint8Array(px) };
+          };
+          const renderWhole = async (
+            engine: InstanceType<typeof glue.Engine>,
+            x: number,
+            y: number,
+          ) => {
+            if (!engine.renderGpu || !engine.gpuPixels) throw new Error("missing GPU entry points");
+            const out = engine.renderGpu(w, h, zoom, x, y, dpr, bg, false, 0, true);
+            const plan = out.plan;
+            const exact = out.exact;
+            check(out);
+            const px = await engine.gpuPixels();
+            if (!(px instanceof Uint8Array)) throw new Error(px.message);
+            return { plan, exact, pixels: new Uint8Array(px) };
+          };
+
+          // Run sequentially so SwiftShader never holds four simultaneous GPU devices.
+          let tiled: Awaited<ReturnType<typeof settleTiled>>;
+          let panned: Awaited<ReturnType<typeof settleTiled>>;
+          let patched: Awaited<ReturnType<typeof settleTiled>>;
+          const tiledEng = await makeEngine(v1);
+          try {
+            tiled = await settleTiled(tiledEng, 0, 0);
+            panned = await settleTiled(tiledEng, -13, -17);
+            check(tiledEng.apply(new Uint8Array(patchToV2)));
+            patched = await settleTiled(tiledEng, 0, 0);
+          } finally {
+            tiledEng.free();
+          }
+
+          let whole: Awaited<ReturnType<typeof renderWhole>>;
+          const wholeEng = await makeEngine(v1);
+          try {
+            whole = await renderWhole(wholeEng, 0, 0);
+          } finally {
+            wholeEng.free();
+          }
+
+          let panFresh: Awaited<ReturnType<typeof settleTiled>>;
+          const panFreshEng = await makeEngine(v1);
+          try {
+            panFresh = await settleTiled(panFreshEng, -13, -17);
+          } finally {
+            panFreshEng.free();
+          }
+
+          let freshEdited: Awaited<ReturnType<typeof settleTiled>>;
+          const editFreshEng = await makeEngine(freshV2);
+          try {
+            freshEdited = await settleTiled(editFreshEng, 0, 0);
+          } finally {
+            editFreshEng.free();
+          }
+
+          const tiledVsWhole = diffStats(tiled.pixels, whole.pixels);
+          const pannedVsFresh = diffStats(panned.pixels, panFresh.pixels);
+          const patchedVsFresh = diffStats(patched.pixels, freshEdited.pixels);
+          const editChanged = diffStats(tiled.pixels, patched.pixels);
+
+          return {
+            tiled: {
+              plan: tiled.plan,
+              exact: tiled.exact,
+              pending: tiled.pending,
+              standin: tiled.standin,
+              slices: tiled.slices,
+            },
+            whole: { plan: whole.plan, exact: whole.exact },
+            panned: { plan: panned.plan, exact: panned.exact, pending: panned.pending },
+            patched: { plan: patched.plan, exact: patched.exact, pending: patched.pending },
+            tiledVsWhole,
+            pannedVsFresh,
+            patchedVsFresh,
+            editChangedBytes: editChanged.bytes,
+            tiledHash: fnv1a(tiled.pixels),
+            patchedHash: fnv1a(patched.pixels),
+          };
+        },
+        { v1, patchToV2, freshV2, expectedBackend: build === "webgl" ? "webgl2" : "webgpu" },
+      );
+
+      console.log(`[wide-blur ${build}] ${JSON.stringify(res)}`);
+      expect(res.tiled.plan, "settled as ordinary 512 px tiles (not reader-halo 4)").toBe(0);
+      expect(res.tiled.exact).toBe(true);
+      expect(res.tiled.pending).toBe(0);
+      expect(res.tiled.standin).toBe(false);
+      expect(res.whole.exact).toBe(true);
+      expect(
+        res.tiledVsWhole.outsideGlassBytes,
+        `wide background blurs tiled == whole byte-for-byte: ${JSON.stringify(res.tiledVsWhole)}`,
+      ).toBe(0);
+      expect(
+        res.tiledVsWhole.maxDelta,
+        `frosted glass lenses across tile seams within 1 LSB: ${JSON.stringify(res.tiledVsWhole)}`,
+      ).toBeLessThanOrEqual(1);
+      expect(res.panned.plan).toBe(0);
+      expect(res.panned.exact).toBe(true);
+      expect(res.pannedVsFresh.bytes, `panned == fresh: ${JSON.stringify(res.pannedVsFresh)}`).toBe(
+        0,
+      );
+      expect(res.patched.plan).toBe(0);
+      expect(res.patched.exact).toBe(true);
+      expect(res.editChangedBytes, "patch behind wide blur updated pixels").toBeGreaterThan(10_000);
+      expect(
+        res.patchedVsFresh.bytes,
+        `patched == fresh: ${JSON.stringify(res.patchedVsFresh)}`,
+      ).toBe(0);
+    });
+
+    test("fused 2x-downsampled level-1 background blurs match whole frames across 512 px tile seams and odd pans", async ({
+      page,
+    }) => {
+      test.setTimeout(180_000);
+      await openEngine(page, build);
+      const list = new ListWriter(0xffffffff, 1);
+      list.reset();
+      const rect = (
+        id: number,
+        parent: number,
+        x: number,
+        y: number,
+        w: number,
+        h: number,
+        ops: WireRecord["ops"],
+      ) => {
+        list.set(id, parent, {
+          flags: 0,
+          transform: [1, 0, 0, 1, x, y],
+          opacity: 1,
+          width: w,
+          height: h,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [{ kind: "rect", w, h, radii: [0, 0, 0, 0], smoothing: 0 }],
+          ops,
+          coarse: [],
+        });
+      };
+      // Rich striped backdrop spanning [0, 1024] x [0, 1024].
+      for (let i = 0; i < 32; i++) {
+        rect(1 + i, ROOT, i * 32, 0, 16, 1024, [
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: {
+              kind: "solid",
+              color: i % 2 === 0 ? [0.95, 0.25, 0.15, 1] : [0.15, 0.45, 0.92, 1],
+            },
+          },
+        ]);
+      }
+      // Unclipped root background blur (r=24 -> sigma=10.8, fused level-1) crossing x=512.
+      rect(100, ROOT, 440, 80, 160, 160, [
+        { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 24 },
+        { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [1, 1, 1, 0.2] } },
+      ]);
+      // Disjoint sibling background blur (shares backdrop pyramid) + overlapping sibling on top,
+      // plus a level-0 blur (r=12 -> sigma=5.4 <= DIRECT_SIGMA_MAX) inside an isolation scope.
+      rect(101, ROOT, 440, 280, 160, 140, [
+        { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 28 },
+        { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [0, 0, 0, 0.2] } },
+      ]);
+      rect(102, ROOT, 480, 320, 120, 120, [
+        { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 26 },
+        {
+          op: "fill",
+          path: 0,
+          evenOdd: false,
+          paint: { kind: "solid", color: [0.2, 0.9, 0.5, 0.25] },
+        },
+      ]);
+      list.set(110, ROOT, {
+        flags: FLAG.isolate,
+        transform: [1, 0, 0, 1, 440, 440],
+        opacity: 0.9,
+        width: 160,
+        height: 120,
+        coarseBelow: 0,
+        reach: 0,
+        unsupported: 0,
+        paths: [{ kind: "rect", w: 160, h: 120, radii: [0, 0, 0, 0], smoothing: 0 }],
+        ops: [{ op: "children" }],
+        coarse: [],
+      });
+      rect(111, 110, 0, 0, 160, 120, [
+        { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 16 },
+        {
+          op: "fill",
+          path: 0,
+          evenOdd: false,
+          paint: { kind: "solid", color: [0.85, 0.55, 0.2, 0.2] },
+        },
+      ]);
+      // Clipped background blur crossing y=512 (sigma=12.6, fused level-1).
+      rect(200, ROOT, 420, 440, 200, 180, [
+        { op: "clip", path: 0, evenOdd: false },
+        { op: "children" },
+        { op: "unclip" },
+      ]);
+      rect(201, 200, 0, 0, 200, 180, [
+        {
+          op: "fill",
+          path: 0,
+          evenOdd: false,
+          paint: { kind: "solid", color: [0.1, 0.7, 0.2, 1] },
+        },
+      ]);
+      rect(202, 200, 40, 20, 120, 140, [
+        {
+          op: "fill",
+          path: 0,
+          evenOdd: false,
+          paint: { kind: "solid", color: [0.9, 0.8, 0.1, 1] },
+        },
+      ]);
+      rect(203, 200, 20, 30, 160, 120, [
+        { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 28 },
+        { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [1, 1, 1, 0.15] } },
+      ]);
+      const bytes = [...list.finish()];
+
+      const res = await page.evaluate(
+        async ({ bytes, expectedBackend }) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          const check = (out: { ok: boolean; message: string; free(): void }) => {
+            const { ok, message } = out;
+            out.free();
+            if (!ok) throw new Error(message);
+          };
+          const diffStats = (a: Uint8Array, b: Uint8Array) => {
+            let bytesDiff = Math.abs(a.length - b.length);
+            let maxDelta = 0;
+            const n = Math.min(a.length, b.length);
+            for (let i = 0; i < n; i++) {
+              const d = Math.abs((a[i] ?? 0) - (b[i] ?? 0));
+              if (d !== 0) {
+                bytesDiff++;
+                if (d > maxDelta) maxDelta = d;
+              }
+            }
+            return { bytes: bytesDiff, maxDelta };
+          };
+          const makeEngine = async () => {
+            let dev = await glue.createGpu(null, 0);
+            for (let attempt = 0; attempt < 3 && !dev.ok; attempt++) {
+              dev.free();
+              await new Promise((r) => setTimeout(r, 300));
+              dev = await glue.createGpu(null, 0);
+            }
+            if (!dev.ok || dev.backend !== expectedBackend) {
+              const msg = dev.message || `expected ${expectedBackend}`;
+              dev.free();
+              throw new Error(msg);
+            }
+            const engine = new glue.Engine(0, 0);
+            if (!engine.attachGpu || !engine.renderGpu || !engine.gpuPixels) {
+              dev.free();
+              engine.free();
+              throw new Error("missing GPU entry points");
+            }
+            check(engine.attachGpu(dev));
+            dev.free();
+            check(engine.apply(new Uint8Array(bytes)));
+            return engine;
+          };
+          const bg = new Float32Array([0.1, 0.1, 0.12, 1]);
+          const [w, h] = [768, 768];
+          const out = [];
+          for (const [px, py] of [
+            [0, 0],
+            [-13, -19],
+          ] as const) {
+            let exact = false;
+            let plan = -1;
+            let tPx: Uint8Array;
+            const tEng = await makeEngine();
+            try {
+              if (!tEng.renderGpu || !tEng.gpuPixels) throw new Error("missing GPU entry points");
+              for (let i = 0; i < 60 && !exact; i++) {
+                const r = tEng.renderGpu(w, h, 1, px, py, 1, bg, false, 40, true);
+                plan = r.plan;
+                exact = r.exact;
+                check(r);
+                await tEng.gpuFinished?.();
+              }
+              const raw = await tEng.gpuPixels();
+              if (!(raw instanceof Uint8Array)) throw new Error(raw.message);
+              tPx = new Uint8Array(raw);
+            } finally {
+              tEng.free();
+            }
+            let wExact = false;
+            let wPx: Uint8Array;
+            const wEng = await makeEngine();
+            try {
+              if (!wEng.renderGpu || !wEng.gpuPixels) throw new Error("missing GPU entry points");
+              const wr = wEng.renderGpu(w, h, 1, px, py, 1, bg, false, 0, true);
+              wExact = wr.exact;
+              check(wr);
+              const raw = await wEng.gpuPixels();
+              if (!(raw instanceof Uint8Array)) throw new Error(raw.message);
+              wPx = new Uint8Array(raw);
+            } finally {
+              wEng.free();
+            }
+            out.push({
+              pan: [px, py],
+              plan,
+              exact,
+              wExact,
+              diff: diffStats(tPx, wPx),
+            });
+          }
+          return out;
+        },
+        { bytes, expectedBackend: build === "webgl" ? "webgl2" : "webgpu" },
+      );
+
+      for (const row of res) {
+        expect(row.plan, `pan ${row.pan} uses ordinary tiles`).toBe(0);
+        expect(row.exact, `pan ${row.pan} tiled exact`).toBe(true);
+        expect(row.wExact, `pan ${row.pan} whole exact`).toBe(true);
+        expect(row.diff, `pan ${row.pan} tiled == whole`).toEqual({ bytes: 0, maxDelta: 0 });
+      }
+    });
+
+    test("clipped pyramid blurs crossing 512 px tile seams match whole frames byte-for-byte", async ({
+      page,
+    }) => {
+      test.setTimeout(240_000);
+      await openEngine(page, build);
+      const makeClippedScene = (rotDeg: number, blurR: number): number[] => {
+        const list = new ListWriter(0xffffffff, 1);
+        list.reset();
+        const add = (
+          id: number,
+          parent: number,
+          x: number,
+          y: number,
+          w: number,
+          h: number,
+          ops: WireRecord["ops"],
+          transform?: [number, number, number, number, number, number],
+        ) => {
+          list.set(id, parent, {
+            flags: 0,
+            transform: transform ?? [1, 0, 0, 1, x, y],
+            opacity: 1,
+            width: w,
+            height: h,
+            coarseBelow: 0,
+            reach: 0,
+            unsupported: 0,
+            paths: [{ kind: "rect", w, h, radii: [0, 0, 0, 0], smoothing: 0 }],
+            ops,
+            coarse: [],
+          });
+        };
+        const solid = (color: [number, number, number, number]): WireRecord["ops"] => [
+          { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color } },
+        ];
+        // Bright surround to verify ancestor clips stop backdrop blur sampling.
+        add(1, ROOT, -200, -200, 1200, 1200, solid([1, 0, 1, 1]));
+        // Filled clip frame crossing x=512 at zoom 1.5 (x=200..440 -> device 300..660).
+        add(2, ROOT, 200, 40, 240, 200, [
+          {
+            op: "fill",
+            path: 0,
+            evenOdd: false,
+            paint: { kind: "solid", color: [0.06, 0.14, 0.34, 1] },
+          },
+          { op: "clip", path: 0, evenOdd: false },
+          { op: "children" },
+          { op: "unclip" },
+        ]);
+        add(3, 2, 20, 20, 90, 160, solid([0.95, 0.3, 0.18, 1]));
+        add(4, 2, 130, 30, 90, 140, solid([0.16, 0.84, 0.44, 1]));
+        add(5, 2, 0, 0, 240, 200, [
+          { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 55 },
+          { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [1, 1, 1, 0.12] } },
+        ]);
+        // Unfilled clip frame crossing x=512 at zoom 1.5 (x=150..370 -> device 225..555),
+        // both unrotated and rotated 12 degrees, with wide and sub-threshold blurs.
+        const rad = (rotDeg * Math.PI) / 180;
+        const c = Math.cos(rad);
+        const s = Math.sin(rad);
+        add(
+          8,
+          ROOT,
+          150,
+          380,
+          220,
+          160,
+          [{ op: "clip", path: 0, evenOdd: false }, { op: "children" }, { op: "unclip" }],
+          rotDeg === 0 ? [1, 0, 0, 1, 150, 380] : [c, s, -s, c, 150, 380],
+        );
+        add(10, 8, 0, 0, 110, 160, solid([0.92, 0.72, 0.12, 1]));
+        add(11, 8, 110, 0, 110, 160, solid([0.12, 0.42, 0.86, 1]));
+        add(9, 8, 0, 0, 220, 160, [
+          { op: "backgroundBlur", paths: [0], evenOdd: false, radius: blurR },
+          { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [0, 0, 0, 0.14] } },
+        ]);
+        return [...list.finish()];
+      };
+
+      const variants = [
+        { label: "rot12-r45", bytes: makeClippedScene(12, 45), pans: [[0, 0] as const] },
+        {
+          label: "rot0-r45",
+          bytes: makeClippedScene(0, 45),
+          pans: [[0, 0] as const, [-512 / 1.5, 0] as const],
+        },
+        { label: "rot12-r30", bytes: makeClippedScene(12, 30), pans: [[0, 0] as const] },
+      ];
+
+      const res = await page.evaluate(
+        async ({ variants, expectedBackend }) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          const check = (out: { ok: boolean; message: string; free(): void }) => {
+            const { ok, message } = out;
+            out.free();
+            if (!ok) throw new Error(message);
+          };
+          const diffStats = (a: Uint8Array, b: Uint8Array) => {
+            let bytesDiff = Math.abs(a.length - b.length);
+            let maxDelta = 0;
+            const n = Math.min(a.length, b.length);
+            for (let i = 0; i < n; i++) {
+              const d = Math.abs((a[i] ?? 0) - (b[i] ?? 0));
+              if (d !== 0) {
+                bytesDiff++;
+                if (d > maxDelta) maxDelta = d;
+              }
+            }
+            return { bytes: bytesDiff, maxDelta };
+          };
+          const makeEngine = async (bytes: number[]) => {
+            let dev = await glue.createGpu(null, 0);
+            for (let attempt = 0; attempt < 3 && !dev.ok; attempt++) {
+              dev.free();
+              await new Promise((r) => setTimeout(r, 300));
+              dev = await glue.createGpu(null, 0);
+            }
+            if (!dev.ok || dev.backend !== expectedBackend) {
+              const msg = dev.message || `expected ${expectedBackend}`;
+              dev.free();
+              throw new Error(msg);
+            }
+            const engine = new glue.Engine(0, 0);
+            if (
+              !engine.attachGpu ||
+              !engine.renderGpu ||
+              !engine.renderGpuAhead ||
+              !engine.gpuPixels
+            ) {
+              dev.free();
+              engine.free();
+              throw new Error("missing GPU entry points");
+            }
+            check(engine.attachGpu(dev));
+            dev.free();
+            check(engine.apply(new Uint8Array(bytes)));
+            return engine;
+          };
+          const bg = new Float32Array([0.1, 0.1, 0.12, 1]);
+          const [w, h, zoom] = [800, 800, 1.5];
+          const out = [];
+          for (const v of variants) {
+            for (const [px, py] of v.pans) {
+              let exact = false;
+              let plan = -1;
+              let tPx: Uint8Array;
+              const tEng = await makeEngine(v.bytes);
+              try {
+                if (!tEng.renderGpu || !tEng.renderGpuAhead || !tEng.gpuPixels)
+                  throw new Error("missing GPU entry points");
+                let r = tEng.renderGpu(w, h, zoom, px, py, 1, bg, false, 8, true);
+                plan = r.plan;
+                exact = r.exact;
+                let pending = r.pending;
+                check(r);
+                await tEng.gpuFinished?.();
+                for (let i = 0; i < 200 && (!exact || pending > 0); i++) {
+                  check(tEng.renderGpuAhead(bg, 8));
+                  await tEng.gpuFinished?.();
+                  r = tEng.renderGpu(w, h, zoom, px, py, 1, bg, false, -1, true);
+                  plan = r.plan;
+                  exact = r.exact;
+                  pending = r.pending;
+                  check(r);
+                  await tEng.gpuFinished?.();
+                }
+                const raw = await tEng.gpuPixels();
+                if (!(raw instanceof Uint8Array)) throw new Error(raw.message);
+                tPx = new Uint8Array(raw);
+              } finally {
+                tEng.free();
+              }
+              let wExact = false;
+              let wPx: Uint8Array;
+              const wEng = await makeEngine(v.bytes);
+              try {
+                if (!wEng.renderGpu || !wEng.gpuPixels) throw new Error("missing GPU entry points");
+                const wr = wEng.renderGpu(w, h, zoom, px, py, 1, bg, false, 0, true);
+                wExact = wr.exact;
+                check(wr);
+                const raw = await wEng.gpuPixels();
+                if (!(raw instanceof Uint8Array)) throw new Error(raw.message);
+                wPx = new Uint8Array(raw);
+              } finally {
+                wEng.free();
+              }
+              out.push({
+                label: v.label,
+                pan: [px, py],
+                plan,
+                exact,
+                wExact,
+                diff: diffStats(tPx, wPx),
+              });
+            }
+          }
+          return out;
+        },
+        { variants, expectedBackend: build === "webgl" ? "webgl2" : "webgpu" },
+      );
+
+      for (const row of res) {
+        expect(row.plan, `${row.label} pan ${row.pan} uses ordinary tiles`).toBe(0);
+        expect(row.exact, `${row.label} pan ${row.pan} tiled exact`).toBe(true);
+        expect(row.wExact, `${row.label} pan ${row.pan} whole exact`).toBe(true);
+        expect(row.diff, `${row.label} pan ${row.pan} tiled == whole`).toEqual({
+          bytes: 0,
+          maxDelta: 0,
+        });
+      }
+    });
+
+    test("clear and frosted glass lenses match whole frames across tile seams over a zoom sweep", async ({
+      page,
+    }) => {
+      test.setTimeout(240_000);
+      await openEngine(page, build);
+      const list = new ListWriter(0xffffffff, 1);
+      list.reset();
+      const add = (
+        id: number,
+        parent: number,
+        x: number,
+        y: number,
+        w: number,
+        h: number,
+        ops: WireRecord["ops"],
+        radii: [number, number, number, number] = [0, 0, 0, 0],
+      ) => {
+        list.set(id, parent, {
+          flags: 0,
+          transform: [1, 0, 0, 1, x, y],
+          opacity: 1,
+          width: w,
+          height: h,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [{ kind: "rect", w, h, radii, smoothing: 0 }],
+          ops,
+          coarse: [],
+        });
+      };
+      const solid = (color: [number, number, number, number]): WireRecord["ops"] => [
+        { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color } },
+      ];
+      // High-contrast striped backdrop spanning [-50, 650] x [-50, 650] to expose rim mip shifts.
+      add(100, ROOT, -50, -50, 700, 700, solid([0.14, 0.16, 0.22, 1]));
+      for (let i = 0; i < 20; i++) {
+        add(
+          101 + i,
+          ROOT,
+          -50 + i * 35,
+          -50,
+          17,
+          700,
+          solid(i % 2 === 0 ? [0.94, 0.28, 0.16, 1] : [0.16, 0.56, 0.94, 1]),
+        );
+        add(
+          141 + i,
+          ROOT,
+          -50,
+          -50 + i * 35,
+          700,
+          10,
+          solid(i % 2 === 0 ? [0.96, 0.86, 0.18, 0.7] : [0.12, 0.82, 0.44, 0.7]),
+        );
+      }
+      add(10, ROOT, 180, 180, 140, 140, [
+        { op: "backgroundBlur", paths: [0], evenOdd: false, radius: 20 },
+        ...solid([1, 1, 1, 0.1]),
+      ]);
+      const makeGlass = (
+        w: number,
+        h: number,
+        frost: number,
+        refraction: number,
+        dispersion: number,
+      ): WireRecord["ops"] => [
+        {
+          op: "glass",
+          paths: [0],
+          evenOdd: false,
+          kind: GLASS_KIND.box,
+          inradius: Math.min(w, h) * 0.5,
+          angle: -45,
+          intensity: 80,
+          refraction,
+          depth: 10,
+          dispersion,
+          frost,
+          splay: 0,
+          boxRadii: [14, 14, 14, 14],
+          boxSmoothing: [0, 0, 0, 0],
+        },
+      ];
+      add(11, ROOT, 230, 230, 60, 60, makeGlass(60, 60, 4, 60, 30), [14, 14, 14, 14]);
+      add(12, ROOT, 20, 150, 300, 110, makeGlass(300, 110, 0, 80, 0), [14, 14, 14, 14]);
+      add(13, ROOT, 300, 20, 120, 300, makeGlass(120, 300, 0, 100, 20), [14, 14, 14, 14]);
+      const bytes = [...list.finish()];
+
+      const res = await page.evaluate(
+        async ({ bytes, expectedBackend }) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          const check = (out: { ok: boolean; message: string; free(): void }) => {
+            const { ok, message } = out;
+            out.free();
+            if (!ok) throw new Error(message);
+          };
+          const diffStats = (a: Uint8Array, b: Uint8Array) => {
+            let bytesDiff = Math.abs(a.length - b.length);
+            let maxDelta = 0;
+            const n = Math.min(a.length, b.length);
+            for (let i = 0; i < n; i++) {
+              const d = Math.abs((a[i] ?? 0) - (b[i] ?? 0));
+              if (d !== 0) {
+                bytesDiff++;
+                if (d > maxDelta) maxDelta = d;
+              }
+            }
+            return { bytes: bytesDiff, maxDelta };
+          };
+          const makeEngine = async () => {
+            let dev = await glue.createGpu(null, 0);
+            for (let attempt = 0; attempt < 3 && !dev.ok; attempt++) {
+              dev.free();
+              await new Promise((r) => setTimeout(r, 300));
+              dev = await glue.createGpu(null, 0);
+            }
+            if (!dev.ok || dev.backend !== expectedBackend) {
+              const msg = dev.message || `expected ${expectedBackend}`;
+              dev.free();
+              throw new Error(msg);
+            }
+            const engine = new glue.Engine(0, 0);
+            if (
+              !engine.attachGpu ||
+              !engine.renderGpu ||
+              !engine.renderGpuAhead ||
+              !engine.gpuPixels
+            ) {
+              dev.free();
+              engine.free();
+              throw new Error("missing GPU entry points");
+            }
+            check(engine.attachGpu(dev));
+            dev.free();
+            check(engine.apply(new Uint8Array(bytes)));
+            return engine;
+          };
+          const bg = new Float32Array([0.1, 0.1, 0.12, 1]);
+          const [w, h] = [800, 800];
+          const out = [];
+          for (const zoom of [1.4, 1.7, 2, 2.5, 3]) {
+            let exact = false;
+            let plan = -1;
+            let pending = 1;
+            let tPx: Uint8Array;
+            const tEng = await makeEngine();
+            try {
+              if (!tEng.renderGpu || !tEng.renderGpuAhead || !tEng.gpuPixels)
+                throw new Error("missing GPU entry points");
+              let r = tEng.renderGpu(w, h, zoom, 0, 0, 1, bg, false, 8, true);
+              plan = r.plan;
+              exact = r.exact;
+              pending = r.pending;
+              check(r);
+              await tEng.gpuFinished?.();
+              for (let i = 0; i < 200 && (!exact || pending > 0); i++) {
+                check(tEng.renderGpuAhead(bg, 8));
+                await tEng.gpuFinished?.();
+                r = tEng.renderGpu(w, h, zoom, 0, 0, 1, bg, false, -1, true);
+                plan = r.plan;
+                exact = r.exact;
+                pending = r.pending;
+                check(r);
+                await tEng.gpuFinished?.();
+              }
+              const raw = await tEng.gpuPixels();
+              if (!(raw instanceof Uint8Array)) throw new Error(raw.message);
+              tPx = new Uint8Array(raw);
+            } finally {
+              tEng.free();
+            }
+            let wExact = false;
+            let wPx: Uint8Array;
+            const wEng = await makeEngine();
+            try {
+              if (!wEng.renderGpu || !wEng.gpuPixels) throw new Error("missing GPU entry points");
+              const wr = wEng.renderGpu(w, h, zoom, 0, 0, 1, bg, false, 0, true);
+              wExact = wr.exact;
+              check(wr);
+              await wEng.gpuFinished?.();
+              const raw = await wEng.gpuPixels();
+              if (!(raw instanceof Uint8Array)) throw new Error(raw.message);
+              wPx = new Uint8Array(raw);
+            } finally {
+              wEng.free();
+            }
+            out.push({ zoom, plan, exact, pending, wExact, diff: diffStats(tPx, wPx) });
+          }
+          return out;
+        },
+        { bytes, expectedBackend: build === "webgl" ? "webgl2" : "webgpu" },
+      );
+
+      console.log(`[glass-zoom-sweep ${build}] ${JSON.stringify(res)}`);
+      for (const row of res) {
+        expect(row.plan, `zoom ${row.zoom} uses ordinary tiles`).toBe(0);
+        expect(row.exact, `zoom ${row.zoom} tiled exact`).toBe(true);
+        expect(row.pending, `zoom ${row.zoom} nothing pending`).toBe(0);
+        expect(row.wExact, `zoom ${row.zoom} whole exact`).toBe(true);
+        expect(
+          row.diff.maxDelta,
+          `zoom ${row.zoom} whole == tiled on lens rims: ${JSON.stringify(row.diff)}`,
+        ).toBeLessThanOrEqual(1);
       }
     });
   });

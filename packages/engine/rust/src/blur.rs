@@ -41,6 +41,12 @@ pub const MIN_SIGMA: f32 = 1e-3;
 /// parity tolerance against `blur_reference` and against the continuous Gaussian.
 pub const DIRECT_SIGMA_MAX: f32 = 10.0;
 
+/// Largest sigma executed directly at level 0 for GPU view background blurs. Matches
+/// `DIRECT_SIGMA_MAX` so `sigma <= 10.0` preserves full-resolution parity; above this sigma,
+/// interactive GPU views run the variance-compensated pyramid and fuse bilinear upsampling into
+/// the blur composite pass (`GpuBlur::encode_view_bg_level`).
+pub const VIEW_BG_DIRECT_SIGMA_MAX: f32 = DIRECT_SIGMA_MAX;
+
 /// Viewport blurs this wide can use a lower-density backdrop without
 /// sampling a visibly sharp source on that grid.
 pub const VIEWPORT_HALO_MIN_SIGMA: f32 = 128.0;
@@ -176,6 +182,12 @@ pub fn blur_reach_view(sigma: f32) -> f32 {
     ((f64::from(r) + 4.0) * (1u64 << lvl) as f64) as f32
 }
 
+/// Maximum device-pixel reach for a GPU view background blur using `choose_level_view_bg`.
+#[inline]
+pub fn blur_reach_view_bg(sigma: f32) -> f32 {
+    blur_reach_view(sigma)
+}
+
 /// The viewport replay can draw radii above the native kernel limit by reducing its density.
 /// Export plans keep this reach (and the refusals it gives) unchanged.
 pub(crate) fn replay_reach(sigma: f32) -> f32 {
@@ -197,6 +209,12 @@ pub(crate) fn replay_reach_view(sigma: f32) -> f32 {
         let ratio = (sigma / VIEW_MAX_BLUR_SIGMA).max(1.0);
         blur_reach_view(VIEW_MAX_BLUR_SIGMA) * ratio
     }
+}
+
+/// A GPU view's reach for a uniform background blur using `choose_level_view_bg`.
+#[inline]
+pub(crate) fn replay_reach_view_bg(sigma: f32) -> f32 {
+    replay_reach_view(sigma)
 }
 
 /// Normalised 1D discrete Gaussian weights for integer taps `-r..=r`, where `r = kernel_radius(sigma)`.
@@ -257,6 +275,12 @@ pub fn choose_level(sigma: f32, max_level: usize) -> (usize, f32) {
 /// Chooses the GPU view pyramid level `0..=VIEW_MAX_PYRAMID_LEVELS` and level-space sigma.
 pub fn choose_level_view(sigma: f32) -> (usize, f32) {
     choose_level_capped(sigma, VIEW_MAX_PYRAMID_LEVELS)
+}
+
+/// Chooses the GPU view background-blur pyramid level and variance-compensated level-space sigma.
+#[inline]
+pub fn choose_level_view_bg(sigma: f32) -> (usize, f32) {
+    choose_level_view(sigma)
 }
 
 /// How many pyramid levels (`0..=L`) can be built for a region of size `width` x `height` up to `MAX_PYRAMID_LEVELS`.
@@ -1798,6 +1822,17 @@ pub mod gpu {
 
     const BG_CACHE_CAP: usize = 256;
 
+    /// Output metadata for a level-space (`level >= 1`) blur still resident in `GpuBlur::scratch_v`,
+    /// ready to be bilinearly upsampled and composited in one fused fragment pass.
+    pub struct GpuBlurLevelOut {
+        pub view: wgpu::TextureView,
+        pub view_id: u64,
+        pub active_size: (u32, u32),
+        pub cb_origin: (i32, i32),
+        pub blur_origin: (i32, i32),
+        pub inv_scale: f32,
+    }
+
     /// Reusable GPU Gaussian blur pass with dynamic uniform batching and shareable blur pyramids.
     pub struct GpuBlur {
         layout: wgpu::BindGroupLayout,
@@ -2050,6 +2085,28 @@ pub mod gpu {
             pyramid_key: Option<PyramidKey>,
         ) -> usize {
             let dirty = effective_dirty(spec.dirty, dst_size, dst_origin);
+            self.estimate_work_bytes_inner(src_size, dirty, spec, pyramid_key, false)
+        }
+
+        /// Estimates peak additional GPU memory for `encode_view_bg_level` (interactive GPU view
+        /// background blur using `choose_level_view_bg`).
+        pub fn estimate_view_bg_work_bytes(
+            &self,
+            src_size: (u32, u32),
+            spec: &BlurSpec,
+            pyramid_key: Option<PyramidKey>,
+        ) -> usize {
+            self.estimate_work_bytes_inner(src_size, spec.dirty, spec, pyramid_key, true)
+        }
+
+        fn estimate_work_bytes_inner(
+            &self,
+            src_size: (u32, u32),
+            dirty: IRect,
+            spec: &BlurSpec,
+            pyramid_key: Option<PyramidKey>,
+            use_view_bg: bool,
+        ) -> usize {
             let cb = Self::source_bounds(spec, src_size, dirty);
             let pyramid_key = pyramid_key.map(|key| PyramidKey::new(key.source_id, cb, spec.edge));
             let r = kernel_radius(spec.sigma);
@@ -2058,7 +2115,11 @@ pub mod gpu {
             }
             let cb_w = (cb.x1 - cb.x0) as u32;
             let cb_h = (cb.y1 - cb.y0) as u32;
-            let (level, level_sigma) = choose_level_view(spec.sigma);
+            let (level, level_sigma) = if use_view_bg {
+                choose_level_view_bg(spec.sigma)
+            } else {
+                choose_level_view(spec.sigma)
+            };
             if level == 0 {
                 let r = r.min(MAX_KERNEL_RADIUS);
                 let dw = (dirty.x1 - dirty.x0) as u32;
@@ -2764,8 +2825,6 @@ pub mod gpu {
                 return Ok(());
             }
 
-            let cb_w = (cb.x1 - cb.x0) as u32;
-            let cb_h = (cb.y1 - cb.y0) as u32;
             let (level, level_sigma) = choose_level_view(spec.sigma);
             if level == 0 {
                 return self.encode_direct(
@@ -2784,7 +2843,146 @@ pub mod gpu {
                 );
             }
 
-            // Large sigma: build/reuse pyramid level `level`, blur at level `level`, then upsample.
+            // Large sigma: build/reuse pyramid level `level`, blur into `scratch_v`, then upsample.
+            let (blur_rect, bw, bh, ephemeral) = self.encode_pyramid_to_scratch_v(
+                device,
+                encoder,
+                src_view,
+                src_id,
+                src_size,
+                cb,
+                spec.edge,
+                level,
+                level_sigma,
+                dirty,
+                pyramid_key,
+                max_tex,
+            )?;
+
+            // Pass 3 (Upsample): scratch_v -> dst_view (scissored to dirty).
+            {
+                let (sv_w, sv_h, v_view, v_id) = {
+                    let sv = self.scratch_v.as_ref().expect("scratch_v");
+                    (sv.width, sv.height, sv.view.clone(), sv.view_id)
+                };
+                let inv_scale = (1.0 / (1u64 << level) as f64) as f32;
+                let data_up = UniformData {
+                    p0: [dst_origin.0 as f32, dst_origin.1 as f32, inv_scale, 0.0],
+                    clamp_bounds: [cb.x0 as f32, cb.y0 as f32, blur_rect.x0 as f32, blur_rect.y0 as f32],
+                    p2: [1.0 / sv_w as f32, 1.0 / sv_h as f32, 0.0, 0.0],
+                    border: [bw as f32, bh as f32, 0.0, 0.0],
+                };
+                let (slab_idx, offset) = self.push_uniform(device, data_up);
+                let group = self.make_bind_group(device, &v_view, v_id, slab_idx);
+                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                    label: Some("blur upsample"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: dst_view,
+                        depth_slice: None,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            load: dst_load_op(invert_alpha),
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    ..Default::default()
+                });
+                pass.set_scissor_rect(dst_scissor.0, dst_scissor.1, dst_scissor.2, dst_scissor.3);
+                pass.set_pipeline(if invert_alpha {
+                    &self.upsample_invert
+                } else {
+                    &self.upsample
+                });
+                pass.set_bind_group(0, &group, &[offset]);
+                pass.draw(0..3, 0..1);
+                drop(pass);
+                self.draws += 1;
+            }
+
+            if ephemeral {
+                self.invalidate_source_inner(u64::MAX, true);
+            }
+            Ok(())
+        }
+
+        /// Encodes an interactive GPU view background blur at pyramid level `>= 1`
+        /// (`choose_level_view_bg`), stopping after the vertical blur in `scratch_v` so the caller
+        /// can bilinearly upsample and composite directly without an extra upsample pass or
+        /// full-resolution `blur_out` texture. Returns `None` when the blur stays at level 0 or is
+        /// degenerate (zero/constant/empty).
+        #[allow(clippy::too_many_arguments)]
+        pub fn encode_view_bg_level(
+            &mut self,
+            device: &wgpu::Device,
+            encoder: &mut wgpu::CommandEncoder,
+            src_view: &wgpu::TextureView,
+            src_id: u64,
+            src_size: (u32, u32),
+            spec: &BlurSpec,
+            pyramid_key: Option<PyramidKey>,
+        ) -> Result<Option<GpuBlurLevelOut>> {
+            let max_tex = device.limits().max_texture_dimension_2d;
+            let dirty = spec.dirty;
+            let cb = Self::source_bounds(spec, src_size, dirty);
+            validate_view_sigma(spec.sigma, cb, spec.edge)?;
+            if dirty.is_empty()
+                || cb.is_empty()
+                || kernel_radius(spec.sigma) == 0
+                || is_constant_clamp_pixel(cb, spec.edge)
+            {
+                return Ok(None);
+            }
+            let (level, level_sigma) = choose_level_view_bg(spec.sigma);
+            if level == 0 {
+                return Ok(None);
+            }
+            let pyramid_key = pyramid_key.map(|key| PyramidKey::new(key.source_id, cb, spec.edge));
+            let (blur_rect, bw, bh, ephemeral) = self.encode_pyramid_to_scratch_v(
+                device,
+                encoder,
+                src_view,
+                src_id,
+                src_size,
+                cb,
+                spec.edge,
+                level,
+                level_sigma,
+                dirty,
+                pyramid_key,
+                max_tex,
+            )?;
+            if ephemeral {
+                self.invalidate_source_inner(u64::MAX, true);
+            }
+            let sv = self.scratch_v.as_ref().expect("scratch_v");
+            Ok(Some(GpuBlurLevelOut {
+                view: sv.view.clone(),
+                view_id: sv.view_id,
+                active_size: (bw, bh),
+                cb_origin: (cb.x0, cb.y0),
+                blur_origin: (blur_rect.x0, blur_rect.y0),
+                inv_scale: (1.0 / (1u64 << level) as f64) as f32,
+            }))
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn encode_pyramid_to_scratch_v(
+            &mut self,
+            device: &wgpu::Device,
+            encoder: &mut wgpu::CommandEncoder,
+            src_view: &wgpu::TextureView,
+            src_id: u64,
+            src_size: (u32, u32),
+            cb: IRect,
+            edge: EdgeMode,
+            level: usize,
+            level_sigma: f32,
+            dirty: IRect,
+            pyramid_key: Option<PyramidKey>,
+            max_tex: u32,
+        ) -> Result<(IRect, u32, u32, bool)> {
+            let cb_w = (cb.x1 - cb.x0) as u32;
+            let cb_h = (cb.y1 - cb.y0) as u32;
             let blur_rect = upsample_blur_rect(dirty, cb, level);
             let r_l = kernel_radius(level_sigma).min(MAX_KERNEL_RADIUS);
             let (lw, lh) = level_logical_size(cb_w, cb_h, level);
@@ -2809,7 +3007,7 @@ pub mod gpu {
                     self.sync_stats();
                 }
                 self.invalidate_source_inner(u64::MAX, true);
-                PyramidKey::new(u64::MAX, cb, spec.edge)
+                PyramidKey::new(u64::MAX, cb, edge)
             } else {
                 pyramid_key.expect("checked")
             };
@@ -2820,7 +3018,7 @@ pub mod gpu {
                 src_view,
                 src_id,
                 src_size,
-                spec.edge,
+                edge,
                 level,
                 needed_stored,
                 ephemeral,
@@ -2958,50 +3156,7 @@ pub mod gpu {
                 self.draws += 1;
             }
 
-            // Pass 3 (Upsample): scratch_v -> dst_view (scissored to dirty).
-            {
-                let (sv_w, sv_h, v_view, v_id) = {
-                    let sv = self.scratch_v.as_ref().expect("scratch_v");
-                    (sv.width, sv.height, sv.view.clone(), sv.view_id)
-                };
-                let inv_scale = (1.0 / (1u64 << level) as f64) as f32;
-                let data_up = UniformData {
-                    p0: [dst_origin.0 as f32, dst_origin.1 as f32, inv_scale, 0.0],
-                    clamp_bounds: [cb.x0 as f32, cb.y0 as f32, blur_rect.x0 as f32, blur_rect.y0 as f32],
-                    p2: [1.0 / sv_w as f32, 1.0 / sv_h as f32, 0.0, 0.0],
-                    border: [bw as f32, bh as f32, 0.0, 0.0],
-                };
-                let (slab_idx, offset) = self.push_uniform(device, data_up);
-                let group = self.make_bind_group(device, &v_view, v_id, slab_idx);
-                let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                    label: Some("blur upsample"),
-                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                        view: dst_view,
-                        depth_slice: None,
-                        resolve_target: None,
-                        ops: wgpu::Operations {
-                            load: dst_load_op(invert_alpha),
-                            store: wgpu::StoreOp::Store,
-                        },
-                    })],
-                    ..Default::default()
-                });
-                pass.set_scissor_rect(dst_scissor.0, dst_scissor.1, dst_scissor.2, dst_scissor.3);
-                pass.set_pipeline(if invert_alpha {
-                    &self.upsample_invert
-                } else {
-                    &self.upsample
-                });
-                pass.set_bind_group(0, &group, &[offset]);
-                pass.draw(0..3, 0..1);
-                drop(pass);
-                self.draws += 1;
-            }
-
-            if ephemeral {
-                self.invalidate_source_inner(u64::MAX, true);
-            }
-            Ok(())
+            Ok((blur_rect, bw, bh, ephemeral))
         }
 
         /// Bilinearly upsamples a reduced-resolution blurred texture covering device origin
@@ -4045,6 +4200,20 @@ mod tests {
                 max_err = max_err.max((got - expected).abs() * 255.0);
             }
             assert!(max_err <= 1.0, "sigma={sigma} max_err={max_err:.3}/255");
+        }
+    }
+
+    #[test]
+    fn view_bg_keeps_level0_through_direct_sigma_max() {
+        for &sigma in &[2.5f32, 3.0, 4.0, 6.0, 10.0] {
+            assert_eq!(choose_level_view_bg(sigma), (0, sigma), "sigma={sigma}");
+            assert_eq!(blur_reach_view_bg(sigma), blur_reach_view(sigma), "sigma={sigma}");
+        }
+        for &sigma in &[10.5f32, 12.0, 16.0, 20.0, 64.0] {
+            let (lvl, lvl_sigma) = choose_level_view_bg(sigma);
+            assert!(lvl >= 1, "sigma={sigma}");
+            assert_eq!((lvl, lvl_sigma), choose_level_view(sigma), "sigma={sigma}");
+            assert!(blur_reach_view_bg(sigma) >= ((kernel_radius(lvl_sigma) + 4) << lvl) as f32);
         }
     }
 }

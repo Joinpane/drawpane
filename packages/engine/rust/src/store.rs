@@ -33,15 +33,16 @@ pub struct CachedReader {
     pub writes_backdrop: bool,
     /// Ancestor/self node IDs with spatial post-effects (`LayerBlur` / `Texture`).
     pub spatial_post_records: Vec<u32>,
-    /// When the innermost wrapping clip frame has no opaque solid fill, stores each wrapping
-    /// ancestor clip's `(world_transform, local_bounds)` so device-space intersection is exact.
-    pub unfilled_clips: Vec<(Affine, Rect)>,
+    /// Wrapping ancestor clips `(world_transform, local_bounds)` open at this reader op.
+    pub clip_within: Vec<(Affine, Rect)>,
+    /// True when the innermost wrapping clip frame has no opaque solid fill (`EdgeMode::Clamp`).
+    pub clip_unfilled: bool,
     pub kind: CachedReaderKind,
 }
 
 #[derive(Clone, Copy)]
 pub enum CachedReaderKind {
-    Glass { local_halo: f32 },
+    Glass { scale_halo: f32, pad_px: f32 },
     Read { halo: f32 },
     BackgroundBlur { radius: f32 },
     ProgressiveBlur,
@@ -1929,7 +1930,7 @@ impl Store {
                             .map_or(box_rect, |cb| cb.union(box_rect))
                     })
                 };
-                let collect_unfilled = |stack: &[ClipEntry]| -> Vec<(Affine, Rect)> {
+                let collect_clips = |stack: &[ClipEntry]| -> (Vec<(Affine, Rect)>, bool) {
                     let mut inner_fill: Option<Option<[u8; 4]>> = None;
                     for item in stack.iter().rev() {
                         if let Some((_, _, fill)) = *item {
@@ -1937,11 +1938,8 @@ impl Store {
                             break;
                         }
                     }
-                    if matches!(inner_fill, Some(None)) {
-                        stack.iter().filter_map(|item| item.map(|(w, lb, _)| (w, lb))).collect()
-                    } else {
-                        Vec::new()
-                    }
+                    let clips = stack.iter().filter_map(|item| item.map(|(w, lb, _)| (w, lb))).collect();
+                    (clips, matches!(inner_fill, Some(None)))
                 };
                 let clip_base = clip_stack.len();
                 for (at, op) in r.ops.iter().enumerate() {
@@ -1976,6 +1974,8 @@ impl Store {
                             }
                         }
                         Op::Glass(g) if !is_context => {
+                            let (clip_within, clip_unfilled) = collect_clips(clip_stack);
+                            let (scale_halo, pad_px) = crate::glass::halo_parts(g);
                             out.push(CachedReader {
                                 key: (id, at),
                                 world,
@@ -1983,13 +1983,13 @@ impl Store {
                                 size: r.size,
                                 writes_backdrop: false,
                                 spatial_post_records: post_records.clone(),
-                                unfilled_clips: Vec::new(),
-                                kind: CachedReaderKind::Glass {
-                                    local_halo: crate::glass::local_halo(g),
-                                },
+                                clip_within,
+                                clip_unfilled,
+                                kind: CachedReaderKind::Glass { scale_halo, pad_px },
                             });
                         }
                         Op::Read { halo, .. } => {
+                            let (clip_within, clip_unfilled) = collect_clips(clip_stack);
                             out.push(CachedReader {
                                 key: (id, at),
                                 world,
@@ -1997,11 +1997,13 @@ impl Store {
                                 size: r.size,
                                 writes_backdrop: true,
                                 spatial_post_records: post_records.clone(),
-                                unfilled_clips: Vec::new(),
+                                clip_within,
+                                clip_unfilled,
                                 kind: CachedReaderKind::Read { halo: *halo },
                             });
                         }
                         Op::BackgroundBlur(b_op) => {
+                            let (clip_within, clip_unfilled) = collect_clips(clip_stack);
                             out.push(CachedReader {
                                 key: (id, at),
                                 world,
@@ -2009,11 +2011,13 @@ impl Store {
                                 size: r.size,
                                 writes_backdrop: true,
                                 spatial_post_records: post_records.clone(),
-                                unfilled_clips: collect_unfilled(clip_stack),
+                                clip_within,
+                                clip_unfilled,
                                 kind: CachedReaderKind::BackgroundBlur { radius: b_op.radius },
                             });
                         }
                         Op::ProgressiveBlur(_) => {
+                            let (clip_within, clip_unfilled) = collect_clips(clip_stack);
                             out.push(CachedReader {
                                 key: (id, at),
                                 world,
@@ -2021,7 +2025,8 @@ impl Store {
                                 size: r.size,
                                 writes_backdrop: true,
                                 spatial_post_records: post_records.clone(),
-                                unfilled_clips: collect_unfilled(clip_stack),
+                                clip_within,
+                                clip_unfilled,
                                 kind: CachedReaderKind::ProgressiveBlur,
                             });
                         }

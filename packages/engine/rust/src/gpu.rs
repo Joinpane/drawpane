@@ -781,6 +781,7 @@ struct GpuIsolation {
     main: GpuTarget,
     backdrop: Option<GpuTarget>,
     isolation: Isolation,
+    clip_to_parent: bool,
     previous_targets: (bool, bool),
 }
 
@@ -908,6 +909,13 @@ struct ActiveDraw {
     frame_dst: Option<usize>,
     /// The part of a padded viewport that is actually presented.
     display_area: Option<IRect>,
+    /// Optional displayed tile area `[h, h + TILE)` for culling apron-only root glass lenses.
+    glass_display_area: Option<IRect>,
+    /// Minimum left/top edge padding (tile apron or whole-frame pad) around displayed pixels.
+    grid_pad: (i32, i32),
+    /// World `Level` and frame-pixel origin of `level.grid()` for this draw, when uniform-scaled.
+    draw_level: Option<crate::tiles::Level>,
+    draw_grid_origin: Option<(i64, i64)>,
     width: u32,
     height: u32,
     background: [f32; 4],
@@ -938,19 +946,29 @@ struct ActiveDraw {
 }
 
 impl ActiveDraw {
+    #[allow(clippy::too_many_arguments)]
     fn new(
         draw_id: u64,
         frame_dst: Option<usize>,
         display_area: Option<IRect>,
+        glass_display_area: Option<IRect>,
+        grid_pad: (i32, i32),
+        view: Affine,
         width: u32,
         height: u32,
         background: [f32; 4],
         detail: bool,
     ) -> Self {
+        let (draw_level, draw_grid_origin) =
+            crate::tiles::Level::of(view).map_or((None, None), |(level, origin)| (Some(level), Some(origin)));
         Self {
             draw_id,
             frame_dst,
             display_area,
+            glass_display_area,
+            grid_pad,
+            draw_level,
+            draw_grid_origin,
             width,
             height,
             background,
@@ -1045,6 +1063,7 @@ struct PausedWalk {
     active: ActiveDraw,
     scratch: usize,
     backdrop_gen: u64,
+    backdrop_blur_written: Option<IRect>,
     /// Where the walk resumes; None for a pass set up but not walked yet.
     checkpoint: Option<exec::WalkCheckpoint>,
 }
@@ -1281,6 +1300,71 @@ const SOFTWARE_HALO_RENDER_MAX_PIXELS: usize = 4_200_000;
 const HARDWARE_HALO_STEADY_FAR_PIXELS: usize = 4_200_000;
 const HARDWARE_HALO_STEADY_MID_PIXELS: usize = 2_200_000;
 const SOFTWARE_HALO_STEADY_PIXELS: usize = 1_650_000;
+const WIDE_BLUR_MAX_SIDE_HW: u32 = 3072;
+const WIDE_BLUR_MAX_PIXELS_HW: usize = 4_200_000;
+const WIDE_BLUR_MAX_SIDE_SW: u32 = 2560;
+const WIDE_BLUR_MAX_PIXELS_SW: usize = 3_500_000;
+
+/// World-grid `d = 2` wide uniform background-blur cache shared across 512 px tiles at one
+/// `Level`, so large-radius blurs stay tiled (`plan == 0`, `exact == true`) instead of falling
+/// into reader-halo whole frames.
+struct WideBlurCache {
+    level: crate::tiles::Level,
+    cap_grid: IRect,
+    cover_grid: IRect,
+    vis_tiles_grid: IRect,
+    inputs: DrawInputs,
+    targets: Vec<(u32, usize)>,
+    apron_glass_safe: bool,
+    residual_readers: Vec<(IRect, i32)>,
+    blurred: HaloMap<HaloPatch>,
+}
+
+impl WideBlurCache {
+    fn covers(&self, plan: &halo::WideBlurPlan, inputs: DrawInputs) -> bool {
+        self.inputs == inputs
+            && self.level == plan.level
+            && self.cover_grid.contains_rect(plan.cover_grid)
+            && plan.targets.iter().all(|k| self.targets.contains(k))
+    }
+
+    fn halo_for_tile(&self, tile_x: i32, tile_y: i32, cap: i32) -> i32 {
+        let t = i64::from(TILE);
+        let x0 = i64::from(tile_x) * t;
+        let y0 = i64::from(tile_y) * t;
+        let (Ok(x0), Ok(y0), Ok(x1), Ok(y1)) = (
+            i32::try_from(x0),
+            i32::try_from(y0),
+            i32::try_from(x0 + t),
+            i32::try_from(y0 + t),
+        ) else {
+            return cap;
+        };
+        let tile_rect = IRect { x0, y0, x1, y1 };
+        if !self.vis_tiles_grid.contains_rect(tile_rect) {
+            return cap;
+        }
+        let mut max_h = 0i32;
+        for &(aff_grid, reach) in &self.residual_readers {
+            if !aff_grid.intersect(tile_rect).is_empty() {
+                max_h = max_h.max(reach);
+            }
+        }
+        if max_h > 0 { (max_h + (max_h & 1)).min(cap) } else { 0 }
+    }
+}
+
+struct WideBlurBuild {
+    plan: halo::WideBlurPlan,
+    inputs: DrawInputs,
+    background: [f32; 4],
+    pass: Option<Box<WholePass>>,
+}
+
+enum WideBlurState {
+    Building(Box<WideBlurBuild>),
+    Ready(Box<WideBlurCache>),
+}
 
 #[derive(Clone, Copy)]
 struct HaloTierCapture {
@@ -1340,6 +1424,11 @@ struct PostScopePatch {
 struct ReaderHalo {
     capture: Option<HaloTierCapture>,
     strip_capture: Option<HaloStripCapture>,
+    /// True during a world-grid `d = 2` wide-blur cache build (`WideBlurState::Building`).
+    wide_capture: bool,
+    wide_targets: Vec<(u32, usize)>,
+    wide_last: Option<(u32, usize)>,
+    wide_done: bool,
     native_prog_cutover: f32,
     native_unif_cutover: f32,
     downstream_readers: Vec<(u32, usize)>,
@@ -1407,6 +1496,8 @@ struct BlurReaderDraw {
     interiors: Vec<usize>,
     source_is_frame: bool,
     source_written: bool,
+    grid_pad: (i32, i32),
+    draw_grid_origin: Option<(i64, i64)>,
     targets: [Option<BlurReaderPlane>; 2],
 }
 
@@ -1422,14 +1513,67 @@ impl BlurReaderDraw {
         (self.origin.0 + self.dirty.x0, self.origin.1 + self.dirty.y0)
     }
 
-    fn bounds_and_edge(&self, within: Option<glass::ClipWithin>, sigma: f32) -> (IRect, EdgeMode) {
-        progressive_blur::blur_bounds_and_edge(
+    fn bounds_and_edge(&self, within: Option<glass::ClipWithin>, sigma: f32, view_bg: bool) -> (IRect, EdgeMode) {
+        let (lvl, _) = if view_bg {
+            blur::choose_level_view_bg(sigma)
+        } else {
+            blur::choose_level_view(sigma)
+        };
+        let align = blur::level_step(lvl);
+        let (mut cb, edge) = progressive_blur::blur_bounds_and_edge_align(
             within,
             self.frame_size,
             (-self.source.bounds.x0, -self.source.bounds.y0),
             (self.source.bounds.size().0 as i32, self.source.bounds.size().1 as i32),
-            sigma,
-        )
+            align,
+        );
+        // Anchor `cb.x0/y0` modulo `align` so tiled and whole frames share the same pyramid phase
+        // across seams and pan offsets:
+        // - Unclipped blurs anchor to `Level::grid()` (for both frame and isolation-scope sources).
+        // - Unfilled clipped blurs (`w.fill.is_none()`) preserve the true `w.x0.floor()` /
+        //   `w.y0.floor()` phase even when a tile or padded view crops past the clip's left/top
+        //   edge (`raw < 0`), where `blur_bounds_and_edge_align` clamps to `0` for unpadded crops.
+        if align > 1 {
+            let reach = if view_bg {
+                blur::blur_reach_view_bg(sigma)
+            } else {
+                blur::blur_reach_view(sigma)
+            }
+            .ceil() as i32;
+            let src_dirty = self.source_rect(self.dirty);
+            let pad_x = self.grid_pad.0 >= align || src_dirty.x0 >= reach + align;
+            let pad_y = self.grid_pad.1 >= align || src_dirty.y0 >= reach + align;
+            match within {
+                None => {
+                    if let Some((nx, ny)) = self.draw_grid_origin {
+                        if pad_x || (!self.source_is_frame && self.source.bounds.x0 > 0) {
+                            cb.x0 = ((nx - i64::from(self.source.bounds.x0)).rem_euclid(i64::from(align)) as i32)
+                                .min(cb.x1);
+                        }
+                        if pad_y || (!self.source_is_frame && self.source.bounds.y0 > 0) {
+                            cb.y0 = ((ny - i64::from(self.source.bounds.y0)).rem_euclid(i64::from(align)) as i32)
+                                .min(cb.y1);
+                        }
+                    }
+                }
+                Some(w) if w.fill.is_none() => {
+                    if w.x0.is_finite() {
+                        let raw_x = w.x0.floor() as i64 - i64::from(self.source.bounds.x0);
+                        if raw_x < 0 && pad_x {
+                            cb.x0 = (raw_x.rem_euclid(i64::from(align)) as i32).min(cb.x1);
+                        }
+                    }
+                    if w.y0.is_finite() {
+                        let raw_y = w.y0.floor() as i64 - i64::from(self.source.bounds.y0);
+                        if raw_y < 0 && pad_y {
+                            cb.y0 = (raw_y.rem_euclid(i64::from(align)) as i32).min(cb.y1);
+                        }
+                    }
+                }
+                Some(_) => {}
+            }
+        }
+        (cb, edge)
     }
 
     fn source_rect(&self, target_rect: IRect) -> IRect {
@@ -1444,6 +1588,7 @@ impl BlurReaderDraw {
         tier: Option<HaloTierCapture>,
         within: Option<glass::ClipWithin>,
         sigma: f32,
+        view_bg: bool,
     ) -> halo::HaloClipBounds {
         if tier.is_some_and(|t| t.render_divisor > 1) {
             halo::reduced_blur_bounds_and_edge(
@@ -1454,7 +1599,7 @@ impl BlurReaderDraw {
                 sigma,
             )
         } else {
-            let (clamp_bounds, edge) = self.bounds_and_edge(within, sigma);
+            let (clamp_bounds, edge) = self.bounds_and_edge(within, sigma, view_bg);
             halo::HaloClipBounds {
                 clamp_bounds,
                 edge,
@@ -1593,6 +1738,7 @@ pub struct Gpu {
     mask_scene: Scene,
     readers: GpuReaders,
     reader_halo: Option<ReaderHalo>,
+    wide_blur: Option<WideBlurState>,
     active: Option<ActiveDraw>,
     /// Hard wall-clock deadline (`now()` ms) checked cooperatively during budgeted tile walks.
     deadline_ms: Option<f64>,
@@ -1624,6 +1770,9 @@ pub struct Gpu {
     /// True while a freshly opened page is still completing its coarse opening ladder tiles.
     opening_pending: bool,
     backdrop_gen: u64,
+    /// Union of root backdrop regions written by exact background blurs since the last
+    /// `bump_backdrop_gen`. Disjoint sibling blurs reuse the cached blur pyramid safely.
+    backdrop_blur_written: Option<IRect>,
     /// Frame textures: the one shown (`cur`) and the one being made.
     frames: Vec<Main>,
     #[cfg(feature = "compute")]
@@ -1817,6 +1966,39 @@ impl Drop for Gpu {
             for plane in set.iter_mut().filter_map(Option::take) {
                 plane.texture.destroy();
             }
+        }
+        if let Some(WideBlurState::Ready(cache)) = self.wide_blur.take() {
+            for (_, p) in cache.blurred.into_vec() {
+                p.texture.destroy();
+            }
+        }
+        if let Some(halo) = self.reader_halo.take() {
+            for (_, p) in halo.prefixes.into_vec() {
+                p.texture.destroy();
+            }
+            for (_, p) in halo.blurred.into_vec() {
+                p.texture.destroy();
+            }
+            for (_, p) in halo.progressive_mid.into_vec() {
+                p.patch.texture.destroy();
+            }
+            for (_, p) in halo.progressive_far.into_vec() {
+                p.patch.texture.destroy();
+            }
+            for (_, s) in halo.clamp_strips.into_vec() {
+                for p in s.into_patches() {
+                    p.texture.destroy();
+                }
+            }
+            for (_, ps) in halo.post_scopes.into_vec() {
+                ps.main.texture.destroy();
+                if let Some(b) = ps.backdrop {
+                    b.texture.destroy();
+                }
+            }
+        }
+        for p in self.halo_prefix_pool.drain(..) {
+            p.texture.destroy();
         }
         self.readers.evict_frame_scratch();
         self.readers.flush_retired();
@@ -2513,6 +2695,7 @@ impl Gpu {
             mask_scene: Scene::new(1, 1),
             readers,
             reader_halo: None,
+            wide_blur: None,
             active: None,
             deadline_ms: None,
             pass_budget: None,
@@ -2531,6 +2714,7 @@ impl Gpu {
             sliced_frame: None,
             opening_pending: false,
             backdrop_gen: 0,
+            backdrop_blur_written: None,
             frames: Vec::new(),
             #[cfg(feature = "compute")]
             next_frame_view_id: 1,
@@ -2921,10 +3105,14 @@ impl Gpu {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn begin_active(
         &mut self,
         frame_dst: Option<usize>,
         display_area: Option<IRect>,
+        glass_display_area: Option<IRect>,
+        grid_pad: (i32, i32),
+        view: Affine,
         width: u32,
         height: u32,
         background: [f32; 4],
@@ -2940,11 +3128,25 @@ impl Gpu {
             self.next_draw_id,
             frame_dst,
             display_area,
+            glass_display_area,
+            grid_pad,
+            view,
             width,
             height,
             background,
             detail,
         ));
+    }
+
+    fn bump_backdrop_gen(&mut self) {
+        self.backdrop_gen += 1;
+        self.backdrop_blur_written = None;
+    }
+
+    fn flush_backdrop_blur_written(&mut self) {
+        if self.backdrop_blur_written.is_some() {
+            self.bump_backdrop_gen();
+        }
     }
 
     fn clear_clip_mask_cache(&mut self) {
@@ -3906,10 +4108,15 @@ impl Gpu {
         }
     }
 
-    /// Whether a walk is paused: a tile's or a whole frame's, holding its scratch, target and
-    /// glass mask atlas until it resumes.
+    /// Whether a walk is paused: a tile's, a whole frame's, or a wide-blur capture's, holding its
+    /// scratch, target and glass mask atlas until it resumes.
     fn walk_paused(&self) -> bool {
-        self.pending_tile.is_some() || self.pending_whole.as_ref().is_some_and(PendingWhole::paused)
+        self.pending_tile.is_some()
+            || self.pending_whole.as_ref().is_some_and(PendingWhole::paused)
+            || matches!(
+                self.wide_blur.as_ref(),
+                Some(WideBlurState::Building(b)) if b.pass.as_ref().is_some_and(|p| p.paused.is_some())
+            )
     }
 
     /// Pauses the active walk at `checkpoint`: flushes and submits what it drew, and takes its
@@ -3940,6 +4147,7 @@ impl Gpu {
             active,
             scratch: self.active_scratch,
             backdrop_gen: self.backdrop_gen,
+            backdrop_blur_written: self.backdrop_blur_written,
             checkpoint,
         })
     }
@@ -3949,6 +4157,7 @@ impl Gpu {
     fn resume_walk(&mut self, paused: PausedWalk, size: (u16, u16)) -> Option<exec::WalkCheckpoint> {
         self.active_scratch = paused.scratch;
         self.backdrop_gen = paused.backdrop_gen;
+        self.backdrop_blur_written = paused.backdrop_blur_written;
         self.active = Some(paused.active);
         self.masks.begin_frame();
         self.readers.begin_frame();
@@ -4001,6 +4210,7 @@ impl Gpu {
     pub fn forget_last(&mut self) {
         self.abort_pending_tile();
         self.abort_pending_whole();
+        self.abort_wide_blur();
         self.opening_pending = false;
         self.last = None;
         self.last_scale = None;
@@ -4024,6 +4234,7 @@ impl Gpu {
     pub fn clear_tiles(&mut self) {
         self.abort_pending_whole();
         self.abort_pending_tile();
+        self.abort_wide_blur();
         self.clear_clip_mask_cache();
         self.opening_pending = false;
         self.tiles.clear();
@@ -4035,6 +4246,7 @@ impl Gpu {
         // Every tile goes but the overview's, a few MiB that a zoom out stands on.
         self.abort_pending_whole();
         self.abort_pending_tile();
+        self.abort_wide_blur();
         self.opening_pending = false;
         self.tiles.clear_keeping_overview();
         self.shown = None;
@@ -5292,7 +5504,11 @@ impl Gpu {
             .bytes()
             .saturating_sub(self.readers.glass_mask_atlas_bytes());
         let atlas_room = reader_room.saturating_sub(other_reader_bytes);
-        let plan = glass::plan_glass_masks(store, frame, self.max_texture_2d, atlas_room);
+        let root_area = self
+            .active
+            .as_ref()
+            .and_then(|a| a.glass_display_area.or(a.display_area));
+        let plan = glass::plan_glass_masks_clipped(store, frame, root_area, self.max_texture_2d, atlas_room);
         if plan.placements.len() < 2
             || !self
                 .readers
@@ -5371,6 +5587,32 @@ impl Gpu {
         } else {
             halo::HALO_REPLAY_SIDE
         }
+    }
+
+    /// Maximum `(side, pixels)` for a world-grid `d = 2` wide-blur capture (`WideBlurPlan`),
+    /// bounded by both adapter limits and available GPU memory (`28 B/px`).
+    pub fn wide_blur_limits(&self) -> (u32, usize) {
+        let (side, max_pixels) = if self.fallback_adapter {
+            (self.max_texture_2d.min(WIDE_BLUR_MAX_SIDE_SW), WIDE_BLUR_MAX_PIXELS_SW)
+        } else {
+            (self.max_texture_2d.min(WIDE_BLUR_MAX_SIDE_HW), WIDE_BLUR_MAX_PIXELS_HW)
+        };
+        let cache_bytes: usize = match self.wide_blur.as_ref() {
+            Some(WideBlurState::Ready(c)) => c
+                .blurred
+                .0
+                .iter()
+                .map(|(_, p)| Self::frame_bytes(p.texture.width(), p.texture.height()))
+                .sum(),
+            _ => 0,
+        };
+        let freed = cache_bytes
+            + self.scratches[FAR_HALO_SCRATCH_SLOT]
+                .as_ref()
+                .map_or(0, |s| (s.width as usize) * (s.height as usize) * 8);
+        let held = self.bytes().saturating_sub(self.pool_bytes) + self.readbacks.bytes.get();
+        let room = self.budget.saturating_sub(held.saturating_sub(freed));
+        (side, max_pixels.min(room / 28))
     }
 
     /// Where a `size` view padded to its readers' `samples` sits in the padded target, and that
@@ -5473,6 +5715,7 @@ impl Gpu {
             return shown;
         }
         self.abort_pending_tile();
+        self.abort_wide_blur();
         self.opening_pending = false;
         if self.pending_whole.is_none() {
             self.sliced_frame = None;
@@ -5497,6 +5740,14 @@ impl Gpu {
         self.pending_whole.is_some()
     }
 
+    /// Tile level scale served by the active or in-progress wide-blur cache, if any.
+    pub fn wide_blur_scale(&self) -> Option<f64> {
+        self.wide_blur.as_ref().map(|wb| match wb {
+            WideBlurState::Building(b) => b.plan.level.scale,
+            WideBlurState::Ready(c) => c.level.scale,
+        })
+    }
+
     /// The scales at which something is drawn or being drawn (the tiles' levels, the frame shown):
     /// an image level no sampler picks at any of them changes nothing. None while a whole frame is
     /// shown or drawn: its readers' reduced captures sample images at scales of their own.
@@ -5506,6 +5757,13 @@ impl Gpu {
         }
         let mut scales: Vec<f64> = self.tiles.levels().iter().map(|(_, l)| l.scale).collect();
         scales.extend(self.last.map(|l| l.view.as_coeffs()[0]));
+        if let Some(wb) = self.wide_blur.as_ref() {
+            let s = match wb {
+                WideBlurState::Building(b) => b.plan.level.scale * 0.5,
+                WideBlurState::Ready(c) => c.level.scale * 0.5,
+            };
+            scales.push(s);
+        }
         Some(scales)
     }
 
@@ -5805,6 +6063,7 @@ impl Gpu {
             active: self.active.take().expect("a begun pass"),
             scratch: self.active_scratch,
             backdrop_gen: self.backdrop_gen,
+            backdrop_blur_written: self.backdrop_blur_written,
             checkpoint: None,
         });
         self.scene.reset();
@@ -5910,7 +6169,15 @@ impl Gpu {
 
     /// Starts a scratch tile draw: ensures scratch, resets per-tile state, and begins `active`.
     #[inline(never)]
-    fn begin_scratch_draw(&mut self, side: u32, background: [f32; 4], detail: bool) -> Result<()> {
+    fn begin_scratch_draw(
+        &mut self,
+        side: u32,
+        tile_halo: i32,
+        clip_apron_glass: bool,
+        view: Affine,
+        background: [f32; 4],
+        detail: bool,
+    ) -> Result<()> {
         self.ensure_scratch(side)?;
         self.masks.begin_frame();
         self.atlas.at = (0, 0, 0);
@@ -5918,8 +6185,24 @@ impl Gpu {
         self.readers.begin_frame();
         self.blur.begin_frame();
         self.shadow.begin_frame();
-        self.backdrop_gen += 1;
-        self.begin_active(None, None, side, side, background, detail);
+        self.bump_backdrop_gen();
+        let glass_display_area = (clip_apron_glass && tile_halo > 0).then_some(IRect {
+            x0: tile_halo,
+            y0: tile_halo,
+            x1: tile_halo + TILE as i32,
+            y1: tile_halo + TILE as i32,
+        });
+        self.begin_active(
+            None,
+            None,
+            glass_display_area,
+            (tile_halo, tile_halo),
+            view,
+            side,
+            side,
+            background,
+            detail,
+        );
         Ok(())
     }
 
@@ -6255,11 +6538,40 @@ impl Gpu {
         moving: bool,
         prefix: Option<(u64, usize)>,
         halo_plan: Option<&ViewportHaloPlan>,
+        wide_plan: Option<&halo::WideBlurPlan>,
     ) -> Result<DrawStats> {
         self.abort_pending_tile();
         self.abort_pending_whole();
         self.pass_budget = None;
         self.opening_pending = false;
+        if let Some(wp) = wide_plan {
+            let inputs = Self::inputs(store, generation, background);
+            let need_build = !matches!(
+                self.wide_blur.as_ref(),
+                Some(WideBlurState::Ready(c)) if c.covers(wp, inputs)
+            );
+            if need_build {
+                self.abort_wide_blur();
+                self.wide_blur = Some(WideBlurState::Building(Box::new(WideBlurBuild {
+                    plan: wp.clone(),
+                    inputs,
+                    background,
+                    pass: None,
+                })));
+                let mut wide_stats = DrawStats::default();
+                self.step_wide_blur(store, false, &mut wide_stats)?;
+            }
+            return self.draw_whole_pass(
+                store,
+                frame,
+                background,
+                generation,
+                moving,
+                prefix,
+                Some(wp.residual_samples),
+            );
+        }
+        self.abort_wide_blur();
         let samples = halo_plan.map(|p| p.samples);
         let size = (u32::from(frame.width), u32::from(frame.height));
         if !moving
@@ -6714,6 +7026,10 @@ impl Gpu {
         self.reader_halo = Some(ReaderHalo {
             capture: None,
             strip_capture: None,
+            wide_capture: false,
+            wide_targets: Vec::new(),
+            wide_last: None,
+            wide_done: false,
             native_prog_cutover: halo::progressive_cutover_sigma(lowest_div),
             native_unif_cutover: halo::uniform_cutover_sigma(lowest_div),
             downstream_readers: plan.downstream_readers.clone(),
@@ -6924,14 +7240,7 @@ impl Gpu {
         }
     }
 
-    /// Releases what `run` captured, finished or not (a paused pass is dropped), and keeps the
-    /// sample bounds of a frame that finished.
-    #[inline(never)]
-    fn end_reader_halo(&mut self, run: &mut HaloRun, plan: &ViewportHaloPlan, finished: bool) {
-        if run.pass.take().is_some_and(|pass| pass.paused.is_some()) {
-            self.drop_walk();
-        }
-        let halo = self.reader_halo.take().expect("reader halo");
+    fn recycle_reader_halo(&mut self, halo: ReaderHalo) {
         for (_, p) in halo.prefixes.into_vec() {
             self.recycle_halo_prefix(p);
         }
@@ -6955,6 +7264,251 @@ impl Gpu {
                 self.recycle_halo_prefix(b);
             }
         }
+    }
+
+    fn abort_wide_blur(&mut self) {
+        match self.wide_blur.take() {
+            Some(WideBlurState::Building(mut b)) => {
+                if b.pass.take().is_some_and(|p| p.paused.is_some()) {
+                    self.drop_walk();
+                }
+                if let Some(halo) = self.reader_halo.take() {
+                    self.recycle_reader_halo(halo);
+                }
+                self.release_oversized_halo_storage();
+            }
+            Some(WideBlurState::Ready(cache)) => {
+                for (_, p) in cache.blurred.into_vec() {
+                    self.recycle_halo_prefix(p);
+                }
+            }
+            None => {}
+        }
+    }
+
+    fn abort_wide_blur_building(&mut self) {
+        if matches!(self.wide_blur, Some(WideBlurState::Building(_))) {
+            self.abort_wide_blur();
+        }
+    }
+
+    #[inline(never)]
+    fn begin_wide_blur_pass(&mut self, store: &Store, build: &WideBlurBuild) -> Result<Box<WholePass>> {
+        let plan = &build.plan;
+        let cap_d2_origin = (plan.cap_grid.x0 / 2, plan.cap_grid.y0 / 2);
+        let cap_w = ((plan.cap_grid.x1 - plan.cap_grid.x0) / 2).max(1);
+        let cap_h = ((plan.cap_grid.y1 - plan.cap_grid.y0) / 2).max(1);
+        self.check_texture_size(cap_w as u32, cap_h as u32, "wide blur capture")?;
+        let freed = self.scratches[FAR_HALO_SCRATCH_SLOT]
+            .as_ref()
+            .map_or(0, |s| (s.width as usize) * (s.height as usize) * 8);
+        let est = (cap_w as usize).saturating_mul(cap_h as usize).saturating_mul(28);
+        self.reserve_or_trim(est, freed, "wide blur capture")?;
+        let offset = (-cap_d2_origin.0, -cap_d2_origin.1);
+        let frame_size = (cap_w, cap_h);
+        let visible = ReaderHalo::map_rect_to_grid(plan.cover_grid, (0, 0), 2, offset);
+        let coarse = Frame {
+            width: cap_w as u16,
+            height: cap_h as u16,
+            view: Affine::translate((f64::from(offset.0), f64::from(offset.1)))
+                * Affine::scale(0.5)
+                * plan.level.grid(),
+            detail: false,
+            area: IRect {
+                x0: 0,
+                y0: 0,
+                x1: cap_w,
+                y1: cap_h,
+            },
+        };
+        self.reader_halo = Some(ReaderHalo {
+            capture: Some(HaloTierCapture {
+                render_divisor: 2,
+                offset,
+                frame_size,
+                visible,
+                prog_min_sigma: f32::INFINITY,
+                prog_max_sigma: f32::INFINITY,
+                unif_min_sigma: halo::WIDE_BLUR_MIN_SIGMA,
+                unif_max_sigma: f32::INFINITY,
+                is_far: true,
+            }),
+            strip_capture: None,
+            wide_capture: true,
+            wide_targets: plan.targets.clone(),
+            wide_last: plan.targets.last().copied(),
+            wide_done: false,
+            native_prog_cutover: f32::INFINITY,
+            native_unif_cutover: f32::INFINITY,
+            downstream_readers: plan.downstream_readers.clone(),
+            downstream_mid_readers: Vec::new(),
+            coarse_post_scopes: Vec::new(),
+            inside_coarse_post_scope: 0,
+            post_scopes: HaloMap::new(),
+            prefixes: HaloMap::new(),
+            blurred: HaloMap::new(),
+            progressive_mid: HaloMap::new(),
+            progressive_far: HaloMap::new(),
+            clamp_strips: HaloMap::new(),
+        });
+        self.swap_halo_reader_planes(true);
+        match self.begin_whole_pass(
+            store,
+            &coarse,
+            build.background,
+            build.inputs.generation,
+            false,
+            None,
+            None,
+            false,
+        ) {
+            Ok(WholeStart::Pass(pass)) => Ok(pass),
+            Ok(WholeStart::Unchanged(_)) => unreachable!("wide blur capture always draws"),
+            Err(e) => {
+                self.swap_halo_reader_planes(true);
+                if let Some(halo) = self.reader_halo.take() {
+                    self.recycle_reader_halo(halo);
+                }
+                Err(e)
+            }
+        }
+    }
+
+    /// Advances an in-progress world-grid `d = 2` wide-blur build. Returns `Ok(true)` once the
+    /// `WideBlurCache` is ready (and installed in `self.wide_blur`), `Ok(false)` if paused at
+    /// `self.deadline_ms`, or `Err` after tearing down cleanly.
+    #[inline(never)]
+    fn step_wide_blur(&mut self, store: &Store, allow_yield: bool, stats: &mut DrawStats) -> Result<bool> {
+        let Some(WideBlurState::Building(mut build)) = self.wide_blur.take() else {
+            return Ok(matches!(self.wide_blur, Some(WideBlurState::Ready(_))));
+        };
+        let mut pass = match build.pass.take() {
+            Some(pass) => {
+                self.swap_halo_reader_planes(true);
+                pass
+            }
+            None => match self.begin_wide_blur_pass(store, &build) {
+                Ok(mut pass) => {
+                    if allow_yield && self.deadline_reached() {
+                        self.pause_begun(&mut pass);
+                        self.swap_halo_reader_planes(true);
+                        build.pass = Some(pass);
+                        self.wide_blur = Some(WideBlurState::Building(build));
+                        return Ok(false);
+                    }
+                    pass
+                }
+                Err(e) => {
+                    self.release_oversized_halo_storage();
+                    return Err(e);
+                }
+            },
+        };
+        match self.walk_whole_pass(store, &mut pass, allow_yield) {
+            Ok(true) => {}
+            Ok(false) => {
+                self.swap_halo_reader_planes(true);
+                build.pass = Some(pass);
+                self.wide_blur = Some(WideBlurState::Building(build));
+                return Ok(false);
+            }
+            Err(e) => {
+                self.swap_halo_reader_planes(true);
+                if let Some(halo) = self.reader_halo.take() {
+                    self.recycle_reader_halo(halo);
+                }
+                self.release_oversized_halo_storage();
+                return Err(e);
+            }
+        }
+        let finished = self.finish_whole_pass(pass, build.inputs.generation);
+        self.swap_halo_reader_planes(true);
+        let s = match finished {
+            Ok(s) => s,
+            Err(e) => {
+                if let Some(halo) = self.reader_halo.take() {
+                    self.recycle_reader_halo(halo);
+                }
+                self.release_oversized_halo_storage();
+                return Err(e);
+            }
+        };
+        stats.encode_ms += s.encode_ms;
+        stats.render_ms += s.render_ms;
+        stats.prepare_masks_ms += s.prepare_masks_ms;
+        stats.vello_render_ms += s.vello_render_ms;
+        stats.reader_ms += s.reader_ms;
+        stats.shadow_ms += s.shadow_ms;
+        stats.submit_ms += s.submit_ms;
+        stats.draws += s.draws;
+        stats.vello_renders += s.vello_renders;
+        stats.bg_blur_ops += s.bg_blur_ops;
+        stats.shadow_ops += s.shadow_ops;
+        stats.shadow_hits += s.shadow_hits;
+        let mut halo = self.reader_halo.take().expect("wide blur halo");
+        let blurred = std::mem::take(&mut halo.blurred);
+        self.recycle_reader_halo(halo);
+        self.release_oversized_halo_storage();
+        self.trim_pools(GPU_POOL_KEEP_BYTES);
+        self.readers.flush_retired();
+        self.wide_blur = Some(WideBlurState::Ready(Box::new(WideBlurCache {
+            level: build.plan.level,
+            cap_grid: build.plan.cap_grid,
+            cover_grid: build.plan.cover_grid,
+            vis_tiles_grid: build.plan.vis_tiles_grid,
+            inputs: build.inputs,
+            targets: build.plan.targets,
+            apron_glass_safe: build.plan.apron_glass_safe,
+            residual_readers: build.plan.residual_readers,
+            blurred,
+        })));
+        Ok(true)
+    }
+
+    fn sample_wide_blur_patch(&self, reader: Option<(u32, usize)>, draw: &BlurReaderDraw) -> Option<BlurHaloSample> {
+        let reader = reader?;
+        let Some(WideBlurState::Ready(cache)) = self.wide_blur.as_ref() else {
+            return None;
+        };
+        let active = self.active.as_ref()?;
+        if active.draw_level != Some(cache.level) {
+            return None;
+        }
+        let (nx, ny) = active.draw_grid_origin?;
+        let patch = cache.blurred.get(&reader)?;
+        let cap_d2_origin = (cache.cap_grid.x0 / 2, cache.cap_grid.y0 / 2);
+        let inv = 0.5f32;
+        let offset = (
+            ((i64::from(draw.origin.0) - nx) as f64 * 0.5 - f64::from(cap_d2_origin.0) - f64::from(patch.origin.0))
+                as f32,
+            ((i64::from(draw.origin.1) - ny) as f64 * 0.5 - f64::from(cap_d2_origin.1) - f64::from(patch.origin.1))
+                as f32,
+        );
+        let min_x = (draw.dirty.x0 as f32 + 0.5) * inv + offset.0;
+        let min_y = (draw.dirty.y0 as f32 + 0.5) * inv + offset.1;
+        let max_x = (draw.dirty.x1 as f32 - 0.5) * inv + offset.0;
+        let max_y = (draw.dirty.y1 as f32 - 0.5) * inv + offset.1;
+        if min_x < -1.5 || min_y < -1.5 || max_x > patch.size.0 as f32 + 1.5 || max_y > patch.size.1 as f32 + 1.5 {
+            return None;
+        }
+        Some(BlurHaloSample {
+            view: patch.view.clone(),
+            view_id: patch.view_id,
+            size: patch.size,
+            inv,
+            offset,
+        })
+    }
+
+    /// Releases what `run` captured, finished or not (a paused pass is dropped), and keeps the
+    /// sample bounds of a frame that finished.
+    #[inline(never)]
+    fn end_reader_halo(&mut self, run: &mut HaloRun, plan: &ViewportHaloPlan, finished: bool) {
+        if run.pass.take().is_some_and(|pass| pass.paused.is_some()) {
+            self.drop_walk();
+        }
+        let halo = self.reader_halo.take().expect("reader halo");
+        self.recycle_reader_halo(halo);
         self.release_oversized_halo_storage();
         self.trim_pools(GPU_POOL_KEEP_BYTES);
         self.readers.flush_retired();
@@ -7180,7 +7734,7 @@ impl Gpu {
         let bh = (dirty.y1 - dirty.y0) as u32;
         self.ensure_reader_tex(2, bw, bh, "")?;
         let blur_sigma = tier.map_or(sigma, |t| halo::compensate_halo_sigma(sigma, t.render_divisor));
-        let clip_info = draw.halo_clip_bounds(tier, within, blur_sigma);
+        let clip_info = draw.halo_clip_bounds(tier, within, blur_sigma, tier.is_none());
         let sample = draw.source_rect(dirty);
         let (src_view, src_id, src_size, crop_origin, clamp_bounds, edge, key) =
             self.prefilter_halo_blur_source(encoder, reader, tier, draw, sample, blur_sigma, clip_info)?;
@@ -7612,18 +8166,23 @@ impl Gpu {
         self.atlas.at = (0, 0, 0);
         self.scene.reset_and_resize(whole.width, whole.height);
         self.readers.begin_frame();
-        self.backdrop_gen += 1;
+        self.bump_backdrop_gen();
         if !capturing {
             self.begin_frame_timestamp();
         }
+        let display_area = padded.map(|((x, y), _)| IRect {
+            x0: x as i32,
+            y0: y as i32,
+            x1: (x + width) as i32,
+            y1: (y + height) as i32,
+        });
+        let grid_pad = display_area.map_or((0, 0), |d| (d.x0, d.y0));
         self.begin_active(
             (padded.is_none() && !capturing).then_some(dst),
-            padded.map(|((x, y), _)| IRect {
-                x0: x as i32,
-                y0: y as i32,
-                x1: (x + width) as i32,
-                y1: (y + height) as i32,
-            }),
+            display_area,
+            None,
+            grid_pad,
+            whole.view,
             w,
             h,
             background,
@@ -7847,6 +8406,7 @@ impl Gpu {
         halo: i32,
         options: TiledOptions,
         drag: Option<&DragFrame>,
+        wide_plan: Option<&halo::WideBlurPlan>,
     ) -> Result<DrawStats> {
         self.check()?;
         let from_whole = self.sliced_frame.is_some() || self.whole_reader_halo || self.pending_whole.is_some();
@@ -7934,8 +8494,13 @@ impl Gpu {
             (w, h),
             zooming || opening,
             plan_last,
-            // No off-screen prefetch while tiles carry a wide apron: each costs many tiles.
-            options.prefetch && !coarse_moving && !opening && i64::from(halo) <= i64::from(store.limits.halo),
+            // No off-screen prefetch while tiles carry a wide apron or share a wide-blur cache.
+            options.prefetch
+                && !coarse_moving
+                && !opening
+                && wide_plan.is_none()
+                && self.wide_blur.is_none()
+                && i64::from(halo) <= i64::from(store.limits.halo),
             coarse_moving,
         ) else {
             if standin_on_limit {
@@ -7960,6 +8525,7 @@ impl Gpu {
         // Nothing to draw and the frame shown is this one, exact: it stays.
         let same = !opening
             && self.pending_tile.is_none()
+            && !matches!(self.wide_blur, Some(WideBlurState::Building(_)))
             && plan.jobs.is_empty()
             && selection.is_none()
             && last.is_some_and(|l| l.view == view && l.size == (w, h))
@@ -7985,9 +8551,60 @@ impl Gpu {
         let bake_t0 = now();
         let walk_budget = self.walk_budget_ms(options.budget_ms);
         let deadline = budgeted.then_some(bake_t0 + walk_budget);
+        let mut wide_paused = false;
+        if options.moving {
+            self.abort_wide_blur_building();
+        } else if composite_only {
+            if matches!(self.wide_blur, Some(WideBlurState::Building(_))) {
+                wide_paused = true;
+            }
+        } else if let Some(wp) = wide_plan {
+            let ready = if let Some(WideBlurState::Ready(c)) = self.wide_blur.as_mut()
+                && c.covers(wp, inputs)
+            {
+                c.vis_tiles_grid = wp.vis_tiles_grid;
+                c.apron_glass_safe = wp.apron_glass_safe;
+                c.residual_readers.clone_from(&wp.residual_readers);
+                true
+            } else {
+                false
+            };
+            if !ready {
+                let need_wide = self.pending_tile.is_some() || plan.jobs.iter().any(|j| !j.detail && !j.rough);
+                if !need_wide {
+                    if !matches!(self.wide_blur.as_ref(), Some(WideBlurState::Ready(c)) if c.inputs == inputs) {
+                        self.abort_wide_blur();
+                    }
+                } else {
+                    self.abort_pending_tile();
+                    let same_build = matches!(
+                        self.wide_blur.as_ref(),
+                        Some(WideBlurState::Building(b)) if b.inputs == inputs && b.plan == *wp
+                    );
+                    if !same_build {
+                        self.abort_wide_blur();
+                        self.wide_blur = Some(WideBlurState::Building(Box::new(WideBlurBuild {
+                            plan: wp.clone(),
+                            inputs,
+                            background,
+                            pass: None,
+                        })));
+                    }
+                    self.deadline_ms = deadline;
+                    let step = self.step_wide_blur(store, budgeted, &mut stats);
+                    self.deadline_ms = None;
+                    if !or_standin!(step) {
+                        wide_paused = true;
+                    }
+                }
+            }
+        } else {
+            self.abort_wide_blur();
+        }
         // Drop a paused tile only when it no longer matches any desired job for this camera/halo
         // (and never drop it during a composite-only present call).
         if !composite_only
+            && !wide_paused
             && let Some(pt) = self.pending_tile.as_ref()
             && (pt.halo != frame_halo
                 || !plan.jobs.iter().any(|j| {
@@ -8024,6 +8641,7 @@ impl Gpu {
         // shown inexact, never old, until every tile is in. No budget: drawn at once, as before.
         let direct_sliced = plan.direct
             && !options.moving
+            && !wide_paused
             && selection.is_none()
             && (options.budget_ms >= 1.0 || options.budget_ms < 0.0);
         self.pass_budget = motion_capped.then_some(MOVING_PASSES);
@@ -8032,7 +8650,7 @@ impl Gpu {
         let mut unfinished_must = false;
         // Tiles nothing stands in for drawn this frame (moving frames draw one past their passes).
         let mut must_drawn = 0u32;
-        if !composite_only {
+        if !composite_only && !wide_paused {
             // If we have a paused tile matching a job in this plan, resume it first so earlier
             // work completes cleanly before starting a new tile.
             let mut resumed_key: Option<TileKey> = None;
@@ -8276,12 +8894,18 @@ impl Gpu {
                 }
             }
         } else {
-            // Composite-only presentation: keep any paused tile intact and note remaining work.
-            if self.pending_tile.is_some() {
+            // Composite-only presentation or paused wide-blur build: keep paused work intact.
+            if self.pending_tile.is_some() || wide_paused {
                 stats.in_progress = true;
+            }
+            if wide_paused {
+                unfinished_must = true;
             }
             for job in &plan.jobs {
                 if job.must {
+                    if wide_paused {
+                        self.tiles.mark_unpainted(job.key);
+                    }
                     unfinished_must = true;
                 } else {
                     stats.queued += 1;
@@ -8428,7 +9052,7 @@ impl Gpu {
         let mut slowest_tile: Option<f64> = None;
         let t1 = now();
         let mut present_encoder = None;
-        if plan.direct && !direct_moving && !direct_sliced {
+        if plan.direct && !direct_moving && !direct_sliced && !wide_paused {
             stats.plan = 2;
         } else {
             // What's drawn straight into the frame after it covers its tile there: the composite
@@ -8645,6 +9269,7 @@ impl Gpu {
         background: [f32; 4],
         generation: u64,
         halo: i32,
+        wide_plan: Option<&halo::WideBlurPlan>,
         budget_ms: f64,
     ) -> Result<DrawStats> {
         self.check()?;
@@ -8684,7 +9309,7 @@ impl Gpu {
             last.size,
             opening,
             plan_last,
-            !opening && i64::from(halo) <= i64::from(store.limits.halo),
+            !opening && wide_plan.is_none() && i64::from(halo) <= i64::from(store.limits.halo),
             false,
         ) else {
             return Ok(stats);
@@ -8701,6 +9326,61 @@ impl Gpu {
         let budgeted = budget_ms > 0.0;
         let walk_budget = self.walk_budget_ms(budget_ms);
         let deadline = budgeted.then_some(t0 + walk_budget);
+        if let Some(wp) = wide_plan {
+            let ready = if let Some(WideBlurState::Ready(c)) = self.wide_blur.as_mut()
+                && c.covers(wp, inputs)
+            {
+                c.vis_tiles_grid = wp.vis_tiles_grid;
+                c.apron_glass_safe = wp.apron_glass_safe;
+                c.residual_readers.clone_from(&wp.residual_readers);
+                true
+            } else {
+                false
+            };
+            if !ready {
+                let need_wide = !opening
+                    && (self.pending_tile.is_some() || plan.jobs.iter().any(|j| !j.direct && !j.detail && !j.rough));
+                if !need_wide {
+                    if !matches!(self.wide_blur.as_ref(), Some(WideBlurState::Ready(c)) if c.inputs == inputs) {
+                        self.abort_wide_blur();
+                    }
+                } else {
+                    self.abort_pending_tile();
+                    let same_build = matches!(
+                        self.wide_blur.as_ref(),
+                        Some(WideBlurState::Building(b)) if b.inputs == inputs && b.plan == *wp
+                    );
+                    if !same_build {
+                        self.abort_wide_blur();
+                        self.wide_blur = Some(WideBlurState::Building(Box::new(WideBlurBuild {
+                            plan: wp.clone(),
+                            inputs,
+                            background,
+                            pass: None,
+                        })));
+                    }
+                    self.deadline_ms = deadline;
+                    let step = self.step_wide_blur(store, budgeted, &mut stats);
+                    self.deadline_ms = None;
+                    if !step? {
+                        stats.pending = self.tiles.left(&plan).0.max(1);
+                        stats.in_progress = true;
+                        stats.held = self.tiles.len() as u32;
+                        stats.evicted = self.tiles.stats.evicted;
+                        stats.submits = self.submits.saturating_sub(submits0);
+                        if stats.submits > 0 {
+                            self.note_submitted();
+                        }
+                        stats.cpu_ms = now() - t0;
+                        self.scene.reset();
+                        self.check()?;
+                        return Ok(stats);
+                    }
+                }
+            }
+        } else {
+            self.abort_wide_blur();
+        }
         // Ahead can't finish a direct tile. Let the caller present it, even when
         // there is optional work left that could otherwise keep ahead reporting progress.
         let mut needs_direct = plan.jobs.iter().any(|j| j.direct);
@@ -8984,6 +9664,28 @@ impl Gpu {
     /// Draws one tile: the scene under its view (`TILE + 2 * halo` a side into `self.scratch`),
     /// then copies the middle `TILE` × `TILE` pixels into its slot (or straight into frame
     /// texture `dst`). Answers whether it was drawn exactly (no level of detail stood in).
+    fn tile_apron_config(&self, store: &Store, view: Affine, key: TileKey, halo: i32, rough: bool) -> (i32, bool) {
+        if halo <= 0 || rough {
+            return (0, false);
+        }
+        if !store.has_context()
+            && let Some(WideBlurState::Ready(cache)) = self.wide_blur.as_ref()
+            && crate::tiles::Level::of(view).is_some_and(|(lvl, _)| lvl == cache.level)
+        {
+            return (cache.halo_for_tile(key.i, key.j, halo), cache.apron_glass_safe);
+        }
+        let tile_halo = if !store.has_context()
+            && !store.has_reader_in_rect(
+                view,
+                Rect::new(-2.0, -2.0, f64::from(TILE) + 2.0, f64::from(TILE) + 2.0),
+            ) {
+            0
+        } else {
+            halo
+        };
+        (tile_halo, false)
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn draw_tile(
         &mut self,
@@ -9002,25 +9704,10 @@ impl Gpu {
         verbs: &mut usize,
     ) -> Result<bool> {
         let t0 = now();
-        // Only tiles that actually overlap a backdrop reader (or carry export context) need the
-        // haloed scratch size. Non-reader tiles produce bit-identical pixels at `TILE` and never
-        // allocate reader backdrop targets; reader tiles in an exact frame keep uniform `halo`
-        // (including ladder prefetch tiles) so reader frame targets never reallocate mid-frame.
-        let tile_halo = if halo <= 0
-            || (!store.has_context()
-                && !store.has_reader_in_rect(
-                    view,
-                    Rect::new(-2.0, -2.0, f64::from(TILE) + 2.0, f64::from(TILE) + 2.0),
-                )) {
-            0
-        } else {
-            halo
-        };
+        let (tile_halo, clip_apron_glass) = self.tile_apron_config(store, view, key, halo, false);
+        let clip_apron_glass = clip_apron_glass && !matches!(target, TileTarget::ScratchOnly);
         let h = tile_halo as u32;
         let side = TILE + 2 * h;
-        // Every tile renders into the active scratch slot (ensured before walking so mid-tile
-        // reader flushes can target it directly).
-        self.begin_scratch_draw(side, background, coarse_readers)?;
         let tile = Frame {
             width: side as u16,
             height: side as u16,
@@ -9033,6 +9720,9 @@ impl Gpu {
                 y1: side as i32,
             },
         };
+        // Every tile renders into the active scratch slot (ensured before walking so mid-tile
+        // reader flushes can target it directly).
+        self.begin_scratch_draw(side, tile_halo, clip_apron_glass, tile.view, background, coarse_readers)?;
         if !coarse_readers
             && tile_halo > 0
             && let Err(e) = self.prepare_glass_masks(store, &tile)
@@ -9133,20 +9823,9 @@ impl Gpu {
         let t0 = now();
         *verbs = store.limits.frame_verbs;
         // A rough stand-in reads nothing, so it needs no apron.
-        let tile_halo = if halo <= 0
-            || job.rough
-            || (!store.has_context()
-                && !store.has_reader_in_rect(
-                    job.view,
-                    Rect::new(-2.0, -2.0, f64::from(TILE) + 2.0, f64::from(TILE) + 2.0),
-                )) {
-            0
-        } else {
-            halo
-        };
+        let (tile_halo, clip_apron_glass) = self.tile_apron_config(store, job.view, job.key, halo, job.rough);
         let h = tile_halo as u32;
         let side = TILE + 2 * h;
-        self.begin_scratch_draw(side, background, coarse_readers)?;
         let tile = Frame {
             width: side as u16,
             height: side as u16,
@@ -9159,6 +9838,7 @@ impl Gpu {
                 y1: side as i32,
             },
         };
+        self.begin_scratch_draw(side, tile_halo, clip_apron_glass, tile.view, background, coarse_readers)?;
         if !coarse_readers
             && tile_halo > 0
             && let Err(e) = self.prepare_glass_masks(store, &tile)
@@ -9675,7 +10355,7 @@ impl Gpu {
         let sub = active.submit_ms - sub0;
         active.vello_render_ms += (now() - t0 - sub).max(0.0);
         if needs_clear || (draw && (write_backdrop || (!active.backdrop_live && root))) {
-            self.backdrop_gen += 1;
+            self.bump_backdrop_gen();
         }
         if self.in_use_bytes >= GPU_TEMP_FLUSH_BYTES
             || !self.temp_textures.is_empty()
@@ -9869,6 +10549,8 @@ impl Gpu {
             write_backdrop.then(|| clone_plane(true)).transpose()?,
         ];
         let active = self.active.as_ref().expect("active draw");
+        let grid_pad = active.grid_pad;
+        let draw_grid_origin = active.draw_grid_origin;
         let source = self.reader_source(base, active)?;
         let source_written = targets
             .iter()
@@ -9882,6 +10564,8 @@ impl Gpu {
             interiors,
             source_is_frame,
             source_written,
+            grid_pad,
+            draw_grid_origin,
             targets,
         }))
     }
@@ -10125,7 +10809,7 @@ impl Gpu {
         }
         self.stash_encoder(encoder);
         if write_backdrop || (write_main && root && !self.active.as_ref().expect("active draw").backdrop_live) {
-            self.backdrop_gen += 1;
+            self.bump_backdrop_gen();
         }
         if let Some(a) = self.active.as_mut() {
             a.draws += blend_draws;
@@ -10355,6 +11039,7 @@ impl Gpu {
             main: up_main,
             backdrop: up_backdrop,
             isolation,
+            clip_to_parent: false,
             previous_targets,
         };
         if !tail_steps.is_empty() {
@@ -11746,7 +12431,7 @@ impl Backend for Gpu {
                     GpuReaders::encode_clear(&mut encoder, &back.view, wgpu::Color::TRANSPARENT);
                 }
                 self.stash_encoder(encoder);
-                self.backdrop_gen += 1;
+                self.bump_backdrop_gen();
                 if let Some(act) = self.active.as_mut() {
                     act.needs_clear = false;
                     act.backdrop_live = true;
@@ -11791,7 +12476,7 @@ impl Backend for Gpu {
             },
         );
         self.stash_encoder(encoder);
-        self.backdrop_gen += 1;
+        self.bump_backdrop_gen();
         if let Some(a) = self.active.as_mut() {
             a.backdrop_live = true;
             a.backdrop_opaque = a.main_opaque;
@@ -11806,8 +12491,7 @@ impl Backend for Gpu {
     fn stop_early(&self) -> bool {
         self.reader_halo
             .as_ref()
-            .and_then(|h| h.strip_capture.as_ref())
-            .is_some_and(|s| s.captured.is_some())
+            .is_some_and(|h| h.wide_done || h.strip_capture.as_ref().is_some_and(|s| s.captured.is_some()))
     }
 
     fn deadline_reached(&self) -> bool {
@@ -11968,8 +12652,13 @@ impl Backend for Gpu {
                 "a backdrop reader inside a layer that fades as one",
             ));
         }
-        if self.reader_halo.as_ref().is_some_and(|h| h.strip_capture.is_some()) {
-            // Glass never writes to the glass-free backdrop (rule b*), so edge strips skip it.
+        if self
+            .reader_halo
+            .as_ref()
+            .is_some_and(|h| h.strip_capture.is_some() || h.wide_capture)
+        {
+            // Glass never writes to the glass-free backdrop (rule b*), so edge strips and
+            // world-grid wide-blur captures skip it.
             return Ok(());
         }
         self.flush_why = 10;
@@ -12137,12 +12826,19 @@ impl Backend for Gpu {
             return Ok(());
         }
         let origin = self.scene_offset();
-        // Root glass writes only to the displayed plane. Inside an isolate,
-        // keep its effect halo because a later filter can read those pixels.
+        // Glass writes only to the main (non-backdrop) plane. Outside spatial
+        // post-effect scopes (`clip_to_parent == false`), pixels outside the
+        // displayed area cannot affect output (provided `apron_glass_safe`).
+        let clip_glass_to_display = self.offscreen_stack.iter().all(|s| s.clip_to_parent);
         let output = active
-            .display_area
-            .filter(|_| self.offscreen_stack.is_empty())
+            .glass_display_area
+            .or(active.display_area)
+            .filter(|_| clip_glass_to_display)
+            .map(|area| area.intersect(self.target_bounds()))
             .unwrap_or_else(|| self.target_bounds());
+        if output.is_empty() {
+            return Ok(());
+        }
         let high_origin = active.display_area.map_or((0, 0), |area| (area.x0, area.y0));
         let high_scale = device.determinant().abs().sqrt() as f32;
         if !(high_scale > 0.0 && high_scale.is_finite()) {
@@ -12579,6 +13275,18 @@ impl Backend for Gpu {
 
             let opaque_target =
                 self.reader_target_opaque(within) && sample_clip.is_none_or(|w| w.fill.is_none_or(|c| c[3] == 255));
+            if low_prefix.is_none() && backdrop_is_frame {
+                self.flush_backdrop_blur_written();
+            }
+            let quad_phase = self.active.as_ref().and_then(|a| a.draw_grid_origin).map_or(
+                ((origin.0 & 1) as u32, (origin.1 & 1) as u32),
+                |(nx, ny)| {
+                    (
+                        ((i64::from(origin.0) - nx) & 1) as u32,
+                        ((i64::from(origin.1) - ny) & 1) as u32,
+                    )
+                },
+            );
             let mut encoder = self.take_encoder("reader glass");
             let clip_arg = clip_mask.as_ref().map(|m| (&m.view, m.view_id, m.origin));
             self.readers.encode_glass(
@@ -12592,6 +13300,7 @@ impl Backend for Gpu {
                 optical_frame,
                 (-sample_origin.0, -sample_origin.1),
                 (-origin.0, -origin.1),
+                quad_phase,
                 self.backdrop_gen,
                 low_prefix.is_none() && backdrop_is_frame,
                 &params,
@@ -12678,6 +13387,7 @@ impl Backend for Gpu {
             main,
             backdrop: None,
             isolation,
+            clip_to_parent,
             previous_targets,
         };
         if isolation.separate {
@@ -13624,6 +14334,12 @@ impl Backend for Gpu {
         if self.reader_halo.as_ref().is_some_and(|h| h.strip_capture.is_some()) {
             return Ok(());
         }
+        if let Some(h) = self.reader_halo.as_mut()
+            && h.wide_capture
+            && reader == h.wide_last
+        {
+            h.wide_done = true;
+        }
         let scale = device.determinant().abs().sqrt() as f32;
         if !(scale > 0.0 && scale.is_finite()) {
             return Ok(());
@@ -13655,8 +14371,12 @@ impl Backend for Gpu {
         // During a halo capture pass, skip blurs that neither belong to this tier nor feed any
         // later visible reader.
         if let Some(tier) = capture_tier {
-            let sigma_dev = sigma * tier.render_divisor as f32;
-            let in_tier = reader.is_some() && sigma_dev >= tier.unif_min_sigma && sigma_dev < tier.unif_max_sigma;
+            let in_tier = if self.reader_halo.as_ref().is_some_and(|h| h.wide_capture) {
+                reader.is_some_and(|key| self.reader_halo.as_ref().is_some_and(|h| h.wide_targets.contains(&key)))
+            } else {
+                let sigma_dev = sigma * tier.render_divisor as f32;
+                reader.is_some() && sigma_dev >= tier.unif_min_sigma && sigma_dev < tier.unif_max_sigma
+            };
             if !in_tier && !has_downstream {
                 return Ok(());
             }
@@ -13711,12 +14431,18 @@ impl Backend for Gpu {
         if clip.clipped_rect.is_empty() {
             return Ok(());
         }
-        let halo_sample = if coarse {
+        let mut halo_sample = if coarse {
             None
         } else {
             reader
                 .and_then(|reader| self.reader_halo.as_ref()?.blurred.get(&reader))
                 .and_then(|patch| self.sample_blur_halo(&draw, patch, patch.size))
+                .or_else(|| {
+                    capture_tier
+                        .is_none()
+                        .then(|| self.sample_wide_blur_patch(reader, &draw))
+                        .flatten()
+                })
         };
         if coarse || halo_sample.is_none() {
             if !coarse
@@ -13726,6 +14452,15 @@ impl Backend for Gpu {
                 && sigma >= self.reader_halo.as_ref().expect("reader halo").native_unif_cutover
             {
                 return Err(EngineError::limit("a visible background blur has no coarse backdrop"));
+            }
+            if !coarse
+                && capture_tier.is_none()
+                && let Some(key) = reader
+                && let Some(WideBlurState::Ready(cache)) = self.wide_blur.as_ref()
+                && self.active.as_ref().and_then(|a| a.draw_level) == Some(cache.level)
+                && cache.targets.contains(&key)
+            {
+                return Err(EngineError::limit("wide blur patch outside capture"));
             }
             self.resolve_blur_source(&mut draw, sigma, None)?;
         }
@@ -13741,6 +14476,9 @@ impl Backend for Gpu {
             self.encode_blur_reader_masks(&draw, paths, device, analytic.is_some(), &clip)?;
         let clip_arg = clip_mask.as_ref().map(|m| (&m.view, m.view_id, m.origin));
         if coarse {
+            if draw.source_is_frame {
+                self.flush_backdrop_blur_written();
+            }
             let opaque_target = self.reader_target_opaque(within);
             let budget = self.reader_budget_room();
             self.readers.encode_coarse_blur(
@@ -13766,32 +14504,103 @@ impl Backend for Gpu {
             )?;
         } else {
             if halo_sample.is_none() {
-                self.encode_single_blur_into_out(&mut encoder, reader, capture_tier, &draw, draw.dirty, sigma, within)?;
-                let capture = reader.and_then(|reader| {
-                    let tier = capture_tier?;
-                    let sigma_dev = sigma * tier.render_divisor as f32;
-                    let bounds = draw
-                        .dirty
-                        .translate(draw.origin.0, draw.origin.1)
-                        .intersect(tier.visible.inflate(2, 2));
-                    (sigma_dev >= tier.unif_min_sigma && sigma_dev < tier.unif_max_sigma && !bounds.is_empty())
-                        .then_some((reader, bounds, tier))
-                });
-                if let Some((reader, bounds, tier)) = capture {
-                    let origin = draw.frame_dirty_origin();
-                    let start = ((bounds.x0 - origin.0) as u32, (bounds.y0 - origin.1) as u32);
-                    if let Some(old) = self.capture_blurred_halo_patch(&mut encoder, reader, bounds, start, tier)? {
-                        // This encoder can still refer to the previous patch.
-                        self.stash_encoder(encoder);
-                        self.submit_active_encoder();
-                        self.recycle_halo_prefix(old);
-                        encoder = self.take_encoder("reader blur composite");
+                if draw.source_is_frame
+                    && let Some(written) = self.backdrop_blur_written
+                {
+                    let reach = blur::blur_reach_view_bg(sigma).min(1.0e7).ceil() as i32 + 2;
+                    if !written
+                        .intersect(draw.source_rect(draw.dirty).inflate(reach, reach))
+                        .is_empty()
+                    {
+                        self.bump_backdrop_gen();
+                    }
+                }
+                let fused = if capture_tier.is_none() && blur::choose_level_view_bg(sigma).0 > 0 {
+                    let (clamp_bounds, edge) = draw.bounds_and_edge(within, sigma, true);
+                    let sample = draw.source_rect(draw.dirty);
+                    let src_size = draw.source.bounds.size();
+                    let key = draw
+                        .source_is_frame
+                        .then(|| blur::PyramidKey::new(self.backdrop_gen, clamp_bounds, edge));
+                    let spec = BlurSpec {
+                        sigma,
+                        edge,
+                        clamp_bounds,
+                        dirty: sample,
+                    };
+                    let work = self.blur.estimate_view_bg_work_bytes(src_size, &spec, key);
+                    self.reserve_or_trim(work, 0, "backdrop Gaussian working textures")?;
+                    self.blur
+                        .encode_view_bg_level(
+                            &self.device,
+                            &mut encoder,
+                            &draw.source.plane.view,
+                            draw.source.plane.view_id,
+                            src_size,
+                            &spec,
+                            key,
+                        )?
+                        .map(|out| {
+                            let inv = out.inv_scale;
+                            let offset = (
+                                (sample.x0 - draw.dirty.x0 - out.cb_origin.0) as f32 * inv - out.blur_origin.0 as f32,
+                                (sample.y0 - draw.dirty.y0 - out.cb_origin.1) as f32 * inv - out.blur_origin.1 as f32,
+                            );
+                            BlurHaloSample {
+                                view: out.view,
+                                view_id: out.view_id,
+                                size: out.active_size,
+                                inv,
+                                offset,
+                            }
+                        })
+                } else {
+                    None
+                };
+                if let Some(sample) = fused {
+                    halo_sample = Some(sample);
+                } else {
+                    self.encode_single_blur_into_out(
+                        &mut encoder,
+                        reader,
+                        capture_tier,
+                        &draw,
+                        draw.dirty,
+                        sigma,
+                        within,
+                    )?;
+                    let capture = reader.and_then(|reader| {
+                        let tier = capture_tier?;
+                        let in_tier = if self.reader_halo.as_ref().is_some_and(|h| h.wide_capture) {
+                            self.reader_halo
+                                .as_ref()
+                                .is_some_and(|h| h.wide_targets.contains(&reader))
+                        } else {
+                            let sigma_dev = sigma * tier.render_divisor as f32;
+                            sigma_dev >= tier.unif_min_sigma && sigma_dev < tier.unif_max_sigma
+                        };
+                        let bounds = draw
+                            .dirty
+                            .translate(draw.origin.0, draw.origin.1)
+                            .intersect(tier.visible.inflate(2, 2));
+                        (in_tier && !bounds.is_empty()).then_some((reader, bounds, tier))
+                    });
+                    if let Some((reader, bounds, tier)) = capture {
+                        let origin = draw.frame_dirty_origin();
+                        let start = ((bounds.x0 - origin.0) as u32, (bounds.y0 - origin.1) as u32);
+                        if let Some(old) = self.capture_blurred_halo_patch(&mut encoder, reader, bounds, start, tier)? {
+                            // This encoder can still refer to the previous patch.
+                            self.stash_encoder(encoder);
+                            self.submit_active_encoder();
+                            self.recycle_halo_prefix(old);
+                            encoder = self.take_encoder("reader blur composite");
+                        }
                     }
                 }
             }
             let opaque_target = self.reader_target_opaque(within)
                 && (halo_sample.is_some()
-                    || !draw.bounds_and_edge(within, sigma).0.is_empty()
+                    || !draw.bounds_and_edge(within, sigma, capture_tier.is_none()).0.is_empty()
                     || within.is_some_and(|w| w.fill.is_some_and(|c| c[3] == 255)));
             let budget = self.reader_budget_room();
             for target in draw.targets.iter().flatten() {
@@ -13810,7 +14619,15 @@ impl Backend for Gpu {
             }
         }
         if draw.source_is_frame && draw.source_written {
-            self.backdrop_gen += 1;
+            if coarse || capture_tier.is_some() {
+                self.bump_backdrop_gen();
+            } else {
+                let written = draw.source_rect(draw.dirty);
+                self.backdrop_blur_written = Some(
+                    self.backdrop_blur_written
+                        .map_or(written, |prev| halo::rect_union(prev, written)),
+                );
+            }
         }
         self.stash_encoder(encoder);
         if let Some(a) = self.active.as_mut() {
@@ -13944,7 +14761,7 @@ impl Backend for Gpu {
                 // Resolve inherited scope prefix (#274) before taking the blur encoder.
                 self.resolve_blur_source(&mut draw, max_raw_stop_sigma, Some(active_dirty))?;
                 let max_stop_sigma = halo::compensate_halo_sigma(max_raw_stop_sigma, tier.render_divisor);
-                let clip_info = draw.halo_clip_bounds(Some(tier), within, max_stop_sigma);
+                let clip_info = draw.halo_clip_bounds(Some(tier), within, max_stop_sigma, false);
                 let mut encoder = self.take_encoder("progressive halo capture");
                 let cols = (stop_count as u32).clamp(1, 4);
                 let rows = (stop_count as u32).div_ceil(cols).max(1);
@@ -14092,7 +14909,7 @@ impl Backend for Gpu {
         // skip native blur passes, blur_out atlas allocation, and progressive tiling completely.
         if fast_halo_only {
             let opaque_target = self.reader_target_opaque(within)
-                && (!draw.bounds_and_edge(within, max_sigma).0.is_empty()
+                && (!draw.bounds_and_edge(within, max_sigma, false).0.is_empty()
                     || within.is_some_and(|w| w.fill.is_some_and(|c| c[3] == 255)));
             let chunk_side = if (width as usize).saturating_mul(height as usize) <= 6_000_000 {
                 width.max(height).max(1)
@@ -14131,7 +14948,7 @@ impl Backend for Gpu {
                 }
             }
             if draw.source_is_frame && draw.source_written {
-                self.backdrop_gen += 1;
+                self.bump_backdrop_gen();
             }
             self.stash_encoder(encoder);
             return Ok(());
@@ -14140,12 +14957,15 @@ impl Backend for Gpu {
         let max_resident_blur_sigma = capture_tier.map_or(max_resident_sigma, |tier| {
             halo::compensate_halo_sigma(max_resident_sigma, tier.render_divisor)
         });
-        let clip_info = draw.halo_clip_bounds(capture_tier, within, max_resident_blur_sigma);
+        let clip_info = draw.halo_clip_bounds(capture_tier, within, max_resident_blur_sigma, false);
         let cols = (resident as u32).clamp(1, 4);
         let rows = (resident as u32).div_ceil(cols).max(1);
         let budget = self.reader_budget_room();
         let tile_side = self.progressive_tile_side(width, height, cols, rows, budget);
         self.ensure_reader_tex(2, width.min(tile_side) * cols, height.min(tile_side) * rows, "")?;
+        if draw.source_is_frame {
+            self.flush_backdrop_blur_written();
+        }
         // Each tile reads the same prefix. Keep a copy when a previous tile can have
         // replaced part of the source used by the next tile's Gaussian, or when a reduced pass
         // needs sub-texel clip border/clamp prefiltering.
@@ -14252,7 +15072,7 @@ impl Backend for Gpu {
             }
         }
         if draw.source_is_frame && draw.source_written {
-            self.backdrop_gen += 1;
+            self.bump_backdrop_gen();
         }
         self.stash_encoder(encoder);
         if let Some(a) = self.active.as_mut() {

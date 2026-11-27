@@ -57,11 +57,26 @@ pub fn glass_mask_atlas_bytes(width: u32, height: u32) -> usize {
 /// lenses pack or the atlas exceeds `max_bytes` / `GLASS_MASK_ATLAS_MAX_BYTES`, the whole frame
 /// stays serial (empty plan).
 pub fn plan_glass_masks(store: &Store, frame: &Frame, max_texture_2d: u32, max_bytes: usize) -> GlassMaskPlan {
+    plan_glass_masks_clipped(store, frame, None, max_texture_2d, max_bytes)
+}
+
+/// Like `plan_glass_masks`, additionally restricting root (non-isolated) glass lenses to
+/// `root_display_area` when skipping apron-only root lenses is safe.
+pub fn plan_glass_masks_clipped(
+    store: &Store,
+    frame: &Frame,
+    root_display_area: Option<IRect>,
+    max_texture_2d: u32,
+    max_bytes: usize,
+) -> GlassMaskPlan {
     if store.readers().len() < 2 {
         return GlassMaskPlan::default();
     }
     let side = max_texture_2d.min(GLASS_MASK_ATLAS_SIDE);
     let frame_size = (i32::from(frame.width), i32::from(frame.height));
+    let root_target = root_display_area.map_or(((0, 0), frame_size), |a| {
+        ((a.x0, a.y0), ((a.x1 - a.x0).max(0), (a.y1 - a.y0).max(0)))
+    });
     let texture_limit = max_texture_2d.min(u32::from(u16::MAX));
     let cap_bytes = max_bytes.min(GLASS_MASK_ATLAS_MAX_BYTES);
 
@@ -94,6 +109,7 @@ pub fn plan_glass_masks(store: &Store, frame: &Frame, max_texture_2d: u32, max_b
         ancestors.clear();
         let mut at = id;
         let mut visible = true;
+        let mut isolated = false;
         let mut steps = 0usize;
         while at != ROOT {
             steps += 1;
@@ -110,6 +126,9 @@ pub fn plan_glass_masks(store: &Store, frame: &Frame, max_texture_2d: u32, max_b
                 visible = false;
                 break;
             }
+            if !r.post_effects.is_empty() {
+                isolated = true;
+            }
             chain.push(r.transform);
             ancestors.push(at);
             at = n.parent;
@@ -117,6 +136,7 @@ pub fn plan_glass_masks(store: &Store, frame: &Frame, max_texture_2d: u32, max_b
         if !visible {
             continue;
         }
+        let (target_origin, target_size) = if isolated { ((0, 0), frame_size) } else { root_target };
         let device = chain.iter().rev().fold(frame.view, |m, t| m * *t);
         let scale = device.determinant().abs().sqrt() as f32;
         if !(scale > 0.0 && scale.is_finite()) {
@@ -143,8 +163,8 @@ pub fn plan_glass_masks(store: &Store, frame: &Frame, max_texture_2d: u32, max_b
                 device,
                 record.size,
                 frame_size,
-                (0, 0),
-                frame_size,
+                target_origin,
+                target_size,
                 texture_limit,
                 HARD_MAX_REGION_PIXELS,
                 EXACT_SPLIT_SIDE,
@@ -393,11 +413,19 @@ pub fn glass_params(op: &GlassOp, scale: f32, inradius: f32) -> GlassParams {
 
 /// Conservative local-unit reach of a glass op past its box, for invalidation and band halos.
 pub fn local_halo(op: &GlassOp) -> f32 {
+    let (scale_halo, pad_px) = halo_parts(op);
+    (scale_halo + pad_px).ceil().max(0.0)
+}
+
+/// Splits a glass op's backdrop read reach into `(scale_factor, device_pad_px)` so its device
+/// reach at `scale` is `(scale_factor * scale + device_pad_px).ceil()`. Keeping the fixed mip and
+/// alignment pad in device pixels avoids multiplying constant pixel overhead by high zoom scales.
+pub fn halo_parts(op: &GlassOp) -> (f32, f32) {
     let inradius = if op.inradius > 0.0 { op.inradius } else { 100.0 };
     let p = glass_params(op, 1.0, inradius);
-    let mip_pad = if p.refraction > 0.0 { 16.0 } else { 0.0 } + (p.frost * 0.7).ceil();
-    let r = p.refraction * (1.0 + p.dispersion) * (1.0 + p.splay) + p.frost * 3.0 + mip_pad + 4.0;
-    r.ceil().max(0.0)
+    let scale_factor = p.refraction * (1.0 + p.dispersion) * (1.0 + p.splay) + p.frost * 3.7;
+    let device_pad = if p.refraction > 0.0 { 16.0 } else { 0.0 } + 4.0;
+    (scale_factor.max(0.0), device_pad)
 }
 
 /// How much the rim's blur can be downsampled: its Gaussian stays at least 3 pixels wide there.
@@ -500,28 +528,33 @@ pub fn compute_regions(
         .clamp(0.0, f64::from(i32::MAX / 4)) as i64;
     let pad = m + rim_pad;
     let (fw, fh) = (i64::from(frame_size.0), i64::from(frame_size.1));
-    let full_x0 = (-pad).max(min_x.floor().clamp(-1e12, 1e12) as i64 - m);
-    let full_y0 = (-pad).max(min_y.floor().clamp(-1e12, 1e12) as i64 - m);
-    let full_x1 = (fw + pad).min(max_x.ceil().clamp(-1e12, 1e12) as i64 + m);
-    let full_y1 = (fh + pad).min(max_y.ceil().clamp(-1e12, 1e12) as i64 + m);
-    let full_rw = full_x1 - full_x0;
-    let full_rh = full_y1 - full_y0;
-    if full_rw <= 0 || full_rh <= 0 || full_x1 <= 0 || full_y1 <= 0 || full_x0 >= fw || full_y0 >= fh {
+    let lens_x0 = min_x.floor().clamp(-1e12, 1e12) as i64 - m;
+    let lens_y0 = min_y.floor().clamp(-1e12, 1e12) as i64 - m;
+    let lens_x1 = max_x.ceil().clamp(-1e12, 1e12) as i64 + m;
+    let lens_y1 = max_y.ceil().clamp(-1e12, 1e12) as i64 + m;
+    let clip_x0 = (-pad).max(lens_x0);
+    let clip_y0 = (-pad).max(lens_y0);
+    let clip_x1 = (fw + pad).min(lens_x1);
+    let clip_y1 = (fh + pad).min(lens_y1);
+    if clip_x1 <= clip_x0 || clip_y1 <= clip_y0 || clip_x1 <= 0 || clip_y1 <= 0 || clip_x0 >= fw || clip_y0 >= fh {
         return Ok(Vec::new());
     }
     let k = i64::from(height_scale(params.sigma));
-    // A wide, clear lens can reach mip level three at its rim. Preserve the mip
-    // phase even when the lens is sliced: odd mip dimensions would stretch the
-    // sampling grid to the slice's full width. The alignment also preserves the
-    // low-resolution height grid when k is six.
-    let align_mips =
-        params.frost <= 0.4 && params.refraction > 0.0 && full_rw.max(full_rh) > i64::from(DEFAULT_CHUNK_SIDE);
+    // A clear refractive lens can reach mip level three at its rim. Anchor both
+    // the clipped origin and extent to the lens's own unclipped grid modulo
+    // `alignment` before clipping to the target margin, so whole frames, split
+    // tiles, and chunks share one mip and height-blur phase at every zoom
+    // regardless of tile apron size.
+    let align_mips = params.frost <= 0.4 && params.refraction > 0.0;
     let alignment = if align_mips { if k == 6 { 24 } else { 8 } } else { k };
+    let align_down = |edge: i64, origin: i64| edge - (edge - origin).rem_euclid(alignment);
     let align_up = |edge: i64, origin: i64| edge + (origin - edge).rem_euclid(alignment);
+    let full_x0 = align_down(clip_x0, lens_x0);
+    let full_y0 = align_down(clip_y0, lens_y0);
     let (full_x1, full_y1) = if align_mips {
-        (align_up(full_x1, full_x0), align_up(full_y1, full_y0))
+        (align_up(clip_x1, lens_x0), align_up(clip_y1, lens_y0))
     } else {
-        (full_x1, full_y1)
+        (clip_x1, clip_y1)
     };
     let full_rw = full_x1 - full_x0;
     let full_rh = full_y1 - full_y0;
@@ -2173,6 +2206,91 @@ mod tests {
         assert_ne!(single, backdrop);
         let worst = single.iter().zip(&chunked).map(|(a, b)| a.abs_diff(*b)).max().unwrap();
         assert!(worst <= 1, "chunked lens differs by {worst} levels");
+    }
+
+    #[test]
+    fn clear_lens_clipped_to_tile_keeps_whole_mip_and_height_phase() {
+        let op = GlassOp {
+            paths: vec![0],
+            even_odd: false,
+            kind: KIND_BOX,
+            inradius: 55.0,
+            angle: -45.0,
+            intensity: 80.0,
+            refraction: 80.0,
+            depth: 10.0,
+            dispersion: 0.0,
+            frost: 0.0,
+            splay: 0.0,
+            box_radii: [14.0; 4],
+            box_smoothing: [0.0; 4],
+            measured_inradius: std::cell::Cell::new(-1.0),
+        };
+        let size = [300.0, 110.0];
+        let frame = (800, 800);
+        for &zoom in &[1.4f64, 1.7, 2.0, 2.5, 3.0] {
+            let params = glass_params(&op, zoom as f32, op.inradius);
+            let k = i64::from(height_scale(params.sigma));
+            let alignment = if k == 6 { 24 } else { 8 };
+            let whole_view = Affine::scale(zoom) * Affine::translate((20.0, 150.0));
+            let whole = compute_regions(
+                &op,
+                &params,
+                whole_view,
+                size,
+                frame,
+                (0, 0),
+                frame,
+                HARD_MAX_REGION_SIDE,
+                HARD_MAX_REGION_PIXELS,
+                EXACT_SPLIT_SIDE,
+                EXACT_SPLIT_PIXELS,
+                EXACT_CHUNK_SIDE,
+            )
+            .unwrap();
+            assert!(!whole.is_empty());
+            let w0 = whole[0];
+            assert_eq!((i64::from(w0.rw) % alignment, i64::from(w0.rh) % alignment), (0, 0));
+            for &apron in &[32i32, 48, 64, 80, 96] {
+                let tile_origin_x = 512 - apron;
+                let tile_side = 512 + 2 * apron;
+                let tile_view = Affine::translate((-f64::from(tile_origin_x), 0.0)) * whole_view;
+                let tiled = compute_regions(
+                    &op,
+                    &params,
+                    tile_view,
+                    size,
+                    (tile_side, tile_side),
+                    (0, 0),
+                    (tile_side, tile_side),
+                    HARD_MAX_REGION_SIDE,
+                    HARD_MAX_REGION_PIXELS,
+                    EXACT_SPLIT_SIDE,
+                    EXACT_SPLIT_PIXELS,
+                    EXACT_CHUNK_SIDE,
+                )
+                .unwrap();
+                for r in &tiled {
+                    let world_x0 = i64::from(tile_origin_x) + i64::from(r.x0);
+                    let world_y0 = i64::from(r.y0);
+                    assert_eq!(
+                        (world_x0 - i64::from(w0.x0)).rem_euclid(alignment),
+                        0,
+                        "zoom={zoom} apron={apron} x phase mismatch"
+                    );
+                    assert_eq!(
+                        (world_y0 - i64::from(w0.y0)).rem_euclid(alignment),
+                        0,
+                        "zoom={zoom} apron={apron} y phase mismatch"
+                    );
+                    assert_eq!(
+                        (i64::from(r.rw) % alignment, i64::from(r.rh) % alignment),
+                        (0, 0),
+                        "zoom={zoom} apron={apron} size alignment mismatch"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
