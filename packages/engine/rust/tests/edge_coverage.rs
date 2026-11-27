@@ -106,6 +106,16 @@ fn a_large_circle_has_no_flat_chords() {
 }
 
 #[test]
+fn the_tolerance_is_in_device_pixels_at_1000_percent() {
+    // A 12 x 12 circle at 1000% (a 120 px disc): flattening works on the transformed curve, so
+    // the chords stay within 1/16 px of it on the device, however far the camera zooms.
+    let drawn = alpha(Entry::Ellipse { w: 12.0, h: 12.0 }, [12.0, 12.0], [0.0, 0.0], 10.0, 120);
+    let (worst, bias) = errors(&drawn, &disc(60.0, 60.0, 60.0, 120));
+    assert!(worst <= 16, "worst pixel {worst} levels from exact coverage");
+    assert!(bias.abs() <= 8.0, "edge pixels {bias:.2} levels from exact on average");
+}
+
+#[test]
 fn a_small_rounded_corner_is_round_at_1x() {
     // A 3-unit corner at 1x, where a quarter pixel draws each corner as one chord: the corner's
     // quarter disc against exact coverage, the straight sides being exact anyway.

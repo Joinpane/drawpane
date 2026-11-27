@@ -12,8 +12,9 @@ Changes:
 - `shader/flatten.wgsl`: replaced Vello 0.12's Euler-spiral flattener and GPU stroke expander with
   a direct WGSL port of `vello_common 0.4`'s `flatten_simd` (Wang/parabola-integral flattener at
   the vendored vello_common's 1/16 px tolerance, plus conservative-bbox viewport culling), so GPU
-  compute emits the same flattened line segments as `vello_cpu` and `vello_gpu` 0.4. All strokes
-  arrive pre-expanded as cached filled outlines (`src/stroke.rs`).
+  compute emits the same flattened line segments as `vello_cpu` and `vello_gpu` 0.4, to within
+  the 1/2048 px vello_common's grid snap moves them. All strokes arrive pre-expanded as cached
+  filled outlines (`src/stroke.rs`).
 - `shader/draw_leaf.wgsl`: computes linear gradient ramp coordinates via the full inverse affine
   transform (`transform_inverse`) instead of transforming endpoints forward under a similarity
   assumption, matching `vello_cpu`, `vello_gpu`, and Figma on skewed / non-uniformly scaled

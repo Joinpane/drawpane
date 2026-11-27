@@ -13,8 +13,16 @@ from crates.io, unchanged except:
   The CPU (`vello_cpu`), WebGPU and WebGL2 (`vello_gpu`) backends all flatten here, so they stay
   identical. The compute experiment's WGSL port (`vendor/vello_shaders/shader/flatten.wgsl`) and
   its native mirror test (`src/ordinary.rs`) carry the same constants.
+- `src/flatten.rs`: flattened points snap to a 1/1024 px grid in `f64` before they become `f32`
+  (`snap`). Points are rounded to `f32` at their absolute position, where `f32`'s step doubles
+  from one power of two to the next, so the same curve moved by whole pixels (a page drawn
+  against a shifted tile grid) could round a vertex differently and change an edge pixel by a
+  level; at 1/16 px there are enough vertices for that to show (the e2e "blended glyph runs keep
+  zero tile-edge seam" check). On the grid, whole-pixel moves are exact up to 8,192 px, and a
+  vertex moves at most 1/2048 px. The compute WGSL port doesn't snap: it stays within that of the
+  CPU's lines.
 - `assets/` (the `probe` feature's reference images) and `Cargo.toml.orig` are left out: the
   engine never enables `probe`.
 
-The patch is marked `Drawpane:` in the code. Upgrading Vello means taking the new release and
-carrying the patch again.
+Patches are marked `Drawpane:` in the code. Upgrading Vello means taking the new release and
+carrying the patches again.

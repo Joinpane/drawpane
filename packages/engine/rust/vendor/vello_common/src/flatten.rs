@@ -12,8 +12,8 @@ use log::warn;
 
 pub use crate::flatten_simd::FlattenCtx;
 
-// The current tolerance is set to 0.25. Since `sqrt` doesn't work in const contexts, we instead
-// hardcode the squared tolerance and derive the others from that.
+// Upstream's tolerance is 0.25. Since `sqrt` doesn't work in const contexts, we instead hardcode
+// the square root of the tolerance and derive the others from that.
 // Drawpane: a 1/16 px tolerance (upstream 0.25 px). Flattened chords always lie on the inner side
 // of a curve, so upstream's quarter pixel drew every small circle and rounded corner visibly
 // inside Figma's edge (an 8 px dot lost a sixth of its edge coverage). See VENDORED.md.
@@ -266,6 +266,21 @@ struct FlattenerCallback<'a> {
     is_nan: bool,
 }
 
+/// Drawpane: flattened points snap to a 1/1024 px grid, in `f64`, before they become `f32`. A
+/// curve's points are worked out in `f64` and then rounded to `f32` at their absolute position,
+/// and `f32`'s step doubles from one power of two to the next: the same curve moved by whole
+/// pixels (a page drawn against a shifted tile grid) could round a vertex differently and change
+/// an edge pixel by a level. On the grid, whole-pixel moves are exact up to 8,192 px, and a vertex
+/// moves at most 1/2048 px. See VENDORED.md.
+#[inline(never)]
+fn snap(p: kurbo::Point) -> Point {
+    const GRID: f64 = 1024.0;
+    Point::new(
+        ((p.x * GRID).round_ties_even() / GRID) as f32,
+        ((p.y * GRID).round_ties_even() / GRID) as f32,
+    )
+}
+
 impl Callback for FlattenerCallback<'_> {
     #[inline(always)]
     fn callback(&mut self, el: LinePathEl) {
@@ -273,14 +288,14 @@ impl Callback for FlattenerCallback<'_> {
             LinePathEl::MoveTo(p) => {
                 self.is_nan |= p.is_nan();
 
-                let p = p.into();
+                let p = snap(p);
                 self.start = p;
                 self.p0 = p;
             }
             LinePathEl::LineTo(p) => {
                 self.is_nan |= p.is_nan();
 
-                let p = p.into();
+                let p = snap(p);
                 self.line_buf.push(Line::new(self.p0, p));
                 self.p0 = p;
             }
