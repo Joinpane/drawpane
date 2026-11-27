@@ -275,7 +275,7 @@
   display: flex;
   align-items: center;
   gap: var(--space-200);
-  flex: 0 2 280px;
+  flex: 0 100000 280px;
   min-width: 160px;
   height: var(--size-control-lg);
   padding: 0 var(--space-300);
@@ -302,8 +302,8 @@
   color: var(--ink-muted);
   font: 500 11px / 14px var(--font-mono);
 }
-/* Tablet portrait (768px with sidebar) and narrow panes: wrap search onto a full-width row. */
-@container dash (max-width: 680px) {
+/* Tablet portrait (768px with sidebar) and narrow panes below 1024px: wrap search onto a full-width row. */
+@container dash (max-width: 719px) {
   .dash__header {
     flex-wrap: wrap;
     gap: var(--space-200);
@@ -742,8 +742,16 @@
   .dash__main {
     padding: var(--space-400);
   }
+  /* Phone layout (including 713-760 px windows): always wrap search onto row 2. */
   .dash__header {
+    flex-wrap: wrap;
+    gap: var(--space-200);
     margin-bottom: var(--space-400);
+  }
+  .dash__search {
+    order: 10;
+    flex: 1 1 100%;
+    min-width: 0;
   }
   /* Compact horizontal file tiles on phones so multiple files fit on the first screen
    * and per-file actions stay visible without hover. */

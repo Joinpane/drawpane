@@ -426,9 +426,68 @@ test.describe
         await page.waitForTimeout(150);
         expect(patchCount).toBe(1);
 
-        // 5. Save tap commits once.
+        // 5. Mouse press on Cancel, slide off, release, then click Save commits once.
         patchCount = 0;
         renameInput = await startRename("Rename via Blur");
+        await renameInput.fill("Slide Off Save");
+        const cancelBtn = page.getByRole("button", { name: "Cancel rename" });
+        const cancelBox = await cancelBtn.boundingBox();
+        expect(cancelBox).not.toBeNull();
+        if (cancelBox) {
+          await page.mouse.move(
+            cancelBox.x + cancelBox.width / 2,
+            cancelBox.y + cancelBox.height / 2,
+          );
+          await page.mouse.down();
+          await page.mouse.move(10, 10);
+          await page.mouse.up();
+        }
+        await expect(renameInput).toBeVisible();
+        expect(patchCount).toBe(0);
+        const slideSavePatch = page.waitForResponse(
+          (res) =>
+            res.request().method() === "PATCH" && res.url().endsWith(`/api/files/${matrixFileId}`),
+        );
+        await page.getByRole("button", { name: "Save name" }).click();
+        expect((await slideSavePatch).status()).toBe(200);
+        await expect(
+          page.locator(".dash__card").filter({ hasText: "Slide Off Save" }),
+        ).toBeVisible();
+        await page.waitForTimeout(150);
+        expect(patchCount).toBe(1);
+
+        // 6. Mouse press on Cancel, slide off, release, then click outside (blur) commits once.
+        patchCount = 0;
+        renameInput = await startRename("Slide Off Save");
+        await renameInput.fill("Slide Off Blur");
+        const cancelBox2 = await page.getByRole("button", { name: "Cancel rename" }).boundingBox();
+        expect(cancelBox2).not.toBeNull();
+        if (cancelBox2) {
+          await page.mouse.move(
+            cancelBox2.x + cancelBox2.width / 2,
+            cancelBox2.y + cancelBox2.height / 2,
+          );
+          await page.mouse.down();
+          await page.mouse.move(10, 10);
+          await page.mouse.up();
+        }
+        await expect(renameInput).toBeVisible();
+        expect(patchCount).toBe(0);
+        const slideBlurPatch = page.waitForResponse(
+          (res) =>
+            res.request().method() === "PATCH" && res.url().endsWith(`/api/files/${matrixFileId}`),
+        );
+        await page.getByRole("searchbox", { name: "Search files" }).click();
+        expect((await slideBlurPatch).status()).toBe(200);
+        await expect(
+          page.locator(".dash__card").filter({ hasText: "Slide Off Blur" }),
+        ).toBeVisible();
+        await page.waitForTimeout(150);
+        expect(patchCount).toBe(1);
+
+        // 7. Save tap commits once.
+        patchCount = 0;
+        renameInput = await startRename("Slide Off Blur");
         await renameInput.fill("Mobile Checkout");
         const savePatch = page.waitForResponse(
           (res) =>
@@ -626,6 +685,7 @@ test.describe
     test("768 px tablet portrait and long team/project names across phone, tablet and desktop", async ({
       browser,
     }) => {
+      test.setTimeout(120_000);
       const longTeamName = "Northwind Product Design and Research Collective Studio";
       const longProjectName = "Customer onboarding and lifecycle marketing experiments Q4 2026";
 
@@ -759,6 +819,78 @@ test.describe
             desktop.page.locator(".dash__header").getByRole("button", { name: "New file" }),
             1280,
           );
+
+          // Sweep 700-1440 px in 10 px steps: Recents and medium project name never truncate or overflow;
+          // very long project name may truncate but never overflows sideways.
+          const mediumProjectName = "Mobile app redesign";
+          const mediumProjectId = await ownerPage.evaluate(
+            async ({ tid, name }) => {
+              const res = await fetch(`/api/teams/${tid}/projects`, {
+                method: "POST",
+                headers: { "content-type": "application/json" },
+                body: JSON.stringify({ name }),
+              });
+              const data = await res.json();
+              return (data.id ?? data.project?.id) as string;
+            },
+            { tid: teamId, name: mediumProjectName },
+          );
+          const sweepRoutes: ReadonlyArray<{
+            label: string;
+            url: string;
+            heading: string;
+            allowTruncate: boolean;
+          }> = [
+            { label: "Recents", url: teamUrl, heading: "Recent files", allowTruncate: false },
+            {
+              label: "Medium project",
+              url: `${teamUrl}?project=${mediumProjectId}`,
+              heading: mediumProjectName,
+              allowTruncate: false,
+            },
+            {
+              label: "Long project",
+              url: `${teamUrl}?project=${longProjectId}`,
+              heading: longProjectName,
+              allowTruncate: true,
+            },
+          ];
+          for (const route of sweepRoutes) {
+            await desktop.page.goto(route.url);
+            await expect(desktop.page.getByRole("heading", { name: route.heading })).toBeVisible();
+            for (let w = 700; w <= 1440; w += 10) {
+              await desktop.page.setViewportSize({ width: w, height: 900 });
+              const metrics = await desktop.page.evaluate(
+                () =>
+                  new Promise<{
+                    titleScrollWidth: number;
+                    titleClientWidth: number;
+                    docScrollWidth: number;
+                    docClientWidth: number;
+                  }>((resolve) =>
+                    requestAnimationFrame(() => {
+                      const title = document.querySelector<HTMLElement>(".dash__title");
+                      resolve({
+                        titleScrollWidth: title?.scrollWidth ?? 0,
+                        titleClientWidth: title?.clientWidth ?? 0,
+                        docScrollWidth: document.documentElement.scrollWidth,
+                        docClientWidth: document.documentElement.clientWidth,
+                      });
+                    }),
+                  ),
+              );
+              expect(
+                metrics.docScrollWidth,
+                `${route.label} horizontal overflow at ${w}px`,
+              ).toBeLessThanOrEqual(metrics.docClientWidth);
+              if (!route.allowTruncate) {
+                expect(
+                  metrics.titleScrollWidth,
+                  `${route.label} title truncated at ${w}px`,
+                ).toBeLessThanOrEqual(metrics.titleClientWidth);
+              }
+            }
+          }
         } finally {
           await desktop.context.close();
         }

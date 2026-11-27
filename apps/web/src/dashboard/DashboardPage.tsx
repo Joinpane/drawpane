@@ -889,6 +889,29 @@ function FileCard({
   const [error, setError] = useState<string | null>(null);
   const finishing = useRef(false);
   const cancelling = useRef(false);
+  const cancelBtnRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    if (!renaming) return;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const onRelease = (e: PointerEvent | MouseEvent) => {
+      if (!cancelling.current) return;
+      const target = e.target;
+      if (target instanceof Node && cancelBtnRef.current?.contains(target)) return;
+      // Defer one tick so any blur or click triggered by the release still sees cancelling=true.
+      if (timer !== undefined) clearTimeout(timer);
+      timer = setTimeout(() => {
+        cancelling.current = false;
+      }, 0);
+    };
+    window.addEventListener("pointerup", onRelease, true);
+    window.addEventListener("mouseup", onRelease, true);
+    return () => {
+      window.removeEventListener("pointerup", onRelease, true);
+      window.removeEventListener("mouseup", onRelease, true);
+      if (timer !== undefined) clearTimeout(timer);
+    };
+  }, [renaming]);
 
   function startRename() {
     finishing.current = false;
@@ -1022,10 +1045,17 @@ function FileCard({
                 type="submit"
                 icon="check"
                 label="Save name"
-                onPointerDown={(e) => e.preventDefault()}
-                onMouseDown={(e) => e.preventDefault()}
+                onPointerDown={(e) => {
+                  cancelling.current = false;
+                  e.preventDefault();
+                }}
+                onMouseDown={(e) => {
+                  cancelling.current = false;
+                  e.preventDefault();
+                }}
               />
               <IconButton
+                ref={cancelBtnRef}
                 icon="close"
                 label="Cancel rename"
                 onPointerDown={(e) => {
