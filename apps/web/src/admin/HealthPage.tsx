@@ -10,6 +10,7 @@ import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import { api } from "../api/client";
 import { CopyField } from "../app/CopyField";
+import type { RendererPolicy } from "../editor/renderer-switch";
 import "./admin.css";
 
 type Period = "7" | "30" | "90";
@@ -207,8 +208,81 @@ export function HealthPage() {
         </div>
 
         {data ? <EmailPanel email={data.email} /> : null}
+        <RendererSettings />
       </main>
     </div>
+  );
+}
+
+function RendererSettings() {
+  const policy = useQuery({
+    queryKey: ["renderer-policy"],
+    queryFn: () => api.get<RendererPolicy>("/renderer-policy"),
+    refetchOnWindowFocus: false,
+  });
+  const save = useMutation({
+    mutationFn: (settings: RendererPolicy) =>
+      api.put<RendererPolicy>("/admin/renderer-policy", settings),
+  });
+  return (
+    <section className="admin__panel admin__renderer" aria-labelledby="renderer-settings-title">
+      <h2 id="renderer-settings-title" className="admin__heading">
+        Renderer settings
+      </h2>
+      <p className="admin__foot">
+        Reload an open file to apply changes immediately. Other tabs refresh their settings when
+        they return to the foreground or open a file with settings more than a minute old.
+      </p>
+      {policy.data ? (
+        <form
+          onSubmit={(event) => {
+            event.preventDefault();
+            const fields = new FormData(event.currentTarget);
+            const choice = fields.get("defaultRenderer");
+            save.mutate({
+              defaultRenderer: choice === "canvas" || choice === "engine" ? choice : null,
+              forceCanvas: fields.has("forceCanvas"),
+            });
+          }}
+          onChange={() => save.reset()}
+        >
+          <fieldset disabled={save.isPending}>
+            <label>
+              Default renderer
+              <select name="defaultRenderer" defaultValue={policy.data.defaultRenderer ?? ""}>
+                <option value="">Drawpane default</option>
+                <option value="canvas">Canvas</option>
+                <option value="engine">Render engine</option>
+              </select>
+            </label>
+            <label>
+              <input type="checkbox" name="forceCanvas" defaultChecked={policy.data.forceCanvas} />
+              Use Canvas for everyone
+            </label>
+            <p className="admin__foot">This overrides browser preferences and renderer links.</p>
+            <Button size="sm" type="submit" disabled={save.isPending}>
+              Save renderer settings
+            </Button>
+          </fieldset>
+        </form>
+      ) : (
+        <p className="admin__foot" role="status">
+          {policy.isError ? "Renderer settings couldn’t be loaded." : "Loading renderer settings…"}
+        </p>
+      )}
+      {save.isSuccess ? (
+        <p className="admin__foot" role="status">
+          Renderer settings saved.
+        </p>
+      ) : null}
+      {save.isError ? (
+        <p className="admin__foot" role="alert">
+          {save.error instanceof Error
+            ? save.error.message
+            : "Renderer settings couldn’t be saved."}
+        </p>
+      ) : null}
+    </section>
   );
 }
 

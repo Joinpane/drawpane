@@ -6,6 +6,7 @@ import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 import { ApiError } from "./api/client";
 import { UpdateBanner } from "./app/UpdateBanner";
+import { startRendererPolicy } from "./editor/renderer-policy";
 import { router } from "./router";
 
 const queryClient = new QueryClient({
@@ -22,6 +23,7 @@ const queryClient = new QueryClient({
 const root = document.getElementById("root");
 if (!root) throw new Error("missing #root");
 
+startRendererPolicy();
 createRoot(root).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>

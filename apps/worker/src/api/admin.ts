@@ -12,6 +12,8 @@ import type { EmailMessage, EmailSender } from "../email/message";
 import { emailSetup } from "../email/setup";
 import type { AppContext, Env } from "../env";
 import { badRequest, conflict, forbidden } from "../lib/http";
+import { readBody } from "./access";
+import { rendererPolicySchema, writeRendererPolicy } from "./renderer-policy";
 import { type AvailableUpdate, availableUpdate } from "./updates";
 
 const PERIODS = [7, 30, 90] as const;
@@ -202,6 +204,13 @@ function formatBytes(bytes: number): string {
 }
 
 export const admin = new Hono<AppContext>()
+  .put("/renderer-policy", async (c) => {
+    const user = requireUser(c);
+    if (!user.isAdmin) throw forbidden("Only the instance's admin can change renderer settings.");
+    const policy = await readBody(c, rendererPolicySchema);
+    await writeRendererPolicy(c.env.DB, policy);
+    return c.json(policy);
+  })
   .get("/health", async (c) => {
     const user = requireUser(c);
     if (!user.isAdmin) throw forbidden("Only the instance's admin can see its health.");

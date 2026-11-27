@@ -1363,6 +1363,9 @@
   font: var(--type-ui-label);
   color: var(--ink-muted);
 }
+.renderer-popover__switch {
+  margin-top: var(--space-300);
+}
 
 .sync {
   bottom: 12px;

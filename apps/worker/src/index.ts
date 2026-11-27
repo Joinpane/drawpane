@@ -4,6 +4,7 @@ import { ZodError } from "zod";
 import { requireFileRole } from "./api/access";
 import { admin } from "./api/admin";
 import { email } from "./api/email";
+import { readRendererPolicy } from "./api/renderer-policy";
 import { api } from "./api/routes";
 import { resolveShareToken } from "./api/share";
 import { account } from "./auth/account";
@@ -31,6 +32,11 @@ app.use("/api/*", secureHeaders({ crossOriginResourcePolicy: "same-origin" }));
 // Unsafe methods must come from this origin. Browsers already preflight
 // cross-origin JSON, so this is defence in depth against CSRF.
 app.use("/api/*", sameOrigin);
+// Renderer policy is public and needed before sign-in or any rendering starts.
+app.get("/api/renderer-policy", async (c) => {
+  c.header("Cache-Control", "no-store");
+  return c.json(await readRendererPolicy(c.env.DB));
+});
 app.use("/api/*", session);
 app.use("/ws/*", session);
 
@@ -173,11 +179,29 @@ app.notFound(async (c) => {
   if (pathname === "/diagnostics" || pathname.startsWith("/diagnostics/")) {
     const headers = new Headers(asset.headers);
     headers.set("X-Robots-Tag", "noindex, nofollow");
-    return new Response(asset.body, {
+    const rendererDiagnostics =
+      pathname === "/diagnostics/renderer" || pathname === "/diagnostics/renderer/";
+    if (rendererDiagnostics) headers.set("Cache-Control", "no-store");
+    const response = new Response(asset.body, {
       status: asset.status,
       statusText: asset.statusText,
       headers,
     });
+    if (!rendererDiagnostics || !asset.ok) return response;
+    // Keep the standalone diagnostics page free of browser API requests.
+    const policy = await readRendererPolicy(c.env.DB).catch(() => null);
+    return new HTMLRewriter()
+      .on("head", {
+        element(head) {
+          head.append(
+            `<meta name="drawpane-renderer-policy" content='${JSON.stringify(policy)}'>`,
+            {
+              html: true,
+            },
+          );
+        },
+      })
+      .transform(response);
   }
   return asset;
 });

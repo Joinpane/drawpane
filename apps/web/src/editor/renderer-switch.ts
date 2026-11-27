@@ -2,20 +2,62 @@
  * Render engine URL and storage switches, kept separate from `engine-view.ts` so the router
  * can read and persist them before the lazy-loaded editor bundle arrives.
  *
- * Precedence (highest first):
- * 1. URL query parameter (`?renderer=engine`, `?renderer=engine-compat`, `?renderer=engine-webgl`,
- *    `?renderer=engine-cpu`, `?renderer=canvas`; `?present=readback`, `?present=webgpu`). Setting
- *    one in the URL remembers it in `sessionStorage` for the rest of the tab session, so in-app
- *    navigation, dashboard-to-file opens, and sign-in redirects keep it.
- * 2. `sessionStorage["drawpane:renderer"]` / `sessionStorage["drawpane:engine-present"]`.
- * 3. `localStorage["drawpane:renderer"]` / `localStorage["drawpane:engine-present"]`.
- * 4. Defaults: `"canvas"` and `"webgpu"`.
- *
- * `?renderer=canvas` turns the engine back off for the session (clearing `sessionStorage`, or
- * storing `"canvas"` in `sessionStorage` when `localStorage` has an engine mode enabled).
+ * The instance can force Canvas. Otherwise the URL, session, browser preference, instance
+ * default, and built-in default are tried in that order. URL overrides follow the tab across
+ * navigation and sign-in redirects. Presentation and motion keep their own URL and storage switches.
  */
 
 export type RendererChoice = "canvas" | "engine" | "engine-compat" | "engine-webgl" | "engine-cpu";
+export type StandardRenderer = "canvas" | "engine";
+export interface RendererPolicy {
+  readonly defaultRenderer: StandardRenderer | null;
+  readonly forceCanvas: boolean;
+}
+export type RendererSource =
+  | "server"
+  | "url"
+  | "session"
+  | "local"
+  | "instance-default"
+  | "settings-unavailable"
+  | "built-in";
+export interface RendererSelection {
+  readonly choice: RendererChoice;
+  readonly source: RendererSource;
+}
+export const DEFAULT_RENDERER_POLICY: RendererPolicy = {
+  defaultRenderer: null,
+  forceCanvas: false,
+};
+
+// Null means the settings could not be read. Use Canvas for this route.
+let policy: RendererPolicy | null = DEFAULT_RENDERER_POLICY;
+let selected: RendererSelection | undefined;
+let selectedPath: string | undefined;
+let selectedUrlChoice: RendererChoice | undefined;
+let temporarySession: RendererChoice | undefined;
+
+export function rendererPolicy(): RendererPolicy | null {
+  return policy;
+}
+
+export function setRendererPolicy(value: RendererPolicy | null): void {
+  if (
+    policy?.defaultRenderer === value?.defaultRenderer &&
+    policy?.forceCanvas === value?.forceCanvas
+  )
+    return;
+  policy = value;
+  selected = undefined;
+}
+
+export function parseRendererPolicy(value: unknown): RendererPolicy | null {
+  if (typeof value !== "object" || value === null) return null;
+  const { defaultRenderer, forceCanvas } = value as Partial<RendererPolicy>;
+  if (defaultRenderer !== null && defaultRenderer !== "canvas" && defaultRenderer !== "engine")
+    return null;
+  return typeof forceCanvas === "boolean" ? { defaultRenderer, forceCanvas } : null;
+}
 export type PresentationMode = "webgpu" | "readback";
 /**
  * How interactive zoom/pan motion frames are rendered:
@@ -91,20 +133,24 @@ function getLocal(key: string): string | null {
   }
 }
 
-function rememberRenderer(choice: RendererChoice): void {
+function rememberRenderer(
+  choice: RendererChoice,
+  instanceDefault?: StandardRenderer | null,
+  keepCanvas = false,
+): void {
   try {
-    if (choice === "canvas") {
-      const stored = parseRenderer(getLocal(RENDERER_STORAGE_KEY));
-      if (stored && stored !== "canvas") {
-        sessionStorage.setItem(RENDERER_STORAGE_KEY, "canvas");
-      } else {
-        sessionStorage.removeItem(RENDERER_STORAGE_KEY);
-      }
-      return;
+    if (
+      choice === "canvas" &&
+      !keepCanvas &&
+      (parseRenderer(getLocal(RENDERER_STORAGE_KEY)) ?? instanceDefault ?? "canvas") === "canvas"
+    ) {
+      sessionStorage.removeItem(RENDERER_STORAGE_KEY);
+    } else {
+      sessionStorage.setItem(RENDERER_STORAGE_KEY, choice);
     }
-    sessionStorage.setItem(RENDERER_STORAGE_KEY, choice);
+    temporarySession = undefined;
   } catch {
-    // Storage blocked.
+    temporarySession = choice;
   }
 }
 
@@ -148,31 +194,86 @@ export function rememberRendererSwitches(search: string | URLSearchParams): void
   try {
     const params = typeof search === "string" ? readParams(search) : search;
     const renderer = parseRenderer(params.get("renderer"));
-    if (renderer) rememberRenderer(renderer);
-    const present = parsePresent(params.get("present"));
-    if (present) rememberPresent(present);
-    const motion = parseMotionPolicy(params.get("motion"));
-    if (motion) rememberMotionPolicy(motion);
+    if (renderer) rememberRenderer(renderer, policy?.defaultRenderer);
+    rememberRenderingDetails(params);
   } catch {
     // URL or storage unavailable.
   }
 }
 
-/** Which renderer the switch asks for. */
-export function rendererChoice(search?: string): RendererChoice {
+function rememberRenderingDetails(params: URLSearchParams): void {
+  const present = parsePresent(params.get("present"));
+  if (present) rememberPresent(present);
+  const motion = parseMotionPolicy(params.get("motion"));
+  if (motion) rememberMotionPolicy(motion);
+}
+
+/** Resolves the renderer once for a route, before any of its rendering surfaces start. */
+export function selectRenderer(
+  search?: string,
+  settings: RendererPolicy | null = policy,
+  keepCanvas = false,
+): RendererSelection {
+  if (settings?.forceCanvas) return { choice: "canvas", source: "server" };
+  if (settings === null) return { choice: "canvas", source: "settings-unavailable" };
   try {
     const url = parseRenderer(readParams(search).get("renderer"));
     if (url) {
-      rememberRenderer(url);
-      return url;
+      rememberRenderer(url, settings.defaultRenderer, keepCanvas);
+      return { choice: url, source: "url" };
     }
   } catch {
     // URL unavailable.
   }
-  const session = parseRenderer(getSession(RENDERER_STORAGE_KEY));
-  if (session) return session;
+  const session = temporarySession ?? parseRenderer(getSession(RENDERER_STORAGE_KEY));
+  if (session) return { choice: session, source: "session" };
   const stored = parseRenderer(getLocal(RENDERER_STORAGE_KEY));
-  return stored ?? "canvas";
+  if (stored) return { choice: stored, source: "local" };
+  if (settings.defaultRenderer)
+    return { choice: settings.defaultRenderer, source: "instance-default" };
+  return { choice: "canvas", source: "built-in" };
+}
+
+/** Runs in the router before a screen mounts, including before sign-in redirects. */
+export function selectRendererForLocation(path: string, search: string, keepCanvas = false): void {
+  const params = readParams(search);
+  const urlChoice = parseRenderer(params.get("renderer"));
+  if (!selected || path !== selectedPath || (urlChoice && urlChoice !== selectedUrlChoice)) {
+    selected = selectRenderer(search, policy, keepCanvas);
+    selectedPath = path;
+  }
+  selectedUrlChoice = urlChoice;
+  rememberRenderingDetails(params);
+}
+
+export function rendererSelection(): RendererSelection {
+  return selected ?? selectRenderer();
+}
+
+/** Which renderer the switch asks for. */
+export function rendererChoice(search?: string): RendererChoice {
+  return (search === undefined ? rendererSelection() : selectRenderer(search)).choice;
+}
+
+/** Reload with a browser preference, falling back to the URL if storage is blocked. */
+export function switchBrowserRenderer(choice: StandardRenderer): void {
+  const url = new URL(window.location.href);
+  let saved = false;
+  try {
+    localStorage.setItem(RENDERER_STORAGE_KEY, choice);
+    saved = true;
+  } catch {
+    // Use the URL if the browser won't save the preference.
+  }
+  try {
+    sessionStorage.removeItem(RENDERER_STORAGE_KEY);
+  } catch {
+    saved = false;
+  }
+  if (saved) url.searchParams.delete("renderer");
+  else url.searchParams.set("renderer", choice);
+  if (url.href === window.location.href) window.location.reload();
+  else window.location.replace(url.href);
 }
 
 /** Whether product flows should run on the render engine instead of CanvasRenderer. */

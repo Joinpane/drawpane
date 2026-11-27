@@ -41,14 +41,14 @@ import {
   type Transition,
 } from "@drawpane/model";
 import { isAbortError, renderEngineSnapshot } from "../editor/engine-snapshot";
-import {
-  EngineView,
-  IDLE_SLICE_MS,
-  REST_BUDGET_MS,
-  type RendererChoice,
-  rendererChoice,
-} from "../editor/engine-view";
+import { EngineView, IDLE_SLICE_MS, REST_BUDGET_MS } from "../editor/engine-view";
 import { mobileBacking, readMobileRendererMemory } from "../editor/renderer-memory";
+import { recordRendererBackend } from "../editor/renderer-status";
+import {
+  type RendererChoice,
+  type RendererSelection,
+  rendererSelection,
+} from "../editor/renderer-switch";
 import { shaper } from "../editor/shaping";
 import { watchDocumentFonts } from "../fonts/document-fonts";
 
@@ -126,7 +126,7 @@ export interface StageOptions extends StageCallbacks {
   readonly player: PrototypePlayer;
   readonly host: HTMLElement;
   readonly device: DeviceId;
-  /** Override the renderer switch (for tests). Defaults to `rendererChoice()`. */
+  /** Override the renderer switch for tests. Defaults to the app's renderer selection. */
   readonly choice?: RendererChoice;
   /** Override the engine overlay first-paint canvas-fallback deadline (ms, for tests). */
   readonly overlayFirstPaintDeadlineMs?: number;
@@ -170,6 +170,7 @@ export class PlayerStage {
   readonly #host: HTMLElement;
   readonly #callbacks: StageCallbacks;
   readonly #choice: RendererChoice;
+  readonly #selection: RendererSelection | undefined;
   readonly #useEngine: boolean;
   readonly #overlayFirstPaintDeadlineMs: number;
   #device: DeviceId;
@@ -219,7 +220,8 @@ export class PlayerStage {
     this.#host = options.host;
     this.#device = options.device;
     this.#callbacks = options;
-    this.#choice = options.choice ?? rendererChoice();
+    this.#selection = options.choice ? undefined : rendererSelection();
+    this.#choice = options.choice ?? this.#selection?.choice ?? "canvas";
     this.#useEngine = this.#choice !== "canvas";
     this.#overlayFirstPaintDeadlineMs =
       options.overlayFirstPaintDeadlineMs ?? OVERLAY_FIRST_PAINT_DEADLINE_MS;
@@ -401,6 +403,14 @@ export class PlayerStage {
   }
 
   #syncRendererAttrs(): void {
+    if (this.#selection) {
+      this.#deviceEl.dataset.rendererSource = this.#selection.source;
+      if (this.#screenDrawable) {
+        const backend =
+          !this.#useEngine || this.#usingFallbackCanvas ? "canvas" : this.#engine?.backend;
+        if (backend) recordRendererBackend(this.#selection, backend);
+      }
+    }
     if (!this.#useEngine) {
       this.#deviceEl.dataset.renderer = "canvas";
       this.#deviceEl.dataset.rendererAdapter = "";

@@ -1,11 +1,72 @@
 import { env, runDurableObjectAlarm } from "cloudflare:test";
 import type { NodeRecord, Op } from "@drawpane/model";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { type InstanceHealth, p95 } from "../src/api/admin";
-import { openSocket, signedInUser } from "./helpers";
+import { Browser, openSocket, signedInUser } from "./helpers";
 
 const makeAdmin = (userId: string) =>
   env.DB.prepare("UPDATE users SET is_admin = 1 WHERE id = ?").bind(userId).run();
+
+describe("renderer policy", () => {
+  const readPath = "/api/renderer-policy";
+  const writePath = "/api/admin/renderer-policy";
+  const settings = { defaultRenderer: "engine", forceCanvas: true };
+
+  afterEach(async () => {
+    await env.DB.prepare("DELETE FROM renderer_policy").run();
+  });
+
+  it("returns uncached settings without sign-in, including when the row is missing", async () => {
+    const browser = new Browser();
+    const initial = await browser.fetch(readPath);
+    expect(initial.status).toBe(200);
+    expect(initial.headers.get("Cache-Control")).toBe("no-store");
+    expect(await initial.json()).toEqual({ defaultRenderer: null, forceCanvas: false });
+
+    const admin = await signedInUser();
+    await makeAdmin(admin.userId);
+    expect(await admin.browser.json(writePath, { method: "PUT", json: settings })).toEqual(
+      settings,
+    );
+    expect(await browser.json(readPath)).toEqual(settings);
+  });
+
+  it("rejects non-admin, cross-site and malformed writes without changing the policy", async () => {
+    const admin = await signedInUser();
+    const member = await signedInUser("Bo", "editor", admin.teamId);
+    await makeAdmin(admin.userId);
+    const update = { method: "PUT", json: settings };
+    expect((await member.browser.fetch(writePath, update)).status).toBe(403);
+    expect(
+      (
+        await admin.browser.fetch(writePath, {
+          ...update,
+          headers: { Origin: "https://unrelated.example" },
+        })
+      ).status,
+    ).toBe(403);
+    for (const json of [
+      { defaultRenderer: "cpu", forceCanvas: true },
+      { defaultRenderer: "canvas" },
+      { ...settings, forceCanvas: "true" },
+    ]) {
+      expect((await admin.browser.fetch(writePath, { method: "PUT", json })).status).toBe(400);
+    }
+    expect(
+      (
+        await admin.browser.fetch(writePath, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: "{",
+        })
+      ).status,
+    ).toBe(400);
+    expect(await admin.browser.json(readPath)).toEqual({
+      defaultRenderer: null,
+      forceCanvas: false,
+    });
+  });
+});
 
 async function edit(browser: Parameters<typeof openSocket>[0], fileId: string, count: number) {
   const socket = await openSocket(browser, fileId);

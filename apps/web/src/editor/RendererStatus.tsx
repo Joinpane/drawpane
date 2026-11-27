@@ -1,38 +1,65 @@
 /**
- * Small status chip shown in the editor's bottom bar when the render engine switch is on.
- * Reports whether the engine is drawing ("Engine · WebGPU") or the canvas renderer took over
- * ("Canvas renderer"), with the reason on hover and in a popover on click.
+ * Shows the active renderer and offers a browser preference during rollout.
  */
-import { cx, Icon, Popover, Tooltip } from "@drawpane/ui";
+import { Button, cx, Icon, Popover, Tooltip } from "@drawpane/ui";
 import { useEffect, useRef, useState } from "react";
 import { PASS_GESTURES } from "./canvas-gestures";
 import { useEditor } from "./hooks";
-import { formatRendererReason, rendererChipLabel, useRendererStatus } from "./renderer-status";
+import {
+  formatRendererReason,
+  rendererChipLabel,
+  showCanvasRendererChip,
+  useRendererStatus,
+} from "./renderer-status";
+import { rendererPolicy, rendererSelection, switchBrowserRenderer } from "./renderer-switch";
 
 export function RendererStatus() {
   const editor = useEditor();
   const status = useRendererStatus(editor);
   const [open, setOpen] = useState(false);
   const buttonRef = useRef<HTMLButtonElement>(null);
+  const selection = rendererSelection();
+  const policy = rendererPolicy();
+  const visible = status.switchOn || showCanvasRendererChip(selection, policy);
 
   useEffect(() => {
-    if (!status.switchOn && open) setOpen(false);
-  }, [status.switchOn, open]);
+    if (!visible && open) setOpen(false);
+  }, [visible, open]);
 
-  if (!status.switchOn) return null;
+  if (!visible) return null;
 
   const label = rendererChipLabel(status);
-  const reason = formatRendererReason(status);
-  const isEngine = status.active === "engine";
+  const reason = status.switchOn
+    ? formatRendererReason(status)
+    : policy === null
+      ? "Renderer settings couldn’t be loaded. Reload to try again."
+      : policy.forceCanvas
+        ? "Your Drawpane administrator has turned on Canvas for everyone."
+        : "Drawing with Canvas.";
+  const isEngine = status.switchOn && status.active === "engine";
   const isStarting =
+    status.switchOn &&
     status.active === "canvas" &&
     (status.reason.kind === "starting" || status.reason.kind === "recovering");
-  const ariaLabel = isEngine ? `Renderer: ${label}` : `Renderer: ${label}, ${reason}`;
+  const ariaLabel =
+    !isEngine && (status.switchOn || !policy || policy.forceCanvas)
+      ? `Renderer: ${label}, ${reason}`
+      : `Renderer: ${label}`;
+  const icon = isEngine ? "bolt" : status.switchOn ? "warning" : "layers";
   const meta = isEngine
     ? [status.compatibility ? "Compatibility mode" : null, status.software ? "Software GPU" : null]
         .filter(Boolean)
         .join(" · ")
     : "";
+  const next = selection.choice === "canvas" ? "engine" : "canvas";
+  const switchAction = (
+    <div className="renderer-popover__switch">
+      <Button size="sm" onClick={() => switchBrowserRenderer(next)}>
+        {next === "canvas" ? "Use Canvas in this browser" : "Use the render engine in this browser"}
+      </Button>
+      <p className="renderer-popover__meta">Reloads this page.</p>
+    </div>
+  );
 
   return (
     <>
@@ -54,7 +81,7 @@ export function RendererStatus() {
           onClick={() => setOpen((v) => !v)}
           {...PASS_GESTURES}
         >
-          <Icon name={isEngine ? "bolt" : "warning"} size={12} />
+          <Icon name={icon} size={12} />
           <span>{label}</span>
         </button>
       </Tooltip>
@@ -68,7 +95,7 @@ export function RendererStatus() {
         >
           <div className="renderer-popover__head">
             <Icon
-              name={isEngine ? "bolt" : "warning"}
+              name={icon}
               size={16}
               className={
                 isEngine ? "renderer-popover__icon--engine" : "renderer-popover__icon--canvas"
@@ -78,6 +105,16 @@ export function RendererStatus() {
           </div>
           <p className="renderer-popover__reason">{reason}</p>
           {meta ? <p className="renderer-popover__meta">{meta}</p> : null}
+          {policy && !policy.forceCanvas ? (
+            policy.defaultRenderer === "canvas" && next === "engine" ? (
+              <details className="renderer-popover__switch">
+                <summary>Switch renderer</summary>
+                {switchAction}
+              </details>
+            ) : (
+              switchAction
+            )
+          ) : null}
         </Popover>
       ) : null}
     </>

@@ -17,6 +17,8 @@ import { CPU_GPU_TOLERANCE, outsideTolerance, type Score, score } from "@drawpan
 import { Badge, Button, Logo, SegmentedControl } from "@drawpane/ui";
 import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useCopy } from "../app/CopyField";
+import { lastRendererObservation } from "../editor/renderer-status";
+import { type RendererSource, rendererPolicy, rendererSelection } from "../editor/renderer-switch";
 import { EXPECTED_PNGS } from "./expected-pixels";
 import {
   CELL_CAMERA,
@@ -308,6 +310,10 @@ function PixelCanvas({
       <span className="diag__thumb-label">{label}</span>
     </div>
   );
+}
+
+function rendererSourceLabel(source: RendererSource): string {
+  return source === "settings-unavailable" ? "settings failed to load" : source;
 }
 
 export function RendererDiagnosticsPage() {
@@ -646,6 +652,8 @@ export function RendererDiagnosticsPage() {
   const allPassed = !state.running && !state.error && totalCount > 0 && passedCount === totalCount;
 
   const reportText = useMemo(() => {
+    const productRenderer = rendererSelection();
+    const lastProductRender = lastRendererObservation();
     const payload = {
       timestamp: new Date().toISOString(),
       browser: {
@@ -654,6 +662,7 @@ export function RendererDiagnosticsPage() {
         devicePixelRatio: window.devicePixelRatio,
         hardwareConcurrency: navigator.hardwareConcurrency,
       },
+      productRenderer: { ...productRenderer, policy: rendererPolicy(), lastProductRender },
       selection: {
         requested: state.requested,
         allowSoftware,
@@ -692,6 +701,12 @@ export function RendererDiagnosticsPage() {
     const header = [
       "# Drawpane Renderer Diagnostics",
       `- Browser: ${navigator.userAgent}`,
+      `- App renderer choice: ${productRenderer.choice} (${rendererSourceLabel(productRenderer.source)})`,
+      ...(lastProductRender
+        ? [
+            `- Last active app backend in this tab: ${lastProductRender.backend} (${rendererSourceLabel(lastProductRender.source)})`,
+          ]
+        : []),
       `- Backend: ${state.backend ?? "none"} (${state.adapter}${state.software ? ", software" : ""})`,
       `- Result: ${passedCount}/${totalCount} cells passed in ${state.totalMs} ms`,
       ...(state.fallbackNotes.length

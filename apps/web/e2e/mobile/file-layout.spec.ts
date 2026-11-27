@@ -287,110 +287,83 @@ async function expectNoHorizontalScroll(page: Page, label: string) {
  * canvas area (clear of visible top/bottom/side chrome) and well above the old broken 2% zoom.
  */
 async function expectContentFitsExposedCanvas(page: Page, label: string) {
-  await expect
-    .poll(
-      () =>
-        page.evaluate(() => {
-          const e = (window as unknown as DebugWindow).drawpane;
-          if (!e) return null;
-          const bounds = e.scene.unionBounds(e.doc.childIds(e.s.pageId));
-          if (!bounds || bounds.width <= 0 || bounds.height <= 0) return null;
-          const { camera, viewport, insets } = e.s;
-          const tl = camera.toScreen({ x: bounds.x, y: bounds.y });
-          const br = camera.toScreen({
-            x: bounds.x + bounds.width,
-            y: bounds.y + bounds.height,
-          });
-          const exposedW = Math.max(1, viewport.width - insets.left - insets.right);
-          const exposedH = Math.max(1, viewport.height - insets.top - insets.bottom);
-          const projectedW = br.x - tl.x;
-          const projectedH = br.y - tl.y;
-          return {
-            zoom: camera.zoom,
-            tl,
-            br,
-            viewport,
-            insets,
-            exposedW,
-            exposedH,
-            fillRatio: Math.max(projectedW / exposedW, projectedH / exposedH),
-          };
-        }),
-      { timeout: 10_000, message: `${label}: waiting for fitted camera` },
-    )
-    .toEqual(
-      expect.objectContaining({
-        zoom: expect.any(Number),
-      }),
-    );
+  // The DOM can rotate before the canvas ResizeObserver updates the editor's viewport and fit.
+  await expect(async () => {
+    const info = await page.evaluate(() => {
+      const e = (window as unknown as DebugWindow).drawpane;
+      const canvas = document.querySelector(".canvas");
+      if (!e || !canvas) throw new Error("The editor canvas has not mounted yet");
+      const bounds = e.scene.unionBounds(e.doc.childIds(e.s.pageId));
+      if (!bounds || bounds.width <= 0 || bounds.height <= 0)
+        throw new Error("Expected non-empty page bounds");
+      const { width, height } = canvas.getBoundingClientRect();
+      const { camera, viewport, insets } = e.s;
+      const tl = camera.toScreen({ x: bounds.x, y: bounds.y });
+      const br = camera.toScreen({ x: bounds.x + bounds.width, y: bounds.y + bounds.height });
+      const exposedLeft = insets.left;
+      const exposedRight = viewport.width - insets.right;
+      const exposedTop = insets.top;
+      const exposedBottom = viewport.height - insets.bottom;
+      const exposedW = Math.max(1, exposedRight - exposedLeft);
+      const exposedH = Math.max(1, exposedBottom - exposedTop);
+      const fillRatio = Math.max((br.x - tl.x) / exposedW, (br.y - tl.y) / exposedH);
+      const rectOf = (sel: string) => {
+        const el = document.querySelector<HTMLElement>(sel);
+        if (!el) return null;
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0
+          ? { top: r.top, right: r.right, bottom: r.bottom, left: r.left }
+          : null;
+      };
+      const domTop = Math.max(rectOf(".phone-topbar")?.bottom ?? 0, rectOf(".topbar")?.bottom ?? 0);
+      const dockRect = rectOf(".phone-dock");
+      const barRect = rectOf(".bottom-bar");
+      const domBottom = Math.min(
+        dockRect ? dockRect.top : viewport.height,
+        barRect ? barRect.top : viewport.height,
+      );
+      const domLeft = rectOf(".pane--left")?.right ?? 0;
+      const rightPane = rectOf(".pane--right");
+      const domRight = rightPane ? rightPane.left : viewport.width;
+      return {
+        viewport,
+        canvasSize: { width, height },
+        zoom: camera.zoom,
+        tl,
+        br,
+        exposedLeft,
+        exposedRight,
+        exposedTop,
+        exposedBottom,
+        domLeft,
+        domRight,
+        domTop,
+        domBottom,
+        fillRatio,
+      };
+    });
 
-  const info = await page.evaluate(() => {
-    const e = (window as unknown as DebugWindow).drawpane;
-    const bounds = e.scene.unionBounds(e.doc.childIds(e.s.pageId));
-    if (!bounds) throw new Error("Expected non-empty page bounds");
-    const { camera, viewport, insets } = e.s;
-    const tl = camera.toScreen({ x: bounds.x, y: bounds.y });
-    const br = camera.toScreen({ x: bounds.x + bounds.width, y: bounds.y + bounds.height });
-    const exposedLeft = insets.left;
-    const exposedRight = viewport.width - insets.right;
-    const exposedTop = insets.top;
-    const exposedBottom = viewport.height - insets.bottom;
-    const exposedW = Math.max(1, exposedRight - exposedLeft);
-    const exposedH = Math.max(1, exposedBottom - exposedTop);
-    const fillRatio = Math.max((br.x - tl.x) / exposedW, (br.y - tl.y) / exposedH);
-    const rectOf = (sel: string) => {
-      const el = document.querySelector<HTMLElement>(sel);
-      if (!el) return null;
-      const r = el.getBoundingClientRect();
-      return r.width > 0 && r.height > 0
-        ? { top: r.top, right: r.right, bottom: r.bottom, left: r.left }
-        : null;
-    };
-    const domTop = Math.max(rectOf(".phone-topbar")?.bottom ?? 0, rectOf(".topbar")?.bottom ?? 0);
-    const dockRect = rectOf(".phone-dock");
-    const barRect = rectOf(".bottom-bar");
-    const domBottom = Math.min(
-      dockRect ? dockRect.top : viewport.height,
-      barRect ? barRect.top : viewport.height,
+    expect(info.viewport, `${label}: editor viewport matches the canvas`).toEqual(info.canvasSize);
+    // Never the broken 2% MIN_ZOOM fallback.
+    expect(info.zoom, `${label}: zoom`).toBeGreaterThan(0.05);
+    // Content sits inside both reported insets and actual rendered DOM chrome (2 px rounding tolerance).
+    expect(info.tl.x, `${label}: content left inside exposed canvas`).toBeGreaterThanOrEqual(
+      Math.max(info.exposedLeft, info.domLeft) - 2,
     );
-    const domLeft = rectOf(".pane--left")?.right ?? 0;
-    const rightPane = rectOf(".pane--right");
-    const domRight = rightPane ? rightPane.left : viewport.width;
-    return {
-      zoom: camera.zoom,
-      tl,
-      br,
-      exposedLeft,
-      exposedRight,
-      exposedTop,
-      exposedBottom,
-      domLeft,
-      domRight,
-      domTop,
-      domBottom,
-      fillRatio,
-    };
-  });
-
-  // Never the broken 2% MIN_ZOOM fallback.
-  expect(info.zoom, `${label}: zoom`).toBeGreaterThan(0.05);
-  // Content sits inside both reported insets and actual rendered DOM chrome (2 px rounding tolerance).
-  expect(info.tl.x, `${label}: content left inside exposed canvas`).toBeGreaterThanOrEqual(
-    Math.max(info.exposedLeft, info.domLeft) - 2,
-  );
-  expect(info.br.x, `${label}: content right inside exposed canvas`).toBeLessThanOrEqual(
-    Math.min(info.exposedRight, info.domRight) + 2,
-  );
-  expect(info.tl.y, `${label}: content top inside exposed canvas`).toBeGreaterThanOrEqual(
-    Math.max(info.exposedTop, info.domTop) - 2,
-  );
-  expect(info.br.y, `${label}: content bottom inside exposed canvas`).toBeLessThanOrEqual(
-    Math.min(info.exposedBottom, info.domBottom) + 2,
-  );
-  // Content occupies a meaningful portion of the exposed area (unless already at 100%).
-  if (info.zoom < 0.99) {
-    expect(info.fillRatio, `${label}: fill ratio`).toBeGreaterThan(0.5);
-  }
+    expect(info.br.x, `${label}: content right inside exposed canvas`).toBeLessThanOrEqual(
+      Math.min(info.exposedRight, info.domRight) + 2,
+    );
+    expect(info.tl.y, `${label}: content top inside exposed canvas`).toBeGreaterThanOrEqual(
+      Math.max(info.exposedTop, info.domTop) - 2,
+    );
+    expect(info.br.y, `${label}: content bottom inside exposed canvas`).toBeLessThanOrEqual(
+      Math.min(info.exposedBottom, info.domBottom) + 2,
+    );
+    // Content occupies a meaningful portion of the exposed area (unless already at 100%).
+    if (info.zoom < 0.99) {
+      expect(info.fillRatio, `${label}: fill ratio`).toBeGreaterThan(0.5);
+    }
+  }).toPass({ timeout: 10_000 });
 }
 
 async function expectTouchTargetAtLeast44(locator: Locator, label: string) {

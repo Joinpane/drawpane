@@ -185,6 +185,16 @@ What it sends:
 
 To turn email off again: `npx wrangler secret delete EMAIL_PROVIDER`.
 
+## Renderer settings
+
+Sign in as the instance admin and open **Health and cost → Renderer settings**. New instances use Canvas by default. Select **Render engine** to make the engine the default for people who have no browser or tab preference. Select **Drawpane default** to use the default shipped with the release.
+
+For an instance-wide rollback, enable **Use Canvas for everyone** and save. This setting takes precedence over renderer links and browser preferences. People can reload an open file to apply it immediately. Tabs refresh their settings when they return to the foreground or start a new rendering view with settings more than a minute old. Turn it off to restore the instance default and people's preferences. Both settings are stored in D1 and can be changed without deploying.
+
+For a single browser, open the renderer chip in the editor and choose **Use Canvas in this browser**. You can also open a Drawpane URL with `?renderer=canvas` to use Canvas for that tab. A `drawpane:renderer` value of `canvas` in local storage is a browser preference. A URL or tab preference takes precedence over local storage.
+
+The copyable report at `/diagnostics/renderer` shows how the app picked a renderer and the last app backend seen in this tab. Its test scene runs its own backend checks. The app keeps the observation in the tab and sends no renderer telemetry.
+
 ## Backups
 
 Every file keeps its own version history. While a file is being edited, its FileRoom saves a gzip snapshot to R2 (`files/<file-id>/snapshots/`) once editing pauses for 10 minutes, and at least once an hour during long sessions. It also saves one whenever someone names a version, and just before anyone restores one, so a restore can always be undone. Each snapshot has a row in D1's `versions` table that says who edited and what changed.

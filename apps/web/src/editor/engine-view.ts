@@ -4,14 +4,7 @@
  * (`engine-compat` for explicit WebGPU compatibility testing, `engine-webgl` for WebGL2,
  * `engine-cpu` for the CPU Worker view mode).
  *
- * Switch persistence rule (see `renderer-switch.ts`):
- * - When the URL sets `renderer` (or `present`), that value is remembered in `sessionStorage`
- *   for the rest of the tab session, so in-app navigation (dashboard to file, toggling review,
- *   switching branches) and login redirects keep it.
- * - `?renderer=canvas` turns the engine back off for the session (clearing `sessionStorage`, or
- *   overriding `localStorage` for this session when `localStorage["drawpane:renderer"]` is set).
- * - Precedence: URL parameter, then `sessionStorage`, then `localStorage`, then `"canvas"`
- *   (and for `present`: URL, `sessionStorage`, `localStorage`, then `"webgpu"`).
+ * The instance policy and browser switches are resolved in `renderer-switch.ts`.
  *
  * Backend selection order:
  * 1. WebGPU core (hardware only unless `drawpane:engine-software=allow`).
