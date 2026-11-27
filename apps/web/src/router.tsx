@@ -5,8 +5,9 @@ import {
   createRouter,
   Outlet,
   redirect,
+  useLocation,
 } from "@tanstack/react-router";
-import { lazy, Suspense } from "react";
+import { lazy, type ReactNode, Suspense, use } from "react";
 import { HealthPage } from "./admin/HealthPage";
 import { api } from "./api/client";
 import { ErrorPage } from "./app/ErrorPage";
@@ -28,11 +29,8 @@ import {
   parseAppSearch,
   stringifyAppSearch,
 } from "./editor/editor-link";
-import {
-  type EngineSearch,
-  engineSearch,
-  selectRendererForLocation,
-} from "./editor/renderer-switch";
+import { enterRendererLocation, rendererLocationReady } from "./editor/renderer-policy";
+import { type EngineSearch, engineSearch } from "./editor/renderer-switch";
 import { NewFilePage } from "./new-file/NewFilePage";
 import type { PresentSearch } from "./prototype/PresentPage";
 import type { SharedSearch } from "./prototype/SharedPrototypePage";
@@ -58,6 +56,21 @@ interface RouterContext {
 }
 
 const sessionQuery = { queryKey: ["session"], queryFn: api.session };
+
+function WaitForRendererPolicy({ children }: { children: ReactNode }) {
+  const path = useLocation({ select: (location) => location.pathname });
+  const ready = rendererLocationReady(path);
+  if (ready) use(ready);
+  return children;
+}
+
+function RenderingRoute({ children }: { children: ReactNode }) {
+  return (
+    <Suspense fallback={<div className="app-loading" aria-busy="true" />}>
+      <WaitForRendererPolicy>{children}</WaitForRendererPolicy>
+    </Suspense>
+  );
+}
 
 const rootRoute = createRootRouteWithContext<RouterContext>()({
   component: () => (
@@ -206,7 +219,11 @@ const newFileRoute = createRoute({
   beforeLoad: requireUser,
   validateSearch: (search: Record<string, unknown>): { project?: string } =>
     typeof search.project === "string" ? { project: search.project } : {},
-  component: NewFilePage,
+  component: () => (
+    <RenderingRoute>
+      <NewFilePage />
+    </RenderingRoute>
+  ),
 });
 
 const fileRoute = createRoute({
@@ -226,9 +243,9 @@ const fileRoute = createRoute({
     ...editorSearch(search),
   }),
   component: () => (
-    <Suspense fallback={<div className="app-loading" aria-busy="true" />}>
+    <RenderingRoute>
       <EditorPage />
-    </Suspense>
+    </RenderingRoute>
   ),
 });
 
@@ -249,9 +266,9 @@ const presentRoute = createRoute({
     };
   },
   component: () => (
-    <Suspense fallback={<div className="app-loading" aria-busy="true" />}>
+    <RenderingRoute>
       <PresentPage />
-    </Suspense>
+    </RenderingRoute>
   ),
 });
 
@@ -267,9 +284,9 @@ const sharedRoute = createRoute({
     return { ...(page ? { page } : {}), ...(flow ? { flow } : {}) };
   },
   component: () => (
-    <Suspense fallback={<div className="app-loading" aria-busy="true" />}>
+    <RenderingRoute>
       <SharedPrototypePage />
-    </Suspense>
+    </RenderingRoute>
   ),
 });
 
@@ -314,7 +331,7 @@ export const router = createRouter({
 
 // Navigation events include in-place query changes even when the root route is reused.
 router.subscribe("onBeforeLoad", ({ toLocation }) => {
-  selectRendererForLocation(toLocation.pathname, toLocation.searchStr);
+  enterRendererLocation(toLocation.pathname, toLocation.searchStr);
 });
 
 declare module "@tanstack/react-router" {

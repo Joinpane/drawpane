@@ -230,7 +230,8 @@ function RendererSettings() {
         Renderer settings
       </h2>
       <p className="admin__foot">
-        Changes take effect the next time people open or reload Drawpane.
+        Reload an open file to apply changes immediately. Other tabs refresh their settings when
+        they return to the foreground or open a file with settings more than a minute old.
       </p>
       {policy.data ? (
         <form

@@ -42,7 +42,9 @@ export function RendererStatus() {
     status.active === "canvas" &&
     (status.reason.kind === "starting" || status.reason.kind === "recovering");
   const ariaLabel =
-    status.switchOn && !isEngine ? `Renderer: ${label}, ${reason}` : `Renderer: ${label}`;
+    !isEngine && (status.switchOn || !policy || policy.forceCanvas)
+      ? `Renderer: ${label}, ${reason}`
+      : `Renderer: ${label}`;
   const icon = isEngine ? "bolt" : status.switchOn ? "warning" : "layers";
   const meta = isEngine
     ? [status.compatibility ? "Compatibility mode" : null, status.software ? "Software GPU" : null]
@@ -50,6 +52,14 @@ export function RendererStatus() {
         .join(" · ")
     : "";
   const next = selection.choice === "canvas" ? "engine" : "canvas";
+  const switchAction = (
+    <div className="renderer-popover__switch">
+      <Button size="sm" onClick={() => switchBrowserRenderer(next)}>
+        {next === "canvas" ? "Use Canvas in this browser" : "Use the render engine in this browser"}
+      </Button>
+      <p className="renderer-popover__meta">Reloads this page.</p>
+    </div>
+  );
 
   return (
     <>
@@ -96,14 +106,14 @@ export function RendererStatus() {
           <p className="renderer-popover__reason">{reason}</p>
           {meta ? <p className="renderer-popover__meta">{meta}</p> : null}
           {policy && !policy.forceCanvas ? (
-            <div className="renderer-popover__switch">
-              <Button size="sm" onClick={() => switchBrowserRenderer(next)}>
-                {next === "canvas"
-                  ? "Use Canvas in this browser"
-                  : "Use the render engine in this browser"}
-              </Button>
-              <p className="renderer-popover__meta">Reloads this page.</p>
-            </div>
+            policy.defaultRenderer === "canvas" && next === "engine" ? (
+              <details className="renderer-popover__switch">
+                <summary>Switch renderer</summary>
+                {switchAction}
+              </details>
+            ) : (
+              switchAction
+            )
           ) : null}
         </Popover>
       ) : null}

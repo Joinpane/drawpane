@@ -189,7 +189,7 @@ To turn email off again: `npx wrangler secret delete EMAIL_PROVIDER`.
 
 Sign in as the instance admin and open **Health and cost → Renderer settings**. New instances use Canvas by default. Select **Render engine** to make the engine the default for people who have no browser or tab preference. Select **Drawpane default** to use the default shipped with the release.
 
-For an instance-wide rollback, enable **Use Canvas for everyone** and save. This setting takes precedence over renderer links and browser preferences. People already in Drawpane can reload once to pick up the change. Turn it off to restore the instance default and people's preferences. Both settings are stored in D1 and can be changed without deploying.
+For an instance-wide rollback, enable **Use Canvas for everyone** and save. This setting takes precedence over renderer links and browser preferences. People can reload an open file to apply it immediately. Tabs refresh their settings when they return to the foreground or start a new rendering view with settings more than a minute old. Turn it off to restore the instance default and people's preferences. Both settings are stored in D1 and can be changed without deploying.
 
 For a single browser, open the renderer chip in the editor and choose **Use Canvas in this browser**. You can also open a Drawpane URL with `?renderer=canvas` to use Canvas for that tab. A `drawpane:renderer` value of `canvas` in local storage is a browser preference. A URL or tab preference takes precedence over local storage.
 

@@ -144,7 +144,7 @@ describe("renderer-switch", () => {
       policy: { defaultRenderer: "canvas", forceCanvas: false },
     },
     { source: "built-in", choice: "canvas", policy: DEFAULT_RENDERER_POLICY },
-    { source: "built-in", choice: "canvas", url: "engine", policy: null },
+    { source: "settings-unavailable", choice: "canvas", url: "engine", policy: null },
   ])("chooses $choice from $source", ({ source, choice, url, session, local, policy }) => {
     if (session) sessionStorage.setItem(RENDERER_STORAGE_KEY, session);
     if (local) localStorage.setItem(RENDERER_STORAGE_KEY, local);

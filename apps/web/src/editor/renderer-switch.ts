@@ -19,6 +19,7 @@ export type RendererSource =
   | "session"
   | "local"
   | "instance-default"
+  | "settings-unavailable"
   | "built-in";
 export interface RendererSelection {
   readonly choice: RendererChoice;
@@ -29,7 +30,7 @@ export const DEFAULT_RENDERER_POLICY: RendererPolicy = {
   forceCanvas: false,
 };
 
-// Null means the settings could not be read. Use Canvas until the next page load can check them.
+// Null means the settings could not be read. Use Canvas for this route.
 let policy: RendererPolicy | null = DEFAULT_RENDERER_POLICY;
 let selected: RendererSelection | undefined;
 let selectedPath: string | undefined;
@@ -41,7 +42,13 @@ export function rendererPolicy(): RendererPolicy | null {
 }
 
 export function setRendererPolicy(value: RendererPolicy | null): void {
+  if (
+    policy?.defaultRenderer === value?.defaultRenderer &&
+    policy?.forceCanvas === value?.forceCanvas
+  )
+    return;
   policy = value;
+  selected = undefined;
 }
 
 export function parseRendererPolicy(value: unknown): RendererPolicy | null {
@@ -126,10 +133,15 @@ function getLocal(key: string): string | null {
   }
 }
 
-function rememberRenderer(choice: RendererChoice, instanceDefault?: StandardRenderer | null): void {
+function rememberRenderer(
+  choice: RendererChoice,
+  instanceDefault?: StandardRenderer | null,
+  keepCanvas = false,
+): void {
   try {
     if (
       choice === "canvas" &&
+      !keepCanvas &&
       (parseRenderer(getLocal(RENDERER_STORAGE_KEY)) ?? instanceDefault ?? "canvas") === "canvas"
     ) {
       sessionStorage.removeItem(RENDERER_STORAGE_KEY);
@@ -200,13 +212,14 @@ function rememberRenderingDetails(params: URLSearchParams): void {
 export function selectRenderer(
   search?: string,
   settings: RendererPolicy | null = policy,
+  keepCanvas = false,
 ): RendererSelection {
   if (settings?.forceCanvas) return { choice: "canvas", source: "server" };
-  if (settings === null) return { choice: "canvas", source: "built-in" };
+  if (settings === null) return { choice: "canvas", source: "settings-unavailable" };
   try {
     const url = parseRenderer(readParams(search).get("renderer"));
     if (url) {
-      rememberRenderer(url, settings.defaultRenderer);
+      rememberRenderer(url, settings.defaultRenderer, keepCanvas);
       return { choice: url, source: "url" };
     }
   } catch {
@@ -222,11 +235,11 @@ export function selectRenderer(
 }
 
 /** Runs in the router before a screen mounts, including before sign-in redirects. */
-export function selectRendererForLocation(path: string, search: string): void {
+export function selectRendererForLocation(path: string, search: string, keepCanvas = false): void {
   const params = readParams(search);
   const urlChoice = parseRenderer(params.get("renderer"));
   if (!selected || path !== selectedPath || (urlChoice && urlChoice !== selectedUrlChoice)) {
-    selected = selectRenderer(search);
+    selected = selectRenderer(search, policy, keepCanvas);
     selectedPath = path;
   }
   selectedUrlChoice = urlChoice;
