@@ -107,27 +107,68 @@ export function DashboardPage() {
   const side = useRef<HTMLElement>(null);
   // Somewhere chosen: the drawer gets out of the way.
   useEffect(() => setNavOpen(false), [teamId, projectId, view]);
+  // Prevent the page behind the phone drawer from scrolling while the drawer is open.
   useEffect(() => {
-    if (!navOpen) return;
-    // Into the drawer, on the current place (or the first).
-    const links = side.current?.querySelectorAll<HTMLElement>("a, button");
-    const current = side.current?.querySelector<HTMLElement>('[aria-current="page"]');
-    (current ?? links?.[0])?.focus();
+    if (!behind) return;
+    const prev = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = prev;
+    };
+  }, [behind]);
+  useEffect(() => {
+    if (!behind) return;
+    const drawer = side.current;
+    const focusables = () =>
+      [
+        ...(drawer?.querySelectorAll<HTMLElement>(
+          'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])',
+        ) ?? []),
+      ].filter((el) => el.offsetParent !== null);
+    // Into the drawer, on the current place (or the first focusable item).
+    const current = drawer?.querySelector<HTMLElement>('[aria-current="page"]');
+    (current ?? focusables()[0])?.focus();
+    const hasOpenOverlay = () => !!document.querySelector(".dp-dropdown, dialog[open]");
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") closeNav();
+      if (e.defaultPrevented || hasOpenOverlay()) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        closeNav();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const items = focusables();
+      const first = items[0];
+      const last = items.at(-1);
+      if (!first || !last) {
+        e.preventDefault();
+        return;
+      }
+      const active = document.activeElement as HTMLElement | null;
+      if (e.shiftKey) {
+        if (!active || !drawer?.contains(active) || active === first) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else if (!active || !drawer?.contains(active) || active === last) {
+        e.preventDefault();
+        first.focus();
+      }
     };
     // A destination picked (clicked, or Enter on it), even the current one: the drawer closes.
     const onPick = (e: MouseEvent) => {
-      if (e.target instanceof Element && e.target.closest("a")) setNavOpen(false);
+      const anchor = e.target instanceof Element ? e.target.closest("a") : null;
+      if (!anchor) return;
+      if (anchor.getAttribute("aria-current") === "page") closeNav();
+      else setNavOpen(false);
     };
-    const drawer = side.current;
     document.addEventListener("keydown", onKey);
     drawer?.addEventListener("click", onPick);
     return () => {
       document.removeEventListener("keydown", onKey);
       drawer?.removeEventListener("click", onPick);
     };
-  }, [navOpen]);
+  }, [behind]);
   const [inviteOpen, setInviteOpen] = useState(false);
   const [newProjectOpen, setNewProjectOpen] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
@@ -287,9 +328,9 @@ export function DashboardPage() {
             to="/t/$teamId"
             params={{ teamId }}
             search={{ view: "inbox" }}
-            className="dash__badge dash__topbar-inbox"
+            className="dash__topbar-inbox"
           >
-            {unread > 99 ? "99+" : unread}
+            <span className="dash__badge">{unread > 99 ? "99+" : unread}</span>
             <span className="dp-visually-hidden"> unread in your inbox</span>
           </Link>
         ) : null}
@@ -528,6 +569,7 @@ export function DashboardPage() {
                     trash={view === "trash"}
                     canEdit={canEdit}
                     isOwner={role === "owner"}
+                    allowDrag={!phone}
                     projectName={
                       projects.data?.projects.find((p) => p.id === file.projectId)?.name ?? ""
                     }
@@ -783,30 +825,32 @@ function UserMenu({ name, email, admin }: { name: string; email: string; admin: 
           <span>{email}</span>
         </span>
       </Link>
-      {admin ? (
-        <Link
-          to="/admin/health"
-          className="dp-iconbtn"
-          aria-label="Instance health and cost"
-          title="Instance health and cost"
-        >
-          <Icon name="bolt" size={16} />
-        </Link>
-      ) : null}
-      <IconButton
-        icon={theme === "dark" ? "moon" : theme === "light" ? "sun" : "fit"}
-        label={`Theme: ${theme}. Switch to ${next}`}
-        onClick={() => setTheme(next)}
-      />
-      <IconButton
-        icon="sign-out"
-        label="Sign out"
-        onClick={async () => {
-          await signOut();
-          forgetCachedData(queryClient);
-          await navigate({ to: "/signin", search: {} });
-        }}
-      />
+      <span className="dash__user-actions">
+        {admin ? (
+          <Link
+            to="/admin/health"
+            className="dp-iconbtn"
+            aria-label="Instance health and cost"
+            title="Instance health and cost"
+          >
+            <Icon name="bolt" size={16} />
+          </Link>
+        ) : null}
+        <IconButton
+          icon={theme === "dark" ? "moon" : theme === "light" ? "sun" : "fit"}
+          label={`Theme: ${theme}. Switch to ${next}`}
+          onClick={() => setTheme(next)}
+        />
+        <IconButton
+          icon="sign-out"
+          label="Sign out"
+          onClick={async () => {
+            await signOut();
+            forgetCachedData(queryClient);
+            await navigate({ to: "/signin", search: {} });
+          }}
+        />
+      </span>
     </div>
   );
 }
@@ -816,6 +860,7 @@ function FileCard({
   trash,
   canEdit,
   isOwner,
+  allowDrag,
   projectName,
   highlight,
   onChanged,
@@ -827,6 +872,7 @@ function FileCard({
   trash: boolean;
   canEdit: boolean;
   isOwner: boolean;
+  allowDrag: boolean;
   projectName: string;
   /** A search query whose words are marked in the name. */
   highlight: string;
@@ -838,10 +884,25 @@ function FileCard({
 }) {
   const navigate = useNavigate();
   const [renaming, setRenaming] = useState(false);
+  const [menuOpen, setMenuOpen] = useState(false);
   const [name, setName] = useState(file.name);
   const [error, setError] = useState<string | null>(null);
+  const finishing = useRef(false);
+
+  function startRename() {
+    finishing.current = false;
+    setName(file.name);
+    setRenaming(true);
+  }
+
+  function cancelRename() {
+    finishing.current = true;
+    setName(file.name);
+    setRenaming(false);
+  }
+
   const menuItems: MenuItem[] = [
-    { label: "Rename", icon: "rename", onSelect: () => setRenaming(true) },
+    { label: "Rename", icon: "rename", onSelect: startRename },
     { label: "Move to…", icon: "move", onSelect: onMove },
     {
       label: "Duplicate",
@@ -886,6 +947,8 @@ function FileCard({
 
   function commitRename(event?: FormEvent) {
     event?.preventDefault();
+    if (finishing.current) return;
+    finishing.current = true;
     setRenaming(false);
     const next = name.trim();
     if (next && next !== file.name) void act(() => api.patch(`/files/${file.id}`, { name: next }));
@@ -896,10 +959,11 @@ function FileCard({
     if (!trash) void navigate({ to: "/f/$fileId", params: { fileId: file.id } });
   };
 
-  const movable = canEdit && !trash && !renaming;
+  const movable = allowDrag && canEdit && !trash && !renaming;
   return (
     <li
-      className="dash__card"
+      className={`dash__card${trash ? " dash__card--trash" : ""}${renaming ? " dash__card--renaming" : ""}`}
+      data-menu-open={menuOpen || undefined}
       draggable={movable}
       onDragStart={(e) => {
         if (!movable) return;
@@ -920,29 +984,43 @@ function FileCard({
       </button>
       <div className="dash__card-meta">
         {renaming ? (
-          <form onSubmit={commitRename}>
+          <form
+            className="dash__rename-form"
+            onSubmit={commitRename}
+            onBlur={(e) => {
+              if (!e.currentTarget.contains(e.relatedTarget as Node | null)) commitRename();
+            }}
+          >
             <input
               className="dash__rename"
               value={name}
               onChange={(e) => setName(e.target.value)}
-              onBlur={() => commitRename()}
               onKeyDown={(e) => {
                 if (e.key === "Escape") {
-                  setName(file.name);
-                  setRenaming(false);
+                  e.preventDefault();
+                  cancelRename();
                 }
               }}
               aria-label="File name"
               // biome-ignore lint/a11y/noAutofocus: the user just asked to rename
               autoFocus
             />
+            <span className="dash__rename-actions">
+              <IconButton type="submit" icon="check" label="Save name" />
+              <IconButton
+                icon="close"
+                label="Cancel rename"
+                onPointerDown={(e) => e.preventDefault()}
+                onClick={cancelRename}
+              />
+            </span>
           </form>
         ) : (
           <button
             type="button"
             className="dash__card-name"
             onClick={open}
-            onDoubleClick={() => canEdit && !trash && setRenaming(true)}
+            onDoubleClick={() => canEdit && !trash && startRename()}
           >
             {highlightParts(file.name, highlight).map((part, i) =>
               part.match ? (
@@ -996,7 +1074,11 @@ function FileCard({
               ) : null}
             </>
           ) : (
-            <MenuButton label={`Options for ${file.name}`} items={menuItems} />
+            <MenuButton
+              label={`Options for ${file.name}`}
+              items={menuItems}
+              onOpenChange={setMenuOpen}
+            />
           )}
         </div>
       ) : null}

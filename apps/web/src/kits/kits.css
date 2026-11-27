@@ -54,7 +54,7 @@
 
 .kits__grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(260px, 100%), 1fr));
   gap: var(--space-600) var(--space-500);
   margin: 0;
   padding: 0;
@@ -354,4 +354,29 @@
   padding: var(--space-400) var(--space-500);
   border-top: 1px solid var(--line);
   background: var(--surface-raised);
+}
+
+@media (max-width: 600px) {
+  .kit__facts > div {
+    grid-template-columns: 72px minmax(0, 1fr);
+    gap: var(--space-200);
+  }
+  .kit__result-name {
+    flex: 1 1 100%;
+  }
+}
+
+@media (max-width: 760px), (hover: none), (pointer: coarse) {
+  .kits__filter {
+    min-height: 44px;
+    height: auto;
+    padding: 0 var(--space-400);
+  }
+  .kit__result .dp-btn {
+    min-height: 44px;
+    padding: 0 var(--space-300);
+  }
+  .kit__licence summary {
+    min-height: 44px;
+  }
 }

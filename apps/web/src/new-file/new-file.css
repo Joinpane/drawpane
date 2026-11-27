@@ -18,8 +18,15 @@
   align-items: center;
   gap: var(--space-200);
   min-width: 0;
+  overflow: hidden;
   color: var(--ink-muted);
   font: 400 13px / 18px var(--font-ui);
+}
+.new-file__crumbs span,
+.new-file__crumbs strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .new-file__crumbs strong {
   color: var(--ink);
@@ -27,6 +34,7 @@
 }
 .new-file__main {
   display: grid;
+  grid-template-columns: minmax(0, 1fr);
   gap: 36px;
   max-width: 1120px;
   margin: 0 auto;
@@ -40,6 +48,7 @@
 }
 .new-file__intro > div {
   flex: 1 1 420px;
+  min-width: 0;
 }
 .new-file__title {
   margin: 0;
@@ -77,6 +86,7 @@
 }
 .new-file__heading-row {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
   gap: var(--space-300);
@@ -186,7 +196,7 @@
 /* Templates */
 .new-file__templates {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(232px, 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(232px, 100%), 1fr));
   gap: var(--space-400);
 }
 .new-file__template {
@@ -291,6 +301,7 @@
 /* Beside the templates: the kit store, for kits from the community. */
 .new-file__kits {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--space-300);
   padding: var(--space-400) var(--space-500);
@@ -299,10 +310,62 @@
   color: var(--ink-muted);
 }
 .new-file__kits p {
-  flex: 1;
+  flex: 1 1 200px;
   margin: 0;
   font: 400 13px / 18px var(--font-ui);
 }
 .new-file__kits strong {
   color: var(--ink);
+}
+
+@media (max-width: 760px) {
+  .new-file__bar {
+    padding: var(--space-200) var(--space-400);
+  }
+  .new-file__main {
+    padding: var(--space-500) var(--space-400) var(--space-800);
+    gap: var(--space-600);
+  }
+  .new-file__title {
+    font-size: 32px;
+    line-height: 36px;
+  }
+  .new-file__kits {
+    padding: var(--space-400);
+  }
+}
+
+@media (max-width: 760px), (hover: none), (pointer: coarse) {
+  .new-file__bar .dp-iconbtn {
+    width: 44px;
+    height: 44px;
+  }
+  .new-file__heading-row .dp-seg {
+    max-width: 100%;
+  }
+  .new-file__heading-row .dp-seg__option {
+    min-height: 44px;
+    height: auto;
+    padding: 0 var(--space-300);
+    font-size: 13px;
+  }
+  .new-file__size-fields {
+    width: 100%;
+  }
+  .new-file__size-fields input {
+    flex: 1;
+    min-width: 0;
+    width: 0;
+    min-height: 40px;
+    height: 40px;
+    font-size: 16px;
+  }
+  .new-file__size--custom .dp-btn {
+    min-height: 44px;
+    width: 100%;
+  }
+  .new-file__kits .dp-btn {
+    min-height: 44px;
+    padding: 0 var(--space-400);
+  }
 }
