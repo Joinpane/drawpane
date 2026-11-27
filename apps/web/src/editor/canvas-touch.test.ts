@@ -241,7 +241,7 @@ describe("real Canvas touch host (createCanvasTouchHost + TouchArbiter)", () => 
     expect((editor.doc.get(id) as NodeRecord).props.x).toBe(250);
   });
 
-  it("rolls back only the drag's own ops, preserving mid-hold Cmd+Z, refitText, and unrelated edits", () => {
+  it("rolls back the held drag before any external commit (nudge, refitText, undo, delete) so undo never saves discarded positions", () => {
     const { editor, arbiter, txns, pt, setCharWidth } = setupCanvasTouch("tablet");
     const textId = editor.createLayer(
       "text",
@@ -265,42 +265,95 @@ describe("real Canvas touch host (createCanvasTouchHost + TouchArbiter)", () => 
     const undoBefore = editor.history.undoDepth;
     const textWidthBefore = (editor.doc.get(textId) as NodeRecord).props.width;
 
-    // Start held drag on `a`.
+    // 1) N2 scenario: drag `a` to x = 160 (held), keyboard nudge (+1), then second finger lands.
+    // The nudge must roll back the held drag to x = 100 first, leaving x = 101 (never 161),
+    // and undo must restore x = 100 (never the discarded x = 160).
     arbiter.pointerDown(pt(1, 180, 150));
     arbiter.pointerMove(pt(1, 240, 150));
     expect((editor.doc.get(a) as NodeRecord).props.x).toBe(160);
     expect(editor.sync.holding).toBe(true);
 
-    // 1) Web font arrives mid-hold -> refitText.
+    editor.nudge(1, 0);
+    expect(editor.sync.holding).toBe(false);
+    expect((editor.doc.get(a) as NodeRecord).props.x).toBe(101);
+    expect(editor.history.undoDepth).toBe(undoBefore + 1);
+
+    // Continued moves on finger 1 and a landing second finger must not corrupt the nudge.
+    arbiter.pointerMove(pt(1, 290, 150));
+    arbiter.pointerDown(pt(2, 340, 150));
+    arbiter.pointerUp(pt(2, 340, 150));
+    arbiter.pointerUp(pt(1, 290, 150));
+    expect((editor.doc.get(a) as NodeRecord).props.x).toBe(101);
+
+    editor.undo();
+    expect((editor.doc.get(a) as NodeRecord).props.x).toBe(100);
+    expect(editor.history.undoDepth).toBe(undoBefore);
+    editor.redo();
+    expect((editor.doc.get(a) as NodeRecord).props.x).toBe(101);
+    editor.undo();
+    expect((editor.doc.get(a) as NodeRecord).props.x).toBe(100);
+
+    // 2) Web font arrives mid-hold -> refitText rolls back the held drag cleanly and refits text.
+    arbiter.pointerDown(pt(3, 180, 150));
+    arbiter.pointerMove(pt(3, 240, 150));
+    expect((editor.doc.get(a) as NodeRecord).props.x).toBe(160);
+    expect(editor.sync.holding).toBe(true);
+
     setCharWidth(12);
     editor.refitText();
     const textWidthRefit = (editor.doc.get(textId) as NodeRecord).props.width;
     expect(textWidthRefit).not.toBe(textWidthBefore);
-
-    // 2) Hardware keyboard Cmd+Z mid-hold undoes `a`'s opacity edit.
-    editor.undo();
-    expect(getProp((editor.doc.get(a) as NodeRecord).props, "opacity")).toBe(1);
-
-    // 3) Unrelated prop edit mid-hold on `b`.
-    editor.setProp([b], "opacity", 0.25);
-
-    // Second finger lands -> rolls back ONLY the held drag on `a`.
-    const sentBeforeRollback = txns().length;
-    arbiter.pointerDown(pt(2, 340, 150));
-    expect(arbiter.phase).toBe("multitouch");
     expect(editor.sync.holding).toBe(false);
+    expect((editor.doc.get(a) as NodeRecord).props.x).toBe(100);
+    arbiter.pointerUp(pt(3, 240, 150));
 
-    // `a` reverted to x=100; refitText, Cmd+Z undo, and `b`'s opacity ALL survived and flushed!
+    // 3) Hardware keyboard Cmd+Z mid-hold rolls back the drag first, then undoes `a`'s opacity.
+    arbiter.pointerDown(pt(4, 180, 150));
+    arbiter.pointerMove(pt(4, 240, 150));
+    expect((editor.doc.get(a) as NodeRecord).props.x).toBe(160);
+    expect(editor.sync.holding).toBe(true);
+
+    editor.undo();
+    expect(editor.sync.holding).toBe(false);
     expect((editor.doc.get(a) as NodeRecord).props.x).toBe(100);
     expect(getProp((editor.doc.get(a) as NodeRecord).props, "opacity")).toBe(1);
-    expect((editor.doc.get(textId) as NodeRecord).props.width).toBe(textWidthRefit);
+    arbiter.pointerDown(pt(5, 340, 150));
+    arbiter.pointerUp(pt(5, 340, 150));
+    arbiter.pointerUp(pt(4, 240, 150));
+
+    // 4) Unrelated prop edit mid-hold on `b` rolls back the held drag on `a` and commits `b`.
+    const sentBeforeProp = txns().length;
+    arbiter.pointerDown(pt(6, 180, 150));
+    arbiter.pointerMove(pt(6, 240, 150));
+    expect((editor.doc.get(a) as NodeRecord).props.x).toBe(160);
+    editor.setProp([b], "opacity", 0.25);
+    editor.sync.flush();
+    expect(editor.sync.holding).toBe(false);
+    expect((editor.doc.get(a) as NodeRecord).props.x).toBe(100);
     expect(getProp((editor.doc.get(b) as NodeRecord).props, "opacity")).toBe(0.25);
-    expect(txns().length).toBeGreaterThan(sentBeforeRollback);
+    expect(txns().length).toBeGreaterThan(sentBeforeProp);
+    arbiter.pointerUp(pt(6, 240, 150));
 
     // History and document agree: undoing once reverts `b`'s opacity (the unrelated edit).
     expect(editor.history.undoDepth).toBe(undoBefore);
     editor.undo();
     expect(getProp((editor.doc.get(b) as NodeRecord).props, "opacity")).toBe(1);
+
+    // 5) Drawing a speculative rect mid-hold then pressing Delete rolls back the drawn rect
+    // cleanly instead of deleting a speculative layer the server never saw.
+    editor.select([]);
+    editor.setTool("rect");
+    const countBeforeDraw = editor.doc.childIds("p").length;
+    const undoBeforeDraw = editor.history.undoDepth;
+    arbiter.pointerDown(pt(7, 500, 300));
+    arbiter.pointerMove(pt(7, 620, 400));
+    expect(editor.sync.holding).toBe(true);
+    expect(editor.doc.childIds("p").length).toBe(countBeforeDraw + 1);
+    editor.deleteSelection();
+    expect(editor.sync.holding).toBe(false);
+    expect(editor.doc.childIds("p").length).toBe(countBeforeDraw);
+    expect(editor.history.undoDepth).toBe(undoBeforeDraw);
+    arbiter.pointerUp(pt(7, 620, 400));
   });
 
   it("releases the sync hold via try/finally even if a tool throws on release", () => {

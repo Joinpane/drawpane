@@ -120,6 +120,33 @@ export function createCanvasTouchHost(deps: CanvasTouchHostDeps): {
     editor.sync.commitHold();
   };
 
+  const rollbackSession = (session: TouchDragSession) => {
+    touchDrag = null;
+    clearHoldTimer(session);
+    try {
+      interaction.rollback();
+    } finally {
+      if (!session.holdReleased) {
+        // Still inside the initial hold window: drop silently with zero server traffic.
+        while (editor.history.groupDepth > session.prevHistoryDepth) editor.dropGesture();
+        session.holdReleased = true;
+        editor.sync.discardHold();
+      } else {
+        // Already streaming to collaborators: revert and sync the revert like desktop Escape.
+        while (editor.history.groupDepth > session.prevHistoryDepth) editor.cancelGesture();
+        editor.sync.flush();
+      }
+      editor.select(session.prevSelection.filter((id) => editor.doc.has(id)));
+      editor.state.set({
+        gesture: editor.history.grouping,
+        guides: [],
+        marquee: null,
+        guideDraft: null,
+      });
+      deps.setCursor(interaction.cursor);
+    }
+  };
+
   const host: TouchArbiterHost = {
     workspaceMode: () => uiFor(editor).get().workspaceMode,
     tool: () => editor.s.tool,
@@ -168,7 +195,6 @@ export function createCanvasTouchHost(deps: CanvasTouchHostDeps): {
       const prevHistoryDepth = editor.history.groupDepth;
       const nestedMark = prevHistoryDepth > 0;
       if (nestedMark) editor.history.begin("Touch stroke", prevSelection);
-      editor.sync.beginHold();
       const session: TouchDragSession = {
         prevSelection,
         prevHistoryDepth,
@@ -176,13 +202,16 @@ export function createCanvasTouchHost(deps: CanvasTouchHostDeps): {
         holdReleased: false,
         holdTimer: null,
       };
+      touchDrag = session;
+      editor.sync.beginHold(() => {
+        if (touchDrag === session) rollbackSession(session);
+      });
       session.holdTimer = setTimer(() => {
         session.holdTimer = null;
         if (touchDrag !== session || session.holdReleased) return;
         session.holdReleased = true;
         editor.sync.commitHold();
       }, holdMs);
-      touchDrag = session;
       try {
         editor.sync.withHeld(() => {
           interaction.down(touchPointToInput(start, 1, { coarse: true }));
@@ -203,8 +232,9 @@ export function createCanvasTouchHost(deps: CanvasTouchHostDeps): {
       deps.setCursor(interaction.cursor);
     },
     onToolDragMove: (point) => {
+      if (!touchDrag) return;
       const input = touchPointToInput(point, 1, { coarse: true });
-      if (touchDrag && !touchDrag.holdReleased) {
+      if (!touchDrag.holdReleased) {
         editor.sync.withHeld(() => interaction.move(input));
       } else {
         interaction.move(input);
@@ -213,46 +243,28 @@ export function createCanvasTouchHost(deps: CanvasTouchHostDeps): {
     },
     onToolDragEnd: (point) => {
       const session = touchDrag;
+      if (!session) return;
       touchDrag = null;
       clearHoldTimer(session);
+      const input = touchPointToInput(point, 1, { coarse: true });
       try {
-        interaction.up(touchPointToInput(point, 1, { coarse: true }));
-        if (session?.nestedMark && editor.history.groupDepth > session.prevHistoryDepth) {
+        if (!session.holdReleased) {
+          editor.sync.withHeld(() => interaction.up(input));
+        } else {
+          interaction.up(input);
+        }
+        if (session.nestedMark && editor.history.groupDepth > session.prevHistoryDepth) {
           editor.history.end();
         }
       } finally {
-        if (session) releaseHold(session);
+        releaseHold(session);
         deps.setCursor(interaction.cursor);
       }
     },
     onToolDragRollback: () => {
       const session = touchDrag;
-      touchDrag = null;
-      clearHoldTimer(session);
-      try {
-        interaction.rollback();
-      } finally {
-        if (session) {
-          if (!session.holdReleased) {
-            // Still inside the initial hold window: drop silently with zero server traffic.
-            while (editor.history.groupDepth > session.prevHistoryDepth) editor.dropGesture();
-            session.holdReleased = true;
-            editor.sync.discardHold();
-          } else {
-            // Already streaming to collaborators: revert and sync the revert like desktop Escape.
-            while (editor.history.groupDepth > session.prevHistoryDepth) editor.cancelGesture();
-            editor.sync.flush();
-          }
-          editor.select(session.prevSelection.filter((id) => editor.doc.has(id)));
-        }
-        editor.state.set({
-          gesture: editor.history.grouping,
-          guides: [],
-          marquee: null,
-          guideDraft: null,
-        });
-        deps.setCursor(interaction.cursor);
-      }
+      if (!session) return;
+      rollbackSession(session);
     },
     onPenDown: (point, penClicks) => {
       deps.blurOutsideCanvas();

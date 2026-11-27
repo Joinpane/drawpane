@@ -732,12 +732,23 @@ export class Editor {
   // Committing
 
   /**
+   * Rolls back any held speculative touch drag before an unrelated edit reads
+   * document state or commits outside `sync.withHeld(...)`, so external edits
+   * and their undo entries never capture discarded drag positions.
+   */
+  #interruptHold(): boolean {
+    if (!this.canEdit) return false;
+    return this.sync.interruptHold();
+  }
+
+  /**
    * Applies operations as you, with derived fix-ups (text auto-size, auto
    * layout) in the same transaction, and records one undo step. Returns false
    * when the edit is invalid or you can only view.
    */
   commit(ops: readonly Op[], label = "Edit", options: CommitOptions = {}): boolean {
     if (!this.canEdit || ops.length === 0) return false;
+    this.#interruptHold();
     // Taking away the auto layout an instance shows, or giving it one its component lacks, is
     // refused through any setter (as Figma refuses them): no edit makes a frame frozen
     // (`frozenFrame`, PR 286), and none races a main gaining a flow.
@@ -767,11 +778,7 @@ export class Editor {
       }
       throw error;
     }
-    // An edit triggered outside a held touch drag (for example a keyboard shortcut while
-    // a finger is down) stays independent of the held drag group so rollback keeps both
-    // the document and undo history consistent.
-    const externalDuringHold = this.sync.holding && !this.sync.capturingHeld;
-    this.history.record(label, inverse, this.s.selection, { bypassOpen: externalDuringHold });
+    this.history.record(label, inverse, this.s.selection);
     return true;
   }
 
@@ -783,6 +790,7 @@ export class Editor {
     /** An edit of a person's or an agent's (not undo or redo): it leaves no frame frozen. */
     edit = false,
   ): Op[] {
+    this.#interruptHold();
     return this.doc.batch(() => {
       const wasFrozen = edit ? frozenBefore(this.doc, ops) : null;
       // A person's edit inside an instance records an override, and setting a
@@ -1126,6 +1134,7 @@ export class Editor {
 
   /** Groups every commit until `endGesture` into one undo step (a drag, a scrub, typing). */
   beginGesture(label: string): void {
+    this.#interruptHold();
     this.history.begin(label, this.s.selection);
     this.state.set({ gesture: true });
   }
@@ -1175,11 +1184,18 @@ export class Editor {
       ids.push(node.id);
     }
     const ops = this.#textFixups(ids);
-    if (ops.length > 0) this.#commitWithFixups(ops, false);
+    if (ops.length > 0) {
+      if (this.#interruptHold()) {
+        this.refitText(families);
+        return;
+      }
+      this.#commitWithFixups(ops, false);
+    }
   }
 
   undo(): void {
     if (!this.canEdit) return;
+    this.#interruptHold();
     const selection = this.history.undo(
       // Copies a teammate has used since stay: their instances need their mains.
       (ops) => this.#commitWithFixups(keepUsedCopies(this.doc, ops), false),
@@ -1190,6 +1206,7 @@ export class Editor {
 
   redo(): void {
     if (!this.canEdit) return;
+    this.#interruptHold();
     const selection = this.history.redo(
       (ops) => this.#commitWithFixups(ops, false),
       this.s.selection,
@@ -1663,6 +1680,7 @@ export class Editor {
 
   /** Creates a layer from a rectangle in page coordinates. Returns its id. */
   createLayer(type: LayerType, rect: Rect, parent: string, props: Props = {}): string | null {
+    this.#interruptHold();
     const id = newId();
     const origin = this.scene.toSpace(parent, { x: rect.x, y: rect.y });
     const ok = this.commit(
@@ -1836,6 +1854,7 @@ export class Editor {
 
   /** Sets one property on several layers, skipping layers the property doesn't apply to. */
   setProp(ids: readonly string[], prop: PropName, value: unknown, label = "Change property"): void {
+    this.#interruptHold();
     const ops: Op[] = [];
     // Characters selected in the text being edited: style just those.
     const range = isRunProp(prop) ? this.#textRange() : null;
@@ -1861,6 +1880,7 @@ export class Editor {
    * change the other side too, and typing a size makes that axis fixed.
    */
   resize(ids: readonly string[], prop: "width" | "height", value: number, label = "Resize"): void {
+    this.#interruptHold();
     const ops: Op[] = [];
     const other = prop === "width" ? "height" : "width";
     for (const id of ids) {
@@ -1888,6 +1908,7 @@ export class Editor {
   }
 
   deleteSelection(): void {
+    this.#interruptHold();
     const all = this.#topmost(this.s.selection);
     const ids = all.filter((id) => !isInsideInstance(this.doc, id));
     if (ids.length < all.length) {
@@ -2064,6 +2085,7 @@ export class Editor {
    * in place, then the drag moves the copy to where it's dropped.
    */
   duplicate({ inPlace = false }: { inPlace?: boolean } = {}): void {
+    this.#interruptHold();
     const ids = this.#topmost(this.s.selection);
     if (ids.length === 0) return;
     const ops: Op[] = [];
@@ -2168,6 +2190,7 @@ export class Editor {
    * mask, it stops being one.
    */
   toggleMask(): void {
+    this.#interruptHold();
     const ids = this.#ordered(this.#topmost(this.s.selection));
     if (ids.length === 0) return;
     const nodes = ids.map((id) => this.doc.get(id)).filter((n): n is NodeRecord => !!n);
@@ -2198,6 +2221,7 @@ export class Editor {
   }
 
   group(options: { name?: string } = {}): void {
+    this.#interruptHold();
     if (this.#refuseInsideInstance()) return;
     const ids = this.#ordered(this.#topmost(this.s.selection));
     const slot = this.#wrapperSlot(ids);
@@ -2221,6 +2245,7 @@ export class Editor {
   }
 
   ungroup(): void {
+    this.#interruptHold();
     if (this.#refuseInsideInstance()) return;
     const ops: Op[] = [];
     const released: string[] = [];
@@ -2249,6 +2274,7 @@ export class Editor {
 
   /** Wraps the selection in a new frame sized to it (⌥⌘G), or with auto layout (⇧A). */
   frameSelection(autoLayout = false): void {
+    this.#interruptHold();
     if (this.#refuseInsideInstance()) return;
     const ids = this.#ordered(this.#topmost(this.s.selection));
     const bounds = this.scene.unionBounds(ids);
@@ -3603,6 +3629,7 @@ export class Editor {
 
   /** Moves the selection up or down the stack among its siblings. */
   reorder(direction: "forward" | "backward" | "front" | "back"): void {
+    this.#interruptHold();
     const ops: Op[] = [];
     for (const id of this.#ordered(this.s.selection)) {
       const node = this.doc.get(id);
@@ -3626,6 +3653,7 @@ export class Editor {
 
   /** Moves selected layers by a page-space delta (arrow keys). */
   nudge(dx: number, dy: number): void {
+    this.#interruptHold();
     const ops: Op[] = [];
     for (const id of this.#topmost(this.s.selection)) {
       if (this.doc.has(id) && !this.scene.isLocked(id)) ops.push(...this.#moveOps(id, dx, dy));
@@ -3635,6 +3663,7 @@ export class Editor {
 
   /** Aligns selected layers to each other (or to their parent when one is selected). */
   align(edge: AlignEdge): void {
+    this.#interruptHold();
     const ids = this.#topmost(this.s.selection);
     if (ids.length === 0) return;
     let target: Rect | null;
@@ -3670,6 +3699,7 @@ export class Editor {
    * along one axis (Figma's "Distribute horizontal spacing").
    */
   distribute(axis: "horizontal" | "vertical"): void {
+    this.#interruptHold();
     const ids = this.#topmost(this.s.selection).filter((id) => !this.scene.isLocked(id));
     const items = ids
       .map((id) => ({ id, b: this.scene.bounds(id) }))
@@ -3700,6 +3730,7 @@ export class Editor {
    * several layers flip as one picture.
    */
   flip(axis: "horizontal" | "vertical"): void {
+    this.#interruptHold();
     const ids = this.#topmost(this.s.selection).filter((id) => !this.scene.isLocked(id));
     const pivot = this.scene.unionBounds(ids);
     if (!pivot) return;
@@ -3753,6 +3784,8 @@ export class Editor {
    * frames hug instead, so they're skipped.
    */
   fitToContent(ids: readonly string[] = this.s.selection): void {
+    const usesSelection = ids === this.s.selection;
+    if (this.#interruptHold() && usesSelection) ids = this.s.selection;
     const ops: Op[] = [];
     for (const id of ids) {
       const frame = this.doc.get(id);
@@ -3884,12 +3917,14 @@ export class Editor {
   }
 
   toggleVisible(): void {
+    this.#interruptHold();
     const ids = this.s.selection;
     const anyVisible = ids.some((id) => this.doc.get(id)?.props.visible !== false);
     this.setProp(ids, "visible", anyVisible ? false : null, anyVisible ? "Hide" : "Show");
   }
 
   toggleLocked(): void {
+    this.#interruptHold();
     const ids = this.s.selection;
     const anyUnlocked = ids.some((id) => this.doc.get(id)?.props.locked !== true);
     // The selection stays, like Figma's: the same shortcut unlocks, and the
@@ -4015,6 +4050,7 @@ export class Editor {
    * there ("Paste here"). One undo step either way.
    */
   paste(text: string, options: { at?: Point } = {}): boolean {
+    this.#interruptHold();
     let data: { format?: string; nodes?: NodeRecord[] };
     try {
       data = JSON.parse(text) as typeof data;
@@ -4182,6 +4218,7 @@ export class Editor {
   pasteProperties(): boolean {
     const copied = this.#styleClipboard;
     if (!copied) return false;
+    this.#interruptHold();
     const ops: Op[] = [];
     for (const id of this.s.selection) {
       const node = this.doc.getUnresolved(id);
@@ -4227,6 +4264,7 @@ export class Editor {
    * column just gets even spacing.
    */
   tidyUp(): void {
+    this.#interruptHold();
     const items = this.#topmost(this.s.selection)
       .filter((id) => !this.scene.isLocked(id))
       .map((id) => ({ id, b: this.scene.bounds(id) }))
@@ -4378,6 +4416,7 @@ export class Editor {
 
   startTextEdit(id: string): void {
     if (!this.canEdit) return;
+    this.#interruptHold();
     // Already typing in it: nothing to start.
     if (this.s.editingText === id) return;
     // Typing in another layer: that edit finishes first (its own undo step, and an emptied

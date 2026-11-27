@@ -114,14 +114,9 @@ export class History {
   }
 
   /** Records the inverse of a commit, either into the open group or as its own entry. */
-  record(
-    label: string,
-    inverse: readonly Op[],
-    selection: readonly string[],
-    options: { readonly bypassOpen?: boolean } = {},
-  ): void {
+  record(label: string, inverse: readonly Op[], selection: readonly string[]): void {
     if (inverse.length === 0) return;
-    if (this.#open && !options.bypassOpen) {
+    if (this.#open) {
       this.#open.undo.push([...inverse]);
       return;
     }

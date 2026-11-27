@@ -693,7 +693,8 @@ test.describe("Mobile and tablet touch gesture arbitration", () => {
       }, rectAId);
       const lensEl = page.locator(".lens-anchor");
       await expect(lensEl).toBeVisible({ timeout: 2_000 });
-      await page.waitForTimeout(100);
+      // Wait past the Lens's 350 ms settle timer before measuring per-move React commits (N4).
+      await page.waitForTimeout(450);
 
       // 1. Two-finger pinch over the selected layer's SE resize handle: 0 React commits per move.
       const handleBox = await rectScreenBox(page, rectAId);
@@ -818,6 +819,69 @@ test.describe("Mobile and tablet touch gesture arbitration", () => {
       expect(afterLensPinchB.camera.zoom).toBeGreaterThan(beforeLensPinchB.camera.zoom * 1.15);
       expect(afterLensPinchB.node).toEqual(beforeLensPinchB.node);
       expect(afterLensPinchB.undoDepth).toBe(beforeLensPinchB.undoDepth);
+
+      // 3b. Lens W-label touch scrub taken over by a second finger (N1):
+      // drifts under 8 px touch slop (3 px, 6 px) write nothing, and a drift past slop (15 px)
+      // starts scrubbing and cancels cleanly on pinch takeover with zero undo entry.
+      for (const drift of [3, 6, 15]) {
+        await page.evaluate((id) => {
+          const ed = (window as unknown as DebugWindow).drawpane;
+          ed.zoomTo(1);
+          ed.centerOn({ x: 380, y: 250 });
+          ed.select([id]);
+        }, rectAId);
+        await expect(lensEl).toBeVisible({ timeout: 2_000 });
+        await page.waitForTimeout(450);
+        const wLabel = lensEl
+          .locator(".dp-field")
+          .filter({ has: page.getByRole("spinbutton", { name: "Width" }) })
+          .locator(".dp-field__label")
+          .first();
+        const wBox = await wLabel.boundingBox();
+        if (!wBox) throw new Error("missing Lens W label bounding box");
+        const targetBox = await rectScreenBox(page, rectAId);
+        const beforeScrubPinch = await readSnapshot(page, rectAId);
+        const f1 = { x: wBox.x + wBox.width / 2, y: wBox.y + wBox.height / 2 };
+        const f2 = { x: targetBox.cx, y: targetBox.cy };
+        await touchStart(cdp, [{ id: 1, x: f1.x, y: f1.y }]);
+        await touchMove(cdp, [{ id: 1, x: f1.x + drift, y: f1.y }]);
+        const midWidth = (await readSnapshot(page, rectAId)).node?.width;
+        if (drift >= 8) {
+          expect(midWidth).toBeGreaterThan(beforeScrubPinch.node?.width ?? 0);
+        } else {
+          expect(midWidth).toBe(beforeScrubPinch.node?.width);
+        }
+        const midX = (f1.x + drift + f2.x) / 2;
+        const midY = (f1.y + f2.y) / 2;
+        const dx = f1.x + drift - midX;
+        const dy = f1.y - midY;
+        const len = Math.hypot(dx, dy) || 1;
+        const ux = (dx / len) * 35;
+        const uy = (dy / len) * 35;
+        const scrubPinchOps: Promise<unknown>[] = [
+          touchStart(cdp, [
+            { id: 1, x: f1.x + drift, y: f1.y },
+            { id: 2, x: f2.x, y: f2.y },
+          ]),
+        ];
+        for (let i = 1; i <= 6; i++) {
+          const t = i / 6;
+          scrubPinchOps.push(
+            touchMove(cdp, [
+              { id: 1, x: f1.x + drift + ux * t, y: f1.y + uy * t },
+              { id: 2, x: f2.x - ux * t, y: f2.y - uy * t },
+            ]),
+          );
+        }
+        scrubPinchOps.push(touchEnd(cdp, []));
+        await Promise.all(scrubPinchOps);
+        await page.waitForTimeout(150);
+        const afterScrubPinch = await readSnapshot(page, rectAId);
+        expect(afterScrubPinch.node).toEqual(beforeScrubPinch.node);
+        expect(afterScrubPinch.undoDepth).toBe(beforeScrubPinch.undoDepth);
+        expect(afterScrubPinch.redoDepth).toBe(beforeScrubPinch.redoDepth);
+        expect(afterScrubPinch.camera.zoom).toBeGreaterThan(beforeScrubPinch.camera.zoom * 1.15);
+      }
 
       // 4. Pinch while drag-selecting inside a text edit box keeps text editing open and zooms (F1).
       const textId = await page.evaluate(() => {

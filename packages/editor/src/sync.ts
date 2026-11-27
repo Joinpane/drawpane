@@ -119,6 +119,7 @@ export class SyncEngine {
   #pending: PendingTxn[] = [];
   #holdDepth = 0;
   #capturingHeld = 0;
+  readonly #holdInterrupts: Array<() => void> = [];
   #flushScheduled = false;
   #lastFlush = 0;
   #snapshot: NodeRecord[] | null = null;
@@ -205,13 +206,31 @@ export class SyncEngine {
 
   /**
    * Opens a hold window so commits made inside `withHeld(...)` stay unsent until
-   * `commitHold()` or `discardHold()` is called. Commits outside `withHeld(...)`
-   * (such as font refits or keyboard undo/redo) remain unheld so rolling back
-   * the speculative drag never reverts unrelated edits.
+   * `commitHold()` or `discardHold()` is called. An optional `onInterrupt` callback
+   * lets the host roll back its speculative interaction (just like a second finger
+   * landing) whenever an unrelated edit occurs outside `withHeld(...)` during the hold.
    */
-  beginHold(): void {
+  beginHold(onInterrupt?: () => void): void {
     if (this.#holdDepth === 0) this.flush();
     this.#holdDepth++;
+    if (onInterrupt) this.#holdInterrupts.push(onInterrupt);
+  }
+
+  /**
+   * Interrupts an active hold when an unrelated edit runs outside `withHeld(...)`.
+   * Runs registered hold interrupt handlers first so the host rolls back its tool
+   * state and drops its open history group, then guarantees no hold remains active.
+   */
+  interruptHold(): boolean {
+    if (this.#holdDepth === 0 || this.#capturingHeld > 0) return false;
+    const handlers = this.#holdInterrupts.splice(0);
+    for (let i = handlers.length - 1; i >= 0; i--) {
+      handlers[i]?.();
+    }
+    while (this.#holdDepth > 0) {
+      this.discardHold();
+    }
+    return true;
   }
 
   /** Runs `fn` tagging synchronous commits inside it as held while `holding` is true. */
@@ -229,6 +248,7 @@ export class SyncEngine {
     if (this.#holdDepth === 0) return;
     this.#holdDepth--;
     if (this.#holdDepth > 0) return;
+    this.#holdInterrupts.length = 0;
     let released = false;
     for (const txn of this.#pending) {
       if (txn.held) {
@@ -252,6 +272,7 @@ export class SyncEngine {
     if (this.#holdDepth === 0) return false;
     this.#holdDepth--;
     if (this.#holdDepth > 0) return false;
+    this.#holdInterrupts.length = 0;
     const firstHeld = this.#pending.findIndex((t) => t.held);
     if (firstHeld === -1) {
       if (this.#pending.some((t) => t.seq === null && !t.held)) {

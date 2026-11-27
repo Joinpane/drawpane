@@ -450,6 +450,69 @@ describe("NumberField", () => {
     expect(onScrubEnd).toHaveBeenCalledTimes(1);
   });
 
+  it("applies 8 px touch slop before scrubbing and cancels on takeover or unmount", () => {
+    const onChange = vi.fn();
+    const onScrubStart = vi.fn();
+    const onScrubEnd = vi.fn();
+    const onScrubCancel = vi.fn();
+    const { unmount } = render(
+      <NumberField
+        label="W"
+        defaultValue={300}
+        onChange={onChange}
+        onScrubStart={onScrubStart}
+        onScrubEnd={onScrubEnd}
+        onScrubCancel={onScrubCancel}
+      />,
+    );
+    const input = screen.getByRole("spinbutton", { name: "W" }) as HTMLInputElement;
+    const label = screen.getByText("W");
+
+    // Drifts under 8 px touch slop (3 px, 6 px) write nothing and never start a scrub.
+    fireEvent.pointerDown(label, { pointerId: 1, pointerType: "touch", button: 0, clientX: 100 });
+    expect(document.documentElement.classList.contains("dp-scrubbing")).toBe(false);
+    fireEvent.pointerMove(label, { pointerId: 1, pointerType: "touch", clientX: 103 });
+    fireEvent.pointerMove(label, { pointerId: 1, pointerType: "touch", clientX: 106 });
+    expect(onChange).not.toHaveBeenCalled();
+    expect(onScrubStart).not.toHaveBeenCalled();
+    fireEvent.lostPointerCapture(label, { pointerId: 1, pointerType: "touch", clientX: 106 });
+    expect(onScrubStart).not.toHaveBeenCalled();
+    expect(onScrubEnd).not.toHaveBeenCalled();
+    expect(onScrubCancel).not.toHaveBeenCalled();
+    expect(input.value).toBe("300");
+
+    // Crossing >= 8 px starts scrubbing; lostpointercapture (pinch takeover) cancels and reverts.
+    fireEvent.pointerDown(label, { pointerId: 2, pointerType: "touch", button: 0, clientX: 100 });
+    fireEvent.pointerMove(label, { pointerId: 2, pointerType: "touch", clientX: 112 });
+    expect(onScrubStart).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenLastCalledWith(312);
+    expect(input.value).toBe("312");
+    expect(document.documentElement.classList.contains("dp-scrubbing")).toBe(true);
+    fireEvent.lostPointerCapture(label, { pointerId: 2, pointerType: "touch", clientX: 112 });
+    expect(document.documentElement.classList.contains("dp-scrubbing")).toBe(false);
+    expect(onScrubCancel).toHaveBeenCalledTimes(1);
+    expect(onScrubEnd).not.toHaveBeenCalled();
+    expect(input.value).toBe("300");
+
+    // Normal single-finger touch scrub (>= 8 px followed by pointerUp) commits via onScrubEnd.
+    fireEvent.pointerDown(label, { pointerId: 3, pointerType: "touch", button: 0, clientX: 100 });
+    fireEvent.pointerMove(label, { pointerId: 3, pointerType: "touch", clientX: 115 });
+    fireEvent.pointerUp(label, { pointerId: 3, pointerType: "touch", clientX: 115 });
+    expect(onScrubStart).toHaveBeenCalledTimes(2);
+    expect(onScrubEnd).toHaveBeenCalledTimes(1);
+    expect(onScrubCancel).toHaveBeenCalledTimes(1);
+    expect(input.value).toBe("315");
+
+    // Unmount mid-touch-scrub (Lens hiding on pinch) calls onScrubCancel instead of onScrubEnd.
+    fireEvent.pointerDown(label, { pointerId: 4, pointerType: "touch", button: 0, clientX: 100 });
+    fireEvent.pointerMove(label, { pointerId: 4, pointerType: "touch", clientX: 120 });
+    expect(onScrubStart).toHaveBeenCalledTimes(3);
+    unmount();
+    expect(document.documentElement.classList.contains("dp-scrubbing")).toBe(false);
+    expect(onScrubCancel).toHaveBeenCalledTimes(2);
+    expect(onScrubEnd).toHaveBeenCalledTimes(1);
+  });
+
   it("scrubs when its unit is dragged too, with no label to drag", () => {
     const onChange = vi.fn();
     render(

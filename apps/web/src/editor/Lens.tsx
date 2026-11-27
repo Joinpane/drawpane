@@ -267,6 +267,10 @@ function lensContents(
         ctx.scrubbing.current = false;
         editor.endGesture();
       }}
+      onScrubCancel={() => {
+        ctx.scrubbing.current = false;
+        editor.cancelGesture();
+      }}
     />
   );
   const prop = (
