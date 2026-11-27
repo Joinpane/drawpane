@@ -9,6 +9,9 @@
  * - A closed path that only retraces itself (`M8 0 L0 8 Z`, the shadcn kit's Lucide X instances)
  *   strokes like the open lines: stroked closed, its two outlines coincide and the engine's
  *   analytic coverage counted their edges twice, half a pixel wider (engine/retraced.ts).
+ * - A filled box with an opaque inside stroke covers its edge once, as its fill alone does: fill
+ *   and stroke both ended on the edge, and an edge pixel got 2c - c² of coverage (the shadcn
+ *   Carousel button). Its fills now stop halfway under the stroke (engine/rim.ts).
  */
 import { expect, type Page, test } from "@playwright/test";
 import { freshInstance } from "./fresh-instance";
@@ -171,6 +174,18 @@ test.describe
               ...x,
               pathData: "M8 0 L0 8 M0 0 L8 8",
             }),
+            // The shadcn kit's Carousel button, bordered and not.
+            bordered: e.createLayer("frame", { x: 120, y: 0, width: 28, height: 28 }, page, {
+              cornerRadius: 9999,
+              fills: [{ type: "solid", color: "#f5f5f5" }],
+              strokes: [{ type: "solid", color: "#e5e5e5" }],
+              strokeWeight: 1,
+              strokeAlign: "inside",
+            }),
+            plain: e.createLayer("frame", { x: 160, y: 0, width: 28, height: 28 }, page, {
+              cornerRadius: 9999,
+              fills: [{ type: "solid", color: "#f5f5f5" }],
+            }),
           };
         }),
       );
@@ -216,6 +231,27 @@ test.describe
         // Stroked closed, a 45° edge pixel the lines cover 157/255 of came out 255.
         expect(Math.max(...closed.map((a, i) => Math.abs(a - (open[i] as number))))).toBe(0);
         expect(open.some((a) => a > 0 && a < 255)).toBe(true);
+      });
+
+      test(`a filled box covers its edge once under an inside stroke (${backend})`, async () => {
+        test.setTimeout(120_000);
+        const bordered = await alpha(page, backend, ids.bordered as string, {
+          x: 120,
+          y: 0,
+          width: 28,
+          height: 28,
+        });
+        const plain = await alpha(page, backend, ids.plain as string, {
+          x: 160,
+          y: 0,
+          width: 28,
+          height: 28,
+        });
+        // Fill and stroke both on the edge: an edge pixel the circle covers 60/255 of came out 98.
+        expect(
+          Math.max(...bordered.map((a, i) => Math.abs(a - (plain[i] as number)))),
+        ).toBeLessThanOrEqual(1);
+        expect(plain.some((a) => a > 0 && a < 255)).toBe(true);
       });
     }
   });
