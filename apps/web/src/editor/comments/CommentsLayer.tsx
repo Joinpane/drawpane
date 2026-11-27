@@ -275,25 +275,38 @@ export function CommentsLayer({
       }
     };
 
-    let suppressClickTimer: number | null = null;
-    let suppressClickPoint: { x: number; y: number } | null = null;
-    const clearSuppressedClick = () => {
-      suppressClickPoint = null;
-      if (suppressClickTimer !== null) {
-        window.clearTimeout(suppressClickTimer);
-        suppressClickTimer = null;
+    let suppressMouseTimer: number | null = null;
+    let suppressMousePoint: { x: number; y: number } | null = null;
+    const clearSuppressedMouse = () => {
+      suppressMousePoint = null;
+      if (suppressMouseTimer !== null) {
+        window.clearTimeout(suppressMouseTimer);
+        suppressMouseTimer = null;
       }
     };
-    const onSuppressedClick = (e: MouseEvent) => {
-      if (!suppressClickPoint) return;
-      const hit =
-        Math.hypot(e.clientX - suppressClickPoint.x, e.clientY - suppressClickPoint.y) <=
+    const withinSuppressedTap = (e: MouseEvent) =>
+      suppressMousePoint !== null &&
+      Math.hypot(e.clientX - suppressMousePoint.x, e.clientY - suppressMousePoint.y) <=
         TAP_SLOP * 2;
-      clearSuppressedClick();
+    const onSuppressedMouseDown = (e: MouseEvent) => {
+      if (!withinSuppressedTap(e)) return;
+      // Keep focus in the newly opened comment field instead of letting the tap's
+      // compatibility mousedown move focus onto the scrim or sheet chrome.
+      e.preventDefault();
+      e.stopPropagation();
+    };
+    const onSuppressedClick = (e: MouseEvent) => {
+      if (!suppressMousePoint) return;
+      const hit = withinSuppressedTap(e);
+      clearSuppressedMouse();
       if (hit) {
         e.preventDefault();
         e.stopPropagation();
       }
+    };
+    const onAnyPointerDown = () => {
+      // A new pointer interaction supersedes any pending compatibility-event suppression.
+      if (suppressMousePoint) clearSuppressedMouse();
     };
 
     const onUp = (e: PointerEvent) => {
@@ -303,11 +316,11 @@ export function CommentsLayer({
       if (editor.s.tool !== "comment") return;
       if (Math.hypot(e.clientX - tap.startX, e.clientY - tap.startY) > TAP_SLOP) return;
       e.stopPropagation();
-      // Swallow the trailing compatibility click from this touch tap so mounting the
-      // bottom sheet under the tapped spot never triggers Cancel, Close or the scrim.
-      clearSuppressedClick();
-      suppressClickPoint = { x: e.clientX, y: e.clientY };
-      suppressClickTimer = window.setTimeout(clearSuppressedClick, 350);
+      // Swallow the trailing compatibility mousedown/click from this touch tap so mounting
+      // the bottom sheet under the tapped spot never steals focus or triggers buttons/scrim.
+      clearSuppressedMouse();
+      suppressMousePoint = { x: e.clientX, y: e.clientY };
+      suppressMouseTimer = window.setTimeout(clearSuppressedMouse, 350);
       placePin(tap.canvas, e.clientX, e.clientY);
     };
 
@@ -316,16 +329,20 @@ export function CommentsLayer({
     };
 
     host.addEventListener("pointerdown", onDown, true);
+    window.addEventListener("pointerdown", onAnyPointerDown, true);
     window.addEventListener("pointermove", onMove, true);
     window.addEventListener("pointerup", onUp, true);
     window.addEventListener("pointercancel", onCancel, true);
+    window.addEventListener("mousedown", onSuppressedMouseDown, true);
     window.addEventListener("click", onSuppressedClick, true);
     return () => {
-      clearSuppressedClick();
+      clearSuppressedMouse();
       host.removeEventListener("pointerdown", onDown, true);
+      window.removeEventListener("pointerdown", onAnyPointerDown, true);
       window.removeEventListener("pointermove", onMove, true);
       window.removeEventListener("pointerup", onUp, true);
       window.removeEventListener("pointercancel", onCancel, true);
+      window.removeEventListener("mousedown", onSuppressedMouseDown, true);
       window.removeEventListener("click", onSuppressedClick, true);
     };
   }, [editor, interaction, store]);

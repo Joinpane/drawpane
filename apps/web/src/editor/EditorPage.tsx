@@ -721,8 +721,11 @@ function FileEditor({ fileId }: { fileId: string }) {
       }
       const env = fitEnvRef.current;
       if (env.workspaceMode === "desktop" || env.viewing || env.comparing) return;
-      // Record immediately once the user has zoomed or panned away from our automatic fit.
-      if (prev.autoFitCamera && !camera.equals(prev.autoFitCamera)) {
+      // Treat an explicit Zoom to fit as the automatic fit so later rotation/resize refits,
+      // and clear it immediately once the user zooms or pans away manually.
+      if (editor.lastFitCamera && camera.equals(editor.lastFitCamera)) {
+        prev.autoFitCamera = camera;
+      } else if (prev.autoFitCamera && !camera.equals(prev.autoFitCamera)) {
         prev.autoFitCamera = null;
       }
       const layoutChanged =
@@ -989,6 +992,8 @@ function FileEditor({ fileId }: { fileId: string }) {
       if (e.defaultPrevented) return;
       // A modal dialog has the keyboard (Escape closes it natively; preventing it wouldn't).
       if (document.querySelector("dialog[open]:modal")) return;
+      // A phone bottom sheet owns Escape before canvas selection shortcuts run.
+      if (e.key === "Escape" && document.querySelector(".mobile-sheet")) return;
       // Enter and Space press the focused button, menu item or link: never also a shortcut.
       if ((e.key === "Enter" || e.key === " ") && isControl(e.target)) return;
       // While a version is on screen, keys act on it (read-only) instead of the live file.
@@ -1085,8 +1090,11 @@ function FileEditor({ fileId }: { fileId: string }) {
         if (triggers(action, e)) {
           // The tokens workspace hides the canvas: only what makes sense there runs.
           if (viewRef.current === "tokens" && !inTokensView(action)) return;
+          const runnable = !action.enabled || action.enabled(editor);
+          // Only swallow Escape when Deselect actually changes selection or leaves text edit.
+          if (action.id === "edit.deselect" && !runnable) return;
           e.preventDefault();
-          if (!action.enabled || action.enabled(editor)) action.run(ctx);
+          if (runnable) action.run(ctx);
           return;
         }
       }

@@ -65,7 +65,7 @@ export function MobileSheet({
 }: MobileSheetProps) {
   const titleId = useId();
   const sheetRef = useRef<HTMLElement>(null);
-  const scrimPressed = useRef(false);
+  const scrimPointer = useRef<{ id: number; x: number; y: number } | null>(null);
   const returnFocusRef = useRef(returnFocusTo);
   returnFocusRef.current = returnFocusTo;
   const onCloseRef = useRef(onClose);
@@ -98,14 +98,17 @@ export function MobileSheet({
     };
   }, [focusInside]);
 
+  const hasNestedPopup = () =>
+    document.querySelector("dialog[open]:modal") !== null ||
+    sheetRef.current?.querySelector('[role="listbox"], [role="menu"]') !== null;
+
   // Listen in the bubble phase so nested popups (such as the @mention listbox or a menu)
   // consume Escape first without closing the sheet.
   useEffect(() => {
     const onKey = (e: globalThis.KeyboardEvent) => {
       if (e.key !== "Escape") return;
       if (e.defaultPrevented) return;
-      if (document.querySelector('dialog[open]:modal, [role="listbox"], [role="menu"]') !== null)
-        return;
+      if (hasNestedPopup()) return;
       e.preventDefault();
       e.stopPropagation();
       onCloseRef.current();
@@ -116,8 +119,7 @@ export function MobileSheet({
 
   const handleKeyDown = (e: KeyboardEvent<HTMLElement>) => {
     if (e.key === "Escape" && !e.defaultPrevented) {
-      if (document.querySelector('dialog[open]:modal, [role="listbox"], [role="menu"]') !== null)
-        return;
+      if (hasNestedPopup()) return;
       e.preventDefault();
       e.stopPropagation();
       onClose();
@@ -126,22 +128,28 @@ export function MobileSheet({
 
   return (
     <div className="mobile-sheet-host" data-variant={variant} {...PASS_GESTURES}>
-      <button
-        type="button"
+      <div
         className="mobile-sheet-scrim"
         aria-hidden="true"
-        tabIndex={-1}
+        onMouseDown={(e) => {
+          // Keep focus in the sheet (for example the comment field) across scrim taps
+          // and any trailing compatibility mousedown from the tap that opened the sheet.
+          e.preventDefault();
+        }}
         onPointerDown={(e) => {
-          if (e.button === 0) scrimPressed.current = true;
+          if (e.button === 0) {
+            scrimPointer.current = { id: e.pointerId, x: e.clientX, y: e.clientY };
+          }
+        }}
+        onPointerUp={(e) => {
+          const down = scrimPointer.current;
+          scrimPointer.current = null;
+          if (!down || down.id !== e.pointerId) return;
+          if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > 12) return;
+          (onScrimClick ?? onClose)();
         }}
         onPointerCancel={() => {
-          scrimPressed.current = false;
-        }}
-        onClick={() => {
-          // Ignore a compatibility click from the gesture that mounted this sheet.
-          if (!scrimPressed.current) return;
-          scrimPressed.current = false;
-          (onScrimClick ?? onClose)();
+          scrimPointer.current = null;
         }}
       />
       <section

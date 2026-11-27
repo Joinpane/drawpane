@@ -112,4 +112,93 @@ describe("workspace readOnly mode", () => {
     expect(editor.doc.get(freshId as string)).toBeUndefined();
     expect(editor.s.canRedo).toBe(false);
   });
+
+  it("closes text-edit undo group when a peer deletes the edited text so later Cancel never rolls back unrelated moves", () => {
+    const { editor, pageId } = makeEditor();
+    const doomedId = editor.createLayer("text", { x: 20, y: 20, width: 120, height: 24 }, pageId);
+    const survivorId = editor.createLayer("text", { x: 20, y: 60, width: 120, height: 24 }, pageId);
+    const markerId = editor.createLayer("rect", { x: 0, y: 120, width: 80, height: 40 }, pageId);
+    expect(doomedId && survivorId && markerId).toBeTruthy();
+    editor.setProp([doomedId as string], "characters", "Soon gone");
+    editor.setProp([survivorId as string], "characters", "Survivor");
+
+    // Start editing doomed text, then a peer deletes it remotely.
+    editor.startTextEdit(doomedId as string);
+    expect(editor.history.grouping).toBe(true);
+    editor.doc.apply([{ op: "delete", id: doomedId as string }]);
+
+    // #reconcile must leave text editing AND close the leaked "Edit text" group.
+    expect(editor.s.editingText).toBeNull();
+    expect(editor.history.grouping).toBe(false);
+    expect(editor.history.groupDepth).toBe(0);
+    expect(editor.s.gesture).toBe(false);
+
+    // Move an unrelated layer twice; each move must be its own saved undo step.
+    editor.select([markerId as string]);
+    editor.setProp([markerId as string], "x", 100);
+    editor.setProp([markerId as string], "x", 222);
+    expect(getProp(editor.doc.get(markerId as string)?.props ?? {}, "x")).toBe(222);
+
+    // Edit another text layer and cancel: must revert only the text edit, never the prior moves.
+    editor.startTextEdit(survivorId as string);
+    editor.updateText(survivorId as string, "Temporary edit");
+    editor.cancelTextEdit();
+
+    expect(getProp(editor.doc.get(survivorId as string)?.props ?? {}, "characters")).toBe(
+      "Survivor",
+    );
+    expect(getProp(editor.doc.get(markerId as string)?.props ?? {}, "x")).toBe(222);
+    expect(editor.s.canRedo).toBe(false);
+
+    // Confirm the two prior moves were NOT merged into one leaked group.
+    editor.undo();
+    expect(getProp(editor.doc.get(markerId as string)?.props ?? {}, "x")).toBe(100);
+    editor.undo();
+    expect(getProp(editor.doc.get(markerId as string)?.props ?? {}, "x")).toBe(0);
+  });
+
+  it("cancelTextEdit discards nested font-preview groups without touching any outer undo group", () => {
+    const { editor, pageId } = makeEditor();
+    const textId = editor.createLayer("text", { x: 20, y: 20, width: 160, height: 28 }, pageId);
+    const markerId = editor.createLayer("rect", { x: 0, y: 100, width: 80, height: 40 }, pageId);
+    expect(textId && markerId).toBeTruthy();
+    editor.setProp([textId as string], "characters", "Headline");
+    const originalFont = getProp(editor.doc.get(textId as string)?.props ?? {}, "fontFamily");
+
+    // 1. Nested font-preview group inside a normal text edit: Cancel reverts both preview and typing.
+    editor.startTextEdit(textId as string);
+    editor.updateText(textId as string, "Draft headline");
+    editor.beginGesture("Preview font");
+    editor.setProp([textId as string], "fontFamily", "Georgia");
+    expect(editor.history.groupDepth).toBe(2);
+
+    editor.cancelTextEdit();
+    expect(editor.history.groupDepth).toBe(0);
+    expect(editor.s.gesture).toBe(false);
+    expect(getProp(editor.doc.get(textId as string)?.props ?? {}, "characters")).toBe("Headline");
+    expect(getProp(editor.doc.get(textId as string)?.props ?? {}, "fontFamily")).toBe(originalFont);
+    expect(editor.s.canRedo).toBe(false);
+
+    // 2. If an unrelated outer group is already open, Cancel only discards groups opened by startTextEdit.
+    editor.beginGesture("Outer work");
+    editor.setProp([markerId as string], "x", 111);
+    editor.setProp([markerId as string], "x", 222);
+    expect(editor.history.groupDepth).toBe(1);
+
+    editor.startTextEdit(textId as string);
+    editor.updateText(textId as string, "Discarded");
+    editor.beginGesture("Preview font");
+    editor.setProp([textId as string], "fontFamily", "Georgia");
+    expect(editor.history.groupDepth).toBe(3);
+
+    editor.cancelTextEdit();
+    expect(editor.history.groupDepth).toBe(1);
+    expect(getProp(editor.doc.get(textId as string)?.props ?? {}, "characters")).toBe("Headline");
+    expect(getProp(editor.doc.get(textId as string)?.props ?? {}, "fontFamily")).toBe(originalFont);
+    expect(getProp(editor.doc.get(markerId as string)?.props ?? {}, "x")).toBe(222);
+
+    editor.endGesture();
+    expect(editor.history.groupDepth).toBe(0);
+    expect(getProp(editor.doc.get(markerId as string)?.props ?? {}, "x")).toBe(222);
+  });
 });

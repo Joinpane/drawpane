@@ -758,14 +758,35 @@ test.describe
         // Backdrop scrim is hidden from assistive tech so there is only one Close Inspect button.
         await expect(page.getByRole("button", { name: "Close Inspect" })).toHaveCount(1);
         await maybeShot(page, "after-phone-393-inspect.png");
+        // Pressing Escape even with focus on body closes Inspect without changing the selection.
+        await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+        await page.keyboard.press("Escape");
+        await expect(inspectSheet).toBeHidden();
+        expect(
+          await page.evaluate(
+            () => (window as unknown as DebugWindow).drawpane.s.selection[0] ?? null,
+          ),
+        ).toBe(heroBannerId);
+
+        // Re-open Inspect and close via its button to verify focus restoration.
+        await inspectTrigger.tap();
+        await expect(inspectSheet).toBeVisible();
         await inspectSheet.getByRole("button", { name: "Close Inspect" }).tap();
         await expect(inspectSheet).toBeHidden();
         await expect(inspectTrigger).toBeFocused();
 
-        // Open Pages sheet: focused, switch to Components page, sheet dismisses and page re-fits.
+        // Open Pages sheet: Escape closes it even with nothing selected and focus on body.
+        await page.evaluate(() => (window as unknown as DebugWindow).drawpane.select([]));
         const pagesTrigger = page.locator(".phone-dock").getByRole("button", { name: /^Pages/ });
         await pagesTrigger.tap();
         const pagesSheet = page.getByRole("dialog", { name: "Pages" });
+        await expect(pagesSheet).toBeVisible();
+        await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+        await page.keyboard.press("Escape");
+        await expect(pagesSheet).toBeHidden();
+
+        // Open Pages sheet again: switch to Components page, sheet dismisses and page re-fits.
+        await pagesTrigger.tap();
         await expect(pagesSheet).toBeVisible();
         await expect(pagesSheet.getByRole("button", { name: "Components" })).toBeVisible();
         await maybeShot(page, "after-phone-393-pages.png");
@@ -836,6 +857,13 @@ test.describe
         expect(customFocusAfter.zoom).toBeCloseTo(customFocusBefore.zoom, 2);
         expect(Math.abs(customFocusAfter.focus.x - customFocusBefore.focus.x)).toBeLessThan(2);
         expect(Math.abs(customFocusAfter.focus.y - customFocusBefore.focus.y)).toBeLessThan(2);
+        await page.setViewportSize({ width: 393, height: 852 });
+
+        // After an explicit Zoom to fit, rotating refits automatically again.
+        await page.getByRole("button", { name: "Zoom to fit" }).tap();
+        await expectContentFitsExposedCanvas(page, "phone-393 after explicit zoom to fit");
+        await page.setViewportSize({ width: 852, height: 393 });
+        await expectContentFitsExposedCanvas(page, "phone-393 rotated after explicit zoom to fit");
         await page.setViewportSize({ width: 393, height: 852 });
 
         // File drops on a phone are swallowed so the browser does not navigate away or mutate the file.
@@ -1007,6 +1035,8 @@ test.describe
         const draftSheet = page.getByRole("dialog", { name: /^New comment on / });
         await expect(draftSheet).toBeVisible({ timeout: 5_000 });
         const draftInput = draftSheet.getByRole("combobox", { name: "Comment" });
+        // Trailing compatibility mousedown/click from the touch tap must not steal focus onto the scrim.
+        await expect(draftInput).toBeFocused();
         await draftInput.fill("Touch pin @An");
         const mentionList = page.getByRole("listbox", { name: "People" });
         await expect(mentionList).toBeVisible();
