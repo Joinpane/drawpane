@@ -7,7 +7,7 @@
 
 mod common;
 
-use common::{ANY, Entry, Op, Paint, Rec, W};
+use common::{ANY, Entry, Op, Paint, Post, Rec, W};
 use drawpane_engine::engine::{Camera, Engine};
 use drawpane_engine::limits::Limits;
 
@@ -191,4 +191,192 @@ fn a_border_over_a_backdrop_reader_leaves_the_fill_whole() {
         .max()
         .unwrap_or(0);
     assert!(worst <= 1, "the child's blur sees another backdrop: {worst} levels off");
+}
+
+/// The re-check's box: 44 x 39 at (12.35, 16.3), radius `radius`, filled a light yellow (not
+/// white, which a multiply blend would leave out), with a 5 unit inside border in black at `ink`
+/// alpha.
+fn bordered(radius: f32, ink: f32) -> Rec {
+    let mut r = Rec::new([1.0, 0.0, 0.0, 1.0, 12.35, 16.3], [44.0, 39.0]);
+    r.paths.push(Entry::Rect {
+        w: 44.0,
+        h: 39.0,
+        radii: [radius; 4],
+    });
+    r.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid([0.95, 0.85, 0.3, 1.0]),
+    });
+    r.ops.push(Op::Clip {
+        path: 0,
+        even_odd: false,
+    });
+    r.ops.push(Op::Stroke {
+        path: 0,
+        width: 10.0,
+        join: 0,
+        cap: 0,
+        dashes: vec![],
+        offset: 0.0,
+        paint: Paint::Solid([0.0, 0.0, 0.0, ink]),
+    });
+    r.ops.push(Op::Unclip);
+    r
+}
+
+/// A filled `w` x `h` box at (`x`, `y`).
+fn square(x: f64, y: f64, w: f32, h: f32, color: [f32; 4]) -> Rec {
+    let mut r = Rec::new([1.0, 0.0, 0.0, 1.0, x, y], [w, h]);
+    r.paths.push(Entry::Rect { w, h, radii: [0.0; 4] });
+    r.ops.push(Op::Fill {
+        path: 0,
+        even_odd: false,
+        paint: Paint::Solid(color),
+    });
+    r
+}
+
+/// An 82 x 82 CPU frame at 1x of `recs` (id, parent), each parent's children in list order.
+fn scene(recs: &[(u32, u32, Rec)]) -> Vec<u8> {
+    let mut e = Engine::new(Limits::default());
+    let mut w = W::new(ANY, 1);
+    w.reset();
+    for (id, parent, r) in recs {
+        w.set(*id, *parent, r);
+    }
+    let mut parents: Vec<u32> = recs.iter().map(|(_, p, _)| *p).collect();
+    parents.dedup();
+    for p in parents {
+        let ids: Vec<u32> = recs.iter().filter(|(_, q, _)| *q == p).map(|(id, _, _)| *id).collect();
+        w.order(p, &ids);
+    }
+    e.apply(&w.finish()).expect("list");
+    let camera = Camera {
+        zoom: 1.0,
+        x: 0.0,
+        y: 0.0,
+        dpr: 1.0,
+    };
+    let (px, _) = e.render_cpu(82, 82, camera, [0.0; 4], false).expect("frame");
+    px.to_vec()
+}
+
+fn worst(a: &[u8], b: &[u8]) -> u8 {
+    a.iter().zip(b).map(|(x, y)| x.abs_diff(*y)).max().unwrap_or(0)
+}
+
+#[test]
+fn a_shape_drawn_into_a_picture_mask_keeps_its_whole_fill() {
+    // The re-check's cases: the bordered box in a group that is the mask picture, masking a red
+    // square, and the box as the content a mask shows. A mask reads the coverage of whatever is
+    // drawn into it, so the fill stays whole on both sides, as main draws it: the opaque border
+    // draws as one a hair short of opaque, which never stops the fill. Stopped, an edge pixel of
+    // the masked square went from alpha 70 to 38.
+    use drawpane_engine::record::{MASK_ALPHA, MASK_LUMINANCE, MASK_OUTLINE_PICTURE};
+    for kind in [MASK_ALPHA, MASK_LUMINANCE, MASK_OUTLINE_PICTURE] {
+        let picture = |ink: f32| -> Vec<(u32, u32, Rec)> {
+            let mut mask = Rec::group();
+            mask.mask = kind;
+            vec![
+                (1, 0, mask),
+                (4, 1, Rec::group()),
+                (2, 4, bordered(8.0, ink)),
+                (3, 0, square(0.0, 0.0, 80.0, 80.0, [1.0, 0.0, 0.0, 1.0])),
+            ]
+        };
+        let content = |ink: f32| -> Vec<(u32, u32, Rec)> {
+            let mut mask = square(2.0, 2.0, 76.0, 76.0, [1.0; 4]);
+            mask.mask = kind;
+            vec![(1, 0, mask), (4, 0, Rec::group()), (2, 4, bordered(8.0, ink))]
+        };
+        for (side, make) in [
+            ("the mask picture", &picture as &dyn Fn(f32) -> Vec<(u32, u32, Rec)>),
+            ("the masked content", &content),
+        ] {
+            let d = worst(&scene(&make(1.0)), &scene(&make(0.999)));
+            assert!(d <= 1, "a bordered box in {side} (mask kind {kind}): {d} levels off");
+        }
+    }
+}
+
+#[test]
+fn scopes_that_composite_a_shape_whole_keep_its_inset_to_the_edge() {
+    // Above the record, an isolated fading group, a multiply layer blend, a layer blur, a frame
+    // clipping its content and an outline mask each take the fill and the stroke into one target
+    // at the device's scale: the fill still stops under the band there (the opaque border draws
+    // unlike one a hair short of opaque, at the box's edge), and nowhere the box covers whole,
+    // its band included, does that show. A blur spreads the edge's change by its reach.
+    use drawpane_engine::record::{FLAG_ISOLATE, MASK_OUTLINE_NONZERO};
+    let backdrop = || square(0.0, 0.0, 82.0, 82.0, [0.2, 0.5, 0.8, 1.0]);
+    let in_group = |g: Rec, ink: f32| vec![(9, 0, backdrop()), (1, 0, g), (2, 1, bordered(0.0, ink))];
+    let isolated = |ink: f32| {
+        let mut g = Rec::group();
+        g.flags |= FLAG_ISOLATE;
+        g.opacity = 0.6;
+        in_group(g, ink)
+    };
+    let blended = |ink: f32| {
+        let mut g = Rec::group();
+        g.layer_blend = 1;
+        in_group(g, ink)
+    };
+    let blurred = |ink: f32| {
+        let mut g = Rec::group();
+        g.post.push(Post::LayerBlur(2.0));
+        in_group(g, ink)
+    };
+    let clipped = |ink: f32| {
+        let mut f = Rec::new([1.0, 0.0, 0.0, 1.0, 0.0, 0.0], [80.0, 80.0]);
+        f.paths.push(Entry::Rect {
+            w: 80.0,
+            h: 80.0,
+            radii: [0.0; 4],
+        });
+        f.ops = vec![
+            Op::Clip {
+                path: 0,
+                even_odd: false,
+            },
+            Op::Children,
+            Op::Unclip,
+        ];
+        in_group(f, ink)
+    };
+    let outlined = |ink: f32| -> Vec<(u32, u32, Rec)> {
+        let mut mask = square(2.0, 2.0, 76.0, 76.0, [1.0; 4]);
+        mask.mask = MASK_OUTLINE_NONZERO;
+        vec![(9, 0, backdrop()), (1, 0, mask), (2, 0, bordered(0.0, ink))]
+    };
+    type Make<'a> = &'a dyn Fn(f32) -> Vec<(u32, u32, Rec)>;
+    let scopes: [(&str, Make, f64); 5] = [
+        ("an isolated fading group", &isolated, 0.0),
+        ("a multiply layer blend", &blended, 0.0),
+        ("a layer blur", &blurred, 8.0),
+        ("a frame clipping its content", &clipped, 0.0),
+        ("an outline mask", &outlined, 0.0),
+    ];
+    for (name, make, reach) in scopes {
+        let (a, b) = (scene(&make(1.0)), scene(&make(0.999)));
+        assert!(worst(&a, &b) > 1, "{name}: the fill no longer stops under the band");
+        // Pixels at least a pixel (and the blur's reach) inside the box's edge, band included.
+        let (x0, x1) = (
+            (12.35 + 1.0 + reach).ceil() as usize,
+            (56.35 - 1.0 - reach).floor() as usize,
+        );
+        let (y0, y1) = (
+            (16.3 + 1.0 + reach).ceil() as usize,
+            (55.3 - 1.0 - reach).floor() as usize,
+        );
+        for y in y0..y1 {
+            for x in x0..x1 {
+                let i = (y * 82 + x) * 4;
+                let d = worst(&a[i..i + 4], &b[i..i + 4]);
+                assert!(
+                    d <= 1,
+                    "{name}: pixel ({x}, {y}), which the box covers whole, is {d} levels off"
+                );
+            }
+        }
+    }
 }

@@ -13,7 +13,8 @@
  *   and stroke both ended on the edge, and an edge pixel got 2c - c² of coverage (the shadcn
  *   Carousel button). Its fills stop halfway under the stroke where that can't show (the engine's
  *   `rim_inset`): a band two device pixels wide or more, so a thin border never turns an opaque
- *   box see-through, and nothing beneath reading the backdrop the fill leaves.
+ *   box see-through, and nothing beneath reading the backdrop the fill leaves. Nor in a mask,
+ *   on either side: a mask reads the coverage of whatever is drawn into it.
  */
 import { expect, type Page, test } from "@playwright/test";
 import { freshInstance } from "./fresh-instance";
@@ -222,11 +223,57 @@ test.describe
                     strokeAlign: "inside",
                   },
                 );
-                e.createLayer("rect", { x: 10, y: 10, width: 80, height: 56 }, frame, {
+                // Page coordinates: 10 units inside the frame.
+                e.createLayer("rect", { x: 310 + i * 120, y: 10, width: 80, height: 56 }, frame, {
                   fills: [{ type: "solid", color: "#ffffff05" }],
                   effects: [{ type: "background-blur", radius: 20 }],
                 });
                 return [i === 0 ? "readerOpaque" : "readerHair", frame];
+              }),
+            ),
+            // The re-check's box (5 unit black inside border) on each side of an alpha mask: in
+            // a frame that is the mask, under a red square, and as the content a white mask
+            // shows. Again with a border a hair short of opaque, which never stops the fill.
+            ...Object.fromEntries(
+              (["#000000", "#000000fe"] as const).flatMap((ink, i) => {
+                const box = (parent: string, x: number) =>
+                  e.createLayer("rect", { x: x + 12.35, y: 16.3, width: 44, height: 39 }, parent, {
+                    fills: [{ type: "solid", color: "#f2d94c" }],
+                    strokes: [{ type: "solid", color: ink }],
+                    strokeWeight: 5,
+                    strokeAlign: "inside",
+                    cornerRadius: 8,
+                  });
+                const x = 560 + i * 200;
+                const picture = e.createLayer("frame", { x, y: 0, width: 82, height: 82 }, page, {
+                  fills: [],
+                });
+                const mask = e.createLayer("frame", { x, y: 0, width: 82, height: 82 }, picture, {
+                  fills: [],
+                  isMask: true,
+                  maskType: "alpha",
+                });
+                box(mask, x);
+                e.createLayer("rect", { x, y: 0, width: 80, height: 80 }, picture, {
+                  fills: [{ type: "solid", color: "#ff0000" }],
+                });
+                const content = e.createLayer(
+                  "frame",
+                  { x: x + 100, y: 0, width: 82, height: 82 },
+                  page,
+                  { fills: [] },
+                );
+                e.createLayer("rect", { x: x + 102, y: 2, width: 76, height: 76 }, content, {
+                  fills: [{ type: "solid", color: "#ffffff" }],
+                  isMask: true,
+                  maskType: "alpha",
+                });
+                box(content, x + 100);
+                const tag = i === 0 ? "Opaque" : "Hair";
+                return [
+                  [`maskPicture${tag}`, picture],
+                  [`maskContent${tag}`, content],
+                ];
               }),
             ),
           };
@@ -347,6 +394,47 @@ test.describe
         expect(
           Math.max(...opaque.map((v, i) => Math.abs(v - (hair[i] as number)))),
         ).toBeLessThanOrEqual(2);
+      });
+
+      test(`a bordered box drawn into an alpha mask keeps its fill whole (${backend})`, async () => {
+        test.setTimeout(120_000);
+        // A mask reads the coverage of whatever is drawn into it, so the fill stays whole on
+        // both of its sides. Stopped, an edge pixel of the masked square went from alpha 70 to 38.
+        for (const side of ["maskPicture", "maskContent"] as const) {
+          const at = side === "maskPicture" ? 560 : 660;
+          const opaque = await pixels(
+            page,
+            backend,
+            ids[`${side}Opaque`] as string,
+            {
+              x: at,
+              y: 0,
+              width: 82,
+              height: 82,
+            },
+            1,
+          );
+          const hair = await pixels(
+            page,
+            backend,
+            ids[`${side}Hair`] as string,
+            {
+              x: at + 200,
+              y: 0,
+              width: 82,
+              height: 82,
+            },
+            1,
+          );
+          expect(
+            Math.max(...opaque.map((v, i) => Math.abs(v - (hair[i] as number)))),
+            side,
+          ).toBeLessThanOrEqual(2);
+          expect(
+            opaque.some((v, i) => i % 4 === 3 && v > 0 && v < 255),
+            side,
+          ).toBe(true);
+        }
       });
     }
   });

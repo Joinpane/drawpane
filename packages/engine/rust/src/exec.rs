@@ -1337,6 +1337,7 @@ pub fn draw_split_resumable<B: Backend>(
         current_context: false,
         context_clips_suspended: false,
         isolated_backdrop_depth: 0,
+        picture_masks: 0,
         allow_yield: can_yield,
         yield_safe_depth: 0,
         paused: false,
@@ -1429,6 +1430,10 @@ struct Walk<'a, B: Backend> {
     current_context: bool,
     context_clips_suspended: bool,
     isolated_backdrop_depth: usize,
+    /// Picture masks (alpha, luminance, outline picture) whose content or mask picture is being
+    /// drawn: their records keep whole fills under inside strokes (`rim_inset`), as main draws
+    /// them, since a mask reads the coverage of everything drawn into it.
+    picture_masks: usize,
     allow_yield: bool,
     yield_safe_depth: usize,
     paused: bool,
@@ -1574,6 +1579,10 @@ pub(crate) fn clip_wraps_children(ops: &[Op], clip_idx: usize) -> bool {
 /// edge to the stroke alone. Only where that can't show: a box or ellipse, an opaque solid
 /// undashed stroke clipped to the same shape (the builder's inside stroke), and a band two device
 /// pixels wide or more, so every pixel the fill's edge touches is one the stroke covers whole.
+/// The walk asks only when nothing in the record's subtree reads, blends or makes a pass, and the
+/// record doesn't draw into a mask (`Walk::picture_masks`, mask layers). Scopes above it that
+/// composite it whole (isolated opacity, a layer blend, a layer blur, on a reduced grid too, and
+/// clips) get the fill and the stroke in one target at `device`'s scale, so it applies there.
 pub(crate) fn rim_inset(r: &Record, ops: &[Op], at: usize, path: u32, device: Affine) -> f64 {
     if r.mask != 0
         || !matches!(
@@ -3252,12 +3261,16 @@ impl<B: Backend> Walk<'_, B> {
             f64::from(whole_mask.x1) + 1.0,
             f64::from(whole_mask.y1) + 1.0,
         );
+        // The scope can't pause (`draw_children` makes masks yield-safe), so the count is back
+        // to its own once each side is drawn.
+        self.picture_masks += 1;
         let content_res = (|| -> Result<()> {
             for &cid in ids {
                 self.node(cid, world, inner, parent_context)?;
             }
             Ok(())
         })();
+        self.picture_masks -= 1;
         while let Some(o) = self.open.pop() {
             match o {
                 Open::Clip { active_on_scene, .. } => {
@@ -3311,7 +3324,9 @@ impl<B: Backend> Walk<'_, B> {
             self.backend.abort_isolated(&self.open);
             return Ok(());
         }
+        self.picture_masks += 1;
         let mask_res = self.node(mask_id, world, 1.0, parent_context);
+        self.picture_masks -= 1;
         while let Some(o) = self.open.pop() {
             match o {
                 Open::Clip { active_on_scene, .. } => {
@@ -3975,12 +3990,14 @@ impl<B: Backend> Walk<'_, B> {
                         self.sync_targets(is_context)?;
                         // Under an opaque inside stroke the fill stops halfway into its band
                         // (`rim_inset`), unless something in the subtree reads or blends with
-                        // what the fill leaves beneath the band.
+                        // what the fill leaves beneath the band, or the record draws into a
+                        // mask, on either side of a picture mask or in a mask layer.
                         let inset = if *blend == 0
                             && !*even_odd
                             && !self.rough
                             && !is_context
                             && mask_depth == 0
+                            && self.picture_masks == 0
                             && active_alpha >= 1.0
                             && !self.store.subtree_has_pass(id)
                             && !self.store.subtree_has_blend(id)
