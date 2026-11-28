@@ -383,6 +383,16 @@ pub fn rect_union(a: IRect, b: IRect) -> IRect {
 /// bounded tile halo. At `d = 2`, `sigma_d2 >= 16.0` is more than 5x above `HALO_MIN_COARSE_SIGMA`.
 pub const WIDE_BLUR_MIN_SIGMA: f32 = 32.0;
 
+/// Side and pixel budgets for a world-grid `d = 2` wide-blur capture (`WideBlurPlan`).
+/// Distinguishes adapter texture/pixel limits from current GPU memory headroom so tight budgets
+/// can fall back to inexact direct/cached tiles without disturbing adapter-capped huge blurs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct WideBlurLimits {
+    pub max_side: u32,
+    pub mem_pixels: usize,
+    pub adapter_pixels: usize,
+}
+
 /// World-grid 2x-downsampled wide-blur capture plan for GPU views, letting large uniform
 /// background blurs feed ordinary 512 px tiles within `Limits::halo`.
 #[derive(Clone, Debug, PartialEq)]
@@ -408,6 +418,9 @@ pub struct WideBlurPlan {
     /// Remaining (non-wide) readers' `(affected_grid, reach_px)` pairs in `level.grid()` space,
     /// so each 512 px tile uses only the apron required by readers overlapping that tile.
     pub residual_readers: Vec<(IRect, i32)>,
+    /// Unfilled `EdgeMode::Clamp` clip frames wrapping active wide blurs (in `level.grid()` px)
+    /// so `begin_wide_blur_pass` can capture 1x-perpendicular edge strips before the `d = 2` blur.
+    pub clamp_clips: Vec<HaloClampClip>,
 }
 
 /// Complete viewport halo plan computed in `Engine::render_gpu` and executed by `Gpu::render_whole`.

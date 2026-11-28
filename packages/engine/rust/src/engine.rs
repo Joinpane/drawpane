@@ -214,6 +214,26 @@ fn image_level_size(width: u32, height: u32, max_side: u32) -> Result<usize> {
 }
 
 #[cfg(feature = "gpu-common")]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WideRefusal {
+    /// WideBlurCache failed with Limit; try degraded halo-128 tiles next.
+    CacheOnly,
+    /// Degraded halo-128 tiles also failed with Limit; try degraded halo-0 tiles next.
+    DegradedHalo,
+    /// Even degraded halo-0 tiles failed with Limit; fall back to whole frames.
+    All,
+}
+
+#[cfg(feature = "gpu-common")]
+#[derive(Clone, Copy)]
+struct WideRefused {
+    generation: u64,
+    view_bits: [u64; 6],
+    size: (u32, u32),
+    level: WideRefusal,
+}
+
+#[cfg(feature = "gpu-common")]
 #[derive(Clone, Copy)]
 struct HaloCache {
     generation: u64,
@@ -221,6 +241,14 @@ struct HaloCache {
     size: (u32, u32),
     halo: i32,
     wide: bool,
+    wide_degraded: bool,
+}
+
+#[allow(dead_code)]
+enum WideBlurCandidate {
+    None,
+    Ready(crate::halo::WideBlurPlan),
+    MemoryLimited,
 }
 
 pub struct Engine {
@@ -246,9 +274,9 @@ pub struct Engine {
     /// The view whose apron tiles hit a GPU limit: it settles on the reduced halo frame instead.
     #[cfg(feature = "gpu-common")]
     apron_refused: Option<HaloCache>,
-    /// The view whose wide-blur cache hit a GPU limit: it falls back to aprons or reader-halo.
+    /// The view whose wide-blur cache (or degraded tile fallback) hit a GPU limit.
     #[cfg(feature = "gpu-common")]
-    wide_refused: Option<HaloCache>,
+    wide_refused: Option<WideRefused>,
     /// The wide-blur plan matching `halo_cache` when `halo_cache.wide` is true.
     #[cfg(feature = "gpu-common")]
     wide_plan_cache: Option<crate::halo::WideBlurPlan>,
@@ -1534,14 +1562,22 @@ impl Engine {
     }
 
     #[cfg(feature = "gpu-common")]
-    fn cached_halo(&mut self, view: Affine, size: (u32, u32)) -> Result<(i32, Option<crate::halo::WideBlurPlan>)> {
+    fn cached_halo(
+        &mut self,
+        view: Affine,
+        size: (u32, u32),
+    ) -> Result<(i32, Option<crate::halo::WideBlurPlan>, bool)> {
         let view_bits = view.as_coeffs().map(f64::to_bits);
         if let Some(c) = self.halo_cache
             && c.generation == self.generation
             && c.view_bits == view_bits
             && c.size == size
         {
-            return Ok((c.halo, c.wide.then(|| self.wide_plan_cache.clone()).flatten()));
+            return Ok((
+                c.halo,
+                c.wide.then(|| self.wide_plan_cache.clone()).flatten(),
+                c.wide_degraded,
+            ));
         }
         let rect = Rect::new(0.0, 0.0, f64::from(size.0), f64::from(size.1));
         let halo = self.halo_for_rect(view, rect)?;
@@ -1551,9 +1587,26 @@ impl Engine {
             size,
             halo,
             wide: false,
+            wide_degraded: false,
         });
         self.wide_plan_cache = None;
-        Ok((halo, None))
+        Ok((halo, None, false))
+    }
+
+    #[cfg(feature = "gpu-common")]
+    fn degraded_wide_halo(&self, refusal: Option<WideRefusal>) -> i32 {
+        // When `WideBlurCache` cannot fit GPU memory, try compact `halo = 128` (`768 x 768`,
+        // ~13.5 MiB working set) first so glass lenses and medium blurs stay clean across seams,
+        // stepping down to `halo = 0` (`512 x 512`, ~9 MiB) if `halo = 128` hits `Limit`.
+        if matches!(refusal, Some(WideRefusal::DegradedHalo)) {
+            return 0;
+        }
+        let max_halo = self.store.limits.halo.min(128) as i32;
+        if max_halo > 0 {
+            (max_halo & !1).max(2).min(max_halo)
+        } else {
+            0
+        }
     }
 
     /// Draws tiles on the GPU for the next frame of the view last drawn, for at most
@@ -1573,7 +1626,7 @@ impl Engine {
         let Some(last) = gpu.last() else {
             return Ok(DrawStats::default());
         };
-        let (halo, wide_plan) = match self.cached_halo(last.view, last.size) {
+        let (halo, wide_plan, wide_degraded) = match self.cached_halo(last.view, last.size) {
             Ok(h) => h,
             // A view drawn as whole frames: no tiles of its own to draw ahead, only the overview.
             Err(e) if e.code == ErrorCode::Limit => {
@@ -1586,29 +1639,74 @@ impl Engine {
             Err(e) => return Err(e),
         };
         let wide = wide_plan.is_some();
+        let wide_mode = if let Some(ref wp) = wide_plan {
+            crate::gpu::WideTileMode::Cache(wp)
+        } else if wide_degraded {
+            crate::gpu::WideTileMode::Degraded
+        } else {
+            crate::gpu::WideTileMode::None
+        };
         let gpu = self
             .gpu
             .as_mut()
             .ok_or_else(|| EngineError::new(ErrorCode::State, "no GPU attached"))?;
-        match gpu.ahead(
-            &self.store,
-            background,
-            self.generation,
-            halo,
-            wide_plan.as_ref(),
-            budget_ms,
-        ) {
+        match gpu.ahead(&self.store, background, self.generation, halo, wide_mode, budget_ms) {
             Err(e) if e.code == ErrorCode::Limit && wide => {
-                self.wide_refused = Some(HaloCache {
+                let degraded_halo = self.degraded_wide_halo(Some(WideRefusal::CacheOnly));
+                let view_bits = last.view.as_coeffs().map(f64::to_bits);
+                self.wide_refused = Some(WideRefused {
                     generation: self.generation,
-                    view_bits: last.view.as_coeffs().map(f64::to_bits),
+                    view_bits,
                     size: last.size,
-                    halo,
-                    wide: true,
+                    level: WideRefusal::CacheOnly,
                 });
-                self.halo_cache = None;
+                self.halo_cache = Some(HaloCache {
+                    generation: self.generation,
+                    view_bits,
+                    size: last.size,
+                    halo: degraded_halo,
+                    wide: false,
+                    wide_degraded: true,
+                });
                 self.wide_plan_cache = None;
-                Ok(DrawStats::default())
+                Ok(DrawStats {
+                    pending: 1,
+                    in_progress: true,
+                    ..DrawStats::default()
+                })
+            }
+            Err(e) if e.code == ErrorCode::Limit && wide_degraded => {
+                let view_bits = last.view.as_coeffs().map(f64::to_bits);
+                if halo > 0 {
+                    self.wide_refused = Some(WideRefused {
+                        generation: self.generation,
+                        view_bits,
+                        size: last.size,
+                        level: WideRefusal::DegradedHalo,
+                    });
+                    self.halo_cache = Some(HaloCache {
+                        generation: self.generation,
+                        view_bits,
+                        size: last.size,
+                        halo: 0,
+                        wide: false,
+                        wide_degraded: true,
+                    });
+                } else {
+                    self.wide_refused = Some(WideRefused {
+                        generation: self.generation,
+                        view_bits,
+                        size: last.size,
+                        level: WideRefusal::All,
+                    });
+                    self.halo_cache = None;
+                }
+                self.wide_plan_cache = None;
+                Ok(DrawStats {
+                    pending: 1,
+                    in_progress: true,
+                    ..DrawStats::default()
+                })
             }
             // An apron tile too large for this GPU: the next frame settles without aprons.
             Err(e) if e.code == ErrorCode::Limit && i64::from(halo) > i64::from(self.store.limits.halo) => {
@@ -1618,9 +1716,14 @@ impl Engine {
                     size: last.size,
                     halo,
                     wide: false,
+                    wide_degraded: false,
                 });
                 self.halo_cache = None;
-                Ok(DrawStats::default())
+                Ok(DrawStats {
+                    pending: 1,
+                    in_progress: true,
+                    ..DrawStats::default()
+                })
             }
             r => r,
         }
@@ -1641,6 +1744,8 @@ impl Engine {
         self.check_size(width, height)?;
         camera.check()?;
         self.check_supported()?;
+        let view = camera.view();
+        let view_level = crate::tiles::Level::of(view).map(|(l, _)| l);
         let (replay_limit, cached_gpu_halo, max_apron, wide_limits) = {
             let gpu = self
                 .gpu
@@ -1650,10 +1755,9 @@ impl Engine {
                 gpu.halo_replay_limit(),
                 gpu.tiles.halo(),
                 gpu.max_view_apron(),
-                gpu.wide_blur_limits(),
+                gpu.wide_blur_limits(self.generation, view_level),
             )
         };
-        let view = camera.view();
         if let Some(g) = self.gpu.as_mut() {
             g.note_input(view, (width, height), options.moving);
         }
@@ -1671,16 +1775,29 @@ impl Engine {
         // without baking exact haloed tiles: reuse the active tile cache halo in O(1) instead of
         // re-walking all backdrop readers on every motion frame.
         let view_bits = view.as_coeffs().map(f64::to_bits);
-        let unverified_halo = (composite_only || reuse_moving_halo)
-            && !self.store.readers().is_empty()
-            && !self.halo_cache.is_some_and(|c| {
-                c.generation == self.generation
-                    && c.view_bits == view_bits
-                    && c.size == (width, height)
-                    && c.halo == cached_gpu_halo
-            });
-        let (halo_opt, mut halo_plan, mut wide_plan) = if composite_only || reuse_moving_halo {
-            (Some(cached_gpu_halo), None, None)
+        let halo_match = self.halo_cache.filter(|c| {
+            c.generation == self.generation
+                && c.view_bits == view_bits
+                && c.size == (width, height)
+                && (!reuse_moving_halo || c.halo == cached_gpu_halo)
+                && (!c.wide || self.wide_plan_cache.is_some())
+        });
+        let unverified_halo =
+            (composite_only || reuse_moving_halo) && !self.store.readers().is_empty() && halo_match.is_none();
+        let (halo_opt, mut halo_plan, mut wide_plan, wide_degraded) = if composite_only || reuse_moving_halo {
+            let (h, wp, deg) = if composite_only && !reuse_moving_halo && !options.moving {
+                match halo_match {
+                    Some(c) => (
+                        c.halo,
+                        c.wide.then(|| self.wide_plan_cache.clone()).flatten(),
+                        c.wide_degraded,
+                    ),
+                    None => (cached_gpu_halo, None, false),
+                }
+            } else {
+                (cached_gpu_halo, None, false)
+            };
+            (Some(h), None, wp, deg)
         } else {
             let plan_viewport = editor_viewport
                 && !self.store.has_context()
@@ -1691,12 +1808,17 @@ impl Engine {
                 && c.view_bits == view_bits
                 && c.size == (width, height)
             {
-                (Some(c.halo), None, None)
+                (Some(c.halo), None, None, c.wide_degraded)
             } else {
-                let wide_refused = self.wide_refused.is_some_and(|c| {
-                    c.generation == self.generation && c.view_bits == view_bits && c.size == (width, height)
-                });
-                let req_wide = (plan_viewport && !options.moving && !wide_refused).then_some(wide_limits);
+                let wide_refusal = self
+                    .wide_refused
+                    .filter(|c| {
+                        c.generation == self.generation && c.view_bits == view_bits && c.size == (width, height)
+                    })
+                    .map(|c| c.level);
+                let wide_refused = wide_refusal.is_some();
+                let wide_degraded_refused = matches!(wide_refusal, Some(WideRefusal::All));
+                let req_wide = (plan_viewport && !options.moving).then_some(wide_limits);
                 let (reach, _, halo_plan, cand_wide) =
                     self.reader_halo_plan(view, Some(frame_rect), plan_viewport, replay_limit, req_wide);
                 let native_fits = halo_plan.as_ref().is_none_or(|p| {
@@ -1704,17 +1826,24 @@ impl Engine {
                         g.prefers_padded_view(p, (width, height), self.store.limits.padded_view_pixels)
                     })
                 });
-                let use_wide = cand_wide.filter(|_| {
-                    plan_viewport
-                        && !options.moving
-                        && !wide_refused
-                        && reach > f64::from(self.store.limits.halo)
-                        && (reach > f64::from(max_apron) || !native_fits)
-                });
-                let (halo_opt, wide_active) = if let Some(ref wp) = use_wide {
-                    (Some(wp.residual_halo), true)
+                let wants_wide = plan_viewport
+                    && !options.moving
+                    && reach > f64::from(self.store.limits.halo)
+                    && (reach > f64::from(max_apron) || !native_fits);
+                let (use_wide, wide_mem_limited) = match cand_wide {
+                    WideBlurCandidate::Ready(wp) if wants_wide && !wide_refused => (Some(wp), false),
+                    WideBlurCandidate::Ready(_) if wants_wide && wide_refused => (None, true),
+                    WideBlurCandidate::MemoryLimited if wants_wide => (None, true),
+                    _ => (None, false),
+                };
+                let (halo_opt, wide_active, degraded) = if let Some(ref wp) = use_wide {
+                    (Some(wp.residual_halo), true, false)
+                } else if wide_mem_limited && !wide_degraded_refused {
+                    // Wide blur cache does not fit GPU memory: fall back to compact degraded tiles
+                    // reported as inexact (`exact = false, reduced > 0`) instead of CoarseWhole.
+                    (Some(self.degraded_wide_halo(wide_refusal)), false, true)
                 } else {
-                    let apron = (plan_viewport && !options.moving)
+                    let apron = (plan_viewport && !options.moving && !wide_mem_limited)
                         .then(|| self.rest_apron(halo_plan.as_ref(), reach, (width, height), view_bits, max_apron))
                         .flatten();
                     // Keep GPU tile aprons even so tile origins stay aligned with 2x2 hardware
@@ -1726,7 +1855,7 @@ impl Engine {
                         .ok()
                         .map(|h| even(h).min(max_halo))
                         .or_else(|| apron.map(|h| even(h).min(max_apron)));
-                    (h, false)
+                    (h, false, false)
                 };
                 if let Some(halo) = halo_opt {
                     self.halo_cache = Some(HaloCache {
@@ -1735,10 +1864,11 @@ impl Engine {
                         size: (width, height),
                         halo,
                         wide: wide_active,
+                        wide_degraded: degraded,
                     });
                     self.wide_plan_cache = use_wide.clone();
                 }
-                (halo_opt, halo_plan, use_wide)
+                (halo_opt, halo_plan, use_wide, degraded)
             }
         };
         let frame = Frame {
@@ -1784,6 +1914,7 @@ impl Engine {
             !options.moving && halo_opt.is_some_and(|h| i64::from(h) > i64::from(self.store.limits.halo));
         let whole = !composite_only
             && !apron_chosen
+            && !wide_degraded
             && (halo_opt != Some(0) || wide_plan.is_some())
             && (options.budget_ms == 0.0 || simple_reader_drag);
         let whole_stats = if whole {
@@ -1831,6 +1962,13 @@ impl Engine {
         } else if let Some(shown) = shown_halo {
             shown?
         } else if let Some(halo) = halo_opt {
+            let wide_mode = if let Some(ref wp) = wide_plan {
+                crate::gpu::WideTileMode::Cache(wp)
+            } else if wide_degraded {
+                crate::gpu::WideTileMode::Degraded
+            } else {
+                crate::gpu::WideTileMode::None
+            };
             match gpu.render(
                 &self.store,
                 &frame,
@@ -1839,41 +1977,166 @@ impl Engine {
                 halo,
                 options,
                 drag.as_ref(),
-                wide_plan.as_ref(),
+                wide_mode,
+                !unverified_halo,
             ) {
                 Ok(stats) => stats,
                 Err(e) if e.code == ErrorCode::Limit && wide_plan.is_some() => {
-                    self.wide_refused = Some(HaloCache {
+                    let fallback_halo = self.degraded_wide_halo(Some(WideRefusal::CacheOnly));
+                    self.wide_refused = Some(WideRefused {
                         generation: self.generation,
                         view_bits,
                         size: (width, height),
-                        halo,
-                        wide: true,
+                        level: WideRefusal::CacheOnly,
                     });
-                    self.halo_cache = None;
+                    self.halo_cache = Some(HaloCache {
+                        generation: self.generation,
+                        view_bits,
+                        size: (width, height),
+                        halo: fallback_halo,
+                        wide: false,
+                        wide_degraded: true,
+                    });
                     self.wide_plan_cache = None;
                     wide_plan = None;
-                    let gpu = self.gpu.as_mut().expect("GPU attached");
-                    if sliced {
-                        gpu.render_whole_sliced(
+                    let mut res = self.gpu.as_mut().expect("GPU attached").render(
+                        &self.store,
+                        &frame,
+                        background,
+                        self.generation,
+                        fallback_halo,
+                        options,
+                        drag.as_ref(),
+                        crate::gpu::WideTileMode::Degraded,
+                        !unverified_halo,
+                    );
+                    if fallback_halo > 0 && res.as_ref().is_err_and(|err| err.code == ErrorCode::Limit) {
+                        self.wide_refused = Some(WideRefused {
+                            generation: self.generation,
+                            view_bits,
+                            size: (width, height),
+                            level: WideRefusal::DegradedHalo,
+                        });
+                        self.halo_cache = Some(HaloCache {
+                            generation: self.generation,
+                            view_bits,
+                            size: (width, height),
+                            halo: 0,
+                            wide: false,
+                            wide_degraded: true,
+                        });
+                        res = self.gpu.as_mut().expect("GPU attached").render(
                             &self.store,
                             &frame,
                             background,
                             self.generation,
-                            halo_plan.take(),
-                            options.budget_ms,
-                        )?
+                            0,
+                            options,
+                            drag.as_ref(),
+                            crate::gpu::WideTileMode::Degraded,
+                            !unverified_halo,
+                        );
+                    }
+                    match res {
+                        Ok(stats) => stats,
+                        Err(e2) if e2.code == ErrorCode::Limit => {
+                            self.wide_refused = Some(WideRefused {
+                                generation: self.generation,
+                                view_bits,
+                                size: (width, height),
+                                level: WideRefusal::All,
+                            });
+                            self.halo_cache = None;
+                            let gpu = self.gpu.as_mut().expect("GPU attached");
+                            if sliced {
+                                gpu.render_whole_sliced(
+                                    &self.store,
+                                    &frame,
+                                    background,
+                                    self.generation,
+                                    halo_plan.take(),
+                                    options.budget_ms,
+                                )?
+                            } else {
+                                gpu.render_whole(
+                                    &self.store,
+                                    &frame,
+                                    background,
+                                    self.generation,
+                                    options.moving,
+                                    None,
+                                    halo_plan.as_ref(),
+                                    None,
+                                )?
+                            }
+                        }
+                        Err(e2) => return Err(e2),
+                    }
+                }
+                Err(e) if e.code == ErrorCode::Limit && wide_degraded => {
+                    let retry_zero = if halo > 0 {
+                        self.wide_refused = Some(WideRefused {
+                            generation: self.generation,
+                            view_bits,
+                            size: (width, height),
+                            level: WideRefusal::DegradedHalo,
+                        });
+                        self.halo_cache = Some(HaloCache {
+                            generation: self.generation,
+                            view_bits,
+                            size: (width, height),
+                            halo: 0,
+                            wide: false,
+                            wide_degraded: true,
+                        });
+                        Some(self.gpu.as_mut().expect("GPU attached").render(
+                            &self.store,
+                            &frame,
+                            background,
+                            self.generation,
+                            0,
+                            options,
+                            drag.as_ref(),
+                            crate::gpu::WideTileMode::Degraded,
+                            !unverified_halo,
+                        ))
                     } else {
-                        gpu.render_whole(
-                            &self.store,
-                            &frame,
-                            background,
-                            self.generation,
-                            options.moving,
-                            None,
-                            halo_plan.as_ref(),
-                            None,
-                        )?
+                        None
+                    };
+                    match retry_zero {
+                        Some(Ok(stats)) => stats,
+                        Some(Err(e2)) if e2.code != ErrorCode::Limit => return Err(e2),
+                        _ => {
+                            self.wide_refused = Some(WideRefused {
+                                generation: self.generation,
+                                view_bits,
+                                size: (width, height),
+                                level: WideRefusal::All,
+                            });
+                            self.halo_cache = None;
+                            let gpu = self.gpu.as_mut().expect("GPU attached");
+                            if sliced {
+                                gpu.render_whole_sliced(
+                                    &self.store,
+                                    &frame,
+                                    background,
+                                    self.generation,
+                                    halo_plan.take(),
+                                    options.budget_ms,
+                                )?
+                            } else {
+                                gpu.render_whole(
+                                    &self.store,
+                                    &frame,
+                                    background,
+                                    self.generation,
+                                    options.moving,
+                                    None,
+                                    halo_plan.as_ref(),
+                                    None,
+                                )?
+                            }
+                        }
                     }
                 }
                 // Apron tiles too large for this GPU's memory: the view settles on the reduced
@@ -1889,6 +2152,7 @@ impl Engine {
                         size: (width, height),
                         halo,
                         wide: false,
+                        wide_degraded: false,
                     });
                     self.halo_cache = None;
                     let gpu = self.gpu.as_mut().expect("GPU attached");
@@ -1929,7 +2193,8 @@ impl Engine {
                 i32::try_from(self.store.limits.halo.max(1)).unwrap_or(i32::MAX),
                 options,
                 drag.as_ref(),
-                None,
+                crate::gpu::WideTileMode::None,
+                false,
             )?
         } else if sliced {
             gpu.render_whole_sliced(
@@ -2153,15 +2418,10 @@ impl Engine {
         crop: Option<Rect>,
         plan_viewport: bool,
         replay_limit: u32,
-        wide_limits: Option<(u32, usize)>,
-    ) -> (
-        f64,
-        f64,
-        Option<crate::halo::ViewportHaloPlan>,
-        Option<crate::halo::WideBlurPlan>,
-    ) {
+        wide_limits: Option<crate::halo::WideBlurLimits>,
+    ) -> (f64, f64, Option<crate::halo::ViewportHaloPlan>, WideBlurCandidate) {
         if self.store.readers().is_empty() {
-            return (0.0, 0.0, None, None);
+            return (0.0, 0.0, None, WideBlurCandidate::None);
         }
         enum ReaderKind {
             Glass,
@@ -2630,7 +2890,7 @@ impl Engine {
             );
         }
         let Some(crop) = crop.filter(|_| plan_viewport) else {
-            return (total, reader_only, None, None);
+            return (total, reader_only, None, WideBlurCandidate::None);
         };
         let frame_irect = IRect::around(crop);
         // Wide layer-blur scopes whose readers draw, or whose blurred output reaches the crop:
@@ -2662,7 +2922,7 @@ impl Engine {
                 .iter()
                 .any(|&ci| candidates[ci].max_lb_sigma > crate::blur::MAX_BLUR_SIGMA)
         {
-            return (total, reader_only, None, None);
+            return (total, reader_only, None, WideBlurCandidate::None);
         }
 
         let far_divisor = crate::halo::replay_divisor(samples_rect, replay_limit);
@@ -2908,7 +3168,7 @@ impl Engine {
                     coarse_post_scopes: Vec::new(),
                     coarse_post_min_sigma: f32::INFINITY,
                 }),
-                None,
+                WideBlurCandidate::None,
             );
         }
 
@@ -3215,7 +3475,7 @@ impl Engine {
         // Plan a world-grid 2x-downsampled wide-blur cache when offloading uniform blurs with
         // `sigma >= WIDE_BLUR_MIN_SIGMA` brings remaining tile reach within `Limits::halo` and
         // the d = 2 capture fits `wide_limits`, so the view renders as ordinary 512 px tiles.
-        let wide_plan = if let Some((wide_max_side, wide_max_pixels)) = wide_limits
+        let wide_plan = if let Some(wlim) = wide_limits
             && total > f64::from(self.store.limits.halo)
             && coarse_post_scopes.is_empty()
             && !nodes
@@ -3242,7 +3502,7 @@ impl Engine {
                 (Ok(x0), Ok(y0), Ok(x1), Ok(y1)) if x1 > x0 && y1 > y0 => Some(IRect { x0, y0, x1, y1 }),
                 _ => None,
             };
-            visible_tiles_grid.and_then(|vis_tiles| {
+            visible_tiles_grid.map_or(WideBlurCandidate::None, |vis_tiles| {
                 let tile_grid_frame = Rect::new(
                     (tx0 + frame_origin.0) as f64,
                     (ty0 + frame_origin.1) as f64,
@@ -3305,7 +3565,7 @@ impl Engine {
                             .any(|prev| matches!(prev.kind, ReaderKind::Glass) && overlaps(n.read, prev.paint))
                 });
                 if !any_wide || !res_total.is_finite() || res_total > f64::from(self.store.limits.halo) {
-                    return None;
+                    return WideBlurCandidate::None;
                 }
                 let raw_halo = res_total.ceil() as i32;
                 let max_halo = i32::try_from(self.store.limits.halo).unwrap_or(i32::MAX);
@@ -3325,6 +3585,7 @@ impl Engine {
                 let mut targets: Vec<(u32, usize)> = Vec::new();
                 let mut wide_downstream: Vec<(u32, usize)> = Vec::new();
                 let mut wide_ds_seen = vec![false; nodes.len()];
+                let mut wide_clamp_clips: Vec<crate::halo::HaloClampClip> = Vec::new();
                 let mut wide_samples_f: Option<Rect> = None;
                 let mut max_wide_sigma = 0.0f32;
                 for (i, node) in nodes.iter().enumerate().rev() {
@@ -3346,7 +3607,106 @@ impl Engine {
                     let vis_pad = downstream + node.post_reach_px;
                     let visible = node.paint.intersect(cover_frame.inflate(vis_pad, vis_pad));
                     if visible.width() > 0.0 && visible.height() > 0.0 {
-                        let mut r = visible.inflate(node.reach_px, node.reach_px);
+                        let r_raw = visible.inflate(node.reach_px, node.reach_px);
+                        if wide && let Some(clip_dev) = node.unfilled_clip {
+                            let shift_x = frame_origin.0 as f64;
+                            let shift_y = frame_origin.1 as f64;
+                            let clip_grid = [
+                                (f64::from(clip_dev[0]) - shift_x) as f32,
+                                (f64::from(clip_dev[1]) - shift_y) as f32,
+                                (f64::from(clip_dev[2]) - shift_x) as f32,
+                                (f64::from(clip_dev[3]) - shift_y) as f32,
+                            ];
+                            let l = clip_grid[0].floor() as i32;
+                            let t_edge = clip_grid[1].floor() as i32;
+                            let r_edge = clip_grid[2].ceil() as i32;
+                            let b_edge = clip_grid[3].ceil() as i32;
+                            let mut rx0 = (r_raw.x0.floor() as i64 - frame_origin.0)
+                                .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+                            let mut ry0 = (r_raw.y0.floor() as i64 - frame_origin.1)
+                                .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+                            let mut rx1 = (r_raw.x1.ceil() as i64 - frame_origin.0)
+                                .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+                            let mut ry1 = (r_raw.y1.ceil() as i64 - frame_origin.1)
+                                .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+                            // Skip any clip edge overlapped by an earlier backdrop writer:
+                            // strip capture skips earlier blurs, so raw edge pixels would be stale.
+                            let vy0 = r_raw.y0.max(f64::from(clip_dev[1]));
+                            let vy1 = r_raw.y1.min(f64::from(clip_dev[3]));
+                            let vx0 = r_raw.x0.max(f64::from(clip_dev[0]));
+                            let vx1 = r_raw.x1.min(f64::from(clip_dev[2]));
+                            let edge_dirty = |band: Rect| {
+                                band.width() > 0.0
+                                    && band.height() > 0.0
+                                    && nodes[..i].iter().any(|prev| {
+                                        matches!(
+                                            prev.kind,
+                                            ReaderKind::UniformBlur { .. } | ReaderKind::ProgressiveBlur { .. }
+                                        ) && overlaps(prev.paint, band)
+                                    })
+                            };
+                            if l > rx0
+                                && l < rx1
+                                && edge_dirty(Rect::new(
+                                    f64::from(clip_dev[0]) - 2.0,
+                                    vy0,
+                                    f64::from(clip_dev[0]) + 2.0,
+                                    vy1,
+                                ))
+                            {
+                                rx0 = rx0.max(l);
+                            }
+                            if r_edge > rx0
+                                && r_edge < rx1
+                                && edge_dirty(Rect::new(
+                                    f64::from(clip_dev[2]) - 2.0,
+                                    vy0,
+                                    f64::from(clip_dev[2]) + 2.0,
+                                    vy1,
+                                ))
+                            {
+                                rx1 = rx1.min(r_edge);
+                            }
+                            if t_edge > ry0
+                                && t_edge < ry1
+                                && edge_dirty(Rect::new(
+                                    vx0,
+                                    f64::from(clip_dev[1]) - 2.0,
+                                    vx1,
+                                    f64::from(clip_dev[1]) + 2.0,
+                                ))
+                            {
+                                ry0 = ry0.max(t_edge);
+                            }
+                            if b_edge > ry0
+                                && b_edge < ry1
+                                && edge_dirty(Rect::new(
+                                    vx0,
+                                    f64::from(clip_dev[3]) - 2.0,
+                                    vx1,
+                                    f64::from(clip_dev[3]) + 2.0,
+                                ))
+                            {
+                                ry1 = ry1.min(b_edge);
+                            }
+                            let any_edge = (l > rx0 && l < rx1)
+                                || (r_edge > rx0 && r_edge < rx1)
+                                || (t_edge > ry0 && t_edge < ry1)
+                                || (b_edge > ry0 && b_edge < ry1);
+                            if any_edge && r_edge > l && b_edge > t_edge && rx1 > rx0 && ry1 > ry0 {
+                                wide_clamp_clips.push(crate::halo::HaloClampClip {
+                                    reader_key: node.key,
+                                    clip_dev: clip_grid,
+                                    reach_rect: IRect {
+                                        x0: rx0,
+                                        y0: ry0,
+                                        x1: rx1,
+                                        y1: ry1,
+                                    },
+                                });
+                            }
+                        }
+                        let mut r = r_raw;
                         if let Some(c) = node.clip_rect {
                             r = r.intersect(c.inflate(2.0, 2.0));
                         }
@@ -3369,10 +3729,14 @@ impl Engine {
                     );
                 }
                 if targets.is_empty() {
-                    return None;
+                    return WideBlurCandidate::None;
                 }
                 targets.reverse();
-                let ws = wide_samples_f?.inflate(4.0, 4.0);
+                wide_clamp_clips.reverse();
+                let Some(ws) = wide_samples_f else {
+                    return WideBlurCandidate::None;
+                };
+                let ws = ws.inflate(4.0, 4.0);
                 let (max_lvl, _) = crate::blur::choose_level_view(max_wide_sigma * 0.5);
                 let snap = i64::from((2 * crate::blur::level_step(max_lvl)).clamp(64, 256));
                 let wx0 = ws.x0.floor() as i64 - frame_origin.0;
@@ -3385,13 +3749,17 @@ impl Engine {
                 let cy1 = -(-wy1).div_euclid(snap) * snap;
                 let cap_w = (cx1 - cx0) / 2;
                 let cap_h = (cy1 - cy0) / 2;
+                let cap_px = (cap_w as usize).saturating_mul(cap_h as usize);
                 if cap_w <= 0
                     || cap_h <= 0
-                    || cap_w > i64::from(wide_max_side)
-                    || cap_h > i64::from(wide_max_side)
-                    || (cap_w as usize).saturating_mul(cap_h as usize) > wide_max_pixels
+                    || cap_w > i64::from(wlim.max_side)
+                    || cap_h > i64::from(wlim.max_side)
+                    || cap_px > wlim.adapter_pixels
                 {
-                    return None;
+                    return WideBlurCandidate::None;
+                }
+                if cap_px > wlim.mem_pixels {
+                    return WideBlurCandidate::MemoryLimited;
                 }
                 let (Ok(x0), Ok(y0), Ok(x1), Ok(y1)) = (
                     i32::try_from(cx0),
@@ -3399,9 +3767,9 @@ impl Engine {
                     i32::try_from(cx1),
                     i32::try_from(cy1),
                 ) else {
-                    return None;
+                    return WideBlurCandidate::None;
                 };
-                Some(crate::halo::WideBlurPlan {
+                WideBlurCandidate::Ready(crate::halo::WideBlurPlan {
                     level,
                     cover_grid,
                     cap_grid: IRect { x0, y0, x1, y1 },
@@ -3412,10 +3780,11 @@ impl Engine {
                     vis_tiles_grid: vis_tiles,
                     apron_glass_safe,
                     residual_readers,
+                    clamp_clips: wide_clamp_clips,
                 })
             })
         } else {
-            None
+            WideBlurCandidate::None
         };
 
         (
@@ -4866,18 +5235,20 @@ mod halo_plan_tests {
         }
         .view();
         let crop = Rect::new(0.0, 0.0, 1802.0, 1800.0);
-        let (total, _, _, wide) = engine.reader_halo_plan(
-            view,
-            Some(crop),
-            true,
-            crate::halo::HALO_REPLAY_SIDE,
-            Some((3072, 4_200_000)),
-        );
+        let full_limits = crate::halo::WideBlurLimits {
+            max_side: 3072,
+            mem_pixels: 4_200_000,
+            adapter_pixels: 4_200_000,
+        };
+        let (total, _, _, wide) =
+            engine.reader_halo_plan(view, Some(crop), true, crate::halo::HALO_REPLAY_SIDE, Some(full_limits));
         assert!(
             total > f64::from(Limits::default().halo),
             "unoffloaded reach {total} should exceed tile halo"
         );
-        let wp = wide.expect("Control-Center-like scene admits WideBlurPlan");
+        let WideBlurCandidate::Ready(wp) = wide else {
+            panic!("Control-Center-like scene admits WideBlurPlan");
+        };
         assert_eq!(wp.targets, vec![(2, 0), (4, 0)]);
         assert!(wp.downstream_readers.contains(&(2, 0)));
         assert!(wp.downstream_readers.contains(&(3, 0)));
@@ -4894,8 +5265,163 @@ mod halo_plan_tests {
         let cap_h = (wp.cap_grid.y1 - wp.cap_grid.y0) / 2;
         assert!(cap_w <= 3072 && cap_h <= 3072);
         assert!((cap_w as usize) * (cap_h as usize) <= 4_200_000);
+        // Unfilled clip edges of wide blurs are recorded in level.grid() coordinates.
+        assert_eq!(wp.clamp_clips.len(), 2, "both wide blurs share unfilled clip frame");
+        assert_eq!(wp.clamp_clips[0].reader_key, (2, 0));
+        assert_eq!(wp.clamp_clips[1].reader_key, (4, 0));
 
-        // Unclipped extreme blur (radius 1500 at 1x) exceeds wide capture limits -> None.
+        // Same scene under a tight GPU memory limit (fits adapter limits, exceeds mem_pixels)
+        // returns MemoryLimited instead of None so GPU views can degrade to inexact direct tiles.
+        let tight_limits = crate::halo::WideBlurLimits {
+            max_side: 3072,
+            mem_pixels: 500_000,
+            adapter_pixels: 4_200_000,
+        };
+        let (_, _, _, tight_wide) = engine.reader_halo_plan(
+            view,
+            Some(crop),
+            true,
+            crate::halo::HALO_REPLAY_SIDE,
+            Some(tight_limits),
+        );
+        assert!(
+            matches!(tight_wide, WideBlurCandidate::MemoryLimited),
+            "tight memory limit should return MemoryLimited"
+        );
+
+        // When an earlier blur covers the clip's left/right/top/bottom edges, a later wide blur
+        // inside the same unfilled clip suppresses those dirty edges so strip capture never reads
+        // raw unblurred pixels over the earlier blur's result. An earlier glass lens never writes
+        // the glass-free backdrop plane and must not dirty those clip edges.
+        let mut stacked = Engine::new(Limits::default());
+        stacked.store.insert_for_test(
+            1,
+            ROOT,
+            make_record(
+                [300.0, 300.0],
+                vec![
+                    Op::Clip {
+                        path: 0,
+                        even_odd: false,
+                    },
+                    Op::Children,
+                    Op::Unclip,
+                ],
+                Vec::new(),
+            ),
+        );
+        stacked.store.insert_for_test(
+            2,
+            1,
+            make_record(
+                [300.0, 300.0],
+                vec![Op::BackgroundBlur(Box::new(BackgroundBlurOp {
+                    paths: vec![0],
+                    even_odd: false,
+                    radius: 24.0,
+                }))],
+                Vec::new(),
+            ),
+        );
+        stacked.store.insert_for_test(
+            3,
+            1,
+            make_record(
+                [260.0, 260.0],
+                vec![Op::BackgroundBlur(Box::new(BackgroundBlurOp {
+                    paths: vec![0],
+                    even_odd: false,
+                    radius: 150.0,
+                }))],
+                Vec::new(),
+            ),
+        );
+        let (_, _, _, stacked_wide) = stacked.reader_halo_plan(
+            Affine::scale(2.0),
+            Some(Rect::new(0.0, 0.0, 600.0, 600.0)),
+            true,
+            crate::halo::HALO_REPLAY_SIDE,
+            Some(full_limits),
+        );
+        let WideBlurCandidate::Ready(swp) = stacked_wide else {
+            panic!("stacked scene admits WideBlurPlan");
+        };
+        assert!(
+            swp.clamp_clips.iter().all(|c| c.reader_key != (3, 0)),
+            "later wide blur over full-frame earlier blur suppresses dirty clip edges: {:?}",
+            swp.clamp_clips
+        );
+
+        let mut glass_before = Engine::new(Limits::default());
+        glass_before.store.insert_for_test(
+            1,
+            ROOT,
+            make_record(
+                [300.0, 300.0],
+                vec![
+                    Op::Clip {
+                        path: 0,
+                        even_odd: false,
+                    },
+                    Op::Children,
+                    Op::Unclip,
+                ],
+                Vec::new(),
+            ),
+        );
+        glass_before.store.insert_for_test(
+            2,
+            1,
+            make_record(
+                [300.0, 300.0],
+                vec![Op::Glass(Box::new(GlassOp {
+                    paths: vec![0],
+                    even_odd: false,
+                    kind: crate::glass::KIND_BOX,
+                    inradius: 34.0,
+                    angle: -45.0,
+                    intensity: 80.0,
+                    refraction: 20.0,
+                    depth: 10.0,
+                    dispersion: 0.0,
+                    frost: 3.0,
+                    splay: 0.0,
+                    box_radii: [0.0; 4],
+                    box_smoothing: [0.0; 4],
+                    measured_inradius: std::cell::Cell::new(-1.0),
+                }))],
+                Vec::new(),
+            ),
+        );
+        glass_before.store.insert_for_test(
+            3,
+            1,
+            make_record(
+                [260.0, 260.0],
+                vec![Op::BackgroundBlur(Box::new(BackgroundBlurOp {
+                    paths: vec![0],
+                    even_odd: false,
+                    radius: 150.0,
+                }))],
+                Vec::new(),
+            ),
+        );
+        let (_, _, _, gb_wide) = glass_before.reader_halo_plan(
+            Affine::scale(2.0),
+            Some(Rect::new(0.0, 0.0, 600.0, 600.0)),
+            true,
+            crate::halo::HALO_REPLAY_SIDE,
+            Some(full_limits),
+        );
+        let WideBlurCandidate::Ready(gwp) = gb_wide else {
+            panic!("glass-before-blur scene admits WideBlurPlan");
+        };
+        assert!(
+            gwp.clamp_clips.iter().any(|c| c.reader_key == (3, 0)),
+            "earlier glass lens does not write backdrop and must not dirty clip edges"
+        );
+
+        // Unclipped extreme blur (radius 1500 at 1x) exceeds adapter limits -> None (falls back to reader-halo).
         let mut huge = Engine::new(Limits::default());
         huge.store.insert_for_test(
             1,
@@ -4915,8 +5441,11 @@ mod halo_plan_tests {
             Some(Rect::new(0.0, 0.0, 1600.0, 896.0)),
             true,
             crate::halo::HALO_REPLAY_SIDE,
-            Some((3072, 4_200_000)),
+            Some(full_limits),
         );
-        assert!(huge_wide.is_none(), "huge unclipped blur must fall back to reader-halo");
+        assert!(
+            matches!(huge_wide, WideBlurCandidate::None),
+            "huge unclipped blur must fall back to reader-halo"
+        );
     }
 }

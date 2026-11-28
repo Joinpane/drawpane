@@ -450,6 +450,16 @@ pub trait Backend {
     fn stop_early(&self) -> bool {
         false
     }
+    /// Target record id for an active clip-edge strip capture pass, if any, so the walk still
+    /// captures the backdrop at the reader's paint-order boundary when the reader lies off-strip.
+    fn strip_capture_record(&self) -> Option<u32> {
+        None
+    }
+    /// Captures the clip-edge strip backdrop when the target reader (or an ancestor) is culled
+    /// outside the strip viewport.
+    fn capture_culled_strip(&mut self, _open: &[Open]) -> Result<()> {
+        Ok(())
+    }
     /// Whether the walk draws a rough stand-in (an overview tile, never shown at rest): no
     /// readers, shadows, layer effects or blend modes, group opacity unisolated, and anything
     /// under `ROUGH_SPECK` device pixels skipped. It is never exact.
@@ -1460,6 +1470,21 @@ struct Walk<'a> {
 fn linear(t: Affine) -> Affine {
     let [a, b, c, d, _, _] = t.as_coeffs();
     Affine::new([a, b, c, d, 0.0, 0.0])
+}
+
+fn is_ancestor_or_self(store: &Store, candidate: u32, mut target: u32) -> bool {
+    loop {
+        if target == candidate {
+            return true;
+        }
+        let Some(node) = store.nodes.get(&target) else {
+            return false;
+        };
+        if node.parent == target || target == crate::store::ROOT {
+            return false;
+        }
+        target = node.parent;
+    }
 }
 
 /// Whether a transform's linear part and its inverse are finite and within `most` on every
@@ -3226,6 +3251,12 @@ impl Walk<'_> {
         let picture_has_reader = self.subtree_readers.get(&mask_id).is_some_and(|&(n, _)| n > 0);
         let has_reader = content_has_reader || picture_has_reader;
         if mask_area.is_empty() {
+            if let Some(target_id) = self.backend.strip_capture_record()
+                && ids.iter().any(|&cid| is_ancestor_or_self(self.store, cid, target_id))
+            {
+                self.backend.capture_culled_strip(&self.open)?;
+                return Ok(());
+            }
             if has_reader {
                 for id in ids.iter().copied().chain(std::iter::once(mask_id)) {
                     self.skip_reader_subtree(id, parent_context)?;
@@ -3409,6 +3440,12 @@ impl Walk<'_> {
         };
         let dev_bbox = device.transform_rect_bbox(bounds).inflate(pad_dev, pad_dev);
         if !overlaps(dev_bbox, self.viewport) {
+            if let Some(target_id) = self.backend.strip_capture_record()
+                && is_ancestor_or_self(store, id, target_id)
+            {
+                self.backend.capture_culled_strip(&self.open)?;
+                return Ok(());
+            }
             if !self.skip_reader_subtree(id, parent_context)?
                 && self.tiled
                 && overlaps(dev_bbox, self.full_viewport)
