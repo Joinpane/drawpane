@@ -2685,6 +2685,57 @@ mod tests {
     }
 
     #[test]
+    fn set_max_slots_zero_then_raise_drops_non_overview_tiles_for_page_shrink() {
+        // Simulates `Gpu::fit_tiles` popping the last 2048 px page (16 slots) and shrinking
+        // `page_side` to 1024 px (e.g. 3 pages = 12 slots): zeroing max_slots first drops all
+        // ordinary tiles even when the new slot cap exceeds the old tile count, while preserving
+        // overview tiles stored on their own texture.
+        let page = Rect::new(0.0, 0.0, 4000.0, 2000.0);
+        let mut c = TileCache::new(512, 16);
+        c.begin([1.0; 4], 0);
+        c.set_overview(Some(page));
+        c.moving = false;
+        c.bake_overview = true;
+        let p = c
+            .plan(cam(8.0, 0.0, 0.0), (1024, 1536), false, None, false, false)
+            .expect("plan");
+        draw_all(&mut c, &p);
+        assert!(c.overview_ready());
+        let ordinary_before = c.tiles.values().filter(|t| t.slot < OVERVIEW_SLOT).count();
+        assert_eq!(ordinary_before, 6);
+        let overview_before = c.tiles.values().filter(|t| t.slot >= OVERVIEW_SLOT).count();
+        assert!(overview_before > 0);
+
+        // Shrink all pages away, then reopen with 12 slots (> 6) on a smaller page side.
+        c.set_max_slots(0);
+        c.set_max_slots(12);
+        assert!(c.overview_ready());
+        assert_eq!(c.tiles.values().filter(|t| t.slot < OVERVIEW_SLOT).count(), 0);
+        assert_eq!(
+            c.tiles.values().filter(|t| t.slot >= OVERVIEW_SLOT).count(),
+            overview_before
+        );
+        assert_eq!(c.slots, 0);
+        assert!(c.free.is_empty());
+
+        // The next plan at the same camera must not treat any evicted tile as complete/exact.
+        c.begin([1.0; 4], 0);
+        c.set_overview(Some(page));
+        c.moving = false;
+        c.bake_overview = false;
+        let after = c
+            .plan(cam(8.0, 0.0, 0.0), (1024, 1536), false, None, false, false)
+            .expect("plan after shrink");
+        assert_eq!(c.left(&after).0, 6);
+        let comp = c.compose(&after, None);
+        assert!(!comp.complete);
+        assert!(!comp.exact);
+        assert!(comp.copies.is_empty());
+        // Fresh slots restart cleanly from 0.
+        assert_eq!(c.slot_for(after.jobs[0].key), Some(0));
+    }
+
+    #[test]
     fn a_rect_less_holes_covers_exactly_the_rest() {
         let r = Rect::new(0.0, 0.0, 100.0, 50.0);
         let holes = [Rect::new(10.0, 10.0, 30.0, 20.0), Rect::new(25.0, 15.0, 60.0, 70.0)];

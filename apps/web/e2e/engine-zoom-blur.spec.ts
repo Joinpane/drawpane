@@ -4460,9 +4460,9 @@ for (const build of ["browser", "webgl"] as const) {
           // Case A: enough room for cached 16 MiB tile page + CoarseWhole div=1 (~104 MiB),
           // too tight for Halo (~150+ MiB). Preserves cached tiles and queues quiet retry.
           const coarseWhole = await runCase(116, 16, false, false);
-          // Case B: 88 MiB (tightest cap, no tile pages fit): forces scaled CoarseWhole div=2
-          // without futilely queuing a retry when no tile pages exist to drop.
-          const coarseScaled = await runCase(88, 16, true, false);
+          // Case B: 88 MiB with tile_bytes = 0 (no tile pages allocated): forces scaled
+          // CoarseWhole div=2 without futilely queuing a retry when no tile pages exist to drop.
+          const coarseScaled = await runCase(88, 0, true, false);
           // Case C: letting CoarseWhole sit still past RETRY_QUIET_MS triggers the quiet retry,
           // drops tile pages, and upgrades cleanly to Halo (plan 4) in budgeted slices.
           const coarseAfterQuiet = await runCase(116, 16, false, true);
@@ -4747,7 +4747,17 @@ for (const build of ["browser", "webgl"] as const) {
             );
           const ahead = (e: Engine, budget: number) =>
             facts(entry(e.renderGpuAhead?.(bg, budget)) as never);
+          const finished = async (e: Engine) => {
+            const done = await e.gpuFinished?.();
+            if (done && !done.ok) {
+              const message = done.message;
+              done.free();
+              throw new Error(message);
+            }
+            done?.free();
+          };
           const pixels = async (e: Engine) => {
+            await finished(e);
             const px = await entry(e.gpuPixels?.());
             if (!(px instanceof Uint8Array)) throw new Error(px.message);
             return px;
