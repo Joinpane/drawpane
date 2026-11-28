@@ -2440,6 +2440,48 @@ impl Store {
         &self.readers
     }
 
+    /// Minimum offscreen GPU bytes (`width * height * 8`, colour + depth) held simultaneously by
+    /// nested isolation groups enclosing any visible backdrop reader within `target` device pixels.
+    pub fn reader_isolation_bytes(&self, view: Affine, target: crate::exec::IRect) -> usize {
+        let target_rect = Rect::new(
+            f64::from(target.x0),
+            f64::from(target.y0),
+            f64::from(target.x1),
+            f64::from(target.y1),
+        );
+        let mut max_bytes = 0usize;
+        for &id in &self.readers {
+            let Some(r_world) = self.world_extent(id) else {
+                continue;
+            };
+            if view.transform_rect_bbox(r_world).intersect(target_rect).area() <= 0.0 {
+                continue;
+            }
+            let mut stack_bytes = 0usize;
+            let mut at = id;
+            while let Some(n) = self.nodes.get(&at) {
+                let p = n.parent;
+                if p == ROOT {
+                    break;
+                }
+                if let Some(pn) = self.nodes.get(&p)
+                    && (pn.record.blend != 0 || (pn.record.isolate() && pn.record.opacity < 1.0))
+                    && let Some(ext) = self.world_extent(p)
+                {
+                    let clipped = view.transform_rect_bbox(ext).intersect(target_rect);
+                    if clipped.area() > 0.0 {
+                        let w = (clipped.x1.ceil() - clipped.x0.floor()).max(0.0) as usize;
+                        let h = (clipped.y1.ceil() - clipped.y0.floor()).max(0.0) as usize;
+                        stack_bytes = stack_bytes.saturating_add(w.saturating_mul(h).saturating_mul(8));
+                    }
+                }
+                at = p;
+            }
+            max_bytes = max_bytes.max(stack_bytes);
+        }
+        max_bytes
+    }
+
     /// Unsupported features and diagnostic notes, by record.
     pub fn unsupported(&self) -> Vec<(u32, u32)> {
         let mut out: Vec<(u32, u32)> = self
@@ -2623,5 +2665,53 @@ mod dirty_tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn reader_isolation_bytes_sums_nested_isolating_ancestors_clipped_to_target() {
+        let mut store = Store::new(Limits::default());
+        let mut outer = Record::empty();
+        outer.flags = crate::record::FLAG_ISOLATE;
+        outer.opacity = 0.95;
+        outer.size = [3200.0, 3200.0];
+        outer.ops = vec![Op::Children];
+        store.insert_for_test(1, ROOT, outer);
+
+        let mut inner = Record::empty();
+        inner.flags = crate::record::FLAG_ISOLATE;
+        inner.opacity = 0.95;
+        inner.transform = Affine::translate((100.0, 50.0));
+        inner.size = [800.0, 400.0];
+        inner.ops = vec![Op::Children];
+        store.insert_for_test(2, 1, inner);
+
+        let mut blur = Record::empty();
+        blur.size = [800.0, 400.0];
+        blur.paths.push(rect_path(800.0, 400.0));
+        blur.ops = vec![Op::BackgroundBlur(Box::new(BackgroundBlurOp {
+            paths: vec![0],
+            even_odd: false,
+            radius: 28.0,
+        }))];
+        store.insert_for_test(3, 2, blur);
+
+        let target = crate::exec::IRect {
+            x0: 0,
+            y0: 0,
+            x1: 1000,
+            y1: 500,
+        };
+        let bytes = store.reader_isolation_bytes(Affine::IDENTITY, target);
+        // Both outer and inner clip to inner's visible extent inside target (800x400 + blur pad),
+        // giving 2 nested isolation targets at 8 B/px each (>= 2 * 800 * 400 * 8).
+        assert!(bytes >= 2 * 800 * 400 * 8, "got {bytes}");
+        // Off-screen target reports 0.
+        let off = crate::exec::IRect {
+            x0: 5000,
+            y0: 5000,
+            x1: 5500,
+            y1: 5500,
+        };
+        assert_eq!(store.reader_isolation_bytes(Affine::IDENTITY, off), 0);
     }
 }

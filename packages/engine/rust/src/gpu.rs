@@ -535,9 +535,6 @@ const READBACKS: u32 = 2;
 /// and the one being made.
 const FRAMES: usize = 2;
 
-/// Default tile page side when no pages are allocated yet; `fit_tiles` upgrades to 4096 when
-/// device limits and tile budget allow (64 tiles of 512x512 per atlas page).
-const DEFAULT_PAGE: u32 = 2048;
 /// Kept free under the budget for what a frame allocates on the way (read-backs, images).
 const HEADROOM: usize = 32 << 20;
 /// SwiftShader can exhaust its frame deadline before it exhausts the texture
@@ -1889,6 +1886,8 @@ pub struct Gpu {
     /// GPU memory allocated (`Limits::gpu_bytes`), and the budget.
     bytes: usize,
     pub budget: usize,
+    /// Exact byte shortfall recorded by the last `reserve` memory-limit refusal.
+    last_limit_shortfall: Cell<usize>,
     /// Actual device limits validated before allocating textures or read-back buffers.
     max_texture_2d: u32,
     max_buffer_size: u64,
@@ -2722,7 +2721,7 @@ impl Gpu {
             surface_bytes: 0,
             tiles: TileCache::new(TILE, 0),
             pages: Vec::new(),
-            page_side: DEFAULT_PAGE.min(device_limits.max_texture_dimension_2d),
+            page_side: crate::tiles::DEFAULT_PAGE_SIDE.min(device_limits.max_texture_dimension_2d),
             scratches: [None, None, None, None, None],
             halo_reader_planes: [[None, None, None], [None, None, None]],
             halo_prefix_pool: Vec::new(),
@@ -2785,6 +2784,7 @@ impl Gpu {
             flush_why: 0,
             bytes: (ATLAS_SIDE * ATLAS_SIDE * 4 + 16 * 16 * 4) as usize,
             budget: crate::limits::Limits::default().gpu_bytes,
+            last_limit_shortfall: Cell::new(0),
             max_texture_2d: device_limits.max_texture_dimension_2d,
             max_buffer_size: device_limits.max_buffer_size,
             readbacks: Rc::new(Flights::default()),
@@ -3005,10 +3005,12 @@ impl Gpu {
     fn reserve(&self, bytes: usize, freed: usize, what: &str) -> Result<()> {
         // Read-back buffers in flight count against the budget.
         let held = self.bytes() + self.readbacks.bytes.get();
-        if held.saturating_sub(freed).saturating_add(bytes) > self.budget {
+        let after = held.saturating_sub(freed).saturating_add(bytes);
+        if after > self.budget {
+            self.last_limit_shortfall.set(after - self.budget);
             return Err(EngineError::limit(format!(
                 "{what} would take the engine's GPU memory to {} MiB; the most is {} MiB",
-                held.saturating_sub(freed).saturating_add(bytes) >> 20,
+                after >> 20,
                 self.budget >> 20
             )));
         }
@@ -4763,15 +4765,6 @@ impl Gpu {
         (self.page_side as usize) * (self.page_side as usize) * 4
     }
 
-    fn choose_page_side(&self, limit: usize) -> u32 {
-        for side in [4096u32, 2048, 1024, TILE] {
-            if side <= self.max_texture_2d && (side as usize) * (side as usize) * 4 <= limit {
-                return side;
-            }
-        }
-        DEFAULT_PAGE.min(self.max_texture_2d).max(TILE)
-    }
-
     /// Bytes the engine holds on the GPU outside its tile pages.
     fn bytes_beside_tiles(&self) -> usize {
         self.bytes().saturating_sub(self.pages.len() * self.page_bytes())
@@ -4787,39 +4780,21 @@ impl Gpu {
     /// `tile_bytes`, in whole pages. Pages past it go, with their tiles. When no pages are
     /// allocated yet, picks 4096x4096 (64 tiles/page) if device limits and budget allow.
     fn fit_tiles(&mut self, tile_bytes: usize) {
-        let mut limit = self.tile_budget_limit(tile_bytes);
-        let mut trimmed = false;
-        if !self.pages.is_empty() {
-            let pbytes = self.page_bytes();
-            let mut pages = (limit / pbytes).min(1024);
-            // Reclaim warm transient pools and dead blur pyramids before evicting live tile pages.
-            if tile_bytes > 0 && limit < tile_bytes && pages < self.pages.len() {
-                self.trim_transient();
-                trimmed = true;
-                limit = self.tile_budget_limit(tile_bytes);
-                pages = (limit / pbytes).min(1024);
-            }
-            while self.pages.len() > pages {
-                if let Some(p) = self.pages.pop() {
-                    p.texture.destroy();
-                    self.bytes -= pbytes;
-                }
-            }
-            if !self.pages.is_empty() {
-                self.tiles.set_max_slots(pages * self.per_page() as usize);
-                return;
-            }
-        }
-        // No pages remain (or none existed): drop all non-overview tile metadata before
-        // picking a new `page_side`, so no tile outlives its destroyed page or shifts slots.
-        self.tiles.set_max_slots(0);
-        if !trimmed && tile_bytes > 0 && !self.walk_paused() && limit < tile_bytes {
-            self.trim_transient();
-            limit = self.tile_budget_limit(tile_bytes);
-        }
-        self.page_side = self.choose_page_side(limit);
-        let pages = (limit / self.page_bytes()).min(1024);
-        self.tiles.set_max_slots(pages * self.per_page() as usize);
+        crate::tiles::fit_tile_pages(self, tile_bytes);
+    }
+
+    /// Checks that no ordinary tile's slot points past `self.pages`, dropping any that do so
+    /// release builds recover by redrawing instead of repeating a missing-page composite forever.
+    fn heal_unbacked_tiles(&mut self) {
+        let resident = self.pages.len() * self.per_page() as usize;
+        let dropped = self.tiles.drop_unbacked_slots(resident);
+        debug_assert_eq!(
+            dropped,
+            0,
+            "dropped {dropped} tile(s) pointing past {} page(s) (per_page={})",
+            self.pages.len(),
+            self.per_page(),
+        );
     }
 
     /// Room remaining under `self.budget` for `self.readers` allocations.
@@ -6102,7 +6077,7 @@ impl Gpu {
         ) {
             Ok(run) => Ok(PendingStage::Halo(Box::new(run))),
             Err(e) if e.code == ErrorCode::Limit => {
-                self.mark_retry(&mut pending.retry, &e);
+                self.mark_retry(&mut pending.retry, &e, 0, 0);
                 Ok(PendingStage::CoarseStart(1))
             }
             Err(e) => Err(e),
@@ -6114,8 +6089,72 @@ impl Gpu {
         e.code == ErrorCode::Limit && (b.ends_with(b" MiB") || b.ends_with(b"available"))
     }
 
-    fn mark_retry(&self, retry: &mut u8, e: &EngineError) {
-        if *retry == 0 && !self.pages.is_empty() && Self::is_memory_limit(e) {
+    fn memory_limit_shortfall(&self, e: &EngineError) -> Option<usize> {
+        if !Self::is_memory_limit(e) {
+            return None;
+        }
+        Some(if e.message.as_bytes().ends_with(b"available") {
+            self.readers.last_limit_shortfall.get()
+        } else {
+            self.last_limit_shortfall.get()
+        })
+    }
+
+    /// Estimated GPU working-set bytes required by `HaloStage::Final` (colour+depth scratch,
+    /// reader working planes, and nested isolation targets enclosing visible readers).
+    ///
+    /// Note: the 12 B/px reader-plane term is a heuristic, not a strict per-term lower bound
+    /// (`delta_frame` is only allocated for dual writes and `blur_out` is sized to each reader's
+    /// dirty rect rather than native viewport pixels).
+    fn halo_stage_min_work(store: &Store, frame: &Frame, plan: &ViewportHaloPlan) -> usize {
+        let native = plan.native_samples;
+        let native_px =
+            ((native.x1 - native.x0).max(0) as usize).saturating_mul((native.y1 - native.y0).max(0) as usize);
+        // Colour+depth scratch (8 B/px) + reader working planes heuristic (12 B/px)
+        // + nested isolation offscreens (8 B/px each).
+        native_px
+            .saturating_mul(20)
+            .saturating_add(store.reader_isolation_bytes(frame.view, native))
+    }
+
+    fn mark_retry(&self, retry: &mut u8, e: &EngineError, extra_freed: usize, stage_min_work: usize) {
+        if *retry != 0 {
+            return;
+        }
+        let Some(shortfall) = self.memory_limit_shortfall(e) else {
+            return;
+        };
+        let page_bytes = self.pages.len() * self.page_bytes();
+        // Count storage the retry chain (`retry_without_overview`) or the Final pass
+        // (`ensure_scratch_size`) can also free alongside ordinary tile pages.
+        let overview_bytes = self.overview_page.as_ref().map_or(0, |o| o.bytes);
+        let spare_frame_bytes = if self.frames.len() > 1 {
+            let f = if self.cur == Some(1) {
+                &self.frames[0]
+            } else {
+                self.frames.last().expect("frames.len() > 1")
+            };
+            Self::frame_bytes(f.width, f.height)
+        } else {
+            0
+        };
+        let halo_scratch_bytes: usize = [FAR_HALO_SCRATCH_SLOT, MID_HALO_SCRATCH_SLOT, EDGE_STRIP_SCRATCH_SLOT]
+            .into_iter()
+            .filter_map(|slot| self.scratches[slot].as_ref())
+            .map(|s| Self::frame_bytes(s.width, s.height) * 2)
+            .sum();
+        let retry_extra = overview_bytes
+            .saturating_add(spare_frame_bytes)
+            .saturating_add(halo_scratch_bytes);
+        let steady_without_pages = (self.bytes_beside_tiles() + self.readbacks.bytes.get()).saturating_sub(retry_extra);
+        let room_without_pages = self.budget.saturating_sub(steady_without_pages);
+        if crate::tiles::retry_covers_shortfall(
+            page_bytes,
+            extra_freed.saturating_add(retry_extra),
+            shortfall,
+            room_without_pages,
+            stage_min_work,
+        ) {
             *retry = 1;
         }
     }
@@ -6167,8 +6206,10 @@ impl Gpu {
         err: Option<&EngineError>,
     ) -> Result<Option<DrawStats>> {
         if let Some(e) = err {
+            let before = self.bytes();
             self.trim_transient();
-            self.mark_retry(&mut pending.retry, e);
+            let freed = before.saturating_sub(self.bytes());
+            self.mark_retry(&mut pending.retry, e, freed, 0);
             if self.retry_without_overview(&mut pending.retry, Some(e)) {
                 pending.stage = PendingStage::Start;
                 return Ok(None);
@@ -6422,7 +6463,13 @@ impl Gpu {
                         Err(e) => {
                             self.end_reader_halo(&mut run, plan, false);
                             if e.code == ErrorCode::Limit {
-                                self.mark_retry(&mut pending.retry, &e);
+                                // Release transient halo pools before measuring steady headroom
+                                // without tile pages (`CoarseStart` trims them immediately anyway).
+                                let before = self.bytes();
+                                self.trim_transient();
+                                let freed = before.saturating_sub(self.bytes());
+                                let min_work = Self::halo_stage_min_work(store, &pending.frame, plan);
+                                self.mark_retry(&mut pending.retry, &e, freed, min_work);
                                 pending.stage = if self.retry_without_overview(&mut pending.retry, Some(&e)) {
                                     PendingStage::Start
                                 } else {
@@ -8469,6 +8516,7 @@ impl Gpu {
         // The overview's refined tiles are the time between frames' (`ahead`), once still.
         self.tiles.refine_overview = false;
         self.fit_tiles(store.limits.tile_bytes);
+        self.heal_unbacked_tiles();
         let zooming = options.moving && self.last_scale.is_some_and(|s| s != scale);
         // A page just shown (opened, switched to, its list made afresh): nothing to stand on.
         // Under a budget its first frames draw coarse ladder tiles within the per-frame budget
@@ -9086,6 +9134,7 @@ impl Gpu {
                     ..Composite::default()
                 }
             } else {
+                self.heal_unbacked_tiles();
                 self.tiles.compose(&plan, plan_last)
             };
             stats.exact = comp.exact;
@@ -9310,6 +9359,7 @@ impl Gpu {
         self.tiles.bake_overview = true;
         self.tiles.refine_overview = self.quiet_for_overview();
         self.fit_tiles(store.limits.tile_bytes);
+        self.heal_unbacked_tiles();
         let opening = self.opening_pending;
         self.tiles.opening = opening;
         let plan_last = if opening { None } else { Some(last) };
@@ -15254,4 +15304,38 @@ fn analytic_box_from_paths(
         smoothing: [0.0; 4],
         unit_px,
     })
+}
+
+impl crate::tiles::TilePageHost for Gpu {
+    fn tile_cache_mut(&mut self) -> &mut TileCache {
+        &mut self.tiles
+    }
+    fn page_side(&self) -> u32 {
+        self.page_side
+    }
+    fn set_page_side(&mut self, side: u32) {
+        self.page_side = side;
+    }
+    fn page_count(&self) -> usize {
+        self.pages.len()
+    }
+    fn max_texture_2d(&self) -> u32 {
+        self.max_texture_2d
+    }
+    fn tile_budget_limit(&self, tile_bytes: usize) -> usize {
+        Gpu::tile_budget_limit(self, tile_bytes)
+    }
+    fn walk_paused(&self) -> bool {
+        Gpu::walk_paused(self)
+    }
+    fn trim_transient(&mut self) {
+        Gpu::trim_transient(self);
+    }
+    fn pop_page(&mut self) {
+        let pbytes = self.page_bytes();
+        if let Some(p) = self.pages.pop() {
+            p.texture.destroy();
+            self.bytes -= pbytes;
+        }
+    }
 }

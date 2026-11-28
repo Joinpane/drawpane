@@ -1023,6 +1023,20 @@ impl TileCache {
         }
     }
 
+    /// Drops any ordinary tile whose slot is at or past `resident_slots` (a missing backing page)
+    /// while preserving `max_slots` and overview tiles so dropped tiles redraw on the next frame.
+    /// Returns the number of dropped tile entries.
+    pub fn drop_unbacked_slots(&mut self, resident_slots: usize) -> usize {
+        if (self.slots as usize) <= resident_slots {
+            return 0;
+        }
+        let before = self.tiles.len();
+        let max = self.max_slots;
+        self.set_max_slots(resident_slots);
+        self.max_slots = max;
+        before - self.tiles.len()
+    }
+
     /// Starts a frame: a change of background or of the readers' reach (`halo`, which every
     /// tile is drawn with round it) drops everything.
     pub fn begin(&mut self, background: [f32; 4], halo: i32) {
@@ -2024,6 +2038,101 @@ impl TileCache {
     }
 }
 
+/// Default tile atlas page side when headroom cannot fit a smaller square page.
+pub const DEFAULT_PAGE_SIDE: u32 = 2048;
+
+/// Picks the largest square tile-atlas page side (`4096..=TILE`) within `max_texture_2d` whose
+/// RGBA8 byte size fits in `limit`.
+pub fn choose_page_side(limit: usize, max_texture_2d: u32) -> u32 {
+    for side in [4096u32, 2048, 1024, TILE] {
+        if side <= max_texture_2d && (side as usize) * (side as usize) * 4 <= limit {
+            return side;
+        }
+    }
+    DEFAULT_PAGE_SIDE.min(max_texture_2d).max(TILE)
+}
+
+/// GPU tile-page storage driven by [`fit_tile_pages`], decoupled from `wgpu` so native unit tests
+/// exercise the exact page-shrink and transient-trim logic.
+pub trait TilePageHost {
+    fn tile_cache_mut(&mut self) -> &mut TileCache;
+    fn page_side(&self) -> u32;
+    fn set_page_side(&mut self, side: u32);
+    fn page_count(&self) -> usize;
+    fn max_texture_2d(&self) -> u32;
+    fn tile_budget_limit(&self, tile_bytes: usize) -> usize;
+    fn walk_paused(&self) -> bool;
+    fn trim_transient(&mut self);
+    fn pop_page(&mut self);
+}
+
+/// Fits allocated tile pages and `TileCache::max_slots` to `tile_bytes` under the GPU budget.
+///
+/// The two transient-trim sites are intentionally asymmetric with respect to `walk_paused()`:
+/// `trim_transient` calls `trim_pools(0)`, which while `active` is `None` (including during a
+/// paused walk) clears blur pyramids, shadow/noise caches, non-capturing halo scratches/planes,
+/// and texture pools (guarding only the paused walk's own active scratch, glass mask atlas, and
+/// clip mask caches). Before evicting a live tile page (`page_count() > 0`), paying that trim once
+/// can save the live page; once zero pages remain, trimming while a walk is paused would wipe
+/// reusable caches on every slice for nothing.
+pub fn fit_tile_pages(host: &mut impl TilePageHost, tile_bytes: usize) {
+    let per_page = |side: u32| -> usize {
+        let r = (side / TILE).max(1) as usize;
+        r * r
+    };
+    let page_bytes = |side: u32| -> usize { (side as usize) * (side as usize) * 4 };
+    let mut limit = host.tile_budget_limit(tile_bytes);
+    let mut trimmed = false;
+    if host.page_count() > 0 {
+        let side = host.page_side();
+        let pbytes = page_bytes(side);
+        let mut pages = (limit / pbytes).min(1024);
+        // Reclaim warm transient pools and dead blur pyramids before evicting live tile pages.
+        if tile_bytes > 0 && limit < tile_bytes && pages < host.page_count() {
+            host.trim_transient();
+            trimmed = true;
+            limit = host.tile_budget_limit(tile_bytes);
+            pages = (limit / pbytes).min(1024);
+        }
+        while host.page_count() > pages {
+            host.pop_page();
+        }
+        if host.page_count() > 0 {
+            host.tile_cache_mut().set_max_slots(pages * per_page(side));
+            return;
+        }
+    }
+    // No pages remain (or none existed): drop all non-overview tile metadata before
+    // picking a new `page_side`, so no tile outlives its destroyed page or shifts slots.
+    host.tile_cache_mut().set_max_slots(0);
+    // Do not wipe blur/shadow/halo caches and pools on every slice of a paused walk when no live
+    // tile pages are at stake; only trim before picking a fresh `page_side` when idle.
+    if !trimmed && !host.walk_paused() && tile_bytes > 0 && limit < tile_bytes {
+        host.trim_transient();
+        limit = host.tile_budget_limit(tile_bytes);
+    }
+    let side = choose_page_side(limit, host.max_texture_2d());
+    host.set_page_side(side);
+    let pages = (limit / page_bytes(side)).min(1024);
+    host.tile_cache_mut().set_max_slots(pages * per_page(side));
+}
+
+/// Whether dropping `held_page_bytes` (plus any `extra_freed` bytes reclaimed right after refusal)
+/// could cover a GPU memory allocation that missed the budget by `shortfall` bytes and leave at
+/// least `stage_min_work` bytes of free headroom (`room_without_pages >= stage_min_work`) for the
+/// refused stage's unavoidable working set.
+pub fn retry_covers_shortfall(
+    held_page_bytes: usize,
+    extra_freed: usize,
+    shortfall: usize,
+    room_without_pages: usize,
+    stage_min_work: usize,
+) -> bool {
+    held_page_bytes > 0
+        && held_page_bytes.saturating_add(extra_freed) >= shortfall
+        && room_without_pages >= stage_min_work
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2684,12 +2793,191 @@ mod tests {
         assert_eq!(c.tiles.keys().filter(|k| k.level == id).count(), 0);
     }
 
+    struct FakePageHost {
+        tiles: TileCache,
+        page_side: u32,
+        pages: usize,
+        max_texture_2d: u32,
+        budget: usize,
+        fixed_bytes: usize,
+        transient_bytes: usize,
+        walk_paused: bool,
+        trims: usize,
+    }
+
+    impl FakePageHost {
+        fn new(budget: usize, page_side: u32) -> Self {
+            Self {
+                tiles: TileCache::new(TILE, 0),
+                page_side,
+                pages: 0,
+                max_texture_2d: 4096,
+                budget,
+                fixed_bytes: 0,
+                transient_bytes: 0,
+                walk_paused: false,
+                trims: 0,
+            }
+        }
+
+        fn per_page(&self) -> u32 {
+            let r = (self.page_side / TILE).max(1);
+            r * r
+        }
+
+        fn draw_all_allocating_pages(&mut self, p: &Plan) {
+            for j in &p.jobs {
+                let s = self.tiles.slot_for(j.key).expect("slot");
+                if s < OVERVIEW_SLOT {
+                    let page = (s / self.per_page()) as usize;
+                    if self.pages <= page {
+                        self.pages = page + 1;
+                    }
+                }
+                self.tiles.drawn(j.key, s, true, !j.detail, false);
+            }
+        }
+    }
+
+    impl TilePageHost for FakePageHost {
+        fn tile_cache_mut(&mut self) -> &mut TileCache {
+            &mut self.tiles
+        }
+        fn page_side(&self) -> u32 {
+            self.page_side
+        }
+        fn set_page_side(&mut self, side: u32) {
+            self.page_side = side;
+        }
+        fn page_count(&self) -> usize {
+            self.pages
+        }
+        fn max_texture_2d(&self) -> u32 {
+            self.max_texture_2d
+        }
+        fn tile_budget_limit(&self, tile_bytes: usize) -> usize {
+            tile_bytes.min(self.budget.saturating_sub(self.fixed_bytes + self.transient_bytes))
+        }
+        fn walk_paused(&self) -> bool {
+            self.walk_paused
+        }
+        fn trim_transient(&mut self) {
+            self.trims += 1;
+            self.transient_bytes = 0;
+        }
+        fn pop_page(&mut self) {
+            self.pages = self.pages.checked_sub(1).expect("page to pop");
+        }
+    }
+
     #[test]
-    fn set_max_slots_zero_then_raise_drops_non_overview_tiles_for_page_shrink() {
-        // Simulates `Gpu::fit_tiles` popping the last 2048 px page (16 slots) and shrinking
-        // `page_side` to 1024 px (e.g. 3 pages = 12 slots): zeroing max_slots first drops all
-        // ordinary tiles even when the new slot cap exceeds the old tile count, while preserving
-        // overview tiles stored on their own texture.
+    fn fit_tile_pages_drops_ordinary_tiles_before_shrinking_page_side() {
+        // Drives the exact `fit_tile_pages` path used by `Gpu::fit_tiles`: warm 6 tiles on one
+        // 2048x2048 (16 MiB) page plus overview tiles, then raise non-transient GPU bytes so
+        // headroom drops to 12 MiB (3 x 1024x1024 = 12 slots > 6 cached tiles). Removing
+        // `set_max_slots(0)` in `fit_tile_pages` makes this fail because the 6 tiles survive
+        // with stale slot indices pointing at zero resident pages.
+        let page = Rect::new(0.0, 0.0, 4000.0, 2000.0);
+        let mib = 1 << 20;
+        let mut host = FakePageHost::new(96 * mib, 2048);
+        host.fixed_bytes = 64 * mib; // 32 MiB free -> capped at 16 MiB tile_bytes -> 1 x 2048 page.
+        fit_tile_pages(&mut host, 16 * mib);
+        assert_eq!(host.page_side, 2048);
+
+        host.tiles.begin([1.0; 4], 0);
+        host.tiles.set_overview(Some(page));
+        host.tiles.moving = false;
+        host.tiles.bake_overview = true;
+        let p = host
+            .tiles
+            .plan(cam(8.0, 0.0, 0.0), (1024, 1536), false, None, false, false)
+            .expect("plan");
+        host.draw_all_allocating_pages(&p);
+        assert_eq!(host.pages, 1);
+        assert!(host.tiles.overview_ready());
+        let ordinary_before = host.tiles.tiles.values().filter(|t| t.slot < OVERVIEW_SLOT).count();
+        let overview_before = host.tiles.tiles.values().filter(|t| t.slot >= OVERVIEW_SLOT).count();
+        assert_eq!(ordinary_before, 6);
+        assert!(overview_before > 0);
+
+        // First: transient pressure alone (10 MiB dead blur pyramids) should be reclaimed by trim
+        // without popping the live 2048 page or dropping cached tiles.
+        host.fixed_bytes = 80 * mib;
+        host.transient_bytes = 10 * mib;
+        fit_tile_pages(&mut host, 16 * mib);
+        assert_eq!(host.trims, 1);
+        assert_eq!(host.pages, 1);
+        assert_eq!(host.page_side, 2048);
+        assert_eq!(host.tiles.tiles.values().filter(|t| t.slot < OVERVIEW_SLOT).count(), 6);
+
+        // Next: non-transient pressure leaves 12 MiB free (< 16 MiB, >= 3 x 4 MiB). `fit_tile_pages`
+        // must pop the 2048 page, zero slots so all 6 ordinary tiles are dropped, shrink page_side
+        // to 1024 (12 slots), and preserve overview tiles.
+        host.fixed_bytes = 84 * mib;
+        host.transient_bytes = 0;
+        fit_tile_pages(&mut host, 16 * mib);
+        assert_eq!(host.pages, 0);
+        assert_eq!(host.page_side, 1024);
+        assert_eq!(host.tiles.max_slots, 12);
+        assert!(host.tiles.overview_ready());
+        assert_eq!(host.tiles.tiles.values().filter(|t| t.slot < OVERVIEW_SLOT).count(), 0);
+        assert_eq!(
+            host.tiles.tiles.values().filter(|t| t.slot >= OVERVIEW_SLOT).count(),
+            overview_before
+        );
+        assert_eq!(host.tiles.slots, 0);
+        assert!(host.tiles.free.is_empty());
+
+        // The next plan at the same camera must not treat any evicted tile as complete/exact.
+        host.tiles.begin([1.0; 4], 0);
+        host.tiles.set_overview(Some(page));
+        host.tiles.moving = false;
+        host.tiles.bake_overview = false;
+        let after = host
+            .tiles
+            .plan(cam(8.0, 0.0, 0.0), (1024, 1536), false, None, false, false)
+            .expect("plan after shrink");
+        assert_eq!(host.tiles.left(&after).0, 6);
+        let comp = host.tiles.compose(&after, None);
+        assert!(!comp.complete);
+        assert!(!comp.exact);
+        assert!(comp.copies.is_empty());
+        assert_eq!(host.tiles.slot_for(after.jobs[0].key), Some(0));
+    }
+
+    #[test]
+    fn fit_tile_pages_skips_idle_trim_while_walk_is_paused() {
+        let mib = 1 << 20;
+        let mut host = FakePageHost::new(80 * mib, 2048);
+        host.fixed_bytes = 64 * mib;
+        host.transient_bytes = 10 * mib; // Only 6 MiB free (< 16 MiB tile_bytes) while walk is paused.
+        host.walk_paused = true;
+
+        // With zero tile pages held during a paused walk, `fit_tile_pages` must not call
+        // `trim_transient` (which would wipe blur/shadow/halo caches and pools on every slice).
+        fit_tile_pages(&mut host, 16 * mib);
+        assert_eq!(host.trims, 0);
+        assert_eq!(host.transient_bytes, 10 * mib);
+        assert_eq!(host.page_side, 1024);
+        assert_eq!(host.tiles.max_slots, 4);
+
+        // Once the walk finishes (`walk_paused = false`), the second trim reclaims transient bytes
+        // and picks the full 2048 page side.
+        host.walk_paused = false;
+        fit_tile_pages(&mut host, 16 * mib);
+        assert_eq!(host.trims, 1);
+        assert_eq!(host.transient_bytes, 0);
+        assert_eq!(host.page_side, 2048);
+        assert_eq!(host.tiles.max_slots, 16);
+    }
+
+    #[test]
+    fn drop_unbacked_slots_heals_missing_pages_and_preserves_budget_and_overview() {
+        // Exercises the release-build heal path before compose: if tiles ever survive past the
+        // resident GPU pages (e.g. slots 0..6 present with 0 resident pages, or slots 4..6 past
+        // 1 resident 1024 px page), `drop_unbacked_slots` evicts only unbacked ordinary tiles,
+        // keeps `max_slots` and overview tiles intact, makes `compose` report pending/incomplete
+        // instead of emitting copies past the pages, and lets the next frame redraw to exact.
         let page = Rect::new(0.0, 0.0, 4000.0, 2000.0);
         let mut c = TileCache::new(512, 16);
         c.begin([1.0; 4], 0);
@@ -2700,39 +2988,70 @@ mod tests {
             .plan(cam(8.0, 0.0, 0.0), (1024, 1536), false, None, false, false)
             .expect("plan");
         draw_all(&mut c, &p);
-        assert!(c.overview_ready());
-        let ordinary_before = c.tiles.values().filter(|t| t.slot < OVERVIEW_SLOT).count();
-        assert_eq!(ordinary_before, 6);
         let overview_before = c.tiles.values().filter(|t| t.slot >= OVERVIEW_SLOT).count();
+        assert_eq!(c.tiles.values().filter(|t| t.slot < OVERVIEW_SLOT).count(), 6);
         assert!(overview_before > 0);
 
-        // Shrink all pages away, then reopen with 12 slots (> 6) on a smaller page side.
-        c.set_max_slots(0);
-        c.set_max_slots(12);
-        assert!(c.overview_ready());
-        assert_eq!(c.tiles.values().filter(|t| t.slot < OVERVIEW_SLOT).count(), 0);
+        // Partial page loss: 1 page of 4 slots remains resident while 6 tiles are cached.
+        let dropped_partial = c.drop_unbacked_slots(4);
+        assert_eq!(dropped_partial, 2);
+        assert_eq!(c.max_slots, 16);
+        assert_eq!(c.slots, 4);
+        assert!(c.tiles.values().all(|t| t.slot < 4 || t.slot >= OVERVIEW_SLOT));
         assert_eq!(
             c.tiles.values().filter(|t| t.slot >= OVERVIEW_SLOT).count(),
             overview_before
         );
-        assert_eq!(c.slots, 0);
-        assert!(c.free.is_empty());
 
-        // The next plan at the same camera must not treat any evicted tile as complete/exact.
+        // Total page loss: 0 pages resident -> drops the remaining 4 ordinary tiles, keeps
+        // max_slots = 16 and overview tiles, and compose plans incomplete instead of missing copies.
+        let dropped_all = c.drop_unbacked_slots(0);
+        assert_eq!(dropped_all, 4);
+        assert_eq!(c.max_slots, 16);
+        assert_eq!(c.slots, 0);
+        assert_eq!(c.drop_unbacked_slots(0), 0);
+        assert_eq!(
+            c.tiles.values().filter(|t| t.slot >= OVERVIEW_SLOT).count(),
+            overview_before
+        );
+        let comp_mid = c.compose(&p, None);
+        assert!(!comp_mid.complete);
+        assert!(!comp_mid.exact);
+        assert!(comp_mid.copies.is_empty());
+        assert_eq!(comp_mid.pending, 6);
+
+        // Next frame redraws all 6 tiles into fresh slots under the preserved max_slots = 16.
         c.begin([1.0; 4], 0);
         c.set_overview(Some(page));
         c.moving = false;
         c.bake_overview = false;
-        let after = c
+        let next = c
             .plan(cam(8.0, 0.0, 0.0), (1024, 1536), false, None, false, false)
-            .expect("plan after shrink");
-        assert_eq!(c.left(&after).0, 6);
-        let comp = c.compose(&after, None);
-        assert!(!comp.complete);
-        assert!(!comp.exact);
-        assert!(comp.copies.is_empty());
-        // Fresh slots restart cleanly from 0.
-        assert_eq!(c.slot_for(after.jobs[0].key), Some(0));
+            .expect("replan after heal");
+        assert_eq!(c.left(&next).0, 6);
+        draw_all(&mut c, &next);
+        let healed = c.compose(&next, None);
+        assert!(healed.complete);
+        assert!(healed.exact);
+        assert_eq!(healed.pending, 0);
+        assert_eq!(healed.copies.len(), 6);
+    }
+
+    #[test]
+    fn retry_covers_shortfall_rejects_futile_page_drops() {
+        let mib = 1 << 20;
+        assert!(!retry_covers_shortfall(0, 0, 4 * mib, 64 * mib, 0));
+        assert!(!retry_covers_shortfall(16 * mib, 0, 24 * mib, 64 * mib, 0));
+        assert!(retry_covers_shortfall(16 * mib, 0, 16 * mib, 64 * mib, 0));
+        assert!(retry_covers_shortfall(16 * mib, 0, 8 * mib, 64 * mib, 0));
+        assert!(retry_covers_shortfall(16 * mib, 4 * mib, 20 * mib, 64 * mib, 0));
+        assert!(!retry_covers_shortfall(16 * mib, 4 * mib, 21 * mib, 64 * mib, 0));
+        // Even when the single refused allocation's shortfall (2 MiB) is smaller than the held
+        // 16 MiB tile page, reject the retry when the post-drop free room (55 MiB at 88 MiB cap)
+        // still cannot cover the refused Halo stage's minimum working set (63 MiB).
+        assert!(!retry_covers_shortfall(16 * mib, 0, 2 * mib, 55 * mib, 63 * mib));
+        // At 116 MiB cap (83 MiB free after dropping the 16 MiB page), the retry is worthwhile.
+        assert!(retry_covers_shortfall(16 * mib, 0, 5 * mib, 83 * mib, 63 * mib));
     }
 
     #[test]
