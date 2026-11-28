@@ -2061,15 +2061,20 @@ pub trait TilePageHost {
     fn page_count(&self) -> usize;
     fn max_texture_2d(&self) -> u32;
     fn tile_budget_limit(&self, tile_bytes: usize) -> usize;
+    fn walk_paused(&self) -> bool;
     fn trim_transient(&mut self);
     fn pop_page(&mut self);
 }
 
 /// Fits allocated tile pages and `TileCache::max_slots` to `tile_bytes` under the GPU budget.
 ///
-/// Both trim sites follow the same rule (no `!walk_paused()` asymmetry): `trim_transient` guards
-/// paused-walk caches internally while still reclaiming dead blur pyramids and unused pool
-/// textures so a tile page can fit without waiting for a paused walk to finish.
+/// The two transient-trim sites are intentionally asymmetric with respect to `walk_paused()`:
+/// `trim_transient` calls `trim_pools(0)`, which while `active` is `None` (including during a
+/// paused walk) clears blur pyramids, shadow/noise caches, non-capturing halo scratches/planes,
+/// and texture pools (guarding only the paused walk's own active scratch, glass mask atlas, and
+/// clip mask caches). Before evicting a live tile page (`page_count() > 0`), paying that trim once
+/// can save the live page; once zero pages remain, trimming while a walk is paused would wipe
+/// reusable caches on every slice for nothing.
 pub fn fit_tile_pages(host: &mut impl TilePageHost, tile_bytes: usize) {
     let per_page = |side: u32| -> usize {
         let r = (side / TILE).max(1) as usize;
@@ -2082,8 +2087,7 @@ pub fn fit_tile_pages(host: &mut impl TilePageHost, tile_bytes: usize) {
         let side = host.page_side();
         let pbytes = page_bytes(side);
         let mut pages = (limit / pbytes).min(1024);
-        // Reclaim warm transient pools and dead blur pyramids before evicting live tile pages;
-        // `trim_transient` guards paused-walk state internally.
+        // Reclaim warm transient pools and dead blur pyramids before evicting live tile pages.
         if tile_bytes > 0 && limit < tile_bytes && pages < host.page_count() {
             host.trim_transient();
             trimmed = true;
@@ -2101,9 +2105,9 @@ pub fn fit_tile_pages(host: &mut impl TilePageHost, tile_bytes: usize) {
     // No pages remain (or none existed): drop all non-overview tile metadata before
     // picking a new `page_side`, so no tile outlives its destroyed page or shifts slots.
     host.tile_cache_mut().set_max_slots(0);
-    // Consistent with the live-page trim above: `trim_transient` guards paused-walk state
-    // internally while still reclaiming dead blur pyramids and unused pool textures.
-    if !trimmed && tile_bytes > 0 && limit < tile_bytes {
+    // Do not wipe blur/shadow/halo caches and pools on every slice of a paused walk when no live
+    // tile pages are at stake; only trim before picking a fresh `page_side` when idle.
+    if !trimmed && !host.walk_paused() && tile_bytes > 0 && limit < tile_bytes {
         host.trim_transient();
         limit = host.tile_budget_limit(tile_bytes);
     }
@@ -2797,6 +2801,7 @@ mod tests {
         budget: usize,
         fixed_bytes: usize,
         transient_bytes: usize,
+        walk_paused: bool,
         trims: usize,
     }
 
@@ -2810,6 +2815,7 @@ mod tests {
                 budget,
                 fixed_bytes: 0,
                 transient_bytes: 0,
+                walk_paused: false,
                 trims: 0,
             }
         }
@@ -2851,6 +2857,9 @@ mod tests {
         }
         fn tile_budget_limit(&self, tile_bytes: usize) -> usize {
             tile_bytes.min(self.budget.saturating_sub(self.fixed_bytes + self.transient_bytes))
+        }
+        fn walk_paused(&self) -> bool {
+            self.walk_paused
         }
         fn trim_transient(&mut self) {
             self.trims += 1;
@@ -2934,6 +2943,32 @@ mod tests {
         assert!(!comp.exact);
         assert!(comp.copies.is_empty());
         assert_eq!(host.tiles.slot_for(after.jobs[0].key), Some(0));
+    }
+
+    #[test]
+    fn fit_tile_pages_skips_idle_trim_while_walk_is_paused() {
+        let mib = 1 << 20;
+        let mut host = FakePageHost::new(80 * mib, 2048);
+        host.fixed_bytes = 64 * mib;
+        host.transient_bytes = 10 * mib; // Only 6 MiB free (< 16 MiB tile_bytes) while walk is paused.
+        host.walk_paused = true;
+
+        // With zero tile pages held during a paused walk, `fit_tile_pages` must not call
+        // `trim_transient` (which would wipe blur/shadow/halo caches and pools on every slice).
+        fit_tile_pages(&mut host, 16 * mib);
+        assert_eq!(host.trims, 0);
+        assert_eq!(host.transient_bytes, 10 * mib);
+        assert_eq!(host.page_side, 1024);
+        assert_eq!(host.tiles.max_slots, 4);
+
+        // Once the walk finishes (`walk_paused = false`), the second trim reclaims transient bytes
+        // and picks the full 2048 page side.
+        host.walk_paused = false;
+        fit_tile_pages(&mut host, 16 * mib);
+        assert_eq!(host.trims, 1);
+        assert_eq!(host.transient_bytes, 0);
+        assert_eq!(host.page_side, 2048);
+        assert_eq!(host.tiles.max_slots, 16);
     }
 
     #[test]

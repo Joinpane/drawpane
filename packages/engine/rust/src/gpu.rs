@@ -535,9 +535,6 @@ const READBACKS: u32 = 2;
 /// and the one being made.
 const FRAMES: usize = 2;
 
-/// Default tile page side when no pages are allocated yet; `fit_tiles` upgrades to 4096 when
-/// device limits and tile budget allow (64 tiles of 512x512 per atlas page).
-const DEFAULT_PAGE: u32 = 2048;
 /// Kept free under the budget for what a frame allocates on the way (read-backs, images).
 const HEADROOM: usize = 32 << 20;
 /// SwiftShader can exhaust its frame deadline before it exhausts the texture
@@ -2724,7 +2721,7 @@ impl Gpu {
             surface_bytes: 0,
             tiles: TileCache::new(TILE, 0),
             pages: Vec::new(),
-            page_side: DEFAULT_PAGE.min(device_limits.max_texture_dimension_2d),
+            page_side: crate::tiles::DEFAULT_PAGE_SIDE.min(device_limits.max_texture_dimension_2d),
             scratches: [None, None, None, None, None],
             halo_reader_planes: [[None, None, None], [None, None, None]],
             halo_prefix_pool: Vec::new(),
@@ -6103,13 +6100,17 @@ impl Gpu {
         })
     }
 
-    /// Lower-bound GPU working-set bytes required by `HaloStage::Final` (colour+depth scratch,
+    /// Estimated GPU working-set bytes required by `HaloStage::Final` (colour+depth scratch,
     /// reader working planes, and nested isolation targets enclosing visible readers).
+    ///
+    /// Note: the 12 B/px reader-plane term is a heuristic, not a strict per-term lower bound
+    /// (`delta_frame` is only allocated for dual writes and `blur_out` is sized to each reader's
+    /// dirty rect rather than native viewport pixels).
     fn halo_stage_min_work(store: &Store, frame: &Frame, plan: &ViewportHaloPlan) -> usize {
         let native = plan.native_samples;
         let native_px =
             ((native.x1 - native.x0).max(0) as usize).saturating_mul((native.y1 - native.y0).max(0) as usize);
-        // Colour+depth scratch (8 B/px) + reader backdrop/delta/work planes (12 B/px)
+        // Colour+depth scratch (8 B/px) + reader working planes heuristic (12 B/px)
         // + nested isolation offscreens (8 B/px each).
         native_px
             .saturating_mul(20)
@@ -6124,10 +6125,36 @@ impl Gpu {
             return;
         };
         let page_bytes = self.pages.len() * self.page_bytes();
-        let steady_without_pages = self.bytes_beside_tiles() + self.readbacks.bytes.get();
+        // Count storage the retry chain (`retry_without_overview`) or the Final pass
+        // (`ensure_scratch_size`) can also free alongside ordinary tile pages.
+        let overview_bytes = self.overview_page.as_ref().map_or(0, |o| o.bytes);
+        let spare_frame_bytes = if self.frames.len() > 1 {
+            let f = if self.cur == Some(1) {
+                &self.frames[0]
+            } else {
+                self.frames.last().expect("frames.len() > 1")
+            };
+            Self::frame_bytes(f.width, f.height)
+        } else {
+            0
+        };
+        let halo_scratch_bytes: usize = [FAR_HALO_SCRATCH_SLOT, MID_HALO_SCRATCH_SLOT, EDGE_STRIP_SCRATCH_SLOT]
+            .into_iter()
+            .filter_map(|slot| self.scratches[slot].as_ref())
+            .map(|s| Self::frame_bytes(s.width, s.height) * 2)
+            .sum();
+        let retry_extra = overview_bytes
+            .saturating_add(spare_frame_bytes)
+            .saturating_add(halo_scratch_bytes);
+        let steady_without_pages = (self.bytes_beside_tiles() + self.readbacks.bytes.get()).saturating_sub(retry_extra);
         let room_without_pages = self.budget.saturating_sub(steady_without_pages);
-        if crate::tiles::retry_covers_shortfall(page_bytes, extra_freed, shortfall, room_without_pages, stage_min_work)
-        {
+        if crate::tiles::retry_covers_shortfall(
+            page_bytes,
+            extra_freed.saturating_add(retry_extra),
+            shortfall,
+            room_without_pages,
+            stage_min_work,
+        ) {
             *retry = 1;
         }
     }
@@ -6438,9 +6465,11 @@ impl Gpu {
                             if e.code == ErrorCode::Limit {
                                 // Release transient halo pools before measuring steady headroom
                                 // without tile pages (`CoarseStart` trims them immediately anyway).
+                                let before = self.bytes();
                                 self.trim_transient();
+                                let freed = before.saturating_sub(self.bytes());
                                 let min_work = Self::halo_stage_min_work(store, &pending.frame, plan);
-                                self.mark_retry(&mut pending.retry, &e, 0, min_work);
+                                self.mark_retry(&mut pending.retry, &e, freed, min_work);
                                 pending.stage = if self.retry_without_overview(&mut pending.retry, Some(&e)) {
                                     PendingStage::Start
                                 } else {
@@ -15295,6 +15324,9 @@ impl crate::tiles::TilePageHost for Gpu {
     }
     fn tile_budget_limit(&self, tile_bytes: usize) -> usize {
         Gpu::tile_budget_limit(self, tile_bytes)
+    }
+    fn walk_paused(&self) -> bool {
+        Gpu::walk_paused(self)
     }
     fn trim_transient(&mut self) {
         Gpu::trim_transient(self);

@@ -4482,11 +4482,11 @@ for (const build of ["browser", "webgl"] as const) {
           // Case B: 88 MiB with tile_bytes = 0 (no tile pages allocated): forces scaled
           // CoarseWhole div=2 without futilely queuing a retry when no tile pages exist to drop.
           const coarseScaled = await runCase(88, 0, true, false);
-          // Case B2: 88 MiB with 16 MiB tile pages: a 16 MiB page fits once transient caches are
-          // trimmed, but dropping it still cannot cover the refused Halo allocation, so no futile
-          // quiet retry is queued, tiles stay held with zero drop churn, and return to tiles needs
-          // zero redraws.
-          const coarseScaledHeld = await runCase(88, 16, true, false, true);
+          // Case B2: 80 MiB with 8 MiB tile budget (2 x 1024x1024 pages stay within headroom
+          // beside both frame buffers): dropping tile pages plus the spare frame and overview
+          // still cannot cover the refused Halo working set, so no futile quiet retry is queued,
+          // tiles stay held with zero drop churn, and return to tiles needs zero redraws.
+          const coarseScaledHeld = await runCase(80, 8, true, false, true);
           // Case C: letting CoarseWhole sit still past RETRY_QUIET_MS triggers the quiet retry,
           // drops tile pages, and upgrades cleanly to Halo (plan 4) in budgeted slices.
           const coarseAfterQuiet = await runCase(116, 16, false, true);
