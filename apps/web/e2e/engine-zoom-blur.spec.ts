@@ -4327,6 +4327,7 @@ for (const build of ["browser", "webgl"] as const) {
             tileMiB: number,
             midPresent: boolean,
             drainRetry: boolean,
+            checkQuietNoDrop = false,
           ) => {
             const dev = await glue.createGpu(null, 0);
             if (!dev.ok) throw new Error(dev.message);
@@ -4341,10 +4342,11 @@ for (const build of ["browser", "webgl"] as const) {
               must(facts(engine.apply(new Uint8Array(bytes)) as never));
 
               // 1. Warm the tiled cache at zoom 0.1 so view caches hold live tiles.
-              let warm = must(renderAt(engine, 0.1, 8));
+              const warmBudget = checkQuietNoDrop ? 200 : 8;
+              let warm = must(renderAt(engine, 0.1, warmBudget));
               for (let i = 0; i < 400 && !warm.exact; i++) {
-                ahead(engine, 8);
-                warm = must(renderAt(engine, 0.1, 8));
+                ahead(engine, warmBudget);
+                warm = must(renderAt(engine, 0.1, warmBudget));
               }
               const warmHeld = warm.held;
 
@@ -4390,6 +4392,14 @@ for (const build of ["browser", "webgl"] as const) {
               const finishSliceMs = last.cpuMs;
               const shown = last.ok ? renderAt(engine, 1, -1) : last;
 
+              for (let i = 0; i < 4; i++) {
+                const done = await engine.gpuFinished?.();
+                if (!done) break;
+                const ok = done.ok;
+                const message = done.message;
+                done.free();
+                if (!ok) throw new Error(message);
+              }
               const px = await entry(engine.gpuPixels?.());
               if (!(px instanceof Uint8Array)) throw new Error(px.message);
               let nonWhite = 0;
@@ -4400,11 +4410,19 @@ for (const build of ["browser", "webgl"] as const) {
               // 3. Before quiet retry fires, composite-only return to the cached tiled view must
               // reuse cached tiles with zero redraws.
               let back: Facts | null = null;
+              let quietCheck: Facts | null = null;
               let retryEnd: Facts | null = null;
               let retryShown: Facts | null = null;
               let retrySlices = 0;
               let retryMaxSliceMs = 0;
               if (!drainRetry) {
+                if (checkQuietNoDrop) {
+                  // Sit still past RETRY_QUIET_MS (200 ms) and pump ahead to prove no futile
+                  // quiet retry fires or drops held tile pages.
+                  await new Promise((res) => setTimeout(res, 260));
+                  ahead(engine, 4);
+                  quietCheck = must(renderAt(engine, 1, -1));
+                }
                 back = must(renderAt(engine, 0.1, -1));
               } else {
                 // Keep the view still past RETRY_QUIET_MS (200 ms) so PendingStage::Retry fires,
@@ -4443,6 +4461,7 @@ for (const build of ["browser", "webgl"] as const) {
                 finishSliceMs,
                 maxTailSliceMs,
                 nonWhite,
+                quietCheck,
                 back,
                 retryEnd,
                 retryShown,
@@ -4463,6 +4482,11 @@ for (const build of ["browser", "webgl"] as const) {
           // Case B: 88 MiB with tile_bytes = 0 (no tile pages allocated): forces scaled
           // CoarseWhole div=2 without futilely queuing a retry when no tile pages exist to drop.
           const coarseScaled = await runCase(88, 0, true, false);
+          // Case B2: 88 MiB with 16 MiB tile pages: a 16 MiB page fits once transient caches are
+          // trimmed, but dropping it still cannot cover the refused Halo allocation, so no futile
+          // quiet retry is queued, tiles stay held with zero drop churn, and return to tiles needs
+          // zero redraws.
+          const coarseScaledHeld = await runCase(88, 16, true, false, true);
           // Case C: letting CoarseWhole sit still past RETRY_QUIET_MS triggers the quiet retry,
           // drops tile pages, and upgrades cleanly to Halo (plan 4) in budgeted slices.
           const coarseAfterQuiet = await runCase(116, 16, false, true);
@@ -4487,6 +4511,11 @@ for (const build of ["browser", "webgl"] as const) {
               ...stripPx(coarseScaled),
               diffFromHalo: diffCount(coarseScaled.px, haloRef.px),
               diffFromCoarseWhole: diffCount(coarseScaled.px, coarseWhole.px),
+            },
+            coarseScaledHeld: {
+              ...stripPx(coarseScaledHeld),
+              diffFromHalo: diffCount(coarseScaledHeld.px, haloRef.px),
+              diffFromCoarseWhole: diffCount(coarseScaledHeld.px, coarseWhole.px),
             },
             coarseAfterQuiet: stripPx(coarseAfterQuiet),
           };
@@ -4514,16 +4543,17 @@ for (const build of ["browser", "webgl"] as const) {
         out.haloRef.warmHeld,
       );
 
-      for (const [label, c, hasCachedTiles] of [
-        ["coarseWhole", out.coarseWhole, true],
-        ["coarseScaled", out.coarseScaled, false],
+      for (const [label, c, hasCachedTiles, expectsRetry] of [
+        ["coarseWhole", out.coarseWhole, true, true],
+        ["coarseScaled", out.coarseScaled, false, false],
+        ["coarseScaledHeld", out.coarseScaledHeld, true, false],
       ] as const) {
         expect(c.warm.exact, `${label}: warm view settled exact`).toBe(true);
         expect(c.first.inProgress, `${label}: first slice yields instead of blocking`).toBe(true);
         expect(c.last.ok, `${label}: ${c.last.message}`).toBe(true);
         expect(c.last.drawn, `${label}: coarse stand-in frame landed`).toBe(1);
         // F4: CoarseWhole is always a stand-in (plan 1 on renderGpu, distinct from Halo's plan 4)
-        // and queues F1's quiet retry whenever tile pages are held (pending 1, inProgress true).
+        // and queues F1's quiet retry only when dropping held tile pages could cover the refusal.
         expect(
           c.shown.plan,
           `${label}: present-only reports stand-in plan 1, not reader-halo 4`,
@@ -4547,27 +4577,42 @@ for (const build of ["browser", "webgl"] as const) {
         ).toBeGreaterThan(0);
         if (hasCachedTiles) {
           expect(c.warmHeld, `${label}: warm view cached tiles`).toBeGreaterThan(0);
-          expect(c.last.pending, `${label}: quiet retry queued while tile pages held`).toBe(1);
-          expect(c.last.inProgress, `${label}: not settled before quiet retry`).toBe(true);
-          expect(c.shown.pending, `${label}: present-only keeps retry pending`).toBe(1);
-          expect(c.shown.inProgress, `${label}: present-only keeps draw in progress`).toBe(true);
           expect(
             c.last.held,
-            `${label}: view tile cache preserved before quiet retry`,
+            `${label}: view tile cache preserved after fallback`,
           ).toBeGreaterThanOrEqual(c.warmHeld);
           expect(c.shown.held, `${label}: present-only keeps tile cache`).toBeGreaterThanOrEqual(
             c.warmHeld,
           );
           expect(
             c.back?.held,
-            `${label}: view tile cache still held on return before quiet retry`,
+            `${label}: view tile cache still held on return`,
           ).toBeGreaterThanOrEqual(c.warmHeld);
           expect(c.back?.exact, `${label}: subsequent view still reaches exact`).toBe(true);
           expect(c.back?.plan, `${label}: subsequent tiled view stays on tiles`).toBe(0);
           expect(c.back?.drawn, `${label}: cached tiles reused with zero redraws`).toBe(0);
+        }
+        if (expectsRetry) {
+          expect(c.last.pending, `${label}: quiet retry queued while tile pages held`).toBe(1);
+          expect(c.last.inProgress, `${label}: not settled before quiet retry`).toBe(true);
+          expect(c.shown.pending, `${label}: present-only keeps retry pending`).toBe(1);
+          expect(c.shown.inProgress, `${label}: present-only keeps draw in progress`).toBe(true);
         } else {
-          expect(c.last.pending, `${label}: no futile retry without tile pages`).toBe(0);
-          expect(c.last.inProgress, `${label}: finished cleanly without tile pages`).toBe(false);
+          expect(c.last.pending, `${label}: no futile retry queued`).toBe(0);
+          expect(c.last.inProgress, `${label}: finished cleanly without futile retry`).toBe(false);
+          expect(c.shown.pending, `${label}: present-only has nothing pending`).toBe(0);
+          expect(c.shown.inProgress, `${label}: present-only has no draw in progress`).toBe(false);
+        }
+        if (c.quietCheck) {
+          expect(c.quietCheck.plan, `${label}: stays on stand-in plan 1 after quiet window`).toBe(
+            1,
+          );
+          expect(c.quietCheck.pending, `${label}: nothing pending after quiet window`).toBe(0);
+          expect(c.quietCheck.inProgress, `${label}: idle after quiet window`).toBe(false);
+          expect(
+            c.quietCheck.held,
+            `${label}: held tiles preserved across quiet window (no drop churn)`,
+          ).toBeGreaterThanOrEqual(c.warmHeld);
         }
         if (c.midShown) {
           expect(c.midShown.inProgress, `${label}: mid-progress present keeps draw alive`).toBe(
@@ -4582,6 +4627,10 @@ for (const build of ["browser", "webgl"] as const) {
       expect(
         out.coarseScaled.diffFromCoarseWhole,
         "coarseScaled stepped down to a smaller divisor than coarseWhole",
+      ).toBeGreaterThan(0);
+      expect(
+        out.coarseScaledHeld.diffFromCoarseWhole,
+        "coarseScaledHeld stepped down to a smaller divisor than coarseWhole",
       ).toBeGreaterThan(0);
       // After sitting still past RETRY_QUIET_MS, quiet retry drops tile pages and terminates
       // cleanly in budgeted slices (no infinite retry loop).

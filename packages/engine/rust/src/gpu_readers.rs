@@ -9,6 +9,7 @@ use crate::error::{EngineError, Result};
 use crate::exec::IRect;
 use crate::glass::{self, ClipWithin, DEFAULT_GLASS_TUNING, GlassParams, GlassRegion};
 use crate::progressive_blur::ProgressivePlan;
+use std::cell::Cell;
 use std::collections::HashMap;
 use vello_gpu::{RenderSize, Renderer};
 
@@ -387,6 +388,8 @@ pub struct GpuReaders {
     /// Replaced or evicted textures still referenced by an unsubmitted encoder, destroyed on
     /// `flush_retired()` after `queue.submit` so WebGPU VRAM does not wait for JS GC.
     retired: Vec<wgpu::Texture>,
+    /// Exact byte shortfall recorded by the last `reserve_bytes` memory-limit refusal.
+    pub last_limit_shortfall: Cell<usize>,
 }
 
 fn tex_binding(binding: u32, filterable: bool) -> wgpu::BindGroupLayoutEntry {
@@ -908,6 +911,7 @@ impl GpuReaders {
             halo_border_src: None,
             dst_copy: None,
             retired: Vec::new(),
+            last_limit_shortfall: Cell::new(0),
         }
     }
 
@@ -1069,6 +1073,7 @@ impl GpuReaders {
     fn reserve_bytes(&self, add: usize, freed: usize, what: &str, max_bytes: usize) -> Result<()> {
         let after = self.bytes().saturating_sub(freed).saturating_add(add);
         if after > max_bytes {
+            self.last_limit_shortfall.set(after - max_bytes);
             return Err(EngineError::limit(format!(
                 "{what} would take reader GPU memory to {} MiB; {} MiB available",
                 after.div_ceil(1 << 20),
