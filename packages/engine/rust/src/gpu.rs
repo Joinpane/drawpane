@@ -7632,6 +7632,7 @@ impl Gpu {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn take_cached_wide_strip(
         &mut self,
         reader_key: (u32, usize),
