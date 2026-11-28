@@ -31,8 +31,15 @@ Changes:
   dropping the unused `fine_msaa8` and `fine_msaa16` variants to save ~32 KB of WASM gzipped size.
 - `build.rs`: panics on shader parse/validation failure instead of emitting a warning and leaving
   `OUT_DIR/shaders.rs` unwritten.
-- `src/compile/mod.rs`: `ShaderInfo::new` strips comments, blank lines and indentation from each
-  preprocessed shader (`strip`) before naga parses and validates it, so the embedded WGSL is the
-  code alone: about 16 KB less gzipped in the compute module.
+- `src/strip.rs`, `src/compile/mod.rs`: `ShaderInfo::new` strips comments, blank lines and
+  indentation from each preprocessed shader (`strip::strip_comments`) before naga parses and
+  validates it, so the embedded WGSL is the code alone: about 16 KB less gzipped in the compute
+  module. The stripper follows the WGSL spec's comments (nested block comments across lines, a
+  line-ending comment up to any of the seven line breaks) and keeps the preprocessor's
+  `//__#enable` lines for `postprocess`. The build also parses each shader whole and fails when
+  the stripped source makes a different module (spans aside), since naga validating the stripped
+  source alone would accept valid code a lost comment boundary exposed. Its tests run from the
+  engine's `tests/wgsl_strip.rs` (this crate is outside the workspace).
+- `build.rs`: includes `src/strip.rs` for `compile`.
 
 Patches are marked `Drawpane:` in the code.

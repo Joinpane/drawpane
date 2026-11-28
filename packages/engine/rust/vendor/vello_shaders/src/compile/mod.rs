@@ -42,6 +42,11 @@ enum InnerError {
 
     #[error("missing entry point function")]
     EntryPointNotFound,
+
+    /// Drawpane: the shader without its comments (`strip::strip_comments`) parsed to another
+    /// module than the shader itself.
+    #[error("stripping comments changed the shader")]
+    StripChanged,
 }
 
 impl fmt::Display for ErrorVec {
@@ -74,53 +79,19 @@ impl InnerError {
     }
 }
 
-/// Drawpane: WGSL without its comments (line and nested block), blank lines or indentation. The
-/// compute module embeds every shader's source, so comments are bytes shipped for nothing; naga
-/// parses and validates the stripped source below, as the browser will.
-fn strip(src: &str) -> String {
-    let mut out = String::with_capacity(src.len());
-    let mut block = 0usize;
-    for line in src.lines() {
-        let mut kept = String::new();
-        let mut rest = line;
-        while !rest.is_empty() {
-            if block > 0 {
-                match (rest.find("/*"), rest.find("*/")) {
-                    (Some(open), Some(close)) if open < close => {
-                        block += 1;
-                        rest = &rest[open + 2..];
-                    }
-                    (_, Some(close)) => {
-                        block -= 1;
-                        rest = &rest[close + 2..];
-                    }
-                    _ => rest = "",
-                }
-            } else {
-                match (rest.find("//"), rest.find("/*")) {
-                    (Some(line_comment), block_comment) if block_comment.is_none_or(|b| line_comment < b) => {
-                        kept.push_str(&rest[..line_comment]);
-                        rest = "";
-                    }
-                    (_, Some(open)) => {
-                        kept.push_str(&rest[..open]);
-                        kept.push(' ');
-                        block += 1;
-                        rest = &rest[open + 2..];
-                    }
-                    _ => {
-                        kept.push_str(rest);
-                        rest = "";
-                    }
-                }
-            }
-        }
-        let kept = kept.trim();
-        if !kept.is_empty() {
-            out.push_str(kept);
-            out.push('\n');
-        }
+/// Drawpane: `module` as text without its source spans, to tell whether two sources parse to the
+/// same module wherever their code sits in them.
+fn without_spans(module: &Module) -> String {
+    let text = format!("{module:?}");
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text.as_str();
+    while let Some(at) = rest.find("Span { start: ") {
+        out.push_str(&rest[..at]);
+        out.push_str("Span");
+        rest = &rest[at..];
+        rest = rest.find(" }").map_or("", |end| &rest[end + 2..]);
     }
+    out.push_str(rest);
     out
 }
 
@@ -140,9 +111,15 @@ impl ShaderInfo {
         reason = "Deferred: This is a cold code path."
     )]
     pub fn new(name: &str, source: String, entry_point: &str) -> Result<Self> {
-        // Drawpane: shipped without comments, blank lines or indentation (`strip`).
-        let source = strip(&source);
+        // Drawpane: shipped without comments, blank lines or indentation
+        // (`strip::strip_comments`), and only when that leaves the same module: naga validating
+        // the stripped source alone would accept valid code a lost comment boundary exposed.
+        let original = wgsl::parse_str(&source).map_err(|error| Error::new(&source, name, error))?;
+        let source = crate::strip::strip_comments(&source);
         let module = wgsl::parse_str(&source).map_err(|error| Error::new(&source, name, error))?;
+        if without_spans(&module) != without_spans(&original) {
+            return Err(Error::new(&source, name, InnerError::StripChanged));
+        }
         let module_info = naga::valid::Validator::new(ValidationFlags::all(), Capabilities::all())
             .validate(&module)
             .map_err(|error| Error::new(&source, name, error))?;
