@@ -24,8 +24,8 @@ use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 use vello_common::kurbo::{self, Affine, BezPath, Cap, Join, PathEl, Rect, Shape, Stroke, StrokeCtx, StrokeOpts};
 
-/// Device pixels of offset tolerance an outline is expanded at. Half of the 0.25 px vello_common's
-/// own stroker targets, because kurbo's offset fits land up to about 2.6 times their tolerance on
+/// Device pixels of offset tolerance an outline is expanded at. Half of the 0.25 px upstream
+/// vello_common's own stroker targets, because kurbo's offset fits land up to about 2.6 times their tolerance on
 /// tight curves: this keeps them within 0.5 px at any zoom, where main's reached 0.7 px.
 pub const DEVICE_TOLERANCE: f64 = 0.125;
 /// Finer outlines kept per op beside the base one (a zoom ladder draws two scales at once).
@@ -556,7 +556,8 @@ pub fn prepare_dashed_stroke<'a>(
 /// Record-space expansion tolerance for `kurbo::stroke_with`.
 ///
 /// - For normal UI shapes and glyphs (`span <= 2500`), uses up to `0.025` units (10x finer than
-///   the 0.25 px flatten tolerance at 1x, 5x finer at Retina 2x, and proportional for tiny shapes).
+///   upstream vello_common's 0.25 px flatten tolerance at 1x, 5x finer at Retina 2x, and
+///   proportional for tiny shapes).
 /// - For gigantic shapes (`span > 2500`, including fuzz inputs up to `1e38`), scales with `span`
 ///   so verb counts stay tightly bounded.
 pub fn stroke_tolerance(bounds: Rect, width: f32) -> f64 {

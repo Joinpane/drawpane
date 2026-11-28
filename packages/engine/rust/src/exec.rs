@@ -1343,6 +1343,7 @@ pub fn draw_split_resumable(
         current_context: false,
         context_clips_suspended: false,
         isolated_backdrop_depth: 0,
+        masks: 0,
         allow_yield: can_yield,
         yield_safe_depth: 0,
         paused: false,
@@ -1435,6 +1436,12 @@ struct Walk<'a> {
     current_context: bool,
     context_clips_suspended: bool,
     isolated_backdrop_depth: usize,
+    /// Masks being drawn into above the record being walked: a picture mask (alpha, luminance,
+    /// outline picture) on either side, its content or its mask picture, and a record's own
+    /// destination-in or destination-out mask layer round its children. Records drawn into one
+    /// keep whole fills under inside strokes (`rim_inset`), as main draws them, since a mask
+    /// reads the coverage of everything drawn into it.
+    masks: usize,
     allow_yield: bool,
     yield_safe_depth: usize,
     paused: bool,
@@ -1572,6 +1579,93 @@ pub(crate) fn clip_wraps_children(ops: &[Op], clip_idx: usize) -> bool {
         }
     }
     false
+}
+
+/// How far the fill at `ops[at]` may stop inside its shape (record units) under an opaque inside
+/// stroke, or 0. A fill and an inside stroke both anti-aliased on the shape's edge cover an edge
+/// pixel 2c - c² (Figma covers it c): stopped halfway into the stroke's band, the fill leaves the
+/// edge to the stroke alone. Only where that can't show: a box or ellipse, an opaque solid
+/// undashed stroke clipped to the same shape (the builder's inside stroke), and a band two device
+/// pixels wide or more, so every pixel the fill's edge touches is one the stroke covers whole.
+/// The walk asks only when nothing in the record's subtree reads, blends or makes a pass, and the
+/// record doesn't draw into a mask (`Walk::masks`, and its own mask layers). Scopes above it that
+/// composite it whole (isolated opacity, a layer blend, a layer blur, on a reduced grid too, and
+/// clips) get the fill and the stroke in one target at `device`'s scale, so it applies there.
+pub(crate) fn rim_inset(r: &Record, ops: &[Op], at: usize, path: u32, device: Affine) -> f64 {
+    if r.mask != 0
+        || !matches!(
+            r.paths.get(path as usize),
+            Some(PathEntry::Rect { .. } | PathEntry::Ellipse { .. })
+        )
+    {
+        return 0.0;
+    }
+    // The strokes right after a clip to the shape (a frame's clip round its children comes first),
+    // and the widest opaque band among them.
+    let mut band = 0.0f32;
+    let mut clipped = false;
+    for op in &ops[at + 1..] {
+        match op {
+            Op::Clip {
+                path: c,
+                even_odd: false,
+            } if *c == path => clipped = true,
+            Op::Stroke {
+                path: s,
+                style,
+                paint,
+                blend,
+                ..
+            } if clipped && *s == path => {
+                if let Paint::Solid(c) = paint
+                    && *blend == 0
+                    && c[3] >= 1.0
+                    && style.dashes.is_empty()
+                {
+                    band = band.max(style.width / 2.0);
+                }
+            }
+            _ if band > 0.0 => break,
+            _ => clipped = false,
+        }
+    }
+    // The band's thinnest on the device: the linear part's smaller singular value.
+    let [a, b, c, d, _, _] = device.as_coeffs();
+    let t = a * a + b * b + c * c + d * d;
+    let det = a * d - b * c;
+    let thin = ((t - (t * t - 4.0 * det * det).max(0.0).sqrt()) / 2.0).max(0.0).sqrt();
+    if f64::from(band) * thin >= 2.0 {
+        f64::from(band) / 2.0
+    } else {
+        0.0
+    }
+}
+
+/// A box or ellipse entry shrunk by `inset` on every side (corners by as much, smoothing kept),
+/// or None when nothing is left.
+#[inline(never)]
+pub(crate) fn rim_path(entry: &PathEntry, inset: f64) -> Option<BezPath> {
+    let mut p = match *entry {
+        PathEntry::Rect { w, h, radii, smoothing } => {
+            let (w, h) = (f64::from(w), f64::from(h));
+            if w <= inset * 2.0 || h <= inset * 2.0 {
+                return None;
+            }
+            let fitted = geometry::fit_corners(w, h, radii.map(f64::from), f64::from(smoothing));
+            let radii = fitted.map(|c| (c.radius - inset).max(0.0) as f32);
+            geometry::rounded_rect((w - inset * 2.0) as f32, (h - inset * 2.0) as f32, radii, smoothing)
+        }
+        PathEntry::Ellipse { w, h } => {
+            let (w, h) = (f64::from(w), f64::from(h));
+            if w <= inset * 2.0 || h <= inset * 2.0 {
+                return None;
+            }
+            geometry::ellipse((w - inset * 2.0) as f32, (h - inset * 2.0) as f32)
+        }
+        _ => return None,
+    };
+    p.apply_affine(Affine::translate((inset, inset)));
+    Some(p)
 }
 
 /// Innermost opaque solid fill painted before `clip_idx`, as premultiplied RGBA8 (decision 0007).
@@ -3175,12 +3269,16 @@ impl Walk<'_> {
             f64::from(whole_mask.x1) + 1.0,
             f64::from(whole_mask.y1) + 1.0,
         );
+        // The scope can't pause (`draw_children` makes masks yield-safe), so the count is back
+        // to its own once each side is drawn.
+        self.masks += 1;
         let content_res = (|| -> Result<()> {
             for &cid in ids {
                 self.node(cid, world, inner, parent_context)?;
             }
             Ok(())
         })();
+        self.masks -= 1;
         while let Some(o) = self.open.pop() {
             match o {
                 Open::Clip { active_on_scene, .. } => {
@@ -3234,7 +3332,9 @@ impl Walk<'_> {
             self.backend.abort_isolated(&self.open);
             return Ok(());
         }
+        self.masks += 1;
         let mask_res = self.node(mask_id, world, 1.0, parent_context);
+        self.masks -= 1;
         while let Some(o) = self.open.pop() {
             match o {
                 Open::Clip { active_on_scene, .. } => {
@@ -3896,6 +3996,24 @@ impl Walk<'_> {
                         blend,
                     } => {
                         self.sync_targets(is_context)?;
+                        // Under an opaque inside stroke the fill stops halfway into its band
+                        // (`rim_inset`), unless something in the subtree reads or blends with
+                        // what the fill leaves beneath the band, or the record draws into a
+                        // mask, on either side of a picture mask or in a mask layer.
+                        let inset = if *blend == 0
+                            && !*even_odd
+                            && !self.rough
+                            && !is_context
+                            && mask_depth == 0
+                            && self.masks == 0
+                            && active_alpha >= 1.0
+                            && !self.store.subtree_has_pass(id)
+                            && !self.store.subtree_has_blend(id)
+                        {
+                            rim_inset(r, ops, at, *path, device)
+                        } else {
+                            0.0
+                        };
                         self.fill(
                             r,
                             *path,
@@ -3905,6 +4023,7 @@ impl Walk<'_> {
                             if self.rough { 0 } else { *blend },
                             active_alpha,
                             mask_depth == 0,
+                            inset,
                         )?;
                     }
                     Op::Stroke {
@@ -3996,7 +4115,13 @@ impl Walk<'_> {
                         }
                     }
                     Op::Children => {
-                        self.draw_children(id, at, world, active_alpha, is_context)?;
+                        // Children in this record's own mask layer draw into the mask too. Mask
+                        // layers can't pause (they're yield-safe), so no resume lands inside one.
+                        let in_mask = usize::from(mask_depth > 0);
+                        self.masks += in_mask;
+                        let drawn = self.draw_children(id, at, world, active_alpha, is_context);
+                        self.masks -= in_mask;
+                        drawn?;
                         if !self.paused {
                             self.sync_targets(is_context)?;
                         }
@@ -4367,7 +4492,7 @@ impl Walk<'_> {
             return false;
         }
         // A device pixel and a half to spare: anti-aliasing, and the flattened arc lying inside
-        // the true one by up to a quarter pixel.
+        // the true one (by up to 1/16 px since vendor/vello_common; a quarter before).
         let (px, py) = (1.5 / a.abs(), 1.5 / d.abs());
         let (w, h) = (f64::from(*w), f64::from(*h));
         if !(e.is_finite() && e.x0 >= px && e.y0 >= py && e.x1 <= w - px && e.y1 <= h - py) {
@@ -4639,6 +4764,7 @@ impl Walk<'_> {
         blend: u8,
         alpha: f32,
         allow_glyph_masks: bool,
+        inset: f64,
     ) -> Result<()> {
         if blend != 0 {
             if !paint_visible(paint, alpha) {
@@ -4646,7 +4772,7 @@ impl Walk<'_> {
             }
             if let Some(hw_mode) = self.can_hw_blend_fill(r, i, u32::from(blend)) {
                 return self.with_hw_blend(hw_mode, |walk| {
-                    walk.fill(r, i, device, even_odd, paint, 0, alpha, allow_glyph_masks)
+                    walk.fill(r, i, device, even_odd, paint, 0, alpha, allow_glyph_masks, 0.0)
                 });
             }
             let Some(local_b) = r.entry_bounds(i, &|g| self.store.glyphs.bounds(g)) else {
@@ -4663,7 +4789,7 @@ impl Walk<'_> {
                 return Ok(());
             }
             let prev_open = std::mem::take(&mut self.open);
-            let res = self.fill(r, i, device, even_odd, paint, 0, alpha, allow_glyph_masks);
+            let res = self.fill(r, i, device, even_odd, paint, 0, alpha, allow_glyph_masks, 0.0);
             self.open = prev_open;
             if res.is_ok() {
                 self.backend.pop_blended(u32::from(blend), 1.0, &self.open)?;
@@ -4678,7 +4804,19 @@ impl Walk<'_> {
         {
             return self.glyphs(device, f64::from(*scale), glyphs, *c, alpha);
         }
-        let p = self.path(r, i, device, 0.0)?;
+        // Stopped under an opaque inside stroke (`rim_inset`), else the whole shape.
+        let p = match r
+            .paths
+            .get(i as usize)
+            .filter(|_| inset > 0.0)
+            .and_then(|e| rim_path(e, inset))
+        {
+            Some(p) => {
+                self.spend(p.elements().len())?;
+                p
+            }
+            None => self.path(r, i, device, 0.0)?,
+        };
         if p.is_empty() {
             return Ok(());
         }
@@ -7187,6 +7325,108 @@ mod hw_blend_gate_tests {
             assert_eq!(scopes, 0, "uniform run stays HW-blended on {area:?}");
             assert!(masked > 0, "uniform run keeps mask cache on {area:?}");
             assert_eq!(outlined, 0, "uniform run should not outline on {area:?}");
+        }
+    }
+}
+
+#[cfg(test)]
+mod rim_tests {
+    use super::*;
+    use vello_common::kurbo::{PathEl, Point};
+
+    /// The outline's points, its curves sampled finely.
+    fn points(p: &BezPath) -> Vec<Point> {
+        let mut out = Vec::new();
+        vello_common::kurbo::flatten(p.iter(), 1e-4, |el| match el {
+            PathEl::MoveTo(q) | PathEl::LineTo(q) => out.push(q),
+            _ => {}
+        });
+        out
+    }
+
+    /// The distance from `q` to the closed polygon `poly`, negative outside it (even-odd).
+    fn signed_distance(q: Point, poly: &[Point]) -> f64 {
+        let mut inside = false;
+        let mut best = f64::INFINITY;
+        for (i, a) in poly.iter().enumerate() {
+            let b = poly[(i + 1) % poly.len()];
+            if (a.y > q.y) != (b.y > q.y) && q.x < (b.x - a.x) * (q.y - a.y) / (b.y - a.y) + a.x {
+                inside = !inside;
+            }
+            let d = b - *a;
+            let t = (((q - *a).dot(d)) / d.hypot2().max(1e-18)).clamp(0.0, 1.0);
+            best = best.min((q - (*a + d * t)).hypot());
+        }
+        if inside { best } else { -best }
+    }
+
+    #[test]
+    fn a_shrunk_outline_stays_inside_the_band_smoothed_corners_too() {
+        // The fill's edge lies halfway into the band, a quarter of the band or more from both of
+        // its edges, for plain, smoothed and tight corners and for ellipses.
+        for (entry, band) in [
+            (
+                PathEntry::Rect {
+                    w: 28.0,
+                    h: 28.0,
+                    radii: [9999.0; 4],
+                    smoothing: 0.0,
+                },
+                1.0,
+            ),
+            (
+                PathEntry::Rect {
+                    w: 28.0,
+                    h: 20.0,
+                    radii: [8.0; 4],
+                    smoothing: 0.6,
+                },
+                1.0,
+            ),
+            (
+                PathEntry::Rect {
+                    w: 40.0,
+                    h: 28.0,
+                    radii: [20.0; 4],
+                    smoothing: 1.0,
+                },
+                2.0,
+            ),
+            (
+                PathEntry::Rect {
+                    w: 28.0,
+                    h: 28.0,
+                    radii: [3.0; 4],
+                    smoothing: 0.6,
+                },
+                4.0,
+            ),
+            (
+                PathEntry::Rect {
+                    w: 28.0,
+                    h: 28.0,
+                    radii: [0.0; 4],
+                    smoothing: 0.0,
+                },
+                1.0,
+            ),
+            (PathEntry::Ellipse { w: 38.0, h: 20.0 }, 2.0),
+        ] {
+            let outer = points(&match entry {
+                PathEntry::Rect { w, h, radii, smoothing } => geometry::rounded_rect(w, h, radii, smoothing),
+                PathEntry::Ellipse { w, h } => geometry::ellipse(w, h),
+                _ => unreachable!(),
+            });
+            let inner = rim_path(&entry, band / 2.0).expect("a shrunk outline");
+            let inner = points(&inner);
+            assert!(inner.len() >= 4);
+            for q in inner {
+                let d = signed_distance(q, &outer);
+                assert!(
+                    d >= band / 4.0 && d <= band * 3.0 / 4.0,
+                    "{entry:?} band {band}: a point {d} from the edge"
+                );
+            }
         }
     }
 }

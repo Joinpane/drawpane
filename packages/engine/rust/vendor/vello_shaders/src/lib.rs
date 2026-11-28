@@ -44,6 +44,9 @@
 
 mod types;
 
+// Drawpane: comment stripping for the embedded shaders, ungated so its tests run without naga.
+pub mod strip;
+
 #[cfg(feature = "compile")]
 pub mod compile;
 

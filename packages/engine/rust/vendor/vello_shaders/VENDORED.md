@@ -10,10 +10,11 @@ Changes:
 
 - The unused CPU implementation and feature are omitted.
 - `shader/flatten.wgsl`: replaced Vello 0.12's Euler-spiral flattener and GPU stroke expander with
-  a direct WGSL port of `vello_common 0.4`'s `flatten_simd` (0.25 px Wang/parabola-integral
-  flattener, plus conservative-bbox viewport culling), so GPU compute emits the same flattened line
-  segments as `vello_cpu` and `vello_gpu` 0.4. All strokes arrive pre-expanded as cached filled
-  outlines (`src/stroke.rs`).
+  a direct WGSL port of `vello_common 0.4`'s `flatten_simd` (Wang/parabola-integral flattener at
+  the vendored vello_common's 1/16 px tolerance, plus conservative-bbox viewport culling), so GPU
+  compute emits the same flattened line segments as `vello_cpu` and `vello_gpu` 0.4, to within
+  the 1/2048 px vello_common's grid snap moves them. All strokes arrive pre-expanded as cached
+  filled outlines (`src/stroke.rs`).
 - `shader/draw_leaf.wgsl`: computes linear gradient ramp coordinates via the full inverse affine
   transform (`transform_inverse`) instead of transforming endpoints forward under a similarity
   assumption, matching `vello_cpu`, `vello_gpu`, and Figma on skewed / non-uniformly scaled
@@ -30,5 +31,18 @@ Changes:
   dropping the unused `fine_msaa8` and `fine_msaa16` variants to save ~32 KB of WASM gzipped size.
 - `build.rs`: panics on shader parse/validation failure instead of emitting a warning and leaving
   `OUT_DIR/shaders.rs` unwritten.
+- `src/strip.rs`, `src/compile/mod.rs`: `ShaderInfo::new` strips comments, blank lines and
+  indentation from each preprocessed shader (`strip::strip_comments`) before naga parses and
+  validates it, so the embedded WGSL is the code alone: about 16 KB less gzipped in the compute
+  module. The stripper follows the WGSL spec's comments (nested block comments across lines, a
+  line-ending comment up to any of the seven line breaks). A shader holding the preprocessor's
+  `//__#enable` stand-in ships unstripped (`strip::shipped`): the directive turns live only in
+  `postprocess`, after naga, which can't read it, has checked the source. The build also parses
+  each shader whole and fails when the stripped source makes a different module (spans aside),
+  or when `postprocess` would change it, since naga validating the stripped source alone would
+  accept valid code a lost comment boundary exposed. `postprocess` moved to `src/strip.rs`. Its
+  tests run from the engine's `tests/wgsl_strip.rs` (this crate is outside the workspace), with
+  an end-to-end case through the preprocessor.
+- `build.rs`: includes `src/strip.rs` for `compile`.
 
 Patches are marked `Drawpane:` in the code.

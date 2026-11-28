@@ -10,6 +10,10 @@ mod compile;
 #[allow(warnings, reason = "Checked elsewhere")]
 #[path = "src/types.rs"]
 mod types;
+// Drawpane: `compile` strips the shaders' comments with it.
+#[allow(warnings, reason = "Checked elsewhere")]
+#[path = "src/strip.rs"]
+mod strip;
 
 use std::env;
 use std::fmt::{self, Write as _};
