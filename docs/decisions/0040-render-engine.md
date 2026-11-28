@@ -2261,8 +2261,10 @@ full-resolution reference blur unchanged.
      frame. Glass halo estimation separates zoom-scaled reach from fixed device pad
      (`glass::halo_parts`: 20 px for refractive lenses, matching `main` so tile scratch sizes and
      `engine-glass-atlas`'s 20 MiB budget stay unchanged).
-   - To keep glass lens rims identical between whole frames and 512 px tiles at every zoom and pan
-     without inflating tile pads:
+   - To keep glass lens rims matching between whole frames and 512 px tiles across zooms and pans
+     without inflating tile pads (within `<= 1/255` on aligned pans, and within `<= 19/255` on rim
+     corners at odd device-pixel pans such as zoom `1.4` where emulated vs hardware 2x2 pixel-quad
+     derivatives still differ slightly, far below `main`):
      - `glass::compute_regions` enables `align_mips` for all clear refractive lenses
        (`params.frost <= 0.4 && params.refraction > 0.0`) before clipping and anchors both near
        and far region edges to the unclipped lens origin modulo `alignment`, so tile clipping never

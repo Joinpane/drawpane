@@ -4747,7 +4747,17 @@ for (const build of ["browser", "webgl"] as const) {
             );
           const ahead = (e: Engine, budget: number) =>
             facts(entry(e.renderGpuAhead?.(bg, budget)) as never);
+          const finished = async (e: Engine) => {
+            const done = await e.gpuFinished?.();
+            if (done && !done.ok) {
+              const message = done.message;
+              done.free();
+              throw new Error(message);
+            }
+            done?.free();
+          };
           const pixels = async (e: Engine) => {
+            await finished(e);
             const px = await entry(e.gpuPixels?.());
             if (!(px instanceof Uint8Array)) throw new Error(px.message);
             return px;

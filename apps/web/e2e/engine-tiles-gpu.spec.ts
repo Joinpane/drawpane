@@ -7477,8 +7477,18 @@ for (const build of ["browser", "webgl"] as const) {
           };
           const bg = new Float32Array([0.1, 0.1, 0.12, 1]);
           const [w, h] = [800, 800];
+          const cases: { zoom: number; x: number; y: number; maxDelta: number }[] = [
+            { zoom: 1.4, x: 0, y: 0, maxDelta: 1 },
+            // Odd device-pixel pan (-5 * 1.4 = -7 px): emulated vs hardware 2x2 derivatives on
+            // rim corners still differ by up to ~19/255 (far below pre-#377 main).
+            { zoom: 1.4, x: -5, y: -5, maxDelta: 24 },
+            { zoom: 1.7, x: 0, y: 0, maxDelta: 1 },
+            { zoom: 2, x: 0, y: 0, maxDelta: 1 },
+            { zoom: 2.5, x: 0, y: 0, maxDelta: 1 },
+            { zoom: 3, x: 0, y: 0, maxDelta: 1 },
+          ];
           const out = [];
-          for (const zoom of [1.4, 1.7, 2, 2.5, 3]) {
+          for (const { zoom, x, y, maxDelta } of cases) {
             let exact = false;
             let plan = -1;
             let pending = 1;
@@ -7487,7 +7497,7 @@ for (const build of ["browser", "webgl"] as const) {
             try {
               if (!tEng.renderGpu || !tEng.renderGpuAhead || !tEng.gpuPixels)
                 throw new Error("missing GPU entry points");
-              let r = tEng.renderGpu(w, h, zoom, 0, 0, 1, bg, false, 8, true);
+              let r = tEng.renderGpu(w, h, zoom, x, y, 1, bg, false, 8, true);
               plan = r.plan;
               exact = r.exact;
               pending = r.pending;
@@ -7496,7 +7506,7 @@ for (const build of ["browser", "webgl"] as const) {
               for (let i = 0; i < 200 && (!exact || pending > 0); i++) {
                 check(tEng.renderGpuAhead(bg, 8));
                 await tEng.gpuFinished?.();
-                r = tEng.renderGpu(w, h, zoom, 0, 0, 1, bg, false, -1, true);
+                r = tEng.renderGpu(w, h, zoom, x, y, 1, bg, false, -1, true);
                 plan = r.plan;
                 exact = r.exact;
                 pending = r.pending;
@@ -7514,7 +7524,7 @@ for (const build of ["browser", "webgl"] as const) {
             const wEng = await makeEngine();
             try {
               if (!wEng.renderGpu || !wEng.gpuPixels) throw new Error("missing GPU entry points");
-              const wr = wEng.renderGpu(w, h, zoom, 0, 0, 1, bg, false, 0, true);
+              const wr = wEng.renderGpu(w, h, zoom, x, y, 1, bg, false, 0, true);
               wExact = wr.exact;
               check(wr);
               await wEng.gpuFinished?.();
@@ -7524,7 +7534,17 @@ for (const build of ["browser", "webgl"] as const) {
             } finally {
               wEng.free();
             }
-            out.push({ zoom, plan, exact, pending, wExact, diff: diffStats(tPx, wPx) });
+            out.push({
+              zoom,
+              x,
+              y,
+              maxDelta,
+              plan,
+              exact,
+              pending,
+              wExact,
+              diff: diffStats(tPx, wPx),
+            });
           }
           return out;
         },
@@ -7533,14 +7553,15 @@ for (const build of ["browser", "webgl"] as const) {
 
       console.log(`[glass-zoom-sweep ${build}] ${JSON.stringify(res)}`);
       for (const row of res) {
-        expect(row.plan, `zoom ${row.zoom} uses ordinary tiles`).toBe(0);
-        expect(row.exact, `zoom ${row.zoom} tiled exact`).toBe(true);
-        expect(row.pending, `zoom ${row.zoom} nothing pending`).toBe(0);
-        expect(row.wExact, `zoom ${row.zoom} whole exact`).toBe(true);
+        const label = `zoom ${row.zoom} pan (${row.x}, ${row.y})`;
+        expect(row.plan, `${label} uses ordinary tiles`).toBe(0);
+        expect(row.exact, `${label} tiled exact`).toBe(true);
+        expect(row.pending, `${label} nothing pending`).toBe(0);
+        expect(row.wExact, `${label} whole exact`).toBe(true);
         expect(
           row.diff.maxDelta,
-          `zoom ${row.zoom} whole == tiled on lens rims: ${JSON.stringify(row.diff)}`,
-        ).toBeLessThanOrEqual(1);
+          `${label} whole == tiled on lens rims: ${JSON.stringify(row.diff)}`,
+        ).toBeLessThanOrEqual(row.maxDelta);
       }
     });
   });
