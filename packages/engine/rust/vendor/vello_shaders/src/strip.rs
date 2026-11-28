@@ -9,11 +9,41 @@
 //! comment. WGSL has no string literals, so nothing else can hold a comment marker. Each comment
 //! is blankspace, so a block comment becomes a space and a line-ending comment ends its line.
 //!
-//! One line-ending comment is kept: a line starting `//__#enable`, the preprocessor's stand-in
-//! for an `enable` directive, which `compile::postprocess` turns back into the directive.
+//! A shader holding the preprocessor's stand-in for an `enable` directive (a line comment
+//! `//__#enable ...`, which `postprocess` makes the directive again) ships as it is: the
+//! directive turns live only after naga, which can't read it, has checked the source, so no
+//! check could vouch for stripping around it.
+
+use std::borrow::Cow;
 
 /// The preprocessor's stand-in for an `enable` directive (`compile::preprocess`).
-const ENABLE: &str = "//__#enable";
+pub const ENABLE: &str = "//__#enable";
+
+/// The preprocessed shader `src` as it ships, before `postprocess`: without its comments
+/// (`strip_comments`), unless it holds the `enable` stand-in anywhere.
+pub fn shipped(src: &str) -> Cow<'_, str> {
+    if src.contains(ENABLE) {
+        Cow::Borrowed(src)
+    } else {
+        Cow::Owned(strip_comments(src))
+    }
+}
+
+/// Turns the preprocessor's `enable` stand-ins back into directives: a workaround for
+/// gfx-rs/wgpu#5476 (naga can't handle the `enable` directive), so other WGSL compilers get it.
+/// Remove it once naga supports the directive. (Upstream's `compile::postprocess`, moved here.)
+pub fn postprocess(wgsl: &str) -> String {
+    let mut output = String::with_capacity(wgsl.len());
+    for line in wgsl.lines() {
+        if line.starts_with("//__#enable") {
+            output.push_str(&line["//__#".len()..]);
+        } else {
+            output.push_str(line);
+        }
+        output.push('\n');
+    }
+    output
+}
 
 /// Whether `c` is a WGSL line break (CR LF counts as one, which `strip` gets by dropping the
 /// empty line between them).
@@ -34,17 +64,10 @@ fn is_blankspace(c: char) -> bool {
 pub fn strip_comments(src: &str) -> String {
     let mut code = String::with_capacity(src.len());
     let mut rest = src;
-    // Whether only blankspace lies between the last line break and here.
-    let mut line_start = true;
     while let Some(c) = rest.chars().next() {
         if rest.starts_with("//") {
-            let end = rest.find(is_line_break).unwrap_or(rest.len());
-            if line_start && rest.starts_with(ENABLE) {
-                code.push_str(&rest[..end]);
-            }
             // The line break itself is the next character.
-            rest = &rest[end..];
-            line_start = false;
+            rest = &rest[rest.find(is_line_break).unwrap_or(rest.len())..];
         } else if rest.starts_with("/*") {
             let mut depth = 0usize;
             let mut at = 0;
@@ -66,14 +89,8 @@ pub fn strip_comments(src: &str) -> String {
             // An unclosed comment runs to the end (naga refuses the original source anyway).
             rest = rest.get(at..).unwrap_or("");
             code.push(' ');
-            line_start = false;
         } else {
             code.push(c);
-            if is_line_break(c) {
-                line_start = true;
-            } else if !is_blankspace(c) {
-                line_start = false;
-            }
             rest = &rest[c.len_utf8()..];
         }
     }
@@ -133,10 +150,23 @@ mod tests {
     }
 
     #[test]
-    fn the_preprocessors_enable_stand_in_is_kept() {
-        assert_eq!(
-            strip_comments("//__#enable f16;\n  //__#enable subgroups; // why\nfn f() {} //__#enable no\n"),
-            "//__#enable f16;\n//__#enable subgroups; // why\nfn f() {}\n"
-        );
+    fn a_shader_holding_an_enable_stand_in_ships_whole() {
+        use super::{postprocess, shipped};
+        // The re-check's cases: a block comment after the directive closing on a line that starts
+        // `//` (stripping kept the opener with the directive and dropped the closer, leaving the
+        // emitted shader an unclosed comment), and stand-in text in an ordinary comment, indented
+        // or after a U+2028 line break, which stripping would have made a live directive.
+        for src in [
+            "//__#enable f16;  /* why\n// continued */\nfn f() {}\n",
+            "fn f() {}\n    //__#enable imaginary;\n",
+            "fn f() {} // note\u{2028}//__#enable imaginary;\n",
+        ] {
+            assert_eq!(shipped(src), src);
+        }
+        assert_eq!(postprocess("//__#enable f16;\nfn f() {}\n"), "enable f16;\nfn f() {}\n");
+        // Without one, stripped, and nothing for `postprocess` to change.
+        let stripped = shipped("fn f() {} /* a\n// b */\n// c\n");
+        assert_eq!(stripped, "fn f() {}\n");
+        assert_eq!(postprocess(&stripped), stripped);
     }
 }

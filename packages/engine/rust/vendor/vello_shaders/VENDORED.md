@@ -35,11 +35,14 @@ Changes:
   indentation from each preprocessed shader (`strip::strip_comments`) before naga parses and
   validates it, so the embedded WGSL is the code alone: about 16 KB less gzipped in the compute
   module. The stripper follows the WGSL spec's comments (nested block comments across lines, a
-  line-ending comment up to any of the seven line breaks) and keeps the preprocessor's
-  `//__#enable` lines for `postprocess`. The build also parses each shader whole and fails when
-  the stripped source makes a different module (spans aside), since naga validating the stripped
-  source alone would accept valid code a lost comment boundary exposed. Its tests run from the
-  engine's `tests/wgsl_strip.rs` (this crate is outside the workspace).
+  line-ending comment up to any of the seven line breaks). A shader holding the preprocessor's
+  `//__#enable` stand-in ships unstripped (`strip::shipped`): the directive turns live only in
+  `postprocess`, after naga, which can't read it, has checked the source. The build also parses
+  each shader whole and fails when the stripped source makes a different module (spans aside),
+  or when `postprocess` would change it, since naga validating the stripped source alone would
+  accept valid code a lost comment boundary exposed. `postprocess` moved to `src/strip.rs`. Its
+  tests run from the engine's `tests/wgsl_strip.rs` (this crate is outside the workspace), with
+  an end-to-end case through the preprocessor.
 - `build.rs`: includes `src/strip.rs` for `compile`.
 
 Patches are marked `Drawpane:` in the code.

@@ -111,15 +111,23 @@ impl ShaderInfo {
         reason = "Deferred: This is a cold code path."
     )]
     pub fn new(name: &str, source: String, entry_point: &str) -> Result<Self> {
-        // Drawpane: shipped without comments, blank lines or indentation
-        // (`strip::strip_comments`), and only when that leaves the same module: naga validating
-        // the stripped source alone would accept valid code a lost comment boundary exposed.
+        // Drawpane: shipped without comments, blank lines or indentation (`strip::shipped`), and
+        // only when that leaves the same module: naga validating the stripped source alone would
+        // accept valid code a lost comment boundary exposed. What's emitted is `postprocess` of
+        // it, which must leave a stripped source as it is (only `enable` stand-ins, which keep a
+        // shader whole, change), so the module checked is the shader shipped.
         let original = wgsl::parse_str(&source).map_err(|error| Error::new(&source, name, error))?;
-        let source = crate::strip::strip_comments(&source);
-        let module = wgsl::parse_str(&source).map_err(|error| Error::new(&source, name, error))?;
-        if without_spans(&module) != without_spans(&original) {
-            return Err(Error::new(&source, name, InnerError::StripChanged));
-        }
+        let shipped = crate::strip::shipped(&source).into_owned();
+        let module = if shipped == source {
+            original
+        } else {
+            let module = wgsl::parse_str(&shipped).map_err(|error| Error::new(&shipped, name, error))?;
+            if without_spans(&module) != without_spans(&original) || crate::strip::postprocess(&shipped) != shipped {
+                return Err(Error::new(&shipped, name, InnerError::StripChanged));
+            }
+            module
+        };
+        let source = shipped;
         let module_info = naga::valid::Validator::new(ValidationFlags::all(), Capabilities::all())
             .validate(&module)
             .map_err(|error| Error::new(&source, name, error))?;
@@ -198,7 +206,7 @@ impl ShaderInfo {
         bindings.sort_by_key(|res| res.location);
         let workgroup_size = entry.workgroup_size;
         Ok(Self {
-            source: postprocess(&source),
+            source: crate::strip::postprocess(&source),
             module,
             module_info,
             workgroup_size,
@@ -278,21 +286,7 @@ impl ShaderInfo {
     }
 }
 
-// TODO: This is a workaround for gfx-rs/wgpu#5476. Since naga can't handle the `enable` directive,
-// we allow its use in other WGSL compilers using our own "#enable" post-process directive. Remove
-// this mechanism once naga supports the directive.
-fn postprocess(wgsl: &str) -> String {
-    let mut output = String::with_capacity(wgsl.len());
-    for line in wgsl.lines() {
-        if line.starts_with("//__#enable") {
-            output.push_str(&line["//__#".len()..]);
-        } else {
-            output.push_str(line);
-        }
-        output.push('\n');
-    }
-    output
-}
+// Drawpane: `postprocess` (gfx-rs/wgpu#5476's `enable` workaround) moved to `strip.rs`.
 
 /// Returns the absolute path to the directory containing the WGSL shaders.
 ///
