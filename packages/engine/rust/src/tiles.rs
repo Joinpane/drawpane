@@ -2711,7 +2711,10 @@ mod tests {
         c.set_max_slots(12);
         assert!(c.overview_ready());
         assert_eq!(c.tiles.values().filter(|t| t.slot < OVERVIEW_SLOT).count(), 0);
-        assert_eq!(c.tiles.values().filter(|t| t.slot >= OVERVIEW_SLOT).count(), overview_before);
+        assert_eq!(
+            c.tiles.values().filter(|t| t.slot >= OVERVIEW_SLOT).count(),
+            overview_before
+        );
         assert_eq!(c.slots, 0);
         assert!(c.free.is_empty());
 
