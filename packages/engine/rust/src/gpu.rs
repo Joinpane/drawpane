@@ -280,12 +280,15 @@ struct DirectSlices {
     bg: [u32; 4],
     halo: i32,
     wide_gen: Option<u64>,
+    wide_degraded: bool,
     /// The frame (`frames` index) holding them.
     frame: usize,
     done: Vec<TileKey>,
-    /// Those of `done` drawn inexact (a provisional record in reach, say): the frame is exact
-    /// once every tile is in and none is here. Each leaves when it's dropped or drawn exact.
+    /// Those of `done` drawn inexact (a provisional record in reach, or degraded wide fallback):
+    /// the frame is exact once every tile is in and none is here.
     inexact: HashSet<TileKey>,
+    /// Those of `done` drawn with a reduced effect (degraded wide fallback or failed clamp strip).
+    reduced: HashSet<TileKey>,
     /// Tiles drawn once and dropped since (an edit, an image level), the longest dropped first:
     /// one drawn and dropped again goes to the back, so a stream of edits near the middle never
     /// starves the rest. They take turns with tiles never drawn.
@@ -941,6 +944,10 @@ struct ActiveDraw {
     bg_blur_ops: u32,
     shadow_ops: u32,
     shadow_hits: u32,
+    /// Reduced effects recorded during this slice (copied into `DrawStats::reduced` and reset per slice).
+    reduced: u32,
+    /// Cumulative reduced effects across all slices of this draw (never reset on pause).
+    total_reduced: u32,
 }
 
 impl ActiveDraw {
@@ -994,6 +1001,8 @@ impl ActiveDraw {
             bg_blur_ops: 0,
             shadow_ops: 0,
             shadow_hits: 0,
+            reduced: 0,
+            total_reduced: 0,
         }
     }
 
@@ -1010,6 +1019,7 @@ impl ActiveDraw {
         stats.bg_blur_ops += self.bg_blur_ops;
         stats.shadow_ops += self.shadow_ops;
         stats.shadow_hits += self.shadow_hits;
+        stats.reduced += self.reduced;
         let render_ms = self.prepare_masks_ms + self.vello_render_ms + self.reader_ms + self.shadow_ms + self.flush_ms;
         stats.render_ms += render_ms;
         stats.encode_ms += (total_ms - render_ms - self.submit_ms).max(0.0);
@@ -1032,6 +1042,7 @@ impl ActiveDraw {
         self.bg_blur_ops = 0;
         self.shadow_ops = 0;
         self.shadow_hits = 0;
+        self.reduced = 0;
     }
 }
 
@@ -1044,6 +1055,7 @@ struct PendingTile {
     detail: bool,
     rough: bool,
     coarse_readers: bool,
+    wide_degraded: bool,
     halo: i32,
     tile_halo: i32,
     side: u32,
@@ -1211,6 +1223,7 @@ struct HaloClampStrip {
     straddle_frame: i32,
     clamp_weight: f32,
     samples_per_texel: u32,
+    short_start_dev: i32,
     long_start_dev: i32,
     strip_divisor: i32,
 }
@@ -1303,6 +1316,63 @@ const WIDE_BLUR_MAX_PIXELS_HW: usize = 4_200_000;
 const WIDE_BLUR_MAX_SIDE_SW: u32 = 2560;
 const WIDE_BLUR_MAX_PIXELS_SW: usize = 3_500_000;
 
+/// How a tiled GPU render handles wide uniform blurs past `Limits::halo`.
+#[derive(Clone, Copy)]
+pub enum WideTileMode<'a> {
+    /// Normal tiled view (no wide-blur offload active).
+    None,
+    /// Offload wide uniform blurs into a world-grid `d = 2` `WideBlurCache` (exact tiles).
+    Cache(&'a halo::WideBlurPlan),
+    /// Wide-blur cache cannot fit GPU memory: draw standard-halo tiles reported as inexact/reduced.
+    Degraded,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WideStripSide {
+    Left,
+    Right,
+    Top,
+    Bottom,
+}
+
+struct WideStripJob {
+    reader_key: (u32, usize),
+    side: WideStripSide,
+    vertical: bool,
+    ex0: i32,
+    ey0: i32,
+    sw: u32,
+    sh: u32,
+    d_strip: i32,
+    straddle_frame: i32,
+    clamp_weight: f32,
+    samples_per_texel: u32,
+    short_start_dev: i32,
+    long_start_dev: i32,
+}
+
+struct CachedWideStrip {
+    reader_key: (u32, usize),
+    side: WideStripSide,
+    short_start_dev: i32,
+    short_len: u32,
+    long_start_dev: i32,
+    long_end_dev: i32,
+    strip_divisor: i32,
+    straddle_dev: i32,
+    clamp_weight: f32,
+    samples_per_texel: u32,
+    patch: HaloPatch,
+}
+
+/// Captured world-grid clamp edge strips kept across wide-blur rebuilds (such as pans) while
+/// `inputs` and `level` stay unchanged.
+struct WideStripCache {
+    inputs: DrawInputs,
+    level: crate::tiles::Level,
+    entries: Vec<CachedWideStrip>,
+}
+
 /// World-grid `d = 2` wide uniform background-blur cache shared across 512 px tiles at one
 /// `Level`, so large-radius blurs stay tiled (`plan == 0`, `exact == true`) instead of falling
 /// into reader-halo whole frames.
@@ -1316,6 +1386,8 @@ struct WideBlurCache {
     apron_glass_safe: bool,
     residual_readers: Vec<(IRect, i32)>,
     blurred: HaloMap<HaloPatch>,
+    /// Wide target keys whose clamp-strip capture failed (sampling them marks tiles reduced/inexact).
+    reduced_readers: Vec<(u32, usize)>,
 }
 
 impl WideBlurCache {
@@ -1356,7 +1428,24 @@ struct WideBlurBuild {
     plan: halo::WideBlurPlan,
     inputs: DrawInputs,
     background: [f32; 4],
+    initialized: bool,
+    pending_strips: Vec<WideStripJob>,
+    failed_strip_readers: Vec<(u32, usize)>,
     pass: Option<Box<WholePass>>,
+}
+
+impl WideBlurBuild {
+    fn new(plan: halo::WideBlurPlan, inputs: DrawInputs, background: [f32; 4]) -> Self {
+        Self {
+            plan,
+            inputs,
+            background,
+            initialized: false,
+            pending_strips: Vec::new(),
+            failed_strip_readers: Vec::new(),
+            pass: None,
+        }
+    }
 }
 
 enum WideBlurState {
@@ -1737,6 +1826,7 @@ pub struct Gpu {
     readers: GpuReaders,
     reader_halo: Option<ReaderHalo>,
     wide_blur: Option<WideBlurState>,
+    wide_strip_cache: Option<WideStripCache>,
     active: Option<ActiveDraw>,
     /// Hard wall-clock deadline (`now()` ms) checked cooperatively during budgeted tile walks.
     deadline_ms: Option<f64>,
@@ -1970,6 +2060,11 @@ impl Drop for Gpu {
         if let Some(WideBlurState::Ready(cache)) = self.wide_blur.take() {
             for (_, p) in cache.blurred.into_vec() {
                 p.texture.destroy();
+            }
+        }
+        if let Some(strips) = self.wide_strip_cache.take() {
+            for e in strips.entries {
+                e.patch.texture.destroy();
             }
         }
         if let Some(halo) = self.reader_halo.take() {
@@ -2696,6 +2791,7 @@ impl Gpu {
             readers,
             reader_halo: None,
             wide_blur: None,
+            wide_strip_cache: None,
             active: None,
             deadline_ms: None,
             pass_budget: None,
@@ -4214,6 +4310,7 @@ impl Gpu {
         self.abort_pending_tile();
         self.abort_pending_whole();
         self.abort_wide_blur();
+        self.clear_wide_strip_cache();
         self.opening_pending = false;
         self.last = None;
         self.last_scale = None;
@@ -4238,6 +4335,7 @@ impl Gpu {
         self.abort_pending_whole();
         self.abort_pending_tile();
         self.abort_wide_blur();
+        self.clear_wide_strip_cache();
         self.clear_clip_mask_cache();
         self.opening_pending = false;
         self.tiles.clear();
@@ -4250,6 +4348,7 @@ impl Gpu {
         self.abort_pending_whole();
         self.abort_pending_tile();
         self.abort_wide_blur();
+        self.clear_wide_strip_cache();
         self.opening_pending = false;
         self.tiles.clear_keeping_overview();
         self.shown = None;
@@ -4832,6 +4931,9 @@ impl Gpu {
     fn trim_transient(&mut self) {
         self.trim_pools(0);
         if self.active.is_none() && !self.walk_paused() {
+            if !matches!(self.wide_blur, Some(WideBlurState::Building(_))) {
+                self.clear_wide_strip_cache();
+            }
             self.readers.evict_frame_scratch();
             self.readers.flush_retired();
             if let Some(old) = self.scratches[1].take() {
@@ -5581,31 +5683,84 @@ impl Gpu {
         }
     }
 
-    /// Maximum `(side, pixels)` for a world-grid `d = 2` wide-blur capture (`WideBlurPlan`),
-    /// bounded by both adapter limits and available GPU memory (`28 B/px`).
-    pub fn wide_blur_limits(&self) -> (u32, usize) {
-        let (side, max_pixels) = if self.fallback_adapter {
+    /// Side and pixel limits for a world-grid `d = 2` wide-blur capture (`WideBlurPlan`),
+    /// separating adapter limits from available GPU memory (`28 B/px`).
+    pub fn wide_blur_limits(&self, generation: u64, level: Option<crate::tiles::Level>) -> halo::WideBlurLimits {
+        let (max_side, adapter_pixels) = if self.fallback_adapter {
             (self.max_texture_2d.min(WIDE_BLUR_MAX_SIDE_SW), WIDE_BLUR_MAX_PIXELS_SW)
         } else {
             (self.max_texture_2d.min(WIDE_BLUR_MAX_SIDE_HW), WIDE_BLUR_MAX_PIXELS_HW)
         };
-        let cache_bytes: usize = match self.wide_blur.as_ref() {
-            Some(WideBlurState::Ready(c)) => c
-                .blurred
-                .0
-                .iter()
-                .map(|(_, p)| Self::frame_bytes(p.texture.width(), p.texture.height()))
-                .sum(),
-            _ => 0,
+        let (cache_bytes, ready_pixels) = match self.wide_blur.as_ref() {
+            Some(WideBlurState::Ready(c)) => {
+                let bytes: usize = c
+                    .blurred
+                    .0
+                    .iter()
+                    .map(|(_, p)| Self::frame_bytes(p.texture.width(), p.texture.height()))
+                    .sum();
+                let px = if c.inputs.generation == generation && level == Some(c.level) {
+                    (((c.cap_grid.x1 - c.cap_grid.x0) / 2).max(1) as usize)
+                        .saturating_mul(((c.cap_grid.y1 - c.cap_grid.y0) / 2).max(1) as usize)
+                } else {
+                    0
+                };
+                (bytes, px)
+            }
+            _ => (0, 0),
+        };
+        let overview_bytes = self.overview_page.as_ref().map_or(0, |o| o.bytes);
+        let strip_scratch_bytes = self.scratches[EDGE_STRIP_SCRATCH_SLOT]
+            .as_ref()
+            .map_or(0, |s| (s.width as usize) * (s.height as usize) * 8);
+        let stale_strip_cache_bytes = self
+            .wide_strip_cache
+            .as_ref()
+            .filter(|c| c.inputs.generation != generation || level != Some(c.level))
+            .map_or(0, |c| {
+                c.entries
+                    .iter()
+                    .map(|e| Self::frame_bytes(e.patch.texture.width(), e.patch.texture.height()))
+                    .sum()
+            });
+        let halo_planes_bytes: usize = self
+            .halo_reader_planes
+            .iter()
+            .flatten()
+            .flatten()
+            .map(PlainTex::bytes)
+            .sum();
+        let reader_scratch_bytes = if self.walk_paused() { 0 } else { self.readers.bytes() };
+        let halo_tile_scratch_bytes = if self.walk_paused() {
+            0
+        } else {
+            self.scratches[1]
+                .as_ref()
+                .map_or(0, |s| (s.width as usize) * (s.height as usize) * 8)
         };
         let freed = cache_bytes
+            + overview_bytes
+            + strip_scratch_bytes
+            + stale_strip_cache_bytes
+            + halo_planes_bytes
+            + reader_scratch_bytes
+            + halo_tile_scratch_bytes
             + self.blur.bytes()
+            + self.shadow_cache.bytes()
+            + self.noise.gpu_bytes()
             + self.scratches[FAR_HALO_SCRATCH_SLOT]
                 .as_ref()
                 .map_or(0, |s| (s.width as usize) * (s.height as usize) * 8);
         let held = self.bytes().saturating_sub(self.pool_bytes) + self.readbacks.bytes.get();
         let room = self.budget.saturating_sub(held.saturating_sub(freed));
-        (side, max_pixels.min(room / 28))
+        // An already-ready cache for this generation and level requires no rebuild allocation
+        // while it covers the view, so never discard it on re-plan because tiles grew into budget.
+        let mem_pixels = adapter_pixels.min((room / 28).max(ready_pixels));
+        halo::WideBlurLimits {
+            max_side,
+            mem_pixels,
+            adapter_pixels,
+        }
     }
 
     /// Where a `size` view padded to its readers' `samples` sits in the padded target, and that
@@ -5842,7 +5997,7 @@ impl Gpu {
                 }
                 self.deadline_ms = deadline;
                 self.idle_pass_budget(&job.key);
-                let step = self.start_slot_tile(store, job, true, 0, background, inputs, &mut stats, &mut verbs);
+                let step = self.start_slot_tile(store, job, true, false, 0, background, inputs, &mut stats, &mut verbs);
                 self.deadline_ms = None;
                 self.pass_budget = None;
                 match step {
@@ -6617,12 +6772,11 @@ impl Gpu {
             );
             if need_build {
                 self.abort_wide_blur();
-                self.wide_blur = Some(WideBlurState::Building(Box::new(WideBlurBuild {
-                    plan: wp.clone(),
+                self.wide_blur = Some(WideBlurState::Building(Box::new(WideBlurBuild::new(
+                    wp.clone(),
                     inputs,
                     background,
-                    pass: None,
-                })));
+                ))));
                 let mut wide_stats = DrawStats::default();
                 self.step_wide_blur(store, false, &mut wide_stats)?;
             }
@@ -6679,8 +6833,89 @@ impl Gpu {
         result
     }
 
+    /// Renders one 1x-perpendicular clamp edge strip into `HaloPatch`. Propagates `DeviceLost`;
+    /// non-fatal errors (such as memory limits) recycle any partial capture and return `Ok(None)`
+    /// so the caller can count the fallback as reduced.
+    #[allow(clippy::too_many_arguments)]
+    fn render_clamp_strip(
+        &mut self,
+        store: &Store,
+        frame_view: Affine,
+        background: [f32; 4],
+        generation: u64,
+        vertical: bool,
+        ex0: i32,
+        ey0: i32,
+        sw: u32,
+        sh: u32,
+        d_strip: i32,
+        reader_key: (u32, usize),
+    ) -> Result<Option<HaloPatch>> {
+        if sw == 0 || sh == 0 || sw > u32::from(u16::MAX) || sh > u32::from(u16::MAX) {
+            return Ok(None);
+        }
+        // Keep the perpendicular (short) axis at 1x device-pixel resolution so the 1-pixel
+        // clip-edge column/row is never mixed with interior pixels even when the long axis
+        // steps down by `d_strip > 1`.
+        let scale = if vertical {
+            Affine::scale_non_uniform(1.0, 1.0 / f64::from(d_strip))
+        } else {
+            Affine::scale_non_uniform(1.0 / f64::from(d_strip), 1.0)
+        };
+        let strip_frame = Frame {
+            width: sw as u16,
+            height: sh as u16,
+            view: scale * Affine::translate((-f64::from(ex0), -f64::from(ey0))) * frame_view,
+            detail: false,
+            area: IRect {
+                x0: 0,
+                y0: 0,
+                x1: sw as i32,
+                y1: sh as i32,
+            },
+        };
+        for attempt in 0..2 {
+            self.reader_halo.as_mut().expect("reader halo").strip_capture = Some(HaloStripCapture {
+                reader_key,
+                size: (sw, sh),
+                captured: None,
+            });
+            let res = self.draw_whole_pass(store, &strip_frame, background, generation, false, None, None);
+            let cap = self.reader_halo.as_mut().expect("reader halo").strip_capture.take();
+            match res {
+                Ok(_) => return Ok(cap.and_then(|c| c.captured)),
+                Err(e) => {
+                    if let Some(patch) = cap.and_then(|c| c.captured) {
+                        self.recycle_halo_prefix(patch);
+                    }
+                    if e.code == ErrorCode::DeviceLost {
+                        return Err(e);
+                    }
+                    if attempt == 0 && e.code == ErrorCode::Limit {
+                        self.drop_overview_page();
+                        self.trim_pools(0);
+                        if self.active.is_none()
+                            && let Some(old) = self.scratches[1].take()
+                        {
+                            self.bytes -= Self::frame_bytes(old.width, old.height) * 2;
+                            old.texture.destroy();
+                        }
+                        self.readers.evict_frame_scratch();
+                        self.readers.drop_glass_mask_atlas();
+                        self.readers.flush_retired();
+                        self.blur.clear();
+                        continue;
+                    }
+                    return Ok(None);
+                }
+            }
+        }
+        Ok(None)
+    }
+
     /// Captures exact device-aligned edge strips for unfilled `EdgeMode::Clamp` clip frames
-    /// before a reduced halo tier runs its blur passes.
+    /// before a reduced halo tier runs its blur passes. Returns the number of requested strips
+    /// that failed to capture (counted as reduced effects).
     #[allow(clippy::too_many_arguments)]
     fn capture_clamp_strips(
         &mut self,
@@ -6691,61 +6926,12 @@ impl Gpu {
         clips: &[halo::HaloClampClip],
         render_divisor: i32,
         offset: (i32, i32),
-    ) {
+    ) -> Result<u32> {
         if clips.is_empty() || render_divisor <= 1 {
-            return;
+            return Ok(0);
         }
         let max_strip_side = self.max_texture_2d.min(4096);
-        let render_strip = |gpu: &mut Self,
-                            vertical: bool,
-                            ex0: i32,
-                            ey0: i32,
-                            sw: u32,
-                            sh: u32,
-                            d_strip: i32,
-                            reader_key: (u32, usize)|
-         -> Option<HaloPatch> {
-            if sw == 0 || sh == 0 || sw > u32::from(u16::MAX) || sh > u32::from(u16::MAX) {
-                return None;
-            }
-            // Keep the perpendicular (short) axis at 1x device-pixel resolution so the 1-pixel
-            // clip-edge column/row is never mixed with interior pixels even when the long axis
-            // steps down by `d_strip > 1`.
-            let scale = if vertical {
-                Affine::scale_non_uniform(1.0, 1.0 / f64::from(d_strip))
-            } else {
-                Affine::scale_non_uniform(1.0 / f64::from(d_strip), 1.0)
-            };
-            let strip_frame = Frame {
-                width: sw as u16,
-                height: sh as u16,
-                view: scale * Affine::translate((-f64::from(ex0), -f64::from(ey0))) * frame.view,
-                detail: false,
-                area: IRect {
-                    x0: 0,
-                    y0: 0,
-                    x1: sw as i32,
-                    y1: sh as i32,
-                },
-            };
-            gpu.reader_halo.as_mut().expect("reader halo").strip_capture = Some(HaloStripCapture {
-                reader_key,
-                size: (sw, sh),
-                captured: None,
-            });
-            let ok = gpu
-                .draw_whole_pass(store, &strip_frame, background, generation, false, None, None)
-                .is_ok();
-            let cap = gpu.reader_halo.as_mut().expect("reader halo").strip_capture.take();
-            if ok {
-                cap.and_then(|c| c.captured)
-            } else {
-                if let Some(patch) = cap.and_then(|c| c.captured) {
-                    gpu.recycle_halo_prefix(patch);
-                }
-                None
-            }
-        };
+        let mut failed = 0u32;
 
         for clip in clips {
             let l = clip.clip_dev[0].floor() as i32;
@@ -6763,6 +6949,7 @@ impl Gpu {
                 bottom: None,
             };
             let capture_axis = |gpu: &mut Self,
+                                failed: &mut u32,
                                 vertical: bool,
                                 edge: i32,
                                 is_hi: bool,
@@ -6773,7 +6960,7 @@ impl Gpu {
                                 d_strip: i32,
                                 rpt: u32,
                                 off_axis: i32|
-             -> Option<HaloClampStrip> {
+             -> Result<Option<HaloClampStrip>> {
                 let t_dev = if is_hi { edge - 1 } else { edge }.div_euclid(render_divisor);
                 let (e0, span_short, weight_px) = if is_hi {
                     let start = (t_dev * render_divisor).max(lo_bound);
@@ -6789,14 +6976,33 @@ impl Gpu {
                 } else {
                     (long_start, e0, long_len, span_short)
                 };
-                render_strip(gpu, vertical, ex0, ey0, sw, sh, d_strip, clip.reader_key).map(|patch| HaloClampStrip {
-                    patch,
-                    straddle_frame: t_dev + off_axis,
-                    clamp_weight: weight_px as f32,
-                    samples_per_texel: rpt,
-                    long_start_dev: long_start,
-                    strip_divisor: d_strip,
-                })
+                match gpu.render_clamp_strip(
+                    store,
+                    frame.view,
+                    background,
+                    generation,
+                    vertical,
+                    ex0,
+                    ey0,
+                    sw,
+                    sh,
+                    d_strip,
+                    clip.reader_key,
+                )? {
+                    Some(patch) => Ok(Some(HaloClampStrip {
+                        patch,
+                        straddle_frame: t_dev + off_axis,
+                        clamp_weight: weight_px as f32,
+                        samples_per_texel: rpt,
+                        short_start_dev: e0,
+                        long_start_dev: long_start,
+                        strip_divisor: d_strip,
+                    })),
+                    None => {
+                        *failed += 1;
+                        Ok(None)
+                    }
+                }
             };
             let vy0 = reach.y0.max(t);
             let vy1 = reach.y1.min(b);
@@ -6810,10 +7016,10 @@ impl Gpu {
                 let sh = span_y.div_ceil(d_strip as u32).max(1);
                 let rpt = (render_divisor / d_strip).max(1) as u32;
                 if l > reach.x0 && l < reach.x1 {
-                    set.left = capture_axis(self, true, l, false, l, r, vy0, sh, d_strip, rpt, offset.0);
+                    set.left = capture_axis(self, &mut failed, true, l, false, l, r, vy0, sh, d_strip, rpt, offset.0)?;
                 }
                 if r > reach.x0 && r < reach.x1 {
-                    set.right = capture_axis(self, true, r, true, l, r, vy0, sh, d_strip, rpt, offset.0);
+                    set.right = capture_axis(self, &mut failed, true, r, true, l, r, vy0, sh, d_strip, rpt, offset.0)?;
                 }
             }
             let vx0 = reach.x0.max(l);
@@ -6828,10 +7034,24 @@ impl Gpu {
                 let sw = span_x.div_ceil(d_strip as u32).max(1);
                 let cpt = (render_divisor / d_strip).max(1) as u32;
                 if t > reach.y0 && t < reach.y1 {
-                    set.top = capture_axis(self, false, t, false, t, b, vx0, sw, d_strip, cpt, offset.1);
+                    set.top = capture_axis(
+                        self,
+                        &mut failed,
+                        false,
+                        t,
+                        false,
+                        t,
+                        b,
+                        vx0,
+                        sw,
+                        d_strip,
+                        cpt,
+                        offset.1,
+                    )?;
                 }
                 if b > reach.y0 && b < reach.y1 {
-                    set.bottom = capture_axis(self, false, b, true, t, b, vx0, sw, d_strip, cpt, offset.1);
+                    set.bottom =
+                        capture_axis(self, &mut failed, false, b, true, t, b, vx0, sw, d_strip, cpt, offset.1)?;
                 }
             }
             if !set.is_empty()
@@ -6847,6 +7067,7 @@ impl Gpu {
                 }
             }
         }
+        Ok(failed)
     }
 
     /// Sets up one supersampled reduced-resolution replay tier that captures eligible reader
@@ -6870,7 +7091,7 @@ impl Gpu {
         min_feature_px: f32,
         max_render_divisor: Option<i32>,
         clamp_clips: &[halo::HaloClampClip],
-    ) -> Result<(Box<WholePass>, i32)> {
+    ) -> Result<(Box<WholePass>, i32, u32)> {
         let (coarse_offset, coarse_size) = halo::replay_grid(tier_bounds, coarse_divisor);
         let (max_side, max_pixels) = if self.fallback_adapter {
             (
@@ -6948,7 +7169,7 @@ impl Gpu {
                 self.recycle_halo_prefix(patch);
             }
         }
-        self.capture_clamp_strips(
+        let failed_strips = self.capture_clamp_strips(
             store,
             frame,
             background,
@@ -6956,7 +7177,7 @@ impl Gpu {
             clamp_clips,
             render_divisor,
             offset,
-        );
+        )?;
         let transform = Affine::translate((f64::from(offset.0), f64::from(offset.1)))
             * Affine::scale(1.0 / f64::from(render_divisor));
         let coarse = Frame {
@@ -6985,7 +7206,7 @@ impl Gpu {
         });
         self.swap_halo_reader_planes(is_far);
         match self.begin_whole_pass(store, &coarse, background, generation, false, None, None, false) {
-            Ok(WholeStart::Pass(pass)) => Ok((pass, render_divisor)),
+            Ok(WholeStart::Pass(pass)) => Ok((pass, render_divisor, failed_strips)),
             Ok(WholeStart::Unchanged(_)) => unreachable!("a capturing halo tier always draws"),
             Err(e) => {
                 self.swap_halo_reader_planes(is_far);
@@ -7168,6 +7389,7 @@ impl Gpu {
             dst.bg_blur_ops += src.bg_blur_ops;
             dst.shadow_ops += src.shadow_ops;
             dst.shadow_hits += src.shadow_hits;
+            dst.reduced += src.reduced;
         }
         let far_prog_cut = halo::progressive_cutover_sigma(plan.far_divisor);
         let far_unif_cut = halo::uniform_cutover_sigma(plan.far_divisor);
@@ -7181,7 +7403,7 @@ impl Gpu {
                             pass
                         }
                         None => {
-                            let (pass, divisor) = if is_far {
+                            let (pass, divisor, failed_strips) = if is_far {
                                 let far_max_render_divisor = plan.coarse_post_min_sigma.is_finite().then(|| {
                                     (plan.coarse_post_min_sigma / halo::HALO_MIN_COARSE_SIGMA)
                                         .floor()
@@ -7224,6 +7446,7 @@ impl Gpu {
                                     &plan.clamp_clips,
                                 )?
                             };
+                            run.replay.reduced += failed_strips;
                             run.tier_divisor = divisor;
                             // Its setup (the clamp edge strips) may have used the slice up: keep
                             // the pass, its target taken along as a paused walk's is.
@@ -7331,13 +7554,163 @@ impl Gpu {
         }
     }
 
+    fn clear_wide_strip_cache(&mut self) {
+        if let Some(cache) = self.wide_strip_cache.take() {
+            for entry in cache.entries {
+                self.recycle_halo_prefix(entry.patch);
+            }
+        }
+    }
+
+    fn stash_wide_clamp_strips(
+        &mut self,
+        inputs: DrawInputs,
+        level: crate::tiles::Level,
+        offset: (i32, i32),
+        strips: HaloMap<HaloClampStripSet>,
+    ) {
+        let items = strips.into_vec();
+        if items.is_empty() {
+            return;
+        }
+        if self
+            .wide_strip_cache
+            .as_ref()
+            .is_some_and(|c| c.inputs != inputs || c.level != level)
+        {
+            self.clear_wide_strip_cache();
+        }
+        let cache = self.wide_strip_cache.get_or_insert_with(|| WideStripCache {
+            inputs,
+            level,
+            entries: Vec::new(),
+        });
+        let mut evicted = Vec::new();
+        for (reader_key, set) in items {
+            for (side, strip_opt) in [
+                (WideStripSide::Left, set.left),
+                (WideStripSide::Right, set.right),
+                (WideStripSide::Top, set.top),
+                (WideStripSide::Bottom, set.bottom),
+            ] {
+                let Some(strip) = strip_opt else { continue };
+                let vertical = matches!(side, WideStripSide::Left | WideStripSide::Right);
+                let (short_len, long_len, off_axis) = if vertical {
+                    (strip.patch.size.0, strip.patch.size.1, offset.0)
+                } else {
+                    (strip.patch.size.1, strip.patch.size.0, offset.1)
+                };
+                let entry = CachedWideStrip {
+                    reader_key,
+                    side,
+                    short_start_dev: strip.short_start_dev,
+                    short_len,
+                    long_start_dev: strip.long_start_dev,
+                    long_end_dev: strip
+                        .long_start_dev
+                        .saturating_add((long_len as i32).saturating_mul(strip.strip_divisor)),
+                    strip_divisor: strip.strip_divisor,
+                    straddle_dev: strip.straddle_frame - off_axis,
+                    clamp_weight: strip.clamp_weight,
+                    samples_per_texel: strip.samples_per_texel,
+                    patch: strip.patch,
+                };
+                if let Some(pos) = cache
+                    .entries
+                    .iter()
+                    .position(|e| e.reader_key == reader_key && e.side == side)
+                {
+                    let old = std::mem::replace(&mut cache.entries[pos], entry);
+                    evicted.push(old.patch);
+                } else {
+                    cache.entries.push(entry);
+                }
+            }
+        }
+        for patch in evicted {
+            self.recycle_halo_prefix(patch);
+        }
+    }
+
+    fn take_cached_wide_strip(
+        &mut self,
+        reader_key: (u32, usize),
+        side: WideStripSide,
+        short_start_dev: i32,
+        short_len: u32,
+        long_start_dev: i32,
+        long_end_dev: i32,
+        strip_divisor: i32,
+        straddle_dev: i32,
+        off_axis: i32,
+    ) -> Option<HaloClampStrip> {
+        let cache = self.wide_strip_cache.as_mut()?;
+        let pos = cache.entries.iter().position(|e| {
+            e.reader_key == reader_key
+                && e.side == side
+                && e.short_start_dev == short_start_dev
+                && e.short_len == short_len
+                && e.strip_divisor == strip_divisor
+                && e.straddle_dev == straddle_dev
+                && e.long_start_dev <= long_start_dev
+                && e.long_end_dev >= long_end_dev
+                && (strip_divisor == 1 || (long_start_dev - e.long_start_dev).rem_euclid(strip_divisor) == 0)
+        })?;
+        let e = cache.entries.swap_remove(pos);
+        Some(HaloClampStrip {
+            patch: e.patch,
+            straddle_frame: e.straddle_dev + off_axis,
+            clamp_weight: e.clamp_weight,
+            samples_per_texel: e.samples_per_texel,
+            short_start_dev: e.short_start_dev,
+            long_start_dev: e.long_start_dev,
+            strip_divisor: e.strip_divisor,
+        })
+    }
+
+    fn insert_wide_clamp_strip(&mut self, reader_key: (u32, usize), side: WideStripSide, strip: HaloClampStrip) {
+        let strips = &mut self.reader_halo.as_mut().expect("reader halo").clamp_strips;
+        let existing = strips.0.iter_mut().find(|(k, _)| *k == reader_key).map(|(_, v)| v);
+        let replaced = if let Some(set) = existing {
+            match side {
+                WideStripSide::Left => set.left.replace(strip),
+                WideStripSide::Right => set.right.replace(strip),
+                WideStripSide::Top => set.top.replace(strip),
+                WideStripSide::Bottom => set.bottom.replace(strip),
+            }
+        } else {
+            let mut set = HaloClampStripSet {
+                left: None,
+                right: None,
+                top: None,
+                bottom: None,
+            };
+            match side {
+                WideStripSide::Left => set.left = Some(strip),
+                WideStripSide::Right => set.right = Some(strip),
+                WideStripSide::Top => set.top = Some(strip),
+                WideStripSide::Bottom => set.bottom = Some(strip),
+            }
+            strips.0.push((reader_key, set));
+            None
+        };
+        if let Some(old) = replaced {
+            self.recycle_halo_prefix(old.patch);
+        }
+    }
+
     fn abort_wide_blur(&mut self) {
         match self.wide_blur.take() {
             Some(WideBlurState::Building(mut b)) => {
                 if b.pass.take().is_some_and(|p| p.paused.is_some()) {
                     self.drop_walk();
                 }
-                if let Some(halo) = self.reader_halo.take() {
+                if let Some(mut halo) = self.reader_halo.take() {
+                    if b.initialized {
+                        let offset = (-(b.plan.cap_grid.x0 / 2), -(b.plan.cap_grid.y0 / 2));
+                        let strips = std::mem::take(&mut halo.clamp_strips);
+                        self.stash_wide_clamp_strips(b.inputs, b.plan.level, offset, strips);
+                    }
                     self.recycle_reader_halo(halo);
                 }
                 self.release_oversized_halo_storage();
@@ -7358,34 +7731,56 @@ impl Gpu {
     }
 
     #[inline(never)]
-    fn begin_wide_blur_pass(&mut self, store: &Store, build: &WideBlurBuild) -> Result<Box<WholePass>> {
+    fn init_wide_blur_build(&mut self, build: &mut WideBlurBuild) -> Result<()> {
         let plan = &build.plan;
         let cap_d2_origin = (plan.cap_grid.x0 / 2, plan.cap_grid.y0 / 2);
         let cap_w = ((plan.cap_grid.x1 - plan.cap_grid.x0) / 2).max(1);
         let cap_h = ((plan.cap_grid.y1 - plan.cap_grid.y0) / 2).max(1);
         self.check_texture_size(cap_w as u32, cap_h as u32, "wide blur capture")?;
-        let freed = self.scratches[FAR_HALO_SCRATCH_SLOT]
+        if self
+            .wide_strip_cache
             .as_ref()
-            .map_or(0, |s| (s.width as usize) * (s.height as usize) * 8);
+            .is_some_and(|c| c.inputs != build.inputs || c.level != plan.level)
+        {
+            self.clear_wide_strip_cache();
+        }
+        // Release idle haloed-tile scratch and reader working targets before reserving wide-blur
+        // storage so edits/pans under tight budgets (e.g. 80 MiB) do not fail on stale scratch.
+        if self.active.is_none() && !self.walk_paused() {
+            if let Some(old) = self.scratches[1].take() {
+                self.bytes -= Self::frame_bytes(old.width, old.height) * 2;
+                old.texture.destroy();
+            }
+            self.readers.evict_frame_scratch();
+            self.readers.drop_glass_mask_atlas();
+            self.readers.flush_retired();
+        }
+        let halo_planes_bytes: usize = self
+            .halo_reader_planes
+            .iter()
+            .flatten()
+            .flatten()
+            .map(PlainTex::bytes)
+            .sum();
+        let freed = halo_planes_bytes
+            + self.scratches[FAR_HALO_SCRATCH_SLOT]
+                .as_ref()
+                .map_or(0, |s| (s.width as usize) * (s.height as usize) * 8);
         let est = (cap_w as usize).saturating_mul(cap_h as usize).saturating_mul(28);
-        self.reserve_or_trim(est, freed, "wide blur capture")?;
-        let offset = (-cap_d2_origin.0, -cap_d2_origin.1);
-        let frame_size = (cap_w, cap_h);
-        let visible = ReaderHalo::map_rect_to_grid(plan.cover_grid, (0, 0), 2, offset);
-        let coarse = Frame {
-            width: cap_w as u16,
-            height: cap_h as u16,
-            view: Affine::translate((f64::from(offset.0), f64::from(offset.1)))
-                * Affine::scale(0.5)
-                * plan.level.grid(),
-            detail: false,
-            area: IRect {
-                x0: 0,
-                y0: 0,
-                x1: cap_w,
-                y1: cap_h,
-            },
-        };
+        if let Err(e) = self.reserve_or_trim(est, freed, "wide blur capture") {
+            if e.code != ErrorCode::Limit {
+                return Err(e);
+            }
+            // Free evictable overview and scratch caches before refusing wide blur on tight budgets.
+            self.drop_overview_page();
+            self.clear_wide_strip_cache();
+            self.trim_pools(0);
+            self.readers.evict_frame_scratch();
+            self.readers.drop_glass_mask_atlas();
+            self.readers.flush_retired();
+            self.blur.clear();
+            self.reserve_or_trim(est, freed, "wide blur capture")?;
+        }
         self.reader_halo = Some(ReaderHalo {
             capture: None,
             strip_capture: None,
@@ -7406,29 +7801,200 @@ impl Gpu {
             progressive_far: HaloMap::new(),
             clamp_strips: HaloMap::new(),
         });
-        if !plan.clamp_clips.is_empty() {
-            let grid_frame = Frame {
-                width: 1,
-                height: 1,
-                view: plan.level.grid(),
-                detail: false,
-                area: IRect {
-                    x0: 0,
-                    y0: 0,
-                    x1: 1,
-                    y1: 1,
-                },
+        let offset = (-cap_d2_origin.0, -cap_d2_origin.1);
+        let max_strip_side = self.max_texture_2d.min(4096);
+        let render_divisor = 2i32;
+        build.pending_strips.clear();
+        for clip in &plan.clamp_clips {
+            let l = clip.clip_dev[0].floor() as i32;
+            let t = clip.clip_dev[1].floor() as i32;
+            let r = clip.clip_dev[2].ceil() as i32;
+            let b = clip.clip_dev[3].ceil() as i32;
+            if r <= l || b <= t {
+                continue;
+            }
+            let reach = clip.reach_rect;
+            let mut enqueue_axis = |gpu: &mut Self,
+                                    side: WideStripSide,
+                                    vertical: bool,
+                                    edge: i32,
+                                    is_hi: bool,
+                                    lo_bound: i32,
+                                    hi_bound: i32,
+                                    long_start: i32,
+                                    long_end: i32,
+                                    long_len: u32,
+                                    d_strip: i32,
+                                    rpt: u32,
+                                    off_axis: i32| {
+                let t_dev = if is_hi { edge - 1 } else { edge }.div_euclid(render_divisor);
+                let (e0, span_short, weight_px) = if is_hi {
+                    let start = (t_dev * render_divisor).max(lo_bound);
+                    let s_px = (edge - start).max(1) as u32;
+                    (edge - s_px as i32, s_px, (t_dev + 1) * render_divisor - edge)
+                } else {
+                    let end = ((t_dev + 1) * render_divisor).min(hi_bound);
+                    let s_px = (end - edge).max(1) as u32;
+                    (edge, s_px, edge - t_dev * render_divisor)
+                };
+                if let Some(cached) = gpu.take_cached_wide_strip(
+                    clip.reader_key,
+                    side,
+                    e0,
+                    span_short,
+                    long_start,
+                    long_end,
+                    d_strip,
+                    t_dev,
+                    off_axis,
+                ) {
+                    gpu.insert_wide_clamp_strip(clip.reader_key, side, cached);
+                    return;
+                }
+                let (ex0, ey0, sw, sh) = if vertical {
+                    (e0, long_start, span_short, long_len)
+                } else {
+                    (long_start, e0, long_len, span_short)
+                };
+                build.pending_strips.push(WideStripJob {
+                    reader_key: clip.reader_key,
+                    side,
+                    vertical,
+                    ex0,
+                    ey0,
+                    sw,
+                    sh,
+                    d_strip,
+                    straddle_frame: t_dev + off_axis,
+                    clamp_weight: weight_px as f32,
+                    samples_per_texel: rpt,
+                    short_start_dev: e0,
+                    long_start_dev: long_start,
+                });
             };
-            self.capture_clamp_strips(
-                store,
-                &grid_frame,
-                build.background,
-                build.inputs.generation,
-                &plan.clamp_clips,
-                2,
-                offset,
-            );
+            let vy0 = reach.y0.max(t);
+            let vy1 = reach.y1.min(b);
+            if vy1 > vy0 {
+                let span_y = (vy1 - vy0) as u32;
+                let d_strip = span_y
+                    .div_ceil(max_strip_side)
+                    .max(1)
+                    .next_power_of_two()
+                    .min(render_divisor as u32) as i32;
+                let sh = span_y.div_ceil(d_strip as u32).max(1);
+                let rpt = (render_divisor / d_strip).max(1) as u32;
+                if l > reach.x0 && l < reach.x1 {
+                    enqueue_axis(
+                        self,
+                        WideStripSide::Left,
+                        true,
+                        l,
+                        false,
+                        l,
+                        r,
+                        vy0,
+                        vy1,
+                        sh,
+                        d_strip,
+                        rpt,
+                        offset.0,
+                    );
+                }
+                if r > reach.x0 && r < reach.x1 {
+                    enqueue_axis(
+                        self,
+                        WideStripSide::Right,
+                        true,
+                        r,
+                        true,
+                        l,
+                        r,
+                        vy0,
+                        vy1,
+                        sh,
+                        d_strip,
+                        rpt,
+                        offset.0,
+                    );
+                }
+            }
+            let vx0 = reach.x0.max(l);
+            let vx1 = reach.x1.min(r);
+            if vx1 > vx0 {
+                let span_x = (vx1 - vx0) as u32;
+                let d_strip = span_x
+                    .div_ceil(max_strip_side)
+                    .max(1)
+                    .next_power_of_two()
+                    .min(render_divisor as u32) as i32;
+                let sw = span_x.div_ceil(d_strip as u32).max(1);
+                let cpt = (render_divisor / d_strip).max(1) as u32;
+                if t > reach.y0 && t < reach.y1 {
+                    enqueue_axis(
+                        self,
+                        WideStripSide::Top,
+                        false,
+                        t,
+                        false,
+                        t,
+                        b,
+                        vx0,
+                        vx1,
+                        sw,
+                        d_strip,
+                        cpt,
+                        offset.1,
+                    );
+                }
+                if b > reach.y0 && b < reach.y1 {
+                    enqueue_axis(
+                        self,
+                        WideStripSide::Bottom,
+                        false,
+                        b,
+                        true,
+                        t,
+                        b,
+                        vx0,
+                        vx1,
+                        sw,
+                        d_strip,
+                        cpt,
+                        offset.1,
+                    );
+                }
+            }
         }
+        // Group strips by dimensions so EDGE_STRIP_SCRATCH_SLOT avoids vertical/horizontal thrashing.
+        build.pending_strips.sort_by_key(|j| (j.vertical, j.sw, j.sh));
+        build.pending_strips.reverse();
+        build.initialized = true;
+        Ok(())
+    }
+
+    #[inline(never)]
+    fn begin_wide_blur_pass(&mut self, store: &Store, build: &WideBlurBuild) -> Result<Box<WholePass>> {
+        let plan = &build.plan;
+        let cap_d2_origin = (plan.cap_grid.x0 / 2, plan.cap_grid.y0 / 2);
+        let cap_w = ((plan.cap_grid.x1 - plan.cap_grid.x0) / 2).max(1);
+        let cap_h = ((plan.cap_grid.y1 - plan.cap_grid.y0) / 2).max(1);
+        let offset = (-cap_d2_origin.0, -cap_d2_origin.1);
+        let frame_size = (cap_w, cap_h);
+        let visible = ReaderHalo::map_rect_to_grid(plan.cover_grid, (0, 0), 2, offset);
+        let coarse = Frame {
+            width: cap_w as u16,
+            height: cap_h as u16,
+            view: Affine::translate((f64::from(offset.0), f64::from(offset.1)))
+                * Affine::scale(0.5)
+                * plan.level.grid(),
+            detail: false,
+            area: IRect {
+                x0: 0,
+                y0: 0,
+                x1: cap_w,
+                y1: cap_h,
+            },
+        };
         let halo = self.reader_halo.as_mut().expect("reader halo");
         halo.wide_capture = true;
         halo.capture = Some(HaloTierCapture {
@@ -7465,35 +8031,98 @@ impl Gpu {
         }
     }
 
-    /// Advances an in-progress world-grid `d = 2` wide-blur build. Returns `Ok(true)` once the
-    /// `WideBlurCache` is ready (and installed in `self.wide_blur`), `Ok(false)` if paused at
-    /// `self.deadline_ms`, or `Err` after tearing down cleanly.
+    /// Advances an in-progress world-grid `d = 2` wide-blur build. Captures missing clamp edge
+    /// strips one at a time with deadline checks between strips, then walks the `d = 2` capture
+    /// pass. Returns `Ok(true)` once `WideBlurCache` is ready in `self.wide_blur`, `Ok(false)` if
+    /// paused at `self.deadline_ms`, or `Err` after tearing down cleanly.
     #[inline(never)]
     fn step_wide_blur(&mut self, store: &Store, allow_yield: bool, stats: &mut DrawStats) -> Result<bool> {
         let Some(WideBlurState::Building(mut build)) = self.wide_blur.take() else {
             return Ok(matches!(self.wide_blur, Some(WideBlurState::Ready(_))));
         };
+        if !build.initialized
+            && let Err(e) = self.init_wide_blur_build(&mut build)
+        {
+            self.release_oversized_halo_storage();
+            return Err(e);
+        }
+        let mut rendered_strips = false;
+        while let Some(job) = build.pending_strips.pop() {
+            let strip_res = self.render_clamp_strip(
+                store,
+                build.plan.level.grid(),
+                build.background,
+                build.inputs.generation,
+                job.vertical,
+                job.ex0,
+                job.ey0,
+                job.sw,
+                job.sh,
+                job.d_strip,
+                job.reader_key,
+            );
+            match strip_res {
+                Ok(Some(patch)) => {
+                    self.insert_wide_clamp_strip(
+                        job.reader_key,
+                        job.side,
+                        HaloClampStrip {
+                            patch,
+                            straddle_frame: job.straddle_frame,
+                            clamp_weight: job.clamp_weight,
+                            samples_per_texel: job.samples_per_texel,
+                            short_start_dev: job.short_start_dev,
+                            long_start_dev: job.long_start_dev,
+                            strip_divisor: job.d_strip,
+                        },
+                    );
+                }
+                Ok(None) => {
+                    if !build.failed_strip_readers.contains(&job.reader_key) {
+                        build.failed_strip_readers.push(job.reader_key);
+                    }
+                }
+                Err(e) => {
+                    if let Some(halo) = self.reader_halo.take() {
+                        self.recycle_reader_halo(halo);
+                    }
+                    self.release_oversized_halo_storage();
+                    return Err(e);
+                }
+            }
+            rendered_strips = true;
+            if allow_yield && self.deadline_reached() {
+                self.wide_blur = Some(WideBlurState::Building(build));
+                return Ok(false);
+            }
+        }
         let mut pass = match build.pass.take() {
             Some(pass) => {
                 self.swap_halo_reader_planes(true);
                 pass
             }
-            None => match self.begin_wide_blur_pass(store, &build) {
-                Ok(mut pass) => {
-                    if allow_yield && self.deadline_reached() {
-                        self.pause_begun(&mut pass);
-                        self.swap_halo_reader_planes(true);
-                        build.pass = Some(pass);
-                        self.wide_blur = Some(WideBlurState::Building(build));
-                        return Ok(false);
+            None => {
+                if rendered_strips && allow_yield && self.deadline_reached() {
+                    self.wide_blur = Some(WideBlurState::Building(build));
+                    return Ok(false);
+                }
+                match self.begin_wide_blur_pass(store, &build) {
+                    Ok(mut pass) => {
+                        if allow_yield && self.deadline_reached() {
+                            self.pause_begun(&mut pass);
+                            self.swap_halo_reader_planes(true);
+                            build.pass = Some(pass);
+                            self.wide_blur = Some(WideBlurState::Building(build));
+                            return Ok(false);
+                        }
+                        pass
                     }
-                    pass
+                    Err(e) => {
+                        self.release_oversized_halo_storage();
+                        return Err(e);
+                    }
                 }
-                Err(e) => {
-                    self.release_oversized_halo_storage();
-                    return Err(e);
-                }
-            },
+            }
         };
         match self.walk_whole_pass(store, &mut pass, allow_yield) {
             Ok(true) => {}
@@ -7538,6 +8167,9 @@ impl Gpu {
         stats.shadow_hits += s.shadow_hits;
         let mut halo = self.reader_halo.take().expect("wide blur halo");
         let blurred = std::mem::take(&mut halo.blurred);
+        let offset = (-(build.plan.cap_grid.x0 / 2), -(build.plan.cap_grid.y0 / 2));
+        let strips = std::mem::take(&mut halo.clamp_strips);
+        self.stash_wide_clamp_strips(build.inputs, build.plan.level, offset, strips);
         self.recycle_reader_halo(halo);
         self.release_oversized_halo_storage();
         self.trim_pools(GPU_POOL_KEEP_BYTES);
@@ -7552,11 +8184,16 @@ impl Gpu {
             apron_glass_safe: build.plan.apron_glass_safe,
             residual_readers: build.plan.residual_readers,
             blurred,
+            reduced_readers: build.failed_strip_readers,
         })));
         Ok(true)
     }
 
-    fn sample_wide_blur_patch(&self, reader: Option<(u32, usize)>, draw: &BlurReaderDraw) -> Option<BlurHaloSample> {
+    fn sample_wide_blur_patch(
+        &self,
+        reader: Option<(u32, usize)>,
+        draw: &BlurReaderDraw,
+    ) -> Option<(BlurHaloSample, bool)> {
         let reader = reader?;
         let Some(WideBlurState::Ready(cache)) = self.wide_blur.as_ref() else {
             return None;
@@ -7582,13 +8219,17 @@ impl Gpu {
         if min_x < -1.5 || min_y < -1.5 || max_x > patch.size.0 as f32 + 1.5 || max_y > patch.size.1 as f32 + 1.5 {
             return None;
         }
-        Some(BlurHaloSample {
-            view: patch.view.clone(),
-            view_id: patch.view_id,
-            size: patch.size,
-            inv,
-            offset,
-        })
+        let reduced = cache.reduced_readers.contains(&reader);
+        Some((
+            BlurHaloSample {
+                view: patch.view.clone(),
+                view_id: patch.view_id,
+                size: patch.size,
+                inv,
+                offset,
+            },
+            reduced,
+        ))
     }
 
     /// Releases what `run` captured, finished or not (a paused pass is dropped), and keeps the
@@ -7661,9 +8302,17 @@ impl Gpu {
         frame_size: (i32, i32),
         within: Option<glass::ClipWithin>,
     ) -> Result<HaloPatch> {
-        // Round the storage so a one-pixel change in the clipped view on pan reuses it.
-        let width = size.0.next_multiple_of(64).min(self.max_texture_2d);
-        let height = size.1.next_multiple_of(64).min(self.max_texture_2d);
+        // Round the storage so a one-pixel change in the clipped view on pan reuses it, while
+        // keeping 1-2 px clamp edge strips compact along their short axis.
+        let round = |v: u32| {
+            if v <= 4 {
+                v.next_multiple_of(4)
+            } else {
+                v.next_multiple_of(64)
+            }
+        };
+        let width = round(size.0).min(self.max_texture_2d);
+        let height = round(size.1).min(self.max_texture_2d);
         let bytes = Self::frame_bytes(width, height);
         let reusable = self
             .halo_prefix_pool
@@ -8400,7 +9049,7 @@ impl Gpu {
             self.scene.reset();
             return Ok(stats);
         }
-        stats.exact = self.reader_halo.is_none() && !moving && total.exact();
+        stats.exact = self.reader_halo.is_none() && !moving && total.exact() && active.total_reduced == 0;
         stats.standin = !stats.exact;
         if self.reader_halo.is_some() {
             stats.plan = 4;
@@ -8497,9 +9146,14 @@ impl Gpu {
         halo: i32,
         options: TiledOptions,
         drag: Option<&DragFrame>,
-        wide_plan: Option<&halo::WideBlurPlan>,
+        wide: WideTileMode<'_>,
         allow_direct: bool,
     ) -> Result<DrawStats> {
+        let wide_plan = match wide {
+            WideTileMode::Cache(wp) => Some(wp),
+            WideTileMode::None | WideTileMode::Degraded => None,
+        };
+        let wide_degraded = matches!(wide, WideTileMode::Degraded);
         self.check()?;
         self.abort_pending_whole();
         // What this shows is made of tiles, not a whole frame (`present_sliced_frame` and
@@ -8595,9 +9249,10 @@ impl Gpu {
         };
         let selection = self.tiles.drag_prepare(&mut plan, drag.map(DragFrame::input).as_ref());
         // A composite-only frame can present cached tiles; direct tiles and drag layers
-        // need an actual draw to produce pixels, unless the cached halo is unverified.
+        // need an actual draw to produce pixels, unless the cached halo is unverified or moving.
         let composite_only = options.budget_ms < 0.0
             && (!allow_direct
+                || options.moving
                 || (selection.is_none()
                     && !plan.direct
                     && (self.pending_tile.is_some() || !plan.jobs.iter().any(|j| j.direct))));
@@ -8669,12 +9324,11 @@ impl Gpu {
                     );
                     if !same_build {
                         self.abort_wide_blur();
-                        self.wide_blur = Some(WideBlurState::Building(Box::new(WideBlurBuild {
-                            plan: wp.clone(),
+                        self.wide_blur = Some(WideBlurState::Building(Box::new(WideBlurBuild::new(
+                            wp.clone(),
                             inputs,
                             background,
-                            pass: None,
-                        })));
+                        ))));
                     }
                     let wide_budgeted = options.budget_ms != 0.0;
                     self.deadline_ms = if options.budget_ms > 0.0 {
@@ -8686,7 +9340,7 @@ impl Gpu {
                     };
                     let step = self.step_wide_blur(store, wide_budgeted, &mut stats);
                     self.deadline_ms = None;
-                    if !or_standin!(step) {
+                    if !step? {
                         wide_paused = true;
                     }
                 }
@@ -8700,6 +9354,7 @@ impl Gpu {
             && !wide_paused
             && let Some(pt) = self.pending_tile.as_ref()
             && (pt.halo != frame_halo
+                || pt.wide_degraded != wide_degraded
                 || !plan.jobs.iter().any(|j| {
                     j.key == pt.key
                         && j.detail == pt.detail
@@ -8729,12 +9384,13 @@ impl Gpu {
         // changed, over the overview), with a few of its tiles drawn rough over them, the nearest
         // the middle first: bounded, soft, never an older frame's pixels.
         let direct_moving = plan.direct && motion_capped && !composite_only && selection.is_none();
-        // At rest, under a real budget (or composite-only), such a frame is drawn over several
-        // frames (`DirectSlices`), exact tiles within the budget each, nearest the middle first:
+        // At rest, under a real budget (or verified direct present), such a frame is drawn over
+        // several frames (`DirectSlices`), within the budget each, nearest the middle first:
         // shown inexact, never old, until every tile is in. No budget: drawn at once, as before.
         let direct_sliced = plan.direct
             && !options.moving
             && !wide_paused
+            && !composite_only
             && selection.is_none()
             && (options.budget_ms >= 1.0 || options.budget_ms < 0.0);
         self.pass_budget = motion_capped.then_some(MOVING_PASSES);
@@ -8866,10 +9522,11 @@ impl Gpu {
                 }
                 let tile_detail = job.detail || coarse_moving;
                 if plan.direct {
-                    let exact = or_standin!(self.draw_job(
+                    let (exact, _) = or_standin!(self.draw_job(
                         store,
                         job,
                         tile_detail,
+                        wide_degraded,
                         frame_halo,
                         background,
                         TileTarget::Scratch,
@@ -8915,6 +9572,7 @@ impl Gpu {
                         store,
                         job,
                         tile_detail,
+                        wide_degraded,
                         frame_halo,
                         background,
                         Self::inputs(store, generation, background),
@@ -8953,10 +9611,11 @@ impl Gpu {
                     match self.tiles.slot_for(job.key) {
                         Some(s) => {
                             let reduced_before = stats.reduced;
-                            let exact = self.draw_job(
+                            let (exact, tile_reduced) = self.draw_job(
                                 store,
                                 job,
                                 tile_detail,
+                                wide_degraded,
                                 frame_halo,
                                 background,
                                 TileTarget::Slot(s),
@@ -8967,8 +9626,13 @@ impl Gpu {
                             )?;
                             let took = now() - t0 - elapsed;
                             self.tile_ms = self.tile_ms * 0.75 + took * 0.25;
-                            self.tiles
-                                .drawn(job.key, s, exact, !tile_detail, stats.reduced > reduced_before);
+                            self.tiles.drawn(
+                                job.key,
+                                s,
+                                exact,
+                                !tile_detail,
+                                tile_reduced || stats.reduced > reduced_before,
+                            );
                         }
                         None => {
                             if job.must {
@@ -9035,8 +9699,8 @@ impl Gpu {
         // changes since the last slice count, never a set an exact frame must clear. Else it
         // starts again over stand-ins.
         let mut slice_holes: Option<Vec<Rect>> = None;
-        // The tiles this frame adds, each with whether it came out inexact: kept once it's shown.
-        let mut slice_drawn: Vec<(TileKey, bool)> = Vec::new();
+        // The tiles this frame adds, each with whether it came out inexact and/or reduced.
+        let mut slice_drawn: Vec<(TileKey, bool, bool)> = Vec::new();
         let direct_wide_gen = wide_plan.is_some().then_some(generation);
         if direct_sliced {
             let view_bits = view.as_coeffs().map(f64::to_bits);
@@ -9046,6 +9710,7 @@ impl Gpu {
                     && s.bg == bg_bits
                     && s.halo == frame_halo
                     && s.wide_gen == direct_wide_gen
+                    && s.wide_degraded == wide_degraded
                     && self.cur == Some(s.frame)
                     && self.screen.standin.is_none()
                     && last.is_some_and(|l| l.view == view && l.size == (w, h))
@@ -9080,6 +9745,7 @@ impl Gpu {
                 dropped.sort_by(|a, b| from_middle(a, origin, (w, h)).total_cmp(&from_middle(b, origin, (w, h))));
                 for k in dropped {
                     s.inexact.remove(&k);
+                    s.reduced.remove(&k);
                     if !s.redraw.contains(&k) {
                         s.redraw.push(k);
                     }
@@ -9093,9 +9759,11 @@ impl Gpu {
                     bg: bg_bits,
                     halo: frame_halo,
                     wide_gen: direct_wide_gen,
+                    wide_degraded,
                     frame: dst,
                     done: Vec::new(),
                     inexact: HashSet::new(),
+                    reduced: HashSet::new(),
                     redraw: Vec::new(),
                     redraw_first: false,
                     slowest_ms: 0.0,
@@ -9148,7 +9816,7 @@ impl Gpu {
         let mut slowest_tile: Option<f64> = None;
         let t1 = now();
         let mut present_encoder = None;
-        if plan.direct && !direct_moving && !direct_sliced && !wide_paused {
+        if plan.direct && !direct_moving && !direct_sliced && !wide_paused && !composite_only {
             stats.plan = 2;
         } else {
             // What's drawn straight into the frame after it covers its tile there: the composite
@@ -9216,6 +9884,7 @@ impl Gpu {
                     store,
                     job,
                     tile_detail,
+                    wide_degraded && !job.rough,
                     if job.rough { 0 } else { frame_halo },
                     background,
                     TileTarget::Scratch,
@@ -9225,13 +9894,17 @@ impl Gpu {
                     &mut verbs,
                 );
                 self.rough = false;
-                let exact = or_standin!(drawn);
+                let (exact, tile_reduced) = if wide_degraded && !options.moving {
+                    drawn?
+                } else {
+                    or_standin!(drawn)
+                };
                 direct_exact &= !tile_detail && !job.rough && exact;
                 if !job.rough {
                     slowest_tile = Some(slowest_tile.unwrap_or(0.0).max(now() - tile_t0));
                 }
                 if direct_sliced {
-                    slice_drawn.push((job.key, tile_detail || !exact));
+                    slice_drawn.push((job.key, tile_detail || !exact, tile_reduced));
                 }
             }
             if let (Some(now), Some(split)) = (selection, drag.and_then(|d| d.split.as_ref())) {
@@ -9255,11 +9928,19 @@ impl Gpu {
         stats.exact = (plan.direct || stats.exact) && direct_exact && stats.pending == 0;
         if direct_sliced {
             // Exact once every tile is in, none inexact (as drawn last), whichever frame drew it.
-            let inexact = slice_drawn.iter().any(|(_, inexact)| *inexact)
+            let inexact = slice_drawn.iter().any(|(_, inexact, _)| *inexact)
                 || self
                     .direct_slices
                     .as_ref()
-                    .is_none_or(|s| s.inexact.iter().any(|k| !slice_drawn.iter().any(|(d, _)| d == k)));
+                    .is_none_or(|s| s.inexact.iter().any(|k| !slice_drawn.iter().any(|(d, _, _)| d == k)));
+            let reduced_tiles = slice_drawn.iter().filter(|(_, _, r)| *r).count() as u32
+                + self.direct_slices.as_ref().map_or(0, |s| {
+                    s.reduced
+                        .iter()
+                        .filter(|k| !slice_drawn.iter().any(|(d, _, _)| d == *k))
+                        .count() as u32
+                });
+            stats.reduced = stats.reduced.max(reduced_tiles);
             stats.exact = stats.pending == 0 && !inexact;
             stats.plan = if stats.exact { 2 } else { 1 };
         }
@@ -9278,13 +9959,18 @@ impl Gpu {
             s.frame = dst;
             s.slowest_ms = s.slowest_ms.max(slowest_tile.unwrap_or(0.0));
             s.resting = s.resting.saturating_add(1);
-            for (k, inexact) in slice_drawn {
+            for (k, inexact, reduced) in slice_drawn {
                 s.done.push(k);
                 s.redraw.retain(|r| *r != k);
                 if inexact {
                     s.inexact.insert(k);
                 } else {
                     s.inexact.remove(&k);
+                }
+                if reduced {
+                    s.reduced.insert(k);
+                } else {
+                    s.reduced.remove(&k);
                 }
             }
         } else {
@@ -9366,9 +10052,14 @@ impl Gpu {
         background: [f32; 4],
         generation: u64,
         halo: i32,
-        wide_plan: Option<&halo::WideBlurPlan>,
+        wide: WideTileMode<'_>,
         budget_ms: f64,
     ) -> Result<DrawStats> {
+        let wide_plan = match wide {
+            WideTileMode::Cache(wp) => Some(wp),
+            WideTileMode::None | WideTileMode::Degraded => None,
+        };
+        let wide_degraded = matches!(wide, WideTileMode::Degraded);
         self.check()?;
         self.abort_pending_whole();
         self.pass_budget = None;
@@ -9380,7 +10071,7 @@ impl Gpu {
         if self
             .pending_tile
             .as_ref()
-            .is_some_and(|pt| pt.inputs != inputs || pt.halo != halo)
+            .is_some_and(|pt| pt.inputs != inputs || pt.halo != halo || pt.wide_degraded != wide_degraded)
         {
             self.abort_pending_tile();
         }
@@ -9450,12 +10141,11 @@ impl Gpu {
                     );
                     if !same_build {
                         self.abort_wide_blur();
-                        self.wide_blur = Some(WideBlurState::Building(Box::new(WideBlurBuild {
-                            plan: wp.clone(),
+                        self.wide_blur = Some(WideBlurState::Building(Box::new(WideBlurBuild::new(
+                            wp.clone(),
                             inputs,
                             background,
-                            pass: None,
-                        })));
+                        ))));
                     }
                     self.deadline_ms = deadline;
                     let step = self.step_wide_blur(store, budgeted, &mut stats);
@@ -9542,6 +10232,7 @@ impl Gpu {
                     store,
                     job,
                     job.detail,
+                    wide_degraded && !job.rough,
                     halo,
                     background,
                     Self::inputs(store, generation, background),
@@ -9568,6 +10259,30 @@ impl Gpu {
             }
         }
         let (mut pending, queued) = self.tiles.left(&plan);
+        if plan.direct && pending > 0 {
+            let view_bits = last.view.as_coeffs().map(f64::to_bits);
+            let bg_bits = background.map(f32::to_bits);
+            let direct_wide_gen = wide_plan.is_some().then_some(generation);
+            if let Some(s) = self.direct_slices.as_ref()
+                && s.view == view_bits
+                && s.size == last.size
+                && s.bg == bg_bits
+                && s.halo == halo
+                && s.wide_gen == direct_wide_gen
+                && s.wide_degraded == wide_degraded
+                && self.cur == Some(s.frame)
+                && self.screen.standin.is_none()
+                && self.tiles.changed_on(last.view, last.size).is_empty()
+                && self.tiles.sharpened_on(last.view, last.size).is_empty()
+            {
+                let remaining = plan
+                    .jobs
+                    .iter()
+                    .filter(|j| !s.done.contains(&j.key) || s.redraw.contains(&j.key))
+                    .count() as u32;
+                pending = remaining;
+            }
+        }
         // The overview's refined tiles wait for the camera to be still a while: the time between
         // frames goes on (doing nothing) until they're drawn.
         if pending == 0 && queued == 0 && self.tiles.overview_refined_left(last.view.as_coeffs()[0]) > 0 {
@@ -9686,6 +10401,7 @@ impl Gpu {
         store: &Store,
         job: &crate::tiles::Job,
         detail: bool,
+        wide_degraded: bool,
         halo: i32,
         background: [f32; 4],
         target: TileTarget,
@@ -9693,13 +10409,14 @@ impl Gpu {
         dst: usize,
         stats: &mut DrawStats,
         verbs: &mut usize,
-    ) -> Result<bool> {
+    ) -> Result<(bool, bool)> {
         *verbs = store.limits.frame_verbs;
         match self.draw_tile(
             store,
             job.view,
             job.detail,
             detail,
+            wide_degraded,
             halo,
             background,
             &Split::all(),
@@ -9710,9 +10427,9 @@ impl Gpu {
             stats,
             verbs,
         ) {
-            Ok(exact) => {
+            Ok((exact, reduced)) => {
                 stats.tiles_drawn += 1;
-                Ok(exact)
+                Ok((exact, reduced))
             }
             Err(e) => {
                 if let TileTarget::Slot(s) = target {
@@ -9791,6 +10508,7 @@ impl Gpu {
         view: Affine,
         detail: bool,
         coarse_readers: bool,
+        wide_degraded: bool,
         halo: i32,
         background: [f32; 4],
         split: &Split,
@@ -9800,7 +10518,7 @@ impl Gpu {
         dst: usize,
         stats: &mut DrawStats,
         verbs: &mut usize,
-    ) -> Result<bool> {
+    ) -> Result<(bool, bool)> {
         let t0 = now();
         let (tile_halo, clip_apron_glass) = self.tile_apron_config(store, view, key, halo, false);
         let clip_apron_glass = clip_apron_glass && !matches!(target, TileTarget::ScratchOnly);
@@ -9837,8 +10555,6 @@ impl Gpu {
             }
         };
         stats.add(&s);
-        // Exact only if nothing stood in: no level of detail, no provisional record.
-        let exact = s.exact();
         let place = match target {
             TileTarget::Slot(slot) => match self.slot_place(slot) {
                 Ok(p) => Some(p),
@@ -9879,8 +10595,14 @@ impl Gpu {
         };
 
         let active = self.finish_scratch_to_frame(copy_info, 4)?;
+        let reduced = s.reduced > 0 || active.total_reduced > 0 || wide_degraded;
+        // Exact only if nothing stood in: no level of detail, no provisional record, no reduced effect.
+        let exact = s.exact() && !reduced;
         active.record_into(stats, now() - t0);
-        Ok(exact)
+        if wide_degraded && s.reduced == 0 && active.total_reduced == 0 {
+            stats.reduced += 1;
+        }
+        Ok((exact, reduced))
     }
 
     /// Computes the cooperative scene-walk budget for a slice, reserving headroom for
@@ -9911,6 +10633,7 @@ impl Gpu {
         store: &Store,
         job: &crate::tiles::Job,
         coarse_readers: bool,
+        wide_degraded: bool,
         halo: i32,
         background: [f32; 4],
         inputs: DrawInputs,
@@ -9973,6 +10696,7 @@ impl Gpu {
             job.detail,
             job.rough,
             coarse_readers,
+            wide_degraded,
             halo,
             tile_halo,
             side,
@@ -10034,6 +10758,7 @@ impl Gpu {
             pt.detail,
             pt.rough,
             pt.coarse_readers,
+            pt.wide_degraded,
             pt.halo,
             pt.tile_halo,
             pt.side,
@@ -10054,6 +10779,7 @@ impl Gpu {
         detail: bool,
         rough: bool,
         coarse_readers: bool,
+        wide_degraded: bool,
         halo: i32,
         tile_halo: i32,
         side: u32,
@@ -10076,6 +10802,7 @@ impl Gpu {
                     detail,
                     rough,
                     coarse_readers,
+                    wide_degraded,
                     halo,
                     tile_halo,
                     side,
@@ -10090,8 +10817,6 @@ impl Gpu {
                 stats: slice_stats,
                 total,
             } => {
-                let exact = total.exact();
-                let reduced = total.reduced > 0;
                 stats.add(&slice_stats);
                 let sub0 = stats.submit_ms;
                 let h = tile_halo as u32;
@@ -10127,8 +10852,13 @@ impl Gpu {
                 };
                 self.readers.drop_glass_mask_atlas();
                 self.readers.flush_retired();
+                let reduced = total.reduced > 0 || active.total_reduced > 0 || wide_degraded;
+                let exact = total.exact() && !reduced;
                 let slice_total = now() - t0;
                 active.record_into(stats, slice_total);
+                if wide_degraded && total.reduced == 0 && active.total_reduced == 0 {
+                    stats.reduced += 1;
+                }
                 self.update_submit_ratio(slice_total, stats.submit_ms - sub0);
                 if let Some((s, _)) = place {
                     if self.tiles.is_overview(&key) {
@@ -11232,6 +11962,7 @@ impl Gpu {
                                 view,
                                 false,
                                 false,
+                                false,
                                 halo,
                                 background,
                                 &Split::all(),
@@ -11251,6 +11982,7 @@ impl Gpu {
                         let drawn = self.draw_tile(
                             store,
                             view,
+                            false,
                             false,
                             false,
                             halo,
@@ -11286,6 +12018,7 @@ impl Gpu {
                 self.draw_tile(
                     store,
                     view,
+                    false,
                     false,
                     false,
                     halo,
@@ -14559,6 +15292,7 @@ impl Backend for Gpu {
         if clip.clipped_rect.is_empty() {
             return Ok(());
         }
+        let mut wide_reduced = false;
         let mut halo_sample = if coarse {
             None
         } else {
@@ -14566,12 +15300,18 @@ impl Backend for Gpu {
                 .and_then(|reader| self.reader_halo.as_ref()?.blurred.get(&reader))
                 .and_then(|patch| self.sample_blur_halo(&draw, patch, patch.size))
                 .or_else(|| {
-                    capture_tier
+                    let (sample, reduced) = capture_tier
                         .is_none()
                         .then(|| self.sample_wide_blur_patch(reader, &draw))
-                        .flatten()
+                        .flatten()?;
+                    wide_reduced = reduced;
+                    Some(sample)
                 })
         };
+        if wide_reduced && let Some(a) = self.active.as_mut() {
+            a.reduced += 1;
+            a.total_reduced += 1;
+        }
         if coarse || halo_sample.is_none() {
             if !coarse
                 && self.reader_halo.is_some()
