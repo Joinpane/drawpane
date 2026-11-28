@@ -380,3 +380,21 @@ fn scopes_that_composite_a_shape_whole_keep_its_inset_to_the_edge() {
         }
     }
 }
+
+#[test]
+fn a_shape_drawn_into_a_records_own_mask_layer_keeps_its_whole_fill() {
+    // The second re-check's wire case: a record fills a red square, opens a destination-in (or
+    // destination-out) mask layer and draws its children into it, the bordered box among them.
+    // The editor writes such masks with their fills in the one record, but the wire allows
+    // children there. Stopped under the band, the box's edge pixel moved from alpha 70 to 38
+    // (destination-in) and from 185 to 217 (destination-out).
+    for (compose, name) in [(2, "destination-in"), (1, "destination-out")] {
+        let make = |ink: f32| -> Vec<(u32, u32, Rec)> {
+            let mut masked = square(0.0, 0.0, 80.0, 80.0, [1.0, 0.0, 0.0, 1.0]);
+            masked.ops.extend([Op::Layer { compose }, Op::Children, Op::Unlayer]);
+            vec![(1, 0, masked), (4, 1, Rec::group()), (2, 4, bordered(8.0, ink))]
+        };
+        let d = worst(&scene(&make(1.0)), &scene(&make(0.999)));
+        assert!(d <= 1, "a bordered box in a {name} mask layer: {d} levels off");
+    }
+}
