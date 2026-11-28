@@ -7544,4 +7544,541 @@ for (const build of ["browser", "webgl"] as const) {
       }
     });
   });
+
+  test.describe(`GPU memory budget and tile page eviction (${build})`, () => {
+    test("panned wide-blur views stay exact across mobile GPU memory budgets (128, 160, 192 MiB)", async ({
+      page,
+    }) => {
+      test.setTimeout(360_000);
+      await openEngine(page, build);
+      const makePhoneList = (edited: boolean, patchOnly: boolean) => {
+        const list = new ListWriter(patchOnly ? 1 : 0xffffffff, patchOnly ? 2 : 1);
+        if (!patchOnly) list.reset();
+        const add = (
+          id: number,
+          parent: number,
+          x: number,
+          y: number,
+          w: number,
+          h: number,
+          ops: WireRecord["ops"],
+          radii: [number, number, number, number] = [0, 0, 0, 0],
+        ) => {
+          list.set(id, parent, {
+            flags: 0,
+            transform: [1, 0, 0, 1, x, y],
+            opacity: 1,
+            width: w,
+            height: h,
+            coarseBelow: 0,
+            reach: 0,
+            unsupported: 0,
+            paths: [{ kind: "rect", w, h, radii, smoothing: 0 }],
+            ops,
+            coarse: [],
+          });
+        };
+        const solid = (c: [number, number, number], a = 1): WireRecord["ops"] => [
+          { op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color: [...c, a] } },
+        ];
+        if (patchOnly) {
+          add(3, 2, 300, 780, 60, 40, solid([0.08, 0.86, 0.78]));
+          return [...list.finish()];
+        }
+        const bgBlur = (
+          r: number,
+          tint: [number, number, number],
+          a: number,
+        ): WireRecord["ops"] => [
+          { op: "backgroundBlur", paths: [0], evenOdd: false, radius: r },
+          ...solid(tint, a),
+        ];
+        const glass = (w: number, h: number): WireRecord["ops"] => [
+          {
+            op: "glass",
+            paths: [0],
+            evenOdd: false,
+            kind: GLASS_KIND.box,
+            inradius: Math.min(w, h) * 0.5,
+            angle: -45,
+            intensity: 80,
+            refraction: 20,
+            depth: 10,
+            dispersion: 0,
+            frost: 3,
+            splay: 0,
+            boxRadii: [14, 14, 14, 14],
+            boxSmoothing: [0, 0, 0, 0],
+          },
+        ];
+        add(1, ROOT, -400, -400, 1200, 1700, solid([1, 0, 1]));
+        add(2, ROOT, 0, 0, 393, 852, [
+          { op: "clip", path: 0, evenOdd: false },
+          { op: "children" },
+          { op: "unclip" },
+        ]);
+        let id = 100;
+        add(id++, 2, 0, 0, 393, 852, solid([0.96, 0.95, 0.9]));
+        for (let i = 0; i < Math.ceil(393 / 23); i++) {
+          add(
+            id++,
+            2,
+            i * 23,
+            0,
+            9,
+            852,
+            solid(
+              i % 3 === 0 ? [0.92, 0.2, 0.15] : i % 3 === 1 ? [0.1, 0.3, 0.85] : [0.1, 0.65, 0.3],
+            ),
+          );
+        }
+        for (let j = 0; j < Math.ceil(852 / 41); j++) {
+          add(id++, 2, 0, j * 41, 393, 4, solid([0.05, 0.05, 0.08]));
+        }
+        add(3, 2, 300, 780, 60, 40, solid(edited ? [0.08, 0.86, 0.78] : [0.92, 0.22, 0.14]));
+        add(10, 2, 20, 120, 170, 170, bgBlur(135.91, [1, 1, 1], 0.2), [40, 40, 40, 40]);
+        add(11, 2, 200, 120, 170, 170, bgBlur(135.91, [1, 1, 1], 0.2), [40, 40, 40, 40]);
+        add(12, 2, 0, 0, 393, 852, bgBlur(24, [0, 0, 0], 0.2));
+        add(13, 2, 20, 320, 160, 70, bgBlur(30, [1, 1, 1], 0.2), [35, 35, 35, 35]);
+        add(14, 2, 40, 420, 68, 68, glass(68, 68), [34, 34, 34, 34]);
+        add(15, 2, 130, 420, 68, 68, glass(68, 68), [34, 34, 34, 34]);
+        return [...list.finish()];
+      };
+      const v1 = makePhoneList(false, false);
+      const patch = makePhoneList(true, true);
+      const v2 = makePhoneList(true, false);
+
+      const res = await page.evaluate(
+        async ({ v1, patch, v2, expectedBackend }) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          const bg = new Float32Array([0.1, 0.1, 0.12, 1]);
+          const [w, h, zoom, cx, cy, dpr] = [824, 1830, 1, 9, 30, 2];
+          const [px, py] = [cx - 37, cy - 53];
+
+          const diffStats = (a: Uint8Array, b: Uint8Array) => {
+            let bytes = Math.abs(a.length - b.length);
+            let maxDelta = 0;
+            const n = Math.min(a.length, b.length);
+            for (let i = 0; i < n; i++) {
+              const d = Math.abs((a[i] ?? 0) - (b[i] ?? 0));
+              if (d !== 0) {
+                bytes++;
+                if (d > maxDelta) maxDelta = d;
+              }
+            }
+            return { bytes, maxDelta };
+          };
+          const drain = async (e: InstanceType<typeof glue.Engine>) => {
+            for (let i = 0; i < 16; i++) {
+              const done = await e.gpuFinished?.();
+              if (done === undefined) break;
+              const ok = done.ok;
+              const message = done.message;
+              done.free();
+              if (!ok) throw new Error(message);
+            }
+          };
+          const readPx = async (e: InstanceType<typeof glue.Engine>) => {
+            await drain(e);
+            const raw = await e.gpuPixels?.();
+            if (!(raw instanceof Uint8Array)) throw new Error(raw?.message ?? "gpuPixels failed");
+            return new Uint8Array(raw);
+          };
+          const makeEngine = async (list: number[], gpuMiB: number, tileMiB: number) => {
+            let dev = await glue.createGpu(null, 0);
+            for (let i = 0; i < 3 && !dev.ok; i++) {
+              dev.free();
+              await new Promise((r) => setTimeout(r, 300));
+              dev = await glue.createGpu(null, 0);
+            }
+            if (!dev.ok || dev.backend !== expectedBackend) {
+              const msg = dev.message || `expected ${expectedBackend}, got ${dev.backend}`;
+              dev.free();
+              throw new Error(msg);
+            }
+            const e = new glue.Engine(0, 0);
+            if (gpuMiB > 0) e.setLimit("gpu_bytes", gpuMiB << 20).free();
+            if (tileMiB > 0) e.setLimit("tile_bytes", tileMiB << 20).free();
+            const att = e.attachGpu?.(dev);
+            dev.free();
+            if (!att?.ok) {
+              const msg = att?.message ?? "attachGpu failed";
+              att?.free();
+              e.free();
+              throw new Error(msg);
+            }
+            att.free();
+            const ap = e.apply(new Uint8Array(list));
+            const apOk = ap.ok;
+            const apMsg = ap.message;
+            ap.free();
+            if (!apOk) {
+              e.free();
+              throw new Error(apMsg);
+            }
+            return e;
+          };
+          const settle = async (
+            e: InstanceType<typeof glue.Engine>,
+            x: number,
+            y: number,
+            refPx?: Uint8Array,
+          ) => {
+            const take = (
+              o: ReturnType<NonNullable<InstanceType<typeof glue.Engine>["renderGpu"]>>,
+            ) => {
+              const f = {
+                ok: o.ok,
+                message: o.message,
+                plan: o.plan,
+                exact: o.exact,
+                pending: o.pending,
+                inProgress: o.in_progress,
+                held: o.held,
+              };
+              o.free();
+              if (!f.ok) throw new Error(f.message);
+              return f;
+            };
+            const render = (budget: number) => {
+              const o = e.renderGpu?.(w, h, zoom, x, y, dpr, bg, false, budget, true);
+              if (!o) throw new Error("missing renderGpu");
+              return take(o);
+            };
+            let f = render(8);
+            await drain(e);
+            let badExactMid = 0;
+            let exactWithPending = 0;
+            if (f.exact && f.pending > 0) exactWithPending++;
+            if (refPx && f.exact) {
+              const mid = diffStats(await readPx(e), refPx);
+              if (mid.bytes !== 0) badExactMid++;
+            }
+            let slices = 0;
+            while ((!f.exact || f.pending > 0 || f.inProgress) && slices < 400) {
+              const a = e.renderGpuAhead?.(bg, 8);
+              if (!a) throw new Error("missing renderGpuAhead");
+              take(a);
+              await drain(e);
+              f = render(-1);
+              await drain(e);
+              if (f.exact && f.pending > 0) exactWithPending++;
+              if (refPx && f.exact) {
+                const mid = diffStats(await readPx(e), refPx);
+                if (mid.bytes !== 0) badExactMid++;
+              }
+              slices++;
+            }
+            return { f, slices, badExactMid, exactWithPending, px: await readPx(e) };
+          };
+
+          // Fresh unconstrained reference at the edited panned view.
+          const freshRef = await (async () => {
+            const e = await makeEngine(v2, 0, 0);
+            try {
+              return await settle(e, px, py);
+            } finally {
+              e.free();
+            }
+          })();
+
+          // Sweep 128:16 three times in one page (bug #380 is nondeterministic across runs),
+          // plus 160:16 and 192:32.
+          const caps: [number, number][] = [
+            [128, 16],
+            [128, 16],
+            [128, 16],
+            [160, 16],
+            [192, 32],
+          ];
+          const rows = [];
+          for (const [idx, [gpuMiB, tileMiB]] of caps.entries()) {
+            const e = await makeEngine(v1, gpuMiB, tileMiB);
+            try {
+              await settle(e, cx, cy);
+              const ap = e.apply(new Uint8Array(patch));
+              if (!ap.ok) throw new Error(ap.message);
+              ap.free();
+              await settle(e, cx, cy);
+              const pan = await settle(e, px, py, freshRef.px);
+              rows.push({
+                run: idx,
+                gpuMiB,
+                tileMiB,
+                plan: pan.f.plan,
+                exact: pan.f.exact,
+                pending: pan.f.pending,
+                held: pan.f.held,
+                slices: pan.slices,
+                badExactMid: pan.badExactMid,
+                exactWithPending: pan.exactWithPending,
+                diff: diffStats(pan.px, freshRef.px),
+              });
+            } finally {
+              e.free();
+            }
+          }
+          return {
+            ref: {
+              plan: freshRef.f.plan,
+              exact: freshRef.f.exact,
+              pending: freshRef.f.pending,
+            },
+            rows,
+          };
+        },
+        { v1, patch, v2, expectedBackend: build === "webgl" ? "webgl2" : "webgpu" },
+      );
+
+      expect(res.ref.exact, "fresh reference is exact").toBe(true);
+      expect(res.ref.pending, "fresh reference has nothing pending").toBe(0);
+      for (const row of res.rows) {
+        const label = `run ${row.run} (${row.gpuMiB}/${row.tileMiB} MiB)`;
+        expect(row.plan, `${label} stays tiled`).toBe(0);
+        expect(row.exact, `${label} settles exact`).toBe(true);
+        expect(row.pending, `${label} has nothing pending`).toBe(0);
+        expect(row.exactWithPending, `${label} never reports exact with pending > 0`).toBe(0);
+        expect(row.badExactMid, `${label} every intermediate exact frame matches fresh`).toBe(0);
+        expect(row.diff, `${label} settled pixels match fresh bit-for-bit`).toEqual({
+          bytes: 0,
+          maxDelta: 0,
+        });
+      }
+    });
+
+    test("shrinking tile page side under GPU budget pressure drops evicted tile slots cleanly", async ({
+      page,
+    }) => {
+      test.setTimeout(180_000);
+      await openEngine(page, build);
+      const list = new ListWriter(0xffffffff, 1);
+      list.reset();
+      const add = (
+        id: number,
+        x: number,
+        y: number,
+        w: number,
+        h: number,
+        color: [number, number, number, number],
+      ) => {
+        list.set(id, ROOT, {
+          flags: 0,
+          transform: [1, 0, 0, 1, x, y],
+          opacity: 1,
+          width: w,
+          height: h,
+          coarseBelow: 0,
+          reach: 0,
+          unsupported: 0,
+          paths: [{ kind: "rect", w, h, radii: [0, 0, 0, 0], smoothing: 0 }],
+          ops: [{ op: "fill", path: 0, evenOdd: false, paint: { kind: "solid", color } }],
+          coarse: [],
+        });
+      };
+      add(1, -200, -200, 1600, 2000, [0.94, 0.92, 0.88, 1]);
+      for (let i = 0; i < 24; i++) {
+        add(
+          10 + i,
+          i * 55,
+          0,
+          22,
+          1800,
+          i % 3 === 0
+            ? [0.9, 0.2, 0.15, 1]
+            : i % 3 === 1
+              ? [0.1, 0.35, 0.85, 1]
+              : [0.1, 0.65, 0.3, 1],
+        );
+      }
+      for (let j = 0; j < 24; j++) {
+        add(50 + j, 0, j * 70, 1400, 12, [0.08, 0.1, 0.16, 1]);
+      }
+      const bytes = [...list.finish()];
+
+      const res = await page.evaluate(
+        async ({ bytes, expectedBackend }) => {
+          const name = "/engine.js";
+          const glue = (await import(name)) as typeof import("@drawpane/engine/browser-glue");
+          await glue.default({ module_or_path: "/engine_bg.wasm" });
+          const bg = new Float32Array([0.1, 0.1, 0.12, 1]);
+          const [w, h, zoom, dpr] = [824, 1830, 1, 2];
+
+          const diffStats = (a: Uint8Array, b: Uint8Array) => {
+            let bytesDiff = Math.abs(a.length - b.length);
+            let maxDelta = 0;
+            const n = Math.min(a.length, b.length);
+            for (let i = 0; i < n; i++) {
+              const d = Math.abs((a[i] ?? 0) - (b[i] ?? 0));
+              if (d !== 0) {
+                bytesDiff++;
+                if (d > maxDelta) maxDelta = d;
+              }
+            }
+            return { bytes: bytesDiff, maxDelta };
+          };
+          const drain = async (e: InstanceType<typeof glue.Engine>) => {
+            for (let i = 0; i < 16; i++) {
+              const done = await e.gpuFinished?.();
+              if (done === undefined) break;
+              const ok = done.ok;
+              const message = done.message;
+              done.free();
+              if (!ok) throw new Error(message);
+            }
+          };
+          const readPx = async (e: InstanceType<typeof glue.Engine>) => {
+            await drain(e);
+            const raw = await e.gpuPixels?.();
+            if (!(raw instanceof Uint8Array)) throw new Error(raw?.message ?? "gpuPixels failed");
+            return new Uint8Array(raw);
+          };
+          const makeEngine = async (gpuMiB: number, tileMiB: number) => {
+            const dev = await glue.createGpu(null, 0);
+            if (!dev.ok || dev.backend !== expectedBackend) {
+              const msg = dev.message || `expected ${expectedBackend}, got ${dev.backend}`;
+              dev.free();
+              throw new Error(msg);
+            }
+            const e = new glue.Engine(0, 0);
+            if (gpuMiB > 0) e.setLimit("gpu_bytes", gpuMiB << 20).free();
+            if (tileMiB > 0) e.setLimit("tile_bytes", tileMiB << 20).free();
+            const att = e.attachGpu?.(dev);
+            dev.free();
+            if (!att?.ok) {
+              const msg = att?.message ?? "attachGpu failed";
+              att?.free();
+              e.free();
+              throw new Error(msg);
+            }
+            att.free();
+            e.apply(new Uint8Array(bytes)).free();
+            return e;
+          };
+          const settle = async (e: InstanceType<typeof glue.Engine>, x: number, y: number) => {
+            const take = (
+              o: ReturnType<NonNullable<InstanceType<typeof glue.Engine>["renderGpu"]>>,
+            ) => {
+              const f = {
+                ok: o.ok,
+                message: o.message,
+                plan: o.plan,
+                exact: o.exact,
+                pending: o.pending,
+                inProgress: o.in_progress,
+                held: o.held,
+              };
+              o.free();
+              if (!f.ok) throw new Error(f.message);
+              return f;
+            };
+            const render = (budget: number) => {
+              const o = e.renderGpu?.(w, h, zoom, x, y, dpr, bg, false, budget, true);
+              if (!o) throw new Error("missing renderGpu");
+              return take(o);
+            };
+            let f = render(8);
+            await drain(e);
+            let slices = 0;
+            while ((!f.exact || f.pending > 0 || f.inProgress) && slices < 300) {
+              const a = e.renderGpuAhead?.(bg, 8);
+              if (!a) throw new Error("missing renderGpuAhead");
+              take(a);
+              await drain(e);
+              f = render(-1);
+              await drain(e);
+              slices++;
+            }
+            return { f, slices, px: await readPx(e) };
+          };
+          const freshAt = async (x: number, y: number) => {
+            const e = await makeEngine(0, 0);
+            try {
+              const s = await settle(e, x, y);
+              return s.px;
+            } finally {
+              e.free();
+            }
+          };
+
+          // Warm an 8-tile 2048x2048 (16 MiB) page under the 128 MiB mobile GPU budget, then
+          // upload 1024x1024 (4 MiB) GPU images so non-transient GPU bytes sweep through the
+          // 16 MiB -> 4 MiB page-shrink window (`room = 128 - 32 - beside` in (4 MiB, 16 MiB),
+          // leaving >= 24 MiB for pixel readback). After each step in the sweep, check both a
+          // small pan (all 8 tile keys unchanged) and a seam-crossing pan (new tile slots
+          // allocated) against fresh renders.
+          const canvas = new OffscreenCanvas(1024, 1024);
+          const ctx = canvas.getContext("2d");
+          if (!ctx) throw new Error("no 2D context");
+          ctx.fillStyle = "#336699";
+          ctx.fillRect(0, 0, 1024, 1024);
+          const bitmap = await createImageBitmap(canvas);
+          const refSameKeys = await freshAt(-13, -17);
+          const refCrossSeam = await freshAt(-180, -17);
+
+          const e = await makeEngine(128, 16);
+          const rows = [];
+          try {
+            const init = await settle(e, 0, 0);
+            let uploaded = 0;
+            // Preload 10 x 4 MiB images (40 MiB), still comfortably above the 16 MiB threshold.
+            for (let id = 1; id <= 10; id++) {
+              const put = e.putGpuImageLevel?.(id, bitmap);
+              if (!put) throw new Error("missing putGpuImageLevel");
+              const ok = put.ok;
+              put.free();
+              if (!ok) break;
+              uploaded++;
+            }
+            // Step 4 MiB at a time across the 16 MiB -> 4 MiB page-shrink window (total up to
+            // 18 x 4 MiB = 72 MiB of images, keeping total GPU bytes well below 128 MiB so
+            // readback always succeeds).
+            for (let id = 11; id <= 18; id++) {
+              const put = e.putGpuImageLevel?.(id, bitmap);
+              if (!put) throw new Error("missing putGpuImageLevel");
+              const ok = put.ok;
+              put.free();
+              if (!ok) break;
+              uploaded++;
+              for (const cross of [false, true]) {
+                const [tx, ty] = cross ? [-180, -17] : [-13, -17];
+                const ref = cross ? refCrossSeam : refSameKeys;
+                const cur = await settle(e, tx, ty);
+                rows.push({
+                  uploaded,
+                  cross,
+                  plan: cur.f.plan,
+                  exact: cur.f.exact,
+                  pending: cur.f.pending,
+                  held: cur.f.held,
+                  diff: diffStats(cur.px, ref),
+                });
+                await settle(e, 0, 0);
+              }
+            }
+            return { initHeld: init.f.held, uploaded, rows };
+          } finally {
+            bitmap.close();
+            e.free();
+          }
+        },
+        { bytes, expectedBackend: build === "webgl" ? "webgl2" : "webgpu" },
+      );
+
+      expect(res.initHeld, "initial tiled settle populates 2048 px page").toBeGreaterThanOrEqual(8);
+      expect(res.uploaded, "uploaded enough 4 MiB images to sweep through page-shrink window").toBe(
+        18,
+      );
+      for (const row of res.rows) {
+        const label = `after ${row.uploaded}x4MiB uploads (${row.cross ? "cross-seam" : "same-keys"})`;
+        expect(row.exact, `${label} settles exact`).toBe(true);
+        expect(row.pending, `${label} has nothing pending`).toBe(0);
+        expect(row.diff, `${label} exact pixels match fresh bit-for-bit`).toEqual({
+          bytes: 0,
+          maxDelta: 0,
+        });
+      }
+    });
+  });
 }

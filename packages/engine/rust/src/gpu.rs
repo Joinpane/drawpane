@@ -4777,32 +4777,48 @@ impl Gpu {
         self.bytes().saturating_sub(self.pages.len() * self.page_bytes())
     }
 
+    /// Available tile-page budget under `self.budget`, capped at `tile_bytes`.
+    fn tile_budget_limit(&self, tile_bytes: usize) -> usize {
+        let beside = self.bytes_beside_tiles() + self.readbacks.bytes.get() + HEADROOM;
+        tile_bytes.min(self.budget.saturating_sub(beside))
+    }
+
     /// Fits the tiles kept to the budget: what's left of it beside everything else, at most
     /// `tile_bytes`, in whole pages. Pages past it go, with their tiles. When no pages are
     /// allocated yet, picks 4096x4096 (64 tiles/page) if device limits and budget allow.
     fn fit_tiles(&mut self, tile_bytes: usize) {
-        let beside = self.bytes_beside_tiles() + self.readbacks.bytes.get() + HEADROOM;
-        let room = self.budget.saturating_sub(beside);
-        let limit = tile_bytes.min(room);
-        if self.pages.is_empty() {
-            self.page_side = self.choose_page_side(limit);
-        }
-        let mut pbytes = self.page_bytes();
-        let mut pages = (limit / pbytes).min(1024);
-        while self.pages.len() > pages {
-            if let Some(p) = self.pages.pop() {
-                p.texture.destroy();
-                self.bytes -= pbytes;
-            }
-        }
-        if pages == 0 && self.pages.is_empty() {
-            let smaller = self.choose_page_side(limit);
-            if smaller != self.page_side {
-                self.page_side = smaller;
-                pbytes = self.page_bytes();
+        let mut limit = self.tile_budget_limit(tile_bytes);
+        let mut trimmed = false;
+        if !self.pages.is_empty() {
+            let pbytes = self.page_bytes();
+            let mut pages = (limit / pbytes).min(1024);
+            // Reclaim warm transient pools and dead blur pyramids before evicting live tile pages.
+            if tile_bytes > 0 && limit < tile_bytes && pages < self.pages.len() {
+                self.trim_transient();
+                trimmed = true;
+                limit = self.tile_budget_limit(tile_bytes);
                 pages = (limit / pbytes).min(1024);
             }
+            while self.pages.len() > pages {
+                if let Some(p) = self.pages.pop() {
+                    p.texture.destroy();
+                    self.bytes -= pbytes;
+                }
+            }
+            if !self.pages.is_empty() {
+                self.tiles.set_max_slots(pages * self.per_page() as usize);
+                return;
+            }
         }
+        // No pages remain (or none existed): drop all non-overview tile metadata before
+        // picking a new `page_side`, so no tile outlives its destroyed page or shifts slots.
+        self.tiles.set_max_slots(0);
+        if !trimmed && tile_bytes > 0 && !self.walk_paused() && limit < tile_bytes {
+            self.trim_transient();
+            limit = self.tile_budget_limit(tile_bytes);
+        }
+        self.page_side = self.choose_page_side(limit);
+        let pages = (limit / self.page_bytes()).min(1024);
         self.tiles.set_max_slots(pages * self.per_page() as usize);
     }
 
@@ -5607,6 +5623,7 @@ impl Gpu {
             _ => 0,
         };
         let freed = cache_bytes
+            + self.blur.bytes()
             + self.scratches[FAR_HALO_SCRATCH_SLOT]
                 .as_ref()
                 .map_or(0, |s| (s.width as usize) * (s.height as usize) * 8);
@@ -8409,7 +8426,6 @@ impl Gpu {
         wide_plan: Option<&halo::WideBlurPlan>,
     ) -> Result<DrawStats> {
         self.check()?;
-        let from_whole = self.sliced_frame.is_some() || self.whole_reader_halo || self.pending_whole.is_some();
         self.abort_pending_whole();
         // What this shows is made of tiles, not a whole frame (`present_sliced_frame` and
         // `render_whole` show one again only while it's shown).
@@ -8452,13 +8468,6 @@ impl Gpu {
         self.tiles.bake_overview = !options.moving && options.budget_ms > 0.0;
         // The overview's refined tiles are the time between frames' (`ahead`), once still.
         self.tiles.refine_overview = false;
-        if from_whole && !self.pages.is_empty() {
-            let beside = self.bytes_beside_tiles() + self.readbacks.bytes.get() + HEADROOM;
-            let room = self.budget.saturating_sub(beside);
-            if room < store.limits.tile_bytes.min(self.pages.len() * self.page_bytes()) {
-                self.trim_transient();
-            }
-        }
         self.fit_tiles(store.limits.tile_bytes);
         let zooming = options.moving && self.last_scale.is_some_and(|s| s != scale);
         // A page just shown (opened, switched to, its list made afresh): nothing to stand on.
@@ -11557,6 +11566,15 @@ impl Gpu {
         for cp in &comp.copies {
             let page = (cp.slot / per_page) as usize;
             let Some(pg) = self.pages.get(page) else {
+                debug_assert!(
+                    false,
+                    "tile copy slot {} past {} pages (per_page={})",
+                    cp.slot,
+                    self.pages.len(),
+                    per_page
+                );
+                stats.exact = false;
+                stats.pending = stats.pending.max(1);
                 continue;
             };
             let within = cp.slot % per_page;
