@@ -408,6 +408,9 @@ pub struct WideBlurPlan {
     /// Remaining (non-wide) readers' `(affected_grid, reach_px)` pairs in `level.grid()` space,
     /// so each 512 px tile uses only the apron required by readers overlapping that tile.
     pub residual_readers: Vec<(IRect, i32)>,
+    /// Unfilled `EdgeMode::Clamp` clip frames wrapping active wide blurs (in `level.grid()` px)
+    /// so `begin_wide_blur_pass` can capture 1x-perpendicular edge strips before the `d = 2` blur.
+    pub clamp_clips: Vec<HaloClampClip>,
 }
 
 /// Complete viewport halo plan computed in `Engine::render_gpu` and executed by `Gpu::render_whole`.

@@ -1671,16 +1671,22 @@ impl Engine {
         // without baking exact haloed tiles: reuse the active tile cache halo in O(1) instead of
         // re-walking all backdrop readers on every motion frame.
         let view_bits = view.as_coeffs().map(f64::to_bits);
-        let unverified_halo = (composite_only || reuse_moving_halo)
-            && !self.store.readers().is_empty()
-            && !self.halo_cache.is_some_and(|c| {
-                c.generation == self.generation
-                    && c.view_bits == view_bits
-                    && c.size == (width, height)
-                    && c.halo == cached_gpu_halo
-            });
+        let halo_match = self.halo_cache.filter(|c| {
+            c.generation == self.generation
+                && c.view_bits == view_bits
+                && c.size == (width, height)
+                && c.halo == cached_gpu_halo
+                && (!c.wide || self.wide_plan_cache.is_some())
+        });
+        let unverified_halo =
+            (composite_only || reuse_moving_halo) && !self.store.readers().is_empty() && halo_match.is_none();
         let (halo_opt, mut halo_plan, mut wide_plan) = if composite_only || reuse_moving_halo {
-            (Some(cached_gpu_halo), None, None)
+            let wp = if composite_only && !reuse_moving_halo {
+                halo_match.filter(|c| c.wide).and_then(|_| self.wide_plan_cache.clone())
+            } else {
+                None
+            };
+            (Some(cached_gpu_halo), None, wp)
         } else {
             let plan_viewport = editor_viewport
                 && !self.store.has_context()
@@ -1840,6 +1846,7 @@ impl Engine {
                 options,
                 drag.as_ref(),
                 wide_plan.as_ref(),
+                !unverified_halo,
             ) {
                 Ok(stats) => stats,
                 Err(e) if e.code == ErrorCode::Limit && wide_plan.is_some() => {
@@ -1930,6 +1937,7 @@ impl Engine {
                 options,
                 drag.as_ref(),
                 None,
+                false,
             )?
         } else if sliced {
             gpu.render_whole_sliced(
@@ -3325,6 +3333,7 @@ impl Engine {
                 let mut targets: Vec<(u32, usize)> = Vec::new();
                 let mut wide_downstream: Vec<(u32, usize)> = Vec::new();
                 let mut wide_ds_seen = vec![false; nodes.len()];
+                let mut wide_clamp_clips: Vec<crate::halo::HaloClampClip> = Vec::new();
                 let mut wide_samples_f: Option<Rect> = None;
                 let mut max_wide_sigma = 0.0f32;
                 for (i, node) in nodes.iter().enumerate().rev() {
@@ -3346,7 +3355,103 @@ impl Engine {
                     let vis_pad = downstream + node.post_reach_px;
                     let visible = node.paint.intersect(cover_frame.inflate(vis_pad, vis_pad));
                     if visible.width() > 0.0 && visible.height() > 0.0 {
-                        let mut r = visible.inflate(node.reach_px, node.reach_px);
+                        let r_raw = visible.inflate(node.reach_px, node.reach_px);
+                        if wide && let Some(clip_dev) = node.unfilled_clip {
+                            let shift_x = frame_origin.0 as f64;
+                            let shift_y = frame_origin.1 as f64;
+                            let clip_grid = [
+                                (f64::from(clip_dev[0]) - shift_x) as f32,
+                                (f64::from(clip_dev[1]) - shift_y) as f32,
+                                (f64::from(clip_dev[2]) - shift_x) as f32,
+                                (f64::from(clip_dev[3]) - shift_y) as f32,
+                            ];
+                            let l = clip_grid[0].floor() as i32;
+                            let t_edge = clip_grid[1].floor() as i32;
+                            let r_edge = clip_grid[2].ceil() as i32;
+                            let b_edge = clip_grid[3].ceil() as i32;
+                            let mut rx0 = (r_raw.x0.floor() as i64 - frame_origin.0)
+                                .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+                            let mut ry0 = (r_raw.y0.floor() as i64 - frame_origin.1)
+                                .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+                            let mut rx1 = (r_raw.x1.ceil() as i64 - frame_origin.0)
+                                .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+                            let mut ry1 = (r_raw.y1.ceil() as i64 - frame_origin.1)
+                                .clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32;
+                            // Skip any clip edge overlapped by an earlier backdrop writer:
+                            // strip capture skips earlier blurs, so raw edge pixels would be stale.
+                            let vy0 = r_raw.y0.max(f64::from(clip_dev[1]));
+                            let vy1 = r_raw.y1.min(f64::from(clip_dev[3]));
+                            let vx0 = r_raw.x0.max(f64::from(clip_dev[0]));
+                            let vx1 = r_raw.x1.min(f64::from(clip_dev[2]));
+                            let edge_dirty = |band: Rect| {
+                                band.width() > 0.0
+                                    && band.height() > 0.0
+                                    && nodes[..i]
+                                        .iter()
+                                        .any(|prev| !matches!(prev.kind, ReaderKind::Read) && overlaps(prev.paint, band))
+                            };
+                            if l > rx0
+                                && l < rx1
+                                && edge_dirty(Rect::new(
+                                    f64::from(clip_dev[0]) - 2.0,
+                                    vy0,
+                                    f64::from(clip_dev[0]) + 2.0,
+                                    vy1,
+                                ))
+                            {
+                                rx0 = rx0.max(l);
+                            }
+                            if r_edge > rx0
+                                && r_edge < rx1
+                                && edge_dirty(Rect::new(
+                                    f64::from(clip_dev[2]) - 2.0,
+                                    vy0,
+                                    f64::from(clip_dev[2]) + 2.0,
+                                    vy1,
+                                ))
+                            {
+                                rx1 = rx1.min(r_edge);
+                            }
+                            if t_edge > ry0
+                                && t_edge < ry1
+                                && edge_dirty(Rect::new(
+                                    vx0,
+                                    f64::from(clip_dev[1]) - 2.0,
+                                    vx1,
+                                    f64::from(clip_dev[1]) + 2.0,
+                                ))
+                            {
+                                ry0 = ry0.max(t_edge);
+                            }
+                            if b_edge > ry0
+                                && b_edge < ry1
+                                && edge_dirty(Rect::new(
+                                    vx0,
+                                    f64::from(clip_dev[3]) - 2.0,
+                                    vx1,
+                                    f64::from(clip_dev[3]) + 2.0,
+                                ))
+                            {
+                                ry1 = ry1.min(b_edge);
+                            }
+                            let any_edge = (l > rx0 && l < rx1)
+                                || (r_edge > rx0 && r_edge < rx1)
+                                || (t_edge > ry0 && t_edge < ry1)
+                                || (b_edge > ry0 && b_edge < ry1);
+                            if any_edge && r_edge > l && b_edge > t_edge && rx1 > rx0 && ry1 > ry0 {
+                                wide_clamp_clips.push(crate::halo::HaloClampClip {
+                                    reader_key: node.key,
+                                    clip_dev: clip_grid,
+                                    reach_rect: IRect {
+                                        x0: rx0,
+                                        y0: ry0,
+                                        x1: rx1,
+                                        y1: ry1,
+                                    },
+                                });
+                            }
+                        }
+                        let mut r = r_raw;
                         if let Some(c) = node.clip_rect {
                             r = r.intersect(c.inflate(2.0, 2.0));
                         }
@@ -3372,6 +3477,7 @@ impl Engine {
                     return None;
                 }
                 targets.reverse();
+                wide_clamp_clips.reverse();
                 let ws = wide_samples_f?.inflate(4.0, 4.0);
                 let (max_lvl, _) = crate::blur::choose_level_view(max_wide_sigma * 0.5);
                 let snap = i64::from((2 * crate::blur::level_step(max_lvl)).clamp(64, 256));
@@ -3412,6 +3518,7 @@ impl Engine {
                     vis_tiles_grid: vis_tiles,
                     apron_glass_safe,
                     residual_readers,
+                    clamp_clips: wide_clamp_clips,
                 })
             })
         } else {
@@ -4894,6 +5001,70 @@ mod halo_plan_tests {
         let cap_h = (wp.cap_grid.y1 - wp.cap_grid.y0) / 2;
         assert!(cap_w <= 3072 && cap_h <= 3072);
         assert!((cap_w as usize) * (cap_h as usize) <= 4_200_000);
+        // Unfilled clip edges of wide blurs are recorded in level.grid() coordinates.
+        assert_eq!(wp.clamp_clips.len(), 2, "both wide blurs share unfilled clip frame");
+        assert_eq!(wp.clamp_clips[0].reader_key, (2, 0));
+        assert_eq!(wp.clamp_clips[1].reader_key, (4, 0));
+
+        // When an earlier blur covers the clip's left/right/top/bottom edges, a later wide blur
+        // inside the same unfilled clip suppresses those dirty edges so strip capture never reads
+        // raw unblurred pixels over the earlier blur's result.
+        let mut stacked = Engine::new(Limits::default());
+        stacked.store.insert_for_test(
+            1,
+            ROOT,
+            make_record(
+                [300.0, 300.0],
+                vec![
+                    Op::Clip {
+                        path: 0,
+                        even_odd: false,
+                    },
+                    Op::Children,
+                    Op::Unclip,
+                ],
+                Vec::new(),
+            ),
+        );
+        stacked.store.insert_for_test(
+            2,
+            1,
+            make_record(
+                [300.0, 300.0],
+                vec![Op::BackgroundBlur(Box::new(BackgroundBlurOp {
+                    paths: vec![0],
+                    even_odd: false,
+                    radius: 24.0,
+                }))],
+                Vec::new(),
+            ),
+        );
+        stacked.store.insert_for_test(
+            3,
+            1,
+            make_record(
+                [260.0, 260.0],
+                vec![Op::BackgroundBlur(Box::new(BackgroundBlurOp {
+                    paths: vec![0],
+                    even_odd: false,
+                    radius: 150.0,
+                }))],
+                Vec::new(),
+            ),
+        );
+        let (_, _, _, stacked_wide) = stacked.reader_halo_plan(
+            Affine::scale(2.0),
+            Some(Rect::new(0.0, 0.0, 600.0, 600.0)),
+            true,
+            crate::halo::HALO_REPLAY_SIDE,
+            Some((3072, 4_200_000)),
+        );
+        let swp = stacked_wide.expect("stacked scene admits WideBlurPlan");
+        assert!(
+            swp.clamp_clips.iter().all(|c| c.reader_key != (3, 0)),
+            "later wide blur over full-frame earlier blur suppresses dirty clip edges: {:?}",
+            swp.clamp_clips
+        );
 
         // Unclipped extreme blur (radius 1500 at 1x) exceeds wide capture limits -> None.
         let mut huge = Engine::new(Limits::default());

@@ -279,6 +279,7 @@ struct DirectSlices {
     size: (u32, u32),
     bg: [u32; 4],
     halo: i32,
+    wide_gen: Option<u64>,
     /// The frame (`frames` index) holding them.
     frame: usize,
     done: Vec<TileKey>,
@@ -7386,19 +7387,9 @@ impl Gpu {
             },
         };
         self.reader_halo = Some(ReaderHalo {
-            capture: Some(HaloTierCapture {
-                render_divisor: 2,
-                offset,
-                frame_size,
-                visible,
-                prog_min_sigma: f32::INFINITY,
-                prog_max_sigma: f32::INFINITY,
-                unif_min_sigma: halo::WIDE_BLUR_MIN_SIGMA,
-                unif_max_sigma: f32::INFINITY,
-                is_far: true,
-            }),
+            capture: None,
             strip_capture: None,
-            wide_capture: true,
+            wide_capture: false,
             wide_targets: plan.targets.clone(),
             wide_last: plan.targets.last().copied(),
             wide_done: false,
@@ -7414,6 +7405,42 @@ impl Gpu {
             progressive_mid: HaloMap::new(),
             progressive_far: HaloMap::new(),
             clamp_strips: HaloMap::new(),
+        });
+        if !plan.clamp_clips.is_empty() {
+            let grid_frame = Frame {
+                width: 1,
+                height: 1,
+                view: plan.level.grid(),
+                detail: false,
+                area: IRect {
+                    x0: 0,
+                    y0: 0,
+                    x1: 1,
+                    y1: 1,
+                },
+            };
+            self.capture_clamp_strips(
+                store,
+                &grid_frame,
+                build.background,
+                build.inputs.generation,
+                &plan.clamp_clips,
+                2,
+                offset,
+            );
+        }
+        let halo = self.reader_halo.as_mut().expect("reader halo");
+        halo.wide_capture = true;
+        halo.capture = Some(HaloTierCapture {
+            render_divisor: 2,
+            offset,
+            frame_size,
+            visible,
+            prog_min_sigma: f32::INFINITY,
+            prog_max_sigma: f32::INFINITY,
+            unif_min_sigma: halo::WIDE_BLUR_MIN_SIGMA,
+            unif_max_sigma: f32::INFINITY,
+            is_far: true,
         });
         self.swap_halo_reader_planes(true);
         match self.begin_whole_pass(
@@ -8471,6 +8498,7 @@ impl Gpu {
         options: TiledOptions,
         drag: Option<&DragFrame>,
         wide_plan: Option<&halo::WideBlurPlan>,
+        allow_direct: bool,
     ) -> Result<DrawStats> {
         self.check()?;
         self.abort_pending_whole();
@@ -8567,11 +8595,12 @@ impl Gpu {
         };
         let selection = self.tiles.drag_prepare(&mut plan, drag.map(DragFrame::input).as_ref());
         // A composite-only frame can present cached tiles; direct tiles and drag layers
-        // need an actual draw to produce pixels.
+        // need an actual draw to produce pixels, unless the cached halo is unverified.
         let composite_only = options.budget_ms < 0.0
-            && selection.is_none()
-            && !plan.direct
-            && (self.pending_tile.is_some() || !plan.jobs.iter().any(|j| j.direct));
+            && (!allow_direct
+                || (selection.is_none()
+                    && !plan.direct
+                    && (self.pending_tile.is_some() || !plan.jobs.iter().any(|j| j.direct))));
         if !composite_only && (selection.is_some() || plan.direct || options.budget_ms <= 0.0) {
             self.abort_pending_tile();
         }
@@ -8647,8 +8676,15 @@ impl Gpu {
                             pass: None,
                         })));
                     }
-                    self.deadline_ms = deadline;
-                    let step = self.step_wide_blur(store, budgeted, &mut stats);
+                    let wide_budgeted = options.budget_ms != 0.0;
+                    self.deadline_ms = if options.budget_ms > 0.0 {
+                        deadline
+                    } else if options.budget_ms < 0.0 {
+                        Some(bake_t0 + self.walk_budget_ms(DIRECT_SLICE_MS))
+                    } else {
+                        None
+                    };
+                    let step = self.step_wide_blur(store, wide_budgeted, &mut stats);
                     self.deadline_ms = None;
                     if !or_standin!(step) {
                         wide_paused = true;
@@ -9001,6 +9037,7 @@ impl Gpu {
         let mut slice_holes: Option<Vec<Rect>> = None;
         // The tiles this frame adds, each with whether it came out inexact: kept once it's shown.
         let mut slice_drawn: Vec<(TileKey, bool)> = Vec::new();
+        let direct_wide_gen = wide_plan.is_some().then_some(generation);
         if direct_sliced {
             let view_bits = view.as_coeffs().map(f64::to_bits);
             let goes_on = self.direct_slices.as_ref().is_some_and(|s| {
@@ -9008,6 +9045,7 @@ impl Gpu {
                     && s.size == (w, h)
                     && s.bg == bg_bits
                     && s.halo == frame_halo
+                    && s.wide_gen == direct_wide_gen
                     && self.cur == Some(s.frame)
                     && self.screen.standin.is_none()
                     && last.is_some_and(|l| l.view == view && l.size == (w, h))
@@ -9054,6 +9092,7 @@ impl Gpu {
                     size: (w, h),
                     bg: bg_bits,
                     halo: frame_halo,
+                    wide_gen: direct_wide_gen,
                     frame: dst,
                     done: Vec::new(),
                     inexact: HashSet::new(),
@@ -9397,8 +9436,8 @@ impl Gpu {
                 false
             };
             if !ready {
-                let need_wide = !opening
-                    && (self.pending_tile.is_some() || plan.jobs.iter().any(|j| !j.direct && !j.detail && !j.rough));
+                let need_wide =
+                    !opening && (self.pending_tile.is_some() || plan.jobs.iter().any(|j| !j.detail && !j.rough));
                 if !need_wide {
                     if !matches!(self.wide_blur.as_ref(), Some(WideBlurState::Ready(c)) if c.inputs == inputs) {
                         self.abort_wide_blur();
@@ -12560,6 +12599,27 @@ impl Backend for Gpu {
         self.reader_halo
             .as_ref()
             .is_some_and(|h| h.wide_done || h.strip_capture.as_ref().is_some_and(|s| s.captured.is_some()))
+    }
+
+    fn strip_capture_record(&self) -> Option<u32> {
+        self.reader_halo
+            .as_ref()
+            .and_then(|h| h.strip_capture.as_ref())
+            .filter(|s| s.captured.is_none())
+            .map(|s| s.reader_key.0)
+    }
+
+    fn capture_culled_strip(&mut self, open: &[Open]) -> Result<()> {
+        let target = self
+            .reader_halo
+            .as_ref()
+            .and_then(|h| h.strip_capture.as_ref())
+            .filter(|s| s.captured.is_none())
+            .map(|s| s.reader_key);
+        if target.is_some() {
+            self.capture_halo_strip_backdrop(target, open)?;
+        }
+        Ok(())
     }
 
     fn deadline_reached(&self) -> bool {
