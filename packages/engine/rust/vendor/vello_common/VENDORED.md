@@ -12,7 +12,9 @@ from crates.io, unchanged except:
   the canvas renderer scored 3.23; at 1/16 px it scores 2.23 (exact coverage would score 1.93).
   The CPU (`vello_cpu`), WebGPU and WebGL2 (`vello_gpu`) backends all flatten here, so they stay
   identical. The compute experiment's WGSL port (`vendor/vello_shaders/shader/flatten.wgsl`) and
-  its native mirror test (`src/ordinary.rs`) carry the same constants.
+  its native mirror test (`src/ordinary.rs`) carry the same constants. Glyph masks and glyph runs
+  filled as outlines flatten at it too (`tests/glyph_flatten.rs`): a coarser tolerance for glyphs
+  alone made no measurable difference to a text-heavy page's opening.
 - `src/flatten.rs`: flattened points snap to a 1/1024 px grid in `f64` before they become `f32`
   (`snap`). Points are rounded to `f32` at their absolute position, where `f32`'s step doubles
   from one power of two to the next, so the same curve moved by whole pixels (a page drawn
